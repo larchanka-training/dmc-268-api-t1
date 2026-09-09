@@ -10,21 +10,21 @@ stages:
 
 syntax:
   stage: syntax
-  image: python:3.12
+  image: python:3.14
   script:
     - pip install -r requirements-dev.txt
     - python -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
 
 lint:
   stage: lint
-  image: python:3.12
+  image: python:3.14
   script:
     - pip install -r requirements-dev.txt
     - ruff check .
 
 test:
   stage: test
-  image: python:3.12
+  image: python:3.14
   script:
     - pip install -r requirements-dev.txt
     - pytest

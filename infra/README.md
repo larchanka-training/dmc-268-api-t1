@@ -1,6 +1,6 @@
-# Стек сервера (PostgreSQL, RabbitMQ, Redis)
+# Стек сервера (API на Python 3.14, PostgreSQL, RabbitMQ, Redis)
 
-Нужны **Docker Engine** на целевом хосте и Terraform >= 1.5.
+Нужны **Docker Engine** на целевом хосте и Terraform >= 1.5. Образ API собирается из `Dockerfile` с базой `python:3.14` (`python_version`).
 
 ## Локальный или удалённый Docker
 
@@ -9,7 +9,7 @@
 - Локальный демон: `docker_host = "unix:///var/run/docker.sock"` (у Docker Desktop на macOS часто `unix:///Users/<вы>/.docker/run/docker.sock`).
 - Удалённый сервер: `docker_host = "ssh://user@server"` (нужны SSH-доступ и Docker на удалённом хосте).
 
-Порты по умолчанию публикуются на `127.0.0.1`. Меняйте `bind_ip` только в частной сети.
+Порты по умолчанию публикуются на `127.0.0.1` (`bind_ip`). В URL для клиентов используется `service_host` (по умолчанию тоже `127.0.0.1`), его нельзя ставить в `0.0.0.0`.
 
 ## Apply / destroy
 
@@ -20,6 +20,6 @@ terraform apply
 terraform destroy
 ```
 
-Выходы (чувствительные): `postgres_url`, `rabbitmq_url`, `redis_url`.
+Выходы: `api_url`; чувствительные: `postgres_url`, `rabbitmq_url`, `redis_url` (пароли в URL кодируются через `urlencode`).
 
 Этот стек только для API. UI деплоится отдельно из `dmc-268-ui-t1/infra/`.

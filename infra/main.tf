@@ -29,6 +29,18 @@ resource "docker_image" "redis" {
   keep_locally = true
 }
 
+resource "docker_image" "api" {
+  name = "dmc268-api:local"
+
+  build {
+    context    = "${path.module}/.."
+    dockerfile = "Dockerfile"
+    build_args = {
+      PYTHON_VERSION = var.python_version
+    }
+  }
+}
+
 resource "docker_container" "postgres" {
   name  = "dmc268-postgres"
   image = docker_image.postgres.image_id
@@ -110,5 +122,32 @@ resource "docker_container" "redis" {
   volumes {
     volume_name    = docker_volume.redis.name
     container_path = "/data"
+  }
+}
+
+resource "docker_container" "api" {
+  name  = "dmc268-api"
+  image = docker_image.api.image_id
+
+  networks_advanced {
+    name = docker_network.dmc268.name
+  }
+
+  env = [
+    "POSTGRES_HOST=dmc268-postgres",
+    "POSTGRES_PORT=5432",
+    "POSTGRES_USER=${var.postgres_user}",
+    "POSTGRES_PASSWORD=${var.postgres_password}",
+    "POSTGRES_DB=${var.postgres_db}",
+    "RABBITMQ_HOST=dmc268-rabbitmq",
+    "RABBITMQ_PORT=5672",
+    "REDIS_HOST=dmc268-redis",
+    "REDIS_PORT=6379",
+  ]
+
+  ports {
+    internal = 8000
+    external = var.api_port
+    ip       = var.bind_ip
   }
 }

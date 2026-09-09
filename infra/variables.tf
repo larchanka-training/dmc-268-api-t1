@@ -6,8 +6,26 @@ variable "docker_host" {
 
 variable "bind_ip" {
   type        = string
-  description = "Interface to publish container ports on."
+  description = "Interface to publish container ports on. Not used as a client hostname."
   default     = "127.0.0.1"
+}
+
+variable "service_host" {
+  type        = string
+  description = "Hostname or IP clients use in connection URLs (must be reachable, not 0.0.0.0)."
+  default     = "127.0.0.1"
+}
+
+variable "python_version" {
+  type        = string
+  description = "Python version for the API image."
+  default     = "3.14"
+}
+
+variable "api_port" {
+  type        = number
+  description = "Host port for the FastAPI HTTP server."
+  default     = 8000
 }
 
 variable "postgres_user" {

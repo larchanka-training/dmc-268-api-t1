@@ -20,4 +20,4 @@ ruff check .
 pytest
 ```
 
-PostgreSQL, RabbitMQ и Redis для этого API поднимаются Terraform из каталога `infra/`.
+API работает на **Python 3.14**. PostgreSQL, RabbitMQ, Redis и контейнер API поднимаются Terraform из каталога `infra/` (`python_version = "3.14"`).
