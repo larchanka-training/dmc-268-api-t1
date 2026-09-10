@@ -11,10 +11,13 @@ jobs:
     container:
       image: alpine:latest
     steps:
-      - run: apk add --no-cache git nodejs python3 py3-pip
+      - run: apk add --no-cache git nodejs build-base
       - uses: actions/checkout@v4
-      - run: pip3 install --break-system-packages -r requirements-dev.txt
-      - run: python3 -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - run: uv sync --all-extras --frozen
+      - run: uv run python -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
 
   lint:
     needs: syntax
@@ -22,18 +25,39 @@ jobs:
     container:
       image: alpine:latest
     steps:
-      - run: apk add --no-cache git nodejs python3 py3-pip
+      - run: apk add --no-cache git nodejs build-base
       - uses: actions/checkout@v4
-      - run: pip3 install --break-system-packages -r requirements-dev.txt
-      - run: ruff check .
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - run: uv sync --all-extras --frozen
+      - run: uv run ruff check .
+      - run: uv run lint-imports
 
   test:
     needs: lint
     runs-on: ubuntu-latest
     container:
       image: alpine:latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dmc268
+          POSTGRES_PASSWORD: dmc268
+          POSTGRES_DB: dmc268
+        options: >-
+          --health-cmd "pg_isready -U dmc268 -d dmc268"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://dmc268:dmc268@postgres:5432/dmc268
     steps:
-      - run: apk add --no-cache git nodejs python3 py3-pip
+      - run: apk add --no-cache git nodejs build-base
       - uses: actions/checkout@v4
-      - run: pip3 install --break-system-packages -r requirements-dev.txt
-      - run: pytest
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - run: uv sync --all-extras --frozen
+      - run: uv run pytest

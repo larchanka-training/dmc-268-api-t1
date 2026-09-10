@@ -8,23 +8,36 @@ stages:
   - lint
   - test
 
-syntax:
-  stage: syntax
+.uv:
   image: python:3.14
+  before_script:
+    - pip install --quiet uv
+    - uv sync --all-extras --frozen
+
+syntax:
+  extends: .uv
+  stage: syntax
   script:
-    - pip install -r requirements-dev.txt
-    - python -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
+    - uv run python -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
 
 lint:
+  extends: .uv
   stage: lint
-  image: python:3.14
   script:
-    - pip install -r requirements-dev.txt
-    - ruff check .
+    - uv run ruff check .
+    - uv run lint-imports
 
 test:
+  extends: .uv
   stage: test
-  image: python:3.14
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_USER: dmc268
+    POSTGRES_PASSWORD: dmc268
+    POSTGRES_DB: dmc268
+    POSTGRES_HOST_AUTH_METHOD: trust
+    DATABASE_URL: postgresql://dmc268:dmc268@postgres:5432/dmc268
   script:
-    - pip install -r requirements-dev.txt
-    - pytest
+    - uv run pytest
