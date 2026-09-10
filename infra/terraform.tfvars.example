@@ -10,5 +10,3 @@ postgres_port     = 5432
 rabbitmq_user     = "dmc268"
 rabbitmq_password  = "CHANGE_ME_RABBITMQ"
 rabbitmq_port     = 5672
-redis_port        = 6379
-redis_password    = "CHANGE_ME_REDIS"

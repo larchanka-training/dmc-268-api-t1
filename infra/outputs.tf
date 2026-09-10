@@ -10,12 +10,6 @@ output "rabbitmq_url" {
   sensitive   = true
 }
 
-output "redis_url" {
-  description = "Redis connection URL."
-  value       = "redis://:${urlencode(var.redis_password)}@${var.service_host}:${var.redis_port}/0"
-  sensitive   = true
-}
-
 output "api_url" {
   description = "HTTP URL of the FastAPI service (Python ${var.python_version})."
   value       = "http://${var.service_host}:${var.api_port}"

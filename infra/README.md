@@ -1,6 +1,6 @@
-# Стек сервера (API на Python 3.14, PostgreSQL, RabbitMQ, Redis)
+# Стек сервера (API на Python 3.14, PostgreSQL, RabbitMQ)
 
-Нужны **Docker Engine** на целевом хосте и Terraform >= 1.5. Образ API собирается из `Dockerfile` с базой `python:3.14` (`python_version`).
+Нужны **Docker Engine** на целевом хосте и Terraform >= 1.5. Образ API собирается из `Dockerfile` с базой `python:3.14-slim` (`python_version`).
 
 ## Локальный или удалённый Docker
 
@@ -20,6 +20,6 @@ terraform apply
 terraform destroy
 ```
 
-Выходы: `api_url`; чувствительные: `postgres_url`, `rabbitmq_url`, `redis_url` (пароли в URL кодируются через `urlencode`).
+Выходы: `api_url`; чувствительные: `postgres_url`, `rabbitmq_url` (пароли в URL кодируются через `urlencode`).
 
 Этот стек только для API. UI деплоится отдельно из `dmc-268-ui-t1/infra/`.

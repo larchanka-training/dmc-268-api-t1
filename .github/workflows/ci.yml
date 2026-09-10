@@ -8,32 +8,32 @@ on:
 jobs:
   syntax:
     runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
     steps:
+      - run: apk add --no-cache git nodejs python3 py3-pip
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
-      - run: pip install -r requirements-dev.txt
-      - run: python -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
+      - run: pip3 install --break-system-packages -r requirements-dev.txt
+      - run: python3 -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
 
   lint:
     needs: syntax
     runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
     steps:
+      - run: apk add --no-cache git nodejs python3 py3-pip
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
-      - run: pip install -r requirements-dev.txt
+      - run: pip3 install --break-system-packages -r requirements-dev.txt
       - run: ruff check .
 
   test:
     needs: lint
     runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
     steps:
+      - run: apk add --no-cache git nodejs python3 py3-pip
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
-      - run: pip install -r requirements-dev.txt
+      - run: pip3 install --break-system-packages -r requirements-dev.txt
       - run: pytest

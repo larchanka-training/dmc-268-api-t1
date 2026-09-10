@@ -10,10 +10,6 @@ resource "docker_volume" "rabbitmq" {
   name = "dmc268-rabbitmq-data"
 }
 
-resource "docker_volume" "redis" {
-  name = "dmc268-redis-data"
-}
-
 resource "docker_image" "postgres" {
   name         = "postgres:16-alpine"
   keep_locally = true
@@ -21,11 +17,6 @@ resource "docker_image" "postgres" {
 
 resource "docker_image" "rabbitmq" {
   name         = "rabbitmq:3.13-alpine"
-  keep_locally = true
-}
-
-resource "docker_image" "redis" {
-  name         = "redis:7-alpine"
   keep_locally = true
 }
 
@@ -99,32 +90,6 @@ resource "docker_container" "rabbitmq" {
   }
 }
 
-resource "docker_container" "redis" {
-  name  = "dmc268-redis"
-  image = docker_image.redis.image_id
-
-  networks_advanced {
-    name = docker_network.dmc268.name
-  }
-
-  command = [
-    "redis-server",
-    "--requirepass",
-    var.redis_password,
-  ]
-
-  ports {
-    internal = 6379
-    external = var.redis_port
-    ip       = var.bind_ip
-  }
-
-  volumes {
-    volume_name    = docker_volume.redis.name
-    container_path = "/data"
-  }
-}
-
 resource "docker_container" "api" {
   name  = "dmc268-api"
   image = docker_image.api.image_id
@@ -141,8 +106,6 @@ resource "docker_container" "api" {
     "POSTGRES_DB=${var.postgres_db}",
     "RABBITMQ_HOST=dmc268-rabbitmq",
     "RABBITMQ_PORT=5672",
-    "REDIS_HOST=dmc268-redis",
-    "REDIS_PORT=6379",
   ]
 
   ports {

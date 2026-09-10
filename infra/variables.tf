@@ -69,15 +69,3 @@ variable "rabbitmq_port" {
   description = "Host port for AMQP."
   default     = 5672
 }
-
-variable "redis_port" {
-  type        = number
-  description = "Host port for Redis."
-  default     = 6379
-}
-
-variable "redis_password" {
-  type        = string
-  description = "Redis password. Do not commit real values."
-  sensitive   = true
-}
