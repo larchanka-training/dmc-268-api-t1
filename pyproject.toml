@@ -31,11 +31,11 @@ markers = [
 ]
 
 [tool.importlinter]
-root_package = "main"
+root_package = "app"
 
 [[tool.importlinter.contracts]]
-name = "Main is a single module"
+name = "App package is independent"
 type = "independence"
 modules = [
-    "main",
+    "app",
 ]

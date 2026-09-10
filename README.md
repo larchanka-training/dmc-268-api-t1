@@ -6,7 +6,7 @@ Backend на FastAPI для DMC-268, команда 1. Зависимости т
 
 ```bash
 uv sync
-uv run uvicorn main:app --reload
+uv run uvicorn app.main:app --reload
 ```
 
 ## Проверки качества

@@ -1,4 +1,4 @@
-from main import health_check
+from app.main import health_check
 
 
 def test_health_check_returns_ok():
