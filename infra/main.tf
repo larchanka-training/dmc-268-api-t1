@@ -41,10 +41,6 @@ resource "docker_image" "api" {
     build_args = {
       PYTHON_VERSION = var.python_version
     }
-
-    triggers = {
-      source_hash = local.api_source_hash
-    }
   }
 }
 
