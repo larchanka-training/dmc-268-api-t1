@@ -2,7 +2,40 @@
 name = "dmc-268-api-t1"
 version = "0.1.0"
 description = "FastAPI backend for DMC-268 Team 1"
+requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.110.0",
-    "uvicorn>=0.28.0"
+    "uvicorn>=0.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "import-linter>=2.1",
+    "psycopg[binary]>=3.2",
+    "pytest>=8.0.0",
+    "ruff>=0.6.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py314"
+exclude = [".venv", "venv", ".git"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "integration: requires DATABASE_URL and Postgres",
+]
+
+[tool.importlinter]
+root_package = "app"
+
+[[tool.importlinter.contracts]]
+name = "App package is independent"
+type = "independence"
+modules = [
+    "app",
 ]

@@ -1,0 +1,13 @@
+.venv
+venv
+__pycache__
+.pytest_cache
+.ruff_cache
+.terraform
+.git
+.github
+.idea
+infra
+*.pyc
+.env
+.DS_Store
