@@ -2,19 +2,17 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
 
 jobs:
   syntax:
     runs-on: ubuntu-latest
-    container:
-      image: alpine:latest
     steps:
-      - run: apk add --no-cache git nodejs build-base
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
+          version: "0.12.12"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - run: uv run python -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
@@ -22,13 +20,11 @@ jobs:
   lint:
     needs: syntax
     runs-on: ubuntu-latest
-    container:
-      image: alpine:latest
     steps:
-      - run: apk add --no-cache git nodejs build-base
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
+          version: "0.12.12"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - run: uv run ruff check .
@@ -37,27 +33,27 @@ jobs:
   test:
     needs: lint
     runs-on: ubuntu-latest
-    container:
-      image: alpine:latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: dmc268
           POSTGRES_PASSWORD: dmc268
           POSTGRES_DB: dmc268
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd "pg_isready -U dmc268 -d dmc268"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgresql://dmc268:dmc268@postgres:5432/dmc268
+      DATABASE_URL: postgresql://dmc268:dmc268@localhost:5432/dmc268
     steps:
-      - run: apk add --no-cache git nodejs build-base
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
+          version: "0.12.12"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - run: uv run pytest

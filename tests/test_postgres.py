@@ -5,7 +5,10 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-@pytest.mark.skipif(not os.environ.get("DATABASE_URL"), reason="DATABASE_URL is not set")
+@pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL") and not os.environ.get("CI"),
+    reason="DATABASE_URL is not set",
+)
 def test_postgres_accepts_connection():
     import psycopg
 

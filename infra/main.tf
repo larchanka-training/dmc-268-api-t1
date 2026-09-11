@@ -11,7 +11,7 @@ resource "docker_volume" "rabbitmq" {
 }
 
 resource "docker_image" "postgres" {
-  name         = "postgres:16-alpine"
+  name         = "postgres:18-alpine"
   keep_locally = true
 }
 
