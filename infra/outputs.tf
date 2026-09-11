@@ -11,6 +11,6 @@ output "rabbitmq_url" {
 }
 
 output "api_url" {
-  description = "HTTP URL of the FastAPI service (Python ${var.python_version})."
+  description = "HTTP URL of the FastAPI service."
   value       = "http://${var.service_host}:${var.api_port}"
 }

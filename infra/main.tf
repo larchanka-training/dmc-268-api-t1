@@ -20,21 +20,38 @@ resource "docker_image" "rabbitmq" {
   keep_locally = true
 }
 
+locals {
+  api_source_hash = sha256(join("", [
+    filesha256("${path.module}/../Dockerfile"),
+    filesha256("${path.module}/../pyproject.toml"),
+    filesha256("${path.module}/../uv.lock"),
+    filesha256("${path.module}/../.dockerignore"),
+    sha256(join("", [for f in sort(fileset("${path.module}/../app", "**/*")) : filesha256("${path.module}/../app/${f}")])),
+  ]))
+  api_image_tag = substr(local.api_source_hash, 0, 12)
+}
+
 resource "docker_image" "api" {
-  name = "dmc268-api:local"
+  name = "dmc268-api:${local.api_image_tag}"
 
   build {
     context    = "${path.module}/.."
     dockerfile = "Dockerfile"
+    tag        = ["dmc268-api:${local.api_image_tag}"]
     build_args = {
       PYTHON_VERSION = var.python_version
+    }
+
+    triggers = {
+      source_hash = local.api_source_hash
     }
   }
 }
 
 resource "docker_container" "postgres" {
-  name  = "dmc268-postgres"
-  image = docker_image.postgres.image_id
+  name    = "dmc268-postgres"
+  image   = docker_image.postgres.image_id
+  restart = "unless-stopped"
 
   networks_advanced {
     name = docker_network.dmc268.name
@@ -49,7 +66,7 @@ resource "docker_container" "postgres" {
   ports {
     internal = 5432
     external = var.postgres_port
-    ip       = var.bind_ip
+    ip       = var.internal_bind_ip
   }
 
   volumes {
@@ -66,8 +83,9 @@ resource "docker_container" "postgres" {
 }
 
 resource "docker_container" "rabbitmq" {
-  name  = "dmc268-rabbitmq"
-  image = docker_image.rabbitmq.image_id
+  name    = "dmc268-rabbitmq"
+  image   = docker_image.rabbitmq.image_id
+  restart = "unless-stopped"
 
   networks_advanced {
     name = docker_network.dmc268.name
@@ -81,31 +99,38 @@ resource "docker_container" "rabbitmq" {
   ports {
     internal = 5672
     external = var.rabbitmq_port
-    ip       = var.bind_ip
+    ip       = var.internal_bind_ip
   }
 
   volumes {
     volume_name    = docker_volume.rabbitmq.name
     container_path = "/var/lib/rabbitmq"
   }
+
+  healthcheck {
+    test     = ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+    interval = "10s"
+    timeout  = "5s"
+    retries  = 5
+  }
 }
 
 resource "docker_container" "api" {
-  name  = "dmc268-api"
-  image = docker_image.api.image_id
+  name    = "dmc268-api"
+  image   = docker_image.api.image_id
+  restart = "unless-stopped"
+
+  depends_on = [
+    docker_container.postgres,
+    docker_container.rabbitmq,
+  ]
 
   networks_advanced {
     name = docker_network.dmc268.name
   }
 
   env = [
-    "POSTGRES_HOST=dmc268-postgres",
-    "POSTGRES_PORT=5432",
-    "POSTGRES_USER=${var.postgres_user}",
-    "POSTGRES_PASSWORD=${var.postgres_password}",
-    "POSTGRES_DB=${var.postgres_db}",
-    "RABBITMQ_HOST=dmc268-rabbitmq",
-    "RABBITMQ_PORT=5672",
+    "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
   ]
 
   ports {

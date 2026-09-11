@@ -6,7 +6,13 @@ variable "docker_host" {
 
 variable "bind_ip" {
   type        = string
-  description = "Interface to publish container ports on. Not used as a client hostname."
+  description = "Interface to publish the API port on. Not used as a client hostname."
+  default     = "127.0.0.1"
+}
+
+variable "internal_bind_ip" {
+  type        = string
+  description = "Interface to publish PostgreSQL and RabbitMQ on the host (keep 127.0.0.1 unless you need local tools only)."
   default     = "127.0.0.1"
 }
 

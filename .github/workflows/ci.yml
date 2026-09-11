@@ -30,8 +30,19 @@ jobs:
       - run: uv run ruff check .
       - run: uv run lint-imports
 
+  terraform:
+    needs: syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.10.5
+      - run: tofu fmt -check -recursive infra/
+      - run: cd infra && tofu init -backend=false && tofu validate
+
   test:
-    needs: lint
+    needs: [lint, terraform]
     runs-on: ubuntu-latest
     services:
       postgres:

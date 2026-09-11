@@ -9,7 +9,7 @@
 - Локальный демон: `docker_host = "unix:///var/run/docker.sock"` (у Docker Desktop на macOS часто `unix:///Users/<вы>/.docker/run/docker.sock`).
 - Удалённый сервер: `docker_host = "ssh://user@server"` (нужны SSH-доступ и Docker на удалённом хосте).
 
-Порты по умолчанию публикуются на `127.0.0.1` (`bind_ip`). В URL для клиентов используется `service_host` (по умолчанию тоже `127.0.0.1`), его нельзя ставить в `0.0.0.0`.
+PostgreSQL и RabbitMQ публикуются на `internal_bind_ip` (по умолчанию `127.0.0.1`). API — на `bind_ip`. В URL для клиентов используется `service_host`, его нельзя ставить в `0.0.0.0`.
 
 ## Apply / destroy
 
