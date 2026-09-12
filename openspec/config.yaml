@@ -1,0 +1,44 @@
+schema: spec-driven
+
+context: |
+  Project: DMC-268 — automated AI code review system (GitLab Duo-like agent).
+  This repo (dmc-268-api-t1) is the BACKEND service. The cohort task board is
+  GitHub Project https://github.com/orgs/larchanka-training/projects/7 — it
+  aggregates issues from several repos; most of the cohort's tickets still live
+  in larchanka-training/dmc-268-ui-t6, which is used as a shared backlog repo.
+
+  Backend stack: Python, FastAPI, SQLAlchemy v2, Alembic, PostgreSQL, uv (package
+  manager), ruff + pylint (lint), Ollama SDK (LLM gateway).
+  System design: RabbitMQ (job queue), Redis (cache/idempotency, tentative),
+  private sub-network between services, JWT authorization, idempotency keys,
+  rate limiting.
+  Frontend (separate repo): TypeScript, React, pnpm, Vite + Vitest, eslint,
+  zod, zustand.
+
+  Domain model (from the review pipeline): Repository, MergeRequest, ReviewJob,
+  ContextPayload, Finding/Comment.
+  Pipeline: trigger (webhook / on-demand) -> context builder (unified diff +
+  surrounding hunk context + whole-file when small + AST/import signatures)
+  -> orchestrator/AI gateway (prompt assembly, auth, routing) -> LLM analysis
+  (security / correctness / performance / readability) -> post-processing
+  (diff-coordinate mapping, dedup, false-positive filtering, suggestions)
+  -> publication (summary comment + inline discussions + status).
+
+  Conventions: conventional commits; Clean/Hexagonal layering
+  Router -> Service -> Repository -> LLM Gateway.
+
+rules:
+  design:
+    - "Prefer the boring construct; justify any abstraction that has no second caller today."
+  tasks:
+    - "Each task names the pure function or adapter it produces, so the split between decision logic and I/O stays visible in the plan."
+
+operations:
+  apply:
+    guidance:
+      - "Follow DRY, KISS and YAGNI. Do not add a port, table, column, class or abstraction until a caller exists. When a ticket is explicitly architectural, describe the intended seam in the architecture document rather than committing unused code."
+      - "Keep the architecture hexagonal. Domain and application layers depend on ports only; adapters live in infrastructure; dependencies point inward."
+      - "Put decision logic in pure functions that take data and return data - state transitions, diff-anchor validation, deduplication, filtering, prompt assembly. No I/O, no clock reads, no randomness inside them; inject those as arguments."
+      - "Keep adapters thin - translation between the external shape and the domain shape, with no branching business rules."
+      - "Every pure function gets a unit test that runs without a database, broker or network. Reserve integration tests for adapters."
+      - "Do not repeat an enum, a transition table or a timestamp definition in more than one place."

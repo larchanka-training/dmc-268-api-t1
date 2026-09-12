@@ -6,3 +6,18 @@ env/
 venv/
 .env
 .pytest_cache/
+
+# AI agent skills and rules are the DevTools / Agentic Engineer ticket's
+# deliverable, not this one's. Until that lands, generate your own with
+# `openspec init --tools <your-tool>` and keep it local.
+.agents/
+.claude/
+.cursor/
+.codex/
+.gemini/
+.windsurf/
+
+# Build output from an editable install
+*.egg-info/
+build/
+dist/
