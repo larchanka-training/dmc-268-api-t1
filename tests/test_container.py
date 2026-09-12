@@ -19,8 +19,7 @@ def test_every_declared_port_has_an_adapter_and_a_caller() -> None:
     source = Path("app/infrastructure/db/repositories.py").read_text()
     source += Path("app/infrastructure/db/unit_of_work.py").read_text()
     for port in declared:
-        concrete = port if port != "UnitOfWork" else "UnitOfWork"
-        assert re.search(rf"SqlAlchemy{concrete}\b", source), f"{port} has no adapter"
+        assert re.search(rf"SqlAlchemy{port}\b", source), f"{port} has no adapter"
 
 
 def test_the_container_is_the_only_place_adapters_are_constructed() -> None:

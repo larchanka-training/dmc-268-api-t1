@@ -34,13 +34,16 @@ or `domain`.
 
 ### The rule is enforced, not agreed
 
-`import-linter` runs in CI with two contracts in `pyproject.toml`. The first
-orders the layers. The second bars `sqlalchemy`, `fastapi`, `httpx`, `ollama`,
-`pika`, `alembic` and `psycopg` from `domain` and `application` outright.
+`import-linter` runs in CI with three contracts in `pyproject.toml`. The first
+orders the layers. The second keeps the entrypoint thin: `app.main` may not
+reach `domain`, `application` or `infrastructure` directly, only through
+`app.api`. The third bars `sqlalchemy`, `fastapi`, `httpx`, `ollama`, `pika`,
+`alembic` and `psycopg` from `domain` and `application` outright.
 
 ```
 $ lint-imports
 Dependencies point inward KEPT
+The entrypoint stays thin KEPT
 Inner layers know no vendor KEPT
 ```
 
@@ -67,9 +70,11 @@ a test asserts an exact timestamp rather than a range.
 | `deduplicate(findings)` | `domain/dedup.py` | which findings repeat one another |
 | `find_stale(runs, now, limit)` | `domain/staleness.py` | which runs stopped making progress |
 
-This is what makes a unit level possible at all. `pytest` with no database, no
-broker and no network runs 65 tests; the 22 that need PostgreSQL are marked
-`integration` and skip when `DATABASE_URL` is unset.
+This is what makes a unit level possible at all. Most of the suite runs under
+`pytest` with no database, no broker and no network. The tests that do need
+PostgreSQL are marked `integration` and skip unless `TEST_DATABASE_URL` is
+set; the README carries the current counts and the reason that variable is not
+`DATABASE_URL`.
 
 Adapters are translation and nothing else. Where an adapter appears to apply a
 rule, it is calling one of the functions above:
@@ -188,7 +193,11 @@ application creates nothing at startup.
   native enum types behind, so the reversal was incomplete and the next
   upgrade would have failed creating types that already existed.
 - `env.py` reads `DATABASE_URL` through `Settings`, so `alembic.ini` carries no
-  connection string and the two cannot disagree.
+  connection string and the two cannot disagree. A caller that has already set
+  the option keeps it, which is how the test suite points migrations at
+  `TEST_DATABASE_URL` without touching what the service reads. The value is
+  escaped on the way in, because `configparser` treats `%` as interpolation and
+  rejects a percent-encoded password outright.
 
 An integration test migrates a disposable database to head and asserts
 autogenerate finds nothing to do, so models and schema cannot drift apart

@@ -17,6 +17,9 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.infrastructure.db import models  # noqa: F401  (registers the tables)
+from app.infrastructure.db.base import Base
+
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 
 requires_db = pytest.mark.skipif(
@@ -60,9 +63,9 @@ def clean_db(migrated):
     but not from writes another test committed. Truncating first is what keeps
     the suite order-independent.
     """
+    tables = ", ".join(sorted(Base.metadata.tables))
     with migrated.begin() as conn:
-        conn.execute(text("TRUNCATE repositories, merge_requests, review_runs, "
-                          "context_payloads, findings, published_comments CASCADE"))
+        conn.execute(text(f"TRUNCATE {tables} CASCADE"))
     return migrated
 
 

@@ -105,8 +105,8 @@ These are constraints, not conventions, so no code path can forget them.
 | A change request number is unique in its repository | `UNIQUE (repository_id, number)` |
 | At most one unfinished run per commit | Partial `UNIQUE (merge_request_id, head_sha) WHERE status NOT IN ('cancelled','completed','failed')`. A finished run does not block a re-review. |
 | Context chunks keep their order | `UNIQUE (review_run_id, chunk_index)` |
-| A finding cannot repeat in a run | `UNIQUE (review_run_id, file_path, new_line, category)` |
-| A finding is published once per run | `UNIQUE (review_run_id, finding_id)` |
+| A finding cannot repeat in a run | `UNIQUE NULLS NOT DISTINCT (review_run_id, file_path, side, old_line, new_line, category)`. An anchor populates only the line number belonging to its side, so the key carries both and treats NULLs as equal. Without either half the constraint never fires on the old side, where `new_line` is always NULL. |
+| A comment is published once per run | `UNIQUE NULLS NOT DISTINCT (review_run_id, finding_id)`. The NULL rule is what extends the limit to the run's summary, which carries no finding. |
 | Deleting a repository removes everything under it | `ON DELETE CASCADE` down the chain |
 
 ## Two things worth knowing

@@ -5,6 +5,7 @@ has reached a terminal state accepts nothing further, which is what stops a
 redelivered queue message from restarting finished work.
 """
 
+from dataclasses import replace
 from datetime import datetime
 from types import MappingProxyType
 
@@ -48,8 +49,6 @@ def advance(run: ReviewRun, requested: ReviewRunStatus, now: datetime) -> Result
     verdict = next_status(run.status, requested)
     if not verdict.ok:
         return Result.failure(verdict.error or "rejected")
-    from dataclasses import replace
-
     return Result.success(
         replace(run, status=requested, last_progress_at=now, updated_at=now)
     )

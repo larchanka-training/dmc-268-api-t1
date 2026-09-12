@@ -25,4 +25,9 @@ class Container:
 
 
 def build_container(settings: Settings) -> Container:
-    return Container(engine=create_engine(settings.database_url, future=True))
+    # pool_pre_ping: a connection that died while idle (server restart, idle
+    # timeout, NAT dropping the flow) is discovered on checkout and replaced,
+    # instead of surfacing as an OperationalError on the next query.
+    return Container(
+        engine=create_engine(settings.database_url, future=True, pool_pre_ping=True)
+    )
