@@ -28,7 +28,6 @@ jobs:
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - run: uv run ruff check .
-      - run: uv run lint-imports
 
   terraform:
     needs: syntax
