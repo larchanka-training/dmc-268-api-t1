@@ -1,4 +1,4 @@
-# 1. Git ИИ Ревьюер кода — POC 
+# 1. Git ИИ Ревьюер кода 
 
 ```mermaid
 flowchart TB
