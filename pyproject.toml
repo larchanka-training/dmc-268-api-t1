@@ -10,7 +10,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "import-linter>=2.1",
     "psycopg[binary]>=3.2",
     "pytest>=8.0.0",
     "ruff>=0.6.0",
@@ -28,14 +27,4 @@ pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
     "integration: requires DATABASE_URL and Postgres",
-]
-
-[tool.importlinter]
-root_package = "app"
-
-[[tool.importlinter.contracts]]
-name = "App package is independent"
-type = "independence"
-modules = [
-    "app",
 ]

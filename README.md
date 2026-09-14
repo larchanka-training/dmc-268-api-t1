@@ -13,9 +13,8 @@ uv run uvicorn app.main:app --reload
 
 ```bash
 uv sync --all-extras
-uv run python -m compileall -q .
+uv run python -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
 uv run ruff check .
-uv run lint-imports
 uv run pytest
 ```
 
