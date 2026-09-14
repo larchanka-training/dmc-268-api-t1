@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-09-09
+# No spec-level behaviour changes: this moves how the existing checks are run,
+# not what the system does. The requirements it serves already live in the
+# backend-architecture and database-migrations specs.
+skip_specs: true
