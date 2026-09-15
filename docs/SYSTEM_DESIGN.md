@@ -1,4 +1,10 @@
-# 1. Git ИИ Ревьюер кода 
+# Git ИИ Ревьюер кода — системный дизайн
+
+Система автоматического ревью кода: отслеживает изменения в pull request'ах, собирает контекст вокруг диффа, передаёт его на ревью LLM и публикует результат обратно в VCS.
+
+> **Разделение ответственности документов.** Этот документ владеет топологией развертывания, layout'ом обменов и очередей RabbitMQ, фронтендом, платежным UX и выбором внешних провайдеров (LLM provider / LLM API, Vector DB). Источник истины по слоям, портам, схеме данных, миграциям и threat model — [BACKEND_ARCHITECTURE.md](BACKEND_ARCHITECTURE.md); по модели данных — [erd.md](erd.md). При расхождении приоритет у BACKEND_ARCHITECTURE.md.
+
+## 1. Диаграмма компонентов
 
 ```mermaid
 flowchart TB
@@ -6,129 +12,118 @@ flowchart TB
     GH[GitHub<br/>PR / Push Events]
     GHR[GitHub<br/>Review Comments / Status]
     PP[Payment Provider<br/>Stripe / etc.]
-
-    %% Entry
-    APIGW[API Gateway<br/>Auth · Validation · Rate Limiting · Routing]
-    MQ[RabbitMQ<br/>Message Broker / Queues]
-
-    %% Core execution
-    AGENT[Worker / Agent<br/>Code Review Logic · Orchestration]
-    GHI[GitHub Integration<br/>PR/Branch Info · Diffs · Files<br/>Post Review Comments · GitHub API Auth]
-
-    %% AI services
-    subgraph AI["Core AI Services"]
-        CR[Context Retrieval<br/>Relevant Code · Repository Context]
-        ORCH[Agent / Orchestrator<br/>Plan & Execute Review<br/>Retries / Error Handling]
-        TOOLS[Tools<br/>Git · Repository Search<br/>Code Analysis · Read-only Filesystem]
-        VDB[(Vector DB<br/>Embeddings · Semantic Search)]
-        LGW[LLM Gateway<br/>Provider Abstraction]
-        LLM[LLM<br/>Ollama initially]
-        IDX[Repository Indexer<br/>Clone/Ingest · Chunk · Embed · Update Index]
-        RS[Repository Storage<br/>Git Repos · History · Metadata]
-    end
-
-    %% Supporting
-    subgraph SUPPORT["Supporting Services"]
-        AUD[Audit Service<br/>Requests · Tool Usage · LLM Calls / Tokens<br/>Users / Repositories · Logs / Metrics]
-        SQL[(SQL Database<br/>PostgreSQL / SQLite)]
-        PAY[Payment Service<br/>Plans · Usage · Billing]
-    end
-
-    %% Frontend
+    LLM[LLM Provider / LLM API<br/>self-hosted or hosted]
     FE[Frontend<br/>PR History · Settings · Usage/Billing · Admin]
 
-    %% Main event flow
-    GH -->|Webhook| APIGW
-    APIGW --> MQ
-    MQ --> AGENT
-    AGENT --> ORCH
+    %% Infrastructure
+    MQ[RabbitMQ<br/>Message Broker / Queues]
+    DB[(PostgreSQL<br/>only PostgreSQL: native enums · JSONB<br/>partial unique index)]
 
-    %% GitHub integration
-    APIGW <--> GHI
-    GHI -->|PR data / diffs / repository files| ORCH
-    ORCH -->|Review result / actions| GHI
-    GHI --> GHR
+    %% Modular monolith
+    subgraph MONOLITH["Modular monolith: one codebase, one image, two processes"]
+        API["app/api · uvicorn app.main:app<br/>webhook intake · HMAC verify · validation<br/>rate limiting · idempotency · REST for the frontend"]
+        WORKER["app/worker · python -m app.worker<br/>review consumer · stale-run sweep"]
+        ORCH["Application use cases<br/>context assembly (pure function) · single LLM call<br/>validate_anchor · deduplicate · next_status"]
+        VCS["VCS Gateway port · GitHub REST adapter<br/>diffs · metadata · comments · statuses<br/>GitHub App auth · backoff inside the adapter"]
+        LGW["LLM Gateway port<br/>transport-only adapter to LLM Provider / LLM API<br/>prompt assembly is a pure function"]
+        REPOS["Repository ports + UnitOfWork<br/>SQLAlchemy adapters"]
+    end
 
-    %% Agent internals
-    ORCH <--> CR
-    ORCH <--> TOOLS
+    %% Planned seams
+    subgraph PLANNED["Planned seams (designed, not built)"]
+        PAY["Payments / accounts<br/>plans · subscriptions · billing"]
+        TOOLS["Read-only tools<br/>git · repo search · code analysis<br/>used by orchestrator code, never by the model"]
+        IDX["Repository Indexer<br/>clone/ingest · chunk · embed"]
+        VDB[(Vector DB<br/>embeddings · semantic search)]
+        RS[("Repository Storage<br/>git repos · history · metadata")]
+    end
+
+    %% Event flow
+    GH -->|Webhook, HMAC-signed| API
+    FE <-->|REST| API
+    API -->|JobQueue enqueue| MQ
+    MQ --> WORKER
+    WORKER --> ORCH
+    API -->|settings · history · usage| ORCH
+
+    %% VCS
+    ORCH <-->|PR data / diffs| VCS
+    VCS -->|review comments / status| GHR
+
+    %% LLM
     ORCH <--> LGW
     LGW <--> LLM
-    CR <--> VDB
 
-    %% Repository indexing
-    RS --> IDX
-    IDX --> VDB
+    %% Data and telemetry
+    ORCH -->|runs · findings · context · comments · telemetry| REPOS
+    REPOS --> DB
 
-    %% Frontend
-    FE <--> APIGW
-
-    %% Audit
-    APIGW --> AUD
-    ORCH --> AUD
-    TOOLS --> AUD
-    LGW --> AUD
-    AUD --> SQL
-
-    %% Billing
-    FE --> PAY
-    PAY --> SQL
-    PAY -. Subscription / payment .-> PP
+    %% Planned seams
+    API -.-> PAY
+    PAY -.->|subscription / payment| PP
+    ORCH -.-> TOOLS
+    ORCH -.->|semantic search| VDB
+    RS -.-> IDX
+    IDX -.-> VDB
 
     %% Styling
     classDef external fill:#f5f5f5,stroke:#555,color:#111;
     classDef core fill:#e8f4ff,stroke:#2878c8,color:#111;
-    classDef ai fill:#eef8ef,stroke:#368a4a,color:#111;
-    classDef support fill:#fff6e8,stroke:#c88719,color:#111;
+    classDef planned fill:#eef8ef,stroke:#368a4a,color:#111;
+    classDef infra fill:#fff6e8,stroke:#c88719,color:#111;
     classDef db fill:#f7eefc,stroke:#8a4db8,color:#111;
 
-    class GH,GHR,PP,FE external;
-    class APIGW,MQ,AGENT,GHI core;
-    class CR,ORCH,TOOLS,LGW,LLM,IDX,RS ai;
-    class AUD,PAY support;
-    class VDB,SQL db;
+    class GH,GHR,PP,LLM,FE external;
+    class API,WORKER,ORCH,VCS,LGW,REPOS core;
+    class PAY,TOOLS,IDX,VDB,RS planned;
+    class MQ infra;
+    class DB db;
 ```
 
+Сплошные узлы и связи — построено. Пунктир — запланированные швы (таблица «Designed, not built» в BACKEND_ARCHITECTURE.md): порт не пишется раньше первого вызова, шов описывается заранее и бесплатно.
 
-# 1. Общая архитектура системы (Компоненты и границы ответственности)
+## 2. Общая архитектура (компоненты и границы ответственности)
 
-Система построена на микросервисной архитектуре, ориентированной на события (Event-Driven Architecture), и включает в себя следующие основные блоки:
+Система — **событийно-ориентированный модульный монолит**: один кодбейс, один образ, два процесса, которые общаются через очередь, а не по HTTP. Это осознанно не микросервисы: микросервисы решают организационную проблему независимых команд, которой здесь нет, а их цену — сетевые вызовы вместо вызовов функций, частичные отказы, версионирование контрактов, идемпотентность на каждой границе — платить нечем. Полное обоснование — раздел «Process shape» в BACKEND_ARCHITECTURE.md.
 
-## 1.1 Границы ответственности
+Границы компонентов ниже — логические (слои `app/api`, `app/application`, `app/domain`, `app/infrastructure`; направление импортов проверяет import-linter в CI), а не деплойментные.
 
-- **Frontend (FE)**: Пользовательский интерфейс для управления настройками репозиториев, просмотра истории PR, администрирования и управления биллингом (Payment Provider).
-- **Backend (Core Execution & Routing)**:
-    - **API Gateway (APIGW)**: Единая точка входа для вебхуков от GitHub/GitLab (Push/PR events), маршрутизация запросов от Frontend, валидация, rate limiting и авторизация.
-    - **RabbitMQ (MQ)**: Брокер сообщений для асинхронного управления очередью задач по ревью кода.
-    - **Worker / Agent**: Выполняет бизнес-логику ревью, забирает задачи из очереди и координирует работу внутренних модулей.
-    - **GitHub Integration (GHI)**: Инкапсуляция логики взаимодействия с GitHub API (получение файлов, диффов, отправка комментариев и статусов).
-- **Core AI Services (ИИ-ядро)**:
-    - **Agent / Orchestrator (ORCH)**: Основной планировщик задач ревью, управляющий обработкой ошибок и вызовом нужных инструментов.
-    - **Context Retrieval (CR) & Repository Indexer (IDX)**: Компоненты для подготовки и семантического поиска релевантного кода (с использованием Vector DB) по всему репозиторию.
-    - **LLM Gateway (LGW) & LLM**: Абстракция над провайдерами нейросетей (изначально Ollama), обеспечивающая балансировку и маршрутизацию запросов к большим языковым моделям.
-    - **Tools**: Набор утилит для поиска по репозиторию, анализа кода, работы с Git в read-only песочнице (filesystem).
-- **Supporting Services (Поддерживающие сервисы)**:
-    - **Audit Service (AUD)**: Логирование расхода токенов, вызовов LLM, истории использования инструментов. Сохраняет данные в SQL-базу.
-    - **Payment Service (PAY)**: Учет тарифных планов и подписок.
+### 2.1 Границы ответственности
 
-## 2. Потоки данных (Data Flows)
+- **Frontend (FE)**: настройки репозиториев, история PR, администрирование, usage/billing. Общается с системой только через REST API монолита (`app/api`).
+- **`app/api` — HTTP-точка входа (`uvicorn app.main:app`)**: приём вебхуков GitHub/GitLab с проверкой HMAC-подписи, валидация, rate limiting (fixed-window, порт `RateLimiter`), идемпотентность повторных доставок (порт `IdempotencyStore`), REST для фронтенда, постановка задач в очередь (порт `JobQueue`).
+- **RabbitMQ**: брокер сообщений; адаптер порта `JobQueue` с единственным методом `enqueue`. Layout обменов — зона ответственности этого документа (см. 4.2).
+- **`app/worker` — консьюмер ревью (`python -m app.worker`)**: ходит минутами, ограничен латентностью модели; также выметает зависшие прогоны (`find_stale`, `last_progress_at`).
+- **Оркестрация — use cases слоя `application`**: одноходовый сценарий ревью — сборка контекста (чистая функция), один вызов LLM через `LlmGateway`, `validate_anchor` и `deduplicate`, публикация через `VcsGateway`; жизненный цикл прогона — `next_status`. Ретраи с exponential backoff живут в адаптерах. **Модель не получает инструментов и никогда не выбирает действий** — структурная защита от prompt injection (threat model в BACKEND_ARCHITECTURE.md).
+- **VCS Gateway (порт; первый адаптер — GitHub REST)**: диффы, метаданные, комментарии, статусы; аутентификация GitHub App с краткосрочными installation-токенами; payload'ы, синтаксис комментариев, auth и backoff — внутри адаптера.
+- **LLM Gateway (порт)**: транспортный адаптер к **LLM provider / LLM API** (self-hosted или hosted). Сборка промпта — чистая функция; адаптер только транспортирует. Выбор провайдера — конфигурация composition root; конкретный первый адаптер зафиксирован в BACKEND_ARCHITECTURE.md. Переход с self-hosted модели на hosted LLM API — в том числе решение по безопасности (крупнейший путь эксфильтрации), не только операционное.
+- **Данные и телеметрия**: не отдельный сервис. Стоимость прогона — колонки `model`, `tokens_used`, `duration_seconds`, `failure_reason` в `review_runs`; per-call аудит (вызовы LLM и инструментов) — будущий шов, его первый заказчик — биллинг по токенам.
+- **Payments / accounts**: сегодня спроектирована только таблица `accounts` — она придёт вместе со своим портом (регистрация репозитория с проверкой прав на него); тарифы, подписки, Stripe — запланированный шов. Приоритет платных тарифов реализуется приоритетом при `enqueue`.
+- **Поиск контекста (планируемые швы)**: Repository Indexer (clone/ingest, chunk, embed), Vector DB (семантический поиск), Repository Storage (зеркала git-репозиториев), read-only инструменты (git, поиск по репозиторию, анализ кода) — используются кодом оркестратора, а не моделью.
 
-1.  **Инициация**: При создании Pull Request или Push-событии GitHub отправляет вебхук в API Gateway.
-2.  **Очередь**: API Gateway валидирует payload и публикует сообщение в очередь RabbitMQ для асинхронной обработки.
-3.  **Оркестрация и Данные**: Agent/Worker вычитывает задачу и передает управление в Orchestrator. Оркестратор через GitHub Integration скачивает данные о Pull Request и измененных файлах.
-4.  **Сбор контекста**: Orchestrator вызывает Context Retrieval и Tools для формирования расширенного контекста вокруг диффа. Если необходим поиск похожих фрагментов кода, Context Retrieval выполняет запрос к Vector DB.
-5.  **Генерация ответа**: Оркестратор отправляет собранный контекст и системные промпты в LLM через LLM Gateway.
-6.  **Публикация результатов**: Полученные от LLM замечания оркестратор отдает в GitHub Integration, который публикует Review Comments в PR на GitHub.
-7.  **Аудит и метрики**: Параллельно LLM Gateway, Tools и Orchestrator отправляют телеметрию в Audit Service для списания токенов и сбора аналитики (сохраняется в SQL Database).
+## 3. Потоки данных
 
-## 3. Правила взаимодействия с VCS, форматы очередей и кэширование
+1. **Инициация**: при создании Pull Request или Push-событии GitHub отправляет webhook в `app/api`.
+2. **Подлинность и идемпотентность**: проверяется HMAC-подпись доставки; ключ идемпотентности занимается через `INSERT ... ON CONFLICT DO NOTHING` (порт `IdempotencyStore`), повторная доставка переигрывает исход первой. Схема дополнительно допускает не более одного незавершённого прогона на коммит (partial unique index).
+3. **Очередь**: задача публикуется в RabbitMQ через `JobQueue.enqueue`.
+4. **Консюмер**: `app/worker` вычитывает сообщение (job); устойчивая сущность — `ReviewRun` (переименована из `ReviewJob`, чтобы строка БД не делила имя с сообщением очереди).
+5. **Сбор контекста**: use case иерархически собирает контекст (раздел 5) и сохраняет показанное модели в `context_payloads` — с редакцией секретов до вставки.
+6. **Генерация**: один вызов LLM через `LlmGateway`; модель возвращает структурированные findings, а не прозу.
+7. **Валидация**: `validate_anchor` отбрасывает замечания вне диффа (отклонения считаются на прогоне), `deduplicate` убирает повторы; переходы статуса — через `next_status`.
+8. **Публикация**: `Vcs Gateway` публикует Review Comments и статусы; каждый опубликованный комментарий фиксируется в `published_comments`.
+9. **Телеметрия**: `model`, `tokens_used`, `duration_seconds`, `failure_reason` пишутся в `review_runs`.
 
-### 3.1 Взаимодействие с VCS (GitHub API)
-- **Аутентификация**: Выполняется посредством GitHub Apps для получения краткосрочных installation access токенов.
-- **Rate Limits & Fallbacks**: GHI обязан отслеживать заголовки лимитов API. При достижении лимитов оркестратор должен применять паттерн Exponential Backoff.
+## 4. Правила взаимодействия с VCS, форматы очередей и кэширование
 
-### 3.2 Формат очереди задач (RabbitMQ)  - TBD, Placeholder
-В брокере сообщений используется JSON-структура. Очереди разделены на приоритетные (для платных пользователей, PAY service) и стандартные.
+### 4.1 Взаимодействие с VCS (GitHub API)
+
+- **Аутентификация**: GitHub Apps — краткосрочные installation access токены; утечка ограничена одной инсталляцией, а не всеми репозиториями владельца токена.
+- **Rate Limits & Fallbacks**: адаптер VCS Gateway отслеживает заголовки лимитов API; exponential backoff при 429/5xx — внутри адаптера.
+- **Подлинность вебхуков**: GitHub подписывает доставки HMAC по телу; без проверки любой, кто узнал endpoint, может заставить систему ревьюить что угодно и тратить бюджет модели.
+
+### 4.2 Формат очереди задач (RabbitMQ) — TBD; layout — ответственность этого документа
+
+JSON-сообщение; очереди разделены на приоритетную (платные тарифы) и стандартную. Порт `JobQueue` сознательно сведён к одному методу `enqueue`, поэтому layout обменов не затрагивает код.
 
 ```json
 {
@@ -148,34 +143,39 @@ flowchart TB
 }
 ```
 
-### 3.3 Стратегия кэширования контекстов -- TBD
+`job_id` — идентификатор сообщения (UUIDv7, генерируется в домене, не базой); устойчивая строка — `ReviewRun`; дедупликация повторных доставок — `IdempotencyStore`.
 
-*   **AST и Векторы:** Repository Indexer асинхронно обновляет векторы (Embeddings) в Vector DB при слиянии кода в основную ветку.
-*   **Кэш Файлов:** Извлеченные репозитории кэшируются в Repository Storage.
-*   **LLM Cache:** LLM Gateway может кэшировать идентичные запросы (семантический кэш) для снижения задержек и экономии токенов.
+### 4.3 Стратегия кэширования — TBD
 
----
+- **CacheStore**: best-effort key/value с TTL; сначала in-process словарь — корректен, пока процесс один, Redis-адаптер появляется вместе со второй репликой. Промах — не ошибка. Семантический кэш LLM-запросов не планируется: ключ точный.
+- **AST и векторы**: Repository Indexer асинхронно обновляет embeddings в Vector DB при слиянии кода в основную ветку — будущий шов.
+- **Кэш файлов**: извлечённые репозитории кэшируются в Repository Storage — будущий шов.
 
-### 4. Концепция сборщика контекста (Context Assembly) --TBD
+## 5. Концепция сборщика контекста (Context Assembly) — TBD
 
-Для соблюдения лимитов токенов `Context Retrieval` передает LLM данные в иерархическом порядке:
+Сборка контекста и промпта — чистая функция (адаптер `Llm Gateway` только транспортирует). Уровни записываются в `context_payloads.tiers` (`diff`, `surrounding`, `whole_file`, `ast`). Для соблюдения лимитов токенов данные передаются иерархически:
 
-*   **Diff (Уровень изменений):**
-    *   **Данные:** Стандартный unified diff (+ добавленные, - удаленные строки).
-    *   **Цель:** Понимание того, какие конкретно строки были модифицированы в PR.
-*   **Surrounding (Окружающий код):**
-    *   **Данные:** Измененные функции или блоки классов целиком (расширение контекста на N строк вверх и вниз).
-    *   **Цель:** Оценка логики изменения внутри конкретной функции (не нарушен ли цикл, обработка ошибок).
-*   **Whole File (Уровень файла):**
-    *   **Данные:** Полный текст модифицируемого файла (добавляется, если позволяет лимит окна контекста).
-    *   **Цель:** Проверка импортов, глобальных констант и соответствия код-стайлу файла.
-*   **AST / Imports (Архитектурный уровень):**
-    *   **Данные:** Сигнатуры вызываемых интерфейсов, классов и функций из соседних файлов. Извлекаются через Repository Indexer и Tools.
-    *   **Цель:** Выявление сайд-эффектов (например, изменение аргументов функции в файле A, когда она также используется в
+- **Diff (уровень изменений)**
+    - **Данные:** стандартный unified diff (+ добавленные, − удалённые строки).
+    - **Цель:** понимание того, какие конкретно строки модифицированы в PR.
+- **Surrounding (окружающий код)**
+    - **Данные:** изменённые функции или блоки классов целиком (расширение контекста на N строк вверх и вниз).
+    - **Цель:** оценка логики изменения внутри конкретной функции (не нарушен ли цикл, обработка ошибок).
+- **Whole File (уровень файла)**
+    - **Данные:** полный текст модифицируемого файла (добавляется, если позволяет лимит окна контекста).
+    - **Цель:** проверка импортов, глобальных констант и соответствия код-стайлу файла.
+- **AST / Imports (архитектурный уровень)**
+    - **Данные:** сигнатуры вызываемых интерфейсов, классов и функций из соседних файлов; извлекаются через Repository Indexer и Tools.
+    - **Цель:** выявление сайд-эффектов — например, изменение аргументов функции в файле A, когда она также используется в файле B.
 
+Безопасность и лимиты (угрозы — threat model в BACKEND_ARCHITECTURE.md):
 
+- дифф передаётся модели как delimited data и никогда не конкатенируется в инструкцию — защита от prompt injection через ревьюимый код;
+- редакция секретов до вставки в `context_payloads` — таблица хранит чужой исходный код verbatim;
+- жёсткие лимиты на число файлов, байты диффа и длительность прогона — дифф может быть сколь угодно большим.
 
+AST-уровень — первый кандидат на вынос из монолита: если tree-sitter не устроит, выделяется сервис парсинга — один порт получает сетевой адаптер (Strangler Fig), структура кода не меняется.
 
-## Основной процесс ревью
+## 6. Основной процесс ревью
 
-**GitHub PR → Webhook → API Gateway → RabbitMQ → Agent → Context + LLM → GitHub Review**
+**GitHub PR → Webhook (HMAC) → `app/api` → `IdempotencyStore` → `JobQueue` / RabbitMQ → `app/worker` → Context Assembly → один вызов LLM → validate / dedup → VCS Gateway → GitHub Review**
