@@ -9,6 +9,7 @@ venv/
 .ruff_cache/
 .idea/
 .DS_Store
+CLAUDE.md
 
 .terraform/
 .terraform.tfstate.lock.info
@@ -22,3 +23,4 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+
