@@ -1,17 +1,18 @@
-import os
+"""Smoke test: the database is reachable.
+
+It arrived with PR #2, before `conftest.py` existed, reading DATABASE_URL
+behind a skipif of its own. That is why the suite reported one skip while
+everything else ran. Same assertion, on the shared marker and fixture.
+"""
 
 import pytest
+from sqlalchemy import text
 
-pytestmark = pytest.mark.integration
+from .conftest import requires_db
+
+pytestmark = [pytest.mark.integration, requires_db]
 
 
-@pytest.mark.skipif(
-    not os.environ.get("DATABASE_URL") and not os.environ.get("CI"),
-    reason="DATABASE_URL is not set",
-)
-def test_postgres_accepts_connection():
-    import psycopg
-
-    with psycopg.connect(os.environ["DATABASE_URL"]) as conn, conn.cursor() as cur:
-        cur.execute("SELECT 1")
-        assert cur.fetchone() == (1,)
+def test_postgres_accepts_connection(engine):
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT 1")).scalar() == 1
