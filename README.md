@@ -50,7 +50,7 @@ Terraform в [`infra/`](infra/README.md); это результат DevOps-ти�
 Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
 ```bash
-uv run pytest                           # 79 tests, no database required
+uv run pytest                           # 78 tests, no database required
 TEST_DATABASE_URL=... uv run pytest     # 121 tests, adapters and migrations included
 ```
 
