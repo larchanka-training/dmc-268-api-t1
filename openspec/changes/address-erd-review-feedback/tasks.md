@@ -23,4 +23,4 @@
 ## 5. Verification and review follow-up
 
 - [x] 5.1 Run the full check on a clean database: `uv run ruff check .`, `uv run lint-imports`, `uv run pytest` with and without `TEST_DATABASE_URL`; update the test counts in `README.md` to match the run
-- [ ] 5.2 After pushing, reply to each of DrZeD-13's five comments on `docs/erd.md` in PR #5 with what changed (or, for the rename, why not), note the local DB recreate step in the PR, and flag the overlapping `models.py`/`entities.py` hunks on PR #9
+- [x] 5.2 After pushing, reply to each of DrZeD-13's five comments on `docs/erd.md` in PR #5 with what changed (or, for the rename, why not), note the local DB recreate step in the PR, and flag the overlapping `models.py`/`entities.py` hunks on PR #9
