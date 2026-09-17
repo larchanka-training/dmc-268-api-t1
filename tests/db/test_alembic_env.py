@@ -46,6 +46,9 @@ def percent_dsn(migrated):
                 f"PASSWORD '{HOSTILE_PASSWORD}'"
             )
         )
+    # `migrated` (this fixture's own dependency) already skips the test
+    # session when the variable is unset, so by this point it is set.
+    assert TEST_DATABASE_URL is not None
     url = make_url(TEST_DATABASE_URL).set(
         username=HOSTILE_ROLE, password=HOSTILE_PASSWORD
     )

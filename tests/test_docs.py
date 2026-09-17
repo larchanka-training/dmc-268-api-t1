@@ -13,7 +13,7 @@ from pathlib import Path
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
-from app.infrastructure.db.models import Base
+from app.infrastructure.db.base import Base
 
 ROOT = Path(__file__).resolve().parent.parent
 ERD = ROOT / "docs" / "erd.md"
@@ -40,7 +40,9 @@ def compiled_unique_clauses(table_name: str) -> set[str]:
 
 def test_erd_prints_the_findings_constraint_as_declared() -> None:
     clause = next(c for c in compiled_unique_clauses("findings") if "uq_findings_anchor" in c)
-    columns = re.search(r"\(([^)]*)\)", clause).group(1)
+    match = re.search(r"\(([^)]*)\)", clause)
+    assert match is not None, f"no column list in {clause!r}"
+    columns = match.group(1)
     text = ERD.read_text()
     assert "NULLS NOT DISTINCT" in text, f"{ERD} does not mention the NULL rule"
     assert f"({columns})" in text, (
@@ -55,7 +57,9 @@ def test_erd_prints_the_published_comment_constraint_as_declared() -> None:
         c for c in compiled_unique_clauses("published_comments")
         if "uq_published_comments_finding" in c
     )
-    columns = re.search(r"\(([^)]*)\)", clause).group(1)
+    match = re.search(r"\(([^)]*)\)", clause)
+    assert match is not None, f"no column list in {clause!r}"
+    columns = match.group(1)
     text = ERD.read_text()
     assert f"NULLS NOT DISTINCT ({columns})" in text, (
         f"{ERD} does not print the published-comment key as declared.\n"

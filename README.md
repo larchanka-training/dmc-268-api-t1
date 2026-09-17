@@ -16,9 +16,28 @@ Architecture and the data model: [`docs/BACKEND_ARCHITECTURE.md`](docs/BACKEND_A
 
 ```bash
 uv sync --all-extras
+uv run pre-commit install   # runs ruff, mypy and lint-imports before each commit
 ```
 
 ## Run
+
+### Fastest path: Docker Compose
+
+```bash
+docker compose up
+```
+
+Starts the API together with PostgreSQL and Redis, waits for PostgreSQL to
+report healthy, applies migrations, then serves the API at
+`localhost:8000`. `GET /health` answers `{"status": "ok"}`. PostgreSQL's data
+persists in a named volume across `docker compose down` / `up`; add `-v` to
+`down` to discard it.
+
+Redis is provisioned as local infrastructure only — nothing in the API talks
+to it yet. It lands with the first feature that needs idempotency, rate
+limiting, or caching (see `docs/BACKEND_ARCHITECTURE.md`, "Adding Redis").
+
+### Dependency-free path: run PostgreSQL yourself
 
 The service reads `DATABASE_URL` and refuses to start without it. It does not
 create tables: the schema arrives through migrations.
@@ -36,9 +55,10 @@ uv run uvicorn app.main:app --reload
 
 `GET /health` answers `{"status": "ok"}`. The generated API docs are at `/docs`.
 
-The whole local stack — PostgreSQL, RabbitMQ and the API container — is also
-described as Terraform in [`infra/`](infra/README.md), which is the DevOps
-ticket's deliverable. The commands above are the dependency-free path.
+The whole cloud-shaped stack — PostgreSQL, RabbitMQ and the API container —
+is also described as Terraform in [`infra/`](infra/README.md), which is the
+DevOps ticket's deliverable and separate from the local `docker-compose.yml`
+above.
 
 If you created a database from an earlier revision of this branch, drop and
 recreate it. The baseline migration was corrected in place while it was still
@@ -73,11 +93,16 @@ provisions one to check that a percent-encoded password survives `alembic.ini`.
 
 ```bash
 uv run ruff check .      # style
+uv run mypy .            # types, strict on app/
 uv run lint-imports      # the layering rule, see the architecture document
 ```
 
 `lint-imports` fails the build when a module imports outward, for example when
-anything under `app/domain` reaches for SQLAlchemy.
+anything under `app/domain` reaches for SQLAlchemy. `mypy` runs in strict mode
+over `app/`; `tests/` is held to a relaxed override (`[[tool.mypy.overrides]]`
+in `pyproject.toml`) since pytest's own style — untyped fixtures, untyped
+`def test_x():` — is the norm there. All three checks also run as
+`pre-commit` hooks (`uv run pre-commit install`, see Setup) and in CI.
 
 ## Migrations
 

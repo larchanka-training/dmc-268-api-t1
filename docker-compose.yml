@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: dmc268
+      POSTGRES_PASSWORD: dmc268
+      POSTGRES_DB: dmc268
+    ports:
+      - "5432:5432"
+    volumes:
+      # postgres:18's image stores data under a major-version subdirectory of
+      # this path; mounting at .../data (the pre-18 convention) makes the
+      # entrypoint refuse to start against an empty, wrongly-shaped volume.
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dmc268 -d dmc268"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Local infrastructure only: no application code talks to this yet. It is
+  # provisioned ahead of the first caller (idempotency, rate limiting, or
+  # cache) per docs/BACKEND_ARCHITECTURE.md's "no Redis now, Redis-ready by
+  # construction". Adding a client, a port, or an adapter belongs to the
+  # ticket that introduces that first caller, not this one.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+
+volumes:
+  postgres_data:

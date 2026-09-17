@@ -1,0 +1,27 @@
+# Runs the same three checks CI runs, before a commit is created rather than
+# after it is pushed. `language: system` on purpose: each hook calls straight
+# into this project's own uv-managed venv, so the hook and CI always resolve
+# the exact tool versions pinned in uv.lock — never a second, drifting copy
+# pip-installed into pre-commit's own isolated environment.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --force-exclude
+        language: system
+        types: [python]
+
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run mypy .
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: lint-imports
+        name: lint-imports (layering rule)
+        entry: uv run lint-imports
+        language: system
+        pass_filenames: false
+        types: [python]

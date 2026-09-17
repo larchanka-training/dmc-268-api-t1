@@ -12,6 +12,7 @@ shell is one `pytest` away from an empty development database.
 """
 
 import os
+from collections.abc import Iterator
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -46,6 +47,10 @@ def migrated(engine):
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
 
+    # `engine` (this fixture's own dependency) already skips the test session
+    # when the variable is unset, so by the time this line runs it is set.
+    assert TEST_DATABASE_URL is not None
+
     config = Config("alembic.ini")
     # Point alembic at the test database explicitly. env.py honours an option
     # the caller already set, so the migration cannot wander off to whatever
@@ -70,7 +75,7 @@ def clean_db(migrated):
 
 
 @pytest.fixture
-def session(clean_db) -> Session:
+def session(clean_db) -> Iterator[Session]:
     """A session rolled back after each test, so tests do not see each other."""
     connection = clean_db.connect()
     transaction = connection.begin()
