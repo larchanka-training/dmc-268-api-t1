@@ -35,15 +35,15 @@ erDiagram
         text author
         text source_branch
         text target_branch
-        text head_sha "commit under review"
-        text state
+        text head_sha "latest head seen on the host"
+        merge_request_state state "open, closed, merged"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
     }
     review_runs {
         uuid merge_request_id FK
-        text head_sha
+        text head_sha "commit this run reviewed, never moves"
         review_run_status status "queued to completed"
         trigger_source trigger "webhook, manual, mention"
         timestamptz last_progress_at "drives the stale sweep"
@@ -51,7 +51,7 @@ erDiagram
         text model
         bigint tokens_used
         float duration_seconds
-        int rejected_findings "anchors outside the diff"
+        int rejected_findings "findings dropped because the line is not in the diff"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
@@ -59,10 +59,10 @@ erDiagram
     context_payloads {
         uuid review_run_id FK
         int chunk_index
-        text_array tiers "diff, surrounding, whole_file, ast"
+        text_array tiers "which context layers went in: diff, surrounding, whole_file, ast"
         text_array file_paths
         int token_count
-        text content_sha256 "reuse key"
+        text content_sha256 "digest of body, equal digest means reuse"
         jsonb body "what the model was shown"
         uuid id PK
         timestamptz created_at
@@ -78,7 +78,7 @@ erDiagram
         finding_severity severity
         text message
         text suggestion
-        float confidence
+        float confidence "estimate reported by the model, not validated"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
@@ -86,7 +86,7 @@ erDiagram
     published_comments {
         uuid review_run_id FK
         uuid finding_id FK "null on a summary"
-        text provider_comment_id
+        text provider_comment_id "id on the host, needed to edit or delete the comment"
         comment_kind kind "summary or inline"
         timestamptz published_at
         uuid id PK
@@ -94,6 +94,41 @@ erDiagram
         timestamptz updated_at
     }
 ```
+
+## Tables
+
+**`repositories`**: a repository the service may review, one row per host.
+Holds the per-repository switch for automatic review.
+
+**`merge_requests`**: a GitHub pull request or GitLab merge request. It holds
+what every review of it shares: number, title, branches, author. `head_sha`
+here is the latest commit seen on the host and moves with every push. A new
+run compares against it to tell whether an earlier run is out of date. `state`
+is reduced to three values both hosts can express; the provider adapter
+translates GitLab's `locked` and GitHub's closed-and-merged before storing.
+
+**`review_runs`**: one attempt to review one commit of a change request. Its
+`head_sha` is the commit that was reviewed and never changes, so history stays
+readable after the request moves on. It carries the run through its lifecycle
+and keeps the result: failure reason, model, tokens, duration, and how many
+findings were thrown away. The name is deliberately not a queue name. The
+queue is RabbitMQ and its message is the `ReviewJob`; the row outlives its
+moment in the queue by the whole analysis and publication, and owns what they
+produce.
+
+**`context_payloads`**: exactly what the model was shown for a run, in order,
+one row per chunk when the context does not fit one request. It makes a run
+reproducible: a bad finding can be traced to the input that caused it. The
+digest lets a later run of identical content reuse it instead of rebuilding.
+
+**`findings`**: what the model reported that survived post-processing: anchored
+to a line the diff touched, deduplicated, categorised. A finding exists whether
+or not it is published, which is why it is separate from the next table.
+
+**`published_comments`**: what was actually posted to the host, and the host's
+id for it. Without that id the service cannot later edit or remove its own
+comment. An inline comment points at its finding; the run's summary points at
+none.
 
 ## Rules the schema enforces
 
@@ -107,7 +142,7 @@ These are constraints, not conventions, so no code path can forget them.
 | Context chunks keep their order | `UNIQUE (review_run_id, chunk_index)` |
 | A finding cannot repeat in a run | `UNIQUE NULLS NOT DISTINCT (review_run_id, file_path, side, old_line, new_line, category)`. An anchor populates only the line number belonging to its side, so the key carries both and treats NULLs as equal. Without either half the constraint never fires on the old side, where `new_line` is always NULL. |
 | A comment is published once per run | `UNIQUE NULLS NOT DISTINCT (review_run_id, finding_id)`. The NULL rule is what extends the limit to the run's summary, which carries no finding. |
-| Deleting a repository removes everything under it | `ON DELETE CASCADE` down the chain |
+| Deleting a row never removes its dependants | `ON DELETE RESTRICT` on every foreign key. A delete that would orphan something is refused, so a posted comment's `provider_comment_id` and a run's cost cannot disappear as a side effect. Cleanup, when it exists, deletes children explicitly. |
 
 ## Two things worth knowing
 

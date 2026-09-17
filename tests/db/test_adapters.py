@@ -18,6 +18,7 @@ from app.domain.enums import (
     DiffSide,
     FindingCategory,
     FindingSeverity,
+    MergeRequestState,
     Provider,
     ReviewRunStatus,
     TriggerSource,
@@ -63,7 +64,7 @@ def a_merge_request(repo_id) -> MergeRequest:
         source_branch="feat",
         target_branch="main",
         head_sha="abc123",
-        state="open",
+        state=MergeRequestState.OPEN,
         created_at=NOW,
         updated_at=NOW,
     )

@@ -189,7 +189,7 @@ application creates nothing at startup.
 - Every migration is reversible. `upgrade head`, `downgrade base`, `upgrade
   head` again must all succeed and leave nothing behind.
 - Generated migrations are reviewed before they are committed. The baseline
-  needed it: autogenerate dropped the tables on downgrade but left all seven
+  needed it: autogenerate dropped the tables on downgrade but left all eight
   native enum types behind, so the reversal was incomplete and the next
   upgrade would have failed creating types that already existed.
 - `env.py` reads `DATABASE_URL` through `Settings`, so `alembic.ini` carries no

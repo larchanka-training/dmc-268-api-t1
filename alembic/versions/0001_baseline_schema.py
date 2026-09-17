@@ -29,6 +29,7 @@ ENUM_TYPES = (
     "finding_category",
     "finding_severity",
     "comment_kind",
+    "merge_request_state",
 )
 
 
@@ -56,11 +57,11 @@ def upgrade() -> None:
     sa.Column('source_branch', sa.String(length=255), nullable=False),
     sa.Column('target_branch', sa.String(length=255), nullable=False),
     sa.Column('head_sha', sa.String(length=64), nullable=False),
-    sa.Column('state', sa.String(length=32), nullable=False),
+    sa.Column('state', sa.Enum('open', 'closed', 'merged', name='merge_request_state'), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['repository_id'], ['repositories.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['repository_id'], ['repositories.id'], ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('repository_id', 'number', name='uq_merge_requests_repo_number')
     )
@@ -79,7 +80,7 @@ def upgrade() -> None:
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['merge_request_id'], ['merge_requests.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['merge_request_id'], ['merge_requests.id'], ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_review_runs_merge_request_id'), 'review_runs', ['merge_request_id'], unique=False)
@@ -95,7 +96,7 @@ def upgrade() -> None:
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['review_run_id'], ['review_runs.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['review_run_id'], ['review_runs.id'], ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('review_run_id', 'chunk_index', name='uq_context_payloads_chunk')
     )
@@ -115,7 +116,7 @@ def upgrade() -> None:
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['review_run_id'], ['review_runs.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['review_run_id'], ['review_runs.id'], ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('review_run_id', 'file_path', 'side', 'old_line', 'new_line', 'category',
                         name='uq_findings_anchor', postgresql_nulls_not_distinct=True)
@@ -130,8 +131,8 @@ def upgrade() -> None:
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['finding_id'], ['findings.id'], ondelete='CASCADE'),
-    sa.ForeignKeyConstraint(['review_run_id'], ['review_runs.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['finding_id'], ['findings.id'], ondelete='RESTRICT'),
+    sa.ForeignKeyConstraint(['review_run_id'], ['review_runs.id'], ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('review_run_id', 'finding_id', name='uq_published_comments_finding',
                         postgresql_nulls_not_distinct=True)
@@ -143,7 +144,7 @@ def downgrade() -> None:
     """Downgrade schema.
 
     Autogenerate drops the tables but leaves the native enum types behind,
-    which breaks reversibility: `downgrade base` would leave seven orphaned
+    which breaks reversibility: `downgrade base` would leave eight orphaned
     types, and the next `upgrade head` would fail trying to create them again.
     They are dropped explicitly below.
     """

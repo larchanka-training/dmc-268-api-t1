@@ -71,9 +71,21 @@ def test_context_payload_body_is_jsonb() -> None:
     assert "JSONB" in ddl("context_payloads")
 
 
-def test_children_cascade_from_their_parent() -> None:
-    for table in ("merge_requests", "review_runs", "context_payloads", "findings"):
-        assert "ON DELETE CASCADE" in ddl(table)
+def test_children_restrict_deletion_of_their_parent() -> None:
+    for table in (
+        "merge_requests",
+        "review_runs",
+        "context_payloads",
+        "findings",
+        "published_comments",
+    ):
+        statement = ddl(table)
+        assert "ON DELETE RESTRICT" in statement
+        assert "CASCADE" not in statement
+
+
+def test_merge_request_state_is_a_native_enum() -> None:
+    assert "merge_request_state" in ddl("merge_requests")
 
 
 def test_findings_cannot_repeat_an_anchor_in_one_run() -> None:

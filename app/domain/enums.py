@@ -23,6 +23,18 @@ class TriggerSource(StrEnum):
     MENTION = "mention"
 
 
+class MergeRequestState(StrEnum):
+    """Where a change request stands on its host, reduced to what both hosts share.
+
+    GitLab's `locked` and GitHub's closed-with-`merged_at` are translated into
+    these by the provider adapter before they reach storage.
+    """
+
+    OPEN = "open"
+    CLOSED = "closed"
+    MERGED = "merged"
+
+
 class ReviewRunStatus(StrEnum):
     """Lifecycle of one attempt to review a commit."""
 

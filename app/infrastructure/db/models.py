@@ -35,6 +35,7 @@ from app.domain.enums import (
     DiffSide,
     FindingCategory,
     FindingSeverity,
+    MergeRequestState,
     Provider,
     ReviewRunStatus,
     TriggerSource,
@@ -66,8 +67,12 @@ class RepositoryRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     default_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     auto_review_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    # Nothing reads these. They exist because the unit of work orders INSERTs by
+    # relationship, not by foreign key: without them a parent and its child
+    # flushed together go in the wrong order. passive_deletes="all" keeps the
+    # ORM from deleting or orphaning children, so RESTRICT decides.
     merge_requests: Mapped[list[MergeRequestRow]] = relationship(
-        back_populates="repository", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="repository", passive_deletes="all"
     )
 
 
@@ -80,7 +85,7 @@ class MergeRequestRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
 
     repository_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False, index=True
+        Uuid, ForeignKey("repositories.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     number: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
@@ -89,11 +94,13 @@ class MergeRequestRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     source_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     target_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
-    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[MergeRequestState] = mapped_column(
+        _enum(MergeRequestState, "merge_request_state"), nullable=False
+    )
 
     repository: Mapped[RepositoryRow] = relationship(back_populates="merge_requests")
     review_runs: Mapped[list[ReviewRunRow]] = relationship(
-        back_populates="merge_request", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="merge_request", passive_deletes="all"
     )
 
 
@@ -119,7 +126,7 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
 
     merge_request_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("merge_requests.id", ondelete="CASCADE"), nullable=False, index=True
+        Uuid, ForeignKey("merge_requests.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[ReviewRunStatus] = mapped_column(
@@ -155,7 +162,7 @@ class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("review_runs.id", ondelete="CASCADE"), nullable=False, index=True
+        Uuid, ForeignKey("review_runs.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tiers: Mapped[list[str]] = mapped_column(ARRAY(String(32)), nullable=False)
@@ -190,7 +197,7 @@ class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("review_runs.id", ondelete="CASCADE"), nullable=False, index=True
+        Uuid, ForeignKey("review_runs.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
     side: Mapped[DiffSide] = mapped_column(_enum(DiffSide, "diff_side"), nullable=False)
@@ -226,10 +233,10 @@ class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("review_runs.id", ondelete="CASCADE"), nullable=False, index=True
+        Uuid, ForeignKey("review_runs.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     finding_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("findings.id", ondelete="CASCADE")
+        Uuid, ForeignKey("findings.id", ondelete="RESTRICT")
     )
     provider_comment_id: Mapped[str] = mapped_column(String(255), nullable=False)
     kind: Mapped[CommentKind] = mapped_column(_enum(CommentKind, "comment_kind"), nullable=False)

@@ -50,8 +50,8 @@ constraints it defined before the fix.
 Everything below the adapters is pure, so most of the suite needs nothing.
 
 ```bash
-uv run pytest                           # 77 tests, no database required
-TEST_DATABASE_URL=... uv run pytest     # 111 tests, adapters and migrations included
+uv run pytest                           # 78 tests, no database required
+TEST_DATABASE_URL=... uv run pytest     # 120 tests, adapters and migrations included
 ```
 
 Tests that need PostgreSQL are marked `integration` and skip when
