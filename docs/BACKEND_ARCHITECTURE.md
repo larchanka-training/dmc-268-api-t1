@@ -1,17 +1,17 @@
-# Backend architecture
+# Архитектура бэкенда
 
-The backend of an automated code-review agent: it watches change requests,
-assembles the context around a diff, asks a model to review it, and publishes
-the result back to the host.
+Бэкенд агента для автоматического код-ревью: он отслеживает change request'ы,
+собирает контекст вокруг диффа, отдаёт его модели на ревью и публикует
+результат обратно на хостинг.
 
-This document describes the structure the service is built into, the rule that
-keeps it from eroding, and the seams that are designed but deliberately not
-built yet. It is meant to be edited in the same change that alters what it
-describes.
+Здесь описано, как устроен сервис, какое правило не даёт этой структуре
+расползтись и какие точки расширения уже спроектированы, но пока намеренно не
+реализованы. Документ правится в том же изменении, которое меняет описанное в
+нём.
 
-## Layers
+## Слои
 
-Four packages under `app/`, and dependencies point inward only.
+Четыре пакета внутри `app/`, зависимости направлены только внутрь.
 
 ```
 app/api/             FastAPI routers, request and response schemas, dependencies
@@ -20,25 +20,25 @@ app/application/     use cases and the ports they depend on
 app/domain/          entities, enums, and the rules, as pure functions
 ```
 
-| Layer | May import | Holds |
+| Слой | Может импортировать | Содержит |
 |---|---|---|
-| `domain` | nothing outward, no third-party package | entities, enums, pure decision functions |
-| `application` | `domain` | use cases, port definitions |
-| `infrastructure` | `application`, `domain`, `api` | adapters, models, container |
-| `api` | `application`, `domain`, `infrastructure` | transport |
+| `domain` | ничего снаружи, никаких сторонних пакетов | сущности, enum'ы, чистые функции принятия решений |
+| `application` | `domain` | use case'ы, определения портов |
+| `infrastructure` | `application`, `domain`, `api` | адаптеры, модели, контейнер |
+| `api` | `application`, `domain`, `infrastructure` | транспорт |
 
-`api` and `infrastructure` sit at the same level and may import each other:
-the composition root lives in `infrastructure` and the app factory in `api`
-has to build it. What matters is that neither is reachable from `application`
-or `domain`.
+`api` и `infrastructure` находятся на одном уровне и могут импортировать друг
+друга: composition root живёт в `infrastructure`, а фабрика приложения в `api`
+должна его собрать. Важно лишь, чтобы ни один из них не был достижим из
+`application` или `domain`.
 
-### The rule is enforced, not agreed
+### Правило проверяется автоматически, а не держится на договорённости
 
-`import-linter` runs in CI with three contracts in `pyproject.toml`. The first
-orders the layers. The second keeps the entrypoint thin: `app.main` may not
-reach `domain`, `application` or `infrastructure` directly, only through
-`app.api`. The third bars `sqlalchemy`, `fastapi`, `httpx`, `ollama`, `pika`,
-`alembic` and `psycopg` from `domain` and `application` outright.
+`import-linter` в CI проверяет три контракта из `pyproject.toml`. Первый задаёт
+порядок слоёв. Второй не даёт точке входа разрастись: `app.main` не может
+обращаться к `domain`, `application` или `infrastructure` напрямую, только
+через `app.api`. Третий полностью запрещает `sqlalchemy`, `fastapi`, `httpx`,
+`ollama`, `pika`, `alembic` и `psycopg` в `domain` и `application`.
 
 ```
 $ lint-imports
@@ -47,164 +47,169 @@ The entrypoint stays thin KEPT
 Inner layers know no vendor KEPT
 ```
 
-A violation names the module and the line:
+При нарушении указываются модуль и строка:
 
 ```
 app.domain is not allowed to import sqlalchemy:
 -   app.domain._violation -> sqlalchemy (l.1)
 ```
 
-This is deliberate. A layering that depends on reviewers noticing decays; one
-that fails the build does not.
+Так сделано специально. Слоистость, которая держится на внимательности
+ревьюеров, со временем разваливается. Слоистость, нарушение которой ломает
+сборку, нет.
 
-## The pure core
+## Чистое ядро
 
-Every decision is a function that takes data and returns data. No I/O, no
-clock read, no randomness inside: time and identifiers arrive as arguments, so
-a test asserts an exact timestamp rather than a range.
+Каждое решение принимает функция, которая получает данные и возвращает данные.
+Внутри нет I/O, чтения часов и случайности: время и идентификаторы приходят
+аргументами, поэтому тест проверяет точный timestamp, а не диапазон.
 
-| Function | Module | Decides |
+| Функция | Модуль | Что решает |
 |---|---|---|
-| `next_status(current, requested)` | `domain/lifecycle.py` | whether a run may change state |
-| `validate_anchor(anchor, hunks)` | `domain/diff.py` | whether a finding points inside the diff |
-| `deduplicate(findings)` | `domain/dedup.py` | which findings repeat one another |
-| `find_stale(runs, now, limit)` | `domain/staleness.py` | which runs stopped making progress |
+| `next_status(current, requested)` | `domain/lifecycle.py` | может ли прогон сменить состояние |
+| `validate_anchor(anchor, hunks)` | `domain/diff.py` | указывает ли замечание внутрь диффа |
+| `deduplicate(findings)` | `domain/dedup.py` | какие замечания дублируют друг друга |
+| `find_stale(runs, now, limit)` | `domain/staleness.py` | какие прогоны перестали продвигаться |
 
-This is what makes a unit level possible at all. Most of the suite runs under
-`pytest` with no database, no broker and no network. The tests that do need
-PostgreSQL are marked `integration` and skip unless `TEST_DATABASE_URL` is
-set; the README carries the current counts and the reason that variable is not
-`DATABASE_URL`.
+Именно благодаря этому unit-уровень тестов вообще возможен. Большая часть
+тестов запускается под `pytest` без базы, брокера и сети. Тесты, которым всё же
+нужен PostgreSQL, помечены `integration` и пропускаются, если не задан
+`TEST_DATABASE_URL`. Актуальное количество тестов и причина, по которой эта
+переменная называется не `DATABASE_URL`, описаны в README.
 
-Adapters are translation and nothing else. Where an adapter appears to apply a
-rule, it is calling one of the functions above:
-`SqlAlchemyReviewRunRepo.update` consults `next_status` before writing a
-status, and `SqlAlchemyFindingRepo.add_validated` consults `validate_anchor`
-and counts the rejection on the run so a filtered finding leaves a trace.
+Адаптеры только переводят данные и больше ничего не делают. Если кажется, что
+адаптер применяет правило, значит, он вызывает одну из функций выше:
+`SqlAlchemyReviewRunRepo.update` сверяется с `next_status` перед записью
+статуса, а `SqlAlchemyFindingRepo.add_validated` сверяется с `validate_anchor`
+и учитывает отклонённое замечание в прогоне, чтобы от отфильтрованного
+замечания оставался след.
 
-## Ports
+## Порты
 
-An external system is reached through a port owned by an inner layer, with the
-adapter supplied by `infrastructure`. Ports are `typing.Protocol`, so an
-adapter never imports the port and the infrastructure layer keeps no
-compile-time dependency on the application layer.
+К внешней системе обращаются через порт, которым владеет внутренний слой, а
+адаптер предоставляет `infrastructure`. Порты сделаны через `typing.Protocol`,
+поэтому адаптер никогда не импортирует порт, и у слоя инфраструктуры нет
+compile-time зависимости от слоя приложения.
 
-### Built
+### Реализованы
 
-| Port | Adapter | Purpose |
+| Порт | Адаптер | Назначение |
 |---|---|---|
-| `RepositoryRepo` | `SqlAlchemyRepositoryRepo` | repositories under review |
-| `MergeRequestRepo` | `SqlAlchemyMergeRequestRepo` | change requests |
-| `ReviewRunRepo` | `SqlAlchemyReviewRunRepo` | review runs and their lifecycle |
-| `ContextPayloadRepo` | `SqlAlchemyContextPayloadRepo` | what the model was shown |
-| `FindingRepo` | `SqlAlchemyFindingRepo` | findings, anchored to the diff |
-| `PublishedCommentRepo` | `SqlAlchemyPublishedCommentRepo` | comments posted back |
-| `UnitOfWork` | `SqlAlchemyUnitOfWork` | transaction boundary |
+| `RepositoryRepo` | `SqlAlchemyRepositoryRepo` | репозитории на ревью |
+| `MergeRequestRepo` | `SqlAlchemyMergeRequestRepo` | change request'ы |
+| `ReviewRunRepo` | `SqlAlchemyReviewRunRepo` | прогоны ревью и их жизненный цикл |
+| `ContextPayloadRepo` | `SqlAlchemyContextPayloadRepo` | что было показано модели |
+| `FindingRepo` | `SqlAlchemyFindingRepo` | замечания с привязкой к диффу |
+| `PublishedCommentRepo` | `SqlAlchemyPublishedCommentRepo` | опубликованные комментарии |
+| `UnitOfWork` | `SqlAlchemyUnitOfWork` | граница транзакции |
 
-`app/infrastructure/container.py` is the single place a port is bound. A test
-asserts that every declared port has an adapter, and that no module under
-`api`, `application` or `domain` names a concrete one.
+`app/infrastructure/container.py` единственное место, где порт связывается с
+адаптером. Тест проверяет, что у каждого объявленного порта есть адаптер и что
+ни один модуль в `api`, `application` или `domain` не ссылается на конкретную
+реализацию.
 
-### Designed, not built
+### Спроектированы, но не реализованы
 
-No port is written before something calls it. An interface written a ticket
-ahead of its first adapter is a guess about a signature, and the guess is
-found wrong exactly when the adapter arrives, at which point the interface,
-its fake and its tests are all rewritten. These are recorded here instead,
-which costs nothing and cannot be wrong.
+Порт не пишется, пока его никто не вызывает. Интерфейс, написанный на тикет
+раньше своего первого адаптера, это догадка о сигнатуре, и выясняется, что она
+неверна, ровно тогда, когда появляется адаптер. В этот момент переписываются и
+интерфейс, и его фейк, и тесты. Поэтому здесь они только зафиксированы: это
+ничего не стоит и не может оказаться неправильным.
 
-| Seam | First adapter | What introducing it needs |
+| Точка расширения | Первый адаптер | Что нужно для внедрения |
 |---|---|---|
-| `VcsGateway` | GitHub REST | fetch diff and metadata, publish comments, set status. Provider-specific payloads, comment syntax and auth stay inside the adapter. |
-| `LlmGateway` | Ollama | run an analysis prompt, return structured findings. Prompt assembly is a pure function; the adapter only transports. |
-| `JobQueue` | RabbitMQ | dispatch a run for async processing. One `enqueue` method; exchange layout is System Design's call. |
-| `IdempotencyStore` | PostgreSQL | claim a key with `INSERT ... ON CONFLICT DO NOTHING`, replay the winner's outcome. Lands with the first endpoint that accepts a retry. |
-| `RateLimiter` | PostgreSQL | fixed-window counter per subject, `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. |
-| `CacheStore` | in-process TTL dict | best-effort key/value. A miss is never an error. |
+| `VcsGateway` | GitHub REST | получить дифф и метаданные, опубликовать комментарии, выставить статус. Специфичные для провайдера payload'ы, синтаксис комментариев и авторизация остаются внутри адаптера. |
+| `LlmGateway` | Ollama | выполнить промпт анализа, вернуть структурированные замечания. Сборка промпта это чистая функция, адаптер отвечает только за транспорт. |
+| `JobQueue` | RabbitMQ | отправить прогон на асинхронную обработку. Один метод `enqueue`, схему exchange'ей определяет System Design. |
+| `IdempotencyStore` | PostgreSQL | захватить ключ через `INSERT ... ON CONFLICT DO NOTHING`, воспроизвести результат победившего запроса. Появится вместе с первым эндпоинтом, который принимает повторы. |
+| `RateLimiter` | PostgreSQL | счётчик с фиксированным окном на субъект, `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. |
+| `CacheStore` | TTL-словарь в памяти процесса | key/value по принципу best effort. Промах никогда не считается ошибкой. |
 
-The `accounts`, `idempotency_records` and `rate_limit_counters` tables are
-designed alongside those ports and arrive with them.
+Таблицы `accounts`, `idempotency_records` и `rate_limit_counters`
+спроектированы вместе с этими портами и появятся вместе с ними.
 
-## Process shape
+## Процессы
 
-One codebase, one image, two entry points.
+Одна кодовая база, один образ, две точки входа.
 
 ```
 uvicorn app.main:app        HTTP: request-response, milliseconds
 python -m app.worker      review consumer: minutes, bound by model latency
 ```
 
-They share the domain, the repositories and the database, and communicate
-through the queue rather than over HTTP. This is a modular monolith, not a set
-of services.
+У них общие домен, репозитории и база данных, а общаются они через очередь, а
+не по HTTP. Это модульный монолит, а не набор сервисов.
 
-Microservices solve an organisational problem: letting independent teams
-release without coordinating. This is one team, so the cost arrives without
-the benefit. Network calls where function calls would do, partial failure,
-contract versioning, tracing across process boundaries, and a local
-environment that needs several containers before anything runs. Idempotency is
-the clearest example: one concern in one place here, and one that would have
-to be solved again at every boundary we invented.
+Микросервисы решают организационную проблему: дают независимым командам
+выпускать релизы без согласования. Здесь одна команда, поэтому издержки есть,
+а выгоды нет. Сетевые вызовы там, где хватило бы вызова функции, частичные
+отказы, версионирование контрактов, трассировка через границы процессов и
+локальное окружение, которому нужно несколько контейнеров, прежде чем что-то
+заработает. Нагляднее всего это видно на идемпотентности: здесь это одна задача
+в одном месте, а так её пришлось бы решать заново на каждой придуманной нами
+границе.
 
-The asymmetry between the two profiles is real, but two processes cover it,
-because they never call each other synchronously.
+Разница в профилях нагрузки двух процессов реальна, но двух процессов для неё
+достаточно, потому что они никогда не вызывают друг друга синхронно.
 
-**When to actually split.** When a component needs a different runtime. The
-visible candidate is AST parsing for the fourth context tier: if the
-tree-sitter Python bindings disappoint, a parser service is the first thing
-that should leave. Extracting it means giving one port a network adapter, not
-restructuring the code, which is the Strangler Fig pattern and the reason a
-modular monolith is the usual starting point for it.
+**Когда действительно стоит разделять.** Когда компоненту нужен другой runtime.
+Очевидный кандидат это парсинг AST для четвёртого уровня контекста: если
+Python-биндинги tree-sitter разочаруют, в отдельный сервис первым стоит
+вынести парсинг. Вынести его значит дать одному порту сетевой адаптер, а не
+перестраивать код. Это паттерн Strangler Fig, и именно поэтому модульный
+монолит обычно служит для него отправной точкой.
 
-Deployment topology belongs to System Design. This records what the backend
-assumes.
+Топология развёртывания в зоне ответственности System Design. Здесь
+зафиксировано, на что рассчитывает бэкенд.
 
-## Data
+## Данные
 
-See [the data model](erd.md) for the diagram and the constraints.
+Диаграмма и ограничения описаны в [модели данных](erd.md).
 
-`ReviewRun` is the ticket's `ReviewJob`. The name changed because "job" is
-also going to be the RabbitMQ message, and a durable row sharing a name with a
-transient message is how people end up debugging the wrong thing.
+`ReviewRun` это `ReviewJob` из тикета. Название поменяли, потому что "job"
+будет называться и сообщение в RabbitMQ, а когда долгоживущая строка в базе и
+временное сообщение называются одинаково, люди в итоге отлаживают не то.
 
-Identifiers are UUIDv7 generated in the domain, never by a database default.
-Time-ordered keys land at the right edge of the index instead of scattering
-across it the way `uuid4` does, and an entity is complete in memory before
-anything touches PostgreSQL. `uuid.uuid7()` is standard library from 3.14.
+Идентификаторы это UUIDv7, которые генерируются в домене и никогда не
+берутся из дефолта базы данных. Упорядоченные по времени ключи попадают в
+правый край индекса, а не разбрасываются по нему, как `uuid4`, и сущность
+полностью собрана в памяти ещё до обращения к PostgreSQL. `uuid.uuid7()` есть
+в стандартной библиотеке начиная с 3.14.
 
-Timestamps are declared `DateTime(timezone=True)` explicitly. A bare
-`Mapped[datetime]` compiles to `TIMESTAMP WITHOUT TIME ZONE`, which reads
-correctly and is wrong: a run that started before a daylight-saving shift
-would appear to finish before it began. The schema tests assert against
-compiled DDL rather than the annotation, because the annotation is exactly
-what looks right while being wrong.
+Timestamp'ы явно объявлены как `DateTime(timezone=True)`. Голый
+`Mapped[datetime]` компилируется в `TIMESTAMP WITHOUT TIME ZONE`, который
+выглядит правильно, но работает неправильно: прогон, начавшийся перед
+переходом на летнее или зимнее время, мог бы завершиться раньше, чем начался.
+Тесты схемы проверяют скомпилированный DDL, а не аннотацию, потому что именно
+аннотация выглядит правильно, будучи неправильной.
 
-## Migrations
+## Миграции
 
-Schema changes reach a database only through a reviewed Alembic revision. The
-application creates nothing at startup.
+Изменения схемы попадают в базу только через Alembic-ревизию, прошедшую ревью.
+Приложение ничего не создаёт при старте.
 
-- Filenames carry a zero-padded prefix: `0001_baseline_schema.py`.
-- Exactly one head. Two branches that each add a migration rebase into a line.
-- Every migration is reversible. `upgrade head`, `downgrade base`, `upgrade
-  head` again must all succeed and leave nothing behind.
-- Generated migrations are reviewed before they are committed. The baseline
-  needed it: autogenerate dropped the tables on downgrade but left all eight
-  native enum types behind, so the reversal was incomplete and the next
-  upgrade would have failed creating types that already existed.
-- `env.py` reads `DATABASE_URL` through `Settings`, so `alembic.ini` carries no
-  connection string and the two cannot disagree. A caller that has already set
-  the option keeps it, which is how the test suite points migrations at
-  `TEST_DATABASE_URL` without touching what the service reads. The value is
-  escaped on the way in, because `configparser` treats `%` as interpolation and
-  rejects a percent-encoded password outright.
+- Имена файлов начинаются с префикса, дополненного нулями: `0001_baseline_schema.py`.
+- Ровно один head. Две ветки, каждая из которых добавляет миграцию, при rebase выстраиваются в линию.
+- Каждая миграция обратима. `upgrade head`, `downgrade base` и снова `upgrade
+  head` должны пройти успешно и не оставить мусора.
+- Сгенерированные миграции просматриваются перед коммитом. Baseline без этого
+  не обошёлся: autogenerate при downgrade удалял таблицы, но оставлял все
+  восемь нативных enum-типов, так что откат был неполным, а следующий upgrade
+  упал бы на создании уже существующих типов.
+- `env.py` читает `DATABASE_URL` через `Settings`, поэтому в `alembic.ini` нет
+  строки подключения, и они не могут разойтись. Если вызывающий код уже задал
+  эту опцию, она сохраняется: так тесты направляют миграции на
+  `TEST_DATABASE_URL`, не трогая то, что читает сервис. Значение экранируется
+  при передаче, потому что `configparser` считает `%` интерполяцией и сразу
+  отвергает пароль с percent-encoding.
 
-An integration test migrates a disposable database to head and asserts
-autogenerate finds nothing to do, so models and schema cannot drift apart
-silently.
+Интеграционный тест мигрирует одноразовую базу до head и проверяет, что
+autogenerate не находит изменений, так что модели и схема не могут незаметно
+разойтись.
 
-**Adding a value to an enum** needs `ALTER TYPE ... ADD VALUE`, which cannot
-run inside a transaction on older PostgreSQL. Put it in its own migration:
+**Добавление значения в enum** требует `ALTER TYPE ... ADD VALUE`, а в старых
+версиях PostgreSQL это нельзя выполнить внутри транзакции. Выносите это в
+отдельную миграцию:
 
 ```python
 def upgrade() -> None:
@@ -212,115 +217,123 @@ def upgrade() -> None:
     op.execute("ALTER TYPE finding_category ADD VALUE 'maintainability'")
 ```
 
-Removing one means recreating the type, which is why the sets are small and
-change rarely.
+Удаление значения означает пересоздание типа, поэтому наборы значений
+небольшие и меняются редко.
 
-## Configuration
+## Конфигурация
 
-Everything comes from one validated object assembled at startup. Below the
-composition root, layers receive what they need as arguments; only
-`app/config.py` reads the environment.
+Всё берётся из одного провалидированного объекта, который собирается при
+старте. Ниже composition root слои получают нужное через аргументы, окружение
+читает только `app/config.py`.
 
-Startup fails loudly when a required setting is missing, naming it. There is
-one setting today, `DATABASE_URL`, because nothing reads more than that yet.
-Auth, rate-limit and cache settings arrive with the code that uses them.
+Если обязательная настройка не задана, старт явно падает и называет её.
+Сейчас настройка одна, `DATABASE_URL`, потому что больше пока ничего не
+читается. Настройки авторизации, rate limit и кэша появятся вместе с кодом,
+который их использует.
 
-## Observability
+## Наблюдаемость
 
-What a run costs is a column, not a metrics stack. `review_runs` stores
-`model`, `tokens_used`, `duration_seconds` and `failure_reason` on the row.
+Стоимость прогона хранится в колонке, а не в стеке метрик. `review_runs`
+хранит в строке `model`, `tokens_used`, `duration_seconds` и `failure_reason`.
 
-The questions this service will be asked are why a review took four minutes,
-what last week cost, and which runs fail and where. All three are answerable
-with SQL over a table that has to exist anyway, and the answers stay attached
-to the run someone is looking at.
+Вопросы, которые будут задавать этому сервису: почему ревью заняло четыре
+минуты, во что обошлась прошлая неделя, какие прогоны падают и где. На все три
+отвечает SQL по таблице, которая нужна в любом случае, и ответы остаются
+привязаны к тому прогону, который человек смотрит.
 
-Prometheus, Grafana and distributed tracing exist to reconstruct a request
-that crossed many services. Two processes sharing a database do not have that
-problem. Structured logs carrying a run id are the next step if that changes.
+Prometheus, Grafana и распределённая трассировка нужны, чтобы восстановить
+запрос, прошедший через множество сервисов. У двух процессов с общей базой
+такой проблемы нет. Если это изменится, следующим шагом будут структурированные
+логи с id прогона.
 
-## Extending
+## Расширение
 
-**Adding GitLab.** A `VcsGateway` adapter and one more value in the `provider`
-enum. No migration: every record that mirrors a host object already carries a
-provider discriminator next to the host's own id, and no use case names a
-provider.
+**Добавление GitLab.** Адаптер `VcsGateway` и ещё одно значение в enum
+`provider`. Миграция не нужна: каждая запись, отражающая объект хостинга, уже
+хранит дискриминатор провайдера рядом с id самого хостинга, и ни один use case
+не ссылается на конкретного провайдера.
 
-**Adding Redis.** One adapter class per port and a binding in the container.
-No call site changes, because callers will have been written against
-`IdempotencyStore`, `RateLimiter` and `CacheStore` from the start. The trigger
-is the in-process cache: it is correct for one process and useless across
-replicas, so the moment a second replica exists, it is wrong.
+**Добавление Redis.** По одному классу адаптера на порт и привязка в
+контейнере. Места вызова не меняются, потому что вызывающий код с самого
+начала будет написан против `IdempotencyStore`, `RateLimiter` и `CacheStore`.
+Поводом станет кэш в памяти процесса: он корректен для одного процесса и
+бесполезен для нескольких реплик, так что как только появится вторая реплика,
+он станет неправильным.
 
-**Changing the database.** Harder, and accepted. The schema uses native enums,
-JSONB, arrays, a partial unique index and `ON CONFLICT`, none of which port to
-another engine. That is a deliberate trade: using the database as a database
-rather than as a row store. The partial index in particular is what makes "one
-active run per commit" atomic instead of a race between `SELECT` and `INSERT`.
+**Смена базы данных.** Сложнее, и мы с этим согласны. Схема использует
+нативные enum'ы, JSONB, массивы, частичный уникальный индекс и `ON CONFLICT`,
+и ничего из этого не переносится на другой движок. Это осознанный компромисс:
+использовать базу данных как базу данных, а не как хранилище строк. В
+частности, именно частичный индекс делает правило "один активный прогон на
+коммит" атомарным, а не гонкой между `SELECT` и `INSERT`.
 
-## Threat model
+## Модель угроз
 
-A code-review agent reads attacker-influenced input by design, holds
-credentials that can write to repositories, and stores other people's source
-code.
+Агент код-ревью по своей природе читает входные данные, на которые может
+влиять атакующий, хранит учётные данные с правом записи в репозитории и хранит
+чужой исходный код.
 
-**Prompt injection through the reviewed code.** The diff is attacker
-controlled. A pull request can contain `# IGNORE ALL PREVIOUS INSTRUCTIONS` in
-a comment, a docstring or a test fixture. The defences are structural, because
-filtering for phrases loses to paraphrase: the diff is passed as delimited
-data and never concatenated into the instruction, the model returns structured
-output rather than prose that gets parsed, model output never selects an
-action, and the review model is given no tools. `validate_anchor` is already
-one such defence, since a finding invented about a file outside the diff
-cannot be stored.
+**Prompt injection через проверяемый код.** Дифф контролирует атакующий.
+Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` в
+комментарии, docstring или тестовой фикстуре. Защита строится на структуре,
+потому что фильтрация по фразам проигрывает перефразированию: дифф передаётся
+как отделённые разделителями данные и никогда не склеивается с инструкцией,
+модель возвращает структурированный вывод, а не прозу, которую потом парсят,
+вывод модели никогда не выбирает действие, а у модели ревью нет инструментов.
+`validate_anchor` уже является одной из таких защит: замечание, выдуманное про
+файл вне диффа, не может быть сохранено.
 
-**Secrets in `context_payloads`.** That table holds source code verbatim. A
-developer who commits an API key gets it copied into our database and kept.
-Redaction belongs before the insert, and `ContextPayloadRepo` is the choke
-point where it can be enforced for every writer. Retention is a
-data-protection question, not only a storage one.
+**Секреты в `context_payloads`.** Эта таблица хранит исходный код как есть.
+Разработчик, закоммитивший API-ключ, получает его копию в нашей базе, и она
+там остаётся. Секреты надо вычищать до вставки, и
+`ContextPayloadRepo` это узкое место, где это можно обеспечить для всех, кто
+пишет в таблицу. Срок хранения это вопрос защиты данных, а не только хранения.
 
-**Webhook authenticity.** GitHub signs deliveries with an HMAC over the body.
-Without verifying it, anyone who learns the endpoint can make the service
-review anything and spend model budget doing it. Lands with the endpoint.
+**Подлинность webhook'ов.** GitHub подписывает доставки HMAC от тела запроса.
+Без проверки подписи любой, кто узнал эндпоинт, может заставить сервис ревьюить
+что угодно и тратить на это бюджет модели. Появится вместе с эндпоинтом.
 
-**Credential scope.** Publishing comments needs write access. A GitHub App
-with per-installation tokens limits a leak to one installation; a personal
-access token would expose every repository its owner can reach.
+**Область действия учётных данных.** Для публикации комментариев нужен доступ
+на запись. GitHub App с токенами на каждую установку ограничивает утечку одной
+установкой. Personal access token открыл бы доступ ко всем репозиториям,
+доступным его владельцу.
 
-**Registration authorisation.** Registering a repository must verify the
-caller has access to it, or someone can subscribe a repository they do not own
-and read the analysis of it.
+**Авторизация при регистрации.** При регистрации репозитория нужно проверять,
+что у вызывающего есть к нему доступ, иначе можно подписать чужой репозиторий
+и читать его анализ.
 
-**Suggestions are a write path.** A finding can carry a one-click-apply patch,
-which is a model-authored change proposed into someone's branch. It stays a
-suggestion a human accepts. Nothing auto-applies.
+**Suggestions пишут в чужие ветки.** Замечание может содержать патч, применяемый в
+один клик, то есть написанное моделью изменение, предлагаемое в чью-то ветку.
+Оно остаётся предложением, которое принимает человек. Ничего не применяется
+автоматически.
 
-**Resource exhaustion.** A change request can be arbitrarily large. Hard
-limits on files, diff bytes and run duration belong with the context builder.
+**Исчерпание ресурсов.** Change request может быть сколь угодно большим.
+Жёсткие лимиты на количество файлов, размер диффа в байтах и длительность
+прогона должны быть в сборщике контекста.
 
-**Self-hosting the model is a security property.** Ollama running in our own
-network removes the largest exfiltration path. Moving to a hosted API later
-would be a security decision, not only an operational one.
+**Self-hosted модель это свойство безопасности.** Ollama в нашей собственной
+сети убирает главный путь утечки данных. Переход на hosted API в будущем был
+бы решением в области безопасности, а не только эксплуатационным.
 
-Of these, this document's own change owns the first two, because they shape
-`ContextPayload.body` and identify the sensitive table. The rest are recorded
-so the tickets that add endpoints and the pipeline start from a list rather
-than from memory.
+Из этого списка изменение, вместе с которым появился этот документ, отвечает за
+первые два пункта, потому что они определяют `ContextPayload.body` и указывают
+на чувствительную таблицу. Остальные зафиксированы, чтобы тикеты, добавляющие
+эндпоинты и пайплайн, начинались со списка, а не с того, что удастся вспомнить.
 
-## How the code is expected to look
+## Как должен выглядеть код
 
-- **Pure core, effectful edge.** Decisions are functions over data. Time,
-  identifiers and randomness are arguments, never ambient.
-- **Thin adapters.** Translation between an external shape and a domain shape.
-  A branch expressing a business rule is in the wrong layer.
-- **No port without a caller.** Where the deliverable is the seam itself,
-  describe it here rather than committing unused code.
-- **Single-source what would drift.** Enums, the transition table and the
-  timestamp mixin exist once. Six similar-looking repository methods are
-  coincidence, not shared meaning, and get no base class.
-- **Prefer the boring construct.** Fixed-window rate limiting over sliding. A
-  dictionary over a cache library. Where the simple version has a ceiling,
-  document the ceiling and the upgrade path instead of pre-building it.
-- **Testability is the acceptance criterion.** If a rule can only be tested by
-  standing up infrastructure, it is in the wrong layer.
+- **Чистое ядро, эффекты на краях.** Решения это функции над данными. Время,
+  идентификаторы и случайность передаются аргументами и никогда не берутся из
+  окружения.
+- **Тонкие адаптеры.** Перевод между внешним форматом и доменным. Ветвление,
+  выражающее бизнес-правило, находится не в том слое.
+- **Нет порта без вызывающего кода.** Если результат задачи это сама точка
+  расширения, опишите её здесь, а не коммитьте неиспользуемый код.
+- **Один источник для того, что может разойтись.** Enum'ы, таблица переходов и
+  mixin для timestamp'ов существуют в одном экземпляре. Шесть похожих методов
+  репозиториев это совпадение, а не общий смысл, и базового класса для них нет.
+- **Предпочитайте скучные решения.** Rate limiting с фиксированным окном, а не
+  со скользящим. Словарь, а не библиотека кэширования. Если у простого варианта
+  есть потолок, опишите потолок и путь дальше, а не стройте всё заранее.
+- **Тестируемость это критерий приёмки.** Если правило можно протестировать,
+  только подняв инфраструктуру, оно находится не в том слое.

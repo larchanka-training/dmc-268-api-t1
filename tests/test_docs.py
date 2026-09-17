@@ -67,13 +67,13 @@ def declared_contract_count() -> int:
     return len(tomllib.loads(PYPROJECT.read_text())["tool"]["importlinter"]["contracts"])
 
 
-NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+NUMBER_WORDS = {"один": 1, "два": 2, "три": 3, "четыре": 4, "пять": 5, "шесть": 6}
 
 
 def test_architecture_names_every_layering_contract() -> None:
     text = ARCHITECTURE.read_text()
-    match = re.search(r"`import-linter` runs in CI with (\w+) contracts", text)
-    assert match, f"{ARCHITECTURE} no longer states how many contracts run in CI"
+    match = re.search(r"`import-linter` в CI проверяет (\w+) контракт", text)
+    assert match, f"{ARCHITECTURE} no longer states how many contracts import-linter checks in CI (in Russian)"
     claimed = NUMBER_WORDS.get(match.group(1))
     assert claimed is not None, f"unrecognised count {match.group(1)!r} in {ARCHITECTURE}"
     assert claimed == declared_contract_count(), (

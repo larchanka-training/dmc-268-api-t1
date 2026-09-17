@@ -1,27 +1,27 @@
 # DMC-268 API (Team 1)
 
-FastAPI backend for the automated code-review agent.
+Бэкенд на FastAPI для агента автоматического код-ревью.
 
-Architecture and the data model: [`docs/BACKEND_ARCHITECTURE.md`](docs/BACKEND_ARCHITECTURE.md),
+Архитектура и модель данных: [`docs/BACKEND_ARCHITECTURE.md`](docs/BACKEND_ARCHITECTURE.md),
 [`docs/erd.md`](docs/erd.md).
 
-## Requirements
+## Требования
 
-- Python 3.14, pinned in `.python-version` and enforced by `requires-python`.
-  `uv` fetches it for you; the system `python3` is very likely something else.
-- [uv](https://docs.astral.sh/uv/) for dependencies.
-- PostgreSQL, for running the service and the integration tests.
+- Python 3.14, версия зафиксирована в `.python-version` и проверяется через `requires-python`.
+  `uv` скачает его сам; системный `python3`, скорее всего, другой версии.
+- [uv](https://docs.astral.sh/uv/) для зависимостей.
+- PostgreSQL, чтобы запускать сервис и интеграционные тесты.
 
-## Setup
+## Установка
 
 ```bash
 uv sync --all-extras
 ```
 
-## Run
+## Запуск
 
-The service reads `DATABASE_URL` and refuses to start without it. It does not
-create tables: the schema arrives through migrations.
+Сервис читает `DATABASE_URL` и без него не стартует. Таблицы он не создаёт:
+схема появляется через миграции.
 
 ```bash
 docker run -d --name dmc268-db -p 5432:5432 \
@@ -34,52 +34,53 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
-`GET /health` answers `{"status": "ok"}`. The generated API docs are at `/docs`.
+`GET /health` отвечает `{"status": "ok"}`. Сгенерированная документация API лежит на `/docs`.
 
-The whole local stack — PostgreSQL, RabbitMQ and the API container — is also
-described as Terraform in [`infra/`](infra/README.md), which is the DevOps
-ticket's deliverable. The commands above are the dependency-free path.
+Весь локальный стек (PostgreSQL, RabbitMQ и контейнер с API) также описан на
+Terraform в [`infra/`](infra/README.md); это результат DevOps-тикета. Команды
+выше дают путь без лишних зависимостей.
 
-If you created a database from an earlier revision of this branch, drop and
-recreate it. The baseline migration was corrected in place while it was still
-unmerged, so an older database claims revision `0001` while carrying the
-constraints it defined before the fix.
+Если вы создавали базу на более ранней ревизии этой ветки, удалите её и
+создайте заново. Базовую миграцию исправили на месте, пока она ещё не была
+смёржена, поэтому старая база заявляет ревизию `0001`, но содержит ограничения
+в том виде, в каком они были до исправления.
 
-## Tests
+## Тесты
 
-Everything below the adapters is pure, so most of the suite needs nothing.
+Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
 ```bash
 uv run pytest                           # 79 tests, no database required
 TEST_DATABASE_URL=... uv run pytest     # 121 tests, adapters and migrations included
 ```
 
-Tests that need PostgreSQL are marked `integration` and skip when
-`TEST_DATABASE_URL` is unset.
+Тесты, которым нужен PostgreSQL, помечены `integration` и пропускаются, если
+`TEST_DATABASE_URL` не задан.
 
-That variable is deliberately not `DATABASE_URL`, and nothing falls back to it.
-Preparing the test database drops its schema, so pointing the suite at the
-database you run the service against would empty it. Give the tests their own:
+Эта переменная намеренно не `DATABASE_URL`, и никакого отката на неё нет.
+Подготовка тестовой базы удаляет её схему, так что если направить тесты на
+базу, с которой работает сервис, она окажется пустой. Выделите тестам отдельную:
 
 ```bash
 createdb dmc268_test
 export TEST_DATABASE_URL="postgresql+psycopg://dmc:dmc@localhost:5432/dmc268_test"
 ```
 
-The role it connects as needs permission to create a role, because one test
-provisions one to check that a percent-encoded password survives `alembic.ini`.
+Роли, под которой идёт подключение, нужно право создавать роли: один из тестов
+создаёт роль, чтобы проверить, что пароль в percent-encoding корректно
+проходит через `alembic.ini`.
 
-## Checks
+## Проверки
 
 ```bash
 uv run ruff check .      # style
 uv run lint-imports      # the layering rule, see the architecture document
 ```
 
-`lint-imports` fails the build when a module imports outward, for example when
-anything under `app/domain` reaches for SQLAlchemy.
+`lint-imports` роняет сборку, когда модуль импортирует что-то из внешнего слоя,
+например когда что-нибудь в `app/domain` тянется к SQLAlchemy.
 
-## Migrations
+## Миграции
 
 ```bash
 uv run alembic upgrade head        # apply
@@ -87,6 +88,5 @@ uv run alembic downgrade base      # reverse, leaves nothing behind
 uv run alembic heads               # must report exactly one
 ```
 
-Generated migrations are reviewed before they are committed. Conventions and
-the `ALTER TYPE` recipe for extending an enum are in the architecture
-document.
+Сгенерированные миграции проходят ревью перед коммитом. Соглашения и рецепт с
+`ALTER TYPE` для расширения enum описаны в документе по архитектуре.

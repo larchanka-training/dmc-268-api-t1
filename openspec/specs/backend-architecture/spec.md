@@ -1,127 +1,127 @@
 # backend-architecture Specification
 
 ## Purpose
-Defines the layering contract of the code-review backend: which layers exist, which direction dependencies are allowed to point, and which capabilities are reached only through abstract ports — so that infrastructure choices (database, LLM runtime, VCS provider, cache) can be replaced without touching business logic.
+Определяет контракт слоёв бэкенда для код-ревью: какие слои существуют, в каком направлении разрешены зависимости и какие возможности доступны только через абстрактные порты. Это позволяет заменять инфраструктурные решения (базу данных, среду выполнения LLM, провайдера системы контроля версий, кеш), не затрагивая бизнес-логику.
 
 ## Requirements
 
-### Requirement: Four-layer separation
+### Requirement: Разделение на четыре слоя
 
-The service SHALL be organised into four layers — API, application, domain, and infrastructure — where the domain layer holds entities and business invariants, the application layer holds use cases, the API layer exposes transport, and the infrastructure layer holds every adapter to an external system.
+Сервис SHALL состоять из четырёх слоёв: API, прикладного, доменного и инфраструктурного. Доменный слой содержит сущности и бизнес-инварианты, прикладной — сценарии использования (use cases), слой API отвечает за транспорт, а инфраструктурный содержит все адаптеры к внешним системам.
 
-Each layer SHALL live in its own package, and no module SHALL belong to two layers.
+Каждый слой SHALL располагаться в собственном пакете, и ни один модуль SHALL NOT относиться к двум слоям одновременно.
 
-#### Scenario: Layer packages exist and are distinct
+#### Scenario: Пакеты слоёв существуют и не пересекаются
 
-- **WHEN** the backend source tree is inspected
-- **THEN** four top-level layer packages are present, each containing only modules belonging to that layer
+- **WHEN** проверяется дерево исходного кода бэкенда
+- **THEN** в нём есть четыре пакета слоёв верхнего уровня, и каждый содержит только модули своего слоя
 
-#### Scenario: Business rule lives in the domain layer
+#### Scenario: Бизнес-правило находится в доменном слое
 
-- **WHEN** a rule about a domain entity's validity or lifecycle is expressed in code
-- **THEN** it resides in the domain layer and is reachable without constructing any transport, database, or network object
+- **WHEN** в коде выражено правило о корректности или жизненном цикле доменной сущности
+- **THEN** оно находится в доменном слое и доступно без создания каких-либо транспортных, сетевых объектов или объектов базы данных
 
-### Requirement: Inward dependency rule
+### Requirement: Зависимости направлены внутрь
 
-Dependencies SHALL point inward only. The domain layer SHALL NOT import from the application, API, or infrastructure layers. The application layer SHALL NOT import from the API or infrastructure layers. The infrastructure and API layers MAY import from the application and domain layers.
+Зависимости SHALL быть направлены только внутрь. Доменный слой SHALL NOT импортировать модули из прикладного, API- или инфраструктурного слоя. Прикладной слой SHALL NOT импортировать модули из слоя API или инфраструктурного слоя. Инфраструктурный слой и слой API MAY импортировать модули из прикладного и доменного слоёв.
 
-Violations SHALL be detectable by an automated check rather than by review alone.
+Нарушения SHALL выявляться автоматической проверкой, а не только на ревью.
 
-#### Scenario: Domain module imports nothing outward
+#### Scenario: Доменный модуль не импортирует ничего из внешних слоёв
 
-- **WHEN** the import graph of any domain module is resolved transitively
-- **THEN** it contains no module from the application, API, or infrastructure layers
+- **WHEN** граф импортов любого доменного модуля разрешается транзитивно
+- **THEN** в нём нет ни одного модуля из прикладного, API- или инфраструктурного слоя
 
-#### Scenario: Application module reaches infrastructure only through a port
+#### Scenario: Прикладной модуль обращается к инфраструктуре только через порт
 
-- **WHEN** an application use case needs an external system
-- **THEN** it depends on a port declared in the application or domain layer, and never on a concrete adapter type
+- **WHEN** сценарию использования прикладного слоя нужна внешняя система
+- **THEN** он зависит от порта, объявленного в прикладном или доменном слое, и никогда не зависит от конкретного типа адаптера
 
-#### Scenario: Violation is caught mechanically
+#### Scenario: Нарушение обнаруживается автоматически
 
-- **WHEN** a change introduces an import that points outward
-- **THEN** the automated layering check fails and identifies the offending module and import
+- **WHEN** изменение добавляет импорт, направленный наружу
+- **THEN** автоматическая проверка слоёв падает и указывает модуль-нарушитель и сам импорт
 
-### Requirement: External systems are reached through ports
+### Requirement: Доступ к внешним системам — через порты
 
-Every external system the service talks to SHALL be represented by a port — an abstract interface owned by the application or domain layer — with concrete adapters supplied by the infrastructure layer. No inner layer SHALL depend on a concrete adapter type.
+Каждая внешняя система, с которой взаимодействует сервис, SHALL быть представлена портом — абстрактным интерфейсом, принадлежащим прикладному или доменному слою, — а конкретные адаптеры SHALL предоставляться инфраструктурным слоем. Ни один внутренний слой SHALL NOT зависеть от конкретного типа адаптера.
 
-A port SHALL be introduced together with the first caller that needs it. Until then the intended seam SHALL be recorded in the architecture document rather than committed as an interface with no implementation.
+Порт SHALL появляться вместе с первым вызывающим кодом, которому он нужен. До этого запланированная точка расширения SHALL быть описана в архитектурном документе, а не закоммичена как интерфейс без реализации.
 
-#### Scenario: Port has no infrastructure detail in its signature
+#### Scenario: В сигнатуре порта нет инфраструктурных деталей
 
-- **WHEN** a port's methods are inspected
-- **THEN** its parameter and return types are domain types or primitives, and reference no database session, HTTP client, message-broker channel, or vendor SDK type
+- **WHEN** проверяются методы порта
+- **THEN** типы их параметров и возвращаемых значений — доменные типы или примитивы, без ссылок на сессию базы данных, HTTP-клиент, канал брокера сообщений или типы SDK конкретного вендора
 
-#### Scenario: Persistence is reached through a port
+#### Scenario: Доступ к хранилищу — через порт
 
-- **WHEN** code outside the infrastructure layer loads or stores a domain entity
-- **THEN** it does so through a repository port and a unit-of-work boundary, and never through a database session directly
+- **WHEN** код вне инфраструктурного слоя загружает или сохраняет доменную сущность
+- **THEN** он делает это через порт репозитория в границах unit of work и никогда не обращается к сессии базы данных напрямую
 
-#### Scenario: Adapter is selected at composition time
+#### Scenario: Адаптер выбирается на этапе композиции
 
-- **WHEN** the application is started
-- **THEN** a single composition step binds each port to exactly one adapter, and no caller constructs an adapter itself
+- **WHEN** приложение запускается
+- **THEN** единый этап композиции связывает каждый порт ровно с одним адаптером, и никакой вызывающий код не создаёт адаптер сам
 
-#### Scenario: Unused port is not committed
+#### Scenario: Неиспользуемый порт не коммитится
 
-- **WHEN** the codebase is inspected for port definitions
-- **THEN** every port has at least one adapter and at least one caller, and any planned-but-unbuilt seam appears only in the architecture document
+- **WHEN** кодовая база проверяется на наличие определений портов
+- **THEN** у каждого порта есть хотя бы один адаптер и хотя бы один вызывающий код, а любая запланированная, но не реализованная точка расширения описана только в архитектурном документе
 
-### Requirement: Version-control provider is replaceable
+### Requirement: Провайдер системы контроля версий заменяем
 
-The stored model SHALL be provider-neutral: every record that mirrors an object on a version-control host SHALL carry an explicit provider discriminator alongside that host's own identifier for the object.
+Модель хранения SHALL не зависеть от провайдера: каждая запись, отражающая объект на хостинге системы контроля версий, SHALL содержать явный признак провайдера вместе с собственным идентификатором этого объекта на хостинге.
 
-Adding support for a second host SHALL require a new adapter and a new value of the provider discriminator, and SHALL NOT require adding, removing, or retyping a column.
+Поддержка второго хостинга SHALL требовать нового адаптера и нового значения признака провайдера и SHALL NOT требовать добавления, удаления или смены типа какого-либо столбца.
 
-#### Scenario: Stored records identify their provider
+#### Scenario: Сохранённые записи указывают своего провайдера
 
-- **WHEN** a repository or change-request record is persisted
-- **THEN** it carries an explicit provider identifier alongside the provider's own identifier for that object
+- **WHEN** сохраняется запись репозитория или запроса на изменение
+- **THEN** она содержит явный идентификатор провайдера вместе с собственным идентификатором объекта у этого провайдера
 
-#### Scenario: Same object identity on two providers does not collide
+#### Scenario: Одинаковые идентификаторы объектов у двух провайдеров не конфликтуют
 
-- **WHEN** two hosts assign the same identifier to different repositories
-- **THEN** both records are stored and remain distinguishable by provider
+- **WHEN** два хостинга присваивают один и тот же идентификатор разным репозиториям
+- **THEN** обе записи сохраняются и различаются по провайдеру
 
-#### Scenario: Second provider needs no schema change
+#### Scenario: Второму провайдеру не нужны изменения схемы
 
-- **WHEN** support for an additional version-control host is added later
-- **THEN** the change consists of a new adapter and a new provider identifier value, with no migration that adds, removes, or retypes a column
+- **WHEN** позже добавляется поддержка ещё одного хостинга системы контроля версий
+- **THEN** изменение состоит из нового адаптера и нового значения идентификатора провайдера, без миграции, которая добавляет, удаляет столбец или меняет его тип
 
-### Requirement: Configuration is supplied, never discovered
+### Requirement: Конфигурация передаётся явно, а не ищется
 
-Every external endpoint, credential, and tunable limit SHALL be read from a single validated configuration object assembled at startup from the environment. Layers below the composition step SHALL receive what they need as arguments rather than reading the environment.
+Все внешние адреса, учётные данные и настраиваемые лимиты SHALL читаться из единого валидированного объекта конфигурации, который собирается из переменных окружения при запуске. Слои ниже этапа композиции SHALL получать нужные значения через аргументы, а не читать окружение.
 
-Startup SHALL fail loudly when a required setting is missing or malformed.
+Запуск SHALL завершаться явной ошибкой, если обязательный параметр отсутствует или задан некорректно.
 
-#### Scenario: No environment access outside configuration assembly
+#### Scenario: Окружение читается только при сборке конфигурации
 
-- **WHEN** the source tree is searched for direct environment-variable reads
-- **THEN** the only matches are inside the configuration module
+- **WHEN** в дереве исходного кода ищутся прямые чтения переменных окружения
+- **THEN** все совпадения находятся только в модуле конфигурации
 
-#### Scenario: Missing required setting stops startup
+#### Scenario: Отсутствие обязательного параметра останавливает запуск
 
-- **WHEN** the service starts without a required setting
-- **THEN** startup aborts with an error naming the missing setting, and no request is served
+- **WHEN** сервис запускается без обязательного параметра
+- **THEN** запуск прерывается с ошибкой, в которой назван отсутствующий параметр, и ни один запрос не обслуживается
 
-### Requirement: Architecture is documented and kept current
+### Requirement: Архитектура задокументирована и актуальна
 
-The repository SHALL contain an architecture document describing the layers, the dependency rule and how it is enforced, every port that exists in code, every seam that is planned but deliberately not yet built, the lifecycle of a review from trigger to publication, and the decisions deferred.
+Репозиторий SHALL содержать архитектурный документ, описывающий слои, правило зависимостей и способ его проверки, каждый существующий в коде порт, каждую точку расширения, которая запланирована, но сознательно пока не реализована, жизненный цикл ревью от запуска до публикации, а также отложенные решения.
 
-The document SHALL be updated in the same change that alters the structure it describes.
+Документ SHALL обновляться в том же изменении, которое меняет описанную в нём структуру.
 
-#### Scenario: Document covers every declared port
+#### Scenario: Документ описывает каждый объявленный порт
 
-- **WHEN** the architecture document is compared against the ports declared in code
-- **THEN** every port appears in the document with its purpose and its adapters
+- **WHEN** архитектурный документ сверяется с портами, объявленными в коде
+- **THEN** каждый порт присутствует в документе с описанием назначения и адаптеров
 
-#### Scenario: Document covers each deferred seam
+#### Scenario: Документ описывает каждую отложенную точку расширения
 
-- **WHEN** a seam is designed but not committed as code
-- **THEN** the document states its purpose, the adapter intended to satisfy it first, and what would have to change to introduce it
+- **WHEN** точка расширения спроектирована, но не реализована в коде
+- **THEN** документ указывает её назначение, адаптер, который первым будет её реализовывать, и что придётся изменить, чтобы её ввести
 
-#### Scenario: Structural change updates the document
+#### Scenario: Структурное изменение обновляет документ
 
-- **WHEN** a change adds, removes, or renames a layer or a port
-- **THEN** the same change updates the architecture document accordingly
+- **WHEN** изменение добавляет, удаляет или переименовывает слой или порт
+- **THEN** это же изменение соответствующим образом обновляет архитектурный документ
