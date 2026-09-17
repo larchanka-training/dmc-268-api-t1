@@ -9,6 +9,7 @@ venv/
 .ruff_cache/
 .idea/
 .DS_Store
+CLAUDE.md
 
 .terraform/
 .terraform.tfstate.lock.info
