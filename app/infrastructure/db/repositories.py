@@ -179,7 +179,10 @@ class SqlAlchemyReviewRunRepo:
         row = self._session.get(ReviewRunRow, run.id)
         if row is None:
             raise LookupError(f"review run {run.id} is not stored")
-        if row.status != run.status:
+        # A terminal row goes through next_status even when the status is
+        # unchanged: equality alone would let a redelivered update overwrite
+        # the cost of a finished run.
+        if row.status in TERMINAL_STATUSES or row.status != run.status:
             verdict = next_status(row.status, run.status)
             if not verdict.ok:
                 raise ValueError(verdict.error)

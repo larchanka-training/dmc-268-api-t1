@@ -147,6 +147,39 @@ def test_the_adapter_refuses_an_illegal_transition(uow) -> None:
             work.review_runs.update(replace(stored, status=ReviewRunStatus.COMPLETED))
 
 
+def test_a_finished_run_refuses_a_same_status_update(uow) -> None:
+    now = NOW
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        run = a_run(mr.id)
+        for status in (
+            ReviewRunStatus.BUILDING_CONTEXT,
+            ReviewRunStatus.ANALYSING,
+            ReviewRunStatus.PUBLISHING,
+        ):
+            run = advance(run, status, now).value
+        run = replace(
+            advance(run, ReviewRunStatus.COMPLETED, now).value,
+            model="m1",
+            tokens_used=100,
+            duration_seconds=1.5,
+        )
+        work.review_runs.add(run)
+        work.commit()
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+        with pytest.raises(ValueError, match="terminal"):
+            work.review_runs.update(
+                replace(stored, model="m2", tokens_used=999, duration_seconds=9.9)
+            )
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+        assert (stored.model, stored.tokens_used, stored.duration_seconds) == ("m1", 100, 1.5)
+
+
 def test_a_finding_outside_the_diff_is_refused_and_counted(uow) -> None:
     hunks = [Hunk(file_path="app/main.py", changed_new_lines=frozenset({10}))]
     with uow as work:
