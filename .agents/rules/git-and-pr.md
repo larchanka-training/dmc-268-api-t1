@@ -46,6 +46,16 @@ mutation($issue:ID!, $pr:ID!) {
 
 `node_id` — из `gh api repos/<owner>/<repo>/issues/<n> --jq .node_id` и `…/pulls/<n> --jq .node_id`.
 
+Привязку после создания пул-реквеста **проверяем**, а не считаем сделанной: ключевое слово в теле
+срабатывает не всегда, и молча.
+
+```bash
+gh pr view <n> --json closingIssuesReferences -q '.closingIssuesReferences[].number'
+```
+
+Пусто — ставим привязку мутацией выше и повторяем проверку. Без неё пул-реквест не находится ни
+из задачи, ни с доски.
+
 Структура описания — скилл [`pull-request`](../skills/pull-request/SKILL.md).
 
 ## Замечания на ревью

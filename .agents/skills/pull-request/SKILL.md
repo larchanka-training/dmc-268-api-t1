@@ -58,6 +58,32 @@ gh pr create --base develop --head "$(git branch --show-current)" --title "<ти
 - `Closes #N` — для задачи в этом же репозитории; для чужой — привязка через панель Development.
 - Коммитим и пушим только по явной просьбе: миграции и спеки проходят ревью до коммита.
 
+## Проверка привязки — обязательная
+
+Пул-реквест не считается открытым, пока не прошли обе проверки. `Closes #N` в теле — намерение,
+а не привязка: с базой не в дефолтную ветку и с задачей в чужом репозитории ключевое слово
+молчит. Непривязанный пул-реквест не виден ни из задачи, ни с доски, и ревьюер узнаёт о нём
+последним.
+
+```bash
+# 1. привязка. пусто — задача о пул-реквесте не знает
+gh pr view <n> --json closingIssuesReferences -q '.closingIssuesReferences[].number'
+
+# пусто → ставим явно и повторяем проверку той же командой
+gh api graphql -f query='
+mutation($issue:ID!, $pr:ID!) {
+  addCloseIssueReferences(input:{issueId:$issue, pullRequestIds:[$pr]}) { clientMutationId }
+}' -f issue="$(gh api repos/<owner>/<repo>/issues/<задача> --jq .node_id)" \
+   -f pr="$(gh api repos/<owner>/<repo>/pulls/<n> --jq .node_id)"
+
+# 2. карточка задачи на доске → Review (id полей и опций — rules/git-and-pr.md, «Доска»)
+gh project item-list 7 --owner larchanka-training --format json
+```
+
+Задачи на доске нет — добавляем карточку (`gh project item-add`), а не пропускаем шаг. Статус
+чинится только вместе с привязкой: карточка в `In Progress` и пул-реквест, о котором задача не
+знает, — это два способа потерять готовую работу, и оба случались.
+
 ## Режим: замечания ревью
 
 ```bash
