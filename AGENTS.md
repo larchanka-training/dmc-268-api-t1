@@ -6,6 +6,10 @@
 публикует сводку и комментарии к строкам. Конвейер целиком будет описан в
 `docs/SYSTEM_DESIGN.md` — документ готовится в PR #6.
 
+Перед тем как писать код, прочитайте [`.agents/rules/backend.md`](.agents/rules/backend.md) —
+команды, слои, швы и тесты. Перед работой с ветками, задачами и пул-реквестами —
+[`.agents/rules/git-and-pr.md`](.agents/rules/git-and-pr.md).
+
 ## Правила, которые нельзя нарушать
 
 Они здесь целиком, а не ссылкой: ссылку агент может не открыть.
@@ -62,7 +66,9 @@
 | Система целиком, границы сервисов, оба стека | `docs/SYSTEM_DESIGN.md` (в работе, PR #6) |
 | Установка, запуск, тесты, миграции | [`README.md`](README.md) |
 | Локальный стек на Terraform | [`infra/README.md`](infra/README.md) |
-| Правила стека, скиллы, шаблоны | [`.agents/README.md`](.agents/README.md) |
+| Правила стека | [`.agents/rules/backend.md`](.agents/rules/backend.md) |
+| Ветки, задачи, пул-реквесты, треды | [`.agents/rules/git-and-pr.md`](.agents/rules/git-and-pr.md) |
+| Скиллы и шаблоны | [`.agents/README.md`](.agents/README.md) |
 | Промпты ревью-агента (продукт) | [`prompts/review/README.md`](prompts/review/README.md) |
 
 Задачи — доска [`dmc-268-t1`](https://github.com/orgs/larchanka-training/projects/7).
