@@ -68,7 +68,7 @@
 | Локальный стек на Terraform | [`infra/README.md`](infra/README.md) |
 | Правила стека | [`.agents/rules/backend.md`](.agents/rules/backend.md) |
 | Ветки, задачи, пул-реквесты, треды | [`.agents/rules/git-and-pr.md`](.agents/rules/git-and-pr.md) |
-| Скиллы и шаблоны | [`.agents/README.md`](.agents/README.md) |
+| Скиллы и шаблоны | [`.agents/skills/`](.agents/skills/), [`.agents/templates/backend/`](.agents/templates/backend/) |
 | Промпты ревью-агента (продукт) | [`prompts/review/README.md`](prompts/review/README.md) |
 
 Задачи — доска [`dmc-268-t1`](https://github.com/orgs/larchanka-training/projects/7).

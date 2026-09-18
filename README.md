@@ -13,9 +13,28 @@ FastAPI backend for the automated code-review agent.
 [`dmc-268-ui-t1`](https://github.com/larchanka-training/dmc-268-ui-t1/issues). Доска собирает
 и те, и другие.
 
-## Правила разработки
+## Правила разработки и агенты
 
-Правила стека, скиллы и шаблоны для агентов — [`.agents/README.md`](.agents/README.md).
+Критичный минимум — в [`AGENTS.md`](AGENTS.md). Детали лежат в `.agents/`:
+
+| Что | Где |
+|---|---|
+| Правила стека: команды, слои, швы, тесты | [`.agents/rules/backend.md`](.agents/rules/backend.md) |
+| Ветки, задачи, пул-реквесты, работа с замечаниями | [`.agents/rules/git-and-pr.md`](.agents/rules/git-and-pr.md) |
+| Скиллы: TDD, ревью, пул-реквест, миграции | [`.agents/skills/`](.agents/skills/) |
+| Шаблоны кода и тестов | [`.agents/templates/backend/`](.agents/templates/backend/) |
+
+Свой инструмент каждый подключает локально — каталоги инструментов не коммитятся:
+
+```bash
+ln -s ../.agents/skills .claude/skills    # или .cursor/, .codex/, .opencode/
+openspec init --tools <tool>              # то же самое, если инструмент поддержан
+ln -s AGENTS.md CLAUDE.md                 # Claude Code читает CLAUDE.md
+```
+
+Симлинк, а не копия: копия разойдётся с оригиналом на первой же правке. Antigravity исключение —
+он читает `.agents/skills` сам.
+
 Системные промпты ревью-агента, которого мы разрабатываем, —
 [`prompts/review/README.md`](prompts/review/README.md).
 
