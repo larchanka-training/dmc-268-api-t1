@@ -2,8 +2,22 @@
 
 FastAPI backend for the automated code-review agent.
 
-Architecture and the data model: [`docs/BACKEND_ARCHITECTURE.md`](docs/BACKEND_ARCHITECTURE.md),
-[`docs/erd.md`](docs/erd.md).
+Архитектура и модель данных: [`docs/BACKEND_ARCHITECTURE.md`](docs/BACKEND_ARCHITECTURE.md),
+[`docs/erd.md`](docs/erd.md). Требования к поведению живут в `openspec/specs/` и меняются
+только через OpenSpec-change.
+
+## Задачи
+
+Доска команды — GitHub Project [`dmc-268-t1`](https://github.com/orgs/larchanka-training/projects/7).
+Бэкендовые тикеты заводятся в этом репозитории, фронтовые — в
+[`dmc-268-ui-t1`](https://github.com/larchanka-training/dmc-268-ui-t1/issues). Доска собирает
+и те, и другие.
+
+## Правила разработки
+
+Правила стека, скиллы и шаблоны для агентов — [`.agents/README.md`](.agents/README.md).
+Системные промпты ревью-агента, которого мы разрабатываем, —
+[`prompts/review/README.md`](prompts/review/README.md).
 
 ## Requirements
 

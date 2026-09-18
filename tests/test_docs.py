@@ -19,6 +19,9 @@ ROOT = Path(__file__).resolve().parent.parent
 ERD = ROOT / "docs" / "erd.md"
 ARCHITECTURE = ROOT / "docs" / "BACKEND_ARCHITECTURE.md"
 PYPROJECT = ROOT / "pyproject.toml"
+BACKEND_RULES = ROOT / ".agents" / "rules" / "backend.md"
+README = ROOT / "README.md"
+CI = ROOT / ".github" / "workflows" / "ci.yml"
 
 # The constraints worth pinning: both carry a NULL rule that is easy to drop
 # and impossible to notice from the outside.
@@ -84,4 +87,24 @@ def test_architecture_names_every_layering_contract() -> None:
         f"{ARCHITECTURE} claims {claimed} contracts, pyproject.toml declares "
         f"{declared_contract_count()}. Update the sentence and the lint-imports "
         f"output block below it."
+    )
+
+
+def quoted_commands(path: Path) -> set[str]:
+    """Every `uv ...` command line in a fenced block, without its trailing comment."""
+    return {
+        line.split("#")[0].strip()
+        for line in path.read_text().splitlines()
+        if line.strip().startswith("uv ")
+    }
+
+
+def test_rules_only_name_commands_that_exist() -> None:
+    """The rules agents always read must not send them to a command nobody runs."""
+    known = CI.read_text() + README.read_text()
+    unknown = sorted(c for c in quoted_commands(BACKEND_RULES) if c not in known)
+    assert not unknown, (
+        f"{BACKEND_RULES} names commands that appear in neither {CI} nor {README}:\n"
+        + "\n".join(f"  {c}" for c in unknown)
+        + "\nEither the command is wrong, or CI and the README have not caught up."
     )
