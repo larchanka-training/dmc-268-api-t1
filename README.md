@@ -1,6 +1,6 @@
 # DMC-268 API (Team 1)
 
-FastAPI backend for the automated code-review agent.
+Бэкенд на FastAPI для агента автоматического код-ревью.
 
 Архитектура и модель данных: [`docs/BACKEND_ARCHITECTURE.md`](docs/BACKEND_ARCHITECTURE.md),
 [`docs/erd.md`](docs/erd.md). Требования к поведению живут в `openspec/specs/` и меняются
@@ -38,42 +38,41 @@ ln -s AGENTS.md CLAUDE.md                 # Claude Code читает CLAUDE.md
 Системные промпты ревью-агента, которого мы разрабатываем, —
 [`prompts/review/README.md`](prompts/review/README.md).
 
-## Requirements
+## Требования
 
-- Python 3.14, pinned in `.python-version` and enforced by `requires-python`.
-  `uv` fetches it for you; the system `python3` is very likely something else.
-- [uv](https://docs.astral.sh/uv/) for dependencies.
-- PostgreSQL, for running the service and the integration tests.
+- Python 3.14, версия зафиксирована в `.python-version` и проверяется через `requires-python`.
+  `uv` скачает его сам; системный `python3`, скорее всего, другой версии.
+- [uv](https://docs.astral.sh/uv/) для зависимостей.
+- PostgreSQL, чтобы запускать сервис и интеграционные тесты.
 
-## Setup
+## Установка
 
 ```bash
 uv sync --all-extras
-uv run pre-commit install   # runs ruff, mypy and lint-imports before each commit
+uv run pre-commit install   # перед каждым коммитом гоняет ruff, mypy и lint-imports
 ```
 
-## Run
+## Запуск
 
-### Fastest path: Docker Compose
+### Самый короткий путь: Docker Compose
 
 ```bash
 docker compose up
 ```
 
-Starts the API together with PostgreSQL and Redis, waits for PostgreSQL to
-report healthy, applies migrations, then serves the API at
-`localhost:8000`. `GET /health` answers `{"status": "ok"}`. PostgreSQL's data
-persists in a named volume across `docker compose down` / `up`; add `-v` to
-`down` to discard it.
+Поднимает API вместе с PostgreSQL и Redis, дожидается, пока PostgreSQL отчитается
+о готовности, применяет миграции и отдаёт API на `localhost:8000`. `GET /health`
+отвечает `{"status": "ok"}`. Данные PostgreSQL остаются в именованном томе и
+переживают `docker compose down` / `up`; чтобы стереть их, добавьте `-v` к `down`.
 
-Redis is provisioned as local infrastructure only — nothing in the API talks
-to it yet. It lands with the first feature that needs idempotency, rate
-limiting, or caching (see `docs/BACKEND_ARCHITECTURE.md`, "Adding Redis").
+Redis поднимается только как локальная инфраструктура — из API в него пока никто
+не ходит. Он понадобится первой же задаче, которой нужны идемпотентность,
+rate limiting или кэш (см. `docs/BACKEND_ARCHITECTURE.md`, «Добавление Redis»).
 
-### Dependency-free path: run PostgreSQL yourself
+### Путь без лишних зависимостей: свой PostgreSQL
 
-The service reads `DATABASE_URL` and refuses to start without it. It does not
-create tables: the schema arrives through migrations.
+Сервис читает `DATABASE_URL` и без него не стартует. Таблицы он не создаёт:
+схема появляется через миграции.
 
 ```bash
 docker run -d --name dmc268-db -p 5432:5432 \
@@ -86,65 +85,65 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
-`GET /health` answers `{"status": "ok"}`. The generated API docs are at `/docs`.
+`GET /health` отвечает `{"status": "ok"}`. Сгенерированная документация API лежит на `/docs`.
 
-The whole cloud-shaped stack — PostgreSQL, RabbitMQ and the API container —
-is also described as Terraform in [`infra/`](infra/README.md), which is the
-DevOps ticket's deliverable and separate from the local `docker-compose.yml`
-above.
+Весь облачный стек — PostgreSQL, RabbitMQ и контейнер с API — описан ещё и на
+Terraform в [`infra/`](infra/README.md); это результат DevOps-тикета, отдельный от
+локального `docker-compose.yml` выше.
 
-If you created a database from an earlier revision of this branch, drop and
-recreate it. The baseline migration was corrected in place while it was still
-unmerged, so an older database claims revision `0001` while carrying the
-constraints it defined before the fix.
+Если вы создавали базу на более ранней ревизии этой ветки, удалите её и создайте
+заново. Базовую миграцию исправили на месте, пока она ещё не была смёржена,
+поэтому старая база заявляет ревизию `0001`, но содержит ограничения в том виде,
+в каком они были до исправления.
 
-## Tests
+## Тесты
 
-Everything below the adapters is pure, so most of the suite needs nothing.
+Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
 ```bash
-uv run pytest                           # 77 tests, no database required
-TEST_DATABASE_URL=... uv run pytest     # 111 tests, adapters and migrations included
+uv run pytest                           # 78 тестов, база не нужна
+TEST_DATABASE_URL=... uv run pytest     # 112 тестов, вместе с адаптерами и миграциями
 ```
 
-Tests that need PostgreSQL are marked `integration` and skip when
-`TEST_DATABASE_URL` is unset.
+Тесты, которым нужен PostgreSQL, помечены `integration` и пропускаются, если
+`TEST_DATABASE_URL` не задан.
 
-That variable is deliberately not `DATABASE_URL`, and nothing falls back to it.
-Preparing the test database drops its schema, so pointing the suite at the
-database you run the service against would empty it. Give the tests their own:
+Эта переменная намеренно не `DATABASE_URL`, и никакого отката на неё нет.
+Подготовка тестовой базы удаляет её схему, так что если направить тесты на базу,
+с которой работает сервис, она окажется пустой. Выделите тестам отдельную:
 
 ```bash
 createdb dmc268_test
 export TEST_DATABASE_URL="postgresql+psycopg://dmc:dmc@localhost:5432/dmc268_test"
 ```
 
-The role it connects as needs permission to create a role, because one test
-provisions one to check that a percent-encoded password survives `alembic.ini`.
+Роли, под которой идёт подключение, нужно право создавать роли: один из тестов
+создаёт роль, чтобы проверить, что пароль в percent-encoding корректно проходит
+через `alembic.ini`.
 
-## Checks
-
-```bash
-uv run ruff check .      # style
-uv run mypy .            # types, strict on app/
-uv run lint-imports      # the layering rule, see the architecture document
-```
-
-`lint-imports` fails the build when a module imports outward, for example when
-anything under `app/domain` reaches for SQLAlchemy. `mypy` runs in strict mode
-over `app/`; `tests/` is held to a relaxed override (`[[tool.mypy.overrides]]`
-in `pyproject.toml`) since pytest's own style — untyped fixtures, untyped
-`def test_x():` — is the norm there. All three checks also run as
-`pre-commit` hooks (`uv run pre-commit install`, see Setup) and in CI.
-
-## Migrations
+## Проверки
 
 ```bash
-uv run alembic upgrade head        # apply
-uv run alembic downgrade base      # reverse, leaves nothing behind
-uv run alembic heads               # must report exactly one
+uv run ruff check .      # стиль
+uv run mypy .            # типы, строгий режим на app/
+uv run lint-imports      # правило слоёв, см. документ по архитектуре
 ```
 
-Generated migrations are reviewed before they are committed. Conventions and
-the `ALTER TYPE` recipe for extending an enum are in the architecture
-document.
+`lint-imports` роняет сборку, когда модуль импортирует что-то из внешнего слоя,
+например когда что-нибудь в `app/domain` тянется к SQLAlchemy. `mypy` работает в
+строгом режиме по `app/`; для `tests/` действует послабление
+(`[[tool.mypy.overrides]]` в `pyproject.toml`), потому что стиль pytest —
+нетипизированные фикстуры и `def test_x():` — там норма. Все три проверки
+работают и как хуки `pre-commit` (`uv run pre-commit install`, см. «Установка»),
+и в CI.
+
+## Миграции
+
+```bash
+uv run alembic upgrade head        # применить
+uv run alembic downgrade base      # откатить, ничего после себя не оставив
+uv run alembic heads               # должна быть ровно одна
+```
+
+Сгенерированные миграции проходят ревью перед коммитом. Соглашения и рецепт с
+`ALTER TYPE` для расширения enum описаны в документе по архитектуре.
