@@ -16,6 +16,7 @@ from app.domain.enums import (
     DiffSide,
     FindingCategory,
     FindingSeverity,
+    MergeRequestState,
     Provider,
     ReviewRunStatus,
     TriggerSource,
@@ -49,7 +50,7 @@ class MergeRequest:
     source_branch: str
     target_branch: str
     head_sha: str
-    state: str
+    state: MergeRequestState
     created_at: datetime
     updated_at: datetime
 

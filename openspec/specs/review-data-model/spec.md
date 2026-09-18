@@ -1,222 +1,264 @@
 # review-data-model Specification
 
 ## Purpose
-Defines the persistent domain model of the automated review pipeline: the entities that outlive a single request, how they relate and are identified, the states a review run moves through, and the invariants that keep a stored finding traceable back to a real line of a real diff.
+Определяет хранимую доменную модель автоматизированного конвейера ревью: сущности, которые живут дольше одного запроса, их связи и способы идентификации, состояния, через которые проходит прогон ревью, и инварианты, благодаря которым сохранённое замечание всегда можно проследить до реальной строки реального диффа.
 
 ## Requirements
 
-### Requirement: Repository registration
+### Requirement: Регистрация репозитория
 
-The system SHALL persist each version-control repository it reviews, recording the hosting provider, the provider's own identifier for the repository, its human-readable full name, its default branch, and whether automatic review is enabled.
+Система SHALL сохранять каждый репозиторий системы контроля версий, для которого выполняет ревью, фиксируя провайдера хостинга, собственный идентификатор репозитория у провайдера, его полное человекочитаемое имя, ветку по умолчанию и признак того, включено ли автоматическое ревью.
 
-A repository SHALL be uniquely identified by the pair of provider and provider-side identifier.
+Репозиторий SHALL однозначно идентифицироваться парой из провайдера и идентификатора на стороне провайдера.
 
-#### Scenario: Repository is stored on first registration
+#### Scenario: Репозиторий сохраняется при первой регистрации
 
-- **WHEN** a repository is registered for review
-- **THEN** a repository record exists carrying its provider, provider-side identifier, full name, default branch, and automatic-review flag
+- **WHEN** репозиторий регистрируется для ревью
+- **THEN** существует запись репозитория с провайдером, идентификатором на стороне провайдера, полным именем, веткой по умолчанию и флагом автоматического ревью
 
-#### Scenario: Re-registering the same repository does not duplicate it
+#### Scenario: Повторная регистрация того же репозитория не создаёт дубликат
 
-- **WHEN** the same provider and provider-side identifier are registered a second time
-- **THEN** the existing record is updated and no second record is created
+- **WHEN** тот же провайдер и идентификатор на стороне провайдера регистрируются повторно
+- **THEN** существующая запись обновляется, и вторая запись не создаётся
 
-#### Scenario: Same name on two providers is allowed
+#### Scenario: Одинаковое имя у двух провайдеров допустимо
 
-- **WHEN** repositories with an identical full name exist on two different providers
-- **THEN** both records are stored and remain distinguishable by provider
+- **WHEN** у двух разных провайдеров существуют репозитории с одинаковым полным именем
+- **THEN** обе записи сохраняются и различаются по провайдеру
 
-### Requirement: Change request tracking
+### Requirement: Хранение запросов на изменение
 
-The system SHALL persist each change request (pull request or merge request) it is asked to review, recording its repository, the provider's number for it, title, description, author, source and target branch, current head commit, and state.
+Система SHALL сохранять каждый запрос на изменение (pull request или merge request), который ей поручено проверить, фиксируя его репозиторий, номер у провайдера, заголовок, описание, автора, исходную и целевую ветки, последний известный head-коммит и состояние.
 
-A change request SHALL be uniquely identified by its repository together with the provider's number.
+Запрос на изменение SHALL однозначно идентифицироваться своим репозиторием вместе с номером у провайдера.
 
-#### Scenario: Change request is stored with its metadata
+Состояние запроса на изменение SHALL принимать одно из значений: open, closed или merged. Состояния, специфичные для провайдера, SHALL приводиться к этому набору перед сохранением.
 
-- **WHEN** a change request is submitted for review
-- **THEN** a record exists linking it to its repository and carrying its number, title, description, author, branches, head commit, and state
+Head-коммит запроса на изменение SHALL означать самый свежий head, который система видела для этого запроса. Коммит, который охватил конкретный прогон ревью, SHALL фиксироваться в этом прогоне и SHALL NOT меняться, когда head запроса на изменение сдвигается.
 
-#### Scenario: New commit updates the head
+#### Scenario: Запрос на изменение сохраняется с метаданными
 
-- **WHEN** a new commit is pushed to a tracked change request
-- **THEN** the record's head commit is updated and the record is not duplicated
+- **WHEN** запрос на изменение отправлен на ревью
+- **THEN** существует запись, связанная с его репозиторием и содержащая номер, заголовок, описание, автора, ветки, head-коммит и состояние
 
-#### Scenario: Deleting a repository removes its change requests
+#### Scenario: Новый коммит обновляет head
 
-- **WHEN** a repository record is deleted
-- **THEN** its change requests, and everything belonging to them, are removed with it
+- **WHEN** в отслеживаемый запрос на изменение пушится новый коммит
+- **THEN** head-коммит записи обновляется, а сама запись не дублируется
 
-### Requirement: Review run lifecycle
+#### Scenario: Предыдущий прогон сохраняет проверенный им коммит
 
-The system SHALL persist a review run for each attempt to review a change request at a specific head commit, recording which change request and commit it covers, what triggered it, its state, its timestamps, and — once finished — the model used and the token and duration cost.
+- **WHEN** head-коммит запроса на изменение обновляется после создания прогона ревью
+- **THEN** этот прогон ревью по-прежнему указывает коммит, для которого был создан
 
-A review run SHALL occupy exactly one of the states: queued, building context, analysing, publishing, completed, failed, or cancelled.
+#### Scenario: Состояние вне допустимого набора отклоняется
 
-#### Scenario: Run is created in the queued state
+- **WHEN** запрос на изменение записывается с состоянием, отличным от open, closed или merged
+- **THEN** запись отклоняется, и записи с таким состоянием не существует
 
-- **WHEN** a review is triggered
-- **THEN** a review run record is created in the queued state, bound to the change request and the head commit being reviewed, and recording its trigger
+#### Scenario: Удаление репозитория с запросами на изменение отклоняется
 
-#### Scenario: Terminal state is final
+- **WHEN** выполняется попытка удалить репозиторий, у которого ещё есть запросы на изменение
+- **THEN** удаление отклоняется, а репозиторий и его запросы на изменение остаются без изменений
 
-- **WHEN** a review run has reached completed, failed, or cancelled
-- **THEN** any further attempt to change its state is rejected and the stored state is unchanged
+### Requirement: Жизненный цикл прогона ревью
 
-#### Scenario: Failure records its cause
+Система SHALL сохранять прогон ревью для каждой попытки проверить запрос на изменение на конкретном head-коммите, фиксируя, какой запрос на изменение и какой коммит он охватывает, что его инициировало, его состояние, временные метки и — после завершения — использованную модель, а также затраты токенов и времени.
 
-- **WHEN** a review run ends in the failed state
-- **THEN** the record carries a failure reason and the timestamp at which it failed
+Прогон ревью SHALL находиться ровно в одном из состояний: queued, building context, analysing, publishing, completed, failed или cancelled.
 
-#### Scenario: Completion records cost
+#### Scenario: Прогон создаётся в состоянии queued
 
-- **WHEN** a review run reaches the completed state
-- **THEN** the record carries the model identifier, the tokens consumed, and the wall-clock duration of the run
+- **WHEN** инициируется ревью
+- **THEN** создаётся запись прогона ревью в состоянии queued, привязанная к запросу на изменение и проверяемому head-коммиту и фиксирующая источник прогона
 
-### Requirement: One run per commit unless re-review is requested
+#### Scenario: Терминальное состояние окончательно
 
-The stored model SHALL prevent a change request from accumulating more than one non-terminal review run for the same head commit. A run that has reached a terminal state SHALL NOT block a later run for the same commit, so an explicitly requested re-review remains possible.
+- **WHEN** прогон ревью достиг состояния completed, failed или cancelled
+- **THEN** любая дальнейшая попытка изменить его состояние отклоняется, и сохранённое состояние не меняется
 
-#### Scenario: Second active run for the same commit is refused
+#### Scenario: Сбой фиксирует причину
 
-- **WHEN** a review run is created for a change request and head commit that already has a run in a non-terminal state
-- **THEN** the write is refused and only the original run exists
+- **WHEN** прогон ревью завершается в состоянии failed
+- **THEN** запись содержит причину сбоя и время, когда он произошёл
 
-#### Scenario: Re-review after completion is allowed
+#### Scenario: Завершение фиксирует затраты
 
-- **WHEN** a review run is created for a head commit whose previous run reached a terminal state
-- **THEN** the new run is stored and the earlier run remains readable
+- **WHEN** прогон ревью достигает состояния completed
+- **THEN** запись содержит идентификатор модели, израсходованные токены и фактическую длительность прогона
 
-#### Scenario: History is preserved across re-reviews
+### Requirement: Один прогон на коммит, если не запрошено повторное ревью
 
-- **WHEN** a change request is reviewed again after a new commit
-- **THEN** a new review run record is created and the earlier runs remain readable
+Модель хранения SHALL не допускать, чтобы у запроса на изменение накапливалось больше одного нетерминального прогона ревью для одного и того же head-коммита. Прогон, достигший терминального состояния, SHALL NOT блокировать последующий прогон для того же коммита, чтобы явно запрошенное повторное ревью оставалось возможным.
 
-### Requirement: A run cannot block its commit forever
+#### Scenario: Второй активный прогон для того же коммита отклоняется
 
-Because at most one non-terminal run may exist per change request and head commit, a run that stops making progress would otherwise block that commit permanently. The stored model SHALL make an abandoned run recoverable without manual database surgery.
+- **WHEN** создаётся прогон ревью для запроса на изменение и head-коммита, у которых уже есть прогон в нетерминальном состоянии
+- **THEN** запись отклоняется, и существует только исходный прогон
 
-Every review run SHALL record when it last changed state. A run that has not changed state for longer than a configured limit SHALL be movable to the failed state, which releases the commit for a new run.
+#### Scenario: Повторное ревью после завершения разрешено
 
-#### Scenario: Abandoned run is identifiable
+- **WHEN** создаётся прогон ревью для head-коммита, предыдущий прогон для которого достиг терминального состояния
+- **THEN** новый прогон сохраняется, а предыдущий остаётся доступным для чтения
 
-- **WHEN** review runs are queried for staleness
-- **THEN** every non-terminal run reports how long it has been in its current state
+#### Scenario: История сохраняется при повторных ревью
 
-#### Scenario: Stale run releases its commit
+- **WHEN** запрос на изменение проверяется повторно после нового коммита
+- **THEN** создаётся новая запись прогона ревью, а предыдущие прогони остаются доступными для чтения
 
-- **WHEN** a non-terminal run has exceeded the staleness limit and is moved to failed
-- **THEN** a new run for the same change request and head commit can be created
+### Requirement: Прогон не может навсегда заблокировать свой коммит
 
-#### Scenario: Progress resets the clock
+Поскольку для запроса на изменение и head-коммита может существовать не более одного нетерминального прогона, зависший прогон иначе навсегда заблокировал бы этот коммит. Модель хранения SHALL позволять восстановиться после брошенного прогона без ручного вмешательства в базу данных.
 
-- **WHEN** a run advances from one non-terminal state to another
-- **THEN** its last-progress timestamp is updated and it is no longer stale
+Каждый прогон ревью SHALL фиксировать, когда он в последний раз менял состояние. Прогон, который не менял состояние дольше настроенного лимита, SHALL быть переводимым в состояние failed, что освобождает коммит для нового прогона.
 
-### Requirement: Repeated delivery of the same job is harmless
+#### Scenario: Брошенный прогон можно выявить
 
-A review run SHALL be claimable by exactly one worker. Delivering the same job twice SHALL NOT produce two concurrent executions or two sets of findings.
+- **WHEN** прогони ревью запрашиваются на предмет устаревания
+- **THEN** каждый нетерминальный прогон сообщает, как долго он находится в текущем состоянии
 
-#### Scenario: Second worker loses the claim
+#### Scenario: Устаревший прогон освобождает свой коммит
 
-- **WHEN** two workers receive the same job and both attempt to move the run out of the queued state
-- **THEN** one succeeds and the other is refused, leaving a single execution
+- **WHEN** нетерминальный прогон превысил лимит устаревания и переведён в failed
+- **THEN** можно создать новый прогон для того же запроса на изменение и head-коммита
 
-#### Scenario: Redelivery after completion is ignored
+#### Scenario: Продвижение сбрасывает отсчёт
 
-- **WHEN** a job is delivered again for a run that already reached a terminal state
-- **THEN** no work is performed and no additional findings are stored
+- **WHEN** прогон переходит из одного нетерминального состояния в другое
+- **THEN** его временная метка последнего продвижения обновляется, и он больше не считается устаревшим
 
-### Requirement: Context payload persistence
+### Requirement: Повторная доставка той же задачи безвредна
 
-The system SHALL persist the context assembled for a review run — the material sent to the model — recording which run it belongs to, which files it covers, the context tiers it includes, its size in tokens, and a content digest.
+Прогон ревью SHALL быть захватываемым ровно одним воркером. Двойная доставка одной и той же задачи SHALL NOT приводить к двум параллельным выполнениям или двум наборам замечаний.
 
-Context payloads SHALL be reusable: an assembled payload for a given change request and head commit SHALL be retrievable without reassembly.
+#### Scenario: Второй воркер не получает захват
 
-#### Scenario: Assembled context is stored with its run
+- **WHEN** два воркера получают одну и ту же задачу и оба пытаются вывести прогон из состояния queued
+- **THEN** одному это удаётся, а второму отказано, так что выполнение остаётся единственным
 
-- **WHEN** context assembly finishes for a review run
-- **THEN** a context payload record is stored against that run with its file list, tiers, token count, and content digest
+#### Scenario: Повторная доставка после завершения игнорируется
 
-#### Scenario: Identical context is recognised
+- **WHEN** задача доставляется повторно для прогона, который уже достиг терминального состояния
+- **THEN** никакая работа не выполняется, и дополнительные замечания не сохраняются
 
-- **WHEN** context assembled for a later run has the same content digest as a stored payload
-- **THEN** the stored payload is reusable and reassembly is unnecessary
+### Requirement: Хранение пакетов контекста
 
-#### Scenario: Oversized context is recorded as chunks
+Система SHALL сохранять контекст, собранный для прогона ревью, — материал, отправляемый модели, — фиксируя, к какому прогону он относится, какие файлы охватывает, какие уровни контекста включает, его размер в токенах и дайджест содержимого.
 
-- **WHEN** assembled context exceeds the model's context budget and is split
-- **THEN** each chunk is stored as its own payload record bound to the same run and ordered within it
+Пакеты контекста SHALL быть переиспользуемыми: собранный пакет для заданного запроса на изменение и head-коммита SHALL быть доступен без повторной сборки.
 
-### Requirement: Findings are anchored to the diff
+#### Scenario: Собранный контекст сохраняется вместе с прогоном
 
-The system SHALL persist each finding a review produces, recording its review run, file path, the line coordinates it refers to, its category, its severity, its message, an optional replacement suggestion, and the model's confidence.
+- **WHEN** сборка контекста для прогона ревью завершена
+- **THEN** для этого прогона сохраняется запись пакета контекста со списком файлов, уровнями, числом токенов и дайджестом содержимого
 
-Every stored finding SHALL refer to a line that is part of the change request's diff. A finding whose coordinates fall outside the diff SHALL be rejected rather than stored.
+#### Scenario: Идентичный контекст распознаётся
 
-#### Scenario: Finding inside the diff is stored
+- **WHEN** контекст, собранный для более позднего прогона, имеет тот же дайджест содержимого, что и сохранённый пакет
+- **THEN** сохранённый пакет можно переиспользовать, и повторная сборка не нужна
 
-- **WHEN** a finding refers to a line that the diff adds or modifies
-- **THEN** it is stored with its file path, line coordinates, category, severity, message, optional suggestion, and confidence
+#### Scenario: Слишком большой контекст сохраняется частями
 
-#### Scenario: Finding outside the diff is rejected
+- **WHEN** собранный контекст превышает бюджет контекста модели и разбивается на части
+- **THEN** каждая часть сохраняется отдельной записью пакета, привязанной к тому же прогону и упорядоченной в его рамках
 
-- **WHEN** a finding refers to a file or line absent from the diff
-- **THEN** it is not stored and the rejection is recorded for the run
+### Requirement: Замечания привязаны к диффу
 
-#### Scenario: Category is constrained
+Система SHALL сохранять каждое замечание, сформированное ревью, фиксируя его прогон ревью, путь к файлу, координаты строк, к которым оно относится, категорию, серьёзность, текст сообщения, необязательное предложение замены и уверенность модели.
 
-- **WHEN** a finding is stored
-- **THEN** its category is one of the recognised review dimensions — security, correctness, performance, or readability — and its severity is one of the defined levels
+Каждое сохранённое замечание SHALL относиться к строке, входящей в дифф запроса на изменение. Замечание, координаты которого выходят за пределы диффа, SHALL отклоняться, а не сохраняться.
 
-#### Scenario: Duplicate findings are collapsed
+#### Scenario: Замечание внутри диффа сохраняется
 
-- **WHEN** a run produces two findings with the same file, coordinates, and category
-- **THEN** one finding is stored and the duplicate is discarded
+- **WHEN** замечание относится к строке, которую дифф добавляет или изменяет
+- **THEN** оно сохраняется с путём к файлу, координатами строк, категорией, серьёзностью, сообщением, необязательным предложением и уверенностью
 
-### Requirement: Published comments are tracked
+#### Scenario: Замечание вне диффа отклоняется
 
-The system SHALL record every comment it publishes to the version-control host, linking it to the finding it came from where one exists, and storing the provider's identifier for the published comment, its kind, and when it was published.
+- **WHEN** замечание относится к файлу или строке, которых нет в диффе
+- **THEN** оно не сохраняется, а факт отклонения фиксируется для прогона
 
-A finding SHALL be published at most once per review run.
+#### Scenario: Категория ограничена
 
-A summary comment SHALL be published at most once per review run. Because a summary carries no originating finding, the absence of a finding SHALL NOT exempt it from that limit.
+- **WHEN** сохраняется замечание
+- **THEN** его категория — одно из признанных измерений ревью (security, correctness, performance или readability), а серьёзность — один из определённых уровней
 
-#### Scenario: Publication is recorded
+#### Scenario: Дублирующиеся замечания схлопываются
 
-- **WHEN** a comment is published to the host
-- **THEN** a record stores the provider's comment identifier, the originating finding where applicable, the comment kind, and the publication time
+- **WHEN** прогон формирует два замечания с одинаковыми файлом, координатами и категорией
+- **THEN** сохраняется одно замечание, а дубликат отбрасывается
 
-#### Scenario: A finding cannot be recorded as published twice in one run
+### Requirement: Опубликованные комментарии отслеживаются
 
-- **WHEN** a second publication record is written for a finding already published in that review run
-- **THEN** the write is refused and the original record stands
+Система SHALL фиксировать каждый комментарий, опубликованный ею на хостинге системы контроля версий, связывая его с исходным замечанием, если оно есть, и сохраняя идентификатор опубликованного комментария у провайдера, его вид и время публикации.
 
-#### Scenario: Summary comment has no finding
+Замечание SHALL публиковаться не более одного раза за прогон ревью.
 
-- **WHEN** the run's overall summary comment is published
-- **THEN** it is recorded as a summary-kind comment with no originating finding
+Итоговый комментарий SHALL публиковаться не более одного раза за прогон ревью. Итоговый комментарий не связан с исходным замечанием, но отсутствие замечания SHALL NOT освобождать его от этого ограничения.
 
-#### Scenario: A summary cannot be recorded as published twice in one run
+#### Scenario: Публикация фиксируется
 
-- **WHEN** the publication step is retried and writes a second summary record for a run that already has one
-- **THEN** the write is refused and the original summary record stands
+- **WHEN** комментарий публикуется на хостинге
+- **THEN** запись хранит идентификатор комментария у провайдера, исходное замечание (если применимо), вид комментария и время публикации
 
-#### Scenario: Two runs of the same change request each keep their summary
+#### Scenario: Замечание нельзя дважды записать как опубликованное в одном прогоне
 
-- **WHEN** a second review run for the same change request publishes its own summary
-- **THEN** both summary records exist, one per run
+- **WHEN** записывается вторая запись о публикации для замечания, уже опубликованного в этом прогоне ревью
+- **THEN** запись отклоняется, и исходная запись остаётся в силе
 
-### Requirement: Timestamps and identity
+#### Scenario: У итогового комментария нет замечания
 
-Every persisted entity SHALL carry a surrogate primary key that is not a provider-assigned value, and creation and last-update timestamps stored with time-zone information.
+- **WHEN** публикуется общий итоговый комментарий прогона
+- **THEN** он фиксируется как комментарий вида summary без исходного замечания
 
-#### Scenario: Entity carries its own key
+#### Scenario: Итоговый комментарий нельзя дважды записать как опубликованный в одном прогоне
 
-- **WHEN** any entity is stored
-- **THEN** its primary key is generated by the system and is independent of any provider-assigned identifier
+- **WHEN** шаг публикации повторяется и записывает вторую запись итогового комментария для прогона, у которого она уже есть
+- **THEN** запись отклоняется, и исходная запись итогового комментария остаётся в силе
 
-#### Scenario: Timestamps are time-zone aware
+#### Scenario: Два прогона одного запроса на изменение сохраняют каждый свой итоговый комментарий
 
-- **WHEN** an entity is created or updated
-- **THEN** its creation and update timestamps are recorded with time-zone information
+- **WHEN** второй прогон ревью для того же запроса на изменение публикует собственный итоговый комментарий
+- **THEN** существуют обе записи итоговых комментариев, по одной на прогон
+
+### Requirement: История ревью никогда не удаляется неявно
+
+Удаление сохранённой записи SHALL NOT удалять зависящие от неё записи. Удаление, после которого остались бы зависимые записи, SHALL отклоняться независимо от пути вызова, включая прямую сессию базы данных.
+
+Это защищает идентификаторы провайдера для комментариев, уже опубликованных на хостинге, — они нужны системе, чтобы позже обновить или удалить эти комментарии, — а также данные о затратах, зафиксированные в прогонах ревью.
+
+Удаление записи вместе с зависимыми записями SHALL требовать явной операции, которая сначала удаляет каждую зависимую запись. Такая операция не входит в это требование.
+
+#### Scenario: Удаление запроса на изменение с прогонами ревью отклоняется
+
+- **WHEN** выполняется попытка удалить запрос на изменение, у которого есть прогони ревью
+- **THEN** удаление отклоняется, а запрос на изменение и его прогони сохраняются
+
+#### Scenario: Удаление прогона ревью с зависимыми записями отклоняется
+
+- **WHEN** выполняется попытка удалить прогон ревью, у которого есть пакеты контекста, замечания или опубликованные комментарии
+- **THEN** удаление отклоняется, и все эти записи сохраняются
+
+#### Scenario: Удаление опубликованного замечания отклоняется
+
+- **WHEN** выполняется попытка удалить замечание, у которого есть запись об опубликованном комментарии
+- **THEN** удаление отклоняется, и опубликованный комментарий сохраняет идентификатор комментария у провайдера
+
+#### Scenario: Запись без зависимых записей можно удалить
+
+- **WHEN** выполняется попытка удалить запись, от которой ничего не зависит
+- **THEN** запись удаляется
+
+### Requirement: Временные метки и идентичность
+
+Каждая хранимая сущность SHALL иметь суррогатный первичный ключ, который не является значением, назначенным провайдером, а также временные метки создания и последнего обновления, хранимые с информацией о часовом поясе.
+
+#### Scenario: Сущность имеет собственный ключ
+
+- **WHEN** сохраняется любая сущность
+- **THEN** её первичный ключ генерируется системой и не зависит ни от какого идентификатора, назначенного провайдером
+
+#### Scenario: Временные метки учитывают часовой пояс
+
+- **WHEN** сущность создаётся или обновляется
+- **THEN** её временные метки создания и обновления записываются с информацией о часовом поясе

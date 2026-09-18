@@ -7,13 +7,15 @@ enforces it, rather than trusting that application code will remember to.
 import datetime as dt
 
 import pytest
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
+from sqlalchemy.exc import DataError, IntegrityError
 
 from app.domain.enums import (
     CommentKind,
     DiffSide,
     FindingCategory,
     FindingSeverity,
+    MergeRequestState,
     Provider,
     ReviewRunStatus,
     TriggerSource,
@@ -61,7 +63,7 @@ def make_mr(session, repo, *, number=1, head="abc123", flush=True):
         source_branch="feat",
         target_branch="main",
         head_sha=head,
-        state="open",
+        state=MergeRequestState.OPEN,
     )
     session.add(row)
     if flush:
@@ -97,12 +99,104 @@ def test_the_same_full_name_on_two_providers_is_allowed(session) -> None:
     session.flush()
 
 
-def test_deleting_a_repository_takes_its_merge_requests(session) -> None:
+def test_a_merge_request_state_outside_the_enum_is_refused(session) -> None:
+    """Raw SQL, so the refusal comes from the column type and not from the ORM."""
+    repo = make_repo(session)
+    with pytest.raises(DataError):
+        session.execute(
+            text(
+                "INSERT INTO merge_requests (id, repository_id, number, title, description,"
+                " author, source_branch, target_branch, head_sha, state, created_at, updated_at)"
+                " VALUES (:id, :repo, 1, 't', '', 'a', 'feat', 'main', 'abc123', 'draft',"
+                " now(), now())"
+            ),
+            {"id": new_id(), "repo": repo.id},
+        )
+
+
+def delete_is_refused(session, row) -> None:
+    """Delete by statement, so the ORM cannot reorder or pre-delete anything."""
+    table = row.__table__
+    with pytest.raises(IntegrityError, match="RestrictViolation"):
+        session.execute(table.delete().where(table.c.id == row.id))
+
+
+def test_deleting_a_repository_with_merge_requests_is_refused(session) -> None:
     repo = make_repo(session)
     make_mr(session, repo)
+    delete_is_refused(session, repo)
+
+
+def test_the_orm_cannot_delete_a_repository_out_from_under_its_children(session) -> None:
+    """With the children loaded, the ORM must neither delete them nor null their key."""
+    repo = make_repo(session)
+    make_mr(session, repo)
+    assert len(repo.merge_requests) == 1
+    session.delete(repo)
+    with pytest.raises(IntegrityError, match="RestrictViolation"):
+        session.flush()
+
+
+def test_deleting_a_merge_request_with_runs_is_refused(session) -> None:
+    mr = make_mr(session, make_repo(session))
+    make_run(session, mr)
+    delete_is_refused(session, mr)
+
+
+def test_deleting_a_run_with_a_context_payload_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    session.add(
+        ContextPayloadRow(
+            id=new_id(),
+            review_run_id=run.id,
+            tiers=["diff"],
+            file_paths=["app/main.py"],
+            token_count=1,
+            content_sha256="0" * 64,
+            body={},
+        )
+    )
+    session.flush()
+    delete_is_refused(session, run)
+
+
+def test_deleting_a_run_with_findings_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    add_finding(session, run)
+    session.flush()
+    delete_is_refused(session, run)
+
+
+def test_deleting_a_run_with_published_comments_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    add_summary(session, run, provider_comment_id="c1")
+    session.flush()
+    delete_is_refused(session, run)
+
+
+def test_deleting_a_published_finding_keeps_its_comment(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    finding = add_finding(session, run)
+    session.flush()
+    session.add(
+        PublishedCommentRow(
+            id=new_id(),
+            review_run_id=run.id,
+            finding_id=finding.id,
+            provider_comment_id="c42",
+            kind=CommentKind.INLINE,
+            published_at=NOW,
+        )
+    )
+    session.flush()
+    delete_is_refused(session, finding)
+
+
+def test_a_row_nothing_depends_on_can_be_deleted(session) -> None:
+    repo = make_repo(session)
     session.delete(repo)
     session.flush()
-    assert session.query(MergeRequestRow).count() == 0
+    assert session.query(RepositoryRow).count() == 0
 
 
 def test_a_merge_request_number_is_unique_within_a_repository(session) -> None:
