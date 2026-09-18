@@ -26,11 +26,28 @@ dev = [
     # not enough, since 2.14 accepts any grimp.
     "import-linter>=2.0,<2.15",
     "grimp<3.16",
+    "mypy>=1.13",
+    "pre-commit>=3.8",
 ]
 
 [tool.ruff]
 target-version = "py314"
 exclude = [".venv", "venv", ".git"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+plugins = ["pydantic.mypy"]
+exclude = ["^\\.venv/", "^venv/"]
+
+# Test functions and fixtures are not held to strict typing: pytest's own
+# style (untyped fixtures, untyped `def test_x():`) is the norm, and forcing
+# annotations there catches no bug strict mode exists to catch.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

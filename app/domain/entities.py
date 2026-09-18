@@ -8,6 +8,7 @@ test can assert an exact timestamp instead of a range.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from app.domain.enums import (
@@ -89,7 +90,7 @@ class ContextPayload:
     file_paths: tuple[str, ...]
     token_count: int
     content_sha256: str
-    body: dict
+    body: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 

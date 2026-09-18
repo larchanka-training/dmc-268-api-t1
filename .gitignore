@@ -24,10 +24,10 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
-# AI agent skills and rules are the DevTools / Agentic Engineer ticket's
-# deliverable, not this one's. Until that lands, generate your own with
-# `openspec init --tools <your-tool>` and keep it local.
-.agents/
+# Общий источник правил, скиллов и шаблонов — `.agents/`, он коммитится.
+# Каталоги конкретных инструментов у каждого свои: симлинк на `.agents/skills`
+# заводится локально, вручную или через `openspec init --tools <tool>`.
+.opencode/
 .claude/
 .cursor/
 .codex/

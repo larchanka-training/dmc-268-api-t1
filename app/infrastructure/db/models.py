@@ -8,6 +8,7 @@ hold against every writer, including a psql session.
 
 import datetime as dt
 import uuid
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -169,7 +170,7 @@ class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     file_paths: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    body: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    body: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
 
 class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):

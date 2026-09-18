@@ -31,6 +31,7 @@ jobs:
       # The layering rule from BACKEND_ARCHITECTURE.md. Its own step, because a
       # combined one reports a single failure for two unrelated problems.
       - run: uv run lint-imports
+      - run: uv run mypy .
 
   terraform:
     needs: syntax

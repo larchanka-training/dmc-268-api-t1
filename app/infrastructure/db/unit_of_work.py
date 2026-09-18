@@ -6,6 +6,14 @@ from typing import Self
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.application.ports.repositories import (
+    ContextPayloadRepo,
+    FindingRepo,
+    MergeRequestRepo,
+    PublishedCommentRepo,
+    RepositoryRepo,
+    ReviewRunRepo,
+)
 from app.infrastructure.db.repositories import (
     SqlAlchemyContextPayloadRepo,
     SqlAlchemyFindingRepo,
@@ -26,12 +34,18 @@ class SqlAlchemyUnitOfWork:
     def __enter__(self) -> Self:
         self._session = self._factory()
         session = self._session
-        self.repositories = SqlAlchemyRepositoryRepo(session)
-        self.merge_requests = SqlAlchemyMergeRequestRepo(session)
-        self.review_runs = SqlAlchemyReviewRunRepo(session)
-        self.context_payloads = SqlAlchemyContextPayloadRepo(session)
-        self.findings = SqlAlchemyFindingRepo(session)
-        self.published_comments = SqlAlchemyPublishedCommentRepo(session)
+        # Typed as the ports, not the concrete adapters: `UnitOfWork` is a
+        # `Protocol` with these as plain (mutable) attributes, so structural
+        # matching needs the attribute's own type to be the port type, not
+        # whatever type mypy would otherwise infer from the adapter literal.
+        self.repositories: RepositoryRepo = SqlAlchemyRepositoryRepo(session)
+        self.merge_requests: MergeRequestRepo = SqlAlchemyMergeRequestRepo(session)
+        self.review_runs: ReviewRunRepo = SqlAlchemyReviewRunRepo(session)
+        self.context_payloads: ContextPayloadRepo = SqlAlchemyContextPayloadRepo(session)
+        self.findings: FindingRepo = SqlAlchemyFindingRepo(session)
+        self.published_comments: PublishedCommentRepo = SqlAlchemyPublishedCommentRepo(
+            session
+        )
         return self
 
     def __exit__(

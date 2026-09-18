@@ -160,9 +160,9 @@ def test_a_finished_run_refuses_a_same_status_update(uow) -> None:
             ReviewRunStatus.ANALYSING,
             ReviewRunStatus.PUBLISHING,
         ):
-            run = advance(run, status, now).value
+            run = advance(run, status, now).unwrap()
         run = replace(
-            advance(run, ReviewRunStatus.COMPLETED, now).value,
+            advance(run, ReviewRunStatus.COMPLETED, now).unwrap(),
             model="m1",
             tokens_used=100,
             duration_seconds=1.5,
