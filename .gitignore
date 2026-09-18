@@ -24,11 +24,12 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
-# AI agent skills and rules are the DevTools / Agentic Engineer ticket's
-# deliverable, not this one's. Until that lands, generate your own with
-# `openspec init --tools <your-tool>` and keep it local.
-.agents/
-.claude/
+# `.agents/` is the shared source: rules, skills and templates live there and are
+# committed. Per-tool directories stay local, except the symlink that points a
+# tool at `.agents/skills` — that one is committed so a checkout works with no
+# setup. Generate wiring for another tool with `openspec init --tools <your-tool>`.
+.claude/*
+!.claude/skills
 .cursor/
 .codex/
 .gemini/
