@@ -2,10 +2,10 @@ schema: spec-driven
 
 context: |
   Project: DMC-268 — automated AI code review system (GitLab Duo-like agent).
-  This repo (dmc-268-api-t1) is the BACKEND service. The cohort task board is
-  GitHub Project https://github.com/orgs/larchanka-training/projects/7 — it
-  aggregates issues from several repos; most of the cohort's tickets still live
-  in larchanka-training/dmc-268-ui-t6, which is used as a shared backlog repo.
+  This repo (dmc-268-api-t1) is the BACKEND service. The team board is GitHub
+  Project https://github.com/orgs/larchanka-training/projects/7 (dmc-268-t1) —
+  it aggregates issues from this repo (backend) and from
+  larchanka-training/dmc-268-ui-t1 (frontend).
 
   Backend stack: Python, FastAPI, SQLAlchemy v2, Alembic, PostgreSQL, uv (package
   manager), ruff + pylint (lint), Ollama SDK (LLM gateway).
