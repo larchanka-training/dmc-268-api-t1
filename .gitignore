@@ -25,11 +25,9 @@ override.tf.json
 *_override.tf.json
 
 # `.agents/` is the shared source: rules, skills and templates live there and are
-# committed. Per-tool directories stay local, except the symlink that points a
-# tool at `.agents/skills` — that one is committed so a checkout works with no
-# setup. Generate wiring for another tool with `openspec init --tools <your-tool>`.
-.claude/*
-!.claude/skills
+# committed. Per-tool wiring stays local — each person symlinks their own tool at
+# `.agents/skills`, by hand or with `openspec init --tools <your-tool>`.
+.claude/
 .cursor/
 .codex/
 .gemini/
