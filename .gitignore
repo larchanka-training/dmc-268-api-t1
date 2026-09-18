@@ -24,9 +24,10 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
-# `.agents/` is the shared source: rules, skills and templates live there and are
-# committed. Per-tool wiring stays local — each person symlinks their own tool at
-# `.agents/skills`, by hand or with `openspec init --tools <your-tool>`.
+# Общий источник правил, скиллов и шаблонов — `.agents/`, он коммитится.
+# Каталоги конкретных инструментов у каждого свои: симлинк на `.agents/skills`
+# заводится локально, вручную или через `openspec init --tools <tool>`.
+.opencode/
 .claude/
 .cursor/
 .codex/
