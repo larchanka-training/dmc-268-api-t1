@@ -28,6 +28,10 @@ jobs:
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - run: uv run ruff check .
+      # The layering rule from BACKEND_ARCHITECTURE.md. Its own step, because a
+      # combined one reports a single failure for two unrelated problems.
+      - run: uv run lint-imports
+      - run: uv run mypy .
 
   terraform:
     needs: syntax
@@ -41,7 +45,10 @@ jobs:
       - run: cd infra && tofu init -backend=false && tofu validate
 
   test:
-    needs: [lint, terraform]
+    # Not terraform: `tofu validate` and `pytest` check unrelated things, and
+    # chaining them let a provider download from registry.opentofu.org decide
+    # whether the suite ran at all.
+    needs: [lint]
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -59,6 +66,10 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgresql://dmc268:dmc268@localhost:5432/dmc268
+      # The suite reads this one, not DATABASE_URL. The +psycopg prefix is
+      # required: bare postgresql:// sends SQLAlchemy to psycopg2, which is not
+      # a dependency.
+      TEST_DATABASE_URL: postgresql+psycopg://dmc268:dmc268@localhost:5432/dmc268
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -66,4 +77,11 @@ jobs:
           version: "0.12.12"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
-      - run: uv run pytest
+      - name: pytest (no test may skip)
+        run: |
+          set -o pipefail
+          uv run pytest -q -rs | tee pytest.out
+          if grep -qE '[0-9]+ skipped' pytest.out; then
+            echo "::error::a test skipped, so this run proves less than it appears to; TEST_DATABASE_URL is the usual cause"
+            exit 1
+          fi

@@ -7,6 +7,11 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 COPY app ./app
+# alembic.ini and the migration scripts: without them the image can start the
+# API but cannot apply its own schema, which the compose stack needs to do
+# on startup.
+COPY alembic.ini ./
+COPY alembic ./alembic
 
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
