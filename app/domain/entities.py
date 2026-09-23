@@ -73,6 +73,7 @@ class ReviewRun:
     created_at: datetime
     updated_at: datetime
     failure_reason: str | None = None
+    base_sha: str | None = None
     model: str | None = None
     tokens_used: int | None = None
     duration_seconds: float | None = None

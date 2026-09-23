@@ -75,6 +75,7 @@ def a_run(mr_id) -> ReviewRun:
         id=new_id(),
         merge_request_id=mr_id,
         head_sha="abc123",
+        base_sha="base789",
         status=ReviewRunStatus.QUEUED,
         trigger=TriggerSource.WEBHOOK,
         last_progress_at=NOW,
@@ -321,6 +322,9 @@ def test_a_run_is_inserted_with_the_counts_it_already_carries(uow) -> None:
     assert stored.model == "qwen2.5-coder"
     assert stored.tokens_used == 1200
     assert stored.duration_seconds == 42
+    # Обе половины пары, по которой воспроизводится дифф, доживают до чтения.
+    assert stored.head_sha == "abc123"
+    assert stored.base_sha == "base789"
 
 
 def test_retargeting_a_change_request_reaches_storage(uow) -> None:

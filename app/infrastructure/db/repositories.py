@@ -154,6 +154,7 @@ class SqlAlchemyReviewRunRepo:
                 id=run.id,
                 merge_request_id=run.merge_request_id,
                 head_sha=run.head_sha,
+                base_sha=run.base_sha,
                 status=run.status,
                 trigger=run.trigger,
                 last_progress_at=run.last_progress_at,

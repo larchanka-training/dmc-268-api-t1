@@ -60,6 +60,7 @@ def review_run_to_domain(row: ReviewRunRow) -> ReviewRun:
         id=row.id,
         merge_request_id=row.merge_request_id,
         head_sha=row.head_sha,
+        base_sha=row.base_sha,
         status=row.status,
         trigger=row.trigger,
         last_progress_at=row.last_progress_at,

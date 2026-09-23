@@ -133,6 +133,9 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
         Uuid, ForeignKey("merge_requests.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Ревизия, относительно которой считался дифф этого прогона. Nullable:
+    # прогон, записанный до того, как воркер научился её сообщать, её не знает.
+    base_sha: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[ReviewRunStatus] = mapped_column(
         _enum(ReviewRunStatus, "review_run_status"), nullable=False
     )
