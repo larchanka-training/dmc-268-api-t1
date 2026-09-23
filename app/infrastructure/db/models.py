@@ -1,9 +1,9 @@
-"""The review pipeline's tables.
+"""Таблицы конвейера ревью.
 
-Enum columns are built from the domain enums, so a value cannot be added in one
-place and forgotten in the other. Native PostgreSQL enum types rather than text
-plus a CHECK, because the constrained sets are part of the contract and should
-hold against every writer, including a psql session.
+Enum-колонки строятся из доменных enum'ов, поэтому значение нельзя добавить в
+одном месте и забыть в другом. Нативные enum-типы PostgreSQL, а не text плюс
+CHECK: ограниченные наборы — часть контракта и должны держаться против любого
+писателя, включая сессию psql.
 """
 
 import datetime as dt
@@ -47,7 +47,7 @@ _TERMINAL_SQL = ", ".join(f"'{s.value}'" for s in sorted(TERMINAL_STATUSES))
 
 
 def _enum(python_enum: type, name: str) -> SAEnum:
-    """Native PostgreSQL enum built from the single domain definition."""
+    """Нативный enum PostgreSQL из единственного доменного определения."""
     return SAEnum(
         python_enum,
         name=name,
@@ -68,17 +68,18 @@ class RepositoryRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     default_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     auto_review_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    # Nothing reads these. They exist because the unit of work orders INSERTs by
-    # relationship, not by foreign key: without them a parent and its child
-    # flushed together go in the wrong order. passive_deletes="all" keeps the
-    # ORM from deleting or orphaning children, so RESTRICT decides.
+    # Их никто не читает. Они нужны потому, что unit of work упорядочивает
+    # INSERT'ы по relationship, а не по внешнему ключу: без них родитель и его
+    # ребёнок, попавшие в один flush, уйдут в неверном порядке.
+    # passive_deletes="all" не даёт ORM удалять детей или оставлять их
+    # сиротами, так что решает RESTRICT.
     merge_requests: Mapped[list[MergeRequestRow]] = relationship(
         back_populates="repository", passive_deletes="all"
     )
 
 
 class MergeRequestRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
-    """A change request. Covers a GitHub pull request as well as a GitLab MR."""
+    """Запрос на изменения. Покрывает и pull request в GitHub, и MR в GitLab."""
 
     __tablename__ = "merge_requests"
     __table_args__ = (
@@ -106,17 +107,19 @@ class MergeRequestRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
 
 
 class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
-    """One attempt to review a change request at a specific commit.
+    """Одна попытка отревьюить запрос на изменения на конкретном коммите.
 
-    The ticket calls this a ReviewJob. That name is reserved for the queue
-    message, so the durable row and the transient message never share a word.
+    В тикете это называется ReviewJob. Имя зарезервировано за сообщением в
+    очереди, чтобы долгоживущая строка и короткоживущее сообщение не носили
+    одно имя.
     """
 
     __tablename__ = "review_runs"
     __table_args__ = (
-        # At most one unfinished run per commit. This is what stops a redelivered
-        # webhook starting a second review, and it is why an abandoned run has to
-        # be reaped: it would otherwise block its commit forever.
+        # Не больше одного незавершённого прогона на коммит. Именно это не даёт
+        # повторно доставленному webhook'у запустить второе ревью, и поэтому же
+        # брошенный прогон нужно подчищать: иначе он заблокирует свой коммит
+        # навсегда.
         Index(
             "uq_review_runs_one_active_per_commit",
             "merge_request_id",
@@ -149,11 +152,11 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
 
 
 class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
-    """What the model was shown, kept so a run stays reproducible.
+    """Что показали модели; хранится, чтобы прогон оставался воспроизводимым.
 
-    This table holds other people's source code verbatim. Redaction of secrets
-    belongs before the insert, in the context builder; this is the sensitive
-    table the retention policy is really about.
+    В этой таблице дословно лежит чужой исходный код. Вычищать секреты нужно до
+    вставки, в сборщике контекста; именно об этой чувствительной таблице и идёт
+    речь в политике хранения.
     """
 
     __tablename__ = "context_payloads"
@@ -174,17 +177,17 @@ class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
 
 
 class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
-    """Something the review noticed, anchored to a line the diff touched."""
+    """Замечание ревью, привязанное к строке, которую затронул дифф."""
 
     __tablename__ = "findings"
     __table_args__ = (
-        # Collapsing duplicates is the database's job, so no insertion path can
-        # forget it. The domain also deduplicates, which lets the caller learn
-        # what was dropped instead of catching an integrity error.
+        # Схлопывание дублей — дело базы, чтобы ни один путь вставки не смог о
+        # нём забыть. Домен тоже дедуплицирует: так вызывающий узнаёт, что было
+        # отброшено, вместо того чтобы ловить ошибку целостности.
         #
-        # The key is the whole anchor. Only the line number belonging to the
-        # anchor's side is populated, so NULLS NOT DISTINCT is what makes the
-        # constraint fire at all on the old side, where every new_line is NULL.
+        # Ключ — вся привязка целиком. Заполнен только номер строки на стороне
+        # привязки, поэтому именно NULLS NOT DISTINCT заставляет ограничение
+        # вообще срабатывать на старой стороне, где new_line всегда NULL.
         UniqueConstraint(
             "review_run_id",
             "file_path",
@@ -216,15 +219,15 @@ class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
 
 
 class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
-    """A comment posted back to the host."""
+    """Комментарий, опубликованный обратно на хостинг."""
 
     __tablename__ = "published_comments"
     __table_args__ = (
-        # A finding is published at most once per run, so a retry cannot
-        # double-post. A summary carries no finding, and NULLS NOT DISTINCT is
-        # what extends the same limit to it: without it Postgres treats every
-        # NULL finding_id as unique and a retried publish stores a second
-        # summary for the run.
+        # Замечание публикуется не больше одного раза за прогон, поэтому повтор
+        # не задвоит комментарий. У сводки замечания нет, и то же ограничение
+        # распространяет на неё именно NULLS NOT DISTINCT: без него Postgres
+        # считает каждый NULL finding_id уникальным, и повторная публикация
+        # сохранит для прогона вторую сводку.
         UniqueConstraint(
             "review_run_id",
             "finding_id",

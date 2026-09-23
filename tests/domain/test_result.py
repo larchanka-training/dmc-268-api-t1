@@ -1,4 +1,4 @@
-"""What a Result says, including the awkward success."""
+"""Что говорит Result, включая неудобный успех."""
 
 import pytest
 
@@ -15,7 +15,7 @@ def test_unwrap_raises_value_error_on_failure() -> None:
 
 
 def test_a_success_carrying_none_is_still_a_success() -> None:
-    """Failure is decided by `error`, not by the value being empty."""
+    """Провал определяет `error`, а не пустое значение."""
     assert Result.success(None).unwrap() is None
 
 

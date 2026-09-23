@@ -1,4 +1,4 @@
-"""The schema the migrations produce must be the schema the models describe."""
+"""Схема, которую создают миграции, должна совпадать со схемой из моделей."""
 
 import pytest
 from alembic.autogenerate import compare_metadata
@@ -13,7 +13,7 @@ from ..conftest import requires_db
 @pytest.mark.integration
 @requires_db
 def test_migrations_leave_no_drift(migrated) -> None:
-    """Autogenerate against a migrated database must find nothing to do."""
+    """Autogenerate по мигрированной базе не должен находить изменений."""
     with migrated.connect() as connection:
         context = MigrationContext.configure(
             connection,

@@ -1,4 +1,4 @@
-"""What the adapters do, and what they refuse."""
+"""Что адаптеры делают и что отклоняют."""
 
 import datetime as dt
 from dataclasses import replace
@@ -98,7 +98,7 @@ def test_entities_round_trip_through_the_ports(uow) -> None:
 def test_a_failed_unit_of_work_rolls_everything_back(uow) -> None:
     with uow as work:
         work.repositories.add(a_repository())
-        # leaving the block without commit must discard the write
+        # выход из блока без коммита обязан отбросить запись
     with uow as work:
         assert work.repositories.find_by_provider(Provider.GITHUB, "1") is None
 
@@ -256,7 +256,7 @@ def a_context_payload(run_id, *, chunk_index: int, digest: str) -> ContextPayloa
 
 
 def seeded(work):
-    """A repository, a change request and a queued run, all committed."""
+    """Репозиторий, запрос на изменения и прогон в очереди, всё закоммичено."""
     repo = a_repository()
     work.repositories.add(repo)
     mr = a_merge_request(repo.id)
@@ -268,7 +268,7 @@ def seeded(work):
 
 
 def test_advancing_a_run_does_not_undo_a_recorded_rejection(uow) -> None:
-    """The counter lives on the row; the caller's entity never learns about it."""
+    """Счётчик живёт в строке; сущность у вызывающего о нём не узнаёт."""
     hunks = [Hunk(file_path="app/main.py", changed_new_lines=frozenset({10}))]
     with uow as work:
         _, _, run = seeded(work)
@@ -286,7 +286,7 @@ def test_advancing_a_run_does_not_undo_a_recorded_rejection(uow) -> None:
     with uow as work:
         with pytest.raises(ValueError, match="outside the changed lines"):
             work.findings.add_validated(outside, hunks, LATER)
-        # `run` is the stale entity the caller has been holding all along
+        # `run` — устаревшая сущность, которую вызывающий держал всё это время
         work.review_runs.update(
             advance(run, ReviewRunStatus.BUILDING_CONTEXT, LATER).unwrap()
         )
@@ -341,7 +341,7 @@ def test_retargeting_a_change_request_reaches_storage(uow) -> None:
 
 
 def test_find_by_digest_is_stable_across_calls(uow) -> None:
-    """Several runs can share a digest; the lookup must not pick at random."""
+    """Несколько прогонов могут делить один digest; поиск не должен выбирать наугад."""
     with uow as work:
         _, _, run = seeded(work)
     with uow as work:

@@ -1,8 +1,8 @@
-"""SQLAlchemy implementations of the persistence ports.
+"""Реализации портов хранения на SQLAlchemy.
 
-Thin by design: each method translates between a row and a domain entity and
-does nothing else. Two of them consult a pure function before writing, and
-those are the only places any rule appears. They are marked.
+Тонкие намеренно: каждый метод переводит между строкой таблицы и доменной
+сущностью и больше ничего не делает. Два из них перед записью сверяются с
+чистой функцией — это единственные места, где появляется правило. Они отмечены.
 """
 
 import datetime as dt
@@ -143,11 +143,11 @@ class SqlAlchemyReviewRunRepo:
         return [m.review_run_to_domain(row) for row in rows]
 
     def add(self, run: ReviewRun) -> None:
-        """Insert a run, carrying every field it already holds.
+        """Вставить прогон, перенеся все поля, которые в нём уже есть.
 
-        At insert the entity is the only source, including for a run rebuilt
-        from an earlier attempt, so the outcome fields and the rejection count
-        are mapped here even though `update` leaves the count alone.
+        При вставке сущность — единственный источник, в том числе для прогона,
+        восстановленного из прошлой попытки, поэтому поля результата и счётчик
+        отклонённых переносятся здесь, хотя `update` счётчик не трогает.
         """
         self._session.add(
             ReviewRunRow(
@@ -166,22 +166,23 @@ class SqlAlchemyReviewRunRepo:
         )
 
     def update(self, run: ReviewRun) -> None:
-        """Persist a run's progress, refusing a status the state machine disallows.
+        """Записать прогресс прогона, отклонив статус, запрещённый машиной состояний.
 
-        The only rule in this class, and it is delegated: `next_status` owns
-        the transition table, so the adapter cannot drift from the domain.
+        Единственное правило в этом классе, и оно делегировано: таблицей
+        переходов владеет `next_status`, поэтому адаптер не может разойтись с
+        доменом.
 
-        `rejected_findings` is deliberately absent. `add_validated` increments
-        it on the row without the caller's entity ever hearing about it, so
-        writing the entity's copy back here would undo the rejection it just
-        recorded. The row owns that counter; everything else is the caller's.
+        `rejected_findings` отсутствует намеренно. `add_validated` увеличивает
+        его в строке, и сущность вызывающего об этом не узнаёт, поэтому запись
+        её копии здесь отменила бы только что учтённое отклонение. Счётчиком
+        владеет строка, всем остальным — вызывающий.
         """
         row = self._session.get(ReviewRunRow, run.id)
         if row is None:
             raise LookupError(f"review run {run.id} is not stored")
-        # A terminal row goes through next_status even when the status is
-        # unchanged: equality alone would let a redelivered update overwrite
-        # the cost of a finished run.
+        # Терминальная строка проходит через next_status, даже если статус не
+        # изменился: одного сравнения на равенство хватило бы, чтобы повторно
+        # доставленное обновление перезаписало стоимость завершённого прогона.
         if row.status in TERMINAL_STATUSES or row.status != run.status:
             verdict = next_status(row.status, run.status)
             if not verdict.ok:
@@ -207,11 +208,12 @@ class SqlAlchemyContextPayloadRepo:
         return [m.context_payload_to_domain(row) for row in rows]
 
     def find_by_digest(self, content_sha256: str) -> ContextPayload | None:
-        """The oldest payload with this digest.
+        """Самый старый payload с таким дайджестом.
 
-        The digest index is not unique, and reuse is the whole point of the
-        lookup, so several rows can match. Ordering by `id` makes the answer
-        the same on every call: the ids are time-ordered UUIDv7.
+        Индекс по дайджесту не уникален, а переиспользование — и есть смысл
+        этого поиска, поэтому совпасть могут несколько строк. Сортировка по
+        `id` делает ответ одинаковым на каждом вызове: id — это UUIDv7,
+        упорядоченные по времени.
         """
         row = self._session.scalars(
             select(ContextPayloadRow)
@@ -265,10 +267,10 @@ class SqlAlchemyFindingRepo:
     def add_validated(
         self, finding: Finding, hunks: Iterable[Hunk], now: dt.datetime
     ) -> None:
-        """Store a finding only if its anchor is inside the diff.
+        """Сохранить замечание, только если его привязка внутри диффа.
 
-        The rule itself is `validate_anchor`; this counts the rejection on the
-        run so a filtered finding leaves a trace instead of vanishing.
+        Само правило — `validate_anchor`; здесь отклонение учитывается в
+        прогоне, чтобы отфильтрованное замечание оставило след, а не исчезло.
         """
         verdict = validate_anchor(finding.anchor, hunks)
         if not verdict.ok:

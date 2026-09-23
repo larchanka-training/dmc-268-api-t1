@@ -1,8 +1,8 @@
-"""Anchoring a finding to a line the change actually touched.
+"""Привязка замечания к строке, которую изменение действительно затронуло.
 
-A model will happily report a problem on a line that is not in the diff. The
-rule that rejects those lives here, takes the parsed hunks as an argument, and
-reads no files, so it is tested on literal data.
+Модель с радостью сообщит о проблеме в строке, которой нет в диффе. Правило,
+которое такие отбрасывает, живёт здесь, получает разобранные hunk'и
+аргументом и не читает файлы, поэтому тестируется на литеральных данных.
 """
 
 from collections.abc import Iterable
@@ -13,7 +13,7 @@ from app.domain.result import Result
 
 
 def validate_anchor(anchor: DiffAnchor, hunks: Iterable[Hunk]) -> Result[DiffAnchor]:
-    """Confirm the anchor points at a line inside the change."""
+    """Убедиться, что привязка указывает на строку внутри изменения."""
     for_file = [h for h in hunks if h.file_path == anchor.file_path]
     if not for_file:
         return Result.failure(f"{anchor.file_path} is not in the diff")

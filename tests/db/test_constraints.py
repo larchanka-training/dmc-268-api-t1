@@ -1,7 +1,7 @@
-"""What the schema refuses.
+"""Что схема отклоняет.
 
-Each test states a rule from the data-model spec and proves the database
-enforces it, rather than trusting that application code will remember to.
+Каждый тест формулирует правило из спецификации модели данных и доказывает, что
+его соблюдает база, а не надеется, что о нём вспомнит код приложения.
 """
 
 import datetime as dt
@@ -100,7 +100,7 @@ def test_the_same_full_name_on_two_providers_is_allowed(session) -> None:
 
 
 def test_a_merge_request_state_outside_the_enum_is_refused(session) -> None:
-    """Raw SQL, so the refusal comes from the column type and not from the ORM."""
+    """Сырой SQL, чтобы отказ пришёл от типа колонки, а не от ORM."""
     repo = make_repo(session)
     with pytest.raises(DataError):
         session.execute(
@@ -115,7 +115,7 @@ def test_a_merge_request_state_outside_the_enum_is_refused(session) -> None:
 
 
 def delete_is_refused(session, row) -> None:
-    """Delete by statement, so the ORM cannot reorder or pre-delete anything."""
+    """Удаление через statement, чтобы ORM не переупорядочила и не удалила заранее."""
     table = row.__table__
     with pytest.raises(IntegrityError, match="RestrictViolation"):
         session.execute(table.delete().where(table.c.id == row.id))
@@ -128,7 +128,7 @@ def test_deleting_a_repository_with_merge_requests_is_refused(session) -> None:
 
 
 def test_the_orm_cannot_delete_a_repository_out_from_under_its_children(session) -> None:
-    """With the children loaded, the ORM must neither delete them nor null their key."""
+    """Когда дети загружены, ORM не должна ни удалять их, ни обнулять их ключ."""
     repo = make_repo(session)
     make_mr(session, repo)
     assert len(repo.merge_requests) == 1
@@ -302,7 +302,7 @@ def add_finding(
     side=DiffSide.NEW,
     category=FindingCategory.SECURITY,
 ):
-    """Put the line number on whichever side the anchor names, as the domain does."""
+    """Номер строки ставим на ту сторону, которую называет привязка, как в домене."""
     row = FindingRow(
         id=new_id(),
         review_run_id=run.id,
@@ -376,7 +376,8 @@ def test_generated_ids_sort_in_creation_order(session) -> None:
 
 
 def test_the_database_refuses_a_duplicate_old_side_finding(session) -> None:
-    """Old-side anchors carry new_line NULL, which a NULLS DISTINCT key ignores."""
+    """У привязки на старой стороне new_line равен NULL, а ключ с NULLS DISTINCT
+    такое игнорирует."""
     run = make_run(session, make_mr(session, make_repo(session)))
     add_finding(session, run, side=DiffSide.OLD, line=7)
     add_finding(session, run, side=DiffSide.OLD, line=7)

@@ -1,9 +1,9 @@
-"""What the application layer is allowed to know about persistence.
+"""Что слою приложения позволено знать о хранении.
 
-Structural protocols, so an adapter never imports this module and the
-infrastructure layer stays free of any compile-time dependency on the
-application layer. Every signature speaks in domain types: no session, no
-engine, no SQLAlchemy anywhere below.
+Структурные протоколы: адаптер никогда не импортирует этот модуль, и у слоя
+инфраструктуры нет compile-time зависимости от слоя приложения. Каждая
+сигнатура говорит в доменных типах: ниже нет ни сессии, ни engine, ни
+SQLAlchemy.
 """
 
 from collections.abc import Iterable
@@ -71,12 +71,12 @@ class FindingRepo(Protocol):
     def add_validated(
         self, finding: Finding, hunks: Iterable[Hunk], now: datetime
     ) -> None:
-        """Store a finding only if its anchor is inside the diff.
+        """Сохранить замечание, только если его привязка внутри диффа.
 
-        Declared here because it is the only path that enforces the rule, and a
-        guard reachable only through the concrete adapter is not a guard. `add`
-        stays for callers that have already validated, or that have no hunks to
-        validate against.
+        Объявлено здесь, потому что это единственный путь, который применяет
+        правило, а проверка, доступная только через конкретный адаптер, — не
+        проверка. `add` остаётся для вызывающих, которые уже проверили или
+        которым не с какими hunk'ами сверяться.
         """
         ...
 

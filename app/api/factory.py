@@ -1,8 +1,8 @@
-"""Application factory.
+"""Фабрика приложения.
 
-`app/main.py` stays a thin entrypoint, inside the package so the layering
-contracts see it: they are rooted at `app`, and a module at the repository
-root is outside the graph they check.
+`app/main.py` остаётся тонкой точкой входа и лежит внутри пакета, чтобы его
+видели контракты слоёв: они укоренены в `app`, а модуль в корне репозитория
+находится вне проверяемого ими графа.
 """
 
 from fastapi import FastAPI
@@ -11,11 +11,11 @@ from app.config import Settings
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    """Build the ASGI application.
+    """Собрать ASGI-приложение.
 
-    Passing `settings` explicitly is how tests avoid needing a real
-    environment; omitting it loads from the environment and fails loudly when
-    a required setting is missing.
+    Явно переданные `settings` — это то, как тесты обходятся без настоящего
+    окружения; без них настройки читаются из окружения и падают громко, если
+    обязательной не хватает.
     """
     if settings is None:
         from app.config import load_settings

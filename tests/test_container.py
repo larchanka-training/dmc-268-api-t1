@@ -1,4 +1,4 @@
-"""The composition root binds every port exactly once, and nothing else does."""
+"""Composition root связывает каждый порт ровно один раз — и только он."""
 
 import inspect
 import re
@@ -13,7 +13,7 @@ SETTINGS = Settings(database_url="postgresql+psycopg://test:test@localhost/test"
 
 
 def test_every_declared_port_has_an_adapter_and_a_caller() -> None:
-    """No port without an implementation. YAGNI, made checkable."""
+    """Нет порта без реализации. YAGNI, который можно проверить."""
     declared = {name for name in ports.__all__}
     assert declared, "no ports declared"
     source = Path("app/infrastructure/db/repositories.py").read_text()
@@ -23,7 +23,7 @@ def test_every_declared_port_has_an_adapter_and_a_caller() -> None:
 
 
 def test_the_container_is_the_only_place_adapters_are_constructed() -> None:
-    """A caller outside infrastructure must never name a concrete adapter."""
+    """Вызывающий за пределами infrastructure не называет конкретный адаптер."""
     for layer in ("app/api", "app/application", "app/domain"):
         for path in Path(layer).rglob("*.py"):
             text = path.read_text()
@@ -45,7 +45,7 @@ def test_the_container_hands_out_a_unit_of_work() -> None:
 
 
 def test_the_fastapi_dependency_is_port_typed() -> None:
-    """The router-facing dependency promises a port, not an implementation."""
+    """Зависимость, которую видит router, обещает порт, а не реализацию."""
     signature = inspect.signature(get_unit_of_work)
     annotation = str(signature.return_annotation)
     assert "UnitOfWork" in annotation

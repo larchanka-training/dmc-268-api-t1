@@ -1,7 +1,7 @@
-"""The transaction boundary.
+"""Граница транзакции.
 
-A use case takes a unit of work, reaches the repositories through it, and
-commits once. Nothing below this line knows what a session is.
+Use case принимает unit of work, через него добирается до репозиториев и
+делает один коммит. Ниже этой строки никто не знает, что такое сессия.
 """
 
 from types import TracebackType

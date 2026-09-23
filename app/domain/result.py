@@ -1,7 +1,8 @@
-"""A verdict a pure function can return without raising.
+"""Вердикт, который чистая функция может вернуть, не бросая исключение.
 
-Rules live in functions that take data and return data, so a rejection is a
-value the caller inspects rather than an exception that unwinds the stack.
+Правила живут в функциях, которые получают данные и возвращают данные, поэтому
+отказ — это значение, которое разбирает вызывающий код, а не исключение,
+разматывающее стек.
 """
 
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class Result[T]:
-    """Either a value or a reason it could not be produced."""
+    """Либо значение, либо причина, по которой его не удалось получить."""
 
     value: T | None = None
     error: str | None = None
@@ -27,11 +28,11 @@ class Result[T]:
         return cls(error=error)
 
     def unwrap(self) -> T:
-        """Return the value, or raise `ValueError` if this is a failure.
+        """Вернуть значение или бросить `ValueError`, если это неудача.
 
-        Failure is decided by `error`, not by the value being None: a success
-        may legitimately carry None. An `assert` would also disappear under
-        `python -O`, taking the check with it.
+        Неудачу определяет `error`, а не None в значении: успех вполне может
+        нести None. К тому же `assert` исчез бы под `python -O` и унёс бы
+        проверку с собой.
         """
         if self.error is not None:
             raise ValueError(self.error)
