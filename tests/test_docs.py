@@ -1,9 +1,9 @@
-"""What the documents claim about the code, checked against the code.
+"""Что документы утверждают о коде — сверено с кодом.
 
-Only facts that exist in machine-readable form on the code side are checked
-here. Prose is not, and neither are test counts: a number that changes when
-anyone adds a test would make this file a nuisance rather than a guard. These
-two drifted once already, which is why they are the ones covered.
+Проверяются только факты, которые на стороне кода есть в машиночитаемом виде.
+Проза — нет, количество тестов — тоже: число, которое меняется от каждого
+нового теста, сделало бы этот файл обузой, а не защитой. Эти два факта уже
+разъезжались с кодом, поэтому покрыты именно они.
 """
 
 import re
@@ -13,6 +13,7 @@ from pathlib import Path
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
+from app.infrastructure.db import models  # noqa: F401
 from app.infrastructure.db.base import Base
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,8 +24,8 @@ BACKEND_RULES = ROOT / ".agents" / "rules" / "backend.md"
 README = ROOT / "README.md"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 
-# The constraints worth pinning: both carry a NULL rule that is easy to drop
-# and impossible to notice from the outside.
+# Ограничения, которые стоит зафиксировать: в обоих есть правило про NULL,
+# которое легко потерять и невозможно заметить снаружи.
 DOCUMENTED_CONSTRAINTS = {
     "findings": "uq_findings_anchor",
     "published_comments": "uq_published_comments_finding",
@@ -32,7 +33,7 @@ DOCUMENTED_CONSTRAINTS = {
 
 
 def compiled_unique_clauses(table_name: str) -> set[str]:
-    """Every UNIQUE clause PostgreSQL would receive for this table."""
+    """Все UNIQUE-выражения, которые PostgreSQL получит для этой таблицы."""
     ddl = str(CreateTable(Base.metadata.tables[table_name]).compile(dialect=postgresql.dialect()))
     return {
         line.strip().rstrip(",")
@@ -74,13 +75,13 @@ def declared_contract_count() -> int:
     return len(tomllib.loads(PYPROJECT.read_text())["tool"]["importlinter"]["contracts"])
 
 
-NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+NUMBER_WORDS = {"один": 1, "два": 2, "три": 3, "четыре": 4, "пять": 5, "шесть": 6}
 
 
 def test_architecture_names_every_layering_contract() -> None:
     text = ARCHITECTURE.read_text()
-    match = re.search(r"`import-linter` runs in CI with (\w+) contracts", text)
-    assert match, f"{ARCHITECTURE} no longer states how many contracts run in CI"
+    match = re.search(r"`import-linter` в CI проверяет (\w+) контракт", text)
+    assert match, f"{ARCHITECTURE} no longer states how many contracts import-linter checks in CI (in Russian)"
     claimed = NUMBER_WORDS.get(match.group(1))
     assert claimed is not None, f"unrecognised count {match.group(1)!r} in {ARCHITECTURE}"
     assert claimed == declared_contract_count(), (
@@ -91,7 +92,7 @@ def test_architecture_names_every_layering_contract() -> None:
 
 
 def quoted_commands(path: Path) -> set[str]:
-    """Every `uv ...` command line in a fenced block, without its trailing comment."""
+    """Каждая команда `uv ...` в блоке кода, без хвостового комментария."""
     return {
         line.split("#")[0].strip()
         for line in path.read_text().splitlines()
@@ -100,7 +101,7 @@ def quoted_commands(path: Path) -> set[str]:
 
 
 def test_rules_only_name_commands_that_exist() -> None:
-    """The rules agents always read must not send them to a command nobody runs."""
+    """Правила, которые агенты читают всегда, не должны звать команду, которой нет."""
     known = CI.read_text() + README.read_text()
     unknown = sorted(c for c in quoted_commands(BACKEND_RULES) if c not in known)
     assert not unknown, (

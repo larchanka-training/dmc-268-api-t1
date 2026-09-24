@@ -1,11 +1,12 @@
-"""Finding runs that stopped making progress.
+"""Поиск прогонов, которые перестали продвигаться.
 
-At most one non-terminal run may exist per commit, so a worker that dies
-mid-run would block that commit forever. A Redis key with a TTL would have
-expired on its own; a database constraint does not, so the sweep is explicit.
+На коммит допускается не больше одного нетерминального прогона, поэтому
+упавший посреди работы worker заблокировал бы этот коммит навсегда. Ключ в
+Redis с TTL истёк бы сам; ограничение в базе — нет, поэтому уборка явная.
 
-Selecting the runs is pure and takes `now` as an argument. Failing them is the
-caller's job, and lands with the worker that can actually strand one.
+Выбор прогонов — чистая функция, `now` приходит аргументом. Переводить их в
+failed — дело вызывающего кода, и оно достаётся тому worker'у, который и может
+подвесить прогон.
 """
 
 from collections.abc import Iterable
@@ -18,7 +19,7 @@ from app.domain.enums import TERMINAL_STATUSES
 def find_stale(
     runs: Iterable[ReviewRun], now: datetime, limit: timedelta
 ) -> list[ReviewRun]:
-    """Return the non-terminal runs that have not advanced within `limit`."""
+    """Вернуть нетерминальные прогоны, не продвинувшиеся за `limit`."""
     cutoff = now - limit
     return [
         run

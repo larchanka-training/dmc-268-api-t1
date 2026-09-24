@@ -1,4 +1,4 @@
-"""The transaction boundary, and the only place a session is created."""
+"""Граница транзакции и единственное место, где создаётся сессия."""
 
 from types import TracebackType
 from typing import Self
@@ -25,7 +25,7 @@ from app.infrastructure.db.repositories import (
 
 
 class SqlAlchemyUnitOfWork:
-    """Opens a session on entry and rolls it back unless `commit` was called."""
+    """Открывает сессию на входе и откатывает её, если не был вызван `commit`."""
 
     def __init__(self, engine: Engine) -> None:
         self._factory = sessionmaker(bind=engine, future=True, expire_on_commit=False)
@@ -34,10 +34,10 @@ class SqlAlchemyUnitOfWork:
     def __enter__(self) -> Self:
         self._session = self._factory()
         session = self._session
-        # Typed as the ports, not the concrete adapters: `UnitOfWork` is a
-        # `Protocol` with these as plain (mutable) attributes, so structural
-        # matching needs the attribute's own type to be the port type, not
-        # whatever type mypy would otherwise infer from the adapter literal.
+        # Типы — порты, а не конкретные адаптеры: `UnitOfWork` — это
+        # `Protocol`, где это обычные (изменяемые) атрибуты, поэтому для
+        # структурного совпадения тип самого атрибута должен быть типом порта,
+        # а не тем, который mypy иначе вывел бы из адаптера справа.
         self.repositories: RepositoryRepo = SqlAlchemyRepositoryRepo(session)
         self.merge_requests: MergeRequestRepo = SqlAlchemyMergeRequestRepo(session)
         self.review_runs: ReviewRunRepo = SqlAlchemyReviewRunRepo(session)

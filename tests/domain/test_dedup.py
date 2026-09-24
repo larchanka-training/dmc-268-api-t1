@@ -44,7 +44,7 @@ def _old(n: int, line: int) -> Finding:
 
 
 def test_old_side_findings_on_different_lines_both_kept() -> None:
-    """Both carry new_line=None, so keying on new_line alone collapsed them."""
+    """У обоих new_line=None, поэтому ключ только по new_line их схлопывал."""
     kept, dropped = deduplicate([_old(1, 7), _old(2, 42)])
     assert [f.anchor.old_line for f in kept] == [7, 42]
     assert dropped == []

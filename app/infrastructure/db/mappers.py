@@ -1,7 +1,7 @@
-"""Translation between rows and domain entities.
+"""Перевод между строками таблиц и доменными сущностями.
 
-Nothing here branches on business rules. If a rule appears to live in a
-mapper, it belongs in a pure function the caller consults first.
+Здесь нет ветвлений по бизнес-правилам. Если кажется, что правило живёт в
+маппере, его место в чистой функции, с которой сверяется вызывающий код.
 """
 
 from copy import deepcopy
@@ -60,6 +60,7 @@ def review_run_to_domain(row: ReviewRunRow) -> ReviewRun:
         id=row.id,
         merge_request_id=row.merge_request_id,
         head_sha=row.head_sha,
+        base_sha=row.base_sha,
         status=row.status,
         trigger=row.trigger,
         last_progress_at=row.last_progress_at,
@@ -82,9 +83,9 @@ def context_payload_to_domain(row: ContextPayloadRow) -> ContextPayload:
         file_paths=tuple(row.file_paths),
         token_count=row.token_count,
         content_sha256=row.content_sha256,
-        # Copied, like tiers and file_paths above. Handing the row's dict out
-        # by reference would make a frozen dataclass a live handle on the
-        # session's state, where mutating payload.body flushes to the database.
+        # Копия, как tiers и file_paths выше. Отдать dict строки по ссылке —
+        # значит превратить frozen dataclass в живую ручку к состоянию сессии,
+        # где правка payload.body уходит во flush в базу.
         body=deepcopy(row.body),
         created_at=row.created_at,
         updated_at=row.updated_at,

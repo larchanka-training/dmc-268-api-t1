@@ -1,9 +1,9 @@
-"""The records that outlive a request.
+"""Записи, которые живут дольше запроса.
 
-Frozen dataclasses with no framework in sight: constructible from literals,
-comparable by value, and testable without a database. Times and identifiers
-arrive as arguments rather than being read from a clock or a generator, so a
-test can assert an exact timestamp instead of a range.
+Замороженные dataclass'ы без единого фреймворка: собираются из литералов,
+сравниваются по значению и тестируются без базы. Время и идентификаторы
+приходят аргументами, а не читаются из часов или генератора, поэтому тест
+проверяет точный timestamp, а не диапазон.
 """
 
 from dataclasses import dataclass, field
@@ -16,6 +16,7 @@ from app.domain.enums import (
     DiffSide,
     FindingCategory,
     FindingSeverity,
+    MergeRequestState,
     Provider,
     ReviewRunStatus,
     TriggerSource,
@@ -24,7 +25,7 @@ from app.domain.enums import (
 
 @dataclass(frozen=True, slots=True)
 class Repository:
-    """A repository the service is allowed to review."""
+    """Репозиторий, который сервису разрешено ревьюить."""
 
     id: UUID
     provider: Provider
@@ -38,7 +39,7 @@ class Repository:
 
 @dataclass(frozen=True, slots=True)
 class MergeRequest:
-    """A change request on a host. Covers a GitHub pull request too."""
+    """Запрос на изменения на хостинге. Пул-реквест GitHub тоже сюда."""
 
     id: UUID
     repository_id: UUID
@@ -49,18 +50,18 @@ class MergeRequest:
     source_branch: str
     target_branch: str
     head_sha: str
-    state: str
+    state: MergeRequestState
     created_at: datetime
     updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
 class ReviewRun:
-    """One attempt to review a change request at a specific commit.
+    """Одна попытка отревьюить запрос на изменения на конкретном коммите.
 
-    Persisted as `review_runs`. The ticket calls this a ReviewJob; that name is
-    reserved for the queue message, so the durable record and the transient
-    message never share a word.
+    Хранится как `review_runs`. В тикете это ReviewJob; имя зарезервировано за
+    сообщением в очереди, чтобы долгоживущая запись и короткоживущее сообщение
+    никогда не назывались одинаково.
     """
 
     id: UUID
@@ -72,6 +73,7 @@ class ReviewRun:
     created_at: datetime
     updated_at: datetime
     failure_reason: str | None = None
+    base_sha: str | None = None
     model: str | None = None
     tokens_used: int | None = None
     duration_seconds: float | None = None
@@ -80,7 +82,7 @@ class ReviewRun:
 
 @dataclass(frozen=True, slots=True)
 class ContextPayload:
-    """One chunk of the material sent to the model for a run."""
+    """Один кусок материала, отправленного модели для прогона."""
 
     id: UUID
     review_run_id: UUID
@@ -96,10 +98,10 @@ class ContextPayload:
 
 @dataclass(frozen=True, slots=True)
 class DiffAnchor:
-    """Where in a diff a finding points.
+    """Куда внутри диффа указывает замечание.
 
-    Construct through `validate_anchor`, which is what proves the coordinates
-    are inside the change rather than an arbitrary line number.
+    Создаётся через `validate_anchor`: именно он доказывает, что координаты
+    попадают внутрь изменения, а не в произвольный номер строки.
     """
 
     file_path: str
@@ -110,7 +112,7 @@ class DiffAnchor:
 
 @dataclass(frozen=True, slots=True)
 class Finding:
-    """Something the review noticed, tied to a line the diff touched."""
+    """То, что заметило ревью, привязанное к строке, затронутой диффом."""
 
     id: UUID
     review_run_id: UUID
@@ -126,7 +128,7 @@ class Finding:
 
 @dataclass(frozen=True, slots=True)
 class PublishedComment:
-    """A comment the service posted back to the host."""
+    """Комментарий, который сервис опубликовал обратно на хостинг."""
 
     id: UUID
     review_run_id: UUID
@@ -140,7 +142,7 @@ class PublishedComment:
 
 @dataclass(frozen=True, slots=True)
 class Hunk:
-    """A contiguous range a diff touched, as the parser reports it."""
+    """Непрерывный диапазон, затронутый диффом, как его выдаёт парсер."""
 
     file_path: str
     old_start: int = 0

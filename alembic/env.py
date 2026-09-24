@@ -1,7 +1,7 @@
-"""Alembic wiring.
+"""Обвязка Alembic.
 
-The connection string comes from Settings rather than alembic.ini, so the
-application and the migrations cannot disagree about which database they mean.
+Строка подключения приходит из Settings, а не из alembic.ini, чтобы
+приложение и миграции не разошлись в том, о какой базе речь.
 """
 
 from logging.config import fileConfig
@@ -10,7 +10,7 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from app.config import load_settings
-from app.infrastructure.db import models  # noqa: F401  (registers the tables)
+from app.infrastructure.db import models  # noqa: F401  (регистрирует таблицы)
 from app.infrastructure.db.base import Base
 
 config = context.config
@@ -21,21 +21,22 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 def _dsn() -> str:
-    """The database to migrate.
+    """База, которую мигрируем.
 
-    A caller that already set the option wins, which is how the test suite
-    points migrations at its own database without touching the environment the
-    service reads. Everything else goes through Settings.
+    Вызывающий, который уже выставил опцию, выигрывает — так набор тестов
+    направляет миграции на свою базу, не трогая окружение, которое читает
+    сервис. Всё остальное идёт через Settings.
     """
     configured = config.get_main_option("sqlalchemy.url", None)
     return configured or load_settings().database_url
 
 
-# `configparser` treats `%` as interpolation and refuses the value as it is
-# written, so a password carrying a percent-encoded character (`p%40ss` for
-# `p@ss`, the ordinary way to put `@` in a DSN) raised ValueError here before
-# anything connected. Doubling it is the one point the value enters the ini,
-# and the read un-doubles it, so online and offline modes see the real DSN.
+# `configparser` считает `%` интерполяцией и отвергает значение как есть,
+# поэтому пароль с процент-кодированным символом (`p%40ss` вместо `p@ss` —
+# обычный способ положить `@` в DSN) ронял здесь ValueError ещё до всякого
+# подключения. Удвоение — единственная точка, где значение попадает в ini, а
+# при чтении оно схлопывается обратно, поэтому online и offline режимы видят
+# настоящий DSN.
 config.set_main_option("sqlalchemy.url", _dsn().replace("%", "%%"))
 
 

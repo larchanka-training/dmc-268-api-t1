@@ -1,8 +1,8 @@
 """Composition root.
 
-The single place a port is bound to an adapter. Nothing above the
-infrastructure layer constructs one, so swapping an implementation is a change
-here and nowhere else.
+Единственное место, где порт связывается с адаптером. Выше слоя инфраструктуры
+его никто не собирает, поэтому подмена реализации — правка здесь и больше
+нигде.
 """
 
 from dataclasses import dataclass
@@ -16,7 +16,7 @@ from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 
 @dataclass(frozen=True, slots=True)
 class Container:
-    """Everything the application layer can be handed."""
+    """Всё, что можно передать слою приложения."""
 
     engine: Engine
 
@@ -25,9 +25,9 @@ class Container:
 
 
 def build_container(settings: Settings) -> Container:
-    # pool_pre_ping: a connection that died while idle (server restart, idle
-    # timeout, NAT dropping the flow) is discovered on checkout and replaced,
-    # instead of surfacing as an OperationalError on the next query.
+    # pool_pre_ping: соединение, умершее в простое (перезапуск сервера, idle
+    # timeout, NAT сбросил поток), обнаруживается при выдаче из пула и
+    # заменяется, а не всплывает OperationalError на следующем запросе.
     return Container(
         engine=create_engine(settings.database_url, future=True, pool_pre_ping=True)
     )

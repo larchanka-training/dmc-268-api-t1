@@ -1,4 +1,4 @@
-"""Literal fixtures. No database, no clock, no network."""
+"""Литеральные фикстуры. Ни базы, ни часов, ни сети."""
 
 from datetime import UTC, datetime
 from uuid import UUID

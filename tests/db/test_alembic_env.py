@@ -1,7 +1,7 @@
-"""How migrations get their connection string.
+"""Как миграции получают строку подключения.
 
-The URL passes through alembic.ini, which is a configparser file, so what that
-file does to the value on the way through is this module's business.
+URL проходит через alembic.ini, а это файл configparser, поэтому что этот файл
+делает со значением по дороге — забота этого модуля.
 """
 
 import pytest
@@ -13,8 +13,8 @@ from alembic import command
 
 from ..conftest import TEST_DATABASE_URL, requires_db
 
-# `p%40ss` is `p@ss` percent-encoded, which is the ordinary way to put an `@`
-# in a DSN. It is also, to configparser, the start of an interpolation.
+# `p%40ss` — это percent-encoded `p@ss`, обычный способ поставить `@` в DSN.
+# Он же, с точки зрения configparser, начало интерполяции.
 HOSTILE_PASSWORD = "p@ss"
 HOSTILE_ROLE = "pct_test"
 
@@ -27,7 +27,7 @@ def test_a_percent_encoded_password_survives_the_ini() -> None:
 
 
 def test_an_unescaped_percent_is_what_used_to_break() -> None:
-    """configparser rejects the value as it is written, not when it is read."""
+    """configparser отвергает значение при записи, а не при чтении."""
     config = Config()
     with pytest.raises(ValueError, match="invalid interpolation syntax"):
         config.set_main_option(
@@ -37,7 +37,7 @@ def test_an_unescaped_percent_is_what_used_to_break() -> None:
 
 @pytest.fixture
 def percent_dsn(migrated):
-    """A DSN whose password has to be percent-encoded, and a role to match."""
+    """DSN с паролем, который приходится percent-encode'ить, и роль под него."""
     with migrated.begin() as conn:
         conn.execute(text(f"DROP ROLE IF EXISTS {HOSTILE_ROLE}"))
         conn.execute(
@@ -46,8 +46,8 @@ def percent_dsn(migrated):
                 f"PASSWORD '{HOSTILE_PASSWORD}'"
             )
         )
-    # `migrated` (this fixture's own dependency) already skips the test
-    # session when the variable is unset, so by this point it is set.
+    # `migrated` (собственная зависимость этой фикстуры) уже пропускает сессию
+    # тестов, если переменная не задана, так что здесь она точно задана.
     assert TEST_DATABASE_URL is not None
     url = make_url(TEST_DATABASE_URL).set(
         username=HOSTILE_ROLE, password=HOSTILE_PASSWORD

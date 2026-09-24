@@ -1,17 +1,17 @@
-"""Identifier generation, kept in one place.
+"""Генерация идентификаторов, собранная в одном месте.
 
-UUIDv7 rather than uuid4: the leading 48 bits are a millisecond timestamp, so
-keys sort in creation order and inserts land at the right edge of the index
-instead of scattering across it. Available in the standard library from 3.14.
+UUIDv7, а не uuid4: первые 48 бит — timestamp в миллисекундах, поэтому ключи
+сортируются в порядке создания и вставки ложатся в правый край индекса, а не
+разбредаются по нему. В стандартной библиотеке доступен с 3.14.
 
-This is the only function in the domain that is not pure. Entities take their
-id as an argument so they stay constructible from literals in a test; callers
-that need a fresh one ask here.
+Это единственная функция в домене, которая не является чистой. Сущности
+получают id аргументом, чтобы оставаться собираемыми из литералов в тесте; кому
+нужен свежий, тот приходит сюда.
 """
 
 import uuid
 
 
 def new_id() -> uuid.UUID:
-    """Return a fresh time-ordered identifier."""
+    """Вернуть свежий идентификатор, упорядоченный по времени."""
     return uuid.uuid7()

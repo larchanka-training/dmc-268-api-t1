@@ -1,90 +1,90 @@
 # database-migrations Specification
 
 ## Purpose
-Defines how the database schema evolves: every structural change reaches an environment through a reviewed, ordered, reversible migration, and the schema an environment ends up with is always the one the application's models expect.
+Определяет, как развивается схема базы данных: каждое структурное изменение попадает в окружение через проверенную на ревью, упорядоченную и обратимую миграцию, а итоговая схема окружения всегда совпадает с той, которую ожидают модели приложения.
 
 ## Requirements
 
-### Requirement: Schema changes only through migrations
+### Requirement: Схема меняется только через миграции
 
-Every change to the database schema SHALL be expressed as a versioned migration committed to the repository. The application SHALL NOT create, alter, or drop schema objects at startup or at runtime.
+Каждое изменение схемы базы данных SHALL оформляться как версионированная миграция, закоммиченная в репозиторий. Приложение SHALL NOT создавать, изменять или удалять объекты схемы при запуске или во время работы.
 
-#### Scenario: Model change is accompanied by a migration
+#### Scenario: Изменение модели сопровождается миграцией
 
-- **WHEN** a change adds, removes, or alters a persisted field, table, index, or constraint
-- **THEN** the same change contains a migration expressing it
+- **WHEN** изменение добавляет, удаляет или меняет хранимое поле, таблицу, индекс или ограничение
+- **THEN** это же изменение содержит миграцию, которая его выражает
 
-#### Scenario: Application does not mutate schema
+#### Scenario: Приложение не меняет схему
 
-- **WHEN** the application starts against an empty database
-- **THEN** no tables are created and the application reports that migrations have not been applied
+- **WHEN** приложение запускается на пустой базе данных
+- **THEN** таблицы не создаются, а приложение сообщает, что миграции не применены
 
-### Requirement: Baseline migration creates the full schema
+### Requirement: Базовая миграция создаёт полную схему
 
-The repository SHALL contain a baseline migration that takes an empty database to the complete review-pipeline schema, including all tables, primary and foreign keys, enumerated types, unique constraints, and indexes.
+Репозиторий SHALL содержать базовую миграцию, которая переводит пустую базу данных в полную схему конвейера ревью, включая все таблицы, первичные и внешние ключи, перечислимые типы, ограничения уникальности и индексы.
 
-#### Scenario: Empty database is fully provisioned
+#### Scenario: Пустая база данных разворачивается полностью
 
-- **WHEN** migrations are applied to an empty database
-- **THEN** every table, key, enumerated type, constraint, and index the models declare is present
+- **WHEN** миграции применяются к пустой базе данных
+- **THEN** присутствуют все таблицы, ключи, перечислимые типы, ограничения и индексы, объявленные в моделях
 
-#### Scenario: Applying twice is harmless
+#### Scenario: Повторное применение безвредно
 
-- **WHEN** migrations are applied to an already up-to-date database
-- **THEN** nothing changes and the command succeeds
+- **WHEN** миграции применяются к базе данных, которая уже в актуальном состоянии
+- **THEN** ничего не меняется, и команда завершается успешно
 
-### Requirement: Migrations are reversible
+### Requirement: Миграции обратимы
 
-Every migration SHALL define a downgrade that reverses its upgrade. Applying a migration and then reversing it SHALL leave the schema as it was before.
+Каждая миграция SHALL определять downgrade, который отменяет её upgrade. Применение миграции с последующим откатом SHALL возвращать схему в исходное состояние.
 
-#### Scenario: Baseline reverses cleanly
+#### Scenario: Базовая миграция откатывается без ошибок
 
-- **WHEN** the schema is migrated to head and then downgraded to base
-- **THEN** every object the baseline created is removed and no error occurs
+- **WHEN** схема мигрируется до head, а затем откатывается до base
+- **THEN** все объекты, созданные базовой миграцией, удаляются, и ошибок не возникает
 
-#### Scenario: Irreversible step is refused
+#### Scenario: Необратимый шаг не допускается
 
-- **WHEN** a migration cannot be reversed without data loss
-- **THEN** it is split so that the destructive step is a separate, explicitly documented migration
+- **WHEN** миграцию нельзя откатить без потери данных
+- **THEN** она разделяется так, чтобы разрушающий шаг был отдельной, явно задокументированной миграцией
 
-### Requirement: Schema matches the models
+### Requirement: Схема соответствует моделям
 
-The migration history SHALL leave the database in the state the application's declarative models describe. Any divergence SHALL be detectable automatically.
+История миграций SHALL приводить базу данных в состояние, описанное декларативными моделями приложения. Любое расхождение SHALL обнаруживаться автоматически.
 
-#### Scenario: No drift after migrating
+#### Scenario: После миграции расхождений нет
 
-- **WHEN** the schema is migrated to head and compared against the models
-- **THEN** the comparison reports no difference
+- **WHEN** схема мигрируется до head и сравнивается с моделями
+- **THEN** сравнение не находит различий
 
-#### Scenario: Drift fails the check
+#### Scenario: Расхождение проваливает проверку
 
-- **WHEN** a model is changed without a corresponding migration
-- **THEN** the automated drift check fails and names the differing object
+- **WHEN** модель изменена без соответствующей миграции
+- **THEN** автоматическая проверка расхождений падает и называет отличающийся объект
 
-### Requirement: Migration history is linear
+### Requirement: История миграций линейна
 
-The migration graph SHALL have exactly one head. Two changes that each add a migration SHALL be reconciled into a single ordered chain before merging.
+Граф миграций SHALL иметь ровно одну head-ревизию. Если два изменения добавляют по миграции, они SHALL быть сведены в единую упорядоченную цепочку до слияния.
 
-#### Scenario: Single head is enforced
+#### Scenario: Единственная head-ревизия обязательна
 
-- **WHEN** the migration graph is inspected
-- **THEN** exactly one head revision is reported
+- **WHEN** проверяется граф миграций
+- **THEN** в нём ровно одна head-ревизия
 
-#### Scenario: Concurrent migrations are rebased
+#### Scenario: Параллельные миграции перебазируются
 
-- **WHEN** two branches each add a migration on the same parent
-- **THEN** the second to merge is rebased onto the first so the history stays linear
+- **WHEN** две ветки добавляют по миграции от одного и того же родителя
+- **THEN** ветка, которая сливается второй, перебазируется на первую, чтобы история оставалась линейной
 
-### Requirement: Naming and reviewability
+### Requirement: Именование и удобство ревью
 
-Each migration SHALL carry a stable revision identifier, a zero-padded sequential prefix in its filename, and a description of its intent. Generated migrations SHALL be reviewed and corrected before being committed.
+Каждая миграция SHALL иметь стабильный идентификатор ревизии, последовательный префикс с ведущими нулями в имени файла и описание своего назначения. Сгенерированные миграции SHALL проверяться и исправляться перед коммитом.
 
-#### Scenario: Migration is identifiable at a glance
+#### Scenario: Миграцию можно опознать с первого взгляда
 
-- **WHEN** the migrations directory is listed
-- **THEN** each file shows its order and a human-readable description of what it does
+- **WHEN** выводится список файлов в каталоге миграций
+- **THEN** по каждому файлу видны его порядковый номер и понятное человеку описание того, что он делает
 
-#### Scenario: Generated migration is reviewed
+#### Scenario: Сгенерированная миграция проходит ревью
 
-- **WHEN** a migration is produced by autogeneration
-- **THEN** it is inspected and edited for correctness before being committed, rather than committed as generated
+- **WHEN** миграция создана автогенерацией
+- **THEN** перед коммитом её проверяют и исправляют, а не коммитят в сгенерированном виде

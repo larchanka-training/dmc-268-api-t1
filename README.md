@@ -101,8 +101,8 @@ Terraform в [`infra/`](infra/README.md); это результат DevOps-ти�
 Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
 ```bash
-uv run pytest                           # 78 тестов, база не нужна
-TEST_DATABASE_URL=... uv run pytest     # 112 тестов, вместе с адаптерами и миграциями
+uv run pytest                           # 79 тестов, база не нужна
+TEST_DATABASE_URL=... uv run pytest     # 122 теста, вместе с адаптерами и миграциями
 ```
 
 Тесты, которым нужен PostgreSQL, помечены `integration` и пропускаются, если

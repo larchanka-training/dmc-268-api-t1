@@ -1,8 +1,9 @@
-"""The review-run state machine.
+"""Машина состояний прогона ревью.
 
-One transition table, consulted by everything that writes a status. A run that
-has reached a terminal state accepts nothing further, which is what stops a
-redelivered queue message from restarting finished work.
+Одна таблица переходов, к которой обращается всё, что пишет статус. Прогон,
+дошедший до терминального состояния, больше ничего не принимает — именно это
+не даёт повторно доставленному сообщению из очереди перезапустить завершённую
+работу.
 """
 
 from dataclasses import replace
@@ -31,7 +32,7 @@ _ALLOWED: MappingProxyType[ReviewRunStatus, frozenset[ReviewRunStatus]] = Mappin
 def next_status(
     current: ReviewRunStatus, requested: ReviewRunStatus
 ) -> Result[ReviewRunStatus]:
-    """Decide whether a run may move from `current` to `requested`."""
+    """Решить, может ли прогон перейти из `current` в `requested`."""
     if current in TERMINAL_STATUSES:
         return Result.failure(
             f"{current} is terminal; cannot move to {requested}"
@@ -42,9 +43,9 @@ def next_status(
 
 
 def advance(run: ReviewRun, requested: ReviewRunStatus, now: datetime) -> Result[ReviewRun]:
-    """Return the run moved to `requested`, or the reason it may not move.
+    """Вернуть прогон, переведённый в `requested`, или причину отказа.
 
-    `now` is supplied rather than read, so a test asserts an exact timestamp.
+    `now` передаётся, а не читается, поэтому тест проверяет точный timestamp.
     """
     verdict = next_status(run.status, requested)
     if not verdict.ok:

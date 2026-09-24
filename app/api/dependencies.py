@@ -1,6 +1,7 @@
-"""FastAPI wiring.
+"""Проводка FastAPI.
 
-Routers ask for a port-typed dependency and never name a concrete adapter.
+Роутеры просят зависимость, типизированную портом, и никогда не называют
+конкретный адаптер.
 """
 
 from collections.abc import Iterator
@@ -13,10 +14,10 @@ from app.infrastructure.container import Container
 
 
 def get_container(request: Request) -> Container:
-    # `Request.app.state` is Starlette's `State`, whose `__getattr__` is
-    # typed to return `Any`; the composition root is the only writer of this
-    # attribute (see `create_app`), so the cast closes the `Any` boundary
-    # here rather than letting it leak into every caller of this dependency.
+    # `Request.app.state` — это `State` из Starlette, чей `__getattr__`
+    # типизирован как возвращающий `Any`; composition root — единственный, кто
+    # пишет этот атрибут (см. `create_app`), поэтому приведение закрывает
+    # границу `Any` здесь, а не пускает её в каждого, кто берёт эту зависимость.
     return cast(Container, request.app.state.container)
 
 

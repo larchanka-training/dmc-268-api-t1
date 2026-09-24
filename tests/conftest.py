@@ -1,14 +1,13 @@
-"""Shared fixtures.
+"""Общие фикстуры.
 
-Integration tests need a live PostgreSQL. They are marked and skipped when
-TEST_DATABASE_URL is unset, so a plain `pytest` stays green on a machine
-without one. That is deliberate: everything worth testing below the adapters
-is pure.
+Интеграционным тестам нужен живой PostgreSQL. Они помечены и пропускаются,
+когда TEST_DATABASE_URL не задан, поэтому обычный `pytest` остаётся зелёным и
+на машине без базы. Так задумано: всё, что ниже адаптеров, — чистое.
 
-The variable is deliberately not DATABASE_URL, and there is no fallback to it.
-`migrated` drops the schema, and DATABASE_URL is what the README tells you to
-export for uvicorn and alembic. Sharing the two would mean a normal working
-shell is one `pytest` away from an empty development database.
+Переменная намеренно называется не DATABASE_URL, и отката к ней нет.
+`migrated` удаляет схему, а DATABASE_URL — то, что README велит
+экспортировать для uvicorn и alembic. Одна переменная на двоих означала бы,
+что обычная рабочая консоль в одном `pytest` от пустой базы разработки.
 """
 
 import os
@@ -18,7 +17,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.infrastructure.db import models  # noqa: F401  (registers the tables)
+from app.infrastructure.db import models  # noqa: F401  (регистрирует таблицы)
 from app.infrastructure.db.base import Base
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
@@ -38,7 +37,7 @@ def engine():
 
 @pytest.fixture(scope="session")
 def migrated(engine):
-    """A database at head, rebuilt once per session."""
+    """База на head, пересобирается один раз за сессию."""
     from alembic.config import Config
 
     from alembic import command
@@ -47,14 +46,14 @@ def migrated(engine):
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
 
-    # `engine` (this fixture's own dependency) already skips the test session
-    # when the variable is unset, so by the time this line runs it is set.
+    # `engine` (собственная зависимость этой фикстуры) уже пропускает сессию
+    # тестов, когда переменная не задана, так что к этой строке она задана.
     assert TEST_DATABASE_URL is not None
 
     config = Config("alembic.ini")
-    # Point alembic at the test database explicitly. env.py honours an option
-    # the caller already set, so the migration cannot wander off to whatever
-    # DATABASE_URL happens to hold.
+    # Явно направляем alembic на тестовую базу. env.py уважает опцию, которую
+    # уже выставил вызывающий, поэтому миграция не уйдёт в ту базу, что
+    # окажется в DATABASE_URL.
     config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL.replace("%", "%%"))
     command.upgrade(config, "head")
     return engine
@@ -62,11 +61,11 @@ def migrated(engine):
 
 @pytest.fixture
 def clean_db(migrated):
-    """Start each test from an empty database.
+    """Каждый тест стартует с пустой базы.
 
-    The session fixture isolates a test from its own writes by rolling back,
-    but not from writes another test committed. Truncating first is what keeps
-    the suite order-independent.
+    Сессионная фикстура откатом изолирует тест от его собственных записей, но
+    не от того, что закоммитил другой тест. Очистка таблиц в начале и делает
+    набор независимым от порядка.
     """
     tables = ", ".join(sorted(Base.metadata.tables))
     with migrated.begin() as conn:
@@ -76,7 +75,7 @@ def clean_db(migrated):
 
 @pytest.fixture
 def session(clean_db) -> Iterator[Session]:
-    """A session rolled back after each test, so tests do not see each other."""
+    """Сессия, откатывается после каждого теста, чтобы тесты не видели друг друга."""
     connection = clean_db.connect()
     transaction = connection.begin()
     factory = sessionmaker(bind=connection, future=True)

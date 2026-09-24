@@ -1,30 +1,42 @@
-"""The constrained sets the schema and the pipeline both rely on.
+"""Ограниченные наборы значений, на которые опираются и схема, и пайплайн.
 
-Defined once here; the SQLAlchemy models build their native PostgreSQL enum
-types from these, so a value cannot be added in one place and missed in the
-other.
+Определены здесь один раз; модели SQLAlchemy строят из них нативные enum'ы
+PostgreSQL, поэтому значение нельзя добавить в одном месте и забыть в
+другом.
 """
 
 from enum import StrEnum
 
 
 class Provider(StrEnum):
-    """Version-control host a repository lives on."""
+    """Хостинг системы контроля версий, где живёт репозиторий."""
 
     GITHUB = "github"
     GITLAB = "gitlab"
 
 
 class TriggerSource(StrEnum):
-    """What caused a review run to be created."""
+    """Из-за чего был создан прогон ревью."""
 
     WEBHOOK = "webhook"
     MANUAL = "manual"
     MENTION = "mention"
 
 
+class MergeRequestState(StrEnum):
+    """Состояние запроса на изменения на хостинге, сведённое к общему для обоих.
+
+    `locked` у GitLab и closed с `merged_at` у GitHub адаптер провайдера
+    переводит в эти значения ещё до того, как они попадут в хранилище.
+    """
+
+    OPEN = "open"
+    CLOSED = "closed"
+    MERGED = "merged"
+
+
 class ReviewRunStatus(StrEnum):
-    """Lifecycle of one attempt to review a commit."""
+    """Жизненный цикл одной попытки отревьюить коммит."""
 
     QUEUED = "queued"
     BUILDING_CONTEXT = "building_context"
@@ -36,7 +48,7 @@ class ReviewRunStatus(StrEnum):
 
 
 class FindingCategory(StrEnum):
-    """The review dimensions a finding can belong to."""
+    """Оси ревью, к которым может относиться замечание."""
 
     SECURITY = "security"
     CORRECTNESS = "correctness"
@@ -45,7 +57,7 @@ class FindingCategory(StrEnum):
 
 
 class FindingSeverity(StrEnum):
-    """How much a finding matters."""
+    """Насколько замечание важно."""
 
     LOW = "low"
     MEDIUM = "medium"
@@ -54,14 +66,14 @@ class FindingSeverity(StrEnum):
 
 
 class CommentKind(StrEnum):
-    """Shape of a comment published back to the host."""
+    """Форма комментария, публикуемого обратно на хостинг."""
 
     SUMMARY = "summary"
     INLINE = "inline"
 
 
 class DiffSide(StrEnum):
-    """Which side of a diff a line coordinate refers to."""
+    """К какой стороне диффа относится координата строки."""
 
     OLD = "old"
     NEW = "new"

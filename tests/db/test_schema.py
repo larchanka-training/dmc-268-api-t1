@@ -1,8 +1,8 @@
-"""Schema assertions that need no database.
+"""Проверки схемы, которым не нужна база.
 
-These compile DDL against the PostgreSQL dialect and read it. The point is to
-check what Postgres will actually be told, not what the Python annotation looks
-like: a bare `Mapped[datetime]` reads correctly and produces a naive column.
+Они компилируют DDL под диалект PostgreSQL и читают его. Смысл в том, чтобы
+проверить, что на самом деле получит Postgres, а не как выглядит аннотация в
+Python: голый `Mapped[datetime]` читается правильно, а колонку даёт naive.
 """
 
 import re
@@ -12,7 +12,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from app.domain.enums import TERMINAL_STATUSES
-from app.infrastructure.db import models  # noqa: F401  (registers the tables)
+from app.infrastructure.db import models  # noqa: F401  (регистрирует таблицы)
 from app.infrastructure.db.base import Base
 
 DIALECT = postgresql.dialect()
@@ -71,13 +71,25 @@ def test_context_payload_body_is_jsonb() -> None:
     assert "JSONB" in ddl("context_payloads")
 
 
-def test_children_cascade_from_their_parent() -> None:
-    for table in ("merge_requests", "review_runs", "context_payloads", "findings"):
-        assert "ON DELETE CASCADE" in ddl(table)
+def test_children_restrict_deletion_of_their_parent() -> None:
+    for table in (
+        "merge_requests",
+        "review_runs",
+        "context_payloads",
+        "findings",
+        "published_comments",
+    ):
+        statement = ddl(table)
+        assert "ON DELETE RESTRICT" in statement
+        assert "CASCADE" not in statement
+
+
+def test_merge_request_state_is_a_native_enum() -> None:
+    assert "merge_request_state" in ddl("merge_requests")
 
 
 def test_findings_cannot_repeat_an_anchor_in_one_run() -> None:
-    """The whole anchor, and NULLS NOT DISTINCT so it fires on the old side too."""
+    """Привязка целиком и NULLS NOT DISTINCT, чтобы срабатывало и на старой стороне."""
     assert re.search(
         r"UNIQUE NULLS NOT DISTINCT "
         r"\(review_run_id, file_path, side, old_line, new_line, category\)",
@@ -86,7 +98,8 @@ def test_findings_cannot_repeat_an_anchor_in_one_run() -> None:
 
 
 def test_a_finding_is_published_at_most_once_per_run() -> None:
-    """NULLS NOT DISTINCT extends the limit to summaries, which carry no finding."""
+    """NULLS NOT DISTINCT распространяет ограничение на итоговый комментарий,
+    у которого замечания нет."""
     assert re.search(
         r"UNIQUE NULLS NOT DISTINCT \(review_run_id, finding_id\)",
         ddl("published_comments"),

@@ -1,12 +1,13 @@
-"""Declarative base and the two columns every table carries.
+"""Declarative base и две колонки, которые есть у каждой таблицы.
 
-`created_at` and `updated_at` are declared with `DateTime(timezone=True)`
-explicitly. A bare `Mapped[datetime]` compiles to TIMESTAMP WITHOUT TIME ZONE,
-which looks correct in review and is wrong in production: a run that started
-before a daylight-saving shift would appear to finish before it began.
+`created_at` и `updated_at` объявлены явно через `DateTime(timezone=True)`.
+Голый `Mapped[datetime]` компилируется в TIMESTAMP WITHOUT TIME ZONE: на ревью
+выглядит правильно, а в проде неверно — прогон, начавшийся до перевода часов,
+окажется завершённым раньше, чем начался.
 
-Identifiers are UUIDv7 supplied by the domain, never a database default, so an
-entity is complete in memory before anything touches Postgres.
+Идентификаторы — UUIDv7, которые выдаёт домен, а не значение по умолчанию в
+базе, поэтому сущность целиком собрана в памяти до того, как её увидит
+Postgres.
 """
 
 import datetime as dt
@@ -17,7 +18,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
-    """Shared metadata for every mapped table."""
+    """Общие метаданные для всех отображённых таблиц."""
 
 
 class TimestampMixin:

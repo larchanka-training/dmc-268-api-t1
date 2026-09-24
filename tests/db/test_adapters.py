@@ -1,4 +1,4 @@
-"""What the adapters do, and what they refuse."""
+"""Что адаптеры делают и что отклоняют."""
 
 import datetime as dt
 from dataclasses import replace
@@ -18,6 +18,7 @@ from app.domain.enums import (
     DiffSide,
     FindingCategory,
     FindingSeverity,
+    MergeRequestState,
     Provider,
     ReviewRunStatus,
     TriggerSource,
@@ -63,7 +64,7 @@ def a_merge_request(repo_id) -> MergeRequest:
         source_branch="feat",
         target_branch="main",
         head_sha="abc123",
-        state="open",
+        state=MergeRequestState.OPEN,
         created_at=NOW,
         updated_at=NOW,
     )
@@ -74,6 +75,7 @@ def a_run(mr_id) -> ReviewRun:
         id=new_id(),
         merge_request_id=mr_id,
         head_sha="abc123",
+        base_sha="base789",
         status=ReviewRunStatus.QUEUED,
         trigger=TriggerSource.WEBHOOK,
         last_progress_at=NOW,
@@ -97,7 +99,7 @@ def test_entities_round_trip_through_the_ports(uow) -> None:
 def test_a_failed_unit_of_work_rolls_everything_back(uow) -> None:
     with uow as work:
         work.repositories.add(a_repository())
-        # leaving the block without commit must discard the write
+        # выход из блока без коммита обязан отбросить запись
     with uow as work:
         assert work.repositories.find_by_provider(Provider.GITHUB, "1") is None
 
@@ -144,6 +146,39 @@ def test_the_adapter_refuses_an_illegal_transition(uow) -> None:
         stored = work.review_runs.get(run.id)
         with pytest.raises(ValueError, match="cannot move"):
             work.review_runs.update(replace(stored, status=ReviewRunStatus.COMPLETED))
+
+
+def test_a_finished_run_refuses_a_same_status_update(uow) -> None:
+    now = NOW
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        run = a_run(mr.id)
+        for status in (
+            ReviewRunStatus.BUILDING_CONTEXT,
+            ReviewRunStatus.ANALYSING,
+            ReviewRunStatus.PUBLISHING,
+        ):
+            run = advance(run, status, now).unwrap()
+        run = replace(
+            advance(run, ReviewRunStatus.COMPLETED, now).unwrap(),
+            model="m1",
+            tokens_used=100,
+            duration_seconds=1.5,
+        )
+        work.review_runs.add(run)
+        work.commit()
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+        with pytest.raises(ValueError, match="terminal"):
+            work.review_runs.update(
+                replace(stored, model="m2", tokens_used=999, duration_seconds=9.9)
+            )
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+        assert (stored.model, stored.tokens_used, stored.duration_seconds) == ("m1", 100, 1.5)
 
 
 def test_a_finding_outside_the_diff_is_refused_and_counted(uow) -> None:
@@ -222,7 +257,7 @@ def a_context_payload(run_id, *, chunk_index: int, digest: str) -> ContextPayloa
 
 
 def seeded(work):
-    """A repository, a change request and a queued run, all committed."""
+    """Репозиторий, запрос на изменения и прогон в очереди, всё закоммичено."""
     repo = a_repository()
     work.repositories.add(repo)
     mr = a_merge_request(repo.id)
@@ -234,7 +269,7 @@ def seeded(work):
 
 
 def test_advancing_a_run_does_not_undo_a_recorded_rejection(uow) -> None:
-    """The counter lives on the row; the caller's entity never learns about it."""
+    """Счётчик живёт в строке; сущность у вызывающего о нём не узнаёт."""
     hunks = [Hunk(file_path="app/main.py", changed_new_lines=frozenset({10}))]
     with uow as work:
         _, _, run = seeded(work)
@@ -252,7 +287,7 @@ def test_advancing_a_run_does_not_undo_a_recorded_rejection(uow) -> None:
     with uow as work:
         with pytest.raises(ValueError, match="outside the changed lines"):
             work.findings.add_validated(outside, hunks, LATER)
-        # `run` is the stale entity the caller has been holding all along
+        # `run` — устаревшая сущность, которую вызывающий держал всё это время
         work.review_runs.update(
             advance(run, ReviewRunStatus.BUILDING_CONTEXT, LATER).unwrap()
         )
@@ -287,6 +322,9 @@ def test_a_run_is_inserted_with_the_counts_it_already_carries(uow) -> None:
     assert stored.model == "qwen2.5-coder"
     assert stored.tokens_used == 1200
     assert stored.duration_seconds == 42
+    # Обе половины пары, по которой воспроизводится дифф, доживают до чтения.
+    assert stored.head_sha == "abc123"
+    assert stored.base_sha == "base789"
 
 
 def test_retargeting_a_change_request_reaches_storage(uow) -> None:
@@ -307,7 +345,7 @@ def test_retargeting_a_change_request_reaches_storage(uow) -> None:
 
 
 def test_find_by_digest_is_stable_across_calls(uow) -> None:
-    """Several runs can share a digest; the lookup must not pick at random."""
+    """Несколько прогонов могут делить один digest; поиск не должен выбирать наугад."""
     with uow as work:
         _, _, run = seeded(work)
     with uow as work:

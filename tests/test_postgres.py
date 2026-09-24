@@ -1,8 +1,8 @@
-"""Smoke test: the database is reachable.
+"""Дымовой тест: база доступна.
 
-It arrived with PR #2, before `conftest.py` existed, reading DATABASE_URL
-behind a skipif of its own. That is why the suite reported one skip while
-everything else ran. Same assertion, on the shared marker and fixture.
+Приехал с PR #2, когда `conftest.py` ещё не было, и читал DATABASE_URL под
+собственным skipif. Поэтому набор тестов показывал один skip, пока всё
+остальное выполнялось. Проверка та же, но на общем маркере и фикстуре.
 """
 
 import pytest
