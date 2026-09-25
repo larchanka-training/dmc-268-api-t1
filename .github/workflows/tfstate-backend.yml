@@ -118,8 +118,8 @@ jobs:
           rc=0
           out="$(aws --endpoint-url "$endpoint" s3api create-bucket --bucket "$STATE_BUCKET" 2>&1)" || rc=$?
           case "$rc:$out" in
-            0:*) echo "bucket=создан" >> "$GITHUB_OUTPUT" ;;
-            *BucketAlreadyOwnedByYou*|*BucketAlreadyExists*) echo "bucket=уже существует" >> "$GITHUB_OUTPUT" ;;
+            0:*) echo "Бакет: создан"; echo "bucket=создан" >> "$GITHUB_OUTPUT" ;;
+            *BucketAlreadyOwnedByYou*|*BucketAlreadyExists*) echo "Бакет: уже существует"; echo "bucket=уже существует" >> "$GITHUB_OUTPUT" ;;
             *) echo "::error::бакет не создан: $out"; exit 1 ;;
           esac
 
@@ -128,6 +128,7 @@ jobs:
 
           status="$(aws --endpoint-url "$endpoint" s3api get-bucket-versioning \
             --bucket "$STATE_BUCKET" --query Status --output text 2>/dev/null || echo 'не определён')"
+          echo "Версионирование: $status"
           echo "versioning=$status" >> "$GITHUB_OUTPUT"
           if [ "$status" != "Enabled" ]; then
             echo "::error::версионирование не включилось: $status"
@@ -154,17 +155,21 @@ jobs:
             --key "$probe" --body /tmp/empty --if-none-match '*' >/dev/null 2>&1 || first=$?
 
           if [ "$first" -ne 0 ]; then
-            echo "result=не проверено: клиент или хранилище не приняли --if-none-match" >> "$GITHUB_OUTPUT"
+            result="не проверено: клиент или хранилище не приняли --if-none-match"
           else
             second=0
             aws --endpoint-url "$endpoint" s3api put-object --bucket "$STATE_BUCKET" \
               --key "$probe" --body /tmp/empty --if-none-match '*' >/dev/null 2>&1 || second=$?
             if [ "$second" -ne 0 ]; then
-              echo "result=поддерживается, нативная блокировка возможна" >> "$GITHUB_OUTPUT"
+              result="поддерживается, нативная блокировка возможна"
             else
-              echo "result=НЕ поддерживается: повторная запись прошла, полагаемся на concurrency" >> "$GITHUB_OUTPUT"
+              result="НЕ поддерживается: повторная запись прошла, полагаемся на concurrency"
             fi
           fi
+          # В лог тоже: иначе ответ виден только в summary, а его не прочитать
+          # ни из `gh run view --log`, ни из API.
+          echo "Условная запись: $result"
+          echo "result=$result" >> "$GITHUB_OUTPUT"
           aws --endpoint-url "$endpoint" s3api delete-object --bucket "$STATE_BUCKET" --key "$probe" >/dev/null 2>&1 || true
 
       - name: Проверить, что tofu принимает бэкенд
