@@ -42,13 +42,13 @@ STATE="\$(docker inspect -f '{{.State.Running}}' "\$NAME" 2>/dev/null || echo mi
 
 case "\$STATE" in
     true)
-        echo 'MINIO=уже запущен'
+        echo 'S3=уже запущен'
         ;;
     false)
         if docker start "\$NAME" >/dev/null 2>&1; then
-            echo 'MINIO=был остановлен, запущен'
+            echo 'S3=был остановлен, запущен'
         else
-            echo 'MINIO=запустить не удалось'
+            echo 'S3=запустить не удалось'
         fi
         ;;
     *)
@@ -62,10 +62,10 @@ case "\$STATE" in
             -p 127.0.0.1:"\$PORT":9000 \
             -v "\$VOLUME":/data \
             --env-file "\$ENV_FILE" \
-            "\$IMAGE" server /data 2>&1 >/dev/null)"; then
-            echo 'MINIO=создан'
+            "\$IMAGE" 2>&1 >/dev/null)"; then
+            echo 'S3=создан'
         else
-            echo "MINIO=создать не удалось: \$(printf '%s' "\$ERR" | tr '\n' ' ')"
+            echo "S3=создать не удалось: \$(printf '%s' "\$ERR" | tr '\n' ' ')"
         fi
         ;;
 esac
