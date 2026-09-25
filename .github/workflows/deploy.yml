@@ -72,7 +72,7 @@ jobs:
 
       - uses: opentofu/setup-opentofu@v1
         with:
-          tofu_version: 1.10.5
+          tofu_version: 1.12.6
 
       # Хранилище состояния и туннель к нему. Тот же composite action, что и у
       # tfstate-backend.yml: снесённый контейнер чинится этим же деплоем.

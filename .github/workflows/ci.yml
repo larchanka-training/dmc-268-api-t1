@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: opentofu/setup-opentofu@v1
         with:
-          tofu_version: 1.10.5
+          tofu_version: 1.12.6
       - run: tofu fmt -check -recursive infra/
       - run: cd infra && tofu init -backend=false && tofu validate
 

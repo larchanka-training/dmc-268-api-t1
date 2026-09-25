@@ -28,7 +28,7 @@ jobs:
 
       - uses: opentofu/setup-opentofu@v1
         with:
-          tofu_version: 1.10.5
+          tofu_version: 1.12.6
 
       - uses: ./.github/actions/s3-backend
         id: backend
