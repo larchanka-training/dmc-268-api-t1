@@ -20,28 +20,12 @@ resource "docker_image" "rabbitmq" {
   keep_locally = true
 }
 
-locals {
-  api_source_hash = sha256(join("", [
-    filesha256("${path.module}/../Dockerfile"),
-    filesha256("${path.module}/../pyproject.toml"),
-    filesha256("${path.module}/../uv.lock"),
-    filesha256("${path.module}/../.dockerignore"),
-    sha256(join("", [for f in sort(fileset("${path.module}/../app", "**/*")) : filesha256("${path.module}/../app/${f}")])),
-  ]))
-  api_image_tag = substr(local.api_source_hash, 0, 12)
-}
-
 resource "docker_image" "api" {
-  name = "dmc268-api:${local.api_image_tag}"
-
-  build {
-    context    = "${path.module}/.."
-    dockerfile = "Dockerfile"
-    tag        = ["dmc268-api:${local.api_image_tag}"]
-    build_args = {
-      PYTHON_VERSION = var.python_version
-    }
-  }
+  # Образ собирается и публикуется в CI, здесь он только забирается по тегу.
+  # Раньше он собирался прямо отсюда по хешу исходников; при удалённом
+  # docker_host такая сборка ушла бы на сервер — без контекста и без кеша.
+  name         = var.api_image
+  keep_locally = true
 }
 
 resource "docker_container" "postgres" {
@@ -111,14 +95,48 @@ resource "docker_container" "rabbitmq" {
   }
 }
 
+resource "docker_container" "migrate" {
+  name  = "dmc268-migrate"
+  image = docker_image.api.image_id
+
+  # Одноразовый контейнер: отрабатывает и завершается. `attach` заставляет
+  # Terraform дождаться конца, а postcondition — упасть на ненулевом коде.
+  # Без этого упавшая миграция осталась бы незамеченной, и API поднялся бы
+  # против непромигрированной базы (ровно то, что делал прежний main.tf).
+  must_run = false
+  attach   = true
+  logs     = true
+
+  depends_on = [docker_container.postgres]
+
+  networks_advanced {
+    name = docker_network.dmc268.name
+  }
+
+  env = [
+    "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
+  ]
+
+  command = ["alembic", "upgrade", "head"]
+
+  lifecycle {
+    postcondition {
+      condition     = self.exit_code == 0
+      error_message = "Миграции завершились с ненулевым кодом — деплой остановлен до старта API."
+    }
+  }
+}
+
 resource "docker_container" "api" {
   name    = "dmc268-api"
   image   = docker_image.api.image_id
   restart = "unless-stopped"
 
+  # Миграции — тоже предусловие старта, не только живые postgres и rabbitmq.
   depends_on = [
     docker_container.postgres,
     docker_container.rabbitmq,
+    docker_container.migrate,
   ]
 
   networks_advanced {

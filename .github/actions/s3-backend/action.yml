@@ -1,0 +1,172 @@
+# Общая часть двух workflow: ключ, хранилище состояния, туннель, бакет.
+#
+# Вынесено в composite action, а не в reusable workflow, по механической
+# причине: туннель живёт внутри job'а и в соседний не передаётся, поэтому
+# «поднять хранилище» и «применить конфигурацию» обязаны быть одним job'ом.
+# Reusable workflow дал бы второй job и туннель пришлось бы открывать заново —
+# то есть скопировать. У этого action два вызывающих: tfstate-backend.yml и
+# deploy.yml.
+name: S3 state backend
+description: Поднимает хранилище состояния на сервере, открывает к нему туннель и готовит бакет.
+
+inputs:
+  ssh_key:
+    description: Приватный ключ CI
+    required: true
+  ssh_user:
+    description: Пользователь на сервере
+    required: true
+  host:
+    description: Адрес сервера
+    required: true
+  s3_user:
+    description: Логин хранилища
+    required: true
+  s3_password:
+    description: Пароль хранилища
+    required: true
+  container:
+    description: Имя контейнера хранилища
+    required: true
+  volume:
+    description: Имя тома хранилища
+    required: true
+  port:
+    description: Порт хранилища, он же локальный конец туннеля
+    required: true
+  image:
+    description: Образ хранилища
+    required: true
+  cred_user_var:
+    description: Имя переменной, которой образ принимает логин
+    required: true
+  cred_pass_var:
+    description: Имя переменной, которой образ принимает пароль
+    required: true
+  bucket:
+    description: Бакет под состояние
+    required: true
+
+outputs:
+  storage:
+    description: Что произошло с контейнером хранилища
+    value: ${{ steps.storage.outputs.storage }}
+  bucket:
+    description: Что произошло с бакетом
+    value: ${{ steps.bucket.outputs.bucket }}
+  versioning:
+    description: Состояние версионирования бакета
+    value: ${{ steps.bucket.outputs.versioning }}
+
+runs:
+  using: composite
+  steps:
+    - name: Подготовить ключ и known_hosts
+      shell: bash
+      env:
+        CI_KEY: ${{ inputs.ssh_key }}
+        HOST: ${{ inputs.host }}
+      run: |
+        set -euo pipefail
+        umask 077
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        printf '%s\n' "$CI_KEY" > ~/.ssh/ci_key
+        chmod 600 ~/.ssh/ci_key
+        ssh-keyscan -T 10 -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+        test -s ~/.ssh/known_hosts
+
+    - name: Поднять S3-хранилище
+      id: storage
+      shell: bash
+      env:
+        SSH_USER: ${{ inputs.ssh_user }}
+        HOST: ${{ inputs.host }}
+        S3_USER: ${{ inputs.s3_user }}
+        S3_PASSWORD: ${{ inputs.s3_password }}
+        S3_CONTAINER: ${{ inputs.container }}
+        S3_VOLUME: ${{ inputs.volume }}
+        S3_PORT: ${{ inputs.port }}
+        S3_IMAGE: ${{ inputs.image }}
+        S3_CRED_USER_VAR: ${{ inputs.cred_user_var }}
+        S3_CRED_PASS_VAR: ${{ inputs.cred_pass_var }}
+      run: |
+        set -uo pipefail
+        script_b64="$(sh "$GITHUB_ACTION_PATH/../../scripts/render-s3-script.sh" \
+          "$S3_CONTAINER" "$S3_VOLUME" "$S3_PORT" "$S3_IMAGE" | base64 -w0)"
+
+        # Скрипт идёт аргументом команды, учётные данные — на stdin, откуда он
+        # кладёт их во временный env-file. Ни то, ни другое не оказывается в
+        # аргументах `docker run`.
+        remote="umask 077; printf %s '$script_b64' | base64 -d > /tmp/dmc268-s3.sh; bash /tmp/dmc268-s3.sh; rc=\$?; rm -f /tmp/dmc268-s3.sh; exit \$rc"
+
+        rc=0
+        out="$(printf '%s=%s\n%s=%s\n' \
+            "$S3_CRED_USER_VAR" "$S3_USER" "$S3_CRED_PASS_VAR" "$S3_PASSWORD" \
+          | ssh -i ~/.ssh/ci_key -o BatchMode=yes -o ConnectTimeout=15 \
+            "$SSH_USER@$HOST" "$remote" 2>&1)" || rc=$?
+
+        printf '%s\n' "$out"
+        storage="$(printf '%s\n' "$out" | sed -n 's/^S3=//p' | tail -1)"
+        echo "storage=${storage:-не сообщено}" >> "$GITHUB_OUTPUT"
+
+        case "$storage" in
+          "создан"|"уже запущен"|"был остановлен, запущен") ;;
+          *) echo "::error::хранилище не поднялось (код $rc)"; exit 1 ;;
+        esac
+
+    - name: Открыть туннель к хранилищу
+      shell: bash
+      env:
+        SSH_USER: ${{ inputs.ssh_user }}
+        HOST: ${{ inputs.host }}
+        S3_PORT: ${{ inputs.port }}
+      run: |
+        set -euo pipefail
+        # ExitOnForwardFailure обязателен: без него ssh уходит в фон даже когда
+        # проброс не удался, и всё падает позже с невнятной ошибкой.
+        ssh -i ~/.ssh/ci_key -o BatchMode=yes -o ExitOnForwardFailure=yes \
+          -f -N -L "${S3_PORT}:127.0.0.1:${S3_PORT}" "$SSH_USER@$HOST"
+
+        for _ in $(seq 1 20); do
+          if (exec 3<>"/dev/tcp/127.0.0.1/${S3_PORT}") 2>/dev/null; then
+            echo "туннель открыт, порт ${S3_PORT} отвечает"
+            exit 0
+          fi
+          sleep 0.5
+        done
+        echo "::error::туннель поднялся, но порт ${S3_PORT} не отвечает"
+        exit 1
+
+    - name: Создать бакет и включить версионирование
+      id: bucket
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.s3_user }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.s3_password }}
+        AWS_DEFAULT_REGION: us-east-1
+        S3_PORT: ${{ inputs.port }}
+        STATE_BUCKET: ${{ inputs.bucket }}
+      run: |
+        set -uo pipefail
+        endpoint="http://127.0.0.1:${S3_PORT}"
+
+        rc=0
+        out="$(aws --endpoint-url "$endpoint" s3api create-bucket --bucket "$STATE_BUCKET" 2>&1)" || rc=$?
+        case "$rc:$out" in
+          0:*) echo "Бакет: создан"; echo "bucket=создан" >> "$GITHUB_OUTPUT" ;;
+          *BucketAlreadyOwnedByYou*|*BucketAlreadyExists*) echo "Бакет: уже существует"; echo "bucket=уже существует" >> "$GITHUB_OUTPUT" ;;
+          *) echo "::error::бакет не создан: $out"; exit 1 ;;
+        esac
+
+        aws --endpoint-url "$endpoint" s3api put-bucket-versioning \
+          --bucket "$STATE_BUCKET" --versioning-configuration Status=Enabled
+
+        status="$(aws --endpoint-url "$endpoint" s3api get-bucket-versioning \
+          --bucket "$STATE_BUCKET" --query Status --output text 2>/dev/null || echo 'не определён')"
+        echo "Версионирование: $status"
+        echo "versioning=$status" >> "$GITHUB_OUTPUT"
+        if [ "$status" != "Enabled" ]; then
+          echo "::error::версионирование не включилось: $status"
+          exit 1
+        fi

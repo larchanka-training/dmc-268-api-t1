@@ -1,6 +1,6 @@
-# Хранилище состояния Terraform: поднимает S3-хранилище на сервере, открывает к нему
-# туннель и готовит бакет. Идемпотентно — задумано как первый job будущего
-# деплой-workflow, чтобы снесённый контейнер чинился следующим же мержем.
+# Проверка хранилища состояния в отрыве от деплоя: поднимает его, готовит
+# бакет и убеждается, что tofu принимает бэкенд. Общие шаги живут в composite
+# action и разделяются с deploy.yml.
 # См. openspec/changes/tfstate-s3-backend/.
 name: Terraform state backend
 
@@ -9,6 +9,7 @@ on:
   push:
     paths:
       - ".github/workflows/tfstate-backend.yml"
+      - ".github/actions/s3-backend/action.yml"
       - ".github/scripts/render-s3-script.sh"
       - "infra/backend.tf"
 
@@ -18,25 +19,6 @@ permissions:
 concurrency:
   group: tfstate-backend
   cancel-in-progress: false
-
-# Точки замены реализации S3. Всё ниже по течению — бакет, версионирование,
-# блокировки, backend.tf, tofu — говорит на протоколе S3 и про RustFS не знает
-# ничего, поэтому замена на другой сервер с такой же моделью запуска стоит двух
-# значений: образа и имён переменных, которыми он принимает учётные данные.
-#
-# Оговорка: так меняется не всякий сервер. Garage, например, не берёт
-# учётные данные из окружения вовсе — ему нужен файл конфигурации, назначение
-# layout и `garage key create`. Для него понадобится свой скрипт бутстрапа, а
-# не другое значение здесь. Заводить его заранее незачем: пишется он за час и
-# со знанием того, что Garage реально требует.
-env:
-  S3_CONTAINER: dmc268-s3
-  S3_VOLUME: dmc268-s3-data
-  S3_PORT: "9000"
-  S3_IMAGE: rustfs/rustfs:1.0.0
-  S3_CRED_USER_VAR: RUSTFS_ACCESS_KEY
-  S3_CRED_PASS_VAR: RUSTFS_SECRET_KEY
-  STATE_BUCKET: dmc268-tfstate
 
 jobs:
   backend:
@@ -48,105 +30,21 @@ jobs:
         with:
           tofu_version: 1.10.5
 
-      - name: Подготовить ключ и known_hosts
-        env:
-          CI_KEY: ${{ secrets.VPS_DMC268_KEY_T1 }}
-          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
-        run: |
-          set -euo pipefail
-          umask 077
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$CI_KEY" > ~/.ssh/ci_key
-          chmod 600 ~/.ssh/ci_key
-          ssh-keyscan -T 10 -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          test -s ~/.ssh/known_hosts
-
-      - name: Поднять S3-хранилище
-        id: s3
-        env:
-          SSH_USER: ${{ secrets.VPS_DMC268_U }}
-          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
-          S3_USER: ${{ secrets.S3_USER_DMC268_T1 }}
-          S3_PASSWORD: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
-        run: |
-          set -uo pipefail
-          script_b64="$(sh .github/scripts/render-s3-script.sh \
-            "$S3_CONTAINER" "$S3_VOLUME" "$S3_PORT" "$S3_IMAGE" | base64 -w0)"
-
-          # Скрипт идёт аргументом команды, учётные данные — на stdin, откуда
-          # он кладёт их во временный env-file. Ни то, ни другое не оказывается
-          # в аргументах `docker run`.
-          remote="umask 077; printf %s '$script_b64' | base64 -d > /tmp/dmc268-s3.sh; bash /tmp/dmc268-s3.sh; rc=\$?; rm -f /tmp/dmc268-s3.sh; exit \$rc"
-
-          rc=0
-          out="$(printf '%s=%s\n%s=%s\n' \
-              "$S3_CRED_USER_VAR" "$S3_USER" "$S3_CRED_PASS_VAR" "$S3_PASSWORD" \
-            | ssh -i ~/.ssh/ci_key -o BatchMode=yes -o ConnectTimeout=15 \
-              "$SSH_USER@$HOST" "$remote" 2>&1)" || rc=$?
-
-          printf '%s\n' "$out"
-          for field in S3 IMAGE_DIGEST LISTENS; do
-            value="$(printf '%s\n' "$out" | sed -n "s/^${field}=//p" | tail -1)"
-            lower="$(printf '%s' "$field" | tr 'A-Z' 'a-z')"
-            echo "${lower}=${value:-не сообщено}" >> "$GITHUB_OUTPUT"
-          done
-
-          case "$(printf '%s\n' "$out" | sed -n 's/^S3=//p' | tail -1)" in
-            "создан"|"уже запущен"|"был остановлен, запущен") ;;
-            *) echo "::error::хранилище не поднялось (код $rc)"; exit 1 ;;
-          esac
-
-      - name: Открыть туннель к хранилищу
-        env:
-          SSH_USER: ${{ secrets.VPS_DMC268_U }}
-          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
-        run: |
-          set -euo pipefail
-          # ExitOnForwardFailure обязателен: без него ssh уходит в фон даже
-          # когда проброс не удался, и всё падает позже с невнятной ошибкой.
-          ssh -i ~/.ssh/ci_key -o BatchMode=yes -o ExitOnForwardFailure=yes \
-            -f -N -L "${S3_PORT}:127.0.0.1:${S3_PORT}" "$SSH_USER@$HOST"
-
-          for _ in $(seq 1 20); do
-            if (exec 3<>"/dev/tcp/127.0.0.1/${S3_PORT}") 2>/dev/null; then
-              echo "туннель открыт, порт ${S3_PORT} отвечает"
-              exit 0
-            fi
-            sleep 0.5
-          done
-          echo "::error::туннель поднялся, но порт ${S3_PORT} не отвечает"
-          exit 1
-
-      - name: Создать бакет и включить версионирование
-        id: bucket
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: |
-          set -uo pipefail
-          endpoint="http://127.0.0.1:${S3_PORT}"
-
-          rc=0
-          out="$(aws --endpoint-url "$endpoint" s3api create-bucket --bucket "$STATE_BUCKET" 2>&1)" || rc=$?
-          case "$rc:$out" in
-            0:*) echo "Бакет: создан"; echo "bucket=создан" >> "$GITHUB_OUTPUT" ;;
-            *BucketAlreadyOwnedByYou*|*BucketAlreadyExists*) echo "Бакет: уже существует"; echo "bucket=уже существует" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::бакет не создан: $out"; exit 1 ;;
-          esac
-
-          aws --endpoint-url "$endpoint" s3api put-bucket-versioning \
-            --bucket "$STATE_BUCKET" --versioning-configuration Status=Enabled
-
-          status="$(aws --endpoint-url "$endpoint" s3api get-bucket-versioning \
-            --bucket "$STATE_BUCKET" --query Status --output text 2>/dev/null || echo 'не определён')"
-          echo "Версионирование: $status"
-          echo "versioning=$status" >> "$GITHUB_OUTPUT"
-          if [ "$status" != "Enabled" ]; then
-            echo "::error::версионирование не включилось: $status"
-            exit 1
-          fi
+      - uses: ./.github/actions/s3-backend
+        id: backend
+        with:
+          ssh_key: ${{ secrets.VPS_DMC268_KEY_T1 }}
+          ssh_user: ${{ secrets.VPS_DMC268_U }}
+          host: ${{ vars.VPS_DMC268_IP_T1 }}
+          s3_user: ${{ secrets.S3_USER_DMC268_T1 }}
+          s3_password: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
+          container: dmc268-s3
+          volume: dmc268-s3-data
+          port: "9000"
+          image: rustfs/rustfs:1.0.0
+          cred_user_var: RUSTFS_ACCESS_KEY
+          cred_pass_var: RUSTFS_SECRET_KEY
+          bucket: dmc268-tfstate
 
       - name: Выяснить, поддерживает ли хранилище условную запись
         id: locking
@@ -156,7 +54,7 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
         run: |
           set -uo pipefail
-          endpoint="http://127.0.0.1:${S3_PORT}"
+          endpoint="http://127.0.0.1:9000"
           probe="locking-probe-$(date +%s)"
           : > /tmp/empty
 
@@ -164,14 +62,14 @@ jobs:
           # (If-None-Match: *). Проверяем саму примитивную операцию: первая
           # запись должна пройти, вторая — упереться в PreconditionFailed.
           first=0
-          aws --endpoint-url "$endpoint" s3api put-object --bucket "$STATE_BUCKET" \
+          aws --endpoint-url "$endpoint" s3api put-object --bucket dmc268-tfstate \
             --key "$probe" --body /tmp/empty --if-none-match '*' >/dev/null 2>&1 || first=$?
 
           if [ "$first" -ne 0 ]; then
             result="не проверено: клиент или хранилище не приняли --if-none-match"
           else
             second=0
-            aws --endpoint-url "$endpoint" s3api put-object --bucket "$STATE_BUCKET" \
+            aws --endpoint-url "$endpoint" s3api put-object --bucket dmc268-tfstate \
               --key "$probe" --body /tmp/empty --if-none-match '*' >/dev/null 2>&1 || second=$?
             if [ "$second" -ne 0 ]; then
               result="поддерживается, нативная блокировка возможна"
@@ -179,11 +77,9 @@ jobs:
               result="НЕ поддерживается: повторная запись прошла, полагаемся на concurrency"
             fi
           fi
-          # В лог тоже: иначе ответ виден только в summary, а его не прочитать
-          # ни из `gh run view --log`, ни из API.
           echo "Условная запись: $result"
           echo "result=$result" >> "$GITHUB_OUTPUT"
-          aws --endpoint-url "$endpoint" s3api delete-object --bucket "$STATE_BUCKET" --key "$probe" >/dev/null 2>&1 || true
+          aws --endpoint-url "$endpoint" s3api delete-object --bucket dmc268-tfstate --key "$probe" >/dev/null 2>&1 || true
 
       - name: Проверить, что tofu принимает бэкенд
         id: tofu
@@ -212,11 +108,9 @@ jobs:
             echo
             echo "| Шаг | Результат |"
             echo "| --- | --- |"
-            echo "| Хранилище | ${{ steps.s3.outputs.s3 || 'не поднимался' }} |"
-            echo "| Слушает | ${{ steps.s3.outputs.listens || 'не проверялось' }} |"
-            echo "| Образ | ${{ steps.s3.outputs.image_digest || 'не определён' }} |"
-            echo "| Бакет | ${{ steps.bucket.outputs.bucket || 'не создавался' }} |"
-            echo "| Версионирование | ${{ steps.bucket.outputs.versioning || 'не проверялось' }} |"
+            echo "| Хранилище | ${{ steps.backend.outputs.storage || 'не поднималось' }} |"
+            echo "| Бакет | ${{ steps.backend.outputs.bucket || 'не создавался' }} |"
+            echo "| Версионирование | ${{ steps.backend.outputs.versioning || 'не проверялось' }} |"
             echo "| Условная запись | ${{ steps.locking.outputs.result || 'не проверялась' }} |"
             echo "| \`tofu init\` | ${{ steps.tofu.outputs.result || 'не выполнялся' }} |"
           } >> "$GITHUB_STEP_SUMMARY"

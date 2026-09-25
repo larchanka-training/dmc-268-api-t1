@@ -1,6 +1,6 @@
 # Стек сервера (API на Python 3.14, PostgreSQL, RabbitMQ)
 
-Нужны **Docker Engine** на целевом хосте и Terraform >= 1.5. Образ API собирается из `Dockerfile` с базой `python:3.14-slim` (`python_version`).
+Нужны **Docker Engine** на целевом хосте и OpenTofu >= 1.10 (в CI ставится 1.10.5). Образ API не собирается здесь: он публикуется в ghcr из CI и забирается по тегу (`api_image`).
 
 ## Локальный или удалённый Docker
 
