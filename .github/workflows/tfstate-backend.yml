@@ -19,11 +19,23 @@ concurrency:
   group: tfstate-backend
   cancel-in-progress: false
 
+# Точки замены реализации S3. Всё ниже по течению — бакет, версионирование,
+# блокировки, backend.tf, tofu — говорит на протоколе S3 и про RustFS не знает
+# ничего, поэтому замена на другой сервер с такой же моделью запуска стоит двух
+# значений: образа и имён переменных, которыми он принимает учётные данные.
+#
+# Оговорка: так меняется не всякий сервер. Garage, например, не берёт
+# учётные данные из окружения вовсе — ему нужен файл конфигурации, назначение
+# layout и `garage key create`. Для него понадобится свой скрипт бутстрапа, а
+# не другое значение здесь. Заводить его заранее незачем: пишется он за час и
+# со знанием того, что Garage реально требует.
 env:
   S3_CONTAINER: dmc268-s3
   S3_VOLUME: dmc268-s3-data
   S3_PORT: "9000"
   S3_IMAGE: rustfs/rustfs:1.0.0
+  S3_CRED_USER_VAR: RUSTFS_ACCESS_KEY
+  S3_CRED_PASS_VAR: RUSTFS_SECRET_KEY
   STATE_BUCKET: dmc268-tfstate
 
 jobs:
@@ -68,7 +80,8 @@ jobs:
           remote="umask 077; printf %s '$script_b64' | base64 -d > /tmp/dmc268-s3.sh; bash /tmp/dmc268-s3.sh; rc=\$?; rm -f /tmp/dmc268-s3.sh; exit \$rc"
 
           rc=0
-          out="$(printf 'RUSTFS_ACCESS_KEY=%s\nRUSTFS_SECRET_KEY=%s\n' "$S3_USER" "$S3_PASSWORD" \
+          out="$(printf '%s=%s\n%s=%s\n' \
+              "$S3_CRED_USER_VAR" "$S3_USER" "$S3_CRED_PASS_VAR" "$S3_PASSWORD" \
             | ssh -i ~/.ssh/ci_key -o BatchMode=yes -o ConnectTimeout=15 \
               "$SSH_USER@$HOST" "$remote" 2>&1)" || rc=$?
 
