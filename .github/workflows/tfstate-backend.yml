@@ -1,0 +1,204 @@
+# Хранилище состояния Terraform: поднимает MinIO на сервере, открывает к нему
+# туннель и готовит бакет. Идемпотентно — задумано как первый job будущего
+# деплой-workflow, чтобы снесённый контейнер чинился следующим же мержем.
+# См. openspec/changes/tfstate-minio-backend/.
+name: Terraform state backend
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/tfstate-backend.yml"
+      - ".github/scripts/render-minio-script.sh"
+      - "infra/backend.tf"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tfstate-backend
+  cancel-in-progress: false
+
+env:
+  MINIO_CONTAINER: dmc268-minio
+  MINIO_VOLUME: dmc268-minio-data
+  MINIO_PORT: "9000"
+  MINIO_IMAGE: minio/minio:latest
+  STATE_BUCKET: dmc268-tfstate
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.10.5
+
+      - name: Подготовить ключ и known_hosts
+        env:
+          CI_KEY: ${{ secrets.VPS_DMC268_KEY_T1 }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$CI_KEY" > ~/.ssh/ci_key
+          chmod 600 ~/.ssh/ci_key
+          ssh-keyscan -T 10 -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          test -s ~/.ssh/known_hosts
+
+      - name: Поднять MinIO
+        id: minio
+        env:
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+          MINIO_USER: ${{ secrets.MINIO_USER_DMC268_T1 }}
+          MINIO_PASSWORD: ${{ secrets.MINIO_PASSWORD_DMC268_T1 }}
+        run: |
+          set -uo pipefail
+          script_b64="$(sh .github/scripts/render-minio-script.sh \
+            "$MINIO_CONTAINER" "$MINIO_VOLUME" "$MINIO_PORT" "$MINIO_IMAGE" | base64 -w0)"
+
+          # Скрипт идёт аргументом команды, учётные данные — на stdin, откуда
+          # он кладёт их во временный env-file. Ни то, ни другое не оказывается
+          # в аргументах `docker run`.
+          remote="umask 077; printf %s '$script_b64' | base64 -d > /tmp/dmc268-minio.sh; bash /tmp/dmc268-minio.sh; rc=\$?; rm -f /tmp/dmc268-minio.sh; exit \$rc"
+
+          rc=0
+          out="$(printf 'MINIO_ROOT_USER=%s\nMINIO_ROOT_PASSWORD=%s\n' "$MINIO_USER" "$MINIO_PASSWORD" \
+            | ssh -i ~/.ssh/ci_key -o BatchMode=yes -o ConnectTimeout=15 \
+              "$SSH_USER@$HOST" "$remote" 2>&1)" || rc=$?
+
+          printf '%s\n' "$out"
+          for field in MINIO IMAGE_DIGEST LISTENS; do
+            value="$(printf '%s\n' "$out" | sed -n "s/^${field}=//p" | tail -1)"
+            lower="$(printf '%s' "$field" | tr 'A-Z' 'a-z')"
+            echo "${lower}=${value:-не сообщено}" >> "$GITHUB_OUTPUT"
+          done
+
+          case "$(printf '%s\n' "$out" | sed -n 's/^MINIO=//p' | tail -1)" in
+            "создан"|"уже запущен"|"был остановлен, запущен") ;;
+            *) echo "::error::MinIO не поднялся (код $rc)"; exit 1 ;;
+          esac
+
+      - name: Открыть туннель к MinIO
+        env:
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -euo pipefail
+          # ExitOnForwardFailure обязателен: без него ssh уходит в фон даже
+          # когда проброс не удался, и всё падает позже с невнятной ошибкой.
+          ssh -i ~/.ssh/ci_key -o BatchMode=yes -o ExitOnForwardFailure=yes \
+            -f -N -L "${MINIO_PORT}:127.0.0.1:${MINIO_PORT}" "$SSH_USER@$HOST"
+
+          for _ in $(seq 1 20); do
+            if (exec 3<>"/dev/tcp/127.0.0.1/${MINIO_PORT}") 2>/dev/null; then
+              echo "туннель открыт, порт ${MINIO_PORT} отвечает"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "::error::туннель поднялся, но порт ${MINIO_PORT} не отвечает"
+          exit 1
+
+      - name: Создать бакет и включить версионирование
+        id: bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_USER_DMC268_T1 }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_PASSWORD_DMC268_T1 }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          set -uo pipefail
+          endpoint="http://127.0.0.1:${MINIO_PORT}"
+
+          rc=0
+          out="$(aws --endpoint-url "$endpoint" s3api create-bucket --bucket "$STATE_BUCKET" 2>&1)" || rc=$?
+          case "$rc:$out" in
+            0:*) echo "bucket=создан" >> "$GITHUB_OUTPUT" ;;
+            *BucketAlreadyOwnedByYou*|*BucketAlreadyExists*) echo "bucket=уже существует" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::бакет не создан: $out"; exit 1 ;;
+          esac
+
+          aws --endpoint-url "$endpoint" s3api put-bucket-versioning \
+            --bucket "$STATE_BUCKET" --versioning-configuration Status=Enabled
+
+          status="$(aws --endpoint-url "$endpoint" s3api get-bucket-versioning \
+            --bucket "$STATE_BUCKET" --query Status --output text 2>/dev/null || echo 'не определён')"
+          echo "versioning=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" != "Enabled" ]; then
+            echo "::error::версионирование не включилось: $status"
+            exit 1
+          fi
+
+      - name: Выяснить, поддерживает ли MinIO условную запись
+        id: locking
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_USER_DMC268_T1 }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_PASSWORD_DMC268_T1 }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          set -uo pipefail
+          endpoint="http://127.0.0.1:${MINIO_PORT}"
+          probe="locking-probe-$(date +%s)"
+          : > /tmp/empty
+
+          # Нативная блокировка бэкенда s3 стоит на условной записи
+          # (If-None-Match: *). Проверяем саму примитивную операцию: первая
+          # запись должна пройти, вторая — упереться в PreconditionFailed.
+          first=0
+          aws --endpoint-url "$endpoint" s3api put-object --bucket "$STATE_BUCKET" \
+            --key "$probe" --body /tmp/empty --if-none-match '*' >/dev/null 2>&1 || first=$?
+
+          if [ "$first" -ne 0 ]; then
+            echo "result=не проверено: клиент или хранилище не приняли --if-none-match" >> "$GITHUB_OUTPUT"
+          else
+            second=0
+            aws --endpoint-url "$endpoint" s3api put-object --bucket "$STATE_BUCKET" \
+              --key "$probe" --body /tmp/empty --if-none-match '*' >/dev/null 2>&1 || second=$?
+            if [ "$second" -ne 0 ]; then
+              echo "result=поддерживается, нативная блокировка возможна" >> "$GITHUB_OUTPUT"
+            else
+              echo "result=НЕ поддерживается: повторная запись прошла, полагаемся на concurrency" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          aws --endpoint-url "$endpoint" s3api delete-object --bucket "$STATE_BUCKET" --key "$probe" >/dev/null 2>&1 || true
+
+      - name: Проверить, что tofu принимает бэкенд
+        id: tofu
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_USER_DMC268_T1 }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_PASSWORD_DMC268_T1 }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          set -uo pipefail
+          rc=0
+          out="$(tofu init -input=false -no-color 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 0 ]; then
+            echo "result=бэкенд принят" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=tofu init не прошёл (код $rc)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Записать результат в summary
+        if: always()
+        run: |
+          {
+            echo "## Хранилище состояния Terraform"
+            echo
+            echo "| Шаг | Результат |"
+            echo "| --- | --- |"
+            echo "| MinIO | ${{ steps.minio.outputs.minio || 'не поднимался' }} |"
+            echo "| Слушает | ${{ steps.minio.outputs.listens || 'не проверялось' }} |"
+            echo "| Образ | ${{ steps.minio.outputs.image_digest || 'не определён' }} |"
+            echo "| Бакет | ${{ steps.bucket.outputs.bucket || 'не создавался' }} |"
+            echo "| Версионирование | ${{ steps.bucket.outputs.versioning || 'не проверялось' }} |"
+            echo "| Условная запись | ${{ steps.locking.outputs.result || 'не проверялась' }} |"
+            echo "| \`tofu init\` | ${{ steps.tofu.outputs.result || 'не выполнялся' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
