@@ -50,8 +50,12 @@ resource "docker_container" "postgres" {
   }
 
   volumes {
-    volume_name    = docker_volume.postgres.name
-    container_path = "/var/lib/postgresql/data"
+    volume_name = docker_volume.postgres.name
+    # Не .../data: postgres:18 держит данные в подкаталоге с номером мажорной
+    # версии, и монтирование по до-18-й конвенции заставляет entrypoint
+    # отказаться стартовать. В docker-compose.yml это уже учтено — здесь
+    # расхождение осталось и обнаружилось первым же деплоем.
+    container_path = "/var/lib/postgresql"
   }
 
   healthcheck {
@@ -117,7 +121,13 @@ resource "docker_container" "migrate" {
     "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
   ]
 
-  command = ["alembic", "upgrade", "head"]
+  # depends_on у docker-провайдера задаёт только порядок создания, но не ждёт
+  # готовности: postgres принимает соединения на несколько секунд позже, чем
+  # создаётся его контейнер. Поэтому ждём порт, а не надеемся на удачу.
+  command = [
+    "sh", "-c",
+    "for i in $(seq 1 60); do python -c 'import socket;s=socket.socket();s.settimeout(2);s.connect((\"dmc268-postgres\",5432))' >/dev/null 2>&1 && break; sleep 2; done; exec alembic upgrade head",
+  ]
 
   lifecycle {
     postcondition {
