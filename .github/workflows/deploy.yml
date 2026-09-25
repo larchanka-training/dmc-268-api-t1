@@ -41,6 +41,11 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "$image"
 
+      # Без этого шага buildx работает на docker-драйвере, а тот не умеет
+      # экспортировать кеш: `cache-to: type=gha` падает с «Cache export is not
+      # supported for the docker driver».
+      - uses: docker/setup-buildx-action@v3
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
