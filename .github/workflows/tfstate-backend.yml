@@ -23,7 +23,7 @@ env:
   MINIO_CONTAINER: dmc268-minio
   MINIO_VOLUME: dmc268-minio-data
   MINIO_PORT: "9000"
-  MINIO_IMAGE: minio/minio:latest
+  MINIO_IMAGE: quay.io/minio/minio:latest
   STATE_BUCKET: dmc268-tfstate
 
 jobs:
