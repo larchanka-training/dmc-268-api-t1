@@ -76,6 +76,18 @@ runs:
         ssh-keyscan -T 10 -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
         test -s ~/.ssh/known_hosts
 
+        # Docker-провайдер Terraform вызывает `ssh` сам и флаг -i не передаёт:
+        # он берёт личности по умолчанию (~/.ssh/id_*), которых на раннере нет,
+        # и упирается в «Permission denied». Поэтому ключ прописывается в
+        # конфиг, а не только передаётся нашими собственными вызовами.
+        cat > ~/.ssh/config <<CFG
+        Host $HOST
+          IdentityFile ~/.ssh/ci_key
+          IdentitiesOnly yes
+          BatchMode yes
+        CFG
+        chmod 600 ~/.ssh/config
+
     - name: Поднять S3-хранилище
       id: storage
       shell: bash
