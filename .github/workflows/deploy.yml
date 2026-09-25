@@ -5,9 +5,7 @@ name: Deploy
 
 on:
   push:
-    # ВРЕМЕННО: feat/devops-cd здесь только чтобы прогнать деплой до мержа —
-    # workflow_dispatch работает лишь для ветки по умолчанию. Убрать до мержа.
-    branches: [develop, feat/devops-cd]
+    branches: [develop]
   workflow_dispatch:
 
 permissions:
