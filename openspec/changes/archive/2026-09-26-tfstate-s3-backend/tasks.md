@@ -21,11 +21,15 @@
 
 ## 4. Бэкенд в конфигурации
 
-- [ ] 4.1 Добавить `infra/backend.tf` с блоком `backend "s3"`: endpoint на `localhost`, `use_path_style`, отключённые проверки региона и учётных данных, ключ состояния `api/terraform.tfstate`; проверить `tofu fmt -check` и `tofu validate`
-- [ ] 4.2 Убедиться, что job `terraform` в `.github/workflows/ci.yml:45` с флагом `-backend=false` продолжает проходить; проверить прогоном на ветке
+- [x] 4.1 Добавить `infra/backend.tf` с блоком `backend "s3"`: endpoint на `localhost`, `use_path_style`, отключённые проверки региона и учётных данных, ключ состояния `api/terraform.tfstate`; проверить `tofu fmt -check` и `tofu validate`
+- [x] 4.2 Убедиться, что job `terraform` в `.github/workflows/ci.yml:45` с флагом `-backend=false` продолжает проходить; проверить прогоном на ветке
 - [x] 4.3 Описать в `infra/README.md` хранилище состояния, туннель и то, что контейнер MinIO не входит в управляемый стек и не удаляется `tofu destroy`; проверить, что описанная последовательность команд соответствует тому, что делает workflow
 
 ## 5. Приёмка
 
 - [x] 5.1 Прогнать `tofu init` из CI против удалённого состояния и убедиться, что бэкенд принят, а не проигнорирован; проверить по выводу `Successfully configured the backend "s3"`
 - [x] 5.2 Зафиксировать в #22 результат и оставшиеся шаги до CD; проверить, что задача отражает текущее состояние
+
+## Примечание
+
+Задачи 4.1 и 4.2 закрыты прогоном [CI 36201546827](https://github.com/larchanka-training/dmc-268-api-t1/actions/runs/36201546827): job `terraform` (`tofu fmt -check`, `tofu init -backend=false`, `tofu validate`) зелёный уже с `backend.tf` в конфигурации. На фиче-ветках `ci.yml` сам не запускается — прогон дал открытый пул-реквест.
