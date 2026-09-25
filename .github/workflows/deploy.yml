@@ -5,7 +5,7 @@ name: Deploy
 
 on:
   push:
-    branches: [develop]
+    branches: [develop, feat/devops-cd] # ВРЕМЕННО: снять после проверки уборки
   workflow_dispatch:
 
 permissions:
@@ -117,6 +117,20 @@ jobs:
           tofu init -input=false -no-color
           tofu apply -input=false -no-color -auto-approve
           echo "api_url=$(tofu output -raw api_url)" >> "$GITHUB_OUTPUT"
+
+      # Уборка — гигиена, а не часть выката: неудача здесь означает мусор на
+      # диске, а не сломанный стенд, поэтому шаг не роняет прогон. Порог в
+      # неделю оставляет предыдущие теги на месте, чтобы откат не требовал
+      # заново тянуть 320 МБ.
+      - name: Убрать устаревшие образы
+        continue-on-error: true
+        env:
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -uo pipefail
+          ssh -i ~/.ssh/ci_key -o BatchMode=yes "$SSH_USER@$HOST" \
+            "docker image prune -af --filter until=168h" 2>&1 | tail -5
 
       - name: Проверить, что API жив (через туннель)
         env:
