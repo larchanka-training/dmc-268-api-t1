@@ -5,7 +5,7 @@ name: Deploy
 
 on:
   push:
-    branches: [develop, feat/devops-cd] # ВРЕМЕННО: снять после проверки бампа
+    branches: [develop]
   workflow_dispatch:
 
 permissions:
