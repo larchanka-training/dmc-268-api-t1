@@ -82,6 +82,34 @@ jobs:
             echo "${lower}=${value:-не сообщено}" >> "$GITHUB_OUTPUT"
           done
 
+      # Приёмка того, ради чего всё затевалось: вход уже не по паролю.
+      # BatchMode=yes не даёт откатиться на пароль, поэтому успех здесь
+      # означает именно рабочий ключ. known_hosts подготовлен шагом выше.
+      - name: Проверить вход по ключу CI
+        id: keycheck
+        env:
+          CI_KEY: ${{ secrets.VPS_DMC268_KEY_T1 }}
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -uo pipefail
+          umask 077
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$CI_KEY" > "$key_file"
+
+          rc=0
+          out="$(ssh -i "$key_file" \
+            -o BatchMode=yes -o ConnectTimeout=15 -o NumberOfPasswordPrompts=0 \
+            "$SSH_USER@$HOST" "docker version --format '{{.Server.Version}}'" 2>&1)" || rc=$?
+
+          if [ "$rc" -eq 0 ]; then
+            echo "result=ок, Docker $out" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=отказ (код $rc): $out" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Вход по ключу: код $rc, ответ: $out"
+
       - name: Записать результат в summary
         if: always()
         run: |
@@ -95,6 +123,7 @@ jobs:
             echo "| Docker | ${{ steps.bootstrap.outputs.docker || 'не проверялся' }} |"
             echo "| Группа \`docker\` | ${{ steps.bootstrap.outputs.group || 'не проверялась' }} |"
             echo "| Публичный ключ CI | ${{ steps.bootstrap.outputs.key || 'не добавлялся' }} |"
+            echo "| Вход по ключу CI | ${{ steps.keycheck.outputs.result || 'не проверялся' }} |"
             echo
             echo "Отсутствие прав — штатный исход: прогон зелёный, значит нужен человек с root."
           } >> "$GITHUB_STEP_SUMMARY"
