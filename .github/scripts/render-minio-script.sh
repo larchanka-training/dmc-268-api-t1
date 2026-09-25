@@ -54,16 +54,18 @@ case "\$STATE" in
     *)
         # Порт публикуется только на петлю: снаружи к хранилищу дороги нет,
         # CI приходит через SSH-туннель.
-        if docker run -d \
+        # Ошибку docker печатаем: без неё «создать не удалось» не отличить от
+        # недоступного реестра, занятого порта и опечатки в имени тома.
+        if ERR="\$(docker run -d \
             --name "\$NAME" \
             --restart unless-stopped \
             -p 127.0.0.1:"\$PORT":9000 \
             -v "\$VOLUME":/data \
             --env-file "\$ENV_FILE" \
-            "\$IMAGE" server /data >/dev/null 2>&1; then
+            "\$IMAGE" server /data 2>&1 >/dev/null)"; then
             echo 'MINIO=создан'
         else
-            echo 'MINIO=создать не удалось'
+            echo "MINIO=создать не удалось: \$(printf '%s' "\$ERR" | tr '\n' ' ')"
         fi
         ;;
 esac
