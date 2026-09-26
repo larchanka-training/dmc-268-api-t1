@@ -6,7 +6,7 @@
 SQLAlchemy.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -21,6 +21,7 @@ from app.domain.entities import (
     ReviewRun,
 )
 from app.domain.enums import Provider
+from app.domain.profile import EmbeddedChunk, ScoredChunk
 
 
 class RepositoryRepo(Protocol):
@@ -85,3 +86,20 @@ class PublishedCommentRepo(Protocol):
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]: ...
 
     def add(self, comment: PublishedComment) -> None: ...
+
+
+class CodeProfileRepo(Protocol):
+    def add_many(self, chunks: Iterable[EmbeddedChunk]) -> None:
+        """Дописать чанки в профиль; уже известные дайджесты пропускает."""
+        ...
+
+    def search(
+        self,
+        repository_id: UUID,
+        embedding: Sequence[float],
+        embedding_model: str,
+        limit: int,
+        exclude_digests: frozenset[str],
+    ) -> list[ScoredChunk]:
+        """Ближайшие чанки одного репозитория и одной модели вложений."""
+        ...

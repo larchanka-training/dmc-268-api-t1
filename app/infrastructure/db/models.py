@@ -10,6 +10,7 @@ import datetime as dt
 import uuid
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -248,3 +249,36 @@ class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     provider_comment_id: Mapped[str] = mapped_column(String(255), nullable=False)
     kind: Mapped[CommentKind] = mapped_column(_enum(CommentKind, "comment_kind"), nullable=False)
     published_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RepoCodeChunkRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
+    """Чанк профиля репозитория: код, который ревью уже видело.
+
+    В этой таблице, как и в `context_payloads`, хранится чужой исходный код;
+    `body` сюда попадает после `redact`. Уникальность
+    `(repository_id, content_sha256)` делает накопление идемпотентным:
+    тот же код из повторного прогона не задвоится.
+    """
+
+    __tablename__ = "repo_code_chunks"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "repository_id", "content_sha256", name="uq_repo_code_chunks_digest"
+        ),
+    )
+
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("repositories.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    review_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("review_runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    start_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(768), nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)

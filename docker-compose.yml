@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:18-alpine
+    # Postgres with built-in pgvector: the repository profile (RAG) stores its
+    # vectors in the same database; migration 0003 creates the extension.
+    image: pgvector/pgvector:pg18
     environment:
       POSTGRES_USER: dmc268
       POSTGRES_PASSWORD: dmc268
@@ -39,6 +41,9 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
+      # Ollama runs on the host, not in this stack; when it is unreachable the
+      # repository profile degrades to empty and review still completes.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
     depends_on:
       postgres:
         condition: service_healthy

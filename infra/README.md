@@ -2,6 +2,12 @@
 
 Нужны **Docker Engine** на целевом хосте и Terraform >= 1.5. Образ API собирается из `Dockerfile` с базой `python:3.14-slim` (`python_version`).
 
+PostgreSQL — образ `pgvector/pgvector:pg18`: профиль репозитория (RAG) держит
+векторы в той же базе, расширение `pgvector` создаёт миграция `0003`. Ollama в
+стек не входит: `ollama_base_url` указывает на существующий сервис (по
+умолчанию — на хост-машину, порт 11434); недоступность Ollama не мешает ревью,
+профиль просто не пополняется.
+
 ## Локальный или удалённый Docker
 
 Скопируйте `terraform.tfvars.example` в `terraform.tfvars` и замените плейсхолдеры `CHANGE_ME_*`. Файл `terraform.tfvars` не коммитится (gitignore).

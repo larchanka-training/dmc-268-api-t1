@@ -17,7 +17,7 @@ flowchart TB
 
     %% Infrastructure
     MQ[RabbitMQ<br/>Message Broker / Queues]
-    DB[(PostgreSQL<br/>only PostgreSQL: native enums · JSONB<br/>partial unique index)]
+    DB[(PostgreSQL<br/>only PostgreSQL: native enums · JSONB<br/>partial unique index · pgvector profile)]
 
     %% Modular monolith
     subgraph MONOLITH["Modular monolith: one codebase, one image, two processes"]
@@ -26,6 +26,7 @@ flowchart TB
         ORCH["Application use cases<br/>context assembly (pure function) · single LLM call<br/>validate_anchor · deduplicate · next_status"]
         VCS["VcsGateway port · GitHub REST adapter<br/>diffs · metadata · comments · statuses<br/>GitHub App auth · backoff inside the adapter"]
         LGW["LlmGateway port<br/>transport-only adapter to LLM Provider / LLM API<br/>prompt assembly is a pure function"]
+        EMB["EmbeddingGateway port · Ollama adapter<br/>batch embeddings for the repo profile"]
         REPOS["Repository ports + UnitOfWork<br/>SQLAlchemy adapters"]
     end
 
@@ -50,6 +51,8 @@ flowchart TB
     %% LLM
     ORCH <--> LGW
     LGW <--> LLM
+    ORCH <--> EMB
+    EMB <--> LLM
 
     %% Data and telemetry
     ORCH -->|runs · findings · context · comments · telemetry| REPOS
@@ -68,7 +71,7 @@ flowchart TB
     classDef db fill:#f7eefc,stroke:#8a4db8,color:#111;
 
     class GH,GHR,PP,LLM,FE external;
-    class API,WORKER,ORCH,VCS,LGW,REPOS core;
+    class API,WORKER,ORCH,VCS,LGW,EMB,REPOS core;
     class PAY,TOOLS planned;
     class MQ infra;
     class DB db;
@@ -91,9 +94,10 @@ flowchart TB
 - **Оркестрация — use cases слоя `application`**: одноходовый сценарий ревью — сборка контекста (чистая функция), один вызов LLM через `LlmGateway`, `validate_anchor` и `deduplicate`, публикация через `VcsGateway`; жизненный цикл прогона — `next_status`. Ретраи с exponential backoff живут в адаптерах. **Модель не получает инструментов и никогда не выбирает действий** — структурная защита от prompt injection (threat model в BACKEND_ARCHITECTURE.md).
 - **`VcsGateway` (порт; первый адаптер — GitHub REST)**: диффы (unified diff; каждый hunk несёт ±30 строк контекста вокруг изменения), метаданные, комментарии, статусы; аутентификация GitHub App с краткосрочными installation-токенами; довыборка содержимого файлов по `head_sha` для уровней `whole_file` и `ast` — деталь реализации адаптера, как payload'ы, синтаксис комментариев, auth и backoff.
 - **`LlmGateway` (порт)**: транспортный адаптер к **LLM provider / LLM API** (self-hosted или hosted). Сборка промпта — чистая функция; адаптер только транспортирует. Выбор провайдера — конфигурация composition root; конкретный первый адаптер зафиксирован в BACKEND_ARCHITECTURE.md. Переход с self-hosted модели на hosted LLM API — в том числе решение по безопасности (крупнейший путь эксфильтрации), не только операционное.
+- **`EmbeddingGateway` (порт; адаптер — Ollama)**: батчевое вложение текстов в векторы для RAG-профиля репозитория; транспортный, как `LlmGateway`. Профиль строится из surrounding-окон уже увиденных прогонов и хранится в той же PostgreSQL (pgvector), без отдельной векторной БД; детали — в BACKEND_ARCHITECTURE.md.
 - **Данные и телеметрия**: не отдельный сервис. Стоимость прогона — колонки `model`, `tokens_used`, `duration_seconds`, `failure_reason` в `review_runs`; per-call аудит (вызовы LLM и инструментов) — будущий шов, его первый заказчик — биллинг по токенам.
 - **Payments / accounts**: сегодня спроектирована только таблица `accounts` — она придёт вместе со своим портом (регистрация репозитория с проверкой прав на него); тарифы, подписки, Stripe — запланированный шов. Приоритет платных тарифов — требование к обслуживанию очереди (раздел 4.2), код порта оно не затрагивает.
-- **Контекст без клона (принцип)**: репозиторий никогда не клонируется целиком и не хранится — Repository Indexer, Vector DB и Repository Storage исключены из дизайна. Весь контекст строится из данных PR через `VcsGateway`: дифф с ±30 строками контекста вокруг изменений, опционально полные тексты изменённых файлов и сигнатуры из файлов, на которые ссылаются импорты (уровень `ast`). Read-only инструменты остаются запланированным швом — только анализ кода (tree-sitter) над файлами, полученными через `VcsGateway`; используются кодом оркестратора, а не моделью.
+- **Контекст без клона (принцип)**: репозиторий никогда не клонируется целиком и не хранится — Repository Indexer и внешняя Vector DB исключены из дизайна. Весь контекст строится из данных PR через `VcsGateway`: дифф с ±30 строками контекста вокруг изменений, опционально полные тексты изменённых файлов и сигнатуры из файлов, на которые ссылаются импорты (уровень `ast`). Исключение — RAG-профиль репозитория: фрагменты, уже увиденные в прошлых прогонах, накапливаются в той же PostgreSQL (pgvector) и возвращаются уровнем `similar`; это не индекс репозитория — его непройденные участки в системе по-прежнему нигде не лежат. Read-only инструменты остаются запланированным швом — только анализ кода (tree-sitter) над файлами, полученными через `VcsGateway`; используются кодом оркестратора, а не моделью.
 
 ## 3. Потоки данных
 
@@ -145,7 +149,7 @@ JSON-сообщение; тело несёт только доменные да�
 
 ## 5. Концепция сборщика контекста (Context Assembly)
 
-Сборка контекста и промпта — чистая функция (адаптер `LlmGateway` только транспортирует). Репозиторий не клонируется и не хранится: каждый уровень собирается из данных PR и содержимого файлов по `head_sha`, полученных через `VcsGateway`. Уровни записываются в `context_payloads.tiers` (`diff`, `surrounding`, `whole_file`, `ast`). Для соблюдения лимитов токенов данные передаются иерархически:
+Сборка контекста и промпта — чистая функция (адаптер `LlmGateway` только транспортирует). Репозиторий не клонируется и не хранится: каждый уровень собирается из данных PR и содержимого файлов по `head_sha`, полученных через `VcsGateway`. Уровни записываются в `context_payloads.tiers` (`diff`, `surrounding`, `whole_file`, `ast`, `similar`). Для соблюдения лимитов токенов данные передаются иерархически:
 
 - **Diff (уровень изменений)**
     - **Данные:** стандартный unified diff (+ добавленные, − удалённые строки).
@@ -159,11 +163,14 @@ JSON-сообщение; тело несёт только доменные да�
 - **AST / Imports (архитектурный уровень)**
     - **Данные:** сигнатуры вызываемых интерфейсов, классов и функций из соседних файлов. Без клона и индекса: импорты извлекаются из уже полученного текста изменённых файлов, каждый импорт разрешается в путь репозитория, `VcsGateway` довыбирает содержимое этих файлов по `head_sha` (с лимитами на число файлов и байты; неразрешённые импорты пропускаются), tree-sitter извлекает только сигнатуры.
     - **Цель:** выявление сайд-эффектов — например, изменение аргументов функции в файле A, когда она также используется в файле B.
+- **Similar (похожий код из профиля репозитория)**
+    - **Данные:** top-k чанков RAG-профиля этого репозитория, ближайших к текущим окнам окружения, — код, который ревью уже видело в прошлых прогонах. Поиск — pgvector по вложениям `EmbeddingGateway`, отбор под лимиты (число, байты, отсечение самосовпадений) — чистая функция; чанки идут в контекст как delimited data по тому же контракту, что и дифф.
+    - **Цель:** память о репозитории между прогонами — ревью видит, как тот же код устроен в соседних местах, не клонируя и не индексируя репозиторий целиком.
 
 Безопасность и лимиты (угрозы — threat model в BACKEND_ARCHITECTURE.md):
 
-- дифф передаётся модели как delimited data и никогда не конкатенируется в инструкцию — защита от prompt injection через ревьюимый код;
-- редакция секретов до вставки в `context_payloads` — таблица хранит чужой исходный код verbatim;
+- дифф передаётся модели как delimited data и никогда не конкатенируется в инструкцию — защита от prompt injection через ревьюимый код; чанки уровня `similar` — тот же чужой код, тот же контракт;
+- редакция секретов до вставки в `context_payloads` и в чанки профиля — обе таблицы хранят чужой исходный код verbatim;
 - жёсткие лимиты на число файлов, байты диффа и довыбираемых файлов, длительность прогона — и дифф, и набор импортируемых файлов могут быть сколь угодно большими.
 
 AST-уровень — первый кандидат на вынос из монолита: если tree-sitter не устроит, выделяется сервис парсинга — один порт получает сетевой адаптер (Strangler Fig), структура кода не меняется.

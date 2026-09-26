@@ -7,6 +7,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.application.ports.repositories import (
+    CodeProfileRepo,
     ContextPayloadRepo,
     FindingRepo,
     MergeRequestRepo,
@@ -15,6 +16,7 @@ from app.application.ports.repositories import (
     ReviewRunRepo,
 )
 from app.infrastructure.db.repositories import (
+    SqlAlchemyCodeProfileRepo,
     SqlAlchemyContextPayloadRepo,
     SqlAlchemyFindingRepo,
     SqlAlchemyMergeRequestRepo,
@@ -46,6 +48,7 @@ class SqlAlchemyUnitOfWork:
         self.published_comments: PublishedCommentRepo = SqlAlchemyPublishedCommentRepo(
             session
         )
+        self.code_profile: CodeProfileRepo = SqlAlchemyCodeProfileRepo(session)
         return self
 
     def __exit__(

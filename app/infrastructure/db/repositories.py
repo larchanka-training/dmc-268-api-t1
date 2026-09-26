@@ -6,10 +6,11 @@
 """
 
 import datetime as dt
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.orm import Session
 
 from app.domain.diff import validate_anchor
@@ -23,13 +24,16 @@ from app.domain.entities import (
     ReviewRun,
 )
 from app.domain.enums import TERMINAL_STATUSES, Provider
+from app.domain.ids import new_id
 from app.domain.lifecycle import next_status
+from app.domain.profile import EmbeddedChunk, ScoredChunk, redact
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
     FindingRow,
     MergeRequestRow,
     PublishedCommentRow,
+    RepoCodeChunkRow,
     RepositoryRow,
     ReviewRunRow,
 )
@@ -306,3 +310,63 @@ class SqlAlchemyPublishedCommentRepo:
                 published_at=comment.published_at,
             )
         )
+
+
+class SqlAlchemyCodeProfileRepo:
+    """Хранение чанков профиля. Редакция секретов — в этом шве: какой бы
+    путь ни привёл чанк в таблицу, секретом он сюда не попадёт."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def add_many(self, chunks: Iterable[EmbeddedChunk]) -> None:
+        for chunk in chunks:
+            draft = chunk.draft
+            self._session.execute(
+                postgres_insert(RepoCodeChunkRow)
+                .values(
+                    id=new_id(),
+                    repository_id=draft.repository_id,
+                    review_run_id=draft.review_run_id,
+                    file_path=draft.file_path,
+                    start_line=draft.start_line,
+                    end_line=draft.end_line,
+                    commit_sha=draft.commit_sha,
+                    content_sha256=draft.content_sha256,
+                    body=redact(draft.body),
+                    embedding=list(chunk.embedding),
+                    embedding_model=chunk.embedding_model,
+                )
+                .on_conflict_do_nothing(constraint="uq_repo_code_chunks_digest"),
+            )
+
+    def search(
+        self,
+        repository_id: UUID,
+        embedding: Sequence[float],
+        embedding_model: str,
+        limit: int,
+        exclude_digests: frozenset[str],
+    ) -> list[ScoredChunk]:
+        distance = RepoCodeChunkRow.embedding.cosine_distance(list(embedding))
+        query = select(RepoCodeChunkRow, distance.label("distance")).where(
+            RepoCodeChunkRow.repository_id == repository_id,
+            RepoCodeChunkRow.embedding_model == embedding_model,
+        )
+        if exclude_digests:
+            query = query.where(RepoCodeChunkRow.content_sha256.not_in(exclude_digests))
+        rows = self._session.execute(
+            query.order_by(distance).limit(limit)
+        ).all()
+        return [
+            ScoredChunk(
+                chunk_id=str(row.id),
+                file_path=row.file_path,
+                start_line=row.start_line,
+                end_line=row.end_line,
+                content_sha256=row.content_sha256,
+                body=row.body,
+                distance=dist,
+            )
+            for row, dist in rows
+        ]
