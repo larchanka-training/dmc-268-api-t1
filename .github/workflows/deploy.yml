@@ -70,6 +70,12 @@ jobs:
   deploy:
     needs: image
     runs-on: ubuntu-latest
+    # packages: read обязателен — образ тянется из приватного пакета, и его
+    # забирает docker-провайдер тем же GITHUB_TOKEN. Без него реестр отвечает
+    # «denied», а не чем-нибудь понятным.
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
