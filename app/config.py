@@ -28,10 +28,6 @@ class Settings(BaseSettings):
         default="nomic-embed-text",
         description="Ollama embedding model used by the repository profile",
     )
-    embedding_dimension: int = Field(
-        default=768,
-        description="Vector dimension produced by embedding_model; must match the DB column",
-    )
     profile_max_chunk_bytes: int = Field(
         default=4096,
         description="Chunks larger than this many bytes are skipped",

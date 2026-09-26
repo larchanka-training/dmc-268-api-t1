@@ -8,19 +8,19 @@
 
 - [x] 2.1 Зависимости `pgvector` и `ollama` через `uv add`; проверка: `uv sync --all-extras` и `uv run pytest` проходят
 - [x] 2.2 Модель `RepoCodeChunk` и маппер (`app/infrastructure/db/models.py`, `mappers.py`): UUIDv7 PK, FK с `ON DELETE RESTRICT` на `repositories` и `review_runs`, уникальность `(repository_id, content_digest)`, столбец `vector(N)`; проверка: тест скомпилированного DDL
-- [x] 2.3 Миграция Alembic (одна ревизия): `CREATE EXTENSION IF NOT EXISTS vector`, таблица `repo_code_chunks` с ограничениями; проверка: интеграционный тест `upgrade head → downgrade → upgrade` на одноразовой базе, `uv run alembic heads` показывает один head
+- [x] 2.3 Миграция Alembic (одна ревизия): `CREATE EXTENSION IF NOT EXISTS vector`, таблица `repo_code_chunks` с ограничениями; откат уносит таблицу и расширение, если им не пользуются чужие vector-колонки; проверка: интеграционный тест `upgrade head → downgrade → upgrade` на одноразовой базе, `uv run alembic heads` показывает один head
 
 ## 3. Порты и адаптеры
 
 - [x] 3.1 Порт `EmbeddingGateway` (Protocol, `app/application/ports/`) с батчевым `embed(texts)`; проверка: тест контейнера — у порта есть адаптер и вызывающий код
-- [x] 3.2 Адаптер `OllamaEmbeddingGateway` (`app/infrastructure/`) — батч-вызов Ollama, сверка размерности ответа с `EMBEDDING_DIMENSION`; проверка: интеграционный тест с живым Ollama (маркер `integration`)
-- [x] 3.3 Порт `CodeProfileRepo` и адаптер `SqlAlchemyCodeProfileRepo` — `add_many` c `ON CONFLICT DO NOTHING`, `search` по косинусному расстоянию с фильтрами репозитория и модели и исключением дайджестов, редакция секретов `redact` в шве адаптера; проверка: интеграционные тесты на одноразовой базе (идемпотентность вставки, границы поиска)
+- [x] 3.2 Адаптер `OllamaEmbeddingGateway` (`app/infrastructure/`) — батч-вызов Ollama, сверка размерности ответа с `EMBEDDING_DIMENSION`; проверка: unit-тест с подменённым клиентом Ollama — контракт вызова и отказ при неверной размерности
+- [x] 3.3 Порт `CodeProfileRepo` и адаптер `SqlAlchemyCodeProfileRepo` — `add_many` c `ON CONFLICT DO NOTHING`, `search` по косинусному расстоянию с фильтрами репозитория и модели и исключением дайджестов, редакция секретов `redact` в шве адаптера; проверка: интеграционные тесты на одноразовой базе (идемпотентность вставки, границы поиска, редакция тела, сбой не калечит транзакцию)
 
 ## 4. Use case'ы и конфигурация
 
 - [x] 4.1 Use case `RetrieveSimilarCode` (`app/application/`) — батч-вложение текущих окон, поиск, отбор `pick_similar`, уровень `similar`; любой сбой — пустой уровень без влияния на прогон; проверка: unit-тест на фейках портов, включая недоступный эмбеддер
 - [x] 4.2 Use case `IngestProfile` (`app/application/`) — `build_chunks` → `redact` → вложение → `add_many`; сбой записи не меняет исход прогона; проверка: unit-тест на фейках портов
-- [x] 4.3 Настройки `EMBEDDING_MODEL`, `EMBEDDING_DIMENSION`, `OLLAMA_BASE_URL` и лимиты профиля в `app/config.py`, привязка портов в `app/infrastructure/container.py`; проверка: тест — отсутствующая настройка останавливает старт с именем параметра
+- [x] 4.3 Настройки `EMBEDDING_MODEL`, `OLLAMA_BASE_URL` и лимиты профиля в `app/config.py`, размерность — константа `EMBEDDING_DIMENSION` в домене, привязка портов в `app/infrastructure/container.py`; проверка: тест — отсутствующая настройка останавливает старт с именем параметра
 
 ## 5. Документация и инфраструктура
 

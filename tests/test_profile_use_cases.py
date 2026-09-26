@@ -14,6 +14,7 @@ from app.domain.profile import (
     ScoredChunk,
     SimilarChunk,
     SurroundingWindow,
+    content_digest,
 )
 
 NOW = dt.datetime(2026, 9, 26, 12, 0, tzinfo=dt.UTC)
@@ -46,6 +47,8 @@ class FakeProfileRepo:
         self.stored.extend(chunks)
 
     def search(self, repository_id, embedding, embedding_model, limit, exclude_digests):
+        if self.fail:
+            raise RuntimeError("search failed")
         return [
             c for c in self.search_results if c.content_sha256 not in exclude_digests
         ][:limit]
@@ -134,8 +137,35 @@ def test_retrieve_excludes_the_current_windows_own_digest() -> None:
     embedder = FakeEmbedder()
     repo = FakeProfileRepo()
     w = window()
+    own = ScoredChunk(
+        chunk_id="c1",
+        file_path=w.file_path,
+        start_line=1,
+        end_line=10,
+        content_sha256=content_digest(w.text),
+        body=w.text,
+        distance=0.0,
+    )
+    foreign = ScoredChunk(
+        chunk_id="c2",
+        file_path="lib/old.py",
+        start_line=1,
+        end_line=5,
+        content_sha256="d-other",
+        body="x = 1\n",
+        distance=0.2,
+    )
+    repo.search_results = [own, foreign]
     retrieve = RetrieveSimilarCode(embedder, repo, MODEL, limits())
-    assert retrieve.retrieve([w], REPO_ID) == []
+    assert retrieve.retrieve([w], REPO_ID) == [
+        SimilarChunk(
+            file_path="lib/old.py",
+            start_line=1,
+            end_line=5,
+            content_sha256="d-other",
+            body="x = 1\n",
+        )
+    ]
 
 
 def test_retrieve_survives_an_embedder_failure() -> None:

@@ -110,6 +110,26 @@ def test_redact_masks_an_aws_access_key() -> None:
     assert "AKIAIOSFODNN7EXAMPLE" not in redact(source)
 
 
+def test_redact_masks_an_aws_secret_access_key_assignment() -> None:
+    """Ключ без узнаваемого префикса: ловит присваивание, а не только голую строку."""
+    source = 'AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n'
+    redacted = redact(source)
+    assert "wJalrXUtnFEMI" not in redacted
+    assert "AWS_SECRET_ACCESS_KEY = [REDACTED]" in redacted
+
+
+def test_redact_masks_a_secret_assignment_without_quotes() -> None:
+    source = "secret_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"
+    redacted = redact(source)
+    assert "wJalrXUtnFEMI" not in redacted
+    assert "secret_key = [REDACTED]" in redacted
+
+
+def test_redact_leaves_short_secret_named_values_alone() -> None:
+    source = 'password = "hunter2"\ntoken: str = "abc"\n'
+    assert redact(source) == source
+
+
 def test_redact_masks_long_key_like_lines_but_keeps_the_indent() -> None:
     source = "    ghp_abcdef0123456789abcdef0123456789abcdefghij\n"
     redacted = redact(source)

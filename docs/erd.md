@@ -105,7 +105,7 @@ erDiagram
         text commit_sha "коммит прогона, давшего окно"
         text content_sha256 "хеш исходного текста окна"
         text body "текст окна после редакции секретов"
-        vector embedding "VECTOR(768), размерность задаёт конфигурация"
+        vector embedding "VECTOR(768), константа EMBEDDING_DIMENSION; смена — миграция"
         text embedding_model "поиск идёт только внутри одной модели"
         uuid id PK
         timestamptz created_at

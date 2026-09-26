@@ -18,8 +18,9 @@ down_revision: str | Sequence[str] | None = '0002'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# Должно совпадать с колонкой в модели: размерность задаёт конфигурация,
-# и пока она не в коде миграции, модели и схема разъезжаются молча.
+# Должно совпадать с `EMBEDDING_DIMENSION` в `app.domain.profile` и колонкой
+# в модели. В миграции — литерал, а не импорт: ревизия остаётся стабильной,
+# каков бы ни был код приложения на момент отката.
 EMBEDDING_DIM = 768
 
 
@@ -57,6 +58,14 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_repo_code_chunks_review_run_id'), table_name='repo_code_chunks')
     op.drop_index(op.f('ix_repo_code_chunks_repository_id'), table_name='repo_code_chunks')
     op.drop_table('repo_code_chunks')
-    # Данные профиля не нужны для корректности ревью, поэтому расширение
-    # уносим тоже: upgrade в чистом окружении должен работать без ручных шагов.
-    op.execute("DROP EXTENSION IF EXISTS vector")
+    # Расширение общее: уносим только если после ухода таблицы профиля не
+    # осталось чужих колонок типа vector — они не должны терять тип при
+    # откате нашей миграции.
+    remaining = op.get_bind().execute(
+        sa.text(
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE udt_name = 'vector'"
+        )
+    ).scalar_one()
+    if remaining == 0:
+        op.execute("DROP EXTENSION IF EXISTS vector")

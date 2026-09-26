@@ -1,7 +1,7 @@
 """Адаптер вложений Ollama: только транспорт.
 
 Никаких бизнес-правил: списки текстов на входе — списки векторов на выходе,
-в том же порядке. Размерность ответа сверяется с конфигурацией, потому что
+в том же порядке. Размерность ответа сверяется со схемой профиля, потому что
 несовпадение иначе всплыло бы много позже — на вставке в vector-столбец.
 """
 
@@ -27,7 +27,8 @@ class OllamaEmbeddingGateway:
             if len(vector) != self._dimension:
                 raise ValueError(
                     f"embedding model {self._model!r} returned dimension "
-                    f"{len(vector)}, expected {self._dimension}: "
-                    "EMBEDDING_DIMENSION disagrees with EMBEDDING_MODEL"
+                    f"{len(vector)}, expected {self._dimension} "
+                    "(EMBEDDING_DIMENSION in app.domain.profile): "
+                    "the model disagrees with the profile schema"
                 )
         return vectors

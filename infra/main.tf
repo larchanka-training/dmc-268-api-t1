@@ -132,6 +132,13 @@ resource "docker_container" "api" {
     "OLLAMA_BASE_URL=${var.ollama_base_url}",
   ]
 
+  # Linux Docker Engine не создаёт host.docker.internal сам (это делает
+  # Docker Desktop); host-gateway прокидывает адрес хоста для Ollama.
+  extra_hosts {
+    host = "host.docker.internal"
+    ip   = "host-gateway"
+  }
+
   ports {
     internal = 8000
     external = var.api_port

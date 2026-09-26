@@ -42,6 +42,7 @@ from app.domain.enums import (
     ReviewRunStatus,
     TriggerSource,
 )
+from app.domain.profile import EMBEDDING_DIMENSION
 from app.infrastructure.db.base import Base, TimestampMixin, UuidPrimaryKeyMixin
 
 _TERMINAL_SQL = ", ".join(f"'{s.value}'" for s in sorted(TERMINAL_STATUSES))
@@ -280,5 +281,7 @@ class RepoCodeChunkRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[list[float]] = mapped_column(Vector(768), nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(
+        Vector(EMBEDDING_DIMENSION), nullable=False
+    )
     embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)

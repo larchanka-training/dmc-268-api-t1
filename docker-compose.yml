@@ -47,6 +47,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Plain Linux Docker Engine does not provide host.docker.internal by itself
+    # (Docker Desktop does); host-gateway maps it to the host's gateway IP.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
 
 volumes:

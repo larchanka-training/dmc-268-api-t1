@@ -11,6 +11,7 @@ from sqlalchemy import Engine, create_engine
 
 from app.application.ports import EmbeddingGateway, UnitOfWork
 from app.config import Settings
+from app.domain.profile import EMBEDDING_DIMENSION
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.ollama_embedding_gateway import OllamaEmbeddingGateway
 
@@ -35,6 +36,6 @@ def build_container(settings: Settings) -> Container:
         embedding_gateway=OllamaEmbeddingGateway(
             base_url=settings.ollama_base_url,
             model=settings.embedding_model,
-            dimension=settings.embedding_dimension,
+            dimension=EMBEDDING_DIMENSION,
         ),
     )

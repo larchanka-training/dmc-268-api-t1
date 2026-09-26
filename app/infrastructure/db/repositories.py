@@ -314,31 +314,39 @@ class SqlAlchemyPublishedCommentRepo:
 
 class SqlAlchemyCodeProfileRepo:
     """Хранение чанков профиля. Редакция секретов — в этом шве: какой бы
-    путь ни привёл чанк в таблицу, секретом он сюда не попадёт."""
+    путь ни привёл чанк в таблицу, секретом он сюда не попадёт.
+
+    Оба метода идут через SAVEPOINT: профиль best-effort, и сбой записи или
+    поиска не должен переводить общую транзакцию прогона в состояние
+    rollback-required — иначе позже упадёт `commit` самого прогона.
+    """
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def add_many(self, chunks: Iterable[EmbeddedChunk]) -> None:
-        for chunk in chunks:
-            draft = chunk.draft
-            self._session.execute(
-                postgres_insert(RepoCodeChunkRow)
-                .values(
-                    id=new_id(),
-                    repository_id=draft.repository_id,
-                    review_run_id=draft.review_run_id,
-                    file_path=draft.file_path,
-                    start_line=draft.start_line,
-                    end_line=draft.end_line,
-                    commit_sha=draft.commit_sha,
-                    content_sha256=draft.content_sha256,
-                    body=redact(draft.body),
-                    embedding=list(chunk.embedding),
-                    embedding_model=chunk.embedding_model,
+        # Один savepoint на батч: неудачная вставка уносит батч целиком,
+        # но не работу прогона, уже проделанную в этой транзакции.
+        with self._session.begin_nested():
+            for chunk in chunks:
+                draft = chunk.draft
+                self._session.execute(
+                    postgres_insert(RepoCodeChunkRow)
+                    .values(
+                        id=new_id(),
+                        repository_id=draft.repository_id,
+                        review_run_id=draft.review_run_id,
+                        file_path=draft.file_path,
+                        start_line=draft.start_line,
+                        end_line=draft.end_line,
+                        commit_sha=draft.commit_sha,
+                        content_sha256=draft.content_sha256,
+                        body=redact(draft.body),
+                        embedding=list(chunk.embedding),
+                        embedding_model=chunk.embedding_model,
+                    )
+                    .on_conflict_do_nothing(constraint="uq_repo_code_chunks_digest"),
                 )
-                .on_conflict_do_nothing(constraint="uq_repo_code_chunks_digest"),
-            )
 
     def search(
         self,
@@ -355,9 +363,12 @@ class SqlAlchemyCodeProfileRepo:
         )
         if exclude_digests:
             query = query.where(RepoCodeChunkRow.content_sha256.not_in(exclude_digests))
-        rows = self._session.execute(
-            query.order_by(distance).limit(limit)
-        ).all()
+        # Чтение — тоже под savepoint: ошибка запроса (например, неверная
+        # размерность вектора) гасит только его, а не транзакцию прогона.
+        with self._session.begin_nested():
+            rows = self._session.execute(
+                query.order_by(distance).limit(limit)
+            ).all()
         return [
             ScoredChunk(
                 chunk_id=str(row.id),

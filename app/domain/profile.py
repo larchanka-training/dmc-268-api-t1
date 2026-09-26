@@ -13,11 +13,24 @@ from uuid import UUID
 
 _REDACTED = "[REDACTED]"
 
+# Пары (паттерн, замена): у большинства секретов замена — просто маркер,
+# присваивание же оставляет имя переменной, чтобы контекст читался.
 _SECRET_PATTERNS = (
     # AWS access key id, GitHub tokens, PEM private key headers.
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), _REDACTED),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), _REDACTED),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), _REDACTED),
+    # Секрет в присваивании: имя переменной намекает на секрет, значение —
+    # длинная строка ключевого алфавита. Покрывает ключи без узнаваемого
+    # префикса, вроде AWS secret access key.
+    (
+        re.compile(
+            r"\b([A-Za-z0-9_-]*(?:secret|token|password|api[_-]?key)"
+            r"[A-Za-z0-9_-]*)\s*[:=]\s*[\"']?[A-Za-z0-9_=/+.-]{20,}[\"']?",
+            re.IGNORECASE,
+        ),
+        r"\1 = [REDACTED]",
+    ),
 )
 
 
@@ -38,8 +51,8 @@ def redact(text: str) -> str:
     паттернов нужно здесь и только здесь.
     """
     result = text
-    for pattern in _SECRET_PATTERNS:
-        result = pattern.sub(_REDACTED, result)
+    for pattern, replacement in _SECRET_PATTERNS:
+        result = pattern.sub(replacement, result)
     lines = result.split("\n")
     redacted = []
     for line in lines:
@@ -49,6 +62,16 @@ def redact(text: str) -> str:
         else:
             redacted.append(line)
     return "\n".join(redacted)
+
+
+EMBEDDING_DIMENSION = 768
+"""Размерность векторов профиля — одна на модель, схему и gateway.
+
+Зафиксирована, а не настраивается: столбец `vector(N)` задаётся миграцией,
+и настройка расходилась бы со схемой молча, отключая профиль через best-effort.
+Смена размерности — это миграция схемы и перевложение всех чанков, отдельный
+change, а не правка окружения.
+"""
 
 
 @dataclass(frozen=True, slots=True)
