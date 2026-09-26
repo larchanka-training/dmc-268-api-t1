@@ -75,3 +75,9 @@ variable "rabbitmq_port" {
   description = "Host port for AMQP."
   default     = 5672
 }
+
+variable "ollama_base_url" {
+  type        = string
+  description = "Base URL of the Ollama service, as reachable from the API container. Profile embeddings fail best-effort when unreachable."
+  default     = "http://host.docker.internal:11434"
+}

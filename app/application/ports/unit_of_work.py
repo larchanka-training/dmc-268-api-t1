@@ -8,6 +8,7 @@ from types import TracebackType
 from typing import Protocol, Self
 
 from app.application.ports.repositories import (
+    CodeProfileRepo,
     ContextPayloadRepo,
     FindingRepo,
     MergeRequestRepo,
@@ -24,6 +25,7 @@ class UnitOfWork(Protocol):
     context_payloads: ContextPayloadRepo
     findings: FindingRepo
     published_comments: PublishedCommentRepo
+    code_profile: CodeProfileRepo
 
     def __enter__(self) -> Self: ...
 

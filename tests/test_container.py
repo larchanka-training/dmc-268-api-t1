@@ -9,7 +9,15 @@ from app.application import ports
 from app.config import Settings
 from app.infrastructure.container import build_container
 
-SETTINGS = Settings(database_url="postgresql+psycopg://test:test@localhost/test")
+SETTINGS = Settings(
+    database_url="postgresql+psycopg://test:test@localhost/test",
+    ollama_base_url="http://localhost:11434",
+)
+
+# Порты, чей адаптер не SqlAlchemy*: внешние системы.
+EXTERNAL_ADAPTERS = {
+    "EmbeddingGateway": "OllamaEmbeddingGateway",
+}
 
 
 def test_every_declared_port_has_an_adapter_and_a_caller() -> None:
@@ -19,7 +27,14 @@ def test_every_declared_port_has_an_adapter_and_a_caller() -> None:
     source = Path("app/infrastructure/db/repositories.py").read_text()
     source += Path("app/infrastructure/db/unit_of_work.py").read_text()
     for port in declared:
-        assert re.search(rf"SqlAlchemy{port}\b", source), f"{port} has no adapter"
+        adapter = EXTERNAL_ADAPTERS.get(port, f"SqlAlchemy{port}")
+        external = EXTERNAL_ADAPTERS.get(port)
+        haystack = (
+            Path("app/infrastructure/ollama_embedding_gateway.py").read_text()
+            if external
+            else source
+        )
+        assert re.search(rf"{adapter}\b", haystack), f"{port} has no adapter"
 
 
 def test_the_container_is_the_only_place_adapters_are_constructed() -> None:
@@ -40,6 +55,7 @@ def test_the_container_hands_out_a_unit_of_work() -> None:
             "context_payloads",
             "findings",
             "published_comments",
+            "code_profile",
         ):
             assert hasattr(uow, attribute)
 

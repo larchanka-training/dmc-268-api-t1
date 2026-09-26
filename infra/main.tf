@@ -11,7 +11,9 @@ resource "docker_volume" "rabbitmq" {
 }
 
 resource "docker_image" "postgres" {
-  name         = "postgres:18-alpine"
+  # Официальный образ postgres со встроенным pgvector: профиль репозитория
+  # держит векторы в той же базе, расширение создаёт миграция 0003.
+  name         = "pgvector/pgvector:pg18"
   keep_locally = true
 }
 
@@ -127,7 +129,15 @@ resource "docker_container" "api" {
 
   env = [
     "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
+    "OLLAMA_BASE_URL=${var.ollama_base_url}",
   ]
+
+  # Linux Docker Engine не создаёт host.docker.internal сам (это делает
+  # Docker Desktop); host-gateway прокидывает адрес хоста для Ollama.
+  extra_hosts {
+    host = "host.docker.internal"
+    ip   = "host-gateway"
+  }
 
   ports {
     internal = 8000

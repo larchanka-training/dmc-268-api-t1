@@ -23,6 +23,7 @@ TABLES = [
     "context_payloads",
     "findings",
     "published_comments",
+    "repo_code_chunks",
 ]
 
 
@@ -78,10 +79,22 @@ def test_children_restrict_deletion_of_their_parent() -> None:
         "context_payloads",
         "findings",
         "published_comments",
+        "repo_code_chunks",
     ):
         statement = ddl(table)
         assert "ON DELETE RESTRICT" in statement
         assert "CASCADE" not in statement
+
+
+def test_profile_chunks_have_a_vector_column() -> None:
+    statement = ddl("repo_code_chunks")
+    assert "VECTOR(768)" in statement
+
+
+def test_profile_chunks_dedupe_per_repository_by_digest() -> None:
+    assert re.search(
+        r"UNIQUE \(repository_id, content_sha256\)", ddl("repo_code_chunks")
+    )
 
 
 def test_merge_request_state_is_a_native_enum() -> None:
