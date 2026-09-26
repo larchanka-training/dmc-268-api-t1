@@ -5,12 +5,12 @@ name: Deploy
 
 on:
   push:
-    branches: [develop]
+    branches: [develop, feat/devops-cd] # ВРЕМЕННО: снять после приёмки
   workflow_dispatch:
 
+# packages: write нужен только job'у сборки — он и получает его у себя.
 permissions:
   contents: read
-  packages: write
 
 # Второй деплой ждёт первый, а не отменяет его: отменённый `tofu apply`
 # оставляет состояние заблокированным и стенд на полпути.
@@ -24,6 +24,9 @@ env:
 jobs:
   image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
       image: ${{ steps.meta.outputs.image }}
     steps:
@@ -115,7 +118,25 @@ jobs:
           export TF_VAR_internal_bind_ip="127.0.0.1"
 
           tofu init -input=false -no-color
-          tofu apply -input=false -no-color -auto-approve
+
+          # Упавшие миграции оставляют свой контейнер с ненулевым кодом, а
+          # Terraform не пересоздаёт ресурс, конфигурация которого не
+          # изменилась, — и постусловие падает на том же старом коде. Новый
+          # коммит расшивает это сам (меняется тег образа), а повторный прогон
+          # того же коммита залипал бы. Форсируем замену ровно в этом случае:
+          # здоровый путь остаётся идемпотентным.
+          # Подключение готовит шаг s3-backend выше.
+          replace=""
+          previous="$(ssh -o BatchMode=yes "$SSH_USER@$HOST" \
+            "docker inspect -f '{{.State.ExitCode}}' dmc268-migrate 2>/dev/null || echo отсутствует")"
+          case "$previous" in
+            отсутствует|0) ;;
+            *) echo "прошлые миграции завершились с кодом $previous — пересоздаём контейнер"
+               replace="-replace=docker_container.migrate" ;;
+          esac
+
+          # shellcheck disable=SC2086  # пустая строка не должна стать аргументом
+          tofu apply -input=false -no-color -auto-approve $replace
           echo "api_url=$(tofu output -raw api_url)" >> "$GITHUB_OUTPUT"
 
       # Уборка — гигиена, а не часть выката: неудача здесь означает мусор на
@@ -169,7 +190,6 @@ jobs:
         run: |
           set -uo pipefail
           if curl -fsS --max-time 10 "http://${HOST}:8000/health" >/dev/null 2>&1; then
-            echo "public=доступен" >> "$GITHUB_OUTPUT"
             echo "API отвечает по публичному адресу"
           else
             # Предыдущий шаг уже доказал, что сервис жив, значит дело не в нём.

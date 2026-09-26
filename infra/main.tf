@@ -122,11 +122,14 @@ resource "docker_container" "migrate" {
   ]
 
   # depends_on у docker-провайдера задаёт только порядок создания, но не ждёт
-  # готовности: postgres принимает соединения на несколько секунд позже, чем
-  # создаётся его контейнер. Поэтому ждём порт, а не надеемся на удачу.
+  # готовности. Прежняя версия ждала открытия TCP-порта — этого мало:
+  # PostgreSQL открывает порт раньше, чем начинает принимать запросы, и окно
+  # между этим давало бы редкие падения деплоя без причины. Повторяем саму
+  # миграцию: успех означает и готовность базы, и применённую схему. Настоящая
+  # ошибка в миграции тоже переживёт все попытки и уйдёт ненулевым кодом.
   command = [
     "sh", "-c",
-    "for i in $(seq 1 60); do python -c 'import socket;s=socket.socket();s.settimeout(2);s.connect((\"dmc268-postgres\",5432))' >/dev/null 2>&1 && break; sleep 2; done; exec alembic upgrade head",
+    "for i in $(seq 1 30); do alembic upgrade head && exit 0; sleep 2; done; exit 1",
   ]
 
   lifecycle {
@@ -161,5 +164,19 @@ resource "docker_container" "api" {
     internal = 8000
     external = var.api_port
     ip       = var.bind_ip
+  }
+
+  # /health существует именно для этого. Без healthcheck Docker знает только,
+  # что процесс не завершился, и зависший uvicorn остался бы живым в его
+  # представлении до следующего деплоя. curl в образе нет, python есть.
+  healthcheck {
+    test = [
+      "CMD-SHELL",
+      "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)\"",
+    ]
+    interval     = "30s"
+    timeout      = "5s"
+    retries      = 3
+    start_period = "10s"
   }
 }
