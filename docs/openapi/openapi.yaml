@@ -1,0 +1,260 @@
+openapi: 3.1.0
+info:
+  title: PR Review API
+  version: 0.1.0
+  description: >
+    Контракт Backend API для запуска автоматического ревью Pull Request
+    и получения состояния и результатов.
+
+paths:
+  /reviews:
+    post:
+      summary: Создать задачу ревью
+      operationId: createReview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateReviewRequest"
+      responses:
+        "202":
+          description: ReviewJob создан и поставлен в очередь
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewJob"
+        "400":
+          description: Некорректный запрос
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    get:
+      summary: Получить список задач ревью
+      operationId: listReviews
+      responses:
+        "200":
+          description: Список ReviewJob
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReviewJob"
+
+  /reviews/{reviewId}:
+    parameters:
+      - $ref: "#/components/parameters/ReviewId"
+    get:
+      summary: Получить состояние ReviewJob
+      operationId: getReview
+      responses:
+        "200":
+          description: Текущее состояние задачи
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewJob"
+        "404":
+          description: ReviewJob не найден
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /reviews/{reviewId}/findings:
+    parameters:
+      - $ref: "#/components/parameters/ReviewId"
+    get:
+      summary: Получить результаты ревью
+      operationId: getReviewFindings
+      responses:
+        "200":
+          description: Findings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Finding"
+        "404":
+          description: ReviewJob не найден
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+components:
+  parameters:
+    ReviewId:
+      name: reviewId
+      in: path
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    CreateReviewRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - repository
+        - pullRequestNumber
+      properties:
+        repository:
+          type: string
+          example: owner/repository
+        pullRequestNumber:
+          type: integer
+          minimum: 1
+          example: 123
+
+    ReviewStatus:
+      type: string
+      enum:
+        - QUEUED
+        - FETCHING_DIFF
+        - PARSING_CONTEXT
+        - LLM_PROCESSING
+        - COMPLETED
+        - FAILED
+
+    ReviewJob:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - repository
+        - pullRequestNumber
+        - status
+        - findingsCount
+        - attempt
+        - createdAt
+        - updatedAt
+        - error
+      properties:
+        id:
+          type: string
+        repository:
+          type: string
+        pullRequestNumber:
+          type: integer
+          minimum: 1
+        headCommitSha:
+          type:
+            - string
+            - "null"
+        status:
+          $ref: "#/components/schemas/ReviewStatus"
+        findingsCount:
+          type: integer
+          minimum: 0
+        attempt:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ReviewError"
+            - type: "null"
+
+    Finding:
+      type: object
+      additionalProperties: false
+      required:
+        - filePath
+        - startLine
+        - endLine
+        - category
+        - severity
+        - title
+        - explanation
+      properties:
+        filePath:
+          type: string
+        startLine:
+          type: integer
+          minimum: 1
+        endLine:
+          type: integer
+          minimum: 1
+        category:
+          type: string
+          enum:
+            - BUG
+            - SECURITY
+            - PERFORMANCE
+            - MAINTAINABILITY
+            - STYLE
+            - OTHER
+        severity:
+          type: string
+          enum:
+            - LOW
+            - MEDIUM
+            - HIGH
+            - CRITICAL
+        title:
+          type: string
+          maxLength: 200
+        explanation:
+          type: string
+        suggestion:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required:
+                - diff
+              properties:
+                diff:
+                  type: string
+            - type: "null"
+
+    ReviewError:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+        - retryable
+      properties:
+        code:
+          type: string
+          enum:
+            - GITHUB_AUTH_ERROR
+            - PR_NOT_FOUND
+            - REPOSITORY_NOT_FOUND
+            - GITHUB_UNAVAILABLE
+            - CONTEXT_PARSING_ERROR
+            - LLM_RATE_LIMITED
+            - LLM_TIMEOUT
+            - LLM_UNAVAILABLE
+            - LLM_INVALID_OUTPUT
+            - INTERNAL_ERROR
+        message:
+          type: string
+        retryable:
+          type: boolean
+        attempt:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+
+    ApiError:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+        message:
+          type: string
