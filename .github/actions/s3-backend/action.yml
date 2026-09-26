@@ -6,8 +6,12 @@
 # Reusable workflow дал бы второй job и туннель пришлось бы открывать заново —
 # то есть скопировать. У этого action два вызывающих: tfstate-backend.yml и
 # deploy.yml.
+# Побочный, но существенный эффект: первый шаг готовит SSH-подключение
+# (~/.ssh/ci_key, known_hosts, config с IdentityFile) для ВСЕГО job'а, а не
+# только для шагов этого action. Шаги вызывающего workflow, которые ходят на
+# сервер, полагаются на это и сломаются, если поставить их раньше.
 name: S3 state backend
-description: Поднимает хранилище состояния на сервере, открывает к нему туннель и готовит бакет.
+description: Поднимает хранилище состояния, открывает туннель, готовит бакет и настраивает SSH для всего job'а.
 
 inputs:
   ssh_key:
@@ -115,7 +119,7 @@ runs:
         rc=0
         out="$(printf '%s=%s\n%s=%s\n' \
             "$S3_CRED_USER_VAR" "$S3_USER" "$S3_CRED_PASS_VAR" "$S3_PASSWORD" \
-          | ssh -i ~/.ssh/ci_key -o BatchMode=yes -o ConnectTimeout=15 \
+          | ssh -o BatchMode=yes -o ConnectTimeout=15 \
             "$SSH_USER@$HOST" "$remote" 2>&1)" || rc=$?
 
         printf '%s\n' "$out"
@@ -137,7 +141,7 @@ runs:
         set -euo pipefail
         # ExitOnForwardFailure обязателен: без него ssh уходит в фон даже когда
         # проброс не удался, и всё падает позже с невнятной ошибкой.
-        ssh -i ~/.ssh/ci_key -o BatchMode=yes -o ExitOnForwardFailure=yes \
+        ssh -o BatchMode=yes -o ExitOnForwardFailure=yes \
           -f -N -L "${S3_PORT}:127.0.0.1:${S3_PORT}" "$SSH_USER@$HOST"
 
         for _ in $(seq 1 20); do

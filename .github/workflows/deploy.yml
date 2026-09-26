@@ -5,7 +5,7 @@ name: Deploy
 
 on:
   push:
-    branches: [develop]
+    branches: [develop, feat/devops-cd] # ВРЕМЕННО: снять после приёмки
   workflow_dispatch:
 
 permissions:
@@ -125,6 +125,8 @@ jobs:
       # Масштаб скромный: слои у тегов общие, и удаление двух образов API
       # освободило 99 КБ. По-настоящему место занимает смена зависимостей —
       # тогда на диск ложится новый набор слоёв, и убрать его больше некому.
+      # Подключение (ключ, known_hosts, ~/.ssh/config) готовит шаг s3-backend
+      # выше. Переставить этот шаг перед ним — получить «Permission denied».
       - name: Убрать устаревшие образы
         continue-on-error: true
         env:
@@ -132,9 +134,10 @@ jobs:
           HOST: ${{ vars.VPS_DMC268_IP_T1 }}
         run: |
           set -uo pipefail
-          ssh -i ~/.ssh/ci_key -o BatchMode=yes "$SSH_USER@$HOST" \
+          ssh -o BatchMode=yes "$SSH_USER@$HOST" \
             "docker image prune -af --filter until=168h" 2>&1 | tail -5
 
+      # Подключение готовит шаг s3-backend выше — см. комментарий к уборке.
       - name: Проверить, что API жив (через туннель)
         env:
           SSH_USER: ${{ secrets.VPS_DMC268_U }}
@@ -144,7 +147,7 @@ jobs:
           # Через туннель, а не по публичному адресу: так «сервис мёртв» не
           # путается с «порт закрыт снаружи». Публичную доступность проверяет
           # следующий шаг.
-          ssh -i ~/.ssh/ci_key -o BatchMode=yes -o ExitOnForwardFailure=yes \
+          ssh -o BatchMode=yes -o ExitOnForwardFailure=yes \
             -f -N -L 18000:127.0.0.1:8000 "$SSH_USER@$HOST"
 
           for _ in $(seq 1 30); do
@@ -156,7 +159,7 @@ jobs:
           done
 
           echo "::error::/health не ответил за минуту"
-          ssh -i ~/.ssh/ci_key -o BatchMode=yes "$SSH_USER@$HOST" \
+          ssh -o BatchMode=yes "$SSH_USER@$HOST" \
             "docker logs --tail 50 dmc268-api 2>&1; echo '--- миграции ---'; docker logs --tail 30 dmc268-migrate 2>&1" || true
           exit 1
 
