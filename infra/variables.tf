@@ -22,12 +22,6 @@ variable "service_host" {
   default     = "127.0.0.1"
 }
 
-variable "python_version" {
-  type        = string
-  description = "Python version for the API image."
-  default     = "3.14"
-}
-
 variable "api_port" {
   type        = number
   description = "Host port for the FastAPI HTTP server."
@@ -74,4 +68,22 @@ variable "rabbitmq_port" {
   type        = number
   description = "Host port for AMQP."
   default     = 5672
+}
+
+variable "api_image" {
+  type        = string
+  description = "Полная ссылка на образ API в реестре, с тегом по commit sha."
+}
+
+variable "registry_username" {
+  type        = string
+  description = "Пользователь реестра образов. В CI — github.actor."
+  default     = ""
+}
+
+variable "registry_password" {
+  type        = string
+  description = "Токен реестра образов. В CI — GITHUB_TOKEN, живёт один прогон."
+  default     = ""
+  sensitive   = true
 }

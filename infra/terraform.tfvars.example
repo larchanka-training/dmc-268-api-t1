@@ -1,13 +1,32 @@
-docker_host        = "unix:///var/run/docker.sock"
-bind_ip            = "127.0.0.1"
-internal_bind_ip   = "127.0.0.1"
-service_host       = "127.0.0.1"
-python_version     = "3.14"
-api_port           = 8000
-postgres_user      = "dmc268"
-postgres_password  = "CHANGE_ME_POSTGRES"
-postgres_db        = "dmc268"
-postgres_port      = 5432
-rabbitmq_user      = "dmc268"
-rabbitmq_password  = "CHANGE_ME_RABBITMQ"
-rabbitmq_port      = 5672
+# Пример для локального запуска. В CI этих значений нет: там переменные
+# приходят через TF_VAR_* из секретов, а terraform.tfvars не существует.
+#
+# Важно: с появлением backend.tf локальный `tofu apply` перестал быть
+# самодостаточным — состояние лежит в хранилище на сервере, и к нему нужен
+# туннель плюс учётные данные. Подробности в README.md.
+
+# --- обязательные (без них apply не стартует) ---
+
+# Полная ссылка на образ API с тегом. В CI — тег по commit sha из ghcr.
+api_image         = "ghcr.io/larchanka-training/dmc-268-api-t1:CHANGE_ME_TAG"
+postgres_password = "CHANGE_ME_POSTGRES"
+rabbitmq_password = "CHANGE_ME_RABBITMQ"
+
+# --- учётные данные реестра образов ---
+# В CI — github.actor и GITHUB_TOKEN, живущие один прогон. Локально нужны
+# только если образ лежит в приватном пакете.
+registry_username = ""
+registry_password = ""
+
+# --- остальное имеет значения по умолчанию ---
+
+docker_host      = "unix:///var/run/docker.sock"
+bind_ip          = "127.0.0.1"
+internal_bind_ip = "127.0.0.1"
+service_host     = "127.0.0.1"
+api_port         = 8000
+postgres_user    = "dmc268"
+postgres_db      = "dmc268"
+postgres_port    = 5432
+rabbitmq_user    = "dmc268"
+rabbitmq_port    = 5672

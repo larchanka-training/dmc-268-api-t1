@@ -1,0 +1,221 @@
+# Деплой бэкенда на стенд. Катит только develop: сервер один, и два источника
+# деплоя дрались бы за него (решение записано в #22).
+# См. openspec/changes/deploy-api-stack/.
+name: Deploy
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+# packages: write нужен только job'у сборки — он и получает его у себя.
+permissions:
+  contents: read
+
+# Второй деплой ждёт первый, а не отменяет его: отменённый `tofu apply`
+# оставляет состояние заблокированным и стенд на полпути.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Посчитать имя образа
+        id: meta
+        run: |
+          set -euo pipefail
+          # Тег по commit sha, а не по хешу исходников: так видно, какой именно
+          # коммит сейчас на стенде.
+          image="$(printf '%s' "$IMAGE_NAME" | tr 'A-Z' 'a-z'):${GITHUB_SHA}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "$image"
+
+      # Без этого шага buildx работает на docker-драйвере, а тот не умеет
+      # экспортировать кеш: `cache-to: type=gha` падает с «Cache export is not
+      # supported for the docker driver».
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Убедиться, что образ забирается обратно
+        run: |
+          set -euo pipefail
+          docker manifest inspect "${{ steps.meta.outputs.image }}" > /dev/null
+          echo "образ доступен по тегу"
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-latest
+    # packages: read обязателен — образ тянется из приватного пакета, и его
+    # забирает docker-провайдер тем же GITHUB_TOKEN. Без него реестр отвечает
+    # «denied», а не чем-нибудь понятным.
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.12.6
+
+      # Хранилище состояния и туннель к нему. Тот же composite action, что и у
+      # tfstate-backend.yml: снесённый контейнер чинится этим же деплоем.
+      - uses: ./.github/actions/s3-backend
+        with:
+          ssh_key: ${{ secrets.VPS_DMC268_KEY_T1 }}
+          ssh_user: ${{ secrets.VPS_DMC268_U }}
+          host: ${{ vars.VPS_DMC268_IP_T1 }}
+          s3_user: ${{ secrets.S3_USER_DMC268_T1 }}
+          s3_password: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
+          container: dmc268-s3
+          volume: dmc268-s3-data
+          port: "9000"
+          image: rustfs/rustfs:1.0.0
+          cred_user_var: RUSTFS_ACCESS_KEY
+          cred_pass_var: RUSTFS_SECRET_KEY
+          bucket: dmc268-tfstate
+
+      - name: Применить конфигурацию
+        id: apply
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
+          AWS_DEFAULT_REGION: us-east-1
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+          TF_VAR_api_image: ${{ needs.image.outputs.image }}
+          TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
+          TF_VAR_rabbitmq_password: ${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}
+          TF_VAR_registry_username: ${{ github.actor }}
+          TF_VAR_registry_password: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Наружу смотрит только API. База и брокер остаются на петле сервера:
+          # к ним ходит API изнутри docker-сети, публиковать их незачем.
+          export TF_VAR_docker_host="ssh://${SSH_USER}@${HOST}"
+          export TF_VAR_service_host="$HOST"
+          export TF_VAR_bind_ip="0.0.0.0"
+          export TF_VAR_internal_bind_ip="127.0.0.1"
+
+          tofu init -input=false -no-color
+
+          # Упавшие миграции оставляют свой контейнер с ненулевым кодом, а
+          # Terraform не пересоздаёт ресурс, конфигурация которого не
+          # изменилась, — и постусловие падает на том же старом коде. Новый
+          # коммит расшивает это сам (меняется тег образа), а повторный прогон
+          # того же коммита залипал бы. Форсируем замену ровно в этом случае:
+          # здоровый путь остаётся идемпотентным.
+          # Подключение готовит шаг s3-backend выше.
+          # Фильтр по цифрам обязателен: для несуществующего контейнера
+          # `docker inspect` печатает пустую строку в stdout и лишь затем
+          # отдаёт ненулевой код. Без фильтра в переменную попадали обе строки,
+          # и замена форсировалась всякий раз, когда контейнера нет.
+          replace=""
+          previous="$(ssh -o BatchMode=yes "$SSH_USER@$HOST" \
+            "docker inspect -f '{{.State.ExitCode}}' dmc268-migrate 2>/dev/null || true" \
+            | grep -E '^[0-9]+$' | tail -1)"
+          case "$previous" in
+            "") echo "контейнера миграций нет — заменять нечего" ;;
+            0) echo "прошлые миграции прошли успешно" ;;
+            *) echo "прошлые миграции завершились с кодом $previous — пересоздаём контейнер"
+               replace="-replace=docker_container.migrate" ;;
+          esac
+
+          # shellcheck disable=SC2086  # пустая строка не должна стать аргументом
+          tofu apply -input=false -no-color -auto-approve $replace
+          echo "api_url=$(tofu output -raw api_url)" >> "$GITHUB_OUTPUT"
+
+      # Уборка — гигиена, а не часть выката: неудача здесь означает мусор на
+      # диске, а не сломанный стенд, поэтому шаг не роняет прогон. Порог в
+      # неделю оставляет предыдущие теги на месте для отката.
+      #
+      # Масштаб скромный: слои у тегов общие, и удаление двух образов API
+      # освободило 99 КБ. По-настоящему место занимает смена зависимостей —
+      # тогда на диск ложится новый набор слоёв, и убрать его больше некому.
+      # Подключение (ключ, known_hosts, ~/.ssh/config) готовит шаг s3-backend
+      # выше. Переставить этот шаг перед ним — получить «Permission denied».
+      - name: Убрать устаревшие образы
+        continue-on-error: true
+        env:
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -uo pipefail
+          ssh -o BatchMode=yes "$SSH_USER@$HOST" \
+            "docker image prune -af --filter until=168h" 2>&1 | tail -5
+
+      # Подключение готовит шаг s3-backend выше — см. комментарий к уборке.
+      - name: Проверить, что API жив (через туннель)
+        env:
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -uo pipefail
+          # Через туннель, а не по публичному адресу: так «сервис мёртв» не
+          # путается с «порт закрыт снаружи». Публичную доступность проверяет
+          # следующий шаг.
+          ssh -o BatchMode=yes -o ExitOnForwardFailure=yes \
+            -f -N -L 18000:127.0.0.1:8000 "$SSH_USER@$HOST"
+
+          for _ in $(seq 1 30); do
+            if curl -fsS --max-time 3 http://127.0.0.1:18000/health >/dev/null 2>&1; then
+              echo "/health отвечает"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "::error::/health не ответил за минуту"
+          ssh -o BatchMode=yes "$SSH_USER@$HOST" \
+            "docker logs --tail 50 dmc268-api 2>&1; echo '--- миграции ---'; docker logs --tail 30 dmc268-migrate 2>&1" || true
+          exit 1
+
+      - name: Проверить публичную доступность
+        env:
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -uo pipefail
+          if curl -fsS --max-time 10 "http://${HOST}:8000/health" >/dev/null 2>&1; then
+            echo "API отвечает по публичному адресу"
+          else
+            # Предыдущий шаг уже доказал, что сервис жив, значит дело не в нём.
+            echo "::warning::сервис жив, но снаружи не отвечает — похоже на файрвол или bind_ip"
+          fi
+
+      - name: Записать результат в summary
+        if: always()
+        run: |
+          {
+            echo "## Деплой"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Образ | \`${{ needs.image.outputs.image }}\` |"
+            echo "| Адрес | ${{ steps.apply.outputs.api_url || 'не получен' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
