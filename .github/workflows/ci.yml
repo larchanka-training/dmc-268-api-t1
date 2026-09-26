@@ -52,7 +52,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18-alpine
+        # Postgres со встроенным pgvector: миграция 0003 создаёт extension
+        # vector, и на чистом postgres:18-alpine тесты падают с FeatureNotSupported.
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_USER: dmc268
           POSTGRES_PASSWORD: dmc268
