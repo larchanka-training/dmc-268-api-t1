@@ -47,7 +47,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(['repository_id'], ['repositories.id'], ondelete='RESTRICT'),
         sa.ForeignKeyConstraint(['review_run_id'], ['review_runs.id'], ondelete='RESTRICT'),
         sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('repository_id', 'content_sha256', name='uq_repo_code_chunks_digest'),
+        sa.UniqueConstraint('repository_id', 'file_path', 'start_line', 'content_sha256', name='uq_repo_code_chunks_window'),
     )
     op.create_index(op.f('ix_repo_code_chunks_repository_id'), 'repo_code_chunks', ['repository_id'], unique=False)
     op.create_index(op.f('ix_repo_code_chunks_review_run_id'), 'repo_code_chunks', ['review_run_id'], unique=False)

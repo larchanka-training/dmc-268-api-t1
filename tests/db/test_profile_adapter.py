@@ -60,6 +60,8 @@ def a_chunk(
     body: str = "x = 1\n",
     model: str = MODEL,
     axis: int = 0,
+    path: str = "app/main.py",
+    start: int = 1,
 ) -> EmbeddedChunk:
     """Чанк с вектором вдоль одной оси: `axis` задаёт «о чём» этот код."""
     embedding = [0.0] * EMBEDDING_DIMENSION
@@ -68,9 +70,9 @@ def a_chunk(
         draft=ChunkDraft(
             review_run_id=run_id,
             repository_id=repo_id,
-            file_path="app/main.py",
-            start_line=1,
-            end_line=10,
+            file_path=path,
+            start_line=start,
+            end_line=start + 9,
             commit_sha="abc123",
             content_sha256=digest,
             body=body,
@@ -109,17 +111,34 @@ def search_all(work, repo_id: UUID, *, model: str = MODEL):
     )
 
 
-def test_add_many_is_idempotent_for_the_same_digest(uow, seeded) -> None:
+def test_add_many_is_idempotent_for_the_same_window(uow, seeded) -> None:
     repo, _, run = seeded
     with uow as work:
         work.code_profile.add_many([a_chunk(repo.id, run.id)])
         work.commit()
     with uow as work:
-        # повторный прогон того же коммита производит те же дайджесты
+        # повторный прогон того же коммита производит те же окна
         work.code_profile.add_many([a_chunk(repo.id, run.id)])
         work.commit()
     with uow as work:
         assert len(search_all(work, repo.id)) == 1
+
+
+def test_same_code_in_two_files_keeps_both_windows(uow, seeded) -> None:
+    """Регрессия ревью: дедуп по голому дайджесту замораживал координаты
+    первого вхождения — окно в b.py искалось бы по a.py:1-10."""
+    repo, _, run = seeded
+    with uow as work:
+        work.code_profile.add_many(
+            [
+                a_chunk(repo.id, run.id, digest="same", path="a.py", start=1),
+                a_chunk(repo.id, run.id, digest="same", path="b.py", start=900),
+            ]
+        )
+        work.commit()
+    with uow as work:
+        found = search_all(work, repo.id)
+    assert {(c.file_path, c.start_line) for c in found} == {("a.py", 1), ("b.py", 900)}
 
 
 def test_search_stays_inside_the_repository(uow, seeded) -> None:

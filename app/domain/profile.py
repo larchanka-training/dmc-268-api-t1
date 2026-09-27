@@ -36,10 +36,18 @@ _SECRET_PATTERNS = (
 
 def _looks_like_secret(text: str) -> bool:
     stripped = text.strip()
-    return (
-        len(stripped) >= 32
-        and re.fullmatch(r"[A-Za-z0-9_=/+.-]+", stripped) is not None
-    )
+    if len(stripped) < 32:
+        return False
+    if re.fullmatch(r"[A-Za-z0-9_=/+.-]+", stripped) is None:
+        return False
+    # Требование классов символов отсекает не-секреты того же алфавита:
+    # пути и dotted-имена — без цифр, SCREAMING_SNAKE-константы — без
+    # нижнего регистра. Ключи вроде AWS secret access key смешивают регистр
+    # и цифры.
+    has_upper = any(c.isupper() for c in stripped)
+    has_lower = any(c.islower() for c in stripped)
+    has_digit = any(c.isdigit() for c in stripped)
+    return has_upper and has_lower and has_digit
 
 
 def redact(text: str) -> str:
@@ -76,11 +84,15 @@ change, а не правка окружения.
 
 @dataclass(frozen=True, slots=True)
 class ProfileLimits:
-    """Лимиты профиля; значения приходят из конфигурации аргументом."""
+    """Лимиты профиля; значения приходят из конфигурации аргументом.
 
-    max_chunk_bytes: int = 4096
-    retrieval_top_k: int = 5
-    retrieval_byte_budget: int = 16384
+    Без дефолтов: единственное место значений — `Settings`, чтобы лимит
+    нельзя было поменять в одном месте и не заметить в другом.
+    """
+
+    max_chunk_bytes: int
+    retrieval_top_k: int
+    retrieval_byte_budget: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,11 +155,14 @@ def build_chunks(
     """Окна → черновики чанков, порядок входа сохраняется.
 
     Сверхлимитное окно пропускается целиком: чанк из половины окна врал бы
-    про то, что ревьюер видел только его часть.
+    про то, что ревьюер видел только его часть. NUL-байты вырезаются до
+    дайджеста и редакции: PostgreSQL их в `text` не принимает, один такой
+    байт унёс бы весь батч вставки, а дайджест и тело не разошлись бы.
     """
     drafts: list[ChunkDraft] = []
     for window in windows:
-        if len(window.text.encode("utf-8")) > limits.max_chunk_bytes:
+        text = window.text.replace("\x00", "")
+        if len(text.encode("utf-8")) > limits.max_chunk_bytes:
             continue
         drafts.append(
             ChunkDraft(
@@ -157,8 +172,8 @@ def build_chunks(
                 start_line=window.start_line,
                 end_line=window.end_line,
                 commit_sha=window.commit_sha,
-                content_sha256=content_digest(window.text),
-                body=redact(window.text),
+                content_sha256=content_digest(text),
+                body=redact(text),
             )
         )
     return drafts

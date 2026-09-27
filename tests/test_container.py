@@ -60,6 +60,38 @@ def test_the_container_hands_out_a_unit_of_work() -> None:
             assert hasattr(uow, attribute)
 
 
+def test_profile_limits_flow_from_settings_into_the_use_cases() -> None:
+    """Регрессия ревью: настройки читаются, а не дублируются дефолтами домена."""
+    settings = Settings(
+        database_url=SETTINGS.database_url,
+        ollama_base_url=SETTINGS.ollama_base_url,
+        profile_max_chunk_bytes=111,
+        profile_retrieval_top_k=2,
+        profile_retrieval_byte_budget=333,
+    )
+    container = build_container(settings)
+    assert container.profile_limits.max_chunk_bytes == 111
+    assert container.profile_limits.retrieval_top_k == 2
+    assert container.profile_limits.retrieval_byte_budget == 333
+    with container.unit_of_work() as uow:
+        retrieve = container.retrieve_similar_code(uow)
+        ingest = container.ingest_profile(uow)
+    assert retrieve._limits is container.profile_limits
+    assert ingest._limits is container.profile_limits
+
+
+def test_profile_limits_have_no_hidden_defaults() -> None:
+    """Единственное место значений — Settings: у лимитов домена нет дефолтов."""
+    from dataclasses import MISSING, fields
+
+    from app.domain.profile import ProfileLimits
+
+    for field in fields(ProfileLimits):
+        assert field.default is MISSING and field.default_factory is MISSING, (
+            f"ProfileLimits.{field.name} не должен иметь дефолта"
+        )
+
+
 def test_the_fastapi_dependency_is_port_typed() -> None:
     """Зависимость, которую видит router, обещает порт, а не реализацию."""
     signature = inspect.signature(get_unit_of_work)

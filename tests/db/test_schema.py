@@ -91,9 +91,12 @@ def test_profile_chunks_have_a_vector_column() -> None:
     assert "VECTOR(768)" in statement
 
 
-def test_profile_chunks_dedupe_per_repository_by_digest() -> None:
+def test_profile_chunks_dedupe_by_window_not_by_bare_digest() -> None:
+    """Тот же код в другом файле или на другой строке — отдельный чанк:
+    поиск отдаёт настоящие координаты, а не координаты первого вхождения."""
     assert re.search(
-        r"UNIQUE \(repository_id, content_sha256\)", ddl("repo_code_chunks")
+        r"UNIQUE \(repository_id, file_path, start_line, content_sha256\)",
+        ddl("repo_code_chunks"),
     )
 
 

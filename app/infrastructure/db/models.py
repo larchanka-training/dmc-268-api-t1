@@ -257,15 +257,21 @@ class RepoCodeChunkRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
 
     В этой таблице, как и в `context_payloads`, хранится чужой исходный код;
     `body` сюда попадает после `redact`. Уникальность
-    `(repository_id, content_sha256)` делает накопление идемпотентным:
-    тот же код из повторного прогона не задвоится.
+    `(repository_id, file_path, start_line, content_sha256)` делает
+    накопление идемпотентным: повторное окно не задвоится, а тот же код
+    в другом файле или на другой строке ляжет отдельным чанком со своими
+    координатами — поиск обязан отдавать настоящие путь и границы.
     """
 
     __tablename__ = "repo_code_chunks"
 
     __table_args__ = (
         UniqueConstraint(
-            "repository_id", "content_sha256", name="uq_repo_code_chunks_digest"
+            "repository_id",
+            "file_path",
+            "start_line",
+            "content_sha256",
+            name="uq_repo_code_chunks_window",
         ),
     )
 

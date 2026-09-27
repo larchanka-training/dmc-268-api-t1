@@ -95,6 +95,18 @@ def test_repeated_window_yields_the_same_digest() -> None:
     assert first.content_sha256 == second.content_sha256
 
 
+def test_build_chunks_strips_nul_bytes_before_digest_and_body() -> None:
+    """Регрессия ревью: один NUL-байт в окне уносил весь батч вставки —
+    PostgreSQL не принимает его в text. Вырезаем до дайджеста, чтобы тело
+    и дайджест не разошлись."""
+    dirty = "def handler():\x00\n    return 1\n"
+    clean = "def handler():\n    return 1\n"
+    draft = build_chunks([window(text=dirty)], REPO_ID, RUN_ID, LIMITS)[0]
+    assert "\x00" not in draft.body
+    assert draft.content_sha256 == hashlib.sha256(clean.encode("utf-8")).hexdigest()
+    assert draft.body == clean
+
+
 # --- redact -----------------------------------------------------------------
 
 
@@ -136,8 +148,26 @@ def test_redact_masks_long_key_like_lines_but_keeps_the_indent() -> None:
     assert redacted == "    [REDACTED]\n"
 
 
+def test_redact_masks_a_bare_mixed_case_key() -> None:
+    """Голый AWS-подобный ключ без присваивания: ловит эвристика строки."""
+    source = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"
+    assert redact(source) == "[REDACTED]\n"
+
+
 def test_redact_leaves_ordinary_code_alone() -> None:
     source = "def handler(value):\n    return value * 2\n"
+    assert redact(source) == source
+
+
+def test_redact_leaves_long_non_secret_lines_alone() -> None:
+    """Регрессия ревью: путь, dotted-имя и SCREAMING-константа того же
+    алфавита и длины — не секреты: в них нет комбинации смешанного
+    регистра и цифр."""
+    source = (
+        "tests/fixtures/deeply/nested/path/to/expected_output.json\n"
+        "app.infrastructure.db.repositories.SqlAlchemyCodeProfileRepo\n"
+        "MAX_RETRIES_BEFORE_GIVING_UP_ON_THE_JOB=5\n"
+    )
     assert redact(source) == source
 
 

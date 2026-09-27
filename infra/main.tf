@@ -134,7 +134,9 @@ resource "docker_container" "api" {
 
   # Linux Docker Engine не создаёт host.docker.internal сам (это делает
   # Docker Desktop); host-gateway прокидывает адрес хоста для Ollama.
-  extra_hosts {
+  # В провайдере kreuzwerker/docker это блок `host` — `extra_hosts`, как в
+  # Compose, здесь нет.
+  host {
     host = "host.docker.internal"
     ip   = "host-gateway"
   }

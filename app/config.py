@@ -22,6 +22,7 @@ class Settings(BaseSettings):
         description="PostgreSQL DSN, e.g. postgresql+psycopg://user:pass@host/db",
     )
     ollama_base_url: str = Field(
+        default="http://localhost:11434",
         description="Base URL of the self-hosted Ollama service, e.g. http://ollama:11434",
     )
     embedding_model: str = Field(

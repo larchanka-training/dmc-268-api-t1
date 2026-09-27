@@ -345,7 +345,7 @@ class SqlAlchemyCodeProfileRepo:
                         embedding=list(chunk.embedding),
                         embedding_model=chunk.embedding_model,
                     )
-                    .on_conflict_do_nothing(constraint="uq_repo_code_chunks_digest"),
+                    .on_conflict_do_nothing(constraint="uq_repo_code_chunks_window"),
                 )
 
     def search(
