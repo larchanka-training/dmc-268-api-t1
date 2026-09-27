@@ -85,6 +85,36 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /webhooks/{provider}:
+    parameters:
+      - name: provider
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Provider"
+    post:
+      summary: Принять webhook-доставку от хостинга и поставить ревью в очередь
+      operationId: receiveWebhook
+      responses:
+        "202":
+          description: Доставка принята, ReviewJob создан или найден существующий
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewJob"
+        "401":
+          description: Подпись доставки не прошла проверку
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Для этого коммита уже есть нетерминальный ReviewJob
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
 components:
   parameters:
     ReviewId:
@@ -95,53 +125,86 @@ components:
         type: string
 
   schemas:
+    Provider:
+      type: string
+      enum:
+        - github
+        - gitlab
+
+    TriggerSource:
+      type: string
+      enum:
+        - webhook
+        - manual
+        - mention
+
     CreateReviewRequest:
       type: object
       additionalProperties: false
       required:
-        - repository
+        - provider
+        - providerRepositoryId
         - pullRequestNumber
+        - trigger
       properties:
-        repository:
+        provider:
+          $ref: "#/components/schemas/Provider"
+        providerRepositoryId:
           type: string
-          example: owner/repository
+          description: Идентификатор репозитория у провайдера (repositories.provider_id).
+          example: "123456789"
         pullRequestNumber:
           type: integer
           minimum: 1
           example: 123
+        trigger:
+          $ref: "#/components/schemas/TriggerSource"
 
     ReviewStatus:
       type: string
       enum:
-        - QUEUED
-        - FETCHING_DIFF
-        - PARSING_CONTEXT
-        - LLM_PROCESSING
-        - COMPLETED
-        - FAILED
+        - queued
+        - building_context
+        - analysing
+        - publishing
+        - completed
+        - failed
+        - cancelled
 
     ReviewJob:
       type: object
       additionalProperties: false
       required:
         - id
-        - repository
+        - provider
+        - providerRepositoryId
         - pullRequestNumber
+        - trigger
         - status
         - findingsCount
-        - attempt
+        - rejectedFindings
         - createdAt
         - updatedAt
+        - lastProgressAt
         - error
       properties:
         id:
           type: string
-        repository:
+          description: reviewRunId.
+        provider:
+          $ref: "#/components/schemas/Provider"
+        providerRepositoryId:
           type: string
         pullRequestNumber:
           type: integer
           minimum: 1
+        trigger:
+          $ref: "#/components/schemas/TriggerSource"
         headCommitSha:
+          type:
+            - string
+            - "null"
+        baseCommitSha:
           type:
             - string
             - "null"
@@ -150,8 +213,22 @@ components:
         findingsCount:
           type: integer
           minimum: 0
-        attempt:
+        rejectedFindings:
           type: integer
+          minimum: 0
+        model:
+          type:
+            - string
+            - "null"
+        tokensUsed:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        durationSeconds:
+          type:
+            - number
+            - "null"
           minimum: 0
         createdAt:
           type: string
@@ -159,6 +236,10 @@ components:
         updatedAt:
           type: string
           format: date-time
+        lastProgressAt:
+          type: string
+          format: date-time
+          description: Обновляется на каждом переходе состояния; используется для выявления зависших прогонов (§7.5 PIPELINE_SPEC.md).
         error:
           oneOf:
             - $ref: "#/components/schemas/ReviewError"
@@ -169,42 +250,53 @@ components:
       additionalProperties: false
       required:
         - filePath
-        - startLine
-        - endLine
+        - side
+        - line
         - category
         - severity
         - title
         - explanation
+        - confidence
       properties:
         filePath:
           type: string
-        startLine:
+        side:
+          type: string
+          description: Сторона диффа, к которой относится line (findings.side).
+          enum:
+            - old
+            - new
+        line:
           type: integer
           minimum: 1
-        endLine:
-          type: integer
-          minimum: 1
+          description: >
+            Номер строки на указанной side. Диапазоны (endLine) в v1 не поддерживаются —
+            в схеме БД на сторону диффа хранится одна строка.
         category:
           type: string
           enum:
-            - BUG
-            - SECURITY
-            - PERFORMANCE
-            - MAINTAINABILITY
-            - STYLE
-            - OTHER
+            - security
+            - correctness
+            - performance
+            - readability
         severity:
           type: string
           enum:
-            - LOW
-            - MEDIUM
-            - HIGH
-            - CRITICAL
+            - low
+            - medium
+            - high
+            - critical
         title:
           type: string
           maxLength: 200
         explanation:
           type: string
+        confidence:
+          type:
+            - number
+            - "null"
+          minimum: 0
+          maximum: 1
         suggestion:
           oneOf:
             - type: object
@@ -223,29 +315,38 @@ components:
         - code
         - message
         - retryable
+        - provider
+        - providerAttempt
       properties:
         code:
           type: string
           enum:
-            - GITHUB_AUTH_ERROR
+            - SCM_AUTH_ERROR
             - PR_NOT_FOUND
             - REPOSITORY_NOT_FOUND
-            - GITHUB_UNAVAILABLE
+            - SCM_UNAVAILABLE
             - CONTEXT_PARSING_ERROR
             - LLM_RATE_LIMITED
             - LLM_TIMEOUT
             - LLM_UNAVAILABLE
             - LLM_INVALID_OUTPUT
+            - REVIEW_RUN_STALE
             - INTERNAL_ERROR
         message:
           type: string
         retryable:
           type: boolean
-        attempt:
+        provider:
+          description: Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null.
+          oneOf:
+            - $ref: "#/components/schemas/Provider"
+            - type: "null"
+        providerAttempt:
           type:
             - integer
             - "null"
           minimum: 1
+          description: Попытка вызова LLM/SCM провайдера. Не путать с redelivery сообщения в очереди.
 
     ApiError:
       type: object

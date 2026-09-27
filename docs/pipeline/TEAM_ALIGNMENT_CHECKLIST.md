@@ -1,25 +1,33 @@
 # Чек-лист согласования контрактов
 
 ## Frontend
-- [ ] Полей `ReviewJob` достаточно для UI.
-- [ ] Все loading/progress states понятны.
-- [ ] `Finding` содержит необходимые данные.
-- [ ] Error model можно корректно показать пользователю.
-- [ ] Согласован способ обновления статуса: polling/SSE/другое.
+- [ ] Полей `ReviewJob` достаточно для UI, включая `trigger`, `baseCommitSha`, `model`,
+      `tokensUsed`, `durationSeconds`, `rejectedFindings`, `lastProgressAt`, статус `publishing`.
+- [ ] Все loading/progress states понятны, включая `cancelled` и зависший (`lastProgressAt`
+      давно не обновлялся) прогон до того, как его подберёт сборщик (§7.5).
+- [ ] `Finding` содержит необходимые данные, включая `side`/`line` вместо диапазона строк и
+      `confidence`.
+- [ ] Error model можно корректно показать пользователю, включая `provider` и `providerAttempt`.
+- [ ] Согласован способ обновления статуса: polling (предложение по умолчанию для MVP) с опорой
+      на `lastProgressAt`, или SSE.
 
 ## Backend
-- [ ] Все endpoints реализуемы.
-- [ ] HTTP status codes согласованы.
-- [ ] ReviewJob можно сохранить в текущей модели данных.
-- [ ] Finding можно сохранить без потери информации.
-- [ ] Idempotency определена.
+- [ ] Все endpoints реализуемы, включая `POST /webhooks/{provider}` с проверкой подписи.
+- [ ] HTTP status codes согласованы, включая `409` на дубль нетерминального ReviewRun.
+- [ ] ReviewJob можно сохранить в текущей модели данных (сверено с `0001_baseline_schema.py`).
+- [ ] Finding можно сохранить без потери информации, включая `side` (обязателен для
+      `uq_findings_anchor`).
+- [ ] Idempotency определена: `provider + providerRepositoryId + pullRequestNumber + headCommitSha`.
 
 ## Queue / Worker
-- [ ] State Machine соответствует реальному worker flow.
+- [ ] State Machine соответствует реальному worker flow (`app/domain/lifecycle.py`), включая
+      `publishing` и `cancelled`.
 - [ ] Retryable ошибки определены.
-- [ ] Max attempts определён.
+- [ ] Max `providerAttempt` определён, разведён с redelivery сообщения брокером.
 - [ ] Timeout определён.
 - [ ] Duplicate delivery безопасен.
+- [ ] Visibility timeout и dead-letter policy в RabbitMQ определены.
+- [ ] Лимит устаревания зависшего прогона (§7.5) определён.
 - [ ] FAILED jobs диагностируемы.
 
 ## Context Engine

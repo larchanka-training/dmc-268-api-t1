@@ -8,6 +8,13 @@
 
 Документ фиксирует межсервисные контракты и жизненный цикл автоматического ревью Pull Request.
 
+Словарь состояний, категорий и сущностей документ **наследует** из
+[`review-data-model`](../../openspec/specs/review-data-model/spec.md) и
+[`ai-review-prompting`](../../openspec/specs/ai-review-prompting/spec.md) — он их не
+переопределяет. Любое поведение, которого в этих спеках ещё нет (лимит устаревания
+прогона, публичная экспозиция опубликованных комментариев и т.п.), фиксируется здесь
+как предложение и до Contract v1 должно пройти отдельный OpenSpec-change.
+
 Основной поток:
 
 ```text
@@ -45,38 +52,44 @@ Review Worker
 
 ## 2. ReviewJob
 
-`ReviewJob` — центральная сущность процесса ревью.
+`ReviewJob` — публичная проекция хранимой сущности `ReviewRun` (см. `review-data-model`).
+Это не то же самое, что сообщение в очереди: сообщение несёт `reviewRunId`, у него нет
+собственной идентичности, отдельной от прогона, который оно продвигает.
 
 ### State Machine
 
-```text
-QUEUED
-   ↓
-FETCHING_DIFF
-   ↓
-PARSING_CONTEXT
-   ↓
-LLM_PROCESSING
-   ↓
-COMPLETED
+Состояния и переходы — те же, что в `ReviewRunStatus` и `app/domain/lifecycle.py`, здесь не
+дублируются вручную во избежание рассинхронизации.
 
-Любой processing-state
+```text
+queued
    ↓
-retry, если ошибка временная
+building_context
    ↓
-FAILED, если retry исчерпан или ошибка невосстановимая
+analysing
+   ↓
+publishing
+   ↓
+completed
+
+Любое нетерминальное состояние
+   ↓
+cancelled — по явному запросу (см. §3, cancelled)
+   ↓
+failed — если ошибка невосстановима, retry исчерпан или прогон признан устаревшим (§7.5)
 ```
 
 ### Разрешённые переходы
 
 | Текущее состояние | Следующее состояние |
 |---|---|
-| `QUEUED` | `FETCHING_DIFF`, `FAILED` |
-| `FETCHING_DIFF` | `PARSING_CONTEXT`, `FAILED` |
-| `PARSING_CONTEXT` | `LLM_PROCESSING`, `FAILED` |
-| `LLM_PROCESSING` | `COMPLETED`, `FAILED` |
-| `COMPLETED` | terminal |
-| `FAILED` | terminal |
+| `queued` | `building_context`, `failed`, `cancelled` |
+| `building_context` | `analysing`, `failed`, `cancelled` |
+| `analysing` | `publishing`, `failed`, `cancelled` |
+| `publishing` | `completed`, `failed`, `cancelled` |
+| `completed` | terminal |
+| `failed` | terminal |
+| `cancelled` | terminal |
 
 Worker не должен пропускать состояния. Изменение состояния должно сохраняться, чтобы Backend мог отдать актуальный статус Frontend.
 
@@ -84,35 +97,29 @@ Worker не должен пропускать состояния. Изменен
 
 ## 3. Этапы обработки
 
-### QUEUED
+### queued
 
 Backend:
 
-- валидирует запрос;
-- создаёт `ReviewJob`;
+- валидирует запрос, включая `provider` + `providerRepositoryId` и `trigger`;
+- создаёт `ReviewRun` в состоянии `queued`;
 - сохраняет его;
-- отправляет `reviewJobId` в очередь.
+- отправляет `reviewRunId` в очередь (RabbitMQ, см. §6).
 
-### FETCHING_DIFF
+### building_context
 
-Worker получает:
+Worker и Context Engine в рамках одного состояния:
 
-- repository;
-- Pull Request;
-- commit SHA;
-- changed files;
-- diff.
+- получают repository, Pull Request, commit SHA, changed files, diff;
+- разбирают изменённые файлы;
+- собирают необходимый контекст;
+- ограничивают размер контекста;
+- формируют нормализованный input для LLM.
 
-### PARSING_CONTEXT
+Отдельного состояния для «только получить diff» нет — фиксируется прогресс внутри
+`building_context`, а не два разных статуса.
 
-Context Engine:
-
-- разбирает изменённые файлы;
-- собирает необходимый контекст;
-- ограничивает размер контекста;
-- формирует нормализованный input для LLM.
-
-### LLM_PROCESSING
+### analysing
 
 LLM Gateway:
 
@@ -122,21 +129,38 @@ LLM Gateway:
 - валидирует результат;
 - преобразует результат в `Finding[]`.
 
-### COMPLETED
+### publishing
 
-После успешной валидации:
+Backend/Worker публикует результат на хостинг (см. `review-data-model`,
+«Опубликованные комментарии отслеживаются»):
 
-- Findings сохраняются;
-- ReviewJob получает `COMPLETED`;
-- результат становится доступен через Backend API.
+- инлайн-комментарий на каждый сохранённый `Finding`, не более одного раза за прогон;
+- один итоговый (`summary`) комментарий на прогон, не более одного раза;
+- каждая публикация фиксируется записью `PublishedComment` с `providerCommentId`.
 
-### FAILED
+### completed
 
-При невосстановимой ошибке или исчерпании retry:
+После успешной публикации:
 
-- ReviewJob получает `FAILED`;
+- Findings сохранены;
+- ReviewRun получает `completed`, фиксируются `model`, `tokensUsed`, `durationSeconds`;
+- результат доступен через Backend API.
+
+### failed
+
+При невосстановимой ошибке, исчерпании retry или признании прогона устаревшим (§7.5):
+
+- ReviewRun получает `failed`, фиксируется `failureReason`;
 - сохраняется структурированная ошибка;
 - Frontend получает безопасный error model.
+
+### cancelled
+
+По явному запросу (например, ручная отмена или PR закрыт/смёржен до завершения ревью):
+
+- ReviewRun получает `cancelled` из любого нетерминального состояния;
+- Findings, накопленные до отмены, не публикуются;
+- повторная доставка задачи из очереди для уже `cancelled` прогона игнорируется.
 
 ---
 
@@ -147,10 +171,13 @@ LLM Gateway:
 Рекомендуемый logical key:
 
 ```text
-repository + pullRequestNumber + headCommitSha
+provider + providerRepositoryId + pullRequestNumber + headCommitSha
 ```
 
-Повторная попытка обработки существующего `ReviewJob` должна использовать тот же `reviewJobId`.
+Повторная попытка обработки существующего `ReviewRun` должна использовать тот же `reviewRunId`.
+Не более одного нетерминального прогона на этот ключ уже гарантирует БД
+(`uq_review_runs_one_active_per_commit`) — контракт API должен транслировать отказ на
+уровне БД в `409`, а не создавать второй `ReviewRun`.
 
 Перед Contract v1 команда должна отдельно решить:
 
@@ -164,7 +191,7 @@ repository + pullRequestNumber + headCommitSha
 
 LLM не имеет права определять публичную модель данных.
 
-Каждый Finding валидируется по `finding.schema.json`.
+Каждый Finding валидируется по `docs/openapi/finding.schema.json`.
 
 При invalid output:
 
@@ -181,7 +208,7 @@ JSON Schema validation
           ↓
        validate
           ├── valid → persist
-          └── invalid → FAILED
+          └── invalid → failed
 ```
 
 Ошибка после исчерпания допустимой попытки восстановления:
@@ -194,30 +221,57 @@ JSON Schema validation
 
 ## 6. Retry policy
 
-Начальная политика для согласования:
+Брокер очереди — **RabbitMQ** (`docs/BACKEND_ARCHITECTURE.md`, порт `JobQueue`). Redis в
+пайплайне отвечает только за кеш и идемпотентность HTTP-слоя и к retry/DLQ отношения не имеет.
+
+### Три независимых счётчика попыток
+
+Документ ранее смешивал в одном `attempt` три разных вещи. Разводим их:
+
+- **`providerAttempt`** — попытка вызвать внешнего провайдера (LLM или SCM) внутри одного
+  прохождения состояния. Инкрементируется клиентом провайдера, ограничена лимитом из этого
+  раздела, попадает в публичную `ReviewError` (§8).
+- **redelivery сообщения** — брокер повторно доставляет то же сообщение очереди после
+  visibility timeout. Это внутренняя метрика RabbitMQ, в публичный контракт не выходит,
+  но фиксируется в наблюдаемости (§10) как `queueRedeliveryCount`.
+- **попытка задачи целиком** — не заводим отдельным счётчиком. Задача либо продвигается в
+  рамках текущего `ReviewRun`, либо тот переходит в `failed`; повторный прогон того же
+  коммита — это новый `ReviewRun` с собственным `reviewRunId` (см. §4).
+
+### Visibility timeout и dead-letter
+
+- **Visibility timeout** — время, в течение которого RabbitMQ ждёт `ack` по сообщению;
+  реализуется через настройку consumer'а и обрыв соединения при его превышении, а не
+  отдельной pending-записью, как это устроено у Redis-очередей.
+- **Dead-letter** — сообщение, исчерпавшее `providerAttempt` или превысившее visibility
+  timeout сверх допустимого числа redelivery, уходит в dead-letter exchange с отдельной
+  политикой обработки (минимум — алертинг), а не удаляется молча.
+
+### Retryable / non-retryable ошибки
 
 | Ошибка | Retry | Поведение |
 |---|---|---|
-| LLM `429` | Да | exponential backoff + jitter |
-| LLM `5xx` | Да | exponential backoff + jitter |
-| Network timeout | Да | exponential backoff + jitter |
+| LLM `429` | Да | exponential backoff + jitter, инкремент `providerAttempt` |
+| LLM `5xx` | Да | exponential backoff + jitter, инкремент `providerAttempt` |
+| Network timeout | Да | exponential backoff + jitter, инкремент `providerAttempt` |
 | Invalid JSON от LLM | Ограниченно | 1 repair/regeneration |
 | JSON Schema validation error | Ограниченно | 1 repair/regeneration |
-| GitHub transient `5xx` | Да | bounded retry |
-| GitHub `401/403` | Нет | FAILED |
-| PR not found | Нет | FAILED |
-| Repository not found | Нет | FAILED |
+| SCM transient `5xx` | Да | bounded retry, инкремент `providerAttempt` |
+| SCM `401/403` | Нет | `failed` |
+| PR not found | Нет | `failed` |
+| Repository not found | Нет | `failed` |
 | Invalid API request | Нет | reject до очереди |
 
 Начальное предложение:
 
-- максимум 3 provider attempts;
-- timeout на каждый LLM request;
+- максимум 3 `providerAttempt` на вызов LLM/SCM;
+- timeout на каждый LLM/SCM request;
 - exponential backoff;
 - jitter;
 - retry-параметры конфигурируемые.
 
-Конкретные timeout/backoff значения должны быть согласованы с Queue, LLM и DevOps инженерами.
+Конкретные timeout/backoff значения и лимит redelivery в RabbitMQ должны быть согласованы с
+Queue, LLM и DevOps инженерами.
 
 ---
 
@@ -234,24 +288,48 @@ retryable?
  ┌───────┴───────┐
 yes              no
  ↓                ↓
-retry           FAILED
+retry           failed
  ↓
 success?
  ┌──────┴──────┐
 yes            no
  ↓              ↓
-continue      FAILED
+continue      failed
 ```
 
-После исчерпания retry job переводится в `FAILED`.
+После исчерпания retry job переводится в `failed`.
 
 LLM Gateway должен позволять в будущем заменить провайдера без изменения публичного Backend/Frontend API.
+
+---
+
+## 7.5. Зависшие прогоны
+
+Поскольку на пару (`ReviewRun.merge_request_id`, `head_sha`) допустим только один
+нетерминальный прогон (`uq_review_runs_one_active_per_commit`), воркер, упавший между
+состояниями, иначе навсегда блокирует коммит — новый ревью для него создать нельзя, пока
+старый висит.
+
+- Каждый прогон фиксирует `last_progress_at` (обновляется при каждом переходе состояния).
+- Прогон, не продвигавшийся дольше настроенного лимита устаревания, переводится в `failed`
+  фоновым сборщиком с кодом ошибки `REVIEW_RUN_STALE` (§8).
+- Перевод в `failed` освобождает коммит: новый `ReviewRun` для того же
+  (`merge_request_id`, `head_sha`) можно создать сразу после этого.
+- `lastProgressAt` отдаётся в `ReviewJob` (§9), чтобы Frontend мог показать зависшую задачу
+  до того, как её подберёт сборщик.
+
+Конкретное значение лимита устаревания — предмет согласования с Queue/DevOps.
 
 ---
 
 ## 8. Error Model
 
 Ошибка должна содержать стабильный machine-readable `code`.
+
+Коды ошибок SCM — провайдер-нейтральные: `Provider` уже сегодня включает `github` и
+`gitlab` (`app/domain/enums.py`), значит поддержка второго провайдера — не гипотетическое
+будущее, а заявленный домен. Публичный enum ошибок не должен требовать breaking change
+при подключении второго провайдера, поэтому вместо `GITHUB_*` — `SCM_*` с полем `provider`.
 
 Пример:
 
@@ -260,21 +338,23 @@ LLM Gateway должен позволять в будущем заменить �
   "code": "LLM_TIMEOUT",
   "message": "LLM provider did not respond within the configured timeout",
   "retryable": true,
-  "attempt": 3
+  "providerAttempt": 3,
+  "provider": null
 }
 ```
 
 Начальный набор кодов:
 
-- `GITHUB_AUTH_ERROR`
+- `SCM_AUTH_ERROR` (поле `provider` заполнено)
 - `PR_NOT_FOUND`
 - `REPOSITORY_NOT_FOUND`
-- `GITHUB_UNAVAILABLE`
+- `SCM_UNAVAILABLE` (поле `provider` заполнено)
 - `CONTEXT_PARSING_ERROR`
 - `LLM_RATE_LIMITED`
 - `LLM_TIMEOUT`
 - `LLM_UNAVAILABLE`
 - `LLM_INVALID_OUTPUT`
+- `REVIEW_RUN_STALE` (§7.5)
 - `INTERNAL_ERROR`
 
 ---
@@ -288,7 +368,21 @@ POST /reviews
 GET  /reviews/{reviewId}
 GET  /reviews/{reviewId}/findings
 GET  /reviews
+POST /webhooks/{provider}
 ```
+
+`POST /webhooks/{provider}` принимает доставки от хостинга (см.
+`docs/BACKEND_ARCHITECTURE.md`, «Подлинность webhook'ов»):
+
+- подпись проверяется алгоритмом и заголовком, специфичным для провайдера; секрет для
+  проверки не хранится в репозитории и не логируется;
+- запрос без валидной подписи отклоняется до постановки в очередь;
+- успешный вебхук создаёт `ReviewRun` с `trigger = webhook`, используя тот же logical key
+  идемпотентности, что и ручной запуск (§4).
+
+`CreateReviewRequest` идентифицирует репозиторий парой `provider` + `providerRepositoryId`
+(соответствует `UNIQUE (provider, provider_id)` в таблице `repositories`), а не строкой вида
+`owner/repository` — `full_name` в этой таблице намеренно не уникален. Обязателен `trigger`.
 
 Источник истины для HTTP-контракта: `openapi.yaml`.
 
@@ -298,12 +392,13 @@ GET  /reviews
 
 Для каждого review необходимо иметь минимум:
 
-- `reviewJobId`;
-- repository;
+- `reviewRunId`;
+- provider + providerRepositoryId;
 - PR number;
 - current state;
-- timestamps;
-- attempt;
+- timestamps, включая `lastProgressAt`;
+- `providerAttempt`;
+- `queueRedeliveryCount`;
 - error code;
 - LLM/provider request duration;
 - correlation/request ID.
@@ -316,17 +411,22 @@ GET  /reviews
 
 Контракт считается готовым, когда:
 
+- словарь состояний, категорий и сущностей совпадает с `review-data-model` и
+  `ai-review-prompting` дословно, а не переопределён параллельно;
 - `PIPELINE_SPEC.md` согласован;
 - `openapi.yaml` согласован;
-- `review-job.schema.json` согласован;
-- `finding.schema.json` согласован;
-- `error.schema.json` согласован;
+- `docs/openapi/review-job.schema.json` согласован;
+- `docs/openapi/finding.schema.json` согласован;
+- `docs/openapi/error.schema.json` согласован;
 - определены retryable/non-retryable ошибки;
 - определена стратегия timeout;
 - определена деградация при LLM outage;
+- определён лимит устаревания зависших прогонов (§7.5);
 - Frontend подтвердил достаточность API;
 - Backend подтвердил реализуемость API;
-- Queue Engineer подтвердил state/retry model;
+- Queue Engineer подтвердил state/retry model, включая RabbitMQ visibility timeout и dead-letter;
 - LLM Engineer подтвердил structured output;
 - QA подтвердил тестируемость переходов и ошибок;
+- поведение, не покрытое действующими OpenSpec-спеками (§7.5, публикация комментариев),
+  оформлено отдельным OpenSpec-change;
 - изменения прошли общий Contract Review.
