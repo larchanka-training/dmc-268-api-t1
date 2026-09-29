@@ -1,12 +1,13 @@
 """Сериализация `ReviewJob` в формат сообщения из `SYSTEM_DESIGN.md` §4.2.
 
-Чистая функция, без брокера: тест не помечен `integration`.
+Чистые функции, без брокера: тест не помечен `integration`.
 """
 
+import json
 from uuid import UUID
 
 from app.domain.entities import ReviewJob
-from app.infrastructure.queue.rabbitmq import to_wire_message
+from app.infrastructure.queue.rabbitmq import from_wire_message, to_wire_message
 
 JOB = ReviewJob(
     id=UUID(int=1),
@@ -32,3 +33,8 @@ def test_wire_message_matches_system_design_schema() -> None:
             "base_sha": "fed654cba",
         },
     }
+
+
+def test_from_wire_message_round_trips_to_wire_message() -> None:
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+    assert from_wire_message(body) == JOB

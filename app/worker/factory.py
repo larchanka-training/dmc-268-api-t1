@@ -1,17 +1,31 @@
-"""Собирает consume-цикл воркера.
+"""Собирает consume-цикл воркера и доменный обработчик, который в нём крутится.
 
-Не знает о доменном пайплайне: принимает обработчик сообщением-байтами.
-`add-review-pipeline` подключит сюда реальную бизнес-логику как `handler`.
+`Worker`/`build_worker` не знают о доменном пайплайне: принимают обработчик
+сообщением-байтами. `build_review_handler` — сборка настоящего обработчика
+(разбор сообщения + `run_review`), а `run_worker` — то, что вызывает
+`app/worker/__main__.py`, чтобы не импортировать `app.infrastructure`/
+`app.application` напрямую (точка входа обязана оставаться тонкой).
 Ack/nack-решение — чистая `should_ack`, здесь только вызовы канала.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Protocol
 
 import pika
 
+from app.application.ports import UnitOfWork
+from app.application.ports.llm_gateway import LlmGateway
+from app.application.review_pipeline import run_review
 from app.config import Settings
-from app.infrastructure.queue.rabbitmq import QUEUE_NAME, declare_topology
+from app.domain.ids import new_id
+from app.infrastructure.container import build_container
+from app.infrastructure.queue.rabbitmq import (
+    QUEUE_NAME,
+    declare_topology,
+    from_wire_message,
+)
 from app.worker.handling import should_ack
 
 MessageHandler = Callable[[bytes], None]
@@ -66,3 +80,31 @@ def build_worker(settings: Settings) -> Worker:
     declare_topology(channel)
     channel.basic_qos(prefetch_count=1)
     return Worker(connection=connection, channel=channel)
+
+
+class ReviewHandlerDeps(Protocol):
+    """Только то, что нужно обработчику — не весь `Container`."""
+
+    def unit_of_work(self) -> UnitOfWork: ...
+
+    def llm_gateway(self) -> LlmGateway: ...
+
+
+def build_review_handler(deps: ReviewHandlerDeps) -> MessageHandler:
+    def handle(body: bytes) -> None:
+        job = from_wire_message(body)
+        run_review(
+            job,
+            uow=deps.unit_of_work(),
+            llm_gateway=deps.llm_gateway(),
+            now=datetime.now(UTC),
+            new_id=new_id,
+        )
+
+    return handle
+
+
+def run_worker(settings: Settings) -> None:
+    """Собрать зависимости и запустить воркер бесконечно. Вызывается из `__main__.py`."""
+    handler = build_review_handler(build_container(settings))
+    build_worker(settings).run(handler)

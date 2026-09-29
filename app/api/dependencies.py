@@ -7,9 +7,11 @@
 from collections.abc import Iterator
 from typing import cast
 
-from fastapi import Request
+from fastapi import Depends, Request
 
 from app.application.ports import UnitOfWork
+from app.application.ports.job_queue import JobQueue
+from app.config import Settings
 from app.infrastructure.container import Container
 
 
@@ -21,6 +23,14 @@ def get_container(request: Request) -> Container:
     return cast(Container, request.app.state.container)
 
 
+def get_settings(request: Request) -> Settings:
+    return cast(Settings, request.app.state.settings)
+
+
 def get_unit_of_work(request: Request) -> Iterator[UnitOfWork]:
     with get_container(request).unit_of_work() as uow:
         yield uow
+
+
+def get_job_queue(container: Container = Depends(get_container)) -> JobQueue:
+    return container.job_queue()
