@@ -53,6 +53,10 @@ class FakeRepositoryRepo:
             None,
         )
 
+    def list_all(self, limit: int, offset: int) -> list[Repository]:
+        ordered = sorted(self._by_id.values(), key=lambda r: r.created_at)
+        return ordered[offset : offset + limit]
+
     def add(self, repository: Repository) -> None:
         self._by_id[repository.id] = repository
 
@@ -78,6 +82,15 @@ class FakeMergeRequestRepo:
             ),
             None,
         )
+
+    def list_for_repository(
+        self, repository_id: UUID, limit: int, offset: int
+    ) -> list[MergeRequest]:
+        ordered = sorted(
+            (m for m in self._by_id.values() if m.repository_id == repository_id),
+            key=lambda m: m.number,
+        )
+        return ordered[offset : offset + limit]
 
     def add(self, merge_request: MergeRequest) -> None:
         self._by_id[merge_request.id] = merge_request

@@ -28,9 +28,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.container = build_container(settings)
 
+    from app.api.pull_requests import router as pull_requests_router
+    from app.api.repositories import router as repositories_router
+    from app.api.reviews import router as reviews_router
     from app.api.webhooks import router as webhooks_router
 
     app.include_router(webhooks_router)
+    app.include_router(repositories_router)
+    app.include_router(pull_requests_router)
+    app.include_router(reviews_router)
 
     @app.get("/")
     def read_root() -> dict[str, str]:
