@@ -77,6 +77,8 @@ def test_successful_run_reaches_completed_with_model_and_tokens() -> None:
     assert run.status == ReviewRunStatus.COMPLETED
     assert run.model == "stub-llm"
     assert run.tokens_used == 0
+    assert run.duration_seconds is not None
+    assert run.duration_seconds >= 0
     assert uow.context_payloads.list_for_run(JOB.id)
 
 

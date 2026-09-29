@@ -131,8 +131,11 @@ async def receive_github_webhook(
             updated_at=now,
         )
     )
-    uow.commit()
 
+    # Постановка в очередь — до commit. Если брокер недоступен, исключение
+    # откатывает и ReviewRun: доставка не остаётся молча потерянной записью
+    # в статусе queued, которую find_active потом примет за уже взятую в
+    # работу — GitHub получит 5xx и повторит вебхук с нуля.
     job_queue.enqueue(
         ReviewJob(
             id=run_id,
@@ -145,4 +148,5 @@ async def receive_github_webhook(
             base_sha=base_sha,
         )
     )
+    uow.commit()
     return {"status": "accepted"}

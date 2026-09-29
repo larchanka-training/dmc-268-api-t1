@@ -23,13 +23,17 @@ class Container:
     """Всё, что можно передать слою приложения."""
 
     engine: Engine
-    rabbitmq_url: str
+    # Один экземпляр на процесс, а не фабрика: `RabbitMQJobQueue` сам держит
+    # переиспользуемое AMQP-соединение, и это работает, только если каждый
+    # запрос получает один и тот же объект, а не новый на каждый вызов
+    # `job_queue()`.
+    _job_queue: JobQueue
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine)
 
     def job_queue(self) -> JobQueue:
-        return RabbitMQJobQueue(self.rabbitmq_url)
+        return self._job_queue
 
     def llm_gateway(self) -> LlmGateway:
         # Заглушка: реальный транспорт к Ollama — отдельная задача, контракт
@@ -43,5 +47,5 @@ def build_container(settings: Settings) -> Container:
     # заменяется, а не всплывает OperationalError на следующем запросе.
     return Container(
         engine=create_engine(settings.database_url, future=True, pool_pre_ping=True),
-        rabbitmq_url=settings.rabbitmq_url,
+        _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
     )
