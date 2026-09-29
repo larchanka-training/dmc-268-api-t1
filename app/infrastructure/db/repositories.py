@@ -53,8 +53,15 @@ class SqlAlchemyRepositoryRepo:
         return m.repository_to_domain(row) if row else None
 
     def list_all(self, limit: int, offset: int) -> list[Repository]:
+        # `id` как тай-брейкер: одного `created_at` недостаточно для
+        # стабильного порядка между страницами, если у двух строк совпадает
+        # timestamp — тогда `limit`/`offset` может задвоить или пропустить
+        # строку между вызовами.
         rows = self._session.scalars(
-            select(RepositoryRow).order_by(RepositoryRow.created_at).limit(limit).offset(offset)
+            select(RepositoryRow)
+            .order_by(RepositoryRow.created_at, RepositoryRow.id)
+            .limit(limit)
+            .offset(offset)
         ).all()
         return [m.repository_to_domain(row) for row in rows]
 

@@ -8,6 +8,7 @@ Use case уровня application: знает порты (`UnitOfWork`, `LlmGate
 когда-нибудь освободить коммит.
 """
 
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -47,6 +48,13 @@ def run_review(
         # повторная доставка после завершения игнорируется (review-data-model).
         return
 
+    # Монотонные часы, а не переданный `now`: `now` — один и тот же снимок на
+    # весь прогон (нужен для детерминированных timestamp'ов в БД), поэтому
+    # разница `now - что-то` всегда даёт 0 и не отражает реальное время
+    # сборки контекста и вызова LLM. `duration_seconds` — это стоимость
+    # прогона (docs/SYSTEM_DESIGN.md), её меряют настоящие часы.
+    started_at = time.monotonic()
+
     try:
         run = _transition(uow, run, ReviewRunStatus.BUILDING_CONTEXT, now)
 
@@ -78,7 +86,7 @@ def run_review(
 
         run = _transition(uow, run, ReviewRunStatus.PUBLISHING, now)
 
-        duration = (now - run.created_at).total_seconds()
+        duration = time.monotonic() - started_at
         run = replace(run, model=result.model, tokens_used=result.tokens_used, duration_seconds=duration)
         _transition(uow, run, ReviewRunStatus.COMPLETED, now)
     except Exception as exc:  # noqa: BLE001 — любой сбой шага переводит прогон в failed, а не роняет воркер

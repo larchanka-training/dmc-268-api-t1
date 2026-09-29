@@ -9,6 +9,7 @@
 """
 
 import json
+import threading
 from typing import Any
 from uuid import UUID
 
@@ -82,16 +83,42 @@ def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel)
 
 
 class RabbitMQJobQueue:
-    """Реализация порта `JobQueue`."""
+    """Реализация порта `JobQueue`.
+
+    Держит одно соединение на весь процесс и переиспользует его между
+    вызовами `enqueue`, а не открывает handshake заново на каждый вебхук —
+    `enqueue` лежит на синхронном горячем пути HTTP-запроса. Пересоздаёт
+    соединение, только если прежнее закрыто (брокер перезапустился, простой
+    оборвал канал). `BlockingConnection` не потокобезопасен, а FastAPI гоняет
+    sync-эндпоинты в threadpool, поэтому доступ сериализован локом.
+    """
 
     def __init__(self, url: str) -> None:
         self._url = url
+        self._lock = threading.Lock()
+        self._connection: pika.BlockingConnection | None = None
+        self._channel: pika.adapters.blocking_connection.BlockingChannel | None = None
+
+    def _channel_ready(self) -> pika.adapters.blocking_connection.BlockingChannel:
+        if self._connection is None or self._connection.is_closed:
+            self._connection = pika.BlockingConnection(pika.URLParameters(self._url))
+            self._channel = self._connection.channel()
+            declare_topology(self._channel)
+            # Publisher confirms: без них `basic_publish` на `BlockingConnection`
+            # только пишет во внутренний буфер и возвращается, не дожидаясь,
+            # чтобы брокер реально принял сообщение — раньше это скрывал
+            # `connection.close()` на каждый вызов (его handshake попутно ждал
+            # отправки), но при переиспользуемом соединении обращение к
+            # соседней очереди сразу после `enqueue` могло не увидеть
+            # сообщение. С `confirm_delivery` `basic_publish` блокируется до
+            # ack/nack брокера.
+            self._channel.confirm_delivery()
+        assert self._channel is not None
+        return self._channel
 
     def enqueue(self, job: ReviewJob) -> None:
-        connection = pika.BlockingConnection(pika.URLParameters(self._url))
-        try:
-            channel = connection.channel()
-            declare_topology(channel)
+        with self._lock:
+            channel = self._channel_ready()
             channel.basic_publish(
                 exchange="",
                 routing_key=QUEUE_NAME,
@@ -101,6 +128,5 @@ class RabbitMQJobQueue:
                     delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
                     priority=DEFAULT_PRIORITY,
                 ),
+                mandatory=True,
             )
-        finally:
-            connection.close()
