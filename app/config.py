@@ -21,6 +21,29 @@ class Settings(BaseSettings):
     database_url: str = Field(
         description="PostgreSQL DSN, e.g. postgresql+psycopg://user:pass@host/db",
     )
+    # Пустые по умолчанию, а не обязательные: composition root строит
+    # VCS-шлюз лениво, и приложение без GitHub-реквизитов продолжает отвечать
+    # на запросы, не касающиеся вебхуков. Пустой ключ громко аукнется при
+    # первом же обращении к VCS API.
+    github_app_id: str = Field(
+        default="",
+        description="Идентификатор GitHub App; из окружения GITHUB_APP_ID",
+    )
+    github_app_private_key: str = Field(
+        default="",
+        description="PEM private key GitHub App; из окружения GITHUB_APP_PRIVATE_KEY",
+    )
+    # Секрет проверки HMAC-подписи вебхуков. Пустой по умолчанию по той же
+    # причине, что и реквизиты выше; пустой секрет означает, что эндпоинт
+    # отклоняет все вебхуки (401), а не принимает неподписанные.
+    github_webhook_secret: str = Field(
+        default="",
+        description="Секрет HMAC вебхуков GitHub; из окружения GITHUB_WEBHOOK_SECRET",
+    )
+    rabbitmq_url: str = Field(
+        default="",
+        description="Строка подключения AMQP; из окружения RABBITMQ_URL",
+    )
 
 
 def load_settings() -> Settings:

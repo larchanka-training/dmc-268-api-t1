@@ -1,9 +1,12 @@
-"""Записи, которые живут дольше запроса.
+"""Доменные записи: хранимые и транзиентные структуры запроса.
 
-Замороженные dataclass'ы без единого фреймворка: собираются из литералов,
-сравниваются по значению и тестируются без базы. Время и идентификаторы
-приходят аргументами, а не читаются из часов или генератора, поэтому тест
-проверяет точный timestamp, а не диапазон.
+Одни записи живут дольше запроса и попадают в базу (репозиторий, запрос на
+изменение, прогон ревью, находка), другие транзиентны — hunk диффа, событие
+вебхука, разобранный файл диффа. Все они — замороженные dataclass'ы без
+единого фреймворка: собираются из литералов, сравниваются по значению и
+тестируются без базы. Время и идентификаторы приходят аргументами, а не
+читаются из часов или генератора, поэтому тест проверяет точный timestamp,
+а не диапазон.
 """
 
 from dataclasses import dataclass, field
@@ -151,3 +154,86 @@ class Hunk:
     new_count: int = 0
     changed_new_lines: frozenset[int] = field(default_factory=frozenset)
     changed_old_lines: frozenset[int] = field(default_factory=frozenset)
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookEvent:
+    """Событие вебхука, запускающее ревью.
+
+    Базового коммита в событии нет: `base.sha` из payload'а может быть
+    устаревшим, поэтому базовый коммит всегда берётся из свежих метаданных
+    PR через `fetch_pr_metadata`. Провайдер один — GitHub, но поля уже
+    нейтральны к нему. `action` — исходное действие GitHub (`opened`,
+    `synchronize`): только эти два проходят через `extract_github_event`,
+    и оно же переезжает в `ReviewJob.action` без преобразований.
+    """
+
+    action: str
+    installation_id: int
+    repo_full_name: str
+    repo_provider_id: str
+    pr_number: int
+    head_sha: str
+    source_branch: str
+    target_branch: str
+    title: str
+    author: str
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedFile:
+    """Один файл диффа: пути, бинарность и разобранные hunk'и.
+
+    `old_path` заполнен только у переименования. Бинарные файлы на hunk'и не
+    разбираются — ревьюить там нечего, их остаётся только отфильтровать.
+    """
+
+    file_path: str
+    old_path: str | None = None
+    is_binary: bool = False
+    hunks: tuple[Hunk, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PRMetadata:
+    """Свежие метаданные запроса на изменения, достанные через VCS-шлюз.
+
+    Транзиентна, как и разобранный дифф: воркер достаёт её заново. Базовый
+    коммит — только отсюда, а не из payload'а вебхука, где он успевает
+    устареть. Состояние уже переведено адаптером в общий enum; «открыт»,
+    «закрыт» и «слит» — всё, что знает о нём домен.
+    """
+
+    number: int
+    head_sha: str
+    base_sha: str
+    title: str
+    author: str
+    source_branch: str
+    target_branch: str
+    state: MergeRequestState
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewJob:
+    """Сообщение очереди: команда воркеру отревьюить прогон.
+
+    Тело сериализуется строго по `docs/SYSTEM_DESIGN.md` §4.2. Отклонение от
+    списка полей плана (`tasks/plan.md`, Task 3.1): добавлены `action` и
+    `repository_provider_id` — §4.2 требует нести в теле `action` и числовой
+    `repository.id`, без них сообщение не собрать. `priority` в тело не
+    входит: это метаданное доставки, адаптер передаёт его свойством AMQP.
+    `job_id` — UUIDv7 из `app.domain.ids.new_id()`, задаётся при создании
+    задачи доменом, а не адаптером и не базой: у сообщения есть
+    идентификатор ещё до брокера.
+    """
+
+    job_id: UUID
+    review_run_id: UUID
+    repository_full_name: str
+    repository_provider_id: int
+    pr_number: int
+    head_sha: str
+    base_sha: str | None
+    action: str
+    priority: int
