@@ -5,7 +5,7 @@
   "description": "Структурированная ошибка ReviewJob (§8 PIPELINE_SPEC.md). Коды SCM_* провайдер-нейтральны, чтобы добавление второго провайдера не было breaking change публичного контракта.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["code", "message", "retryable", "provider", "providerAttempt"],
+  "required": ["code", "message", "retryable", "scmProvider", "providerAttempt"],
   "properties": {
     "code": {
       "type": "string",
@@ -29,8 +29,8 @@
     "retryable": {
       "type": "boolean"
     },
-    "provider": {
-      "description": "Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null.",
+    "scmProvider": {
+      "description": "Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null. Называется scmProvider, а не provider: поле про сторону SCM, providerAttempt считает попытки и LLM, и SCM.",
       "oneOf": [
         { "type": "string", "enum": ["github", "gitlab"] },
         { "type": "null" }

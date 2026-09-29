@@ -11,8 +11,7 @@
     "line",
     "category",
     "severity",
-    "title",
-    "explanation",
+    "message",
     "confidence"
   ],
   "properties": {
@@ -38,13 +37,10 @@
       "type": "string",
       "enum": ["low", "medium", "high", "critical"]
     },
-    "title": {
+    "message": {
       "type": "string",
-      "maxLength": 200
-    },
-    "explanation": {
-      "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "Текст замечания (findings.message, соответствует Finding.message)."
     },
     "confidence": {
       "type": ["number", "null"],

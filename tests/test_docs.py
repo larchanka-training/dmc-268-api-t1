@@ -6,13 +6,16 @@
 разъезжались с кодом, поэтому покрыты именно они.
 """
 
+import json
 import re
 import tomllib
 from pathlib import Path
 
+import yaml
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
+from app.domain.lifecycle import _ALLOWED
 from app.infrastructure.db import models  # noqa: F401
 from app.infrastructure.db.base import Base
 
@@ -23,6 +26,11 @@ PYPROJECT = ROOT / "pyproject.toml"
 BACKEND_RULES = ROOT / ".agents" / "rules" / "backend.md"
 README = ROOT / "README.md"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
+PIPELINE_SPEC = ROOT / "docs" / "pipeline" / "PIPELINE_SPEC.md"
+OPENAPI = ROOT / "docs" / "openapi" / "openapi.yaml"
+FINDING_SCHEMA = ROOT / "docs" / "openapi" / "finding.schema.json"
+ERROR_SCHEMA = ROOT / "docs" / "openapi" / "error.schema.json"
+REVIEW_JOB_SCHEMA = ROOT / "docs" / "openapi" / "review-job.schema.json"
 
 # Ограничения, которые стоит зафиксировать: в обоих есть правило про NULL,
 # которое легко потерять и невозможно заметить снаружи.
@@ -109,3 +117,90 @@ def test_rules_only_name_commands_that_exist() -> None:
         + "\n".join(f"  {c}" for c in unknown)
         + "\nEither the command is wrong, or CI and the README have not caught up."
     )
+
+
+def documented_transition_table() -> dict[str, set[str]]:
+    """Таблица «Разрешённые переходы» из PIPELINE_SPEC.md как {состояние: {состояния}}."""
+    text = PIPELINE_SPEC.read_text()
+    section = text.split("### Разрешённые переходы", 1)[1]
+    rows = re.findall(r"^\| `(\w+)` \| (.+) \|$", section, re.MULTILINE)
+    assert rows, f"{PIPELINE_SPEC} has no rows under 'Разрешённые переходы'"
+    return {current: set(re.findall(r"`(\w+)`", nexts)) for current, nexts in rows}
+
+
+def test_pipeline_spec_transition_table_matches_lifecycle() -> None:
+    """§2 заявляет, что таблица — ручное зеркало `_ALLOWED`, а не источник правды."""
+    documented = documented_transition_table()
+    actual = {state.value: {n.value for n in nexts} for state, nexts in _ALLOWED.items()}
+    assert documented == actual, (
+        f"{PIPELINE_SPEC} 'Разрешённые переходы' has drifted from "
+        f"app/domain/lifecycle.py::_ALLOWED.\n"
+        f"  doc:  {documented}\n"
+        f"  code: {actual}"
+    )
+
+
+def load_openapi_schemas() -> dict:
+    return yaml.safe_load(OPENAPI.read_text())["components"]["schemas"]
+
+
+def resolve_enum(schemas: dict, node: dict) -> list[str]:
+    """Спуститься через $ref/oneOf к списку enum, который узел в итоге описывает."""
+    if "$ref" in node:
+        name = node["$ref"].rsplit("/", 1)[-1]
+        return resolve_enum(schemas, schemas[name])
+    if "oneOf" in node:
+        for branch in node["oneOf"]:
+            if branch.get("type") != "null":
+                return resolve_enum(schemas, branch)
+        raise AssertionError(f"oneOf has no non-null branch: {node!r}")
+    return node["enum"]
+
+
+def json_schema_enum(path: Path, property_name: str) -> list[str]:
+    node = json.loads(path.read_text())["properties"][property_name]
+    if "enum" in node:
+        return node["enum"]
+    for branch in node.get("oneOf", []):
+        if "enum" in branch:
+            return branch["enum"]
+    raise AssertionError(f"{path} property {property_name!r} has no enum")
+
+
+def test_finding_schema_enums_match_openapi() -> None:
+    """finding.schema.json инлайнит enum'ы отдельно от openapi.yaml — не должны разойтись."""
+    schemas = load_openapi_schemas()
+    finding = schemas["Finding"]["properties"]
+    for prop in ("side", "category", "severity"):
+        doc_enum = json_schema_enum(FINDING_SCHEMA, prop)
+        api_enum = resolve_enum(schemas, finding[prop])
+        assert doc_enum == api_enum, (
+            f"{FINDING_SCHEMA} property {prop!r} = {doc_enum}, "
+            f"openapi.yaml Finding.{prop} = {api_enum}"
+        )
+
+
+def test_review_job_schema_enums_match_openapi() -> None:
+    """review-job.schema.json инлайнит enum'ы отдельно от openapi.yaml — не должны разойтись."""
+    schemas = load_openapi_schemas()
+    review_job = schemas["ReviewJob"]["properties"]
+    for prop in ("provider", "trigger", "status"):
+        doc_enum = json_schema_enum(REVIEW_JOB_SCHEMA, prop)
+        api_enum = resolve_enum(schemas, review_job[prop])
+        assert doc_enum == api_enum, (
+            f"{REVIEW_JOB_SCHEMA} property {prop!r} = {doc_enum}, "
+            f"openapi.yaml ReviewJob.{prop} = {api_enum}"
+        )
+
+
+def test_error_schema_enums_match_openapi() -> None:
+    """error.schema.json инлайнит enum'ы отдельно от openapi.yaml — не должны разойтись."""
+    schemas = load_openapi_schemas()
+    review_error = schemas["ReviewError"]["properties"]
+    for prop in ("code", "scmProvider"):
+        doc_enum = json_schema_enum(ERROR_SCHEMA, prop)
+        api_enum = resolve_enum(schemas, review_error[prop])
+        assert doc_enum == api_enum, (
+            f"{ERROR_SCHEMA} property {prop!r} = {doc_enum}, "
+            f"openapi.yaml ReviewError.{prop} = {api_enum}"
+        )

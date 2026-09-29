@@ -11,9 +11,12 @@
 Словарь состояний, категорий и сущностей документ **наследует** из
 [`review-data-model`](../../openspec/specs/review-data-model/spec.md) и
 [`ai-review-prompting`](../../openspec/specs/ai-review-prompting/spec.md) — он их не
-переопределяет. Любое поведение, которого в этих спеках ещё нет (лимит устаревания
-прогона, публичная экспозиция опубликованных комментариев и т.п.), фиксируется здесь
-как предложение и до Contract v1 должно пройти отдельный OpenSpec-change.
+переопределяет. Любое поведение, которого в этих спеках ещё нет (на сегодня —
+персистентность стабильного `ReviewError.code`, см. §8, и аутентификация пользователя,
+см. §9.1), фиксируется здесь как предложение и до Contract v1 должно пройти отдельный
+OpenSpec-change. Лимит устаревания прогона (§7.5) и публикация комментариев такого
+change уже не требуют — оба входят в смерженный `review-data-model` («Прогон не может
+навсегда заблокировать свой коммит», «Опубликованные комментарии отслеживаются»).
 
 Основной поток:
 
@@ -58,8 +61,9 @@ Review Worker
 
 ### State Machine
 
-Состояния и переходы — те же, что в `ReviewRunStatus` и `app/domain/lifecycle.py`, здесь не
-дублируются вручную во избежание рассинхронизации.
+Состояния и переходы — те же, что в `ReviewRunStatus` и `app/domain/lifecycle.py`. Таблица
+переходов ниже — вручную поддерживаемое зеркало `_ALLOWED`; расхождение ловит
+`tests/test_docs.py::test_pipeline_spec_transition_table_matches_lifecycle`, а не читатель.
 
 ```text
 queued
@@ -329,7 +333,11 @@ LLM Gateway должен позволять в будущем заменить �
 Коды ошибок SCM — провайдер-нейтральные: `Provider` уже сегодня включает `github` и
 `gitlab` (`app/domain/enums.py`), значит поддержка второго провайдера — не гипотетическое
 будущее, а заявленный домен. Публичный enum ошибок не должен требовать breaking change
-при подключении второго провайдера, поэтому вместо `GITHUB_*` — `SCM_*` с полем `provider`.
+при подключении второго провайдера, поэтому вместо `GITHUB_*` — `SCM_*` с полем
+`scmProvider`, а не просто `provider`: `providerAttempt` уже считает попытки и LLM, и SCM,
+и поле с именем `provider`, типизированное как `Provider` (`github`/`gitlab`), для
+retryable LLM-ошибок (почти вся таблица §6) осталось бы пустым, хотя формально называет
+отказавшую сторону.
 
 Пример:
 
@@ -339,16 +347,16 @@ LLM Gateway должен позволять в будущем заменить �
   "message": "LLM provider did not respond within the configured timeout",
   "retryable": true,
   "providerAttempt": 3,
-  "provider": null
+  "scmProvider": null
 }
 ```
 
 Начальный набор кодов:
 
-- `SCM_AUTH_ERROR` (поле `provider` заполнено)
+- `SCM_AUTH_ERROR` (поле `scmProvider` заполнено)
 - `PR_NOT_FOUND`
 - `REPOSITORY_NOT_FOUND`
-- `SCM_UNAVAILABLE` (поле `provider` заполнено)
+- `SCM_UNAVAILABLE` (поле `scmProvider` заполнено)
 - `CONTEXT_PARSING_ERROR`
 - `LLM_RATE_LIMITED`
 - `LLM_TIMEOUT`
@@ -356,6 +364,15 @@ LLM Gateway должен позволять в будущем заменить �
 - `LLM_INVALID_OUTPUT`
 - `REVIEW_RUN_STALE` (§7.5)
 - `INTERNAL_ERROR`
+
+### Персистентность `code`
+
+`review-data-model` («Сбой фиксирует причину») даёт прогону только `failure_reason` (текст)
+и время — колонки под стабильный machine-readable `code` в схеме нет. Ответ API может
+построить `code` в момент сбоя (значение известно вызывающему коду), но прочитать его
+из уже сохранённого `failed`-прогона задним числом сегодня нельзя. Это и есть то
+поведение вне действующих спек, которое требует отдельного OpenSpec-change к
+`review-data-model` до Contract v1 (см. §1, §11).
 
 ---
 
@@ -371,6 +388,9 @@ GET  /reviews
 POST /webhooks/{provider}
 ```
 
+Аутентификация пользователя (`POST /auth/oauth/token`, `POST /auth/refresh`) сюда не
+входит — proposal, см. §9.1.
+
 `POST /webhooks/{provider}` принимает доставки от хостинга (см.
 `docs/BACKEND_ARCHITECTURE.md`, «Подлинность webhook'ов»):
 
@@ -385,6 +405,36 @@ POST /webhooks/{provider}
 `owner/repository` — `full_name` в этой таблице намеренно не уникален. Обязателен `trigger`.
 
 Источник истины для HTTP-контракта: `openapi.yaml`.
+
+### 9.1. Аутентификация (proposal)
+
+`POST /reviews` подразумевает пользователя: кто-то должен ходить в SCM его правами и иметь
+право запускать ревью по конкретному репозиторию. Ни в одном из перечисленных выше
+endpoint'ов, ни в текущих OpenSpec-спеках этого нет — аутентификация здесь фиксируется как
+предложение и, как и `ReviewError.code` (§8), должна пройти отдельный OpenSpec-change до
+Contract v1 (см. §1).
+
+```text
+POST /auth/oauth/token
+POST /auth/refresh
+```
+
+- `POST /auth/oauth/token` обменивает код OAuth-редиректа провайдера (`provider` +
+  `code`) на сессию.
+- `POST /auth/refresh` обновляет access-токен по refresh-куке, без тела запроса.
+- Обе ручки отдают access-токен в теле ответа (`AuthSession.accessToken`,
+  `expiresIn` в секундах) и переиздают refresh-токен `Set-Cookie`-заголовком:
+  `HttpOnly; Secure; SameSite=Strict`, `Path=/auth/refresh` — кука не читается
+  скриптом и не уходит ни на один другой путь API.
+- Транспорт сессии на Frontend: access-токен — в памяти вкладки, не в
+  `localStorage`; при перезагрузке — тихий `POST /auth/refresh` по куке. Это
+  решение бэкенда, а не фронта, потому что `Set-Cookie` ставит только сервер.
+- Ошибки — `ApiError`: `AUTH_CODE_INVALID` (код OAuth недействителен/истёк),
+  `AUTH_REFRESH_INVALID` (refresh-кука отсутствует, истекла или отозвана).
+
+Единый origin у Frontend и API через reverse-proxy (что и делает `SameSite=Strict`
+рабочим без CORS) в контракт не входит — это устройство инфраструктуры конкретного
+деплоя, а не публичный API.
 
 ---
 
@@ -427,6 +477,8 @@ POST /webhooks/{provider}
 - Queue Engineer подтвердил state/retry model, включая RabbitMQ visibility timeout и dead-letter;
 - LLM Engineer подтвердил structured output;
 - QA подтвердил тестируемость переходов и ошибок;
-- поведение, не покрытое действующими OpenSpec-спеками (§7.5, публикация комментариев),
-  оформлено отдельным OpenSpec-change;
+- поведение, не покрытое действующими OpenSpec-спеками — персистентность `ReviewError.code`
+  (§8) и аутентификация пользователя (§9.1) — оформлено отдельными OpenSpec-change; §7.5 и
+  публикация комментариев уже входят в смерженный `review-data-model` и отдельного change
+  не требуют;
 - изменения прошли общий Contract Review.
