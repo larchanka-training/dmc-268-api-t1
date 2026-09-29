@@ -60,6 +60,7 @@ def settings() -> Settings:
     return Settings(
         database_url="postgresql+psycopg://test:test@localhost/test",
         rabbitmq_url=TEST_RABBITMQ_URL,
+        github_webhook_secret="test-secret",
     )
 
 

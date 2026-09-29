@@ -28,6 +28,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.container = build_container(settings)
 
+    from app.api.webhooks import router as webhooks_router
+
+    app.include_router(webhooks_router)
+
     @app.get("/")
     def read_root() -> dict[str, str]:
         return {"message": "Welcome to DMC-268 Team 1 API"}

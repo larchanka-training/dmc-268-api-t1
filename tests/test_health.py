@@ -8,6 +8,7 @@ client = TestClient(
         Settings(
             database_url="postgresql+psycopg://test/test",
             rabbitmq_url="amqp://guest:guest@localhost//",
+            github_webhook_secret="test-secret",
         )
     )
 )

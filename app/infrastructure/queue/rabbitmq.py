@@ -1,13 +1,16 @@
 """Адаптер `JobQueue` на RabbitMQ.
 
-Тонкий: `to_wire_message` — чистый перевод сущности в формат из
-`docs/SYSTEM_DESIGN.md` §4.2, `RabbitMQJobQueue` — только транспорт и
-топология (декларация очереди/exchange'ей идемпотентна на уровне AMQP, это
-не бизнес-правило).
+Тонкий: `to_wire_message`/`from_wire_message` — чистый перевод сущности в
+формат из `docs/SYSTEM_DESIGN.md` §4.2 и обратно, `RabbitMQJobQueue` —
+только транспорт и топология (декларация очереди/exchange'ей идемпотентна на
+уровне AMQP, это не бизнес-правило). `from_wire_message` использует воркер
+(`app/worker/factory.py`), чтобы разобрать сообщение, полученное из очереди,
+обратно в `ReviewJob`.
 """
 
 import json
 from typing import Any
+from uuid import UUID
 
 import pika
 from pika import spec
@@ -41,6 +44,20 @@ def to_wire_message(job: ReviewJob) -> dict[str, Any]:
             "base_sha": job.base_sha,
         },
     }
+
+
+def from_wire_message(data: bytes) -> ReviewJob:
+    message = json.loads(data)
+    return ReviewJob(
+        id=UUID(message["job_id"]),
+        event_type=message["event_type"],
+        action=message["action"],
+        repository_provider_id=message["repository"]["id"],
+        repository_full_name=message["repository"]["full_name"],
+        pull_request_number=message["pull_request"]["number"],
+        head_sha=message["pull_request"]["head_sha"],
+        base_sha=message["pull_request"]["base_sha"],
+    )
 
 
 def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel) -> None:

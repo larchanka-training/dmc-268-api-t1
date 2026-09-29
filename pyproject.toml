@@ -35,6 +35,12 @@ dev = [
 target-version = "py314"
 exclude = [".venv", "venv", ".git"]
 
+# `Depends(...)` as a FastAPI parameter default is the framework's own
+# dependency-injection idiom (see .agents/templates/backend/endpoint.md),
+# not the mutable-default-argument bug B008 exists to catch.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]
+
 [tool.mypy]
 python_version = "3.14"
 strict = true

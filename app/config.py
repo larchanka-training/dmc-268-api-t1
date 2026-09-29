@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     rabbitmq_url: str = Field(
         description="RabbitMQ AMQP DSN, e.g. amqp://user:pass@host//",
     )
+    github_webhook_secret: str = Field(
+        description="Shared secret GitHub signs webhook deliveries with (X-Hub-Signature-256).",
+    )
 
 
 def load_settings() -> Settings:

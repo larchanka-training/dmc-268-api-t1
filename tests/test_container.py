@@ -12,6 +12,7 @@ from app.infrastructure.container import build_container
 SETTINGS = Settings(
     database_url="postgresql+psycopg://test:test@localhost/test",
     rabbitmq_url="amqp://guest:guest@localhost//",
+    github_webhook_secret="test-secret",
 )
 
 # Порты хранения следуют конвенции `SqlAlchemy<Port>` в этих двух файлах.
@@ -24,6 +25,7 @@ STORAGE_ADAPTER_FILES = [
 # конвенции `SqlAlchemy*`) — явная карта "порт → класс адаптера → файл".
 OTHER_PORTS: dict[str, tuple[str, Path]] = {
     "JobQueue": ("RabbitMQJobQueue", Path("app/infrastructure/queue/rabbitmq.py")),
+    "LlmGateway": ("StubLlmGateway", Path("app/infrastructure/llm/stub.py")),
 }
 
 

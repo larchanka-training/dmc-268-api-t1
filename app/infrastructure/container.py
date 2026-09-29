@@ -11,8 +11,10 @@ from sqlalchemy import Engine, create_engine
 
 from app.application.ports import UnitOfWork
 from app.application.ports.job_queue import JobQueue
+from app.application.ports.llm_gateway import LlmGateway
 from app.config import Settings
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.llm.stub import StubLlmGateway
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
 
 
@@ -28,6 +30,11 @@ class Container:
 
     def job_queue(self) -> JobQueue:
         return RabbitMQJobQueue(self.rabbitmq_url)
+
+    def llm_gateway(self) -> LlmGateway:
+        # Заглушка: реальный транспорт к Ollama — отдельная задача, контракт
+        # порта уже готов её принять (см. app/application/ports/llm_gateway.py).
+        return StubLlmGateway()
 
 
 def build_container(settings: Settings) -> Container:
