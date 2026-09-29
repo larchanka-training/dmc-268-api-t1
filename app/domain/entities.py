@@ -141,6 +141,25 @@ class PublishedComment:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewJob:
+    """Сообщение очереди, которое просит проверить один коммит.
+
+    Не хранится: живёт ровно между `JobQueue.enqueue` и обработкой воркером.
+    `id` совпадает с id соответствующего `ReviewRun` — так очередь и таблица
+    указывают на одну попытку ревью, не изобретая второй идентификатор.
+    """
+
+    id: UUID
+    event_type: str
+    action: str
+    repository_provider_id: str
+    repository_full_name: str
+    pull_request_number: int
+    head_sha: str
+    base_sha: str
+
+
+@dataclass(frozen=True, slots=True)
 class Hunk:
     """Непрерывный диапазон, затронутый диффом, как его выдаёт парсер."""
 

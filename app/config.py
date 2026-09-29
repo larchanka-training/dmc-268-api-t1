@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     database_url: str = Field(
         description="PostgreSQL DSN, e.g. postgresql+psycopg://user:pass@host/db",
     )
+    rabbitmq_url: str = Field(
+        description="RabbitMQ AMQP DSN, e.g. amqp://user:pass@host//",
+    )
 
 
 def load_settings() -> Settings:

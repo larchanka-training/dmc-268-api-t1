@@ -102,6 +102,7 @@ compile-time зависимости от слоя приложения.
 | `FindingRepo` | `SqlAlchemyFindingRepo` | замечания с привязкой к диффу |
 | `PublishedCommentRepo` | `SqlAlchemyPublishedCommentRepo` | опубликованные комментарии |
 | `UnitOfWork` | `SqlAlchemyUnitOfWork` | граница транзакции |
+| `JobQueue` | `RabbitMQJobQueue` | отправить прогон на асинхронную обработку. Один метод `enqueue`; очередь `review_jobs` с `x-max-priority`, необработанное сообщение уходит в dead-letter очередь `review_jobs.dlq` — топология в System Design §4.2. |
 
 `app/infrastructure/container.py` единственное место, где порт связывается с
 адаптером. Тест проверяет, что у каждого объявленного порта есть адаптер и что
@@ -120,7 +121,6 @@ compile-time зависимости от слоя приложения.
 |---|---|---|
 | `VcsGateway` | GitHub REST | получить дифф и метаданные, опубликовать комментарии, выставить статус. Специфичные для провайдера payload'ы, синтаксис комментариев и авторизация остаются внутри адаптера. |
 | `LlmGateway` | Ollama | выполнить промпт анализа, вернуть структурированные замечания. Сборка промпта это чистая функция, адаптер отвечает только за транспорт. |
-| `JobQueue` | RabbitMQ | отправить прогон на асинхронную обработку. Один метод `enqueue`, схему exchange'ей определяет System Design. |
 | `IdempotencyStore` | PostgreSQL | захватить ключ через `INSERT ... ON CONFLICT DO NOTHING`, воспроизвести результат победившего запроса. Появится вместе с первым эндпоинтом, который принимает повторы. |
 | `RateLimiter` | PostgreSQL | счётчик с фиксированным окном на субъект, `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. |
 | `CacheStore` | TTL-словарь в памяти процесса | key/value по принципу best effort. Промах никогда не считается ошибкой. |
@@ -136,6 +136,13 @@ compile-time зависимости от слоя приложения.
 uvicorn app.main:app        HTTP: request-response, milliseconds
 python -m app.worker      review consumer: minutes, bound by model latency
 ```
+
+`app/worker` — такая же тонкая точка входа, как `app/main.py`
+(`app/worker/__main__.py` + `app/worker/factory.py`, по аналогии с
+`app/api/factory.py`): собирает и запускает consume-цикл над `review_jobs`,
+ack/nack и dead-letter уже настоящие. Обработчик сообщения, реализующий сам
+доменный пайплайн ревью, — предмет отдельного change'а; до него воркер
+запускается с временной заглушкой-обработчиком.
 
 У них общие домен, репозитории и база данных, а общаются они через очередь, а
 не по HTTP. Это модульный монолит, а не набор сервисов.

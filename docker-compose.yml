@@ -35,16 +35,43 @@ services:
       timeout: 5s
       retries: 10
 
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
+    ports:
+      - "5672:5672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   api:
     build: .
     ports:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
+      # %2F — закодированный дефолтный vhost "/"; pika разбирает буквальный
+      # "//" как пустой vhost, а не как "/" (см. tasks.md задачи 2.5).
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
     depends_on:
       postgres:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: ["python", "-m", "app.worker"]
 
 volumes:
   postgres_data:
