@@ -10,6 +10,7 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from typing import Any, cast
 
 import yaml
 from sqlalchemy.dialects import postgresql
@@ -140,11 +141,12 @@ def test_pipeline_spec_transition_table_matches_lifecycle() -> None:
     )
 
 
-def load_openapi_schemas() -> dict:
-    return yaml.safe_load(OPENAPI.read_text())["components"]["schemas"]
+def load_openapi_schemas() -> dict[str, Any]:
+    document = yaml.safe_load(OPENAPI.read_text())
+    return cast(dict[str, Any], document["components"]["schemas"])
 
 
-def resolve_enum(schemas: dict, node: dict) -> list[str]:
+def resolve_enum(schemas: dict[str, Any], node: dict[str, Any]) -> list[str]:
     """Спуститься через $ref/oneOf к списку enum, который узел в итоге описывает."""
     if "$ref" in node:
         name = node["$ref"].rsplit("/", 1)[-1]
@@ -154,16 +156,16 @@ def resolve_enum(schemas: dict, node: dict) -> list[str]:
             if branch.get("type") != "null":
                 return resolve_enum(schemas, branch)
         raise AssertionError(f"oneOf has no non-null branch: {node!r}")
-    return node["enum"]
+    return cast(list[str], node["enum"])
 
 
 def json_schema_enum(path: Path, property_name: str) -> list[str]:
     node = json.loads(path.read_text())["properties"][property_name]
     if "enum" in node:
-        return node["enum"]
+        return cast(list[str], node["enum"])
     for branch in node.get("oneOf", []):
         if "enum" in branch:
-            return branch["enum"]
+            return cast(list[str], branch["enum"])
     raise AssertionError(f"{path} property {property_name!r} has no enum")
 
 
