@@ -52,6 +52,12 @@ class SqlAlchemyRepositoryRepo:
         ).one_or_none()
         return m.repository_to_domain(row) if row else None
 
+    def list_all(self, limit: int, offset: int) -> list[Repository]:
+        rows = self._session.scalars(
+            select(RepositoryRow).order_by(RepositoryRow.created_at).limit(limit).offset(offset)
+        ).all()
+        return [m.repository_to_domain(row) for row in rows]
+
     def add(self, repository: Repository) -> None:
         self._session.add(
             RepositoryRow(
@@ -89,6 +95,18 @@ class SqlAlchemyMergeRequestRepo:
             )
         ).one_or_none()
         return m.merge_request_to_domain(row) if row else None
+
+    def list_for_repository(
+        self, repository_id: UUID, limit: int, offset: int
+    ) -> list[MergeRequest]:
+        rows = self._session.scalars(
+            select(MergeRequestRow)
+            .where(MergeRequestRow.repository_id == repository_id)
+            .order_by(MergeRequestRow.number)
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return [m.merge_request_to_domain(row) for row in rows]
 
     def add(self, merge_request: MergeRequest) -> None:
         self._session.add(
