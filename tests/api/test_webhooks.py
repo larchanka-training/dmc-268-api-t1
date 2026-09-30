@@ -1,10 +1,11 @@
-"""Эндпоинт `POST /webhooks/github` на TestClient с фейками в контейнере.
+"""Эндпоинт `POST /api/webhooks/{provider}` на TestClient с фейками в контейнере.
 
 Контейнеры подменяются целиком: `app.state.container` получает заглушку с
 фейковыми портами, поэтому тесты отвечают на вопрос «что делает HTTP-слой» —
-подпись, коды ответов, маппинг исходов use case — и не трогают базу и брокер.
-Подписи считаются здесь независимо (hmac + hashlib), а не функцией `verify_hmac`,
-чтобы тест не сверял реализацию с ней же.
+подпись, коды ответов, маппинг исходов use case в контракт `openapi.yaml` —
+и не трогают базу и брокер. Подписи считаются здесь независимо
+(hmac + hashlib), а не функцией `verify_hmac`, чтобы тест не сверял
+реализацию с ней же.
 """
 
 import hashlib
@@ -17,8 +18,9 @@ from httpx import Client, Response
 
 from app.api.factory import create_app
 from app.config import Settings
+from app.domain.vcs_errors import VcsError
 
-from ..fakes import FakeQueue, FakeUow, FakeVcs, webhook_payload
+from ..fakes import FakeCacheStore, FakeQueue, FakeUow, FakeVcs, webhook_payload
 
 SECRET = "test-webhook-secret"
 SIGNATURE_HEADER = "X-Hub-Signature-256"
@@ -36,6 +38,7 @@ class StubContainer:
     uow: FakeUow
     vcs: FakeVcs
     queue: FakeQueue
+    cache: FakeCacheStore
 
     def unit_of_work(self) -> FakeUow:
         return self.uow
@@ -45,6 +48,9 @@ class StubContainer:
 
     def job_queue(self) -> FakeQueue:
         return self.queue
+
+    def cache_store(self) -> FakeCacheStore:
+        return self.cache
 
 
 def make_client(
@@ -71,6 +77,7 @@ def make_client(
         uow=uow,
         vcs=vcs if vcs is not None else FakeVcs(),
         queue=queue if queue is not None else FakeQueue(),
+        cache=FakeCacheStore(),
     )
     app = create_app(settings)
     app.state.container = container
@@ -83,6 +90,7 @@ def post_webhook(
     *,
     signature: str | None = "auto",
     body: bytes | None = None,
+    provider: str = "github",
 ) -> Response:
     if body is None:
         body = json.dumps(webhook_payload(action)).encode("utf-8")
@@ -91,16 +99,20 @@ def post_webhook(
         headers[SIGNATURE_HEADER] = sign(body)
     elif signature is not None:
         headers[SIGNATURE_HEADER] = signature
-    return client.post("/webhooks/github", content=body, headers=headers)
+    return client.post(f"/api/webhooks/{provider}", content=body, headers=headers)
 
 
-def test_valid_opened_returns_202_and_creates_records_and_job() -> None:
+def test_valid_opened_returns_202_with_review_job_projection() -> None:
     client, container = make_client()
     response = post_webhook(client, "opened")
     assert response.status_code == 202
-    assert response.json()["status"] == "created"
     (run,) = container.uow.review_runs.added
-    assert response.json()["review_run_id"] == str(run.id)
+    job = response.json()
+    assert job["id"] == str(run.id)
+    assert job["provider"] == "github"
+    assert job["status"] == "queued"
+    assert job["trigger"] == "webhook"
+    assert job["headCommitSha"] == run.head_sha
     assert container.uow.commits == 1
     assert len(container.queue.jobs) == 1
 
@@ -112,10 +124,28 @@ def test_valid_synchronize_returns_202_and_enqueues_job() -> None:
     assert container.queue.jobs[-1].action == "synchronize"
 
 
+def test_duplicate_delivery_returns_202_with_existing_review_job() -> None:
+    """Контракт: «ReviewJob создан или найден существующий»."""
+    client, container = make_client()
+    first = post_webhook(client, "opened")
+    (existing,) = container.uow.review_runs.added
+
+    second = post_webhook(client, "opened")
+    assert second.status_code == 202
+    assert second.json()["id"] == str(existing.id)
+    assert second.json()["id"] == first.json()["id"]
+    assert len(container.uow.review_runs.added) == 1
+    assert len(container.queue.jobs) == 1
+
+
 def test_missing_signature_is_rejected_with_401() -> None:
     client, container = make_client()
     response = post_webhook(client, "opened", signature=None)
     assert response.status_code == 401
+    assert response.json() == {
+        "code": "WEBHOOK_SIGNATURE_INVALID",
+        "message": "invalid webhook signature",
+    }
     assert container.uow.review_runs.added == []
     assert container.queue.jobs == []
 
@@ -178,11 +208,25 @@ def test_unregistered_repository_returns_202_ignored() -> None:
 
 
 def test_vcs_failure_returns_502_without_records() -> None:
-    from app.application.ports.vcs_gateway import VcsError
-
-    client, container = make_client(uow=FakeUow(), vcs=FakeVcs(error=VcsError("HTTP 502")))
+    client, container = make_client(
+        uow=FakeUow(), vcs=FakeVcs(error=VcsError("HTTP 502"))
+    )
     response = post_webhook(client, "opened")
     assert response.status_code == 502
+    assert response.json() == {
+        "code": "SCM_UNAVAILABLE",
+        "message": "VCS provider unavailable",
+    }
+    assert container.uow.review_runs.added == []
+    assert container.queue.jobs == []
+
+
+def test_unsupported_provider_returns_501() -> None:
+    """GitLab приёмником ещё не поддержан: маршрут контрактный, адаптера нет."""
+    client, container = make_client()
+    response = post_webhook(client, "opened", provider="gitlab")
+    assert response.status_code == 501
+    assert response.json()["code"] == "PROVIDER_NOT_SUPPORTED"
     assert container.uow.review_runs.added == []
     assert container.queue.jobs == []
 

@@ -28,9 +28,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.container = build_container(settings)
 
+    from app.api.webhooks import ROUTER_PREFIX
     from app.api.webhooks import router as webhooks_router
 
-    app.include_router(webhooks_router)
+    # Пути контракта живут под /api (servers.url в openapi.yaml); префикс
+    # ставит приложение, а не reverse-proxy.
+    app.include_router(webhooks_router, prefix=ROUTER_PREFIX)
 
     @app.get("/")
     def read_root() -> dict[str, str]:

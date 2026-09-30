@@ -6,6 +6,10 @@
 описанный в самом `MergeRequestState`. На 429/5xx — экспоненциальный backoff
 с ограниченным числом попыток; пауза приходит инъекцией (`sleep`), чтобы
 тесты не ждали по-настоящему.
+
+Любой ответ адаптер переводит в своё исключение: наверх добирается 502, а не
+голый `JSONDecodeError` или `KeyError` от неожиданного тела (прокси отдал
+HTML, GitHub сменил форму ответа).
 """
 
 import time
@@ -16,7 +20,11 @@ import httpx
 
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
-from app.infrastructure.vcs.errors import VcsError, VcsUnavailableError
+from app.infrastructure.vcs.errors import (
+    VcsAuthError,
+    VcsError,
+    VcsUnavailableError,
+)
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 
 _DIFF_ACCEPT = "application/vnd.github.v3.diff"
@@ -71,37 +79,63 @@ class GitHubVcsGateway:
             installation_id,
             _JSON_ACCEPT,
         )
-        data: dict[str, Any] = response.json()
-        return PRMetadata(
-            number=data["number"],
-            head_sha=data["head"]["sha"],
-            base_sha=data["base"]["sha"],
-            title=data["title"],
-            author=data["user"]["login"],
-            source_branch=data["head"]["ref"],
-            target_branch=data["base"]["ref"],
-            state=_translate_state(data),
-        )
+        try:
+            data: dict[str, Any] = response.json()
+            state = _translate_state(data)
+            return PRMetadata(
+                number=data["number"],
+                head_sha=data["head"]["sha"],
+                base_sha=data["base"]["sha"],
+                title=data["title"],
+                author=data["user"]["login"],
+                source_branch=data["head"]["ref"],
+                target_branch=data["base"]["ref"],
+                state=state,
+            )
+        except (ValueError, KeyError, TypeError) as error:
+            raise VcsError(
+                "GitHub API вернул неожиданное тело на GET"
+                f" /repos/{repo_full_name}/pulls/{pr_number}: {error!r}"
+            ) from error
 
     def _get(self, url: str, installation_id: int, accept: str) -> httpx.Response:
-        """GET с backoff: 429/5xx повторяются; клиентская ошибка или обрыв
-        сети — сразу ошибка адаптера, чтобы наверх добрался 502, а не 500."""
+        """GET с backoff: 429/5xx повторяются; 401 один раз сбрасывает кэш
+        installation token и берёт новый (токен мог быть отозван до истечения);
+        прочие клиентские ошибки или обрыв сети — сразу ошибка адаптера, чтобы
+        наверх добрался 502, а не 500."""
         token = self._auth.installation_token(installation_id)
-        headers = {"Authorization": f"Bearer {token}", "Accept": accept}
-        for attempt in range(self._max_attempts):
-            try:
-                response = self._client.get(url, headers=headers)
-            except httpx.RequestError as error:
-                raise VcsUnavailableError(
-                    f"GitHub API недоступен на GET {url}: {error}"
-                ) from error
+        token_refreshed = False
+        attempt = 0
+        while True:
+            response = self._send(url, token, accept)
             if not response.is_error:
                 return response
+            if response.status_code == 401 and not token_refreshed:
+                # Формально не истёкший, но отозванный токен (приостановка App,
+                # переустановка, ротация ключа) жил бы в кэше до конца TTL:
+                # сбрасываем и пробуем свежим ровно один раз.
+                self._auth.invalidate(installation_id)
+                token = self._auth.installation_token(installation_id)
+                token_refreshed = True
+                continue
+            if response.status_code == 401:
+                raise VcsAuthError(f"GitHub API отклонил токен на GET {url}")
+            attempt += 1
             if not _is_retryable(response.status_code):
                 raise VcsError(f"GitHub API: HTTP {response.status_code} на GET {url}")
-            if attempt + 1 < self._max_attempts:
-                self._sleep(self._backoff_base_seconds * 2**attempt)
-        raise VcsUnavailableError(
-            f"GitHub API отвечал 429/5xx {self._max_attempts} попытки подряд"
-            f" на GET {url}"
-        )
+            if attempt >= self._max_attempts:
+                raise VcsUnavailableError(
+                    f"GitHub API отвечал 429/5xx {self._max_attempts} попытки подряд"
+                    f" на GET {url}"
+                )
+            self._sleep(self._backoff_base_seconds * 2 ** (attempt - 1))
+
+    def _send(self, url: str, token: str, accept: str) -> httpx.Response:
+        try:
+            return self._client.get(
+                url, headers={"Authorization": f"Bearer {token}", "Accept": accept}
+            )
+        except httpx.RequestError as error:
+            raise VcsUnavailableError(
+                f"GitHub API недоступен на GET {url}: {error}"
+            ) from error

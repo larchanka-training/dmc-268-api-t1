@@ -16,9 +16,9 @@ from uuid import UUID, uuid4
 import pika
 
 from app.application.ports import UnitOfWork
-from app.application.ports.vcs_gateway import VcsError
 from app.domain.entities import Hunk, PRMetadata, Repository, ReviewJob
-from app.domain.enums import MergeRequestState, Provider
+from app.domain.enums import TERMINAL_STATUSES, MergeRequestState, Provider
+from app.domain.vcs_errors import VcsError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 NOW = dt.datetime(2026, 9, 29, 12, 0, tzinfo=dt.UTC)
@@ -46,14 +46,20 @@ def webhook_payload(action: str = "opened") -> dict[str, Any]:
 
 
 def pr_metadata(base_sha: str = "fedcba0987654321fedcba0987654321fedcba09") -> PRMetadata:
+    """Свежие метаданные VCS.
+
+    Заголовок, автор и ветки нарочно отличаются от payload'а вебхука: так
+    тест видит, что в `MergeRequest` ложится версия из метаданных, а не
+    устаревшая копия из доставленного тела.
+    """
     return PRMetadata(
         number=6,
         head_sha="a1b2c3d4e5f6789012345678abcdef0123456789",
         base_sha=base_sha,
-        title="feat: приём вебхуков и VCS-шлюз",
-        author="ilyassakhanov",
-        source_branch="feat/webhook-intake",
-        target_branch="develop",
+        title="feat: метаданные из VCS свежее payload'а",
+        author="grinv",
+        source_branch="feat/webhook-intake-rebased",
+        target_branch="main",
         state=MergeRequestState.OPEN,
     )
 
@@ -118,17 +124,21 @@ class FakeReviewRuns:
         return next((r for r in self.runs if r.id == run_id), None)
 
     def find_active(self, merge_request_id: UUID, head_sha: str) -> Any | None:
+        # Тот же фильтр, что у `SqlAlchemyReviewRunRepo.find_active`:
+        # завершённый прогон на том же коммите не блокирует новый.
         return next(
             (
                 r
                 for r in self.runs
-                if r.merge_request_id == merge_request_id and r.head_sha == head_sha
+                if r.merge_request_id == merge_request_id
+                and r.head_sha == head_sha
+                and r.status not in TERMINAL_STATUSES
             ),
             None,
         )
 
     def list_unfinished(self) -> list[Any]:
-        return list(self.runs)
+        return [r for r in self.runs if r.status not in TERMINAL_STATUSES]
 
     def add(self, run: Any) -> None:
         self.added.append(run)
@@ -196,8 +206,14 @@ class FakeUow(UnitOfWork):
         default_factory=FakePublishedComments
     )
     commits: int = 0
+    rollbacks: int = 0
+    commit_error: Exception | None = None
+    # Сколько прогонов закоммичено к началу текущей транзакции: rollback
+    # убирает добавленные после этого, как это сделал бы настоящий UoW.
+    _committed_runs: int = 0
 
     def __enter__(self) -> Self:
+        self._committed_runs = len(self.review_runs.runs)
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -205,9 +221,30 @@ class FakeUow(UnitOfWork):
 
     def commit(self) -> None:
         self.commits += 1
+        if self.commit_error is not None:
+            raise self.commit_error
+        self._committed_runs = len(self.review_runs.runs)
 
     def rollback(self) -> None:
-        return None
+        self.rollbacks += 1
+        runs = self.review_runs
+        del runs.runs[self._committed_runs :]
+        del runs.added[self._committed_runs :]
+
+
+@dataclass
+class FakeCacheStore:
+    """Двойник `CacheStore`: записи видны тесту, TTL записывается."""
+
+    entries: dict[str, str] = field(default_factory=dict)
+    puts: list[tuple[str, str, int]] = field(default_factory=list)
+
+    def get(self, key: str) -> str | None:
+        return self.entries.get(key)
+
+    def put(self, key: str, value: str, *, ttl_seconds: int) -> None:
+        self.puts.append((key, value, ttl_seconds))
+        self.entries[key] = value
 
 
 @dataclass

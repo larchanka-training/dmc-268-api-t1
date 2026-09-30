@@ -99,3 +99,9 @@ name = "Inner layers know no vendor"
 type = "forbidden"
 source_modules = ["app.domain", "app.application"]
 forbidden_modules = ["sqlalchemy", "fastapi", "httpx", "ollama", "pika", "alembic", "psycopg"]
+
+[dependency-groups]
+dev = [
+    "pyyaml>=6.0.3",
+    "types-pyyaml>=6.0.12.20260906",
+]

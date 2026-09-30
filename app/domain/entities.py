@@ -181,20 +181,6 @@ class WebhookEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class ParsedFile:
-    """Один файл диффа: пути, бинарность и разобранные hunk'и.
-
-    `old_path` заполнен только у переименования. Бинарные файлы на hunk'и не
-    разбираются — ревьюить там нечего, их остаётся только отфильтровать.
-    """
-
-    file_path: str
-    old_path: str | None = None
-    is_binary: bool = False
-    hunks: tuple[Hunk, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
 class PRMetadata:
     """Свежие метаданные запроса на изменения, достанные через VCS-шлюз.
 
@@ -221,8 +207,9 @@ class ReviewJob:
     Тело сериализуется строго по `docs/SYSTEM_DESIGN.md` §4.2. Отклонение от
     списка полей плана (`tasks/plan.md`, Task 3.1): добавлены `action` и
     `repository_provider_id` — §4.2 требует нести в теле `action` и числовой
-    `repository.id`, без них сообщение не собрать. `priority` в тело не
-    входит: это метаданное доставки, адаптер передаёт его свойством AMQP.
+    `repository.id`, без них сообщение не собрать. `priority` в сущности нет:
+    это метаданное доставки, и выводит его адаптер очереди — слой приложения
+    про тарифы знать не должен.
     `job_id` — UUIDv7 из `app.domain.ids.new_id()`, задаётся при создании
     задачи доменом, а не адаптером и не базой: у сообщения есть
     идентификатор ещё до брокера.
@@ -236,4 +223,3 @@ class ReviewJob:
     head_sha: str
     base_sha: str | None
     action: str
-    priority: int

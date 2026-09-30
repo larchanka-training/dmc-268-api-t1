@@ -28,6 +28,17 @@ QUEUE_NAME = "review.jobs"
 MAX_PRIORITY = 10
 _EVENT_TYPE = "pull_request"
 
+# Приоритет выводится здесь, а не в слое приложения: теле сообщения его нет
+# (§4.2), а правило доставки — знание адаптера. `synchronize` несёт свежий
+# коммит поверх ещё не отревьюенного: пока воркер доберётся до старого,
+# он успеет устареть, поэтому свежий коммит идёт впереди очереди.
+_SYNCHRONIZE_PRIORITY = 5
+_DEFAULT_PRIORITY = 0
+
+
+def _priority_of(job: ReviewJob) -> int:
+    return _SYNCHRONIZE_PRIORITY if job.action == "synchronize" else _DEFAULT_PRIORITY
+
 
 class RabbitMqConfigError(RuntimeError):
     """Адаптеру не с чем соединяться: RABBITMQ_URL не задан."""
@@ -107,6 +118,6 @@ class PikaJobQueue:
             properties=pika.BasicProperties(
                 delivery_mode=2,
                 content_type="application/json",
-                priority=job.priority,
+                priority=_priority_of(job),
             ),
         )

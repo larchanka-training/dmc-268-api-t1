@@ -4,7 +4,7 @@
 (см. BACKEND_ARCHITECTURE.md, раздел «Конфигурация»).
 """
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,20 +24,22 @@ class Settings(BaseSettings):
     # Пустые по умолчанию, а не обязательные: composition root строит
     # VCS-шлюз лениво, и приложение без GitHub-реквизитов продолжает отвечать
     # на запросы, не касающиеся вебхуков. Пустой ключ громко аукнется при
-    # первом же обращении к VCS API.
+    # первом же обращении к VCS API. Ключ — SecretStr, а не str: Settings
+    # попадает в dataclass с рабочим __repr__, и обычная строка ушла бы в
+    # трейсбек с локальными переменными целиком.
     github_app_id: str = Field(
         default="",
         description="Идентификатор GitHub App; из окружения GITHUB_APP_ID",
     )
-    github_app_private_key: str = Field(
-        default="",
+    github_app_private_key: SecretStr = Field(
+        default=SecretStr(""),
         description="PEM private key GitHub App; из окружения GITHUB_APP_PRIVATE_KEY",
     )
     # Секрет проверки HMAC-подписи вебхуков. Пустой по умолчанию по той же
     # причине, что и реквизиты выше; пустой секрет означает, что эндпоинт
     # отклоняет все вебхуки (401), а не принимает неподписанные.
-    github_webhook_secret: str = Field(
-        default="",
+    github_webhook_secret: SecretStr = Field(
+        default=SecretStr(""),
         description="Секрет HMAC вебхуков GitHub; из окружения GITHUB_WEBHOOK_SECRET",
     )
     rabbitmq_url: str = Field(

@@ -21,9 +21,8 @@ from httpx import Client, Response
 from sqlalchemy import Engine
 
 from app.api.factory import create_app
-from app.application.ports import JobQueue, UnitOfWork, VcsGateway
+from app.application.ports import CacheStore, JobQueue, UnitOfWork, VcsGateway
 from app.config import Settings
-from app.domain.diff_parser import filter_diff_files, parse_diff
 from app.domain.entities import MergeRequest, Repository, ReviewRun
 from app.domain.enums import ReviewRunStatus, TriggerSource
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -33,6 +32,7 @@ from ..conftest import requires_db
 from ..fakes import (
     INSTALLATION_ID,
     REPO_FULL_NAME,
+    FakeCacheStore,
     FakeChannel,
     FakeVcs,
     a_repository,
@@ -57,12 +57,13 @@ def sign(body: bytes, secret: str = SECRET) -> str:
 
 @dataclass
 class E2EContainer:
-    """Настоящие адаптеры базы и очереди, фейковый VCS: сеть не нужна."""
+    """Настоящие адаптеры базы и очереди, фейковые VCS и кэш: сеть не нужна."""
 
     engine: Engine
     settings: Settings
     vcs: FakeVcs
     queue: PikaJobQueue
+    cache: FakeCacheStore
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine)
@@ -73,6 +74,9 @@ class E2EContainer:
     def job_queue(self) -> JobQueue:
         return self.queue
 
+    def cache_store(self) -> CacheStore:
+        return self.cache
+
 
 @dataclass(frozen=True)
 class Flow:
@@ -81,6 +85,7 @@ class Flow:
     repository: Repository
     vcs: FakeVcs
     channel: FakeChannel
+    cache: FakeCacheStore
 
 
 @pytest.fixture
@@ -96,11 +101,13 @@ def flow(clean_db) -> Flow:
     )
     vcs = FakeVcs(diff=SAMPLE_DIFF)
     channel = FakeChannel()
+    cache = FakeCacheStore()
     container = E2EContainer(
         engine=clean_db,
         settings=settings,
         vcs=vcs,
         queue=PikaJobQueue(url="", channel=channel),
+        cache=cache,
     )
     app = create_app(settings)
     app.state.container = container
@@ -110,6 +117,7 @@ def flow(clean_db) -> Flow:
         repository=repository,
         vcs=vcs,
         channel=channel,
+        cache=cache,
     )
 
 
@@ -125,7 +133,7 @@ def post_webhook(
         headers[SIGNATURE_HEADER] = sign(body)
     elif signature is not None:
         headers[SIGNATURE_HEADER] = signature
-    return client.post("/webhooks/github", content=body, headers=headers)
+    return client.post("/api/webhooks/github", content=body, headers=headers)
 
 
 def stored_state(
@@ -142,17 +150,36 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
     response = post_webhook(flow.client, "opened")
 
     assert response.status_code == 202
-    assert response.json()["status"] == "created"
+    job = response.json()
     merge_request, runs = stored_state(flow.engine, flow.repository.id)
     assert merge_request is not None
+    # Заголовок и автор — из свежих метаданных VCS, не из payload'а.
     assert (merge_request.title, merge_request.author) == (
-        "feat: приём вебхуков и VCS-шлюз",
-        "ilyassakhanov",
+        pr_metadata().title,
+        pr_metadata().author,
     )
     (run,) = runs
     assert run.head_sha == HEAD_SHA
     assert run.status is ReviewRunStatus.QUEUED
     assert run.trigger is TriggerSource.WEBHOOK
+
+    # Тело 202 — публичная проекция ReviewJob из openapi.yaml, camelCase.
+    assert job == {
+        "id": str(run.id),
+        "provider": "github",
+        "providerRepositoryId": str(flow.repository.provider_id),
+        "pullRequestNumber": PR_NUMBER,
+        "trigger": "webhook",
+        "status": "queued",
+        "headCommitSha": HEAD_SHA,
+        "baseCommitSha": BASE_SHA,
+        "findingsCount": 0,
+        "rejectedFindings": 0,
+        "createdAt": run.created_at.isoformat(),
+        "updatedAt": run.updated_at.isoformat(),
+        "lastProgressAt": run.last_progress_at.isoformat(),
+        "error": None,
+    }
 
     (published,) = flow.channel.published
     body = json.loads(published.body)
@@ -170,6 +197,7 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
             "base_sha": BASE_SHA,
         },
     }
+    # Приоритет открытого PR — дефолтный, выведен адаптером из action.
     assert published.properties.priority == 0
     assert "priority" not in body
     assert flow.channel.declared == [
@@ -179,36 +207,21 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
             "arguments": {"x-max-priority": 10},
         }
     ]
+    # Дифф не выброшен: он в кэше по ключу доставки — воркер не потянет
+    # его у GitHub третий раз (§4.3).
+    assert flow.cache.entries == {
+        f"diff:{REPO_FULL_NAME}:{PR_NUMBER}:{HEAD_SHA}": SAMPLE_DIFF
+    }
 
 
-def test_diff_noise_is_filtered_and_sources_keep_exact_line_numbers(flow: Flow) -> None:
+def test_vcs_is_called_for_diff_then_metadata(flow: Flow) -> None:
+    """Дифф запрашивается до метаданных: его сбой даёт 502 до создания записей."""
     post_webhook(flow.client, "opened")
 
     assert flow.vcs.calls == [
         ("diff", REPO_FULL_NAME, PR_NUMBER, INSTALLATION_ID),
         ("metadata", REPO_FULL_NAME, PR_NUMBER, INSTALLATION_ID),
     ]
-    sources = filter_diff_files(parse_diff(SAMPLE_DIFF))
-    assert [f.file_path for f in sources] == ["app/services/review_pipeline.py"]
-    first, second = sources[0].hunks
-    assert (first.old_start, first.old_count, first.new_start, first.new_count) == (
-        12,
-        8,
-        12,
-        10,
-    )
-    assert first.changed_new_lines == frozenset({15, 18, 19})
-    assert first.changed_old_lines == frozenset({17})
-    assert (second.old_start, second.old_count, second.new_start, second.new_count) == (
-        40,
-        3,
-        42,
-        5,
-    )
-    assert second.changed_new_lines == frozenset({44, 45, 46})
-    assert second.changed_old_lines == frozenset({42})
-    (published,) = flow.channel.published
-    assert "uv.lock" not in published.body.decode("utf-8")
 
 
 @pytest.mark.parametrize("signature", [None, "sha256=" + "0" * 64])

@@ -139,3 +139,64 @@ def test_token_transport_failure_raises_vcs_unavailable(
 
     with pytest.raises(VcsUnavailableError):
         auth.installation_token(INSTALLATION_ID)
+
+
+def test_invalidate_forces_a_fresh_token(rsa_key_pair: RsaKeyPair) -> None:
+    """После 401 кэш сбрасывают снаружи: следующий вызов делает новый POST."""
+    tokens = iter(["ghs_revoked", "ghs_fresh"])
+    posts: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(
+            200, json={"token": next(tokens), "expires_at": FAR_FUTURE}
+        )
+
+    auth = make_auth(rsa_key_pair.private_pem, handler)
+
+    assert auth.installation_token(INSTALLATION_ID) == "ghs_revoked"
+    auth.invalidate(INSTALLATION_ID)
+    assert auth.installation_token(INSTALLATION_ID) == "ghs_fresh"
+    assert len(posts) == 2
+
+
+def test_invalidate_of_unknown_installation_is_noop(rsa_key_pair: RsaKeyPair) -> None:
+    """Сброс чужой/несуществующей инсталляции не падает."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"token": "ghs_1", "expires_at": FAR_FUTURE}
+        )
+
+    auth = make_auth(rsa_key_pair.private_pem, handler)
+    auth.invalidate(INSTALLATION_ID)
+    assert auth.installation_token(INSTALLATION_ID) == "ghs_1"
+
+
+def test_unexpected_token_body_raises_vcs_auth_error(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """200 с телом не той формы (прокси, смена контракта) — VcsAuthError,
+    а не KeyError/JSONDecodeError мимо `except VcsError` в use case."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>portal</html>")
+
+    auth = make_auth(rsa_key_pair.private_pem, handler)
+
+    with pytest.raises(VcsAuthError):
+        auth.installation_token(INSTALLATION_ID)
+
+
+def test_token_without_expires_at_raises_vcs_auth_error(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """Тело без `expires_at` — та же ошибка адаптера."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"token": "ghs_1"})
+
+    auth = make_auth(rsa_key_pair.private_pem, handler)
+
+    with pytest.raises(VcsAuthError):
+        auth.installation_token(INSTALLATION_ID)

@@ -27,7 +27,6 @@ JOB = ReviewJob(
     head_sha="a1b2c3d4e5f6789012345678abcdef0123456789",
     base_sha="fed654cba0fed654cba0fed654cba0fed654cba0",
     action="opened",
-    priority=5,
 )
 
 
@@ -63,11 +62,31 @@ def test_publishes_body_exactly_per_section_4_2() -> None:
     }
 
 
-def test_priority_is_amqp_property_not_a_body_field() -> None:
+def test_priority_is_derived_from_action_in_the_adapter() -> None:
+    """Приоритет — свойство AMQP, выведенное адаптером, в теле его нет.
+
+    Свежий коммит (`synchronize`) ревьюится раньше уже ждущего (`opened`):
+    пока воркер доберётся до старого, тот успеет устареть.
+    """
     channel = FakeChannel()
     published = enqueue(channel)
-    assert published.properties.priority == 5
+    assert published.properties.priority == 0
     assert "priority" not in json.loads(published.body)
+
+    channel = FakeChannel()
+    make_queue(channel).enqueue(
+        ReviewJob(
+            job_id=JOB.job_id,
+            review_run_id=JOB.review_run_id,
+            repository_full_name=JOB.repository_full_name,
+            repository_provider_id=JOB.repository_provider_id,
+            pr_number=JOB.pr_number,
+            head_sha=JOB.head_sha,
+            base_sha=JOB.base_sha,
+            action="synchronize",
+        )
+    )
+    assert channel.published[0].properties.priority == 5
 
 
 def test_queue_is_declared_with_max_priority() -> None:
@@ -97,7 +116,6 @@ def test_missing_base_sha_serializes_as_null() -> None:
             head_sha=JOB.head_sha,
             base_sha=None,
             action="synchronize",
-            priority=0,
         )
     )
     body = json.loads(channel.published[0].body)

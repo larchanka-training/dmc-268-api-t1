@@ -22,6 +22,7 @@ class Adapter:
 
 
 PORT_TO_ADAPTER: dict[str, Adapter] = {
+    "CacheStore": Adapter("cache/memory.py", "InMemoryCacheStore"),
     "ContextPayloadRepo": Adapter(
         "db/repositories.py", "SqlAlchemyContextPayloadRepo"
     ),
@@ -101,9 +102,20 @@ def test_the_container_hands_out_a_unit_of_work() -> None:
 
 def test_the_container_hands_out_a_vcs_gateway() -> None:
     """Ленивая выдача: конструирование не касается сети, контракт — порта."""
-    gateway = build_container(SETTINGS).vcs_gateway()
+    container = build_container(SETTINGS)
+    gateway = container.vcs_gateway()
     assert callable(gateway.fetch_diff)
     assert callable(gateway.fetch_pr_metadata)
+
+
+def test_the_container_caches_its_lazy_adapters() -> None:
+    """Кэши обязаны пережить вызов builder'а (D7): иначе каждый вебхук
+    получает свежий `GitHubAppAuth` с пустым кэшем токенов и лишним POST
+    к GitHub. Удалите `object.__setattr__` в контейнере — тест красный."""
+    container = build_container(SETTINGS)
+    assert container.vcs_gateway() is container.vcs_gateway()
+    assert container.cache_store() is container.cache_store()
+    assert container.cache_store().get("missing") is None
 
 
 def test_the_container_hands_out_a_job_queue() -> None:

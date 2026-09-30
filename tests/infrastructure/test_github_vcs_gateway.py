@@ -14,7 +14,11 @@ import pytest
 
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
-from app.infrastructure.vcs.errors import VcsError, VcsUnavailableError
+from app.infrastructure.vcs.errors import (
+    VcsAuthError,
+    VcsError,
+    VcsUnavailableError,
+)
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from tests.infrastructure.conftest import RsaKeyPair
@@ -268,3 +272,112 @@ def test_transport_failure_of_metadata_raises_vcs_unavailable(
         gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
 
     assert len(seen) == 1
+
+
+def html_portal_handler(seen: list[httpx.Request]) -> Handler:
+    """Токен — 200, PR — 200 с HTML вместо JSON: прокси или captive portal."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(
+                200, json={"token": "ghs_test", "expires_at": FAR_FUTURE}
+            )
+        seen.append(request)
+        return httpx.Response(200, text="<html>login page</html>")
+
+    return handler
+
+
+def test_metadata_200_with_html_body_raises_vcs_error(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """Неожиданное тело не уходит наружу JSONDecodeError/KeyError: наверху 502."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, html_portal_handler(seen), [])
+
+    with pytest.raises(VcsError):
+        gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
+
+    assert len(seen) == 1
+
+
+def test_incomplete_metadata_json_raises_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """Форма ответа, сменившаяся у GitHub (нет `user.login`), — тоже VcsError."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(
+                200, json={"token": "ghs_test", "expires_at": FAR_FUTURE}
+            )
+        seen.append(request)
+        return httpx.Response(200, json={"number": 6, "head": {"sha": "a" * 40}})
+
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, handler, sleeps)
+
+    with pytest.raises(VcsError):
+        gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
+
+    assert sleeps == []
+
+
+def revoked_token_handler(seen: list[httpx.Request]) -> Handler:
+    """Первый токен просрочен для GitHub'а: 401; после перевыпуска — 200."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.startswith("/app/installations/"):
+            pr_seen = [r for r in seen if not r.url.path.startswith("/app/installations/")]
+            token = "ghs_stale" if len(pr_seen) == 0 else "ghs_fresh"
+            return httpx.Response(
+                200, json={"token": token, "expires_at": FAR_FUTURE}
+            )
+        if request.headers["Authorization"] == "Bearer ghs_stale":
+            return httpx.Response(401, json={"message": "Bad credentials"})
+        return httpx.Response(200, text=DIFF)
+
+    return handler
+
+
+def test_401_invalidates_cached_token_and_retries_once(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """Отозванный до истечения TTL токен не держит инсталляцию в 502:
+    после 401 кэш сброшен, новый токен проходит."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, revoked_token_handler(seen), sleeps)
+
+    assert gateway.fetch_diff("owner/repo", 6, INSTALLATION_ID) == DIFF
+
+    pr_requests = [r for r in seen if not r.url.path.startswith("/app/installations/")]
+    token_requests = [r for r in seen if r.url.path.startswith("/app/installations/")]
+    assert len(token_requests) == 2  # перевыпуск после сброса кэша
+    assert len(pr_requests) == 2  # повтор после 401, без пауз backoff
+    assert sleeps == []
+
+
+def test_second_401_after_refresh_raises_vcs_auth_error(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """Новый токен тоже отклонён — честная ошибка аутентификации, не цикл."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(
+                200, json={"token": "ghs_stale", "expires_at": FAR_FUTURE}
+            )
+        seen.append(request)
+        return httpx.Response(401, json={"message": "Bad credentials"})
+
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, handler, sleeps)
+
+    with pytest.raises(VcsAuthError):
+        gateway.fetch_diff("owner/repo", 6, INSTALLATION_ID)
+
+    pr_requests = [r for r in seen if not r.url.path.startswith("/app/installations/")]
+    assert len(pr_requests) == 2
+    assert sleeps == []

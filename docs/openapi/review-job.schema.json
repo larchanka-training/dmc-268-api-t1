@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larchanka-training.github.io/dmc-268-api-t1/schemas/review-job.schema.json",
+  "title": "ReviewJob",
+  "description": "Публичная проекция хранимой сущности ReviewRun (review-data-model). Не путать с сообщением очереди — у него нет собственной идентичности, отдельной от reviewRunId.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "provider",
+    "providerRepositoryId",
+    "pullRequestNumber",
+    "trigger",
+    "status",
+    "findingsCount",
+    "rejectedFindings",
+    "createdAt",
+    "updatedAt",
+    "lastProgressAt",
+    "error"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "reviewRunId."
+    },
+    "provider": {
+      "type": "string",
+      "enum": ["github", "gitlab"]
+    },
+    "providerRepositoryId": {
+      "type": "string"
+    },
+    "pullRequestNumber": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "trigger": {
+      "type": "string",
+      "enum": ["webhook", "manual", "mention"]
+    },
+    "headCommitSha": {
+      "type": ["string", "null"]
+    },
+    "baseCommitSha": {
+      "type": ["string", "null"]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "building_context",
+        "analysing",
+        "publishing",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "findingsCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "rejectedFindings": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "model": {
+      "type": ["string", "null"]
+    },
+    "tokensUsed": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "durationSeconds": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "lastProgressAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Обновляется на каждом переходе состояния; используется для выявления зависших прогонов (§7.5 PIPELINE_SPEC.md)."
+    },
+    "error": {
+      "oneOf": [
+        { "$ref": "error.schema.json" },
+        { "type": "null" }
+      ]
+    }
+  }
+}

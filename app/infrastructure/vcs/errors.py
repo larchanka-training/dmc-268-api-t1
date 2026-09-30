@@ -1,12 +1,12 @@
 """Исключения VCS-адаптеров.
 
-Базовая шапка `VcsError` живёт в порту `app.application.ports.vcs_gateway`:
-слой приложения ловит её, не нарушая слои (адаптер отсюда не импортируется
-вверх, а порт не импортирует инфраструктуру). Здесь определены только
-наследники, уточняющие причину сбоя для логирования и тестов.
+Базовая шапка `VcsError` живёт в домене (`app.domain.vcs_errors`): и слой
+приложения, и адаптеры импортируют её оттуда, поэтому ни один из них не
+зависит от другого. Здесь определены только наследники, уточняющие причину
+сбоя для логирования и тестов.
 """
 
-from app.application.ports.vcs_gateway import VcsError
+from app.domain.vcs_errors import VcsError
 
 __all__ = ["VcsAuthError", "VcsError", "VcsUnavailableError"]
 
@@ -17,4 +17,5 @@ class VcsUnavailableError(VcsError):
 
 
 class VcsAuthError(VcsError):
-    """Не удалось получить installation token."""
+    """Ошибка аутентификации: не удалось получить installation token
+    или выданный токен отклонён GitHub'ом."""

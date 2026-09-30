@@ -75,3 +75,23 @@ variable "rabbitmq_port" {
   description = "Host port for AMQP."
   default     = 5672
 }
+
+variable "github_app_id" {
+  type        = string
+  description = "GitHub App id (GITHUB_APP_ID for the API container)."
+  default     = ""
+}
+
+variable "github_app_private_key" {
+  type        = string
+  description = "GitHub App private key in PEM (GITHUB_APP_PRIVATE_KEY). Do not commit real values."
+  default     = ""
+  sensitive   = true
+}
+
+variable "github_webhook_secret" {
+  type        = string
+  description = "HMAC secret of GitHub webhooks (GITHUB_WEBHOOK_SECRET). Do not commit real values."
+  default     = ""
+  sensitive   = true
+}

@@ -127,6 +127,10 @@ resource "docker_container" "api" {
 
   env = [
     "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
+    "RABBITMQ_URL=amqp://${var.rabbitmq_user}:${var.rabbitmq_password}@dmc268-rabbitmq:5672/",
+    "GITHUB_APP_ID=${var.github_app_id}",
+    "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
+    "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
   ]
 
   ports {

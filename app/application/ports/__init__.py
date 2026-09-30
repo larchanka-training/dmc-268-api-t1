@@ -1,3 +1,4 @@
+from app.application.ports.cache_store import CacheStore
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.repositories import (
     ContextPayloadRepo,
@@ -11,6 +12,7 @@ from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 
 __all__ = [
+    "CacheStore",
     "ContextPayloadRepo",
     "FindingRepo",
     "JobQueue",

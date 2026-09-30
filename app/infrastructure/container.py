@@ -2,7 +2,8 @@
 
 Единственное место, где порт связывается с адаптером. Выше слоя инфраструктуры
 его никто не собирает, поэтому подмена реализации — правка здесь и больше
-нигде.
+нигде. Все поля контейнера без значений по умолчанию: врывающееся поле с
+дефолтом ломает порядок аргументов dataclass при следующем расширении.
 """
 
 from dataclasses import dataclass
@@ -10,8 +11,9 @@ from dataclasses import dataclass
 import httpx
 from sqlalchemy import Engine, create_engine
 
-from app.application.ports import JobQueue, UnitOfWork, VcsGateway
+from app.application.ports import CacheStore, JobQueue, UnitOfWork, VcsGateway
 from app.config import Settings
+from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.queue.rabbitmq import PikaJobQueue
 from app.infrastructure.vcs.github import GitHubVcsGateway
@@ -26,10 +28,12 @@ class Container:
 
     engine: Engine
     settings: Settings
-    # Кэш ленивого VCS-шлюза: frozen-контейнер, но кэш installation tokens
-    # обязан пережить один вызов `vcs_gateway`, иначе теряется смысл кэша
-    # (design D7). `None` в поле-заглушке до первого обращения.
-    _vcs_gateway: VcsGateway | None = None
+    # Заглушки ленивых адаптеров до первого обращения. Оба кэша — installation
+    # tokens и скачанные диффы — обязаны пережить один вызов своего builder'а,
+    # иначе теряется смысл кэша (design D7): поэтому адаптер создаётся один раз
+    # и запоминается в frozen-контейнере через `object.__setattr__`.
+    _vcs_gateway: VcsGateway | None
+    _cache_store: CacheStore | None
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine)
@@ -46,12 +50,20 @@ class Container:
             client = httpx.Client(base_url=_GITHUB_API)
             auth = GitHubAppAuth(
                 self.settings.github_app_id,
-                self.settings.github_app_private_key,
+                self.settings.github_app_private_key.get_secret_value(),
                 client,
             )
             gateway = GitHubVcsGateway(auth, client)
             object.__setattr__(self, "_vcs_gateway", gateway)
         return gateway
+
+    def cache_store(self) -> CacheStore:
+        """Собрать кэш при первом обращении; один экземпляр на контейнер."""
+        store = self._cache_store
+        if store is None:
+            store = InMemoryCacheStore()
+            object.__setattr__(self, "_cache_store", store)
+        return store
 
 
 def build_container(settings: Settings) -> Container:
@@ -61,4 +73,6 @@ def build_container(settings: Settings) -> Container:
     return Container(
         engine=create_engine(settings.database_url, future=True, pool_pre_ping=True),
         settings=settings,
+        _vcs_gateway=None,
+        _cache_store=None,
     )

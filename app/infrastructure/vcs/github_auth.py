@@ -42,6 +42,12 @@ class GitHubAppAuth:
         self._cache[installation_id] = (token, expires_at)
         return token
 
+    def invalidate(self, installation_id: int) -> None:
+        """Забыть кэшированный токен: после 401 он мог быть отозван досрочно
+        (приостановка App, переустановка, ротация ключа) — тогда держать его
+        до конца TTL значило бы отвечать 502 на каждый вебхук инсталляции."""
+        self._cache.pop(installation_id, None)
+
     def _needs_refresh(self, expires_at: datetime) -> bool:
         return expires_at - _EXPIRY_MARGIN <= datetime.now(UTC)
 
@@ -61,9 +67,15 @@ class GitHubAppAuth:
                 "GitHub не выдал installation token"
                 f" для {installation_id}: HTTP {response.status_code}"
             )
-        payload: dict[str, Any] = response.json()
-        token: str = payload["token"]
-        return token, datetime.fromisoformat(payload["expires_at"])
+        try:
+            payload: dict[str, Any] = response.json()
+            token: str = payload["token"]
+            return token, datetime.fromisoformat(payload["expires_at"])
+        except (ValueError, KeyError, TypeError) as error:
+            raise VcsAuthError(
+                f"GitHub вернул неожиданное тело на выдаче token"
+                f" для {installation_id}: {error!r}"
+            ) from error
 
     def _build_jwt(self) -> str:
         issued_at = int(time.time())
