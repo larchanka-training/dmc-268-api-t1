@@ -13,7 +13,9 @@
 
 ## Backend
 - [ ] Все endpoints реализуемы, включая `POST /webhooks/{provider}` с проверкой подписи.
-- [ ] HTTP status codes согласованы, включая `409` на дубль нетерминального ReviewRun.
+- [ ] HTTP status codes согласованы: дубль нетерминального ReviewRun — `409` на
+      `POST /reviews` и `202` с существующим ReviewJob на `POST /webhooks/{provider}` (§4).
+- [ ] Префикс `/api` (`servers` в `openapi.yaml`) ставит приложение, прокси его не срезает.
 - [ ] ReviewJob можно сохранить в текущей модели данных (сверено с `0001_baseline_schema.py`).
 - [ ] Finding можно сохранить без потери информации, включая `side` (обязателен для
       `uq_findings_anchor`).

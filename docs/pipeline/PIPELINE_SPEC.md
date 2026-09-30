@@ -180,8 +180,13 @@ provider + providerRepositoryId + pullRequestNumber + headCommitSha
 
 Повторная попытка обработки существующего `ReviewRun` должна использовать тот же `reviewRunId`.
 Не более одного нетерминального прогона на этот ключ уже гарантирует БД
-(`uq_review_runs_one_active_per_commit`) — контракт API должен транслировать отказ на
-уровне БД в `409`, а не создавать второй `ReviewRun`.
+(`uq_review_runs_one_active_per_commit`) — API не создаёт второй `ReviewRun`, а отвечает
+по-разному в зависимости от того, кто прислал дубль:
+
+- `POST /reviews` (ручной запуск) — `409` с `ApiError.code = REVIEW_ALREADY_ACTIVE`:
+  человек должен увидеть, что прогон уже идёт;
+- `POST /webhooks/{provider}` — `202` с уже существующим `ReviewJob`: повторная доставка
+  вебхука штатна, а не-2xx хостинг считает неудачей и повторяет доставку снова.
 
 Перед Contract v1 команда должна отдельно решить:
 
@@ -404,6 +409,14 @@ POST /webhooks/{provider}
 (соответствует `UNIQUE (provider, provider_id)` в таблице `repositories`), а не строкой вида
 `owner/repository` — `full_name` в этой таблице намеренно не уникален. Обязателен `trigger`.
 
+Все пути — относительно `/api` (`servers` в `openapi.yaml`): префикс ставит само
+приложение, а не reverse-proxy, поэтому фронт ходит на `/api/reviews`, а хостинг шлёт
+вебхуки на `/api/webhooks/{provider}`.
+
+Ошибки HTTP-слоя — `ApiError` с закрытым списком `code`: `VALIDATION_ERROR`,
+`REVIEW_NOT_FOUND`, `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `AUTH_CODE_INVALID`,
+`AUTH_REFRESH_INVALID`. Каждый ответ с `ApiError` в `openapi.yaml` называет свой код.
+
 Источник истины для HTTP-контракта: `openapi.yaml`.
 
 ### 9.1. Аутентификация (proposal)
@@ -424,7 +437,7 @@ POST /auth/refresh
 - `POST /auth/refresh` обновляет access-токен по refresh-куке, без тела запроса.
 - Обе ручки отдают access-токен в теле ответа (`AuthSession.accessToken`,
   `expiresIn` в секундах) и переиздают refresh-токен `Set-Cookie`-заголовком:
-  `HttpOnly; Secure; SameSite=Strict`, `Path=/auth/refresh` — кука не читается
+  `HttpOnly; Secure; SameSite=Strict`, `Path=/api/auth/refresh` — кука не читается
   скриптом и не уходит ни на один другой путь API.
 - Транспорт сессии на Frontend: access-токен — в памяти вкладки, не в
   `localStorage`; при перезагрузке — тихий `POST /auth/refresh` по куке. Это

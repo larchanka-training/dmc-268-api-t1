@@ -6,6 +6,13 @@ info:
     Контракт Backend API для запуска автоматического ревью Pull Request
     и получения состояния и результатов.
 
+servers:
+  - url: /api
+    description: >
+      Все пути ниже — относительно /api. Префикс ставит само приложение, а не
+      reverse-proxy: контракт не зависит от того, срезает ли прокси префикс.
+      Фронт ходит на /api/..., хостинг шлёт вебхуки на /api/webhooks/{provider}.
+
 paths:
   /reviews:
     post:
@@ -25,7 +32,16 @@ paths:
               schema:
                 $ref: "#/components/schemas/ReviewJob"
         "400":
-          description: Некорректный запрос
+          description: Некорректный запрос (ApiError.code = VALIDATION_ERROR)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: >
+            Для этого коммита уже есть нетерминальный ReviewJob
+            (ApiError.code = REVIEW_ALREADY_ACTIVE). Ручной запуск видит отказ явно;
+            вебхук на тот же случай отвечает 202, см. POST /webhooks/{provider}.
           content:
             application/json:
               schema:
@@ -57,7 +73,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ReviewJob"
         "404":
-          description: ReviewJob не найден
+          description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND)
           content:
             application/json:
               schema:
@@ -79,7 +95,7 @@ paths:
                 items:
                   $ref: "#/components/schemas/Finding"
         "404":
-          description: ReviewJob не найден
+          description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND)
           content:
             application/json:
               schema:
@@ -97,19 +113,17 @@ paths:
       operationId: receiveWebhook
       responses:
         "202":
-          description: Доставка принята, ReviewJob создан или найден существующий
+          description: >
+            Доставка принята: ReviewJob создан или, если для этого коммита уже есть
+            нетерминальный, возвращён существующий. Дубль — не ошибка: не-2xx
+            хостинг считает неудачной доставкой, повторяет её и после серии отказов
+            может отключить вебхук, поэтому 409 здесь не отдаём.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReviewJob"
         "401":
-          description: Подпись доставки не прошла проверку
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "409":
-          description: Для этого коммита уже есть нетерминальный ReviewJob
+          description: Подпись доставки не прошла проверку (ApiError.code = WEBHOOK_SIGNATURE_INVALID)
           content:
             application/json:
               schema:
@@ -131,12 +145,12 @@ paths:
         "200":
           description: >
             Access-токен в теле, refresh-токен — httpOnly-кукой, привязанной к пути
-            /auth/refresh.
+            /api/auth/refresh.
           headers:
             Set-Cookie:
               schema:
                 type: string
-                example: "refresh_token=...; Path=/auth/refresh; HttpOnly; Secure; SameSite=Strict"
+                example: "refresh_token=...; Path=/api/auth/refresh; HttpOnly; Secure; SameSite=Strict"
           content:
             application/json:
               schema:
@@ -161,7 +175,7 @@ paths:
             Set-Cookie:
               schema:
                 type: string
-                example: "refresh_token=...; Path=/auth/refresh; HttpOnly; Secure; SameSite=Strict"
+                example: "refresh_token=...; Path=/api/auth/refresh; HttpOnly; Secure; SameSite=Strict"
           content:
             application/json:
               schema:
@@ -319,6 +333,7 @@ components:
       properties:
         filePath:
           type: string
+          minLength: 1
         side:
           type: string
           description: Сторона диффа, к которой относится line (findings.side).
@@ -347,6 +362,7 @@ components:
             - critical
         message:
           type: string
+          minLength: 1
           description: Текст замечания (findings.message, соответствует Finding.message).
         confidence:
           type:
@@ -417,6 +433,16 @@ components:
       properties:
         code:
           type: string
+          description: >
+            Закрытый список, как и ReviewError.code. Каждый ответ с ApiError называет
+            свой код в description — это сверяет tests/test_docs.py.
+          enum:
+            - VALIDATION_ERROR
+            - REVIEW_NOT_FOUND
+            - REVIEW_ALREADY_ACTIVE
+            - WEBHOOK_SIGNATURE_INVALID
+            - AUTH_CODE_INVALID
+            - AUTH_REFRESH_INVALID
         message:
           type: string
 

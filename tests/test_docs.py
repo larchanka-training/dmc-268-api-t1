@@ -12,6 +12,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
@@ -146,63 +147,81 @@ def load_openapi_schemas() -> dict[str, Any]:
     return cast(dict[str, Any], document["components"]["schemas"])
 
 
-def resolve_enum(schemas: dict[str, Any], node: dict[str, Any]) -> list[str]:
-    """Спуститься через $ref/oneOf к списку enum, который узел в итоге описывает."""
+# Аннотации не влияют на то, что схема принимает, и расходятся по делу: в json-схемах
+# описания длиннее, у openapi есть example.
+ANNOTATIONS = {"description", "example", "title", "$schema", "$id"}
+
+
+def resolve_ref(ref: str) -> Any:
+    """`#/components/schemas/X` — из openapi.yaml, `x.schema.json` — соседний файл."""
+    if ref.startswith("#/components/schemas/"):
+        return load_openapi_schemas()[ref.rsplit("/", 1)[-1]]
+    return json.loads((OPENAPI.parent / ref).read_text())
+
+
+def schema_shape(node: Any) -> Any:
+    """Схема без аннотаций, с раскрытыми $ref и `required` без учёта порядка."""
+    if isinstance(node, list):
+        return [schema_shape(item) for item in node]
+    if not isinstance(node, dict):
+        return node
     if "$ref" in node:
-        name = node["$ref"].rsplit("/", 1)[-1]
-        return resolve_enum(schemas, schemas[name])
-    if "oneOf" in node:
-        for branch in node["oneOf"]:
-            if branch.get("type") != "null":
-                return resolve_enum(schemas, branch)
-        raise AssertionError(f"oneOf has no non-null branch: {node!r}")
-    return cast(list[str], node["enum"])
+        return schema_shape(resolve_ref(node["$ref"]))
+    shape: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in ANNOTATIONS:
+            continue
+        if key == "properties":
+            # Здесь ключи — имена полей, а не ключевые слова: не фильтруем.
+            shape[key] = {name: schema_shape(prop) for name, prop in value.items()}
+        elif key == "required":
+            shape[key] = sorted(value)
+        else:
+            shape[key] = schema_shape(value)
+    return shape
 
 
-def json_schema_enum(path: Path, property_name: str) -> list[str]:
-    node = json.loads(path.read_text())["properties"][property_name]
-    if "enum" in node:
-        return cast(list[str], node["enum"])
-    for branch in node.get("oneOf", []):
-        if "enum" in branch:
-            return cast(list[str], branch["enum"])
-    raise AssertionError(f"{path} property {property_name!r} has no enum")
+@pytest.mark.parametrize(
+    ("schema_name", "path"),
+    [
+        ("Finding", FINDING_SCHEMA),
+        ("ReviewJob", REVIEW_JOB_SCHEMA),
+        ("ReviewError", ERROR_SCHEMA),
+    ],
+)
+def test_json_schema_matches_openapi(schema_name: str, path: Path) -> None:
+    """*.schema.json повторяют схему из openapi.yaml целиком: поля, required, enum'ы, ограничения."""
+    doc_shape = schema_shape(json.loads(path.read_text()))
+    api_shape = schema_shape(load_openapi_schemas()[schema_name])
+    assert doc_shape == api_shape, (
+        f"{path} has drifted from openapi.yaml components.schemas.{schema_name}.\n"
+        f"  json:    {json.dumps(doc_shape, ensure_ascii=False, sort_keys=True)}\n"
+        f"  openapi: {json.dumps(api_shape, ensure_ascii=False, sort_keys=True)}"
+    )
 
 
-def test_finding_schema_enums_match_openapi() -> None:
-    """finding.schema.json инлайнит enum'ы отдельно от openapi.yaml — не должны разойтись."""
-    schemas = load_openapi_schemas()
-    finding = schemas["Finding"]["properties"]
-    for prop in ("side", "category", "severity"):
-        doc_enum = json_schema_enum(FINDING_SCHEMA, prop)
-        api_enum = resolve_enum(schemas, finding[prop])
-        assert doc_enum == api_enum, (
-            f"{FINDING_SCHEMA} property {prop!r} = {doc_enum}, "
-            f"openapi.yaml Finding.{prop} = {api_enum}"
-        )
+def api_error_responses() -> list[tuple[str, str]]:
+    """(где, description) для каждого ответа openapi.yaml, тело которого — ApiError."""
+    document = yaml.safe_load(OPENAPI.read_text())
+    found = []
+    for path, item in document["paths"].items():
+        for method, operation in item.items():
+            if not isinstance(operation, dict) or "responses" not in operation:
+                continue
+            for status, response in operation["responses"].items():
+                schema = response.get("content", {}).get("application/json", {}).get("schema", {})
+                if schema.get("$ref") == "#/components/schemas/ApiError":
+                    found.append((f"{method.upper()} {path} {status}", response["description"]))
+    return found
 
 
-def test_review_job_schema_enums_match_openapi() -> None:
-    """review-job.schema.json инлайнит enum'ы отдельно от openapi.yaml — не должны разойтись."""
-    schemas = load_openapi_schemas()
-    review_job = schemas["ReviewJob"]["properties"]
-    for prop in ("provider", "trigger", "status"):
-        doc_enum = json_schema_enum(REVIEW_JOB_SCHEMA, prop)
-        api_enum = resolve_enum(schemas, review_job[prop])
-        assert doc_enum == api_enum, (
-            f"{REVIEW_JOB_SCHEMA} property {prop!r} = {doc_enum}, "
-            f"openapi.yaml ReviewJob.{prop} = {api_enum}"
-        )
-
-
-def test_error_schema_enums_match_openapi() -> None:
-    """error.schema.json инлайнит enum'ы отдельно от openapi.yaml — не должны разойтись."""
-    schemas = load_openapi_schemas()
-    review_error = schemas["ReviewError"]["properties"]
-    for prop in ("code", "scmProvider"):
-        doc_enum = json_schema_enum(ERROR_SCHEMA, prop)
-        api_enum = resolve_enum(schemas, review_error[prop])
-        assert doc_enum == api_enum, (
-            f"{ERROR_SCHEMA} property {prop!r} = {doc_enum}, "
-            f"openapi.yaml ReviewError.{prop} = {api_enum}"
-        )
+def test_every_api_error_response_names_a_declared_code() -> None:
+    """Код ошибки HTTP-слоя живёт в description ответа — сверяем его с enum ApiError.code."""
+    declared = set(load_openapi_schemas()["ApiError"]["properties"]["code"]["enum"])
+    used = set()
+    for where, description in api_error_responses():
+        codes = re.findall(r"ApiError\.code = (\w+)", description)
+        assert len(codes) == 1, f"{OPENAPI} {where}: expected one 'ApiError.code = X', got {codes}"
+        assert codes[0] in declared, f"{OPENAPI} {where}: {codes[0]} is not in ApiError.code enum"
+        used.add(codes[0])
+    assert used == declared, f"ApiError.code declares codes no response uses: {sorted(declared - used)}"
