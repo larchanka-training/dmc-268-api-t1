@@ -9,17 +9,36 @@ from app.application import ports
 from app.config import Settings
 from app.infrastructure.container import build_container
 
-SETTINGS = Settings(database_url="postgresql+psycopg://test:test@localhost/test")
+SETTINGS = Settings(
+    database_url="postgresql+psycopg://test:test@localhost/test",
+    rabbitmq_url="amqp://guest:guest@localhost//",
+    github_webhook_secret="test-secret",
+)
+
+# Порты хранения следуют конвенции `SqlAlchemy<Port>` в этих двух файлах.
+STORAGE_ADAPTER_FILES = [
+    Path("app/infrastructure/db/repositories.py"),
+    Path("app/infrastructure/db/unit_of_work.py"),
+]
+
+# Остальные порты (не порты хранения, не в `ports.__all__`, свой адаптер вне
+# конвенции `SqlAlchemy*`) — явная карта "порт → класс адаптера → файл".
+OTHER_PORTS: dict[str, tuple[str, Path]] = {
+    "JobQueue": ("RabbitMQJobQueue", Path("app/infrastructure/queue/rabbitmq.py")),
+    "LlmGateway": ("StubLlmGateway", Path("app/infrastructure/llm/stub.py")),
+}
 
 
 def test_every_declared_port_has_an_adapter_and_a_caller() -> None:
     """Нет порта без реализации. YAGNI, который можно проверить."""
     declared = {name for name in ports.__all__}
     assert declared, "no ports declared"
-    source = Path("app/infrastructure/db/repositories.py").read_text()
-    source += Path("app/infrastructure/db/unit_of_work.py").read_text()
+    source = "".join(path.read_text() for path in STORAGE_ADAPTER_FILES)
     for port in declared:
         assert re.search(rf"SqlAlchemy{port}\b", source), f"{port} has no adapter"
+
+    for port, (adapter, path) in OTHER_PORTS.items():
+        assert re.search(rf"\b{adapter}\b", path.read_text()), f"{port} has no adapter"
 
 
 def test_the_container_is_the_only_place_adapters_are_constructed() -> None:
