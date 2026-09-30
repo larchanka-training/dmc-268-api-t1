@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime
 from types import TracebackType
-from typing import Self
+from typing import Any, Self
 from uuid import UUID
 
 from app.application.ports.repositories import (
@@ -40,6 +40,12 @@ class FakeRepositoryRepo:
     def __init__(self) -> None:
         self._by_id: dict[UUID, Repository] = {}
 
+    def snapshot(self) -> dict[UUID, Repository]:
+        return dict(self._by_id)
+
+    def restore(self, state: dict[UUID, Repository]) -> None:
+        self._by_id = dict(state)
+
     def get(self, repository_id: UUID) -> Repository | None:
         return self._by_id.get(repository_id)
 
@@ -54,7 +60,8 @@ class FakeRepositoryRepo:
         )
 
     def list_all(self, limit: int, offset: int) -> list[Repository]:
-        ordered = sorted(self._by_id.values(), key=lambda r: r.created_at)
+        # Порядок как у SQL-адаптера: `(created_at, id)`.
+        ordered = sorted(self._by_id.values(), key=lambda r: (r.created_at, r.id))
         return ordered[offset : offset + limit]
 
     def add(self, repository: Repository) -> None:
@@ -69,6 +76,12 @@ class FakeRepositoryRepo:
 class FakeMergeRequestRepo:
     def __init__(self) -> None:
         self._by_id: dict[UUID, MergeRequest] = {}
+
+    def snapshot(self) -> dict[UUID, MergeRequest]:
+        return dict(self._by_id)
+
+    def restore(self, state: dict[UUID, MergeRequest]) -> None:
+        self._by_id = dict(state)
 
     def get(self, merge_request_id: UUID) -> MergeRequest | None:
         return self._by_id.get(merge_request_id)
@@ -105,6 +118,12 @@ class FakeReviewRunRepo:
     def __init__(self) -> None:
         self._by_id: dict[UUID, ReviewRun] = {}
 
+    def snapshot(self) -> dict[UUID, ReviewRun]:
+        return dict(self._by_id)
+
+    def restore(self, state: dict[UUID, ReviewRun]) -> None:
+        self._by_id = dict(state)
+
     def get(self, run_id: UUID) -> ReviewRun | None:
         return self._by_id.get(run_id)
 
@@ -130,10 +149,14 @@ class FakeReviewRunRepo:
         existing = self._by_id.get(run.id)
         if existing is None:
             raise LookupError(f"review run {run.id} is not stored")
-        verdict = next_status(existing.status, run.status)
-        if not verdict.ok:
-            raise ValueError(verdict.error)
-        self._by_id[run.id] = run
+        # Как у SQL-адаптера: проверка перехода — только при смене статуса или
+        # для терминальной строки.
+        if existing.status in TERMINAL_STATUSES or existing.status != run.status:
+            verdict = next_status(existing.status, run.status)
+            if not verdict.ok:
+                raise ValueError(verdict.error)
+        # `rejected_findings` принадлежит строке, а не сущности вызывающего.
+        self._by_id[run.id] = replace(run, rejected_findings=existing.rejected_findings)
 
     def bump_rejected(self, run_id: UUID, now: datetime) -> None:
         """Не часть порта: используется только `FakeFindingRepo.add_validated`."""
@@ -147,6 +170,12 @@ class FakeReviewRunRepo:
 class FakeContextPayloadRepo:
     def __init__(self) -> None:
         self._items: list[ContextPayload] = []
+
+    def snapshot(self) -> list[ContextPayload]:
+        return list(self._items)
+
+    def restore(self, state: list[ContextPayload]) -> None:
+        self._items = list(state)
 
     def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]:
         return [p for p in self._items if p.review_run_id == review_run_id]
@@ -163,23 +192,39 @@ class FakeFindingRepo:
         self._items: list[Finding] = []
         self._review_runs = review_runs
 
+    def snapshot(self) -> list[Finding]:
+        return list(self._items)
+
+    def restore(self, state: list[Finding]) -> None:
+        self._items = list(state)
+
     def list_for_run(self, review_run_id: UUID) -> list[Finding]:
-        return [f for f in self._items if f.review_run_id == review_run_id]
+        return sorted(
+            (f for f in self._items if f.review_run_id == review_run_id),
+            key=lambda f: (f.created_at, f.id),
+        )
 
     def add(self, finding: Finding) -> None:
         self._items.append(finding)
 
-    def add_validated(self, finding: Finding, hunks: Iterable[Hunk], now: datetime) -> None:
+    def add_validated(self, finding: Finding, hunks: Iterable[Hunk], now: datetime) -> bool:
         verdict = validate_anchor(finding.anchor, hunks)
         if not verdict.ok:
             self._review_runs.bump_rejected(finding.review_run_id, now)
-            raise ValueError(verdict.error)
+            return False
         self.add(finding)
+        return True
 
 
 class FakePublishedCommentRepo:
     def __init__(self) -> None:
         self._items: list[PublishedComment] = []
+
+    def snapshot(self) -> list[PublishedComment]:
+        return list(self._items)
+
+    def restore(self, state: list[PublishedComment]) -> None:
+        self._items = list(state)
 
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]:
         return [c for c in self._items if c.review_run_id == review_run_id]
@@ -189,25 +234,34 @@ class FakePublishedCommentRepo:
 
 
 class FakeUnitOfWork:
-    """Держит состояние между повторными входами в `with` — как настоящая база."""
+    """Держит состояние между повторными входами в `with` — как настоящая база.
+
+    Транзакционный: `rollback` возвращает состояние на момент последнего
+    `commit` (или входа в `with`), поэтому тест на фейке видит то же, что и
+    тест на настоящей базе, — в том числе потерю всего, что не закоммичено.
+    Вне `with` (как в тестах роутера, где зависимость подменена) снимка нет, и
+    `rollback` ничего не откатывает.
+    """
 
     def __init__(self) -> None:
         # Типы атрибутов — порты, не конкретные фейки: то же самое, что
         # `SqlAlchemyUnitOfWork` делает для структурного совпадения с
-        # протоколом `UnitOfWork` (см. её `__enter__`). Локальная переменная
-        # до аннотации нужна `FakeFindingRepo`, которому — единственному —
-        # нужен доступ к `bump_rejected`, отсутствующему в самом протоколе.
-        review_runs = FakeReviewRunRepo()
-        self.repositories: RepositoryRepo = FakeRepositoryRepo()
-        self.merge_requests: MergeRequestRepo = FakeMergeRequestRepo()
-        self.review_runs: ReviewRunRepo = review_runs
-        self.context_payloads: ContextPayloadRepo = FakeContextPayloadRepo()
-        self.findings: FindingRepo = FakeFindingRepo(review_runs)
-        self.published_comments: PublishedCommentRepo = FakePublishedCommentRepo()
+        # протоколом `UnitOfWork` (см. её `__enter__`). Локальные переменные
+        # до аннотации нужны снимкам и `FakeFindingRepo`, которому нужен
+        # доступ к `bump_rejected`, отсутствующему в самом протоколе.
+        self._fakes = _Fakes()
+        self.repositories: RepositoryRepo = self._fakes.repositories
+        self.merge_requests: MergeRequestRepo = self._fakes.merge_requests
+        self.review_runs: ReviewRunRepo = self._fakes.review_runs
+        self.context_payloads: ContextPayloadRepo = self._fakes.context_payloads
+        self.findings: FindingRepo = self._fakes.findings
+        self.published_comments: PublishedCommentRepo = self._fakes.published_comments
         self.committed = 0
         self.rolled_back = 0
+        self._committed_state: list[Any] | None = None
 
     def __enter__(self) -> Self:
+        self._committed_state = self._fakes.snapshot()
         return self
 
     def __exit__(
@@ -217,9 +271,43 @@ class FakeUnitOfWork:
         tb: TracebackType | None,
     ) -> None:
         self.rollback()
+        self._committed_state = None
 
     def commit(self) -> None:
         self.committed += 1
+        if self._committed_state is not None:
+            self._committed_state = self._fakes.snapshot()
 
     def rollback(self) -> None:
         self.rolled_back += 1
+        if self._committed_state is not None:
+            self._fakes.restore(self._committed_state)
+
+
+class _Fakes:
+    """Все фейки-репозитории и их совместные снимки."""
+
+    def __init__(self) -> None:
+        self.repositories = FakeRepositoryRepo()
+        self.merge_requests = FakeMergeRequestRepo()
+        self.review_runs = FakeReviewRunRepo()
+        self.context_payloads = FakeContextPayloadRepo()
+        self.findings = FakeFindingRepo(self.review_runs)
+        self.published_comments = FakePublishedCommentRepo()
+
+    def _all(self) -> list[Any]:
+        return [
+            self.repositories,
+            self.merge_requests,
+            self.review_runs,
+            self.context_payloads,
+            self.findings,
+            self.published_comments,
+        ]
+
+    def snapshot(self) -> list[Any]:
+        return [fake.snapshot() for fake in self._all()]
+
+    def restore(self, state: list[Any]) -> None:
+        for fake, snap in zip(self._all(), state, strict=True):
+            fake.restore(snap)

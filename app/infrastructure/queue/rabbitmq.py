@@ -100,7 +100,16 @@ class RabbitMQJobQueue:
         self._channel: pika.adapters.blocking_connection.BlockingChannel | None = None
 
     def _channel_ready(self) -> pika.adapters.blocking_connection.BlockingChannel:
-        if self._connection is None or self._connection.is_closed:
+        # Канал закрывается брокером независимо от соединения (channel-level
+        # error: unroutable при `mandatory`, nack, несовпадающий queue_declare),
+        # поэтому проверяется и он: иначе живое соединение отдавало бы мёртвый
+        # канал, и каждый следующий `enqueue` падал бы до перезапуска процесса.
+        if (
+            self._connection is None
+            or self._connection.is_closed
+            or self._channel is None
+            or self._channel.is_closed
+        ):
             self._connection = pika.BlockingConnection(pika.URLParameters(self._url))
             self._channel = self._connection.channel()
             declare_topology(self._channel)
