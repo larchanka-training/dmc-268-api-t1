@@ -269,7 +269,11 @@ class SqlAlchemyFindingRepo:
 
     def list_for_run(self, review_run_id: UUID) -> list[Finding]:
         rows = self._session.scalars(
-            select(FindingRow).where(FindingRow.review_run_id == review_run_id)
+            select(FindingRow)
+            .where(FindingRow.review_run_id == review_run_id)
+            # Без ORDER BY Postgres порядка не обещает и меняет его после
+            # UPDATE и vacuum; id — UUIDv7, упорядочены по времени создания.
+            .order_by(FindingRow.created_at, FindingRow.id)
         ).all()
         return [m.finding_to_domain(row) for row in rows]
 
@@ -292,7 +296,7 @@ class SqlAlchemyFindingRepo:
 
     def add_validated(
         self, finding: Finding, hunks: Iterable[Hunk], now: dt.datetime
-    ) -> None:
+    ) -> bool:
         """Сохранить замечание, только если его привязка внутри диффа.
 
         Само правило — `validate_anchor`; здесь отклонение учитывается в
@@ -304,8 +308,9 @@ class SqlAlchemyFindingRepo:
             if row is not None:
                 row.rejected_findings += 1
                 row.last_progress_at = now
-            raise ValueError(verdict.error)
+            return False
         self.add(finding)
+        return True
 
 
 class SqlAlchemyPublishedCommentRepo:

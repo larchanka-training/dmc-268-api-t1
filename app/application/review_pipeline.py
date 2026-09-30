@@ -8,7 +8,7 @@ Use case уровня application: знает порты (`UnitOfWork`, `LlmGate
 когда-нибудь освободить коммит.
 """
 
-import time
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -21,6 +21,8 @@ from app.domain.entities import Finding, ReviewJob, ReviewRun
 from app.domain.enums import TERMINAL_STATUSES, ReviewRunStatus
 from app.domain.lifecycle import advance
 
+logger = logging.getLogger(__name__)
+
 
 def _transition(
     uow: UnitOfWork, run: ReviewRun, status: ReviewRunStatus, now: datetime
@@ -32,43 +34,78 @@ def _transition(
     return new_run
 
 
+def _mark_failed(uow: UnitOfWork, run_id: UUID, exc: Exception, now: datetime) -> None:
+    """Перевести прогон в failed по свежей строке из базы.
+
+    Копия прогона в памяти могла разойтись с базой (строка ушла вперёд), и
+    переход от неё бросил бы сам. Терминальный прогон не трогаем. Сбой этой
+    записи (например, база недоступна) логируется и не подменяет исходное
+    исключение — зависший прогон выметет `sweep_stale_runs`.
+    """
+    try:
+        with uow:
+            run = uow.review_runs.get(run_id)
+            if run is None or run.status in TERMINAL_STATUSES:
+                return
+            failed = replace(
+                advance(run, ReviewRunStatus.FAILED, now).unwrap(),
+                failure_reason=str(exc) or type(exc).__name__,
+            )
+            uow.review_runs.update(failed)
+            uow.commit()
+    except Exception:
+        logger.exception("не удалось перевести прогон %s в failed", run_id)
+
+
 def run_review(
     job: ReviewJob,
     *,
     uow: UnitOfWork,
     llm_gateway: LlmGateway,
-    now: datetime,
+    now: Callable[[], datetime],
+    monotonic: Callable[[], float],
     new_id: Callable[[], UUID],
 ) -> None:
+    """Довести прогон до терминального состояния.
+
+    Часы приходят функциями, как `new_id`: каждый переход берёт свой `now()`,
+    поэтому `last_progress_at` отражает реальный прогресс (по нему
+    `find_stale` отличает зависший прогон от идущего), а `duration_seconds` —
+    разность монотонных часов, которую тест проверяет точно.
+
+    Сбой любого шага переводит прогон в `failed` и **пробрасывается**: воркер
+    отклоняет сообщение, и оно попадает в DLQ для разбора (`job-queue`).
+    """
     with uow:
         run = uow.review_runs.get(job.id)
 
-    if run is None or run.status in TERMINAL_STATUSES:
-        # Строки нет (сообщение без прогона) или прогон уже завершён —
-        # повторная доставка после завершения игнорируется (review-data-model).
+    if run is None:
+        # Прогон коммитится до постановки задачи, поэтому сообщение без
+        # строки — аномалия, а не гонка. Подтвердить его значило бы
+        # уничтожить единственный след; исключение отправит его в DLQ.
+        raise LookupError(f"review run {job.id} not found")
+    if run.status in TERMINAL_STATUSES:
+        # Прогон уже завершён — повторная доставка после завершения
+        # игнорируется (review-data-model).
         return
 
-    # Монотонные часы, а не переданный `now`: `now` — один и тот же снимок на
-    # весь прогон (нужен для детерминированных timestamp'ов в БД), поэтому
-    # разница `now - что-то` всегда даёт 0 и не отражает реальное время
-    # сборки контекста и вызова LLM. `duration_seconds` — это стоимость
-    # прогона (docs/SYSTEM_DESIGN.md), её меряют настоящие часы.
-    started_at = time.monotonic()
+    started_at = monotonic()
 
     try:
-        run = _transition(uow, run, ReviewRunStatus.BUILDING_CONTEXT, now)
+        run = _transition(uow, run, ReviewRunStatus.BUILDING_CONTEXT, now())
 
-        context = assemble_context_stub(job, review_run_id=run.id, now=now, new_id=new_id)
+        context = assemble_context_stub(job, review_run_id=run.id, now=now(), new_id=new_id)
         with uow:
             uow.context_payloads.add(context)
             uow.commit()
 
-        run = _transition(uow, run, ReviewRunStatus.ANALYSING, now)
+        run = _transition(uow, run, ReviewRunStatus.ANALYSING, now())
 
         result = llm_gateway.review(context)
         hunks = stub_hunks()
         with uow:
             for item in result.findings:
+                moment = now()
                 finding = Finding(
                     id=new_id(),
                     review_run_id=run.id,
@@ -78,19 +115,23 @@ def run_review(
                     message=item.message,
                     suggestion=item.suggestion,
                     confidence=item.confidence,
-                    created_at=now,
-                    updated_at=now,
+                    created_at=moment,
+                    updated_at=moment,
                 )
-                uow.findings.add_validated(finding, hunks, now)
+                # Отклонённая привязка учтена в прогоне и не прерывает
+                # остальные находки.
+                uow.findings.add_validated(finding, hunks, moment)
             uow.commit()
 
-        run = _transition(uow, run, ReviewRunStatus.PUBLISHING, now)
+        run = _transition(uow, run, ReviewRunStatus.PUBLISHING, now())
 
-        duration = time.monotonic() - started_at
-        run = replace(run, model=result.model, tokens_used=result.tokens_used, duration_seconds=duration)
-        _transition(uow, run, ReviewRunStatus.COMPLETED, now)
-    except Exception as exc:  # noqa: BLE001 — любой сбой шага переводит прогон в failed, а не роняет воркер
-        failed = replace(advance(run, ReviewRunStatus.FAILED, now).unwrap(), failure_reason=str(exc))
-        with uow:
-            uow.review_runs.update(failed)
-            uow.commit()
+        run = replace(
+            run,
+            model=result.model,
+            tokens_used=result.tokens_used,
+            duration_seconds=monotonic() - started_at,
+        )
+        _transition(uow, run, ReviewRunStatus.COMPLETED, now())
+    except Exception as exc:
+        _mark_failed(uow, job.id, exc, now())
+        raise

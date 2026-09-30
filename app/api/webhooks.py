@@ -6,12 +6,12 @@
 только создание прогона и постановка задачи.
 """
 
-import hashlib
-import hmac
 import json
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
@@ -20,17 +20,20 @@ from app.application.ports import UnitOfWork
 from app.application.ports.job_queue import JobQueue
 from app.config import Settings
 from app.domain.entities import MergeRequest, Repository, ReviewJob, ReviewRun
-from app.domain.enums import MergeRequestState, Provider, ReviewRunStatus, TriggerSource
+from app.domain.enums import (
+    TERMINAL_STATUSES,
+    MergeRequestState,
+    Provider,
+    ReviewRunStatus,
+    TriggerSource,
+)
 from app.domain.ids import new_id
+from app.domain.lifecycle import advance
+from app.domain.webhook_signature import verify_webhook_signature
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
-
-
-def _signature_is_valid(secret: str, body: bytes, header_value: str | None) -> bool:
-    if not header_value or not header_value.startswith("sha256="):
-        return False
-    expected = "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, header_value)
 
 
 def _upsert_repository(uow: UnitOfWork, repo_payload: dict[str, Any], now: datetime) -> Repository:
@@ -55,6 +58,15 @@ def _upsert_repository(uow: UnitOfWork, repo_payload: dict[str, Any], now: datet
     return repository
 
 
+def _merge_request_state(pr_payload: dict[str, Any]) -> MergeRequestState:
+    # GitHub присылает `state` open/closed и отдельный флаг `merged`.
+    if pr_payload.get("merged"):
+        return MergeRequestState.MERGED
+    if pr_payload.get("state") == "closed":
+        return MergeRequestState.CLOSED
+    return MergeRequestState.OPEN
+
+
 def _upsert_merge_request(
     uow: UnitOfWork, repository: Repository, pr_payload: dict[str, Any], head_sha: str, now: datetime
 ) -> MergeRequest:
@@ -71,13 +83,22 @@ def _upsert_merge_request(
             source_branch=pr_payload.get("head", {}).get("ref", ""),
             target_branch=pr_payload.get("base", {}).get("ref", ""),
             head_sha=head_sha,
-            state=MergeRequestState.OPEN,
+            state=_merge_request_state(pr_payload),
             created_at=now,
             updated_at=now,
         )
         uow.merge_requests.add(merge_request)
         return merge_request
-    updated = replace(existing, head_sha=head_sha, updated_at=now)
+    updated = replace(
+        existing,
+        title=pr_payload.get("title", existing.title),
+        description=pr_payload.get("body") or existing.description,
+        source_branch=pr_payload.get("head", {}).get("ref", existing.source_branch),
+        target_branch=pr_payload.get("base", {}).get("ref", existing.target_branch),
+        head_sha=head_sha,
+        state=_merge_request_state(pr_payload),
+        updated_at=now,
+    )
     uow.merge_requests.update(updated)
     return updated
 
@@ -92,7 +113,7 @@ async def receive_github_webhook(
     job_queue: JobQueue = Depends(get_job_queue),
 ) -> dict[str, str]:
     body = await request.body()
-    if not _signature_is_valid(settings.github_webhook_secret, body, x_hub_signature_256):
+    if not verify_webhook_signature(settings.github_webhook_secret, body, x_hub_signature_256):
         raise HTTPException(status_code=401, detail="invalid signature")
 
     # Неизвестное/нерелевантное событие — 202, не ошибка: вебхук доставлен и
@@ -132,21 +153,46 @@ async def receive_github_webhook(
         )
     )
 
-    # Постановка в очередь — до commit. Если брокер недоступен, исключение
-    # откатывает и ReviewRun: доставка не остаётся молча потерянной записью
-    # в статусе queued, которую find_active потом примет за уже взятую в
-    # работу — GitHub получит 5xx и повторит вебхук с нуля.
-    job_queue.enqueue(
-        ReviewJob(
-            id=run_id,
-            event_type=x_github_event,
-            action=payload.get("action", ""),
-            repository_provider_id=repository.provider_id,
-            repository_full_name=repository.full_name,
-            pull_request_number=pr_payload["number"],
-            head_sha=head_sha,
-            base_sha=base_sha,
-        )
-    )
+    # Сначала commit, потом enqueue. Обратный порядок отдаёт сообщение воркеру
+    # раньше, чем строка прогона видна в базе: воркер не находит прогон,
+    # подтверждает сообщение, а API затем коммитит `queued` — задача потеряна,
+    # и `find_active` блокирует коммит на каждую следующую доставку.
     uow.commit()
+
+    try:
+        job_queue.enqueue(
+            ReviewJob(
+                id=run_id,
+                event_type=x_github_event,
+                action=payload.get("action", ""),
+                repository_provider_id=repository.provider_id,
+                repository_full_name=repository.full_name,
+                pull_request_number=pr_payload["number"],
+                head_sha=head_sha,
+                base_sha=base_sha,
+            )
+        )
+    except Exception as exc:
+        # «Закоммитили, но не поставили»: без компенсации прогон навсегда
+        # остался бы `queued`, а повторная доставка GitHub получила бы 202 от
+        # `find_active` и ничего не поставила. Ошибка идёт дальше — GitHub
+        # получит 5xx и повторит вебхук. Если не удалась и компенсация (база
+        # недоступна), прогон выметет `sweep_stale_runs` в воркере.
+        _fail_unenqueued(uow, run_id, exc)
+        raise
     return {"status": "accepted"}
+
+
+def _fail_unenqueued(uow: UnitOfWork, run_id: UUID, cause: Exception) -> None:
+    try:
+        run = uow.review_runs.get(run_id)
+        if run is None or run.status in TERMINAL_STATUSES:
+            return
+        failed = replace(
+            advance(run, ReviewRunStatus.FAILED, datetime.now(UTC)).unwrap(),
+            failure_reason=f"не удалось поставить задачу в очередь: {cause}",
+        )
+        uow.review_runs.update(failed)
+        uow.commit()
+    except Exception:
+        logger.exception("не удалось перевести прогон %s в failed после сбоя очереди", run_id)

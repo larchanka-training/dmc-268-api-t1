@@ -8,9 +8,11 @@
 Ack/nack-решение — чистая `should_ack`, здесь только вызовы канала.
 """
 
+import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import pika
@@ -18,6 +20,7 @@ import pika
 from app.application.ports import UnitOfWork
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.review_pipeline import run_review
+from app.application.stale_sweep import sweep_stale_runs
 from app.config import Settings
 from app.domain.ids import new_id
 from app.infrastructure.container import build_container
@@ -28,7 +31,14 @@ from app.infrastructure.queue.rabbitmq import (
 )
 from app.worker.handling import should_ack
 
+logger = logging.getLogger(__name__)
+
 MessageHandler = Callable[[bytes], None]
+
+# Как часто выметать зависшие прогоны. Проход дёргается на каждом такте
+# consume-цикла (простой раз в секунду или очередное сообщение) и сам
+# ограничивается этим интервалом.
+SWEEP_INTERVAL_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +46,14 @@ class Worker:
     connection: pika.BlockingConnection
     channel: pika.adapters.blocking_connection.BlockingChannel
 
-    def run(self, handler: MessageHandler, *, limit: int | None = None) -> None:
+    def run(
+        self,
+        handler: MessageHandler,
+        *,
+        limit: int | None = None,
+        sweep: Callable[[], object] | None = None,
+        sweep_interval: float = SWEEP_INTERVAL_SECONDS,
+    ) -> None:
         """Потреблять `review_jobs`.
 
         `limit=None` — бесконечно (боевой запуск `python -m app.worker`);
@@ -45,12 +62,24 @@ class Worker:
         консьюмера и закрываем соединение — иначе брокер продолжает считать
         канал живым консьюмером и делит с ним следующие сообщения, хотя
         Python-цикл их уже не читает.
+
+        `sweep` — периодический проход по зависшим прогонам; его сбой
+        логируется и не останавливает потребление.
         """
         processed = 0
+        last_sweep: float | None = None
         try:
             for method, _properties, body in self.channel.consume(
                 QUEUE_NAME, inactivity_timeout=1
             ):
+                if sweep is not None and (
+                    last_sweep is None or time.monotonic() - last_sweep >= sweep_interval
+                ):
+                    last_sweep = time.monotonic()
+                    try:
+                        sweep()
+                    except Exception:
+                        logger.exception("проход по зависшим прогонам завершился ошибкой")
                 if method is None:
                     continue
                 # Стаб типизирует элементы кортежа независимо, поэтому
@@ -75,7 +104,13 @@ class Worker:
 
 
 def build_worker(settings: Settings) -> Worker:
-    connection = pika.BlockingConnection(pika.URLParameters(settings.rabbitmq_url))
+    parameters = pika.URLParameters(settings.rabbitmq_url)
+    # Обработчик вызывается синхронно и ходит минутами (запрос к модели), а
+    # пока он работает, цикл событий `BlockingConnection` не крутится и
+    # heartbeat не отправляется: брокер по умолчанию рвёт такое соединение, и
+    # `basic_ack` падает `StreamLostError`. Без heartbeat обрыв не случается.
+    parameters.heartbeat = 0
+    connection = pika.BlockingConnection(parameters)
     channel = connection.channel()
     declare_topology(channel)
     channel.basic_qos(prefetch_count=1)
@@ -97,7 +132,8 @@ def build_review_handler(deps: ReviewHandlerDeps) -> MessageHandler:
             job,
             uow=deps.unit_of_work(),
             llm_gateway=deps.llm_gateway(),
-            now=datetime.now(UTC),
+            now=lambda: datetime.now(UTC),
+            monotonic=time.monotonic,
             new_id=new_id,
         )
 
@@ -106,5 +142,12 @@ def build_review_handler(deps: ReviewHandlerDeps) -> MessageHandler:
 
 def run_worker(settings: Settings) -> None:
     """Собрать зависимости и запустить воркер бесконечно. Вызывается из `__main__.py`."""
-    handler = build_review_handler(build_container(settings))
-    build_worker(settings).run(handler)
+    container = build_container(settings)
+    limit = timedelta(seconds=settings.stale_run_timeout_seconds)
+
+    def sweep() -> None:
+        swept = sweep_stale_runs(container.unit_of_work(), now=datetime.now(UTC), limit=limit)
+        if swept:
+            logger.warning("зависших прогонов переведено в failed: %d", swept)
+
+    build_worker(settings).run(build_review_handler(container), sweep=sweep)
