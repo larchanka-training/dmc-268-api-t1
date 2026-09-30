@@ -1,4 +1,4 @@
-"""Эндпоинт `POST /api/webhooks/{provider}` на TestClient с фейками в контейнере.
+"""Эндпоинт `POST /api/v1/webhooks/{provider}` на TestClient с фейками в контейнере.
 
 Контейнеры подменяются целиком: `app.state.container` получает заглушку с
 фейковыми портами, поэтому тесты отвечают на вопрос «что делает HTTP-слой» —
@@ -99,7 +99,7 @@ def post_webhook(
         headers[SIGNATURE_HEADER] = sign(body)
     elif signature is not None:
         headers[SIGNATURE_HEADER] = signature
-    return client.post(f"/api/webhooks/{provider}", content=body, headers=headers)
+    return client.post(f"/api/v1/webhooks/{provider}", content=body, headers=headers)
 
 
 def test_valid_opened_returns_202_with_review_job_projection() -> None:

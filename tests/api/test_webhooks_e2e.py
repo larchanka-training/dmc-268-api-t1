@@ -133,7 +133,7 @@ def post_webhook(
         headers[SIGNATURE_HEADER] = sign(body)
     elif signature is not None:
         headers[SIGNATURE_HEADER] = signature
-    return client.post("/api/webhooks/github", content=body, headers=headers)
+    return client.post("/api/v1/webhooks/github", content=body, headers=headers)
 
 
 def stored_state(

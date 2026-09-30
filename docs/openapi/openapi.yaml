@@ -7,11 +7,11 @@ info:
     и получения состояния и результатов.
 
 servers:
-  - url: /api
+  - url: /api/v1
     description: >
-      Все пути ниже — относительно /api. Префикс ставит само приложение, а не
+      Все пути ниже — относительно /api/v1. Префикс ставит само приложение, а не
       reverse-proxy: контракт не зависит от того, срезает ли прокси префикс.
-      Фронт ходит на /api/..., хостинг шлёт вебхуки на /api/webhooks/{provider}.
+      Фронт ходит на /api/v1/..., хостинг шлёт вебхуки на /api/v1/webhooks/{provider}.
 
 paths:
   /reviews:
@@ -162,12 +162,12 @@ paths:
         "200":
           description: >
             Access-токен в теле, refresh-токен — httpOnly-кукой, привязанной к пути
-            /api/auth/refresh.
+            /api/v1/auth/refresh.
           headers:
             Set-Cookie:
               schema:
                 type: string
-                example: "refresh_token=...; Path=/api/auth/refresh; HttpOnly; Secure; SameSite=Strict"
+                example: "refresh_token=...; Path=/api/v1/auth/refresh; HttpOnly; Secure; SameSite=Strict"
           content:
             application/json:
               schema:
@@ -192,7 +192,7 @@ paths:
             Set-Cookie:
               schema:
                 type: string
-                example: "refresh_token=...; Path=/api/auth/refresh; HttpOnly; Secure; SameSite=Strict"
+                example: "refresh_token=...; Path=/api/v1/auth/refresh; HttpOnly; Secure; SameSite=Strict"
           content:
             application/json:
               schema:

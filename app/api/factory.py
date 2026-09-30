@@ -31,7 +31,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.api.webhooks import ROUTER_PREFIX
     from app.api.webhooks import router as webhooks_router
 
-    # Пути контракта живут под /api (servers.url в openapi.yaml); префикс
+    # Пути контракта живут под /api/v1 (servers.url в openapi.yaml); префикс
     # ставит приложение, а не reverse-proxy.
     app.include_router(webhooks_router, prefix=ROUTER_PREFIX)
 
