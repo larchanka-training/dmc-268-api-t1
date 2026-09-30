@@ -409,9 +409,9 @@ POST /webhooks/{provider}
 (соответствует `UNIQUE (provider, provider_id)` в таблице `repositories`), а не строкой вида
 `owner/repository` — `full_name` в этой таблице намеренно не уникален. Обязателен `trigger`.
 
-Все пути — относительно `/api` (`servers` в `openapi.yaml`): префикс ставит само
-приложение, а не reverse-proxy, поэтому фронт ходит на `/api/reviews`, а хостинг шлёт
-вебхуки на `/api/webhooks/{provider}`.
+Все пути — относительно `/api/v1` (`servers` в `openapi.yaml`): префикс ставит само
+приложение, а не reverse-proxy, поэтому фронт ходит на `/api/v1/reviews`, а хостинг шлёт
+вебхуки на `/api/v1/webhooks/{provider}`.
 
 Ошибки HTTP-слоя — `ApiError` с закрытым списком `code`: `VALIDATION_ERROR`,
 `REVIEW_NOT_FOUND`, `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `AUTH_CODE_INVALID`,
@@ -437,7 +437,7 @@ POST /auth/refresh
 - `POST /auth/refresh` обновляет access-токен по refresh-куке, без тела запроса.
 - Обе ручки отдают access-токен в теле ответа (`AuthSession.accessToken`,
   `expiresIn` в секундах) и переиздают refresh-токен `Set-Cookie`-заголовком:
-  `HttpOnly; Secure; SameSite=Strict`, `Path=/api/auth/refresh` — кука не читается
+  `HttpOnly; Secure; SameSite=Strict`, `Path=/api/v1/auth/refresh` — кука не читается
   скриптом и не уходит ни на один другой путь API.
 - Транспорт сессии на Frontend: access-токен — в памяти вкладки, не в
   `localStorage`; при перезагрузке — тихий `POST /auth/refresh` по куке. Это
