@@ -153,6 +153,11 @@ class SqlAlchemyReviewRunRepo:
         При вставке сущность — единственный источник, в том числе для прогона,
         восстановленного из прошлой попытки, поэтому поля результата и счётчик
         отклонённых переносятся здесь, хотя `update` счётчик не трогает.
+
+        `created_at` и `updated_at` переносятся тоже: время прогона выдаёт
+        `now`, переданный use case'у, и публичная проекция `ReviewJob` отдаёт
+        именно его. Серверный дефолт `func.now()` остался бы вторым источником
+        времени, разъезжающимся с сущностью на миллисекунды.
         """
         self._session.add(
             ReviewRunRow(
@@ -163,6 +168,8 @@ class SqlAlchemyReviewRunRepo:
                 status=run.status,
                 trigger=run.trigger,
                 last_progress_at=run.last_progress_at,
+                created_at=run.created_at,
+                updated_at=run.updated_at,
                 failure_reason=run.failure_reason,
                 model=run.model,
                 tokens_used=run.tokens_used,
