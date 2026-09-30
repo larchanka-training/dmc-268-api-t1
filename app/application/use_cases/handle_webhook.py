@@ -22,7 +22,9 @@
 находит существующий активный (исход `duplicate`), а гонку параллельных
 доставок страхует частичный уникальный индекс схемы — его отказ адаптер
 хранилища переводит в `ActiveRunConflict`, и проигравший возвращает
-`conflict`, не падая и не отвечая 5xx.
+`conflict`, не падая и не отвечая 5xx. Дубль проверяется до upsert'а
+merge_request: на PR один активный прогон, повторная доставка ничего
+не переписывает, а обновление без коммита откатилось бы молча.
 """
 
 from collections.abc import Callable
@@ -63,8 +65,9 @@ class WebhookOutcome:
     `ignored` — событие не запускает ревью (`reopened`, неизвестное действие,
     незарегистрированный репозиторий): записей нет, задачи нет. `failure` —
     VCS недоступен: прогон не создан, задачи нет. `duplicate` — на этот коммит
-    уже есть активный прогон, найденный до вставки: ответ — 202 с проекцией
-    существующего прогона. `conflict` — гонка, вставку отклонил уникальный
+    уже есть активный прогон, найденный до вставки и до обновления
+    merge_request: ответ — 202 с проекцией существующего прогона. `conflict` —
+    гонка, вставку отклонил уникальный
     индекс: ответ — 409. В `duplicate` и `success` заполнены `run`,
     `merge_request` и `repository` — из них HTTP-слой собирает проекцию
     `ReviewJob`; use case сам форму контракта не знает.
@@ -123,17 +126,28 @@ def handle_webhook_event(
         except VcsError:
             return WebhookOutcome(kind="failure")
 
-        merge_request = _upsert_merge_request(
-            work, repository.id, event, metadata, now(), new_id
+        # Дубль проверяется до upsert'а merge_request: на PR один активный
+        # прогон, повторная доставка его не трогает — обновление без коммита
+        # откатилось бы молча при выходе из транзакции, а свежие метаданные
+        # лягут при следующем реально созданном прогоне.
+        existing_merge_request = work.merge_requests.find_by_number(
+            repository.id, event.pr_number
         )
-        existing = work.review_runs.find_active(merge_request.id, event.head_sha)
-        if existing is not None:
-            return WebhookOutcome(
-                kind="duplicate",
-                run=existing,
-                merge_request=merge_request,
-                repository=repository,
+        if existing_merge_request is not None:
+            existing_run = work.review_runs.find_active(
+                existing_merge_request.id, event.head_sha
             )
+            if existing_run is not None:
+                return WebhookOutcome(
+                    kind="duplicate",
+                    run=existing_run,
+                    merge_request=existing_merge_request,
+                    repository=repository,
+                )
+
+        merge_request = _upsert_merge_request(
+            work, repository.id, existing_merge_request, event, metadata, now(), new_id
+        )
 
         run = _create_review_run(work, merge_request.id, event, metadata, now(), new_id())
         queue.enqueue(
@@ -178,20 +192,21 @@ def _diff_key(event: WebhookEvent) -> str:
 def _upsert_merge_request(
     work: UnitOfWork,
     repository_id: UUID,
+    existing: MergeRequest | None,
     event: WebhookEvent,
     metadata: PRMetadata,
     now: datetime,
     new_id: Callable[[], UUID],
 ) -> MergeRequest:
-    """Найти существующий PR по номеру или создать новый.
+    """Обновить найденный PR свежими метаданными VCS или создать новый.
 
     Заголовок, автор и ветки берутся из свежих метаданных VCS, а не из
     payload'а: они приезжают тем же запросом, что и `base_sha`, и актуальнее
     того, что успела доставить очередь вебхуков (заголовок могли отредактировать
     между доставкой и обработкой). `head_sha` — из события: прогон создаётся
-    для доставленного коммита.
+    для доставленного коммита. Вызывается только когда дубля нет: обновление
+    без будущего коммита откатилось бы вместе с транзакцией.
     """
-    existing = work.merge_requests.find_by_number(repository_id, event.pr_number)
     if existing is None:
         created = MergeRequest(
             id=new_id(),

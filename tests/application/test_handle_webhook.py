@@ -215,10 +215,15 @@ def test_diff_is_cached_for_the_worker() -> None:
 def test_duplicate_delivery_returns_existing_run_and_enqueues_nothing() -> None:
     outcome, uow, _, queue, _ = run_case()
     (existing,) = uow.review_runs.added
+    (original_mr,) = uow.merge_requests.added
 
     outcome, uow, _, queue, _ = run_case(uow=uow, queue=queue)
     assert outcome.kind == "duplicate"
     assert outcome.run is existing
+    # Дубль не трогает merge_request: на PR один активный прогон, а
+    # обновление без коммита откатилось бы молча при выходе из транзакции.
+    assert uow.merge_requests.updated == []
+    assert outcome.merge_request is original_mr
     assert len(uow.review_runs.added) == 1
     assert len(queue.jobs) == 1
 
@@ -281,8 +286,11 @@ def test_broker_failure_does_not_commit_the_run() -> None:
     uow = FakeUow()
     with pytest.raises(RuntimeError, match="брокер недоступен"):
         run_case(uow=uow, queue=BrokenQueue())
-    assert uow.review_runs.added  # прогон создан в транзакции...
-    assert uow.commits == 0  # ...но не закоммичен
+    assert uow.commits == 0  # коммита не было...
+    # ...а честный `__exit__` фейка откатил транзакцию, как реальный UoW:
+    # навсегда queued записи без задачи в базе не осталось.
+    assert uow.review_runs.runs == []
+    assert uow.rollbacks >= 1
 
     # Повторная доставка того же коммита снова создаёт прогон: ничего не висит.
     outcome, _, _, _, _ = run_case(uow=FakeUow())

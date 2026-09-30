@@ -217,7 +217,9 @@ class FakeUow(UnitOfWork):
         return self
 
     def __exit__(self, *args: object) -> None:
-        return None
+        # Как `SqlAlchemyUnitOfWork`: выход из `with` без коммита откатывает
+        # транзакцию — иначе фейк маскирует молчаливую потерю записей.
+        self.rollback()
 
     def commit(self) -> None:
         self.commits += 1
