@@ -96,3 +96,20 @@ def test_list_for_repository_slices(uow) -> None:
         page = work.merge_requests.list_for_repository(repo.id, limit=1, offset=1)
 
     assert [mr.number for mr in page] == [2]
+
+
+def test_list_all_breaks_created_at_ties_by_id_so_pages_neither_repeat_nor_skip(uow) -> None:
+    """Три строки с одним `created_at`: порядок задаёт только тай-брейкер `id`."""
+    with uow as work:
+        repositories = [a_repository(provider_id=str(i), created_at=NOW) for i in range(3)]
+        # Вставка против порядка `id`: без тай-брейкера Postgres отдал бы строки
+        # в порядке вставки, и тест это заметил бы.
+        for repository in sorted(repositories, key=lambda r: r.id, reverse=True):
+            work.repositories.add(repository)
+        work.commit()
+
+    with uow as work:
+        pages = [work.repositories.list_all(limit=1, offset=offset) for offset in range(4)]
+
+    paged_ids = [r.id for page in pages for r in page]
+    assert paged_ids == sorted(r.id for r in repositories)

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_unit_of_work
 from app.api.factory import create_app
+from app.api.repositories import MAX_LIMIT
 from app.config import Settings
 from app.domain.entities import Repository
 from app.domain.enums import Provider
@@ -60,10 +61,13 @@ def test_returns_registered_repositories() -> None:
     assert {item["full_name"] for item in body["items"]} == {"owner/repo-1", "owner/repo-2"}
 
 
-def test_limit_above_the_ceiling_is_not_rejected() -> None:
+def test_limit_above_the_ceiling_is_capped_not_rejected() -> None:
     uow = FakeUnitOfWork()
+    for n in range(MAX_LIMIT + 5):
+        uow.repositories.add(_repository(n))
     client = _client(uow)
 
     response = client.get("/api/v1/repositories", params={"limit": 10_000})
 
     assert response.status_code == 200
+    assert len(response.json()["items"]) == MAX_LIMIT
