@@ -3,7 +3,14 @@ from fastapi.testclient import TestClient
 from app.api.factory import create_app
 from app.config import Settings
 
-client = TestClient(create_app(Settings(database_url="postgresql+psycopg://test/test")))
+client = TestClient(
+    create_app(
+        Settings(
+            database_url="postgresql+psycopg://test/test",
+            ollama_base_url="http://localhost:11434",
+        )
+    )
+)
 
 
 def test_root() -> None:

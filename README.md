@@ -77,13 +77,21 @@ rate limiting или кэш (см. `docs/BACKEND_ARCHITECTURE.md`, «Добав�
 ```bash
 docker run -d --name dmc268-db -p 5432:5432 \
   -e POSTGRES_USER=dmc -e POSTGRES_PASSWORD=dmc -e POSTGRES_DB=dmc268 \
-  postgres:18-alpine
+  pgvector/pgvector:pg18
 
 export DATABASE_URL="postgresql+psycopg://dmc:dmc@localhost:5432/dmc268"
+export OLLAMA_BASE_URL="http://localhost:11434"  # опционально; это и так дефолт
 
 uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
+
+Образ базы — `pgvector/pgvector` (postgres со встроенным pgvector): расширение
+для RAG-профиля репозитория создаёт миграция `0003`. `OLLAMA_BASE_URL`
+указывает на Ollama и по умолчанию — `http://localhost:11434`: выкат со старым
+окружением не упадёт на старте. Недоступность Ollama ревью не ломает — профиль
+просто не пополняется и не используется (см. `docs/BACKEND_ARCHITECTURE.md`,
+«Профиль репозитория»).
 
 `GET /health` отвечает `{"status": "ok"}`. Сгенерированная документация API лежит на `/docs`.
 
