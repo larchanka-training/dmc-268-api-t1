@@ -175,10 +175,29 @@ def test_redact_masks_a_stripe_live_key() -> None:
     assert "[REDACTED]" in redacted
 
 
+def test_redact_masks_a_stripe_test_key() -> None:
+    """Регрессия ревью: тестовые ключи Stripe ловятся тем же префиксом,
+    что и live — различие только в сегменте после sk_."""
+    source = 'stripe_test = "sk_test_51h7kqpdmzxcvbnmasdfghjklqwerty"\n'
+    redacted = redact(source)
+    assert "51h7kqpdmzxcvbnm" not in redacted
+    assert "[REDACTED]" in redacted
+
+
 def test_redact_masks_a_google_api_key() -> None:
     source = 'google_api_key = "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q"\n'
     redacted = redact(source)
     assert "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_masks_a_google_api_key_ending_with_a_dash() -> None:
+    """Регрессия ревью: хвостовой \\b не срабатывает за не-словесным '-' —
+    границы слова между '-' и кавычкой нет; вместо неё — lookahead. Имя
+    переменной `key` не из словаря присваиваний: ловит только префикс AIza."""
+    source = 'key = "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6-"\n'
+    redacted = redact(source)
+    assert "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6" not in redacted
     assert "[REDACTED]" in redacted
 
 

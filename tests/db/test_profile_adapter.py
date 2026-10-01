@@ -173,6 +173,26 @@ def test_search_ignores_chunks_of_other_models(uow, seeded) -> None:
     assert [c.content_sha256 for c in found] == ["d-model"]
 
 
+def test_same_window_under_a_new_model_stores_a_new_chunk(uow, seeded) -> None:
+    """Регрессия ревью: модель вне ключа уникальности гасила вставку окна,
+    уже вложенного прежней моделью, — пространство новой модели не наполнялось."""
+    repo, _, run = seeded
+    with uow as work:
+        work.code_profile.add_many([a_chunk(repo.id, run.id, digest="same", model=MODEL)])
+        work.commit()
+    with uow as work:
+        # повторное окно после смены модели — отдельный чанк новой модели
+        work.code_profile.add_many(
+            [a_chunk(repo.id, run.id, digest="same", model=OTHER_MODEL)]
+        )
+        work.commit()
+    with uow as work:
+        mine = search_all(work, repo.id, model=MODEL)
+        theirs = search_all(work, repo.id, model=OTHER_MODEL)
+    assert [c.content_sha256 for c in mine] == ["same"]
+    assert [c.content_sha256 for c in theirs] == ["same"]
+
+
 def test_search_excludes_the_given_digests(uow, seeded) -> None:
     repo, _, run = seeded
     with uow as work:

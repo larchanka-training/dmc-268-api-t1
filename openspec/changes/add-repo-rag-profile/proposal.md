@@ -26,7 +26,7 @@
 ## Impact
 
 - **Код**: новые `app/domain/profile.py` (чистые функции: чанкинг окон, отбор под лимиты, редакция секретов), `app/application/ports/embedding_gateway.py` и порт репозитория чанков, use case'ы накопления и retrieval, адаптеры `app/infrastructure` (SQLAlchemy-модель, pgvector-поиск, Ollama-эмбеддер), `app/config.py`, `app/infrastructure/container.py`.
-- **Схема БД**: одна миграция Alembic — расширение `pgvector`, таблица `repo_code_chunks` c уникальностью `(repository_id, file_path, start_line, content_sha256)`; обратимый downgrade.
+- **Схема БД**: одна миграция Alembic — расширение `pgvector`, таблица `repo_code_chunks` c уникальностью `(repository_id, file_path, start_line, content_sha256, embedding_model)`; обратимый downgrade.
 - **Зависимости**: `pgvector` (python-пакет с SQLAlchemy-типом), `ollama` (SDK; появится здесь раньше планируемого `LlmGateway`).
 - **Развёртывание**: образ PostgreSQL должен содержать pgvector (расширение создаёт миграция).
 - **Интеграция с пайплайном**: воркер и сборка контекста ещё не реализованы. Этот change поставляет подсистему профиля целиком (домен, порты, адаптеры, use case'ы с тестами на фейках); вызов use case'ов из пайплайна ревью фиксируется в BACKEND_ARCHITECTURE.md как шов и выполняется в change'ах пайплайна — до них порты не мертвы: их первый вызывающий код — use case'ы этого change.

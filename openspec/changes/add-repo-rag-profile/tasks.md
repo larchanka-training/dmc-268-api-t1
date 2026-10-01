@@ -7,7 +7,7 @@
 ## 2. Схема и миграция
 
 - [x] 2.1 Зависимости `pgvector` и `ollama` через `uv add`; проверка: `uv sync --all-extras` и `uv run pytest` проходят
-- [x] 2.2 Модель `RepoCodeChunk` и маппер (`app/infrastructure/db/models.py`, `mappers.py`): UUIDv7 PK, FK с `ON DELETE RESTRICT` на `repositories` и `review_runs`, уникальность `(repository_id, file_path, start_line, content_sha256)`, столбец `vector(N)`; проверка: тест скомпилированного DDL
+- [x] 2.2 Модель `RepoCodeChunk` и маппер (`app/infrastructure/db/models.py`, `mappers.py`): UUIDv7 PK, FK с `ON DELETE RESTRICT` на `repositories` и `review_runs`, уникальность `(repository_id, file_path, start_line, content_sha256, embedding_model)`, столбец `vector(N)`; проверка: тест скомпилированного DDL
 - [x] 2.3 Миграция Alembic (одна ревизия): `CREATE EXTENSION IF NOT EXISTS vector`, таблица `repo_code_chunks` с ограничениями; откат уносит таблицу и расширение, если им не пользуются чужие vector-колонки; проверка: интеграционный тест `upgrade head → downgrade → upgrade` на одноразовой базе, `uv run alembic heads` показывает один head
 
 ## 3. Порты и адаптеры
