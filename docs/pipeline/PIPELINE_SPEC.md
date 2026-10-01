@@ -403,7 +403,13 @@ POST /webhooks/{provider}
   проверки не хранится в репозитории и не логируется;
 - запрос без валидной подписи отклоняется до постановки в очередь;
 - успешный вебхук создаёт `ReviewRun` с `trigger = webhook`, используя тот же logical key
-  идемпотентности, что и ручной запуск (§4).
+  идемпотентности, что и ручной запуск (§4);
+- доставка, которая ревью не запускает (действие `reopened`, `closed` или неизвестное,
+  незарегистрированный репозиторий), — `202` с телом `WebhookIgnored` (`{"status": "ignored"}`):
+  записей нет, очередь не тронута;
+- сбой VCS при получении диффа или метаданных — `502` с `ApiError.code = SCM_UNAVAILABLE`,
+  прогон не создаётся; провайдер из `Provider`, для которого приёмника ещё нет, — `501` с
+  `PROVIDER_NOT_SUPPORTED`.
 
 `CreateReviewRequest` идентифицирует репозиторий парой `provider` + `providerRepositoryId`
 (соответствует `UNIQUE (provider, provider_id)` в таблице `repositories`), а не строкой вида
@@ -414,8 +420,8 @@ POST /webhooks/{provider}
 вебхуки на `/api/v1/webhooks/{provider}`.
 
 Ошибки HTTP-слоя — `ApiError` с закрытым списком `code`: `VALIDATION_ERROR`,
-`REVIEW_NOT_FOUND`, `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `AUTH_CODE_INVALID`,
-`AUTH_REFRESH_INVALID`. Каждый ответ с `ApiError` в `openapi.yaml` называет свой код.
+`REVIEW_NOT_FOUND`, `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `SCM_UNAVAILABLE`,
+`PROVIDER_NOT_SUPPORTED`, `AUTH_CODE_INVALID`, `AUTH_REFRESH_INVALID`. Каждый ответ с `ApiError` в `openapi.yaml` называет свой код.
 
 Источник истины для HTTP-контракта: `openapi.yaml`.
 
