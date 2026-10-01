@@ -235,21 +235,6 @@ class FakeUow(UnitOfWork):
 
 
 @dataclass
-class FakeCacheStore:
-    """Двойник `CacheStore`: записи видны тесту, TTL записывается."""
-
-    entries: dict[str, str] = field(default_factory=dict)
-    puts: list[tuple[str, str, int]] = field(default_factory=list)
-
-    def get(self, key: str) -> str | None:
-        return self.entries.get(key)
-
-    def put(self, key: str, value: str, *, ttl_seconds: int) -> None:
-        self.puts.append((key, value, ttl_seconds))
-        self.entries[key] = value
-
-
-@dataclass
 class FakeVcs:
     diff: str = DIFF
     meta: PRMetadata = field(default_factory=pr_metadata)

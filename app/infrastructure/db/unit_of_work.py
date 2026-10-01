@@ -25,9 +25,14 @@ from app.infrastructure.db.repositories import (
     SqlAlchemyReviewRunRepo,
 )
 
-# Частичный уникальный индекс гонки доставок; его отказ переводится в
+# Частичные уникальные индексы гонки доставок: их отказ переводится в
 # портовое исключение, отказ любого другого ограничения идёт наружу как есть.
-_ONE_ACTIVE_PER_COMMIT = "uq_review_runs_one_active_per_commit"
+_RACE_CONSTRAINTS = (
+    # два активных прогона на один коммит
+    "uq_review_runs_one_active_per_commit",
+    # два merge_request на пару репозиторий+номер (гонка первых доставок PR)
+    "uq_merge_requests_repo_number",
+)
 
 
 class SqlAlchemyUnitOfWork:
@@ -78,13 +83,12 @@ class SqlAlchemyUnitOfWork:
             self.session.commit()
         except IntegrityError as error:
             # Сессия после отказа в откате непригодна: гасим транзакцию здесь,
-            # чтобы вызывающий после ActiveRunConflict мог открыть новую
-            # и перечитать победителя гонки.
+            # чтобы вызывающий после ActiveRunConflict мог перечитать записи
+            # победителя гонки по естественному ключу.
             self.rollback()
-            if _ONE_ACTIVE_PER_COMMIT in str(error.orig):
+            if any(name in str(error.orig) for name in _RACE_CONSTRAINTS):
                 raise ActiveRunConflict(
-                    "параллельная доставка закоммитила активный прогон"
-                    " на этот коммит раньше"
+                    "параллельная доставка закоммитила записи этого PR раньше"
                 ) from error
             raise
 

@@ -20,7 +20,7 @@ from app.api.factory import create_app
 from app.config import Settings
 from app.domain.vcs_errors import VcsError
 
-from ..fakes import FakeCacheStore, FakeQueue, FakeUow, FakeVcs, webhook_payload
+from ..fakes import FakeQueue, FakeUow, FakeVcs, webhook_payload
 
 SECRET = "test-webhook-secret"
 SIGNATURE_HEADER = "X-Hub-Signature-256"
@@ -38,7 +38,6 @@ class StubContainer:
     uow: FakeUow
     vcs: FakeVcs
     queue: FakeQueue
-    cache: FakeCacheStore
 
     def unit_of_work(self) -> FakeUow:
         return self.uow
@@ -48,9 +47,6 @@ class StubContainer:
 
     def job_queue(self) -> FakeQueue:
         return self.queue
-
-    def cache_store(self) -> FakeCacheStore:
-        return self.cache
 
 
 def make_client(
@@ -77,7 +73,6 @@ def make_client(
         uow=uow,
         vcs=vcs if vcs is not None else FakeVcs(),
         queue=queue if queue is not None else FakeQueue(),
-        cache=FakeCacheStore(),
     )
     app = create_app(settings)
     app.state.container = container

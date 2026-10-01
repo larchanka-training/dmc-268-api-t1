@@ -2,29 +2,34 @@
 
 Оркестрирует чистые функции домена и порты: извлекает событие из payload'а,
 ищет зарегистрированный репозиторий, достаёт дифф и метаданные через
-`VcsGateway` (сбой — 502 ещё до создания записей), кладёт дифф в `CacheStore`
-и создаёт `ReviewRun`. Сам дифф use case не разбирает: разбор и фильтрация —
-территория воркера (design D3), который возьмёт его из кэша или повторно
-достанет по идентификаторам из задачи. Зависимости — только порты
-(`UnitOfWork`, `VcsGateway`, `JobQueue`, `CacheStore`), поэтому юнит-тесты
-обходятся фейками без базы, брокера и сети.
+`VcsGateway` (сбой — 502 ещё до создания записей) и создаёт `ReviewRun`.
+Сам дифф use case не разбирает и не хранит: разбор — территория воркера
+(design D3), который повторно достанет дифф по идентификаторам из задачи.
+Зависимости — только порты (`UnitOfWork`, `VcsGateway`, `JobQueue`),
+поэтому юнит-тесты обходятся фейками без базы, брокера и сети.
 
-Время и идентификаторы приходят аргументами (`now`, `new_id`), а не читаются
-из часов или генератора: тест проверяет точный timestamp и идентификатор.
+Транзакции короткие: репозиторий ищется отдельным чтением, VCS-вызовы идут
+между транзакциями — соединение пула не висит idle in transaction, пока
+отвечает GitHub. Запись — вторая транзакция, одна на merge_request и прогон.
 
-Порядок «задача в брокере, потом коммит» выбран сознательно: если брокер
-недоступен, транзакция откатывается вместе с прогоном — в базе не остаётся
-навсегда `queued` записи без сообщения, которая закрыла бы коммит от новых
-прогонов. Обратная цена: при гонке двух доставок сообщение проигравшего
-переживает откат; воркер отбрасывает задачу о прогоне, которого нет.
+Порядок «коммит, потом задача» — по воркеру #36: тот рассчитывает, что прогон
+закоммичен до постановки задачи, и сообщение без строки кладёт в DLQ.
+Обратная цена: при сбое брокера прогон остаётся закоммиченным `queued` без
+сообщения — его переведёт в `failed` sweep обработки (`list_unfinished`);
+повторная доставка до того находит активный прогон и отвечает `duplicate`,
+не плодя второй.
 
 Повторная доставка на тот же коммит не создаёт второй прогон: `find_active`
 находит существующий активный (исход `duplicate`), а гонку параллельных
-доставок страхует частичный уникальный индекс схемы — его отказ адаптер
-хранилища переводит в `ActiveRunConflict`, и проигравший возвращает
-`conflict`, не падая и не отвечая 5xx. Дубль проверяется до upsert'а
-merge_request: на PR один активный прогон, повторная доставка ничего
-не переписывает, а обновление без коммита откатилось бы молча.
+доставок страхуют частичные уникальные индексы — отказ любого из них
+адаптер хранилища переводит в `ActiveRunConflict`, и проигравший по
+естественному ключу (репозиторий, номер) находит записи победителя и
+возвращает `conflict`, не падая и не отвечая 5xx. Дубль проверяется до
+upsert'а merge_request: на PR один активный прогон, повторная доставка
+ничего не переписывает.
+
+Время и идентификаторы приходят аргументами (`now`, `new_id`), а не читаются
+из часов или генератора: тест проверяет точный timestamp и идентификатор.
 """
 
 from collections.abc import Callable
@@ -33,7 +38,6 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from app.application.ports.cache_store import CacheStore
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
@@ -53,10 +57,6 @@ from app.domain.enums import (
 from app.domain.vcs_errors import VcsError
 from app.domain.webhook import extract_github_event
 
-# Дифф в кэше живёт до конца обработки задачи: воркер подхватывает её
-# за секунды, час — запас на очередь из простоявших прогонов.
-_DIFF_TTL_SECONDS = 60 * 60
-
 
 @dataclass(frozen=True, slots=True)
 class WebhookOutcome:
@@ -64,13 +64,15 @@ class WebhookOutcome:
 
     `ignored` — событие не запускает ревью (`reopened`, неизвестное действие,
     незарегистрированный репозиторий): записей нет, задачи нет. `failure` —
-    VCS недоступен: прогон не создан, задачи нет. `duplicate` — на этот коммит
-    уже есть активный прогон, найденный до вставки и до обновления
-    merge_request: ответ — 202 с проекцией существующего прогона. `conflict` —
-    гонка, вставку отклонил уникальный
-    индекс: ответ — 409. В `duplicate` и `success` заполнены `run`,
-    `merge_request` и `repository` — из них HTTP-слой собирает проекцию
-    `ReviewJob`; use case сам форму контракта не знает.
+    VCS недоступен: прогон не создан, задачи нет. `duplicate` — на этот
+    коммит уже есть активный прогон, найденный до вставки и до обновления
+    merge_request. `conflict` — гонку отклонил уникальный индекс, проигравший
+    откатился и нашёл записи победителя. Оба исхода находят существующий
+    прогон: не-2xx хостинг считает неудачной доставкой и повторяет её, поэтому
+    ответ — 202 с проекцией найденного прогона (контракт `openapi.yaml`).
+    В `duplicate`, `conflict` и `success` заполнены `run`, `merge_request`
+    и `repository` — из них HTTP-слой собирает проекцию `ReviewJob`; use case
+    сам форму контракта не знает.
     """
 
     kind: Literal["ignored", "failure", "duplicate", "conflict", "success"]
@@ -84,12 +86,11 @@ def handle_webhook_event(
     uow: UnitOfWork,
     vcs: VcsGateway,
     queue: JobQueue,
-    cache: CacheStore,
     *,
     now: Callable[[], datetime],
     new_id: Callable[[], UUID],
 ) -> WebhookOutcome:
-    """Принять вебхук: от payload'а до задачи в очереди.
+    """Принять вебхук: от payload'а до закоммиченного прогона и задачи.
 
     `now` и `new_id` передаются вызывающим, чтобы тесты фиксировали точные
     значения. Вне тестов это `datetime.now(UTC)` и `app.domain.ids.new_id`.
@@ -98,38 +99,28 @@ def handle_webhook_event(
     if event is None:
         return WebhookOutcome(kind="ignored")
 
+    # Короткое чтение: транзакция живёт только на SELECT репозитория.
     with uow as work:
         repository = work.repositories.find_by_provider(
             Provider.GITHUB, event.repo_provider_id
         )
-        if repository is None:
-            return WebhookOutcome(kind="ignored")
+    if repository is None:
+        return WebhookOutcome(kind="ignored")
 
-        diff_key = _diff_key(event)
-        diff = cache.get(diff_key)
-        if diff is None:
-            try:
-                # Дифф достаётся здесь, чтобы сбой VCS дал 502 до создания
-                # записей; разбирает его воркер (D3), поэтому в записях он
-                # не живёт — вместо этого кладётся в кэш для воркера (§4.3).
-                diff = vcs.fetch_diff(
-                    event.repo_full_name, event.pr_number, event.installation_id
-                )
-            except VcsError:
-                return WebhookOutcome(kind="failure")
-            cache.put(diff_key, diff, ttl_seconds=_DIFF_TTL_SECONDS)
+    # VCS между транзакциями: соединение пула не занято, пока GitHub отвечает.
+    try:
+        # Дифф достаётся здесь, чтобы сбой VCS дал 502 до создания записей;
+        # разбирает его воркер (D3), поэтому результат не нужен.
+        vcs.fetch_diff(event.repo_full_name, event.pr_number, event.installation_id)
+        metadata = vcs.fetch_pr_metadata(
+            event.repo_full_name, event.pr_number, event.installation_id
+        )
+    except VcsError:
+        return WebhookOutcome(kind="failure")
 
-        try:
-            metadata = vcs.fetch_pr_metadata(
-                event.repo_full_name, event.pr_number, event.installation_id
-            )
-        except VcsError:
-            return WebhookOutcome(kind="failure")
-
+    with uow as work:
         # Дубль проверяется до upsert'а merge_request: на PR один активный
-        # прогон, повторная доставка его не трогает — обновление без коммита
-        # откатилось бы молча при выходе из транзакции, а свежие метаданные
-        # лягут при следующем реально созданном прогоне.
+        # прогон, повторная доставка его не трогает.
         existing_merge_request = work.merge_requests.find_by_number(
             repository.id, event.pr_number
         )
@@ -148,45 +139,56 @@ def handle_webhook_event(
         merge_request = _upsert_merge_request(
             work, repository.id, existing_merge_request, event, metadata, now(), new_id
         )
-
         run = _create_review_run(work, merge_request.id, event, metadata, now(), new_id())
-        queue.enqueue(
-            ReviewJob(
-                job_id=new_id(),
-                review_run_id=run.id,
-                repository_full_name=event.repo_full_name,
-                repository_provider_id=int(event.repo_provider_id),
-                pr_number=event.pr_number,
-                head_sha=event.head_sha,
-                base_sha=metadata.base_sha,
-                action=event.action,
-            )
-        )
         try:
             work.commit()
         except ActiveRunConflict:
-            # Индекс сказал, что победитель уже закоммитил активный прогон
-            # на этот коммит. Откат убирает нашу вставку; в новой транзакции
-            # прогон победителя уже виден — отвечаем конфликтом, а не 5xx.
+            # Индекс сказал, что победитель закоммитил раньше: либо активный
+            # прогон на этот коммит, либо merge_request этого PR. Наша вставка
+            # откатилась, поэтому записи победителя ищутся по естественному
+            # ключу (репозиторий, номер), а не по идентификатору нашей вставки.
             work.rollback()
-            survivor = work.review_runs.find_active(merge_request.id, event.head_sha)
-            if survivor is None:
+            survivor_run, survivor_mr = _find_survivor(
+                work, repository.id, event.pr_number, event.head_sha
+            )
+            if survivor_run is None or survivor_mr is None:
                 raise
             return WebhookOutcome(
                 kind="conflict",
-                run=survivor,
-                merge_request=merge_request,
+                run=survivor_run,
+                merge_request=survivor_mr,
                 repository=repository,
             )
 
+    # Задача — после коммита: воркер #36 ожидает, что прогон уже виден в базе,
+    # и сообщение без строки кладёт в DLQ. Сбой здесь оставляет закоммиченный
+    # queued-прогон без сообщения — его подберёт sweep обработки (#36).
+    queue.enqueue(
+        ReviewJob(
+            job_id=new_id(),
+            review_run_id=run.id,
+            repository_full_name=event.repo_full_name,
+            repository_provider_id=int(event.repo_provider_id),
+            pr_number=event.pr_number,
+            head_sha=event.head_sha,
+            base_sha=metadata.base_sha,
+            action=event.action,
+        )
+    )
     return WebhookOutcome(
         kind="success", run=run, merge_request=merge_request, repository=repository
     )
 
 
-def _diff_key(event: WebhookEvent) -> str:
-    """Ключ диффа в кэше: содержимое однозначно определяется тройкой."""
-    return f"diff:{event.repo_full_name}:{event.pr_number}:{event.head_sha}"
+def _find_survivor(
+    work: UnitOfWork, repository_id: UUID, pr_number: int, head_sha: str
+) -> tuple[ReviewRun | None, MergeRequest | None]:
+    """Записи победителя гонки после отката: merge_request по естественному
+    ключу, активный прогон — по нему и доставленному коммиту."""
+    survivor_mr = work.merge_requests.find_by_number(repository_id, pr_number)
+    if survivor_mr is None:
+        return None, None
+    return work.review_runs.find_active(survivor_mr.id, head_sha), survivor_mr
 
 
 def _upsert_merge_request(

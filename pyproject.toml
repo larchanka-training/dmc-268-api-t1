@@ -35,6 +35,10 @@ dev = [
     "grimp<3.16",
     "mypy>=1.13",
     "pre-commit>=3.8",
+    # Туда же, куда dev-инструменты #25: [dependency-groups] dev рядом создал
+    # бы второй dev-список и конфликт uv.lock при слиянии.
+    "pyyaml>=6.0.3",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.ruff]
@@ -99,9 +103,3 @@ name = "Inner layers know no vendor"
 type = "forbidden"
 source_modules = ["app.domain", "app.application"]
 forbidden_modules = ["sqlalchemy", "fastapi", "httpx", "ollama", "pika", "alembic", "psycopg"]
-
-[dependency-groups]
-dev = [
-    "pyyaml>=6.0.3",
-    "types-pyyaml>=6.0.12.20260906",
-]

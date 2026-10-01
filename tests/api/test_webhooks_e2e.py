@@ -21,7 +21,7 @@ from httpx import Client, Response
 from sqlalchemy import Engine
 
 from app.api.factory import create_app
-from app.application.ports import CacheStore, JobQueue, UnitOfWork, VcsGateway
+from app.application.ports import JobQueue, UnitOfWork, VcsGateway
 from app.config import Settings
 from app.domain.entities import MergeRequest, Repository, ReviewRun
 from app.domain.enums import ReviewRunStatus, TriggerSource
@@ -32,7 +32,6 @@ from ..conftest import requires_db
 from ..fakes import (
     INSTALLATION_ID,
     REPO_FULL_NAME,
-    FakeCacheStore,
     FakeChannel,
     FakeVcs,
     a_repository,
@@ -57,13 +56,12 @@ def sign(body: bytes, secret: str = SECRET) -> str:
 
 @dataclass
 class E2EContainer:
-    """Настоящие адаптеры базы и очереди, фейковые VCS и кэш: сеть не нужна."""
+    """Настоящие адаптеры базы и очереди, фейковый VCS: сеть не нужна."""
 
     engine: Engine
     settings: Settings
     vcs: FakeVcs
     queue: PikaJobQueue
-    cache: FakeCacheStore
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine)
@@ -74,9 +72,6 @@ class E2EContainer:
     def job_queue(self) -> JobQueue:
         return self.queue
 
-    def cache_store(self) -> CacheStore:
-        return self.cache
-
 
 @dataclass(frozen=True)
 class Flow:
@@ -85,7 +80,6 @@ class Flow:
     repository: Repository
     vcs: FakeVcs
     channel: FakeChannel
-    cache: FakeCacheStore
 
 
 @pytest.fixture
@@ -101,13 +95,11 @@ def flow(clean_db) -> Flow:
     )
     vcs = FakeVcs(diff=SAMPLE_DIFF)
     channel = FakeChannel()
-    cache = FakeCacheStore()
     container = E2EContainer(
         engine=clean_db,
         settings=settings,
         vcs=vcs,
         queue=PikaJobQueue(url="", channel=channel),
-        cache=cache,
     )
     app = create_app(settings)
     app.state.container = container
@@ -117,7 +109,6 @@ def flow(clean_db) -> Flow:
         repository=repository,
         vcs=vcs,
         channel=channel,
-        cache=cache,
     )
 
 
@@ -207,11 +198,6 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
             "arguments": {"x-max-priority": 10},
         }
     ]
-    # Дифф не выброшен: он в кэше по ключу доставки — воркер не потянет
-    # его у GitHub третий раз (§4.3).
-    assert flow.cache.entries == {
-        f"diff:{REPO_FULL_NAME}:{PR_NUMBER}:{HEAD_SHA}": SAMPLE_DIFF
-    }
 
 
 def test_vcs_is_called_for_diff_then_metadata(flow: Flow) -> None:

@@ -88,7 +88,6 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
         container.unit_of_work(),
         container.vcs_gateway(),
         container.job_queue(),
-        container.cache_store(),
         now=lambda: datetime.now(UTC),
         new_id=new_id,
     )
