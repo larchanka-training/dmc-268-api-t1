@@ -154,6 +154,34 @@ def test_redact_masks_a_bare_mixed_case_key() -> None:
     assert redact(source) == "[REDACTED]\n"
 
 
+def test_redact_masks_a_bare_slack_token() -> None:
+    """Регрессия ревью: токен в нижнем регистре эвристика строки не ловит
+    (нет верхнего регистра), ловит только узнаваемый префикс."""
+    source = "xoxb-2417283748-2411234567890-abcdefghijklmnopqrstuvwx\n"
+    assert redact(source) == "[REDACTED]\n"
+
+
+def test_redact_masks_a_slack_token_in_an_assignment() -> None:
+    source = 'slack_token = "xoxb-2417283748-2411234567890-abcdefghijklmnopqrstuvwx"\n'
+    redacted = redact(source)
+    assert "2417283748" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_masks_a_stripe_live_key() -> None:
+    source = 'STRIPE_KEY = "sk_live_51h7kqpdmzxcvbnmasdfghjklqwertyuiop1234"\n'
+    redacted = redact(source)
+    assert "51h7kqpdmzxcvbnm" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_masks_a_google_api_key() -> None:
+    source = 'google_api_key = "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q"\n'
+    redacted = redact(source)
+    assert "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q" not in redacted
+    assert "[REDACTED]" in redacted
+
+
 def test_redact_leaves_ordinary_code_alone() -> None:
     source = "def handler(value):\n    return value * 2\n"
     assert redact(source) == source

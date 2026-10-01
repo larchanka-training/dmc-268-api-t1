@@ -168,6 +168,48 @@ def test_retrieve_excludes_the_current_windows_own_digest() -> None:
     ]
 
 
+def test_retrieve_normalizes_nul_bytes_like_the_stored_chunks() -> None:
+    """Регрессия ревью: build_chunks вырезает NUL до дайджеста и редакции,
+    а retrieval считал дайджест от сырого окна. Окно с NUL возвращалось
+    само себе в уровне `similar`, и вектор запроса расходился с вектором
+    записанного чанка."""
+    embedder = FakeEmbedder()
+    repo = FakeProfileRepo()
+    dirty = "def handler():\x00\n    return 1\n"
+    clean = "def handler():\n    return 1\n"
+    w = window(text=dirty)
+    own = ScoredChunk(
+        chunk_id="c1",
+        file_path=w.file_path,
+        start_line=1,
+        end_line=10,
+        content_sha256=content_digest(clean),
+        body=clean,
+        distance=0.0,
+    )
+    foreign = ScoredChunk(
+        chunk_id="c2",
+        file_path="lib/old.py",
+        start_line=1,
+        end_line=5,
+        content_sha256="d-other",
+        body="x = 1\n",
+        distance=0.2,
+    )
+    repo.search_results = [own, foreign]
+    retrieve = RetrieveSimilarCode(embedder, repo, MODEL, limits())
+    assert retrieve.retrieve([w], REPO_ID) == [
+        SimilarChunk(
+            file_path="lib/old.py",
+            start_line=1,
+            end_line=5,
+            content_sha256="d-other",
+            body="x = 1\n",
+        )
+    ]
+    assert embedder.calls == [[clean]]
+
+
 def test_retrieve_survives_an_embedder_failure() -> None:
     retrieve = RetrieveSimilarCode(
         FakeEmbedder(fail=True), FakeProfileRepo(), MODEL, limits()

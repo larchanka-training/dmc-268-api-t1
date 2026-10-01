@@ -58,6 +58,7 @@ def build_container(settings: Settings) -> Container:
             base_url=settings.ollama_base_url,
             model=settings.embedding_model,
             dimension=EMBEDDING_DIMENSION,
+            timeout=settings.ollama_timeout,
         ),
         profile_limits=ProfileLimits(
             max_chunk_bytes=settings.profile_max_chunk_bytes,

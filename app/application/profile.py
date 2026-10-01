@@ -18,6 +18,7 @@ from app.domain.profile import (
     SurroundingWindow,
     build_chunks,
     content_digest,
+    normalize_window_text,
     pick_similar,
     redact,
 )
@@ -46,8 +47,11 @@ class RetrieveSimilarCode:
         """Похожие чанки под лимитами; на любой сбой — пустой уровень."""
         try:
             return self._retrieve(windows, repository_id)
-        except Exception:  # noqa: BLE001 — граница best-effort: любой сбой профиля не роняет прогон
-            logger.warning("profile retrieval failed; continuing without `similar`")
+        except Exception:  # граница best-effort: любой сбой профиля не роняет прогон
+            logger.warning(
+                "profile retrieval failed; continuing without `similar`",
+                exc_info=True,
+            )
             return []
 
     def _retrieve(
@@ -55,12 +59,14 @@ class RetrieveSimilarCode:
     ) -> list[SimilarChunk]:
         if not windows:
             return []
+        # Нормализация та же, что в build_chunks: дайджест запроса обязан
+        # совпасть с дайджестом записанного окна, иначе самосовпадение не
+        # отсекается, а вектор запроса расходится с вектором записи.
+        texts = [normalize_window_text(w.text) for w in windows]
         # Запрос и хранение вложат один и тот же отредактированный текст:
         # вектор секрета — тоже утечка, хоть и косвенная.
-        queries = [redact(w.text) for w in windows]
-        # Самосовпадения исключаются дайджестом исходного окна — ровно тем,
-        # под которым окно лежит в профиле.
-        current_digests = frozenset(content_digest(w.text) for w in windows)
+        queries = [redact(text) for text in texts]
+        current_digests = frozenset(content_digest(text) for text in texts)
         vectors = self._embedder.embed(queries)
         scored = []
         for vector in vectors:
@@ -97,8 +103,10 @@ class IngestProfile:
         """Чанки прогона — в профиль; на любой сбой — просто без пополнения."""
         try:
             self._ingest(windows, repository_id, review_run_id)
-        except Exception:  # noqa: BLE001 — граница best-effort: любой сбой профиля не роняет прогон
-            logger.warning("profile ingestion failed; run continues without it")
+        except Exception:  # граница best-effort: любой сбой профиля не роняет прогон
+            logger.warning(
+                "profile ingestion failed; run continues without it", exc_info=True
+            )
 
     def _ingest(
         self, windows: list[SurroundingWindow], repository_id: UUID, review_run_id: UUID

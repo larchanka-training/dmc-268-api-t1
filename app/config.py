@@ -29,6 +29,13 @@ class Settings(BaseSettings):
         default="nomic-embed-text",
         description="Ollama embedding model used by the repository profile",
     )
+    ollama_timeout: float = Field(
+        default=10.0,
+        description=(
+            "Seconds before an Ollama embedding call fails; a hung call must "
+            "raise instead of stalling the review run (profile is best-effort)"
+        ),
+    )
     profile_max_chunk_bytes: int = Field(
         default=4096,
         description="Chunks larger than this many bytes are skipped",

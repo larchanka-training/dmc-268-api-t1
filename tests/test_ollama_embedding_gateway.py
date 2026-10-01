@@ -26,14 +26,28 @@ class FakeOllamaClient:
         return SimpleNamespace(embeddings=self._embeddings)
 
 
-def make_gateway(monkeypatch: pytest.MonkeyPatch, embeddings) -> tuple[
-    OllamaEmbeddingGateway, FakeOllamaClient
-]:
+def make_gateway(
+    monkeypatch: pytest.MonkeyPatch, embeddings
+) -> tuple[OllamaEmbeddingGateway, FakeOllamaClient]:
     client = FakeOllamaClient(embeddings)
-    monkeypatch.setattr(ollama, "Client", lambda host: client)
+    received: dict[str, object] = {}
+
+    def fake_client(host: str, timeout: float) -> FakeOllamaClient:
+        # Контракт транспорта: таймаут обязан быть явным — молчаливое
+        # бесконечное ожидание не поднимает исключение, и best-effort
+        # граница use case'а не срабатывает на зависшей сети.
+        received["host"] = host
+        received["timeout"] = timeout
+        return client
+
+    monkeypatch.setattr(ollama, "Client", fake_client)
     gateway = OllamaEmbeddingGateway(
-        base_url="http://ollama:11434", model=MODEL, dimension=EMBEDDING_DIMENSION
+        base_url="http://ollama:11434",
+        model=MODEL,
+        dimension=EMBEDDING_DIMENSION,
+        timeout=7.5,
     )
+    assert received == {"host": "http://ollama:11434", "timeout": 7.5}
     return gateway, client
 
 
