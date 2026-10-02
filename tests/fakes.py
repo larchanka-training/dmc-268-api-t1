@@ -206,6 +206,9 @@ class FakeUow(UnitOfWork):
     commits: int = 0
     rollbacks: int = 0
     commit_error: Exception | None = None
+    # Одноразовые отказы: сцена «первый коммит упал, повтор доезжает» — гонка
+    # с другим коммитом. Поднимаются и расходуются по одному на коммит.
+    commit_errors: list[Exception] = field(default_factory=list)
     # Сколько прогонов закоммичено к началу текущей транзакции: rollback
     # убирает добавленные после этого, как это сделал бы настоящий UoW.
     _committed_runs: int = 0
@@ -221,6 +224,8 @@ class FakeUow(UnitOfWork):
 
     def commit(self) -> None:
         self.commits += 1
+        if self.commit_errors:
+            raise self.commit_errors.pop(0)
         if self.commit_error is not None:
             raise self.commit_error
         self._committed_runs = len(self.review_runs.runs)

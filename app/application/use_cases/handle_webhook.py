@@ -13,25 +13,32 @@
 отвечает GitHub. Запись — вторая транзакция, одна на merge_request и прогон.
 
 Порядок «коммит, потом задача» — по воркеру #36: тот рассчитывает, что прогон
-закоммичен до постановки задачи, и сообщение без строки кладёт в DLQ.
-Обратная цена: при сбое брокера прогон остаётся закоммиченным `queued` без
-сообщения — его переведёт в `failed` sweep обработки (`list_unfinished`);
-повторная доставка до того находит активный прогон и отвечает `duplicate`,
-не плодя второй.
+закоммичен до постановки задачи, и сообщение без строки кладёт в DLQ. Сбой
+постановки после коммита компенсируется сразу (`_fail_unenqueued`): прогон
+переводится в `failed` — терминальное состояние не блокирует повторную
+доставку через `find_active`, и следующая доставка создаёт новый прогон.
+Оставленный `queued` без задачи сделал бы коммит навсегда без ревью: повторная
+доставка до sweep получала бы `duplicate` и задачу больше не ставила. Если не
+удалась и компенсация, прогон выметет sweep обработки (`list_unfinished`, #36).
 
 Повторная доставка на тот же коммит не создаёт второй прогон: `find_active`
 находит существующий активный (исход `duplicate`), а гонку параллельных
 доставок страхуют частичные уникальные индексы — отказ любого из них
-адаптер хранилища переводит в `ActiveRunConflict`, и проигравший по
-естественному ключу (репозиторий, номер) находит записи победителя и
-возвращает `conflict`, не падая и не отвечая 5xx. Дубль проверяется до
-upsert'а merge_request: на PR один активный прогон, повторная доставка
-ничего не переписывает.
+адаптер хранилища переводит в `ActiveRunConflict`. Проигравший после отката
+ищет записи победителя по естественному ключу (репозиторий, номер): у
+победителя с тем же коммитом есть активный прогон — исход `conflict`, 202 с
+его проекцией; у победителя с другим коммитом (opened и synchronize в окне
+гонки) есть только merge_request — запись повторяется поверх его записей один
+раз: update его merge_request и новый прогон на доставленный коммит. Второй
+отказ индекса — 5xx: хостинг считает доставку неудавшейся и повторит её.
+Дубль проверяется до upsert'а merge_request: на PR один активный прогон,
+повторная доставка ничего не переписывает.
 
 Время и идентификаторы приходят аргументами (`now`, `new_id`), а не читаются
 из часов или генератора: тест проверяет точный timestamp и идентификатор.
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -50,12 +57,16 @@ from app.domain.entities import (
     WebhookEvent,
 )
 from app.domain.enums import (
+    TERMINAL_STATUSES,
     Provider,
     ReviewRunStatus,
     TriggerSource,
 )
+from app.domain.lifecycle import advance
 from app.domain.vcs_errors import VcsError
 from app.domain.webhook import extract_github_event
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,33 +162,95 @@ def handle_webhook_event(
             survivor_run, survivor_mr = _find_survivor(
                 work, repository.id, event.pr_number, event.head_sha
             )
-            if survivor_run is None or survivor_mr is None:
+            if survivor_run is not None:
+                return WebhookOutcome(
+                    kind="conflict",
+                    run=survivor_run,
+                    merge_request=survivor_mr,
+                    repository=repository,
+                )
+            if survivor_mr is None:
+                # Ни merge_request, ни активного прогона на наш коммит нет —
+                # это не гонка доставок, отказ индекса означает настоящую
+                # ошибку данных.
                 raise
-            return WebhookOutcome(
-                kind="conflict",
-                run=survivor_run,
-                merge_request=survivor_mr,
-                repository=repository,
+            # Победитель нёс другой коммит (opened и synchronize в окне
+            # гонки): его merge_request уже есть, а активного прогона на наш
+            # head_sha нет. Запись повторяется поверх его записей: update
+            # его merge_request и новый прогон на доставленный коммит.
+            merge_request = _upsert_merge_request(
+                work, repository.id, survivor_mr, event, metadata, now(), new_id
             )
+            run = _create_review_run(work, merge_request.id, event, metadata, now(), new_id())
+            try:
+                work.commit()
+            except ActiveRunConflict:
+                # Между откатом и повтором активный прогон на наш коммит
+                # создала третья доставка — возвращаем её прогон. Любой
+                # другой повторный отказ — наверх: 5xx, хостинг повторит
+                # доставку.
+                work.rollback()
+                survivor_run, survivor_mr = _find_survivor(
+                    work, repository.id, event.pr_number, event.head_sha
+                )
+                if survivor_run is None or survivor_mr is None:
+                    raise
+                return WebhookOutcome(
+                    kind="conflict",
+                    run=survivor_run,
+                    merge_request=survivor_mr,
+                    repository=repository,
+                )
 
     # Задача — после коммита: воркер #36 ожидает, что прогон уже виден в базе,
-    # и сообщение без строки кладёт в DLQ. Сбой здесь оставляет закоммиченный
-    # queued-прогон без сообщения — его подберёт sweep обработки (#36).
-    queue.enqueue(
-        ReviewJob(
-            id=run.id,
-            event_type="pull_request",
-            action=event.action,
-            repository_provider_id=event.repo_provider_id,
-            repository_full_name=event.repo_full_name,
-            pull_request_number=event.pr_number,
-            head_sha=event.head_sha,
-            base_sha=metadata.base_sha,
+    # и сообщение без строки кладёт в DLQ.
+    try:
+        queue.enqueue(
+            ReviewJob(
+                id=run.id,
+                event_type="pull_request",
+                action=event.action,
+                repository_provider_id=event.repo_provider_id,
+                repository_full_name=event.repo_full_name,
+                pull_request_number=event.pr_number,
+                head_sha=event.head_sha,
+                base_sha=metadata.base_sha,
+            )
         )
-    )
+    except Exception as exc:
+        # «Закоммитили, но не поставили»: оставшийся queued блокировал бы
+        # коммит от ревью навсегда — повторная доставка до sweep получала бы
+        # duplicate и задачу больше не ставила. Прогон переводится в failed:
+        # терминальное состояние не блокирует следующую доставку. Ошибка идёт
+        # дальше — вебхук ответит 5xx, и хостинг повторит доставку.
+        _fail_unenqueued(uow, run.id, exc, now())
+        raise
     return WebhookOutcome(
         kind="success", run=run, merge_request=merge_request, repository=repository
     )
+
+
+def _fail_unenqueued(
+    uow: UnitOfWork, run_id: UUID, cause: Exception, now: datetime
+) -> None:
+    """Перевести закоммиченный прогон в failed, когда задача не ушла в брокер.
+
+    Отказ компенсации (база недоступна) не маскирует исходную ошибку —
+    прогон останется до sweep обработки (#36).
+    """
+    try:
+        with uow as work:
+            run = work.review_runs.get(run_id)
+            if run is None or run.status in TERMINAL_STATUSES:
+                return
+            failed = replace(
+                advance(run, ReviewRunStatus.FAILED, now).unwrap(),
+                failure_reason=f"не удалось поставить задачу в очередь: {cause}",
+            )
+            work.review_runs.update(failed)
+            work.commit()
+    except Exception:
+        logger.exception("не удалось перевести прогон %s в failed после сбоя очереди", run_id)
 
 
 def _find_survivor(

@@ -260,12 +260,31 @@ def test_lost_race_without_survivor_reraises() -> None:
         run_case(uow=uow)
 
 
-def test_broker_failure_leaves_committed_run_for_the_sweep() -> None:
-    """Сбой брокера после коммита: прогон остаётся закоммиченным queued
-    без сообщения — порядок коммит → задача выбран по воркеру #36, который
-    сообщение без строки кладёт в DLQ. Сироту переводит в `failed` sweep
-    обработки (`list_unfinished`); до того повторная доставка находит
-    активный прогон и отвечает `duplicate`, не плодя второй."""
+def test_race_with_a_different_commit_retries_the_write() -> None:
+    """Гонка первых доставок с разными коммитами (opened и synchronize): у
+    победителя нет активного прогона на коммит проигравшего, есть только
+    merge_request — запись повторяется поверх его записей, а не отвечает 5xx.
+    """
+    outcome, uow, _, queue = run_case(action="opened")
+    assert outcome.kind == "success"
+
+    uow.commit_errors.append(ActiveRunConflict("проигравший с другим коммитом"))
+    outcome, uow, _, queue = run_case(action="synchronize", uow=uow, queue=queue)
+    assert outcome.kind == "success"
+    mr = merge_request_of(uow)
+    assert mr.head_sha == "0987654321abcdef0987654321abcdef09876543"
+    (new_run,) = uow.review_runs.added[1:]
+    assert new_run.head_sha == mr.head_sha
+    assert queue.jobs[-1].id == new_run.id
+    assert queue.jobs[-1].action == "synchronize"
+
+
+def test_broker_failure_fails_the_run_and_next_delivery_starts_a_new_one() -> None:
+    """Сбой брокера после коммита компенсируется сразу, как `_fail_unenqueued`
+    в #36: прогон переводится в failed, ошибка идёт дальше — вебхук отвечает
+    5xx и хостинг повторит доставку. Оставленный queued блокировал бы коммит
+    от ревью навсегда: повторная доставка до sweep получала бы duplicate и
+    задачу больше не ставила."""
 
     class BrokenQueue(FakeQueue):
         def enqueue(self, job) -> None:
@@ -274,17 +293,16 @@ def test_broker_failure_leaves_committed_run_for_the_sweep() -> None:
     uow = FakeUow()
     with pytest.raises(RuntimeError, match="брокер недоступен"):
         run_case(uow=uow, queue=BrokenQueue())
-    assert uow.commits == 1  # прогон закоммичен...
-    (orphan,) = uow.review_runs.runs
-    assert orphan.status is ReviewRunStatus.QUEUED
+    assert uow.commits == 2  # прогон и его компенсация
+    (failed,) = uow.review_runs.runs
+    assert failed.status is ReviewRunStatus.FAILED
+    assert "брокер недоступен" in failed.failure_reason
 
-    # Повторная доставка того же коммита находит сироту: дубль, без второго
-    # прогона и без второй задачи.
+    # failed терминален: повторная доставка создаёт новый прогон и задачу.
     outcome, uow, _, queue = run_case(uow=uow, queue=FakeQueue())
-    assert outcome.kind == "duplicate"
-    assert outcome.run is orphan
-    assert len(uow.review_runs.added) == 1
-    assert queue.jobs == []  # дубль задачу не ставит
+    assert outcome.kind == "success"
+    assert len(uow.review_runs.added) == 2
+    assert len(queue.jobs) == 1
 
 
 def test_new_head_after_active_run_starts_new_run() -> None:
