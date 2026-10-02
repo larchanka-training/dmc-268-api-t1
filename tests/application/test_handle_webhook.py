@@ -100,18 +100,20 @@ def test_opened_creates_merge_request_run_and_job() -> None:
     assert run.base_sha == pr_metadata().base_sha
     assert (run.created_at, run.last_progress_at) == (NOW, NOW)
     assert uow.commits == 1
-    assert [job.review_run_id for job in queue.jobs] == [run.id]
+    # id задачи — id прогона: очередь и таблица указывают на одну попытку.
+    assert [job.id for job in queue.jobs] == [run.id]
 
 
 def test_opened_job_message_carries_section_4_2_fields() -> None:
     _, _, _, queue = run_case()
     (job,) = queue.jobs
     assert job.repository_full_name == REPO_FULL_NAME
-    assert job.repository_provider_id == int(REGISTERED_PROVIDER_ID)
-    assert job.pr_number == 6
+    assert job.repository_provider_id == REGISTERED_PROVIDER_ID
+    assert job.pull_request_number == 6
     assert job.head_sha == "a1b2c3d4e5f6789012345678abcdef0123456789"
     assert job.base_sha == pr_metadata().base_sha
     assert job.action == "opened"
+    assert job.event_type == "pull_request"
     # Приоритета в сообщении нет: это метаданное доставки, его выводит
     # адаптер очереди — слой приложения про тарифы знать не должен.
     assert not hasattr(job, "priority")

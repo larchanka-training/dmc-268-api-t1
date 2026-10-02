@@ -202,24 +202,18 @@ class PRMetadata:
 
 @dataclass(frozen=True, slots=True)
 class ReviewJob:
-    """Сообщение очереди: команда воркеру отревьюить прогон.
+    """Сообщение очереди, которое просит проверить один коммит.
 
-    Тело сериализуется строго по `docs/SYSTEM_DESIGN.md` §4.2. Отклонение от
-    списка полей плана (`tasks/plan.md`, Task 3.1): добавлены `action` и
-    `repository_provider_id` — §4.2 требует нести в теле `action` и числовой
-    `repository.id`, без них сообщение не собрать. `priority` в сущности нет:
-    это метаданное доставки, и выводит его адаптер очереди — слой приложения
-    про тарифы знать не должен.
-    `job_id` — UUIDv7 из `app.domain.ids.new_id()`, задаётся при создании
-    задачи доменом, а не адаптером и не базой: у сообщения есть
-    идентификатор ещё до брокера.
+    Не хранится: живёт ровно между `JobQueue.enqueue` и обработкой воркером.
+    `id` совпадает с id соответствующего `ReviewRun` — так очередь и таблица
+    указывают на одну попытку ревью, не изобретая второй идентификатор.
     """
 
-    job_id: UUID
-    review_run_id: UUID
-    repository_full_name: str
-    repository_provider_id: int
-    pr_number: int
-    head_sha: str
-    base_sha: str | None
+    id: UUID
+    event_type: str
     action: str
+    repository_provider_id: str
+    repository_full_name: str
+    pull_request_number: int
+    head_sha: str
+    base_sha: str

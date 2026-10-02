@@ -64,12 +64,24 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       DATABASE_URL: postgresql://dmc268:dmc268@localhost:5432/dmc268
       # The suite reads this one, not DATABASE_URL. The +psycopg prefix is
       # required: bare postgresql:// sends SQLAlchemy to psycopg2, which is not
       # a dependency.
       TEST_DATABASE_URL: postgresql+psycopg://dmc268:dmc268@localhost:5432/dmc268
+      # %2F is the default vhost "/" URL-encoded — pika parses a bare "//" as
+      # an empty vhost, not "/" (see tests/queue).
+      TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672/%2F
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

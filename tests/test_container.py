@@ -26,7 +26,7 @@ PORT_TO_ADAPTER: dict[str, Adapter] = {
         "db/repositories.py", "SqlAlchemyContextPayloadRepo"
     ),
     "FindingRepo": Adapter("db/repositories.py", "SqlAlchemyFindingRepo"),
-    "JobQueue": Adapter("queue/rabbitmq.py", "PikaJobQueue"),
+    "JobQueue": Adapter("queue/rabbitmq.py", "RabbitMQJobQueue"),
     "MergeRequestRepo": Adapter("db/repositories.py", "SqlAlchemyMergeRequestRepo"),
     "PublishedCommentRepo": Adapter(
         "db/repositories.py", "SqlAlchemyPublishedCommentRepo"

@@ -1,9 +1,10 @@
 """Интеграционный E2E: подписанный вебхук → HTTP → база → очередь.
 
 Живого GitHub и брокера нет: `VcsGateway` — фейк, отдающий записанный
-`sample.diff`, канал RabbitMQ — двойник, записывающий публикации. Всё между
-ними настоящее: эндпоинт, use case, `SqlAlchemyUnitOfWork` на тестовой базе
-и `PikaJobQueue`, который сериализует задачу по §4.2 `SYSTEM_DESIGN.md`.
+`sample.diff`, очередь — `FakeQueue`, хранящий сущности `ReviewJob` как есть.
+Всё между ними настоящее: эндпоинт, use case и `SqlAlchemyUnitOfWork` на
+тестовой базе. Поля задачи сверяются по сущности; wire-формат сообщения §4.2,
+топология и свойства AMQP — юнит- и интеграционные тесты `tests/queue/`.
 
 Без `TEST_DATABASE_URL` набор пропускается — как остальные интеграционные.
 """
@@ -26,13 +27,12 @@ from app.config import Settings
 from app.domain.entities import MergeRequest, Repository, ReviewRun
 from app.domain.enums import ReviewRunStatus, TriggerSource
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.infrastructure.queue.rabbitmq import QUEUE_NAME, PikaJobQueue
 
 from ..conftest import requires_db
 from ..fakes import (
     INSTALLATION_ID,
     REPO_FULL_NAME,
-    FakeChannel,
+    FakeQueue,
     FakeVcs,
     a_repository,
     pr_metadata,
@@ -56,12 +56,12 @@ def sign(body: bytes, secret: str = SECRET) -> str:
 
 @dataclass
 class E2EContainer:
-    """Настоящие адаптеры базы и очереди, фейковый VCS: сеть не нужна."""
+    """Настоящий адаптер базы, фейковые VCS и очередь: сеть не нужна."""
 
     engine: Engine
     settings: Settings
     vcs: FakeVcs
-    queue: PikaJobQueue
+    queue: FakeQueue
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine)
@@ -79,7 +79,7 @@ class Flow:
     engine: Engine
     repository: Repository
     vcs: FakeVcs
-    channel: FakeChannel
+    queue: FakeQueue
 
 
 @pytest.fixture
@@ -94,12 +94,12 @@ def flow(clean_db) -> Flow:
         github_webhook_secret=SECRET,
     )
     vcs = FakeVcs(diff=SAMPLE_DIFF)
-    channel = FakeChannel()
+    queue = FakeQueue()
     container = E2EContainer(
         engine=clean_db,
         settings=settings,
         vcs=vcs,
-        queue=PikaJobQueue(url="", channel=channel),
+        queue=queue,
     )
     app = create_app(settings)
     app.state.container = container
@@ -108,7 +108,7 @@ def flow(clean_db) -> Flow:
         engine=clean_db,
         repository=repository,
         vcs=vcs,
-        channel=channel,
+        queue=queue,
     )
 
 
@@ -172,32 +172,16 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
         "error": None,
     }
 
-    (published,) = flow.channel.published
-    body = json.loads(published.body)
-    assert UUID(body.pop("job_id")).version == 7
-    assert body == {
-        "event_type": "pull_request",
-        "action": "opened",
-        "repository": {
-            "full_name": REPO_FULL_NAME,
-            "id": int(flow.repository.provider_id),
-        },
-        "pull_request": {
-            "number": PR_NUMBER,
-            "head_sha": HEAD_SHA,
-            "base_sha": BASE_SHA,
-        },
-    }
-    # Приоритет открытого PR — дефолтный, выведен адаптером из action.
-    assert published.properties.priority == 0
-    assert "priority" not in body
-    assert flow.channel.declared == [
-        {
-            "queue": QUEUE_NAME,
-            "durable": True,
-            "arguments": {"x-max-priority": 10},
-        }
-    ]
+    # Задача в очереди — сущность с полями §4.2; id задачи — id прогона.
+    (enqueued,) = flow.queue.jobs
+    assert enqueued.id == run.id
+    assert enqueued.event_type == "pull_request"
+    assert enqueued.action == "opened"
+    assert enqueued.repository_full_name == REPO_FULL_NAME
+    assert enqueued.repository_provider_id == flow.repository.provider_id
+    assert enqueued.pull_request_number == PR_NUMBER
+    assert enqueued.head_sha == HEAD_SHA
+    assert enqueued.base_sha == BASE_SHA
 
 
 def test_vcs_is_called_for_diff_then_metadata(flow: Flow) -> None:
@@ -218,7 +202,7 @@ def test_rejected_signature_leaves_no_records(flow: Flow, signature: str | None)
     merge_request, runs = stored_state(flow.engine, flow.repository.id)
     assert merge_request is None
     assert runs == []
-    assert flow.channel.published == []
+    assert flow.queue.jobs == []
     assert flow.vcs.calls == []
 
 
@@ -230,5 +214,5 @@ def test_reopened_is_ignored_without_records(flow: Flow) -> None:
     merge_request, runs = stored_state(flow.engine, flow.repository.id)
     assert merge_request is None
     assert runs == []
-    assert flow.channel.published == []
+    assert flow.queue.jobs == []
     assert flow.vcs.calls == []

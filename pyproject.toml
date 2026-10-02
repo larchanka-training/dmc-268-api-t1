@@ -39,6 +39,7 @@ dev = [
     # бы второй dev-список и конфликт uv.lock при слиянии.
     "pyyaml>=6.0.3",
     "types-pyyaml>=6.0.12.20260906",
+    "types-pika>=1.2.0b1",
 ]
 
 [tool.ruff]
@@ -59,12 +60,6 @@ module = "tests.*"
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 disallow_untyped_calls = false
-
-# pika 1.4 ships no py.typed marker and no stubs package exists; the adapter
-# keeps every pika type behind app/infrastructure/queue/, so Any stops here.
-[[tool.mypy.overrides]]
-module = "pika.*"
-ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -165,14 +165,14 @@ def handle_webhook_event(
     # queued-прогон без сообщения — его подберёт sweep обработки (#36).
     queue.enqueue(
         ReviewJob(
-            job_id=new_id(),
-            review_run_id=run.id,
+            id=run.id,
+            event_type="pull_request",
+            action=event.action,
+            repository_provider_id=event.repo_provider_id,
             repository_full_name=event.repo_full_name,
-            repository_provider_id=int(event.repo_provider_id),
-            pr_number=event.pr_number,
+            pull_request_number=event.pr_number,
             head_sha=event.head_sha,
             base_sha=metadata.base_sha,
-            action=event.action,
         )
     )
     return WebhookOutcome(

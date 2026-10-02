@@ -14,7 +14,7 @@ from sqlalchemy import Engine, create_engine
 from app.application.ports import JobQueue, UnitOfWork, VcsGateway
 from app.config import Settings
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.infrastructure.queue.rabbitmq import PikaJobQueue
+from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 
@@ -32,14 +32,19 @@ class Container:
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
     _vcs_gateway: VcsGateway | None
+    # Один экземпляр на процесс, а не фабрика: `RabbitMQJobQueue` сам держит
+    # переиспользуемое AMQP-соединение, и это работает, только если каждый
+    # запрос получает один и тот же объект, а не новый на каждый вызов
+    # `job_queue()`.
+    _job_queue: JobQueue
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine)
 
     def job_queue(self) -> JobQueue:
-        """Собрать очередь задач; адаптер соединяется с брокером лениво,
+        """Выдать очередь задач; соединение с брокером открывается лениво,
         при первом `enqueue`, — старт без RabbitMQ не падает."""
-        return PikaJobQueue(self.settings.rabbitmq_url)
+        return self._job_queue
 
     def vcs_gateway(self) -> VcsGateway:
         """Собрать VCS-шлюз при первом обращении; конструирование — без сети."""
@@ -64,4 +69,5 @@ def build_container(settings: Settings) -> Container:
         engine=create_engine(settings.database_url, future=True, pool_pre_ping=True),
         settings=settings,
         _vcs_gateway=None,
+        _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
     )

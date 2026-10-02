@@ -1,4 +1,4 @@
-"""Фейковые двойники портов и канала брокера, общие для тестов.
+"""Фейковые двойники портов, общие для тестов.
 
 Это не моки: двойники хранят сущности в словарях и записывают вызовы, поэтому
 тесты сверяют исход с точными записями и задачами. Ни базы, ни брокера, ни
@@ -12,8 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 from uuid import UUID, uuid4
-
-import pika
 
 from app.application.ports import UnitOfWork
 from app.domain.entities import Hunk, PRMetadata, Repository, ReviewJob
@@ -262,41 +260,3 @@ class FakeQueue:
 
     def enqueue(self, job: ReviewJob) -> None:
         self.jobs.append(job)
-
-
-@dataclass
-class Published:
-    """Одна публикация в брокер: обмен, маршрут, тело и свойства AMQP."""
-
-    exchange: str
-    routing_key: str
-    body: bytes
-    properties: pika.BasicProperties
-
-
-class FakeChannel:
-    """Двойник pika-канала: только запись вызовов, без брокера."""
-
-    def __init__(self) -> None:
-        self.declared: list[dict[str, Any]] = []
-        self.published: list[Published] = []
-
-    def queue_declare(
-        self,
-        queue: str,
-        durable: bool = False,
-        arguments: dict[str, Any] | None = None,
-    ) -> None:
-        self.declared.append(
-            {"queue": queue, "durable": durable, "arguments": arguments}
-        )
-
-    def basic_publish(
-        self,
-        exchange: str,
-        routing_key: str,
-        body: bytes,
-        properties: pika.BasicProperties | None = None,
-    ) -> None:
-        assert properties is not None
-        self.published.append(Published(exchange, routing_key, body, properties))

@@ -103,7 +103,7 @@ compile-time зависимости от слоя приложения.
 | `PublishedCommentRepo` | `SqlAlchemyPublishedCommentRepo` | опубликованные комментарии |
 | `UnitOfWork` | `SqlAlchemyUnitOfWork` | граница транзакции |
 | `VcsGateway` | `GitHubVcsGateway` | дифф и метаданные PR через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и exponential backoff внутри адаптера |
-| `JobQueue` | `PikaJobQueue` | задача ревью в RabbitMQ, один метод `enqueue`; тело — только доменные данные по §4.2 System Design, приоритет — свойство AMQP |
+| `JobQueue` | `RabbitMQJobQueue` | задача ревью в RabbitMQ, один метод `enqueue`; тело — только доменные данные по §4.2 System Design, приоритет — свойство AMQP; переиспользуемое соединение с publisher confirms и DLX/DLQ-топологией внутри адаптера |
 
 `app/infrastructure/container.py` единственное место, где порт связывается с
 адаптером. Тест проверяет, что у каждого объявленного порта есть адаптер и что
