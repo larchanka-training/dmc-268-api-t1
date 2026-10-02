@@ -5,14 +5,26 @@ on:
     branches: [main, develop]
   pull_request:
 
+# У токена прогона только чтение: CI ничего не пишет в репозиторий.
+permissions:
+  contents: read
+
+# Новый пуш в ветку пул-реквеста отменяет прогон по устаревшему коммиту.
+# Пуши в main и develop не отменяются: там нужен результат по каждому коммиту.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   syntax:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      # Точная версия: плавающих мажорных тегов у setup-uv нет.
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
-          version: "0.12.12"
+          version: "0.12.21"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - run: uv run python -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
@@ -20,36 +32,40 @@ jobs:
   lint:
     needs: syntax
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      # Точная версия: плавающих мажорных тегов у setup-uv нет.
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
-          version: "0.12.12"
+          version: "0.12.21"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - run: uv run ruff check .
-      # The layering rule from BACKEND_ARCHITECTURE.md. Its own step, because a
-      # combined one reports a single failure for two unrelated problems.
+      # Правило слоёв из BACKEND_ARCHITECTURE.md. Отдельным шагом: общий шаг
+      # сообщил бы одну ошибку на две несвязанные проблемы.
       - run: uv run lint-imports
       - run: uv run mypy .
 
   terraform:
     needs: syntax
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: opentofu/setup-opentofu@v1
+      - uses: actions/checkout@v7
+      - uses: opentofu/setup-opentofu@v2
         with:
-          tofu_version: 1.10.5
+          tofu_version: 1.12.6
       - run: tofu fmt -check -recursive infra/
       - run: cd infra && tofu init -backend=false && tofu validate
 
   test:
-    # Not terraform: `tofu validate` and `pytest` check unrelated things, and
-    # chaining them let a provider download from registry.opentofu.org decide
-    # whether the suite ran at all.
+    # Не после terraform: `tofu validate` и `pytest` проверяют несвязанное, а в
+    # цепочке загрузка провайдера с registry.opentofu.org решала бы, запустятся
+    # ли тесты вообще.
     needs: [lint]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:18-alpine
@@ -66,22 +82,23 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgresql://dmc268:dmc268@localhost:5432/dmc268
-      # The suite reads this one, not DATABASE_URL. The +psycopg prefix is
-      # required: bare postgresql:// sends SQLAlchemy to psycopg2, which is not
-      # a dependency.
+      # Тесты читают эту переменную, а не DATABASE_URL. Префикс +psycopg
+      # обязателен: с голым postgresql:// SQLAlchemy берёт psycopg2, которого
+      # нет в зависимостях.
       TEST_DATABASE_URL: postgresql+psycopg://dmc268:dmc268@localhost:5432/dmc268
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      # Точная версия: плавающих мажорных тегов у setup-uv нет.
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
-          version: "0.12.12"
+          version: "0.12.21"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
-      - name: pytest (no test may skip)
+      - name: pytest (пропуск теста — провал)
         run: |
           set -o pipefail
           uv run pytest -q -rs | tee pytest.out
           if grep -qE '[0-9]+ skipped' pytest.out; then
-            echo "::error::a test skipped, so this run proves less than it appears to; TEST_DATABASE_URL is the usual cause"
+            echo "::error::тест пропущен, и прогон доказывает меньше, чем кажется; обычно причина в TEST_DATABASE_URL"
             exit 1
           fi
