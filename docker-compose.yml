@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:18-alpine
+    # Postgres with built-in pgvector: the repository profile (RAG) stores its
+    # vectors in the same database; migration 0003 creates the extension.
+    image: pgvector/pgvector:pg18
     environment:
       POSTGRES_USER: dmc268
       POSTGRES_PASSWORD: dmc268
@@ -24,7 +26,7 @@ services:
   # construction". Adding a client, a port, or an adapter belongs to the
   # ticket that introduces that first caller, not this one.
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     ports:
       - "6379:6379"
     healthcheck:
@@ -46,3 +48,6 @@ services:
 
 volumes:
   postgres_data:
+    # Новое имя при переходе с postgres:18-alpine (musl) на pgvector (glibc):
+    # текстовые индексы старого тома под другой сортировкой неконсистентны.
+    name: dmc268-postgres-pgvector-data
