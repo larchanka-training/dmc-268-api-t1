@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larchanka-training.github.io/dmc-268-api-t1/schemas/finding.schema.json",
+  "title": "Finding",
+  "description": "Structured output одного замечания ревью. Этой схемой валидируется как ответ LLM (§5 PIPELINE_SPEC.md), так и представление Finding в Backend API — расхождения между входной и выходной формой не допускаются.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "filePath",
+    "side",
+    "line",
+    "category",
+    "severity",
+    "message",
+    "confidence"
+  ],
+  "properties": {
+    "filePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "side": {
+      "type": "string",
+      "enum": ["old", "new"],
+      "description": "Сторона диффа, к которой относится line (findings.side)."
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Номер строки на указанной side. Диапазоны (endLine) в v1 не поддерживаются."
+    },
+    "category": {
+      "type": "string",
+      "enum": ["security", "correctness", "performance", "readability"]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Текст замечания (findings.message, соответствует Finding.message)."
+    },
+    "confidence": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "suggestion": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["diff"],
+          "properties": {
+            "diff": { "type": "string" }
+          }
+        },
+        { "type": "null" }
+      ]
+    }
+  }
+}

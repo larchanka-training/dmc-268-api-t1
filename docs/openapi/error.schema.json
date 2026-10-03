@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larchanka-training.github.io/dmc-268-api-t1/schemas/error.schema.json",
+  "title": "ReviewError",
+  "description": "Структурированная ошибка ReviewJob (§8 PIPELINE_SPEC.md). Коды SCM_* провайдер-нейтральны, чтобы добавление второго провайдера не было breaking change публичного контракта.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "message", "retryable", "scmProvider", "providerAttempt"],
+  "properties": {
+    "code": {
+      "type": "string",
+      "enum": [
+        "SCM_AUTH_ERROR",
+        "PR_NOT_FOUND",
+        "REPOSITORY_NOT_FOUND",
+        "SCM_UNAVAILABLE",
+        "CONTEXT_PARSING_ERROR",
+        "LLM_RATE_LIMITED",
+        "LLM_TIMEOUT",
+        "LLM_UNAVAILABLE",
+        "LLM_INVALID_OUTPUT",
+        "REVIEW_RUN_STALE",
+        "INTERNAL_ERROR"
+      ]
+    },
+    "message": {
+      "type": "string"
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "scmProvider": {
+      "description": "Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null. Называется scmProvider, а не provider: поле про сторону SCM, providerAttempt считает попытки и LLM, и SCM.",
+      "oneOf": [
+        { "type": "string", "enum": ["github", "gitlab"] },
+        { "type": "null" }
+      ]
+    },
+    "providerAttempt": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Попытка вызова LLM/SCM провайдера. Не путать с redelivery сообщения в очереди (queueRedeliveryCount, наблюдаемость §10)."
+    }
+  }
+}

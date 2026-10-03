@@ -2,6 +2,11 @@
 
 Use case принимает unit of work, через него добирается до репозиториев и
 делает один коммит. Ниже этой строки никто не знает, что такое сессия.
+
+`ActiveRunConflict` — отказ коммита из-за гонки двух доставок одного PR:
+гонку страхуют уникальные индексы `uq_review_runs_one_active_per_commit`
+и `uq_merge_requests_repo_number`. Исключение определено в порту, а не
+заимствовано у вендора хранилища: use case ловит его, не зная SQLAlchemy.
 """
 
 from types import TracebackType
@@ -15,6 +20,11 @@ from app.application.ports.repositories import (
     RepositoryRepo,
     ReviewRunRepo,
 )
+
+
+class ActiveRunConflict(RuntimeError):
+    """Параллельная доставка того же PR закоммитила записи раньше этой
+    транзакции; повторная доставка проиграла гонку индексов."""
 
 
 class UnitOfWork(Protocol):

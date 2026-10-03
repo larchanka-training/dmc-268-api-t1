@@ -21,10 +21,16 @@ from app.infrastructure.db import models  # noqa: F401  (регистрируе�
 from app.infrastructure.db.base import Base
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
+TEST_RABBITMQ_URL = os.environ.get("TEST_RABBITMQ_URL")
 
 requires_db = pytest.mark.skipif(
     not TEST_DATABASE_URL,
     reason="needs a live PostgreSQL; set TEST_DATABASE_URL",
+)
+
+requires_broker = pytest.mark.skipif(
+    not TEST_RABBITMQ_URL,
+    reason="needs a live RabbitMQ; set TEST_RABBITMQ_URL",
 )
 
 

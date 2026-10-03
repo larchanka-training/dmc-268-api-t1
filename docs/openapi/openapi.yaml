@@ -1,0 +1,493 @@
+openapi: 3.1.0
+info:
+  title: PR Review API
+  version: 0.1.0
+  description: >
+    Контракт Backend API для запуска автоматического ревью Pull Request
+    и получения состояния и результатов.
+
+servers:
+  - url: /api/v1
+    description: >
+      Все пути ниже — относительно /api/v1. Префикс ставит само приложение, а не
+      reverse-proxy: контракт не зависит от того, срезает ли прокси префикс.
+      Фронт ходит на /api/v1/..., хостинг шлёт вебхуки на /api/v1/webhooks/{provider}.
+
+paths:
+  /reviews:
+    post:
+      summary: Создать задачу ревью
+      operationId: createReview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateReviewRequest"
+      responses:
+        "202":
+          description: ReviewJob создан и поставлен в очередь
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewJob"
+        "400":
+          description: Некорректный запрос (ApiError.code = VALIDATION_ERROR)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: >
+            Для этого коммита уже есть нетерминальный ReviewJob
+            (ApiError.code = REVIEW_ALREADY_ACTIVE). Ручной запуск видит отказ явно;
+            вебхук на тот же случай отвечает 202, см. POST /webhooks/{provider}.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    get:
+      summary: Получить список задач ревью
+      operationId: listReviews
+      responses:
+        "200":
+          description: Список ReviewJob
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReviewJob"
+
+  /reviews/{reviewId}:
+    parameters:
+      - $ref: "#/components/parameters/ReviewId"
+    get:
+      summary: Получить состояние ReviewJob
+      operationId: getReview
+      responses:
+        "200":
+          description: Текущее состояние задачи
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewJob"
+        "404":
+          description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /reviews/{reviewId}/findings:
+    parameters:
+      - $ref: "#/components/parameters/ReviewId"
+    get:
+      summary: Получить результаты ревью
+      operationId: getReviewFindings
+      responses:
+        "200":
+          description: Findings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Finding"
+        "404":
+          description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /webhooks/{provider}:
+    parameters:
+      - name: provider
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Provider"
+    post:
+      summary: Принять webhook-доставку от хостинга и поставить ревью в очередь
+      operationId: receiveWebhook
+      responses:
+        "202":
+          description: >
+            Доставка принята: ReviewJob создан или, если для этого коммита уже есть
+            нетерминальный, возвращён существующий. Дубль — не ошибка: не-2xx
+            хостинг считает неудачной доставкой, повторяет её и после серии отказов
+            может отключить вебхук, поэтому 409 здесь не отдаём.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewJob"
+        "401":
+          description: Подпись доставки не прошла проверку (ApiError.code = WEBHOOK_SIGNATURE_INVALID)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: >
+            VCS недоступен или ответил ошибкой при получении диффа или метаданных;
+            прогон не создан и задача не поставлена (ApiError.code = SCM_UNAVAILABLE).
+            Ответ обязан спекой webhook-intake: сбой VCS — 502, а не прочий 5xx.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "501":
+          description: >
+            Провайдер есть в enum Provider, но приёмник вебхуков для него ещё
+            не написан (ApiError.code = PROVIDER_NOT_SUPPORTED).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /auth/oauth/token:
+    post:
+      summary: >
+        Обменять код OAuth на сессию (proposal, §9.1 PIPELINE_SPEC.md — требует
+        отдельного OpenSpec-change до Contract v1)
+      operationId: exchangeOAuthToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthTokenRequest"
+      responses:
+        "200":
+          description: >
+            Access-токен в теле, refresh-токен — httpOnly-кукой, привязанной к пути
+            /api/v1/auth/refresh.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "refresh_token=...; Path=/api/v1/auth/refresh; HttpOnly; Secure; SameSite=Strict"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+        "401":
+          description: Код OAuth недействителен или истёк (ApiError.code = AUTH_CODE_INVALID)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /auth/refresh:
+    post:
+      summary: >
+        Обновить access-токен по refresh-куке (proposal, §9.1 PIPELINE_SPEC.md —
+        требует отдельного OpenSpec-change до Contract v1)
+      operationId: refreshSession
+      responses:
+        "200":
+          description: Новый access-токен; refresh-кука переиздаётся (rotation)
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "refresh_token=...; Path=/api/v1/auth/refresh; HttpOnly; Secure; SameSite=Strict"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+        "401":
+          description: >
+            Refresh-кука отсутствует, истекла или отозвана
+            (ApiError.code = AUTH_REFRESH_INVALID)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+components:
+  parameters:
+    ReviewId:
+      name: reviewId
+      in: path
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    Provider:
+      type: string
+      enum:
+        - github
+        - gitlab
+
+    TriggerSource:
+      type: string
+      enum:
+        - webhook
+        - manual
+        - mention
+
+    CreateReviewRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - provider
+        - providerRepositoryId
+        - pullRequestNumber
+        - trigger
+      properties:
+        provider:
+          $ref: "#/components/schemas/Provider"
+        providerRepositoryId:
+          type: string
+          description: Идентификатор репозитория у провайдера (repositories.provider_id).
+          example: "123456789"
+        pullRequestNumber:
+          type: integer
+          minimum: 1
+          example: 123
+        trigger:
+          $ref: "#/components/schemas/TriggerSource"
+
+    ReviewStatus:
+      type: string
+      enum:
+        - queued
+        - building_context
+        - analysing
+        - publishing
+        - completed
+        - failed
+        - cancelled
+
+    ReviewJob:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - provider
+        - providerRepositoryId
+        - pullRequestNumber
+        - trigger
+        - status
+        - findingsCount
+        - rejectedFindings
+        - createdAt
+        - updatedAt
+        - lastProgressAt
+        - error
+      properties:
+        id:
+          type: string
+          description: reviewRunId.
+        provider:
+          $ref: "#/components/schemas/Provider"
+        providerRepositoryId:
+          type: string
+        pullRequestNumber:
+          type: integer
+          minimum: 1
+        trigger:
+          $ref: "#/components/schemas/TriggerSource"
+        headCommitSha:
+          type:
+            - string
+            - "null"
+        baseCommitSha:
+          type:
+            - string
+            - "null"
+        status:
+          $ref: "#/components/schemas/ReviewStatus"
+        findingsCount:
+          type: integer
+          minimum: 0
+        rejectedFindings:
+          type: integer
+          minimum: 0
+        model:
+          type:
+            - string
+            - "null"
+        tokensUsed:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        durationSeconds:
+          type:
+            - number
+            - "null"
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        lastProgressAt:
+          type: string
+          format: date-time
+          description: Обновляется на каждом переходе состояния; используется для выявления зависших прогонов (§7.5 PIPELINE_SPEC.md).
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ReviewError"
+            - type: "null"
+
+    Finding:
+      type: object
+      additionalProperties: false
+      required:
+        - filePath
+        - side
+        - line
+        - category
+        - severity
+        - message
+        - confidence
+      properties:
+        filePath:
+          type: string
+          minLength: 1
+        side:
+          type: string
+          description: Сторона диффа, к которой относится line (findings.side).
+          enum:
+            - old
+            - new
+        line:
+          type: integer
+          minimum: 1
+          description: >
+            Номер строки на указанной side. Диапазоны (endLine) в v1 не поддерживаются —
+            в схеме БД на сторону диффа хранится одна строка.
+        category:
+          type: string
+          enum:
+            - security
+            - correctness
+            - performance
+            - readability
+        severity:
+          type: string
+          enum:
+            - low
+            - medium
+            - high
+            - critical
+        message:
+          type: string
+          minLength: 1
+          description: Текст замечания (findings.message, соответствует Finding.message).
+        confidence:
+          type:
+            - number
+            - "null"
+          minimum: 0
+          maximum: 1
+        suggestion:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required:
+                - diff
+              properties:
+                diff:
+                  type: string
+            - type: "null"
+
+    ReviewError:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+        - retryable
+        - scmProvider
+        - providerAttempt
+      properties:
+        code:
+          type: string
+          enum:
+            - SCM_AUTH_ERROR
+            - PR_NOT_FOUND
+            - REPOSITORY_NOT_FOUND
+            - SCM_UNAVAILABLE
+            - CONTEXT_PARSING_ERROR
+            - LLM_RATE_LIMITED
+            - LLM_TIMEOUT
+            - LLM_UNAVAILABLE
+            - LLM_INVALID_OUTPUT
+            - REVIEW_RUN_STALE
+            - INTERNAL_ERROR
+        message:
+          type: string
+        retryable:
+          type: boolean
+        scmProvider:
+          description: >
+            Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null. Называется
+            scmProvider, а не provider: поле про сторону SCM, providerAttempt считает
+            попытки и LLM, и SCM.
+          oneOf:
+            - $ref: "#/components/schemas/Provider"
+            - type: "null"
+        providerAttempt:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          description: Попытка вызова LLM/SCM провайдера. Не путать с redelivery сообщения в очереди.
+
+    ApiError:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: >
+            Закрытый список, как и ReviewError.code. Каждый ответ с ApiError называет
+            свой код в description — это сверяет tests/test_docs.py.
+          enum:
+            - VALIDATION_ERROR
+            - REVIEW_NOT_FOUND
+            - REVIEW_ALREADY_ACTIVE
+            - WEBHOOK_SIGNATURE_INVALID
+            - SCM_UNAVAILABLE
+            - PROVIDER_NOT_SUPPORTED
+            - AUTH_CODE_INVALID
+            - AUTH_REFRESH_INVALID
+        message:
+          type: string
+
+    OAuthTokenRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - provider
+        - code
+      properties:
+        provider:
+          $ref: "#/components/schemas/Provider"
+        code:
+          type: string
+          description: Код авторизации, полученный от OAuth-редиректа провайдера.
+
+    AuthSession:
+      type: object
+      additionalProperties: false
+      required:
+        - accessToken
+        - expiresIn
+      properties:
+        accessToken:
+          type: string
+        expiresIn:
+          type: integer
+          minimum: 1
+          description: Время жизни accessToken в секундах.

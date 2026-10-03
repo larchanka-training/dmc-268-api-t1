@@ -1,0 +1,47 @@
+diff --git a/app/services/review_pipeline.py b/app/services/review_pipeline.py
+index 8c9f4a2..d3e7b91 100644
+--- a/app/services/review_pipeline.py
++++ b/app/services/review_pipeline.py
+@@ -12,8 +12,10 @@ class ReviewPipeline:
+     def __init__(self, gateway: VcsGateway, queue: JobQueue) -> None:
+         self._gateway = gateway
+         self._queue = queue
++        self._cache: dict[str, str] = {}
+ 
+     def start(self, run_id: str) -> None:
+-        payload = self._build_payload(run_id)
++        payload = self._build_payload(run_id, use_cache=True)
++        self._cache[run_id] = payload
+         self._queue.enqueue(payload)
+ 
+@@ -40,3 +42,5 @@ class ReviewPipeline:
+     def _build_payload(self, run_id: str) -> str:
+         body = {"run": run_id}
+-        return json.dumps(body)
++        if not run_id:
++            raise ValueError("run_id обязателен")
++        return json.dumps(body, sort_keys=True)
+diff --git a/app/web/static/bundle.min.js b/app/web/static/bundle.min.js
+index 4f7c21a..9b8e0d3 100644
+--- a/app/web/static/bundle.min.js
++++ b/app/web/static/bundle.min.js
+@@ -1,2 +1,2 @@
+ (function(){var a=1;console.log(a);
+-var b=2;return b});
+\ No newline at end of file
++var b=2;return b});
+diff --git a/app/assets/logo.png b/app/assets/logo.png
+index 9a3bc2e..7d4f1a8 100644
+GIT binary patch
+literal 1642
+zcmV;c38r#<ctl~Wp#z;O6dQ7hZ36dLM>!Zq0SSv!z#v9v<)nGJ}H0MRV9
+z0000000000000000000000000000000000000000000000000000000000
+diff --git a/uv.lock b/uv.lock
+index 1b2d3e4..5f6a7b8 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -15,3 +15,3 @@
+ name = "fastapi"
+-version = "0.115.0"
++version = "0.118.0"
+ source = { registry = "https://pypi.org/simple" }
