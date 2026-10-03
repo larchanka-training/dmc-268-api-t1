@@ -88,9 +88,12 @@ class RabbitMQJobQueue:
     Держит одно соединение на весь процесс и переиспользует его между
     вызовами `enqueue`, а не открывает handshake заново на каждый вебхук —
     `enqueue` лежит на синхронном горячем пути HTTP-запроса. Пересоздаёт
-    соединение, только если прежнее закрыто (брокер перезапустился, простой
-    оборвал канал). `BlockingConnection` не потокобезопасен, а FastAPI гоняет
-    sync-эндпоинты в threadpool, поэтому доступ сериализован локом.
+    соединение, если прежнее закрыто (брокер перезапустился, простой оборвал
+    канал), а при разрыве, которого клиент ещё не видит (`is_closed` остаётся
+    `False`), — по факту отказа первой публикации: сбрасывает обе стороны и
+    публикует заново один раз. `BlockingConnection` не потокобезопасен, а
+    FastAPI гоняет sync-эндпоинты в threadpool, поэтому доступ сериализован
+    локом.
     """
 
     def __init__(self, url: str) -> None:
@@ -127,15 +130,35 @@ class RabbitMQJobQueue:
 
     def enqueue(self, job: ReviewJob) -> None:
         with self._lock:
-            channel = self._channel_ready()
-            channel.basic_publish(
-                exchange="",
-                routing_key=QUEUE_NAME,
-                body=json.dumps(to_wire_message(job)).encode("utf-8"),
-                properties=pika.BasicProperties(
-                    content_type="application/json",
-                    delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
-                    priority=DEFAULT_PRIORITY,
-                ),
-                mandatory=True,
-            )
+            try:
+                self._publish(job)
+            except (
+                pika.exceptions.AMQPConnectionError,
+                pika.exceptions.ChannelClosedByBroker,
+            ):
+                # Соединение могло простоять: BlockingConnection шлёт heartbeat,
+                # только пока по соединению идёт трафик, поэтому после паузы в
+                # вебхуках брокер закрывает его, а `is_closed` остаётся `False`
+                # — отказ всплывает первой же публикацией. Сбрасываем и
+                # соединение, и канал, переоткрываем и публикуем заново один
+                # раз; второй отказ уходит наверх — прогон переведёт в `failed`
+                # компенсация use case (`_fail_unenqueued`), а повторная
+                # доставка создаст новый. Отказы публикации (nack, unroutable)
+                # не ретраятся: повтор не устраняет их причину.
+                self._connection = None
+                self._channel = None
+                self._publish(job)
+
+    def _publish(self, job: ReviewJob) -> None:
+        channel = self._channel_ready()
+        channel.basic_publish(
+            exchange="",
+            routing_key=QUEUE_NAME,
+            body=json.dumps(to_wire_message(job)).encode("utf-8"),
+            properties=pika.BasicProperties(
+                content_type="application/json",
+                delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
+                priority=DEFAULT_PRIORITY,
+            ),
+            mandatory=True,
+        )

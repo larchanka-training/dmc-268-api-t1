@@ -126,7 +126,7 @@ JSON-сообщение; тело несёт только доменные да�
   "action": "opened",
   "repository": {
     "full_name": "owner/repo",
-    "id": 987654
+    "id": "987654"
   },
   "pull_request": {
     "number": 42,
