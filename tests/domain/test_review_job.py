@@ -20,6 +20,7 @@ def test_field_set_matches_section_4_2_wire_format() -> None:
         "id",
         "event_type",
         "action",
+        "installation_id",
         "repository_provider_id",
         "repository_full_name",
         "pull_request_number",

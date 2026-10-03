@@ -207,11 +207,14 @@ class ReviewJob:
     Не хранится: живёт ровно между `JobQueue.enqueue` и обработкой воркером.
     `id` совпадает с id соответствующего `ReviewRun` — так очередь и таблица
     указывают на одну попытку ревью, не изобретая второй идентификатор.
+    `installation_id` — инсталляция провайдера для повторного получения
+    диффа воркером (разбор диффа — у воркера, дифф в сообщении не возится).
     """
 
     id: UUID
     event_type: str
     action: str
+    installation_id: int
     repository_provider_id: str
     repository_full_name: str
     pull_request_number: int

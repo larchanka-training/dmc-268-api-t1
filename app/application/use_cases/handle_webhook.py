@@ -210,6 +210,7 @@ def handle_webhook_event(
                 id=run.id,
                 event_type="pull_request",
                 action=event.action,
+                installation_id=event.installation_id,
                 repository_provider_id=event.repo_provider_id,
                 repository_full_name=event.repo_full_name,
                 pull_request_number=event.pr_number,

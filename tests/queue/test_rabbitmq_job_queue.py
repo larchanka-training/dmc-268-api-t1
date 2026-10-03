@@ -25,6 +25,7 @@ JOB = ReviewJob(
     id=UUID(int=1),
     event_type="pull_request",
     action="opened",
+    installation_id=1,
     repository_provider_id="987654",
     repository_full_name="owner/repo",
     pull_request_number=42,
@@ -62,6 +63,7 @@ def test_enqueue_publishes_the_wire_message_with_default_priority(
         "job_id": str(JOB.id),
         "event_type": "pull_request",
         "action": "opened",
+        "installation_id": 1,
         "repository": {"id": "987654", "full_name": "owner/repo"},
         "pull_request": {"number": 42, "head_sha": "abc123def", "base_sha": "fed654cba"},
     }

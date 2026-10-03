@@ -182,6 +182,7 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
     assert enqueued.pull_request_number == PR_NUMBER
     assert enqueued.head_sha == HEAD_SHA
     assert enqueued.base_sha == BASE_SHA
+    assert enqueued.installation_id == INSTALLATION_ID
 
 
 def test_vcs_is_called_for_diff_then_metadata(flow: Flow) -> None:

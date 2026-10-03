@@ -114,6 +114,9 @@ def test_opened_job_message_carries_section_4_2_fields() -> None:
     assert job.base_sha == pr_metadata().base_sha
     assert job.action == "opened"
     assert job.event_type == "pull_request"
+    # Инсталляция для повторного получения диффа воркером — из payload'а
+    # доставленного вебхука, а не из конфигурации.
+    assert job.installation_id == INSTALLATION_ID
     # Приоритета в сообщении нет: это метаданное доставки, его выводит
     # адаптер очереди — слой приложения про тарифы знать не должен.
     assert not hasattr(job, "priority")

@@ -13,6 +13,7 @@ JOB = ReviewJob(
     id=UUID(int=1),
     event_type="pull_request",
     action="opened",
+    installation_id=512804923,
     repository_provider_id="987654",
     repository_full_name="owner/repo",
     pull_request_number=42,
@@ -26,6 +27,7 @@ def test_wire_message_matches_system_design_schema() -> None:
         "job_id": str(JOB.id),
         "event_type": "pull_request",
         "action": "opened",
+        "installation_id": 512804923,
         "repository": {"id": "987654", "full_name": "owner/repo"},
         "pull_request": {
             "number": 42,
