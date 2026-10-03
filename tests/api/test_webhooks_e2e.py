@@ -45,6 +45,7 @@ FIXTURES = Path(__file__).parent.parent / "fixtures"
 SAMPLE_DIFF = (FIXTURES / "sample.diff").read_text(encoding="utf-8")
 SECRET = "test-webhook-signature-secret"
 SIGNATURE_HEADER = "X-Hub-Signature-256"
+EVENT_HEADER = "X-GitHub-Event"
 PR_NUMBER = 6
 HEAD_SHA = "a1b2c3d4e5f6789012345678abcdef0123456789"
 BASE_SHA = pr_metadata().base_sha
@@ -117,6 +118,7 @@ def post_webhook(
     action: str = "opened",
     *,
     signature: str | None = "auto",
+    event: str | None = "pull_request",
 ) -> Response:
     body = json.dumps(webhook_payload(action)).encode("utf-8")
     headers = {"Content-Type": "application/json"}
@@ -124,6 +126,8 @@ def post_webhook(
         headers[SIGNATURE_HEADER] = sign(body)
     elif signature is not None:
         headers[SIGNATURE_HEADER] = signature
+    if event is not None:
+        headers[EVENT_HEADER] = event
     return client.post("/api/v1/webhooks/github", content=body, headers=headers)
 
 
@@ -209,6 +213,20 @@ def test_rejected_signature_leaves_no_records(flow: Flow, signature: str | None)
 
 def test_reopened_is_ignored_without_records(flow: Flow) -> None:
     response = post_webhook(flow.client, "reopened")
+
+    assert response.status_code == 202
+    assert response.json() == {"status": "ignored"}
+    merge_request, runs = stored_state(flow.engine, flow.repository.id)
+    assert merge_request is None
+    assert runs == []
+    assert flow.queue.jobs == []
+    assert flow.vcs.calls == []
+
+
+def test_foreign_event_type_is_ignored_without_records(flow: Flow) -> None:
+    """Подписанный `pull_request_target` с pull-request-совместимым телом
+    не создаёт ни записей, ни задач: тип события — только из заголовка."""
+    response = post_webhook(flow.client, "opened", event="pull_request_target")
 
     assert response.status_code == 202
     assert response.json() == {"status": "ignored"}

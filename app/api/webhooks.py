@@ -1,9 +1,14 @@
 """Эндпоинт приёма вебхуков по контракту `docs/openapi/openapi.yaml`.
 
 Порядок строго по спеке: сырое тело читается до любого разбора, подпись из
-заголовка `X-Hub-Signature-256` проверяется чистой функцией `verify_hmac` — и
-только после этого payload разбирается и уходит в use case. Без подписи или с
-неверной — 401, ни одной записи; ошибка VCS — 502; повторная доставка и
+заголовка `X-Hub-Signature-256` проверяется чистой функцией `verify_hmac`,
+затем заголовок `X-GitHub-Event` отсекает чужие события — и только после
+этого payload разбирается и уходит в use case. Без подписи или с
+неверной — 401, ни одной записи; подписанное событие не `pull_request`
+— 202 `{"status": "ignored"}` без разбора тела: у GitHub есть события вроде
+`pull_request_target` с неотличимой по форме полезной нагрузкой, поэтому тип
+события берётся из заголовка, а не из полей тела; ошибка VCS — 502;
+повторная доставка и
 проигравшая гонку доставка — 202 с проекцией существующего прогона: дубль для
 хостинга не ошибка (контракт: «ReviewJob создан или найден существующий»), а
 не-2xx он считает неудачной доставкой и повторяет её; игнор (`reopened`,
@@ -51,6 +56,10 @@ SUPPORTED_PROVIDERS = frozenset({Provider.GITHUB})
 # для вызывающего это один исход «ReviewJob создан или найден существующий».
 _JOB_OUTCOMES = ("success", "duplicate", "conflict")
 
+# Тип события GitHub присылает заголовком; прогон создаёт ровно `pull_request`.
+EVENT_HEADER = "X-GitHub-Event"
+TRIGGERING_EVENT = "pull_request"
+
 
 def _api_error(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"code": code, "message": message})
@@ -72,6 +81,12 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
     # числе «подписанные» пустым ключом.
     if not secret or signature is None or not verify_hmac(body, signature, secret):
         return _api_error(401, "WEBHOOK_SIGNATURE_INVALID", "invalid webhook signature")
+
+    # Гейт события стоит до разбора тела: подписанная доставка другого события
+    # с pull-request-совместимой формой (`pull_request_target`) не должна ни
+    # создавать записи, ни доходить до use case.
+    if request.headers.get(EVENT_HEADER) != TRIGGERING_EVENT:
+        return JSONResponse(status_code=202, content={"status": "ignored"})
 
     try:
         payload: Any = json.loads(body)

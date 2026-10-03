@@ -24,6 +24,7 @@ from ..fakes import FakeQueue, FakeUow, FakeVcs, webhook_payload
 
 SECRET = "test-webhook-secret"
 SIGNATURE_HEADER = "X-Hub-Signature-256"
+EVENT_HEADER = "X-GitHub-Event"
 
 
 def sign(body: bytes, secret: str = SECRET) -> str:
@@ -86,6 +87,7 @@ def post_webhook(
     signature: str | None = "auto",
     body: bytes | None = None,
     provider: str = "github",
+    event: str | None = "pull_request",
 ) -> Response:
     if body is None:
         body = json.dumps(webhook_payload(action)).encode("utf-8")
@@ -94,6 +96,8 @@ def post_webhook(
         headers[SIGNATURE_HEADER] = sign(body)
     elif signature is not None:
         headers[SIGNATURE_HEADER] = signature
+    if event is not None:
+        headers[EVENT_HEADER] = event
     return client.post(f"/api/v1/webhooks/{provider}", content=body, headers=headers)
 
 
@@ -181,6 +185,35 @@ def test_valid_signature_with_non_dict_json_is_ignored() -> None:
     response = post_webhook(client, body=b"[1, 2, 3]")
     assert response.status_code == 202
     assert response.json() == {"status": "ignored"}
+
+
+def test_signed_delivery_of_another_event_type_is_ignored() -> None:
+    """Тип события — заголовок, а не форма payload'а: тело `pull_request_target`
+    неотличимо от `pull_request`, но прогон создаёт только `pull_request`."""
+    client, container = make_client()
+    response = post_webhook(client, "opened", event="pull_request_target")
+    assert response.status_code == 202
+    assert response.json() == {"status": "ignored"}
+    assert container.uow.review_runs.added == []
+    assert container.queue.jobs == []
+
+
+def test_delivery_without_event_header_is_ignored() -> None:
+    client, container = make_client()
+    response = post_webhook(client, "opened", event=None)
+    assert response.status_code == 202
+    assert response.json() == {"status": "ignored"}
+    assert container.uow.review_runs.added == []
+    assert container.queue.jobs == []
+
+
+def test_foreign_event_is_ignored_before_the_body_is_parsed() -> None:
+    """Чужое событие отсекается до разбора: не-JSON тело всё равно ignored."""
+    client, container = make_client()
+    response = post_webhook(client, event="issue_comment", body=b"not json at all")
+    assert response.status_code == 202
+    assert response.json() == {"status": "ignored"}
+    assert container.queue.jobs == []
 
 
 def test_reopened_returns_202_ignored_without_records() -> None:
