@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 import pika
+import pika.exceptions
 import pytest
 
 from app.domain.entities import ReviewJob

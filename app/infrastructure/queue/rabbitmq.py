@@ -14,6 +14,7 @@ from typing import Any
 from uuid import UUID
 
 import pika
+import pika.exceptions
 from pika import spec
 from pika.exchange_type import ExchangeType
 
