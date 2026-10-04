@@ -42,6 +42,7 @@ def assemble_context_stub(
     body = {
         "note": "заготовка: реальная сборка контекста (VcsGateway/AST) не реализована",
         "job_id": str(job.id),
+        "review_run_id": str(job.review_run_id),
         "head_sha": job.head_sha,
     }
     digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()

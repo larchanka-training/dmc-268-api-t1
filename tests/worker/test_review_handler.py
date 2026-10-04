@@ -1,8 +1,11 @@
 """Обработчик воркера: разбор сообщения очереди + `run_review`. Без БД и брокера."""
 
 import json
+import logging
 from datetime import UTC, datetime
 from uuid import UUID
+
+import pytest
 
 from app.application.ports.llm_gateway import LlmReviewResult
 from app.domain.entities import ReviewJob, ReviewRun
@@ -14,6 +17,7 @@ from ..fakes.unit_of_work import FakeUnitOfWork
 
 JOB = ReviewJob(
     id=UUID(int=1),
+    review_run_id=UUID(int=2),
     event_type="pull_request",
     action="opened",
     repository_provider_id="987654",
@@ -47,8 +51,8 @@ def test_handler_parses_the_message_and_drives_the_run_to_completed() -> None:
     uow = FakeUnitOfWork()
     uow.review_runs.add(
         ReviewRun(
-            id=JOB.id,
-            merge_request_id=UUID(int=2),
+            id=JOB.review_run_id,
+            merge_request_id=UUID(int=3),
             head_sha=JOB.head_sha,
             status=ReviewRunStatus.QUEUED,
             trigger=TriggerSource.WEBHOOK,
@@ -62,7 +66,25 @@ def test_handler_parses_the_message_and_drives_the_run_to_completed() -> None:
     handler = build_review_handler(_Deps(uow))
     handler(body)
 
-    run = uow.review_runs.get(JOB.id)
+    run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.COMPLETED
     assert run.model == "stub-llm"
+
+
+def test_handler_logs_both_ids_when_the_run_fails(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Прогона нет — обработка падает; в логе должны быть и задача, и прогон.
+    # Интеграционные тесты миграций вызывают `fileConfig` из `alembic/env.py`,
+    # а он выключает уже созданные логгеры — без этого тест зависит от порядка.
+    monkeypatch.setattr(logging.getLogger("app.worker.factory"), "disabled", False)
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+    handler = build_review_handler(_Deps(FakeUnitOfWork()))
+
+    with caplog.at_level(logging.ERROR), pytest.raises(LookupError):
+        handler(body)
+
+    [record] = caplog.records
+    assert str(JOB.id) in record.getMessage()
+    assert str(JOB.review_run_id) in record.getMessage()

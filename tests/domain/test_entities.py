@@ -9,6 +9,7 @@ from app.domain.entities import ReviewJob
 def _job(**overrides: object) -> ReviewJob:
     fields = {
         "id": UUID(int=1),
+        "review_run_id": UUID(int=2),
         "event_type": "pull_request",
         "action": "opened",
         "repository_provider_id": "987654",

@@ -25,6 +25,7 @@ NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 
 JOB = ReviewJob(
     id=UUID(int=1),
+    review_run_id=UUID(int=2),
     event_type="pull_request",
     action="opened",
     repository_provider_id="987654",
@@ -38,8 +39,8 @@ JOB = ReviewJob(
 def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.QUEUED) -> None:
     uow.review_runs.add(
         ReviewRun(
-            id=JOB.id,
-            merge_request_id=UUID(int=2),
+            id=JOB.review_run_id,
+            merge_request_id=UUID(int=3),
             head_sha=JOB.head_sha,
             status=status,
             trigger=TriggerSource.WEBHOOK,
@@ -106,13 +107,13 @@ def test_successful_run_reaches_completed_with_model_and_tokens() -> None:
 
     _run(uow, gateway)
 
-    run = uow.review_runs.get(JOB.id)
+    run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.COMPLETED
     assert run.model == "stub-llm"
     assert run.tokens_used == 0
     assert run.duration_seconds == 12.5
-    assert uow.context_payloads.list_for_run(JOB.id)
+    assert uow.context_payloads.list_for_run(JOB.review_run_id)
 
 
 def test_a_finding_anchored_in_the_stub_hunk_is_persisted() -> None:
@@ -128,7 +129,7 @@ def test_a_finding_anchored_in_the_stub_hunk_is_persisted() -> None:
 
     _run(uow, gateway)
 
-    findings = uow.findings.list_for_run(JOB.id)
+    findings = uow.findings.list_for_run(JOB.review_run_id)
     assert len(findings) == 1
     assert findings[0].message == "заготовочная находка"
 
@@ -140,7 +141,7 @@ def test_llm_failure_marks_the_run_failed_with_a_reason_and_reraises() -> None:
     with pytest.raises(RuntimeError, match="модель недоступна"):
         _run(uow, FailingGateway())
 
-    run = uow.review_runs.get(JOB.id)
+    run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.FAILED
     assert run.failure_reason == "модель недоступна"
@@ -153,7 +154,7 @@ def test_missing_run_raises_so_the_message_goes_to_the_dlq() -> None:
     with pytest.raises(LookupError):
         _run(uow, gateway)
 
-    assert uow.review_runs.get(JOB.id) is None
+    assert uow.review_runs.get(JOB.review_run_id) is None
 
 
 def test_last_progress_at_follows_the_clock_on_every_transition() -> None:
@@ -202,11 +203,11 @@ def test_a_rejected_anchor_keeps_the_other_findings_and_the_count() -> None:
 
     _run(uow, gateway)
 
-    run = uow.review_runs.get(JOB.id)
+    run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.COMPLETED
     assert run.rejected_findings == 1
-    assert {f.message for f in uow.findings.list_for_run(JOB.id)} == {
+    assert {f.message for f in uow.findings.list_for_run(JOB.review_run_id)} == {
         "внутри диффа",
         "тоже внутри",
     }
@@ -239,7 +240,7 @@ def test_marking_failed_reads_the_fresh_row_not_the_stale_copy() -> None:
 
     class SweptGateway:
         def review(self, context: object) -> LlmReviewResult:
-            current = uow.review_runs.get(JOB.id)
+            current = uow.review_runs.get(JOB.review_run_id)
             assert current is not None
             swept = replace(current, status=ReviewRunStatus.FAILED, failure_reason="выметен")
             uow.review_runs.update(swept)
@@ -248,7 +249,7 @@ def test_marking_failed_reads_the_fresh_row_not_the_stale_copy() -> None:
     with pytest.raises(RuntimeError, match="сбой после выметания"):
         _run(uow, SweptGateway())
 
-    run = uow.review_runs.get(JOB.id)
+    run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.FAILED
     assert run.failure_reason == "выметен"
@@ -261,7 +262,7 @@ def test_already_terminal_run_is_left_untouched() -> None:
 
     _run(uow, gateway)
 
-    run = uow.review_runs.get(JOB.id)
+    run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.COMPLETED
     assert run.model is None

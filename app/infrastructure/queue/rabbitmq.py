@@ -35,6 +35,7 @@ DEFAULT_PRIORITY = 5
 def to_wire_message(job: ReviewJob) -> dict[str, Any]:
     return {
         "job_id": str(job.id),
+        "review_run_id": str(job.review_run_id),
         "event_type": job.event_type,
         "action": job.action,
         "repository": {
@@ -53,6 +54,7 @@ def from_wire_message(data: bytes) -> ReviewJob:
     message = json.loads(data)
     return ReviewJob(
         id=UUID(message["job_id"]),
+        review_run_id=UUID(message["review_run_id"]),
         event_type=message["event_type"],
         action=message["action"],
         repository_provider_id=message["repository"]["id"],

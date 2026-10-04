@@ -14,6 +14,7 @@ NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 
 JOB = ReviewJob(
     id=UUID(int=1),
+    review_run_id=UUID(int=2),
     event_type="pull_request",
     action="opened",
     repository_provider_id="987654",

@@ -77,13 +77,13 @@ def run_review(
     отклоняет сообщение, и оно попадает в DLQ для разбора (`job-queue`).
     """
     with uow:
-        run = uow.review_runs.get(job.id)
+        run = uow.review_runs.get(job.review_run_id)
 
     if run is None:
         # Прогон коммитится до постановки задачи, поэтому сообщение без
         # строки — аномалия, а не гонка. Подтвердить его значило бы
         # уничтожить единственный след; исключение отправит его в DLQ.
-        raise LookupError(f"review run {job.id} not found")
+        raise LookupError(f"review run {job.review_run_id} not found")
     if run.status in TERMINAL_STATUSES:
         # Прогон уже завершён — повторная доставка после завершения
         # игнорируется (review-data-model).
@@ -133,5 +133,5 @@ def run_review(
         )
         _transition(uow, run, ReviewRunStatus.COMPLETED, now())
     except Exception as exc:
-        _mark_failed(uow, job.id, exc, now())
+        _mark_failed(uow, job.review_run_id, exc, now())
         raise

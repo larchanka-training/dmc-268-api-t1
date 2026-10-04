@@ -73,7 +73,24 @@ def test_a_manual_request_creates_a_run_with_its_trigger_and_enqueues_it() -> No
     [run] = uow.review_runs.list_unfinished()
     assert run.trigger is TriggerSource.MANUAL
     assert run.status is ReviewRunStatus.QUEUED
-    assert [job.id for job in queue.jobs] == [run.id]
+    [job] = queue.jobs
+    assert job.review_run_id == run.id
+    assert job.id != run.id
+
+
+def test_each_enqueue_gets_its_own_job_id() -> None:
+    # Два прогона — две постановки; job_id не повторяет ни друг друга, ни прогоны.
+    uow, queue = FakeUnitOfWork(), _Queue()
+    new_id = _ids()
+    accept_review_request(_request(), uow=uow, job_queue=queue, now=NOW, new_id=new_id)
+    accept_review_request(
+        _request(head_sha="other"), uow=uow, job_queue=queue, now=NOW, new_id=new_id
+    )
+
+    job_ids = {job.id for job in queue.jobs}
+    run_ids = {job.review_run_id for job in queue.jobs}
+    assert len(job_ids) == 2
+    assert job_ids.isdisjoint(run_ids)
 
 
 def test_a_second_request_for_the_same_commit_is_a_duplicate() -> None:

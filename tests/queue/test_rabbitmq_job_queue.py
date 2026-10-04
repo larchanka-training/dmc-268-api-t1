@@ -23,6 +23,7 @@ pytestmark = [pytest.mark.integration, requires_broker]
 
 JOB = ReviewJob(
     id=UUID(int=1),
+    review_run_id=UUID(int=2),
     event_type="pull_request",
     action="opened",
     repository_provider_id="987654",
@@ -60,6 +61,7 @@ def test_enqueue_publishes_the_wire_message_with_default_priority(
     assert body is not None
     assert json.loads(body) == {
         "job_id": str(JOB.id),
+        "review_run_id": str(JOB.review_run_id),
         "event_type": "pull_request",
         "action": "opened",
         "repository": {"id": "987654", "full_name": "owner/repo"},

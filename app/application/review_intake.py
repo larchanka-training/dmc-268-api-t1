@@ -162,7 +162,8 @@ def accept_review_request(
     try:
         job_queue.enqueue(
             ReviewJob(
-                id=run_id,
+                id=new_id(),
+                review_run_id=run_id,
                 event_type=request.event_type,
                 action=request.action,
                 repository_provider_id=repository.provider_id,

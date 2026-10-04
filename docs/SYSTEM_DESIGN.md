@@ -122,6 +122,7 @@ JSON-сообщение; тело несёт только доменные да�
 ```json
 {
   "job_id": "uuid-1234",
+  "review_run_id": "uuid-5678",
   "event_type": "pull_request",
   "action": "opened",
   "repository": {
@@ -136,7 +137,7 @@ JSON-сообщение; тело несёт только доменные да�
 }
 ```
 
-`job_id` — идентификатор сообщения (UUIDv7, генерируется в домене, не базой); устойчивая строка — `ReviewRun`; дедупликация повторных доставок — `IdempotencyStore`.
+`job_id` — идентификатор сообщения (UUIDv7, генерируется в домене, не базой, новый на каждую постановку); устойчивая строка — `ReviewRun`, воркер находит её по `review_run_id`; дедупликация повторных доставок — `IdempotencyStore`.
 
 **Dead-letter queue.** Очередь `review_jobs` объявлена с
 `x-dead-letter-exchange: review_jobs.dlx` — fanout-exchange, на который

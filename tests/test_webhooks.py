@@ -88,7 +88,7 @@ def test_valid_signature_is_accepted_and_enqueues_a_job() -> None:
     runs = uow.review_runs.list_unfinished()
     assert len(runs) == 1
     assert runs[0].status == ReviewRunStatus.QUEUED
-    assert runs[0].id == queue.enqueued[0].id
+    assert runs[0].id == queue.enqueued[0].review_run_id
 
 
 def test_missing_signature_is_rejected() -> None:

@@ -128,14 +128,22 @@ class ReviewHandlerDeps(Protocol):
 def build_review_handler(deps: ReviewHandlerDeps) -> MessageHandler:
     def handle(body: bytes) -> None:
         job = from_wire_message(body)
-        run_review(
-            job,
-            uow=deps.unit_of_work(),
-            llm_gateway=deps.llm_gateway(),
-            now=lambda: datetime.now(UTC),
-            monotonic=time.monotonic,
-            new_id=new_id,
-        )
+        try:
+            run_review(
+                job,
+                uow=deps.unit_of_work(),
+                llm_gateway=deps.llm_gateway(),
+                now=lambda: datetime.now(UTC),
+                monotonic=time.monotonic,
+                new_id=new_id,
+            )
+        except Exception:
+            # Сообщение уйдёт в DLQ; по job_id видно, какая это постановка
+            # прогона, по review_run_id — какой прогон.
+            logger.exception(
+                "задача %s (прогон %s) завершилась ошибкой", job.id, job.review_run_id
+            )
+            raise
 
     return handle
 
