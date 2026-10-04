@@ -81,8 +81,9 @@ def test_a_stale_connection_is_reopened_and_the_publish_retried_once(monkeypatch
             self.closed_by_us = True
 
     def connect(params: Any) -> FakeConnection:
-        connections.append(FakeConnection(stale=not connections))
-        return connections[-1]
+        connection = FakeConnection(stale=not connections)
+        connections.append(connection)
+        return connection
 
     monkeypatch.setattr(pika, "BlockingConnection", connect)
     monkeypatch.setattr(rabbitmq, "declare_topology", lambda channel: None)
