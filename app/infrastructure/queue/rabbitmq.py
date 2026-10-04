@@ -8,6 +8,7 @@
 обратно в `ReviewJob`.
 """
 
+import contextlib
 import json
 import threading
 from typing import Any
@@ -15,6 +16,7 @@ from uuid import UUID
 
 import pika
 from pika import spec
+from pika.exceptions import AMQPConnectionError, ChannelWrongStateError
 from pika.exchange_type import ExchangeType
 
 from app.domain.entities import ReviewJob
@@ -125,17 +127,38 @@ class RabbitMQJobQueue:
         assert self._channel is not None
         return self._channel
 
+    def _drop_connection(self) -> None:
+        # Соединение уже мертво или подозрительно: закрыть без шума и забыть,
+        # `_channel_ready` откроет новое.
+        if self._connection is not None:
+            with contextlib.suppress(Exception):  # закрываем заведомо сломанное соединение
+                self._connection.close()
+        self._connection = None
+        self._channel = None
+
+    def _publish(self, job: ReviewJob) -> None:
+        self._channel_ready().basic_publish(
+            exchange="",
+            routing_key=QUEUE_NAME,
+            body=json.dumps(to_wire_message(job)).encode("utf-8"),
+            properties=pika.BasicProperties(
+                content_type="application/json",
+                delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
+                priority=DEFAULT_PRIORITY,
+            ),
+            mandatory=True,
+        )
+
     def enqueue(self, job: ReviewJob) -> None:
+        # `BlockingConnection` шлёт heartbeat, только пока по нему что-то идёт:
+        # после простоя без вебхуков брокер закрывает соединение, а `is_closed`
+        # узнаёт об этом лишь при следующей записи. GitHub доставку не
+        # повторяет, поэтому обрыв соединения переживаем здесь: переподключаемся
+        # и публикуем ещё раз, один раз. `UnroutableError`/`NackError` — ответ
+        # брокера, а не обрыв, и сюда не попадают.
         with self._lock:
-            channel = self._channel_ready()
-            channel.basic_publish(
-                exchange="",
-                routing_key=QUEUE_NAME,
-                body=json.dumps(to_wire_message(job)).encode("utf-8"),
-                properties=pika.BasicProperties(
-                    content_type="application/json",
-                    delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
-                    priority=DEFAULT_PRIORITY,
-                ),
-                mandatory=True,
-            )
+            try:
+                self._publish(job)
+            except (AMQPConnectionError, ChannelWrongStateError):
+                self._drop_connection()
+                self._publish(job)

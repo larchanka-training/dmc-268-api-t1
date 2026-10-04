@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 import pika
+import pytest
 
 from app.domain.entities import ReviewJob
 from app.infrastructure.queue import rabbitmq
@@ -54,3 +55,62 @@ def test_a_closed_channel_on_a_live_connection_is_reopened(monkeypatch) -> None:
 
     assert len(channels) == 2
     assert channels[1].published == 1
+
+
+def test_a_stale_connection_is_reopened_and_the_publish_retried_once(monkeypatch) -> None:
+    connections: list[Any] = []
+
+    class StaleChannel(FakeChannel):
+        def basic_publish(self, **kwargs: Any) -> None:
+            raise pika.exceptions.StreamLostError("broker closed the idle connection")
+
+    class FakeConnection:
+        is_closed = False  # pika узнаёт об обрыве только при записи
+
+        def __init__(self, stale: bool) -> None:
+            self.stale = stale
+            self.closed_by_us = False
+            self.channels: list[FakeChannel] = []
+
+        def channel(self) -> FakeChannel:
+            self.channels.append(StaleChannel() if self.stale else FakeChannel())
+            return self.channels[-1]
+
+        def close(self) -> None:
+            self.closed_by_us = True
+
+    def connect(params: Any) -> FakeConnection:
+        connections.append(FakeConnection(stale=not connections))
+        return connections[-1]
+
+    monkeypatch.setattr(pika, "BlockingConnection", connect)
+    monkeypatch.setattr(rabbitmq, "declare_topology", lambda channel: None)
+    monkeypatch.setattr(pika, "URLParameters", lambda url: SimpleNamespace())
+    queue = RabbitMQJobQueue("amqp://x")
+
+    queue.enqueue(JOB)
+
+    assert len(connections) == 2
+    assert connections[0].closed_by_us
+    assert connections[1].channels[0].published == 1
+
+
+def test_a_second_connection_failure_is_not_swallowed(monkeypatch) -> None:
+    class DeadChannel(FakeChannel):
+        def basic_publish(self, **kwargs: Any) -> None:
+            raise pika.exceptions.StreamLostError("broker is down")
+
+    class FakeConnection:
+        is_closed = False
+
+        def channel(self) -> FakeChannel:
+            return DeadChannel()
+
+        def close(self) -> None: ...
+
+    monkeypatch.setattr(pika, "BlockingConnection", lambda params: FakeConnection())
+    monkeypatch.setattr(rabbitmq, "declare_topology", lambda channel: None)
+    monkeypatch.setattr(pika, "URLParameters", lambda url: SimpleNamespace())
+
+    with pytest.raises(pika.exceptions.StreamLostError):
+        RabbitMQJobQueue("amqp://x").enqueue(JOB)

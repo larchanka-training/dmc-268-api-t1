@@ -85,6 +85,12 @@ variable "rabbitmq_port" {
   default     = 5672
 }
 
+variable "github_webhook_secret" {
+  type        = string
+  description = "Общий секрет, которым GitHub подписывает доставки вебхуков (X-Hub-Signature-256). Не коммитить."
+  sensitive   = true
+}
+
 variable "api_image" {
   type        = string
   description = "Полная ссылка на образ API в реестре, с тегом по commit sha."
