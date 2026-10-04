@@ -8,24 +8,33 @@ variable "bind_ip" {
   type        = string
   description = "Interface to publish the API port on. Not used as a client hostname."
   default     = "127.0.0.1"
+
+  # Спека backend-delivery: порт API не выходит за пределы сервера. Гарантирует
+  # это только петля; ловим ошибку на plan, пока на сервере ничего не изменилось.
+  validation {
+    condition     = can(regex("^127\\.", var.bind_ip)) || var.bind_ip == "::1"
+    error_message = "bind_ip должен быть адресом петли (127.0.0.0/8 или ::1): иначе порт API окажется доступен снаружи."
+  }
 }
 
 variable "internal_bind_ip" {
   type        = string
   description = "Interface to publish PostgreSQL and RabbitMQ on the host (keep 127.0.0.1 unless you need local tools only)."
   default     = "127.0.0.1"
+
+  # Спека backend-delivery: порты PostgreSQL и RabbitMQ не выходят за пределы
+  # сервера. Гарантирует это только петля; ловим ошибку на plan, пока на сервере
+  # ничего не изменилось.
+  validation {
+    condition     = can(regex("^127\\.", var.internal_bind_ip)) || var.internal_bind_ip == "::1"
+    error_message = "internal_bind_ip должен быть адресом петли (127.0.0.0/8 или ::1): иначе порты PostgreSQL и RabbitMQ окажутся доступны снаружи."
+  }
 }
 
 variable "service_host" {
   type        = string
   description = "Hostname or IP clients use in connection URLs (must be reachable, not 0.0.0.0)."
   default     = "127.0.0.1"
-}
-
-variable "python_version" {
-  type        = string
-  description = "Python version for the API image."
-  default     = "3.14"
 }
 
 variable "api_port" {
@@ -74,4 +83,22 @@ variable "rabbitmq_port" {
   type        = number
   description = "Host port for AMQP."
   default     = 5672
+}
+
+variable "api_image" {
+  type        = string
+  description = "Полная ссылка на образ API в реестре, с тегом по commit sha."
+}
+
+variable "registry_username" {
+  type        = string
+  description = "Пользователь реестра образов. В CI — github.actor."
+  default     = ""
+}
+
+variable "registry_password" {
+  type        = string
+  description = "Токен реестра образов. В CI — GITHUB_TOKEN, живёт один прогон."
+  default     = ""
+  sensitive   = true
 }
