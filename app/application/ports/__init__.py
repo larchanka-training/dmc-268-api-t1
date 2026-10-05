@@ -1,4 +1,5 @@
 from app.application.ports.job_queue import JobQueue
+from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.repositories import (
     ContextPayloadRepo,
     FindingRepo,
@@ -14,6 +15,7 @@ __all__ = [
     "ContextPayloadRepo",
     "FindingRepo",
     "JobQueue",
+    "LlmGateway",
     "MergeRequestRepo",
     "PublishedCommentRepo",
     "RepositoryRepo",

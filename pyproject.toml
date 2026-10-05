@@ -10,15 +10,12 @@ dependencies = [
     "alembic>=1.13",
     "psycopg[binary]>=3.1",
     "pydantic-settings>=2.0",
-    # httpx: вызовы VCS API в рантайме; он же нужен TestClient'у fastapi в
-    # тестах, поэтому с переездом из dev в runtime тестовой среде ничего не
-    # добавляется.
-    "httpx>=0.28.1",
+    "pika>=1.4.4",
     # pyjwt + cryptography: подписание JWT RS256 для GitHub App.
     "pyjwt>=2.15.1",
     "cryptography>=50.0.1",
-    # pika: адаптер RabbitMQ порта JobQueue (BlockingConnection).
-    "pika>=1.4.4",
+    # Транспорт VcsGateway к GitHub REST, не только TestClient в тестах.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -35,16 +32,19 @@ dev = [
     "grimp<3.16",
     "mypy>=1.13",
     "pre-commit>=3.8",
-    # Туда же, куда dev-инструменты #25: [dependency-groups] dev рядом создал
-    # бы второй dev-список и конфликт uv.lock при слиянии.
     "pyyaml>=6.0.3",
     "types-pyyaml>=6.0.12.20260906",
-    "types-pika>=1.2.0b1",
 ]
 
 [tool.ruff]
 target-version = "py314"
 exclude = [".venv", "venv", ".git"]
+
+# `Depends(...)` as a FastAPI parameter default is the framework's own
+# dependency-injection idiom (see .agents/templates/backend/endpoint.md),
+# not the mutable-default-argument bug B008 exists to catch.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]
 
 [tool.mypy]
 python_version = "3.14"
@@ -76,19 +76,24 @@ include_external_packages = true
 [[tool.importlinter.contracts]]
 name = "Dependencies point inward"
 type = "layers"
-# ":" marks siblings that may import each other. api and infrastructure sit at
-# the same level and are allowed to: the composition root lives in
-# infrastructure and the app factory in api has to build it. What matters is
-# that neither is reachable from application or domain.
-layers = ["app.main", "app.api : app.infrastructure", "app.application", "app.domain"]
+# ":" marks siblings that may import each other. api, infrastructure and
+# worker sit at the same level and are allowed to: the composition root lives
+# in infrastructure, the app factory in api has to build it, and
+# `app/worker/factory.py` builds the consume loop the same way `api/factory.py`
+# builds the ASGI app. What matters is that none of the three is reachable
+# from application or domain.
+layers = ["app.main", "app.api : app.infrastructure : app.worker", "app.application", "app.domain"]
 
 [[tool.importlinter.contracts]]
 name = "The entrypoint stays thin"
 type = "forbidden"
-# app.main exists to call the factory. Naming it in the layers contract above
-# only stops the layers importing it; this is what stops it reaching past the
-# api layer into a repository or a session of its own.
-source_modules = ["app.main"]
+# app.main and app.worker.__main__ exist only to call their factory. Naming
+# the package in the layers contract above only stops the layers importing
+# it; this is what stops each thin entrypoint file reaching past its factory
+# into a repository or a session of its own. `app.worker.factory` itself is
+# deliberately not listed here — it is the factory, not the entrypoint, same
+# role as `app.api.factory`.
+source_modules = ["app.main", "app.worker.__main__"]
 forbidden_modules = ["app.domain", "app.application", "app.infrastructure"]
 # Direct imports only: reaching them through the factory is the whole point.
 allow_indirect_imports = true
@@ -98,3 +103,8 @@ name = "Inner layers know no vendor"
 type = "forbidden"
 source_modules = ["app.domain", "app.application"]
 forbidden_modules = ["sqlalchemy", "fastapi", "httpx", "ollama", "pika", "alembic", "psycopg"]
+
+[dependency-groups]
+dev = [
+    "types-pika>=1.2.0b1",
+]

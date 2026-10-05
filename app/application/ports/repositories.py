@@ -28,6 +28,8 @@ class RepositoryRepo(Protocol):
 
     def find_by_provider(self, provider: Provider, provider_id: str) -> Repository | None: ...
 
+    def list_all(self, limit: int, offset: int) -> list[Repository]: ...
+
     def add(self, repository: Repository) -> None: ...
 
     def update(self, repository: Repository) -> None: ...
@@ -37,6 +39,10 @@ class MergeRequestRepo(Protocol):
     def get(self, merge_request_id: UUID) -> MergeRequest | None: ...
 
     def find_by_number(self, repository_id: UUID, number: int) -> MergeRequest | None: ...
+
+    def list_for_repository(
+        self, repository_id: UUID, limit: int, offset: int
+    ) -> list[MergeRequest]: ...
 
     def add(self, merge_request: MergeRequest) -> None: ...
 
@@ -70,8 +76,12 @@ class FindingRepo(Protocol):
 
     def add_validated(
         self, finding: Finding, hunks: Iterable[Hunk], now: datetime
-    ) -> None:
+    ) -> bool:
         """Сохранить замечание, только если его привязка внутри диффа.
+
+        `True` — сохранено; `False` — привязка вне диффа, отклонение учтено в
+        `rejected_findings` прогона. Исключения нет намеренно: оно, пройдя
+        границу транзакции, откатило бы и остальные находки, и сам учёт.
 
         Объявлено здесь, потому что это единственный путь, который применяет
         правило, а проверка, доступная только через конкретный адаптер, — не

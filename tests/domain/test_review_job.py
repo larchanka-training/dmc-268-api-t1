@@ -18,6 +18,7 @@ def test_field_set_matches_section_4_2_wire_format() -> None:
     names = [field.name for field in fields(ReviewJob)]
     assert names == [
         "id",
+        "review_run_id",
         "event_type",
         "action",
         "installation_id",

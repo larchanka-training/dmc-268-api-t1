@@ -43,10 +43,9 @@ from app.domain.enums import Provider
 from app.domain.hmac import verify_hmac
 from app.domain.ids import new_id
 
-# Путь контракта — /api/v1/webhooks/{provider}; префикс ставит само приложение.
-ROUTER_PREFIX = "/api/v1"
-
-router = APIRouter()
+# Путь контракта — /api/v1/webhooks/{provider}; префикс ставит роутер,
+# как и остальные роутеры приложения.
+router = APIRouter(prefix="/api/v1")
 
 # Приём вебхуков поддержан ровно для адаптеров, которые уже написаны.
 SUPPORTED_PROVIDERS = frozenset({Provider.GITHUB})

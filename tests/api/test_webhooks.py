@@ -13,8 +13,10 @@ import hmac
 import json
 from dataclasses import dataclass
 
+import pytest
 from fastapi.testclient import TestClient
 from httpx import Client, Response
+from pydantic import ValidationError
 
 from app.api.factory import create_app
 from app.config import Settings
@@ -59,6 +61,7 @@ def make_client(
 ) -> tuple[TestClient, StubContainer]:
     settings = Settings(
         database_url="postgresql+psycopg://test:test@localhost/test",
+        rabbitmq_url="amqp://guest:guest@localhost//",
         github_webhook_secret=secret,
     )
     uow = uow if uow is not None else FakeUow()
@@ -259,9 +262,12 @@ def test_unsupported_provider_returns_501() -> None:
     assert container.queue.jobs == []
 
 
-def test_empty_secret_rejects_everything() -> None:
-    """Пустой секрет не подписывает ничего: даже «валидная» подпись отклоняется."""
-    client, _ = make_client(secret="")
-    body = json.dumps(webhook_payload()).encode("utf-8")
-    response = post_webhook(client, signature=sign(body, secret=""), body=body)
-    assert response.status_code == 401
+def test_empty_secret_does_not_reach_the_endpoint() -> None:
+    """Пустой секрет отклоняется на старте настроек: приложение без секрета
+    не поднимается, «валидная» подпись с пустым ключом невозможна by design."""
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url="postgresql+psycopg://test:test@localhost/test",
+            rabbitmq_url="amqp://guest:guest@localhost//",
+            github_webhook_secret="",
+        )

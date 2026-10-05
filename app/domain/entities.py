@@ -144,6 +144,30 @@ class PublishedComment:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewJob:
+    """Сообщение очереди, которое просит проверить один коммит.
+
+    Не хранится: живёт ровно между `JobQueue.enqueue` и обработкой воркером.
+    `id` — идентификатор сообщения, новый на каждую постановку (§4.2
+    SYSTEM_DESIGN.md); прогон указывает `review_run_id`. Так две постановки
+    одного прогона различимы в DLQ и в логах. `installation_id` — инсталляция
+    провайдера для повторного получения диффа воркером (разбор диффа — у
+    воркера, дифф в сообщении не возится).
+    """
+
+    id: UUID
+    review_run_id: UUID
+    event_type: str
+    action: str
+    installation_id: int
+    repository_provider_id: str
+    repository_full_name: str
+    pull_request_number: int
+    head_sha: str
+    base_sha: str
+
+
+@dataclass(frozen=True, slots=True)
 class Hunk:
     """Непрерывный диапазон, затронутый диффом, как его выдаёт парсер."""
 
@@ -198,25 +222,3 @@ class PRMetadata:
     source_branch: str
     target_branch: str
     state: MergeRequestState
-
-
-@dataclass(frozen=True, slots=True)
-class ReviewJob:
-    """Сообщение очереди, которое просит проверить один коммит.
-
-    Не хранится: живёт ровно между `JobQueue.enqueue` и обработкой воркером.
-    `id` совпадает с id соответствующего `ReviewRun` — так очередь и таблица
-    указывают на одну попытку ревью, не изобретая второй идентификатор.
-    `installation_id` — инсталляция провайдера для повторного получения
-    диффа воркером (разбор диффа — у воркера, дифф в сообщении не возится).
-    """
-
-    id: UUID
-    event_type: str
-    action: str
-    installation_id: int
-    repository_provider_id: str
-    repository_full_name: str
-    pull_request_number: int
-    head_sha: str
-    base_sha: str

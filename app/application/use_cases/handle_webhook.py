@@ -209,11 +209,14 @@ def handle_webhook_event(
                 )
 
     # Задача — после коммита: воркер #36 ожидает, что прогон уже виден в базе,
-    # и сообщение без строки кладёт в DLQ.
+    # и сообщение без строки кладёт в DLQ. `id` — идентификатор сообщения,
+    # новый на каждую постановку (§4.2, спека job-queue); прогон указывает
+    # `review_run_id`, так что две постановки одного прогона различимы в DLQ.
     try:
         queue.enqueue(
             ReviewJob(
-                id=run.id,
+                id=new_id(),
+                review_run_id=run.id,
                 event_type="pull_request",
                 action=event.action,
                 installation_id=event.installation_id,

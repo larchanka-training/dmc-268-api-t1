@@ -10,7 +10,11 @@ from app.application import ports
 from app.config import Settings
 from app.infrastructure.container import build_container
 
-SETTINGS = Settings(database_url="postgresql+psycopg://test:test@localhost/test")
+SETTINGS = Settings(
+    database_url="postgresql+psycopg://test:test@localhost/test",
+    rabbitmq_url="amqp://guest:guest@localhost//",
+    github_webhook_secret="test-secret",
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,7 @@ PORT_TO_ADAPTER: dict[str, Adapter] = {
     ),
     "FindingRepo": Adapter("db/repositories.py", "SqlAlchemyFindingRepo"),
     "JobQueue": Adapter("queue/rabbitmq.py", "RabbitMQJobQueue"),
+    "LlmGateway": Adapter("llm/stub.py", "StubLlmGateway"),
     "MergeRequestRepo": Adapter("db/repositories.py", "SqlAlchemyMergeRequestRepo"),
     "PublishedCommentRepo": Adapter(
         "db/repositories.py", "SqlAlchemyPublishedCommentRepo"

@@ -92,6 +92,7 @@ def flow(clean_db) -> Flow:
 
     settings = Settings(
         database_url=str(clean_db.url),
+        rabbitmq_url="amqp://guest:guest@localhost//",
         github_webhook_secret=SECRET,
     )
     vcs = FakeVcs(diff=SAMPLE_DIFF)
@@ -178,7 +179,8 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
 
     # Задача в очереди — сущность с полями §4.2; id задачи — id прогона.
     (enqueued,) = flow.queue.jobs
-    assert enqueued.id == run.id
+    assert enqueued.review_run_id == run.id
+    assert enqueued.id != run.id
     assert enqueued.event_type == "pull_request"
     assert enqueued.action == "opened"
     assert enqueued.repository_full_name == REPO_FULL_NAME

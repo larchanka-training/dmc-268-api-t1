@@ -52,6 +52,19 @@ class SqlAlchemyRepositoryRepo:
         ).one_or_none()
         return m.repository_to_domain(row) if row else None
 
+    def list_all(self, limit: int, offset: int) -> list[Repository]:
+        # `id` как тай-брейкер: одного `created_at` недостаточно для
+        # стабильного порядка между страницами, если у двух строк совпадает
+        # timestamp — тогда `limit`/`offset` может задвоить или пропустить
+        # строку между вызовами.
+        rows = self._session.scalars(
+            select(RepositoryRow)
+            .order_by(RepositoryRow.created_at, RepositoryRow.id)
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return [m.repository_to_domain(row) for row in rows]
+
     def add(self, repository: Repository) -> None:
         self._session.add(
             RepositoryRow(
@@ -89,6 +102,18 @@ class SqlAlchemyMergeRequestRepo:
             )
         ).one_or_none()
         return m.merge_request_to_domain(row) if row else None
+
+    def list_for_repository(
+        self, repository_id: UUID, limit: int, offset: int
+    ) -> list[MergeRequest]:
+        rows = self._session.scalars(
+            select(MergeRequestRow)
+            .where(MergeRequestRow.repository_id == repository_id)
+            .order_by(MergeRequestRow.number)
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return [m.merge_request_to_domain(row) for row in rows]
 
     def add(self, merge_request: MergeRequest) -> None:
         self._session.add(
@@ -256,7 +281,11 @@ class SqlAlchemyFindingRepo:
 
     def list_for_run(self, review_run_id: UUID) -> list[Finding]:
         rows = self._session.scalars(
-            select(FindingRow).where(FindingRow.review_run_id == review_run_id)
+            select(FindingRow)
+            .where(FindingRow.review_run_id == review_run_id)
+            # Без ORDER BY Postgres порядка не обещает и меняет его после
+            # UPDATE и vacuum; id — UUIDv7, упорядочены по времени создания.
+            .order_by(FindingRow.created_at, FindingRow.id)
         ).all()
         return [m.finding_to_domain(row) for row in rows]
 
@@ -279,7 +308,7 @@ class SqlAlchemyFindingRepo:
 
     def add_validated(
         self, finding: Finding, hunks: Iterable[Hunk], now: dt.datetime
-    ) -> None:
+    ) -> bool:
         """Сохранить замечание, только если его привязка внутри диффа.
 
         Само правило — `validate_anchor`; здесь отклонение учитывается в
@@ -291,8 +320,9 @@ class SqlAlchemyFindingRepo:
             if row is not None:
                 row.rejected_findings += 1
                 row.last_progress_at = now
-            raise ValueError(verdict.error)
+            return False
         self.add(finding)
+        return True
 
 
 class SqlAlchemyPublishedCommentRepo:

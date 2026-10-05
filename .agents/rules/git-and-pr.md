@@ -77,6 +77,24 @@ gh pr view <n> --json closingIssuesReferences -q '.closingIssuesReferences[].num
 gh pr edit <n> --add-reviewer <login>
 ```
 
+## Ревьюеры
+
+Команда — восемь человек:
+
+```
+AndrewKonst  DrZeD-13  farranfox  Grinv  ilyassakhanov  Myrhoiazov  pgalkevich  yuzislav
+```
+
+Открывая пул-реквест **не черновиком**, запрашиваем ревью у всех, кроме автора: работа не должна ждать, пока кто-то догадается на неё посмотреть.
+
+```bash
+gh pr edit <n> --add-reviewer AndrewKonst,DrZeD-13,farranfox,ilyassakhanov,Myrhoiazov,pgalkevich,yuzislav
+```
+
+Черновик ревьюеров не получает — он для того и черновик. Запрашиваем в момент, когда снимаем черновик (`gh pr ready <n>`).
+
+Список живёт здесь, а не в скилле: меняется состав — правится одно место. Команда организации `dmc-268` для этого не годится, в ней тридцать человек со всего потока и доступа к нашим репозиториям у неё нет.
+
 ## Доска
 
 [`dmc-268-t1`](https://github.com/orgs/larchanka-training/projects/7). Статус двигаем вместе с

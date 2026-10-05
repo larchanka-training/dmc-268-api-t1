@@ -100,8 +100,11 @@ def test_opened_creates_merge_request_run_and_job() -> None:
     assert run.base_sha == pr_metadata().base_sha
     assert (run.created_at, run.last_progress_at) == (NOW, NOW)
     assert uow.commits == 1
-    # id задачи — id прогона: очередь и таблица указывают на одну попытку.
-    assert [job.id for job in queue.jobs] == [run.id]
+    # id задачи — идентификатор сообщения, новый на каждую постановку; прогон
+    # указывается review_run_id (§4.2, спека job-queue): две постановки одного
+    # прогона различимы в DLQ.
+    assert [job.review_run_id for job in queue.jobs] == [run.id]
+    assert all(job.id != run.id for job in queue.jobs)
 
 
 def test_opened_job_message_carries_section_4_2_fields() -> None:
@@ -278,7 +281,7 @@ def test_race_with_a_different_commit_retries_the_write() -> None:
     assert mr.head_sha == "0987654321abcdef0987654321abcdef09876543"
     (new_run,) = uow.review_runs.added[1:]
     assert new_run.head_sha == mr.head_sha
-    assert queue.jobs[-1].id == new_run.id
+    assert queue.jobs[-1].review_run_id == new_run.id
     assert queue.jobs[-1].action == "synchronize"
 
 
@@ -299,6 +302,7 @@ def test_broker_failure_fails_the_run_and_next_delivery_starts_a_new_one() -> No
     assert uow.commits == 2  # прогон и его компенсация
     (failed,) = uow.review_runs.runs
     assert failed.status is ReviewRunStatus.FAILED
+    assert failed.failure_reason is not None
     assert "брокер недоступен" in failed.failure_reason
 
     # failed терминален: повторная доставка создаёт новый прогон и задачу.

@@ -117,11 +117,15 @@ paths:
             Доставка принята: ReviewJob создан или, если для этого коммита уже есть
             нетерминальный, возвращён существующий. Дубль — не ошибка: не-2xx
             хостинг считает неудачной доставкой, повторяет её и после серии отказов
-            может отключить вебхук, поэтому 409 здесь не отдаём.
+            может отключить вебхук, поэтому 409 здесь не отдаём. Доставка, которая
+            ревью не запускает, — тоже 202, но с телом WebhookIgnored: записей нет,
+            очередь не тронута (спека webhook-intake).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ReviewJob"
+                oneOf:
+                  - $ref: "#/components/schemas/ReviewJob"
+                  - $ref: "#/components/schemas/WebhookIgnored"
         "401":
           description: Подпись доставки не прошла проверку (ApiError.code = WEBHOOK_SIGNATURE_INVALID)
           content:
@@ -464,6 +468,20 @@ components:
             - AUTH_REFRESH_INVALID
         message:
           type: string
+
+    WebhookIgnored:
+      type: object
+      additionalProperties: false
+      description: >
+        Тело 202 для доставки, которая ревью не запускает: действие reopened, closed
+        или неизвестное, незарегистрированный репозиторий, тело без события.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - ignored
 
     OAuthTokenRequest:
       type: object

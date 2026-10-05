@@ -8,14 +8,15 @@
 обратно в `ReviewJob`.
 """
 
+import contextlib
 import json
 import threading
 from typing import Any
 from uuid import UUID
 
 import pika
-import pika.exceptions
 from pika import spec
+from pika.exceptions import AMQPConnectionError, ChannelWrongStateError
 from pika.exchange_type import ExchangeType
 
 from app.domain.entities import ReviewJob
@@ -34,6 +35,7 @@ DEFAULT_PRIORITY = 5
 def to_wire_message(job: ReviewJob) -> dict[str, Any]:
     return {
         "job_id": str(job.id),
+        "review_run_id": str(job.review_run_id),
         "event_type": job.event_type,
         "action": job.action,
         "installation_id": job.installation_id,
@@ -53,6 +55,7 @@ def from_wire_message(data: bytes) -> ReviewJob:
     message = json.loads(data)
     return ReviewJob(
         id=UUID(message["job_id"]),
+        review_run_id=UUID(message["review_run_id"]),
         event_type=message["event_type"],
         action=message["action"],
         installation_id=message["installation_id"],
@@ -91,12 +94,9 @@ class RabbitMQJobQueue:
     Держит одно соединение на весь процесс и переиспользует его между
     вызовами `enqueue`, а не открывает handshake заново на каждый вебхук —
     `enqueue` лежит на синхронном горячем пути HTTP-запроса. Пересоздаёт
-    соединение, если прежнее закрыто (брокер перезапустился, простой оборвал
-    канал), а при разрыве, которого клиент ещё не видит (`is_closed` остаётся
-    `False`), — по факту отказа первой публикации: сбрасывает обе стороны и
-    публикует заново один раз. `BlockingConnection` не потокобезопасен, а
-    FastAPI гоняет sync-эндпоинты в threadpool, поэтому доступ сериализован
-    локом.
+    соединение, только если прежнее закрыто (брокер перезапустился, простой
+    оборвал канал). `BlockingConnection` не потокобезопасен, а FastAPI гоняет
+    sync-эндпоинты в threadpool, поэтому доступ сериализован локом.
     """
 
     def __init__(self, url: str) -> None:
@@ -131,30 +131,17 @@ class RabbitMQJobQueue:
         assert self._channel is not None
         return self._channel
 
-    def enqueue(self, job: ReviewJob) -> None:
-        with self._lock:
-            try:
-                self._publish(job)
-            except (
-                pika.exceptions.AMQPConnectionError,
-                pika.exceptions.ChannelClosedByBroker,
-            ):
-                # Соединение могло простоять: BlockingConnection шлёт heartbeat,
-                # только пока по соединению идёт трафик, поэтому после паузы в
-                # вебхуках брокер закрывает его, а `is_closed` остаётся `False`
-                # — отказ всплывает первой же публикацией. Сбрасываем и
-                # соединение, и канал, переоткрываем и публикуем заново один
-                # раз; второй отказ уходит наверх — прогон переведёт в `failed`
-                # компенсация use case (`_fail_unenqueued`), а повторная
-                # доставка создаст новый. Отказы публикации (nack, unroutable)
-                # не ретраятся: повтор не устраняет их причину.
-                self._connection = None
-                self._channel = None
-                self._publish(job)
+    def _drop_connection(self) -> None:
+        # Соединение уже мертво или подозрительно: закрыть без шума и забыть,
+        # `_channel_ready` откроет новое.
+        if self._connection is not None:
+            with contextlib.suppress(Exception):  # закрываем заведомо сломанное соединение
+                self._connection.close()
+        self._connection = None
+        self._channel = None
 
     def _publish(self, job: ReviewJob) -> None:
-        channel = self._channel_ready()
-        channel.basic_publish(
+        self._channel_ready().basic_publish(
             exchange="",
             routing_key=QUEUE_NAME,
             body=json.dumps(to_wire_message(job)).encode("utf-8"),
@@ -165,3 +152,17 @@ class RabbitMQJobQueue:
             ),
             mandatory=True,
         )
+
+    def enqueue(self, job: ReviewJob) -> None:
+        # `BlockingConnection` шлёт heartbeat, только пока по нему что-то идёт:
+        # после простоя без вебхуков брокер закрывает соединение, а `is_closed`
+        # узнаёт об этом лишь при следующей записи. GitHub доставку не
+        # повторяет, поэтому обрыв соединения переживаем здесь: переподключаемся
+        # и публикуем ещё раз, один раз. `UnroutableError`/`NackError` — ответ
+        # брокера, а не обрыв, и сюда не попадают.
+        with self._lock:
+            try:
+                self._publish(job)
+            except (AMQPConnectionError, ChannelWrongStateError):
+                self._drop_connection()
+                self._publish(job)

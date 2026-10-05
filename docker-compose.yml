@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:18-alpine
+    # Postgres with built-in pgvector: the repository profile (RAG) stores its
+    # vectors in the same database; migration 0003 creates the extension.
+    image: pgvector/pgvector:pg18
     environment:
       POSTGRES_USER: dmc268
       POSTGRES_PASSWORD: dmc268
@@ -24,7 +26,7 @@ services:
   # construction". Adding a client, a port, or an adapter belongs to the
   # ticket that introduces that first caller, not this one.
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     ports:
       - "6379:6379"
     healthcheck:
@@ -34,14 +36,9 @@ services:
       retries: 10
 
   rabbitmq:
-    image: rabbitmq:3.13-alpine
-    environment:
-      RABBITMQ_DEFAULT_USER: dmc268
-      RABBITMQ_DEFAULT_PASS: dmc268
+    image: rabbitmq:4.3-alpine
     ports:
       - "5672:5672"
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
@@ -55,14 +52,16 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
       # %2F — закодированный дефолтный vhost "/"; pika разбирает буквальный
-      # "//" как пустой vhost, а не как "/".
-      RABBITMQ_URL: amqp://dmc268:dmc268@rabbitmq:5672/%2F
-      # Реквизиты GitHub App и секрет вебхуков — из окружения или .env:
-      # пустые значения означают, что вебхуки отклоняются (401), а VCS-вызовы
-      # падают громко при первом обращении.
+      # "//" как пустой vhost, а не как "/" (см. tasks.md задачи 2.5).
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      # Только для локального docker-compose. Реальный секрет — в переменных
+      # окружения деплоя, не в этом файле.
+      GITHUB_WEBHOOK_SECRET: local-dev-secret
+      # Реквизиты GitHub App — из окружения или .env: пустые значения
+      # означают, что вебхуки отвечают 502 на обращении к VCS, остальное
+      # API работает.
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
-      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -70,6 +69,21 @@ services:
         condition: service_healthy
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
 
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      GITHUB_WEBHOOK_SECRET: local-dev-secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: ["python", "-m", "app.worker"]
+
 volumes:
   postgres_data:
-  rabbitmq_data:
+    # Новое имя при переходе с postgres:18-alpine (musl) на pgvector (glibc):
+    # текстовые индексы старого тома под другой сортировкой неконсистентны.
+    name: dmc268-postgres-pgvector-data

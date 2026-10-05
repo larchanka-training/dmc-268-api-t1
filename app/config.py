@@ -21,12 +21,29 @@ class Settings(BaseSettings):
     database_url: str = Field(
         description="PostgreSQL DSN, e.g. postgresql+psycopg://user:pass@host/db",
     )
+    rabbitmq_url: str = Field(
+        description="RabbitMQ AMQP DSN, e.g. amqp://user:pass@host//",
+    )
+    # Секрет проверки HMAC-подписи вебхуков GitHub (X-Hub-Signature-256).
+    # Обязателен: пустой секрет — HMAC с ключом, который знает каждый, это
+    # то же самое, что отсутствие проверки подписи. SecretStr, а не str:
+    # Settings попадает в dataclass с рабочим __repr__, и обычная строка
+    # ушла бы в трейсбек с локальными переменными целиком.
+    github_webhook_secret: SecretStr = Field(
+        min_length=1,
+        description="Shared secret GitHub signs webhook deliveries with (X-Hub-Signature-256).",
+    )
+    # Дольше самой долгой ожидаемой обработки: иначе выметатель зависших
+    # объявит живой прогон мёртвым (docs/SYSTEM_DESIGN.md, `app/worker`).
+    stale_run_timeout_seconds: int = Field(
+        default=1800,
+        gt=0,
+        description="How long a non-terminal review run may go without progress before the worker fails it.",
+    )
     # Пустые по умолчанию, а не обязательные: composition root строит
     # VCS-шлюз лениво, и приложение без GitHub-реквизитов продолжает отвечать
     # на запросы, не касающиеся вебхуков. Пустой ключ громко аукнется при
-    # первом же обращении к VCS API. Ключ — SecretStr, а не str: Settings
-    # попадает в dataclass с рабочим __repr__, и обычная строка ушла бы в
-    # трейсбек с локальными переменными целиком.
+    # первом же обращении к VCS API.
     github_app_id: str = Field(
         default="",
         description="Идентификатор GitHub App; из окружения GITHUB_APP_ID",
@@ -34,17 +51,6 @@ class Settings(BaseSettings):
     github_app_private_key: SecretStr = Field(
         default=SecretStr(""),
         description="PEM private key GitHub App; из окружения GITHUB_APP_PRIVATE_KEY",
-    )
-    # Секрет проверки HMAC-подписи вебхуков. Пустой по умолчанию по той же
-    # причине, что и реквизиты выше; пустой секрет означает, что эндпоинт
-    # отклоняет все вебхуки (401), а не принимает неподписанные.
-    github_webhook_secret: SecretStr = Field(
-        default=SecretStr(""),
-        description="Секрет HMAC вебхуков GitHub; из окружения GITHUB_WEBHOOK_SECRET",
-    )
-    rabbitmq_url: str = Field(
-        default="",
-        description="Строка подключения AMQP; из окружения RABBITMQ_URL",
     )
 
 

@@ -3,7 +3,15 @@ from fastapi.testclient import TestClient
 from app.api.factory import create_app
 from app.config import Settings
 
-client = TestClient(create_app(Settings(database_url="postgresql+psycopg://test/test")))
+client = TestClient(
+    create_app(
+        Settings(
+            database_url="postgresql+psycopg://test/test",
+            rabbitmq_url="amqp://guest:guest@localhost//",
+            github_webhook_secret="test-secret",
+        )
+    )
+)
 
 
 def test_root() -> None:
