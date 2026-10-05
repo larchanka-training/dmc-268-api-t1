@@ -5,6 +5,7 @@
 импорты `from ..fakes import ...` рабочими.
 """
 
+from .container import FakeContainer
 from .unit_of_work import FakeUnitOfWork
 from .webhooks import (
     DIFF,
@@ -28,6 +29,7 @@ __all__ = [
     "NOW",
     "REGISTERED_PROVIDER_ID",
     "REPO_FULL_NAME",
+    "FakeContainer",
     "FakeQueue",
     "FakeUnitOfWork",
     "FakeUow",

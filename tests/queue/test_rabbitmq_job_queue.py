@@ -65,6 +65,7 @@ def test_enqueue_publishes_the_wire_message_with_default_priority(
         "review_run_id": str(JOB.review_run_id),
         "event_type": "pull_request",
         "action": "opened",
+        "installation_id": 512804923,
         "repository": {"id": "987654", "full_name": "owner/repo"},
         "pull_request": {"number": 42, "head_sha": "abc123def", "base_sha": "fed654cba"},
     }

@@ -22,7 +22,6 @@ from httpx import Client, Response
 from sqlalchemy import Engine
 
 from app.api.factory import create_app
-from app.application.ports import JobQueue, UnitOfWork, VcsGateway
 from app.config import Settings
 from app.domain.entities import MergeRequest, Repository, ReviewRun
 from app.domain.enums import ReviewRunStatus, TriggerSource
@@ -32,6 +31,7 @@ from ..conftest import requires_db
 from ..fakes import (
     INSTALLATION_ID,
     REPO_FULL_NAME,
+    FakeContainer,
     FakeQueue,
     FakeVcs,
     a_repository,
@@ -53,25 +53,6 @@ BASE_SHA = pr_metadata().base_sha
 
 def sign(body: bytes, secret: str = SECRET) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-
-
-@dataclass
-class E2EContainer:
-    """Настоящий адаптер базы, фейковые VCS и очередь: сеть не нужна."""
-
-    engine: Engine
-    settings: Settings
-    vcs: FakeVcs
-    queue: FakeQueue
-
-    def unit_of_work(self) -> UnitOfWork:
-        return SqlAlchemyUnitOfWork(self.engine)
-
-    def vcs_gateway(self) -> VcsGateway:
-        return self.vcs
-
-    def job_queue(self) -> JobQueue:
-        return self.queue
 
 
 @dataclass(frozen=True)
@@ -97,7 +78,7 @@ def flow(clean_db) -> Flow:
     )
     vcs = FakeVcs(diff=SAMPLE_DIFF)
     queue = FakeQueue()
-    container = E2EContainer(
+    container = FakeContainer(
         engine=clean_db,
         settings=settings,
         vcs=vcs,
