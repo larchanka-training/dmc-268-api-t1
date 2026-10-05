@@ -242,10 +242,12 @@ class FakeVcs:
     diff: str = DIFF
     meta: PRMetadata = field(default_factory=pr_metadata)
     error: VcsError | None = None
-    calls: list[tuple[str, str, int, int]] = field(default_factory=list)
+    calls: list[tuple[str, ...]] = field(default_factory=list)
 
-    def fetch_diff(self, repo_full_name: str, pr_number: int, installation_id: int) -> str:
-        self.calls.append(("diff", repo_full_name, pr_number, installation_id))
+    def fetch_diff(
+        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
+    ) -> str:
+        self.calls.append(("diff", repo_full_name, base_sha, head_sha, installation_id))
         if self.error is not None:
             raise self.error
         return self.diff

@@ -34,8 +34,8 @@ from ..fakes import (
 )
 
 EXPECTED_VCS_CALLS = [
-    ("diff", REPO_FULL_NAME, 6, INSTALLATION_ID),
     ("metadata", REPO_FULL_NAME, 6, INSTALLATION_ID),
+    ("diff", REPO_FULL_NAME, pr_metadata().base_sha, pr_metadata().head_sha, INSTALLATION_ID),
 ]
 
 
@@ -191,8 +191,8 @@ def test_unregistered_repository_is_ignored_without_records() -> None:
 def test_vcs_error_yields_failure_and_creates_nothing() -> None:
     outcome, uow, vcs, queue = run_case(vcs_error=VcsError("GitHub API: HTTP 502"))
     assert outcome.kind == "failure"
-    # Дифф запросили — и на его ошибке обработка прекратилась: метаданные
-    # за ним не запрашиваются.
+    # Метаданные запросили — и на ошибке VCS обработка прекратилась: дифф за
+    # ними не запрашивается.
     assert vcs.calls == [EXPECTED_VCS_CALLS[0]]
     assert uow.merge_requests.added == []
     assert uow.review_runs.added == []

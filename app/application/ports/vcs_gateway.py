@@ -21,9 +21,14 @@ from app.domain.entities import PRMetadata
 
 class VcsGateway(Protocol):
     def fetch_diff(
-        self, repo_full_name: str, pr_number: int, installation_id: int
+        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
     ) -> str:
-        """Unified diff запроса на изменения как есть, строкой."""
+        """Unified diff пары коммитов base...head как есть, строкой.
+
+        Пара SHA берётся из сообщения задачи, а не актуальный head `/pulls/{n}`:
+        между доставкой вебхука и обработкой мог прийти `synchronize` — воркер
+        обязан ревьюить тот коммит, для которого создан прогон.
+        """
         ...
 
     def fetch_pr_metadata(

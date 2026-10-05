@@ -120,11 +120,17 @@ def handle_webhook_event(
 
     # VCS между транзакциями: соединение пула не занято, пока GitHub отвечает.
     try:
-        # Дифф достаётся здесь, чтобы сбой VCS дал 502 до создания записей;
-        # разбирает его воркер (D3), поэтому результат не нужен.
-        vcs.fetch_diff(event.repo_full_name, event.pr_number, event.installation_id)
+        # Метаданные раньше диффа: base_sha берётся только из них (спека
+        # webhook-intake), и дифф запрашивается той же парой SHA, что уйдёт
+        # в сообщение, — после `synchronize` воркер ревьюит доставленный
+        # коммит, а не актуальный head. Дифф достаётся здесь, чтобы сбой VCS
+        # дал 502 до создания записей; разбирает его воркер (D3), поэтому
+        # результат не нужен.
         metadata = vcs.fetch_pr_metadata(
             event.repo_full_name, event.pr_number, event.installation_id
+        )
+        vcs.fetch_diff(
+            event.repo_full_name, metadata.base_sha, event.head_sha, event.installation_id
         )
     except VcsError:
         return WebhookOutcome(kind="failure")

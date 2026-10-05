@@ -62,10 +62,10 @@ class GitHubVcsGateway:
         self._backoff_base_seconds = backoff_base_seconds
 
     def fetch_diff(
-        self, repo_full_name: str, pr_number: int, installation_id: int
+        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
     ) -> str:
         response = self._get(
-            f"/repos/{repo_full_name}/pulls/{pr_number}",
+            f"/repos/{repo_full_name}/compare/{base_sha}...{head_sha}",
             installation_id,
             _DIFF_ACCEPT,
         )

@@ -86,7 +86,12 @@ def responding(
 
 
 def test_fetch_diff_returns_recorded_body_verbatim(rsa_key_pair: RsaKeyPair) -> None:
-    """Дифф — тело ответа без преобразований, с правильными заголовками."""
+    """Дифф — тело ответа без преобразований, с правильными заголовками.
+
+    Дифф запрашивается compare-парой SHA, а не текущим head `/pulls/{n}`:
+    после `synchronize` между доставкой и обработкой воркер отревьюит
+    доставленный коммит, а не актуальный.
+    """
     seen: list[httpx.Request] = []
     sleeps: list[float] = []
     gateway = make_gateway(
@@ -97,11 +102,20 @@ def test_fetch_diff_returns_recorded_body_verbatim(rsa_key_pair: RsaKeyPair) -> 
         sleeps,
     )
 
-    assert gateway.fetch_diff("larchanka-training/dmc-268-api-t1", 6, INSTALLATION_ID) == DIFF
+    base_sha, head_sha = "b" * 40, "a" * 40
+    assert (
+        gateway.fetch_diff(
+            "larchanka-training/dmc-268-api-t1", base_sha, head_sha, INSTALLATION_ID
+        )
+        == DIFF
+    )
 
     get = seen[-1]
     assert get.method == "GET"
-    assert get.url.path == "/repos/larchanka-training/dmc-268-api-t1/pulls/6"
+    assert (
+        get.url.path
+        == f"/repos/larchanka-training/dmc-268-api-t1/compare/{base_sha}...{head_sha}"
+    )
     assert get.headers["Accept"] == "application/vnd.github.v3.diff"
     assert get.headers["Authorization"] == "Bearer ghs_test"
     assert sleeps == []
@@ -165,7 +179,7 @@ def test_5xx_is_retried_with_growing_pauses(rsa_key_pair: RsaKeyPair) -> None:
         sleeps,
     )
 
-    assert gateway.fetch_diff("owner/repo", 6, INSTALLATION_ID) == DIFF
+    assert gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID) == DIFF
     assert len(seen) == 3
     assert sleeps == [0.5, 1.0]
 
@@ -184,7 +198,7 @@ def test_429_is_retried(rsa_key_pair: RsaKeyPair) -> None:
         sleeps,
     )
 
-    assert gateway.fetch_diff("owner/repo", 6, INSTALLATION_ID) == DIFF
+    assert gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID) == DIFF
     assert len(seen) == 2
     assert sleeps == [0.5]
 
@@ -200,7 +214,7 @@ def test_exhausted_retries_raise_vcs_unavailable(rsa_key_pair: RsaKeyPair) -> No
     )
 
     with pytest.raises(VcsUnavailableError):
-        gateway.fetch_diff("owner/repo", 6, INSTALLATION_ID)
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID)
 
     assert len(seen) == 3
     assert sleeps == [0.5, 1.0]
@@ -217,7 +231,7 @@ def test_404_raises_immediately_without_retry(rsa_key_pair: RsaKeyPair) -> None:
     )
 
     with pytest.raises(VcsError):
-        gateway.fetch_diff("owner/repo", 6, INSTALLATION_ID)
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID)
 
     assert len(seen) == 1
     assert sleeps == []
@@ -254,7 +268,7 @@ def test_transport_failure_of_diff_raises_vcs_unavailable(
     gateway = make_gateway(rsa_key_pair, failing_transport(connect_fails, seen), sleeps)
 
     with pytest.raises(VcsUnavailableError):
-        gateway.fetch_diff("owner/repo", 6, INSTALLATION_ID)
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID)
 
     assert len(seen) == 1
     assert sleeps == []
@@ -349,7 +363,7 @@ def test_401_invalidates_cached_token_and_retries_once(
     sleeps: list[float] = []
     gateway = make_gateway(rsa_key_pair, revoked_token_handler(seen), sleeps)
 
-    assert gateway.fetch_diff("owner/repo", 6, INSTALLATION_ID) == DIFF
+    assert gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID) == DIFF
 
     pr_requests = [r for r in seen if not r.url.path.startswith("/app/installations/")]
     token_requests = [r for r in seen if r.url.path.startswith("/app/installations/")]
@@ -376,7 +390,7 @@ def test_second_401_after_refresh_raises_vcs_auth_error(
     gateway = make_gateway(rsa_key_pair, handler, sleeps)
 
     with pytest.raises(VcsAuthError):
-        gateway.fetch_diff("owner/repo", 6, INSTALLATION_ID)
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID)
 
     pr_requests = [r for r in seen if not r.url.path.startswith("/app/installations/")]
     assert len(pr_requests) == 2
