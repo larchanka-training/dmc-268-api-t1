@@ -141,6 +141,27 @@ class PublishedComment:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewJob:
+    """Сообщение очереди, которое просит проверить один коммит.
+
+    Не хранится: живёт ровно между `JobQueue.enqueue` и обработкой воркером.
+    `id` — идентификатор сообщения, новый на каждую постановку (§4.2
+    SYSTEM_DESIGN.md); прогон указывает `review_run_id`. Так две постановки
+    одного прогона различимы в DLQ и в логах.
+    """
+
+    id: UUID
+    review_run_id: UUID
+    event_type: str
+    action: str
+    repository_provider_id: str
+    repository_full_name: str
+    pull_request_number: int
+    head_sha: str
+    base_sha: str
+
+
+@dataclass(frozen=True, slots=True)
 class Hunk:
     """Непрерывный диапазон, затронутый диффом, как его выдаёт парсер."""
 

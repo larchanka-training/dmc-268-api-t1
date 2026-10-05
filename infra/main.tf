@@ -169,6 +169,9 @@ resource "docker_container" "migrate" {
 
   env = [
     "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
+    # %2F — закодированный дефолтный vhost "/": pika разбирает буквальный "//" как пустой vhost.
+    "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@dmc268-rabbitmq:5672/%2F",
+    "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
   ]
 
   # depends_on у docker-провайдера задаёт только порядок создания, но не ждёт
@@ -222,6 +225,9 @@ resource "docker_container" "api" {
 
   env = [
     "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
+    # %2F — закодированный дефолтный vhost "/": pika разбирает буквальный "//" как пустой vhost.
+    "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@dmc268-rabbitmq:5672/%2F",
+    "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
   ]
 
   ports {

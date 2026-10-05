@@ -203,8 +203,7 @@ def test_a_finding_outside_the_diff_is_refused_and_counted(uow) -> None:
         updated_at=NOW,
     )
     with uow as work:
-        with pytest.raises(ValueError, match="outside the changed lines"):
-            work.findings.add_validated(outside, hunks, LATER)
+        assert work.findings.add_validated(outside, hunks, LATER) is False
         work.commit()
 
     with uow as work:
@@ -233,7 +232,7 @@ def test_a_finding_inside_the_diff_is_stored(uow) -> None:
         updated_at=NOW,
     )
     with uow as work:
-        work.findings.add_validated(inside, hunks, LATER)
+        assert work.findings.add_validated(inside, hunks, LATER) is True
         work.commit()
     with uow as work:
         stored = work.findings.list_for_run(run.id)
@@ -285,8 +284,7 @@ def test_advancing_a_run_does_not_undo_a_recorded_rejection(uow) -> None:
         updated_at=NOW,
     )
     with uow as work:
-        with pytest.raises(ValueError, match="outside the changed lines"):
-            work.findings.add_validated(outside, hunks, LATER)
+        assert work.findings.add_validated(outside, hunks, LATER) is False
         # `run` — устаревшая сущность, которую вызывающий держал всё это время
         work.review_runs.update(
             advance(run, ReviewRunStatus.BUILDING_CONTEXT, LATER).unwrap()

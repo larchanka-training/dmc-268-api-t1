@@ -46,6 +46,7 @@ cd infra && tofu init -backend=false -upgrade && tofu providers lock \
 | --- | --- |
 | `api_image` | тег собранного образа |
 | `postgres_password`, `rabbitmq_password` | секреты `PG_PASSWORD_DMC268_T1`, `RABBITMQ_PASSWORD_DMC268_T1` |
+| `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `registry_username`, `registry_password` | `github.actor` и `GITHUB_TOKEN`, живут один прогон |
 | `docker_host`, `service_host` | собираются из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
 | `bind_ip` | `127.0.0.1`: API снаружи не публикуется, к нему ходит интерфейс изнутри docker-сети |
