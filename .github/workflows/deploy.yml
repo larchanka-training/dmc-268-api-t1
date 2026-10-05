@@ -163,7 +163,7 @@ jobs:
           TF_VAR_api_image: ${{ needs.image.outputs.image }}
           TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
           TF_VAR_rabbitmq_password: ${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}
-          TF_VAR_github_webhook_secret: ${{ secrets.GITHUB_WEBHOOK_SECRET_DMC268_T1 }}
+          TF_VAR_github_webhook_secret: ${{ secrets.WEBHOOK_SECRET_DMC268_T1 }}
           TF_VAR_registry_username: ${{ github.actor }}
           TF_VAR_registry_password: ${{ secrets.GITHUB_TOKEN }}
         run: |

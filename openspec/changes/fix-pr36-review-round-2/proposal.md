@@ -28,7 +28,7 @@
   `GITHUB_WEBHOOK_SECRET`; секрет приходит в деплой отдельной переменной.
 - Локальный `docker-compose.yml` и CI используют `rabbitmq:4.3-alpine`.
 - **BREAKING**: нет для внешнего контракта. Для деплоя нужен новый секрет
-  репозитория `GITHUB_WEBHOOK_SECRET_DMC268_T1` — до его появления `apply`
+  репозитория `WEBHOOK_SECRET_DMC268_T1` — до его появления `apply`
   не пройдёт.
 
 ## Capabilities

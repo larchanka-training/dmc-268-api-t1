@@ -13,8 +13,8 @@
       `GITHUB_WEBHOOK_SECRET` в `env` контейнеров `migrate` и `api`; sensitive
       переменная `github_webhook_secret`.
 - [x] 2.2 `.github/workflows/deploy.yml`, `infra/README.md`:
-      `TF_VAR_github_webhook_secret` из `GITHUB_WEBHOOK_SECRET_DMC268_T1`.
-- [ ] 2.3 Завести секрет репозитория `GITHUB_WEBHOOK_SECRET_DMC268_T1`
+      `TF_VAR_github_webhook_secret` из `WEBHOOK_SECRET_DMC268_T1`.
+- [x] 2.3 Завести секрет репозитория `WEBHOOK_SECRET_DMC268_T1`
       (значение совпадает с секретом вебхука GitHub). Делает владелец
       репозитория до мёржа.
 
