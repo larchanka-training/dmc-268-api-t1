@@ -14,14 +14,7 @@ from types import TracebackType
 from typing import Any, Self
 from uuid import UUID
 
-from app.application.ports.repositories import (
-    ContextPayloadRepo,
-    FindingRepo,
-    MergeRequestRepo,
-    PublishedCommentRepo,
-    RepositoryRepo,
-    ReviewRunRepo,
-)
+from app.application.ports.unit_of_work import UnitOfWork
 from app.domain.diff import validate_anchor
 from app.domain.entities import (
     ContextPayload,
@@ -39,6 +32,11 @@ from app.domain.lifecycle import next_status
 class FakeRepositoryRepo:
     def __init__(self) -> None:
         self._by_id: dict[UUID, Repository] = {}
+
+    @property
+    def stored(self) -> dict[tuple[Provider, str], Repository]:
+        """Вид по естественному ключу — для тестов приёма вебхуков."""
+        return {(r.provider, r.provider_id): r for r in self._by_id.values()}
 
     def snapshot(self) -> dict[UUID, Repository]:
         return dict(self._by_id)
@@ -76,12 +74,26 @@ class FakeRepositoryRepo:
 class FakeMergeRequestRepo:
     def __init__(self) -> None:
         self._by_id: dict[UUID, MergeRequest] = {}
+        # Что добавлено/обновлено через этот фейк — тестам приёма, которые
+        # сверяют исход с точными записями.
+        self.added: list[MergeRequest] = []
+        self.updated: list[MergeRequest] = []
+        self._added_mark = 0
+
+    @property
+    def by_number(self) -> dict[tuple[UUID, int], MergeRequest]:
+        """Вид по естественному ключу — для тестов приёма вебхуков."""
+        return {(m.repository_id, m.number): m for m in self._by_id.values()}
 
     def snapshot(self) -> dict[UUID, MergeRequest]:
+        # Отметка added — rollback позже уберёт добавленное после снимка,
+        # как это сделал бы настоящий UoW.
+        self._added_mark = len(self.added)
         return dict(self._by_id)
 
     def restore(self, state: dict[UUID, MergeRequest]) -> None:
         self._by_id = dict(state)
+        del self.added[self._added_mark :]
 
     def get(self, merge_request_id: UUID) -> MergeRequest | None:
         return self._by_id.get(merge_request_id)
@@ -106,23 +118,36 @@ class FakeMergeRequestRepo:
         return ordered[offset : offset + limit]
 
     def add(self, merge_request: MergeRequest) -> None:
+        self.added.append(merge_request)
         self._by_id[merge_request.id] = merge_request
 
     def update(self, merge_request: MergeRequest) -> None:
         if merge_request.id not in self._by_id:
             raise LookupError(f"merge request {merge_request.id} is not stored")
+        self.updated.append(merge_request)
         self._by_id[merge_request.id] = merge_request
 
 
 class FakeReviewRunRepo:
     def __init__(self) -> None:
         self._by_id: dict[UUID, ReviewRun] = {}
+        # Что добавлено через этот фейк — тестам приёма вебхуков.
+        self.added: list[ReviewRun] = []
+        self._added_mark = 0
+
+    @property
+    def runs(self) -> list[ReviewRun]:
+        return list(self._by_id.values())
 
     def snapshot(self) -> dict[UUID, ReviewRun]:
+        # Отметка added — rollback позже уберёт добавленное после снимка,
+        # как это сделал бы настоящий UoW.
+        self._added_mark = len(self.added)
         return dict(self._by_id)
 
     def restore(self, state: dict[UUID, ReviewRun]) -> None:
         self._by_id = dict(state)
+        del self.added[self._added_mark :]
 
     def get(self, run_id: UUID) -> ReviewRun | None:
         return self._by_id.get(run_id)
@@ -143,6 +168,7 @@ class FakeReviewRunRepo:
         return [r for r in self._by_id.values() if r.status not in TERMINAL_STATUSES]
 
     def add(self, run: ReviewRun) -> None:
+        self.added.append(run)
         self._by_id[run.id] = run
 
     def update(self, run: ReviewRun) -> None:
@@ -233,8 +259,12 @@ class FakePublishedCommentRepo:
         self._items.append(comment)
 
 
-class FakeUnitOfWork:
+class FakeUnitOfWork(UnitOfWork):
     """Держит состояние между повторными входами в `with` — как настоящая база.
+
+    Наследует протокол номинально: изменяемые атрибуты mypy проверяет
+    инвариантно, поэтому конкретные типы фейков совместимы с ним только
+    через базу.
 
     Транзакционный: `rollback` возвращает состояние на момент последнего
     `commit` (или входа в `with`), поэтому тест на фейке видит то же, что и
@@ -244,21 +274,35 @@ class FakeUnitOfWork:
     """
 
     def __init__(self) -> None:
-        # Типы атрибутов — порты, не конкретные фейки: то же самое, что
-        # `SqlAlchemyUnitOfWork` делает для структурного совпадения с
-        # протоколом `UnitOfWork` (см. её `__enter__`). Локальные переменные
-        # до аннотации нужны снимкам и `FakeFindingRepo`, которому нужен
-        # доступ к `bump_rejected`, отсутствующему в самом протоколе.
+        # Типы атрибутов — конкретные фейки, не протоколы: тестам нужен и
+        # порт, и фейковый API поверх него (`added`, `stored`, `by_number`).
+        # Протокол `UnitOfWork` фейк наследует номинально — инвариантность
+        # изменяемых атрибутов проверяется именно наследованием.
         self._fakes = _Fakes()
-        self.repositories: RepositoryRepo = self._fakes.repositories
-        self.merge_requests: MergeRequestRepo = self._fakes.merge_requests
-        self.review_runs: ReviewRunRepo = self._fakes.review_runs
-        self.context_payloads: ContextPayloadRepo = self._fakes.context_payloads
-        self.findings: FindingRepo = self._fakes.findings
-        self.published_comments: PublishedCommentRepo = self._fakes.published_comments
+        self.repositories: FakeRepositoryRepo = self._fakes.repositories
+        self.merge_requests: FakeMergeRequestRepo = self._fakes.merge_requests
+        self.review_runs: FakeReviewRunRepo = self._fakes.review_runs
+        self.context_payloads: FakeContextPayloadRepo = self._fakes.context_payloads
+        self.findings: FakeFindingRepo = self._fakes.findings
+        self.published_comments: FakePublishedCommentRepo = (
+            self._fakes.published_comments
+        )
         self.committed = 0
         self.rolled_back = 0
         self._committed_state: list[Any] | None = None
+        # Отказы коммита — сцены гонки доставок: постоянный (`commit_error`)
+        # и одноразовые (`commit_errors`, расходуются по одному на коммит).
+        self.commit_error: Exception | None = None
+        self.commit_errors: list[Exception] = []
+
+    @property
+    def commits(self) -> int:
+        """Псевдоним `committed` — имя, которое ждут тесты приёма вебхуков."""
+        return self.committed
+
+    @property
+    def rollbacks(self) -> int:
+        return self.rolled_back
 
     def __enter__(self) -> Self:
         self._committed_state = self._fakes.snapshot()
@@ -275,6 +319,10 @@ class FakeUnitOfWork:
 
     def commit(self) -> None:
         self.committed += 1
+        if self.commit_errors:
+            raise self.commit_errors.pop(0)
+        if self.commit_error is not None:
+            raise self.commit_error
         if self._committed_state is not None:
             self._committed_state = self._fakes.snapshot()
 

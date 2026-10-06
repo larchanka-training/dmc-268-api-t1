@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from app.application.ports.unit_of_work import ActiveRunConflict
 from app.domain.entities import (
     ContextPayload,
     DiffAnchor,
@@ -102,6 +103,26 @@ def test_a_failed_unit_of_work_rolls_everything_back(uow) -> None:
         # выход из блока без коммита обязан отбросить запись
     with uow as work:
         assert work.repositories.find_by_provider(Provider.GITHUB, "1") is None
+
+
+def test_two_merge_requests_on_one_repo_and_number_map_to_active_run_conflict(
+    uow,
+) -> None:
+    """`uq_merge_requests_repo_number` переводится в портовый ActiveRunConflict.
+
+    Сопоставление идёт по тексту ошибки драйвера, поэтому проверяется на
+    живом Postgres: на фейке оно ничего не доказывает.
+    """
+    repo = a_repository()
+    with uow as work:
+        work.repositories.add(repo)
+        work.commit()
+    with uow as work:
+        work.merge_requests.add(a_merge_request(repo.id))
+        work.commit()
+    with uow as work, pytest.raises(ActiveRunConflict):
+        work.merge_requests.add(a_merge_request(repo.id))
+        work.commit()
 
 
 def test_find_active_ignores_finished_runs(uow) -> None:

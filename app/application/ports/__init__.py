@@ -1,3 +1,5 @@
+from app.application.ports.job_queue import JobQueue
+from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.repositories import (
     ContextPayloadRepo,
     FindingRepo,
@@ -7,13 +9,17 @@ from app.application.ports.repositories import (
     ReviewRunRepo,
 )
 from app.application.ports.unit_of_work import UnitOfWork
+from app.application.ports.vcs_gateway import VcsGateway
 
 __all__ = [
     "ContextPayloadRepo",
     "FindingRepo",
+    "JobQueue",
+    "LlmGateway",
     "MergeRequestRepo",
     "PublishedCommentRepo",
     "RepositoryRepo",
     "ReviewRunRepo",
     "UnitOfWork",
+    "VcsGateway",
 ]

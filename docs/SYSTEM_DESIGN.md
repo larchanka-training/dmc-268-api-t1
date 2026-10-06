@@ -85,8 +85,8 @@ flowchart TB
 ### 2.1 Границы ответственности
 
 - **Frontend (FE)**: настройки репозиториев, история PR, администрирование, usage/billing. Общается с системой только через REST API монолита (`app/api`).
-- **`app/api` — HTTP-точка входа (`uvicorn app.main:app`)**: приём вебхуков GitHub/GitLab с проверкой HMAC-подписи, валидация, rate limiting (fixed-window, порт `RateLimiter`), идемпотентность повторных доставок (порт `IdempotencyStore`), REST для фронтенда, постановка задач в очередь (порт `JobQueue`).
-- **RabbitMQ**: брокер сообщений; адаптер порта `JobQueue` с единственным методом `enqueue`. Layout обменов — зона ответственности этого документа (см. 4.2).
+- **`app/api` — HTTP-точка входа (`uvicorn app.main:app`)**: построено — приём вебхуков GitHub с проверкой HMAC-подписи (constant-time, `app/domain/hmac.py`) и постановка задач в очередь через порт `JobQueue`; запланированные швы — rate limiting (fixed-window, порт `RateLimiter`), идемпотентность повторных доставок (порт `IdempotencyStore`), приём вебхуков GitLab, REST для фронтенда.
+- **RabbitMQ**: брокер сообщений; адаптер порта `JobQueue` с единственным методом `enqueue` построен (`RabbitMQJobQueue`: тело — только доменные данные, переиспользуемое соединение с publisher confirms, DLX/DLQ для отклонённых сообщений). Layout обменов — зона ответственности этого документа (см. 4.2).
 - **`app/worker` — консьюмер ревью (`python -m app.worker`)**: ходит минутами, ограничен латентностью модели; также выметает зависшие прогоны (`find_stale`, `last_progress_at`).
 - **Оркестрация — use cases слоя `application`**: одноходовый сценарий ревью — сборка контекста (чистая функция), один вызов LLM через `LlmGateway`, `validate_anchor` и `deduplicate`, публикация через `VcsGateway`; жизненный цикл прогона — `next_status`. Ретраи с exponential backoff живут в адаптерах. **Модель не получает инструментов и никогда не выбирает действий** — структурная защита от prompt injection (threat model в BACKEND_ARCHITECTURE.md).
 - **`VcsGateway` (порт; первый адаптер — GitHub REST)**: диффы (unified diff; каждый hunk несёт ±30 строк контекста вокруг изменения), метаданные, комментарии, статусы; аутентификация GitHub App с краткосрочными installation-токенами; довыборка содержимого файлов по `head_sha` для уровней `whole_file` и `ast` — деталь реализации адаптера, как payload'ы, синтаксис комментариев, auth и backoff.
@@ -97,8 +97,8 @@ flowchart TB
 
 ## 3. Потоки данных
 
-1. **Инициация**: вебхуки GitHub — события pull request и push — приходят в `app/api`, но прогон создаётся не по факту открытия PR: ревью запускается, когда бота добавили в ревьюеры PR или упомянули в комментарии. Источник прогона фиксируется колонкой `review_runs.trigger_source` (enum `TriggerSource`: `webhook` / `manual` / `mention`).
-2. **Подлинность и идемпотентность**: проверяется HMAC-подпись доставки; ключ идемпотентности занимается через `INSERT ... ON CONFLICT DO NOTHING` (порт `IdempotencyStore`), повторная доставка переигрывает исход первой. Схема дополнительно допускает не более одного незавершённого прогона на коммит (partial unique index).
+1. **Инициация**: вебхук GitHub (`pull_request` с действием `opened` или `synchronize`) приходит в `app/api`, проверяет HMAC-подпись, достаёт дифф и метаданные PR через `VcsGateway` (сбой VCS — 502 до записей), создаёт `MergeRequest` + `ReviewRun` (state `queued`) и ставит задачу в очередь — без разбора диффа: разбор и фильтрацию шума выполняет воркер по идентификаторам из задачи (capability `webhook-intake` в спеках). Источник прогона фиксируется колонкой `review_runs.trigger_source` (enum `TriggerSource`: `webhook` / `manual` / `mention`); сегодня работает `webhook`, а запуск по назначению бота ревьюером или упоминанию в комментарии (`manual` / `mention`) — запланированный шов. Событие `reopened` и прочие действия игнорируются (202): бот никогда не переназначается автоматически.
+2. **Подлинность и идемпотентность**: проверяется HMAC-подпись доставки (построено, constant-time по сырому телу до разбора payload'а); повторная доставка того же коммита не создаёт второй активный прогон — частичный уникальный индекс схемы (построено). Порт `IdempotencyStore` — запланированный шов: займёт ключ через `INSERT ... ON CONFLICT DO NOTHING` и переиграет исход первой доставки, когда появится.
 3. **Очередь**: задача публикуется в RabbitMQ через `JobQueue.enqueue`.
 4. **Консюмер**: `app/worker` вычитывает сообщение (job); устойчивая сущность — `ReviewRun` (переименована из `ReviewJob`, чтобы строка БД не делила имя с сообщением очереди).
 5. **Сбор контекста**: use case иерархически собирает контекст (раздел 5) и сохраняет показанное модели в `context_payloads` — с редакцией секретов до вставки.
@@ -125,6 +125,7 @@ JSON-сообщение; тело несёт только доменные да�
   "review_run_id": "uuid-5678",
   "event_type": "pull_request",
   "action": "opened",
+  "installation_id": 512804923,
   "repository": {
     "full_name": "owner/repo",
     "id": "987654"
@@ -137,7 +138,7 @@ JSON-сообщение; тело несёт только доменные да�
 }
 ```
 
-`job_id` — идентификатор сообщения (UUIDv7, генерируется в домене, не базой, новый на каждую постановку); устойчивая строка — `ReviewRun`, воркер находит её по `review_run_id`; дедупликация повторных доставок — `IdempotencyStore`.
+`job_id` — идентификатор сообщения (UUIDv7, генерируется в домене, не базой, новый на каждую постановку); устойчивая строка — `ReviewRun`, воркер находит её по `review_run_id`; дедупликация повторных доставок — `IdempotencyStore`. `installation_id` — инсталляция провайдера для авторизации воркера при повторном получении диффа (разбор диффа — у воркера, тело сообщения дифф не несёт).
 
 **Dead-letter queue.** Очередь `review_jobs` объявлена с
 `x-dead-letter-exchange: review_jobs.dlx` — fanout-exchange, на который
@@ -180,4 +181,6 @@ AST-уровень — первый кандидат на вынос из мон
 
 ## 6. Основной процесс ревью
 
-**GitHub PR → Webhook (HMAC) → `app/api` → `IdempotencyStore` → `JobQueue` / RabbitMQ → `app/worker` → Context Assembly → один вызов LLM → validate / dedup → `VcsGateway` → GitHub Review**
+**GitHub PR → Webhook (HMAC) → `app/api` → `JobQueue` / RabbitMQ → `app/worker` → Context Assembly → один вызов LLM → validate / dedup → `VcsGateway` → GitHub Review**
+
+Построено: webhook intake с проверкой HMAC, постановка задачи в очередь (`JobQueue` → RabbitMQ), парсинг/фильтрация диффа чистыми функциями домена — на стороне воркера. Запланированные швы: `IdempotencyStore` (в живой цепочке его место — между `app/api` и очередью), Context Assembly, вызов LLM (`LlmGateway`), валидация/дедупликация и публикация через `VcsGateway`.

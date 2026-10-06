@@ -5,9 +5,8 @@
 `JobQueue`: гвардрейл в `tests/test_container.py` заточен под SQLAlchemy-
 адаптеры портов хранения.
 
-Первый (пока единственный) адаптер — `StubLlmGateway`: заглушка вместо
-реального транспорта к Ollama, спроектированного в
-`docs/BACKEND_ARCHITECTURE.md`.
+Первый (пока единственный) адаптер — заглушка вместо реального транспорта
+к Ollama, спроектированного в `docs/BACKEND_ARCHITECTURE.md`.
 """
 
 from dataclasses import dataclass

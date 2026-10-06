@@ -16,6 +16,7 @@ JOB = ReviewJob(
     review_run_id=UUID(int=2),
     event_type="pull_request",
     action="opened",
+    installation_id=512804923,
     repository_provider_id="1",
     repository_full_name="o/r",
     pull_request_number=1,

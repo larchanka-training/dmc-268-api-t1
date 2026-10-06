@@ -228,6 +228,8 @@ resource "docker_container" "api" {
     # %2F — закодированный дефолтный vhost "/": pika разбирает буквальный "//" как пустой vhost.
     "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@dmc268-rabbitmq:5672/%2F",
     "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
+    "GITHUB_APP_ID=${var.github_app_id}",
+    "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
   ]
 
   ports {

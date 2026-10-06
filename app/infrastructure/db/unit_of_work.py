@@ -4,6 +4,7 @@ from types import TracebackType
 from typing import Self
 
 from sqlalchemy import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.application.ports.repositories import (
@@ -14,6 +15,7 @@ from app.application.ports.repositories import (
     RepositoryRepo,
     ReviewRunRepo,
 )
+from app.application.ports.unit_of_work import ActiveRunConflict
 from app.infrastructure.db.repositories import (
     SqlAlchemyContextPayloadRepo,
     SqlAlchemyFindingRepo,
@@ -21,6 +23,15 @@ from app.infrastructure.db.repositories import (
     SqlAlchemyPublishedCommentRepo,
     SqlAlchemyRepositoryRepo,
     SqlAlchemyReviewRunRepo,
+)
+
+# Частичные уникальные индексы гонки доставок: их отказ переводится в
+# портовое исключение, отказ любого другого ограничения идёт наружу как есть.
+_RACE_CONSTRAINTS = (
+    # два активных прогона на один коммит
+    "uq_review_runs_one_active_per_commit",
+    # два merge_request на пару репозиторий+номер (гонка первых доставок PR)
+    "uq_merge_requests_repo_number",
 )
 
 
@@ -68,7 +79,18 @@ class SqlAlchemyUnitOfWork:
         return self._session
 
     def commit(self) -> None:
-        self.session.commit()
+        try:
+            self.session.commit()
+        except IntegrityError as error:
+            # Сессия после отказа в откате непригодна: гасим транзакцию здесь,
+            # чтобы вызывающий после ActiveRunConflict мог перечитать записи
+            # победителя гонки по естественному ключу.
+            self.rollback()
+            if any(name in str(error.orig) for name in _RACE_CONSTRAINTS):
+                raise ActiveRunConflict(
+                    "параллельная доставка закоммитила записи этого PR раньше"
+                ) from error
+            raise
 
     def rollback(self) -> None:
         if self._session is not None:

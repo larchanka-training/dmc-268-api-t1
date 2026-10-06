@@ -1,0 +1,38 @@
+{
+  "action": "synchronize",
+  "number": 6,
+  "installation": {
+    "id": 512804923,
+    "node_id": "MDIzOkludGVsbGF0aW9uNTEyODA0OTIzMQ=="
+  },
+  "repository": {
+    "id": 923478362,
+    "node_id": "R_kgDONvV4Wg",
+    "name": "dmc-268-api-t1",
+    "full_name": "larchanka-training/dmc-268-api-t1",
+    "private": false
+  },
+  "pull_request": {
+    "url": "https://api.github.com/repos/larchanka-training/dmc-268-api-t1/pulls/6",
+    "number": 6,
+    "state": "open",
+    "title": "feat: приём вебхуков и VCS-шлюз",
+    "user": {
+      "login": "ilyassakhanov",
+      "id": 25091015,
+      "type": "User"
+    },
+    "body": "Вебхук, проверка подписи, VcsGateway, парсер диффа.",
+    "head": {
+      "ref": "feat/webhook-intake",
+      "sha": "0987654321abcdef0987654321abcdef09876543",
+      "label": "larchanka-training:feat/webhook-intake"
+    },
+    "base": {
+      "ref": "develop",
+      "sha": "fedcba0987654321fedcba0987654321fedcba09",
+      "label": "larchanka-training:develop"
+    }
+  },
+  "before": "a1b2c3d4e5f6789012345678abcdef0123456789"
+}

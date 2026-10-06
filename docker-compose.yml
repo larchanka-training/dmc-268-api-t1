@@ -57,6 +57,11 @@ services:
       # Только для локального docker-compose. Реальный секрет — в переменных
       # окружения деплоя, не в этом файле.
       GITHUB_WEBHOOK_SECRET: local-dev-secret
+      # Реквизиты GitHub App — из окружения или .env: пустые значения
+      # означают, что вебхуки отвечают 502 на обращении к VCS, остальное
+      # API работает.
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

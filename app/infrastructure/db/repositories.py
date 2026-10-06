@@ -152,13 +152,18 @@ class SqlAlchemyReviewRunRepo:
         return m.review_run_to_domain(row) if row else None
 
     def find_active(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        # `first`, а не `one_or_none`: в окне гонки индекс ещё не разрешал
+        # коллизию, и две нетерминальные строки на этот коммит — возможный
+        # промежуточный ответ; MultipleResultsFound здесь означал бы 500.
         row = self._session.scalars(
-            select(ReviewRunRow).where(
+            select(ReviewRunRow)
+            .where(
                 ReviewRunRow.merge_request_id == merge_request_id,
                 ReviewRunRow.head_sha == head_sha,
                 ReviewRunRow.status.not_in(TERMINAL_STATUSES),
             )
-        ).one_or_none()
+            .order_by(ReviewRunRow.created_at)
+        ).first()
         return m.review_run_to_domain(row) if row else None
 
     def list_unfinished(self) -> list[ReviewRun]:
@@ -173,6 +178,11 @@ class SqlAlchemyReviewRunRepo:
         При вставке сущность — единственный источник, в том числе для прогона,
         восстановленного из прошлой попытки, поэтому поля результата и счётчик
         отклонённых переносятся здесь, хотя `update` счётчик не трогает.
+
+        `created_at` и `updated_at` переносятся тоже: время прогона выдаёт
+        `now`, переданный use case'у, и публичная проекция `ReviewJob` отдаёт
+        именно его. Серверный дефолт `func.now()` остался бы вторым источником
+        времени, разъезжающимся с сущностью на миллисекунды.
         """
         self._session.add(
             ReviewRunRow(
@@ -183,6 +193,8 @@ class SqlAlchemyReviewRunRepo:
                 status=run.status,
                 trigger=run.trigger,
                 last_progress_at=run.last_progress_at,
+                created_at=run.created_at,
+                updated_at=run.updated_at,
                 failure_reason=run.failure_reason,
                 model=run.model,
                 tokens_used=run.tokens_used,

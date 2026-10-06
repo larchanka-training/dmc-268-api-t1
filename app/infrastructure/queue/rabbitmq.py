@@ -38,6 +38,7 @@ def to_wire_message(job: ReviewJob) -> dict[str, Any]:
         "review_run_id": str(job.review_run_id),
         "event_type": job.event_type,
         "action": job.action,
+        "installation_id": job.installation_id,
         "repository": {
             "id": job.repository_provider_id,
             "full_name": job.repository_full_name,
@@ -57,6 +58,7 @@ def from_wire_message(data: bytes) -> ReviewJob:
         review_run_id=UUID(message["review_run_id"]),
         event_type=message["event_type"],
         action=message["action"],
+        installation_id=message["installation_id"],
         repository_provider_id=message["repository"]["id"],
         repository_full_name=message["repository"]["full_name"],
         pull_request_number=message["pull_request"]["number"],

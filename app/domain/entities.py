@@ -1,9 +1,12 @@
-"""Записи, которые живут дольше запроса.
+"""Доменные записи: хранимые и транзиентные структуры запроса.
 
-Замороженные dataclass'ы без единого фреймворка: собираются из литералов,
-сравниваются по значению и тестируются без базы. Время и идентификаторы
-приходят аргументами, а не читаются из часов или генератора, поэтому тест
-проверяет точный timestamp, а не диапазон.
+Одни записи живут дольше запроса и попадают в базу (репозиторий, запрос на
+изменение, прогон ревью, находка), другие транзиентны — hunk диффа, событие
+вебхука, разобранный файл диффа. Все они — замороженные dataclass'ы без
+единого фреймворка: собираются из литералов, сравниваются по значению и
+тестируются без базы. Время и идентификаторы приходят аргументами, а не
+читаются из часов или генератора, поэтому тест проверяет точный timestamp,
+а не диапазон.
 """
 
 from dataclasses import dataclass, field
@@ -147,13 +150,16 @@ class ReviewJob:
     Не хранится: живёт ровно между `JobQueue.enqueue` и обработкой воркером.
     `id` — идентификатор сообщения, новый на каждую постановку (§4.2
     SYSTEM_DESIGN.md); прогон указывает `review_run_id`. Так две постановки
-    одного прогона различимы в DLQ и в логах.
+    одного прогона различимы в DLQ и в логах. `installation_id` — инсталляция
+    провайдера для повторного получения диффа воркером (разбор диффа — у
+    воркера, дифф в сообщении не возится).
     """
 
     id: UUID
     review_run_id: UUID
     event_type: str
     action: str
+    installation_id: int
     repository_provider_id: str
     repository_full_name: str
     pull_request_number: int
@@ -172,3 +178,47 @@ class Hunk:
     new_count: int = 0
     changed_new_lines: frozenset[int] = field(default_factory=frozenset)
     changed_old_lines: frozenset[int] = field(default_factory=frozenset)
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookEvent:
+    """Событие вебхука, запускающее ревью.
+
+    Базового коммита в событии нет: `base.sha` из payload'а может быть
+    устаревшим, поэтому базовый коммит всегда берётся из свежих метаданных
+    PR через `fetch_pr_metadata`. Провайдер один — GitHub, но поля уже
+    нейтральны к нему. `action` — исходное действие GitHub (`opened`,
+    `synchronize`): только эти два проходят через `extract_github_event`,
+    и оно же переезжает в `ReviewJob.action` без преобразований.
+    """
+
+    action: str
+    installation_id: int
+    repo_full_name: str
+    repo_provider_id: str
+    pr_number: int
+    head_sha: str
+    source_branch: str
+    target_branch: str
+    title: str
+    author: str
+
+
+@dataclass(frozen=True, slots=True)
+class PRMetadata:
+    """Свежие метаданные запроса на изменения, достанные через VCS-шлюз.
+
+    Транзиентна, как и разобранный дифф: воркер достаёт её заново. Базовый
+    коммит — только отсюда, а не из payload'а вебхука, где он успевает
+    устареть. Состояние уже переведено адаптером в общий enum; «открыт»,
+    «закрыт» и «слит» — всё, что знает о нём домен.
+    """
+
+    number: int
+    head_sha: str
+    base_sha: str
+    title: str
+    author: str
+    source_branch: str
+    target_branch: str
+    state: MergeRequestState
