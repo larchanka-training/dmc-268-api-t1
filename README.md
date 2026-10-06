@@ -152,3 +152,24 @@ uv run alembic heads               # должна быть ровно одна
 
 Сгенерированные миграции проходят ревью перед коммитом. Соглашения и рецепт с
 `ALTER TYPE` для расширения enum описаны в документе по архитектуре.
+
+## Регистрация репозитория
+
+Вебхуки репозиториев, которых нет в системе, сервис игнорирует: регистрацию
+по вебхуку спека запрещает — её выполняет отдельная операция с авторизацией.
+До появления такой ручки (тикет
+[#41](https://github.com/larchanka-training/dmc-268-api-t1/issues/41))
+репозиторий вносится вручную:
+
+```bash
+psql "$DATABASE_URL" -c "
+  INSERT INTO repositories (id, provider, provider_id, full_name,
+                            default_branch, auto_review_enabled)
+  VALUES (gen_random_uuid(), 'github', '<числовой id репозитория>',
+          '<owner>/<имя>', '<ветка по умолчанию>', true);"
+```
+
+Числовой `id` и `full_name` репозитория — из API хостинга (`GET /repos/{owner}/{repo}`).
+Повторная вставка того же `(provider, provider_id)` упадёт на уникальном
+индексе `uq_repositories_provider_id` — повторное внесение невозможно по
+конструкции.
