@@ -5,12 +5,10 @@
 адаптерными тестами. Проверки перед коммитом каждого шага: `uv run ruff
 check .`, `uv run lint-imports`, `uv run pytest`.
 
-## 1. Спайк зависимостей и база ветки
+## 1. Спайк зависимостей
 
-- [ ] 1.1 Перебазировать ветку `feat/tree-sitter` на
-      `feat/architecture_and_vcs_context_engine` (база PR #37) и выполнить
-      `uv sync --all-extras`; проверить: `git log --oneline -3` показывает
-      коммиты #37, тесты ветки зелёные (`uv run pytest`).
+- [ ] 1.1 `uv sync --all-extras`; проверить: тесты ветки зелёные
+      (`uv run pytest`).
 - [ ] 1.2 Спайк tree-sitter: `uv add tree-sitter tree-sitter-python`,
       зафиксировать версии в `pyproject.toml` с комментарием о колёсах cp314;
       проверить: `uv run python -c "import tree_sitter, tree_sitter_python"`
@@ -25,15 +23,7 @@ check .`, `uv run lint-imports`, `uv run pytest`.
 - [ ] 2.1 Чистый тип `Definition` (вид, имя, сигнатура, путь, строка) в
       `app/domain/entities.py`; проверить: юнит-тест в
       `tests/domain/test_entities.py`.
-- [ ] 2.2 Чистая функция `extract_push_event(payload)` в
-      `app/domain/webhook.py`: `ref`, `after`, `default_branch`,
-      `installation_id`, репозиторий; мусорный payload даёт `None`;
-      проверить: юнит-тесты в `tests/domain/test_webhook.py` — основная
-      ветка, побочная ветка, нулевой `after`, битый payload.
-- [ ] 2.3 Чистая функция `should_reindex(commit_sha, indexed_sha)` —
-      решение коалесинга задачи переиндексации; проверить: юнит-тест в
-      `tests/domain/test_definitions_index.py` — равные sha и новые.
-- [ ] 2.4 Чистая функция `language_for_path(path)` — реестр
+- [ ] 2.2 Чистая функция `language_for_path(path)` — реестр
       «расширение → грамматика» в `app/domain/definitions_index.py`,
       неизвестное расширение даёт `None`; проверить: юнит-тест в
       `tests/domain/test_definitions_index.py`.
@@ -68,39 +58,36 @@ check .`, `uv run lint-imports`, `uv run pytest`.
 
 ## 5. Прикладной слой
 
-- [ ] 5.1 Use case `handle_push_event` в `app/application/use_cases/`:
-      подписанный push → `extract_push_event` → решение → постановка задачи
-      переиндексации или игнор; проверить: юнит-тесты use case на фейках —
-      матрица сценариев спеки webhook-intake.
-- [ ] 5.2 Use case `reindex_repository`: `should_reindex` → `fetch_tree`
+- [ ] 5.1 Use case `ensure_definitions_index`: ключ «репозиторий,
+      base_sha» → попадание: вернуть индекс без работы; промах: `fetch_tree`
       → лимиты (число файлов, размер, время) → `fetch_file` +
-      `DefinitionExtractor` → запись в `CacheStore` по ключу «репозиторий,
-      sha» и маркер; проверить: юнит-тесты сценария — полный индекс,
-      частичный при исчерпании лимитов, коалесинг, файл неизвестного языка.
-- [ ] 5.3 Доменная задача `ReindexJob` и её wire-формат в сообщении очереди
-      (`event_type: "push"`, без `review_run_id`); проверить: тест формата
-      в `tests/queue/test_wire_format.py` по образцу задач ревью.
+      `DefinitionExtractor` → запись в `CacheStore`; сбой довыборки или
+      парсинга — признак промаха наверх, не исключение; проверить:
+      юнит-тесты сценария на фейках — полный индекс, частичный при исчерпании
+      лимитов, файл неизвестного языка, повторный вызов не парсит, сбой не
+      роняет сценарий.
+- [ ] 5.2 Потребление в сборке контекста: контекст прогона включает словарь
+      сигнатур по ключу «репозиторий, base_sha», `tiers` дополняется
+      уровнем `ast`; промах — контекст собирается без словаря; проверить:
+      тесты сборки контекста — попадание, промах, лимит токенов на словарь.
 
-## 6. API и воркер
+## 6. Встраивание в конвейер ревью
 
-- [ ] 6.1 Гейт `X-GitHub-Event` в `app/api/webhooks.py` пропускает `push`
-      и передаёт payload в `handle_push_event`; контракт ответов
-      (202 accepted/ignored, 401, 501, 502) не меняется; проверить:
-      тесты в `tests/api/test_webhooks.py` по матрице сценариев спеки.
-- [ ] 6.2 Диспетчер воркера в `app/worker/` маршрутизирует по
-      `event_type`: задача `push` уходит в `reindex_repository`, задача
-      ревью — как раньше; коалесинг-задача подтверждается без работы;
-      проверить: тесты воркера (`tests/worker/`).
+- [ ] 6.1 `run_review` на шаге `BUILDING_CONTEXT` вызывает
+      `ensure_definitions_index` и передаёт индекс в сборку контекста; сбой
+      индексации не переводит прогон в failed (best-effort); проверить:
+      тесты пайплайна и воркера (`tests/application/`,
+      `tests/worker/`) — прогон с индексом, прогон при сбое индексации.
 
 ## 7. Документы и сквозные проверки
 
 - [ ] 7.1 `docs/SYSTEM_DESIGN.md`: правка принципа «контекст без клона»
       (индекс определений основной ветки разрешён, полный клон запрещён),
-      AST-уровень §5 — шов потребления индекса; проверить: дифф документа
+      AST-уровень §5 — потребитель индекса; проверить: дифф документа
       согласован с design.md (D1).
 - [ ] 7.2 `docs/BACKEND_ARCHITECTURE.md`: порт `DefinitionExtractor`,
       шов Strangler Fig для выноса парсинга; проверить: дифф документа.
 - [ ] 7.3 Сквозные проверки: `uv run ruff check .`, `uv run lint-imports`,
       `uv run mypy .`, `uv run pytest`, `uv run alembic heads` (одна
-      ревизия), `openspec validate --strict`; синхронизация дельт в
-      `openspec/specs/` при вливании PR #37 (см. design.md, D8).
+      ревизия), `openspec validate --strict`; синхронизация дельты
+      `definitions-index` в `openspec/specs/` при архивации change'а.
