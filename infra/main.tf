@@ -1,10 +1,20 @@
-# Ротация логов: без неё json-file растёт, пока не кончится диск сервера.
-# Три файла по 10 МБ на контейнер хватает, чтобы разобрать падение после деплоя.
 locals {
+  # Ротация логов: без неё json-file растёт, пока не кончится диск сервера.
+  # Три файла по 10 МБ на контейнер хватает, чтобы разобрать падение после деплоя.
   log_opts = {
     "max-size" = "10m"
     "max-file" = "3"
   }
+
+  # Окружение, без которого не загрузятся общие настройки (`load_settings`):
+  # его получают все три контейнера из образа приложения — migrate, api и
+  # worker. Одно описание вместо трёх копий, чтобы они не разъезжались.
+  app_env = [
+    "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
+    # %2F — закодированный дефолтный vhost "/": pika разбирает буквальный "//" как пустой vhost.
+    "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@dmc268-rabbitmq:5672/%2F",
+    "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
+  ]
 }
 
 resource "docker_network" "dmc268" {
@@ -167,12 +177,7 @@ resource "docker_container" "migrate" {
     name = docker_network.dmc268.name
   }
 
-  env = [
-    "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
-    # %2F — закодированный дефолтный vhost "/": pika разбирает буквальный "//" как пустой vhost.
-    "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@dmc268-rabbitmq:5672/%2F",
-    "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
-  ]
+  env = local.app_env
 
   # depends_on у docker-провайдера задаёт только порядок создания, но не ждёт
   # готовности. Прежняя версия ждала открытия TCP-порта — этого мало:
@@ -223,14 +228,11 @@ resource "docker_container" "api" {
     name = docker_network.dmc268.name
   }
 
-  env = [
-    "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
-    # %2F — закодированный дефолтный vhost "/": pika разбирает буквальный "//" как пустой vhost.
-    "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@dmc268-rabbitmq:5672/%2F",
-    "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
+  # Реквизиты GitHub App нужны только API: VCS-шлюз есть лишь у вебхуков.
+  env = concat(local.app_env, [
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
-  ]
+  ])
 
   ports {
     internal = 8000
@@ -251,4 +253,44 @@ resource "docker_container" "api" {
     retries      = 3
     start_period = "10s"
   }
+}
+
+# Воркер: тот же образ, что у API, другая команда. Портов нет: с остальным
+# стеком он говорит только через очередь и базу (`backend-delivery`).
+resource "docker_container" "worker" {
+  name    = "dmc268-worker"
+  image   = docker_image.api.image_id
+  restart = "unless-stopped"
+  command = ["python", "-m", "app.worker"]
+
+  # Те же основания, что у migrate: образ один.
+  read_only     = true
+  tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=64m" }
+  security_opts = ["no-new-privileges:true"]
+  init          = true
+  memory        = 512
+  memory_swap   = 512
+  log_driver    = "json-file"
+  log_opts      = local.log_opts
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  # Как у API: воркер пишет в ту же схему, поэтому стартует только после
+  # миграций. Готовности брокера depends_on не ждёт; если воркер поднялся
+  # раньше, он упадёт на подключении и рестарт поднимет его снова.
+  depends_on = [
+    docker_container.postgres,
+    docker_container.rabbitmq,
+    docker_container.migrate,
+  ]
+
+  networks_advanced {
+    name = docker_network.dmc268.name
+  }
+
+  # Секрет вебхука воркеру не нужен, но без него не загрузятся общие
+  # настройки; убрать его можно, когда настройки API и воркера разделятся.
+  env = local.app_env
 }
