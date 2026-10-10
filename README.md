@@ -173,3 +173,24 @@ psql "$DATABASE_URL" -c "
 Повторная вставка того же `(provider, provider_id)` упадёт на уникальном
 индексе `uq_repositories_provider_id` — повторное внесение невозможно по
 конструкции.
+
+## Диагностика VCS-шлюза
+
+Связность с реальным GitHub проверяется вручную: живого GitHub в CI нет, а
+пропущенный тест CI считает провалом. Скрипт гоняет продовый код
+`GitHubAppAuth` + `GitHubVcsGateway` против `api.github.com`: обменивает JWT
+на installation token, читает метаданные PR и забирает дифф. Секреты
+(ключ, токен) не печатает.
+
+```bash
+GITHUB_APP_ID=... uv run python scripts/vcs_smoke.py \
+  --repo <owner>/<name> --pr <номер> \
+  --installation-id <id> \
+  --key-file <путь к PEM-ключу GitHub App>
+```
+
+`installation_id` — из URL страницы установки App
+(`github.com/settings/installations/<id>`). У App должны быть права
+Pull requests: Read-only и Contents: Read-only, ключ можно передать и через
+`GITHUB_APP_PRIVATE_KEY` (переносы строк — как `\n`). Вся диагностика
+ошибок (401/403/404, недоступность) — в подсказках самого скрипта.
