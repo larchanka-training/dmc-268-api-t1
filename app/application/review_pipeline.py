@@ -1,6 +1,7 @@
 """Оркестрация одного прогона ревью: queued → ... → completed | failed.
 
-Use case уровня application: знает порты (`UnitOfWork`, `LlmGateway`) и
+Use case уровня application: знает порты (`UnitOfWork`, `LlmGateway`,
+`VcsGateway` и порты сборки контекста) и
 чистые функции домена (`advance`), не знает ни одного адаптера. Каждый
 переход — свой вход в `with uow:` и свой `commit`, поэтому прогресс,
 записанный до сбоя, не откатывается вместе с сбойным шагом: если воркер
@@ -14,9 +15,13 @@ from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
-from app.application.context_assembly import assemble_context_stub, stub_hunks
+from app.application.context_assembly import ContextLimits
 from app.application.ports import UnitOfWork
+from app.application.ports.cache_store import CacheStore
+from app.application.ports.definition_extractor import DefinitionExtractor
 from app.application.ports.llm_gateway import LlmGateway
+from app.application.ports.vcs_gateway import VcsGateway
+from app.application.use_cases.build_review_context import build_review_context
 from app.domain.entities import Finding, ReviewJob, ReviewRun
 from app.domain.enums import TERMINAL_STATUSES, ReviewRunStatus
 from app.domain.lifecycle import advance
@@ -62,6 +67,10 @@ def run_review(
     *,
     uow: UnitOfWork,
     llm_gateway: LlmGateway,
+    vcs_gateway: VcsGateway,
+    definition_extractor: DefinitionExtractor,
+    cache_store: CacheStore,
+    context_limits: ContextLimits,
     now: Callable[[], datetime],
     monotonic: Callable[[], float],
     new_id: Callable[[], UUID],
@@ -75,6 +84,8 @@ def run_review(
 
     Сбой любого шага переводит прогон в `failed` и **пробрасывается**: воркер
     отклоняет сообщение, и оно попадает в DLQ для разбора (`job-queue`).
+    Сбои правил и AST-окружения шагом не считаются — их гасит сборка
+    контекста, деградируя пакет (`context-assembly`).
     """
     with uow:
         run = uow.review_runs.get(job.review_run_id)
@@ -94,7 +105,17 @@ def run_review(
     try:
         run = _transition(uow, run, ReviewRunStatus.BUILDING_CONTEXT, now())
 
-        context = assemble_context_stub(job, review_run_id=run.id, now=now(), new_id=new_id)
+        assembled = build_review_context(
+            job,
+            vcs=vcs_gateway,
+            extractor=definition_extractor,
+            cache=cache_store,
+            limits=context_limits,
+            review_run_id=run.id,
+            now=now(),
+            new_id=new_id,
+        )
+        context = assembled.payload
         with uow:
             uow.context_payloads.add(context)
             uow.commit()
@@ -102,7 +123,6 @@ def run_review(
         run = _transition(uow, run, ReviewRunStatus.ANALYSING, now())
 
         result = llm_gateway.review(context)
-        hunks = stub_hunks()
         with uow:
             for item in result.findings:
                 moment = now()
@@ -120,7 +140,7 @@ def run_review(
                 )
                 # Отклонённая привязка учтена в прогоне и не прерывает
                 # остальные находки.
-                uow.findings.add_validated(finding, hunks, moment)
+                uow.findings.add_validated(finding, assembled.hunks, moment)
             uow.commit()
 
         run = _transition(uow, run, ReviewRunStatus.PUBLISHING, now())
