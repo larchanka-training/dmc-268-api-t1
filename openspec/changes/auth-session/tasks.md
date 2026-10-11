@@ -8,6 +8,7 @@
 
 - [ ] 2.1 Модели и миграция Alembic: `users`, `sessions`; `downgrade` удаляет обе; `alembic heads` — одна ревизия
 - [ ] 2.2 Репозитории пользователей и сессий на SQLAlchemy
+- [ ] 2.3 `docs/erd.md`: таблицы `users` и `sessions`, связь `sessions.user_id` → `users.id`, хэш вместо значения cookie
 
 ## 3. Домен и use cases
 
