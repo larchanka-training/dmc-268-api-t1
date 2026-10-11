@@ -1,8 +1,11 @@
 ## 1. Контракт
 
 - [ ] 1.1 `docs/openapi/openapi.yaml`: убрать `/auth/oauth/token`, `/auth/refresh`, `OAuthTokenRequest`, `AuthSession`, коды `AUTH_CODE_INVALID` и `AUTH_REFRESH_INVALID`; добавить `/auth/{provider}/login`, `/auth/{provider}/callback`, `/auth/me`, `/auth/logout`, cookie-схему безопасности, коды `UNAUTHENTICATED` и `ORIGIN_FORBIDDEN`
-- [ ] 1.2 `docs/pipeline/PIPELINE_SPEC.md` §9.1: заменить предложение на ссылку на спеку `user-auth`
+- [ ] 1.2 `docs/pipeline/PIPELINE_SPEC.md`: §9.1 — заменить предложение на ссылку на спеку `user-auth`; §9 — в закрытом списке кодов `ApiError` заменить `AUTH_CODE_INVALID` и `AUTH_REFRESH_INVALID` на `UNAUTHENTICATED` и `ORIGIN_FORBIDDEN`
 - [ ] 1.3 `openspec/config.yaml`: «JWT authorization» → сессия в httpOnly cookie
+- [ ] 1.4 `docs/BACKEND_ARCHITECTURE.md`: порт `OAuthProvider`, адаптеры GitHub и GitLab, зависимость `current_user`, проверка `Origin`
+- [ ] 1.5 `docs/SYSTEM_DESIGN.md`: вход пользователя через OAuth на бэкенде и сессия в cookie — рядом с GitHub App
+- [ ] 1.6 `README.md` и `.env.example`: новые переменные окружения
 
 ## 2. Данные
 
@@ -20,13 +23,16 @@
 
 - [ ] 4.1 GitHub: OAuth GitHub App, `GET /user`
 - [ ] 4.2 GitLab: OAuth-приложение, `GET /api/v4/user`
-- [ ] 4.3 Настройки: `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITLAB_OAUTH_CLIENT_ID`, `GITLAB_OAUTH_CLIENT_SECRET`, `PUBLIC_ORIGIN`; секреты — `SecretStr`, в логи не попадают
+- [ ] 4.3 Настройки: `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITLAB_OAUTH_CLIENT_ID`, `GITLAB_OAUTH_CLIENT_SECRET`, `GITLAB_BASE_URL`, `PUBLIC_ORIGIN`; секреты — `SecretStr`, в логи не попадают
+- [ ] 4.4 GitLab: scope `read_user`
 
 ## 5. API
 
 - [ ] 5.1 Роутер `/auth`: `login`, `callback`, `me`, `logout`
 - [ ] 5.2 Зависимость `current_user` на роутерах REST и SSE; `401` удаляет недействительную cookie
 - [ ] 5.3 Проверка `Origin` для изменяющих запросов с сессией; вебхуки вне её
+- [ ] 5.4 `redirect`: только относительный путь под `/app/`, проверка при начале входа и в callback
+- [ ] 5.5 Логи: ни `Cookie`, ни `Set-Cookie`, ни токен провайдера, ни `code`
 
 ## 6. Тесты
 
@@ -34,9 +40,13 @@
 - [ ] 6.2 Сессия: в базе только хэш, истёкшая — `401` и удаление cookie, выход прекращает доступ
 - [ ] 6.3 Ручки чтения без сессии — `401`; вебхуки работают без сессии
 - [ ] 6.4 `Origin`: чужой и отсутствующий — `403`, свой — проходит
-- [ ] 6.5 Токен провайдера не попадает в базу и логи
+- [ ] 6.5 Токен провайдера и cookie сессии не попадают в базу и логи
+- [ ] 6.6 `redirect`: глубокая ссылка возвращается, внешний адрес и `//host` — нет
+- [ ] 6.7 Существующие тесты REST (`test_repositories_api.py`, `test_reviews_api.py`, `test_pull_requests_api.py`): фикстура вошедшего пользователя
+- [ ] 6.8 `docs/testing/TEST_PLAN.md`: кейсы входа, сессии, `Origin` и `redirect`
 
 ## 7. Стенд
 
-- [ ] 7.1 Callback зарегистрирован у GitHub App и OAuth-приложения GitLab, секреты — в окружении стенда
-- [ ] 7.2 Вход через GitHub на стенде: cookie `session` поставлена, `/login` уводит в `/app/`
+- [ ] 7.1 Callback зарегистрирован у GitHub App и OAuth-приложения GitLab
+- [ ] 7.2 `infra/variables.tf` и `infra/main.tf`: новые переменные в окружение контейнера API; секреты — в GitHub Actions, как `GITHUB_APP_PRIVATE_KEY`
+- [ ] 7.3 Вход через GitHub на стенде: cookie `session` поставлена, `/login` уводит в `/app/`

@@ -54,11 +54,11 @@
 
 ### OAuth на бэкенде
 
-1. `GET /api/v1/auth/{provider}/login` генерирует `state`, кладёт его в cookie `oauth_state` (`HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=600`) и отвечает `302` на страницу авторизации провайдера.
+1. `GET /api/v1/auth/{provider}/login?redirect=…` генерирует `state`, кладёт его и проверенный `redirect` в cookie `oauth_state` (`HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=600`) и отвечает `302` на страницу авторизации провайдера.
 2. Провайдер возвращает на `GET /api/v1/auth/{provider}/callback?code=…&state=…`. `SameSite=Lax` пропускает `oauth_state` с этим переходом верхнего уровня.
 3. Бэкенд сверяет `state` с cookie, обменивает `code` на токен пользователя секретом приложения и одним запросом получает профиль: `GET /user` у GitHub, `GET /api/v4/user` у GitLab.
 4. Находит или создаёт пользователя по паре `provider` + `provider_user_id`, обновляет логин, имя и аватар.
-5. Создаёт сессию, ставит cookie `session`, удаляет `oauth_state` и отвечает `302` на `/app/`.
+5. Создаёт сессию, ставит cookie `session`, удаляет `oauth_state` и отвечает `302` на `redirect` или на `/app/`.
 
 ```mermaid
 sequenceDiagram
@@ -69,21 +69,27 @@ sequenceDiagram
     participant G as GitHub
     participant DB as PostgreSQL
 
-    U->>N: GET /login
+    U->>N: GET /app/reviews/42 (cookie session нет)
+    N-->>U: 302 /login?redirect=/app/reviews/42
+    U->>N: GET /login?redirect=/app/reviews/42
     N-->>U: статичная страница входа
-    U->>A: GET /api/v1/auth/github/login
-    A-->>U: 302 на github.com/login/oauth/authorize?state=…<br/>Set-Cookie: oauth_state
+    Note over U: скрипт дописывает redirect к ссылкам входа
+    U->>A: GET /api/v1/auth/github/login?redirect=/app/reviews/42
+    A->>A: redirect — путь под /app/, иначе /app/
+    A-->>U: 302 на github.com/login/oauth/authorize?state=…<br/>Set-Cookie: oauth_state (state, redirect)
     U->>G: вход и согласие
     G-->>U: 302 на /api/v1/auth/github/callback?code=…&state=…
     U->>A: callback + cookie oauth_state
-    A->>A: state из запроса = state из cookie
+    A->>A: state из запроса = state из cookie, redirect проверен снова
     A->>G: обмен code на токен пользователя (секрет приложения)
     G-->>A: токен пользователя
     A->>G: GET /user
     G-->>A: id, login, avatar
     Note over A: токен пользователя выброшен
     A->>DB: upsert users по (github, id)<br/>insert sessions (хэш cookie, срок)
-    A-->>U: 302 на /app/<br/>Set-Cookie: session, удалить oauth_state
+    A-->>U: 302 на /app/reviews/42<br/>Set-Cookie: session, удалить oauth_state
+    U->>N: GET /app/reviews/42 (cookie session есть)
+    N-->>U: HTML приложения
 ```
 
 Токен пользователя после шага 3 не сохраняется. Ревью продолжает работать через installation-токены GitHub App.
@@ -91,6 +97,23 @@ sequenceDiagram
 Ошибка на любом шаге — `302` на `/login?error=<код>`: `state_mismatch`, `denied` (пользователь отказал у провайдера), `provider_unavailable`. Сессия не создаётся.
 
 Для GitHub используется OAuth самого GitHub App (его `client_id` и `client_secret`), а не отдельное OAuth App: один реестр приложения, и пользователь видит одно приложение.
+
+### Возврат на исходную страницу
+
+nginx интерфейса уводит гостя с `/app/…` на `/login?redirect=<путь>`, страница входа дописывает `redirect` к ссылкам на `/api/v1/auth/{provider}/login`. Бэкенд принимает `redirect`, только если он начинается с `/app/` и не содержит `//`, `\` и схемы; иначе — `/app/`. Проверка — дважды: при начале входа и перед редиректом в callback, потому что cookie `oauth_state` приходит от клиента.
+
+### Провайдеры
+
+- **GitHub** — OAuth самого GitHub App: у него нет scope, приложение получает только профиль. Callback регистрируется в настройках приложения.
+- **GitLab** — OAuth-приложение со scope `read_user`. Адрес инстанса — настройка `GITLAB_BASE_URL`, по умолчанию `https://gitlab.com`.
+
+### Cookie по HTTP
+
+`Secure` браузер не принимает по HTTP, кроме `localhost`. Стенд без `PUBLIC_HOST` отдаётся по HTTP, и вход на нём работать не будет — это осознанно: сессия по открытому каналу не передаётся. Локальная разработка на `localhost` работает. Флага, отключающего `Secure`, нет.
+
+### Логи
+
+Значение cookie сессии равносильно паролю. Ни приложение, ни uvicorn не пишут заголовки `Cookie` и `Set-Cookie`; токен провайдера и `code` не попадают в сообщения об ошибках.
 
 ### Какие ручки требуют сессию
 
