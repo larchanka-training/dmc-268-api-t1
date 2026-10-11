@@ -87,7 +87,7 @@ variable "rabbitmq_port" {
 
 variable "github_app_id" {
   type        = string
-  description = "GitHub App id (GITHUB_APP_ID for the API container)."
+  description = "GitHub App id (GITHUB_APP_ID for the API and worker containers)."
   default     = ""
 }
 

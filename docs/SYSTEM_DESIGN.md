@@ -24,7 +24,9 @@ flowchart TB
         API["app/api · uvicorn app.main:app<br/>webhook intake · HMAC verify · validation<br/>rate limiting · idempotency · REST for the frontend"]
         WORKER["app/worker · python -m app.worker<br/>review consumer · stale-run sweep"]
         ORCH["Application use cases<br/>context assembly (pure function) · single LLM call<br/>validate_anchor · deduplicate · next_status"]
-        VCS["VcsGateway port · GitHub REST adapter<br/>diffs · metadata · comments · statuses<br/>GitHub App auth · backoff inside the adapter"]
+        PARSE["DefinitionExtractor port · tree-sitter adapter<br/>outline of changed files for the ast tier<br/>used by orchestrator code, never by the model"]
+        CACHE["CacheStore port · in-process TTL dict<br/>repo rules by (repo, base_sha)"]
+        VCS["VcsGateway port · GitHub REST adapter<br/>diffs · metadata · file contents · comments · statuses<br/>GitHub App auth · backoff inside the adapter"]
         LGW["LlmGateway port<br/>transport-only adapter to LLM Provider / LLM API<br/>prompt assembly is a pure function"]
         REPOS["Repository ports + UnitOfWork<br/>SQLAlchemy adapters"]
     end
@@ -32,7 +34,6 @@ flowchart TB
     %% Planned seams
     subgraph PLANNED["Planned seams (designed, not built)"]
         PAY["Payments / accounts<br/>plans · subscriptions · billing"]
-        TOOLS["Read-only tools<br/>code analysis (tree-sitter)<br/>used by orchestrator code, never by the model"]
     end
 
     %% Event flow
@@ -44,7 +45,9 @@ flowchart TB
     API -->|settings · history · usage| ORCH
 
     %% VCS
-    ORCH <-->|PR data / diffs| VCS
+    ORCH <-->|PR data / diffs / files| VCS
+    ORCH --> PARSE
+    ORCH <--> CACHE
     VCS -->|review comments / status| GHR
 
     %% LLM
@@ -58,7 +61,6 @@ flowchart TB
     %% Planned seams
     API -.-> PAY
     PAY -.->|subscription / payment| PP
-    ORCH -.-> TOOLS
 
     %% Styling
     classDef external fill:#f5f5f5,stroke:#555,color:#111;
@@ -68,8 +70,8 @@ flowchart TB
     classDef db fill:#f7eefc,stroke:#8a4db8,color:#111;
 
     class GH,GHR,PP,LLM,FE external;
-    class API,WORKER,ORCH,VCS,LGW,REPOS core;
-    class PAY,TOOLS planned;
+    class API,WORKER,ORCH,VCS,LGW,REPOS,PARSE,CACHE core;
+    class PAY planned;
     class MQ infra;
     class DB db;
 ```
@@ -89,11 +91,11 @@ flowchart TB
 - **RabbitMQ**: брокер сообщений; адаптер порта `JobQueue` с единственным методом `enqueue` построен (`RabbitMQJobQueue`: тело — только доменные данные, переиспользуемое соединение с publisher confirms, DLX/DLQ для отклонённых сообщений). Layout обменов — зона ответственности этого документа (см. 4.2).
 - **`app/worker` — консьюмер ревью (`python -m app.worker`)**: ходит минутами, ограничен латентностью модели; также выметает зависшие прогоны (`find_stale`, `last_progress_at`).
 - **Оркестрация — use cases слоя `application`**: одноходовый сценарий ревью — сборка контекста (чистая функция), один вызов LLM через `LlmGateway`, `validate_anchor` и `deduplicate`, публикация через `VcsGateway`; жизненный цикл прогона — `next_status`. Ретраи с exponential backoff живут в адаптерах. **Модель не получает инструментов и никогда не выбирает действий** — структурная защита от prompt injection (threat model в BACKEND_ARCHITECTURE.md).
-- **`VcsGateway` (порт; первый адаптер — GitHub REST)**: диффы (unified diff; каждый hunk несёт ±30 строк контекста вокруг изменения), метаданные, комментарии, статусы; аутентификация GitHub App с краткосрочными installation-токенами; довыборка содержимого файлов по `head_sha` для уровней `whole_file` и `ast` — деталь реализации адаптера, как payload'ы, синтаксис комментариев, auth и backoff.
+- **`VcsGateway` (порт; первый адаптер — GitHub REST)**: диффы (unified diff; сегодня hunk несёт 3 строки контекста, которые отдаёт GitHub, ±30 строк — запланированный уровень `surrounding`), метаданные, комментарии, статусы; аутентификация GitHub App с краткосрочными installation-токенами; содержимое файла на коммите — метод порта `fetch_file` (файлы диффа для уровня `ast` — по `head_sha`, `.review/rules.md` — по `base_sha`; лимиты применяет вызывающий). Payload'ы, синтаксис комментариев, auth и backoff — детали адаптера.
 - **`LlmGateway` (порт)**: транспортный адаптер к **LLM provider / LLM API** (self-hosted или hosted). Сборка промпта — чистая функция; адаптер только транспортирует. Выбор провайдера — конфигурация composition root; конкретный первый адаптер зафиксирован в BACKEND_ARCHITECTURE.md. Переход с self-hosted модели на hosted LLM API — в том числе решение по безопасности (крупнейший путь эксфильтрации), не только операционное.
 - **Данные и телеметрия**: не отдельный сервис. Стоимость прогона — колонки `model`, `tokens_used`, `duration_seconds`, `failure_reason` в `review_runs`; per-call аудит (вызовы LLM и инструментов) — будущий шов, его первый заказчик — биллинг по токенам.
 - **Payments / accounts**: сегодня спроектирована только таблица `accounts` — она придёт вместе со своим портом (регистрация репозитория с проверкой прав на него); тарифы, подписки, Stripe — запланированный шов. Приоритет платных тарифов — требование к обслуживанию очереди (раздел 4.2), код порта оно не затрагивает.
-- **Контекст без клона (принцип)**: репозиторий никогда не клонируется целиком и не хранится — Repository Indexer, Vector DB и Repository Storage исключены из дизайна. Весь контекст строится из данных PR через `VcsGateway`: дифф с ±30 строками контекста вокруг изменений, опционально полные тексты изменённых файлов и сигнатуры из файлов, на которые ссылаются импорты (уровень `ast`). Read-only инструменты остаются запланированным швом — только анализ кода (tree-sitter) над файлами, полученными через `VcsGateway`; используются кодом оркестратора, а не моделью.
+- **Контекст без клона (принцип)**: репозиторий никогда не клонируется целиком и не хранится — Repository Indexer, Vector DB и Repository Storage исключены из дизайна. Весь контекст строится из данных PR через `VcsGateway`: дифф, AST-окружение изменённых строк (уровень `ast`) и правила владельца из целевой ветки; запланированы ±30 строк вокруг изменений, полные тексты изменённых файлов и сигнатуры из файлов, на которые ссылаются импорты. Анализ кода (tree-sitter за портом `DefinitionExtractor`) идёт над файлами, полученными через `VcsGateway`, и используется кодом оркестратора, а не моделью.
 
 ## 3. Потоки данных
 
@@ -101,7 +103,7 @@ flowchart TB
 2. **Подлинность и идемпотентность**: проверяется HMAC-подпись доставки (построено, constant-time по сырому телу до разбора payload'а); повторная доставка того же коммита не создаёт второй активный прогон — частичный уникальный индекс схемы (построено). Порт `IdempotencyStore` — запланированный шов: займёт ключ через `INSERT ... ON CONFLICT DO NOTHING` и переиграет исход первой доставки, когда появится.
 3. **Очередь**: задача публикуется в RabbitMQ через `JobQueue.enqueue`.
 4. **Консюмер**: `app/worker` вычитывает сообщение (job); устойчивая сущность — `ReviewRun` (переименована из `ReviewJob`, чтобы строка БД не делила имя с сообщением очереди).
-5. **Сбор контекста**: use case иерархически собирает контекст (раздел 5) и сохраняет показанное модели в `context_payloads` — с редакцией секретов до вставки.
+5. **Сбор контекста**: use case иерархически собирает контекст (раздел 5) и сохраняет показанное модели в `context_payloads`; редакция секретов до вставки — запланирована (задача #28).
 6. **Генерация**: один вызов LLM через `LlmGateway`; модель возвращает структурированные findings, а не прозу.
 7. **Валидация**: `validate_anchor` отбрасывает замечания вне диффа (отклонения считаются на прогоне), `deduplicate` убирает повторы; переходы статуса — через `next_status`.
 8. **Публикация**: `VcsGateway` публикует Review Comments и статусы; каждый опубликованный комментарий фиксируется в `published_comments`.
@@ -152,19 +154,20 @@ JSON-сообщение; тело несёт только доменные да�
 ### 4.3 Стратегия кэширования
 
 - **CacheStore**: best-effort key/value с TTL; сначала in-process словарь — корректен, пока процесс один, Redis-адаптер появляется вместе со второй репликой. Промах — не ошибка. Семантический кэш LLM-запросов не планируется: ключ точный.
-- **Кэш файлов**: диффы и содержимое файлов, полученные через `VcsGateway`, кэшируются в CacheStore по неизменяемым ключам (репозиторий, путь, sha) — содержимое по sha не меняется; промах — не ошибка.
+- **Кэш правил (построено)**: результат загрузки `.review/rules.md` — в `InMemoryCacheStore` по ключу `repo-rules:v1:{репозиторий}:{base_sha}`; сбой VCS не кэшируется.
+- **Кэш файлов (запланировано, по измерениям)**: диффы и содержимое файлов, полученные через `VcsGateway`, — в CacheStore по неизменяемым ключам (репозиторий, путь, sha); содержимое по sha не меняется, промах — не ошибка.
 
 ## 5. Концепция сборщика контекста (Context Assembly)
 
-Сборка контекста и промпта — чистая функция (адаптер `LlmGateway` только транспортирует). Репозиторий не клонируется и не хранится: каждый уровень собирается из данных PR и содержимого файлов по `head_sha` (правила — по `base_sha`), полученных через `VcsGateway`. Уровни записываются в `context_payloads.tiers` (`diff`, `surrounding`, `whole_file`, `ast`). Для соблюдения лимитов токенов данные передаются иерархически:
+Сборка контекста и промпта — чистая функция (адаптер `LlmGateway` только транспортирует). Репозиторий не клонируется и не хранится: каждый уровень собирается из данных PR и содержимого файлов по `head_sha` (правила — по `base_sha`), полученных через `VcsGateway`. Уровни записываются в `context_payloads.tiers` (`diff`, `surrounding`, `whole_file`, `ast`); сегодня пишутся `diff` и, при наличии AST-блоков, `ast`. Для соблюдения лимитов токенов данные передаются иерархически:
 
 - **Diff (уровень изменений)**
     - **Данные:** стандартный unified diff (+ добавленные, − удалённые строки).
     - **Цель:** понимание того, какие конкретно строки модифицированы в PR.
-- **Surrounding (окружающий код)**
+- **Surrounding (окружающий код) — запланировано**
     - **Данные:** ровно ±30 строк вокруг каждого изменённого блока — контекстные строки unified diff'а, который возвращает `VcsGateway` (довыборка содержимого файла по `head_sha` — внутри адаптера); перекрывающиеся окна склеиваются чистой функцией сборки.
     - **Цель:** оценка логики изменения внутри конкретной функции (не нарушен ли цикл, обработка ошибок).
-- **Whole File (уровень файла)**
+- **Whole File (уровень файла) — запланировано**
     - **Данные:** полный текст модифицируемого файла, полученный через `VcsGateway` по `head_sha` той же довыборкой (добавляется, если позволяет лимит окна контекста).
     - **Цель:** проверка импортов, глобальных констант и соответствия код-стайлу файла.
 - **AST / Imports (архитектурный уровень)**
@@ -189,4 +192,4 @@ AST-уровень — первый кандидат на вынос из мон
 
 **GitHub PR → Webhook (HMAC) → `app/api` → `JobQueue` / RabbitMQ → `app/worker` → Context Assembly → один вызов LLM → validate / dedup → `VcsGateway` → GitHub Review**
 
-Построено: webhook intake с проверкой HMAC, постановка задачи в очередь (`JobQueue` → RabbitMQ), парсинг/фильтрация диффа чистыми функциями домена — на стороне воркера. Запланированные швы: `IdempotencyStore` (в живой цепочке его место — между `app/api` и очередью), Context Assembly, вызов LLM (`LlmGateway`), валидация/дедупликация и публикация через `VcsGateway`.
+Построено: webhook intake с проверкой HMAC, постановка задачи в очередь (`JobQueue` → RabbitMQ), парсинг/фильтрация диффа чистыми функциями домена — на стороне воркера, Context Assembly (дифф, AST-окружение, правила владельца под лимитом токенов), валидация привязок и дедупликация. Запланированные швы: `IdempotencyStore` (в живой цепочке его место — между `app/api` и очередью), реальный вызов LLM (`LlmGateway` пока заглушка) и публикация через `VcsGateway`.

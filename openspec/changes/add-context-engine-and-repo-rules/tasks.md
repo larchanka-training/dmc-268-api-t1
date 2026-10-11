@@ -87,4 +87,10 @@
       модель угроз), README — разрешение App **Contents: read**.
 - [x] 7.3 `uv run ruff check .`, `uv run lint-imports`, `uv run mypy .`,
       `uv run pytest`, `uv run alembic heads`, `openspec validate --strict`.
-      Синхронизация дельт в `openspec/specs/` и архивация — после мерджа.
+      Синхронизация дельт в `openspec/specs/` и архивация — после мерджа; при
+      синхронизации поправить Purpose `review-pipeline` (заготовки остаётся
+      только `LlmGateway`).
+- [x] 7.4 Воркеру — реквизиты GitHub App в `docker-compose.yml` и
+      `infra/main.tf`: без них `fetch_diff` переводит каждый прогон в `failed`.
+      Передача `TF_VAR_github_app_*` в `deploy.yml` — за DevOps (секретов в
+      репозитории нет).

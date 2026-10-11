@@ -38,7 +38,8 @@ app/domain/          entities, enums, and the rules, as pure functions
 порядок слоёв. Второй не даёт точке входа разрастись: `app.main` не может
 обращаться к `domain`, `application` или `infrastructure` напрямую, только
 через `app.api`. Третий полностью запрещает `sqlalchemy`, `fastapi`, `httpx`,
-`ollama`, `pika`, `alembic` и `psycopg` в `domain` и `application`.
+`ollama`, `pika`, `alembic`, `psycopg` и пакеты `tree_sitter*` в `domain` и
+`application`.
 
 ```
 $ lint-imports
@@ -144,7 +145,8 @@ python -m app.worker      review consumer: minutes, bound by model latency
 ack/nack и dead-letter настоящие. Обработчик сообщения — `run_review`
 (`app/application/review_pipeline.py`): разбирает `ReviewJob` из сообщения,
 проводит прогон через `queued → building_context → analysing → publishing →
-completed`/`failed`, используя заготовку контекста и `LlmGateway`.
+completed`/`failed`: контекст собирает `build_review_context` (дифф,
+AST-окружение, правила владельца), анализ — `LlmGateway` (пока заглушка).
 
 У них общие домен, репозитории и база данных, а общаются они через очередь, а
 не по HTTP. Это модульный монолит, а не набор сервисов.

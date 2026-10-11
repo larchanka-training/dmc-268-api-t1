@@ -228,7 +228,7 @@ resource "docker_container" "api" {
     name = docker_network.dmc268.name
   }
 
-  # Реквизиты GitHub App нужны только API: VCS-шлюз есть лишь у вебхуков.
+  # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера.
   env = concat(local.app_env, [
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
@@ -256,7 +256,8 @@ resource "docker_container" "api" {
 }
 
 # Воркер: тот же образ, что у API, другая команда. Портов нет: с остальным
-# стеком он говорит только через очередь и базу (`backend-delivery`).
+# стеком он говорит только через очередь и базу (`backend-delivery`), наружу —
+# исходящими запросами к GitHub API за диффом, правилами и файлами.
 resource "docker_container" "worker" {
   name    = "dmc268-worker"
   image   = docker_image.api.image_id
@@ -292,5 +293,10 @@ resource "docker_container" "worker" {
 
   # Секрет вебхука воркеру не нужен, но без него не загрузятся общие
   # настройки; убрать его можно, когда настройки API и воркера разделятся.
-  env = local.app_env
+  # Реквизиты App нужны: сборка контекста довыбирает дифф, `.review/rules.md`
+  # и изменённые файлы через VCS-шлюз.
+  env = concat(local.app_env, [
+    "GITHUB_APP_ID=${var.github_app_id}",
+    "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
+  ])
 }
