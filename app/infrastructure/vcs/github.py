@@ -15,6 +15,7 @@ HTML, GitHub сменил форму ответа).
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -23,12 +24,15 @@ from app.domain.enums import MergeRequestState
 from app.infrastructure.vcs.errors import (
     VcsAuthError,
     VcsError,
+    VcsNotFoundError,
     VcsUnavailableError,
 )
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 
 _DIFF_ACCEPT = "application/vnd.github.v3.diff"
 _JSON_ACCEPT = "application/vnd.github+json"
+# Содержимое файла телом ответа, без base64-обёртки JSON.
+_RAW_ACCEPT = "application/vnd.github.raw+json"
 
 
 def _is_retryable(status_code: int) -> bool:
@@ -98,6 +102,18 @@ class GitHubVcsGateway:
                 f" /repos/{repo_full_name}/pulls/{pr_number}: {error!r}"
             ) from error
 
+    def fetch_file(
+        self, repo_full_name: str, path: str, sha: str, installation_id: int
+    ) -> str | None:
+        # Путь приходит из диффа, то есть от автора PR: экранируем всё, кроме
+        # разделителя каталогов, чтобы `?`, `#` и пробелы не меняли запрос.
+        url = f"/repos/{repo_full_name}/contents/{quote(path, safe='/')}?ref={quote(sha)}"
+        try:
+            response = self._get(url, installation_id, _RAW_ACCEPT)
+        except VcsNotFoundError:
+            return None
+        return response.text
+
     def _get(self, url: str, installation_id: int, accept: str) -> httpx.Response:
         """GET с backoff: 429/5xx повторяются; 401 один раз сбрасывает кэш
         installation token и берёт новый (токен мог быть отозван до истечения);
@@ -120,6 +136,8 @@ class GitHubVcsGateway:
                 continue
             if response.status_code == 401:
                 raise VcsAuthError(f"GitHub API отклонил токен на GET {url}")
+            if response.status_code == 404:
+                raise VcsNotFoundError(f"GitHub API: HTTP 404 на GET {url}")
             attempt += 1
             if not _is_retryable(response.status_code):
                 raise VcsError(f"GitHub API: HTTP {response.status_code} на GET {url}")

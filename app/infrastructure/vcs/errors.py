@@ -8,7 +8,7 @@
 
 from app.domain.vcs_errors import VcsError
 
-__all__ = ["VcsAuthError", "VcsError", "VcsUnavailableError"]
+__all__ = ["VcsAuthError", "VcsError", "VcsNotFoundError", "VcsUnavailableError"]
 
 
 class VcsUnavailableError(VcsError):
@@ -19,3 +19,9 @@ class VcsUnavailableError(VcsError):
 class VcsAuthError(VcsError):
     """Ошибка аутентификации: не удалось получить installation token
     или выданный токен отклонён GitHub'ом."""
+
+
+class VcsNotFoundError(VcsError):
+    """GitHub ответил 404. Для диффа и метаданных — сбой, для `fetch_file`
+    — штатный исход «файла на коммите нет», который адаптер переводит в
+    `None`."""

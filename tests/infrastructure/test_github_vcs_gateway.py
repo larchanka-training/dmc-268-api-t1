@@ -395,3 +395,76 @@ def test_second_401_after_refresh_raises_vcs_auth_error(
     pr_requests = [r for r in seen if not r.url.path.startswith("/app/installations/")]
     assert len(pr_requests) == 2
     assert sleeps == []
+
+
+def test_fetch_file_returns_raw_content_at_sha(rsa_key_pair: RsaKeyPair) -> None:
+    """Содержимое — тело ответа raw; коммит — параметром `ref`, а не веткой."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(
+        rsa_key_pair,
+        responding([200], httpx.Response(200, text="## Rule\n"), seen),
+        [],
+    )
+
+    content = gateway.fetch_file("owner/repo", ".review/rules.md", "b" * 40, INSTALLATION_ID)
+
+    assert content == "## Rule\n"
+    (request,) = seen
+    assert request.url.path == "/repos/owner/repo/contents/.review/rules.md"
+    assert request.url.params["ref"] == "b" * 40
+    assert request.headers["Accept"] == "application/vnd.github.raw+json"
+    assert request.headers["Authorization"] == "Bearer ghs_test"
+
+
+def test_fetch_file_404_means_no_file(rsa_key_pair: RsaKeyPair) -> None:
+    """Отсутствие файла — штатный исход: `None`, без повторов и пауз."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(
+        rsa_key_pair, responding([404], httpx.Response(200, text=""), seen), sleeps
+    )
+
+    assert gateway.fetch_file("owner/repo", "missing.md", "b" * 40, INSTALLATION_ID) is None
+    assert len(seen) == 1
+    assert sleeps == []
+
+
+def test_fetch_file_escapes_path_from_the_diff(rsa_key_pair: RsaKeyPair) -> None:
+    """Путь пишет автор PR: `?` и `#` в имени файла не превращаются в запрос."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(
+        rsa_key_pair, responding([200], httpx.Response(200, text="x"), seen), []
+    )
+
+    gateway.fetch_file("owner/repo", "dir/a b?c#d.py", "b" * 40, INSTALLATION_ID)
+
+    (request,) = seen
+    assert request.url.raw_path.decode().startswith(
+        "/repos/owner/repo/contents/dir/a%20b%3Fc%23d.py?"
+    )
+    assert dict(request.url.params) == {"ref": "b" * 40}
+
+
+def test_fetch_file_5xx_is_retried_then_raises(rsa_key_pair: RsaKeyPair) -> None:
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(
+        rsa_key_pair, responding([503], httpx.Response(200, text=""), seen), sleeps
+    )
+
+    with pytest.raises(VcsUnavailableError):
+        gateway.fetch_file("owner/repo", "a.py", "b" * 40, INSTALLATION_ID)
+
+    assert len(seen) == 3
+    assert sleeps == [0.5, 1.0]
+
+
+def test_fetch_file_403_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """Нет разрешения Contents: read — сбой, а не «файла нет»."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(
+        rsa_key_pair, responding([403], httpx.Response(200, text=""), seen), []
+    )
+
+    with pytest.raises(VcsError):
+        gateway.fetch_file("owner/repo", "a.py", "b" * 40, INSTALLATION_ID)
