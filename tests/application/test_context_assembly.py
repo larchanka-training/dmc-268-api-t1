@@ -297,3 +297,25 @@ def test_empty_diff_gives_empty_but_valid_payload() -> None:
     assert payload.file_paths == ()
     assert payload.tiers == ("diff",)
     assert payload.body["diff"] == []
+
+
+def test_unused_rules_share_goes_to_the_diff() -> None:
+    """Без правил доля под них не отнимается у диффа."""
+    small_share = ContextLimits(2_000, 50, 32_768, 60, 20, 262_144)
+    large_share = ContextLimits(2_000, 1_500, 32_768, 60, 20, 262_144)
+    absent = RepoRules(status=RulesStatus.ABSENT)
+    diff = _big_diff(files=200)
+    shown_small = _assemble(diff=diff, rules=absent, asts=(), limits=small_share).hunks
+    shown_large = _assemble(diff=diff, rules=absent, asts=(), limits=large_share).hunks
+    assert len(shown_large) == len(shown_small)
+
+
+def test_rules_share_is_reserved_only_for_what_rules_need() -> None:
+    """Правило на один файл не резервирует всю долю."""
+    tiny = RepoRule("Tiny", ("app/f0.py",), ("x/**",), ("c",))
+    limits = ContextLimits(2_000, 1_500, 32_768, 60, 20, 262_144)
+    diff = _big_diff(files=200)
+    with_rule = _assemble(diff=diff, rules=RepoRules(RulesStatus.LOADED, (tiny,)), asts=(), limits=limits)
+    without = _assemble(diff=diff, rules=RepoRules(RulesStatus.ABSENT), asts=(), limits=limits)
+    assert with_rule.payload.body["rules"]["items"]
+    assert len(without.hunks) - len(with_rule.hunks) <= 1

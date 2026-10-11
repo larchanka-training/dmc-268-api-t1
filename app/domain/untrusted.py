@@ -49,7 +49,7 @@ def boundary(text: str) -> str:
 def fence(kind: str, text: str) -> str:
     """Обезвредить текст и поместить в блок недоверенных данных.
 
-    `kind` задаёт наш код (`diff`, `signature`, `import`, `rule_check`), а
+    `kind` задаёт наш код (`diff`, `scopes`, `imports`, `rule_check`), а
     не репозиторий, поэтому в разметку попадает как есть.
     """
     clean = sanitize(text)

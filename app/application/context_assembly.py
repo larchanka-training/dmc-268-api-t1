@@ -8,8 +8,9 @@
 
 Жёсткий лимит (design D5). Бюджет — `max_tokens × 4` байт сериализованного
 тела; каркас оплачивается заранее, каждый элемент массива — своей длиной.
-Порядок: доля правил резервируется первой, затем hunk'и всех файлов в
-порядке диффа, затем правила — уже по файлам, чей дифф вошёл, — затем
+Порядок: под правила резервируется то, что им нужно на файлах диффа (не
+больше их доли), затем hunk'и всех файлов в порядке диффа, затем правила —
+уже по файлам, чей дифф вошёл, — затем
 AST: сначала охватывающие определения всех файлов, потом импорты. Элемент,
 не поместившийся целиком, не обрезается, а перечисляется в `omitted`;
 под этот перечень заранее отложен резерв, остаток перечня считает
@@ -131,7 +132,12 @@ def assemble_context(
     limit_bytes = limits.max_tokens * BYTES_PER_TOKEN
     reserve = min(limit_bytes // 10, _OMITTED_RESERVE_MAX_BYTES)
     budget = Budget(limit_bytes - json_size(body) - reserve)
-    rules_share = budget.split(limits.rules_max_tokens * BYTES_PER_TOKEN)
+    # Правила резервируют не всю свою долю, а сколько им нужно на всех
+    # файлах диффа: без правил дифф получает весь бюджет. После диффа правила
+    # привязываются к вошедшим файлам — подмножеству, — и в резерв укладываются.
+    candidate_paths = tuple(dict.fromkeys(h.file_path for f in reviewable for h in f.hunks))
+    wanted = sum(Budget.cost(item) for item in _rule_items(rules, candidate_paths))
+    rules_share = budget.split(min(limits.rules_max_tokens * BYTES_PER_TOKEN, wanted))
 
     shown: list[Hunk] = []
     for parsed in reviewable:
@@ -144,20 +150,12 @@ def assemble_context(
                 omitted.append(_omission(parsed.file_path, "hunk", "budget", line=hunk.new_start))
     file_paths = tuple(dict.fromkeys(h.file_path for h in shown))
 
-    for rule, rule_files in applicable_rules(rules.rules, file_paths):
-        item = {
-            "name": sanitize(rule.name),
-            "files": [sanitize(p) for p in rule_files],
-            "checks": [fence("rule_check", check) for check in rule.checks],
-        }
+    for item in _rule_items(rules, file_paths):
+        section = "rejected" if "reason" in item else "items"
         if rules_share.take(item):
-            body["rules"]["items"].append(item)
-        else:
-            omitted.append(_omission(RULES_PATH, "rule", "budget", name=sanitize(rule.name)))
-    for rejected in rules.rejected:
-        item = {"name": sanitize(rejected.name), "reason": rejected.reason}
-        if rules_share.take(item):
-            body["rules"]["rejected"].append(item)
+            body["rules"][section].append(item)
+        elif section == "items":
+            omitted.append(_omission(RULES_PATH, "rule", "budget", name=item["name"]))
         else:
             omitted.append(_omission(RULES_PATH, "rejected_rule", "budget"))
     budget.merge(rules_share)
@@ -195,6 +193,20 @@ def assemble_context(
         ),
         hunks=tuple(shown),
     )
+
+
+def _rule_items(rules: RepoRules, paths: Sequence[str]) -> list[dict[str, Any]]:
+    """Применимые к `paths` правила, затем отклонённые — элементы раздела `rules`."""
+    items: list[dict[str, Any]] = [
+        {
+            "name": sanitize(rule.name),
+            "files": [sanitize(p) for p in rule_files],
+            "checks": [fence("rule_check", check) for check in rule.checks],
+        }
+        for rule, rule_files in applicable_rules(rules.rules, paths)
+    ]
+    items += [{"name": sanitize(r.name), "reason": r.reason} for r in rules.rejected]
+    return items
 
 
 def _hunk_item(parsed: ParsedFile, hunk: Hunk) -> dict[str, Any]:

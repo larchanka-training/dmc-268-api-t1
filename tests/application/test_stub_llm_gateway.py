@@ -9,7 +9,7 @@ CONTEXT = ContextPayload(
     review_run_id=UUID(int=2),
     chunk_index=0,
     tiers=("diff",),
-    file_paths=("PLACEHOLDER.md",),
+    file_paths=("app/main.py",),
     token_count=0,
     content_sha256="0" * 64,
     body={},

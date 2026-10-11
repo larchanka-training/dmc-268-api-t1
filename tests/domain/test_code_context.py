@@ -86,3 +86,13 @@ def test_hunks_are_unioned() -> None:
         Hunk("a.py", 30, 1, 30, 1, changed_new_lines=frozenset({30})),
     ]
     assert touched_lines(hunks) == frozenset({1, 30})
+
+
+def test_large_file_is_selected_without_quadratic_blowup() -> None:
+    """Новый файл: 5000 добавленных строк и 2000 определений — доли секунды."""
+    definitions = tuple(
+        Definition(DefinitionKind.FUNCTION, f"f{i}", f"def f{i}()", 2 * i + 1, 2 * i + 2)
+        for i in range(2000)
+    )
+    touched = frozenset(range(1, 5001))
+    assert len(select_scopes(FileOutline(definitions=definitions), touched)) == 2000

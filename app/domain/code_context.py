@@ -6,6 +6,7 @@
 hunk'ами и контуром, поэтому тестируется на литералах без tree-sitter.
 """
 
+from bisect import bisect_left
 from collections.abc import Iterable
 from pathlib import PurePosixPath
 
@@ -64,10 +65,15 @@ def select_scopes(outline: FileOutline, touched: frozenset[int]) -> tuple[Defini
     структуры — её тип добавляется по имени родителя (ресивера). Результат —
     в порядке файла.
     """
+    lines = sorted(touched)
+
+    def covers(d: Definition) -> bool:
+        # Первая затронутая строка не раньше начала определения — внутри ли она.
+        at = bisect_left(lines, d.line)
+        return at < len(lines) and lines[at] <= d.end_line
+
     ordered = sorted(outline.definitions, key=lambda d: (d.line, -d.end_line))
-    selected = [
-        d for d in ordered if any(d.line <= line <= d.end_line for line in touched)
-    ]
+    selected = {d for d in ordered if covers(d)}
     parents = {d.parent for d in selected if d.parent is not None}
     return tuple(
         d
