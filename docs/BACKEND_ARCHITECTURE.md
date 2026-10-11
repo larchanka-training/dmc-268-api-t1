@@ -102,7 +102,9 @@ compile-time зависимости от слоя приложения.
 | `FindingRepo` | `SqlAlchemyFindingRepo` | замечания с привязкой к диффу |
 | `PublishedCommentRepo` | `SqlAlchemyPublishedCommentRepo` | опубликованные комментарии |
 | `UnitOfWork` | `SqlAlchemyUnitOfWork` | граница транзакции |
-| `VcsGateway` | `GitHubVcsGateway` | дифф и метаданные PR через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и exponential backoff внутри адаптера |
+| `VcsGateway` | `GitHubVcsGateway` | дифф, метаданные PR и содержимое файла на коммите (`fetch_file`, contents API; 404 — `None`) через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и exponential backoff внутри адаптера. Для `fetch_file` App нужно разрешение **Contents: read** |
+| `CacheStore` | `InMemoryCacheStore` | best-effort key/value с TTL в памяти процесса воркера, один экземпляр на composition root; промах не ошибка. Первый потребитель — правила `.review/rules.md` по ключу «репозиторий, base_sha». Redis — со второй репликой |
+| `DefinitionExtractor` | `TreeSitterDefinitionExtractor` | контур файла (определения с диапазонами строк, импорты) для AST-окружения изменённых строк; грамматики Python, TypeScript/TSX, JavaScript, Go. Какие определения показать модели, решает домен (`select_scopes`); tree-sitter запрещён во внутренних слоях контрактом import-linter |
 | `JobQueue` | `RabbitMQJobQueue` | задача ревью в RabbitMQ, один метод `enqueue`; тело — только доменные данные по §4.2 System Design, приоритет — свойство AMQP; очередь `review_jobs` с `x-max-priority` и DLX/DLQ-топологией, переиспользуемое соединение с publisher confirms внутри адаптера |
 | `LlmGateway` | `StubLlmGateway` **(заглушка)** | выполнить промпт анализа, вернуть структурированные замечания. Текущий адаптер — фиксированный ответ без похода к модели; реальный транспорт к Ollama меняет только адаптер, контракт порта (`review(context) -> LlmReviewResult`) уже готов его принять. |
 
@@ -123,7 +125,6 @@ compile-time зависимости от слоя приложения.
 |---|---|---|
 | `IdempotencyStore` | PostgreSQL | захватить ключ через `INSERT ... ON CONFLICT DO NOTHING`, воспроизвести результат победившего запроса. Появится вместе с первым эндпоинтом, который принимает повторы. |
 | `RateLimiter` | PostgreSQL | счётчик с фиксированным окном на субъект, `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. |
-| `CacheStore` | TTL-словарь в памяти процесса | key/value по принципу best effort. Промах никогда не считается ошибкой. |
 
 Таблицы `accounts`, `idempotency_records` и `rate_limit_counters`
 спроектированы вместе с этими портами и появятся вместе с ними.
@@ -294,6 +295,17 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 `validate_anchor` уже является одной из таких защит: замечание, выдуманное про
 файл вне диффа, не может быть сохранено.
 
+Сборка контекста (`app/application/context_assembly.py`) добавляет к этому три
+структурные меры. Каждый текст из репозитория — hunk'и, сигнатуры, импорты,
+проверки правил — лежит внутри блока `<<<untrusted kind=… id=…>>>`, граница
+которого — префикс sha256 от самого текста: закрыть блок досрочно можно,
+только вписав в код хэш этого же кода. Управляющие, bidi- и zero-width-символы
+до этого заменяются видимой записью `<U+XXXX>` — Trojan Source становится
+видимым. Правила владельца (`.review/rules.md`) читаются только с `base_sha`
+целевой ветки: автор PR не может переписать критерии собственного ревью, а из
+файла в контекст попадают только распознанные поля правил, без прозы.
+Фильтр по фразам не вводится — проигрывает перефразированию.
+
 **Секреты в `context_payloads`.** Эта таблица хранит исходный код как есть.
 Разработчик, закоммитивший API-ключ, получает его копию в нашей базе, и она
 там остаётся. Секреты надо вычищать до вставки, и
@@ -323,8 +335,11 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 автоматически.
 
 **Исчерпание ресурсов.** Change request может быть сколь угодно большим.
-Жёсткие лимиты на количество файлов, размер диффа в байтах и длительность
-прогона должны быть в сборщике контекста.
+Сборщик контекста держит жёсткий лимит `context_max_tokens` (по умолчанию
+32 000): оценка токенов сериализованного пакета его никогда не превышает, не
+поместившееся перечисляется в `omitted`. Довыборка файлов для AST ограничена
+`ast_max_files` и `ast_max_file_bytes`, правила — `rules_max_bytes`. Лимита на
+длительность прогона пока нет.
 
 **Self-hosted модель это свойство безопасности.** Ollama в нашей собственной
 сети убирает главный путь утечки данных. Переход на hosted API в будущем был
