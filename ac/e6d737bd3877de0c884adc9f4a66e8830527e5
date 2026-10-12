@@ -1,0 +1,18 @@
+app/application/publish_review.py
+  h_ca021d20ed223d 8-12,16-22
+app/domain/review_comment.py
+  h_ca021d20ed223d 4-9
+app/infrastructure/vcs/github_review.py
+  h_ca021d20ed223d 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "ace6d737bd3877de0c884adc9f4a66e8830527e5",
+  "prompts": {},
+  "humans": {
+    "h_ca021d20ed223d": {
+      "author": "pnaumov <pnaumov@sberhealth.ru>"
+    }
+  }
+}
