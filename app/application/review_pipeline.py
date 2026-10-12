@@ -17,6 +17,8 @@ from uuid import UUID
 from app.application.context_assembly import assemble_context_stub, stub_hunks
 from app.application.ports import UnitOfWork
 from app.application.ports.llm_gateway import LlmGateway
+from app.application.ports.vcs_gateway import VcsGateway
+from app.application.publish_review import publish_review
 from app.domain.entities import Finding, ReviewJob, ReviewRun
 from app.domain.enums import TERMINAL_STATUSES, ReviewRunStatus
 from app.domain.lifecycle import advance
@@ -62,6 +64,7 @@ def run_review(
     *,
     uow: UnitOfWork,
     llm_gateway: LlmGateway,
+    vcs_gateway: VcsGateway,
     now: Callable[[], datetime],
     monotonic: Callable[[], float],
     new_id: Callable[[], UUID],
@@ -124,6 +127,16 @@ def run_review(
             uow.commit()
 
         run = _transition(uow, run, ReviewRunStatus.PUBLISHING, now())
+
+        publish_review(
+            job,
+            run,
+            result,
+            uow=uow,
+            vcs=vcs_gateway,
+            now=now(),
+            new_id=new_id,
+        )
 
         run = replace(
             run,

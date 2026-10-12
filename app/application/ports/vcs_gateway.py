@@ -16,7 +16,14 @@
 
 from typing import Protocol
 
+from app.application.ports.vcs_review import (
+    InlineCommentDraft,
+    MergeGateCheck,
+    PullRequestReviewPublication,
+)
 from app.domain.entities import PRMetadata
+
+CHECK_RUN_NAME = "dmc-268-ai-review"
 
 
 class VcsGateway(Protocol):
@@ -35,4 +42,46 @@ class VcsGateway(Protocol):
         self, repo_full_name: str, pr_number: int, installation_id: int
     ) -> PRMetadata:
         """Свежие метаданные; базовый коммит берётся только отсюда."""
+        ...
+
+    def publish_pull_request_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        head_sha: str,
+        installation_id: int,
+        summary_body: str,
+        inline_comments: tuple[InlineCommentDraft, ...],
+    ) -> PullRequestReviewPublication:
+        """Один review на прогон: сводка и пакет инлайн-комментариев."""
+        ...
+
+    def reply_to_review_comment(
+        self,
+        repo_full_name: str,
+        installation_id: int,
+        provider_comment_id: str,
+        body: str,
+    ) -> str:
+        """Ответ в существующий review comment; возвращает id нового комментария."""
+        ...
+
+    def resolve_review_thread_for_comment(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        provider_comment_id: str,
+    ) -> None:
+        """Закрыть тред, в котором лежит корневой комментарий."""
+        ...
+
+    def set_merge_gate_check(
+        self,
+        repo_full_name: str,
+        head_sha: str,
+        installation_id: int,
+        check: MergeGateCheck,
+    ) -> None:
+        """Check run на head коммита — блокировка мерджа при conclusion=failure."""
         ...

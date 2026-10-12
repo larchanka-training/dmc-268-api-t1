@@ -141,6 +141,19 @@ class PublishedComment:
     created_at: datetime
     updated_at: datetime
     finding_id: UUID | None = None
+    thread_resolved: bool = False
+    in_reply_to_provider_comment_id: str | None = None
+    feedback_positive: int = 0
+    feedback_negative: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class OpenReviewThread:
+    """Незакрытый инлайн-тред на хостинге, оставшийся с прошлого прогона."""
+
+    finding: Finding
+    root_provider_comment_id: str
+    root_published_comment_id: UUID
 
 
 @dataclass(frozen=True, slots=True)

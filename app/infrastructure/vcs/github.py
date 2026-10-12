@@ -18,6 +18,11 @@ from typing import Any
 
 import httpx
 
+from app.application.ports.vcs_review import (
+    InlineCommentDraft,
+    MergeGateCheck,
+    PullRequestReviewPublication,
+)
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
 from app.infrastructure.vcs.errors import (
@@ -26,6 +31,7 @@ from app.infrastructure.vcs.errors import (
     VcsUnavailableError,
 )
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
+from app.infrastructure.vcs.github_review import GitHubReviewClient
 
 _DIFF_ACCEPT = "application/vnd.github.v3.diff"
 _JSON_ACCEPT = "application/vnd.github+json"
@@ -60,6 +66,7 @@ class GitHubVcsGateway:
         self._sleep = sleep
         self._max_attempts = max_attempts
         self._backoff_base_seconds = backoff_base_seconds
+        self._review = GitHubReviewClient(self)
 
     def fetch_diff(
         self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
@@ -97,6 +104,126 @@ class GitHubVcsGateway:
                 "GitHub API вернул неожиданное тело на GET"
                 f" /repos/{repo_full_name}/pulls/{pr_number}: {error!r}"
             ) from error
+
+    def publish_pull_request_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        head_sha: str,
+        installation_id: int,
+        summary_body: str,
+        inline_comments: tuple[InlineCommentDraft, ...],
+    ) -> PullRequestReviewPublication:
+        return self._review.publish_pull_request_review(
+            repo_full_name,
+            pr_number,
+            head_sha,
+            installation_id,
+            summary_body,
+            inline_comments,
+        )
+
+    def reply_to_review_comment(
+        self,
+        repo_full_name: str,
+        installation_id: int,
+        provider_comment_id: str,
+        body: str,
+    ) -> str:
+        return self._review.reply_to_review_comment(
+            repo_full_name, installation_id, provider_comment_id, body
+        )
+
+    def resolve_review_thread_for_comment(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        provider_comment_id: str,
+    ) -> None:
+        self._review.resolve_review_thread_for_comment(
+            repo_full_name, pr_number, installation_id, provider_comment_id
+        )
+
+    def set_merge_gate_check(
+        self,
+        repo_full_name: str,
+        head_sha: str,
+        installation_id: int,
+        check: MergeGateCheck,
+    ) -> None:
+        self._review.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
+
+    def _post_json(self, url: str, installation_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        response = self._request_json("POST", url, installation_id, json=payload)
+        try:
+            data: dict[str, Any] = response.json()
+        except ValueError as error:
+            raise VcsError(f"GitHub API вернул не-JSON на POST {url}") from error
+        if not isinstance(data, dict):
+            raise VcsError(f"GitHub API вернул не объект на POST {url}")
+        return data
+
+    def _post_graphql(
+        self, installation_id: int, query: str, variables: dict[str, Any]
+    ) -> dict[str, Any]:
+        response = self._request_json(
+            "/graphql",
+            installation_id,
+            json={"query": query, "variables": variables},
+        )
+        try:
+            body: dict[str, Any] = response.json()
+        except ValueError as error:
+            raise VcsError("GitHub GraphQL вернул не-JSON") from error
+        if body.get("errors"):
+            raise VcsError(f"GitHub GraphQL: {body['errors']}")
+        data = body.get("data")
+        if not isinstance(data, dict):
+            raise VcsError("GitHub GraphQL: нет поля data")
+        return data
+
+    def _request_json(
+        self,
+        method: str,
+        url: str,
+        installation_id: int,
+        *,
+        json: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        token = self._auth.installation_token(installation_id)
+        token_refreshed = False
+        attempt = 0
+        while True:
+            try:
+                response = self._client.request(
+                    method,
+                    url,
+                    headers={"Authorization": f"Bearer {token}", "Accept": _JSON_ACCEPT},
+                    json=json,
+                )
+            except httpx.RequestError as error:
+                raise VcsUnavailableError(
+                    f"GitHub API недоступен на {method} {url}: {error}"
+                ) from error
+            if not response.is_error:
+                return response
+            if response.status_code == 401 and not token_refreshed:
+                self._auth.invalidate(installation_id)
+                token = self._auth.installation_token(installation_id)
+                token_refreshed = True
+                continue
+            if response.status_code == 401:
+                raise VcsAuthError(f"GitHub API отклонил токен на {method} {url}")
+            attempt += 1
+            if not _is_retryable(response.status_code):
+                raise VcsError(f"GitHub API: HTTP {response.status_code} на {method} {url}")
+            if attempt >= self._max_attempts:
+                raise VcsUnavailableError(
+                    f"GitHub API отвечал 429/5xx {self._max_attempts} попытки подряд"
+                    f" на {method} {url}"
+                )
+            self._sleep(self._backoff_base_seconds * 2 ** (attempt - 1))
 
     def _get(self, url: str, installation_id: int, accept: str) -> httpx.Response:
         """GET с backoff: 429/5xx повторяются; 401 один раз сбрасывает кэш

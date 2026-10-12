@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.domain.entities import ContextPayload, DiffAnchor
-from app.domain.enums import FindingCategory, FindingSeverity
+from app.domain.enums import FindingCategory, FindingSeverity, ThreadFollowUpStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,10 +29,28 @@ class LlmFinding:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmReviewSummary:
+    problem: str
+    positives: tuple[str, ...]
+    effort: str
+
+
+@dataclass(frozen=True, slots=True)
+class LlmThreadFollowUp:
+    anchor: DiffAnchor
+    category: FindingCategory
+    status: ThreadFollowUpStatus
+    reply: str
+    resolve_thread: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class LlmReviewResult:
     model: str
     tokens_used: int
     findings: tuple[LlmFinding, ...]
+    summary: LlmReviewSummary | None = None
+    thread_follow_ups: tuple[LlmThreadFollowUp, ...] = ()
 
 
 class LlmGateway(Protocol):

@@ -19,6 +19,7 @@ import pika
 
 from app.application.ports import UnitOfWork
 from app.application.ports.llm_gateway import LlmGateway
+from app.application.ports.vcs_gateway import VcsGateway
 from app.application.review_pipeline import run_review
 from app.application.stale_sweep import sweep_stale_runs
 from app.config import Settings
@@ -124,6 +125,8 @@ class ReviewHandlerDeps(Protocol):
 
     def llm_gateway(self) -> LlmGateway: ...
 
+    def vcs_gateway(self) -> VcsGateway: ...
+
 
 def build_review_handler(deps: ReviewHandlerDeps) -> MessageHandler:
     def handle(body: bytes) -> None:
@@ -133,6 +136,7 @@ def build_review_handler(deps: ReviewHandlerDeps) -> MessageHandler:
                 job,
                 uow=deps.unit_of_work(),
                 llm_gateway=deps.llm_gateway(),
+                vcs_gateway=deps.vcs_gateway(),
                 now=lambda: datetime.now(UTC),
                 monotonic=time.monotonic,
                 new_id=new_id,

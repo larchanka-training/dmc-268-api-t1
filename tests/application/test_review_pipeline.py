@@ -10,16 +10,18 @@ import pytest
 
 from app.application.ports.llm_gateway import LlmFinding, LlmReviewResult
 from app.application.review_pipeline import run_review
-from app.domain.entities import DiffAnchor, ReviewJob, ReviewRun
+from app.domain.entities import DiffAnchor, MergeRequest, ReviewJob, ReviewRun
 from app.domain.enums import (
     DiffSide,
     FindingCategory,
     FindingSeverity,
+    MergeRequestState,
     ReviewRunStatus,
     TriggerSource,
 )
 
 from ..fakes.unit_of_work import FakeUnitOfWork
+from ..fakes.vcs_gateway import RecordingVcsGateway
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 
@@ -37,11 +39,30 @@ JOB = ReviewJob(
 )
 
 
+MR_ID = UUID(int=3)
+
+
 def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.QUEUED) -> None:
+    uow.merge_requests.add(
+        MergeRequest(
+            id=MR_ID,
+            repository_id=UUID(int=9),
+            number=JOB.pull_request_number,
+            title="t",
+            description="",
+            author="a",
+            source_branch="feat",
+            target_branch="develop",
+            head_sha=JOB.head_sha,
+            state=MergeRequestState.OPEN,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
     uow.review_runs.add(
         ReviewRun(
             id=JOB.review_run_id,
-            merge_request_id=UUID(int=3),
+            merge_request_id=MR_ID,
             head_sha=JOB.head_sha,
             status=status,
             trigger=TriggerSource.WEBHOOK,
@@ -88,6 +109,7 @@ def _run(uow: FakeUnitOfWork, gateway: object, **overrides: object) -> None:
     kwargs: dict[str, object] = {
         "uow": uow,
         "llm_gateway": gateway,
+        "vcs_gateway": RecordingVcsGateway(),
         "now": _Clock().now,
         "monotonic": _Monotonic(0.0, 12.5),
         "new_id": _new_id(),
