@@ -1,0 +1,22 @@
+app/application/publish_review.py
+  h_ca021d20ed223d 15-19,65,214,218,225-228,230-232
+app/infrastructure/vcs/github.py
+  h_ca021d20ed223d 171
+app/infrastructure/vcs/github_review.py
+  h_ca021d20ed223d 177-180
+tests/fakes/webhooks.py
+  h_ca021d20ed223d 15-19,104-153
+tests/infrastructure/test_github_review_publish.py
+  h_ca021d20ed223d 3,37-38,83-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "f0257a674493bc87611e8f6378e6946adeafd612",
+  "prompts": {},
+  "humans": {
+    "h_ca021d20ed223d": {
+      "author": "pnaumov <pnaumov@sberhealth.ru>"
+    }
+  }
+}
