@@ -1,0 +1,19 @@
+app/application/publish_review.py
+  s_a1a27ee850bde1::t_5fe46739f8252a 20,177-186,249
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "752f4116704dab3f9569047ac1d5b0ca0173568d",
+  "prompts": {},
+  "sessions": {
+    "s_a1a27ee850bde1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "57a2db80-0462-46ea-b17e-515fdb857d26",
+        "model": "composer-2.5"
+      },
+      "human_author": "pnaumov <pnaumov@sberhealth.ru>"
+    }
+  }
+}
