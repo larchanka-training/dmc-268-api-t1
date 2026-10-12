@@ -1,8 +1,9 @@
 """Сверка `thread_resolved` с состоянием треда на GitHub."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from app.application.ports.unit_of_work import UnitOfWork
@@ -44,7 +45,7 @@ def sync_open_threads_from_host(
 
 
 def apply_review_thread_webhook(
-    payload: dict[str, object],
+    payload: Mapping[str, Any],
     *,
     uow: UnitOfWork,
     now: Callable[[], datetime],
