@@ -210,15 +210,15 @@ def _publish_thread_follow_ups(
     if not follow_ups:
         return
     by_key: dict[tuple[str, DiffSide, int, FindingCategory], OpenReviewThread] = {}
-    for thread in open_threads:
-        anchor_line = _line_for_anchor(thread.finding)
+    for open_thread in open_threads:
+        anchor_line = _line_for_anchor(open_thread.finding)
         key = (
-            thread.finding.anchor.file_path,
-            thread.finding.anchor.side,
+            open_thread.finding.anchor.file_path,
+            open_thread.finding.anchor.side,
             anchor_line,
-            thread.finding.category,
+            open_thread.finding.category,
         )
-        by_key[key] = thread
+        by_key[key] = open_thread
 
     moment = now
     for item in follow_ups:
@@ -227,42 +227,44 @@ def _publish_thread_follow_ups(
         )
         if follow_up_line is None:
             continue
-        thread = by_key.get(
+        matched = by_key.get(
             (item.anchor.file_path, item.anchor.side, follow_up_line, item.category)
         )
-        if thread is None:
+        if matched is None:
             continue
-        body = format_thread_reply(item.status, item.reply, severity=thread.finding.severity)
+        body = format_thread_reply(item.status, item.reply, severity=matched.finding.severity)
         reply_id = vcs.reply_to_review_comment(
             job.repository_full_name,
             job.installation_id,
-            thread.root_provider_comment_id,
+            matched.root_provider_comment_id,
             body,
         )
-        resolve = item.resolve_thread and _may_resolve_thread(item.status, thread.finding.severity)
+        resolve = item.resolve_thread and _may_resolve_thread(
+            item.status, matched.finding.severity
+        )
         if resolve:
             vcs.resolve_review_thread_for_comment(
                 job.repository_full_name,
                 job.pull_request_number,
                 job.installation_id,
-                thread.root_provider_comment_id,
+                matched.root_provider_comment_id,
             )
         with uow:
             uow.published_comments.add(
                 PublishedComment(
                     id=new_id(),
                     review_run_id=run.id,
-                    finding_id=thread.finding.id,
+                    finding_id=matched.finding.id,
                     provider_comment_id=reply_id,
                     kind=CommentKind.THREAD_REPLY,
                     published_at=moment,
                     created_at=moment,
                     updated_at=moment,
-                    in_reply_to_provider_comment_id=thread.root_provider_comment_id,
+                    in_reply_to_provider_comment_id=matched.root_provider_comment_id,
                 )
             )
             if resolve:
-                root = uow.published_comments.get(thread.root_published_comment_id)
+                root = uow.published_comments.get(matched.root_published_comment_id)
                 if root is not None:
                     uow.published_comments.update(
                         replace(root, thread_resolved=True, updated_at=moment)
