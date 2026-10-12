@@ -12,6 +12,7 @@ from app.application.ports.vcs_review import (
 from app.domain.enums import DiffSide
 from app.infrastructure.vcs.errors import VcsError
 
+
 def _github_side(side: DiffSide) -> str:
     return "RIGHT" if side is DiffSide.NEW else "LEFT"
 

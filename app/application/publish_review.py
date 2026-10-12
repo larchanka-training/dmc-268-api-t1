@@ -5,11 +5,21 @@ from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
-from app.application.ports.llm_gateway import LlmReviewResult, LlmReviewSummary, LlmThreadFollowUp
+from app.application.ports.llm_gateway import (
+    LlmReviewResult,
+    LlmReviewSummary,
+    LlmThreadFollowUp,
+)
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import InlineCommentDraft, MergeGateCheck
-from app.domain.entities import Finding, OpenReviewThread, PublishedComment, ReviewJob, ReviewRun
+from app.domain.entities import (
+    Finding,
+    OpenReviewThread,
+    PublishedComment,
+    ReviewJob,
+    ReviewRun,
+)
 from app.domain.enums import (
     CommentKind,
     DiffSide,

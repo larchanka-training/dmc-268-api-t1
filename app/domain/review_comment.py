@@ -1,7 +1,12 @@
 """Текст комментариев, публикуемых на хостинг (шапка severity/category и ответы в тред)."""
 
 from app.domain.entities import DiffAnchor, Finding
-from app.domain.enums import DiffSide, FindingCategory, FindingSeverity, ThreadFollowUpStatus
+from app.domain.enums import (
+    DiffSide,
+    FindingCategory,
+    FindingSeverity,
+    ThreadFollowUpStatus,
+)
 
 _SEVERITY_LABEL: dict[FindingSeverity, str] = {
     FindingSeverity.CRITICAL: "🔴 Критично",
