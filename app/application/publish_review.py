@@ -12,7 +12,11 @@ from app.application.ports.llm_gateway import (
 )
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
-from app.application.ports.vcs_review import InlineCommentDraft, MergeGateCheck
+from app.application.ports.vcs_review import (
+    InlineCommentDraft,
+    MergeGateCheck,
+    PublishedInlineComment,
+)
 from app.domain.entities import (
     Finding,
     OpenReviewThread,
@@ -58,7 +62,7 @@ def _line_for_anchor(finding: Finding) -> int:
 
 
 def _match_published_to_finding(
-    finding: Finding, published: tuple
+    finding: Finding, published: tuple[PublishedInlineComment, ...]
 ) -> str | None:
     for item in published:
         if (
@@ -207,21 +211,25 @@ def _publish_thread_follow_ups(
         return
     by_key: dict[tuple[str, DiffSide, int, FindingCategory], OpenReviewThread] = {}
     for thread in open_threads:
-        line = _line_for_anchor(thread.finding)
+        anchor_line = _line_for_anchor(thread.finding)
         key = (
             thread.finding.anchor.file_path,
             thread.finding.anchor.side,
-            line,
+            anchor_line,
             thread.finding.category,
         )
         by_key[key] = thread
 
     moment = now
     for item in follow_ups:
-        line = item.anchor.new_line if item.anchor.side is DiffSide.NEW else item.anchor.old_line
-        if line is None:
+        follow_up_line = (
+            item.anchor.new_line if item.anchor.side is DiffSide.NEW else item.anchor.old_line
+        )
+        if follow_up_line is None:
             continue
-        thread = by_key.get((item.anchor.file_path, item.anchor.side, line, item.category))
+        thread = by_key.get(
+            (item.anchor.file_path, item.anchor.side, follow_up_line, item.category)
+        )
         if thread is None:
             continue
         body = format_thread_reply(item.status, item.reply, severity=thread.finding.severity)

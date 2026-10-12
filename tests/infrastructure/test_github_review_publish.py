@@ -1,5 +1,6 @@
 """Публикация review и check run через `GitHubVcsGateway`."""
 
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -33,7 +34,8 @@ def test_publish_pull_request_review_posts_comments(rsa_key_pair: RsaKeyPair) ->
             return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
         seen.append(request)
         if request.method == "POST" and request.url.path.endswith("/reviews"):
-            body: dict[str, Any] = request.json()  # type: ignore[assignment]
+            body = json.loads(request.content.decode())
+            assert isinstance(body, dict)
             assert body["event"] == "COMMENT"
             return httpx.Response(
                 200,
@@ -78,7 +80,9 @@ def test_set_merge_gate_check_posts_check_run(rsa_key_pair: RsaKeyPair) -> None:
         if request.url.path.startswith("/app/installations/"):
             return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
         if request.url.path.endswith("/check-runs"):
-            payloads.append(request.json())  # type: ignore[arg-type]
+            payload = json.loads(request.content.decode())
+            assert isinstance(payload, dict)
+            payloads.append(payload)
             return httpx.Response(201, json={"id": 1})
         return httpx.Response(404)
 

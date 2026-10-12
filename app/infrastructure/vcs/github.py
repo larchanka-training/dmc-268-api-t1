@@ -168,6 +168,7 @@ class GitHubVcsGateway:
         self, installation_id: int, query: str, variables: dict[str, Any]
     ) -> dict[str, Any]:
         response = self._request_json(
+            "POST",
             "/graphql",
             installation_id,
             json={"query": query, "variables": variables},

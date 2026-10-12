@@ -174,5 +174,8 @@ class GitHubReviewClient:
         for thread in threads:
             for node in thread.get("comments", {}).get("nodes", []):
                 if node.get("databaseId") == target:
-                    return thread["id"]
+                    thread_id = thread["id"]
+                    if not isinstance(thread_id, str):
+                        raise VcsError("GraphQL вернул thread id не-строкой")
+                    return thread_id
         raise VcsError(f"тред для комментария {provider_comment_id} не найден")
