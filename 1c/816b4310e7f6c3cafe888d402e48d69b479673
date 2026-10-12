@@ -1,0 +1,21 @@
+openspec/changes/feat-github-review-publication/tasks.md
+  s_a1a27ee850bde1::t_43fa45da1c1cf1 1-9
+tests/application/test_record_comment_feedback.py
+  s_a1a27ee850bde1::t_2a18ee2d5e9211 1-29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "1c816b4310e7f6c3cafe888d402e48d69b479673",
+  "prompts": {},
+  "sessions": {
+    "s_a1a27ee850bde1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "57a2db80-0462-46ea-b17e-515fdb857d26",
+        "model": "composer-2.5"
+      },
+      "human_author": "pnaumov <pnaumov@sberhealth.ru>"
+    }
+  }
+}
