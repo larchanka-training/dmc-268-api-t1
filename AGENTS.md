@@ -17,13 +17,16 @@
 - Зависимости ставим и обновляем **только через `uv`**: `uv sync --all-extras`. Ни `pip`, ни
   `poetry`, ни правка `requirements.txt`.
 - Python 3.14, версия зафиксирована в `.python-version` и в `requires-python`.
-- Проверки перед коммитом: `uv run ruff check .`, `uv run lint-imports`, `uv run pytest`.
+- Проверки перед коммитом: `uv run ruff check .`, `uv run lint-imports`, `uv run pytest`,
+  `npx @fission-ai/openspec@1.14.1 validate --all --strict`.
   Пропущенный тест приравнивается к упавшему — CI падает, если тест пропустили.
 - Схему базы данных меняет **только миграция Alembic**. Приложение не создаёт и не меняет
   объекты схемы ни при старте, ни во время работы. Ревизия должна быть одна:
   `uv run alembic heads`.
 - Поведение сервиса меняется **только через OpenSpec-change**. Каталог `openspec/specs/`
   руками не правится: сначала change, потом реализация, потом синхронизация спеки.
+  Change, у которого закрыты все задачи, архивируется (`openspec archive`) в том же PR,
+  до мерджа, — CI падает на незаархивированном.
 - Зависимости направлены внутрь: `app/domain` и `app/application` не знают про SQLAlchemy,
   FastAPI и прочих вендоров. Правило проверяет `uv run lint-imports`, а не ревью.
 - Работаем по git flow. Рабочая ветка отводится **от `develop`** и пул-реквестом мёржится
