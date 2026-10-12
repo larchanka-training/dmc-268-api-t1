@@ -19,8 +19,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute("COMMIT")
-    op.execute("ALTER TYPE comment_kind ADD VALUE IF NOT EXISTS 'thread_reply'")
+    with op.get_context().autocommit_block():
+        op.execute("ALTER TYPE comment_kind ADD VALUE IF NOT EXISTS 'thread_reply'")
     op.add_column(
         "published_comments",
         sa.Column("thread_resolved", sa.Boolean(), server_default="false", nullable=False),

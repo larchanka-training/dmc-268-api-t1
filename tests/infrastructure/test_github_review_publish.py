@@ -26,7 +26,7 @@ def make_gateway(rsa_key_pair: RsaKeyPair, handler: Callable[[httpx.Request], ht
     return GitHubVcsGateway(auth, client, sleep=lambda _: None)
 
 
-def test_publish_pull_request_review_posts_comments(rsa_key_pair: RsaKeyPair) -> None:
+def test_publish_pull_request_review_fetches_inline_ids(rsa_key_pair: RsaKeyPair) -> None:
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -39,18 +39,19 @@ def test_publish_pull_request_review_posts_comments(rsa_key_pair: RsaKeyPair) ->
             assert body["event"] == "COMMENT"
             return httpx.Response(
                 200,
-                json={
-                    "id": 9001,
-                    "body": body["body"],
-                    "comments": [
-                        {
-                            "id": 42,
-                            "path": "a.py",
-                            "line": 3,
-                            "side": "RIGHT",
-                        }
-                    ],
-                },
+                json={"id": 9001, "body": body["body"]},
+            )
+        if request.method == "GET" and "/reviews/9001/comments" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 42,
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                    }
+                ],
             )
         return httpx.Response(404)
 
@@ -70,7 +71,23 @@ def test_publish_pull_request_review_posts_comments(rsa_key_pair: RsaKeyPair) ->
 
     assert publication.summary_provider_comment_id == "9001"
     assert publication.inline_comments[0].provider_comment_id == "42"
-    assert any(r.url.path.endswith("/pulls/7/reviews") for r in seen)
+    assert any("/pulls/7/reviews/9001/comments" in r.url.path for r in seen)
+
+
+def test_reply_uses_pull_number_in_path(rsa_key_pair: RsaKeyPair) -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        paths.append(request.url.path)
+        if request.method == "POST" and "/pulls/7/comments/99/replies" in request.url.path:
+            return httpx.Response(200, json={"id": 100})
+        return httpx.Response(404)
+
+    gateway = make_gateway(rsa_key_pair, handler)
+    assert gateway.reply_to_review_comment("o/r", 7, INSTALLATION_ID, "99", "ответ") == "100"
+    assert any("/pulls/7/comments/99/replies" in p for p in paths)
 
 
 def test_set_merge_gate_check_posts_check_run(rsa_key_pair: RsaKeyPair) -> None:

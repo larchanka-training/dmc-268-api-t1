@@ -59,11 +59,22 @@ class VcsGateway(Protocol):
     def reply_to_review_comment(
         self,
         repo_full_name: str,
+        pr_number: int,
         installation_id: int,
         provider_comment_id: str,
         body: str,
     ) -> str:
         """Ответ в существующий review comment; возвращает id нового комментария."""
+        ...
+
+    def is_review_thread_resolved(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        provider_comment_id: str,
+    ) -> bool | None:
+        """`True`/`False` — состояние на хостинге; `None` — тред не найден."""
         ...
 
     def resolve_review_thread_for_comment(

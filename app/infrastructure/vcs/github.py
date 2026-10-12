@@ -126,12 +126,24 @@ class GitHubVcsGateway:
     def reply_to_review_comment(
         self,
         repo_full_name: str,
+        pr_number: int,
         installation_id: int,
         provider_comment_id: str,
         body: str,
     ) -> str:
         return self._review.reply_to_review_comment(
-            repo_full_name, installation_id, provider_comment_id, body
+            repo_full_name, pr_number, installation_id, provider_comment_id, body
+        )
+
+    def is_review_thread_resolved(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        provider_comment_id: str,
+    ) -> bool | None:
+        return self._review.is_review_thread_resolved(
+            repo_full_name, pr_number, installation_id, provider_comment_id
         )
 
     def resolve_review_thread_for_comment(
@@ -153,6 +165,16 @@ class GitHubVcsGateway:
         check: MergeGateCheck,
     ) -> None:
         self._review.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
+
+    def _get_json_list(self, url: str, installation_id: int) -> list[dict[str, Any]]:
+        response = self._request_json("GET", url, installation_id)
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise VcsError(f"GitHub API вернул не-JSON на GET {url}") from error
+        if not isinstance(data, list):
+            raise VcsError(f"GitHub API вернул не массив на GET {url}")
+        return [item for item in data if isinstance(item, dict)]
 
     def _post_json(self, url: str, installation_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         response = self._request_json("POST", url, installation_id, json=payload)

@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import get_container
+from app.application.sync_thread_resolution import apply_review_thread_webhook
 from app.application.use_cases.handle_webhook import (
     WebhookOutcome,
     handle_webhook_event,
@@ -58,6 +59,7 @@ _JOB_OUTCOMES = ("success", "duplicate", "conflict")
 # Тип события GitHub присылает заголовком; прогон создаёт ровно `pull_request`.
 EVENT_HEADER = "X-GitHub-Event"
 TRIGGERING_EVENT = "pull_request"
+REVIEW_THREAD_EVENT = "pull_request_review_thread"
 
 
 def _api_error(status_code: int, code: str, message: str) -> JSONResponse:
@@ -81,11 +83,7 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
     if not secret or signature is None or not verify_hmac(body, signature, secret):
         return _api_error(401, "WEBHOOK_SIGNATURE_INVALID", "invalid webhook signature")
 
-    # Гейт события стоит до разбора тела: подписанная доставка другого события
-    # с pull-request-совместимой формой (`pull_request_target`) не должна ни
-    # создавать записи, ни доходить до use case.
-    if request.headers.get(EVENT_HEADER) != TRIGGERING_EVENT:
-        return JSONResponse(status_code=202, content={"status": "ignored"})
+    event_type = request.headers.get(EVENT_HEADER)
 
     try:
         payload: Any = json.loads(body)
@@ -94,6 +92,21 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
         # поэтому это игнор, а не ошибка.
         return JSONResponse(status_code=202, content={"status": "ignored"})
     if not isinstance(payload, dict):
+        return JSONResponse(status_code=202, content={"status": "ignored"})
+
+    if event_type == REVIEW_THREAD_EVENT:
+        await run_in_threadpool(
+            apply_review_thread_webhook,
+            payload,
+            uow=container.unit_of_work(),
+            now=lambda: datetime.now(UTC),
+        )
+        return JSONResponse(status_code=202, content={"status": "acknowledged"})
+
+    # Гейт события стоит до разбора тела: подписанная доставка другого события
+    # с pull-request-совместимой формой (`pull_request_target`) не должна ни
+    # создавать записи, ни доходить до use case.
+    if event_type != TRIGGERING_EVENT:
         return JSONResponse(status_code=202, content={"status": "ignored"})
 
     outcome = await run_in_threadpool(

@@ -21,6 +21,38 @@ def _line_for_side(draft: InlineCommentDraft) -> int:
     return draft.line
 
 
+def _map_fetched_inline_comments(
+    drafts: tuple[InlineCommentDraft, ...],
+    raw_comments: list[dict[str, Any]],
+) -> tuple[PublishedInlineComment, ...]:
+    published: list[PublishedInlineComment] = []
+    for draft in drafts:
+        want_side = _github_side(draft.side)
+        want_line = _line_for_side(draft)
+        match = next(
+            (
+                raw
+                for raw in raw_comments
+                if raw.get("path") == draft.file_path
+                and int(raw.get("line", -1)) == want_line
+                and raw.get("side", "RIGHT") == want_side
+            ),
+            None,
+        )
+        if match is None:
+            continue
+        side = DiffSide.NEW if match.get("side", "RIGHT") == "RIGHT" else DiffSide.OLD
+        published.append(
+            PublishedInlineComment(
+                file_path=draft.file_path,
+                side=side,
+                line=want_line,
+                provider_comment_id=str(match["id"]),
+            )
+        )
+    return tuple(published)
+
+
 class GitHubReviewClient:
     """Методы публикации; вызываются из `GitHubVcsGateway`."""
 
@@ -60,37 +92,48 @@ class GitHubReviewClient:
         summary_id = None
         if response.get("body"):
             summary_id = str(response["id"])
-        published: list[PublishedInlineComment] = []
-        for raw in response.get("comments") or []:
-            path = raw["path"]
-            side = DiffSide.NEW if raw.get("side", "RIGHT") == "RIGHT" else DiffSide.OLD
-            line = int(raw["line"])
-            published.append(
-                PublishedInlineComment(
-                    file_path=path,
-                    side=side,
-                    line=line,
-                    provider_comment_id=str(raw["id"]),
-                )
+        published: tuple[PublishedInlineComment, ...] = ()
+        if inline_comments:
+            review_id = response["id"]
+            raw_comments = self._gw._get_json_list(
+                f"/repos/{repo_full_name}/pulls/{pr_number}/reviews/{review_id}/comments",
+                installation_id,
             )
+            published = _map_fetched_inline_comments(inline_comments, raw_comments)
         return PullRequestReviewPublication(
             summary_provider_comment_id=summary_id,
-            inline_comments=tuple(published),
+            inline_comments=published,
         )
 
     def reply_to_review_comment(
         self,
         repo_full_name: str,
+        pr_number: int,
         installation_id: int,
         provider_comment_id: str,
         body: str,
     ) -> str:
         response = self._gw._post_json(
-            f"/repos/{repo_full_name}/pulls/comments/{provider_comment_id}/replies",
+            f"/repos/{repo_full_name}/pulls/{pr_number}/comments/{provider_comment_id}/replies",
             installation_id,
             {"body": body},
         )
         return str(response["id"])
+
+    def is_review_thread_resolved(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        provider_comment_id: str,
+    ) -> bool | None:
+        owner, name = repo_full_name.split("/", 1)
+        state = self._thread_for_comment(
+            owner, name, pr_number, installation_id, provider_comment_id
+        )
+        if state is None:
+            return None
+        return state[0]
 
     def resolve_review_thread_for_comment(
         self,
@@ -100,7 +143,12 @@ class GitHubReviewClient:
         provider_comment_id: str,
     ) -> None:
         owner, name = repo_full_name.split("/", 1)
-        thread_id = self._find_thread_id(owner, name, pr_number, installation_id, provider_comment_id)
+        state = self._thread_for_comment(
+            owner, name, pr_number, installation_id, provider_comment_id
+        )
+        if state is None:
+            raise VcsError(f"тред для комментария {provider_comment_id} не найден")
+        thread_id = state[1]
         mutation = """
         mutation($threadId: ID!) {
           resolveReviewThread(input: {threadId: $threadId}) {
@@ -135,14 +183,14 @@ class GitHubReviewClient:
             },
         )
 
-    def _find_thread_id(
+    def _thread_for_comment(
         self,
         owner: str,
         name: str,
         pr_number: int,
         installation_id: int,
         provider_comment_id: str,
-    ) -> str:
+    ) -> tuple[bool, str] | None:
         query = """
         query($owner: String!, $name: String!, $number: Int!) {
           repository(owner: $owner, name: $name) {
@@ -150,6 +198,7 @@ class GitHubReviewClient:
               reviewThreads(first: 100) {
                 nodes {
                   id
+                  isResolved
                   comments(first: 50) {
                     nodes { databaseId }
                   }
@@ -177,5 +226,8 @@ class GitHubReviewClient:
                     thread_id = thread["id"]
                     if not isinstance(thread_id, str):
                         raise VcsError("GraphQL вернул thread id не-строкой")
-                    return thread_id
-        raise VcsError(f"тред для комментария {provider_comment_id} не найден")
+                    is_resolved = thread.get("isResolved")
+                    if not isinstance(is_resolved, bool):
+                        raise VcsError("GraphQL вернул isResolved не bool")
+                    return is_resolved, thread_id
+        return None

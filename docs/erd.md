@@ -88,7 +88,11 @@ erDiagram
         uuid review_run_id FK
         uuid finding_id FK "null у итогового комментария"
         text provider_comment_id "id на хостинге, нужен для правки или удаления комментария"
-        comment_kind kind "summary или inline"
+        comment_kind kind "summary, inline, thread_reply"
+        bool thread_resolved "тред на хостинге закрыт (в т.ч. вручную)"
+        text in_reply_to_provider_comment_id "корневой комментарий треда для ответа"
+        int feedback_positive "счётчик 👍"
+        int feedback_negative "счётчик 👎"
         timestamptz published_at
         uuid id PK
         timestamptz created_at
@@ -135,7 +139,11 @@ push. Новый прогон сверяется с ним, чтобы поня�
 **`published_comments`**: то, что реально опубликовано на хостинге, и id,
 который хостинг ему присвоил. Без этого id сервис не сможет потом отредактировать
 или удалить собственный комментарий. Inline-комментарий ссылается на своё
-замечание, итоговый комментарий прогона ни на что не ссылается.
+замечание, итоговый комментарий прогона ни на что не ссылается, ответ в тред —
+`thread_reply` с `in_reply_to_provider_comment_id`. `thread_resolved` отражает,
+закрыт ли тред на хостинге (обновляется ботом, вебхуком `pull_request_review_thread`
+и сверкой перед merge gate). `feedback_positive` / `feedback_negative` — оценки
+комментария пользователями.
 
 ## Правила, которые обеспечивает схема
 

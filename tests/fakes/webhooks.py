@@ -120,14 +120,29 @@ class FakeVcs:
     def reply_to_review_comment(
         self,
         repo_full_name: str,
+        pr_number: int,
         installation_id: int,
         provider_comment_id: str,
         body: str,
     ) -> str:
-        self.calls.append(("reply", repo_full_name, installation_id, provider_comment_id))
+        self.calls.append(
+            ("reply", repo_full_name, pr_number, installation_id, provider_comment_id)
+        )
         if self.error is not None:
             raise self.error
         return "fake-reply-id"
+
+    def is_review_thread_resolved(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        provider_comment_id: str,
+    ) -> bool | None:
+        self.calls.append(("thread_state", provider_comment_id))
+        if self.error is not None:
+            raise self.error
+        return False
 
     def resolve_review_thread_for_comment(
         self,

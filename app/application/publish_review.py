@@ -17,6 +17,7 @@ from app.application.ports.vcs_review import (
     MergeGateCheck,
     PublishedInlineComment,
 )
+from app.application.sync_thread_resolution import sync_open_threads_from_host
 from app.domain.entities import (
     Finding,
     OpenReviewThread,
@@ -173,6 +174,16 @@ def publish_review(
         new_id=new_id,
     )
 
+    sync_open_threads_from_host(
+        run.merge_request_id,
+        repo_full_name=job.repository_full_name,
+        pr_number=job.pull_request_number,
+        installation_id=job.installation_id,
+        uow=uow,
+        vcs=vcs,
+        now=now,
+    )
+
     still_open = _collect_open_findings(uow, run.merge_request_id)
     blocked = merge_blocked_by_findings(still_open)
     conclusion = "failure" if blocked else "success"
@@ -235,6 +246,7 @@ def _publish_thread_follow_ups(
         body = format_thread_reply(item.status, item.reply, severity=matched.finding.severity)
         reply_id = vcs.reply_to_review_comment(
             job.repository_full_name,
+            job.pull_request_number,
             job.installation_id,
             matched.root_provider_comment_id,
             body,
