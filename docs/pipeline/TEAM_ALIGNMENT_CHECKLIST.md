@@ -8,8 +8,9 @@
 - [ ] `Finding` содержит необходимые данные, включая `side`/`line` вместо диапазона строк и
       `confidence`.
 - [ ] Error model можно корректно показать пользователю, включая `scmProvider` и `providerAttempt`.
-- [ ] Согласован способ обновления статуса: polling (предложение по умолчанию для MVP) с опорой
-      на `lastProgressAt`, или SSE.
+- [x] Согласован способ обновления статуса: SSE, без polling —
+      `GET /api/v1/reviews/{id}/events` (спека `review-run-events`). Снимок при каждом
+      подключении закрывает пропуски; зависший прогон виден по `lastProgressAt`.
 
 ## Backend
 - [ ] Все endpoints реализуемы, включая `POST /webhooks/{provider}` с проверкой подписи.
