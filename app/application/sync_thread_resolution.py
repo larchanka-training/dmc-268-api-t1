@@ -6,7 +6,10 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from app.application.merge_gate_publish import refresh_merge_gate_for_merge_request
+from app.application.merge_gate_publish import (
+    build_merge_gate_check,
+    collect_open_findings,
+)
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.domain.enums import CommentKind, Provider
@@ -55,6 +58,35 @@ def sync_open_threads_from_host(
                 replace(root, thread_resolved=True, updated_at=now)
             )
             uow.commit()
+
+
+def refresh_merge_gate_for_merge_request(
+    merge_request_id: UUID,
+    *,
+    repo_full_name: str,
+    pr_number: int,
+    head_sha: str,
+    installation_id: int,
+    uow: UnitOfWork,
+    vcs: VcsGateway,
+    now: datetime,
+) -> None:
+    sync_open_threads_from_host(
+        merge_request_id,
+        repo_full_name=repo_full_name,
+        pr_number=pr_number,
+        installation_id=installation_id,
+        uow=uow,
+        vcs=vcs,
+        now=now,
+    )
+    still_open = collect_open_findings(uow, merge_request_id)
+    vcs.set_merge_gate_check(
+        repo_full_name,
+        head_sha,
+        installation_id,
+        build_merge_gate_check(still_open),
+    )
 
 
 def apply_review_thread_webhook(
