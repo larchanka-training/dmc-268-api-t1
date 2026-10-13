@@ -65,14 +65,14 @@ class RecordingVcsGateway:
         self.replies.append((provider_comment_id, body))
         return f"reply-to-{provider_comment_id}"
 
-    def is_review_thread_resolved(
+    def fetch_review_threads_resolved_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
-        provider_comment_id: str,
-    ) -> bool | None:
-        return False
+        provider_comment_ids: frozenset[str],
+    ) -> dict[str, bool]:
+        return {cid: False for cid in provider_comment_ids}
 
     def resolve_review_thread_for_comment(
         self,

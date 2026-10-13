@@ -23,7 +23,10 @@ def test_webhook_resolved_marks_inline_thread() -> None:
             updated_at=NOW,
         )
     )
-    payload = {"action": "resolved", "comment": {"id": 77}}
+    payload = {
+        "action": "resolved",
+        "thread": {"comments": [{"id": 77}, {"id": 88}]},
+    }
 
     assert apply_review_thread_webhook(payload, uow=uow, now=lambda: NOW) is True
 

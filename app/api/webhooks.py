@@ -35,7 +35,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import get_container
-from app.application.sync_thread_resolution import apply_review_thread_webhook
+from app.application.sync_thread_resolution import handle_review_thread_webhook
 from app.application.use_cases.handle_webhook import (
     WebhookOutcome,
     handle_webhook_event,
@@ -96,9 +96,10 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
 
     if event_type == REVIEW_THREAD_EVENT:
         await run_in_threadpool(
-            apply_review_thread_webhook,
+            handle_review_thread_webhook,
             payload,
             uow=container.unit_of_work(),
+            vcs=container.vcs_gateway(),
             now=lambda: datetime.now(UTC),
         )
         return JSONResponse(status_code=202, content={"status": "acknowledged"})

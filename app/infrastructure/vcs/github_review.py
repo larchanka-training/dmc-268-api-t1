@@ -26,6 +26,7 @@ def _map_fetched_inline_comments(
     raw_comments: list[dict[str, Any]],
 ) -> tuple[PublishedInlineComment, ...]:
     published: list[PublishedInlineComment] = []
+    used_provider_ids: set[str] = set()
     for draft in drafts:
         want_side = _github_side(draft.side)
         want_line = _line_for_side(draft)
@@ -33,7 +34,8 @@ def _map_fetched_inline_comments(
             (
                 raw
                 for raw in raw_comments
-                if raw.get("path") == draft.file_path
+                if str(raw.get("id")) not in used_provider_ids
+                and raw.get("path") == draft.file_path
                 and int(raw.get("line", -1)) == want_line
                 and raw.get("side", "RIGHT") == want_side
             ),
@@ -42,12 +44,14 @@ def _map_fetched_inline_comments(
         if match is None:
             continue
         side = DiffSide.NEW if match.get("side", "RIGHT") == "RIGHT" else DiffSide.OLD
+        provider_id = str(match["id"])
+        used_provider_ids.add(provider_id)
         published.append(
             PublishedInlineComment(
                 file_path=draft.file_path,
                 side=side,
                 line=want_line,
-                provider_comment_id=str(match["id"]),
+                provider_comment_id=provider_id,
             )
         )
     return tuple(published)
@@ -95,7 +99,7 @@ class GitHubReviewClient:
         published: tuple[PublishedInlineComment, ...] = ()
         if inline_comments:
             review_id = response["id"]
-            raw_comments = self._gw._get_json_list(
+            raw_comments = self._gw._get_json_list_paginated(
                 f"/repos/{repo_full_name}/pulls/{pr_number}/reviews/{review_id}/comments",
                 installation_id,
             )
@@ -120,20 +124,28 @@ class GitHubReviewClient:
         )
         return str(response["id"])
 
-    def is_review_thread_resolved(
+    def fetch_review_threads_resolved_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
-        provider_comment_id: str,
-    ) -> bool | None:
+        provider_comment_ids: frozenset[str],
+    ) -> dict[str, bool]:
+        if not provider_comment_ids:
+            return {}
         owner, name = repo_full_name.split("/", 1)
-        state = self._thread_for_comment(
-            owner, name, pr_number, installation_id, provider_comment_id
-        )
-        if state is None:
-            return None
-        return state[0]
+        targets = {int(cid) for cid in provider_comment_ids}
+        threads = self._load_review_threads(owner, name, pr_number, installation_id)
+        result: dict[str, bool] = {}
+        for thread in threads:
+            is_resolved = thread.get("isResolved")
+            if not isinstance(is_resolved, bool):
+                continue
+            for node in thread.get("comments", {}).get("nodes", []):
+                database_id = node.get("databaseId")
+                if database_id in targets:
+                    result[str(database_id)] = is_resolved
+        return result
 
     def resolve_review_thread_for_comment(
         self,
@@ -183,14 +195,13 @@ class GitHubReviewClient:
             },
         )
 
-    def _thread_for_comment(
+    def _load_review_threads(
         self,
         owner: str,
         name: str,
         pr_number: int,
         installation_id: int,
-        provider_comment_id: str,
-    ) -> tuple[bool, str] | None:
+    ) -> list[dict[str, Any]]:
         query = """
         query($owner: String!, $name: String!, $number: Int!) {
           repository(owner: $owner, name: $name) {
@@ -213,14 +224,24 @@ class GitHubReviewClient:
             query,
             {"owner": owner, "name": name, "number": pr_number},
         )
-        target = int(provider_comment_id)
-        threads = (
+        nodes = (
             data.get("repository", {})
             .get("pullRequest", {})
             .get("reviewThreads", {})
             .get("nodes", [])
         )
-        for thread in threads:
+        return [node for node in nodes if isinstance(node, dict)]
+
+    def _thread_for_comment(
+        self,
+        owner: str,
+        name: str,
+        pr_number: int,
+        installation_id: int,
+        provider_comment_id: str,
+    ) -> tuple[bool, str] | None:
+        target = int(provider_comment_id)
+        for thread in self._load_review_threads(owner, name, pr_number, installation_id):
             for node in thread.get("comments", {}).get("nodes", []):
                 if node.get("databaseId") == target:
                     thread_id = thread["id"]

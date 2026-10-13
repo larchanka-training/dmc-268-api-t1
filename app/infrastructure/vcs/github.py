@@ -135,15 +135,15 @@ class GitHubVcsGateway:
             repo_full_name, pr_number, installation_id, provider_comment_id, body
         )
 
-    def is_review_thread_resolved(
+    def fetch_review_threads_resolved_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
-        provider_comment_id: str,
-    ) -> bool | None:
-        return self._review.is_review_thread_resolved(
-            repo_full_name, pr_number, installation_id, provider_comment_id
+        provider_comment_ids: frozenset[str],
+    ) -> dict[str, bool]:
+        return self._review.fetch_review_threads_resolved_state(
+            repo_full_name, pr_number, installation_id, provider_comment_ids
         )
 
     def resolve_review_thread_for_comment(
@@ -175,6 +175,18 @@ class GitHubVcsGateway:
         if not isinstance(data, list):
             raise VcsError(f"GitHub API вернул не массив на GET {url}")
         return [item for item in data if isinstance(item, dict)]
+
+    def _get_json_list_paginated(self, url: str, installation_id: int) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            separator = "&" if "?" in url else "?"
+            page_url = f"{url}{separator}per_page=100&page={page}"
+            batch = self._get_json_list(page_url, installation_id)
+            items.extend(batch)
+            if len(batch) < 100:
+                return items
+            page += 1
 
     def _post_json(self, url: str, installation_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         response = self._request_json("POST", url, installation_id, json=payload)

@@ -67,14 +67,14 @@ class VcsGateway(Protocol):
         """Ответ в существующий review comment; возвращает id нового комментария."""
         ...
 
-    def is_review_thread_resolved(
+    def fetch_review_threads_resolved_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
-        provider_comment_id: str,
-    ) -> bool | None:
-        """`True`/`False` — состояние на хостинге; `None` — тред не найден."""
+        provider_comment_ids: frozenset[str],
+    ) -> dict[str, bool]:
+        """Для каждого id корневого комментария — `isResolved` треда на хостинге."""
         ...
 
     def resolve_review_thread_for_comment(

@@ -5,6 +5,10 @@ from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
+from app.application.merge_gate_publish import (
+    build_merge_gate_check,
+    collect_open_findings,
+)
 from app.application.ports.llm_gateway import (
     LlmReviewResult,
     LlmReviewSummary,
@@ -12,11 +16,7 @@ from app.application.ports.llm_gateway import (
 )
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
-from app.application.ports.vcs_review import (
-    InlineCommentDraft,
-    MergeGateCheck,
-    PublishedInlineComment,
-)
+from app.application.ports.vcs_review import InlineCommentDraft, PublishedInlineComment
 from app.application.sync_thread_resolution import sync_open_threads_from_host
 from app.domain.entities import (
     Finding,
@@ -32,7 +32,6 @@ from app.domain.enums import (
     FindingSeverity,
     ThreadFollowUpStatus,
 )
-from app.domain.merge_gate import merge_blocked_by_findings
 from app.domain.review_comment import (
     format_inline_finding_comment,
     format_summary_comment,
@@ -184,27 +183,13 @@ def publish_review(
         now=now,
     )
 
-    still_open = _collect_open_findings(uow, run.merge_request_id)
-    blocked = merge_blocked_by_findings(still_open)
-    conclusion = "failure" if blocked else "success"
-    title = "Есть критичные замечания" if blocked else "Ревью пройдено"
-    gate_summary = (
-        "Остаются незакрытые замечания уровня critical — мердж заблокирован."
-        if blocked
-        else "Критичных незакрытых замечаний нет."
-    )
+    still_open = collect_open_findings(uow, run.merge_request_id)
     vcs.set_merge_gate_check(
         job.repository_full_name,
         job.head_sha,
         job.installation_id,
-        MergeGateCheck(conclusion=conclusion, title=title, summary=gate_summary),
+        build_merge_gate_check(still_open),
     )
-
-
-def _collect_open_findings(uow: UnitOfWork, merge_request_id: UUID) -> tuple[Finding, ...]:
-    with uow:
-        threads = uow.published_comments.list_open_threads_for_merge_request(merge_request_id)
-    return tuple(t.finding for t in threads)
 
 
 def _publish_thread_follow_ups(
