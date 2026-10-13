@@ -6,7 +6,8 @@ pull request'а, так что адаптер прогоняется целик�
 (0.5 c * 2^n), а не из таймера.
 """
 
-from collections.abc import Callable
+import gzip
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import httpx
@@ -14,6 +15,7 @@ import pytest
 
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
+from app.domain.vcs_errors import VcsFileTooLargeError
 from app.infrastructure.vcs.errors import (
     VcsAuthError,
     VcsError,
@@ -26,6 +28,7 @@ from tests.infrastructure.conftest import RsaKeyPair
 APP_ID = "123456"
 INSTALLATION_ID = 512804923
 FAR_FUTURE = "2099-01-01T00:00:00Z"
+LIMIT = 1_000
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -406,7 +409,7 @@ def test_fetch_file_returns_raw_content_at_sha(rsa_key_pair: RsaKeyPair) -> None
         [],
     )
 
-    content = gateway.fetch_file("owner/repo", ".review/rules.md", "b" * 40, INSTALLATION_ID)
+    content = gateway.fetch_file("owner/repo", ".review/rules.md", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT)
 
     assert content == "## Rule\n"
     (request,) = seen
@@ -424,7 +427,7 @@ def test_fetch_file_404_means_no_file(rsa_key_pair: RsaKeyPair) -> None:
         rsa_key_pair, responding([404], httpx.Response(200, text=""), seen), sleeps
     )
 
-    assert gateway.fetch_file("owner/repo", "missing.md", "b" * 40, INSTALLATION_ID) is None
+    assert gateway.fetch_file("owner/repo", "missing.md", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT) is None
     assert len(seen) == 1
     assert sleeps == []
 
@@ -436,7 +439,7 @@ def test_fetch_file_escapes_path_from_the_diff(rsa_key_pair: RsaKeyPair) -> None
         rsa_key_pair, responding([200], httpx.Response(200, text="x"), seen), []
     )
 
-    gateway.fetch_file("owner/repo", "dir/a b?c#d.py", "b" * 40, INSTALLATION_ID)
+    gateway.fetch_file("owner/repo", "dir/a b?c#d.py", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT)
 
     (request,) = seen
     assert request.url.raw_path.decode().startswith(
@@ -453,7 +456,7 @@ def test_fetch_file_5xx_is_retried_then_raises(rsa_key_pair: RsaKeyPair) -> None
     )
 
     with pytest.raises(VcsUnavailableError):
-        gateway.fetch_file("owner/repo", "a.py", "b" * 40, INSTALLATION_ID)
+        gateway.fetch_file("owner/repo", "a.py", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT)
 
     assert len(seen) == 3
     assert sleeps == [0.5, 1.0]
@@ -467,4 +470,88 @@ def test_fetch_file_403_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
     )
 
     with pytest.raises(VcsError):
-        gateway.fetch_file("owner/repo", "a.py", "b" * 40, INSTALLATION_ID)
+        gateway.fetch_file("owner/repo", "a.py", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+
+def file_handler(build: Callable[[], httpx.Response], seen: list[httpx.Request]) -> Handler:
+    """Handler: токен выдаётся, на запрос файла — ответ, собранный `build`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        seen.append(request)
+        return build()
+
+    return handler
+
+
+def test_fetch_file_declared_length_over_limit_is_refused(rsa_key_pair: RsaKeyPair) -> None:
+    """Объявленная длина больше лимита — отказ без чтения тела, без повторов."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(
+        rsa_key_pair, file_handler(lambda: httpx.Response(200, content=b"x" * (LIMIT + 1)), seen), sleeps
+    )
+
+    with pytest.raises(VcsFileTooLargeError):
+        gateway.fetch_file("owner/repo", "big.py", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+    assert len(seen) == 1
+    assert sleeps == []
+
+
+def test_fetch_file_stream_without_length_is_cut_at_limit(rsa_key_pair: RsaKeyPair) -> None:
+    """Без `Content-Length` тело читается потоком и обрывается на лимите."""
+    produced: list[int] = []
+
+    def chunks() -> Iterator[bytes]:
+        for _ in range(100):
+            produced.append(1)
+            yield b"x" * 100
+
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(
+        rsa_key_pair, file_handler(lambda: httpx.Response(200, content=chunks()), seen), []
+    )
+
+    with pytest.raises(VcsFileTooLargeError):
+        gateway.fetch_file("owner/repo", "big.py", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+    # Оборвано на 11-м куске из 100: остальное не читалось.
+    assert len(produced) < 100
+
+
+def test_fetch_file_compressed_bomb_is_cut_after_decoding(rsa_key_pair: RsaKeyPair) -> None:
+    """Лимит — на распакованные байты: маленький gzip с большим телом не проходит."""
+    packed = gzip.compress(b"x" * (LIMIT * 50))
+    assert len(packed) < LIMIT
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(
+        rsa_key_pair,
+        file_handler(
+            lambda: httpx.Response(200, content=packed, headers={"Content-Encoding": "gzip"}), seen
+        ),
+        [],
+    )
+
+    with pytest.raises(VcsFileTooLargeError):
+        gateway.fetch_file("owner/repo", "bomb.py", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+
+def test_fetch_file_compressed_body_within_limit_is_decoded(rsa_key_pair: RsaKeyPair) -> None:
+    packed = gzip.compress("привет".encode())
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(
+        rsa_key_pair,
+        file_handler(
+            lambda: httpx.Response(
+                200,
+                content=packed,
+                headers={"Content-Encoding": "gzip", "Content-Type": "text/plain; charset=utf-8"},
+            ),
+            seen,
+        ),
+        [],
+    )
+
+    assert gateway.fetch_file("owner/repo", "a.py", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT) == "привет"

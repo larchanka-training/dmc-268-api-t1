@@ -127,6 +127,8 @@ def test_too_large_file_is_not_parsed() -> None:
     vcs = FakeVcs(diff=_file_diff("app/a.py"), files={("app/a.py", HEAD): big})
     extractor = FakeExtractor()
     body = _build(vcs, extractor).payload.body
+    # Лимит уходит в VCS: адаптер обрывает загрузку, а не проверяет после.
+    assert 1_000 in vcs.file_limits
     assert extractor.calls == []
     assert {"path": "app/a.py", "part": "ast", "reason": "too_large"} in body["omitted"]
 

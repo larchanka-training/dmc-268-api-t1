@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from app.domain.entities import PRMetadata, Repository, ReviewJob
 from app.domain.enums import MergeRequestState, Provider
-from app.domain.vcs_errors import VcsError
+from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 NOW = dt.datetime(2026, 9, 29, 12, 0, tzinfo=dt.UTC)
@@ -82,6 +82,7 @@ class FakeVcs:
     files: dict[tuple[str, str], str] = field(default_factory=dict)
     # Сбой довыборки конкретного файла — не задевает дифф и метаданные.
     file_errors: dict[str, VcsError] = field(default_factory=dict)
+    file_limits: list[int] = field(default_factory=list)
     calls: list[tuple[Any, ...]] = field(default_factory=list)
 
     def fetch_diff(
@@ -101,12 +102,17 @@ class FakeVcs:
         return self.meta
 
     def fetch_file(
-        self, repo_full_name: str, path: str, sha: str, installation_id: int
+        self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
     ) -> str | None:
         self.calls.append(("file", repo_full_name, path, sha, installation_id))
+        self.file_limits.append(max_bytes)
         if path in self.file_errors:
             raise self.file_errors[path]
-        return self.files.get((path, sha))
+        content = self.files.get((path, sha))
+        # Как адаптер: лимит — исключением, тело наверх не отдаётся.
+        if content is not None and len(content.encode("utf-8")) > max_bytes:
+            raise VcsFileTooLargeError(f"{path}: больше {max_bytes} байт")
+        return content
 
 
 @dataclass

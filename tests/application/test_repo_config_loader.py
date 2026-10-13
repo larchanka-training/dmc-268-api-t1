@@ -57,6 +57,7 @@ def test_missing_file_falls_back_and_is_cached() -> None:
 def test_too_large_file_is_not_parsed_and_text_is_not_cached() -> None:
     vcs, cache = FakeVcs(files={(PATH, BASE): RULES_MD}), FakeCache()
     assert _load(vcs, cache, max_bytes=10) == RepoRules(status=RulesStatus.TOO_LARGE)
+    assert vcs.file_limits == [10]
     (_, value, _), = cache.sets
     assert json.loads(value) == {"status": "too_large", "text": ""}
 

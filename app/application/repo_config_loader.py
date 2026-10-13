@@ -19,7 +19,7 @@ from app.application.ports.vcs_gateway import VcsGateway
 from app.domain.entities import RepoRules
 from app.domain.enums import RulesStatus
 from app.domain.repo_rules import RULES_PATH, parse_rules_markdown
-from app.domain.vcs_errors import VcsError
+from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,13 @@ def load_repo_rules(
         status, text = cached
     else:
         try:
-            content = vcs.fetch_file(repo_full_name, RULES_PATH, base_sha, installation_id)
+            content = vcs.fetch_file(
+                repo_full_name, RULES_PATH, base_sha, installation_id, max_bytes=max_bytes
+            )
+            status, text = _classify(content)
+        except VcsFileTooLargeError:
+            # Тело не дочитано; по sha оно не изменится — исход кэшируется.
+            status, text = RulesStatus.TOO_LARGE, ""
         except VcsError:
             logger.warning(
                 "правила %s@%s недоступны — ревью по стандартным критериям",
@@ -55,7 +61,6 @@ def load_repo_rules(
                 exc_info=True,
             )
             return RepoRules(status=RulesStatus.UNAVAILABLE)
-        status, text = _classify(content, max_bytes)
         _write_cache(cache, key, status, text, cache_ttl_seconds)
 
     if status is not RulesStatus.LOADED:
@@ -73,12 +78,9 @@ def load_repo_rules(
     return RepoRules(status=RulesStatus.LOADED, rules=rules, rejected=rejected)
 
 
-def _classify(content: str | None, max_bytes: int) -> tuple[RulesStatus, str]:
+def _classify(content: str | None) -> tuple[RulesStatus, str]:
     if content is None:
         return RulesStatus.ABSENT, ""
-    if len(content.encode("utf-8")) > max_bytes:
-        # Текст не храним: по sha он не изменится, а разбирать его не будем.
-        return RulesStatus.TOO_LARGE, ""
     return RulesStatus.LOADED, content
 
 

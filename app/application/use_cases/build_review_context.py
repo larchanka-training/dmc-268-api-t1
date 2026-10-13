@@ -26,7 +26,7 @@ from app.application.repo_config_loader import load_repo_rules
 from app.domain.code_context import language_for_path
 from app.domain.diff_parser import filter_diff_files, parse_diff
 from app.domain.entities import ParsedFile, ReviewJob
-from app.domain.vcs_errors import VcsError
+from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 
 logger = logging.getLogger(__name__)
 
@@ -96,16 +96,23 @@ def _collect_asts(
     for parsed, language in candidates[: limits.ast_max_files]:
         path = parsed.file_path
         try:
-            source = vcs.fetch_file(job.repository_full_name, path, job.head_sha, job.installation_id)
+            source = vcs.fetch_file(
+                job.repository_full_name,
+                path,
+                job.head_sha,
+                job.installation_id,
+                max_bytes=limits.ast_max_file_bytes,
+            )
+        except VcsFileTooLargeError:
+            # Адаптер оборвал загрузку на лимите — тело в память не попало.
+            skipped.append(SkippedAst(path, "too_large"))
+            continue
         except VcsError:
             logger.warning("файл %s@%s недоступен для AST", path, job.head_sha, exc_info=True)
             skipped.append(SkippedAst(path, "unavailable"))
             continue
         if source is None:
             skipped.append(SkippedAst(path, "missing"))
-            continue
-        if len(source.encode("utf-8")) > limits.ast_max_file_bytes:
-            skipped.append(SkippedAst(path, "too_large"))
             continue
         try:
             outline = extractor.extract(source, language)
