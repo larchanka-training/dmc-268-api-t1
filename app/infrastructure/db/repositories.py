@@ -196,6 +196,7 @@ class SqlAlchemyReviewRunRepo:
                 created_at=run.created_at,
                 updated_at=run.updated_at,
                 failure_reason=run.failure_reason,
+                failed_stage=run.failed_stage,
                 model=run.model,
                 tokens_used=run.tokens_used,
                 duration_seconds=run.duration_seconds,
@@ -228,6 +229,7 @@ class SqlAlchemyReviewRunRepo:
         row.status = run.status
         row.last_progress_at = run.last_progress_at
         row.failure_reason = run.failure_reason
+        row.failed_stage = run.failed_stage
         row.model = run.model
         row.tokens_used = run.tokens_used
         row.duration_seconds = run.duration_seconds

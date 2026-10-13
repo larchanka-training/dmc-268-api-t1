@@ -81,6 +81,9 @@ class ReviewRun:
     tokens_used: int | None = None
     duration_seconds: float | None = None
     rejected_findings: int = 0
+    # Этап, на котором прогон упал. Заполняет только `advance` при переходе в
+    # `failed`; у прогона, упавшего из `queued`, этапа нет.
+    failed_stage: ReviewRunStatus | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -41,3 +41,29 @@ def test_advance_leaves_a_terminal_run_untouched(run) -> None:
     verdict = advance(done, S.FAILED, NOW)
     assert not verdict.ok
     assert done.status is S.COMPLETED
+
+
+@pytest.mark.parametrize("stage", [S.BUILDING_CONTEXT, S.ANALYSING, S.PUBLISHING])
+def test_failing_records_the_stage_the_run_was_in(run, stage: S) -> None:
+    failed = advance(replace(run, status=stage), S.FAILED, NOW).unwrap()
+    assert failed.failed_stage is stage
+
+
+def test_failing_before_work_started_has_no_stage(run) -> None:
+    failed = advance(run, S.FAILED, NOW).unwrap()
+    assert failed.status is S.FAILED
+    assert failed.failed_stage is None
+
+
+@pytest.mark.parametrize(
+    ("current", "requested"),
+    [
+        (S.QUEUED, S.BUILDING_CONTEXT),
+        (S.ANALYSING, S.PUBLISHING),
+        (S.ANALYSING, S.CANCELLED),
+        (S.PUBLISHING, S.COMPLETED),
+    ],
+)
+def test_other_transitions_leave_the_failed_stage_empty(run, current: S, requested: S) -> None:
+    moved = advance(replace(run, status=current), requested, NOW).unwrap()
+    assert moved.failed_stage is None

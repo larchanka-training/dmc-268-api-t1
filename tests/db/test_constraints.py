@@ -430,3 +430,28 @@ def test_each_run_keeps_its_own_summary(session) -> None:
     add_summary(session, second, provider_comment_id="c2")
     session.flush()
     assert session.query(PublishedCommentRow).count() == 2
+
+
+def test_a_failed_stage_on_a_run_that_did_not_fail_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    run.status = ReviewRunStatus.ANALYSING
+    run.failed_stage = ReviewRunStatus.ANALYSING
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_a_failed_stage_outside_the_processing_stages_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    run.status = ReviewRunStatus.FAILED
+    run.failed_stage = ReviewRunStatus.QUEUED
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_a_failed_run_stores_its_stage(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    run.status = ReviewRunStatus.FAILED
+    run.failed_stage = ReviewRunStatus.PUBLISHING
+    session.flush()
+    session.refresh(run)
+    assert run.failed_stage is ReviewRunStatus.PUBLISHING
