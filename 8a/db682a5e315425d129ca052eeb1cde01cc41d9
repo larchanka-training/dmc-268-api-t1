@@ -1,0 +1,14 @@
+app/application/sync_thread_resolution.py
+  h_ca021d20ed223d 9-12,63-91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "8adb682a5e315425d129ca052eeb1cde01cc41d9",
+  "prompts": {},
+  "humans": {
+    "h_ca021d20ed223d": {
+      "author": "pnaumov <pnaumov@sberhealth.ru>"
+    }
+  }
+}
