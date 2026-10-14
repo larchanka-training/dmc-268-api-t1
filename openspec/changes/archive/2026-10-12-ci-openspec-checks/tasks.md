@@ -5,6 +5,7 @@
 - [x] 1.1 Job `openspec`: `validate --all --strict`
 - [x] 1.2 `scripts/check_openspec_archived.py` и шаг в job `openspec`
 - [x] 1.3 AGENTS.md: проверка перед коммитом и архив в том же PR
+- [x] 1.4 Хук `pre-commit` с той же версией openspec, что в CI
 
 ## 2. Приёмка
 
