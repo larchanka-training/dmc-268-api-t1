@@ -1,0 +1,23 @@
+app/api/webhooks.py
+  s_a1a27ee850bde1::t_1bc79b0f2e19c4 46,99-108
+tests/domain/test_diff_parser.py
+  s_a1a27ee850bde1::t_403ff69d51d582 1-27
+tests/fakes/vcs_gateway.py
+  s_a1a27ee850bde1::t_713c4437783275 16,27,49,51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "5a6074b623a5904a3f56b10f0dcf1e8444bdcb48",
+  "prompts": {},
+  "sessions": {
+    "s_a1a27ee850bde1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "57a2db80-0462-46ea-b17e-515fdb857d26",
+        "model": "composer-2.5"
+      },
+      "human_author": "pnaumov <pnaumov@sberhealth.ru>"
+    }
+  }
+}
