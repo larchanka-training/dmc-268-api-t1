@@ -423,3 +423,64 @@ def test_filter_diff_files_keeps_reviewable_files_in_order() -> None:
 
 def test_filter_diff_files_on_empty_input() -> None:
     assert filter_diff_files([]) == []
+
+
+# Вывод `git diff` как есть: с `core.quotePath` пути с не-ASCII, `"` и
+# управляющими символами идут в кавычках, байты UTF-8 — восьмеричными escape.
+QUOTED_PATHS_DIFF = r'''diff --git "a/\320\277\321\200\320\270\320\262\320\265\321\202.py" "b/\320\277\321\200\320\270\320\262\320\265\321\202.py"
+index 7d4290a..407de30 100644
+--- "a/\320\277\321\200\320\270\320\262\320\265\321\202.py"
++++ "b/\320\277\321\200\320\270\320\262\320\265\321\202.py"
+@@ -1 +1 @@
+-x = 1
++x = 2
+diff --git "a/tab\"quote.py" "b/tab\"quote.py"
+index bca70f3..e556b83 100644
+--- "a/tab\"quote.py"
++++ "b/tab\"quote.py"
+@@ -1 +1 @@
+-q
++w
+diff --git "a/\320\275\320\276\320\262\321\213\320\271 space.py" "b/\320\275\320\276\320\262\321\213\320\271 space.py"
+new file mode 100644
+index 0000000..6178079
+--- /dev/null
++++ "b/\320\275\320\276\320\262\321\213\320\271 space.py"	
+@@ -0,0 +1 @@
++b
+'''
+
+
+def test_quoted_non_ascii_path_is_decoded() -> None:
+    edited, quote, new = parse_diff(QUOTED_PATHS_DIFF)
+    assert edited.file_path == "привет.py"
+    assert edited.hunks[0].file_path == "привет.py"
+    # Одинаковые пути в кавычках — не переименование.
+    assert edited.old_path is None
+    assert quote.file_path == 'tab"quote.py'
+    assert quote.old_path is None
+    assert new.file_path == "новый space.py"
+
+
+def test_quoted_rename_is_decoded() -> None:
+    diff = (
+        'diff --git "a/\\320\\260.py" "b/\\320\\261.py"\n'
+        "similarity index 90%\n"
+        'rename from "\\320\\260.py"\n'
+        'rename to "\\320\\261.py"\n'
+    )
+    (parsed,) = parse_diff(diff)
+    assert (parsed.file_path, parsed.old_path) == ("б.py", "а.py")
+
+
+def test_quoted_header_is_the_fallback_without_markers() -> None:
+    """Чистое переименование без `---`/`+++`: пути берутся из `diff --git`."""
+    diff = 'diff --git a/plain.py "b/\\320\\261.py"\nsimilarity index 100%\n'
+    (parsed,) = parse_diff(diff)
+    assert (parsed.file_path, parsed.old_path) == ("б.py", "plain.py")
+
+
+def test_unquoted_paths_with_trailing_tab_are_unchanged() -> None:
+    diff = "diff --git a/with space.py b/with space.py\n--- a/with space.py\t\n+++ b/with space.py\t\n@@ -1 +1 @@\n-a\n+b\n"
+    (parsed,) = parse_diff(diff)
+    assert (parsed.file_path, parsed.old_path) == ("with space.py", None)

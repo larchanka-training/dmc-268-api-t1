@@ -101,9 +101,9 @@ def _parse_file(lines: list[str]) -> ParsedFile:
         elif line.startswith("deleted file mode"):
             is_deleted = True
         elif line.startswith("rename from "):
-            rename_from = line[len("rename from ") :]
+            rename_from = _unquote(line[len("rename from ") :])
         elif line.startswith("rename to "):
-            rename_to = line[len("rename to ") :]
+            rename_to = _unquote(line[len("rename to ") :])
         elif line.startswith("Binary files ") or line == "GIT binary patch":
             is_binary = True
     if header is not None:
@@ -161,17 +161,27 @@ def _build_hunk(file_path: str, header: re.Match[str], body: list[str]) -> Hunk:
 
 def _path_after_marker(line: str, marker: str) -> str | None:
     """Путь из `--- a/x` / `+++ b/x`; `/dev/null` означает «стороны нет»."""
-    value = line[len(marker) :].split("\t")[0].strip()
-    if value == "/dev/null":
-        return None
-    if value.startswith(("a/", "b/")):
-        value = value[2:]
-    return value
+    raw = line[len(marker) :]
+    if raw.startswith('"'):
+        value = _read_quoted(raw)[0]
+    else:
+        value = raw.split("\t")[0].strip()
+        if value == "/dev/null":
+            return None
+    return _strip_git_prefix(value)
 
 
 def _paths_from_git_header(line: str) -> tuple[str, str]:
     """Обе стороны из `diff --git a/x b/y` — запас, когда нет `---`/`+++`."""
     rest = line[len("diff --git ") :]
+    if rest.startswith('"'):
+        a_raw, tail = _read_quoted(rest)
+        tail = tail.lstrip(" ")
+        b_raw = _read_quoted(tail)[0] if tail.startswith('"') else tail
+        return _strip_git_prefix(a_raw), _strip_git_prefix(b_raw)
+    if ' "b/' in rest:
+        a_raw, b_quoted = rest.split(' "', 1)
+        return _strip_git_prefix(a_raw), _strip_git_prefix(_read_quoted('"' + b_quoted)[0])
     if " b/" in rest:
         a_raw, b_raw = rest.split(" b/", 1)
         return _strip_git_prefix(a_raw), b_raw
@@ -181,3 +191,44 @@ def _paths_from_git_header(line: str) -> tuple[str, str]:
 
 def _strip_git_prefix(path: str) -> str:
     return path[2:] if path.startswith(("a/", "b/")) else path
+
+
+# C-quoting git (`core.quotePath`, по умолчанию включён): путь с не-ASCII,
+# управляющими символами, `"` или `\` идёт в кавычках, байты UTF-8 —
+# восьмеричными escape (`"b/\320\277.py"`).
+_C_ESCAPES = {"a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r"}
+# Байт — не больше \377: иное git не выдаёт, и `bytearray` его не примет.
+_OCTAL = re.compile(r"[0-3][0-7]{2}")
+
+
+def _unquote(value: str) -> str:
+    """Путь как есть или раскрытый из кавычек git."""
+    return _read_quoted(value)[0] if value.startswith('"') else value
+
+
+def _read_quoted(text: str) -> tuple[str, str]:
+    """Раскрыть путь в кавычках в начале `text`; вернуть путь и остаток строки.
+
+    Восьмеричные escape — байты, поэтому путь собирается в байтах и
+    декодируется как UTF-8 целиком. Без закрывающей кавычки строка не
+    раскрывается: это не C-quoting git, а путь, начинающийся с `"`.
+    """
+    out = bytearray()
+    i = 1
+    while i < len(text):
+        char = text[i]
+        if char == '"':
+            return out.decode("utf-8", errors="replace"), text[i + 1 :]
+        if char == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if _OCTAL.match(text, i + 1):
+                out.append(int(text[i + 1 : i + 4], 8))
+                i += 4
+                continue
+            out += _C_ESCAPES.get(nxt, nxt).encode("utf-8")
+            i += 2
+            continue
+        out += char.encode("utf-8")
+        i += 1
+    return text, ""
+
