@@ -21,11 +21,23 @@ def _line_for_side(draft: InlineCommentDraft) -> int:
     return draft.line
 
 
+def _raw_comment_line(raw: dict[str, Any]) -> int | None:
+    line = raw.get("line")
+    if line is None:
+        line = raw.get("original_line")
+    if line is None:
+        return None
+    try:
+        return int(line)
+    except (TypeError, ValueError):
+        return None
+
+
 def _map_fetched_inline_comments(
     drafts: tuple[InlineCommentDraft, ...],
     raw_comments: list[dict[str, Any]],
-) -> tuple[PublishedInlineComment, ...]:
-    published: list[PublishedInlineComment] = []
+) -> tuple[PublishedInlineComment | None, ...]:
+    published: list[PublishedInlineComment | None] = []
     used_provider_ids: set[str] = set()
     for draft in drafts:
         want_side = _github_side(draft.side)
@@ -36,12 +48,13 @@ def _map_fetched_inline_comments(
                 for raw in raw_comments
                 if str(raw.get("id")) not in used_provider_ids
                 and raw.get("path") == draft.file_path
-                and int(raw.get("line", -1)) == want_line
+                and _raw_comment_line(raw) == want_line
                 and raw.get("side", "RIGHT") == want_side
             ),
             None,
         )
         if match is None:
+            published.append(None)
             continue
         side = DiffSide.NEW if match.get("side", "RIGHT") == "RIGHT" else DiffSide.OLD
         provider_id = str(match["id"])
@@ -96,7 +109,7 @@ class GitHubReviewClient:
         summary_id = None
         if response.get("body"):
             summary_id = str(response["id"])
-        published: tuple[PublishedInlineComment, ...] = ()
+        published: tuple[PublishedInlineComment | None, ...] = ()
         if inline_comments:
             review_id = response["id"]
             raw_comments = self._gw._get_json_list_paginated(
@@ -203,10 +216,11 @@ class GitHubReviewClient:
         installation_id: int,
     ) -> list[dict[str, Any]]:
         query = """
-        query($owner: String!, $name: String!, $number: Int!) {
+        query($owner: String!, $name: String!, $number: Int!, $after: String) {
           repository(owner: $owner, name: $name) {
             pullRequest(number: $number) {
-              reviewThreads(first: 100) {
+              reviewThreads(first: 100, after: $after) {
+                pageInfo { hasNextPage endCursor }
                 nodes {
                   id
                   isResolved
@@ -219,18 +233,28 @@ class GitHubReviewClient:
           }
         }
         """
-        data = self._gw._post_graphql(
-            installation_id,
-            query,
-            {"owner": owner, "name": name, "number": pr_number},
-        )
-        nodes = (
-            data.get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-            .get("nodes", [])
-        )
-        return [node for node in nodes if isinstance(node, dict)]
+        threads: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            data = self._gw._post_graphql(
+                installation_id,
+                query,
+                {"owner": owner, "name": name, "number": pr_number, "after": cursor},
+            )
+            block = (
+                data.get("repository", {})
+                .get("pullRequest", {})
+                .get("reviewThreads", {})
+            )
+            nodes = block.get("nodes", [])
+            threads.extend(node for node in nodes if isinstance(node, dict))
+            page_info = block.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                return threads
+            next_cursor = page_info.get("endCursor")
+            if not isinstance(next_cursor, str):
+                return threads
+            cursor = next_cursor
 
     def _thread_for_comment(
         self,

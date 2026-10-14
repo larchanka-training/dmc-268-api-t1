@@ -24,7 +24,8 @@ class PublishedInlineComment:
 @dataclass(frozen=True, slots=True)
 class PullRequestReviewPublication:
     summary_provider_comment_id: str | None
-    inline_comments: tuple[PublishedInlineComment, ...]
+    # Порядок совпадает с черновиками инлайн-комментариев; `None` — не сопоставлен.
+    inline_comments: tuple[PublishedInlineComment | None, ...]
 
 
 @dataclass(frozen=True, slots=True)

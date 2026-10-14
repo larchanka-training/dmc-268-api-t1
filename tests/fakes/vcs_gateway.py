@@ -13,6 +13,7 @@ from app.domain.entities import PRMetadata
 
 @dataclass
 class RecordingVcsGateway:
+    diff: str = ""
     checks: list[MergeGateCheck] = field(default_factory=list)
     replies: list[tuple[str, str]] = field(default_factory=list)
     resolved: list[str] = field(default_factory=list)
@@ -23,7 +24,7 @@ class RecordingVcsGateway:
     def fetch_diff(
         self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
     ) -> str:
-        return ""
+        return self.diff
 
     def fetch_pr_metadata(
         self, repo_full_name: str, pr_number: int, installation_id: int
@@ -45,9 +46,9 @@ class RecordingVcsGateway:
                 file_path=item.file_path,
                 side=item.side,
                 line=item.line,
-                provider_comment_id=f"inline-{item.file_path}-{item.line}",
+                provider_comment_id=f"inline-{index}-{item.file_path}-{item.line}",
             )
-            for item in inline_comments
+            for index, item in enumerate(inline_comments)
         )
         return PullRequestReviewPublication(
             summary_provider_comment_id="summary-1",

@@ -16,10 +16,14 @@ from app.application.ports.llm_gateway import (
 )
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
-from app.application.ports.vcs_review import InlineCommentDraft, PublishedInlineComment
+from app.application.ports.vcs_review import InlineCommentDraft
 from app.application.sync_thread_resolution import sync_open_threads_from_host
+from app.domain.diff import validate_anchor
+from app.domain.diff_parser import parse_diff
 from app.domain.entities import (
+    DiffAnchor,
     Finding,
+    Hunk,
     OpenReviewThread,
     PublishedComment,
     ReviewJob,
@@ -61,32 +65,19 @@ def _line_for_anchor(finding: Finding) -> int:
     return finding.anchor.old_line
 
 
-def _match_published_to_finding(
-    finding: Finding, published: tuple[PublishedInlineComment, ...]
-) -> str | None:
-    for item in published:
-        if (
-            item.file_path == finding.anchor.file_path
-            and item.side == finding.anchor.side
-            and item.line == _line_for_anchor(finding)
-        ):
-            return item.provider_comment_id
-    return None
-
-
-def _may_resolve_thread(status: ThreadFollowUpStatus, severity: FindingSeverity) -> bool:
+def _may_resolve_thread(
+    status: ThreadFollowUpStatus,
+    severity: FindingSeverity,
+    anchor: DiffAnchor,
+    hunks: tuple[Hunk, ...],
+) -> bool:
     if status is ThreadFollowUpStatus.STILL_RELEVANT:
         return False
-    if status is ThreadFollowUpStatus.ACCEPTED_RISK and severity in (
-        FindingSeverity.CRITICAL,
-        FindingSeverity.HIGH,
-    ):
+    if status not in (ThreadFollowUpStatus.FIXED, ThreadFollowUpStatus.SUPERSEDED):
         return False
-    return status in (
-        ThreadFollowUpStatus.FIXED,
-        ThreadFollowUpStatus.SUPERSEDED,
-        ThreadFollowUpStatus.ACCEPTED_RISK,
-    )
+    if status is ThreadFollowUpStatus.FIXED and severity is FindingSeverity.CRITICAL:
+        return not validate_anchor(anchor, hunks).ok
+    return True
 
 
 def publish_review(
@@ -144,10 +135,12 @@ def publish_review(
                     updated_at=moment,
                 )
             )
-        for finding in findings:
-            provider_id = _match_published_to_finding(finding, publication.inline_comments)
-            if provider_id is None:
+        for finding, published_item in zip(
+            findings, publication.inline_comments, strict=True
+        ):
+            if published_item is None:
                 continue
+            provider_id = published_item.provider_comment_id
             uow.published_comments.add(
                 PublishedComment(
                     id=new_id(),
@@ -205,6 +198,10 @@ def _publish_thread_follow_ups(
 ) -> None:
     if not follow_ups:
         return
+    diff_text = vcs.fetch_diff(
+        job.repository_full_name, job.base_sha, job.head_sha, job.installation_id
+    )
+    hunks = parse_diff(diff_text)
     by_key: dict[tuple[str, DiffSide, int, FindingCategory], OpenReviewThread] = {}
     for open_thread in open_threads:
         anchor_line = _line_for_anchor(open_thread.finding)
@@ -237,7 +234,10 @@ def _publish_thread_follow_ups(
             body,
         )
         resolve = item.resolve_thread and _may_resolve_thread(
-            item.status, matched.finding.severity
+            item.status,
+            matched.finding.severity,
+            matched.finding.anchor,
+            hunks,
         )
         if resolve:
             vcs.resolve_review_thread_for_comment(

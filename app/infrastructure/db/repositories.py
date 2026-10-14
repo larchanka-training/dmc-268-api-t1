@@ -9,7 +9,7 @@ import datetime as dt
 from collections.abc import Iterable
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.domain.diff import validate_anchor
@@ -401,15 +401,21 @@ class SqlAlchemyPublishedCommentRepo:
         row.updated_at = comment.updated_at
 
     def record_feedback(self, provider_comment_id: str, *, positive: bool) -> bool:
-        row = self._session.scalars(
-            select(PublishedCommentRow).where(
-                PublishedCommentRow.provider_comment_id == provider_comment_id
-            )
-        ).first()
-        if row is None:
-            return False
         if positive:
-            row.feedback_positive += 1
+            values = {
+                PublishedCommentRow.feedback_positive: (
+                    PublishedCommentRow.feedback_positive + 1
+                )
+            }
         else:
-            row.feedback_negative += 1
-        return True
+            values = {
+                PublishedCommentRow.feedback_negative: (
+                    PublishedCommentRow.feedback_negative + 1
+                )
+            }
+        result = self._session.execute(
+            update(PublishedCommentRow)
+            .where(PublishedCommentRow.provider_comment_id == provider_comment_id)
+            .values(values)
+        )
+        return result.rowcount == 1

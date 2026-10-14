@@ -43,6 +43,7 @@ from app.application.use_cases.handle_webhook import (
 from app.domain.enums import Provider
 from app.domain.hmac import verify_hmac
 from app.domain.ids import new_id
+from app.domain.vcs_errors import VcsError
 
 # Путь контракта — /api/v1/webhooks/{provider}; префикс ставит роутер,
 # как и остальные роутеры приложения.
@@ -95,13 +96,16 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
         return JSONResponse(status_code=202, content={"status": "ignored"})
 
     if event_type == REVIEW_THREAD_EVENT:
-        await run_in_threadpool(
-            handle_review_thread_webhook,
-            payload,
-            uow=container.unit_of_work(),
-            vcs=container.vcs_gateway(),
-            now=lambda: datetime.now(UTC),
-        )
+        try:
+            await run_in_threadpool(
+                handle_review_thread_webhook,
+                payload,
+                uow=container.unit_of_work(),
+                vcs=container.vcs_gateway(),
+                now=lambda: datetime.now(UTC),
+            )
+        except VcsError:
+            return _api_error(502, "SCM_UNAVAILABLE", "VCS provider unavailable")
         return JSONResponse(status_code=202, content={"status": "acknowledged"})
 
     # Гейт события стоит до разбора тела: подписанная доставка другого события
