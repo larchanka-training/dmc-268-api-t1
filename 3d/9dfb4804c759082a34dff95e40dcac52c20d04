@@ -1,0 +1,19 @@
+app/infrastructure/db/repositories.py
+  s_a1a27ee850bde1::t_ab92fdea07e2f0 416,420-422
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "3d9dfb4804c759082a34dff95e40dcac52c20d04",
+  "prompts": {},
+  "sessions": {
+    "s_a1a27ee850bde1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "57a2db80-0462-46ea-b17e-515fdb857d26",
+        "model": "composer-2.5"
+      },
+      "human_author": "pnaumov <pnaumov@sberhealth.ru>"
+    }
+  }
+}
