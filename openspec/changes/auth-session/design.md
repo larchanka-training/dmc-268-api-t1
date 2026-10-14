@@ -10,7 +10,7 @@
 
 **Goals:**
 
-- Вход через GitHub и GitLab, общий для всех вкладок браузера.
+- Вход через GitHub, общий для всех вкладок браузера.
 - Выход и отзыв сессии действуют сразу.
 - Ни один токен не доступен JS страницы.
 - SSE и обычные запросы авторизуются одинаково, без заголовков.
@@ -21,6 +21,7 @@
 - Роли и права на репозитории: кто может регистрировать репозиторий и запускать ревью (api#41) — отдельный change поверх этого.
 - Список установок GitHub App пользователя и подключение репозиториев.
 - Хранение токенов пользователей у провайдеров.
+- Вход через GitLab: репозитории GitLab сервис пока не подключает. Порт `OAuthProvider` и `{provider}` в путях оставляют место для его адаптера.
 
 ## Decisions
 
@@ -56,7 +57,7 @@
 
 1. `GET /api/v1/auth/{provider}/login?redirect=…` генерирует `state`, кладёт его и проверенный `redirect` в cookie `oauth_state` (`HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=600`) и отвечает `302` на страницу авторизации провайдера.
 2. Провайдер возвращает на `GET /api/v1/auth/{provider}/callback?code=…&state=…`. `SameSite=Lax` пропускает `oauth_state` с этим переходом верхнего уровня.
-3. Бэкенд сверяет `state` с cookie, обменивает `code` на токен пользователя секретом приложения и одним запросом получает профиль: `GET /user` у GitHub, `GET /api/v4/user` у GitLab.
+3. Бэкенд сверяет `state` с cookie, обменивает `code` на токен пользователя секретом приложения и одним запросом получает профиль: `GET /user`.
 4. Находит или создаёт пользователя по паре `provider` + `provider_user_id`, обновляет логин, имя и аватар.
 5. Создаёт сессию, ставит cookie `session`, удаляет `oauth_state` и отвечает `302` на `redirect` или на `/app/`.
 
@@ -104,8 +105,9 @@ nginx интерфейса уводит гостя с `/app/…` на `/login?re
 
 ### Провайдеры
 
-- **GitHub** — OAuth самого GitHub App: у него нет scope, приложение получает только профиль. Callback регистрируется в настройках приложения.
-- **GitLab** — OAuth-приложение со scope `read_user`. Адрес инстанса — настройка `GITLAB_BASE_URL`, по умолчанию `https://gitlab.com`.
+Провайдер один — GitHub: OAuth самого GitHub App, у него нет scope, приложение получает только профиль. Callback регистрируется в настройках приложения.
+
+Провайдер — адаптер порта `OAuthProvider`, выбранный по `{provider}` из пути; неизвестный — `404`. Второй провайдер добавляется адаптером и настройками, без изменения контракта и схемы.
 
 ### Cookie по HTTP
 
@@ -122,6 +124,8 @@ nginx интерфейса уводит гостя с `/app/…` на `/login?re
 Без сессии — `401` с `ApiError.code = UNAUTHENTICATED`. Если cookie `session` пришла, но недействительна, тот же ответ её удаляет (`Max-Age=0`). Так nginx интерфейса перестаёт считать пользователя вошедшим, и страница входа не уводит его обратно в приложение по кругу.
 
 Проверка — зависимость FastAPI на уровне роутера, а не middleware: исключения видны в объявлении маршрутов.
+
+Поток SSE зависимость проверяет один раз, при подключении, а дальше он живёт до конца прогона. Поэтому цикл потока, который раз в секунду читает прогон (api#56), раз в 5 секунд заодно перечитывает сессию по хэшу cookie — тот же запрос по уникальному индексу. Сессии нет или срок истёк — поток закрывается без события. `EventSource` переподключается, получает `401` и больше не пробует; кабинет уводит на `/login`.
 
 Рабочие запросы, протухшая сессия и выход:
 
@@ -143,6 +147,7 @@ sequenceDiagram
     T1->>A: POST /api/v1/auth/logout (cookie, Origin)
     A->>DB: delete sessions
     A-->>T1: 204, Set-Cookie: session удалена
+    Note over A,T2: поток T2 перечитывает сессию — её нет, поток закрыт
     T2->>A: следующий запрос (та же cookie)
     A->>DB: сессии нет
     A-->>T2: 401 UNAUTHENTICATED, Set-Cookie: session удалена
@@ -159,7 +164,7 @@ sequenceDiagram
 ```text
 users
   id                uuid PK
-  provider          text NOT NULL            -- github | gitlab
+  provider          text NOT NULL            -- github
   provider_user_id  text NOT NULL
   login             text NOT NULL
   name              text NULL
@@ -176,13 +181,13 @@ sessions
   expires_at        timestamptz NOT NULL
 ```
 
-`provider_user_id` — строка: идентификаторы GitHub и GitLab числовые, но тип у провайдеров разный, а сравнивать их между собой не нужно. Миграция одна, `downgrade` удаляет обе таблицы.
+`provider` в ключе — чтобы второй провайдер не потребовал миграции. `provider_user_id` — строка: тип идентификатора у провайдеров разный, а сравнивать их между собой не нужно. Миграция одна, `downgrade` удаляет обе таблицы.
 
 ### Слои
 
 - `app/domain`: `User`, `Session`, правило срока жизни.
 - `app/application`: порт `OAuthProvider` (`authorize_url`, `exchange_code` → профиль), порт репозиториев пользователей и сессий; use cases `start_login`, `complete_login`, `authenticate`, `logout`.
-- `app/infrastructure`: адаптеры GitHub и GitLab на `httpx`, репозитории на SQLAlchemy.
+- `app/infrastructure`: адаптер GitHub на `httpx`, репозитории на SQLAlchemy.
 - `app/api`: роутер `/auth`, зависимость `current_user`, проверка `Origin`.
 
 ## Risks / Trade-offs

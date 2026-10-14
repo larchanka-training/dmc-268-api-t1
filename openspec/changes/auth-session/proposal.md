@@ -17,12 +17,12 @@
 ## What Changes
 
 - **BREAKING** для контракта-предложения §9.1 и мока ui#16 (реализаций нет): убираются `POST /auth/oauth/token`, `POST /auth/refresh`, схемы `OAuthTokenRequest`, `AuthSession` и коды `AUTH_CODE_INVALID`, `AUTH_REFRESH_INVALID`.
-- OAuth выполняет бэкенд целиком: `GET /api/v1/auth/{provider}/login` уводит к провайдеру, `GET /api/v1/auth/{provider}/callback` проверяет `state`, обменивает код, находит или создаёт пользователя, ставит cookie сессии и перенаправляет в приложение. Провайдеры — GitHub и GitLab.
+- OAuth выполняет бэкенд целиком: `GET /api/v1/auth/{provider}/login` уводит к провайдеру, `GET /api/v1/auth/{provider}/callback` проверяет `state`, обменивает код, находит или создаёт пользователя, ставит cookie сессии и перенаправляет в приложение. Провайдер — GitHub; GitLab добавится адаптером, когда сервис начнёт подключать его репозитории.
 - `GET /api/v1/auth/me` — текущий пользователь, `POST /api/v1/auth/logout` — выход.
 - Сессия — непрозрачный случайный идентификатор в cookie `session` (`HttpOnly; Secure; SameSite=Lax; Path=/`). В базе хранится его хэш.
 - Ручки `/api/v1`, кроме вебхуков и входа, требуют сессию. Без неё — `401`, а недействительная cookie удаляется в том же ответе.
 - Изменяющие запросы с cookie сессии проверяют `Origin`.
-- Токены пользователей GitHub и GitLab не хранятся: токен нужен один раз, чтобы узнать пользователя. Ревью работает через GitHub App installation-токены, как сейчас.
+- Токены пользователей GitHub не хранятся: токен нужен один раз, чтобы узнать пользователя. Ревью работает через GitHub App installation-токены, как сейчас.
 - Новые таблицы `users` и `sessions` — миграцией Alembic.
 
 ## Capabilities
@@ -39,5 +39,5 @@
 
 - Контракт: `docs/openapi/openapi.yaml`, `docs/pipeline/PIPELINE_SPEC.md` §9.1, контекст `openspec/config.yaml` («JWT authorization» → сессия в cookie).
 - Данные: таблицы `users`, `sessions`; миграция с рабочим `downgrade`.
-- Конфигурация: `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITLAB_OAUTH_CLIENT_ID`, `GITLAB_OAUTH_CLIENT_SECRET`, `PUBLIC_ORIGIN`. Callback регистрируется у GitHub App и OAuth-приложения GitLab.
+- Конфигурация: `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `PUBLIC_ORIGIN`. Callback регистрируется у GitHub App.
 - Фронтенд: кабинет (ui#16) убирает обмен кода, хранение и обновление токенов и страницу callback; запросы — с `credentials: 'include'`; вход — `/login` (ui#24); SSE (ui#20) остаётся на нативном `EventSource`.
