@@ -43,7 +43,7 @@ def test_rules_are_read_from_the_target_branch_commit() -> None:
     assert rules.status is RulesStatus.LOADED
     assert [r.name for r in rules.rules] == ["Errors"]
     assert rules.rejected == (
-        RejectedRule("Broken", "нет исключения (exclude); нет проверок"),
+        RejectedRule("Broken", "нет проверок"),
     )
 
 

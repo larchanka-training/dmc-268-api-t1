@@ -52,7 +52,6 @@ class _Draft:
             label
             for label, part in (
                 ("нет паттерна (pattern)", self.patterns),
-                ("нет исключения (exclude)", self.excludes),
                 ("нет проверок", self.checks),
             )
             if not part

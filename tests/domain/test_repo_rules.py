@@ -63,12 +63,26 @@ def test_rule_without_checks_is_rejected_and_others_survive() -> None:
     assert rejected == (RejectedRule(name="Naming", reason="нет проверок"),)
 
 
+def test_rule_without_exclude_is_accepted_and_excludes_nothing() -> None:
+    text = """\
+## All sources
+
+- pattern: app/**/*.py
+
+1. Публичная функция с аннотациями типов
+"""
+    (rule,), rejected = parse_rules_markdown(text)
+    assert rejected == ()
+    assert rule.excludes == ()
+    assert rule_applies_to(rule, "app/tests/test_core.py")
+
+
 def test_rejection_lists_every_missing_part() -> None:
     _, rejected = parse_rules_markdown("## Пустое\n\nпросто текст\n")
     assert rejected == (
         RejectedRule(
             name="Пустое",
-            reason="нет паттерна (pattern); нет исключения (exclude); нет проверок",
+            reason="нет паттерна (pattern); нет проверок",
         ),
     )
 
