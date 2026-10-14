@@ -413,9 +413,10 @@ class SqlAlchemyPublishedCommentRepo:
                     PublishedCommentRow.feedback_negative + 1
                 )
             }
-        result = self._session.execute(
+        updated_id = self._session.scalars(
             update(PublishedCommentRow)
             .where(PublishedCommentRow.provider_comment_id == provider_comment_id)
             .values(values)
-        )
-        return result.rowcount == 1
+            .returning(PublishedCommentRow.id)
+        ).first()
+        return updated_id is not None
