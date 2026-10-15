@@ -8,4 +8,8 @@
 ## 2. Приёмка
 
 - [x] 2.1 Локально `npx @fission-ai/openspec@1.14.2 validate --all --strict` и проверка архива зелёные
-- [ ] 2.2 Дождаться зелёного job `openspec` в CI на 1.14.2; приложить ссылку на прогон
+- [x] 2.2 Дождаться зелёного job `openspec` в CI на 1.14.2; приложить ссылку на прогон
+
+## Примечания к выполнению
+
+Проверка: [CI 38822741550](https://github.com/larchanka-training/dmc-268-api-t1/actions/runs/38822741550) — все job зелёные, `openspec` на 1.14.2.
