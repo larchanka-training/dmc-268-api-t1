@@ -25,3 +25,12 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
+
+      # Та же версия openspec, что в CI: старые версии не проверяют длину
+      # требований, и «локально зелено» расходилось бы с CI. Нужен Node с npx.
+      - id: openspec-validate
+        name: openspec validate --strict
+        entry: npx --yes @fission-ai/openspec@1.14.2 validate --all --strict
+        language: system
+        pass_filenames: false
+        files: ^openspec/

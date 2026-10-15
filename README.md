@@ -49,7 +49,7 @@ ln -s AGENTS.md CLAUDE.md                 # Claude Code читает CLAUDE.md
 
 ```bash
 uv sync --all-extras
-uv run pre-commit install   # перед каждым коммитом гоняет ruff, mypy и lint-imports
+uv run pre-commit install   # перед каждым коммитом гоняет ruff, mypy, lint-imports и openspec validate (нужен Node)
 ```
 
 ## Запуск
@@ -138,7 +138,7 @@ uv run lint-imports      # правило слоёв, см. документ п�
 например когда что-нибудь в `app/domain` тянется к SQLAlchemy. `mypy` работает в
 строгом режиме по `app/`; для `tests/` действует послабление
 (`[[tool.mypy.overrides]]` в `pyproject.toml`), потому что стиль pytest —
-нетипизированные фикстуры и `def test_x():` — там норма. Все три проверки
+нетипизированные фикстуры и `def test_x():` — там норма. Все три проверки, как и `openspec validate --strict`,
 работают и как хуки `pre-commit` (`uv run pre-commit install`, см. «Установка»),
 и в CI.
 
