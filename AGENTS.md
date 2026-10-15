@@ -18,7 +18,7 @@
   `poetry`, ни правка `requirements.txt`.
 - Python 3.14, версия зафиксирована в `.python-version` и в `requires-python`.
 - Проверки перед коммитом: `uv run ruff check .`, `uv run lint-imports`, `uv run pytest`,
-  `npx @fission-ai/openspec@1.14.1 validate --all --strict`.
+  `npx @fission-ai/openspec@1.14.2 validate --all --strict`.
   Пропущенный тест приравнивается к упавшему — CI падает, если тест пропустили.
 - Схему базы данных меняет **только миграция Alembic**. Приложение не создаёт и не меняет
   объекты схемы ни при старте, ни во время работы. Ревизия должна быть одна:
