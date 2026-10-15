@@ -63,7 +63,10 @@ jobs:
       - run: npx --yes @fission-ai/openspec@1.14.1 validate --all --strict
       # Change со всеми закрытыми задачами архивируется в том же PR — иначе его
       # дельты не доходят до openspec/specs/. Открытые change — в summary.
+      # Явный `shell: bash` включает pipefail: сбой openspec не маскируется
+      # ошибкой разбора JSON в скрипте.
       - run: npx --yes @fission-ai/openspec@1.14.1 list --json | python3 scripts/check_openspec_archived.py
+        shell: bash
 
   terraform:
     needs: syntax
