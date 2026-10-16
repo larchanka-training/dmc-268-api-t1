@@ -121,6 +121,16 @@ class DefinitionKind(StrEnum):
     METHOD = "method"
 
 
+# Этапы обработки — то, что может стоять в `failed_stage`. `queued` сюда не
+# входит: прогон, упавший до начала работы, ни на каком этапе не был.
+FAILURE_STAGES: frozenset[ReviewRunStatus] = frozenset(
+    {
+        ReviewRunStatus.BUILDING_CONTEXT,
+        ReviewRunStatus.ANALYSING,
+        ReviewRunStatus.PUBLISHING,
+    }
+)
+
 TERMINAL_STATUSES: frozenset[ReviewRunStatus] = frozenset(
     {
         ReviewRunStatus.COMPLETED,

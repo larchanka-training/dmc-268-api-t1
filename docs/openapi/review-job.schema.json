@@ -89,6 +89,11 @@
       "format": "date-time",
       "description": "Обновляется на каждом переходе состояния; используется для выявления зависших прогонов (§7.5 PIPELINE_SPEC.md)."
     },
+    "failedStage": {
+      "type": ["string", "null"],
+      "enum": ["building_context", "analysing", "publishing", null],
+      "description": "Этап, на котором прогон упал; null, если прогон не падал или упал из queued."
+    },
     "error": {
       "oneOf": [
         { "$ref": "error.schema.json" },

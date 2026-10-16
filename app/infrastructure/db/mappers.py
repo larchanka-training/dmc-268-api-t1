@@ -67,6 +67,7 @@ def review_run_to_domain(row: ReviewRunRow) -> ReviewRun:
         created_at=row.created_at,
         updated_at=row.updated_at,
         failure_reason=row.failure_reason,
+        failed_stage=row.failed_stage,
         model=row.model,
         tokens_used=row.tokens_used,
         duration_seconds=row.duration_seconds,

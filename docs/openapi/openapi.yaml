@@ -79,6 +79,50 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /reviews/{reviewId}/events:
+    parameters:
+      - $ref: "#/components/parameters/ReviewId"
+    get:
+      summary: Поток событий статуса прогона (Server-Sent Events)
+      operationId: streamReviewEvents
+      description: |
+        Первое событие после подключения — `status` со снимком текущего состояния,
+        дальше — по событию `status` на каждую смену статуса и `ping` в тишине,
+        не реже раза в 15 секунд. После терминального статуса сервер закрывает
+        поток. Поток начинается со строки `retry: 3000`. Поток отражает состояние,
+        а не журнал: несколько переходов между проверками приходят одним событием.
+
+        Поля события — в `snake_case`, как их отдаёт сервер:
+
+            event: status
+            data: {"review_run_id":"…","status":"analysing","last_progress_at":"2026-10-11T10:00:00Z","failed_stage":null,"failure_reason":null}
+
+            event: ping
+            data: {}
+      responses:
+        "200":
+          description: Поток событий; данные события `status` — ReviewRunStatusEvent
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+            X-Accel-Buffering:
+              description: Отключает буферизацию ответа в nginx.
+              schema:
+                type: string
+                const: "no"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "404":
+          description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND); поток не открывается
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /reviews/{reviewId}/findings:
     parameters:
       - $ref: "#/components/parameters/ReviewId"
@@ -335,10 +379,52 @@ components:
           type: string
           format: date-time
           description: Обновляется на каждом переходе состояния; используется для выявления зависших прогонов (§7.5 PIPELINE_SPEC.md).
+        failedStage:
+          type:
+            - string
+            - "null"
+          enum:
+            - building_context
+            - analysing
+            - publishing
+            - null
+          description: Этап, на котором прогон упал; null, если прогон не падал или упал из queued.
         error:
           oneOf:
             - $ref: "#/components/schemas/ReviewError"
             - type: "null"
+
+    ReviewRunStatusEvent:
+      type: object
+      description: Данные события `status` потока `/reviews/{reviewId}/events`.
+      additionalProperties: false
+      required:
+        - review_run_id
+        - status
+        - last_progress_at
+        - failed_stage
+        - failure_reason
+      properties:
+        review_run_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/ReviewStatus"
+        last_progress_at:
+          type: string
+          format: date-time
+        failed_stage:
+          type:
+            - string
+            - "null"
+          enum:
+            - building_context
+            - analysing
+            - publishing
+            - null
+        failure_reason:
+          type:
+            - string
+            - "null"
 
     Finding:
       type: object

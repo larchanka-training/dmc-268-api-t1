@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -31,6 +32,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.domain.enums import (
+    FAILURE_STAGES,
     TERMINAL_STATUSES,
     CommentKind,
     DiffSide,
@@ -44,6 +46,7 @@ from app.domain.enums import (
 from app.infrastructure.db.base import Base, TimestampMixin, UuidPrimaryKeyMixin
 
 _TERMINAL_SQL = ", ".join(f"'{s.value}'" for s in sorted(TERMINAL_STATUSES))
+_STAGES_SQL = ", ".join(f"'{s.value}'" for s in sorted(FAILURE_STAGES))
 
 
 def _enum(python_enum: type, name: str) -> SAEnum:
@@ -127,6 +130,13 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             unique=True,
             postgresql_where=text(f"status NOT IN ({_TERMINAL_SQL})"),
         ),
+        # Этап сбоя есть только у упавшего прогона и только из числа этапов
+        # обработки: правило `advance` держится против любого писателя.
+        CheckConstraint(
+            "failed_stage IS NULL"
+            f" OR (status = 'failed' AND failed_stage IN ({_STAGES_SQL}))",
+            name="ck_review_runs_failed_stage",
+        ),
     )
 
     merge_request_id: Mapped[uuid.UUID] = mapped_column(
@@ -146,6 +156,10 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
         DateTime(timezone=True), nullable=False
     )
     failure_reason: Mapped[str | None] = mapped_column(Text)
+    # Тот же enum-тип, что у `status`: отдельный повторил бы список статусов.
+    failed_stage: Mapped[ReviewRunStatus | None] = mapped_column(
+        _enum(ReviewRunStatus, "review_run_status")
+    )
     model: Mapped[str | None] = mapped_column(String(255))
     tokens_used: Mapped[int | None] = mapped_column(BigInteger)
     duration_seconds: Mapped[float | None] = mapped_column(Float)

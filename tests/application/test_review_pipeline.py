@@ -219,6 +219,7 @@ def test_llm_failure_marks_the_run_failed_with_a_reason_and_reraises() -> None:
     assert run is not None
     assert run.status == ReviewRunStatus.FAILED
     assert run.failure_reason == "модель недоступна"
+    assert run.failed_stage is ReviewRunStatus.ANALYSING
 
 
 def test_missing_run_raises_so_the_message_goes_to_the_dlq() -> None:
