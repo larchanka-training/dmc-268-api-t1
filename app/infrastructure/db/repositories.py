@@ -9,7 +9,7 @@ import datetime as dt
 from collections.abc import Iterable
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.domain.diff import validate_anchor
@@ -18,11 +18,12 @@ from app.domain.entities import (
     Finding,
     Hunk,
     MergeRequest,
+    OpenReviewThread,
     PublishedComment,
     Repository,
     ReviewRun,
 )
-from app.domain.enums import TERMINAL_STATUSES, Provider
+from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
@@ -337,6 +338,42 @@ class SqlAlchemyPublishedCommentRepo:
         ).all()
         return [m.published_comment_to_domain(row) for row in rows]
 
+    def list_open_threads_for_merge_request(
+        self, merge_request_id: UUID
+    ) -> list[OpenReviewThread]:
+        stmt = (
+            select(PublishedCommentRow, FindingRow)
+            .join(ReviewRunRow, PublishedCommentRow.review_run_id == ReviewRunRow.id)
+            .join(FindingRow, PublishedCommentRow.finding_id == FindingRow.id)
+            .where(
+                ReviewRunRow.merge_request_id == merge_request_id,
+                PublishedCommentRow.kind == CommentKind.INLINE,
+                PublishedCommentRow.thread_resolved.is_(False),
+            )
+            .order_by(PublishedCommentRow.published_at, PublishedCommentRow.id)
+        )
+        rows = self._session.execute(stmt).all()
+        return [
+            OpenReviewThread(
+                finding=m.finding_to_domain(finding_row),
+                root_provider_comment_id=comment_row.provider_comment_id,
+                root_published_comment_id=comment_row.id,
+            )
+            for comment_row, finding_row in rows
+        ]
+
+    def get(self, published_comment_id: UUID) -> PublishedComment | None:
+        row = self._session.get(PublishedCommentRow, published_comment_id)
+        return m.published_comment_to_domain(row) if row is not None else None
+
+    def find_by_provider_comment_id(self, provider_comment_id: str) -> PublishedComment | None:
+        row = self._session.scalars(
+            select(PublishedCommentRow).where(
+                PublishedCommentRow.provider_comment_id == provider_comment_id
+            )
+        ).first()
+        return m.published_comment_to_domain(row) if row is not None else None
+
     def add(self, comment: PublishedComment) -> None:
         self._session.add(
             PublishedCommentRow(
@@ -346,5 +383,40 @@ class SqlAlchemyPublishedCommentRepo:
                 provider_comment_id=comment.provider_comment_id,
                 kind=comment.kind,
                 published_at=comment.published_at,
+                thread_resolved=comment.thread_resolved,
+                in_reply_to_provider_comment_id=comment.in_reply_to_provider_comment_id,
+                feedback_positive=comment.feedback_positive,
+                feedback_negative=comment.feedback_negative,
             )
         )
+
+    def update(self, comment: PublishedComment) -> None:
+        row = self._session.get(PublishedCommentRow, comment.id)
+        if row is None:
+            raise LookupError(f"published comment {comment.id} is not stored")
+        row.thread_resolved = comment.thread_resolved
+        row.in_reply_to_provider_comment_id = comment.in_reply_to_provider_comment_id
+        row.feedback_positive = comment.feedback_positive
+        row.feedback_negative = comment.feedback_negative
+        row.updated_at = comment.updated_at
+
+    def record_feedback(self, provider_comment_id: str, *, positive: bool) -> bool:
+        if positive:
+            values = {
+                PublishedCommentRow.feedback_positive: (
+                    PublishedCommentRow.feedback_positive + 1
+                )
+            }
+        else:
+            values = {
+                PublishedCommentRow.feedback_negative: (
+                    PublishedCommentRow.feedback_negative + 1
+                )
+            }
+        updated_id = self._session.scalars(
+            update(PublishedCommentRow)
+            .where(PublishedCommentRow.provider_comment_id == provider_comment_id)
+            .values(values)
+            .returning(PublishedCommentRow.id)
+        ).first()
+        return updated_id is not None

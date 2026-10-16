@@ -21,6 +21,7 @@ from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.vcs_gateway import VcsGateway
+from app.application.publish_review import publish_review
 from app.application.use_cases.build_review_context import build_review_context
 from app.domain.entities import Finding, ReviewJob, ReviewRun
 from app.domain.enums import TERMINAL_STATUSES, ReviewRunStatus
@@ -144,6 +145,16 @@ def run_review(
             uow.commit()
 
         run = _transition(uow, run, ReviewRunStatus.PUBLISHING, now())
+
+        publish_review(
+            job,
+            run,
+            result,
+            uow=uow,
+            vcs=vcs_gateway,
+            now=now(),
+            new_id=new_id,
+        )
 
         run = replace(
             run,

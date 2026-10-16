@@ -9,14 +9,14 @@ import pytest
 
 from app.application.context_assembly import ContextLimits
 from app.application.ports.llm_gateway import LlmReviewResult
-from app.domain.entities import ReviewJob, ReviewRun
-from app.domain.enums import ReviewRunStatus, TriggerSource
+from app.domain.entities import MergeRequest, ReviewJob, ReviewRun
+from app.domain.enums import MergeRequestState, ReviewRunStatus, TriggerSource
 from app.infrastructure.queue.rabbitmq import to_wire_message
 from app.worker.factory import build_review_handler
 
 from ..fakes.context import FakeCache, FakeExtractor
 from ..fakes.unit_of_work import FakeUnitOfWork
-from ..fakes.webhooks import FakeVcs
+from ..fakes.vcs_gateway import RecordingVcsGateway
 
 LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144)
 
@@ -51,8 +51,8 @@ class _Deps:
     def llm_gateway(self) -> _StubGateway:
         return _StubGateway()
 
-    def vcs_gateway(self) -> FakeVcs:
-        return FakeVcs()
+    def vcs_gateway(self) -> RecordingVcsGateway:
+        return RecordingVcsGateway()
 
     def definition_extractor(self) -> FakeExtractor:
         return FakeExtractor()
@@ -64,10 +64,27 @@ class _Deps:
 def test_handler_parses_the_message_and_drives_the_run_to_completed() -> None:
     now = datetime(2026, 9, 29, tzinfo=UTC)
     uow = FakeUnitOfWork()
+    mr_id = UUID(int=3)
+    uow.merge_requests.add(
+        MergeRequest(
+            id=mr_id,
+            repository_id=UUID(int=9),
+            number=JOB.pull_request_number,
+            title="t",
+            description="",
+            author="a",
+            source_branch="feat",
+            target_branch="develop",
+            head_sha=JOB.head_sha,
+            state=MergeRequestState.OPEN,
+            created_at=now,
+            updated_at=now,
+        )
+    )
     uow.review_runs.add(
         ReviewRun(
             id=JOB.review_run_id,
-            merge_request_id=UUID(int=3),
+            merge_request_id=mr_id,
             head_sha=JOB.head_sha,
             status=ReviewRunStatus.QUEUED,
             trigger=TriggerSource.WEBHOOK,

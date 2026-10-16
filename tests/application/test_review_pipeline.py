@@ -11,11 +11,12 @@ import pytest
 from app.application.context_assembly import ContextLimits
 from app.application.ports.llm_gateway import LlmFinding, LlmReviewResult
 from app.application.review_pipeline import run_review
-from app.domain.entities import DiffAnchor, ReviewJob, ReviewRun
+from app.domain.entities import DiffAnchor, MergeRequest, ReviewJob, ReviewRun
 from app.domain.enums import (
     DiffSide,
     FindingCategory,
     FindingSeverity,
+    MergeRequestState,
     ReviewRunStatus,
     TriggerSource,
 )
@@ -23,6 +24,7 @@ from app.domain.vcs_errors import VcsError
 
 from ..fakes.context import FakeCache, FakeExtractor
 from ..fakes.unit_of_work import FakeUnitOfWork
+from ..fakes.vcs_gateway import RecordingVcsGateway
 from ..fakes.webhooks import FakeVcs
 
 # Дифф фейкового VCS меняет первую строку `app/main.py`.
@@ -45,11 +47,30 @@ JOB = ReviewJob(
 )
 
 
+MR_ID = UUID(int=3)
+
+
 def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.QUEUED) -> None:
+    uow.merge_requests.add(
+        MergeRequest(
+            id=MR_ID,
+            repository_id=UUID(int=9),
+            number=JOB.pull_request_number,
+            title="t",
+            description="",
+            author="a",
+            source_branch="feat",
+            target_branch="develop",
+            head_sha=JOB.head_sha,
+            state=MergeRequestState.OPEN,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
     uow.review_runs.add(
         ReviewRun(
             id=JOB.review_run_id,
-            merge_request_id=UUID(int=3),
+            merge_request_id=MR_ID,
             head_sha=JOB.head_sha,
             status=status,
             trigger=TriggerSource.WEBHOOK,
@@ -96,7 +117,7 @@ def _run(uow: FakeUnitOfWork, gateway: object, **overrides: object) -> None:
     kwargs: dict[str, object] = {
         "uow": uow,
         "llm_gateway": gateway,
-        "vcs_gateway": FakeVcs(),
+        "vcs_gateway": RecordingVcsGateway(),
         "definition_extractor": FakeExtractor(),
         "cache_store": FakeCache(),
         "context_limits": LIMITS,

@@ -70,6 +70,16 @@ class CommentKind(StrEnum):
 
     SUMMARY = "summary"
     INLINE = "inline"
+    THREAD_REPLY = "thread_reply"
+
+
+class ThreadFollowUpStatus(StrEnum):
+    """Как модель оценивает открытый тред на повторном прогоне."""
+
+    FIXED = "fixed"
+    STILL_RELEVANT = "still_relevant"
+    ACCEPTED_RISK = "accepted_risk"
+    SUPERSEDED = "superseded"
 
 
 class DiffSide(StrEnum):
