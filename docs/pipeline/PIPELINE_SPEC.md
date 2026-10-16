@@ -429,7 +429,7 @@ POST /webhooks/{provider}
 
 Вход через GitHub выполняет бэкенд, сессия живёт в httpOnly cookie и хранится на
 сервере. Требования — спека `user-auth` (`openspec/specs/user-auth/spec.md`), ручки —
-`openapi.yaml`, обоснование выбора — design change'а `auth-session`.
+`openapi.yaml`, обоснование выбора — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
 
 ---
 

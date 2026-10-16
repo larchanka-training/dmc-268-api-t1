@@ -352,7 +352,7 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 сессию сразу. Токен пользователя GitHub после входа не хранится. Access-лог uvicorn
 пишет путь с query, а в query callback'а лежат `code` и `state`, поэтому
 `app/api/log_redaction.py` вырезает query на путях `/api/v1/auth/`. CSRF держат
-`SameSite=Lax` и проверка `Origin`. Обоснование — design change'а `auth-session`.
+`SameSite=Lax` и проверка `Origin`. Обоснование — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
 
 **Область действия учётных данных.** Для публикации комментариев нужен доступ
 на запись. GitHub App с токенами на каждую установку ограничивает утечку одной
