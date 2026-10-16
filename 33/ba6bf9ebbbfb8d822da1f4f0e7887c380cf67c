@@ -1,0 +1,207 @@
+.agents/skills/openspec-apply-change/SKILL.md
+  s_a1a27ee850bde1::t_be72c552866e77 3,10,17-27,59,63,66-69,111-113,128,159-160,194
+.agents/skills/openspec-archive-change/SKILL.md
+  s_a1a27ee850bde1::t_390638fa783f17 3,10,17-27,89-102,109,120-124,126,129-131,136,150-161,164
+.agents/skills/openspec-explore/SKILL.md
+  s_a1a27ee850bde1::t_11825168f18618 3,10,15,21-31,132,156,163,182-183,193,321-322,338,348,352
+.agents/skills/openspec-propose/SKILL.md
+  s_a1a27ee850bde1::t_c0318155a734f3 3,10,31-41,59
+.agents/skills/openspec-sync-specs/SKILL.md
+  s_a1a27ee850bde1::t_c4a86a7c68189e 3,10,19-29,110-116,164-171,196-197
+.agents/skills/openspec-update-change/SKILL.md
+  s_a1a27ee850bde1::t_cf194c83e53e83 3,10,17-27,30,62,70,72-79,82-83,91,99-100,106-107,109
+.env.example
+  s_a1a27ee850bde1::t_a818b04fdb649f 27-35
+.github/workflows/ci.yml
+  s_a1a27ee850bde1::t_385327b5867982 50-70
+.pre-commit-config.yaml
+  s_a1a27ee850bde1::t_42206af4f2d7e1 28-36
+AGENTS.md
+  s_a1a27ee850bde1::t_0cc7d64985c1b7 20-21,28-29
+README.md
+  s_a1a27ee850bde1::t_11c251ae32ceee 52,141,176-185
+app/application/context_assembly.py
+  s_a1a27ee850bde1::t_a11473a862c292 1,3-21,25-26,28,31-51,53,55-58,61-79,81-98,100-103,105,109-123,125-130,132-194,196-245
+app/application/ports/__init__.py
+  s_a1a27ee850bde1::t_ec15e49359b6b6 1-2,17,19
+app/application/ports/cache_store.py
+  s_a1a27ee850bde1::t_a8c32b286749e2 1-20
+app/application/ports/definition_extractor.py
+  s_a1a27ee850bde1::t_c8fa2dddd53cef 1-21
+app/application/repo_config_loader.py
+  s_a1a27ee850bde1::t_aa255a3f36cfbe 1-103
+app/application/use_cases/build_review_context.py
+  s_a1a27ee850bde1::t_732c88a13b4a81 1-124
+app/config.py
+  s_a1a27ee850bde1::t_faba98db5050ec 55-90
+app/domain/code_context.py
+  s_a1a27ee850bde1::t_65c51790b2a1b0 1-83
+app/domain/context_budget.py
+  s_a1a27ee850bde1::t_ff4cd39c16e3a3 1-72
+app/domain/entities.py
+  s_a1a27ee850bde1::t_c961665c16b109 19,26,259-319
+app/domain/enums.py
+  s_a1a27ee850bde1::t_a016a08c0032de 92-123
+app/domain/repo_rules.py
+  s_a1a27ee850bde1::t_14845a67612e2c 1-137
+app/domain/untrusted.py
+  s_a1a27ee850bde1::t_de4de59f30adfc 1-61
+app/domain/vcs_errors.py
+  s_a1a27ee850bde1::t_51228a09a43309 13-20
+app/infrastructure/cache/memory.py
+  s_a1a27ee850bde1::t_fbdf37d51fc8d2 1-47
+app/infrastructure/container.py
+  s_a1a27ee850bde1::t_e4b118ac746dbc 14,19,22-24,48-52,81-90,101-102
+app/infrastructure/parsing/tree_sitter_extractor.py
+  s_a1a27ee850bde1::t_9082e6dac1353c 1-196
+app/infrastructure/vcs/errors.py
+  s_a1a27ee850bde1::t_86790af7db750b 11,22-27
+docker-compose.yml
+  s_a1a27ee850bde1::t_478fef28b6acee 78-81
+docs/BACKEND_ARCHITECTURE.md
+  s_a1a27ee850bde1::t_b84a802a9f7da1 41-42,106-108,148-149,300-315,345-354
+docs/SYSTEM_DESIGN.md
+  s_a1a27ee850bde1::t_a624be6e3f848e 27-29,48-50,73-74,94,98,106,157-158,162,167,170,174-175,177-181,185-187,195
+infra/README.md
+  s_a1a27ee850bde1::t_1cc7a26e59d955 43
+infra/main.tf
+  s_a1a27ee850bde1::t_827846daa13da8 231,259-260,296-301
+infra/variables.tf
+  s_a1a27ee850bde1::t_83d90a8b66c351 90
+openspec/changes/archive/2026-10-12-ci-openspec-checks/.openspec.yaml
+  s_a1a27ee850bde1::t_7661dfb131fac3 1-3
+openspec/changes/archive/2026-10-12-ci-openspec-checks/proposal.md
+  s_a1a27ee850bde1::t_1177f7ac0acae9 1-19
+openspec/changes/archive/2026-10-12-ci-openspec-checks/tasks.md
+  s_a1a27ee850bde1::t_f08ac364a51cea 1-12
+openspec/changes/archive/2026-10-12-split-long-requirements/.openspec.yaml
+  s_a1a27ee850bde1::t_c0da785e0b6cc6 1-2
+openspec/changes/archive/2026-10-12-split-long-requirements/proposal.md
+  s_a1a27ee850bde1::t_7a783fa19bfcfe 1-26
+openspec/changes/archive/2026-10-12-split-long-requirements/specs/backend-architecture/spec.md
+  s_a1a27ee850bde1::t_628ee06519bd94 1-27
+openspec/changes/archive/2026-10-12-split-long-requirements/specs/backend-base-setup/spec.md
+  s_a1a27ee850bde1::t_6a5c793844ab03 1-30
+openspec/changes/archive/2026-10-12-split-long-requirements/specs/backend-delivery/spec.md
+  s_a1a27ee850bde1::t_258376f3f70da8 1-102
+openspec/changes/archive/2026-10-12-split-long-requirements/specs/job-queue/spec.md
+  s_a1a27ee850bde1::t_6e67cec40da63f 1-44
+openspec/changes/archive/2026-10-12-split-long-requirements/specs/review-data-model/spec.md
+  s_a1a27ee850bde1::t_8b2c9225eebe79 1-120
+openspec/changes/archive/2026-10-12-split-long-requirements/specs/review-pipeline/spec.md
+  s_a1a27ee850bde1::t_0a8e077f0b98d8 1-121
+openspec/changes/archive/2026-10-12-split-long-requirements/specs/webhook-intake/spec.md
+  s_a1a27ee850bde1::t_99507d07937fcd 1-280
+openspec/changes/archive/2026-10-12-split-long-requirements/tasks.md
+  s_a1a27ee850bde1::t_3297b5a9c7428c 1-16
+openspec/changes/archive/2026-10-16-add-context-engine-and-repo-rules/.openspec.yaml
+  s_a1a27ee850bde1::t_4249d3a737da9d 1-2
+openspec/changes/archive/2026-10-16-add-context-engine-and-repo-rules/design.md
+  s_a1a27ee850bde1::t_b10720b0d76a3b 1-208
+openspec/changes/archive/2026-10-16-add-context-engine-and-repo-rules/proposal.md
+  s_a1a27ee850bde1::t_d240dd01ec3ea4 1-92
+openspec/changes/archive/2026-10-16-add-context-engine-and-repo-rules/specs/ai-review-prompting/spec.md
+  s_a1a27ee850bde1::t_5d549c53bd356d 1-51
+openspec/changes/archive/2026-10-16-add-context-engine-and-repo-rules/specs/context-assembly/spec.md
+  s_a1a27ee850bde1::t_5dc472c4eaed06 1-142
+openspec/changes/archive/2026-10-16-add-context-engine-and-repo-rules/specs/repo-rules/spec.md
+  s_a1a27ee850bde1::t_bfb442b30dd151 1-125
+openspec/changes/archive/2026-10-16-add-context-engine-and-repo-rules/specs/review-pipeline/spec.md
+  s_a1a27ee850bde1::t_8574d3855e94b4 1-35
+openspec/changes/archive/2026-10-16-add-context-engine-and-repo-rules/tasks.md
+  s_a1a27ee850bde1::t_e7aba6f3572471 1-96
+openspec/changes/archive/2026-10-16-bump-openspec-1-14-2/.openspec.yaml
+  s_a1a27ee850bde1::t_0734d7b74c21db 1-3
+openspec/changes/archive/2026-10-16-bump-openspec-1-14-2/design.md
+  s_a1a27ee850bde1::t_5f214006317c04 1-18
+openspec/changes/archive/2026-10-16-bump-openspec-1-14-2/proposal.md
+  s_a1a27ee850bde1::t_789c44fd8df15e 1-30
+openspec/changes/archive/2026-10-16-bump-openspec-1-14-2/tasks.md
+  s_a1a27ee850bde1::t_8b9e87de2277ef 1-15
+openspec/specs/ai-review-prompting/spec.md
+  s_a1a27ee850bde1::t_ebbe504b6a3040 53-56,64-69,182-202
+openspec/specs/backend-architecture/spec.md
+  s_a1a27ee850bde1::t_6c0bea95f96279 47,49
+openspec/specs/backend-base-setup/spec.md
+  s_a1a27ee850bde1::t_cac762238b04f2 69-73
+openspec/specs/backend-delivery/spec.md
+  s_a1a27ee850bde1::t_6c7bc7b9c191ed 137-221
+openspec/specs/context-assembly/spec.md
+  s_a1a27ee850bde1::t_0ac8da2c61a007 1-141
+openspec/specs/job-queue/spec.md
+  s_a1a27ee850bde1::t_86ec86529a4a4d 8,11,13,122-168
+openspec/specs/repo-rules/spec.md
+  s_a1a27ee850bde1::t_83f1878f460164 1-124
+openspec/specs/review-data-model/spec.md
+  s_a1a27ee850bde1::t_0dc65c955720f2 76,156,185,220-256
+openspec/specs/review-pipeline/spec.md
+  s_a1a27ee850bde1::t_59dc46b59a8f26 7-10,12,44-104,111-112,128,130-132,134,136-138,140,142-146,148-152,158,178,180-185,187,189-192,194,196-198,200,202-203
+openspec/specs/webhook-intake/spec.md
+  s_a1a27ee850bde1::t_164e1c41aaa232 11,47-102,104-113,115-144,156-159,170,172,189,191,193,195-196,198,200-201,203,205,207,209-210,212,214,231,233,235,237-238,240,242-243,245,247-248,250,252,274,276,278,280-281,283,285-286
+prompts/review/README.md
+  s_a1a27ee850bde1::t_14ad9f047d834a 15-16
+prompts/review/custom-rules.md
+  s_a1a27ee850bde1::t_6b38f960b7bdca 8-10,24-53,70-72
+prompts/review/system.md
+  s_a1a27ee850bde1::t_d7ef1e2306decb 12-15,19-39
+pyproject.toml
+  s_a1a27ee850bde1::t_4a88819bc27021 19-26,49-50,62,114-119
+scripts/check_openspec_archived.py
+  s_a1a27ee850bde1::t_4ad054d73e4781 1-51
+tests/application/test_build_review_context.py
+  s_a1a27ee850bde1::t_f501b6331d3783 1-158
+tests/application/test_context_assembly.py
+  s_a1a27ee850bde1::t_48dbb3cc6cc2ca 1,6-7,9-24,26-27,29-30,34,41-51,54-69,71-87,90-125,127,129-297,299,302-310,313-321
+tests/application/test_repo_config_loader.py
+  s_a1a27ee850bde1::t_7e28291bc855c1 1-108
+tests/application/test_stub_llm_gateway.py
+  s_a1a27ee850bde1::t_146a1325861e44 12
+tests/domain/test_code_context.py
+  s_a1a27ee850bde1::t_efecd88303b9b5 1-98
+tests/domain/test_context_budget.py
+  s_a1a27ee850bde1::t_d7ab45c3dafe96 1-57
+tests/domain/test_repo_rules.py
+  s_a1a27ee850bde1::t_3b9a6f35f25c0b 1-174
+tests/domain/test_untrusted.py
+  s_a1a27ee850bde1::t_8ee2f1b4f269f4 1-63
+tests/fakes/context.py
+  s_a1a27ee850bde1::t_d2e20849138977 1-41
+tests/fakes/vcs_gateway.py
+  s_a1a27ee850bde1::t_79c8522123493e 13-19,23,41-45
+tests/fixtures/outline/sample.go
+  s_a1a27ee850bde1::t_cd4a5edaaa7ccf 1-23
+tests/fixtures/outline/sample.js
+  s_a1a27ee850bde1::t_bfa74639eb8b79 1-18
+tests/fixtures/outline/sample.py
+  s_a1a27ee850bde1::t_d221311b1ab8d6 1-25
+tests/fixtures/outline/sample.ts
+  s_a1a27ee850bde1::t_f2cc0108aff95a 1-24
+tests/infrastructure/test_github_vcs_gateway.py
+  s_a1a27ee850bde1::t_3fb60868440fdb 9-10,18,31,401-557
+tests/infrastructure/test_memory_cache.py
+  s_a1a27ee850bde1::t_67b6dcf015250b 1-54
+tests/infrastructure/test_tree_sitter_extractor.py
+  s_a1a27ee850bde1::t_81e5dd9026edd9 1-112
+tests/test_config.py
+  s_a1a27ee850bde1::t_a58c092637de37 10-11,66-101
+tests/test_container.py
+  s_a1a27ee850bde1::t_a99192fa36de68 29-32,117,128-140
+uv.lock
+  s_a1a27ee850bde1::t_dc82a2151158af 2,270-274,313-317,962-1040
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "33ba6bf9ebbbfb8d822da1f4f0e7887c380cf67c",
+  "prompts": {},
+  "sessions": {
+    "s_a1a27ee850bde1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "57a2db80-0462-46ea-b17e-515fdb857d26",
+        "model": "composer-2.5"
+      },
+      "human_author": "pnaumov <pnaumov@sberhealth.ru>"
+    }
+  }
+}
