@@ -219,3 +219,50 @@ def test_critical_fixed_not_resolved_while_anchor_still_in_diff() -> None:
     root = uow.published_comments.get(ROOT_COMMENT_ID)
     assert root is not None
     assert root.thread_resolved is False
+
+
+def test_critical_fixed_not_resolved_when_line_inserted_above_anchor() -> None:
+    # Над строкой с замечанием добавили комментарий, сама строка не тронута:
+    # новая строка 10 — добавленная, но старая 10 не изменена.
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow)
+    run = ReviewRun(
+        id=RUN_ID,
+        merge_request_id=MR_ID,
+        head_sha=JOB.head_sha,
+        status=ReviewRunStatus.PUBLISHING,
+        trigger=TriggerSource.WEBHOOK,
+        last_progress_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    uow.review_runs.add(run)
+    vcs = RecordingVcsGateway()
+    vcs.diff = (
+        "diff --git a/app/x.py b/app/x.py\n"
+        "--- a/app/x.py\n+++ b/app/x.py\n"
+        "@@ -9,2 +9,3 @@\n"
+        " line9\n"
+        "+# исправлено, баг закрыт\n"
+        " критично\n"
+    )
+    follow_up = LlmThreadFollowUp(
+        anchor=DiffAnchor(file_path="app/x.py", side=DiffSide.NEW, new_line=10),
+        category=FindingCategory.CORRECTNESS,
+        status=ThreadFollowUpStatus.FIXED,
+        reply="исправлено",
+        resolve_thread=True,
+    )
+    result = LlmReviewResult(
+        model="m",
+        tokens_used=0,
+        findings=(),
+        thread_follow_ups=(follow_up,),
+    )
+
+    publish_review(JOB, run, result, uow=uow, vcs=vcs, now=NOW, new_id=lambda: UUID(int=303))
+
+    assert vcs.resolved == []
+    root = uow.published_comments.get(ROOT_COMMENT_ID)
+    assert root is not None
+    assert root.thread_resolved is False

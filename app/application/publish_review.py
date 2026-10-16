@@ -18,7 +18,6 @@ from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import InlineCommentDraft
 from app.application.sync_thread_resolution import sync_open_threads_from_host
-from app.domain.diff import validate_anchor
 from app.domain.diff_parser import parse_diff
 from app.domain.entities import (
     DiffAnchor,
@@ -90,8 +89,23 @@ def _may_resolve_thread(
     if status not in (ThreadFollowUpStatus.FIXED, ThreadFollowUpStatus.SUPERSEDED):
         return False
     if status is ThreadFollowUpStatus.FIXED and severity is FindingSeverity.CRITICAL:
-        return validate_anchor(anchor, incremental_hunks).ok
+        return _anchor_line_changed(anchor, incremental_hunks)
     return True
+
+
+def _anchor_line_changed(anchor: DiffAnchor, incremental_hunks: tuple[Hunk, ...]) -> bool:
+    """Изменена ли сама строка якоря между прошлым и текущим head.
+
+    Номер строки якоря — в координатах прошлого head, то есть старой стороны
+    диффа `prev_head..head`. Якорь на удалённой строке (`OLD`) в координатах
+    base, этим диффом не подтверждается — такой тред закрывает человек.
+    """
+    if anchor.side is not DiffSide.NEW or anchor.new_line is None:
+        return False
+    return any(
+        hunk.file_path == anchor.file_path and anchor.new_line in hunk.changed_old_lines
+        for hunk in incremental_hunks
+    )
 
 
 def publish_review(
