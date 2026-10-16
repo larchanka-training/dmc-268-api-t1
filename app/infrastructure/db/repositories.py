@@ -9,7 +9,7 @@ import datetime as dt
 from collections.abc import Iterable
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.domain.diff import validate_anchor
@@ -21,7 +21,9 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    User,
 )
+from app.domain.entities import Session as UserSession
 from app.domain.enums import TERMINAL_STATUSES, Provider
 from app.domain.lifecycle import next_status
 from app.infrastructure.db import mappers as m
@@ -32,6 +34,8 @@ from app.infrastructure.db.models import (
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
+    SessionRow,
+    UserRow,
 )
 
 
@@ -348,3 +352,66 @@ class SqlAlchemyPublishedCommentRepo:
                 published_at=comment.published_at,
             )
         )
+
+
+class SqlAlchemyUserRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get(self, user_id: UUID) -> User | None:
+        row = self._session.get(UserRow, user_id)
+        return m.user_to_domain(row) if row else None
+
+    def find_by_provider(self, provider: Provider, provider_user_id: str) -> User | None:
+        row = self._session.scalars(
+            select(UserRow).where(
+                UserRow.provider == provider,
+                UserRow.provider_user_id == provider_user_id,
+            )
+        ).one_or_none()
+        return m.user_to_domain(row) if row else None
+
+    def add(self, user: User) -> None:
+        self._session.add(
+            UserRow(
+                id=user.id,
+                provider=user.provider,
+                provider_user_id=user.provider_user_id,
+                login=user.login,
+                name=user.name,
+                avatar_url=user.avatar_url,
+            )
+        )
+
+    def update(self, user: User) -> None:
+        row = self._session.get(UserRow, user.id)
+        if row is None:
+            raise LookupError(f"user {user.id} is not stored")
+        row.login = user.login
+        row.name = user.name
+        row.avatar_url = user.avatar_url
+
+
+class SqlAlchemySessionRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def find_by_token_hash(self, token_hash: bytes) -> UserSession | None:
+        row = self._session.scalars(
+            select(SessionRow).where(SessionRow.token_hash == token_hash)
+        ).one_or_none()
+        return m.session_to_domain(row) if row else None
+
+    def add(self, session: UserSession) -> None:
+        self._session.add(
+            SessionRow(
+                id=session.id,
+                token_hash=session.token_hash,
+                user_id=session.user_id,
+                created_at=session.created_at,
+                expires_at=session.expires_at,
+            )
+        )
+
+    def delete(self, session_id: UUID) -> None:
+        self._session.execute(delete(SessionRow).where(SessionRow.id == session_id))

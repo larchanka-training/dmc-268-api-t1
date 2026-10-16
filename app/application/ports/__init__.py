@@ -7,6 +7,8 @@ from app.application.ports.repositories import (
     PublishedCommentRepo,
     RepositoryRepo,
     ReviewRunRepo,
+    SessionRepo,
+    UserRepo,
 )
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
@@ -20,6 +22,8 @@ __all__ = [
     "PublishedCommentRepo",
     "RepositoryRepo",
     "ReviewRunRepo",
+    "SessionRepo",
     "UnitOfWork",
+    "UserRepo",
     "VcsGateway",
 ]

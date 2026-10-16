@@ -19,6 +19,8 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    Session,
+    User,
 )
 from app.domain.enums import Provider
 
@@ -95,3 +97,23 @@ class PublishedCommentRepo(Protocol):
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]: ...
 
     def add(self, comment: PublishedComment) -> None: ...
+
+
+class UserRepo(Protocol):
+    def get(self, user_id: UUID) -> User | None: ...
+
+    def find_by_provider(self, provider: Provider, provider_user_id: str) -> User | None: ...
+
+    def add(self, user: User) -> None: ...
+
+    def update(self, user: User) -> None: ...
+
+
+class SessionRepo(Protocol):
+    def find_by_token_hash(self, token_hash: bytes) -> Session | None: ...
+
+    def add(self, session: Session) -> None: ...
+
+    def delete(self, session_id: UUID) -> None:
+        """Удалить сессию; отсутствующая — не ошибка: выход идемпотентен."""
+        ...

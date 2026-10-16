@@ -166,7 +166,7 @@ sequenceDiagram
 ```text
 users
   id                uuid PK
-  provider          text NOT NULL            -- github
+  provider          provider NOT NULL        -- enum из 0001: github, gitlab
   provider_user_id  text NOT NULL
   login             text NOT NULL
   name              text NULL
@@ -183,7 +183,7 @@ sessions
   expires_at        timestamptz NOT NULL
 ```
 
-`provider` в ключе — чтобы второй провайдер не потребовал миграции. `provider_user_id` — строка: тип идентификатора у провайдеров разный, а сравнивать их между собой не нужно. Миграция одна, `downgrade` удаляет обе таблицы.
+`provider` в ключе — чтобы второй провайдер не потребовал миграции; тип — тот же нативный enum `provider`, что у `repositories`, в нём уже есть `gitlab`. `provider_user_id` — строка: тип идентификатора у провайдеров разный, а сравнивать их между собой не нужно. Миграция одна, `downgrade` удаляет обе таблицы.
 
 ### Слои
 
