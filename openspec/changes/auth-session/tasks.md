@@ -16,8 +16,8 @@
 ## 3. Домен и use cases
 
 - [x] 3.1 `User`, `Session`, срок жизни сессии 30 дней
-- [ ] 3.2 Порт `OAuthProvider`: адрес авторизации, обмен кода на профиль
-- [ ] 3.3 Use cases `start_login`, `complete_login`, `authenticate`, `logout`
+- [x] 3.2 Порт `OAuthProvider`: адрес авторизации, обмен кода на профиль
+- [x] 3.3 Use cases `start_login`, `complete_login`, `authenticate`, `logout`
 
 ## 4. Провайдеры
 

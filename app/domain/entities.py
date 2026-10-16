@@ -247,3 +247,13 @@ class Session:
     user_id: UUID
     created_at: datetime
     expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthProfile:
+    """Профиль, который провайдер вернул при входе. Транзиентный: токена в нём нет."""
+
+    provider_user_id: str
+    login: str
+    name: str | None
+    avatar_url: str | None
