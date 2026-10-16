@@ -455,3 +455,39 @@ def test_a_failed_run_stores_its_stage(session) -> None:
     session.flush()
     session.refresh(run)
     assert run.failed_stage is ReviewRunStatus.PUBLISHING
+
+
+def test_a_partial_rule_reference_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    finding = add_finding(session, run)
+    finding.rule_name = "Errors"
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_a_rule_check_below_one_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    finding = add_finding(session, run)
+    finding.rule_name = "Errors"
+    finding.rule_check = 0
+    finding.rule_check_text = "Отказ - значение Result"
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_a_full_rule_reference_is_stored(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    finding = add_finding(session, run)
+    finding.rule_name = "Errors"
+    finding.rule_check = 1
+    finding.rule_check_text = "Отказ - значение Result"
+    session.flush()
+    session.refresh(finding)
+    assert (finding.rule_name, finding.rule_check) == ("Errors", 1)
+
+
+def test_a_negative_verifier_drop_count_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    run.verifier_dropped_findings = -1
+    with pytest.raises(IntegrityError):
+        session.flush()

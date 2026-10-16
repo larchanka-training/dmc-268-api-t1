@@ -6,15 +6,12 @@
 SQLAlchemy.
 """
 
-from collections.abc import Iterable
-from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
 from app.domain.entities import (
     ContextPayload,
     Finding,
-    Hunk,
     MergeRequest,
     OpenReviewThread,
     PublishedComment,
@@ -74,22 +71,6 @@ class FindingRepo(Protocol):
     def list_for_run(self, review_run_id: UUID) -> list[Finding]: ...
 
     def add(self, finding: Finding) -> None: ...
-
-    def add_validated(
-        self, finding: Finding, hunks: Iterable[Hunk], now: datetime
-    ) -> bool:
-        """Сохранить замечание, только если его привязка внутри диффа.
-
-        `True` — сохранено; `False` — привязка вне диффа, отклонение учтено в
-        `rejected_findings` прогона. Исключения нет намеренно: оно, пройдя
-        границу транзакции, откатило бы и остальные находки, и сам учёт.
-
-        Объявлено здесь, потому что это единственный путь, который применяет
-        правило, а проверка, доступная только через конкретный адаптер, — не
-        проверка. `add` остаётся для вызывающих, которые уже проверили или
-        которым не с какими hunk'ами сверяться.
-        """
-        ...
 
 
 class PublishedCommentRepo(Protocol):

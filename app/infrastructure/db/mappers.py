@@ -14,6 +14,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    RuleRef,
 )
 from app.infrastructure.db.models import (
     ContextPayloadRow,
@@ -72,6 +73,8 @@ def review_run_to_domain(row: ReviewRunRow) -> ReviewRun:
         tokens_used=row.tokens_used,
         duration_seconds=row.duration_seconds,
         rejected_findings=row.rejected_findings,
+        verification=row.verification,
+        verifier_dropped_findings=row.verifier_dropped_findings,
     )
 
 
@@ -110,7 +113,15 @@ def finding_to_domain(row: FindingRow) -> Finding:
         updated_at=row.updated_at,
         suggestion=row.suggestion,
         confidence=row.confidence,
+        rule=_rule_ref(row),
     )
+
+
+def _rule_ref(row: FindingRow) -> RuleRef | None:
+    # Ограничение ck_findings_rule_ref держит три колонки вместе.
+    if row.rule_name is None or row.rule_check is None or row.rule_check_text is None:
+        return None
+    return RuleRef(name=row.rule_name, check=row.rule_check, check_text=row.rule_check_text)
 
 
 def published_comment_to_domain(row: PublishedCommentRow) -> PublishedComment:

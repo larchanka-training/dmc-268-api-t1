@@ -59,6 +59,29 @@
         },
         { "type": "null" }
       ]
+    },
+    "rule": {
+      "description": "Пункт правила владельца (.review/rules.md), которому противоречит код; null или отсутствие поля - замечание по стандартным критериям. Сервис принимает ссылку, только если правило было показано модели и применимо к filePath.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "check"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Имя правила - точно как в разделе правил запроса."
+            },
+            "check": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Порядковый номер пункта правила, с единицы."
+            }
+          }
+        },
+        { "type": "null" }
+      ]
     }
   }
 }

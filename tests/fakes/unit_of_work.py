@@ -1,25 +1,20 @@
 """Фейковый `UnitOfWork` — для тестов прикладного слоя без БД.
 
 Подменяет порт, не вендора: каждый фейк реализует тот же протокол, что и
-`SqlAlchemy*`-адаптер, включая единственные правила, которые адаптеры
-проверяют сами (`next_status` в `review_runs.update`, `validate_anchor` в
-`findings.add_validated`), чтобы тест на фейке и тест на реальной базе видели
-одно и то же поведение.
+`SqlAlchemy*`-адаптер, включая единственное правило, которое адаптер
+проверяет сам (`next_status` в `review_runs.update`), чтобы тест на фейке и
+тест на реальной базе видели одно и то же поведение.
 """
 
-from collections.abc import Iterable
 from dataclasses import replace
-from datetime import datetime
 from types import TracebackType
 from typing import Any, Self
 from uuid import UUID
 
 from app.application.ports.unit_of_work import UnitOfWork
-from app.domain.diff import validate_anchor
 from app.domain.entities import (
     ContextPayload,
     Finding,
-    Hunk,
     MergeRequest,
     OpenReviewThread,
     PublishedComment,
@@ -182,16 +177,7 @@ class FakeReviewRunRepo:
             verdict = next_status(existing.status, run.status)
             if not verdict.ok:
                 raise ValueError(verdict.error)
-        # `rejected_findings` принадлежит строке, а не сущности вызывающего.
-        self._by_id[run.id] = replace(run, rejected_findings=existing.rejected_findings)
-
-    def bump_rejected(self, run_id: UUID, now: datetime) -> None:
-        """Не часть порта: используется только `FakeFindingRepo.add_validated`."""
-        run = self._by_id.get(run_id)
-        if run is not None:
-            self._by_id[run_id] = replace(
-                run, rejected_findings=run.rejected_findings + 1, last_progress_at=now
-            )
+        self._by_id[run.id] = run
 
 
 class FakeContextPayloadRepo:
@@ -233,14 +219,6 @@ class FakeFindingRepo:
 
     def add(self, finding: Finding) -> None:
         self._items.append(finding)
-
-    def add_validated(self, finding: Finding, hunks: Iterable[Hunk], now: datetime) -> bool:
-        verdict = validate_anchor(finding.anchor, hunks)
-        if not verdict.ok:
-            self._review_runs.bump_rejected(finding.review_run_id, now)
-            return False
-        self.add(finding)
-        return True
 
 
 class FakePublishedCommentRepo:

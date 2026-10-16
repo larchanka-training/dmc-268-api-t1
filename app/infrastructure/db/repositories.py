@@ -5,18 +5,14 @@
 чистой функцией — это единственные места, где появляется правило. Они отмечены.
 """
 
-import datetime as dt
-from collections.abc import Iterable
 from uuid import UUID
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.domain.diff import validate_anchor
 from app.domain.entities import (
     ContextPayload,
     Finding,
-    Hunk,
     MergeRequest,
     OpenReviewThread,
     PublishedComment,
@@ -202,6 +198,8 @@ class SqlAlchemyReviewRunRepo:
                 tokens_used=run.tokens_used,
                 duration_seconds=run.duration_seconds,
                 rejected_findings=run.rejected_findings,
+                verification=run.verification,
+                verifier_dropped_findings=run.verifier_dropped_findings,
             )
         )
 
@@ -212,10 +210,9 @@ class SqlAlchemyReviewRunRepo:
         переходов владеет `next_status`, поэтому адаптер не может разойтись с
         доменом.
 
-        `rejected_findings` отсутствует намеренно. `add_validated` увеличивает
-        его в строке, и сущность вызывающего об этом не узнаёт, поэтому запись
-        её копии здесь отменила бы только что учтённое отклонение. Счётчиком
-        владеет строка, всем остальным — вызывающий.
+        Счётчики отсева (`rejected_findings`, `verifier_dropped_findings`) и
+        итог верификации считает пайплайн чистыми функциями и приносит в
+        сущности, поэтому ими, как и всем остальным, владеет вызывающий.
         """
         row = self._session.get(ReviewRunRow, run.id)
         if row is None:
@@ -234,6 +231,9 @@ class SqlAlchemyReviewRunRepo:
         row.model = run.model
         row.tokens_used = run.tokens_used
         row.duration_seconds = run.duration_seconds
+        row.rejected_findings = run.rejected_findings
+        row.verification = run.verification
+        row.verifier_dropped_findings = run.verifier_dropped_findings
 
 
 class SqlAlchemyContextPayloadRepo:
@@ -306,26 +306,11 @@ class SqlAlchemyFindingRepo:
                 message=finding.message,
                 suggestion=finding.suggestion,
                 confidence=finding.confidence,
+                rule_name=finding.rule.name if finding.rule else None,
+                rule_check=finding.rule.check if finding.rule else None,
+                rule_check_text=finding.rule.check_text if finding.rule else None,
             )
         )
-
-    def add_validated(
-        self, finding: Finding, hunks: Iterable[Hunk], now: dt.datetime
-    ) -> bool:
-        """Сохранить замечание, только если его привязка внутри диффа.
-
-        Само правило — `validate_anchor`; здесь отклонение учитывается в
-        прогоне, чтобы отфильтрованное замечание оставило след, а не исчезло.
-        """
-        verdict = validate_anchor(finding.anchor, hunks)
-        if not verdict.ok:
-            row = self._session.get(ReviewRunRow, finding.review_run_id)
-            if row is not None:
-                row.rejected_findings += 1
-                row.last_progress_at = now
-            return False
-        self.add(finding)
-        return True
 
 
 class SqlAlchemyPublishedCommentRepo:

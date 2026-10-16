@@ -11,7 +11,9 @@
     1. Отказ возвращается значением Result, а не исключением
 
 Раздел второго уровня — правило, строки `pattern:` / `exclude:` — область
-действия, нумерованные пункты — проверки. Всё остальное отбрасывается: в
+действия, нумерованные пункты - проверки. Имя правила уникально в файле, а
+номер пункта - его позиция среди проверок, а не номер, написанный автором:
+по паре «имя, номер» замечание ссылается на пункт. Всё остальное отбрасывается: в
 контекст модели попадают только распознанные поля, поэтому проза вокруг
 правил — и всё, что подложено под её видом, — модель не видит. Содержимое
 блоков кода (```) не разбирается вовсе: пример правила внутри него правилом
@@ -97,14 +99,20 @@ def parse_rules_markdown(text: str) -> tuple[tuple[RepoRule, ...], tuple[Rejecte
         elif (check := _CHECK.match(line)) is not None:
             current.checks.append(check.group("text"))
 
+    # Имя - ключ ссылки замечания на правило: второе принятое правило с тем же
+    # именем сделало бы ссылку неоднозначной. Отклонённый раздел имя не занимает.
     accepted: list[RepoRule] = []
     rejected: list[RejectedRule] = []
+    taken: set[str] = set()
     for draft in drafts:
         result = draft.finish()
-        if isinstance(result, RepoRule):
-            accepted.append(result)
-        else:
+        if isinstance(result, RejectedRule):
             rejected.append(result)
+        elif result.name in taken:
+            rejected.append(RejectedRule(name=result.name, reason="имя правила повторяется"))
+        else:
+            taken.add(result.name)
+            accepted.append(result)
     return tuple(accepted), tuple(rejected)
 
 

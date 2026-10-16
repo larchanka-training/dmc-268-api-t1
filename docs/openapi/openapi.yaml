@@ -487,6 +487,24 @@ components:
                 diff:
                   type: string
             - type: "null"
+        rule:
+          description: >
+            Пункт правила владельца (.review/rules.md), которому противоречит код;
+            null - замечание по стандартным критериям.
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required:
+                - name
+                - check
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                check:
+                  type: integer
+                  minimum: 1
+            - type: "null"
 
     ReviewError:
       type: object
