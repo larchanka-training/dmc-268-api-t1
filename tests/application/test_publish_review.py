@@ -161,6 +161,13 @@ def test_thread_follow_up_fixed_resolves_on_host() -> None:
         thread_follow_ups=(follow_up,),
     )
 
+    vcs.diff = (
+        "diff --git a/app/x.py b/app/x.py\n"
+        "--- a/app/x.py\n+++ b/app/x.py\n"
+        "@@ -10,1 +10,1 @@\n"
+        "-критично\n"
+        "+исправлено\n"
+    )
     publish_review(JOB, run, result, uow=uow, vcs=vcs, now=NOW, new_id=lambda: UUID(int=301))
 
     assert vcs.resolved == ["root-inline"]
@@ -188,9 +195,9 @@ def test_critical_fixed_not_resolved_while_anchor_still_in_diff() -> None:
     vcs.diff = (
         "diff --git a/app/x.py b/app/x.py\n"
         "--- a/app/x.py\n+++ b/app/x.py\n"
-        "@@ -9,2 +9,3 @@\n"
-        " unchanged\n"
-        "+still broken\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-header\n"
+        "+header changed\n"
     )
     follow_up = LlmThreadFollowUp(
         anchor=DiffAnchor(file_path="app/x.py", side=DiffSide.NEW, new_line=10),

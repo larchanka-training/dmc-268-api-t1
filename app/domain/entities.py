@@ -191,6 +191,25 @@ class Hunk:
     new_count: int = 0
     changed_new_lines: frozenset[int] = field(default_factory=frozenset)
     changed_old_lines: frozenset[int] = field(default_factory=frozenset)
+    # Заголовок `@@` и тело hunk'а как в диффе: единица, которой сборка
+    # контекста отмеряет бюджет и которую показывает модели.
+    text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedFile:
+    """Один файл диффа: пути, бинарность и разобранные hunk'и.
+
+    `old_path` заполнен только у переименования. Бинарные файлы на hunk'и не
+    разбираются — ревьюить там нечего, их остаётся только отфильтровать.
+    `is_deleted` — у файла нет новой стороны: AST-окружение строить не из чего.
+    """
+
+    file_path: str
+    old_path: str | None = None
+    is_binary: bool = False
+    is_deleted: bool = False
+    hunks: tuple[Hunk, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

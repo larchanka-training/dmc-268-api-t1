@@ -65,18 +65,32 @@ def _line_for_anchor(finding: Finding) -> int:
     return finding.anchor.old_line
 
 
+def _hunks_between_commits(
+    vcs: VcsGateway,
+    job: ReviewJob,
+    base_sha: str,
+    head_sha: str,
+) -> tuple[Hunk, ...]:
+    if base_sha == head_sha:
+        return ()
+    diff_text = vcs.fetch_diff(
+        job.repository_full_name, base_sha, head_sha, job.installation_id
+    )
+    return tuple(hunk for parsed in parse_diff(diff_text) for hunk in parsed.hunks)
+
+
 def _may_resolve_thread(
     status: ThreadFollowUpStatus,
     severity: FindingSeverity,
     anchor: DiffAnchor,
-    hunks: tuple[Hunk, ...],
+    incremental_hunks: tuple[Hunk, ...],
 ) -> bool:
     if status is ThreadFollowUpStatus.STILL_RELEVANT:
         return False
     if status not in (ThreadFollowUpStatus.FIXED, ThreadFollowUpStatus.SUPERSEDED):
         return False
     if status is ThreadFollowUpStatus.FIXED and severity is FindingSeverity.CRITICAL:
-        return not validate_anchor(anchor, hunks).ok
+        return validate_anchor(anchor, incremental_hunks).ok
     return True
 
 
@@ -198,10 +212,7 @@ def _publish_thread_follow_ups(
 ) -> None:
     if not follow_ups:
         return
-    diff_text = vcs.fetch_diff(
-        job.repository_full_name, job.base_sha, job.head_sha, job.installation_id
-    )
-    hunks = parse_diff(diff_text)
+    incremental_hunks_cache: dict[str, tuple[Hunk, ...]] = {}
     by_key: dict[tuple[str, DiffSide, int, FindingCategory], OpenReviewThread] = {}
     for open_thread in open_threads:
         anchor_line = _line_for_anchor(open_thread.finding)
@@ -225,6 +236,14 @@ def _publish_thread_follow_ups(
         )
         if matched is None:
             continue
+        with uow:
+            prev_run = uow.review_runs.get(matched.finding.review_run_id)
+        prev_head = prev_run.head_sha if prev_run is not None else job.head_sha
+        if prev_head not in incremental_hunks_cache:
+            incremental_hunks_cache[prev_head] = _hunks_between_commits(
+                vcs, job, prev_head, job.head_sha
+            )
+        incremental_hunks = incremental_hunks_cache[prev_head]
         body = format_thread_reply(item.status, item.reply, severity=matched.finding.severity)
         reply_id = vcs.reply_to_review_comment(
             job.repository_full_name,
@@ -237,7 +256,7 @@ def _publish_thread_follow_ups(
             item.status,
             matched.finding.severity,
             matched.finding.anchor,
-            hunks,
+            incremental_hunks,
         )
         if resolve:
             vcs.resolve_review_thread_for_comment(
