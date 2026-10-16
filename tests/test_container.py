@@ -26,6 +26,10 @@ class Adapter:
 
 
 PORT_TO_ADAPTER: dict[str, Adapter] = {
+    "CacheStore": Adapter("cache/memory.py", "InMemoryCacheStore"),
+    "DefinitionExtractor": Adapter(
+        "parsing/tree_sitter_extractor.py", "TreeSitterDefinitionExtractor"
+    ),
     "ContextPayloadRepo": Adapter(
         "db/repositories.py", "SqlAlchemyContextPayloadRepo"
     ),
@@ -115,6 +119,7 @@ def test_the_container_hands_out_a_vcs_gateway() -> None:
     gateway = container.vcs_gateway()
     assert callable(gateway.fetch_diff)
     assert callable(gateway.fetch_pr_metadata)
+    assert callable(gateway.fetch_file)
 
 
 def test_the_container_caches_its_lazy_adapters() -> None:
@@ -131,6 +136,17 @@ def test_the_container_hands_out_oauth_providers_by_path_name() -> None:
     assert github is not None
     assert callable(github.exchange_code)
     assert container.oauth_provider("bitbucket") is None
+def test_the_container_keeps_one_cache_per_process() -> None:
+    """In-process кэш полезен, только если переживает прогон: один объект."""
+    container = build_container(SETTINGS)
+    assert container.cache_store() is container.cache_store()
+
+
+def test_the_container_builds_the_parser_once() -> None:
+    container = build_container(SETTINGS)
+    extractor = container.definition_extractor()
+    assert callable(extractor.extract)
+    assert container.definition_extractor() is extractor
 
 
 def test_the_container_hands_out_a_job_queue() -> None:

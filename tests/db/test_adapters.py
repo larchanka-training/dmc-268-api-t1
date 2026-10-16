@@ -393,3 +393,32 @@ def test_a_payload_body_is_a_copy_not_a_handle_on_the_row(uow) -> None:
 
     with uow as work:
         assert work.context_payloads.find_by_digest("d1").body == {"text": "x"}
+
+
+def test_a_failed_run_keeps_the_stage_it_failed_in(uow) -> None:
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        run = a_run(mr.id)
+        work.review_runs.add(run)
+        work.commit()
+    analysing = replace(run, status=ReviewRunStatus.BUILDING_CONTEXT)
+    with uow as work:
+        work.review_runs.update(analysing)
+        work.commit()
+    failed = replace(
+        analysing,
+        status=ReviewRunStatus.FAILED,
+        failed_stage=ReviewRunStatus.BUILDING_CONTEXT,
+        failure_reason="дифф недоступен",
+        last_progress_at=LATER,
+    )
+    with uow as work:
+        work.review_runs.update(failed)
+        work.commit()
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert stored.status is ReviewRunStatus.FAILED
+    assert stored.failed_stage is ReviewRunStatus.BUILDING_CONTEXT

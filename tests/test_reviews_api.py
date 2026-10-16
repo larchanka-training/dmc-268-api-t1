@@ -105,3 +105,31 @@ def test_unknown_run_is_404() -> None:
     response = client.get(f"/api/v1/reviews/{new_id()}")
 
     assert response.status_code == 404
+
+
+def test_a_running_run_reports_its_last_progress_and_no_failed_stage() -> None:
+    uow = FakeUnitOfWork()
+    run = _run(status=ReviewRunStatus.ANALYSING, model=None, tokens_used=None)
+    uow.review_runs.add(run)
+    client = _client(uow)
+
+    body = client.get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["last_progress_at"] == "2026-09-29T00:00:00Z"
+    assert body["failed_stage"] is None
+
+
+def test_a_failed_run_reports_the_stage_it_failed_in() -> None:
+    uow = FakeUnitOfWork()
+    run = _run(
+        status=ReviewRunStatus.FAILED,
+        failed_stage=ReviewRunStatus.ANALYSING,
+        failure_reason="модель недоступна",
+    )
+    uow.review_runs.add(run)
+    client = _client(uow)
+
+    body = client.get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["failed_stage"] == "analysing"
+    assert body["failure_reason"] == "модель недоступна"

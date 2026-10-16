@@ -41,6 +41,17 @@ def test_a_run_without_progress_beyond_the_limit_is_failed() -> None:
     assert run.last_progress_at == NOW
 
 
+def test_a_swept_run_keeps_the_stage_it_stalled_in() -> None:
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.PUBLISHING, timedelta(hours=1)))
+
+    sweep_stale_runs(uow, now=NOW, limit=LIMIT)
+
+    run = uow.review_runs.get(UUID(int=1))
+    assert run is not None
+    assert run.failed_stage is ReviewRunStatus.PUBLISHING
+
+
 def test_a_run_within_the_limit_and_a_terminal_run_are_left_alone() -> None:
     uow = FakeUnitOfWork()
     uow.review_runs.add(_run(1, ReviewRunStatus.ANALYSING, timedelta(minutes=5)))

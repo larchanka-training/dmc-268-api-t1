@@ -32,6 +32,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.api.auth import router as auth_router
     from app.api.pull_requests import router as pull_requests_router
     from app.api.repositories import router as repositories_router
+    from app.api.review_events import router as review_events_router
     from app.api.reviews import router as reviews_router
     from app.api.session import (
         OriginForbidden,
@@ -50,6 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(repositories_router)
     app.include_router(pull_requests_router)
     app.include_router(reviews_router)
+    app.include_router(review_events_router)
 
     @app.get("/")
     def read_root() -> dict[str, str]:

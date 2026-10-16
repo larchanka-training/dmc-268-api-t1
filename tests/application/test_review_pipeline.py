@@ -8,18 +8,28 @@ from uuid import UUID
 
 import pytest
 
+from app.application.context_assembly import ContextLimits
 from app.application.ports.llm_gateway import LlmFinding, LlmReviewResult
 from app.application.review_pipeline import run_review
-from app.domain.entities import DiffAnchor, ReviewJob, ReviewRun
+from app.domain.entities import DiffAnchor, MergeRequest, ReviewJob, ReviewRun
 from app.domain.enums import (
     DiffSide,
     FindingCategory,
     FindingSeverity,
+    MergeRequestState,
     ReviewRunStatus,
     TriggerSource,
 )
+from app.domain.vcs_errors import VcsError
 
+from ..fakes.context import FakeCache, FakeExtractor
 from ..fakes.unit_of_work import FakeUnitOfWork
+from ..fakes.vcs_gateway import RecordingVcsGateway
+from ..fakes.webhooks import FakeVcs
+
+# Дифф фейкового VCS меняет первую строку `app/main.py`.
+CHANGED_FILE = "app/main.py"
+LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144)
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 
@@ -37,11 +47,30 @@ JOB = ReviewJob(
 )
 
 
+MR_ID = UUID(int=3)
+
+
 def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.QUEUED) -> None:
+    uow.merge_requests.add(
+        MergeRequest(
+            id=MR_ID,
+            repository_id=UUID(int=9),
+            number=JOB.pull_request_number,
+            title="t",
+            description="",
+            author="a",
+            source_branch="feat",
+            target_branch="develop",
+            head_sha=JOB.head_sha,
+            state=MergeRequestState.OPEN,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
     uow.review_runs.add(
         ReviewRun(
             id=JOB.review_run_id,
-            merge_request_id=UUID(int=3),
+            merge_request_id=MR_ID,
             head_sha=JOB.head_sha,
             status=status,
             trigger=TriggerSource.WEBHOOK,
@@ -88,6 +117,10 @@ def _run(uow: FakeUnitOfWork, gateway: object, **overrides: object) -> None:
     kwargs: dict[str, object] = {
         "uow": uow,
         "llm_gateway": gateway,
+        "vcs_gateway": RecordingVcsGateway(),
+        "definition_extractor": FakeExtractor(),
+        "cache_store": FakeCache(),
+        "context_limits": LIMITS,
         "now": _Clock().now,
         "monotonic": _Monotonic(0.0, 12.5),
         "new_id": _new_id(),
@@ -117,14 +150,54 @@ def test_successful_run_reaches_completed_with_model_and_tokens() -> None:
     assert uow.context_payloads.list_for_run(JOB.review_run_id)
 
 
-def test_a_finding_anchored_in_the_stub_hunk_is_persisted() -> None:
+def test_context_is_built_from_the_real_diff() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    _run(uow, StubGateway(LlmReviewResult(model="m", tokens_used=0, findings=())))
+
+    (payload,) = uow.context_payloads.list_for_run(JOB.review_run_id)
+    assert payload.file_paths == (CHANGED_FILE,)
+    assert payload.body["schema"] == "context-payload/v1"
+    assert "+new" in payload.body["diff"][0]["hunk"]
+
+
+def test_diff_failure_marks_the_run_failed_and_reraises() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = StubGateway(LlmReviewResult(model="m", tokens_used=0, findings=()))
+
+    with pytest.raises(VcsError, match="GitHub недоступен"):
+        _run(uow, gateway, vcs_gateway=FakeVcs(error=VcsError("GitHub недоступен")))
+
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    assert run.status == ReviewRunStatus.FAILED
+    assert run.failure_reason == "GitHub недоступен"
+
+
+def test_rules_failure_does_not_fail_the_run() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = FakeVcs(file_errors={".review/rules.md": VcsError("403")})
+
+    _run(uow, StubGateway(LlmReviewResult(model="m", tokens_used=0, findings=())), vcs_gateway=vcs)
+
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    assert run.status == ReviewRunStatus.COMPLETED
+    (payload,) = uow.context_payloads.list_for_run(JOB.review_run_id)
+    assert payload.body["rules"]["status"] == "unavailable"
+
+
+def test_a_finding_anchored_in_the_diff_is_persisted() -> None:
     uow = FakeUnitOfWork()
     _seed_run(uow)
     finding = LlmFinding(
-        anchor=DiffAnchor(file_path="PLACEHOLDER.md", side=DiffSide.NEW, new_line=1),
+        anchor=DiffAnchor(file_path=CHANGED_FILE, side=DiffSide.NEW, new_line=1),
         category=FindingCategory.READABILITY,
         severity=FindingSeverity.LOW,
-        message="заготовочная находка",
+        message="находка в диффе",
     )
     gateway = StubGateway(LlmReviewResult(model="stub-llm", tokens_used=5, findings=(finding,)))
 
@@ -132,7 +205,7 @@ def test_a_finding_anchored_in_the_stub_hunk_is_persisted() -> None:
 
     findings = uow.findings.list_for_run(JOB.review_run_id)
     assert len(findings) == 1
-    assert findings[0].message == "заготовочная находка"
+    assert findings[0].message == "находка в диффе"
 
 
 def test_llm_failure_marks_the_run_failed_with_a_reason_and_reraises() -> None:
@@ -146,6 +219,7 @@ def test_llm_failure_marks_the_run_failed_with_a_reason_and_reraises() -> None:
     assert run is not None
     assert run.status == ReviewRunStatus.FAILED
     assert run.failure_reason == "модель недоступна"
+    assert run.failed_stage is ReviewRunStatus.ANALYSING
 
 
 def test_missing_run_raises_so_the_message_goes_to_the_dlq() -> None:
@@ -195,9 +269,9 @@ def test_a_rejected_anchor_keeps_the_other_findings_and_the_count() -> None:
             model="m",
             tokens_used=1,
             findings=(
-                finding("PLACEHOLDER.md", "внутри диффа"),
+                finding(CHANGED_FILE, "внутри диффа"),
                 finding("вне/диффа.py", "вне диффа"),
-                finding("PLACEHOLDER.md", "тоже внутри"),
+                finding(CHANGED_FILE, "тоже внутри"),
             ),
         )
     )

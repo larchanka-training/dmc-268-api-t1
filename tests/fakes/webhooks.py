@@ -12,9 +12,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.application.ports.vcs_review import (
+    InlineCommentDraft,
+    MergeGateCheck,
+    PullRequestReviewPublication,
+)
 from app.domain.entities import PRMetadata, Repository, ReviewJob
 from app.domain.enums import MergeRequestState, Provider
-from app.domain.vcs_errors import VcsError
+from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 NOW = dt.datetime(2026, 9, 29, 12, 0, tzinfo=dt.UTC)
@@ -78,6 +83,11 @@ class FakeVcs:
     diff: str = DIFF
     meta: PRMetadata = field(default_factory=pr_metadata)
     error: VcsError | None = None
+    # Содержимое файлов по (путь, sha); отсутствие ключа — файла на коммите нет.
+    files: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Сбой довыборки конкретного файла — не задевает дифф и метаданные.
+    file_errors: dict[str, VcsError] = field(default_factory=dict)
+    file_limits: list[int] = field(default_factory=list)
     calls: list[tuple[Any, ...]] = field(default_factory=list)
 
     def fetch_diff(
@@ -95,6 +105,83 @@ class FakeVcs:
         if self.error is not None:
             raise self.error
         return self.meta
+
+    def fetch_file(
+        self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
+    ) -> str | None:
+        self.calls.append(("file", repo_full_name, path, sha, installation_id))
+        self.file_limits.append(max_bytes)
+        if path in self.file_errors:
+            raise self.file_errors[path]
+        content = self.files.get((path, sha))
+        if content is not None and len(content.encode("utf-8")) > max_bytes:
+            raise VcsFileTooLargeError(f"{path}: больше {max_bytes} байт")
+        return content
+
+    def publish_pull_request_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        head_sha: str,
+        installation_id: int,
+        summary_body: str,
+        inline_comments: tuple[InlineCommentDraft, ...],
+    ) -> PullRequestReviewPublication:
+        self.calls.append(
+            ("publish_review", repo_full_name, pr_number, head_sha, installation_id)
+        )
+        if self.error is not None:
+            raise self.error
+        return PullRequestReviewPublication(summary_provider_comment_id=None, inline_comments=())
+
+    def reply_to_review_comment(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        provider_comment_id: str,
+        body: str,
+    ) -> str:
+        self.calls.append(
+            ("reply", repo_full_name, pr_number, installation_id, provider_comment_id)
+        )
+        if self.error is not None:
+            raise self.error
+        return "fake-reply-id"
+
+    def fetch_review_threads_resolved_state(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        provider_comment_ids: frozenset[str],
+    ) -> dict[str, bool]:
+        self.calls.append(("thread_state", provider_comment_ids))
+        if self.error is not None:
+            raise self.error
+        return {cid: False for cid in provider_comment_ids}
+
+    def resolve_review_thread_for_comment(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        provider_comment_id: str,
+    ) -> None:
+        self.calls.append(("resolve", repo_full_name, pr_number, provider_comment_id))
+        if self.error is not None:
+            raise self.error
+
+    def set_merge_gate_check(
+        self,
+        repo_full_name: str,
+        head_sha: str,
+        installation_id: int,
+        check: MergeGateCheck,
+    ) -> None:
+        self.calls.append(("check", repo_full_name, head_sha, check.conclusion))
+        if self.error is not None:
+            raise self.error
 
 
 @dataclass

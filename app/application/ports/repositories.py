@@ -16,6 +16,7 @@ from app.domain.entities import (
     Finding,
     Hunk,
     MergeRequest,
+    OpenReviewThread,
     PublishedComment,
     Repository,
     ReviewRun,
@@ -96,8 +97,19 @@ class FindingRepo(Protocol):
 class PublishedCommentRepo(Protocol):
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]: ...
 
+    def list_open_threads_for_merge_request(
+        self, merge_request_id: UUID
+    ) -> list[OpenReviewThread]: ...
+
+    def get(self, published_comment_id: UUID) -> PublishedComment | None: ...
+
+    def find_by_provider_comment_id(self, provider_comment_id: str) -> PublishedComment | None: ...
+
     def add(self, comment: PublishedComment) -> None: ...
 
+    def update(self, comment: PublishedComment) -> None: ...
+
+    def record_feedback(self, provider_comment_id: str, *, positive: bool) -> bool: ...
 
 class UserRepo(Protocol):
     def get(self, user_id: UUID) -> User | None: ...

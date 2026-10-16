@@ -12,15 +12,19 @@ from dataclasses import dataclass
 import httpx
 from sqlalchemy import Engine, create_engine
 
-from app.application.ports import UnitOfWork
+from app.application.ports import CacheStore, DefinitionExtractor, UnitOfWork
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.vcs_gateway import VcsGateway
 from app.config import Settings
+from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.llm.stub import StubLlmGateway
 from app.infrastructure.oauth.github import GitHubOAuthProvider
+from app.infrastructure.parsing.tree_sitter_extractor import (
+    TreeSitterDefinitionExtractor,
+)
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
@@ -49,6 +53,11 @@ class Container:
     # Провайдеры входа по имени из пути `/auth/{provider}`. Конструирование —
     # без сети, поэтому они собираются сразу, а не лениво.
     _oauth_providers: Mapping[str, OAuthProvider]
+    # In-process кэш живёт, пока жив процесс, — только если он один на
+    # контейнер: фабрика на каждый вызов теряла бы всё между прогонами.
+    _cache_store: CacheStore
+    # Ленивый, как VCS-шлюз: процессу API парсеры грамматик не нужны.
+    _definition_extractor: DefinitionExtractor | None
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine)
@@ -80,6 +89,15 @@ class Container:
     def oauth_provider(self, name: str) -> OAuthProvider | None:
         """Провайдер входа по имени из пути; неизвестное имя — `None`."""
         return self._oauth_providers.get(name)
+    def cache_store(self) -> CacheStore:
+        return self._cache_store
+
+    def definition_extractor(self) -> DefinitionExtractor:
+        extractor = self._definition_extractor
+        if extractor is None:
+            extractor = TreeSitterDefinitionExtractor()
+            object.__setattr__(self, "_definition_extractor", extractor)
+        return extractor
 
 
 def build_container(settings: Settings) -> Container:
@@ -99,4 +117,6 @@ def build_container(settings: Settings) -> Container:
                 httpx.Client(timeout=10.0),
             ),
         },
+        _cache_store=InMemoryCacheStore(),
+        _definition_extractor=None,
     )

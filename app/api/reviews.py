@@ -42,6 +42,8 @@ class ReviewRunResponse(BaseModel):
     tokens_used: int | None
     duration_seconds: float | None
     failure_reason: str | None
+    failed_stage: str | None
+    last_progress_at: datetime
     created_at: datetime
     updated_at: datetime
     findings: list[FindingResponse]
@@ -68,6 +70,8 @@ def get_review(
         tokens_used=run.tokens_used,
         duration_seconds=run.duration_seconds,
         failure_reason=run.failure_reason,
+        failed_stage=run.failed_stage.value if run.failed_stage else None,
+        last_progress_at=run.last_progress_at,
         created_at=run.created_at,
         updated_at=run.updated_at,
         findings=[

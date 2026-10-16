@@ -16,12 +16,14 @@ from uuid import UUID
 
 from app.domain.enums import (
     CommentKind,
+    DefinitionKind,
     DiffSide,
     FindingCategory,
     FindingSeverity,
     MergeRequestState,
     Provider,
     ReviewRunStatus,
+    RulesStatus,
     TriggerSource,
 )
 
@@ -81,6 +83,9 @@ class ReviewRun:
     tokens_used: int | None = None
     duration_seconds: float | None = None
     rejected_findings: int = 0
+    # Этап, на котором прогон упал. Заполняет только `advance` при переходе в
+    # `failed`; у прогона, упавшего из `queued`, этапа нет.
+    failed_stage: ReviewRunStatus | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +146,19 @@ class PublishedComment:
     created_at: datetime
     updated_at: datetime
     finding_id: UUID | None = None
+    thread_resolved: bool = False
+    in_reply_to_provider_comment_id: str | None = None
+    feedback_positive: int = 0
+    feedback_negative: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class OpenReviewThread:
+    """Незакрытый инлайн-тред на хостинге, оставшийся с прошлого прогона."""
+
+    finding: Finding
+    root_provider_comment_id: str
+    root_published_comment_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +196,25 @@ class Hunk:
     new_count: int = 0
     changed_new_lines: frozenset[int] = field(default_factory=frozenset)
     changed_old_lines: frozenset[int] = field(default_factory=frozenset)
+    # Заголовок `@@` и тело hunk'а как в диффе: единица, которой сборка
+    # контекста отмеряет бюджет и которую показывает модели.
+    text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedFile:
+    """Один файл диффа: пути, бинарность и разобранные hunk'и.
+
+    `old_path` заполнен только у переименования. Бинарные файлы на hunk'и не
+    разбираются — ревьюить там нечего, их остаётся только отфильтровать.
+    `is_deleted` — у файла нет новой стороны: AST-окружение строить не из чего.
+    """
+
+    file_path: str
+    old_path: str | None = None
+    is_binary: bool = False
+    is_deleted: bool = False
+    hunks: tuple[Hunk, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +259,67 @@ class PRMetadata:
     source_branch: str
     target_branch: str
     state: MergeRequestState
+
+
+@dataclass(frozen=True, slots=True)
+class RepoRule:
+    """Правило владельца репозитория из `.review/rules.md`, принятое разбором.
+
+    Четыре части из спеки `ai-review-prompting`: имя, паттерны области
+    действия, паттерны исключения, проверки. Исключения необязательны (пустой
+    кортеж — не исключено ничего); без имени, паттерна или проверок правило
+    не принимается — см. `parse_rules_markdown`.
+    """
+
+    name: str
+    patterns: tuple[str, ...]
+    excludes: tuple[str, ...]
+    checks: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedRule:
+    """Раздел `rules.md`, не ставший правилом, и чего ему не хватило."""
+
+    name: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class RepoRules:
+    """Итог загрузки правил для прогона: статус и то, что удалось разобрать.
+
+    При любом статусе, кроме `LOADED`, оба кортежа пусты — дефолтный фоллбэк.
+    """
+
+    status: RulesStatus
+    rules: tuple[RepoRule, ...] = ()
+    rejected: tuple[RejectedRule, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Definition:
+    """Определение в файле: класс, интерфейс, функция или метод.
+
+    `signature` — заголовок до тела в одну строку (с базовыми классами,
+    `extends`, ресивером Go). `parent` — имя охватывающего класса у метода.
+    Строки — с единицы, как в диффе; `end_line` включительно.
+    """
+
+    kind: DefinitionKind
+    name: str
+    signature: str
+    line: int
+    end_line: int
+    parent: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FileOutline:
+    """Контур файла, как его отдаёт парсер: определения и импорты по порядку."""
+
+    definitions: tuple[Definition, ...] = ()
+    imports: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

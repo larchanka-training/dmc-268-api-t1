@@ -21,13 +21,14 @@ from app.domain.entities import (
     Finding,
     Hunk,
     MergeRequest,
+    OpenReviewThread,
     PublishedComment,
     Repository,
     ReviewRun,
     Session,
     User,
 )
-from app.domain.enums import TERMINAL_STATUSES, Provider
+from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
 
 
@@ -245,8 +246,13 @@ class FakeFindingRepo:
 
 
 class FakePublishedCommentRepo:
-    def __init__(self) -> None:
+    def __init__(self, review_runs: FakeReviewRunRepo) -> None:
         self._items: list[PublishedComment] = []
+        self._review_runs = review_runs
+        self._findings: FakeFindingRepo | None = None
+
+    def bind_findings(self, findings: FakeFindingRepo) -> None:
+        self._findings = findings
 
     def snapshot(self) -> list[PublishedComment]:
         return list(self._items)
@@ -257,8 +263,67 @@ class FakePublishedCommentRepo:
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]:
         return [c for c in self._items if c.review_run_id == review_run_id]
 
+    def list_open_threads_for_merge_request(
+        self, merge_request_id: UUID
+    ) -> list[OpenReviewThread]:
+        if self._findings is None:
+            return []
+        runs = {
+            r.id: r
+            for r in self._review_runs.runs
+            if r.merge_request_id == merge_request_id
+        }
+        threads: list[OpenReviewThread] = []
+        for comment in self._items:
+            if comment.kind is not CommentKind.INLINE or comment.thread_resolved:
+                continue
+            run = runs.get(comment.review_run_id)
+            if run is None or comment.finding_id is None:
+                continue
+            finding = next(
+                (f for f in self._findings._items if f.id == comment.finding_id),
+                None,
+            )
+            if finding is None:
+                continue
+            threads.append(
+                OpenReviewThread(
+                    finding=finding,
+                    root_provider_comment_id=comment.provider_comment_id,
+                    root_published_comment_id=comment.id,
+                )
+            )
+        return threads
+
+    def get(self, published_comment_id: UUID) -> PublishedComment | None:
+        return next((c for c in self._items if c.id == published_comment_id), None)
+
+    def find_by_provider_comment_id(self, provider_comment_id: str) -> PublishedComment | None:
+        return next(
+            (c for c in self._items if c.provider_comment_id == provider_comment_id),
+            None,
+        )
+
     def add(self, comment: PublishedComment) -> None:
         self._items.append(comment)
+
+    def update(self, comment: PublishedComment) -> None:
+        for index, existing in enumerate(self._items):
+            if existing.id == comment.id:
+                self._items[index] = comment
+                return
+        raise LookupError(f"published comment {comment.id} is not stored")
+
+    def record_feedback(self, provider_comment_id: str, *, positive: bool) -> bool:
+        comment = self.find_by_provider_comment_id(provider_comment_id)
+        if comment is None:
+            return False
+        if positive:
+            updated = replace(comment, feedback_positive=comment.feedback_positive + 1)
+        else:
+            updated = replace(comment, feedback_negative=comment.feedback_negative + 1)
+        self.update(updated)
+        return True
 
 
 class FakeUserRepo:
@@ -346,9 +411,8 @@ class FakeUnitOfWork(UnitOfWork):
         self.review_runs: FakeReviewRunRepo = self._fakes.review_runs
         self.context_payloads: FakeContextPayloadRepo = self._fakes.context_payloads
         self.findings: FakeFindingRepo = self._fakes.findings
-        self.published_comments: FakePublishedCommentRepo = (
-            self._fakes.published_comments
-        )
+        self.published_comments: FakePublishedCommentRepo = self._fakes.published_comments
+        self.published_comments.bind_findings(self.findings)
         self.users: FakeUserRepo = self._fakes.users
         self.sessions: FakeSessionRepo = self._fakes.sessions
         self.committed = 0
@@ -405,7 +469,7 @@ class _Fakes:
         self.review_runs = FakeReviewRunRepo()
         self.context_payloads = FakeContextPayloadRepo()
         self.findings = FakeFindingRepo(self.review_runs)
-        self.published_comments = FakePublishedCommentRepo()
+        self.published_comments = FakePublishedCommentRepo(self.review_runs)
         self.users = FakeUserRepo()
         self.sessions = FakeSessionRepo()
 

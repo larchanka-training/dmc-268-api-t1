@@ -1,7 +1,7 @@
 """пользователи и сессии входа
 
-Revision ID: 0003
-Revises: 0002
+Revision ID: 0005
+Revises: 0004
 Create Date: 2026-10-17 12:00:00.000000
 
 """
@@ -13,8 +13,8 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 # Идентификаторы ревизии, используются Alembic.
-revision: str = '0003'
-down_revision: str | Sequence[str] | None = '0002'
+revision: str = '0005'
+down_revision: str | Sequence[str] | None = '0004'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

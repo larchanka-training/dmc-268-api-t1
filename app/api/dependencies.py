@@ -4,8 +4,10 @@
 конкретный адаптер.
 """
 
-from collections.abc import Callable, Iterator
+import asyncio
+from collections.abc import Awaitable, Callable, Iterator
 from typing import cast
+from uuid import UUID
 
 from fastapi import Depends, Request
 
@@ -13,6 +15,7 @@ from app.application.ports import UnitOfWork
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
 from app.config import Settings
+from app.domain.entities import ReviewRun
 from app.infrastructure.container import Container
 
 
@@ -50,3 +53,23 @@ def get_oauth_provider(
 ) -> OAuthProvider | None:
     """Провайдер входа по `{provider}` из пути; неизвестный — `None`."""
     return container.oauth_provider(provider)
+def get_run_reader(
+    container: Container = Depends(get_container),
+) -> Callable[[UUID], ReviewRun | None]:
+    """Чтение прогона короткой единицей работы — для потока событий.
+
+    `get_unit_of_work` держит транзакцию и соединение до конца запроса, а
+    поток живёт минуты: несколько открытых вкладок исчерпали бы пул. Здесь
+    соединение берётся на одно чтение и сразу возвращается.
+    """
+
+    def read(run_id: UUID) -> ReviewRun | None:
+        with container.unit_of_work() as uow:
+            return uow.review_runs.get(run_id)
+
+    return read
+
+
+def get_sleep() -> Callable[[float], Awaitable[None]]:
+    """Ожидание между проверками статуса; тесты подменяют его мгновенным."""
+    return asyncio.sleep
