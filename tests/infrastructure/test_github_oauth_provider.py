@@ -1,6 +1,7 @@
 """`GitHubOAuthProvider` на записанных ответах: обмен `code` и `GET /user`."""
 
 from collections.abc import Callable
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -12,7 +13,7 @@ from app.infrastructure.oauth.github import GitHubOAuthProvider
 
 CALLBACK = "https://review.example/api/v1/auth/github/callback"
 USER_TOKEN = "ghu_user-token-value"
-USER_JSON = {
+USER_JSON: dict[str, Any] = {
     "id": 583231,
     "login": "octocat",
     "name": "The Octocat",
