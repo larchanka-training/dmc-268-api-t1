@@ -5,7 +5,11 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
-from app.application.review_run_events import POLL_SECONDS, review_run_events
+from app.application.review_run_events import (
+    POLL_SECONDS,
+    SESSION_CHECK_SECONDS,
+    review_run_events,
+)
 from app.domain.entities import ReviewRun
 from app.domain.enums import ReviewRunStatus as S
 from app.domain.enums import TriggerSource
@@ -32,6 +36,9 @@ class Script:
         self._states = list(states)
         self.reads = 0
         self.slept: list[float] = []
+        # Сессия жива первые `session_checks_alive` проверок, потом — нет.
+        self.session_checks_alive: int | None = None
+        self.session_checks = 0
 
     async def read(self) -> ReviewRun | None:
         state = self._states[min(self.reads, len(self._states) - 1)]
@@ -41,6 +48,10 @@ class Script:
     async def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)
 
+    async def session_alive(self) -> bool:
+        self.session_checks += 1
+        return self.session_checks_alive is None or self.session_checks <= self.session_checks_alive
+
 
 def _collect(script: Script, *, limit: int = 100) -> list[RunEvent]:
     async def run() -> list[RunEvent]:
@@ -48,7 +59,9 @@ def _collect(script: Script, *, limit: int = 100) -> list[RunEvent]:
         first = await script.read()
         assert first is not None
         events: list[RunEvent] = []
-        async for event in review_run_events(first, script.read, sleep=script.sleep):
+        async for event in review_run_events(
+            first, script.read, sleep=script.sleep, session_alive=script.session_alive
+        ):
             events.append(event)
             if len(events) == limit:
                 break
@@ -135,3 +148,27 @@ def test_the_stream_ends_when_the_run_can_no_longer_be_read() -> None:
     events = _collect(script)
 
     assert _statuses(events) == [S.QUEUED]
+
+
+def test_the_session_is_rechecked_every_five_seconds() -> None:
+    script = Script(RUN)
+    script.session_checks_alive = 2
+
+    events = _collect(script)
+
+    assert SESSION_CHECK_SECONDS == 5.0
+    # Две живые проверки на 5-й и 10-й секунде, третья на 15-й закрывает поток.
+    assert script.session_checks == 3
+    assert sum(script.slept) == 15 * POLL_SECONDS
+    assert _statuses(events) == [S.QUEUED]
+
+
+def test_a_gone_session_closes_the_stream_without_another_event() -> None:
+    script = Script(RUN, replace(RUN, status=S.ANALYSING))
+    script.session_checks_alive = 0
+
+    events = _collect(script)
+
+    assert _statuses(events) == [S.QUEUED, S.ANALYSING]
+    assert script.session_checks == 1
+    assert sum(script.slept) == SESSION_CHECK_SECONDS

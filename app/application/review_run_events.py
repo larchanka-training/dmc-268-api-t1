@@ -14,6 +14,8 @@ from app.domain.run_events import RunEvent, StatusEvent, next_event
 
 # Спека обещает событие не позже двух секунд после записи статуса.
 POLL_SECONDS = 1.0
+# Спека `user-auth`: поток закрывается не позже чем через 5 секунд после выхода.
+SESSION_CHECK_SECONDS = 5.0
 
 
 async def review_run_events(
@@ -21,6 +23,7 @@ async def review_run_events(
     read_run: Callable[[], Awaitable[ReviewRun | None]],
     *,
     sleep: Callable[[float], Awaitable[None]],
+    session_alive: Callable[[], Awaitable[bool]],
 ) -> AsyncIterator[RunEvent]:
     """Отдавать события прогона, пока он не завершится.
 
@@ -28,9 +31,14 @@ async def review_run_events(
     никогда не открывается пустым. Дальше прогон перечитывается раз в
     `POLL_SECONDS`. Поток кончается после терминального статуса или если
     прогон перестал читаться.
+
+    Сессию проверили при подключении, но поток живёт минуты, поэтому раз в
+    `SESSION_CHECK_SECONDS` она перечитывается: нет её — поток закрывается
+    без события. Аргумент обязательный, чтобы поток без проверки не открылся.
     """
     last_sent: ReviewRunStatus | None = None
     idle_seconds = 0.0
+    since_session_check = 0.0
     while True:
         decision = next_event(run, last_sent=last_sent, idle_seconds=idle_seconds)
         if decision.event is not None:
@@ -42,6 +50,11 @@ async def review_run_events(
             return
         await sleep(POLL_SECONDS)
         idle_seconds += POLL_SECONDS
+        since_session_check += POLL_SECONDS
+        if since_session_check >= SESSION_CHECK_SECONDS:
+            since_session_check = 0.0
+            if not await session_alive():
+                return
         next_run = await read_run()
         if next_run is None:
             return

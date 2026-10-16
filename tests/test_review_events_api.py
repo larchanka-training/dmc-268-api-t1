@@ -14,6 +14,7 @@ from app.domain.enums import ReviewRunStatus as S
 from app.domain.enums import TriggerSource
 from app.domain.ids import new_id
 
+from .fakes.auth import sign_in_with_session
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -57,7 +58,8 @@ def _client(*states: ReviewRun | None) -> TestClient:
 
     app.dependency_overrides[get_run_reader] = lambda: read
     app.dependency_overrides[get_sleep] = lambda: no_sleep
-    return TestClient(app)
+    cookies = sign_in_with_session(app, FakeUnitOfWork())
+    return TestClient(app, cookies=cookies)
 
 
 def test_unknown_run_is_404_and_no_stream_opens() -> None:
@@ -148,8 +150,9 @@ def test_the_real_reader_is_wired_to_the_container() -> None:
     uow = FakeUnitOfWork()
     uow.review_runs.add(replace(RUN, status=S.CANCELLED))
     app.dependency_overrides[get_container] = lambda: _CountingContainer(uow)
+    cookies = sign_in_with_session(app, uow)
 
-    response = TestClient(app).get(f"/api/v1/reviews/{RUN_ID}/events")
+    response = TestClient(app, cookies=cookies).get(f"/api/v1/reviews/{RUN_ID}/events")
 
     assert response.status_code == 200
     assert '"status":"cancelled"' in response.text

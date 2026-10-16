@@ -8,9 +8,17 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_oauth_provider, get_unit_of_work_factory
+from app.api.dependencies import (
+    get_oauth_provider,
+    get_run_reader,
+    get_sleep,
+    get_unit_of_work_factory,
+)
 from app.api.factory import create_app
+from app.application.use_cases.auth import logout
 from app.config import Settings
+from app.domain.entities import ReviewRun
+from app.domain.enums import ReviewRunStatus, TriggerSource
 from app.domain.ids import new_id
 
 from .fakes.oauth import FakeOAuthProvider
@@ -144,7 +152,7 @@ def test_an_unavailable_provider_goes_to_login(stand) -> None:
 @pytest.mark.parametrize(
     "path",
     ["/api/v1/auth/me", "/api/v1/repositories", f"/api/v1/reviews/{new_id()}",
-     f"/api/v1/repositories/{new_id()}/pull-requests"],
+     f"/api/v1/repositories/{new_id()}/pull-requests", f"/api/v1/reviews/{new_id()}/events"],
 )
 def test_reading_without_a_session_is_401_and_sets_no_cookie(stand, path) -> None:
     response = stand.client().get(path)
@@ -238,3 +246,37 @@ def test_the_access_log_hides_the_callback_query() -> None:
     message = record.getMessage()
     assert "c-1" not in message and "s-1" not in message
     assert "/api/v1/auth/github/callback?<скрыто>" in message
+
+
+def test_logout_closes_an_open_event_stream_and_reconnecting_is_401(stand) -> None:
+    run = ReviewRun(
+        id=new_id(),
+        merge_request_id=new_id(),
+        head_sha="abc123",
+        status=ReviewRunStatus.ANALYSING,
+        trigger=TriggerSource.WEBHOOK,
+        last_progress_at=datetime(2026, 10, 17, tzinfo=UTC),
+        created_at=datetime(2026, 10, 17, tzinfo=UTC),
+        updated_at=datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    slept: list[float] = []
+    client = stand.client()
+    sign_in(client)
+    token = client.cookies["session"]
+
+    async def sleep_then_logout(seconds: float) -> None:
+        slept.append(seconds)
+        assert len(slept) < 30, "поток не закрылся после выхода"
+        if len(slept) == 2:
+            # Выход в другой вкладке, пока этот поток открыт.
+            logout(stand.uow, token)
+
+    stand.app.dependency_overrides[get_run_reader] = lambda: lambda run_id: run
+    stand.app.dependency_overrides[get_sleep] = lambda: sleep_then_logout
+
+    response = client.get(f"/api/v1/reviews/{run.id}/events")
+
+    assert response.status_code == 200
+    assert response.text.count('"status":"analysing"') == 1
+    assert sum(slept) <= 5
+    assert client.get(f"/api/v1/reviews/{run.id}/events").status_code == 401
