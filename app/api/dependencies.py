@@ -4,13 +4,14 @@
 конкретный адаптер.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import cast
 
 from fastapi import Depends, Request
 
 from app.application.ports import UnitOfWork
 from app.application.ports.job_queue import JobQueue
+from app.application.ports.oauth_provider import OAuthProvider
 from app.config import Settings
 from app.infrastructure.container import Container
 
@@ -34,3 +35,18 @@ def get_unit_of_work(request: Request) -> Iterator[UnitOfWork]:
 
 def get_job_queue(container: Container = Depends(get_container)) -> JobQueue:
     return container.job_queue()
+
+
+def get_unit_of_work_factory(
+    container: Container = Depends(get_container),
+) -> Callable[[], UnitOfWork]:
+    """Фабрика, а не открытый unit of work: use case входа сам решает, когда
+    открыть транзакцию, — например, после ответа провайдера."""
+    return container.unit_of_work
+
+
+def get_oauth_provider(
+    provider: str, container: Container = Depends(get_container)
+) -> OAuthProvider | None:
+    """Провайдер входа по `{provider}` из пути; неизвестный — `None`."""
+    return container.oauth_provider(provider)

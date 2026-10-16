@@ -28,12 +28,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.container = build_container(settings)
 
+    from app.api import log_redaction
+    from app.api.auth import router as auth_router
     from app.api.pull_requests import router as pull_requests_router
     from app.api.repositories import router as repositories_router
     from app.api.reviews import router as reviews_router
+    from app.api.session import (
+        OriginForbidden,
+        Unauthenticated,
+        origin_forbidden_response,
+        unauthenticated_response,
+    )
     from app.api.webhooks import router as webhooks_router
 
+    log_redaction.install()
+    app.add_exception_handler(Unauthenticated, unauthenticated_response)
+    app.add_exception_handler(OriginForbidden, origin_forbidden_response)
+
     app.include_router(webhooks_router)
+    app.include_router(auth_router)
     app.include_router(repositories_router)
     app.include_router(pull_requests_router)
     app.include_router(reviews_router)

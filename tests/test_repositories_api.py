@@ -13,6 +13,7 @@ from app.domain.entities import Repository
 from app.domain.enums import Provider
 from app.domain.ids import new_id
 
+from .fakes.auth import sign_in
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -39,6 +40,7 @@ def _repository(n: int) -> Repository:
 
 def _client(uow: FakeUnitOfWork) -> TestClient:
     app = create_app(SETTINGS)
+    sign_in(app)
 
     def override_uow() -> Iterator[FakeUnitOfWork]:
         yield uow

@@ -18,6 +18,7 @@ from app.domain.enums import (
 )
 from app.domain.ids import new_id
 
+from .fakes.auth import sign_in
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -31,6 +32,7 @@ NOW = datetime(2026, 9, 29, tzinfo=UTC)
 
 def _client(uow: FakeUnitOfWork) -> TestClient:
     app = create_app(SETTINGS)
+    sign_in(app)
 
     def override_uow() -> Iterator[FakeUnitOfWork]:
         yield uow
