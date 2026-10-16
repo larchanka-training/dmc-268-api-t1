@@ -49,7 +49,7 @@ ln -s AGENTS.md CLAUDE.md                 # Claude Code читает CLAUDE.md
 
 ```bash
 uv sync --all-extras
-uv run pre-commit install   # перед каждым коммитом гоняет ruff, mypy и lint-imports
+uv run pre-commit install   # перед каждым коммитом гоняет ruff, mypy, lint-imports и openspec validate (нужен Node)
 ```
 
 ## Запуск
@@ -138,7 +138,7 @@ uv run lint-imports      # правило слоёв, см. документ п�
 например когда что-нибудь в `app/domain` тянется к SQLAlchemy. `mypy` работает в
 строгом режиме по `app/`; для `tests/` действует послабление
 (`[[tool.mypy.overrides]]` в `pyproject.toml`), потому что стиль pytest —
-нетипизированные фикстуры и `def test_x():` — там норма. Все три проверки
+нетипизированные фикстуры и `def test_x():` — там норма. Все три проверки, как и `openspec validate --strict`,
 работают и как хуки `pre-commit` (`uv run pre-commit install`, см. «Установка»),
 и в CI.
 
@@ -173,3 +173,13 @@ psql "$DATABASE_URL" -c "
 Повторная вставка того же `(provider, provider_id)` упадёт на уникальном
 индексе `uq_repositories_provider_id` — повторное внесение невозможно по
 конструкции.
+
+## Правила ревью и разрешения GitHub App
+
+Воркер довыбирает через contents API `.review/rules.md` (с коммита целевой
+ветки PR) и изменённые файлы (с `head_sha`) для AST-окружения, поэтому GitHub
+App нужно разрешение **Contents: read**. Без него прогон не падает: правила
+уходят в дефолтный фоллбэк (`rules.status = unavailable`), AST пропускается.
+Формат правил — [`prompts/review/custom-rules.md`](prompts/review/custom-rules.md),
+лимиты сборки контекста (`CONTEXT_MAX_TOKENS`, `RULES_MAX_BYTES`,
+`AST_MAX_FILES`, …) — в [`app/config.py`](app/config.py).

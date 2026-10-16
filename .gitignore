@@ -7,6 +7,7 @@ venv/
 .env
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .idea/
 .DS_Store
 CLAUDE.md

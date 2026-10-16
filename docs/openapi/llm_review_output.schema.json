@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larchanka-training.github.io/dmc-268-api-t1/schemas/llm_review_output.schema.json",
+  "title": "LlmReviewOutput",
+  "description": "Структурированный ответ модели на один прогон ревью (issue #50).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "findings", "summary"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1"
+    },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "finding.schema.json" }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["problem", "positives", "effort"],
+      "properties": {
+        "problem": { "type": "string", "minLength": 1 },
+        "positives": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "effort": { "type": "string", "minLength": 1 }
+      }
+    },
+    "threadFollowUps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["anchor", "status", "reply"],
+        "properties": {
+          "anchor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["filePath", "side", "line", "category"],
+            "properties": {
+              "filePath": { "type": "string", "minLength": 1 },
+              "side": { "type": "string", "enum": ["old", "new"] },
+              "line": { "type": "integer", "minimum": 1 },
+              "category": {
+                "type": "string",
+                "enum": ["security", "correctness", "performance", "readability"]
+              }
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": ["fixed", "still_relevant", "accepted_risk", "superseded"]
+          },
+          "reply": { "type": "string", "minLength": 1 },
+          "resolveThread": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

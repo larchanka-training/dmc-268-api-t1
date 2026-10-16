@@ -262,3 +262,7 @@ class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     provider_comment_id: Mapped[str] = mapped_column(String(255), nullable=False)
     kind: Mapped[CommentKind] = mapped_column(_enum(CommentKind, "comment_kind"), nullable=False)
     published_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    thread_resolved: Mapped[bool] = mapped_column(default=False, server_default="false")
+    in_reply_to_provider_comment_id: Mapped[str | None] = mapped_column(String(255))
+    feedback_positive: Mapped[int] = mapped_column(default=0, server_default="0")
+    feedback_negative: Mapped[int] = mapped_column(default=0, server_default="0")

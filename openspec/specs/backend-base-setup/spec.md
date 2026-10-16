@@ -66,12 +66,11 @@ enforces.
 ### Requirement: Containerized local development environment
 
 The repository SHALL provide a `docker-compose.yml` that starts the API and
-the worker process together with PostgreSQL, Redis, and RabbitMQ using one
-command. The API service SHALL wait for PostgreSQL's health check before
-starting, SHALL apply pending Alembic migrations before serving traffic, and
-SHALL read its database connection from compose-provided configuration
-rather than requiring a developer to export it by hand. Both the API and the
-worker service SHALL wait for RabbitMQ's health check before starting.
+the worker together with PostgreSQL, Redis, and RabbitMQ in one command. The
+API service SHALL start after PostgreSQL's health check, SHALL apply pending
+Alembic migrations before serving traffic, and SHALL read its database
+connection from compose-provided configuration, not a hand-exported variable.
+The API and the worker SHALL both start after RabbitMQ's health check.
 
 #### Scenario: One command starts the whole stack
 

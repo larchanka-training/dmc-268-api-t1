@@ -70,6 +70,16 @@ class CommentKind(StrEnum):
 
     SUMMARY = "summary"
     INLINE = "inline"
+    THREAD_REPLY = "thread_reply"
+
+
+class ThreadFollowUpStatus(StrEnum):
+    """Как модель оценивает открытый тред на повторном прогоне."""
+
+    FIXED = "fixed"
+    STILL_RELEVANT = "still_relevant"
+    ACCEPTED_RISK = "accepted_risk"
+    SUPERSEDED = "superseded"
 
 
 class DiffSide(StrEnum):
@@ -77,6 +87,38 @@ class DiffSide(StrEnum):
 
     OLD = "old"
     NEW = "new"
+
+
+class RulesStatus(StrEnum):
+    """Чем закончилась загрузка `.review/rules.md` для прогона.
+
+    Всё, кроме `LOADED`, — дефолтный фоллбэк: ревью идёт по стандартным
+    критериям, прогон не падает.
+    """
+
+    LOADED = "loaded"
+    ABSENT = "absent"
+    TOO_LARGE = "too_large"
+    UNAVAILABLE = "unavailable"
+
+
+class Language(StrEnum):
+    """Язык файла, для которого есть грамматика AST-окружения."""
+
+    PYTHON = "python"
+    TYPESCRIPT = "typescript"
+    TSX = "tsx"
+    JAVASCRIPT = "javascript"
+    GO = "go"
+
+
+class DefinitionKind(StrEnum):
+    """Вид определения в контуре файла."""
+
+    CLASS = "class"
+    INTERFACE = "interface"
+    FUNCTION = "function"
+    METHOD = "method"
 
 
 # Этапы обработки — то, что может стоять в `failed_stage`. `queued` сюда не
