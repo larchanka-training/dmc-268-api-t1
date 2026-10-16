@@ -17,21 +17,21 @@ POLL_SECONDS = 1.0
 
 
 async def review_run_events(
+    run: ReviewRun,
     read_run: Callable[[], Awaitable[ReviewRun | None]],
     *,
     sleep: Callable[[float], Awaitable[None]],
 ) -> AsyncIterator[RunEvent]:
     """Отдавать события прогона, пока он не завершится.
 
-    Первым всегда уходит снимок. Поток кончается после терминального статуса
-    или если прогон перестал читаться.
+    `run` — уже прочитанный прогон: из него первым уходит снимок, и поток
+    никогда не открывается пустым. Дальше прогон перечитывается раз в
+    `POLL_SECONDS`. Поток кончается после терминального статуса или если
+    прогон перестал читаться.
     """
     last_sent: ReviewRunStatus | None = None
     idle_seconds = 0.0
     while True:
-        run = await read_run()
-        if run is None:
-            return
         decision = next_event(run, last_sent=last_sent, idle_seconds=idle_seconds)
         if decision.event is not None:
             yield decision.event
@@ -42,3 +42,7 @@ async def review_run_events(
             return
         await sleep(POLL_SECONDS)
         idle_seconds += POLL_SECONDS
+        next_run = await read_run()
+        if next_run is None:
+            return
+        run = next_run

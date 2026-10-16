@@ -48,12 +48,15 @@ async def stream_review_events(
         return await run_in_threadpool(read_run, review_run_id)
 
     # До начала потока: после первого байта статус ответа уже не поменять.
-    if await read() is None:
+    # Прочитанный прогон становится снимком — второго чтения нет, и прогон,
+    # удалённый между проверкой и потоком, не даёт пустой поток.
+    run = await read()
+    if run is None:
         raise HTTPException(status_code=404, detail="review run not found")
 
     async def body() -> AsyncIterator[str]:
         yield _RETRY
-        async for event in review_run_events(read, sleep=sleep):
+        async for event in review_run_events(run, read, sleep=sleep):
             yield format_sse(event)
 
     return StreamingResponse(body(), media_type="text/event-stream", headers=_HEADERS)

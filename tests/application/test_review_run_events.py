@@ -5,11 +5,11 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
-from app.application.review_run_events import review_run_events
+from app.application.review_run_events import POLL_SECONDS, review_run_events
 from app.domain.entities import ReviewRun
 from app.domain.enums import ReviewRunStatus as S
 from app.domain.enums import TriggerSource
-from app.domain.run_events import PingEvent, RunEvent, StatusEvent
+from app.domain.run_events import PING_AFTER_SECONDS, PingEvent, RunEvent, StatusEvent
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
 
@@ -44,8 +44,11 @@ class Script:
 
 def _collect(script: Script, *, limit: int = 100) -> list[RunEvent]:
     async def run() -> list[RunEvent]:
+        # Как в роутере: первое чтение — проверка существования, оно же снимок.
+        first = await script.read()
+        assert first is not None
         events: list[RunEvent] = []
-        async for event in review_run_events(script.read, sleep=script.sleep):
+        async for event in review_run_events(first, script.read, sleep=script.sleep):
             events.append(event)
             if len(events) == limit:
                 break
@@ -104,8 +107,9 @@ def test_silence_produces_a_ping_and_the_count_starts_over() -> None:
         failure_reason=None,
     )
     assert events[1:] == [PingEvent(), PingEvent()]
-    # Снимок, 14 секунд тишины до первого ping и ещё 14 до второго.
-    assert script.reads == 1 + 14 + 14
+    # Снимок, тишина до первого ping и столько же до второго.
+    polls_to_ping = int(PING_AFTER_SECONDS / POLL_SECONDS)
+    assert script.reads == 1 + polls_to_ping + polls_to_ping
 
 
 def test_a_status_change_resets_the_silence() -> None:
@@ -122,7 +126,7 @@ def test_a_status_change_resets_the_silence() -> None:
         failure_reason=None,
     )
     assert events[2] == PingEvent()
-    assert script.reads == 11 + 14
+    assert script.reads == 11 + int(PING_AFTER_SECONDS / POLL_SECONDS)
 
 
 def test_the_stream_ends_when_the_run_can_no_longer_be_read() -> None:

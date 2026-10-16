@@ -54,7 +54,7 @@ def next_event(
     первого: тогда уходит снимок, каким бы статус ни был. `idle_seconds` —
     сколько прошло с последнего отправленного события любого вида.
     """
-    if run.status is not last_sent:
+    if run.status != last_sent:
         event = StatusEvent(
             review_run_id=run.id,
             status=run.status,
