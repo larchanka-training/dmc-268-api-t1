@@ -21,8 +21,8 @@
 
 ## 4. Провайдеры
 
-- [ ] 4.1 GitHub: OAuth GitHub App, `GET /user`
-- [ ] 4.2 Настройки: `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `PUBLIC_ORIGIN`; секреты — `SecretStr`, в логи не попадают
+- [x] 4.1 GitHub: OAuth GitHub App, `GET /user`
+- [x] 4.2 Настройки: `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `PUBLIC_ORIGIN`; секреты — `SecretStr`, в логи не попадают
 
 ## 5. API
 
