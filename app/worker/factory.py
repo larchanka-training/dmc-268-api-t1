@@ -17,9 +17,14 @@ from typing import Protocol
 
 import pika
 
-from app.application.ports import UnitOfWork
+from app.application.context_assembly import ContextLimits
+from app.application.ports import (
+    CacheStore,
+    DefinitionExtractor,
+    UnitOfWork,
+    VcsGateway,
+)
 from app.application.ports.llm_gateway import LlmGateway
-from app.application.ports.vcs_gateway import VcsGateway
 from app.application.review_pipeline import run_review
 from app.application.stale_sweep import sweep_stale_runs
 from app.config import Settings
@@ -127,8 +132,24 @@ class ReviewHandlerDeps(Protocol):
 
     def vcs_gateway(self) -> VcsGateway: ...
 
+    def definition_extractor(self) -> DefinitionExtractor: ...
 
-def build_review_handler(deps: ReviewHandlerDeps) -> MessageHandler:
+    def cache_store(self) -> CacheStore: ...
+
+
+def context_limits(settings: Settings) -> ContextLimits:
+    """Лимиты сборки контекста из настроек: слой приложения окружения не читает."""
+    return ContextLimits(
+        max_tokens=settings.context_max_tokens,
+        rules_max_tokens=settings.rules_max_tokens,
+        rules_max_bytes=settings.rules_max_bytes,
+        rules_cache_ttl_seconds=settings.rules_cache_ttl_seconds,
+        ast_max_files=settings.ast_max_files,
+        ast_max_file_bytes=settings.ast_max_file_bytes,
+    )
+
+
+def build_review_handler(deps: ReviewHandlerDeps, limits: ContextLimits) -> MessageHandler:
     def handle(body: bytes) -> None:
         job = from_wire_message(body)
         try:
@@ -137,6 +158,9 @@ def build_review_handler(deps: ReviewHandlerDeps) -> MessageHandler:
                 uow=deps.unit_of_work(),
                 llm_gateway=deps.llm_gateway(),
                 vcs_gateway=deps.vcs_gateway(),
+                definition_extractor=deps.definition_extractor(),
+                cache_store=deps.cache_store(),
+                context_limits=limits,
                 now=lambda: datetime.now(UTC),
                 monotonic=time.monotonic,
                 new_id=new_id,
@@ -162,4 +186,5 @@ def run_worker(settings: Settings) -> None:
         if swept:
             logger.warning("зависших прогонов переведено в failed: %d", swept)
 
-    build_worker(settings).run(build_review_handler(container), sweep=sweep)
+    handler = build_review_handler(container, context_limits(settings))
+    build_worker(settings).run(handler, sweep=sweep)

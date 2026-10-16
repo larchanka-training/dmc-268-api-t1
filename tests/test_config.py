@@ -7,6 +7,8 @@
 проверки подписи.
 """
 
+from typing import Any
+
 import pytest
 from pydantic import ValidationError
 
@@ -61,3 +63,39 @@ def test_stale_timeout_must_be_positive() -> None:
             github_webhook_secret="s",
             stale_run_timeout_seconds=0,
         )
+
+
+def test_context_limits_have_defaults() -> None:
+    settings = make_settings()
+    assert settings.context_max_tokens == 32_000
+    assert settings.rules_max_tokens < settings.context_max_tokens
+
+
+def test_context_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CONTEXT_MAX_TOKENS", "16000")
+    monkeypatch.setenv("AST_MAX_FILES", "5")
+    settings = make_settings()
+    assert settings.context_max_tokens == 16_000
+    assert settings.ast_max_files == 5
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "context_max_tokens",
+        "rules_max_tokens",
+        "rules_max_bytes",
+        "rules_cache_ttl_seconds",
+        "ast_max_files",
+        "ast_max_file_bytes",
+    ],
+)
+def test_context_limits_must_be_positive(field: str) -> None:
+    values: dict[str, Any] = {
+        "database_url": DATABASE_URL,
+        "rabbitmq_url": RABBITMQ_URL,
+        "github_webhook_secret": "s",
+        field: 0,
+    }
+    with pytest.raises(ValidationError):
+        Settings(**values)

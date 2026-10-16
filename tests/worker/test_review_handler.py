@@ -7,14 +7,18 @@ from uuid import UUID
 
 import pytest
 
+from app.application.context_assembly import ContextLimits
 from app.application.ports.llm_gateway import LlmReviewResult
 from app.domain.entities import MergeRequest, ReviewJob, ReviewRun
 from app.domain.enums import MergeRequestState, ReviewRunStatus, TriggerSource
 from app.infrastructure.queue.rabbitmq import to_wire_message
 from app.worker.factory import build_review_handler
 
+from ..fakes.context import FakeCache, FakeExtractor
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
+
+LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144)
 
 JOB = ReviewJob(
     id=UUID(int=1),
@@ -49,6 +53,12 @@ class _Deps:
 
     def vcs_gateway(self) -> RecordingVcsGateway:
         return RecordingVcsGateway()
+
+    def definition_extractor(self) -> FakeExtractor:
+        return FakeExtractor()
+
+    def cache_store(self) -> FakeCache:
+        return FakeCache()
 
 
 def test_handler_parses_the_message_and_drives_the_run_to_completed() -> None:
@@ -85,7 +95,7 @@ def test_handler_parses_the_message_and_drives_the_run_to_completed() -> None:
     )
     body = json.dumps(to_wire_message(JOB)).encode("utf-8")
 
-    handler = build_review_handler(_Deps(uow))
+    handler = build_review_handler(_Deps(uow), LIMITS)
     handler(body)
 
     run = uow.review_runs.get(JOB.review_run_id)
@@ -102,7 +112,7 @@ def test_handler_logs_both_ids_when_the_run_fails(
     # а он выключает уже созданные логгеры — без этого тест зависит от порядка.
     monkeypatch.setattr(logging.getLogger("app.worker.factory"), "disabled", False)
     body = json.dumps(to_wire_message(JOB)).encode("utf-8")
-    handler = build_review_handler(_Deps(FakeUnitOfWork()))
+    handler = build_review_handler(_Deps(FakeUnitOfWork()), LIMITS)
 
     with caplog.at_level(logging.ERROR), pytest.raises(LookupError):
         handler(body)

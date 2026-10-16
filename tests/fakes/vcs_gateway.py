@@ -10,10 +10,17 @@ from app.application.ports.vcs_review import (
 )
 from app.domain.entities import PRMetadata
 
+# Как у `FakeVcs`: первая строка `app/main.py` в диффе для сборки контекста.
+_PIPELINE_DIFF = (
+    "diff --git a/app/main.py b/app/main.py\n"
+    "--- a/app/main.py\n+++ b/app/main.py\n"
+    "@@ -1 +1 @@\n-old\n+new\n"
+)
+
 
 @dataclass
 class RecordingVcsGateway:
-    diff: str = ""
+    diff: str = _PIPELINE_DIFF
     checks: list[MergeGateCheck] = field(default_factory=list)
     replies: list[tuple[str, str]] = field(default_factory=list)
     resolved: list[str] = field(default_factory=list)
@@ -30,6 +37,11 @@ class RecordingVcsGateway:
         self, repo_full_name: str, pr_number: int, installation_id: int
     ) -> PRMetadata:
         raise NotImplementedError
+
+    def fetch_file(
+        self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
+    ) -> str | None:
+        return None
 
     def publish_pull_request_review(
         self,
