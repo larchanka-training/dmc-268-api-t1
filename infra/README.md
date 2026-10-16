@@ -53,6 +53,14 @@ cd infra && tofu init -backend=false -upgrade && tofu providers lock \
 | `docker_host`, `service_host` | собираются из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
 | `bind_ip` | `127.0.0.1`: API снаружи не публикуется, к нему ходит интерфейс изнутри docker-сети |
 
+Вход пользователей через GitHub без них `apply` пройдёт, но работать не будет:
+
+| Переменная | Откуда |
+| --- | --- |
+| `github_app_client_id` | переменная `GITHUB_APP_CLIENT_ID_DMC268_T1` |
+| `github_app_client_secret` | секрет `GITHUB_APP_CLIENT_SECRET_DMC268_T1` |
+| `public_origin` | `https://` + `VPS_DMC268_IP_T1`: интерфейс отдаётся по HTTPS на тот же адрес. Callback `<public_origin>/api/v1/auth/github/callback` регистрируется в настройках GitHub App |
+
 Из этого стека наружу не смотрит ничего. API, PostgreSQL и RabbitMQ публикуются на петле сервера, воркер не публикуется вовсе; снаружи доступен только интерфейс, и API — через его `/api/`.
 
 ## Хранилище состояния

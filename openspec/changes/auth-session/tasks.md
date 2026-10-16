@@ -47,5 +47,5 @@
 ## 7. Стенд
 
 - [ ] 7.1 Callback зарегистрирован у GitHub App
-- [ ] 7.2 `infra/variables.tf` и `infra/main.tf`: новые переменные в окружение контейнера API; секреты — в GitHub Actions, как `GITHUB_APP_PRIVATE_KEY`
+- [x] 7.2 `infra/variables.tf` и `infra/main.tf`: новые переменные в окружение контейнера API; секреты — в GitHub Actions, как `GITHUB_APP_PRIVATE_KEY`
 - [ ] 7.3 Вход через GitHub на стенде: cookie `session` поставлена, `/login` уводит в `/app/`

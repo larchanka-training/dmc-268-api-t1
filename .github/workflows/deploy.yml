@@ -164,6 +164,8 @@ jobs:
           TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
           TF_VAR_rabbitmq_password: ${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}
           TF_VAR_github_webhook_secret: ${{ secrets.WEBHOOK_SECRET_DMC268_T1 }}
+          TF_VAR_github_app_client_id: ${{ vars.GITHUB_APP_CLIENT_ID_DMC268_T1 }}
+          TF_VAR_github_app_client_secret: ${{ secrets.GITHUB_APP_CLIENT_SECRET_DMC268_T1 }}
           TF_VAR_registry_username: ${{ github.actor }}
           TF_VAR_registry_password: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -174,6 +176,9 @@ jobs:
           # туннельная проверка живости и отладка.
           export TF_VAR_docker_host="ssh://${SSH_USER}@${HOST}"
           export TF_VAR_service_host="$HOST"
+          # Интерфейс отдаётся по HTTPS на тот же адрес (public_tls в dmc-268-ui-t1),
+          # и API приходят его запросы: с этим origin сверяется Origin.
+          export TF_VAR_public_origin="https://$HOST"
           export TF_VAR_bind_ip="127.0.0.1"
           export TF_VAR_internal_bind_ip="127.0.0.1"
 
