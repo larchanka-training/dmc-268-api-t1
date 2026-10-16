@@ -101,8 +101,11 @@ compile-time зависимости от слоя приложения.
 | `ContextPayloadRepo` | `SqlAlchemyContextPayloadRepo` | что было показано модели |
 | `FindingRepo` | `SqlAlchemyFindingRepo` | замечания с привязкой к диффу |
 | `PublishedCommentRepo` | `SqlAlchemyPublishedCommentRepo` | опубликованные комментарии |
+| `UserRepo` | `SqlAlchemyUserRepo` | пользователи кабинета по учётной записи у провайдера |
+| `SessionRepo` | `SqlAlchemySessionRepo` | сессии входа по хэшу cookie |
 | `UnitOfWork` | `SqlAlchemyUnitOfWork` | граница транзакции |
 | `VcsGateway` | `GitHubVcsGateway` | дифф и метаданные PR через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и exponential backoff внутри адаптера |
+| `OAuthProvider` | `GitHubOAuthProvider` | вход через OAuth самого GitHub App: адрес авторизации и обмен `code` на профиль (`GET /user`); токен пользователя не выходит из адаптера, любой сбой — `OAuthProviderUnavailable`. Контейнер выдаёт провайдера по `{provider}` из пути, неизвестный — `404` |
 | `JobQueue` | `RabbitMQJobQueue` | задача ревью в RabbitMQ, один метод `enqueue`; тело — только доменные данные по §4.2 System Design, приоритет — свойство AMQP; очередь `review_jobs` с `x-max-priority` и DLX/DLQ-топологией, переиспользуемое соединение с publisher confirms внутри адаптера |
 | `LlmGateway` | `StubLlmGateway` **(заглушка)** | выполнить промпт анализа, вернуть структурированные замечания. Текущий адаптер — фиксированный ответ без похода к модели; реальный транспорт к Ollama меняет только адаптер, контракт порта (`review(context) -> LlmReviewResult`) уже готов его принять. |
 
@@ -110,6 +113,22 @@ compile-time зависимости от слоя приложения.
 адаптером. Тест проверяет, что у каждого объявленного порта есть адаптер и что
 ни один модуль в `api`, `application` или `domain` не ссылается на конкретную
 реализацию.
+
+### Сессия на ручках
+
+Сессию проверяют две зависимости FastAPI из `app/api/session.py`, собранные в
+`SESSION_REQUIRED` и подключённые на уровне роутера, а не middleware: какие ручки
+открыты, видно в объявлении маршрутов.
+
+- `require_origin` — изменяющие запросы (`POST`, `PUT`, `PATCH`, `DELETE`) проходят,
+  только если `Origin` равен `PUBLIC_ORIGIN`; иначе `403 ORIGIN_FORBIDDEN`. Стоит
+  первой, чтобы чужой запрос отклонялся без похода в базу.
+- `current_user` — пользователь сессии из cookie `session` через use case
+  `authenticate`; без действительной сессии `401 UNAUTHENTICATED`, а пришедшая
+  недействительная cookie удаляется в том же ответе.
+
+Открыты без сессии: `/webhooks/*` (подпись), `/auth/{provider}/login`,
+`/auth/{provider}/callback` и `/health`.
 
 ### Спроектированы, но не реализованы
 
@@ -236,7 +255,8 @@ def upgrade() -> None:
 
 Если обязательная настройка не задана, старт явно падает и называет её.
 Обязательная сейчас одна, `DATABASE_URL`. Настройки `github_app_id`,
-`github_app_private_key`, `github_webhook_secret` и `rabbitmq_url`
+`github_app_private_key`, `github_webhook_secret`, `rabbitmq_url`,
+`github_app_client_id`, `github_app_client_secret` и `public_origin`
 опциональны с пустым дефолтом: приложение без GitHub-реквизитов поднимается
 и отвечает на запросы, не касающиеся вебхуков, а пустая настройка громко
 падает при первом использовании. Новые настройки появляются вместе с кодом,
@@ -307,6 +327,13 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 (`hmac.compare_digest`) по сырому телу запроса до разбора payload'а; без
 подписи или с неверной вебхук получает 401, и ни одной записи не появляется.
 Пустой секрет не принимает ничего: все доставки отклоняются.
+
+**Сессия пользователя.** Значение cookie `session` равносильно паролю. В базе —
+только SHA-256 от него, cookie `HttpOnly; Secure; SameSite=Lax`, выход удаляет
+сессию сразу. Токен пользователя GitHub после входа не хранится. Access-лог uvicorn
+пишет путь с query, а в query callback'а лежат `code` и `state`, поэтому
+`app/api/log_redaction.py` вырезает query на путях `/api/v1/auth/`. CSRF держат
+`SameSite=Lax` и проверка `Origin`. Обоснование — design change'а `auth-session`.
 
 **Область действия учётных данных.** Для публикации комментариев нужен доступ
 на запись. GitHub App с токенами на каждую установку ограничивает утечку одной

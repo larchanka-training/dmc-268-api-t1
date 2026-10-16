@@ -62,6 +62,11 @@ services:
       # API работает.
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      # OAuth того же GitHub App для входа и публичный origin интерфейса:
+      # пустые — вход не работает, изменяющие запросы с сессией получают 403.
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
     depends_on:
       postgres:
         condition: service_healthy

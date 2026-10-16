@@ -1,11 +1,11 @@
 ## 1. Контракт
 
-- [ ] 1.1 `docs/openapi/openapi.yaml`: убрать `/auth/oauth/token`, `/auth/refresh`, `OAuthTokenRequest`, `AuthSession`, коды `AUTH_CODE_INVALID` и `AUTH_REFRESH_INVALID`; добавить `/auth/{provider}/login`, `/auth/{provider}/callback`, `/auth/me`, `/auth/logout`, cookie-схему безопасности, коды `UNAUTHENTICATED` и `ORIGIN_FORBIDDEN`
-- [ ] 1.2 `docs/pipeline/PIPELINE_SPEC.md`: §9.1 — заменить предложение на ссылку на спеку `user-auth`; §9 — в закрытом списке кодов `ApiError` заменить `AUTH_CODE_INVALID` и `AUTH_REFRESH_INVALID` на `UNAUTHENTICATED` и `ORIGIN_FORBIDDEN`
-- [ ] 1.3 `openspec/config.yaml`: «JWT authorization» → сессия в httpOnly cookie
-- [ ] 1.4 `docs/BACKEND_ARCHITECTURE.md`: порт `OAuthProvider`, адаптер GitHub, зависимость `current_user`, проверка `Origin`
-- [ ] 1.5 `docs/SYSTEM_DESIGN.md`: вход пользователя через OAuth на бэкенде и сессия в cookie — рядом с GitHub App
-- [ ] 1.6 `README.md` и `.env.example`: новые переменные окружения
+- [x] 1.1 `docs/openapi/openapi.yaml`: убрать `/auth/oauth/token`, `/auth/refresh`, `OAuthTokenRequest`, `AuthSession`, коды `AUTH_CODE_INVALID` и `AUTH_REFRESH_INVALID`; добавить `/auth/{provider}/login`, `/auth/{provider}/callback`, `/auth/me`, `/auth/logout`, cookie-схему безопасности, коды `UNAUTHENTICATED` и `ORIGIN_FORBIDDEN`
+- [x] 1.2 `docs/pipeline/PIPELINE_SPEC.md`: §9.1 — заменить предложение на ссылку на спеку `user-auth`; §9 — в закрытом списке кодов `ApiError` заменить `AUTH_CODE_INVALID` и `AUTH_REFRESH_INVALID` на `UNAUTHENTICATED` и `ORIGIN_FORBIDDEN`
+- [x] 1.3 `openspec/config.yaml`: «JWT authorization» → сессия в httpOnly cookie
+- [x] 1.4 `docs/BACKEND_ARCHITECTURE.md`: порт `OAuthProvider`, адаптер GitHub, зависимость `current_user`, проверка `Origin`
+- [x] 1.5 `docs/SYSTEM_DESIGN.md`: вход пользователя через OAuth на бэкенде и сессия в cookie — рядом с GitHub App
+- [x] 1.6 `README.md` и `.env.example`: новые переменные окружения
 
 ## 2. Данные
 
@@ -42,7 +42,7 @@
 - [x] 6.5 Токен провайдера и cookie сессии не попадают в базу и логи
 - [x] 6.6 `redirect`: глубокая ссылка возвращается, внешний адрес и `//host` — нет
 - [x] 6.7 Существующие тесты REST (`test_repositories_api.py`, `test_reviews_api.py`, `test_pull_requests_api.py`): фикстура вошедшего пользователя
-- [ ] 6.8 `docs/testing/TEST_PLAN.md`: кейсы входа, сессии, `Origin` и `redirect`
+- [x] 6.8 `docs/testing/TEST_PLAN.md`: кейсы входа, сессии, `Origin` и `redirect`
 
 ## 7. Стенд
 

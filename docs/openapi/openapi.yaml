@@ -110,6 +110,9 @@ paths:
           $ref: "#/components/schemas/Provider"
     post:
       summary: Принять webhook-доставку от хостинга и поставить ревью в очередь
+      description: >
+        Без сессии и без проверки Origin: доставку подтверждает подпись.
+      security: []
       operationId: receiveWebhook
       responses:
         "202":
@@ -150,61 +153,129 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
-  /auth/oauth/token:
-    post:
-      summary: >
-        Обменять код OAuth на сессию (proposal, §9.1 PIPELINE_SPEC.md — требует
-        отдельного OpenSpec-change до Contract v1)
-      operationId: exchangeOAuthToken
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/OAuthTokenRequest"
+  /auth/{provider}/login:
+    parameters:
+      - $ref: "#/components/parameters/AuthProvider"
+    get:
+      summary: Начать вход через провайдера
+      description: >
+        Открыт без сессии. Ставит cookie oauth_state со state и проверенным
+        redirect и перенаправляет на страницу авторизации провайдера. redirect
+        принимается, только если это путь под /app/; иначе после входа — /app/.
+      operationId: startLogin
+      security: []
+      parameters:
+        - name: redirect
+          in: query
+          required: false
+          schema:
+            type: string
+          example: /app/reviews/42
       responses:
-        "200":
-          description: >
-            Access-токен в теле, refresh-токен — httpOnly-кукой, привязанной к пути
-            /api/v1/auth/refresh.
+        "302":
+          description: Редирект на страницу авторизации провайдера с параметром state.
           headers:
+            Location:
+              schema:
+                type: string
             Set-Cookie:
               schema:
                 type: string
-                example: "refresh_token=...; Path=/api/v1/auth/refresh; HttpOnly; Secure; SameSite=Strict"
+                example: "oauth_state=...; HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=600"
+        "404":
+          description: Неизвестный провайдер.
+
+  /auth/{provider}/callback:
+    parameters:
+      - $ref: "#/components/parameters/AuthProvider"
+    get:
+      summary: Завершить вход
+      description: >
+        Сюда провайдер возвращает браузер. Открыт без сессии. state сверяется с
+        cookie oauth_state, code обменивается на профиль, пользователь находится
+        или создаётся, создаётся сессия. Любая ошибка — редирект на
+        /login?error=<код>: state_mismatch, denied, provider_unavailable.
+      operationId: completeLogin
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          description: Код ошибки провайдера; access_denied — пользователь отказал.
+          schema:
+            type: string
+      responses:
+        "302":
+          description: >
+            Успех — редирект на redirect из oauth_state или на /app/ и cookie session.
+            Ошибка — редирект на /login?error=<код>, сессии нет. oauth_state
+            удаляется в обоих случаях.
+          headers:
+            Location:
+              schema:
+                type: string
+            Set-Cookie:
+              schema:
+                type: string
+                example: "session=...; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000"
+        "404":
+          description: Неизвестный провайдер.
+
+  /auth/me:
+    get:
+      summary: Пользователь текущей сессии
+      operationId: getCurrentUser
+      responses:
+        "200":
+          description: Профиль пользователя
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AuthSession"
+                $ref: "#/components/schemas/CurrentUser"
         "401":
-          description: Код OAuth недействителен или истёк (ApiError.code = AUTH_CODE_INVALID)
+          description: >
+            Нет действительной сессии (ApiError.code = UNAUTHENTICATED). Пришедшая
+            недействительная cookie session удаляется в том же ответе.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
-  /auth/refresh:
+  /auth/logout:
     post:
-      summary: >
-        Обновить access-токен по refresh-куке (proposal, §9.1 PIPELINE_SPEC.md —
-        требует отдельного OpenSpec-change до Contract v1)
-      operationId: refreshSession
+      summary: Выйти
+      description: >
+        Удаляет сессию текущей cookie: следующий запрос с ней из любой вкладки
+        получает 401.
+      operationId: logout
       responses:
-        "200":
-          description: Новый access-токен; refresh-кука переиздаётся (rotation)
+        "204":
+          description: Сессия удалена, cookie session удалена.
           headers:
             Set-Cookie:
               schema:
                 type: string
-                example: "refresh_token=...; Path=/api/v1/auth/refresh; HttpOnly; Secure; SameSite=Strict"
+                example: "session=\"\"; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
+        "401":
+          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AuthSession"
-        "401":
+                $ref: "#/components/schemas/ApiError"
+        "403":
           description: >
-            Refresh-кука отсутствует, истекла или отозвана
-            (ApiError.code = AUTH_REFRESH_INVALID)
+            Origin отсутствует или не совпадает с адресом сервиса
+            (ApiError.code = ORIGIN_FORBIDDEN); сессия не удалена.
           content:
             application/json:
               schema:
@@ -212,6 +283,15 @@ paths:
 
 components:
   parameters:
+    AuthProvider:
+      name: provider
+      in: path
+      required: true
+      description: Провайдер входа; сейчас только github, неизвестный — 404.
+      schema:
+        type: string
+        enum:
+          - github
     ReviewId:
       name: reviewId
       in: path
@@ -464,8 +544,8 @@ components:
             - WEBHOOK_SIGNATURE_INVALID
             - SCM_UNAVAILABLE
             - PROVIDER_NOT_SUPPORTED
-            - AUTH_CODE_INVALID
-            - AUTH_REFRESH_INVALID
+            - UNAUTHENTICATED
+            - ORIGIN_FORBIDDEN
         message:
           type: string
 
@@ -483,29 +563,37 @@ components:
           enum:
             - ignored
 
-    OAuthTokenRequest:
+    CurrentUser:
       type: object
       additionalProperties: false
       required:
         - provider
-        - code
+        - login
+        - name
+        - avatar_url
       properties:
         provider:
           $ref: "#/components/schemas/Provider"
-        code:
+        login:
           type: string
-          description: Код авторизации, полученный от OAuth-редиректа провайдера.
+        name:
+          type:
+            - string
+            - "null"
+        avatar_url:
+          type:
+            - string
+            - "null"
 
-    AuthSession:
-      type: object
-      additionalProperties: false
-      required:
-        - accessToken
-        - expiresIn
-      properties:
-        accessToken:
-          type: string
-        expiresIn:
-          type: integer
-          minimum: 1
-          description: Время жизни accessToken в секундах.
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: session
+      description: >
+        Сессия в httpOnly cookie, ставится callback'ом входа. Изменяющие запросы
+        (POST, PUT, PATCH, DELETE) с сессией дополнительно сверяют Origin с адресом
+        сервиса, иначе 403 ORIGIN_FORBIDDEN.
+
+security:
+  - session: []
