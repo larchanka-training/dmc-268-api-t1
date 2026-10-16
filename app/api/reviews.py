@@ -16,6 +16,14 @@ from app.application.ports import UnitOfWork
 router = APIRouter(prefix="/api/v1/reviews", tags=["reviews"])
 
 
+class RuleRefResponse(BaseModel):
+    """Пункт правила владельца, по которому выпущена находка."""
+
+    name: str
+    check: int
+    check_text: str
+
+
 class FindingResponse(BaseModel):
     id: UUID
     file_path: str
@@ -27,6 +35,8 @@ class FindingResponse(BaseModel):
     message: str
     suggestion: str | None
     confidence: float | None
+    # null - находка по стандартным критериям ревью.
+    rule: RuleRefResponse | None
 
 
 class ReviewRunResponse(BaseModel):
@@ -41,6 +51,9 @@ class ReviewRunResponse(BaseModel):
     duration_seconds: float | None
     failure_reason: str | None
     failed_stage: str | None
+    # Итог второго прохода модели; null, пока анализ не завершён.
+    verification: str | None
+    verifier_dropped_findings: int
     last_progress_at: datetime
     created_at: datetime
     updated_at: datetime
@@ -69,6 +82,8 @@ def get_review(
         duration_seconds=run.duration_seconds,
         failure_reason=run.failure_reason,
         failed_stage=run.failed_stage.value if run.failed_stage else None,
+        verification=run.verification.value if run.verification else None,
+        verifier_dropped_findings=run.verifier_dropped_findings,
         last_progress_at=run.last_progress_at,
         created_at=run.created_at,
         updated_at=run.updated_at,
@@ -84,6 +99,13 @@ def get_review(
                 message=f.message,
                 suggestion=f.suggestion,
                 confidence=f.confidence,
+                rule=(
+                    RuleRefResponse(
+                        name=f.rule.name, check=f.rule.check, check_text=f.rule.check_text
+                    )
+                    if f.rule
+                    else None
+                ),
             )
             for f in findings
         ],

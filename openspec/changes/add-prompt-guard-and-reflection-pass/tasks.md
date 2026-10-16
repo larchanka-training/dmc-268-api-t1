@@ -55,7 +55,7 @@
       Проверка: `uv run pytest tests/test_docs.py`; ревью текстов в PR.
 - [x] 6.2 `app/infrastructure/prompts.py`: адаптер `load_prompt_texts(root) -> PromptTexts` - тело файла после первой строки `---`, системное сообщение ревью из файлов перечня `REVIEW_SYSTEM_PARTS` (`system.md`, `comment-templates.md`, `output-format.md`) в этом порядке; нет файла или разделителя - исключение.
       Проверка: `tests/infrastructure/test_prompts.py` на временном каталоге - точная склейка; добавление файла в перечень добавляет его тело в конец без других изменений; отсутствующий файл и файл без разделителя дают исключение с именем файла; настоящий `prompts/review/` загружается.
-- [ ] 6.3 `run_worker` (`app/worker/factory.py`) загружает тексты один раз при старте воркера, до подключения к брокеру, и передаёт их в обработчик; общий `Container` их не грузит - процессу API промпты не нужны. `Dockerfile` копирует `prompts/`.
+- [x] 6.3 `run_worker` (`app/worker/factory.py`) загружает тексты один раз при старте воркера, до подключения к брокеру, и передаёт их в обработчик; общий `Container` их не грузит - процессу API промпты не нужны. `Dockerfile` копирует `prompts/`.
       Проверка: `tests/test_container.py`; `docker compose build` и старт воркера без ошибок.
 
 ## 7. Сборка запроса
@@ -90,23 +90,26 @@
 
 ## 11. REST
 
-- [ ] 11.1 `app/api/reviews.py`: `FindingResponse.rule` (`name`, `check`, `check_text` или `null`), `ReviewRunResponse.verification` и `verifier_dropped_findings`.
+- [x] 11.1 `app/api/reviews.py`: `FindingResponse.rule` (`name`, `check`, `check_text` или `null`), `ReviewRunResponse.verification` и `verifier_dropped_findings`.
       Проверка: `tests/test_reviews_api.py` - три сценария требования «Находка отдаёт ссылку на правило, прогон - итог верификации».
-- [ ] 11.2 `docs/openapi/openapi.yaml`: те же поля в `Finding` и в схеме прогона.
+- [x] 11.2 `docs/openapi/openapi.yaml` и `review-job.schema.json`: `verification` и `verifierDroppedFindings` в схеме прогона; `rule` в `Finding` - форма `{name, check}`, общая с выводом модели (добавлена в 2.4), `check_text` отдаёт только фактический ответ ручки.
       Проверка: `uv run pytest tests/test_docs.py`.
 
 ## 12. Архитектурные документы
 
-- [ ] 12.1 `docs/BACKEND_ARCHITECTURE.md`, модель угроз: экранирование маркеров снимает допущение о сверке `id`; ссылка на правило проверяется кодом; верификатор только отсеивает и сам является мерой, а не гарантией; повтор адаптера не меняет исходных сообщений; hosted-провайдер - отдельное решение по безопасности, которое принимает задача «LLM Gateway».
+- [x] 12.1 `docs/BACKEND_ARCHITECTURE.md`, модель угроз: экранирование маркеров снимает допущение о сверке `id`; ссылка на правило проверяется кодом; верификатор только отсеивает и сам является мерой, а не гарантией; повтор адаптера не меняет исходных сообщений; hosted-провайдер - отдельное решение по безопасности, которое принимает задача «LLM Gateway».
       `docs/SYSTEM_DESIGN.md`: два вызова модели вместо одного на схеме и в сквозном пути.
       Проверка: `uv run pytest tests/test_docs.py`; ревью текста в PR.
 
 ## 13. Сквозная проверка
 
-- [ ] 13.1 `tests/application/test_prompt_injection.py`: набор adversarial-кейсов через `run_review` с поддельными VCS и гейтвеем, записывающим запросы, - инструкция в комментарии кода, `<|im_start|>system` в диффе, поддельная граница блока, «правило» в коде PR и замечание со ссылкой на него, правило с инструкцией в имени, повторённая инъекция в тексте замечания для верификатора, верификатор, пытающийся добавить замечание, повтор адаптера с дописанным сообщением.
-      Проверка: по каждому кейсу - запрос модели не содержит сырого маркера вне блока, исходные сообщения не изменены, опубликованные находки соответствуют требованиям `review-verification`.
-- [ ] 13.2 `uv run ruff check . && uv run mypy . && uv run lint-imports && uv run pytest`; с `TEST_DATABASE_URL` - интеграционные без пропусков; `uv run alembic heads` - одна голова; `npx @fission-ai/openspec@1.14.2 validate --all --strict`.
+- [x] 13.1 `tests/application/test_prompt_injection.py`: набор adversarial-кейсов через `run_review` с поддельными VCS и гейтвеем, записывающим запросы, - инструкция в комментарии кода, `<|im_start|>system` в диффе, поддельная граница блока, «правило» в коде PR и замечание со ссылкой на него, правило с маркерами в имени и пункте, повторённая инъекция в тексте замечания для верификатора, верификатор, пытающийся добавить замечание.
+      Проверка: по каждому кейсу - `<<<` встречается только в строках-границах сервиса, сырых маркеров чат-шаблонов в запросе нет, опубликованные находки соответствуют требованиям `review-verification`; при отключённом экранировании маркеров три кейса падают (мутационная проверка).
+      Кейс «повтор адаптера с дописанным сообщением не меняет исходные» - обязанность адаптера (`review-prompt-assembly`), проверяется тестами адаптера в задаче «LLM Gateway».
+- [x] 13.2 `uv run ruff check . && uv run mypy . && uv run lint-imports && uv run pytest`; с `TEST_DATABASE_URL` - интеграционные без пропусков; `uv run alembic heads` - одна голова; `npx @fission-ai/openspec@1.14.2 validate --all --strict`.
 - [ ] 13.3 Вживую: `docker compose up -d --build`, вебхук с PR, где на `base_sha` лежит `.review/rules.md` с правилом, а дифф содержит инъекцию; заглушка доводит прогон до `completed`, в `context_payloads` маркеры экранированы, `GET /api/v1/reviews/<id>` отдаёт `verification: "not_required"`.
+      Сделано на собранном образе против одноразовых Postgres и RabbitMQ: миграция `0005` применяется в контейнере; воркер стартует с промптами из образа и не стартует без них (`PromptFileError: нет файла промпта system.md`); ручка прогона отдаёт `verification`, `verifier_dropped_findings` и `rule` с `check_text`; база отвергает частичную ссылку на правило.
+      Не сделано: путь вебхука до `completed` требует реквизитов GitHub App - без них вебхук падает ещё до прогона (500 вместо обещанных в `docker-compose.yml` 502: `jwt.InvalidKeyError` не переводится в `VcsError`, отдельный баг вне этого change).
 
 ## Workflow follow-up
 
