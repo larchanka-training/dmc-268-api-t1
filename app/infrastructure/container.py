@@ -11,13 +11,17 @@ from dataclasses import dataclass
 import httpx
 from sqlalchemy import Engine, create_engine
 
-from app.application.ports import UnitOfWork
+from app.application.ports import CacheStore, DefinitionExtractor, UnitOfWork
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.vcs_gateway import VcsGateway
 from app.config import Settings
+from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.llm.stub import StubLlmGateway
+from app.infrastructure.parsing.tree_sitter_extractor import (
+    TreeSitterDefinitionExtractor,
+)
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
@@ -41,6 +45,11 @@ class Container:
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
     _vcs_gateway: VcsGateway | None
+    # In-process кэш живёт, пока жив процесс, — только если он один на
+    # контейнер: фабрика на каждый вызов теряла бы всё между прогонами.
+    _cache_store: CacheStore
+    # Ленивый, как VCS-шлюз: процессу API парсеры грамматик не нужны.
+    _definition_extractor: DefinitionExtractor | None
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine)
@@ -69,6 +78,16 @@ class Container:
             object.__setattr__(self, "_vcs_gateway", gateway)
         return gateway
 
+    def cache_store(self) -> CacheStore:
+        return self._cache_store
+
+    def definition_extractor(self) -> DefinitionExtractor:
+        extractor = self._definition_extractor
+        if extractor is None:
+            extractor = TreeSitterDefinitionExtractor()
+            object.__setattr__(self, "_definition_extractor", extractor)
+        return extractor
+
 
 def build_container(settings: Settings) -> Container:
     # pool_pre_ping: соединение, умершее в простое (перезапуск сервера, idle
@@ -79,4 +98,6 @@ def build_container(settings: Settings) -> Container:
         settings=settings,
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
+        _cache_store=InMemoryCacheStore(),
+        _definition_extractor=None,
     )

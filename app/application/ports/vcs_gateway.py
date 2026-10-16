@@ -36,3 +36,16 @@ class VcsGateway(Protocol):
     ) -> PRMetadata:
         """Свежие метаданные; базовый коммит берётся только отсюда."""
         ...
+
+    def fetch_file(
+        self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
+    ) -> str | None:
+        """Содержимое файла на коммите `sha` или `None`, если файла там нет.
+
+        Отсутствие — штатный исход (у репозитория нет `.review/rules.md`), а не
+        сбой: `VcsError` означает, что VCS ответить не смогла. Путь и размер
+        файла задаёт автор PR, поэтому лимит `max_bytes` соблюдается во время
+        загрузки, а не после: тело больше лимита не дочитывается —
+        `VcsFileTooLargeError`.
+        """
+        ...

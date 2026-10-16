@@ -15,20 +15,25 @@ HTML, GitHub сменил форму ответа).
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
+from app.domain.vcs_errors import VcsFileTooLargeError
 from app.infrastructure.vcs.errors import (
     VcsAuthError,
     VcsError,
+    VcsNotFoundError,
     VcsUnavailableError,
 )
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 
 _DIFF_ACCEPT = "application/vnd.github.v3.diff"
 _JSON_ACCEPT = "application/vnd.github+json"
+# Содержимое файла телом ответа, без base64-обёртки JSON.
+_RAW_ACCEPT = "application/vnd.github.raw+json"
 
 
 def _is_retryable(status_code: int) -> bool:
@@ -98,7 +103,21 @@ class GitHubVcsGateway:
                 f" /repos/{repo_full_name}/pulls/{pr_number}: {error!r}"
             ) from error
 
-    def _get(self, url: str, installation_id: int, accept: str) -> httpx.Response:
+    def fetch_file(
+        self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
+    ) -> str | None:
+        # Путь приходит из диффа, то есть от автора PR: экранируем всё, кроме
+        # разделителя каталогов, чтобы `?`, `#` и пробелы не меняли запрос.
+        url = f"/repos/{repo_full_name}/contents/{quote(path, safe='/')}?ref={quote(sha)}"
+        try:
+            response = self._get(url, installation_id, _RAW_ACCEPT, max_bytes=max_bytes)
+        except VcsNotFoundError:
+            return None
+        return response.text
+
+    def _get(
+        self, url: str, installation_id: int, accept: str, *, max_bytes: int | None = None
+    ) -> httpx.Response:
         """GET с backoff: 429/5xx повторяются; 401 один раз сбрасывает кэш
         installation token и берёт новый (токен мог быть отозван до истечения);
         прочие клиентские ошибки или обрыв сети — сразу ошибка адаптера, чтобы
@@ -107,7 +126,7 @@ class GitHubVcsGateway:
         token_refreshed = False
         attempt = 0
         while True:
-            response = self._send(url, token, accept)
+            response = self._send(url, token, accept, max_bytes)
             if not response.is_error:
                 return response
             if response.status_code == 401 and not token_refreshed:
@@ -120,6 +139,8 @@ class GitHubVcsGateway:
                 continue
             if response.status_code == 401:
                 raise VcsAuthError(f"GitHub API отклонил токен на GET {url}")
+            if response.status_code == 404:
+                raise VcsNotFoundError(f"GitHub API: HTTP 404 на GET {url}")
             attempt += 1
             if not _is_retryable(response.status_code):
                 raise VcsError(f"GitHub API: HTTP {response.status_code} на GET {url}")
@@ -130,12 +151,44 @@ class GitHubVcsGateway:
                 )
             self._sleep(self._backoff_base_seconds * 2 ** (attempt - 1))
 
-    def _send(self, url: str, token: str, accept: str) -> httpx.Response:
+    def _send(self, url: str, token: str, accept: str, max_bytes: int | None) -> httpx.Response:
+        headers = {"Authorization": f"Bearer {token}", "Accept": accept}
         try:
-            return self._client.get(
-                url, headers={"Authorization": f"Bearer {token}", "Accept": accept}
-            )
+            if max_bytes is None:
+                return self._client.get(url, headers=headers)
+            with self._client.stream("GET", url, headers=headers) as response:
+                if response.is_error:
+                    response.read()
+                    return response
+                content = _read_limited(response, max_bytes, url)
+                # Тело уже распаковано: заголовки кодировки и длины относятся
+                # к тому, что пришло по сети, а не к этим байтам.
+                kept = [
+                    (k, v)
+                    for k, v in response.headers.items()
+                    if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")
+                ]
+                return httpx.Response(
+                    response.status_code, headers=kept, content=content, request=response.request
+                )
         except httpx.RequestError as error:
             raise VcsUnavailableError(
                 f"GitHub API недоступен на GET {url}: {error}"
             ) from error
+
+
+def _read_limited(response: httpx.Response, max_bytes: int, url: str) -> bytes:
+    """Прочитать тело потоком, оборвав на `max_bytes`.
+
+    Объявленная длина отсекает большой файл до первого байта; поток
+    распакованного тела — и файл без `Content-Length`, и сжатую «бомбу».
+    """
+    declared = response.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > max_bytes:
+        raise VcsFileTooLargeError(f"GET {url}: {declared} байт больше лимита {max_bytes}")
+    body = bytearray()
+    for chunk in response.iter_bytes():
+        body += chunk
+        if len(body) > max_bytes:
+            raise VcsFileTooLargeError(f"GET {url}: тело больше лимита {max_bytes} байт")
+    return bytes(body)

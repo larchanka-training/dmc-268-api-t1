@@ -52,6 +52,42 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="PEM private key GitHub App; из окружения GITHUB_APP_PRIVATE_KEY",
     )
+    # Лимиты сборки контекста прогона (change add-context-engine-and-repo-rules).
+    # Потолок пакета контекста — только данных, без системного промпта и
+    # ответа модели: окно модели должно вмещать пакет + промпты + ответ.
+    # Соблюдается оценка (байты / 4), а не точное число токенов — см.
+    # `app.domain.context_budget`. Не поместившееся перечисляется в `omitted`.
+    # Нижняя граница — чтобы в лимит гарантированно влезал каркас пакета.
+    context_max_tokens: int = Field(
+        default=32_000,
+        ge=1_024,
+        description="Жёсткий лимит оценки токенов пакета контекста прогона",
+    )
+    rules_max_tokens: int = Field(
+        default=4_000,
+        gt=0,
+        description="Доля бюджета контекста под правила владельца репозитория",
+    )
+    rules_max_bytes: int = Field(
+        default=32_768,
+        gt=0,
+        description="Больший .review/rules.md не разбирается — дефолтный фоллбэк",
+    )
+    rules_cache_ttl_seconds: int = Field(
+        default=3_600,
+        gt=0,
+        description="Сколько живёт в CacheStore результат загрузки правил",
+    )
+    ast_max_files: int = Field(
+        default=20,
+        gt=0,
+        description="Сколько файлов диффа довыбирается для AST-окружения",
+    )
+    ast_max_file_bytes: int = Field(
+        default=262_144,
+        gt=0,
+        description="Больший файл попадает в контекст без AST-окружения",
+    )
 
 
 def load_settings() -> Settings:
