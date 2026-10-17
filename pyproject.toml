@@ -75,6 +75,7 @@ pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
     "integration: needs a live PostgreSQL; skipped when TEST_DATABASE_URL is unset",
+    "live: paid call to the real EUrouter; skipped when EUROROUTER_API_KEYS is unset",
 ]
 
 # Enforces the dependency rule from BACKEND_ARCHITECTURE.md. Run with `lint-imports`.

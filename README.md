@@ -106,8 +106,8 @@ uv run uvicorn app.main:app --reload
 Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
 ```bash
-uv run pytest                           # 79 тестов, база не нужна
-TEST_DATABASE_URL=... uv run pytest     # 122 теста, вместе с адаптерами и миграциями
+uv run pytest -m "not live"                         # чистые тесты, база не нужна
+TEST_DATABASE_URL=... uv run pytest -m "not live"   # вместе с адаптерами и миграциями
 ```
 
 Тесты, которым нужен PostgreSQL, помечены `integration` и пропускаются, если
@@ -125,6 +125,16 @@ export TEST_DATABASE_URL="postgresql+psycopg://dmc:dmc@localhost:5432/dmc268_tes
 Роли, под которой идёт подключение, нужно право создавать роли: один из тестов
 создаёт роль, чтобы проверить, что пароль в percent-encoding корректно проходит
 через `alembic.ini`.
+
+Живые тесты (`tests/live/`, маркер `live`) ходят в настоящий EUrouter и платные, поэтому основной прогон CI их исключает.
+Их запускает workflow `LLM live` (`.github/workflows/llm-live.yml`) с ключом организации - секрет `AI_DMC268_T1` и переменная `AI_DMC268_URL` - на pull request и push, меняющих код модели или промпты, и вручную (`gh workflow run "LLM live"`).
+Запросы в них синтетические: код проверяемых репозиториев наружу не уходит.
+Без ключа тесты пропускаются; локально с ключом:
+
+```bash
+EUROROUTER_API_KEYS=... EUROROUTER_BASE_URL=https://api.eurouter.ai/api/v1 \
+EUROROUTER_MODEL=qwen3-coder-30b-a3b uv run pytest -m live tests/live
+```
 
 ## Проверки
 

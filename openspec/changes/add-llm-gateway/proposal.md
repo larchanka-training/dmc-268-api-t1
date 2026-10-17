@@ -47,6 +47,7 @@
   - `app/application/context_assembly.py`, `app/application/use_cases/build_review_context.py` (контекст PR), `app/domain/prompt.py` (раздел контекста PR в сообщении кода);
   - `app/config.py` (провайдеры, ключи, окно, предел ответа, повторы, таймаут), `app/infrastructure/container.py`, `app/infrastructure/prompts.py` (`REVIEW_SYSTEM_PARTS`).
 - Документы: `docs/BACKEND_ARCHITECTURE.md` (адаптеры, модель угроз: self-hosted по умолчанию, hosted - явный фоллбэк), `docs/SYSTEM_DESIGN.md`, `README.md`, `.env.example`, `prompts/review/README.md`.
+- CI: workflow `llm-live.yml` - живые тесты против EUrouter с ключом организации (`secrets.AI_DMC268_T1`, `vars.AI_DMC268_URL`) при правках кода модели и вручную; job `test` исключает их маркером.
 - Развёртывание: новые переменные окружения воркера в `docker-compose.yml` и `infra/` (по `backend-delivery` описания должны совпадать); профиль `ollama` в `docker-compose.yml` для локального прогона.
 - Зависимости: новых нет - транспорт на уже используемом `httpx`.
 - Опирается на незаархивированный change `add-prompt-guard-and-reflection-pass` (PR #63): ветка и PR стопкой, архивировать после него.

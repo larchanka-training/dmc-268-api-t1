@@ -78,15 +78,22 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
 - [x] 11.1 `tests/application/test_prompt_injection.py`: инструкция в описании PR и в сообщении коммита стоит внутри блоков недоверенных данных сообщения кода и отсутствует в системном сообщении.
       Проверка: кейс зелёный; при выводе контекста PR без `fence` кейс падает (мутационная проверка).
 - [x] 11.2 `uv run ruff check . && uv run mypy . && uv run lint-imports && uv run pytest`; с `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL` - без пропусков; `npx @fission-ai/openspec@1.14.2 validate --all --strict`.
-- [ ] 11.3 Вживую: `docker compose --profile ollama up -d --build`, в контейнер Ollama подтянута небольшая модель; разовый вызов `request_review` через `Container.llm_gateway()` на фиксированном пакете возвращает проверенный `ReviewOutput`, `model` - имя локальной модели; с `LLM_HOSTED_FALLBACK=true`, рабочим ключом Eurorouter и остановленной Ollama тот же вызов возвращает ответ с моделью Eurorouter; с остановленной Ollama и выключенным фоллбэком - `LlmError`.
+- [x] 11.3 Вживую с локальной моделью: `docker compose --profile ollama up -d --build`, в контейнер Ollama подтянута небольшая модель; адаптер Ollama возвращает проверенный ответ, фоллбэк уходит на OpenAI-совместимый протокол, с остановленной Ollama и выключенным фоллбэком - `LlmError`. Живая проверка EUrouter - группа 12.
       Сделано на собранном образе воркера и профиле `ollama` (`ollama/ollama:0.12.6`, модель `qwen2.5-coder:0.5b`):
       - воркер стартует с промптами из образа и пишет в лог порядок провайдеров; окно из запроса доходит до модели (`n_ctx = 32768` в логе Ollama);
       - `OllamaGateway` на коротком запросе - ответ прошёл `ReviewOutput` (модель, токены из ответа);
       - фоллбэк: недоступная локальная модель → `OpenAiCompatibleGateway` в OpenAI-совместимую ручку Ollama `/v1` с `json_schema` - ответ прошёл `ReviewOutput`, переход записан в лог;
       - Ollama остановлена, фоллбэк выключен → `LlmError: Ollama недоступна (ConnectError)`.
-      Не сделано:
-      - `request_review` с полным системным промптом не уложился в таймаут: Docker Desktop на этой машине даёт ~3 с на токен на CPU даже для модели 0.5B и при окне 2048 - свойство окружения, не адаптера (адаптер вернул `LlmError` с причиной «таймаут», как и должен);
-      - настоящий Eurorouter: нужен рабочий ключ; поддержка `json_schema` в `response_format` проверена только на OpenAI-совместимой ручке Ollama.
+      Полный `request_review` с настоящим системным промптом на локальной модели не уложился в таймаут: Docker Desktop на машине проверки даёт ~3 с на токен на CPU даже для модели 0.5B и при окне 2048 - свойство окружения, адаптер вернул `LlmError` с причиной «таймаут», как и должен. Полный промпт проверяется на EUrouter в задаче 12.1.
+
+## 12. Живая проверка EUrouter в CI
+
+- [ ] 12.1 Маркер `live` в `pyproject.toml`, `requires_eurorouter` в `tests/conftest.py` (пропуск без `EUROROUTER_API_KEYS`), тесты `tests/live/test_eurorouter.py` по design D11 - адаптер `OpenAiCompatibleGateway` и контейнер против настоящего EUrouter.
+      Проверка: без ключа локально - тесты пропущены с понятной причиной; в workflow - зелёные: ответ по `json_schema` проходит `ReviewOutput` и `VerificationOutput`; неверный ключ первым в списке - в логе отказ ключа 1 (`HTTP 401`), ответ получен по следующему; контейнер из окружения с недоступной локальной моделью отвечает моделью EUrouter, переход записан в лог; полный `request_review` с настоящими промптами возвращает проверенный ответ.
+- [ ] 12.2 `.github/workflows/llm-live.yml` по design D11 (секрет `AI_DMC268_T1`, переменная `AI_DMC268_URL`, модель `qwen3-coder-30b-a3b` в workflow, фильтр путей, `workflow_dispatch`, «пропуск - провал»); job `test` в `ci.yml` - с `-m "not live"`.
+      Проверка: прогон workflow на PR зелёный, ссылка на прогон - в примечании к задаче; job `test` без пропусков.
+- [ ] 12.3 `README.md`, раздел «Тесты»: живые тесты, где берётся ключ и как запустить их вручную или локально с ключом.
+      Проверка: `uv run pytest tests/test_docs.py`; ревью текста в PR.
 
 ## Workflow follow-up
 
