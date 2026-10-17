@@ -30,7 +30,7 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
 
 ## 5. Адаптер Eurorouter
 
-- [ ] 5.1 `app/infrastructure/llm/openai_compatible.py`: `OpenAiCompatibleGateway(client, model, keys, max_attempts)` - `POST /chat/completions` по design D1, ротация ключей по D4.
+- [x] 5.1 `app/infrastructure/llm/openai_compatible.py`: `OpenAiCompatibleGateway(client, model, keys, max_attempts)` - `POST /chat/completions` по design D1, ротация ключей по D4.
       Проверка: `tests/infrastructure/test_openai_compatible_gateway.py` - точное тело (`response_format` с `json_schema` и `strict: false`, `max_tokens`, `temperature = 0`) и заголовок `Authorization`; `429` на первом ключе, `200` на втором → ответ, два запроса; `401` на всех ключах → `LlmError`; два вызова подряд начинаются с разных ключей; `503` → `LlmError` после одного запроса, без перебора ключей; ни текст исключения, ни записи лога (`caplog`) не содержат ни одного ключа.
 
 ## 6. Фоллбэк
