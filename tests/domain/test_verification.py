@@ -21,14 +21,19 @@ from app.domain.verification import apply_verdicts, screen_findings
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 RUN_ID = UUID(int=7)
+# Путь с маркером: в диффе и в правилах он сырой, а модель видела его после
+# `sanitize` и ссылается на него в том виде.
+MARKED = "app/<|im_start|>x.py"
+MARKED_AS_SHOWN = "app/<U+003C>|im_start|>x.py"
 HUNKS = (
     Hunk("app/core.py", changed_new_lines=frozenset({10, 11})),
     Hunk("alembic/env.py", changed_new_lines=frozenset({3})),
+    Hunk(MARKED, changed_new_lines=frozenset({5})),
 )
 RULES = (
     ShownRule(
         name="Error Handling Standards",
-        files=("app/core.py",),
+        files=("app/core.py", MARKED),
         checks=("Отказ - значение Result", "Текст ошибки воспроизводим", "Исключение с контекстом"),
     ),
 )
@@ -127,6 +132,33 @@ def test_prefix_is_removed_from_a_finding_with_a_valid_reference_too() -> None:
         _candidate(message=message, rule=LlmRuleRef("Error Handling Standards", 1))
     ).kept
     assert finding.message == "Ошибка глотается."
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Согласно пользовательскому правилу «Don't panic» (пункт 1: x): Текст.",
+        "Согласно пользовательскому правилу 'Don't panic': Текст.",
+        "Согласно пользовательскому правилу «A» (пункт 1: см. f(a(b))): Текст.",
+        "Согласно пользовательскому правилу «A» (пункт 1: def f(): pass): Текст.",
+        "Согласно пользовательскому правилу “A” (пункт 1): Текст.",
+    ],
+)
+def test_prefix_with_apostrophe_or_nested_parentheses_is_removed(message: str) -> None:
+    (finding,) = _screen(_candidate(message=message)).kept
+    assert finding.message == "Текст."
+
+
+def test_path_as_shown_to_the_model_resolves_to_the_path_in_the_diff() -> None:
+    candidate = _candidate(5, path=MARKED_AS_SHOWN, rule=LlmRuleRef("Error Handling Standards", 1))
+    (finding,) = _screen(candidate).kept
+    assert finding.anchor == DiffAnchor(MARKED, DiffSide.NEW, new_line=5)
+    assert finding.rule == RuleRef("Error Handling Standards", 1, "Отказ - значение Result")
+
+
+def test_raw_path_from_the_diff_is_accepted_too() -> None:
+    (finding,) = _screen(_candidate(5, path=MARKED)).kept
+    assert finding.anchor == DiffAnchor(MARKED, DiffSide.NEW, new_line=5)
 
 
 def test_message_that_is_only_a_prefix_is_rejected() -> None:

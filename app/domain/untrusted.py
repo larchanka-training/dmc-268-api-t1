@@ -51,9 +51,12 @@ _MARKER_START = re.compile(
       <(?=<<)                        # разметка блоков недоверенных данных
     | <(?=\|[A-Za-z_][\w.-]*\|>)     # ChatML, Llama 3, Phi: <|im_start|>
     | <(?=｜[^｜\n]*｜>)               # DeepSeek, полноширинная черта: <｜begin▁of▁sentence｜>
-    | \[(?=/?INST\])                 # Llama 2, Mistral: [INST] [/INST]
+    # Llama 2 и Mistral: [INST] [/INST]; управляющие токены Mistral v3/v7
+    # (tekken): [SYSTEM_PROMPT] [/SYSTEM_PROMPT], [TOOL_CALLS] и другие.
+    | \[(?=/?(?:INST|SYSTEM_PROMPT|AVAILABLE_TOOLS|TOOL_CALLS|TOOL_RESULTS|TOOL_CONTENT|THINK)\])
     | <(?=</?SYS>>)                  # Llama 2: <<SYS>> <</SYS>>
     | <(?=(?:start|end)_of_turn>)    # Gemma
+    | <(?=(?:bos|eos)>)              # BOS/EOS Gemma: <bos> <eos>
     | <(?=/?s>)                      # BOS/EOS SentencePiece-моделей: <s> </s>
     """,
     re.VERBOSE,

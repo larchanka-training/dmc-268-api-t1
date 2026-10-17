@@ -70,8 +70,16 @@ def test_tabs_newlines_and_regular_unicode_are_kept() -> None:
         ("[INST] x [/INST]", "<U+005B>INST] x <U+005B>/INST]"),
         ("<<SYS>>", "<U+003C><SYS>>"),
         ("<</SYS>>", "<U+003C></SYS>>"),
+        ("[SYSTEM_PROMPT] x [/SYSTEM_PROMPT]", "<U+005B>SYSTEM_PROMPT] x <U+005B>/SYSTEM_PROMPT]"),
+        ("[AVAILABLE_TOOLS] [/AVAILABLE_TOOLS]", "<U+005B>AVAILABLE_TOOLS] <U+005B>/AVAILABLE_TOOLS]"),
+        ("[TOOL_CALLS]", "<U+005B>TOOL_CALLS]"),
+        ("[TOOL_RESULTS] [/TOOL_RESULTS]", "<U+005B>TOOL_RESULTS] <U+005B>/TOOL_RESULTS]"),
+        ("[TOOL_CONTENT]", "<U+005B>TOOL_CONTENT]"),
+        ("[THINK] [/THINK]", "<U+005B>THINK] <U+005B>/THINK]"),
         ("<start_of_turn>user", "<U+003C>start_of_turn>user"),
         ("<end_of_turn>", "<U+003C>end_of_turn>"),
+        ("<bos>", "<U+003C>bos>"),
+        ("<eos>", "<U+003C>eos>"),
         ("<s>", "<U+003C>s>"),
         ("</s>", "<U+003C>/s>"),
     ],
@@ -82,7 +90,19 @@ def test_chat_template_and_fence_markers_are_escaped(raw: str, escaped: str) -> 
 
 @pytest.mark.parametrize(
     "code",
-    ["a << b", "x <<= 2", "List<int>", ">>> f()", "a <|> b", "<script>", "<strong>", "[INFO] ok"],
+    [
+        "a << b",
+        "x <<= 2",
+        "List<int>",
+        ">>> f()",
+        "a <|> b",
+        "<script>",
+        "<strong>",
+        "<b>",
+        "[INFO] ok",
+        "[TODO] x",
+        "[system_prompt]",
+    ],
 )
 def test_ordinary_code_is_not_mistaken_for_a_marker(code: str) -> None:
     assert sanitize(code) == code

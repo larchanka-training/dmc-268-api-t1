@@ -2,7 +2,8 @@
 
 Два шага, оба - чистые функции (спека `review-verification`):
 
-- `screen_findings` - детерминированный отсев до верификатора: привязка
+- `screen_findings` - детерминированный отсев до верификатора: путь в том
+  виде, в каком его видела модель, сводится к пути из диффа, привязка
   внутри показанных hunk'ов, ссылка на правило, которое модель видела и
   которое применимо к файлу, без префикса атрибуции в тексте, без дублей.
   Отклонённое замечание отклоняется целиком: ссылка на правило, которого
@@ -15,7 +16,7 @@
 
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from uuid import UUID
 
@@ -33,17 +34,20 @@ from app.domain.entities import (
 from app.domain.enums import VerifierVerdict
 from app.domain.prompt import candidate_ids
 from app.domain.result import Result
+from app.domain.untrusted import sanitize
 
-# Префикс атрибуции, который модель всё же написала сама. Атрибуцию строит
-# сервис из проверенной ссылки, поэтому в тексте замечания её быть не должно:
-# иначе замечание без ссылки выглядело бы как замечание по правилу. Скобки
-# допускают один уровень вложенности: «(пункт 1: текст (уточнение))».
-_MODEL_PREFIX = re.compile(
+# Начало префикса атрибуции, который модель всё же написала сама: слова и имя
+# правила в кавычках. Атрибуцию строит сервис из проверенной ссылки, поэтому в
+# тексте замечания её быть не должно: иначе замечание без ссылки выглядело бы
+# как замечание по правилу. Имя - до закрывающей кавычки своей пары, за которой
+# идёт пересказ в скобках или двоеточие: апостроф внутри имени его не обрывает.
+# Скобки пересказа регулярным выражением не разобрать (вложенность любая),
+# их считает `_without_model_prefix`.
+_PREFIX_HEAD = re.compile(
     r"""
     \A\s*согласно\s+пользовательскому\s+правилу\s*
-    [«"„'][^\n»"“']*[»"“']                          # имя правила в кавычках
-    (?:\s*\((?:[^()\n]|\([^()\n]*\))*\))?           # пересказ в скобках
-    \s*:\s*
+    (?:«.*?»|".*?"|„.*?[“”]|“.*?”|'.*?')
+    (?=\s*[(:])
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -67,13 +71,21 @@ def screen_findings(
     new_id: Callable[[], UUID],
 ) -> Screening:
     hunk_list = list(hunks)
+    # Модель видела пути после `sanitize` и ссылается на них в том виде, а
+    # находка хранит путь из диффа: по нему публикуется комментарий и с ним
+    # сверяются файлы правила. Сырой путь тоже принимается и при совпадении
+    # главнее.
+    paths = {sanitize(h.file_path): h.file_path for h in hunk_list} | {
+        h.file_path: h.file_path for h in hunk_list
+    }
     rules = {rule.name: rule for rule in shown_rules}
     accepted: list[Finding] = []
     rejected = 0
     for candidate in candidates:
-        anchor = validate_anchor(candidate.anchor, hunk_list)
-        rule = _resolve(candidate.rule, candidate.anchor.file_path, rules)
-        message = _MODEL_PREFIX.sub("", candidate.message, count=1).strip()
+        path = paths.get(candidate.anchor.file_path, candidate.anchor.file_path)
+        anchor = validate_anchor(replace(candidate.anchor, file_path=path), hunk_list)
+        rule = _resolve(candidate.rule, path, rules)
+        message = _without_model_prefix(candidate.message).strip()
         if not anchor.ok or not rule.ok or not message:
             rejected += 1
             continue
@@ -94,6 +106,35 @@ def screen_findings(
         )
     kept, duplicates = deduplicate(accepted)
     return Screening(kept=tuple(kept), rejected=rejected + len(duplicates))
+
+
+def _without_model_prefix(message: str) -> str:
+    """Текст замечания без префикса атрибуции; не похожий на префикс - как есть."""
+    head = _PREFIX_HEAD.match(message)
+    if head is None:
+        return message
+    rest = message[head.end() :].lstrip()
+    if rest.startswith("("):
+        close = _closing_parenthesis(rest)
+        if close is None:
+            return message
+        rest = rest[close + 1 :].lstrip()
+    return rest[1:] if rest.startswith(":") else message
+
+
+def _closing_parenthesis(text: str) -> int | None:
+    """Индекс скобки, закрывающей открытую в начале `text`; в пределах строки."""
+    depth = 0
+    for index, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        elif char == "\n":
+            return None
+    return None
 
 
 def _resolve(

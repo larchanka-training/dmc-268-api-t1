@@ -32,7 +32,7 @@ from typing import Any
 
 from app.domain.entities import Finding, PromptMessage
 from app.domain.enums import DiffSide, Language, PromptRole, RulesStatus
-from app.domain.untrusted import fence
+from app.domain.untrusted import fence, sanitize
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,8 +164,10 @@ def _candidates_message(candidates: Sequence[Finding]) -> str:
     for candidate_id, finding in zip(candidate_ids(len(candidates)), candidates, strict=True):
         anchor = finding.anchor
         line = anchor.new_line if anchor.side is DiffSide.NEW else anchor.old_line
+        # Путь в находке сырой - по нему публикуется комментарий; модель видит
+        # его так же, как в пакете: литерал JSON маркеры не обезвреживает.
         metadata = {
-            "filePath": anchor.file_path,
+            "filePath": sanitize(anchor.file_path),
             "side": anchor.side.value,
             "line": line,
             "category": finding.category.value,
