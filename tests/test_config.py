@@ -68,6 +68,7 @@ def test_stale_timeout_must_be_positive() -> None:
 def test_context_limits_have_defaults() -> None:
     settings = make_settings()
     assert settings.context_max_tokens == 32_000
+    assert settings.pr_context_max_tokens == 1_000
     assert settings.rules_max_tokens < settings.context_max_tokens
 
 
@@ -104,6 +105,7 @@ def test_context_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatc
         "ast_max_file_bytes",
         "llm_context_window_tokens",
         "llm_max_output_tokens",
+        "pr_context_max_tokens",
     ],
 )
 def test_context_limits_must_be_positive(field: str) -> None:

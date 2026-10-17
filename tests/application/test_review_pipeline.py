@@ -36,7 +36,7 @@ from ..fakes.webhooks import FakeVcs
 
 # Дифф фейкового VCS меняет первую строку `app/main.py`.
 CHANGED_FILE = "app/main.py"
-LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144)
+LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000)
 LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
 TEXTS = PromptTexts(review_system="ревью", verifier_system="верификация")
 

@@ -38,6 +38,7 @@ PR_JSON: dict[str, Any] = {
     "number": 6,
     "state": "open",
     "title": "feat: приём вебхуков и VCS-шлюз",
+    "body": "Принимает вебхуки и ставит прогон в очередь.",
     "user": {"login": "ilyassakhanov"},
     "head": {"sha": "a" * 40, "ref": "feat/webhook-intake"},
     "base": {"sha": "b" * 40, "ref": "develop"},
@@ -48,6 +49,7 @@ EXPECTED_METADATA = PRMetadata(
     head_sha="a" * 40,
     base_sha="b" * 40,
     title="feat: приём вебхуков и VCS-шлюз",
+    description="Принимает вебхуки и ставит прогон в очередь.",
     author="ilyassakhanov",
     source_branch="feat/webhook-intake",
     target_branch="develop",
@@ -142,6 +144,53 @@ def test_fetch_pr_metadata_maps_fields_one_to_one(rsa_key_pair: RsaKeyPair) -> N
 
     assert metadata == EXPECTED_METADATA
     assert seen[-1].headers["Accept"] == "application/vnd.github+json"
+
+
+def test_pr_without_a_description_has_an_empty_one(rsa_key_pair: RsaKeyPair) -> None:
+    """GitHub отдаёт `body: null` для PR без описания."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(
+        rsa_key_pair, responding([200], httpx.Response(200, json={**PR_JSON, "body": None}), seen), []
+    )
+
+    assert gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID).description == ""
+
+
+def _commits_handler(pages: list[list[dict[str, Any]]], seen: list[httpx.Request]) -> Handler:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        seen.append(request)
+        return httpx.Response(200, json=pages[int(request.url.params["page"]) - 1])
+
+    return handler
+
+
+def _commit(n: int) -> dict[str, Any]:
+    return {"sha": f"{n:040d}", "commit": {"message": f"коммит {n}"}}
+
+
+def test_commit_messages_come_newest_first_across_pages(rsa_key_pair: RsaKeyPair) -> None:
+    """GitHub отдаёт коммиты PR от старого к новому, не больше 250, по 100 на страницу."""
+    pages = [[_commit(n) for n in range(start, start + size)] for start, size in ((1, 100), (101, 100), (201, 50))]
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, _commits_handler(pages, seen), [])
+
+    messages = gateway.fetch_pr_commit_messages("owner/repo", 6, INSTALLATION_ID)
+
+    assert len(messages) == 250
+    assert messages[:2] == ("коммит 250", "коммит 249")
+    assert messages[-1] == "коммит 1"
+    assert [r.url.path for r in seen] == ["/repos/owner/repo/pulls/6/commits"] * 3
+    assert [r.url.params["per_page"] for r in seen] == ["100"] * 3
+
+
+def test_commit_without_a_message_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, _commits_handler([[{"sha": "1" * 40}]], seen), [])
+
+    with pytest.raises(VcsError, match="коммит"):
+        gateway.fetch_pr_commit_messages("owner/repo", 6, INSTALLATION_ID)
 
 
 @pytest.mark.parametrize(

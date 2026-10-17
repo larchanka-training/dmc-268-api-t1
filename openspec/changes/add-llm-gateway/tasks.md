@@ -51,15 +51,15 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
 
 ## 8. Контекст PR
 
-- [ ] 8.1 Шлюз VCS: `PRMetadata.description` (`app/domain/entities.py`), чтение `body` в `GitHubVcsGateway.fetch_pr_metadata`, новый метод `fetch_pr_commit_messages` в порте `app/application/ports/vcs_gateway.py` и адаптере `app/infrastructure/vcs/github.py` по design D6; фейки `tests/fakes/vcs_gateway.py`.
+- [x] 8.1 Шлюз VCS: `PRMetadata.description` (`app/domain/entities.py`), чтение `body` в `GitHubVcsGateway.fetch_pr_metadata`, новый метод `fetch_pr_commit_messages` в порте `app/application/ports/vcs_gateway.py` и адаптере `app/infrastructure/vcs/github.py` по design D6; фейки `tests/fakes/vcs_gateway.py`.
       Проверка: `tests/infrastructure/test_github_vcs_gateway.py` - `body: null` → пустая строка; три страницы коммитов → сообщения от нового к старому, не больше 250, не больше трёх запросов; неожиданное тело → `VcsError`.
-- [ ] 8.2 `app/application/context_assembly.py`: чистая `assemble_context` принимает контекст PR и кладёт `pull_request_context` долей бюджета по design D6; `ContextLimits.pr_context_max_tokens` из `PR_CONTEXT_MAX_TOKENS`.
+- [x] 8.2 `app/application/context_assembly.py`: чистая `assemble_context` принимает контекст PR и кладёт `pull_request_context` долей бюджета по design D6; `ContextLimits.pr_context_max_tokens` из `PR_CONTEXT_MAX_TOKENS`.
       Проверка: `tests/application/test_context_assembly.py` - все сценарии требования «Контекст PR входит в пакет как недоверенные данные» и сценарий «Длинное описание PR не вытесняет дифф»; `token_count` не больше лимита.
-- [ ] 8.3 `app/application/use_cases/build_review_context.py`: получение контекста PR best-effort.
+- [x] 8.3 `app/application/use_cases/build_review_context.py`: получение контекста PR best-effort.
       Проверка: в `tests/application/test_context_assembly.py` или `test_review_pipeline.py` - `VcsError` на сообщениях коммитов: прогон продолжается, `omitted` содержит `pr_context` с `unavailable`.
-- [ ] 8.4 `app/domain/prompt.py`: раздел «Контекст PR» в сообщении кода перед изменениями; пакет без `pull_request_context` даёт запрос без раздела.
+- [x] 8.4 `app/domain/prompt.py`: раздел «Контекст PR» в сообщении кода перед изменениями; пакет без `pull_request_context` даёт запрос без раздела.
       Проверка: `tests/domain/test_prompt.py` - точная раскладка раздела; тексты контекста PR отсутствуют в системном сообщении; старый пакет без поля собирается без ошибки и без раздела.
-- [ ] 8.5 Документы: описание пакета в `docs/SYSTEM_DESIGN.md` и `docs/BACKEND_ARCHITECTURE.md` - поле `pull_request_context` и его доля бюджета.
+- [x] 8.5 Документы: описание пакета в `docs/SYSTEM_DESIGN.md` и `docs/BACKEND_ARCHITECTURE.md` - поле `pull_request_context` и его доля бюджета.
       Проверка: `uv run pytest tests/test_docs.py`; ревью текста в PR.
 
 ## 9. Few-shot примеры

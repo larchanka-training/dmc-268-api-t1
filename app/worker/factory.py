@@ -150,6 +150,7 @@ def context_limits(settings: Settings) -> ContextLimits:
         rules_cache_ttl_seconds=settings.rules_cache_ttl_seconds,
         ast_max_files=settings.ast_max_files,
         ast_max_file_bytes=settings.ast_max_file_bytes,
+        pr_context_max_tokens=settings.pr_context_max_tokens,
     )
 
 

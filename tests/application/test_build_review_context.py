@@ -1,5 +1,6 @@
 """Сценарий сборки контекста на фейках VCS, кэша и парсера — без сети и tree-sitter."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -12,7 +13,7 @@ from app.domain.enums import DefinitionKind, Language
 from app.domain.vcs_errors import VcsError
 
 from ..fakes.context import FakeCache, FakeExtractor
-from ..fakes.webhooks import FakeVcs
+from ..fakes.webhooks import FakeVcs, pr_metadata
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 BASE, HEAD = "b" * 40, "a" * 40
@@ -29,7 +30,9 @@ JOB = ReviewJob(
     head_sha=HEAD,
     base_sha=BASE,
 )
-LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, ast_max_files=20, ast_max_file_bytes=1_000)
+LIMITS = ContextLimits(
+    32_000, 4_000, 32_768, 60, ast_max_files=20, ast_max_file_bytes=1_000, pr_context_max_tokens=1_000
+)
 
 SOURCE = "class Repo:\n    def save(self):\n        return 2\n"
 OUTLINE = FileOutline(
@@ -111,7 +114,9 @@ def test_parser_failure_degrades_only_that_file() -> None:
 def test_files_beyond_limit_are_not_fetched() -> None:
     diff = "".join(_file_diff(f"app/f{i}.py") for i in range(5))
     vcs = FakeVcs(diff=diff, files={(f"app/f{i}.py", HEAD): SOURCE for i in range(5)})
-    limits = ContextLimits(32_000, 4_000, 32_768, 60, ast_max_files=2, ast_max_file_bytes=1_000)
+    limits = ContextLimits(
+        32_000, 4_000, 32_768, 60, ast_max_files=2, ast_max_file_bytes=1_000, pr_context_max_tokens=1_000
+    )
     body = _build(vcs, limits=limits).payload.body
     fetched = [c[2] for c in vcs.calls if c[0] == "file" and c[3] == HEAD]
     assert fetched == ["app/f0.py", "app/f1.py"]
@@ -156,3 +161,32 @@ def test_deleted_file_gets_no_ast() -> None:
     vcs = FakeVcs(diff=diff)
     _build(vcs)
     assert [c for c in vcs.calls if c[0] == "file" and c[2] == "app/gone.py"] == []
+
+
+def test_pr_title_description_and_commits_reach_the_package() -> None:
+    meta = replace(pr_metadata(), title="feat: сохранение", description="Зачем это нужно.")
+    vcs = FakeVcs(diff=_file_diff("app/repo.py"), meta=meta, commit_messages=("второй", "первый"))
+    body = _build(vcs).payload.body
+    assert [item["part"] for item in body["pull_request_context"]] == [
+        "title",
+        "description",
+        "commit",
+        "commit",
+    ]
+    assert ("metadata", "owner/repo", 5, 77) in vcs.calls
+    assert ("commits", "owner/repo", 5, 77) in vcs.calls
+
+
+def test_commit_messages_failure_does_not_fail_the_run() -> None:
+    vcs = FakeVcs(diff=_file_diff("app/repo.py"), commits_error=VcsError("503"))
+    body = _build(vcs).payload.body
+    assert [item["part"] for item in body["pull_request_context"]] == ["title"]
+    assert {"part": "commit_messages", "reason": "unavailable"} in body["omitted"]
+    assert body["diff"]
+
+
+def test_pr_metadata_failure_does_not_fail_the_run() -> None:
+    vcs = FakeVcs(diff=_file_diff("app/repo.py"), metadata_error=VcsError("503"), commit_messages=("c",))
+    body = _build(vcs).payload.body
+    assert [item["part"] for item in body["pull_request_context"]] == ["commit"]
+    assert {"part": "pr_metadata", "reason": "unavailable"} in body["omitted"]

@@ -303,6 +303,9 @@ class PRMetadata:
     head_sha: str
     base_sha: str
     title: str
+    # Описание PR; пустая строка, если автор его не написал. Текст автора PR -
+    # в пакет контекста он попадает только блоком недоверенных данных.
+    description: str
     author: str
     source_branch: str
     target_branch: str

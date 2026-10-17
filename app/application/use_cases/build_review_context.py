@@ -1,9 +1,10 @@
 """Сценарий сборки контекста прогона: всё I/O в одном месте (design D7).
 
-`fetch_diff` → `parse_diff` → правила целевой ветки → содержимое изменённых
-файлов на `head_sha` и их контуры → чистая `assemble_context`. Сбой
-получения диффа пробрасывается: без диффа ревьюить нечего, прогон уходит в
-`failed` и DLQ. Правила и AST — best-effort: сбой на них деградирует пакет
+`fetch_diff` → `parse_diff` → контекст PR (заголовок, описание, сообщения
+коммитов) → правила целевой ветки → содержимое изменённых файлов на
+`head_sha` и их контуры → чистая `assemble_context`. Сбой получения диффа
+пробрасывается: без диффа ревьюить нечего, прогон уходит в `failed` и DLQ.
+Контекст PR, правила и AST — best-effort: сбой на них деградирует пакет
 (причина — в `omitted` и `rules.status`), но не прогон.
 """
 
@@ -16,6 +17,7 @@ from app.application.context_assembly import (
     AssembledContext,
     ContextLimits,
     FileAst,
+    PrContext,
     SkippedAst,
     assemble_context,
 )
@@ -46,6 +48,7 @@ def build_review_context(
         job.repository_full_name, job.base_sha, job.head_sha, job.installation_id
     )
     files = parse_diff(diff)
+    pr_context = _fetch_pr_context(job, vcs)
     rules = load_repo_rules(
         job.repository_full_name,
         job.base_sha,
@@ -62,11 +65,33 @@ def build_review_context(
         rules,
         asts,
         skipped,
+        pr_context=pr_context,
         limits=limits,
         review_run_id=review_run_id,
         now=now,
         new_id=new_id,
     )
+
+
+def _fetch_pr_context(job: ReviewJob, vcs: VcsGateway) -> PrContext:
+    """Заголовок, описание и сообщения коммитов PR; недоступное - `None`."""
+    title: str | None = None
+    description: str | None = None
+    commit_messages: tuple[str, ...] | None = None
+    try:
+        metadata = vcs.fetch_pr_metadata(
+            job.repository_full_name, job.pull_request_number, job.installation_id
+        )
+        title, description = metadata.title, metadata.description
+    except VcsError:
+        logger.warning("метаданные PR %s недоступны для контекста", job.pull_request_number, exc_info=True)
+    try:
+        commit_messages = vcs.fetch_pr_commit_messages(
+            job.repository_full_name, job.pull_request_number, job.installation_id
+        )
+    except VcsError:
+        logger.warning("коммиты PR %s недоступны для контекста", job.pull_request_number, exc_info=True)
+    return PrContext(title=title, description=description, commit_messages=commit_messages)
 
 
 def _collect_asts(
