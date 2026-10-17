@@ -10,7 +10,7 @@ from app.application.llm_schema import ReviewOutput, VerificationOutput
 from app.application.ports.llm_gateway import LlmRuleRef, LlmTask
 from app.domain.entities import ContextPayload, DiffAnchor, Finding, Verdict
 from app.domain.enums import DiffSide, FindingCategory, FindingSeverity, VerifierVerdict
-from app.domain.llm_errors import LlmOutputError
+from app.domain.llm_errors import LlmOutputError, PromptTooLargeError
 from app.domain.prompt import (
     PromptTexts,
     build_review_prompt,
@@ -109,3 +109,23 @@ def test_verification_that_misses_a_candidate_is_a_failed_result_not_an_exceptio
     assert not answer.verdicts.ok
     assert "F1" in (answer.verdicts.error or "")
     assert answer.tokens_used == 4
+
+
+def test_review_over_the_model_window_is_never_sent() -> None:
+    gateway = ScriptedLlmGateway([])
+    tight = LlmLimits(window_tokens=100, max_output_tokens=50)
+
+    with pytest.raises(PromptTooLargeError, match="больше окна 100"):
+        request_review(CONTEXT, TEXTS, gateway, limits=tight)
+
+    assert gateway.requests == []
+
+
+def test_verification_over_the_model_window_is_never_sent() -> None:
+    gateway = ScriptedLlmGateway([])
+    tight = LlmLimits(window_tokens=100, max_output_tokens=50)
+
+    with pytest.raises(PromptTooLargeError, match="больше окна 100"):
+        request_verification(CONTEXT, TEXTS, gateway, (CANDIDATE,), limits=tight)
+
+    assert gateway.requests == []

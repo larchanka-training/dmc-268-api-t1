@@ -11,11 +11,11 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
 
 ## 2. Окно модели
 
-- [ ] 2.1 Чистая функция `check_window(messages, *, window_tokens, max_output_tokens) -> Result[int]` в `app/domain/prompt.py` по design D5.
+- [x] 2.1 Чистая функция `check_window(messages, *, window_tokens, max_output_tokens) -> Result[int]` в `app/domain/prompt.py` по design D5.
       Проверка: `tests/domain/test_prompt.py` - точная оценка для запроса с кириллицей и латиницей (байты UTF-8, округление вверх, накладка на сообщение); запрос ровно на границе помещается, на токен больше - неудача, текст которой называет оценку и окно.
-- [ ] 2.2 Чистая функция `check_window_config(*, context_max_tokens, review_system_tokens, max_output_tokens, window_tokens) -> Result[None]` там же.
-      Проверка: в `tests/domain/test_prompt.py` - помещающаяся конфигурация проходит, не помещающаяся даёт неудачу с четырьмя значениями в тексте.
-- [ ] 2.3 `app/domain/llm_errors.py`: `PromptTooLargeError(LlmError)`; `app/application/llm_review.py`: `request_review` и `request_verification` вызывают `check_window` с `LlmLimits` до порта и при неудаче бросают `PromptTooLargeError`.
+- [x] 2.2 Чистая функция `check_window_config(texts, *, context_max_tokens, max_output_tokens, window_tokens) -> Result[None]` там же (системный промпт - длиннейший из двух, разметка - на четыре сообщения запроса верификатора); её вызывает `load_checked_prompt_texts(settings, root)` в `app/worker/factory.py` при старте воркера, до подключения к брокеру, и при неудаче бросает `WorkerConfigError`.
+      Проверка: в `tests/domain/test_prompt.py` - помещающаяся конфигурация проходит, не помещающаяся даёт неудачу со всеми значениями в тексте; `tests/worker/test_startup.py` - конфигурация по умолчанию с настоящими промптами проходит, окно меньше пакета и резерва останавливает воркер.
+- [x] 2.3 `app/domain/llm_errors.py`: `PromptTooLargeError(LlmError)`; `app/application/llm_review.py`: `request_review` и `request_verification` вызывают `check_window` с `LlmLimits` до порта и при неудаче бросают `PromptTooLargeError`.
       Проверка: `tests/application/test_llm_review.py` - слишком большой запрос: `PromptTooLargeError`, гейтвей не вызван; `tests/application/test_review_pipeline.py` - ревью больше окна → `failed` с `failed_stage = analysing` и причиной с оценкой и окном; верификация больше окна → `completed` и `unavailable`.
 
 ## 3. Цикл получения ответа по схеме
@@ -44,8 +44,8 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
       Проверка: `tests/test_config.py` - значения по умолчанию; `LLM_BACKEND=ollama` без `OLLAMA_MODEL` и `LLM_HOSTED_FALLBACK=true` без ключей, адреса или модели Eurorouter, а также фоллбэк при `LLM_BACKEND=stub` - ошибка с именем параметра; ключи - `SecretStr`, `repr(Settings)` их не содержит.
 - [ ] 7.2 `app/infrastructure/container.py`: `llm_gateway()` по конфигурации - `StubLlmGateway` при `stub`, `FallbackLlmGateway([ollama])` или `[ollama, eurorouter]` при `ollama`; один `httpx.Client` на провайдера с `LLM_TIMEOUT_SECONDS`, созданный лениво и один раз.
       Проверка: `tests/test_container.py` - без `LLM_HOSTED_FALLBACK` Eurorouter в списке провайдеров нет при любых заданных ключах; с ним - вторым и только вторым; адаптер кэшируется; гвардрейлы `test_every_adapter_is_wired_in_the_composition_root` и `test_the_container_is_the_only_place_adapters_are_constructed` зелёные.
-- [ ] 7.3 `run_worker` (`app/worker/factory.py`): `LLM_BACKEND` не задан - ошибка до подключения к брокеру; `check_window_config` по загруженным текстам промптов - не помещается → ошибка до подключения к брокеру.
-      Проверка: `tests/worker/test_factory.py` - оба отказа с текстом, называющим параметр и значения.
+- [ ] 7.3 `run_worker` (`app/worker/factory.py`): `LLM_BACKEND` не задан - `WorkerConfigError` до подключения к брокеру (проверка окна при старте - задача 2.2).
+      Проверка: `tests/worker/test_startup.py` - отказ с текстом, называющим параметр.
 - [ ] 7.4 Развёртывание и документы: переменные design D7 в `.env.example`, `README.md`, `docker-compose.yml` (воркер - `LLM_BACKEND=stub` по умолчанию) и `infra/` (`main.tf`, `variables.tf`, ключи - sensitive); профиль `ollama` в `docker-compose.yml` (образ с зафиксированной версией, том для моделей, воркер с `LLM_BACKEND=ollama`).
       Проверка: `uv run pytest tests/test_stack_descriptions.py tests/test_docs.py`; `docker compose config` и `docker compose --profile ollama config` без ошибок.
 

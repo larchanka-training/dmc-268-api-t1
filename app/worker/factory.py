@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Protocol
 
 import pika
@@ -30,7 +31,7 @@ from app.application.review_pipeline import run_review
 from app.application.stale_sweep import sweep_stale_runs
 from app.config import Settings
 from app.domain.ids import new_id
-from app.domain.prompt import PromptTexts
+from app.domain.prompt import PromptTexts, check_window_config
 from app.infrastructure.container import build_container
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
@@ -194,12 +195,34 @@ def build_review_handler(
     return handle
 
 
+class WorkerConfigError(RuntimeError):
+    """Конфигурация, с которой воркер заведомо не сможет работать."""
+
+
+def load_checked_prompt_texts(settings: Settings, root: Path) -> PromptTexts:
+    """Тексты промптов и проверка, что полный пакет с ними помещается в окно модели.
+
+    Без текстов воркер не поднимается, а не отправляет модели пустые
+    инструкции; с окном, в которое не помещается пакет на пределе лимита, -
+    тоже, а не роняет каждый крупный прогон (change `add-llm-gateway`, D5).
+    """
+    texts = load_prompt_texts(root)
+    fits = check_window_config(
+        texts,
+        context_max_tokens=settings.context_max_tokens,
+        max_output_tokens=settings.llm_max_output_tokens,
+        window_tokens=settings.llm_context_window_tokens,
+    )
+    if not fits.ok:
+        raise WorkerConfigError(fits.error)
+    return texts
+
+
 def run_worker(settings: Settings) -> None:
     """Собрать зависимости и запустить воркер бесконечно. Вызывается из `__main__.py`."""
     container = build_container(settings)
-    # До подключения к брокеру: без текстов промптов воркер не поднимается,
-    # а не отправляет модели пустые инструкции на первом же прогоне.
-    prompt_texts = load_prompt_texts(DEFAULT_PROMPTS_DIR)
+    # До подключения к брокеру: с непригодной конфигурацией воркер не поднимается.
+    prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
     limit = timedelta(seconds=settings.stale_run_timeout_seconds)
 
     def sweep() -> None:

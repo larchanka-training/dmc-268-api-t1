@@ -15,6 +15,8 @@ from app.domain.prompt import (
     build_review_prompt,
     build_verification_prompt,
     candidate_ids,
+    check_window,
+    check_window_config,
 )
 from app.domain.untrusted import fence
 
@@ -224,3 +226,44 @@ def test_injection_repeated_in_a_finding_stays_inside_its_block() -> None:
 
 def test_candidate_ids_follow_candidate_order() -> None:
     assert candidate_ids(3) == ("F1", "F2", "F3")
+
+
+def _messages(*contents: str) -> tuple[PromptMessage, ...]:
+    return tuple(PromptMessage(PromptRole.USER, content) for content in contents)
+
+
+def test_window_estimate_counts_utf8_bytes_and_a_per_message_overhead() -> None:
+    # «абв» - 6 байт, «abcd» - 4: 10 байт / 4 = 2.5 -> 3 токена, плюс 8 на каждое из двух сообщений.
+    assert check_window(_messages("абв", "abcd"), window_tokens=1_000, max_output_tokens=0).unwrap() == 19
+
+
+def test_request_exactly_at_the_window_fits() -> None:
+    assert check_window(_messages("abcd"), window_tokens=109, max_output_tokens=100).unwrap() == 9
+
+
+def test_request_one_token_over_the_window_is_rejected_with_estimate_and_window() -> None:
+    result = check_window(_messages("abcd"), window_tokens=108, max_output_tokens=100)
+    assert result.error == (
+        "запрос к модели не помещается в окно: оценка 9 токенов и резерв ответа 100 "
+        "больше окна 108"
+    )
+
+
+def test_configuration_that_fits_the_window_passes() -> None:
+    texts = PromptTexts(review_system="a" * 400, verifier_system="b" * 40)
+    assert check_window_config(
+        texts, context_max_tokens=32_000, max_output_tokens=4_096, window_tokens=65_536
+    ).ok
+
+
+def test_configuration_over_the_window_names_every_value() -> None:
+    # Системное сообщение - 400 байт = 100 токенов, длиннее из двух; накладка - четыре
+    # сообщения запроса верификатора по 8.
+    texts = PromptTexts(review_system="a" * 400, verifier_system="b" * 40)
+    result = check_window_config(
+        texts, context_max_tokens=32_000, max_output_tokens=4_096, window_tokens=36_000
+    )
+    assert result.error == (
+        "окно модели 36000 меньше лимита пакета контекста 32000, системного промпта 100, "
+        "разметки сообщений 32 и резерва ответа 4096"
+    )
