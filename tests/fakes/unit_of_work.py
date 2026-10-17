@@ -349,8 +349,11 @@ class FakeUserRepo:
             None,
         )
 
-    def add(self, user: User) -> None:
+    def add(self, user: User) -> bool:
+        if self.find_by_provider(user.provider, user.provider_user_id) is not None:
+            return False
         self._by_id[user.id] = user
+        return True
 
     def update(self, user: User) -> None:
         if user.id not in self._by_id:
@@ -384,6 +387,12 @@ class FakeSessionRepo:
 
     def delete(self, session_id: UUID) -> None:
         self._by_id.pop(session_id, None)
+
+    def delete_expired(self, now: datetime) -> int:
+        expired = [s.id for s in self._by_id.values() if now >= s.expires_at]
+        for session_id in expired:
+            del self._by_id[session_id]
+        return len(expired)
 
 
 class FakeUnitOfWork(UnitOfWork):

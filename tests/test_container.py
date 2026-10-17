@@ -136,6 +136,8 @@ def test_the_container_hands_out_oauth_providers_by_path_name() -> None:
     assert github is not None
     assert callable(github.exchange_code)
     assert container.oauth_provider("bitbucket") is None
+
+
 def test_the_container_keeps_one_cache_per_process() -> None:
     """In-process кэш полезен, только если переживает прогон: один объект."""
     container = build_container(SETTINGS)

@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
+from itertools import pairwise
 from uuid import UUID
 
 from app.application.review_run_events import (
@@ -39,17 +40,28 @@ class Script:
         # Сессия жива первые `session_checks_alive` проверок, потом — нет.
         self.session_checks_alive: int | None = None
         self.session_checks = 0
+        # Время часов теста в момент каждой проверки сессии.
+        self.check_times: list[float] = []
+        # Часы теста: ожидание и чтение «занимают» время.
+        self.now = 0.0
+        self.read_cost = 0.0
 
     async def read(self) -> ReviewRun | None:
         state = self._states[min(self.reads, len(self._states) - 1)]
         self.reads += 1
+        self.now += self.read_cost
         return state
 
     async def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)
+        self.now += seconds
+
+    def clock(self) -> float:
+        return self.now
 
     async def session_alive(self) -> bool:
         self.session_checks += 1
+        self.check_times.append(self.now)
         return self.session_checks_alive is None or self.session_checks <= self.session_checks_alive
 
 
@@ -60,7 +72,11 @@ def _collect(script: Script, *, limit: int = 100) -> list[RunEvent]:
         assert first is not None
         events: list[RunEvent] = []
         async for event in review_run_events(
-            first, script.read, sleep=script.sleep, session_alive=script.session_alive
+            first,
+            script.read,
+            sleep=script.sleep,
+            session_alive=script.session_alive,
+            clock=script.clock,
         ):
             events.append(event)
             if len(events) == limit:
@@ -172,3 +188,24 @@ def test_a_gone_session_closes_the_stream_without_another_event() -> None:
     assert _statuses(events) == [S.QUEUED, S.ANALYSING]
     assert script.session_checks == 1
     assert sum(script.slept) == SESSION_CHECK_SECONDS
+
+
+def test_the_session_is_rechecked_by_the_clock_even_when_reads_are_slow() -> None:
+    script = Script(RUN)
+    script.read_cost = 2.0
+    script.session_checks_alive = 3
+
+    events = _collect(script)
+
+    # Круг «ожидание 1 с + чтение 2 с»: время чтения копится в интервале, поэтому
+    # проверки идут по часам, а не через пять ожиданий (это было бы 15 с).
+    # Проверка делается после ожидания, поэтому запаздывает не больше чем
+    # на один круг: SESSION_CHECK_SECONDS + POLL_SECONDS + время чтения.
+    assert script.session_checks == 4
+    # Отсчёт начинается после первого чтения (снимка) в `_collect`.
+    points = [script.read_cost, *script.check_times]
+    gaps = [b - a for a, b in pairwise(points)]
+    assert gaps
+    limit = SESSION_CHECK_SECONDS + POLL_SECONDS + script.read_cost
+    assert all(SESSION_CHECK_SECONDS <= gap <= limit for gap in gaps), gaps
+    assert len(events) == 1

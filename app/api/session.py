@@ -8,6 +8,7 @@
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import Depends, Request, Response
 from fastapi.responses import JSONResponse
@@ -75,6 +76,8 @@ def current_user(
 
 # Порядок важен: чужой `Origin` отклоняется до похода в базу.
 SESSION_REQUIRED = [Depends(require_origin), Depends(current_user)]
+# Ответ `401` в документации OpenAPI роутеров, которые требуют сессию.
+SESSION_RESPONSES: dict[int | str, dict[str, Any]] = {401: {"description": "Нет действительной сессии"}}
 
 
 def unauthenticated_response(request: Request, error: Exception) -> Response:

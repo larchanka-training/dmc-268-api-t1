@@ -10,6 +10,7 @@ cookie приходят аргументами: случайность — де�
 """
 
 import hmac
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -20,6 +21,8 @@ from app.application.ports.unit_of_work import UnitOfWork
 from app.domain.entities import OAuthProfile, User
 from app.domain.login import LoginError, OAuthProviderUnavailable, safe_redirect
 from app.domain.session import hash_token, is_expired, open_session
+
+_log = logging.getLogger(__name__)
 
 # Код отказа пользователя в RFC 6749, §4.1.2.1. Остальные коды `error` —
 # сбой на стороне провайдера.
@@ -44,13 +47,21 @@ class LoginFailed:
     error: LoginError
 
 
-def start_login(provider: OAuthProvider, redirect: str | None, state: str) -> LoginStart:
-    """Адрес авторизации и то, что слой API положит в cookie `oauth_state`."""
-    return LoginStart(
-        authorize_url=provider.authorize_url(state),
-        state=state,
-        redirect=safe_redirect(redirect),
-    )
+def start_login(
+    provider: OAuthProvider, redirect: str | None, state: str
+) -> LoginStart | LoginFailed:
+    """Адрес авторизации и то, что слой API положит в cookie `oauth_state`.
+
+    Ненастроенный провайдер сообщает об этом `OAuthProviderUnavailable`:
+    вход тогда — штатная ошибка, а не редирект к GitHub с пустым `client_id`.
+    """
+    try:
+        authorize_url = provider.authorize_url(state)
+    except OAuthProviderUnavailable as error:
+        # В сообщении причина без секретов: имя настройки, а не её значение.
+        _log.warning("вход недоступен: %s", error)
+        return LoginFailed(LoginError.PROVIDER_UNAVAILABLE)
+    return LoginStart(authorize_url=authorize_url, state=state, redirect=safe_redirect(redirect))
 
 
 def complete_login(
@@ -65,9 +76,19 @@ def complete_login(
     token: str,
     now: datetime,
     new_id: Callable[[], UUID],
+    previous_token: str | None = None,
 ) -> LoginSucceeded | LoginFailed:
-    """Сверить `state`, получить профиль, записать пользователя и сессию."""
-    if not state or not expected_state or not hmac.compare_digest(state, expected_state):
+    """Сверить `state`, получить профиль, записать пользователя и сессию.
+
+    `previous_token` — cookie сессии, с которой пришёл запрос: новый вход
+    отзывает её в той же транзакции, чтобы старые сессии не копились.
+    """
+    # Байты, а не `str`: `compare_digest` на нелатинском `str` бросает `TypeError`.
+    if (
+        not state
+        or not expected_state
+        or not hmac.compare_digest(state.encode(), expected_state.encode())
+    ):
         return LoginFailed(LoginError.STATE_MISMATCH)
     if error == _ACCESS_DENIED:
         return LoginFailed(LoginError.DENIED)
@@ -81,6 +102,10 @@ def complete_login(
     # Провайдер опрошен до транзакции: соединение не ждёт ответа GitHub.
     with uow as work:
         user = _upsert_user(work, provider, profile, now, new_id)
+        if previous_token:
+            previous = work.sessions.find_by_token_hash(hash_token(previous_token))
+            if previous is not None:
+                work.sessions.delete(previous.id)
         work.sessions.add(open_session(new_id(), user.id, token, now))
         work.commit()
     return LoginSucceeded(token=token, redirect=safe_redirect(redirect))
@@ -102,7 +127,7 @@ def authenticate(uow: UnitOfWork, token: str | None, now: datetime) -> User | No
 
 
 def logout(uow: UnitOfWork, token: str | None) -> None:
-    """Удалить сессию этой cookie. Нет сессии — нечего удалять."""
+    """Удалить сессию этой cookie. Нет cookie или сессии — нечего удалять, не ошибка."""
     if not token:
         return
     with uow as work:
@@ -121,15 +146,7 @@ def _upsert_user(
 ) -> User:
     existing = work.users.find_by_provider(provider.provider, profile.provider_user_id)
     if existing is not None:
-        updated = replace(
-            existing,
-            login=profile.login,
-            name=profile.name,
-            avatar_url=profile.avatar_url,
-            updated_at=now,
-        )
-        work.users.update(updated)
-        return updated
+        return _refresh(work, existing, profile, now)
     user = User(
         id=new_id(),
         provider=provider.provider,
@@ -140,5 +157,23 @@ def _upsert_user(
         created_at=now,
         updated_at=now,
     )
-    work.users.add(user)
-    return user
+    if work.users.add(user):
+        return user
+    # Параллельный первый вход того же аккаунта успел раньше: его строка
+    # уже есть, и мы обновляем её, а не создаём вторую.
+    existing = work.users.find_by_provider(provider.provider, profile.provider_user_id)
+    if existing is None:
+        raise RuntimeError("пользователь не вставлен и не найден")
+    return _refresh(work, existing, profile, now)
+
+
+def _refresh(work: UnitOfWork, existing: User, profile: OAuthProfile, now: datetime) -> User:
+    updated = replace(
+        existing,
+        login=profile.login,
+        name=profile.name,
+        avatar_url=profile.avatar_url,
+        updated_at=now,
+    )
+    work.users.update(updated)
+    return updated

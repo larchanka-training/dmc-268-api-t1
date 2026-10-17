@@ -111,12 +111,19 @@ class PublishedCommentRepo(Protocol):
 
     def record_feedback(self, provider_comment_id: str, *, positive: bool) -> bool: ...
 
+
 class UserRepo(Protocol):
     def get(self, user_id: UUID) -> User | None: ...
 
     def find_by_provider(self, provider: Provider, provider_user_id: str) -> User | None: ...
 
-    def add(self, user: User) -> None: ...
+    def add(self, user: User) -> bool:
+        """Вставить пользователя; `False` — пара провайдер + аккаунт уже занята.
+
+        Два параллельных первых входа одного аккаунта не должны давать ошибку
+        базы: проигравший получает `False` и обновляет найденную строку.
+        """
+        ...
 
     def update(self, user: User) -> None: ...
 
@@ -128,4 +135,8 @@ class SessionRepo(Protocol):
 
     def delete(self, session_id: UUID) -> None:
         """Удалить сессию; отсутствующая — не ошибка: выход идемпотентен."""
+        ...
+
+    def delete_expired(self, now: datetime) -> int:
+        """Удалить сессии, срок которых истёк к `now`; вернуть их число."""
         ...

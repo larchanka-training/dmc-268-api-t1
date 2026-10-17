@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from typing import cast
 from uuid import UUID
@@ -53,6 +54,8 @@ def get_oauth_provider(
 ) -> OAuthProvider | None:
     """Провайдер входа по `{provider}` из пути; неизвестный — `None`."""
     return container.oauth_provider(provider)
+
+
 def get_run_reader(
     container: Container = Depends(get_container),
 ) -> Callable[[UUID], ReviewRun | None]:
@@ -73,3 +76,8 @@ def get_run_reader(
 def get_sleep() -> Callable[[float], Awaitable[None]]:
     """Ожидание между проверками статуса; тесты подменяют его мгновенным."""
     return asyncio.sleep
+
+
+def get_clock() -> Callable[[], float]:
+    """Монотонные часы потока событий; тесты подменяют их ходом своего «времени»."""
+    return time.monotonic

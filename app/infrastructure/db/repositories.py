@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from uuid import UUID
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.domain.diff import validate_anchor
@@ -427,6 +428,7 @@ class SqlAlchemyPublishedCommentRepo:
         ).first()
         return updated_id is not None
 
+
 class SqlAlchemyUserRepo:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -444,17 +446,29 @@ class SqlAlchemyUserRepo:
         ).one_or_none()
         return m.user_to_domain(row) if row else None
 
-    def add(self, user: User) -> None:
-        self._session.add(
-            UserRow(
-                id=user.id,
-                provider=user.provider,
-                provider_user_id=user.provider_user_id,
-                login=user.login,
-                name=user.name,
-                avatar_url=user.avatar_url,
-            )
-        )
+    def add(self, user: User) -> bool:
+        # `ON CONFLICT DO NOTHING`: при параллельной вставке той же пары
+        # вторая транзакция ждёт коммита первой и получает 0 строк, а не
+        # `IntegrityError`.
+        # `no_autoflush`: ожидающая сессия с этим пользователем не должна
+        # уйти в базу раньше самого пользователя.
+        with self._session.no_autoflush:
+            inserted = self._session.execute(
+                pg_insert(UserRow)
+                .values(
+                    id=user.id,
+                    provider=user.provider,
+                    provider_user_id=user.provider_user_id,
+                    login=user.login,
+                    name=user.name,
+                    avatar_url=user.avatar_url,
+                    created_at=user.created_at,
+                    updated_at=user.updated_at,
+                )
+                .on_conflict_do_nothing(constraint="uq_users_provider_user_id")
+                .returning(UserRow.id)
+            ).first()
+        return inserted is not None
 
     def update(self, user: User) -> None:
         row = self._session.get(UserRow, user.id)
@@ -463,6 +477,7 @@ class SqlAlchemyUserRepo:
         row.login = user.login
         row.name = user.name
         row.avatar_url = user.avatar_url
+        row.updated_at = user.updated_at
 
 
 class SqlAlchemySessionRepo:
@@ -488,3 +503,7 @@ class SqlAlchemySessionRepo:
 
     def delete(self, session_id: UUID) -> None:
         self._session.execute(delete(SessionRow).where(SessionRow.id == session_id))
+
+    def delete_expired(self, now: dt.datetime) -> int:
+        result = self._session.execute(delete(SessionRow).where(SessionRow.expires_at <= now))
+        return int(result.rowcount)  # type: ignore[attr-defined]

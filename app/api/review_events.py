@@ -14,15 +14,25 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
-from app.api.dependencies import get_run_reader, get_sleep, get_unit_of_work_factory
-from app.api.session import SESSION_COOKIE, SESSION_REQUIRED
+from app.api.dependencies import (
+    get_clock,
+    get_run_reader,
+    get_sleep,
+    get_unit_of_work_factory,
+)
+from app.api.session import SESSION_COOKIE, SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
 from app.application.review_run_events import review_run_events
 from app.application.use_cases.auth import authenticate
 from app.domain.entities import ReviewRun
 from app.domain.run_events import format_sse
 
-router = APIRouter(prefix="/api/v1/reviews", tags=["reviews"], dependencies=SESSION_REQUIRED)
+router = APIRouter(
+    prefix="/api/v1/reviews",
+    tags=["reviews"],
+    dependencies=SESSION_REQUIRED,
+    responses=SESSION_RESPONSES,
+)
 
 # Через сколько миллисекунд `EventSource` переподключается после обрыва.
 _RETRY = "retry: 3000\n\n"
@@ -39,7 +49,6 @@ _HEADERS = {
     response_class=StreamingResponse,
     responses={
         200: {"content": {"text/event-stream": {}}, "description": "Поток событий прогона"},
-        401: {"description": "Нет действительной сессии"},
         404: {"description": "Прогон не найден"},
     },
 )
@@ -48,6 +57,7 @@ async def stream_review_events(
     request: Request,
     read_run: Callable[[UUID], ReviewRun | None] = Depends(get_run_reader),
     sleep: Callable[[float], Awaitable[None]] = Depends(get_sleep),
+    clock: Callable[[], float] = Depends(get_clock),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> StreamingResponse:
     token = request.cookies.get(SESSION_COOKIE)
@@ -70,7 +80,9 @@ async def stream_review_events(
 
     async def body() -> AsyncIterator[str]:
         yield _RETRY
-        async for event in review_run_events(run, read, sleep=sleep, session_alive=session_alive):
+        async for event in review_run_events(
+            run, read, sleep=sleep, session_alive=session_alive, clock=clock
+        ):
             yield format_sse(event)
 
     return StreamingResponse(body(), media_type="text/event-stream", headers=_HEADERS)

@@ -5,10 +5,12 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import (
+    get_clock,
     get_oauth_provider,
     get_run_reader,
     get_sleep,
@@ -20,6 +22,7 @@ from app.config import Settings
 from app.domain.entities import ReviewRun
 from app.domain.enums import ReviewRunStatus, TriggerSource
 from app.domain.ids import new_id
+from app.infrastructure.oauth.github import GitHubOAuthProvider
 
 from .fakes.oauth import FakeOAuthProvider
 from .fakes.unit_of_work import FakeUnitOfWork
@@ -140,6 +143,50 @@ def test_a_callback_without_the_state_cookie_is_a_mismatch(stand) -> None:
     assert response.headers["location"] == "/login?error=state_mismatch"
 
 
+def test_a_non_ascii_state_is_a_mismatch_and_clears_the_state_cookie(stand) -> None:
+    client = stand.client()
+    client.cookies.set("oauth_state", "state-1|%2Fapp%2F", domain="review.example")
+
+    response = client.get("/api/v1/auth/github/callback", params={"code": "c", "state": "é"})
+
+    assert (response.status_code, response.headers["location"]) == (
+        302,
+        "/login?error=state_mismatch",
+    )
+    cookie = set_cookies(response)["oauth_state"]
+    assert 'oauth_state=""' in cookie and "Max-Age=0" in cookie
+
+
+@pytest.mark.parametrize(
+    ("client_id", "callback_url", "reason"),
+    [
+        ("", f"{ORIGIN}/api/v1/auth/github/callback", "GITHUB_APP_CLIENT_ID"),
+        ("Iv1.client", "/api/v1/auth/github/callback", "PUBLIC_ORIGIN"),
+    ],
+)
+def test_login_without_a_configured_provider_goes_to_login(
+    stand, caplog, monkeypatch, client_id, callback_url, reason
+) -> None:
+    stand.provider = GitHubOAuthProvider(
+        client_id, "client-secret", callback_url, httpx.Client()
+    )
+    caplog.set_level(logging.WARNING)
+    # `fileConfig` в тестах Alembic отключает уже созданные логгеры.
+    # TODO: убрать после мёржа #65 (change fix-migration-logging), как и такой же
+    # обход в tests/worker/test_review_handler.py.
+    monkeypatch.setattr(logging.getLogger("app.application.use_cases.auth"), "disabled", False)
+
+    response = stand.client().get("/api/v1/auth/github/login")
+
+    assert (response.status_code, response.headers["location"]) == (
+        302,
+        "/login?error=provider_unavailable",
+    )
+    assert "oauth_state" not in set_cookies(response)
+    assert reason in caplog.text
+    assert "client-secret" not in caplog.text
+
+
 def test_an_unavailable_provider_goes_to_login(stand) -> None:
     stand.provider.unavailable = True
 
@@ -197,6 +244,37 @@ def test_logout_ends_the_session_in_every_tab(stand) -> None:
     assert response.status_code == 204
     assert "Max-Age=0" in set_cookies(response)["session"]
     assert tab_2.get("/api/v1/auth/me").status_code == 401
+
+
+def test_logging_in_again_revokes_the_session_of_the_cookie_it_came_with(stand) -> None:
+    client = stand.client()
+    sign_in(client)
+    first = client.cookies["session"]
+
+    sign_in(client)
+
+    old_tab = stand.client()
+    old_tab.cookies.set("session", first, domain="review.example")
+    assert old_tab.get("/api/v1/auth/me").status_code == 401
+    assert client.get("/api/v1/auth/me").status_code == 200
+    assert len(stand.uow.sessions.stored) == 1
+
+
+def test_logout_without_a_session_is_204_and_clears_the_cookie(stand) -> None:
+    response = stand.client().post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+
+    assert response.status_code == 204
+    assert "Max-Age=0" in set_cookies(response)["session"]
+
+
+def test_logout_with_an_unknown_session_is_204_and_clears_the_cookie(stand) -> None:
+    client = stand.client()
+    client.cookies.set("session", "never-issued", domain="review.example")
+
+    response = client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+
+    assert response.status_code == 204
+    assert "Max-Age=0" in set_cookies(response)["session"]
 
 
 @pytest.mark.parametrize("headers", [{}, {"Origin": "https://evil.example"}, {"Origin": "null"}])
@@ -260,12 +338,14 @@ def test_logout_closes_an_open_event_stream_and_reconnecting_is_401(stand) -> No
         updated_at=datetime(2026, 10, 17, tzinfo=UTC),
     )
     slept: list[float] = []
+    now = [0.0]
     client = stand.client()
     sign_in(client)
     token = client.cookies["session"]
 
     async def sleep_then_logout(seconds: float) -> None:
         slept.append(seconds)
+        now[0] += seconds
         assert len(slept) < 30, "поток не закрылся после выхода"
         if len(slept) == 2:
             # Выход в другой вкладке, пока этот поток открыт.
@@ -273,6 +353,7 @@ def test_logout_closes_an_open_event_stream_and_reconnecting_is_401(stand) -> No
 
     stand.app.dependency_overrides[get_run_reader] = lambda: lambda run_id: run
     stand.app.dependency_overrides[get_sleep] = lambda: sleep_then_logout
+    stand.app.dependency_overrides[get_clock] = lambda: lambda: now[0]
 
     response = client.get(f"/api/v1/reviews/{run.id}/events")
 

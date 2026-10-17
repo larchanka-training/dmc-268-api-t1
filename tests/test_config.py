@@ -75,6 +75,8 @@ def test_the_client_secret_is_readable_and_the_origin_has_no_trailing_slash() ->
     settings = make_settings()
     assert settings.github_app_client_secret.get_secret_value() == CLIENT_SECRET
     assert settings.public_origin == "https://review.example"
+
+
 def test_context_limits_have_defaults() -> None:
     settings = make_settings()
     assert settings.context_max_tokens == 32_000

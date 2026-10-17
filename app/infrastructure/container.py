@@ -89,6 +89,7 @@ class Container:
     def oauth_provider(self, name: str) -> OAuthProvider | None:
         """Провайдер входа по имени из пути; неизвестное имя — `None`."""
         return self._oauth_providers.get(name)
+
     def cache_store(self) -> CacheStore:
         return self._cache_store
 

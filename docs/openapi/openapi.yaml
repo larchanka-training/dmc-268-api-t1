@@ -31,6 +31,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReviewJob"
+        "401":
+          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "400":
           description: Некорректный запрос (ApiError.code = VALIDATION_ERROR)
           content:
@@ -58,6 +64,12 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/ReviewJob"
+        "401":
+          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 
   /reviews/{reviewId}:
     parameters:
@@ -72,6 +84,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReviewJob"
+        "401":
+          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "404":
           description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND)
           content:
@@ -116,6 +134,12 @@ paths:
             text/event-stream:
               schema:
                 type: string
+        "401":
+          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "404":
           description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND); поток не открывается
           content:
@@ -138,6 +162,12 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Finding"
+        "401":
+          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "404":
           description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND)
           content:
@@ -300,7 +330,8 @@ paths:
       summary: Выйти
       description: >
         Удаляет сессию текущей cookie: следующий запрос с ней из любой вкладки
-        получает 401.
+        получает 401. Идемпотентен: без cookie и с cookie неизвестной сессии тоже
+        204, cookie session удаляется. Сессия не нужна, проверяется только Origin.
       operationId: logout
       responses:
         "204":
@@ -310,12 +341,6 @@ paths:
               schema:
                 type: string
                 example: "session=\"\"; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
-        "401":
-          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
         "403":
           description: >
             Origin отсутствует или не совпадает с адресом сервиса

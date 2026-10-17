@@ -37,6 +37,12 @@ class GitHubOAuthProvider:
         self._client = client
 
     def authorize_url(self, state: str) -> str:
+        # Пустые настройки дали бы редирект к GitHub с пустым `client_id` и
+        # относительным `redirect_uri`; секреты в сообщение не попадают.
+        if not self._client_id:
+            raise OAuthProviderUnavailable("не задан GITHUB_APP_CLIENT_ID")
+        if not self._callback_url.startswith(("https://", "http://")):
+            raise OAuthProviderUnavailable("PUBLIC_ORIGIN пуст или без схемы http(s)")
         query = urlencode(
             {"client_id": self._client_id, "state": state, "redirect_uri": self._callback_url}
         )

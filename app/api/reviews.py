@@ -11,11 +11,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api.dependencies import get_unit_of_work
-from app.api.session import SESSION_REQUIRED
+from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
 
 # Сессия — на весь роутер: исключения видны здесь, а не в middleware.
-router = APIRouter(prefix="/api/v1/reviews", tags=["reviews"], dependencies=SESSION_REQUIRED)
+router = APIRouter(
+    prefix="/api/v1/reviews",
+    tags=["reviews"],
+    dependencies=SESSION_REQUIRED,
+    responses=SESSION_RESPONSES,
+)
 
 
 class FindingResponse(BaseModel):

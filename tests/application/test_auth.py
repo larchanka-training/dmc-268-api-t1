@@ -6,18 +6,20 @@ import pytest
 
 from app.application.use_cases.auth import (
     LoginFailed,
+    LoginStart,
     LoginSucceeded,
     authenticate,
     complete_login,
     logout,
     start_login,
 )
+from app.domain.entities import User
 from app.domain.enums import Provider
 from app.domain.login import LoginError
 from app.domain.session import hash_token
 
 from ..fakes.oauth import OCTOCAT, FakeOAuthProvider
-from ..fakes.unit_of_work import FakeUnitOfWork
+from ..fakes.unit_of_work import FakeUnitOfWork, FakeUserRepo
 
 NOW = dt.datetime(2026, 10, 17, 12, 0, tzinfo=dt.UTC)
 LATER = NOW + dt.timedelta(days=1)
@@ -41,8 +43,30 @@ def login(uow, provider, *, token="cookie-1", now=NOW, new_id=None, **overrides)
     )
 
 
+class LosingRaceUserRepo(FakeUserRepo):
+    """`add` проигрывает гонку: параллельный первый вход успел вставить строку раньше."""
+
+    def __init__(self, twin: User | None) -> None:
+        super().__init__()
+        self.twin = twin
+
+    def add(self, user: User) -> bool:
+        if self.twin is not None:
+            self._by_id[self.twin.id] = self.twin
+        return False
+
+
+def _uow_losing_the_race(twin: User | None) -> FakeUnitOfWork:
+    uow = FakeUnitOfWork()
+    repo = LosingRaceUserRepo(twin)
+    uow.users = repo
+    uow._fakes.users = repo  # снимки транзакции берутся из общего набора фейков
+    return uow
+
+
 def test_start_login_points_at_the_provider_with_the_state_and_a_checked_redirect() -> None:
     start = start_login(FakeOAuthProvider(), "//evil.example/app/", "s-1")
+    assert isinstance(start, LoginStart)
 
     assert start.authorize_url == "https://github.com/login/oauth/authorize?state=s-1"
     assert (start.state, start.redirect) == ("s-1", "/app/")
@@ -145,3 +169,60 @@ def test_logout_ends_the_session_for_every_tab_and_is_idempotent() -> None:
     logout(uow, None)
 
     assert authenticate(uow, "cookie-1", LATER) is None
+
+
+def test_a_new_login_revokes_the_session_of_the_cookie_it_came_with() -> None:
+    uow = FakeUnitOfWork()
+    provider = FakeOAuthProvider()
+    login(uow, provider, token="old-cookie")
+    [old] = uow.sessions.stored
+
+    login(uow, provider, token="new-cookie", previous_token="old-cookie")
+
+    assert old.id not in {s.id for s in uow.sessions.stored}
+    assert len(uow.sessions.stored) == 1
+
+
+def test_a_stale_previous_cookie_does_not_break_the_login() -> None:
+    uow = FakeUnitOfWork()
+
+    result = login(uow, FakeOAuthProvider(), previous_token="never-issued")
+
+    assert isinstance(result, LoginSucceeded)
+    assert len(uow.sessions.stored) == 1
+
+
+def test_a_lost_insert_race_refreshes_the_winners_row_instead_of_creating_a_second() -> None:
+    twin = User(
+        id=UUID(int=777),
+        provider=Provider.GITHUB,
+        provider_user_id="583231",
+        login="old-login",
+        name="Old Name",
+        avatar_url="https://example.test/old.png",
+        created_at=NOW - dt.timedelta(seconds=1),
+        updated_at=NOW - dt.timedelta(seconds=1),
+    )
+    uow = _uow_losing_the_race(twin)
+
+    result = login(uow, FakeOAuthProvider())
+
+    assert result == LoginSucceeded(token="cookie-1", redirect="/app/reviews/42")
+    [stored] = uow.users._by_id.values()
+    assert stored.id == twin.id
+    assert (stored.login, stored.name, stored.avatar_url) == (
+        OCTOCAT.login,
+        OCTOCAT.name,
+        OCTOCAT.avatar_url,
+    )
+    [session] = uow.sessions.stored
+    assert session.user_id == twin.id
+
+
+def test_a_lost_insert_race_with_no_row_to_find_is_an_error_and_creates_nothing() -> None:
+    uow = _uow_losing_the_race(None)
+
+    with pytest.raises(RuntimeError, match="не вставлен и не найден"):
+        login(uow, FakeOAuthProvider())
+
+    assert uow.sessions.stored == []
