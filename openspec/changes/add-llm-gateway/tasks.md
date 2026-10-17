@@ -25,7 +25,7 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
 
 ## 4. Адаптер локальной модели
 
-- [ ] 4.1 `app/infrastructure/llm/ollama.py`: `OllamaGateway(client, model, window_tokens, max_attempts)` - перевод в `POST /api/chat` и обратно по design D1, повтор через `complete_structured`, сверка `prompt_eval_count` по D5.
+- [x] 4.1 `app/infrastructure/llm/ollama.py`: `OllamaGateway(client, model, window_tokens, max_attempts)` - перевод в `POST /api/chat` и обратно по design D1, повтор через `complete_structured`, сверка `prompt_eval_count` по D5.
       Проверка: `tests/infrastructure/test_ollama_gateway.py` - точное тело запроса (`model`, роли и тексты сообщений, `format` = `model_json_schema()` модели ответа, `options.num_ctx`, `num_predict`, `temperature = 0`, `stream = false`); `model` и токены ответа (`prompt_eval_count + eval_count`) в `LlmResponse`; `prompt_eval_count` больше `window - max_output_tokens` → `LlmError`; `5xx`, таймаут, обрыв соединения → `LlmError` с причиной без тела запроса.
 
 ## 5. Адаптер Eurorouter
