@@ -115,3 +115,80 @@ def test_context_limits_must_be_positive(field: str) -> None:
     }
     with pytest.raises(ValidationError):
         Settings(**values)
+
+
+def _llm_settings(**overrides: Any) -> Settings:
+    return Settings(
+        database_url=DATABASE_URL,
+        rabbitmq_url=RABBITMQ_URL,
+        github_webhook_secret=WEBHOOK_SECRET,
+        **overrides,
+    )
+
+
+HOSTED = {
+    "llm_backend": "ollama",
+    "ollama_model": "qwen2.5-coder:7b",
+    "llm_hosted_fallback": True,
+    "eurorouter_base_url": "https://eurorouter.example/v1",
+    "eurorouter_model": "mistral-large-2411",
+    "eurorouter_api_keys": "sk-secret-one, sk-secret-two",
+}
+
+
+def test_model_settings_have_defaults() -> None:
+    settings = make_settings()
+    assert settings.llm_backend is None
+    assert settings.ollama_base_url == "http://ollama:11434"
+    assert settings.llm_hosted_fallback is False
+    assert settings.llm_max_attempts == 2
+    assert settings.llm_timeout_seconds == 300
+
+
+def test_ollama_backend_requires_a_model() -> None:
+    with pytest.raises(ValidationError, match="OLLAMA_MODEL"):
+        _llm_settings(llm_backend="ollama")
+
+
+def test_unknown_backend_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="llm_backend"):
+        _llm_settings(llm_backend="openai")
+
+
+def test_hosted_fallback_needs_the_local_model_first() -> None:
+    with pytest.raises(ValidationError, match="LLM_HOSTED_FALLBACK"):
+        _llm_settings(**{**HOSTED, "llm_backend": "stub"})
+
+
+@pytest.mark.parametrize(
+    ("missing", "named"),
+    [
+        ("eurorouter_base_url", "EUROROUTER_BASE_URL"),
+        ("eurorouter_model", "EUROROUTER_MODEL"),
+        ("eurorouter_api_keys", "EUROROUTER_API_KEYS"),
+    ],
+)
+def test_hosted_fallback_names_each_missing_parameter(missing: str, named: str) -> None:
+    with pytest.raises(ValidationError, match=named):
+        _llm_settings(**{**HOSTED, missing: ""})
+
+
+def test_hosted_keys_are_split_on_commas_and_hidden_from_repr() -> None:
+    settings = _llm_settings(**HOSTED)
+    assert [key.get_secret_value() for key in settings.eurorouter_keys] == [
+        "sk-secret-one",
+        "sk-secret-two",
+    ]
+    assert "sk-secret-one" not in repr(settings)
+    assert "sk-secret-one" not in str(settings)
+
+
+def test_hosted_keys_without_the_flag_are_allowed_but_unused() -> None:
+    settings = _llm_settings(**{**HOSTED, "llm_hosted_fallback": False})
+    assert settings.llm_hosted_fallback is False
+
+
+@pytest.mark.parametrize("field", ["llm_max_attempts", "llm_timeout_seconds"])
+def test_model_transport_limits_must_be_positive(field: str) -> None:
+    with pytest.raises(ValidationError):
+        _llm_settings(**{field: 0})

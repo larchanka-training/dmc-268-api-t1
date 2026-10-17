@@ -98,6 +98,54 @@ variable "github_app_private_key" {
   sensitive   = true
 }
 
+variable "llm_backend" {
+  type        = string
+  description = "Адаптер модели воркера (LLM_BACKEND): stub - без похода к модели, ollama - локальная модель."
+  default     = "stub"
+
+  validation {
+    condition     = contains(["stub", "ollama"], var.llm_backend)
+    error_message = "llm_backend - stub или ollama."
+  }
+}
+
+variable "ollama_base_url" {
+  type        = string
+  description = "Адрес Ollama в сети стека (OLLAMA_BASE_URL)."
+  default     = "http://dmc268-ollama:11434"
+}
+
+variable "ollama_model" {
+  type        = string
+  description = "Модель Ollama (OLLAMA_MODEL); обязательна при llm_backend = ollama."
+  default     = ""
+}
+
+variable "llm_hosted_fallback" {
+  type        = bool
+  description = "Подключить Eurorouter фоллбэком после локальной модели (LLM_HOSTED_FALLBACK). Включение отправляет код проверяемых репозиториев hosted-провайдеру."
+  default     = false
+}
+
+variable "eurorouter_base_url" {
+  type        = string
+  description = "Адрес OpenAI-совместимого API Eurorouter (EUROROUTER_BASE_URL)."
+  default     = ""
+}
+
+variable "eurorouter_model" {
+  type        = string
+  description = "Модель Eurorouter (EUROROUTER_MODEL)."
+  default     = ""
+}
+
+variable "eurorouter_api_keys" {
+  type        = string
+  description = "Ключи Eurorouter через запятую (EUROROUTER_API_KEYS). Не коммитить."
+  default     = ""
+  sensitive   = true
+}
+
 variable "github_webhook_secret" {
   type        = string
   description = "Общий секрет, которым GitHub подписывает доставки вебхуков (X-Hub-Signature-256). Не коммитить."

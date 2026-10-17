@@ -220,9 +220,15 @@ def load_checked_prompt_texts(settings: Settings, root: Path) -> PromptTexts:
 
 def run_worker(settings: Settings) -> None:
     """Собрать зависимости и запустить воркер бесконечно. Вызывается из `__main__.py`."""
-    container = build_container(settings)
     # До подключения к брокеру: с непригодной конфигурацией воркер не поднимается.
+    # Заглушка модели выбирается только явно - иначе прогоны молча выходили бы
+    # пустыми (change `add-llm-gateway`, требование «Выбор заглушки явный»).
+    if settings.llm_backend is None:
+        raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
+    container = build_container(settings)
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
+    # Собрать адаптер модели сразу: порядок провайдеров уходит в лог при старте.
+    container.llm_gateway()
     limit = timedelta(seconds=settings.stale_run_timeout_seconds)
 
     def sweep() -> None:

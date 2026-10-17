@@ -6,6 +6,7 @@
 дефолтом ломает порядок аргументов dataclass при следующем расширении.
 """
 
+import logging
 from dataclasses import dataclass
 
 import httpx
@@ -18,6 +19,9 @@ from app.application.ports.vcs_gateway import VcsGateway
 from app.config import Settings
 from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.llm.fallback import FallbackLlmGateway
+from app.infrastructure.llm.ollama import OllamaGateway
+from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 from app.infrastructure.llm.stub import StubLlmGateway
 from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
@@ -25,6 +29,8 @@ from app.infrastructure.parsing.tree_sitter_extractor import (
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
+
+logger = logging.getLogger(__name__)
 
 _GITHUB_API = "https://api.github.com"
 
@@ -48,6 +54,9 @@ class Container:
     # In-process кэш живёт, пока жив процесс, — только если он один на
     # контейнер: фабрика на каждый вызов теряла бы всё между прогонами.
     _cache_store: CacheStore
+    # Ленивый, как VCS-шлюз: процессу API параметры модели не нужны, а
+    # HTTP-клиенты провайдеров создаются один раз на процесс.
+    _llm_gateway: LlmGateway | None
     # Ленивый, как VCS-шлюз: процессу API парсеры грамматик не нужны.
     _definition_extractor: DefinitionExtractor | None
 
@@ -60,9 +69,12 @@ class Container:
         return self._job_queue
 
     def llm_gateway(self) -> LlmGateway:
-        # Заглушка: реальный транспорт к Ollama — отдельная задача, контракт
-        # порта уже готов её принять (см. app/application/ports/llm_gateway.py).
-        return StubLlmGateway()
+        """Собрать адаптер модели при первом обращении; конструирование - без сети."""
+        gateway = self._llm_gateway
+        if gateway is None:
+            gateway = _build_llm_gateway(self.settings)
+            object.__setattr__(self, "_llm_gateway", gateway)
+        return gateway
 
     def vcs_gateway(self) -> VcsGateway:
         """Собрать VCS-шлюз при первом обращении; конструирование — без сети."""
@@ -99,5 +111,54 @@ def build_container(settings: Settings) -> Container:
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
         _cache_store=InMemoryCacheStore(),
+        _llm_gateway=None,
         _definition_extractor=None,
     )
+
+
+def _build_llm_gateway(settings: Settings) -> LlmGateway:
+    """Порядок провайдеров не выбирается: локальная модель первая, hosted -
+    только вторым и только по флагу (change `add-llm-gateway`, design D3).
+
+    Итог пишется в лог: по нему видно, может ли код проверяемых
+    репозиториев уйти за пределы нашей сети.
+    """
+    if settings.llm_backend is None:
+        raise RuntimeError("LLM_BACKEND не задан: выберите stub или ollama")
+    if settings.llm_backend == "stub":
+        logger.info("модель: заглушка без похода к модели")
+        return StubLlmGateway()
+    timeout = httpx.Timeout(settings.llm_timeout_seconds)
+    providers: list[tuple[str, LlmGateway]] = [
+        (
+            "Ollama",
+            OllamaGateway(
+                httpx.Client(base_url=settings.ollama_base_url, timeout=timeout),
+                settings.ollama_model,
+                window_tokens=settings.llm_context_window_tokens,
+                max_attempts=settings.llm_max_attempts,
+            ),
+        )
+    ]
+    local = f"модель: Ollama ({settings.ollama_model})"
+    if not settings.llm_hosted_fallback:
+        logger.info("%s; hosted-фоллбэк выключен", local)
+        return FallbackLlmGateway(providers)
+    providers.append(
+        (
+            "Eurorouter",
+            OpenAiCompatibleGateway(
+                httpx.Client(base_url=settings.eurorouter_base_url, timeout=timeout),
+                settings.eurorouter_model,
+                settings.eurorouter_keys,
+                name="Eurorouter",
+                max_attempts=settings.llm_max_attempts,
+            ),
+        )
+    )
+    logger.info(
+        "%s; фоллбэк - Eurorouter (%s): при сбое локальной модели код уходит hosted-провайдеру",
+        local,
+        settings.eurorouter_model,
+    )
+    return FallbackLlmGateway(providers)

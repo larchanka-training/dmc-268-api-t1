@@ -40,13 +40,13 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
 
 ## 7. Конфигурация и сборка
 
-- [ ] 7.1 `app/config.py`: остальные поля design D7 (окно и предел ответа - в задаче 1.1) и валидаторы.
+- [x] 7.1 `app/config.py`: остальные поля design D7 (окно и предел ответа - в задаче 1.1) и валидаторы.
       Проверка: `tests/test_config.py` - значения по умолчанию; `LLM_BACKEND=ollama` без `OLLAMA_MODEL` и `LLM_HOSTED_FALLBACK=true` без ключей, адреса или модели Eurorouter, а также фоллбэк при `LLM_BACKEND=stub` - ошибка с именем параметра; ключи - `SecretStr`, `repr(Settings)` их не содержит.
-- [ ] 7.2 `app/infrastructure/container.py`: `llm_gateway()` по конфигурации - `StubLlmGateway` при `stub`, `FallbackLlmGateway([ollama])` или `[ollama, eurorouter]` при `ollama`; один `httpx.Client` на провайдера с `LLM_TIMEOUT_SECONDS`, созданный лениво и один раз.
+- [x] 7.2 `app/infrastructure/container.py`: `llm_gateway()` по конфигурации - `StubLlmGateway` при `stub`, `FallbackLlmGateway([ollama])` или `[ollama, eurorouter]` при `ollama`; один `httpx.Client` на провайдера с `LLM_TIMEOUT_SECONDS`, созданный лениво и один раз.
       Проверка: `tests/test_container.py` - без `LLM_HOSTED_FALLBACK` Eurorouter в списке провайдеров нет при любых заданных ключах; с ним - вторым и только вторым; адаптер кэшируется; гвардрейлы `test_every_adapter_is_wired_in_the_composition_root` и `test_the_container_is_the_only_place_adapters_are_constructed` зелёные.
-- [ ] 7.3 `run_worker` (`app/worker/factory.py`): `LLM_BACKEND` не задан - `WorkerConfigError` до подключения к брокеру (проверка окна при старте - задача 2.2).
+- [x] 7.3 `run_worker` (`app/worker/factory.py`): `LLM_BACKEND` не задан - `WorkerConfigError` до подключения к брокеру (проверка окна при старте - задача 2.2).
       Проверка: `tests/worker/test_startup.py` - отказ с текстом, называющим параметр.
-- [ ] 7.4 Развёртывание и документы: переменные design D7 в `.env.example`, `README.md`, `docker-compose.yml` (воркер - `LLM_BACKEND=stub` по умолчанию) и `infra/` (`main.tf`, `variables.tf`, ключи - sensitive); профиль `ollama` в `docker-compose.yml` (образ с зафиксированной версией, том для моделей, воркер с `LLM_BACKEND=ollama`).
+- [x] 7.4 Развёртывание и документы: переменные design D7 в `.env.example`, `README.md`, `docker-compose.yml` (воркер - `LLM_BACKEND=stub` по умолчанию) и `infra/` (`main.tf`, `variables.tf`, ключи - sensitive); профиль `ollama` в `docker-compose.yml` (образ с зафиксированной версией, том для моделей, воркер с `LLM_BACKEND=ollama`).
       Проверка: `uv run pytest tests/test_stack_descriptions.py tests/test_docs.py`; `docker compose config` и `docker compose --profile ollama config` без ошибок.
 
 ## 8. Контекст PR

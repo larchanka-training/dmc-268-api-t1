@@ -4,7 +4,7 @@ import pytest
 
 from app.config import Settings
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
-from app.worker.factory import WorkerConfigError, load_checked_prompt_texts
+from app.worker.factory import WorkerConfigError, load_checked_prompt_texts, run_worker
 
 
 def _settings(**overrides: object) -> Settings:
@@ -32,3 +32,10 @@ def test_window_smaller_than_package_and_reserve_stops_the_worker() -> None:
     message = str(error.value)
     for value in ("32768", "32000", "4096"):
         assert value in message
+
+
+def test_worker_without_a_chosen_model_backend_does_not_start() -> None:
+    # Брокер по адресу из настроек недоступен: тест проходит, только если
+    # проверка срабатывает раньше подключения.
+    with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
+        run_worker(_settings())

@@ -183,3 +183,25 @@ App нужно разрешение **Contents: read**. Без него прог
 Формат правил — [`prompts/review/custom-rules.md`](prompts/review/custom-rules.md),
 лимиты сборки контекста (`CONTEXT_MAX_TOKENS`, `RULES_MAX_BYTES`,
 `AST_MAX_FILES`, …) — в [`app/config.py`](app/config.py).
+
+## Модель
+
+Воркер обращается к модели через адаптер, который выбирает `LLM_BACKEND`; без этой переменной воркер не стартует.
+
+- `stub` - заглушка без похода к модели: прогон доходит до `completed` с пустым ревью. Так по умолчанию работает `docker compose up`.
+- `ollama` - локальная модель в нашей сети (`OLLAMA_BASE_URL`, `OLLAMA_MODEL`).
+
+Локальная модель поднимается профилем compose:
+
+```bash
+docker compose --profile ollama up -d
+docker compose exec ollama ollama pull qwen2.5-coder:7b
+# в .env: LLM_BACKEND=ollama, OLLAMA_MODEL=qwen2.5-coder:7b
+docker compose up -d worker
+```
+
+Eurorouter (OpenAI-совместимый hosted-провайдер) подключается только фоллбэком после локальной модели и только при `LLM_HOSTED_FALLBACK=true` вместе с `EUROROUTER_BASE_URL`, `EUROROUTER_MODEL` и `EUROROUTER_API_KEYS` (ключи через запятую).
+Включение отправляет код проверяемых репозиториев за пределы нашей сети; какие провайдеры включены, воркер пишет в лог при старте.
+
+Окно модели (`LLM_CONTEXT_WINDOW_TOKENS`) должно вмещать пакет контекста (`CONTEXT_MAX_TOKENS`), системный промпт и резерв ответа (`LLM_MAX_OUTPUT_TOKENS`): иначе воркер не стартует.
+Все переменные с пояснениями - в [`.env.example`](.env.example).
