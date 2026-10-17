@@ -35,7 +35,7 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
 
 ## 6. Фоллбэк
 
-- [ ] 6.1 `app/infrastructure/llm/fallback.py`: `FallbackLlmGateway(providers)` по design D3.
+- [x] 6.1 `app/infrastructure/llm/fallback.py`: `FallbackLlmGateway(providers)` по design D3.
       Проверка: `tests/infrastructure/test_fallback_gateway.py` с поддельными провайдерами - первый ответил: второй не вызван; первый бросил `LlmError` или `LlmOutputError`: ответ второго и его `model`; оба упали: проброшен сбой второго; переход записан в лог с именем провайдера и классом сбоя.
 
 ## 7. Конфигурация и сборка
