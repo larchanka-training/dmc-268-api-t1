@@ -42,6 +42,7 @@ from app.domain.enums import (
     Provider,
     ReviewRunStatus,
     TriggerSource,
+    VerificationOutcome,
 )
 from app.infrastructure.db.base import Base, TimestampMixin, UuidPrimaryKeyMixin
 
@@ -137,6 +138,10 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             f" OR (status = 'failed' AND failed_stage IN ({_STAGES_SQL}))",
             name="ck_review_runs_failed_stage",
         ),
+        CheckConstraint(
+            "verifier_dropped_findings >= 0",
+            name="ck_review_runs_verifier_dropped",
+        ),
     )
 
     merge_request_id: Mapped[uuid.UUID] = mapped_column(
@@ -164,6 +169,14 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     tokens_used: Mapped[int | None] = mapped_column(BigInteger)
     duration_seconds: Mapped[float | None] = mapped_column(Float)
     rejected_findings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Итог второго прохода модели; пуст, пока анализ не завершён, и у прогонов,
+    # записанных до появления верификации.
+    verification: Mapped[VerificationOutcome | None] = mapped_column(
+        _enum(VerificationOutcome, "review_verification")
+    )
+    verifier_dropped_findings: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     merge_request: Mapped[MergeRequestRow] = relationship(back_populates="review_runs")
 
@@ -215,6 +228,14 @@ class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             name="uq_findings_anchor",
             postgresql_nulls_not_distinct=True,
         ),
+        # Ссылка на правило заполнена целиком или пуста целиком: префикс
+        # атрибуции строится из всех трёх частей.
+        CheckConstraint(
+            "(rule_name IS NULL AND rule_check IS NULL AND rule_check_text IS NULL)"
+            " OR (rule_name IS NOT NULL AND rule_check IS NOT NULL"
+            " AND rule_check_text IS NOT NULL AND rule_check >= 1)",
+            name="ck_findings_rule_ref",
+        ),
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -233,6 +254,11 @@ class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     suggestion: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[float | None] = mapped_column(Float)
+    # Пункт правила владельца, по которому выпущено замечание; текст пункта -
+    # копия на момент прогона. Пусто целиком - замечание по стандартным критериям.
+    rule_name: Mapped[str | None] = mapped_column(Text)
+    rule_check: Mapped[int | None] = mapped_column(Integer)
+    rule_check_text: Mapped[str | None] = mapped_column(Text)
 
 
 class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):

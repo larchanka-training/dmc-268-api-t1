@@ -45,6 +45,7 @@ from app.domain.entities import (
     ParsedFile,
     RepoRules,
     ReviewJob,
+    ShownRule,
 )
 from app.domain.enums import Language
 from app.domain.repo_rules import RULES_PATH, applicable_rules
@@ -93,6 +94,8 @@ class AssembledContext:
     # Hunk'и, вошедшие в пакет: находка вне них указывает на то, чего модель
     # не видела.
     hunks: tuple[Hunk, ...]
+    # Правила, вошедшие в пакет, - по тому же принципу для ссылки на правило.
+    rules: tuple[ShownRule, ...] = ()
 
 
 def assemble_context(
@@ -136,7 +139,7 @@ def assemble_context(
     # файлах диффа: без правил дифф получает весь бюджет. После диффа правила
     # привязываются к вошедшим файлам — подмножеству, — и в резерв укладываются.
     candidate_paths = tuple(dict.fromkeys(h.file_path for f in reviewable for h in f.hunks))
-    wanted = sum(Budget.cost(item) for item in _rule_items(rules, candidate_paths))
+    wanted = sum(Budget.cost(item) for item, _ in _rule_items(rules, candidate_paths))
     rules_share = budget.split(min(limits.rules_max_tokens * BYTES_PER_TOKEN, wanted))
 
     shown: list[Hunk] = []
@@ -150,10 +153,13 @@ def assemble_context(
                 omitted.append(_omission(parsed.file_path, "hunk", "budget", line=hunk.new_start))
     file_paths = tuple(dict.fromkeys(h.file_path for h in shown))
 
-    for item in _rule_items(rules, file_paths):
-        section = "rejected" if "reason" in item else "items"
+    shown_rules: list[ShownRule] = []
+    for item, rule in _rule_items(rules, file_paths):
+        section = "items" if rule is not None else "rejected"
         if rules_share.take(item):
             body["rules"][section].append(item)
+            if rule is not None:
+                shown_rules.append(rule)
         elif section == "items":
             omitted.append(_omission(RULES_PATH, "rule", "budget", name=item["name"]))
         else:
@@ -192,20 +198,34 @@ def assemble_context(
             updated_at=now,
         ),
         hunks=tuple(shown),
+        rules=tuple(shown_rules),
     )
 
 
-def _rule_items(rules: RepoRules, paths: Sequence[str]) -> list[dict[str, Any]]:
-    """Применимые к `paths` правила, затем отклонённые — элементы раздела `rules`."""
-    items: list[dict[str, Any]] = [
-        {
-            "name": sanitize(rule.name),
-            "files": [sanitize(p) for p in rule_files],
-            "checks": [fence("rule_check", check) for check in rule.checks],
-        }
+def _rule_items(
+    rules: RepoRules, paths: Sequence[str]
+) -> list[tuple[dict[str, Any], ShownRule | None]]:
+    """Применимые к `paths` правила, затем отклонённые - элементы раздела `rules`.
+
+    У применимого правила рядом с элементом пакета - `ShownRule` для сверки
+    ссылок; у отклонённого - `None`.
+    """
+    items: list[tuple[dict[str, Any], ShownRule | None]] = [
+        (
+            {
+                "name": sanitize(rule.name),
+                "files": [sanitize(p) for p in rule_files],
+                "checks": [fence("rule_check", check) for check in rule.checks],
+            },
+            ShownRule(
+                name=sanitize(rule.name),
+                files=rule_files,
+                checks=tuple(sanitize(check) for check in rule.checks),
+            ),
+        )
         for rule, rule_files in applicable_rules(rules.rules, paths)
     ]
-    items += [{"name": sanitize(r.name), "reason": r.reason} for r in rules.rejected]
+    items += [({"name": sanitize(r.name), "reason": r.reason}, None) for r in rules.rejected]
     return items
 
 

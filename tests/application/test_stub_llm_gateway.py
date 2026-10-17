@@ -1,25 +1,37 @@
-from datetime import UTC, datetime
-from uuid import UUID
+import pytest
+from pydantic import BaseModel
 
-from app.domain.entities import ContextPayload
+from app.application.llm_schema import ReviewOutput, VerificationOutput
+from app.application.ports.llm_gateway import LlmRequest, LlmTask
+from app.domain.entities import PromptMessage
+from app.domain.enums import PromptRole
 from app.infrastructure.llm.stub import StubLlmGateway
 
-CONTEXT = ContextPayload(
-    id=UUID(int=1),
-    review_run_id=UUID(int=2),
-    chunk_index=0,
-    tiers=("diff",),
-    file_paths=("app/main.py",),
-    token_count=0,
-    content_sha256="0" * 64,
-    body={},
-    created_at=datetime(2026, 9, 29, tzinfo=UTC),
-    updated_at=datetime(2026, 9, 29, tzinfo=UTC),
+MESSAGES = (PromptMessage(PromptRole.SYSTEM, "инструкции"), PromptMessage(PromptRole.USER, "код"))
+
+
+@pytest.mark.parametrize(
+    ("task", "model"),
+    [(LlmTask.REVIEW, ReviewOutput), (LlmTask.VERIFY, VerificationOutput)],
 )
+def test_stub_answers_with_an_empty_instance_of_the_requested_model(
+    task: LlmTask, model: type[BaseModel]
+) -> None:
+    response = StubLlmGateway().complete(LlmRequest(task, MESSAGES, model))
+
+    assert response.model == "stub-llm"
+    assert response.tokens_used == 0
+    assert isinstance(response.content, model)
 
 
-def test_stub_returns_a_fixed_result_with_no_findings() -> None:
-    result = StubLlmGateway().review(CONTEXT)
-    assert result.model == "stub-llm"
-    assert result.tokens_used == 0
-    assert result.findings == ()
+def test_stub_review_has_no_findings() -> None:
+    response = StubLlmGateway().complete(LlmRequest(LlmTask.REVIEW, MESSAGES, ReviewOutput))
+
+    assert response.content.findings == ()
+    assert response.content.thread_follow_ups == ()
+
+
+def test_stub_verification_has_no_verdicts() -> None:
+    response = StubLlmGateway().complete(LlmRequest(LlmTask.VERIFY, MESSAGES, VerificationOutput))
+
+    assert response.content.verdicts == ()

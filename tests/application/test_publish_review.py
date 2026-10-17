@@ -12,6 +12,7 @@ from app.domain.entities import (
     PublishedComment,
     ReviewJob,
     ReviewRun,
+    RuleRef,
 )
 from app.domain.enums import (
     CommentKind,
@@ -266,3 +267,48 @@ def test_critical_fixed_not_resolved_when_line_inserted_above_anchor() -> None:
     root = uow.published_comments.get(ROOT_COMMENT_ID)
     assert root is not None
     assert root.thread_resolved is False
+
+
+def test_inline_comment_is_attributed_from_the_stored_rule_reference() -> None:
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow)
+    run = ReviewRun(
+        id=RUN_ID,
+        merge_request_id=MR_ID,
+        head_sha=JOB.head_sha,
+        status=ReviewRunStatus.PUBLISHING,
+        trigger=TriggerSource.WEBHOOK,
+        last_progress_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    uow.review_runs.add(run)
+    uow.findings.add(
+        Finding(
+            id=UUID(int=60),
+            review_run_id=RUN_ID,
+            anchor=DiffAnchor(file_path="app/y.py", side=DiffSide.NEW, new_line=3),
+            category=FindingCategory.READABILITY,
+            severity=FindingSeverity.LOW,
+            message="Имя не глагол.",
+            created_at=NOW,
+            updated_at=NOW,
+            rule=RuleRef("Naming", 1, "Имя функции - глагол"),
+        )
+    )
+    vcs = RecordingVcsGateway()
+
+    publish_review(
+        JOB,
+        run,
+        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        uow=uow,
+        vcs=vcs,
+        now=NOW,
+        new_id=lambda: UUID(int=301),
+    )
+
+    ((_, (inline,)),) = vcs.publications
+    assert inline.body.endswith(
+        "Согласно пользовательскому правилу «Naming» (пункт 1: Имя функции - глагол): Имя не глагол."
+    )

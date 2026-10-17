@@ -389,6 +389,23 @@ components:
             - publishing
             - null
           description: Этап, на котором прогон упал; null, если прогон не падал или упал из queued.
+        verification:
+          type:
+            - string
+            - "null"
+          enum:
+            - verified
+            - not_required
+            - unavailable
+            - null
+          description: >
+            Итог второго прохода модели (Reflection Pass): verified - вердикты применены,
+            not_required - замечаний после отсева не осталось, unavailable - верификатор
+            упал или ответил не по схеме, опубликованы замечания после отсева; null до конца анализа.
+        verifierDroppedFindings:
+          type: integer
+          minimum: 0
+          description: Сколько замечаний отбросил верификатор.
         error:
           oneOf:
             - $ref: "#/components/schemas/ReviewError"
@@ -486,6 +503,24 @@ components:
               properties:
                 diff:
                   type: string
+            - type: "null"
+        rule:
+          description: >
+            Пункт правила владельца (.review/rules.md), которому противоречит код;
+            null - замечание по стандартным критериям.
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required:
+                - name
+                - check
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                check:
+                  type: integer
+                  minimum: 1
             - type: "null"
 
     ReviewError:

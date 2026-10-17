@@ -94,6 +94,16 @@
       "enum": ["building_context", "analysing", "publishing", null],
       "description": "Этап, на котором прогон упал; null, если прогон не падал или упал из queued."
     },
+    "verification": {
+      "type": ["string", "null"],
+      "enum": ["verified", "not_required", "unavailable", null],
+      "description": "Итог второго прохода модели (Reflection Pass); null до конца анализа."
+    },
+    "verifierDroppedFindings": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Сколько замечаний отбросил верификатор."
+    },
     "error": {
       "oneOf": [
         { "$ref": "error.schema.json" },

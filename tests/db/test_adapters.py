@@ -10,10 +10,10 @@ from app.domain.entities import (
     ContextPayload,
     DiffAnchor,
     Finding,
-    Hunk,
     MergeRequest,
     Repository,
     ReviewRun,
+    RuleRef,
 )
 from app.domain.enums import (
     DiffSide,
@@ -23,6 +23,7 @@ from app.domain.enums import (
     Provider,
     ReviewRunStatus,
     TriggerSource,
+    VerificationOutcome,
 )
 from app.domain.ids import new_id
 from app.domain.lifecycle import advance
@@ -202,65 +203,6 @@ def test_a_finished_run_refuses_a_same_status_update(uow) -> None:
         assert (stored.model, stored.tokens_used, stored.duration_seconds) == ("m1", 100, 1.5)
 
 
-def test_a_finding_outside_the_diff_is_refused_and_counted(uow) -> None:
-    hunks = [Hunk(file_path="app/main.py", changed_new_lines=frozenset({10}))]
-    with uow as work:
-        repo = a_repository()
-        work.repositories.add(repo)
-        mr = a_merge_request(repo.id)
-        work.merge_requests.add(mr)
-        run = a_run(mr.id)
-        work.review_runs.add(run)
-        work.commit()
-
-    outside = Finding(
-        id=new_id(),
-        review_run_id=run.id,
-        anchor=DiffAnchor("app/main.py", DiffSide.NEW, new_line=999),
-        category=FindingCategory.SECURITY,
-        severity=FindingSeverity.HIGH,
-        message="m",
-        created_at=NOW,
-        updated_at=NOW,
-    )
-    with uow as work:
-        assert work.findings.add_validated(outside, hunks, LATER) is False
-        work.commit()
-
-    with uow as work:
-        assert work.findings.list_for_run(run.id) == []
-        assert work.review_runs.get(run.id).rejected_findings == 1
-
-
-def test_a_finding_inside_the_diff_is_stored(uow) -> None:
-    hunks = [Hunk(file_path="app/main.py", changed_new_lines=frozenset({10}))]
-    with uow as work:
-        repo = a_repository()
-        work.repositories.add(repo)
-        mr = a_merge_request(repo.id)
-        work.merge_requests.add(mr)
-        run = a_run(mr.id)
-        work.review_runs.add(run)
-        work.commit()
-    inside = Finding(
-        id=new_id(),
-        review_run_id=run.id,
-        anchor=DiffAnchor("app/main.py", DiffSide.NEW, new_line=10),
-        category=FindingCategory.SECURITY,
-        severity=FindingSeverity.HIGH,
-        message="m",
-        created_at=NOW,
-        updated_at=NOW,
-    )
-    with uow as work:
-        assert work.findings.add_validated(inside, hunks, LATER) is True
-        work.commit()
-    with uow as work:
-        stored = work.findings.list_for_run(run.id)
-        assert len(stored) == 1
-        assert stored[0].anchor.new_line == 10
-
-
 def a_context_payload(run_id, *, chunk_index: int, digest: str) -> ContextPayload:
     return ContextPayload(
         id=new_id(),
@@ -288,33 +230,19 @@ def seeded(work):
     return repo, mr, run
 
 
-def test_advancing_a_run_does_not_undo_a_recorded_rejection(uow) -> None:
-    """Счётчик живёт в строке; сущность у вызывающего о нём не узнаёт."""
-    hunks = [Hunk(file_path="app/main.py", changed_new_lines=frozenset({10}))]
+def test_update_writes_the_counts_the_caller_carries(uow) -> None:
+    """Счётчики отсева считает пайплайн и приносит в сущности; адаптер их пишет."""
     with uow as work:
         _, _, run = seeded(work)
-
-    outside = Finding(
-        id=new_id(),
-        review_run_id=run.id,
-        anchor=DiffAnchor("app/main.py", DiffSide.NEW, new_line=999),
-        category=FindingCategory.SECURITY,
-        severity=FindingSeverity.HIGH,
-        message="m",
-        created_at=NOW,
-        updated_at=NOW,
-    )
+    building = advance(run, ReviewRunStatus.BUILDING_CONTEXT, LATER).unwrap()
     with uow as work:
-        assert work.findings.add_validated(outside, hunks, LATER) is False
-        # `run` — устаревшая сущность, которую вызывающий держал всё это время
-        work.review_runs.update(
-            advance(run, ReviewRunStatus.BUILDING_CONTEXT, LATER).unwrap()
-        )
+        work.review_runs.update(building)
+        work.review_runs.update(replace(building, rejected_findings=2))
         work.commit()
 
     with uow as work:
         stored = work.review_runs.get(run.id)
-    assert stored.rejected_findings == 1
+    assert stored.rejected_findings == 2
     assert stored.status is ReviewRunStatus.BUILDING_CONTEXT
 
 
@@ -422,3 +350,97 @@ def test_a_failed_run_keeps_the_stage_it_failed_in(uow) -> None:
         stored = work.review_runs.get(run.id)
     assert stored.status is ReviewRunStatus.FAILED
     assert stored.failed_stage is ReviewRunStatus.BUILDING_CONTEXT
+
+
+def _stored_run(uow) -> ReviewRun:
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        run = a_run(mr.id)
+        work.review_runs.add(run)
+        work.commit()
+    return run
+
+
+def test_a_finding_keeps_its_rule_reference(uow) -> None:
+    run = _stored_run(uow)
+    finding = Finding(
+        id=new_id(),
+        review_run_id=run.id,
+        anchor=DiffAnchor("app/main.py", DiffSide.NEW, new_line=10),
+        category=FindingCategory.CORRECTNESS,
+        severity=FindingSeverity.MEDIUM,
+        message="m",
+        created_at=NOW,
+        updated_at=NOW,
+        rule=RuleRef(name="Errors", check=2, check_text="Отказ - значение Result"),
+    )
+    with uow as work:
+        work.findings.add(finding)
+        work.commit()
+    with uow as work:
+        (stored,) = work.findings.list_for_run(run.id)
+    assert stored.rule == RuleRef(name="Errors", check=2, check_text="Отказ - значение Result")
+
+
+def test_a_finding_without_a_rule_comes_back_without_one(uow) -> None:
+    run = _stored_run(uow)
+    finding = Finding(
+        id=new_id(),
+        review_run_id=run.id,
+        anchor=DiffAnchor("app/main.py", DiffSide.NEW, new_line=10),
+        category=FindingCategory.CORRECTNESS,
+        severity=FindingSeverity.MEDIUM,
+        message="m",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    with uow as work:
+        work.findings.add(finding)
+        work.commit()
+    with uow as work:
+        (stored,) = work.findings.list_for_run(run.id)
+    assert stored.rule is None
+
+
+def test_a_run_keeps_its_verification_outcome(uow) -> None:
+    run = _stored_run(uow)
+    with uow as work:
+        assert work.review_runs.get(run.id).verification is None
+    building = replace(run, status=ReviewRunStatus.BUILDING_CONTEXT)
+    analysing = replace(
+        building,
+        status=ReviewRunStatus.ANALYSING,
+        verification=VerificationOutcome.VERIFIED,
+        verifier_dropped_findings=2,
+        last_progress_at=LATER,
+    )
+    with uow as work:
+        work.review_runs.update(building)
+        work.review_runs.update(analysing)
+        work.commit()
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert stored.verification is VerificationOutcome.VERIFIED
+    assert stored.verifier_dropped_findings == 2
+
+
+def test_a_run_is_inserted_with_its_verification_outcome(uow) -> None:
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        run = replace(
+            a_run(mr.id),
+            verification=VerificationOutcome.UNAVAILABLE,
+            verifier_dropped_findings=1,
+        )
+        work.review_runs.add(run)
+        work.commit()
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert stored.verification is VerificationOutcome.UNAVAILABLE
+    assert stored.verifier_dropped_findings == 1

@@ -90,5 +90,8 @@ def session(clean_db) -> Iterator[Session]:
         yield db
     finally:
         db.close()
-        transaction.rollback()
+        # Тест на ограничение базы роняет транзакцию сам: после IntegrityError
+        # она уже отвязана от соединения, и повторный откат только предупреждает.
+        if transaction.is_active:
+            transaction.rollback()
         connection.close()

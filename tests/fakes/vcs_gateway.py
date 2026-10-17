@@ -21,6 +21,8 @@ _PIPELINE_DIFF = (
 @dataclass
 class RecordingVcsGateway:
     diff: str = _PIPELINE_DIFF
+    # Содержимое файлов по (путь, sha); отсутствие ключа - файла на коммите нет.
+    files: dict[tuple[str, str], str] = field(default_factory=dict)
     checks: list[MergeGateCheck] = field(default_factory=list)
     replies: list[tuple[str, str]] = field(default_factory=list)
     resolved: list[str] = field(default_factory=list)
@@ -41,7 +43,7 @@ class RecordingVcsGateway:
     def fetch_file(
         self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
     ) -> str | None:
-        return None
+        return self.files.get((path, sha))
 
     def publish_pull_request_review(
         self,
