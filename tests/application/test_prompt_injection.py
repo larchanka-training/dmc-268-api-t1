@@ -12,6 +12,7 @@ from typing import Any
 from uuid import UUID
 
 from app.application.context_assembly import ContextLimits
+from app.application.llm_review import LlmLimits
 from app.application.ports.llm_gateway import LlmRequest
 from app.application.review_pipeline import run_review
 from app.domain.entities import MergeRequest, ReviewJob, ReviewRun
@@ -36,6 +37,7 @@ from ..fakes.vcs_gateway import RecordingVcsGateway
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144)
+LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
 TEXTS = PromptTexts(review_system="ИНСТРУКЦИИ РЕВЬЮ", verifier_system="ИНСТРУКЦИИ ВЕРИФИКАТОРА")
 JOB = ReviewJob(
     id=UUID(int=1),
@@ -112,6 +114,7 @@ def _review(
         definition_extractor=FakeExtractor(),
         cache_store=FakeCache(),
         context_limits=LIMITS,
+        llm_limits=LLM_LIMITS,
         prompt_texts=TEXTS,
         now=lambda: NOW,
         monotonic=lambda: 0.0,

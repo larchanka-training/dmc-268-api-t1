@@ -18,6 +18,7 @@ from typing import Protocol
 import pika
 
 from app.application.context_assembly import ContextLimits
+from app.application.llm_review import LlmLimits
 from app.application.ports import (
     CacheStore,
     DefinitionExtractor,
@@ -151,8 +152,19 @@ def context_limits(settings: Settings) -> ContextLimits:
     )
 
 
+def llm_limits(settings: Settings) -> LlmLimits:
+    """Окно модели и резерв под ответ из настроек."""
+    return LlmLimits(
+        window_tokens=settings.llm_context_window_tokens,
+        max_output_tokens=settings.llm_max_output_tokens,
+    )
+
+
 def build_review_handler(
-    deps: ReviewHandlerDeps, limits: ContextLimits, prompt_texts: PromptTexts
+    deps: ReviewHandlerDeps,
+    limits: ContextLimits,
+    model_limits: LlmLimits,
+    prompt_texts: PromptTexts,
 ) -> MessageHandler:
     def handle(body: bytes) -> None:
         job = from_wire_message(body)
@@ -165,6 +177,7 @@ def build_review_handler(
                 definition_extractor=deps.definition_extractor(),
                 cache_store=deps.cache_store(),
                 context_limits=limits,
+                llm_limits=model_limits,
                 prompt_texts=prompt_texts,
                 now=lambda: datetime.now(UTC),
                 monotonic=time.monotonic,
@@ -194,5 +207,7 @@ def run_worker(settings: Settings) -> None:
         if swept:
             logger.warning("зависших прогонов переведено в failed: %d", swept)
 
-    handler = build_review_handler(container, context_limits(settings), prompt_texts)
+    handler = build_review_handler(
+        container, context_limits(settings), llm_limits(settings), prompt_texts
+    )
     build_worker(settings).run(handler, sweep=sweep)

@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 
 from app.application.context_assembly import ContextLimits
+from app.application.llm_review import LlmLimits
 from app.application.ports.llm_gateway import LlmTask
 from app.application.review_pipeline import run_review
 from app.domain.entities import MergeRequest, ReviewJob, ReviewRun, RuleRef
@@ -36,6 +37,7 @@ from ..fakes.webhooks import FakeVcs
 # Дифф фейкового VCS меняет первую строку `app/main.py`.
 CHANGED_FILE = "app/main.py"
 LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144)
+LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
 TEXTS = PromptTexts(review_system="ревью", verifier_system="верификация")
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
@@ -115,6 +117,7 @@ def _run(uow: FakeUnitOfWork, gateway: object, **overrides: object) -> None:
         "definition_extractor": FakeExtractor(),
         "cache_store": FakeCache(),
         "context_limits": LIMITS,
+        "llm_limits": LLM_LIMITS,
         "prompt_texts": TEXTS,
         "now": _Clock().now,
         "monotonic": _Monotonic(0.0, 12.5),

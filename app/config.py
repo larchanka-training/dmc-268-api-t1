@@ -88,6 +88,19 @@ class Settings(BaseSettings):
         gt=0,
         description="Больший файл попадает в контекст без AST-окружения",
     )
+    # Окно модели и резерв в нём под ответ (change add-llm-gateway, design D5).
+    # Окно одно на все провайдеры - наименьшее из окон настроенных моделей;
+    # резерв уходит провайдеру пределом длины ответа.
+    llm_context_window_tokens: int = Field(
+        default=65_536,
+        gt=0,
+        description="Окно модели в токенах: запрос вместе с резервом ответа обязан в него помещаться",
+    )
+    llm_max_output_tokens: int = Field(
+        default=4_096,
+        gt=0,
+        description="Резерв окна под ответ модели и предел длины ответа",
+    )
 
 
 def load_settings() -> Settings:

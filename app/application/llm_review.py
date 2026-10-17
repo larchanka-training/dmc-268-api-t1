@@ -37,15 +37,28 @@ from app.domain.result import Result
 
 
 @dataclass(frozen=True, slots=True)
+class LlmLimits:
+    """Окно модели и резерв в нём под ответ - из конфигурации, как `ContextLimits`."""
+
+    window_tokens: int
+    max_output_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class VerificationAnswer:
     verdicts: Result[dict[str, Verdict]]
     tokens_used: int
 
 
 def request_review(
-    context: ContextPayload, texts: PromptTexts, gateway: LlmGateway
+    context: ContextPayload, texts: PromptTexts, gateway: LlmGateway, *, limits: LlmLimits
 ) -> LlmReviewResult:
-    request = LlmRequest(LlmTask.REVIEW, build_review_prompt(texts, context.body), ReviewOutput)
+    request = LlmRequest(
+        LlmTask.REVIEW,
+        build_review_prompt(texts, context.body),
+        ReviewOutput,
+        max_output_tokens=limits.max_output_tokens,
+    )
     response = gateway.complete(request)
     return to_review_result(response.content, model=response.model, tokens_used=response.tokens_used)
 
@@ -55,11 +68,14 @@ def request_verification(
     texts: PromptTexts,
     gateway: LlmGateway,
     candidates: Sequence[Finding],
+    *,
+    limits: LlmLimits,
 ) -> VerificationAnswer:
     request = LlmRequest(
         LlmTask.VERIFY,
         build_verification_prompt(texts, context.body, candidates),
         VerificationOutput,
+        max_output_tokens=limits.max_output_tokens,
     )
     response = gateway.complete(request)
     return VerificationAnswer(

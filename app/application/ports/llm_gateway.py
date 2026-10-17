@@ -50,6 +50,9 @@ class LlmRequest[T: BaseModel]:
     task: LlmTask
     messages: tuple[PromptMessage, ...]
     response_model: type[T]
+    # Предел длины ответа - резерв окна модели под ответ; адаптер передаёт его
+    # провайдеру, чтобы ответ не вытеснил запрос из окна.
+    max_output_tokens: int
 
 
 @dataclass(frozen=True, slots=True)

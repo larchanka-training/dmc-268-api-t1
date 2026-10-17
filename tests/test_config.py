@@ -71,6 +71,20 @@ def test_context_limits_have_defaults() -> None:
     assert settings.rules_max_tokens < settings.context_max_tokens
 
 
+def test_llm_limits_have_defaults() -> None:
+    settings = make_settings()
+    assert settings.llm_context_window_tokens == 65_536
+    assert settings.llm_max_output_tokens == 4_096
+
+
+def test_llm_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_CONTEXT_WINDOW_TOKENS", "131072")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "8192")
+    settings = make_settings()
+    assert settings.llm_context_window_tokens == 131_072
+    assert settings.llm_max_output_tokens == 8_192
+
+
 def test_context_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CONTEXT_MAX_TOKENS", "16000")
     monkeypatch.setenv("AST_MAX_FILES", "5")
@@ -88,6 +102,8 @@ def test_context_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatc
         "rules_cache_ttl_seconds",
         "ast_max_files",
         "ast_max_file_bytes",
+        "llm_context_window_tokens",
+        "llm_max_output_tokens",
     ],
 )
 def test_context_limits_must_be_positive(field: str) -> None:
