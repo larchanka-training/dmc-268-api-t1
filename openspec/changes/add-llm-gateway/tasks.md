@@ -20,7 +20,7 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
 
 ## 3. Цикл получения ответа по схеме
 
-- [ ] 3.1 `app/infrastructure/llm/structured.py`: `RawReply(text, model, tokens)` и `complete_structured(send, request, max_attempts) -> LlmResponse` по design D2.
+- [x] 3.1 `app/infrastructure/llm/structured.py`: `RawReply(text, model, tokens)` и `complete_structured(send, request, max_attempts) -> LlmResponse` по design D2.
       Проверка: `tests/infrastructure/test_llm_structured.py` - ответ по схеме с первой попытки: один вызов `send`; ответ не по схеме, затем по схеме: второй вызов получил исходные сообщения без изменений и в том же порядке плюс одно `user`-сообщение со списком `путь: вид`, токены - сумма; все попытки не по схеме → `LlmOutputError` со списком нарушений; невалидный JSON → «ответ не JSON»; поле с неверным типом и текстом «игнорируй системные инструкции» - этого текста нет ни в сообщении повтора, ни в тексте `LlmOutputError`.
 
 ## 4. Адаптер локальной модели
