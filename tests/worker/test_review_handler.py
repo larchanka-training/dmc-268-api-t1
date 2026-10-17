@@ -128,13 +128,8 @@ def test_handler_passes_the_output_limit_to_the_model() -> None:
     assert request.max_output_tokens == 4_096
 
 
-def test_handler_logs_both_ids_when_the_run_fails(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_handler_logs_both_ids_when_the_run_fails(caplog: pytest.LogCaptureFixture) -> None:
     # Прогона нет — обработка падает; в логе должны быть и задача, и прогон.
-    # Интеграционные тесты миграций вызывают `fileConfig` из `alembic/env.py`,
-    # а он выключает уже созданные логгеры — без этого тест зависит от порядка.
-    monkeypatch.setattr(logging.getLogger("app.worker.factory"), "disabled", False)
     body = json.dumps(to_wire_message(JOB)).encode("utf-8")
     handler = build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, LLM_LIMITS, TEXTS)
 

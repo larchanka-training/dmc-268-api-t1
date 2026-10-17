@@ -16,7 +16,11 @@ from app.infrastructure.db.base import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Не выключать логгеры, созданные до миграций: по умолчанию `fileConfig`
+    # глушит каждый уже существующий логгер. Миграции идут и внутри процесса
+    # тестов - тогда логи приложения, созданные раньше, молча пропадали бы, а
+    # проверки «в логе нет ключа» проходили бы впустую.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
