@@ -10,7 +10,7 @@ context: |
   Backend stack: Python, FastAPI, SQLAlchemy v2, Alembic, PostgreSQL, uv (package
   manager), ruff + pylint (lint), Ollama SDK (LLM gateway).
   System design: RabbitMQ (job queue), Redis (cache/idempotency, tentative),
-  private sub-network between services, JWT authorization, idempotency keys,
+  private sub-network between services, session in an httpOnly cookie, idempotency keys,
   rate limiting.
   Frontend (separate repo): TypeScript, React, pnpm, Vite + Vitest, eslint,
   zod, zustand.

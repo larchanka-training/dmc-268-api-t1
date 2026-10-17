@@ -1,0 +1,45 @@
+"""Вошедший пользователь для тестов ручек, которым сессия не предмет проверки."""
+
+from datetime import UTC, datetime
+from uuid import UUID
+
+from fastapi import FastAPI
+
+from app.api.dependencies import get_unit_of_work_factory
+from app.api.session import SESSION_COOKIE, current_user
+from app.domain.entities import User
+from app.domain.enums import Provider
+from app.domain.session import open_session
+
+from .unit_of_work import FakeUnitOfWork
+
+SIGNED_IN = User(
+    id=UUID("01920000-0000-7000-8000-0000000000aa"),
+    provider=Provider.GITHUB,
+    provider_user_id="583231",
+    login="octocat",
+    name="The Octocat",
+    avatar_url=None,
+    created_at=datetime(2026, 10, 1, tzinfo=UTC),
+    updated_at=datetime(2026, 10, 1, tzinfo=UTC),
+)
+
+
+def sign_in(app: FastAPI, user: User = SIGNED_IN) -> None:
+    """Подменить проверку сессии: запросы идут от `user`."""
+    app.dependency_overrides[current_user] = lambda: user
+
+
+SESSION_TOKEN = "signed-in-session"
+
+
+def sign_in_with_session(app: FastAPI, uow: FakeUnitOfWork) -> dict[str, str]:
+    """Вошедший пользователь с живой сессией в `uow` — для ручек, которые
+    перечитывают сессию сами, как поток SSE. Возвращает cookie для клиента."""
+    sign_in(app)
+    uow.users.add(SIGNED_IN)
+    uow.sessions.add(
+        open_session(UUID(int=0xA5), SIGNED_IN.id, SESSION_TOKEN, datetime.now(UTC))
+    )
+    app.dependency_overrides[get_unit_of_work_factory] = lambda: lambda: uow
+    return {SESSION_COOKIE: SESSION_TOKEN}

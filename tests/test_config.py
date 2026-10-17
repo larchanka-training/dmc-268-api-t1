@@ -18,6 +18,7 @@ DATABASE_URL = "postgresql+psycopg://test:test@localhost/test"
 RABBITMQ_URL = "amqp://guest:guest@localhost//"
 PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\nreal-key-material\n-----END PRIVATE KEY-----"
 WEBHOOK_SECRET = "real-webhook-secret-material"
+CLIENT_SECRET = "real-client-secret-material"
 
 
 def make_settings() -> Settings:
@@ -27,6 +28,9 @@ def make_settings() -> Settings:
         github_app_id="123456",
         github_app_private_key=PRIVATE_KEY,
         github_webhook_secret=WEBHOOK_SECRET,
+        github_app_client_id="Iv1.client",
+        github_app_client_secret=CLIENT_SECRET,
+        public_origin="https://review.example/",
     )
 
 
@@ -34,6 +38,7 @@ def test_repr_hides_both_secrets() -> None:
     rendered = repr(make_settings())
     assert "real-key-material" not in rendered
     assert "real-webhook-secret-material" not in rendered
+    assert CLIENT_SECRET not in rendered
     assert "BEGIN PRIVATE KEY" not in rendered
 
 
@@ -41,6 +46,7 @@ def test_str_hides_both_secrets() -> None:
     rendered = str(make_settings())
     assert "real-key-material" not in rendered
     assert "real-webhook-secret-material" not in rendered
+    assert CLIENT_SECRET not in rendered
 
 
 def test_secrets_are_readable_through_get_secret_value() -> None:
@@ -63,6 +69,12 @@ def test_stale_timeout_must_be_positive() -> None:
             github_webhook_secret="s",
             stale_run_timeout_seconds=0,
         )
+
+
+def test_the_client_secret_is_readable_and_the_origin_has_no_trailing_slash() -> None:
+    settings = make_settings()
+    assert settings.github_app_client_secret.get_secret_value() == CLIENT_SECRET
+    assert settings.public_origin == "https://review.example"
 
 
 def test_context_limits_have_defaults() -> None:

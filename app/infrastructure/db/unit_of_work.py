@@ -14,6 +14,8 @@ from app.application.ports.repositories import (
     PublishedCommentRepo,
     RepositoryRepo,
     ReviewRunRepo,
+    SessionRepo,
+    UserRepo,
 )
 from app.application.ports.unit_of_work import ActiveRunConflict
 from app.infrastructure.db.repositories import (
@@ -23,6 +25,8 @@ from app.infrastructure.db.repositories import (
     SqlAlchemyPublishedCommentRepo,
     SqlAlchemyRepositoryRepo,
     SqlAlchemyReviewRunRepo,
+    SqlAlchemySessionRepo,
+    SqlAlchemyUserRepo,
 )
 
 # Частичные уникальные индексы гонки доставок: их отказ переводится в
@@ -57,6 +61,8 @@ class SqlAlchemyUnitOfWork:
         self.published_comments: PublishedCommentRepo = SqlAlchemyPublishedCommentRepo(
             session
         )
+        self.users: UserRepo = SqlAlchemyUserRepo(session)
+        self.sessions: SessionRepo = SqlAlchemySessionRepo(session)
         return self
 
     def __exit__(

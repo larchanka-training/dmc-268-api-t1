@@ -98,6 +98,25 @@ variable "github_app_private_key" {
   sensitive   = true
 }
 
+variable "github_app_client_id" {
+  type        = string
+  description = "Client ID GitHub App для входа пользователей (GITHUB_APP_CLIENT_ID). Пустой — вход не работает."
+  default     = ""
+}
+
+variable "github_app_client_secret" {
+  type        = string
+  description = "Client secret GitHub App для входа пользователей (GITHUB_APP_CLIENT_SECRET). Не коммитить."
+  default     = ""
+  sensitive   = true
+}
+
+variable "public_origin" {
+  type        = string
+  description = "Публичный origin интерфейса без завершающего / (PUBLIC_ORIGIN): сверка Origin и callback входа. Пустой — изменяющие запросы с сессией получают 403."
+  default     = ""
+}
+
 variable "github_webhook_secret" {
   type        = string
   description = "Общий секрет, которым GitHub подписывает доставки вебхуков (X-Hub-Signature-256). Не коммитить."
