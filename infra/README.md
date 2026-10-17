@@ -57,10 +57,10 @@ cd infra && tofu init -backend=false -upgrade && tofu providers lock \
 
 | Переменная | Откуда |
 | --- | --- |
-| `github_app_id` | переменная `GITHUB_APP_ID_DMC268_T1` |
-| `github_app_private_key` | секрет `GITHUB_APP_PRIVATE_KEY_DMC268_T1` — PEM целиком, с переносами строк |
-| `github_app_client_id` | переменная `GITHUB_APP_CLIENT_ID_DMC268_T1` |
-| `github_app_client_secret` | секрет `GITHUB_APP_CLIENT_SECRET_DMC268_T1` |
+| `github_app_id` | переменная `APP_ID_DMC268_T1` |
+| `github_app_private_key` | секрет `APP_PRIVATE_KEY_DMC268_T1` — PEM целиком, с переносами строк |
+| `github_app_client_id` | переменная `APP_CLIENT_ID_DMC268_T1` |
+| `github_app_client_secret` | секрет `APP_CLIENT_SECRET_DMC268_T1` |
 | `public_origin` | `https://` + `VPS_DMC268_IP_T1`: интерфейс отдаётся по HTTPS на тот же адрес. Callback `<public_origin>/api/v1/auth/github/callback` регистрируется в настройках GitHub App |
 
 Из этого стека наружу не смотрит ничего. API, PostgreSQL и RabbitMQ публикуются на петле сервера, воркер не публикуется вовсе; снаружи доступен только интерфейс, и API — через его `/api/`.
