@@ -64,7 +64,7 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
 
 ## 9. Few-shot примеры
 
-- [ ] 9.1 `prompts/review/few-shot.md` по design D8 и строка в `REVIEW_SYSTEM_PARTS` (`app/infrastructure/prompts.py`); `prompts/review/README.md` - состав системного сообщения.
+- [x] 9.1 `prompts/review/few-shot.md` по design D8 и строка в `REVIEW_SYSTEM_PARTS` (`app/infrastructure/prompts.py`); `prompts/review/README.md` - состав системного сообщения.
       Проверка: `tests/infrastructure/test_prompts.py` - настоящий `prompts/review/` загружается, тело few-shot стоит в конце системного сообщения ревью; каждый блок ` ```json ` из тела проходит `ReviewOutput.model_validate_json`; среди них есть замечание с `rule` без префикса атрибуции, замечание с `rule: null` и ответ с пустым `findings`.
 
 ## 10. Архитектурные документы
