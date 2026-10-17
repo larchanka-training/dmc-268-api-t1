@@ -69,7 +69,7 @@ HTTP-адаптеры тестируются на `httpx.MockTransport`, как 
 
 ## 10. Архитектурные документы
 
-- [ ] 10.1 `docs/BACKEND_ARCHITECTURE.md`: строка `LlmGateway` в таблице портов - адаптеры Ollama, Eurorouter и составной; модель угроз по design D9; раздел конфигурации - переменные D7.
+- [x] 10.1 `docs/BACKEND_ARCHITECTURE.md`: строка `LlmGateway` в таблице портов - адаптеры Ollama, Eurorouter и составной; модель угроз по design D9; раздел конфигурации - переменные D7.
       `docs/SYSTEM_DESIGN.md`: провайдеры и порядок фоллбэка на схеме и в сквозном пути.
       Проверка: `uv run pytest tests/test_docs.py`; ревью текста в PR.
 
