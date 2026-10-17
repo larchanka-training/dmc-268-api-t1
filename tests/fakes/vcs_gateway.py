@@ -9,6 +9,7 @@ from app.application.ports.vcs_review import (
     PullRequestReviewPublication,
 )
 from app.domain.entities import PRMetadata
+from app.domain.enums import MergeRequestState
 
 # Как у `FakeVcs`: первая строка `app/main.py` в диффе для сборки контекста.
 _PIPELINE_DIFF = (
@@ -29,6 +30,10 @@ class RecordingVcsGateway:
     publications: list[tuple[str, tuple[InlineCommentDraft, ...]]] = field(
         default_factory=list
     )
+    # Контекст PR для сборки пакета: описание и сообщения коммитов (новые первыми).
+    pr_title: str = "feat: изменение"
+    pr_description: str = ""
+    commit_messages: tuple[str, ...] = ()
 
     def fetch_diff(
         self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
@@ -38,7 +43,22 @@ class RecordingVcsGateway:
     def fetch_pr_metadata(
         self, repo_full_name: str, pr_number: int, installation_id: int
     ) -> PRMetadata:
-        raise NotImplementedError
+        return PRMetadata(
+            number=pr_number,
+            head_sha="a" * 40,
+            base_sha="b" * 40,
+            title=self.pr_title,
+            description=self.pr_description,
+            author="author",
+            source_branch="feat",
+            target_branch="develop",
+            state=MergeRequestState.OPEN,
+        )
+
+    def fetch_pr_commit_messages(
+        self, repo_full_name: str, pr_number: int, installation_id: int
+    ) -> tuple[str, ...]:
+        return self.commit_messages
 
     def fetch_file(
         self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int

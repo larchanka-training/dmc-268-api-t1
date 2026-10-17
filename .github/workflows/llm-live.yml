@@ -1,0 +1,73 @@
+name: LLM live
+
+# Живые тесты против настоящего EUrouter с ключом организации (change
+# add-llm-gateway, design D11). Каждый прогон - платный вызов, поэтому только
+# при правках кода, который ходит к модели или собирает для неё запрос, и
+# вручную. Фильтр путей вешается на workflow целиком - отсюда отдельный файл,
+# а не job в ci.yml. Запросы синтетические: код проверяемых репозиториев
+# наружу не уходит.
+on:
+  pull_request:
+    # Списки путей у pull_request и push совпадают; якорь YAML не годится -
+    # его не разбирает actionlint.
+    paths:
+      - "app/infrastructure/llm/**"
+      - "app/infrastructure/container.py"
+      - "app/application/llm_*.py"
+      - "app/application/ports/llm_gateway.py"
+      - "app/domain/prompt.py"
+      - "app/domain/untrusted.py"
+      - "app/config.py"
+      - "prompts/**"
+      - "tests/live/**"
+      - ".github/workflows/llm-live.yml"
+  push:
+    branches: [main, develop]
+    paths:
+      - "app/infrastructure/llm/**"
+      - "app/infrastructure/container.py"
+      - "app/application/llm_*.py"
+      - "app/application/ports/llm_gateway.py"
+      - "app/domain/prompt.py"
+      - "app/domain/untrusted.py"
+      - "app/config.py"
+      - "prompts/**"
+      - "tests/live/**"
+      - ".github/workflows/llm-live.yml"
+  workflow_dispatch:
+
+# У токена прогона только чтение: workflow ничего не пишет в репозиторий.
+permissions:
+  contents: read
+
+concurrency:
+  group: llm-live-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  eurorouter:
+    runs-on: ubuntu-latest
+    # Таймаут запроса к модели - 300 с, попыток по схеме - две.
+    timeout-minutes: 20
+    env:
+      # Ключ и адрес выдала организация; GitHub маскирует секрет в логе.
+      EUROROUTER_API_KEYS: ${{ secrets.AI_DMC268_T1 }}
+      EUROROUTER_BASE_URL: ${{ vars.AI_DMC268_URL }}
+      # Модель записана здесь: сменить её - правка этого файла.
+      EUROROUTER_MODEL: qwen3-coder-30b-a3b
+    steps:
+      - uses: actions/checkout@v7
+      # Точная версия: плавающих мажорных тегов у setup-uv нет.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.21"
+          python-version: "3.14"
+      - run: uv sync --all-extras --frozen
+      - name: pytest -m live (пропуск теста - провал)
+        run: |
+          set -o pipefail
+          uv run pytest -q -rs -m live tests/live | tee pytest.out
+          if grep -qE '[0-9]+ skipped' pytest.out; then
+            echo "::error::живой тест пропущен: нет секрета AI_DMC268_T1 или переменной AI_DMC268_URL в окружении прогона"
+            exit 1
+          fi

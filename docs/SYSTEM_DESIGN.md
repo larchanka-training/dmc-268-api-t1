@@ -12,7 +12,8 @@ flowchart TB
     GH[GitHub<br/>PR / Push Events]
     GHR[GitHub<br/>Review Comments / Status]
     PP[Payment Provider<br/>Stripe / etc.]
-    LLM[LLM Provider / LLM API<br/>self-hosted or hosted]
+    OLLAMA[Ollama · local model<br/>in our network · primary]
+    EURO[Eurorouter · hosted LLM API<br/>opt-in fallback only]
     FE[Frontend<br/>PR History · Settings · Usage/Billing · Admin]
 
     %% Infrastructure
@@ -27,7 +28,7 @@ flowchart TB
         PARSE["DefinitionExtractor port · tree-sitter adapter<br/>outline of changed files for the ast tier<br/>used by orchestrator code, never by the model"]
         CACHE["CacheStore port · in-process TTL dict<br/>repo rules by (repo, base_sha)"]
         VCS["VcsGateway port · GitHub REST adapter<br/>diffs · metadata · file contents · comments · statuses<br/>GitHub App auth · backoff inside the adapter"]
-        LGW["LlmGateway port<br/>transport-only adapter to LLM Provider / LLM API<br/>prompt assembly is a pure function"]
+        LGW["LlmGateway port · fallback adapter<br/>Ollama first · Eurorouter only by flag<br/>answer checked against the response model"]
         REPOS["Repository ports + UnitOfWork<br/>SQLAlchemy adapters"]
     end
 
@@ -52,7 +53,8 @@ flowchart TB
 
     %% LLM
     ORCH <--> LGW
-    LGW <--> LLM
+    LGW <-->|primary| OLLAMA
+    LGW -.->|opt-in fallback| EURO
 
     %% Data and telemetry
     ORCH -->|runs · findings · context · comments · telemetry| REPOS
@@ -69,7 +71,7 @@ flowchart TB
     classDef infra fill:#fff6e8,stroke:#c88719,color:#111;
     classDef db fill:#f7eefc,stroke:#8a4db8,color:#111;
 
-    class GH,GHR,PP,LLM,FE external;
+    class GH,GHR,PP,OLLAMA,EURO,FE external;
     class API,WORKER,ORCH,VCS,LGW,REPOS,PARSE,CACHE core;
     class PAY planned;
     class MQ infra;
@@ -92,7 +94,7 @@ flowchart TB
 - **`app/worker` — консьюмер ревью (`python -m app.worker`)**: ходит минутами, ограничен латентностью модели; также выметает зависшие прогоны (`find_stale`, `last_progress_at`).
 - **Оркестрация - use cases слоя `application`**: сценарий ревью - сборка контекста и запроса (чистые функции), вызов ревью через `LlmGateway`, детерминированный отсев (`validate_anchor`, ссылка на правило, `deduplicate`), вызов верификатора, который может только отбросить замечание, публикация через `VcsGateway`; жизненный цикл прогона - `next_status`. Ретраи с exponential backoff живут в адаптерах. **Модель не получает инструментов и никогда не выбирает действий** - структурная защита от prompt injection (threat model в BACKEND_ARCHITECTURE.md).
 - **`VcsGateway` (порт; первый адаптер — GitHub REST)**: диффы (unified diff; сегодня hunk несёт 3 строки контекста, которые отдаёт GitHub, ±30 строк — запланированный уровень `surrounding`), метаданные, комментарии, статусы; аутентификация GitHub App с краткосрочными installation-токенами; содержимое файла на коммите — метод порта `fetch_file` (файлы диффа для уровня `ast` — по `head_sha`, `.review/rules.md` — по `base_sha`; лимиты применяет вызывающий). Payload'ы, синтаксис комментариев, auth и backoff — детали адаптера.
-- **`LlmGateway` (порт)**: транспортный адаптер к **LLM provider / LLM API** (self-hosted или hosted). Сборка промпта — чистая функция; адаптер только транспортирует. Выбор провайдера — конфигурация composition root; конкретный первый адаптер зафиксирован в BACKEND_ARCHITECTURE.md. Переход с self-hosted модели на hosted LLM API — в том числе решение по безопасности (крупнейший путь эксфильтрации), не только операционное.
+- **`LlmGateway` (порт)**: транспорт к модели. Провайдеры - локальная модель в Ollama (основная) и Eurorouter по OpenAI-совместимому протоколу (только фоллбэк и только при `LLM_HOSTED_FALLBACK=true`); порядок не выбирается, а собирается composition root из конфигурации, заглушка - только явным `LLM_BACKEND=stub`. Ответ проверяется Pydantic-моделью из запроса с повторами, ключи Eurorouter ротируются. Сборка промпта и проверка окна модели - чистые функции; адаптер только транспортирует. Включение hosted-фоллбэка - решение по безопасности (крупнейший путь эксфильтрации), не только операционное; детали - в BACKEND_ARCHITECTURE.md.
 - **Данные и телеметрия**: не отдельный сервис. Стоимость прогона — колонки `model`, `tokens_used`, `duration_seconds`, `failure_reason` в `review_runs`; per-call аудит (вызовы LLM и инструментов) — будущий шов, его первый заказчик — биллинг по токенам.
 - **Payments / accounts**: сегодня спроектирована только таблица `accounts` — она придёт вместе со своим портом (регистрация репозитория с проверкой прав на него); тарифы, подписки, Stripe — запланированный шов. Приоритет платных тарифов — требование к обслуживанию очереди (раздел 4.2), код порта оно не затрагивает.
 - **Контекст без клона (принцип)**: репозиторий никогда не клонируется целиком и не хранится — Repository Indexer, Vector DB и Repository Storage исключены из дизайна. Весь контекст строится из данных PR через `VcsGateway`: дифф, AST-окружение изменённых строк (уровень `ast`) и правила владельца из целевой ветки; запланированы ±30 строк вокруг изменений, полные тексты изменённых файлов и сигнатуры из файлов, на которые ссылаются импорты. Анализ кода (tree-sitter за портом `DefinitionExtractor`) идёт над файлами, полученными через `VcsGateway`, и используется кодом оркестратора, а не моделью.
@@ -104,7 +106,7 @@ flowchart TB
 3. **Очередь**: задача публикуется в RabbitMQ через `JobQueue.enqueue`.
 4. **Консюмер**: `app/worker` вычитывает сообщение (job); устойчивая сущность — `ReviewRun` (переименована из `ReviewJob`, чтобы строка БД не делила имя с сообщением очереди).
 5. **Сбор контекста**: use case иерархически собирает контекст (раздел 5) и сохраняет показанное модели в `context_payloads`; редакция секретов до вставки — запланирована (задача #28).
-6. **Генерация**: вызов ревью через `LlmGateway`; модель возвращает структурированные findings по Pydantic-модели ответа, а не прозу.
+6. **Генерация**: запрос, не помещающийся вместе с резервом ответа в окно модели, не отправляется; вызов ревью через `LlmGateway` - локальная модель, при её сбое и включённом фоллбэке Eurorouter; модель возвращает структурированные findings по Pydantic-модели ответа, а не прозу, ответ не по схеме повторяется.
 7. **Валидация**: детерминированный отсев - `validate_anchor` отбрасывает замечания вне диффа, ссылка на правило проверяется по показанным модели правилам, `deduplicate` убирает повторы (отклонения считаются на прогоне); затем второй вызов - верификатор (Reflection Pass) - отбрасывает галлюцинации, а при сбое прогон продолжается с замечаниями после отсева (fail-open); переходы статуса - через `next_status`.
 8. **Публикация**: `VcsGateway` публикует Review Comments и статусы; каждый опубликованный комментарий фиксируется в `published_comments`.
 9. **Телеметрия**: `model`, `tokens_used`, `duration_seconds`, `failure_reason` пишутся в `review_runs`.
@@ -174,17 +176,20 @@ JSON-сообщение; тело несёт только доменные да�
     - **Данные (построено):** окружение изменённых строк — `VcsGateway.fetch_file` довыбирает изменённые файлы по `head_sha` (лимиты `ast_max_files`, `ast_max_file_bytes`), tree-sitter за портом `DefinitionExtractor` отдаёт контур файла (Python, TypeScript/TSX, JavaScript, Go), чистая `select_scopes` оставляет определения, охватывающие изменённые строки, — родительский класс и сигнатуру метода, — плюс импорты файла.
     - **Данные (запланировано):** сигнатуры из файлов, на которые ссылаются импорты, — индекс определений основной ветки (change `add-tree-sitter-index`).
     - **Цель:** выявление сайд-эффектов — например, изменение аргументов функции в файле A, когда она также используется в файле B.
+- **Контекст PR**
+    - **Данные:** заголовок и описание PR (`fetch_pr_metadata`) и сообщения его коммитов от нового к старому (`fetch_pr_commit_messages`), каждый текст - в своём блоке недоверенных данных, поле пакета `pull_request_context`. Сбой получения деградирует пакет (`omitted`), а не прогон.
+    - **Цель:** намерение автора, ради которого модель правильно читает дифф; в системное сообщение текст автора PR не попадает.
 - **Правила владельца репозитория**
     - **Данные:** `.review/rules.md`, прочитанный через `VcsGateway` на `base_sha` — коммите целевой ветки, а не PR; разбор Markdown в правила (имя, паттерны, исключения, проверки), в пакет — только правила, применимые к файлам диффа. Кэш — `CacheStore` по ключу «репозиторий, base_sha». Нет файла, сбой, превышение лимита — стандартные критерии, прогон не прерывается.
     - **Цель:** ревью по конвенциям конкретного проекта (спеки `repo-rules`, `ai-review-prompting`).
 
-Пакет собирает чистая `assemble_context` (тело `context-payload/v1`, один чанк); всё I/O — сценарий `build_review_context`. Сбой получения диффа завершает прогон ошибкой, сбои правил и AST деградируют пакет.
+Пакет собирает чистая `assemble_context` (тело `context-payload/v1`, один чанк); всё I/O — сценарий `build_review_context`. Сбой получения диффа завершает прогон ошибкой, сбои контекста PR, правил и AST деградируют пакет.
 
 Безопасность и лимиты (угрозы — threat model в BACKEND_ARCHITECTURE.md):
 
 - каждый текст из репозитория лежит в блоке `<<<untrusted kind=… id=…>>>` с границей от sha256 содержимого и никогда не конкатенируется в инструкцию; невидимые символы заменяются записью `<U+XXXX>`; правила читаются только из целевой ветки — защита от prompt injection через ревьюимый код и `rules.md`;
 - редакция секретов до вставки в `context_payloads` — таблица хранит чужой исходный код verbatim (задача #28);
-- жёсткий лимит пакета `context_max_tokens` (32 000 по умолчанию; оценка — байты UTF-8 / 4 сериализованного тела, средняя, а не верхняя граница; лимит — пакета, а не окна модели: окно вмещает пакет, системный промпт и ответ, точный подсчёт — токенизатором в реальном `LlmGateway`): приоритет — правила в пределах своей доли, затем дифф, затем AST; не поместившееся перечисляется в `omitted`; лимиты на число и размер довыбираемых файлов. Лимита на длительность прогона пока нет.
+- жёсткий лимит пакета `context_max_tokens` (32 000 по умолчанию; оценка — байты UTF-8 / 4 сериализованного тела, средняя, а не верхняя граница; лимит — пакета, а не окна модели: запрос целиком вместе с резервом ответа сверяется с окном `llm_context_window_tokens` до отправки): приоритет — контекст PR в пределах своей доли (`pr_context_max_tokens`), правила в пределах своей доли, затем дифф, затем AST; не поместившееся перечисляется в `omitted`; лимиты на число и размер довыбираемых файлов. Лимита на длительность прогона пока нет.
 
 AST-уровень — первый кандидат на вынос из монолита: если tree-sitter не устроит, выделяется сервис парсинга — один порт получает сетевой адаптер (Strangler Fig), структура кода не меняется.
 
@@ -192,4 +197,4 @@ AST-уровень — первый кандидат на вынос из мон
 
 **GitHub PR → Webhook (HMAC) → `app/api` → `JobQueue` / RabbitMQ → `app/worker` → Context Assembly → вызов ревью → отсев → вызов верификатора → `VcsGateway` → GitHub Review**
 
-Построено: webhook intake с проверкой HMAC, постановка задачи в очередь (`JobQueue` → RabbitMQ), парсинг/фильтрация диффа чистыми функциями домена - на стороне воркера, Context Assembly (дифф, AST-окружение, правила владельца под лимитом токенов), валидация привязок и дедупликация. Запланированные швы: `IdempotencyStore` (в живой цепочке его место - между `app/api` и очередью), адаптеры провайдеров LLM (`LlmGateway` пока заглушка; сборка запроса, разбор ответа и верификатор уже работают за портом) и публикация через `VcsGateway`.
+Построено: webhook intake с проверкой HMAC, постановка задачи в очередь (`JobQueue` → RabbitMQ), парсинг/фильтрация диффа чистыми функциями домена - на стороне воркера, Context Assembly (дифф, контекст PR, AST-окружение, правила владельца под лимитом токенов), транспорт к модели (`LlmGateway`: локальная модель в Ollama, Eurorouter - явным фоллбэком), детерминированный отсев, верификатор и публикация через `VcsGateway`. Запланированные швы: `IdempotencyStore` (в живой цепочке его место - между `app/api` и очередью); развёртывание Ollama на стенде - отдельная задача.

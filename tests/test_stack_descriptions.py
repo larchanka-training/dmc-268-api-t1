@@ -85,6 +85,32 @@ def infra_applies_migrations(text: str) -> bool:
     return has_resource and api_depends
 
 
+# Переменные модели воркера (change `add-llm-gateway`): без `LLM_BACKEND` воркер
+# не стартует, и описание, которое её не передаёт, роняет деплой проверкой
+# устойчивой работы воркера.
+_MODEL_ENV = r"(?:LLM|OLLAMA|EUROROUTER)_[A-Z_]+"
+
+
+def compose_worker_model_env(text: str) -> frozenset[str]:
+    """Имена переменных модели в окружении сервиса worker в compose."""
+    block = re.search(r"^  worker:\n(.*?)(?=^  \S|^\S|\Z)", text, re.MULTILINE | re.DOTALL)
+    if block is None:
+        return frozenset()
+    return frozenset(re.findall(rf"^\s+({_MODEL_ENV}):", block.group(1), re.MULTILINE))
+
+
+def infra_worker_model_env(text: str) -> frozenset[str]:
+    """Имена переменных модели в окружении контейнера воркера в Terraform."""
+    block = re.search(
+        r"resource\s+\"docker_container\"\s+\"worker\"\s*\{(.*?)^\}",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if block is None:
+        return frozenset()
+    return frozenset(re.findall(rf"\"({_MODEL_ENV})=", block.group(1)))
+
+
 def test_extractors_find_facts_that_are_present() -> None:
     """Шаблон, переставший находить факт, обязан падать здесь, а не молчать."""
     assert (
@@ -117,6 +143,19 @@ def test_extractors_find_facts_that_are_present() -> None:
         'resource "docker_container" "migrate" {}\n'
         "depends_on = [docker_container.migrate]"
     )
+    assert compose_worker_model_env(
+        "services:\n  worker:\n    environment:\n      # комментарий\n"
+        "      LLM_BACKEND: stub\n      DATABASE_URL: x\n  ollama:\n    environment:\n"
+        "      OLLAMA_HOST: 0.0.0.0\n"
+    ) == frozenset({"LLM_BACKEND"})
+    assert infra_worker_model_env(
+        'resource "docker_container" "worker" {\n'
+        '  env = concat(local.app_env, [\n'
+        '    "LLM_BACKEND=${var.llm_backend}",\n'
+        '    "GITHUB_APP_ID=${var.github_app_id}",\n'
+        "  ])\n}\n"
+        'resource "docker_container" "api" {\n  env = ["OLLAMA_MODEL=x"]\n}\n'
+    ) == frozenset({"LLM_BACKEND"})
 
 
 def test_extractors_report_absence_instead_of_a_blank() -> None:
@@ -127,6 +166,8 @@ def test_extractors_report_absence_instead_of_a_blank() -> None:
     assert infra_postgres_volume_path("ничего похожего") == NOT_FOUND
     assert not compose_applies_migrations("ничего похожего")
     assert not infra_applies_migrations('resource "docker_container" "migrate" {}')
+    assert compose_worker_model_env("ничего похожего") == frozenset()
+    assert infra_worker_model_env("ничего похожего") == frozenset()
 
 
 def test_both_descriptions_use_the_same_postgres_image() -> None:
@@ -159,3 +200,15 @@ def test_both_descriptions_apply_migrations_before_serving() -> None:
     assert infra_applies_migrations(
         INFRA.read_text()
     ), "infra/main.tf не применяет миграции до старта API"
+
+
+def test_both_descriptions_give_the_worker_the_same_model_settings() -> None:
+    """Без `LLM_BACKEND` воркер не стартует: описание без неё роняет деплой."""
+    compose = compose_worker_model_env(COMPOSE.read_text())
+    infra = infra_worker_model_env(INFRA.read_text())
+    assert "LLM_BACKEND" in compose, "docker-compose.yml не передаёт воркеру LLM_BACKEND"
+    assert "LLM_BACKEND" in infra, "infra/main.tf не передаёт воркеру LLM_BACKEND"
+    assert compose == infra, (
+        f"переменные модели воркера разошлись: только в compose {sorted(compose - infra)}, "
+        f"только в infra {sorted(infra - compose)}"
+    )

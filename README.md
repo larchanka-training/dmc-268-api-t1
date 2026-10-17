@@ -106,8 +106,8 @@ uv run uvicorn app.main:app --reload
 Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
 ```bash
-uv run pytest                           # 79 тестов, база не нужна
-TEST_DATABASE_URL=... uv run pytest     # 122 теста, вместе с адаптерами и миграциями
+uv run pytest -m "not live"                         # чистые тесты, база не нужна
+TEST_DATABASE_URL=... uv run pytest -m "not live"   # вместе с адаптерами и миграциями
 ```
 
 Тесты, которым нужен PostgreSQL, помечены `integration` и пропускаются, если
@@ -125,6 +125,16 @@ export TEST_DATABASE_URL="postgresql+psycopg://dmc:dmc@localhost:5432/dmc268_tes
 Роли, под которой идёт подключение, нужно право создавать роли: один из тестов
 создаёт роль, чтобы проверить, что пароль в percent-encoding корректно проходит
 через `alembic.ini`.
+
+Живые тесты (`tests/live/`, маркер `live`) ходят в настоящий EUrouter и платные, поэтому основной прогон CI их исключает.
+Их запускает workflow `LLM live` (`.github/workflows/llm-live.yml`) с ключом организации - секрет `AI_DMC268_T1` и переменная `AI_DMC268_URL` - на pull request и push, меняющих код модели или промпты, и вручную (`gh workflow run "LLM live"`).
+Запросы в них синтетические: код проверяемых репозиториев наружу не уходит.
+Без ключа тесты пропускаются; локально с ключом:
+
+```bash
+EUROROUTER_API_KEYS=... EUROROUTER_BASE_URL=https://api.eurouter.ai/api/v1 \
+EUROROUTER_MODEL=qwen3-coder-30b-a3b uv run pytest -m live tests/live
+```
 
 ## Проверки
 
@@ -183,3 +193,25 @@ App нужно разрешение **Contents: read**. Без него прог
 Формат правил — [`prompts/review/custom-rules.md`](prompts/review/custom-rules.md),
 лимиты сборки контекста (`CONTEXT_MAX_TOKENS`, `RULES_MAX_BYTES`,
 `AST_MAX_FILES`, …) — в [`app/config.py`](app/config.py).
+
+## Модель
+
+Воркер обращается к модели через адаптер, который выбирает `LLM_BACKEND`; без этой переменной воркер не стартует.
+
+- `stub` - заглушка без похода к модели: прогон доходит до `completed` с пустым ревью. Так по умолчанию работает `docker compose up`.
+- `ollama` - локальная модель в нашей сети (`OLLAMA_BASE_URL`, `OLLAMA_MODEL`).
+
+Локальная модель поднимается профилем compose:
+
+```bash
+docker compose --profile ollama up -d
+docker compose exec ollama ollama pull qwen2.5-coder:7b
+# в .env: LLM_BACKEND=ollama, OLLAMA_MODEL=qwen2.5-coder:7b
+docker compose up -d worker
+```
+
+Eurorouter (OpenAI-совместимый hosted-провайдер) подключается только фоллбэком после локальной модели и только при `LLM_HOSTED_FALLBACK=true` вместе с `EUROROUTER_BASE_URL`, `EUROROUTER_MODEL` и `EUROROUTER_API_KEYS` (ключи через запятую).
+Включение отправляет код проверяемых репозиториев за пределы нашей сети; какие провайдеры включены, воркер пишет в лог при старте.
+
+Окно модели (`LLM_CONTEXT_WINDOW_TOKENS`) должно вмещать пакет контекста (`CONTEXT_MAX_TOKENS`), системный промпт и резерв ответа (`LLM_MAX_OUTPUT_TOKENS`): иначе воркер не стартует.
+Все переменные с пояснениями - в [`.env.example`](.env.example).

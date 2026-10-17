@@ -1,14 +1,19 @@
 """Composition root связывает каждый порт ровно один раз — и только он."""
 
 import inspect
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+import pytest
 
 from app.api.dependencies import get_unit_of_work
 from app.application import ports
 from app.config import Settings
 from app.infrastructure.container import build_container
+from app.infrastructure.llm.fallback import FallbackLlmGateway
+from app.infrastructure.llm.stub import StubLlmGateway
 
 SETTINGS = Settings(
     database_url="postgresql+psycopg://test:test@localhost/test",
@@ -150,3 +155,58 @@ def test_the_fastapi_dependency_is_port_typed() -> None:
     annotation = str(signature.return_annotation)
     assert "UnitOfWork" in annotation
     assert "SqlAlchemy" not in annotation
+
+
+def _model_settings(**overrides: object) -> Settings:
+    return Settings(
+        database_url="postgresql+psycopg://test:test@localhost/test",
+        rabbitmq_url="amqp://guest:guest@localhost//",
+        github_webhook_secret="test-secret",
+        **overrides,  # type: ignore[arg-type]
+    )
+
+
+LOCAL = {"llm_backend": "ollama", "ollama_model": "qwen2.5-coder:7b"}
+HOSTED = {
+    "eurorouter_base_url": "https://eurorouter.example/v1",
+    "eurorouter_model": "mistral-large-2411",
+    "eurorouter_api_keys": "sk-secret-one",
+}
+
+
+def _built_gateway_log(caplog: pytest.LogCaptureFixture, **overrides: object) -> str:
+    container = build_container(_model_settings(**overrides))
+    with caplog.at_level(logging.INFO, logger="app.infrastructure.container"):
+        container.llm_gateway()
+    return "\n".join(record.getMessage() for record in caplog.records)
+
+
+def test_stub_is_handed_out_only_when_chosen() -> None:
+    gateway = build_container(_model_settings(llm_backend="stub")).llm_gateway()
+    assert isinstance(gateway, StubLlmGateway)
+
+
+def test_container_without_a_chosen_backend_refuses_to_build_a_gateway() -> None:
+    with pytest.raises(RuntimeError, match="LLM_BACKEND"):
+        build_container(SETTINGS).llm_gateway()
+
+
+def test_local_model_alone_keeps_the_code_in_our_network(caplog: pytest.LogCaptureFixture) -> None:
+    # Ключи Eurorouter заданы, но без флага фоллбэка провайдер не подключается.
+    log = _built_gateway_log(caplog, **LOCAL, **HOSTED)
+    assert log == "модель: Ollama (qwen2.5-coder:7b); hosted-фоллбэк выключен"
+
+
+def test_hosted_provider_is_only_ever_the_second(caplog: pytest.LogCaptureFixture) -> None:
+    log = _built_gateway_log(caplog, **LOCAL, **HOSTED, llm_hosted_fallback=True)
+    assert log == (
+        "модель: Ollama (qwen2.5-coder:7b); фоллбэк - Eurorouter (mistral-large-2411): "
+        "при сбое локальной модели код уходит hosted-провайдеру"
+    )
+
+
+def test_the_model_gateway_is_built_once() -> None:
+    container = build_container(_model_settings(**LOCAL))
+    gateway = container.llm_gateway()
+    assert isinstance(gateway, FallbackLlmGateway)
+    assert container.llm_gateway() is gateway

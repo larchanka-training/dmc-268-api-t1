@@ -19,7 +19,7 @@ from datetime import datetime
 from uuid import UUID
 
 from app.application.context_assembly import ContextLimits
-from app.application.llm_review import request_review, request_verification
+from app.application.llm_review import LlmLimits, request_review, request_verification
 from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
@@ -84,6 +84,7 @@ def run_review(
     definition_extractor: DefinitionExtractor,
     cache_store: CacheStore,
     context_limits: ContextLimits,
+    llm_limits: LlmLimits,
     prompt_texts: PromptTexts,
     now: Callable[[], datetime],
     monotonic: Callable[[], float],
@@ -137,7 +138,7 @@ def run_review(
 
         run = _transition(uow, run, ReviewRunStatus.ANALYSING, now())
 
-        result = request_review(context, prompt_texts, llm_gateway)
+        result = request_review(context, prompt_texts, llm_gateway, limits=llm_limits)
         screening = screen_findings(
             result.findings,
             hunks=assembled.hunks,
@@ -146,7 +147,9 @@ def run_review(
             now=now(),
             new_id=new_id,
         )
-        verification = _verify(context, prompt_texts, llm_gateway, screening.kept, run.id)
+        verification = _verify(
+            context, prompt_texts, llm_gateway, llm_limits, screening.kept, run.id
+        )
         run = replace(
             run,
             last_progress_at=now(),
@@ -196,6 +199,7 @@ def _verify(
     context: ContextPayload,
     texts: PromptTexts,
     gateway: LlmGateway,
+    limits: LlmLimits,
     candidates: Sequence[Finding],
     run_id: UUID,
 ) -> _Verification:
@@ -208,7 +212,7 @@ def _verify(
     if not candidates:
         return _Verification((), VerificationOutcome.NOT_REQUIRED, 0, 0)
     try:
-        answer = request_verification(context, texts, gateway, candidates)
+        answer = request_verification(context, texts, gateway, candidates, limits=limits)
     except LlmError:
         logger.warning(
             "верификатор недоступен для прогона %s, публикуются замечания после отсева",

@@ -20,7 +20,12 @@ DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts" / "review"
 
 # Части системного сообщения ревью в порядке склейки. Новая часть (например,
 # few-shot примеры) - новый файл и строка здесь; сборщик запроса не меняется.
-REVIEW_SYSTEM_PARTS: tuple[str, ...] = ("system.md", "comment-templates.md", "output-format.md")
+REVIEW_SYSTEM_PARTS: tuple[str, ...] = (
+    "system.md",
+    "comment-templates.md",
+    "output-format.md",
+    "few-shot.md",
+)
 VERIFIER_SYSTEM_PARTS: tuple[str, ...] = ("verifier.md",)
 
 _SEPARATOR = "---"

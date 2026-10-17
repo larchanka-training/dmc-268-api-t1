@@ -99,6 +99,8 @@ class GitHubVcsGateway:
                 head_sha=data["head"]["sha"],
                 base_sha=data["base"]["sha"],
                 title=data["title"],
+                # PR без описания GitHub отдаёт с `body: null`.
+                description=data.get("body") or "",
                 author=data["user"]["login"],
                 source_branch=data["head"]["ref"],
                 target_branch=data["base"]["ref"],
@@ -109,6 +111,19 @@ class GitHubVcsGateway:
                 "GitHub API вернул неожиданное тело на GET"
                 f" /repos/{repo_full_name}/pulls/{pr_number}: {error!r}"
             ) from error
+
+    def fetch_pr_commit_messages(
+        self, repo_full_name: str, pr_number: int, installation_id: int
+    ) -> tuple[str, ...]:
+        # GitHub отдаёт коммиты PR от старого к новому и не больше 250 - это
+        # не больше трёх страниц по 100.
+        url = f"/repos/{repo_full_name}/pulls/{pr_number}/commits"
+        commits = self._get_json_list_paginated(url, installation_id)
+        try:
+            messages = [str(item["commit"]["message"]) for item in commits]
+        except (KeyError, TypeError) as error:
+            raise VcsError(f"GitHub API вернул коммит без сообщения на GET {url}") from error
+        return tuple(reversed(messages))
 
     def publish_pull_request_review(
         self,

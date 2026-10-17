@@ -4,7 +4,9 @@
 (см. BACKEND_ARCHITECTURE.md, раздел «Конфигурация»).
 """
 
-from pydantic import Field, SecretStr
+from typing import Literal, Self
+
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -88,6 +90,95 @@ class Settings(BaseSettings):
         gt=0,
         description="Больший файл попадает в контекст без AST-окружения",
     )
+    # Доля пакета под контекст PR - заголовок, описание, сообщения коммитов;
+    # берётся первой, неистраченное уходит диффу (change add-llm-gateway, D6).
+    pr_context_max_tokens: int = Field(
+        default=1_000,
+        gt=0,
+        description="Доля бюджета контекста под заголовок, описание и коммиты PR",
+    )
+    # Окно модели и резерв в нём под ответ (change add-llm-gateway, design D5).
+    # Окно одно на все провайдеры - наименьшее из окон настроенных моделей;
+    # резерв уходит провайдеру пределом длины ответа.
+    llm_context_window_tokens: int = Field(
+        default=65_536,
+        gt=0,
+        description="Окно модели в токенах: запрос вместе с резервом ответа обязан в него помещаться",
+    )
+    llm_max_output_tokens: int = Field(
+        default=4_096,
+        gt=0,
+        description="Резерв окна под ответ модели и предел длины ответа",
+    )
+    # Провайдеры модели (change add-llm-gateway, design D3 и D7). Не задан -
+    # воркер не стартует: заглушка выбирается только явно. Необязательна здесь,
+    # потому что настройки общие с API, которому модель не нужна.
+    llm_backend: Literal["stub", "ollama"] | None = Field(
+        default=None,
+        description="Адаптер модели воркера: stub или ollama; обязателен для воркера",
+    )
+    ollama_base_url: str = Field(
+        default="http://ollama:11434",
+        description="Адрес Ollama в нашей сети",
+    )
+    ollama_model: str = Field(
+        default="",
+        description="Модель Ollama; обязательна при LLM_BACKEND=ollama",
+    )
+    # Код проверяемого репозитория уходит hosted-провайдеру только при явном
+    # включении и только после сбоя локальной модели: основным он не бывает.
+    llm_hosted_fallback: bool = Field(
+        default=False,
+        description="Включить Eurorouter фоллбэком после локальной модели",
+    )
+    eurorouter_base_url: str = Field(
+        default="",
+        description="Адрес OpenAI-совместимого API Eurorouter, например https://…/v1",
+    )
+    eurorouter_model: str = Field(default="", description="Модель Eurorouter")
+    # Несколько ключей через запятую: ключ, упёршийся в лимит, сменяется
+    # следующим (design D4). SecretStr - по той же причине, что ключ App.
+    eurorouter_api_keys: SecretStr = Field(
+        default=SecretStr(""),
+        description="Ключи Eurorouter через запятую",
+    )
+    llm_max_attempts: int = Field(
+        default=2,
+        ge=1,
+        description="Попыток получить ответ по схеме у одного провайдера",
+    )
+    llm_timeout_seconds: float = Field(
+        default=300,
+        gt=0,
+        description="Таймаут одного HTTP-запроса к модели, секунды",
+    )
+
+    @model_validator(mode="after")
+    def _check_model_providers(self) -> Self:
+        if self.llm_backend == "ollama" and not self.ollama_model:
+            raise ValueError("OLLAMA_MODEL обязателен при LLM_BACKEND=ollama")
+        if not self.llm_hosted_fallback:
+            return self
+        if self.llm_backend != "ollama":
+            raise ValueError("LLM_HOSTED_FALLBACK требует LLM_BACKEND=ollama: hosted - только фоллбэк")
+        missing = [
+            name
+            for name, value in (
+                ("EUROROUTER_BASE_URL", self.eurorouter_base_url),
+                ("EUROROUTER_MODEL", self.eurorouter_model),
+                ("EUROROUTER_API_KEYS", self.eurorouter_keys),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(f"LLM_HOSTED_FALLBACK=true требует {', '.join(missing)}")
+        return self
+
+    @property
+    def eurorouter_keys(self) -> tuple[SecretStr, ...]:
+        """Ключи Eurorouter по одному, без пустых и пробелов вокруг."""
+        raw = self.eurorouter_api_keys.get_secret_value()
+        return tuple(SecretStr(key.strip()) for key in raw.split(",") if key.strip())
 
 
 def load_settings() -> Settings:

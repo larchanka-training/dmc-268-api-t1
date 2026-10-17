@@ -8,6 +8,8 @@ from uuid import UUID
 import pytest
 
 from app.application.context_assembly import ContextLimits
+from app.application.llm_review import LlmLimits
+from app.application.ports.llm_gateway import LlmGateway
 from app.domain.entities import MergeRequest, ReviewJob, ReviewRun
 from app.domain.enums import (
     MergeRequestState,
@@ -21,10 +23,12 @@ from app.infrastructure.queue.rabbitmq import to_wire_message
 from app.worker.factory import build_review_handler
 
 from ..fakes.context import FakeCache, FakeExtractor
+from ..fakes.llm_gateway import ScriptedLlmGateway, review_response
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
 
-LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144)
+LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000)
+LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
 TEXTS = PromptTexts(review_system="ревью", verifier_system="верификация")
 
 JOB = ReviewJob(
@@ -44,14 +48,15 @@ JOB = ReviewJob(
 class _Deps:
     """Заглушка вместо `Container`: только то, что нужно обработчику."""
 
-    def __init__(self, uow: FakeUnitOfWork) -> None:
+    def __init__(self, uow: FakeUnitOfWork, gateway: LlmGateway | None = None) -> None:
         self._uow = uow
+        self._gateway = gateway or StubLlmGateway()
 
     def unit_of_work(self) -> FakeUnitOfWork:
         return self._uow
 
-    def llm_gateway(self) -> StubLlmGateway:
-        return StubLlmGateway()
+    def llm_gateway(self) -> LlmGateway:
+        return self._gateway
 
     def vcs_gateway(self) -> RecordingVcsGateway:
         return RecordingVcsGateway()
@@ -63,7 +68,8 @@ class _Deps:
         return FakeCache()
 
 
-def test_handler_parses_the_message_and_drives_the_run_to_completed() -> None:
+def _seeded_uow() -> FakeUnitOfWork:
+    """База с открытым PR и прогоном задачи в `queued`."""
     now = datetime(2026, 9, 29, tzinfo=UTC)
     uow = FakeUnitOfWork()
     mr_id = UUID(int=3)
@@ -95,9 +101,14 @@ def test_handler_parses_the_message_and_drives_the_run_to_completed() -> None:
             updated_at=now,
         )
     )
+    return uow
+
+
+def test_handler_parses_the_message_and_drives_the_run_to_completed() -> None:
+    uow = _seeded_uow()
     body = json.dumps(to_wire_message(JOB)).encode("utf-8")
 
-    handler = build_review_handler(_Deps(uow), LIMITS, TEXTS)
+    handler = build_review_handler(_Deps(uow), LIMITS, LLM_LIMITS, TEXTS)
     handler(body)
 
     run = uow.review_runs.get(JOB.review_run_id)
@@ -107,15 +118,20 @@ def test_handler_parses_the_message_and_drives_the_run_to_completed() -> None:
     assert run.verification is VerificationOutcome.NOT_REQUIRED
 
 
-def test_handler_logs_both_ids_when_the_run_fails(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Прогона нет — обработка падает; в логе должны быть и задача, и прогон.
-    # Интеграционные тесты миграций вызывают `fileConfig` из `alembic/env.py`,
-    # а он выключает уже созданные логгеры — без этого тест зависит от порядка.
-    monkeypatch.setattr(logging.getLogger("app.worker.factory"), "disabled", False)
+def test_handler_passes_the_output_limit_to_the_model() -> None:
+    gateway = ScriptedLlmGateway([review_response()])
     body = json.dumps(to_wire_message(JOB)).encode("utf-8")
-    handler = build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, TEXTS)
+
+    build_review_handler(_Deps(_seeded_uow(), gateway), LIMITS, LLM_LIMITS, TEXTS)(body)
+
+    (request,) = gateway.requests
+    assert request.max_output_tokens == 4_096
+
+
+def test_handler_logs_both_ids_when_the_run_fails(caplog: pytest.LogCaptureFixture) -> None:
+    # Прогона нет — обработка падает; в логе должны быть и задача, и прогон.
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+    handler = build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, LLM_LIMITS, TEXTS)
 
     with caplog.at_level(logging.ERROR), pytest.raises(LookupError):
         handler(body)
