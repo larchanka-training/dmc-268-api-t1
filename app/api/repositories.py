@@ -12,8 +12,10 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from app.api.dependencies import get_unit_of_work
+from app.api.errors import ERRORS_422
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
+from app.domain.enums import Provider
 
 # Сессия — на весь роутер: исключения видны здесь, а не в middleware.
 router = APIRouter(
@@ -29,7 +31,7 @@ MAX_LIMIT = 200
 
 class RepositoryResponse(BaseModel):
     id: UUID
-    provider: str
+    provider: Provider
     provider_id: str
     full_name: str
     default_branch: str
@@ -42,10 +44,20 @@ class RepositoryListResponse(BaseModel):
     items: list[RepositoryResponse]
 
 
-@router.get("", response_model=RepositoryListResponse)
+@router.get(
+    "",
+    response_model=RepositoryListResponse,
+    summary="Список зарегистрированных репозиториев",
+    response_description="Страница репозиториев.",
+    description=(
+        "Постранично, по времени регистрации, затем по id. limit выше 200 не отклоняется, а "
+        "приводится к 200. Общего числа записей в ответе нет: конец списка — страница короче limit."
+    ),
+    responses=ERRORS_422,
+)
 def list_repositories(
-    limit: int = Query(default=DEFAULT_LIMIT, ge=1),
-    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, description="Размер страницы; больше 200 приводится к 200."),
+    offset: int = Query(default=0, ge=0, description="Сколько записей пропустить."),
     uow: UnitOfWork = Depends(get_unit_of_work),
 ) -> RepositoryListResponse:
     repositories = uow.repositories.list_all(min(limit, MAX_LIMIT), offset)
@@ -53,7 +65,7 @@ def list_repositories(
         items=[
             RepositoryResponse(
                 id=r.id,
-                provider=r.provider.value,
+                provider=r.provider,
                 provider_id=r.provider_id,
                 full_name=r.full_name,
                 default_branch=r.default_branch,

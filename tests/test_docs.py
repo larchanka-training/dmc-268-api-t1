@@ -2,18 +2,21 @@
 
 Проверяются только факты, которые на стороне кода есть в машиночитаемом виде.
 Проза — нет, количество тестов — тоже: число, которое меняется от каждого
-нового теста, сделало бы этот файл обузой, а не защитой. Эти два факта уже
+нового теста, сделало бы этот файл обузой, а не защитой. Эти факты уже
 разъезжались с кодом, поэтому покрыты именно они.
+
+Контракт HTTP API — `docs/openapi/openapi.json` — экспорт схемы из кода: тест следит,
+что экспорт свежий и что схема описывает ошибки так, как их отдаёт сервер.
 """
 
 import json
 import re
 import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
-import pytest
-import yaml
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
@@ -29,10 +32,7 @@ BACKEND_RULES = ROOT / ".agents" / "rules" / "backend.md"
 README = ROOT / "README.md"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 PIPELINE_SPEC = ROOT / "docs" / "pipeline" / "PIPELINE_SPEC.md"
-OPENAPI = ROOT / "docs" / "openapi" / "openapi.yaml"
-FINDING_SCHEMA = ROOT / "docs" / "openapi" / "finding.schema.json"
-ERROR_SCHEMA = ROOT / "docs" / "openapi" / "error.schema.json"
-REVIEW_JOB_SCHEMA = ROOT / "docs" / "openapi" / "review-job.schema.json"
+OPENAPI = ROOT / "docs" / "openapi" / "openapi.json"
 
 # Ограничения, которые стоит зафиксировать: в обоих есть правило про NULL,
 # которое легко потерять и невозможно заметить снаружи.
@@ -142,86 +142,126 @@ def test_pipeline_spec_transition_table_matches_lifecycle() -> None:
     )
 
 
-def load_openapi_schemas() -> dict[str, Any]:
-    document = yaml.safe_load(OPENAPI.read_text())
-    return cast(dict[str, Any], document["components"]["schemas"])
+# --- Контракт API: экспорт схемы из кода -----------------------------------------
+
+PROBLEM_MEDIA_TYPE = "application/problem+json"
+TRACE_ID_HEADER_REF = "#/components/headers/X-Trace-ID"
+HTTP_METHODS = {"get", "put", "post", "delete", "patch", "head", "options", "trace"}
 
 
-# Аннотации не влияют на то, что схема принимает, и расходятся по делу: в json-схемах
-# описания длиннее, у openapi есть example.
-ANNOTATIONS = {"description", "example", "title", "$schema", "$id"}
+def load_openapi() -> dict[str, Any]:
+    return cast(dict[str, Any], json.loads(OPENAPI.read_text(encoding="utf-8")))
 
 
-def resolve_ref(ref: str) -> Any:
-    """`#/components/schemas/X` — из openapi.yaml, `x.schema.json` — соседний файл."""
-    if ref.startswith("#/components/schemas/"):
-        return load_openapi_schemas()[ref.rsplit("/", 1)[-1]]
-    return json.loads((OPENAPI.parent / ref).read_text())
+def ref_name(ref: str) -> str:
+    return ref.rsplit("/", 1)[-1]
 
 
-def schema_shape(node: Any) -> Any:
-    """Схема без аннотаций, с раскрытыми $ref и `required` без учёта порядка."""
-    if isinstance(node, list):
-        return [schema_shape(item) for item in node]
-    if not isinstance(node, dict):
-        return node
-    if "$ref" in node:
-        return schema_shape(resolve_ref(node["$ref"]))
-    shape: dict[str, Any] = {}
-    for key, value in node.items():
-        if key in ANNOTATIONS:
+def operation_responses(document: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+    """(«МЕТОД /путь статус», статус, ответ) — для всех ответов всех операций."""
+    return [
+        (f"{method.upper()} {path} {status}", status, response)
+        for path, item in document["paths"].items()
+        for method, operation in item.items()
+        if method in HTTP_METHODS
+        for status, response in operation["responses"].items()
+    ]
+
+
+def is_error_status(status: str) -> bool:
+    return status == "default" or status[0] in "45"
+
+
+def test_exported_contract_is_up_to_date() -> None:
+    """(а) `docs/openapi/openapi.json` — ровно то, что строит код; та же проверка, что `--check` в CI."""
+    from scripts.export_openapi import STALE_MESSAGE, render
+
+    assert OPENAPI.read_text(encoding="utf-8") == render(), f"{OPENAPI.relative_to(ROOT)}: {STALE_MESSAGE}"
+
+
+def test_every_error_code_is_in_the_discriminated_union() -> None:
+    """(б) Каждый `ErrorCode` — в `AnyProblem` с discriminator по `code`, у схемы кода свои константы."""
+    from app.api.problems import PROBLEM_MODELS, TITLES, ErrorCode, problem_type
+
+    assert set(PROBLEM_MODELS) == set(ErrorCode), "у каждого кода из ErrorCode должна быть модель в AnyProblem"
+    schemas = load_openapi()["components"]["schemas"]
+    any_problem = schemas["AnyProblem"]
+    assert any_problem["discriminator"]["propertyName"] == "code"
+    mapping = {code: ref_name(ref) for code, ref in any_problem["discriminator"]["mapping"].items()}
+    assert set(mapping) == {code.value for code in ErrorCode}
+    assert {ref_name(v["$ref"]) for v in any_problem["oneOf"]} == set(mapping.values())
+    for code in ErrorCode:
+        properties = schemas[mapping[code.value]]["properties"]
+        assert properties["code"]["const"] == code.value
+        assert properties["type"]["const"] == problem_type(code)
+        assert properties["title"]["const"] == TITLES[code]
+        assert set(schemas[mapping[code.value]]["required"]) >= {
+            "type", "title", "status", "detail", "instance", "code", "trace_id"
+        }
+
+
+def test_every_error_response_is_problem_json() -> None:
+    """(в) Каждый ответ 4xx/5xx и `default` — только `application/problem+json` с моделью ошибки;
+    у каждого ответа — заголовок `X-Trace-ID`."""
+    document = load_openapi()
+    problem_schemas = {"AnyProblem"} | {
+        ref_name(ref) for ref in document["components"]["schemas"]["AnyProblem"]["discriminator"]["mapping"].values()
+    }
+    problems = []
+    for where, status, response in operation_responses(document):
+        if response.get("headers", {}).get("X-Trace-ID") != {"$ref": TRACE_ID_HEADER_REF}:
+            problems.append(f"{where}: нет заголовка X-Trace-ID")
+        if not is_error_status(status):
             continue
-        if key == "properties":
-            # Здесь ключи — имена полей, а не ключевые слова: не фильтруем.
-            shape[key] = {name: schema_shape(prop) for name, prop in value.items()}
-        elif key == "required":
-            shape[key] = sorted(value)
-        else:
-            shape[key] = schema_shape(value)
-    return shape
+        content = response.get("content", {})
+        if set(content) != {PROBLEM_MEDIA_TYPE}:
+            problems.append(f"{where}: тип содержимого {sorted(content)}, а нужен только {PROBLEM_MEDIA_TYPE}")
+            continue
+        ref = content[PROBLEM_MEDIA_TYPE]["schema"].get("$ref", "")
+        if ref_name(ref) not in problem_schemas:
+            problems.append(f"{where}: схема {ref!r} — не модель ошибки")
+    assert not problems, "\n".join(problems)
 
 
-@pytest.mark.parametrize(
-    ("schema_name", "path"),
-    [
-        ("Finding", FINDING_SCHEMA),
-        ("ReviewJob", REVIEW_JOB_SCHEMA),
-        ("ReviewError", ERROR_SCHEMA),
-    ],
-)
-def test_json_schema_matches_openapi(schema_name: str, path: Path) -> None:
-    """*.schema.json повторяют схему из openapi.yaml целиком: поля, required, enum'ы, ограничения."""
-    doc_shape = schema_shape(json.loads(path.read_text()))
-    api_shape = schema_shape(load_openapi_schemas()[schema_name])
-    assert doc_shape == api_shape, (
-        f"{path} has drifted from openapi.yaml components.schemas.{schema_name}.\n"
-        f"  json:    {json.dumps(doc_shape, ensure_ascii=False, sort_keys=True)}\n"
-        f"  openapi: {json.dumps(api_shape, ensure_ascii=False, sort_keys=True)}"
+def can_fail_validation(parameter: dict[str, Any]) -> bool:
+    """Параметр, который может не пройти проверку: не просто строка (UUID, число, enum…)."""
+    schema = parameter["schema"]
+    return any(
+        variant.get("type") not in ("string", "null") or set(variant) - {"type", "title", "description"}
+        for variant in schema.get("anyOf", [schema])
     )
 
 
-def api_error_responses() -> list[tuple[str, str]]:
-    """(где, description) для каждого ответа openapi.yaml, тело которого — ApiError."""
-    document = yaml.safe_load(OPENAPI.read_text())
-    found = []
-    for path, item in document["paths"].items():
-        for method, operation in item.items():
-            if not isinstance(operation, dict) or "responses" not in operation:
-                continue
-            for status, response in operation["responses"].items():
-                schema = response.get("content", {}).get("application/json", {}).get("schema", {})
-                if schema.get("$ref") == "#/components/schemas/ApiError":
-                    found.append((f"{method.upper()} {path} {status}", response["description"]))
-    return found
+def test_no_framework_validation_error_in_the_contract() -> None:
+    """(г) 422 описан `ValidationProblem`, а не `HTTPValidationError` FastAPI; у операции с телом
+    или параметром, который может не пройти проверку, 422 объявлен."""
+    document = load_openapi()
+    schemas = document["components"]["schemas"]
+    assert "HTTPValidationError" not in schemas and "ValidationError" not in schemas
+    assert "HTTPValidationError" not in OPENAPI.read_text(encoding="utf-8")
+    missing = [
+        f"{method.upper()} {path}"
+        for path, item in document["paths"].items()
+        for method, operation in item.items()
+        if (operation.get("requestBody") or any(map(can_fail_validation, operation.get("parameters", []))))
+        and "422" not in operation["responses"]
+    ]
+    assert not missing, f"у операций с параметрами нет ответа 422 VALIDATION_ERROR: {missing}"
 
 
-def test_every_api_error_response_names_a_declared_code() -> None:
-    """Код ошибки HTTP-слоя живёт в description ответа — сверяем его с enum ApiError.code."""
-    declared = set(load_openapi_schemas()["ApiError"]["properties"]["code"]["enum"])
-    used = set()
-    for where, description in api_error_responses():
-        codes = re.findall(r"ApiError\.code = (\w+)", description)
-        assert len(codes) == 1, f"{OPENAPI} {where}: expected one 'ApiError.code = X', got {codes}"
-        assert codes[0] in declared, f"{OPENAPI} {where}: {codes[0]} is not in ApiError.code enum"
-        used.add(codes[0])
-    assert used == declared, f"ApiError.code declares codes no response uses: {sorted(declared - used)}"
+def test_sse_status_event_matches_its_model() -> None:
+    """Данные события `status` потока проходят `ReviewRunStatusEvent` и не несут лишних полей."""
+    from app.api.review_events import ReviewRunStatusEvent
+    from app.domain.enums import ReviewRunStatus
+    from app.domain.run_events import StatusEvent, format_sse
+
+    event = StatusEvent(
+        review_run_id=UUID("00000000-0000-0000-0000-000000000001"),
+        status=ReviewRunStatus.FAILED,
+        last_progress_at=datetime(2026, 10, 11, 10, 0, tzinfo=UTC),
+        failed_stage=ReviewRunStatus.ANALYSING,
+        failure_reason="LLM_TIMEOUT",
+    )
+    data = json.loads(format_sse(event).split("data: ", 1)[1])
+    assert set(data) == set(ReviewRunStatusEvent.model_fields)
+    ReviewRunStatusEvent.model_validate(data)

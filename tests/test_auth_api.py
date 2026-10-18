@@ -85,8 +85,14 @@ def test_login_redirects_to_the_provider_and_remembers_the_state(stand) -> None:
 def test_an_unknown_provider_is_404(stand) -> None:
     client = stand.client()
 
-    assert client.get("/api/v1/auth/bitbucket/login").status_code == 404
-    assert client.get("/api/v1/auth/bitbucket/callback").status_code == 404
+    for path in ("/api/v1/auth/bitbucket/login", "/api/v1/auth/bitbucket/callback"):
+        response = client.get(path)
+        assert response.status_code == 404
+        assert response.headers["content-type"] == "application/problem+json"
+        body = response.json()
+        assert body["code"] == "PROVIDER_NOT_SUPPORTED"
+        assert body["detail"] == "Вход через этого провайдера не поддержан."
+        assert body["instance"] == path
 
 
 def test_callback_sets_the_session_and_returns_to_the_deep_link(stand) -> None:

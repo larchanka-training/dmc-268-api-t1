@@ -1,4 +1,4 @@
-"""Эндпоинт приёма вебхуков по контракту `docs/openapi/openapi.yaml`.
+"""Эндпоинт приёма вебхуков.
 
 Порядок строго по спеке: сырое тело читается до любого разбора, подпись из
 заголовка `X-Hub-Signature-256` проверяется чистой функцией `verify_hmac`,
@@ -13,9 +13,8 @@
 хостинга не ошибка (контракт: «ReviewJob создан или найден существующий»), а
 не-2xx он считает неудачной доставкой и повторяет её; игнор (`reopened`,
 незарегистрированный репозиторий, неизвестное действие) — 202
-`{"status": "ignored"}` по спеке вебхуков. Тела ошибок — `ApiError`
-(`code` + `message`), как в контракте, поэтому без `HTTPException` с его
-`{"detail": …}`.
+`{"status": "ignored"}` по спеке вебхуков. Ошибки — `ApiError`, тело —
+Problem Details из `app/api/errors.py`.
 
 Тело читается из `Request`, а не параметром `Body`: FastAPI для JSON-типа
 контента разбирает тело до проверки типов, что нарушило бы сценарий «подпись
@@ -28,13 +27,23 @@ GitLab приёмником пока не поддержан: маршрут к�
 
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import get_container
+from app.api.errors import (
+    ERRORS_401_WEBHOOK_SIGNATURE,
+    ERRORS_422,
+    ERRORS_501_WEBHOOK_PROVIDER,
+    ERRORS_502_SCM,
+    ApiError,
+)
+from app.api.problems import ErrorCode
+from app.api.reviews import ReviewJob
 from app.application.sync_thread_resolution import handle_review_thread_webhook
 from app.application.use_cases.handle_webhook import (
     WebhookOutcome,
@@ -63,17 +72,52 @@ TRIGGERING_EVENT = "pull_request"
 REVIEW_THREAD_EVENT = "pull_request_review_thread"
 
 
-def _api_error(status_code: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content={"code": code, "message": message})
+
+class WebhookIgnored(BaseModel):
+    """Тело `202` для доставки, которая ревью не запускает: действие reopened, closed или
+    неизвестное, незарегистрированный репозиторий, тело без события."""
+
+    status: Literal["ignored"]
 
 
-@router.post("/webhooks/{provider}", status_code=202)
+class WebhookAcknowledged(BaseModel):
+    """Тело `202` для события pull_request_review_thread: отметка закрытия треда принята."""
+
+    status: Literal["acknowledged"]
+
+
+@router.post(
+    "/webhooks/{provider}",
+    status_code=202,
+    # Ручка отдаёт `JSONResponse` сама; модель — для схемы, тело сверяют тесты.
+    response_model=ReviewJob | WebhookIgnored | WebhookAcknowledged,
+    tags=["webhooks"],
+    # Без сессии: доставку подтверждает подпись.
+    openapi_extra={"security": []},
+    response_description=(
+        "Доставка принята: ReviewJob создан или найден существующий; WebhookIgnored — доставка "
+        "ревью не запускает; WebhookAcknowledged — событие pull_request_review_thread."
+    ),
+    summary="Принять webhook-доставку от хостинга и поставить ревью в очередь",
+    description=(
+        "Без сессии и без проверки Origin: доставку подтверждает подпись. ReviewJob создан или, "
+        "если для этого коммита уже есть нетерминальный, возвращён существующий. Дубль — не "
+        "ошибка: не-2xx хостинг считает неудачной доставкой и повторяет её, поэтому 409 здесь "
+        "не отдаём."
+    ),
+    responses={
+        **ERRORS_401_WEBHOOK_SIGNATURE,
+        **ERRORS_422,
+        **ERRORS_501_WEBHOOK_PROVIDER,
+        **ERRORS_502_SCM,
+    },
+)
 async def receive_webhook(provider: Provider, request: Request) -> Response:
     if provider not in SUPPORTED_PROVIDERS:
-        return _api_error(
+        raise ApiError(
             501,
-            "PROVIDER_NOT_SUPPORTED",
-            f"провайдер {provider.value} приёмником вебхуков не поддержан",
+            ErrorCode.PROVIDER_NOT_SUPPORTED,
+            "Приёмник вебхуков для этого провайдера не реализован.",
         )
     container = get_container(request)
     body = await request.body()
@@ -82,7 +126,11 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
     # Пустой секрет не подписывает ничего: все вебхуки отклоняются, в том
     # числе «подписанные» пустым ключом.
     if not secret or signature is None or not verify_hmac(body, signature, secret):
-        return _api_error(401, "WEBHOOK_SIGNATURE_INVALID", "invalid webhook signature")
+        raise ApiError(
+            401,
+            ErrorCode.WEBHOOK_SIGNATURE_INVALID,
+            "Подписи X-Hub-Signature-256 нет, или она не совпала с телом доставки.",
+        )
 
     event_type = request.headers.get(EVENT_HEADER)
 
@@ -105,7 +153,7 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
                 now=lambda: datetime.now(UTC),
             )
         except VcsError:
-            return _api_error(502, "SCM_UNAVAILABLE", "VCS provider unavailable")
+            raise _scm_unavailable()
         return JSONResponse(status_code=202, content={"status": "acknowledged"})
 
     # Гейт события стоит до разбора тела: подписанная доставка другого события
@@ -124,7 +172,7 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
         new_id=new_id,
     )
     if outcome.kind == "failure":
-        return _api_error(502, "SCM_UNAVAILABLE", "VCS provider unavailable")
+        raise _scm_unavailable()
     if outcome.kind == "ignored":
         return JSONResponse(status_code=202, content={"status": "ignored"})
     if outcome.kind in _JOB_OUTCOMES:
@@ -132,8 +180,16 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
     raise RuntimeError(f"неожиданный исход use case: {outcome.kind!r}")
 
 
+def _scm_unavailable() -> ApiError:
+    return ApiError(
+        502,
+        ErrorCode.SCM_UNAVAILABLE,
+        "Провайдер VCS не ответил или ответил ошибкой; прогон не создан.",
+    )
+
+
 def _review_job_payload(outcome: WebhookOutcome) -> dict[str, Any]:
-    """Проекция прогона в публичную схему `ReviewJob` из `openapi.yaml`.
+    """Проекция прогона в публичную схему `ReviewJob` (`app/api/reviews.py`).
 
     `findingsCount` у свежего прогона всегда 0: находки появляются позже,
     при обработке задачи воркером, и в этот эндпоинт больше не возвращаются.

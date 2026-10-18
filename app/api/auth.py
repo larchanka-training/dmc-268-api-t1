@@ -11,13 +11,20 @@ cookie приходит от клиента. Любая ошибка callback �
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from app.api.dependencies import get_oauth_provider, get_unit_of_work_factory
+from app.api.errors import (
+    ERRORS_403_ORIGIN,
+    ERRORS_404_LOGIN_PROVIDER,
+    ApiError,
+)
+from app.api.problems import ErrorCode
 from app.api.session import (
     SESSION_COOKIE,
     SESSION_RESPONSES,
@@ -34,6 +41,7 @@ from app.application.use_cases.auth import (
     start_login,
 )
 from app.domain.entities import User
+from app.domain.enums import Provider
 from app.domain.ids import new_id
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -45,8 +53,13 @@ _STATE_MAX_AGE = 600
 _SEPARATOR = "|"
 
 
+# Ручка открыта без сессии — в схеме явно, а не пропуском.
+_PUBLIC: dict[str, Any] = {"security": []}
+_LOCATION = {"Location": {"description": "Куда перенаправлен браузер.", "schema": {"type": "string"}}}
+
+
 class UserResponse(BaseModel):
-    provider: str
+    provider: Provider
     login: str
     name: str | None
     avatar_url: str | None
@@ -54,7 +67,9 @@ class UserResponse(BaseModel):
 
 def _known(provider: OAuthProvider | None) -> OAuthProvider:
     if provider is None:
-        raise HTTPException(status_code=404, detail="unknown provider")
+        raise ApiError(
+            404, ErrorCode.PROVIDER_NOT_SUPPORTED, "Вход через этого провайдера не поддержан."
+        )
     return provider
 
 
@@ -71,7 +86,28 @@ def _read_state_cookie(value: str | None) -> tuple[str | None, str | None]:
     return state, unquote(redirect)
 
 
-@router.get("/{provider}/login")
+@router.get(
+    "/{provider}/login",
+    status_code=302,
+    response_class=RedirectResponse,
+    openapi_extra=_PUBLIC,
+    summary="Начать вход через провайдера",
+    description=(
+        "Открыт без сессии. Ставит cookie oauth_state со state и проверенным redirect и "
+        "перенаправляет на страницу авторизации провайдера. redirect принимается, только если "
+        "это путь под /app/ не длиннее 1000 байт в UTF-8; иначе после входа — /app/."
+    ),
+    responses={
+        302: {
+            "description": (
+                "Редирект на страницу авторизации провайдера с параметром state. Если вход у "
+                "провайдера не настроен — редирект на /login?error=provider_unavailable без cookie."
+            ),
+            "headers": _LOCATION,
+        },
+        **ERRORS_404_LOGIN_PROVIDER,
+    },
+)
 def begin_login(
     redirect: str | None = Query(default=None),
     provider: OAuthProvider | None = Depends(get_oauth_provider),
@@ -92,7 +128,29 @@ def begin_login(
     return response
 
 
-@router.get("/{provider}/callback")
+@router.get(
+    "/{provider}/callback",
+    status_code=302,
+    response_class=RedirectResponse,
+    openapi_extra=_PUBLIC,
+    summary="Завершить вход",
+    description=(
+        "Сюда провайдер возвращает браузер. Открыт без сессии. state сверяется с cookie "
+        "oauth_state, code обменивается на профиль, пользователь находится или создаётся, "
+        "создаётся сессия. Любая ошибка — редирект на /login?error=<код>: state_mismatch, "
+        "denied, provider_unavailable."
+    ),
+    responses={
+        302: {
+            "description": (
+                "Успех — редирект на redirect из oauth_state или на /app/ и cookie session. "
+                "Ошибка — редирект на /login?error=<код>, сессии нет. oauth_state удаляется в обоих случаях."
+            ),
+            "headers": _LOCATION,
+        },
+        **ERRORS_404_LOGIN_PROVIDER,
+    },
+)
 def finish_login(
     request: Request,
     code: str | None = Query(default=None),
@@ -125,17 +183,35 @@ def finish_login(
     return response
 
 
-@router.get("/me", response_model=UserResponse, responses=SESSION_RESPONSES)
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    summary="Пользователь текущей сессии",
+    response_description="Профиль пользователя.",
+    responses=SESSION_RESPONSES,
+)
 def me(user: User = Depends(current_user)) -> UserResponse:
     return UserResponse(
-        provider=user.provider.value,
+        provider=user.provider,
         login=user.login,
         name=user.name,
         avatar_url=user.avatar_url,
     )
 
 
-@router.post("/logout", status_code=204, dependencies=[Depends(require_origin)])
+@router.post(
+    "/logout",
+    status_code=204,
+    dependencies=[Depends(require_origin)],
+    openapi_extra=_PUBLIC,
+    summary="Выйти",
+    description=(
+        "Удаляет сессию текущей cookie: следующий запрос с ней из любой вкладки получает 401. "
+        "Идемпотентен: без cookie и с cookie неизвестной сессии тоже 204, cookie session "
+        "удаляется. Сессия не нужна, проверяется только Origin."
+    ),
+    responses={204: {"description": "Сессия удалена, cookie session удалена."}, **ERRORS_403_ORIGIN},
+)
 def end_session(
     request: Request,
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),

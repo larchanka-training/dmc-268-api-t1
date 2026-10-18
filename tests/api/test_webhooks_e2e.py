@@ -140,7 +140,7 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
     assert run.status is ReviewRunStatus.QUEUED
     assert run.trigger is TriggerSource.WEBHOOK
 
-    # Тело 202 — публичная проекция ReviewJob из openapi.yaml, camelCase.
+    # Тело 202 — публичная проекция ReviewJob (app/api/reviews.py), camelCase.
     assert job == {
         "id": str(run.id),
         "provider": "github",

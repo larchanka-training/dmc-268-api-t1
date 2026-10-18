@@ -2,7 +2,7 @@
 
 Контейнеры подменяются целиком: `app.state.container` получает заглушку с
 фейковыми портами, поэтому тесты отвечают на вопрос «что делает HTTP-слой» —
-подпись, коды ответов, маппинг исходов use case в контракт `openapi.yaml` —
+подпись, коды ответов, маппинг исходов use case в ответы ручки —
 и не трогают базу и брокер. Подписи считаются здесь независимо
 (hmac + hashlib), а не функцией `verify_hmac`, чтобы тест не сверял
 реализацию с ней же.
@@ -19,6 +19,7 @@ from httpx import Client, Response
 from pydantic import ValidationError
 
 from app.api.factory import create_app
+from app.api.reviews import ReviewJob
 from app.config import Settings
 from app.domain.vcs_errors import VcsError
 
@@ -115,6 +116,9 @@ def test_valid_opened_returns_202_with_review_job_projection() -> None:
     assert job["status"] == "queued"
     assert job["trigger"] == "webhook"
     assert job["headCommitSha"] == run.head_sha
+    # Тело отдаётся без модели ответа — модель схемы сверяется здесь.
+    ReviewJob.model_validate(job)
+    assert set(job) <= {field.alias for field in ReviewJob.model_fields.values()}
     assert container.uow.commits == 1
     assert len(container.queue.jobs) == 1
 
@@ -144,10 +148,8 @@ def test_missing_signature_is_rejected_with_401() -> None:
     client, container = make_client()
     response = post_webhook(client, "opened", signature=None)
     assert response.status_code == 401
-    assert response.json() == {
-        "code": "WEBHOOK_SIGNATURE_INVALID",
-        "message": "invalid webhook signature",
-    }
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "WEBHOOK_SIGNATURE_INVALID"
     assert container.uow.review_runs.added == []
     assert container.queue.jobs == []
 
@@ -244,10 +246,8 @@ def test_vcs_failure_returns_502_without_records() -> None:
     )
     response = post_webhook(client, "opened")
     assert response.status_code == 502
-    assert response.json() == {
-        "code": "SCM_UNAVAILABLE",
-        "message": "VCS provider unavailable",
-    }
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
     assert container.uow.review_runs.added == []
     assert container.queue.jobs == []
 

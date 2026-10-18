@@ -1,19 +1,20 @@
 """Сессия в cookie: проверка на входе в ручку и ответы `401` и `403`.
 
 Проверка — зависимости FastAPI, а не middleware: какие ручки их требуют,
-видно в объявлении роутеров. `401` и `403` — исключения с обработчиками в
-`create_app`, потому что зависимость не может вернуть ответ сама, а `401`
-должен ещё и удалить недействительную cookie.
+видно в объявлении роутеров. `401` и `403` — подклассы `ApiError`: зависимость
+не может вернуть ответ сама, а тело собирает общий обработчик. `401` ещё и
+удаляет недействительную cookie — в своём `finish`.
 """
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
 
-from fastapi import Depends, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import Depends, Request, Response, Security
+from fastapi.security import APIKeyCookie
 
 from app.api.dependencies import get_settings, get_unit_of_work_factory
+from app.api.errors import ERRORS_401_SESSION, ApiError
+from app.api.problems import ErrorCode
 from app.application.ports import UnitOfWork
 from app.application.use_cases.auth import authenticate
 from app.config import Settings
@@ -21,19 +22,41 @@ from app.domain.entities import User
 from app.domain.session import SESSION_LIFETIME
 
 SESSION_COOKIE = "session"
+# Только для схемы: cookie описана как схема безопасности `session`. Сама проверка — в
+# `current_user`, отказ — `401 UNAUTHENTICATED`, а не ответ схемы безопасности FastAPI.
+_SESSION_SCHEME = APIKeyCookie(
+    name=SESSION_COOKIE,
+    scheme_name="session",
+    description=(
+        "Сессия в httpOnly cookie, ставится callback'ом входа. Изменяющие запросы (POST, PUT, "
+        "PATCH, DELETE) дополнительно сверяют `Origin` с адресом сервиса, иначе `403 ORIGIN_FORBIDDEN`."
+    ),
+    auto_error=False,
+)
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
-class Unauthenticated(Exception):
+class Unauthenticated(ApiError):
     """Нет действительной сессии. `had_cookie` — cookie пришла, её надо удалить."""
 
     def __init__(self, had_cookie: bool) -> None:
-        super().__init__("нет действительной сессии")
+        super().__init__(401, ErrorCode.UNAUTHENTICATED, "Нет действительной сессии.")
         self.had_cookie = had_cookie
 
+    def finish(self, response: Response) -> None:
+        if self.had_cookie:
+            clear_session_cookie(response)
 
-class OriginForbidden(Exception):
+
+class OriginForbidden(ApiError):
     """Изменяющий запрос пришёл без `Origin` или с чужим."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            403,
+            ErrorCode.ORIGIN_FORBIDDEN,
+            "Изменяющий запрос пришёл без Origin или с Origin другого сайта.",
+        )
 
 
 def set_session_cookie(response: Response, token: str) -> None:
@@ -63,11 +86,10 @@ def require_origin(request: Request, settings: Settings = Depends(get_settings))
 
 
 def current_user(
-    request: Request,
+    token: str | None = Security(_SESSION_SCHEME),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> User:
     """Пользователь сессии из cookie или `401`."""
-    token = request.cookies.get(SESSION_COOKIE)
     user = authenticate(uow_factory(), token, datetime.now(UTC))
     if user is None:
         raise Unauthenticated(had_cookie=token is not None)
@@ -76,22 +98,6 @@ def current_user(
 
 # Порядок важен: чужой `Origin` отклоняется до похода в базу.
 SESSION_REQUIRED = [Depends(require_origin), Depends(current_user)]
-# Ответ `401` в документации OpenAPI роутеров, которые требуют сессию.
-SESSION_RESPONSES: dict[int | str, dict[str, Any]] = {401: {"description": "Нет действительной сессии"}}
+# Ответ `401` в схеме роутеров, которые требуют сессию.
+SESSION_RESPONSES = ERRORS_401_SESSION
 
-
-def unauthenticated_response(request: Request, error: Exception) -> Response:
-    response = JSONResponse(
-        status_code=401,
-        content={"code": "UNAUTHENTICATED", "message": "требуется вход"},
-    )
-    if isinstance(error, Unauthenticated) and error.had_cookie:
-        clear_session_cookie(response)
-    return response
-
-
-def origin_forbidden_response(request: Request, error: Exception) -> Response:
-    return JSONResponse(
-        status_code=403,
-        content={"code": "ORIGIN_FORBIDDEN", "message": "запрос с чужого origin"},
-    )
