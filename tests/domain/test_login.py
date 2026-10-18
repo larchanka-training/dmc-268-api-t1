@@ -1,6 +1,6 @@
 import pytest
 
-from app.domain.login import DEFAULT_REDIRECT, safe_redirect
+from app.domain.login import DEFAULT_REDIRECT, MAX_REDIRECT_BYTES, safe_redirect
 
 
 @pytest.mark.parametrize(
@@ -43,3 +43,13 @@ def test_a_path_under_app_is_kept(value: str) -> None:
 )
 def test_anything_else_falls_back_to_app(value: str | None) -> None:
     assert safe_redirect(value) == DEFAULT_REDIRECT == "/app/"
+
+
+def test_a_redirect_at_the_limit_is_kept_and_a_longer_one_is_not() -> None:
+    at_limit = "/app/" + "a" * (MAX_REDIRECT_BYTES - len("/app/"))
+    # Кириллица — два байта на символ: предел считается в байтах, а не в символах.
+    too_long = "/app/" + "я" * (MAX_REDIRECT_BYTES // 2)
+
+    assert safe_redirect(at_limit) == at_limit
+    assert safe_redirect(at_limit + "a") == DEFAULT_REDIRECT
+    assert safe_redirect(too_long) == DEFAULT_REDIRECT

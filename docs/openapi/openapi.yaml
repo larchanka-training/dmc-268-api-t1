@@ -235,7 +235,8 @@ paths:
       description: >
         Открыт без сессии. Ставит cookie oauth_state со state и проверенным
         redirect и перенаправляет на страницу авторизации провайдера. redirect
-        принимается, только если это путь под /app/; иначе после входа — /app/.
+        принимается, только если это путь под /app/ не длиннее 1000 байт в UTF-8;
+        иначе после входа — /app/.
       operationId: startLogin
       security: []
       parameters:

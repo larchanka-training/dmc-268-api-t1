@@ -11,6 +11,11 @@ from urllib.parse import unquote
 
 DEFAULT_REDIRECT = "/app/"
 
+# `redirect` едет в cookie `oauth_state` в процент-кодировке: до трёх символов на
+# байт. Браузер отбрасывает cookie больше 4096 байт, и вход тогда кончается
+# `state_mismatch`, поэтому длинный адрес заменяется на `/app/` заранее.
+MAX_REDIRECT_BYTES = 1000
+
 
 class LoginError(StrEnum):
     """Код ошибки в `/login?error=…`."""
@@ -30,7 +35,7 @@ class OAuthProviderUnavailable(RuntimeError):
 
 def safe_redirect(value: str | None) -> str:
     """`value`, если это путь под `/app/`, иначе `/app/`."""
-    if not value:
+    if not value or len(value.encode()) > MAX_REDIRECT_BYTES:
         return DEFAULT_REDIRECT
     # Браузер раскрывает `%2e` в точку, поэтому проверяется и раскрытый вид.
     for form in (value, unquote(value)):

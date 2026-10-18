@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from app.api.dependencies import get_oauth_provider, get_unit_of_work_factory
 from app.api.session import (
     SESSION_COOKIE,
+    SESSION_RESPONSES,
     clear_session_cookie,
     current_user,
     require_origin,
@@ -124,7 +125,7 @@ def finish_login(
     return response
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get("/me", response_model=UserResponse, responses=SESSION_RESPONSES)
 def me(user: User = Depends(current_user)) -> UserResponse:
     return UserResponse(
         provider=user.provider.value,
