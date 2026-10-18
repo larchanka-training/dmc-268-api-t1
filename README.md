@@ -94,9 +94,9 @@ uv run uvicorn app.main:app --reload
 (см. `.env.example`), а callback `<PUBLIC_ORIGIN>/api/v1/auth/github/callback`
 должен быть зарегистрирован в настройках GitHub App. `PUBLIC_ORIGIN` — origin, на
 котором браузер открывает и кабинет, и API (на стенде они за одним nginx). Локально
-`http://localhost:8000` из `.env.example` подходит, когда API открывают напрямую:
-dev-сервер кабинета на `:3000` запросы к `/api` пока не проксирует. Если кабинет
-будет ходить в API через прокси dev-сервера, ставьте `http://localhost:3000`.
+`http://localhost:8000` из `.env.example` подходит, когда API открывают напрямую.
+Для кабинета с настоящим бэкендом (`VITE_USE_MOCK_API=false`, dev-сервер на `:3000`
+проксирует `/api` сюда) ставьте `http://localhost:3000`.
 Cookie сессии ставится с `Secure`: вход работает по HTTPS и на `localhost`, по
 голому HTTP на другом хосте — нет.
 
