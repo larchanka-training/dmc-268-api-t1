@@ -20,6 +20,7 @@ from uuid import UUID
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
+from app.api.openapi import HTTP_METHODS, finish_schema
 from app.domain.lifecycle import _ALLOWED
 from app.infrastructure.db import models  # noqa: F401
 from app.infrastructure.db.base import Base
@@ -146,7 +147,6 @@ def test_pipeline_spec_transition_table_matches_lifecycle() -> None:
 
 PROBLEM_MEDIA_TYPE = "application/problem+json"
 TRACE_ID_HEADER_REF = "#/components/headers/X-Trace-ID"
-HTTP_METHODS = {"get", "put", "post", "delete", "patch", "head", "options", "trace"}
 
 
 def load_openapi() -> dict[str, Any]:
@@ -265,3 +265,13 @@ def test_sse_status_event_matches_its_model() -> None:
     data = json.loads(format_sse(event).split("data: ", 1)[1])
     assert set(data) == set(ReviewRunStatusEvent.model_fields)
     ReviewRunStatusEvent.model_validate(data)
+
+
+def test_finish_schema_skips_path_level_keys() -> None:
+    # `parameters` на уровне пути — не операция: обход не должен принимать его за метод.
+    schema = {"paths": {"/x": {"parameters": [{"name": "id", "in": "path"}], "get": {"responses": {"200": {}}}}}}
+
+    finished = finish_schema(schema)
+
+    assert finished["paths"]["/x"]["parameters"] == [{"name": "id", "in": "path"}]
+    assert "X-Trace-ID" in finished["paths"]["/x"]["get"]["responses"]["200"]["headers"]

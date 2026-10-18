@@ -34,6 +34,10 @@ _TRACE_ID_HEADER_DOC = {
 _TRACE_ID_REF = {"$ref": f"#/components/headers/{TRACE_ID_HEADER}"}
 
 
+# Ключи path-item, которые описывают операции; остальные (`parameters`, `summary`…) — нет.
+HTTP_METHODS = frozenset({"get", "put", "post", "delete", "patch", "head", "options", "trace"})
+
+
 def _is_error(status: str) -> bool:
     return status == "default" or status[0] in "45"
 
@@ -49,6 +53,8 @@ def finish_schema(schema: dict[str, Any], extra_models: Sequence[type[BaseModel]
     components.setdefault("headers", {})[TRACE_ID_HEADER] = _TRACE_ID_HEADER_DOC
     for path, item in schema.get("paths", {}).items():
         for method, operation in item.items():
+            if method not in HTTP_METHODS:
+                continue
             for status, response in operation.get("responses", {}).items():
                 response.setdefault("headers", {})[TRACE_ID_HEADER] = _TRACE_ID_REF
                 if not _is_error(status):
