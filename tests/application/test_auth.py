@@ -1,4 +1,5 @@
 import datetime as dt
+import logging
 from dataclasses import replace
 from uuid import UUID
 
@@ -127,6 +128,42 @@ def test_an_unavailable_provider_creates_nothing() -> None:
     assert login(uow, provider) == LoginFailed(LoginError.PROVIDER_UNAVAILABLE)
     assert uow.users.find_by_provider(Provider.GITHUB, "583231") is None
     assert uow.sessions.stored == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "unavailable", "reason"),
+    [
+        ({"expected_state": None}, False, "нет cookie oauth_state"),
+        ({"state": "other"}, False, "state не совпал"),
+        ({"code": None, "error": "redirect_uri_mismatch"}, False, "'redirect_uri_mismatch'"),
+        ({}, True, "github не ответил"),
+    ],
+)
+def test_a_failed_callback_logs_the_reason_without_secrets(
+    overrides, unavailable, reason, caplog, monkeypatch
+) -> None:
+    # TODO: убрать после мёржа #65 (change fix-migration-logging), как и такой же
+    # обход в tests/test_auth_api.py.
+    monkeypatch.setattr(logging.getLogger("app.application.use_cases.auth"), "disabled", False)
+    provider = FakeOAuthProvider()
+    provider.unavailable = unavailable
+
+    with caplog.at_level(logging.WARNING, logger="app.application.use_cases.auth"):
+        login(FakeUnitOfWork(), provider, **overrides)
+
+    assert reason in caplog.text
+    assert "s-1" not in caplog.text and "code-1" not in caplog.text
+
+
+def test_a_forged_error_cannot_break_the_log_line(caplog, monkeypatch) -> None:
+    monkeypatch.setattr(logging.getLogger("app.application.use_cases.auth"), "disabled", False)
+
+    with caplog.at_level(logging.WARNING, logger="app.application.use_cases.auth"):
+        login(FakeUnitOfWork(), FakeOAuthProvider(), code=None, error="x\nподделка" + "y" * 500)
+
+    assert len(caplog.records) == 1
+    assert "\n" not in caplog.records[0].getMessage()
+    assert len(caplog.records[0].getMessage()) < 250
 
 
 def test_the_redirect_from_the_cookie_is_checked_again() -> None:

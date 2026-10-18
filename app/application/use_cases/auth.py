@@ -84,19 +84,24 @@ def complete_login(
     отзывает её в той же транзакции, чтобы старые сессии не копились.
     """
     # Байты, а не `str`: `compare_digest` на нелатинском `str` бросает `TypeError`.
-    if (
-        not state
-        or not expected_state
-        or not hmac.compare_digest(state.encode(), expected_state.encode())
-    ):
+    # В логе причина без значений `state`, `code` и секретов: по ней видно,
+    # где сломался вход на стенде. `error` пишет клиент, поэтому через `%r` и
+    # с обрезкой: перевод строки не подделает запись лога.
+    if not expected_state:
+        _log.warning("вход не завершён: нет cookie oauth_state (истекла или не дошла)")
+        return LoginFailed(LoginError.STATE_MISMATCH)
+    if not state or not hmac.compare_digest(state.encode(), expected_state.encode()):
+        _log.warning("вход не завершён: state не совпал с cookie oauth_state")
         return LoginFailed(LoginError.STATE_MISMATCH)
     if error == _ACCESS_DENIED:
         return LoginFailed(LoginError.DENIED)
     if error or not code:
+        _log.warning("вход не завершён: провайдер вернул error=%r без code", (error or "")[:100])
         return LoginFailed(LoginError.PROVIDER_UNAVAILABLE)
     try:
         profile = provider.exchange_code(code)
-    except OAuthProviderUnavailable:
+    except OAuthProviderUnavailable as failure:
+        _log.warning("вход не завершён: %s", failure)
         return LoginFailed(LoginError.PROVIDER_UNAVAILABLE)
 
     # Провайдер опрошен до транзакции: соединение не ждёт ответа GitHub.
