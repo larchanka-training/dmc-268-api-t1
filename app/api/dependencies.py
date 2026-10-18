@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from typing import cast
 from uuid import UUID
@@ -13,6 +14,7 @@ from fastapi import Depends, Request
 
 from app.application.ports import UnitOfWork
 from app.application.ports.job_queue import JobQueue
+from app.application.ports.oauth_provider import OAuthProvider
 from app.config import Settings
 from app.domain.entities import ReviewRun
 from app.infrastructure.container import Container
@@ -39,6 +41,21 @@ def get_job_queue(container: Container = Depends(get_container)) -> JobQueue:
     return container.job_queue()
 
 
+def get_unit_of_work_factory(
+    container: Container = Depends(get_container),
+) -> Callable[[], UnitOfWork]:
+    """Фабрика, а не открытый unit of work: use case входа сам решает, когда
+    открыть транзакцию, — например, после ответа провайдера."""
+    return container.unit_of_work
+
+
+def get_oauth_provider(
+    provider: str, container: Container = Depends(get_container)
+) -> OAuthProvider | None:
+    """Провайдер входа по `{provider}` из пути; неизвестный — `None`."""
+    return container.oauth_provider(provider)
+
+
 def get_run_reader(
     container: Container = Depends(get_container),
 ) -> Callable[[UUID], ReviewRun | None]:
@@ -59,3 +76,8 @@ def get_run_reader(
 def get_sleep() -> Callable[[float], Awaitable[None]]:
     """Ожидание между проверками статуса; тесты подменяют его мгновенным."""
     return asyncio.sleep
+
+
+def get_clock() -> Callable[[], float]:
+    """Монотонные часы потока событий; тесты подменяют их ходом своего «времени»."""
+    return time.monotonic
