@@ -98,10 +98,11 @@ variable "github_app_private_key" {
   sensitive   = true
 }
 
+# Без значения по умолчанию: заглушка выбирается только явно, иначе стенд
+# молча публиковал бы пустые ревью (спека llm-gateway, «Выбор заглушки явный»).
 variable "llm_backend" {
   type        = string
   description = "Адаптер модели воркера (LLM_BACKEND): stub - без похода к модели, ollama - локальная модель."
-  default     = "stub"
 
   validation {
     condition     = contains(["stub", "ollama"], var.llm_backend)

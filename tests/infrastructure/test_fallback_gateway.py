@@ -50,6 +50,25 @@ def test_when_every_provider_fails_the_last_failure_is_raised() -> None:
         FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(REQUEST)
 
 
+def test_tokens_burnt_by_a_failed_provider_are_added_to_the_answer() -> None:
+    local = ScriptedLlmGateway([LlmOutputError("не по схеме", tokens_used=500)])
+    hosted = ScriptedLlmGateway([review_response(model="mistral", tokens=300)])
+
+    response = FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(REQUEST)
+
+    assert response.tokens_used == 800
+
+
+def test_tokens_of_every_provider_are_reported_when_all_fail() -> None:
+    local = ScriptedLlmGateway([LlmOutputError("не по схеме", tokens_used=500)])
+    hosted = ScriptedLlmGateway([LlmError("Eurorouter недоступен")])
+
+    with pytest.raises(LlmError, match="Eurorouter") as error:
+        FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(REQUEST)
+
+    assert error.value.tokens_used == 500
+
+
 def test_single_provider_failure_is_raised_as_is() -> None:
     local = ScriptedLlmGateway([LlmError("Ollama недоступна")])
 

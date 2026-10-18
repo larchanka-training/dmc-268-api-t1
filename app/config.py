@@ -175,6 +175,13 @@ class Settings(BaseSettings):
         description="Таймаут одного HTTP-запроса к модели, секунды",
     )
 
+    @field_validator("llm_backend", mode="before")
+    @classmethod
+    def _empty_backend_is_unset(cls, value: object) -> object:
+        # docker compose передаёт незаданную переменную пустой строкой: это
+        # тот же невыбранный адаптер, а не ошибка формата.
+        return None if value == "" else value
+
     @model_validator(mode="after")
     def _check_model_providers(self) -> Self:
         if self.llm_backend == "ollama" and not self.ollama_model:
@@ -195,6 +202,14 @@ class Settings(BaseSettings):
         if missing:
             raise ValueError(f"LLM_HOSTED_FALLBACK=true требует {', '.join(missing)}")
         return self
+
+    @property
+    def llm_call_worst_case_seconds(self) -> float:
+        """Худший случай одного вызова модели: таймаут × попытки × провайдеры."""
+        if self.llm_backend != "ollama":
+            return 0.0
+        providers = 2 if self.llm_hosted_fallback else 1
+        return self.llm_timeout_seconds * self.llm_max_attempts * providers
 
     @property
     def eurorouter_keys(self) -> tuple[SecretStr, ...]:

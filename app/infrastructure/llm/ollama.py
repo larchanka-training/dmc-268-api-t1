@@ -57,9 +57,9 @@ class OllamaGateway:
         try:
             response = self._client.post("/api/chat", json=body)
         except httpx.TimeoutException as error:
-            raise LlmError(f"Ollama: таймаут ({type(error).__name__})") from error
+            raise LlmError(f"Ollama: таймаут ({type(error).__name__})") from None
         except httpx.RequestError as error:
-            raise LlmError(f"Ollama недоступна ({type(error).__name__})") from error
+            raise LlmError(f"Ollama недоступна ({type(error).__name__})") from None
         if response.status_code != httpx.codes.OK:
             raise LlmError(f"Ollama: HTTP {response.status_code}: {_error_text(response)}")
         try:
@@ -69,6 +69,8 @@ class OllamaGateway:
             # Полностью закэшированный запрос Ollama не считает и поле опускает.
             prompt_tokens: int = data.get("prompt_eval_count", 0)
             output_tokens: int = data["eval_count"]
+            # `length` - ответ оборван по `num_predict`.
+            truncated = data.get("done_reason") == "length"
         except (ValueError, KeyError, TypeError) as error:
             raise LlmError("Ollama вернула неожиданное тело на /api/chat") from error
         # Оценка запроса до отправки - средняя («байты / 4»). Если модель
@@ -78,9 +80,12 @@ class OllamaGateway:
         if prompt_tokens > prompt_limit:
             raise LlmError(
                 f"Ollama насчитала в запросе {prompt_tokens} токенов при пределе "
-                f"{prompt_limit}: запрос мог быть обрезан"
+                f"{prompt_limit}: запрос мог быть обрезан",
+                tokens_used=prompt_tokens + output_tokens,
             )
-        return RawReply(text=text, model=model, tokens=prompt_tokens + output_tokens)
+        return RawReply(
+            text=text, model=model, tokens=prompt_tokens + output_tokens, truncated=truncated
+        )
 
 
 def _error_text(response: httpx.Response) -> str:

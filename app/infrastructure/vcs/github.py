@@ -115,7 +115,8 @@ class GitHubVcsGateway:
     def fetch_pr_commit_messages(
         self, repo_full_name: str, pr_number: int, installation_id: int
     ) -> tuple[str, ...]:
-        # GitHub отдаёт коммиты PR от старого к новому и не больше 250 - это
+        # GitHub отдаёт коммиты PR от старого к новому и не больше 250 - первые
+        # 250, так что на более длинном PR теряются новые, а не старые. Это
         # не больше трёх страниц по 100.
         url = f"/repos/{repo_full_name}/pulls/{pr_number}/commits"
         commits = self._get_json_list_paginated(url, installation_id)

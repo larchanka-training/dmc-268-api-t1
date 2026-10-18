@@ -130,9 +130,9 @@ jobs:
       - name: pytest (пропуск теста — провал)
         run: |
           set -o pipefail
-          # Живые тесты против EUrouter (маркер live) - платные, их гоняет
-          # workflow llm-live.yml с ключом организации.
-          uv run pytest -q -rs -m "not live" | tee pytest.out
+          # Живые тесты против EUrouter (маркер live) - платные: `addopts` в
+          # pyproject.toml их не собирает, их гоняет llm-live.yml с ключом.
+          uv run pytest -q -rs | tee pytest.out
           if grep -qE '[0-9]+ skipped' pytest.out; then
             echo "::error::тест пропущен, и прогон доказывает меньше, чем кажется; обычно причина в TEST_DATABASE_URL"
             exit 1

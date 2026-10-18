@@ -85,10 +85,11 @@ services:
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
       # Адаптер модели. stub - без похода к модели, ollama - локальная модель
-      # (профиль ollama ниже, модель - OLLAMA_MODEL). Без LLM_BACKEND воркер не
-      # стартует. Eurorouter подключается только вторым и только флагом
+      # (профиль ollama ниже, модель - OLLAMA_MODEL). Значения по умолчанию нет
+      # намеренно: без LLM_BACKEND в .env воркер не стартует, а не публикует
+      # пустые ревью. Eurorouter подключается только вторым и только флагом
       # LLM_HOSTED_FALLBACK=true: тогда код уходит hosted-провайдеру.
-      LLM_BACKEND: ${LLM_BACKEND:-stub}
+      LLM_BACKEND: ${LLM_BACKEND:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       LLM_HOSTED_FALLBACK: ${LLM_HOSTED_FALLBACK:-false}

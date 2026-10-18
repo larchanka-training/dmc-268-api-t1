@@ -126,3 +126,35 @@ def test_transport_failure_is_not_retried() -> None:
         complete_structured(send, REQUEST, max_attempts=2)
 
     assert len(send.calls) == 1
+
+
+def test_every_attempt_invalid_reports_the_tokens_of_all_attempts() -> None:
+    send = _Scripted(WITHOUT_SEVERITY, WITHOUT_SEVERITY)
+
+    with pytest.raises(LlmOutputError) as error:
+        complete_structured(send, REQUEST, max_attempts=2)
+
+    assert error.value.tokens_used == 200
+
+
+def test_transport_failure_after_an_invalid_answer_carries_its_tokens() -> None:
+    send = _Scripted(WITHOUT_SEVERITY, LlmError("таймаут"))
+
+    with pytest.raises(LlmError, match="таймаут") as error:
+        complete_structured(send, REQUEST, max_attempts=2)
+
+    assert error.value.tokens_used == 100
+
+
+def test_truncated_answer_fails_at_once_without_a_retry() -> None:
+    calls: list[tuple[PromptMessage, ...]] = []
+
+    def send(messages: Sequence[PromptMessage]) -> RawReply:
+        calls.append(tuple(messages))
+        return RawReply(text='{"schemaVersion": "1", "find', model="m", tokens=4_200, truncated=True)
+
+    with pytest.raises(LlmOutputError, match="обрезан пределом длины \\(4096") as error:
+        complete_structured(send, REQUEST, max_attempts=3)
+
+    assert len(calls) == 1
+    assert error.value.tokens_used == 4_200

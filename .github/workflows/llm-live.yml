@@ -17,10 +17,14 @@ on:
       - "app/application/ports/llm_gateway.py"
       - "app/domain/prompt.py"
       - "app/domain/untrusted.py"
+      - "app/domain/context_budget.py"
+      - "app/infrastructure/prompts.py"
+      - "app/worker/factory.py"
       - "app/config.py"
       - "prompts/**"
       - "tests/live/**"
       - ".github/workflows/llm-live.yml"
+      - "uv.lock"
   push:
     branches: [main, develop]
     paths:
@@ -30,10 +34,14 @@ on:
       - "app/application/ports/llm_gateway.py"
       - "app/domain/prompt.py"
       - "app/domain/untrusted.py"
+      - "app/domain/context_budget.py"
+      - "app/infrastructure/prompts.py"
+      - "app/worker/factory.py"
       - "app/config.py"
       - "prompts/**"
       - "tests/live/**"
       - ".github/workflows/llm-live.yml"
+      - "uv.lock"
   workflow_dispatch:
 
 # У токена прогона только чтение: workflow ничего не пишет в репозиторий.

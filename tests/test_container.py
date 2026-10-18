@@ -11,7 +11,7 @@ import pytest
 from app.api.dependencies import get_unit_of_work
 from app.application import ports
 from app.config import Settings
-from app.infrastructure.container import build_container
+from app.infrastructure.container import build_container, llm_http_timeout
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.stub import StubLlmGateway
 
@@ -216,6 +216,11 @@ def test_hosted_provider_is_only_ever_the_second(caplog: pytest.LogCaptureFixtur
         "модель: Ollama (qwen2.5-coder:7b); фоллбэк - Eurorouter (mistral-large-2411): "
         "при сбое локальной модели код уходит hosted-провайдеру"
     )
+
+
+def test_connection_to_a_model_host_times_out_long_before_the_answer_does() -> None:
+    timeout = llm_http_timeout(_model_settings(**LOCAL, llm_timeout_seconds=300))
+    assert (timeout.connect, timeout.read) == (10.0, 300)
 
 
 def test_the_model_gateway_is_built_once() -> None:

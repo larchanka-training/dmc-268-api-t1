@@ -11,7 +11,7 @@ from app.application.llm_schema import ReviewOutput
 from app.application.ports.llm_gateway import LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
-from app.domain.llm_errors import LlmError
+from app.domain.llm_errors import LlmError, LlmOutputError
 from app.infrastructure.llm.ollama import OllamaGateway
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -95,8 +95,23 @@ def test_fully_cached_prompt_without_prompt_eval_count_is_accepted() -> None:
 def test_prompt_counted_over_the_window_minus_reserve_is_treated_as_truncated() -> None:
     handler, _ = _recording(httpx.Response(200, json=_reply(prompt_eval_count=WINDOW - 4_096 + 1)))
 
-    with pytest.raises(LlmError, match="61441 .* 61440"):
+    with pytest.raises(LlmError, match="61441 .* 61440") as error:
         _gateway(handler).complete(REQUEST)
+
+    assert error.value.tokens_used == WINDOW - 4_096 + 1 + 300
+
+
+def test_answer_cut_by_num_predict_is_not_retried() -> None:
+    handler, seen = _recording(
+        httpx.Response(200, json=_reply('{"schemaVersion": "1", "fin', done_reason="length")),
+        httpx.Response(200, json=_reply()),
+    )
+
+    with pytest.raises(LlmOutputError, match="обрезан пределом длины") as error:
+        _gateway(handler).complete(REQUEST)
+
+    assert len(seen) == 1
+    assert error.value.tokens_used == 1_500
 
 
 def test_answer_off_the_schema_is_retried_through_the_shared_loop() -> None:
@@ -139,5 +154,9 @@ def test_transport_failure_is_a_model_failure(raised: type[httpx.RequestError], 
     def handler(request: httpx.Request) -> httpx.Response:
         raise raised("boom", request=request)
 
-    with pytest.raises(LlmError, match=reason):
+    with pytest.raises(LlmError, match=reason) as error:
         _gateway(handler).complete(REQUEST)
+
+    # Исключение httpx держит запрос с кодом проверяемого репозитория.
+    assert error.value.__cause__ is None
+    assert error.value.__suppress_context__

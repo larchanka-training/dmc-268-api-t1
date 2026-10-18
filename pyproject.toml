@@ -73,6 +73,9 @@ disallow_untyped_calls = false
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# Живые тесты - платный вызов EUrouter: только явным `-m live` (workflow
+# `llm-live.yml`), иначе `uv run pytest` без ключей всегда давал бы пропуски.
+addopts = ["-m", "not live"]
 markers = [
     "integration: needs a live PostgreSQL; skipped when TEST_DATABASE_URL is unset",
     "live: paid call to the real EUrouter; skipped when EUROROUTER_API_KEYS is unset",

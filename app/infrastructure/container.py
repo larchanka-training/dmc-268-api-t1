@@ -136,6 +136,17 @@ def build_container(settings: Settings) -> Container:
     )
 
 
+# Подключение в нашей сети или к hosted-провайдеру дольше этого - сбой, а не
+# медленная модель: выключенный хост Ollama иначе держал бы вызов весь таймаут
+# ответа (change `llm-gateway-review-fixes`, design D3).
+_LLM_CONNECT_TIMEOUT_SECONDS = 10.0
+
+
+def llm_http_timeout(settings: Settings) -> httpx.Timeout:
+    """Таймауты HTTP к провайдерам модели: ответ - из настроек, подключение - свой."""
+    return httpx.Timeout(settings.llm_timeout_seconds, connect=_LLM_CONNECT_TIMEOUT_SECONDS)
+
+
 def _build_llm_gateway(settings: Settings) -> LlmGateway:
     """Порядок провайдеров не выбирается: локальная модель первая, hosted -
     только вторым и только по флагу (change `add-llm-gateway`, design D3).
@@ -148,7 +159,7 @@ def _build_llm_gateway(settings: Settings) -> LlmGateway:
     if settings.llm_backend == "stub":
         logger.info("модель: заглушка без похода к модели")
         return StubLlmGateway()
-    timeout = httpx.Timeout(settings.llm_timeout_seconds)
+    timeout = llm_http_timeout(settings)
     providers: list[tuple[str, LlmGateway]] = [
         (
             "Ollama",

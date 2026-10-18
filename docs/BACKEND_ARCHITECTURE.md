@@ -110,7 +110,7 @@ compile-time зависимости от слоя приложения.
 | `DefinitionExtractor` | `TreeSitterDefinitionExtractor` | контур файла (определения с диапазонами строк, импорты) для AST-окружения изменённых строк; грамматики Python, TypeScript/TSX, JavaScript, Go. Какие определения показать модели, решает домен (`select_scopes`); tree-sitter запрещён во внутренних слоях контрактом import-linter |
 | `OAuthProvider` | `GitHubOAuthProvider` | вход через OAuth самого GitHub App: адрес авторизации и обмен `code` на профиль (`GET /user`); токен пользователя не выходит из адаптера, любой сбой — `OAuthProviderUnavailable`. Контейнер выдаёт провайдера по `{provider}` из пути, неизвестный — `404` |
 | `JobQueue` | `RabbitMQJobQueue` | задача ревью в RabbitMQ, один метод `enqueue`; тело — только доменные данные по §4.2 System Design, приоритет — свойство AMQP; очередь `review_jobs` с `x-max-priority` и DLX/DLQ-топологией, переиспользуемое соединение с publisher confirms внутри адаптера |
-| `LlmGateway` | `FallbackLlmGateway` над `OllamaGateway` и `OpenAiCompatibleGateway` (Eurorouter); `StubLlmGateway` при `LLM_BACKEND=stub` | `complete(LlmRequest) -> LlmResponse`: получить от модели ответ по Pydantic-модели из запроса. На входе - уже собранные сообщения (`app/domain/prompt.py`), модель ответа (`app/application/llm_schema.py`) и предел длины ответа; на выходе - её проверенный экземпляр, фактически ответившая модель и число токенов. `OllamaGateway` - локальная модель через нативную `/api/chat` (`format` по схеме, окно `num_ctx` передаётся явно, `prompt_eval_count` больше окна за вычетом резерва - сбой: модель могла обрезать запрос); `OpenAiCompatibleGateway` - `/chat/completions` с `json_schema` и ротацией ключей на `401`/`403`/`429`. Проверка ответа по модели и повторы - общий `complete_structured`: повтор дописывает одно сообщение с путями и видами нарушений после исходных, не меняя их и не возвращая модели её отвергнутый ответ. `FallbackLlmGateway` вызывает провайдеров по порядку: локальная модель первая, Eurorouter - вторым и только при `LLM_HOSTED_FALLBACK=true`. Сборка промпта, проверка окна модели и отсев замечаний - не дело адаптера. Сбой транспорта - `LlmError`, ответ, так и не прошедший модель, - `LlmOutputError`. |
+| `LlmGateway` | `FallbackLlmGateway` над `OllamaGateway` и `OpenAiCompatibleGateway` (Eurorouter); `StubLlmGateway` при `LLM_BACKEND=stub` | `complete(LlmRequest) -> LlmResponse`: получить от модели ответ по Pydantic-модели из запроса. На входе - уже собранные сообщения (`app/domain/prompt.py`), модель ответа (`app/application/llm_schema.py`) и предел длины ответа; на выходе - её проверенный экземпляр, фактически ответившая модель и число токенов. `OllamaGateway` - локальная модель через нативную `/api/chat` (`format` по схеме, окно `num_ctx` передаётся явно, `prompt_eval_count` больше окна за вычетом резерва - сбой: модель могла обрезать запрос); `OpenAiCompatibleGateway` - `/chat/completions` с `json_schema` и ротацией ключей на `401`/`403`/`429`. Проверка ответа по модели и повторы - общий `complete_structured`: повтор дописывает одно сообщение с путями и видами нарушений после исходных, не меняя их и не возвращая модели её отвергнутый ответ; ответ, оборванный пределом длины, не повторяется. Сбой несёт токены, израсходованные к нему (`LlmError.tokens_used`). `FallbackLlmGateway` вызывает провайдеров по порядку: локальная модель первая, Eurorouter - вторым и только при `LLM_HOSTED_FALLBACK=true`; токены сбойных провайдеров прибавляются к ответу или к последнему сбою. Подключение к провайдеру ограничено 10 секундами независимо от таймаута ответа. Сборка промпта, проверка окна модели и отсев замечаний - не дело адаптера. Сбой транспорта - `LlmError`, ответ, так и не прошедший модель, - `LlmOutputError`. |
 
 `app/infrastructure/container.py` единственное место, где порт связывается с
 адаптером. Тест проверяет, что у каждого объявленного порта есть адаптер и что
@@ -264,11 +264,14 @@ def upgrade() -> None:
 Если обязательная настройка не задана, старт явно падает и называет её.
 Обязательная для всех процессов сейчас одна, `DATABASE_URL`; воркеру нужна
 ещё `LLM_BACKEND` (`stub` или `ollama`): заглушка модели выбирается только
-явно, и без переменной воркер не стартует. Зависимости между настройками
+явно, и без переменной (или с пустой, как её передаёт compose) воркер не
+стартует. Зависимости между настройками
 модели - `OLLAMA_MODEL` при `ollama`, адрес, модель и ключи Eurorouter при
 `LLM_HOSTED_FALLBACK=true` - проверяет валидатор настроек, а то, что пакет
 контекста на пределе лимита, системный промпт и резерв ответа помещаются в
-окно `LLM_CONTEXT_WINDOW_TOKENS`, - воркер при старте, до подключения к брокеру.
+окно `LLM_CONTEXT_WINDOW_TOKENS`, и что вызов модели в худшем случае
+(`LLM_TIMEOUT_SECONDS` × `LLM_MAX_ATTEMPTS` × провайдеры) короче
+`STALE_RUN_TIMEOUT_SECONDS`, - воркер при старте, до подключения к брокеру.
 Настройки `github_app_id`, `github_app_private_key`, `github_webhook_secret`,
 `rabbitmq_url`, `github_app_client_id`, `github_app_client_secret` и `public_origin`
 опциональны с пустым дефолтом: приложение без GitHub-реквизитов поднимается

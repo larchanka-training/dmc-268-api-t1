@@ -94,6 +94,6 @@ def _fitting(messages: tuple[PromptMessage, ...], limits: LlmLimits) -> tuple[Pr
     fits = check_window(
         messages, window_tokens=limits.window_tokens, max_output_tokens=limits.max_output_tokens
     )
-    if not fits.ok:
+    if fits.error is not None:
         raise PromptTooLargeError(fits.error)
     return messages

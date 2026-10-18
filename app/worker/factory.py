@@ -220,6 +220,22 @@ def load_checked_prompt_texts(settings: Settings, root: Path) -> PromptTexts:
     return texts
 
 
+def check_model_deadline(settings: Settings) -> None:
+    """Один вызов модели в худшем случае короче порога зависшего прогона.
+
+    Иначе выметатель объявил бы мёртвым живой прогон, пока модель ещё
+    отвечает. Считается один вызов, а не два: между вызовом ревью и
+    верификатором прогон отмечает прогресс (change `llm-gateway-review-fixes`, D4).
+    """
+    worst = settings.llm_call_worst_case_seconds
+    if worst >= settings.stale_run_timeout_seconds:
+        raise WorkerConfigError(
+            f"вызов модели в худшем случае {worst:g} с (LLM_TIMEOUT_SECONDS × LLM_MAX_ATTEMPTS"
+            f" × провайдеры) не короче порога зависшего прогона"
+            f" {settings.stale_run_timeout_seconds} с (STALE_RUN_TIMEOUT_SECONDS)"
+        )
+
+
 def build_maintenance(
     uow_factory: Callable[[], UnitOfWork],
     *,
@@ -255,6 +271,7 @@ def run_worker(settings: Settings) -> None:
     # пустыми (change `add-llm-gateway`, требование «Выбор заглушки явный»).
     if settings.llm_backend is None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
+    check_model_deadline(settings)
     container = build_container(settings)
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
     # Собрать адаптер модели сразу: порядок провайдеров уходит в лог при старте.

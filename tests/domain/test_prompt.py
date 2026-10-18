@@ -297,6 +297,37 @@ def test_pr_context_goes_into_the_code_message_before_the_changes() -> None:
         assert text not in system.content
 
 
+def _pr_part_labels(items: list[dict[str, object]]) -> list[str]:
+    body = copy.deepcopy(BODY)
+    body.update(diff=[], ast=[], omitted=[], omitted_count=0, pull_request_context=items)
+    _, _, code = build_review_prompt(TEXTS, body)
+    labels = ("Заголовок PR", "Описание PR", "Сообщение коммита")
+    return [line for line in code.content.split("\n") if line.startswith(labels)]
+
+
+def test_commit_is_labelled_by_its_place_in_the_pr_not_among_the_shown() -> None:
+    # Самый новый коммит не поместился: вошедший - второй, без метки «самый новый».
+    labels = _pr_part_labels([{"part": "commit", "index": 2, "text": fence("commit_message", "x")}])
+    assert labels == ["Сообщение коммита 2:"]
+
+
+def test_package_saved_before_commit_index_is_numbered_in_order() -> None:
+    labels = _pr_part_labels(
+        [
+            {"part": "commit", "text": fence("commit_message", "b")},
+            {"part": "commit", "text": fence("commit_message", "a")},
+        ]
+    )
+    assert labels == ["Сообщение коммита 1 (самый новый):", "Сообщение коммита 2:"]
+
+
+def test_cut_description_is_labelled_as_cut() -> None:
+    labels = _pr_part_labels(
+        [{"part": "description", "text": fence("pr_description", "нача"), "truncated": True}]
+    )
+    assert labels == ["Описание PR (обрезано):"]
+
+
 def test_package_without_pr_context_field_has_no_pr_section() -> None:
     # Пакеты, сохранённые до появления поля, собираются как раньше.
     assert "### Контекст PR" not in build_review_prompt(TEXTS, BODY)[2].content

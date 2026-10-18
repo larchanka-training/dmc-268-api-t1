@@ -7,10 +7,13 @@
 Сбой модели любого класса (`LlmError`, включая `LlmOutputError`) передаёт тот
 же запрос следующему провайдеру; после последнего пробрасывается его сбой.
 Прочие исключения - ошибки программы - не гасятся и дальше не передаются.
+Токены, которые сожгли сбойные провайдеры, прибавляются к ответу или к
+последнему сбою: прогон учитывает весь расход вызова.
 """
 
 import logging
 from collections.abc import Sequence
+from dataclasses import replace
 
 from pydantic import BaseModel
 
@@ -28,10 +31,12 @@ class FallbackLlmGateway:
 
     def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
         *heads, (_, last) = self._providers
+        spent = 0
         for (name, provider), (next_name, _) in zip(heads, self._providers[1:], strict=True):
             try:
-                return provider.complete(request)
+                return _plus(provider.complete(request), spent)
             except LlmError as error:
+                spent += error.tokens_used
                 logger.warning(
                     "модель %s не ответила на %s (%s: %s), запрос уходит %s",
                     name,
@@ -40,4 +45,12 @@ class FallbackLlmGateway:
                     error,
                     next_name,
                 )
-        return last.complete(request)
+        try:
+            return _plus(last.complete(request), spent)
+        except LlmError as error:
+            error.tokens_used += spent
+            raise
+
+
+def _plus[T: BaseModel](response: LlmResponse[T], spent: int) -> LlmResponse[T]:
+    return replace(response, tokens_used=response.tokens_used + spent) if spent else response

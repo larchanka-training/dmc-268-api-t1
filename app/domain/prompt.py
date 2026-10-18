@@ -208,17 +208,23 @@ def _code_message(body: Mapping[str, Any]) -> str:
 
 
 def _pr_parts(items: Sequence[Mapping[str, Any]]) -> list[str]:
-    """Блоки контекста PR с подписью; коммиты нумеруются с единицы, новые первыми."""
+    """Блоки контекста PR с подписью; коммиты - по месту в PR, с единицы от нового.
+
+    Место берётся из `index` элемента: если самый новый коммит не вошёл, метку
+    «самый новый» не получает следующий. Пакеты, сохранённые до появления
+    `index`, нумеруются по порядку вошедших.
+    """
     parts: list[str] = []
     commit = 0
     for item in items:
         if item["part"] == "title":
             label = "Заголовок PR"
         elif item["part"] == "description":
-            label = "Описание PR"
+            label = "Описание PR" + (" (обрезано)" if item.get("truncated") else "")
         else:
             commit += 1
-            label = f"Сообщение коммита {commit}" + (" (самый новый)" if commit == 1 else "")
+            place = item.get("index", commit)
+            label = f"Сообщение коммита {place}" + (" (самый новый)" if place == 1 else "")
         parts.append(f"{label}:\n{item['text']}")
     return parts
 

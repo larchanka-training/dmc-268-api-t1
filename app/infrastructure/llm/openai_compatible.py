@@ -117,12 +117,15 @@ class OpenAiCompatibleGateway:
     def _reply(self, response: httpx.Response) -> RawReply:
         try:
             data = response.json()
-            text: str = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            text: str = choice["message"]["content"]
             model: str = data["model"]
             tokens: int = data["usage"]["total_tokens"]
         except (ValueError, KeyError, IndexError, TypeError) as error:
             raise LlmError(f"{self._name} вернул неожиданное тело на /chat/completions") from error
-        return RawReply(text=text, model=model, tokens=tokens)
+        # `length` - ответ оборван по `max_tokens`.
+        truncated = choice.get("finish_reason") == "length"
+        return RawReply(text=text, model=model, tokens=tokens, truncated=truncated)
 
     def _error_text(self, response: httpx.Response) -> str:
         """Описание ошибки провайдера без ключей: провайдер может процитировать ключ."""

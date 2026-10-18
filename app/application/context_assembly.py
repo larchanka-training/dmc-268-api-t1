@@ -15,7 +15,9 @@
 в порядке диффа, затем правила —
 уже по файлам, чей дифф вошёл, — затем
 AST: сначала охватывающие определения всех файлов, потом импорты. Элемент,
-не поместившийся целиком, не обрезается, а перечисляется в `omitted`;
+не поместившийся целиком, не обрезается, а перечисляется в `omitted`. Одно
+исключение - описание PR: оно входит началом, обрезанным до остатка доли
+(change `llm-gateway-review-fixes`, design D6);
 под этот перечень заранее отложен резерв, остаток перечня считает
 `omitted_count`.
 
@@ -86,7 +88,8 @@ class PrContext:
 
     title: str | None
     description: str | None
-    # От нового к старому: при нехватке доли теряются старые коммиты.
+    # От нового к старому: при нехватке доли теряются старые коммиты. На PR
+    # длиннее 250 коммитов новых здесь нет: VCS их не отдаёт (`VcsGateway`).
     commit_messages: tuple[str, ...] | None
 
 
@@ -165,6 +168,11 @@ def assemble_context(
     for item, omission in pr_items:
         if pr_share.take(item):
             body["pull_request_context"].append(item)
+        elif item["part"] == "description" and (
+            cut := _cut_description(pr_context.description or "", pr_share)
+        ):
+            pr_share.take(cut)
+            body["pull_request_context"].append(cut)
         else:
             omitted.append(omission)
     budget.merge(pr_share)
@@ -290,11 +298,34 @@ def _pr_context_items(
         for index, message in enumerate(context.commit_messages, start=1):
             items.append(
                 (
-                    {"part": "commit", "text": fence("commit_message", message)},
+                    # `index` - место коммита в PR, с единицы от нового: по нему
+                    # подписывается сообщение, даже если новые не вошли.
+                    {"part": "commit", "index": index, "text": fence("commit_message", message)},
                     {"part": "commit_message", "reason": "budget", "index": index},
                 )
             )
     return items, unavailable
+
+
+def _cut_description(text: str, share: Budget) -> dict[str, Any] | None:
+    """Блок самого длинного начала описания, который помещается в остаток доли.
+
+    Описание - первый контекст ревью, и выпадать целиком из-за длины ему
+    нельзя. Стоимость блока растёт с длиной начала, поэтому длина ищется
+    двоичным поиском; `None` - не помещается ни один символ.
+    """
+
+    def item(length: int) -> dict[str, Any]:
+        return {"part": "description", "text": fence("pr_description", text[:length]), "truncated": True}
+
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if Budget.cost(item(middle)) <= share.remaining:
+            low = middle
+        else:
+            high = middle - 1
+    return item(low) if low else None
 
 
 def _hunk_item(parsed: ParsedFile, hunk: Hunk) -> dict[str, Any]:

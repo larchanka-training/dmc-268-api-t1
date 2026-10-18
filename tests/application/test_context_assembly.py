@@ -14,7 +14,7 @@ from app.application.context_assembly import (
     SkippedAst,
     assemble_context,
 )
-from app.domain.context_budget import estimate_tokens, serialize
+from app.domain.context_budget import estimate_tokens, json_size, serialize
 from app.domain.diff_parser import parse_diff
 from app.domain.entities import (
     Definition,
@@ -388,8 +388,8 @@ def test_pr_context_is_title_description_and_commits_newest_first_each_in_a_bloc
     assert body["pull_request_context"] == [
         {"part": "title", "text": fence("pr_title", "feat: вставка в начало")},
         {"part": "description", "text": fence("pr_description", "Новые элементы должны идти первыми.")},
-        {"part": "commit", "text": fence("commit_message", "fix: вернуть элемент")},
-        {"part": "commit", "text": fence("commit_message", "feat: вставка в начало")},
+        {"part": "commit", "index": 1, "text": fence("commit_message", "fix: вернуть элемент")},
+        {"part": "commit", "index": 2, "text": fence("commit_message", "feat: вставка в начало")},
     ]
 
 
@@ -422,14 +422,30 @@ def test_empty_description_has_no_block_and_no_omission() -> None:
     assert all(entry.get("part") != "description" for entry in body["omitted"])
 
 
-def test_long_description_is_omitted_without_displacing_the_diff() -> None:
-    # 2 000 токенов описания при доле 1 000: описание не входит, дифф - как без него.
-    long = PrContext(title="t", description="д" * 4_000, commit_messages=())
+def test_long_description_is_cut_to_the_share_without_displacing_the_diff() -> None:
+    # 2 000 токенов описания при доле 1 000: входит начало, дифф - как без него.
+    text = "".join(f"абзац {n}. " for n in range(500))
+    long = PrContext(title="t", description=text, commit_messages=("c",))
     with_long = _assemble(pr_context=long).payload.body
     without = _assemble().payload.body
-    assert [item["part"] for item in with_long["pull_request_context"]] == ["title"]
-    assert {"part": "pr_description", "reason": "budget"} in with_long["omitted"]
+    title, description = with_long["pull_request_context"]
+    assert description["truncated"] is True
+    shown = description["text"].split("\n")[1]
+    assert text.startswith(shown) and 0 < len(shown) < len(text)
+    # Описание взяло остаток доли: ещё один символ не поместился бы.
+    share = 1_000 * 4
+    assert json_size(title) + 1 + json_size(description) + 1 <= share
+    longer = {**description, "text": fence("pr_description", text[: len(shown) + 1])}
+    assert json_size(title) + 1 + json_size(longer) + 1 > share
+    assert {"part": "pr_description", "reason": "budget"} not in with_long["omitted"]
+    assert {"part": "commit_message", "reason": "budget", "index": 1} in with_long["omitted"]
     assert with_long["diff"] == without["diff"]
+
+
+def test_description_that_fits_is_not_marked_as_cut() -> None:
+    body = _assemble(pr_context=PR_CONTEXT).payload.body
+    (description,) = [i for i in body["pull_request_context"] if i["part"] == "description"]
+    assert "truncated" not in description
 
 
 def test_commits_over_the_share_are_each_reported() -> None:
