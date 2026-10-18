@@ -42,12 +42,15 @@ PORT_TO_ADAPTER: dict[str, Adapter] = {
     "JobQueue": Adapter("queue/rabbitmq.py", "RabbitMQJobQueue"),
     "LlmGateway": Adapter("llm/stub.py", "StubLlmGateway"),
     "MergeRequestRepo": Adapter("db/repositories.py", "SqlAlchemyMergeRequestRepo"),
+    "OAuthProvider": Adapter("oauth/github.py", "GitHubOAuthProvider"),
     "PublishedCommentRepo": Adapter(
         "db/repositories.py", "SqlAlchemyPublishedCommentRepo"
     ),
     "RepositoryRepo": Adapter("db/repositories.py", "SqlAlchemyRepositoryRepo"),
     "ReviewRunRepo": Adapter("db/repositories.py", "SqlAlchemyReviewRunRepo"),
+    "SessionRepo": Adapter("db/repositories.py", "SqlAlchemySessionRepo"),
     "UnitOfWork": Adapter("db/unit_of_work.py", "SqlAlchemyUnitOfWork"),
+    "UserRepo": Adapter("db/repositories.py", "SqlAlchemyUserRepo"),
     "VcsGateway": Adapter("vcs/github.py", "GitHubVcsGateway"),
 }
 
@@ -109,6 +112,8 @@ def test_the_container_hands_out_a_unit_of_work() -> None:
             "context_payloads",
             "findings",
             "published_comments",
+            "users",
+            "sessions",
         ):
             assert hasattr(uow, attribute)
 
@@ -128,6 +133,14 @@ def test_the_container_caches_its_lazy_adapters() -> None:
     Удалите `object.__setattr__` в контейнере — тест красный."""
     container = build_container(SETTINGS)
     assert container.vcs_gateway() is container.vcs_gateway()
+
+
+def test_the_container_hands_out_oauth_providers_by_path_name() -> None:
+    container = build_container(SETTINGS)
+    github = container.oauth_provider("github")
+    assert github is not None
+    assert callable(github.exchange_code)
+    assert container.oauth_provider("bitbucket") is None
 
 
 def test_the_container_keeps_one_cache_per_process() -> None:

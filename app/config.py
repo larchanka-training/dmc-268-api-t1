@@ -6,7 +6,7 @@
 
 from typing import Literal, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -54,6 +54,28 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="PEM private key GitHub App; из окружения GITHUB_APP_PRIVATE_KEY",
     )
+    # OAuth того же GitHub App — вход пользователей. Пустые по той же причине:
+    # без них не работает только вход, остальное API отвечает.
+    github_app_client_id: str = Field(
+        default="",
+        description="Client ID GitHub App; из окружения GITHUB_APP_CLIENT_ID",
+    )
+    github_app_client_secret: SecretStr = Field(
+        default=SecretStr(""),
+        description="Client secret GitHub App; из окружения GITHUB_APP_CLIENT_SECRET",
+    )
+    # Публичный адрес сервиса без завершающего `/`: с ним сверяется `Origin`
+    # изменяющих запросов, от него строится callback OAuth. Пустой не совпадёт
+    # ни с одним `Origin` — изменяющие запросы с сессией отклоняются.
+    public_origin: str = Field(
+        default="",
+        description="Публичный origin сервиса, например https://review.example; из PUBLIC_ORIGIN",
+    )
+
+    @field_validator("public_origin")
+    @classmethod
+    def _strip_trailing_slash(cls, value: str) -> str:
+        return value.rstrip("/")
     # Лимиты сборки контекста прогона (change add-context-engine-and-repo-rules).
     # Потолок пакета контекста — только данных, без системного промпта и
     # ответа модели: окно модели должно вмещать пакет + промпты + ответ.

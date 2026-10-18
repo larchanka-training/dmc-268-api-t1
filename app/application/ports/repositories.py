@@ -6,6 +6,7 @@
 SQLAlchemy.
 """
 
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -17,6 +18,8 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    Session,
+    User,
 )
 from app.domain.enums import Provider
 
@@ -89,3 +92,33 @@ class PublishedCommentRepo(Protocol):
     def update(self, comment: PublishedComment) -> None: ...
 
     def record_feedback(self, provider_comment_id: str, *, positive: bool) -> bool: ...
+
+
+class UserRepo(Protocol):
+    def get(self, user_id: UUID) -> User | None: ...
+
+    def find_by_provider(self, provider: Provider, provider_user_id: str) -> User | None: ...
+
+    def add(self, user: User) -> bool:
+        """Вставить пользователя; `False` — пара провайдер + аккаунт уже занята.
+
+        Два параллельных первых входа одного аккаунта не должны давать ошибку
+        базы: проигравший получает `False` и обновляет найденную строку.
+        """
+        ...
+
+    def update(self, user: User) -> None: ...
+
+
+class SessionRepo(Protocol):
+    def find_by_token_hash(self, token_hash: bytes) -> Session | None: ...
+
+    def add(self, session: Session) -> None: ...
+
+    def delete(self, session_id: UUID) -> None:
+        """Удалить сессию; отсутствующая — не ошибка: выход идемпотентен."""
+        ...
+
+    def delete_expired(self, now: datetime) -> int:
+        """Удалить сессии, срок которых истёк к `now`; вернуть их число."""
+        ...

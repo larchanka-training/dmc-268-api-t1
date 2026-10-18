@@ -1,7 +1,7 @@
 """ссылка замечания на правило владельца и итог верификации прогона
 
-Revision ID: 0005
-Revises: 0004
+Revision ID: 0006
+Revises: 0005
 Create Date: 2026-10-16 12:00:00.000000
 
 """
@@ -13,8 +13,8 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 # Идентификаторы ревизии, используются Alembic.
-revision: str = '0005'
-down_revision: str | Sequence[str] | None = '0004'
+revision: str = '0006'
+down_revision: str | Sequence[str] | None = '0005'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

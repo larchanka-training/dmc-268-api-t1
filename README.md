@@ -89,6 +89,17 @@ uv run uvicorn app.main:app --reload
 
 `GET /health` отвечает `{"status": "ok"}`. Сгенерированная документация API лежит на `/docs`.
 
+Ручки `/api/v1`, кроме вебхуков и входа, требуют сессию. Для входа через GitHub
+нужны `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` и `PUBLIC_ORIGIN`
+(см. `.env.example`), а callback `<PUBLIC_ORIGIN>/api/v1/auth/github/callback`
+должен быть зарегистрирован в настройках GitHub App. `PUBLIC_ORIGIN` — origin, на
+котором браузер открывает и кабинет, и API (на стенде они за одним nginx). Локально
+`http://localhost:8000` из `.env.example` подходит, когда API открывают напрямую.
+Для кабинета с настоящим бэкендом (`VITE_USE_MOCK_API=false`, dev-сервер на `:3000`
+проксирует `/api` сюда) ставьте `http://localhost:3000`.
+Cookie сессии ставится с `Secure`: вход работает по HTTPS и на `localhost`, по
+голому HTTP на другом хосте — нет.
+
 Тот же стек — PostgreSQL, RabbitMQ и контейнеры API и воркера — описан ещё раз в
 [`infra/`](infra/README.md), для сервера. Два описания одного стека уже дважды
 разъезжались и ломали стенд, поэтому факты, которые обязаны совпадать (миграции

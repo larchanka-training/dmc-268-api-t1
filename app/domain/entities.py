@@ -407,3 +407,38 @@ class Verdict:
 
     verdict: VerifierVerdict
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class User:
+    """Пользователь кабинета. Ключ — учётная запись у провайдера входа."""
+
+    id: UUID
+    provider: Provider
+    provider_user_id: str
+    login: str
+    name: str | None
+    avatar_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class Session:
+    """Сессия входа. Хранится хэш значения cookie, а не само значение."""
+
+    id: UUID
+    token_hash: bytes
+    user_id: UUID
+    created_at: datetime
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthProfile:
+    """Профиль, который провайдер вернул при входе. Транзиентный: токена в нём нет."""
+
+    provider_user_id: str
+    login: str
+    name: str | None
+    avatar_url: str | None

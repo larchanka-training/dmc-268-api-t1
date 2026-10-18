@@ -42,7 +42,7 @@
 
 ## 5. Хранение
 
-- [x] 5.1 Миграция `0005` по скиллу `alembic-migration` поверх `0004`: `findings.rule_name`, `rule_check`, `rule_check_text` и `CHECK ck_findings_rule_ref` (все пусты либо все заполнены и `rule_check >= 1`); тип `review_verification`, `review_runs.verification`, `review_runs.verifier_dropped_findings INTEGER NOT NULL DEFAULT 0` с `CHECK ck_review_runs_verifier_dropped`; рабочий `downgrade`, удаляющий и тип.
+- [x] 5.1 Миграция `0006` по скиллу `alembic-migration` поверх `0005` (была `0005` поверх `0004`; перенумерована при слиянии `develop` с `0005_add_users_and_sessions` из #47): `findings.rule_name`, `rule_check`, `rule_check_text` и `CHECK ck_findings_rule_ref` (все пусты либо все заполнены и `rule_check >= 1`); тип `review_verification`, `review_runs.verification`, `review_runs.verifier_dropped_findings INTEGER NOT NULL DEFAULT 0` с `CHECK ck_review_runs_verifier_dropped`; рабочий `downgrade`, удаляющий и тип.
       Проверка: `uv run alembic heads` - одна голова; с `TEST_DATABASE_URL` - `upgrade head` → `downgrade -1` → `upgrade head`.
 - [x] 5.2 Адаптер базы: колонки и ограничения в `FindingRow` и `ReviewRunRow` (`app/infrastructure/db/models.py`), поля в маппингах (`mappers.py`) и в `SqlAlchemyFindingRepo.add` (`repositories.py`).
       Проверка: `tests/db/test_drift.py` без расхождений; в `tests/db/test_adapters.py` - замечание со ссылкой и прогон с `verification` сохраняются и читаются обратно; в `tests/db/test_constraints.py` - частичная ссылка и отрицательный `verifier_dropped_findings` отклоняются базой.
@@ -108,7 +108,7 @@
       Кейс «повтор адаптера с дописанным сообщением не меняет исходные» - обязанность адаптера (`review-prompt-assembly`), проверяется тестами адаптера в задаче «LLM Gateway».
 - [x] 13.2 `uv run ruff check . && uv run mypy . && uv run lint-imports && uv run pytest`; с `TEST_DATABASE_URL` - интеграционные без пропусков; `uv run alembic heads` - одна голова; `npx @fission-ai/openspec@1.14.2 validate --all --strict`.
 - [ ] 13.3 Вживую: `docker compose up -d --build`, вебхук с PR, где на `base_sha` лежит `.review/rules.md` с правилом, а дифф содержит инъекцию; заглушка доводит прогон до `completed`, в `context_payloads` маркеры экранированы, `GET /api/v1/reviews/<id>` отдаёт `verification: "not_required"`.
-      Сделано на собранном образе против одноразовых Postgres и RabbitMQ: миграция `0005` применяется в контейнере; воркер стартует с промптами из образа и не стартует без них (`PromptFileError: нет файла промпта system.md`); ручка прогона отдаёт `verification`, `verifier_dropped_findings` и `rule` с `check_text`; база отвергает частичную ссылку на правило.
+      Сделано на собранном образе против одноразовых Postgres и RabbitMQ: миграция (тогда `0005`) применяется в контейнере; воркер стартует с промптами из образа и не стартует без них (`PromptFileError: нет файла промпта system.md`); ручка прогона отдаёт `verification`, `verifier_dropped_findings` и `rule` с `check_text`; база отвергает частичную ссылку на правило.
       Не сделано: путь вебхука до `completed` требует реквизитов GitHub App - без них вебхук падает ещё до прогона (500 вместо обещанных в `docker-compose.yml` 502: `jwt.InvalidKeyError` не переводится в `VcsError`, отдельный баг вне этого change).
 
 ## Workflow follow-up

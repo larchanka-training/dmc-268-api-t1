@@ -23,6 +23,8 @@ TABLES = [
     "context_payloads",
     "findings",
     "published_comments",
+    "users",
+    "sessions",
 ]
 
 
@@ -110,3 +112,19 @@ def test_same_full_name_under_two_providers_is_allowed() -> None:
     statement = ddl("repositories")
     assert re.search(r"UNIQUE \(provider, provider_id\)", statement)
     assert "UNIQUE (full_name)" not in statement
+
+
+def test_a_user_is_unique_per_provider_account() -> None:
+    assert "CONSTRAINT uq_users_provider_user_id UNIQUE (provider, provider_user_id)" in ddl(
+        "users"
+    )
+
+
+def test_a_session_is_found_by_a_unique_token_hash() -> None:
+    statement = ddl("sessions")
+    assert "token_hash BYTEA NOT NULL" in statement
+    assert "CONSTRAINT uq_sessions_token_hash UNIQUE (token_hash)" in statement
+
+
+def test_deleting_a_user_deletes_their_sessions() -> None:
+    assert "REFERENCES users (id) ON DELETE CASCADE" in ddl("sessions")

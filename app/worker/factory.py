@@ -28,6 +28,7 @@ from app.application.ports import (
 )
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.review_pipeline import run_review
+from app.application.session_purge import purge_expired_sessions
 from app.application.stale_sweep import sweep_stale_runs
 from app.config import Settings
 from app.domain.ids import new_id
@@ -219,6 +220,34 @@ def load_checked_prompt_texts(settings: Settings, root: Path) -> PromptTexts:
     return texts
 
 
+def build_maintenance(
+    uow_factory: Callable[[], UnitOfWork],
+    *,
+    stale_limit: timedelta,
+    now: Callable[[], datetime],
+) -> Callable[[], None]:
+    """Периодический проход: зависшие прогоны и истёкшие сессии.
+
+    Шаги независимы: сбой одного логируется и не мешает другому.
+    """
+
+    def maintenance() -> None:
+        try:
+            swept = sweep_stale_runs(uow_factory(), now=now(), limit=stale_limit)
+            if swept:
+                logger.warning("зависших прогонов переведено в failed: %d", swept)
+        except Exception:
+            logger.exception("проход по зависшим прогонам завершился ошибкой")
+        try:
+            purged = purge_expired_sessions(uow_factory(), now=now())
+            if purged:
+                logger.info("истёкших сессий удалено: %d", purged)
+        except Exception:
+            logger.exception("удаление истёкших сессий завершилось ошибкой")
+
+    return maintenance
+
+
 def run_worker(settings: Settings) -> None:
     """Собрать зависимости и запустить воркер бесконечно. Вызывается из `__main__.py`."""
     # До подключения к брокеру: с непригодной конфигурацией воркер не поднимается.
@@ -230,13 +259,11 @@ def run_worker(settings: Settings) -> None:
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
     # Собрать адаптер модели сразу: порядок провайдеров уходит в лог при старте.
     container.llm_gateway()
-    limit = timedelta(seconds=settings.stale_run_timeout_seconds)
-
-    def sweep() -> None:
-        swept = sweep_stale_runs(container.unit_of_work(), now=datetime.now(UTC), limit=limit)
-        if swept:
-            logger.warning("зависших прогонов переведено в failed: %d", swept)
-
+    sweep = build_maintenance(
+        container.unit_of_work,
+        stale_limit=timedelta(seconds=settings.stale_run_timeout_seconds),
+        now=lambda: datetime.now(UTC),
+    )
     handler = build_review_handler(
         container, context_limits(settings), llm_limits(settings), prompt_texts
     )

@@ -19,6 +19,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -292,3 +293,45 @@ class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     in_reply_to_provider_comment_id: Mapped[str | None] = mapped_column(String(255))
     feedback_positive: Mapped[int] = mapped_column(default=0, server_default="0")
     feedback_negative: Mapped[int] = mapped_column(default=0, server_default="0")
+
+
+class UserRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
+    """Пользователь кабинета. Логин, имя и аватар обновляются при каждом входе."""
+
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_user_id", name="uq_users_provider_user_id"),
+    )
+
+    provider: Mapped[Provider] = mapped_column(_enum(Provider, "provider"), nullable=False)
+    # Строка: тип идентификатора у провайдеров разный.
+    provider_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    login: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(255))
+    avatar_url: Mapped[str | None] = mapped_column(Text)
+
+    # Нужна только для порядка INSERT'ов в одном flush, как у repositories.
+    # Сессии удаляет база (CASCADE), а не ORM.
+    sessions: Mapped[list[SessionRow]] = relationship(
+        back_populates="user", passive_deletes="all"
+    )
+
+
+class SessionRow(Base, UuidPrimaryKeyMixin):
+    """Сессия входа. Ни updated_at, ни продления: срок жизни задаётся при входе."""
+
+    __tablename__ = "sessions"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_sessions_token_hash"),)
+
+    # SHA-256 от значения cookie; самого значения в базе нет. Уникальный
+    # индекс — путь поиска сессии на каждом запросе.
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Удаление пользователя гасит его сессии — в отличие от RESTRICT конвейера,
+    # сессия без пользователя ничего не значит.
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped[UserRow] = relationship(back_populates="sessions")
