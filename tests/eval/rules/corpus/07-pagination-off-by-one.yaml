@@ -1,0 +1,16 @@
+title: Пагинация - off-by-one, правила не при чём
+pull_request:
+  title: "feat: границы страницы списка платежей"
+  description: Вычисляет срез списка платежей для страницы в кабинете.
+files:
+  app/billing/pagination.py: |
+    def page_bounds(page: int, size: int, total: int) -> tuple[int, int]:
+        """Полуоткрытый интервал [start, end) элементов страницы с номером page (с нуля)."""
+        start = page * size
+        end = start + size + 1
+        return start, min(end, total)
+expected:
+  - id: off-by-one
+    path: app/billing/pagination.py
+    contains: "end = start + size + 1"
+    category: correctness
