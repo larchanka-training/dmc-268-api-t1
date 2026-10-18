@@ -158,3 +158,15 @@ def test_truncated_answer_fails_at_once_without_a_retry() -> None:
 
     assert len(calls) == 1
     assert error.value.tokens_used == 4_200
+
+
+def test_complete_answer_marked_as_cut_by_the_provider_is_accepted() -> None:
+    """Модель дописала пробелы после объекта до предела: ответ полный."""
+
+    def send(messages: Sequence[PromptMessage]) -> RawReply:
+        return RawReply(text=VALID + " " * 50, model="m", tokens=1_024, truncated=True)
+
+    response = complete_structured(send, REQUEST, max_attempts=2)
+
+    assert isinstance(response.content, ReviewOutput)
+    assert response.tokens_used == 1_024
