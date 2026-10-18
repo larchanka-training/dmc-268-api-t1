@@ -26,6 +26,7 @@
 
 import logging
 from collections.abc import Sequence
+from http import HTTPStatus
 from typing import Any
 from urllib.parse import quote
 
@@ -73,32 +74,32 @@ ERRORS_DEFAULT = _doc(
     "`404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
 )
 ERRORS_422 = _doc(
-    422,
+    HTTPStatus.UNPROCESSABLE_CONTENT,
     ValidationProblem,
     "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
 )
 ERRORS_401_SESSION = _doc(
-    401,
+    HTTPStatus.UNAUTHORIZED,
     UnauthenticatedProblem,
     "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
 )
 ERRORS_403_ORIGIN = _doc(
-    403, OriginForbiddenProblem, "`Origin` изменяющего запроса отсутствует или не совпадает с адресом сервиса."
+    HTTPStatus.FORBIDDEN, OriginForbiddenProblem, "`Origin` изменяющего запроса отсутствует или не совпадает с адресом сервиса."
 )
-ERRORS_404_REVIEW = _doc(404, ReviewNotFoundProblem, "Прогона ревью с таким id нет.")
-ERRORS_404_REPOSITORY = _doc(404, RepositoryNotFoundProblem, "Репозитория с таким id нет.")
-ERRORS_404_LOGIN_PROVIDER = _doc(404, ProviderNotSupportedProblem, "Вход через этого провайдера не поддержан.")
-ERRORS_409_REVIEW_ACTIVE = _doc(409, ReviewAlreadyActiveProblem, "По этому коммиту уже идёт прогон ревью.")
+ERRORS_404_REVIEW = _doc(HTTPStatus.NOT_FOUND, ReviewNotFoundProblem, "Прогона ревью с таким id нет.")
+ERRORS_404_REPOSITORY = _doc(HTTPStatus.NOT_FOUND, RepositoryNotFoundProblem, "Репозитория с таким id нет.")
+ERRORS_404_LOGIN_PROVIDER = _doc(HTTPStatus.NOT_FOUND, ProviderNotSupportedProblem, "Вход через этого провайдера не поддержан.")
+ERRORS_409_REVIEW_ACTIVE = _doc(HTTPStatus.CONFLICT, ReviewAlreadyActiveProblem, "По этому коммиту уже идёт прогон ревью.")
 ERRORS_401_WEBHOOK_SIGNATURE = _doc(
-    401, WebhookSignatureInvalidProblem, "Подписи доставки нет или она не прошла проверку; записей нет."
+    HTTPStatus.UNAUTHORIZED, WebhookSignatureInvalidProblem, "Подписи доставки нет или она не прошла проверку; записей нет."
 )
 ERRORS_501_WEBHOOK_PROVIDER = _doc(
-    501, ProviderNotSupportedProblem, "Провайдер есть в `Provider`, но приёмник вебхуков для него не написан."
+    HTTPStatus.NOT_IMPLEMENTED, ProviderNotSupportedProblem, "Провайдер есть в `Provider`, но приёмник вебхуков для него не написан."
 )
 ERRORS_502_SCM = _doc(
-    502, ScmUnavailableProblem, "Провайдер VCS недоступен или ответил ошибкой; прогон не создан."
+    HTTPStatus.BAD_GATEWAY, ScmUnavailableProblem, "Провайдер VCS недоступен или ответил ошибкой; прогон не создан."
 )
-ERRORS_501_NOT_IMPLEMENTED = _doc(501, NotImplementedProblem, "Ручка ещё не реализована.")
+ERRORS_501_NOT_IMPLEMENTED = _doc(HTTPStatus.NOT_IMPLEMENTED, NotImplementedProblem, "Ручка ещё не реализована.")
 
 
 # Что `quote` оставляет как есть: уже закодированные `%XX`, разделители пути и
@@ -184,17 +185,30 @@ def _api_error_handler(request: Request, error: Exception) -> Response:
 # для части типов цитирует ввод.
 _REASONS = {
     "missing": "обязательный параметр не передан",
+    "extra_forbidden": "лишнее поле",
     "int_parsing": "ожидается целое число",
     "int_type": "ожидается целое число",
+    "int_from_float": "ожидается целое число",
+    "int_parsing_size": "число слишком большое",
+    "float_parsing": "ожидается число",
+    "float_type": "ожидается число",
     "uuid_parsing": "ожидается UUID",
     "uuid_type": "ожидается UUID",
     "enum": "значение не из допустимого списка",
     "literal_error": "значение не из допустимого списка",
     "string_type": "ожидается строка",
     "bool_parsing": "ожидается логическое значение",
+    "bool_type": "ожидается логическое значение",
+    "model_type": "ожидается объект",
+    "model_attributes_type": "ожидается объект",
+    "dict_type": "ожидается объект",
+    "list_type": "ожидается массив",
     "json_invalid": "тело запроса — не JSON",
 }
 _DEFAULT_REASON = "недопустимое значение"
+# Ошибки, у которых последний элемент `loc` — ключ, присланный клиентом (имя лишнего поля).
+# Его в ответ не повторяем: ключ — тоже ввод, а `where` указывает на объект, где он был.
+_CLIENT_KEY_ERRORS = frozenset({"extra_forbidden"})
 
 
 def _reason(error: dict[str, Any]) -> str:
@@ -202,18 +216,37 @@ def _reason(error: dict[str, Any]) -> str:
     ctx = error.get("ctx") or {}
     if kind == "greater_than_equal":
         return f"должно быть не меньше {ctx.get('ge')}"
+    if kind == "greater_than":
+        return f"должно быть больше {ctx.get('gt')}"
     if kind == "less_than_equal":
         return f"должно быть не больше {ctx.get('le')}"
+    if kind == "less_than":
+        return f"должно быть меньше {ctx.get('lt')}"
+    if kind == "string_too_short":
+        return f"длина строки должна быть не меньше {ctx.get('min_length')}"
+    if kind == "string_too_long":
+        return f"длина строки должна быть не больше {ctx.get('max_length')}"
+    if kind == "too_short":
+        return f"элементов должно быть не меньше {ctx.get('min_length')}"
+    if kind == "too_long":
+        return f"элементов должно быть не больше {ctx.get('max_length')}"
     return _REASONS.get(str(kind), _DEFAULT_REASON)
 
 
-def _where(location: Sequence[Any]) -> str:
+def _where(error: dict[str, Any]) -> str:
+    location = list(error.get("loc", ()))
+    if error.get("type") in _CLIENT_KEY_ERRORS and location:
+        location.pop()
     return ".".join(str(part) for part in location) or "запрос"
 
 
 def validation_errors(errors: Sequence[Any]) -> list[dict[str, str]]:
-    """`[{"where": "query.limit", "reason": "ожидается целое число"}]` — без самих значений."""
-    return [{"where": _where(error.get("loc", ())), "reason": _reason(error)} for error in errors]
+    """`[{"where": "query.limit", "reason": "ожидается целое число"}]` — без самих значений.
+
+    Ключи от клиента в `loc` попадают только у лишних полей: словарей с ключами клиента во
+    входных моделях нет. Появится такое поле — его тип ошибки добавляется в `_CLIENT_KEY_ERRORS`.
+    """
+    return [{"where": _where(error), "reason": _reason(error)} for error in errors]
 
 
 def _validation_error_handler(request: Request, error: Exception) -> Response:
@@ -222,7 +255,7 @@ def _validation_error_handler(request: Request, error: Exception) -> Response:
     errors = validation_errors(error.errors())
     return problem_response(
         request,
-        422,
+        HTTPStatus.UNPROCESSABLE_CONTENT,
         ErrorCode.VALIDATION_ERROR,
         f"Параметры запроса не прошли проверку, ошибок: {len(errors)}.",
         errors=errors,
@@ -246,14 +279,14 @@ def _http_exception_handler(request: Request, error: Exception) -> Response:
     if not isinstance(error, StarletteHTTPException):
         raise error
     headers = dict(error.headers or {})
-    if error.status_code == 404:
+    if error.status_code == HTTPStatus.NOT_FOUND:
         return problem_response(
-            request, 404, ErrorCode.ROUTE_NOT_FOUND, "По этому пути ресурса нет.", headers=headers
+            request, HTTPStatus.NOT_FOUND, ErrorCode.ROUTE_NOT_FOUND, "По этому пути ресурса нет.", headers=headers
         )
-    if error.status_code == 405:
+    if error.status_code == HTTPStatus.METHOD_NOT_ALLOWED:
         return problem_response(
             request,
-            405,
+            HTTPStatus.METHOD_NOT_ALLOWED,
             ErrorCode.METHOD_NOT_ALLOWED,
             "Метод для этого пути не разрешён; разрешённые — в заголовке Allow.",
             headers=headers,
@@ -283,7 +316,7 @@ def _internal_error_handler(request: Request, error: Exception) -> Response:
     """
     response = problem_response(
         request,
-        500,
+        HTTPStatus.INTERNAL_SERVER_ERROR,
         ErrorCode.INTERNAL_ERROR,
         "Сервер не смог обработать запрос. Если ошибка повторяется, сообщите trace_id.",
     )

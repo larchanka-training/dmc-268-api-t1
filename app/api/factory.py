@@ -59,6 +59,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     from app.api import errors, log_redaction
     from app.api.auth import router as auth_router
+    from app.api.origin import OriginMiddleware
     from app.api.pull_requests import router as pull_requests_router
     from app.api.repositories import router as repositories_router
     from app.api.review_events import router as review_events_router
@@ -68,6 +69,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     log_redaction.install()
     errors.install(app)
+    # Последний добавленный — внешний: trace id ставится раньше, чем Origin может отказать.
+    app.add_middleware(OriginMiddleware, public_origin=settings.public_origin)
     app.add_middleware(TraceIdMiddleware)
 
     app.include_router(webhooks_router)

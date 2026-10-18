@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_unit_of_work
 from app.api.factory import create_app
-from app.api.repositories import MAX_LIMIT
+from app.api.pagination import MAX_LIMIT
 from app.config import Settings
 from app.domain.entities import Repository
 from app.domain.enums import Provider

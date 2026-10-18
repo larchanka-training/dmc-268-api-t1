@@ -32,7 +32,8 @@
   правится: после правки ручки — `uv run python scripts/export_openapi.py` в том же PR, CI
   сверяет. Запланированная ручка — заглушка с полной схемой, отвечает `501 NOT_IMPLEMENTED`.
   Ошибки — только RFC 9457 Problem Details (`raise ApiError(…, ErrorCode.X, …)`) с `trace_id`
-  (заголовок `X-Trace-ID`), по модели на код в `app/api/problems.py`; подробно —
+  (заголовок `X-Trace-ID`), по модели на код в `app/api/problems.py`. Ручка возвращает модель
+  ответа, время — `UtcDatetime`, статус — `HTTPStatus`, `Origin` проверяет middleware; подробно —
   `.agents/rules/backend.md`, «Ошибки».
 - Зависимости направлены внутрь: `app/domain` и `app/application` не знают про SQLAlchemy,
   FastAPI и прочих вендоров. Правило проверяет `uv run lint-imports`, а не ревью.

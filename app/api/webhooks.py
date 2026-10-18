@@ -27,11 +27,11 @@ GitLab приёмником пока не поддержан: маршрут к�
 
 import json
 from datetime import UTC, datetime
-from typing import Any, Literal
+from http import HTTPStatus
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Request, Response
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi import APIRouter, Path, Request
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import get_container
@@ -72,24 +72,26 @@ TRIGGERING_EVENT = "pull_request"
 REVIEW_THREAD_EVENT = "pull_request_review_thread"
 
 
-
 class WebhookIgnored(BaseModel):
     """Тело `202` для доставки, которая ревью не запускает: действие reopened, closed или
     неизвестное, незарегистрированный репозиторий, тело без события."""
 
-    status: Literal["ignored"]
+    status: Literal["ignored"] = Field(description="Доставка принята и проигнорирована.")
 
 
 class WebhookAcknowledged(BaseModel):
     """Тело `202` для события pull_request_review_thread: отметка закрытия треда принята."""
 
-    status: Literal["acknowledged"]
+    status: Literal["acknowledged"] = Field(description="Событие треда принято.")
+
+
+_IGNORED = WebhookIgnored(status="ignored")
+_ACKNOWLEDGED = WebhookAcknowledged(status="acknowledged")
 
 
 @router.post(
     "/webhooks/{provider}",
-    status_code=202,
-    # Ручка отдаёт `JSONResponse` сама; модель — для схемы, тело сверяют тесты.
+    status_code=HTTPStatus.ACCEPTED,
     response_model=ReviewJob | WebhookIgnored | WebhookAcknowledged,
     tags=["webhooks"],
     # Без сессии: доставку подтверждает подпись.
@@ -112,10 +114,12 @@ class WebhookAcknowledged(BaseModel):
         **ERRORS_502_SCM,
     },
 )
-async def receive_webhook(provider: Provider, request: Request) -> Response:
+async def receive_webhook(
+    provider: Annotated[Provider, Path(description="Хостинг, приславший доставку.")], request: Request
+) -> ReviewJob | WebhookIgnored | WebhookAcknowledged:
     if provider not in SUPPORTED_PROVIDERS:
         raise ApiError(
-            501,
+            HTTPStatus.NOT_IMPLEMENTED,
             ErrorCode.PROVIDER_NOT_SUPPORTED,
             "Приёмник вебхуков для этого провайдера не реализован.",
         )
@@ -127,7 +131,7 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
     # числе «подписанные» пустым ключом.
     if not secret or signature is None or not verify_hmac(body, signature, secret):
         raise ApiError(
-            401,
+            HTTPStatus.UNAUTHORIZED,
             ErrorCode.WEBHOOK_SIGNATURE_INVALID,
             "Подписи X-Hub-Signature-256 нет, или она не совпала с телом доставки.",
         )
@@ -139,9 +143,9 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
     except json.JSONDecodeError:
         # Подпись валидна, но тело — не JSON: события из него не извлечь,
         # поэтому это игнор, а не ошибка.
-        return JSONResponse(status_code=202, content={"status": "ignored"})
+        return _IGNORED
     if not isinstance(payload, dict):
-        return JSONResponse(status_code=202, content={"status": "ignored"})
+        return _IGNORED
 
     if event_type == REVIEW_THREAD_EVENT:
         try:
@@ -154,13 +158,13 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
             )
         except VcsError:
             raise _scm_unavailable()
-        return JSONResponse(status_code=202, content={"status": "acknowledged"})
+        return _ACKNOWLEDGED
 
     # Гейт события стоит до разбора тела: подписанная доставка другого события
     # с pull-request-совместимой формой (`pull_request_target`) не должна ни
     # создавать записи, ни доходить до use case.
     if event_type != TRIGGERING_EVENT:
-        return JSONResponse(status_code=202, content={"status": "ignored"})
+        return _IGNORED
 
     outcome = await run_in_threadpool(
         handle_webhook_event,
@@ -174,22 +178,22 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
     if outcome.kind == "failure":
         raise _scm_unavailable()
     if outcome.kind == "ignored":
-        return JSONResponse(status_code=202, content={"status": "ignored"})
+        return _IGNORED
     if outcome.kind in _JOB_OUTCOMES:
-        return JSONResponse(status_code=202, content=_review_job_payload(outcome))
+        return _review_job(outcome)
     raise RuntimeError(f"неожиданный исход use case: {outcome.kind!r}")
 
 
 def _scm_unavailable() -> ApiError:
     return ApiError(
-        502,
+        HTTPStatus.BAD_GATEWAY,
         ErrorCode.SCM_UNAVAILABLE,
         "Провайдер VCS не ответил или ответил ошибкой; прогон не создан.",
     )
 
 
-def _review_job_payload(outcome: WebhookOutcome) -> dict[str, Any]:
-    """Проекция прогона в публичную схему `ReviewJob` (`app/api/schemas.py`).
+def _review_job(outcome: WebhookOutcome) -> ReviewJob:
+    """Проекция прогона в публичную модель `ReviewJob` (`app/api/schemas.py`).
 
     `findingsCount` у свежего прогона всегда 0: находки появляются позже,
     при обработке задачи воркером, и в этот эндпоинт больше не возвращаются.
@@ -197,19 +201,23 @@ def _review_job_payload(outcome: WebhookOutcome) -> dict[str, Any]:
     run, merge_request, repository = outcome.run, outcome.merge_request, outcome.repository
     if run is None or merge_request is None or repository is None:
         raise RuntimeError(f"исход {outcome.kind!r} без записей для проекции ReviewJob")
-    return {
-        "id": str(run.id),
-        "provider": repository.provider.value,
-        "providerRepositoryId": repository.provider_id,
-        "pullRequestNumber": merge_request.number,
-        "trigger": run.trigger.value,
-        "status": run.status.value,
-        "headCommitSha": run.head_sha,
-        "baseCommitSha": run.base_sha,
-        "findingsCount": 0,
-        "rejectedFindings": run.rejected_findings,
-        "createdAt": run.created_at.isoformat(),
-        "updatedAt": run.updated_at.isoformat(),
-        "lastProgressAt": run.last_progress_at.isoformat(),
-        "error": None,
-    }
+    return ReviewJob(
+        id=run.id,
+        provider=repository.provider,
+        provider_repository_id=repository.provider_id,
+        pull_request_number=merge_request.number,
+        trigger=run.trigger,
+        status=run.status,
+        head_commit_sha=run.head_sha,
+        base_commit_sha=run.base_sha,
+        findings_count=0,
+        rejected_findings=run.rejected_findings,
+        model=run.model,
+        tokens_used=run.tokens_used,
+        duration_seconds=run.duration_seconds,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        last_progress_at=run.last_progress_at,
+        failed_stage=run.failed_stage,
+        error=None,
+    )

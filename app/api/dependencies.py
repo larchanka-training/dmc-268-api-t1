@@ -7,10 +7,10 @@
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Iterator
-from typing import cast
+from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import Depends, Request
+from fastapi import Depends, Path, Request
 
 from app.application.ports import UnitOfWork
 from app.application.ports.job_queue import JobQueue
@@ -50,7 +50,8 @@ def get_unit_of_work_factory(
 
 
 def get_oauth_provider(
-    provider: str, container: Container = Depends(get_container)
+    provider: Annotated[str, Path(description="Провайдер входа, например github.")],
+    container: Container = Depends(get_container),
 ) -> OAuthProvider | None:
     """Провайдер входа по `{provider}` из пути; неизвестный — `None`."""
     return container.oauth_provider(provider)

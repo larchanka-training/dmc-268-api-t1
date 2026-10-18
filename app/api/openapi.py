@@ -15,7 +15,6 @@ from collections.abc import Sequence
 from typing import Any
 
 from fastapi import FastAPI
-from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 
 from app.api.errors import PROBLEM_MEDIA_TYPE
@@ -70,22 +69,13 @@ def finish_schema(schema: dict[str, Any], extra_models: Sequence[type[BaseModel]
 
 
 def install(app: FastAPI, extra_models: Sequence[type[BaseModel]] = ()) -> None:
-    """`app.openapi()` — схема FastAPI, дописанная `finish_schema`; строится один раз."""
+    """`app.openapi()` — штатная схема FastAPI, дописанная `finish_schema`; строится один раз."""
+    base = app.openapi
 
     def openapi() -> dict[str, Any]:
         if app.openapi_schema is None:
-            app.openapi_schema = finish_schema(
-                get_openapi(
-                    title=app.title,
-                    version=app.version,
-                    openapi_version=app.openapi_version,
-                    description=app.description,
-                    routes=app.routes,
-                    tags=app.openapi_tags,
-                    servers=app.servers,
-                ),
-                extra_models,
-            )
+            # `base` кладёт схему в `app.openapi_schema` сам; дописываем её один раз.
+            app.openapi_schema = finish_schema(base(), extra_models)
         return app.openapi_schema
 
     app.openapi = openapi  # type: ignore[method-assign]

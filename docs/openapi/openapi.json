@@ -26,8 +26,10 @@
             "in": "path",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/Provider"
-            }
+              "$ref": "#/components/schemas/Provider",
+              "description": "Хостинг, приславший доставку."
+            },
+            "description": "Хостинг, приславший доставку."
           }
         ],
         "responses": {
@@ -151,8 +153,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Провайдер входа, например github.",
               "title": "Provider"
-            }
+            },
+            "description": "Провайдер входа, например github."
           },
           {
             "name": "redirect",
@@ -167,8 +171,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Куда вернуть после входа: путь под /app/.",
               "title": "Redirect"
-            }
+            },
+            "description": "Куда вернуть после входа: путь под /app/."
           }
         ],
         "responses": {
@@ -235,8 +241,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Провайдер входа, например github.",
               "title": "Provider"
-            }
+            },
+            "description": "Провайдер входа, например github."
           },
           {
             "name": "code",
@@ -251,8 +259,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Код авторизации от провайдера.",
               "title": "Code"
-            }
+            },
+            "description": "Код авторизации от провайдера."
           },
           {
             "name": "state",
@@ -267,8 +277,10 @@
                   "type": "null"
                 }
               ],
+              "description": "state, выданный при начале входа.",
               "title": "State"
-            }
+            },
+            "description": "state, выданный при начале входа."
           },
           {
             "name": "error",
@@ -283,8 +295,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Ошибка от провайдера, например отказ пользователя.",
               "title": "Error"
-            }
+            },
+            "description": "Ошибка от провайдера, например отказ пользователя."
           }
         ],
         "responses": {
@@ -342,6 +356,7 @@
           "auth"
         ],
         "summary": "Пользователь текущей сессии",
+        "description": "Требует сессию. По ответу кабинет решает, показывать ли страницу входа.",
         "operationId": "me",
         "responses": {
           "200": {
@@ -454,7 +469,7 @@
           "repositories"
         ],
         "summary": "Список зарегистрированных репозиториев",
-        "description": "Постранично, по времени регистрации, затем по id. limit выше 200 не отклоняется, а приводится к 200. Общего числа записей в ответе нет: конец списка — страница короче limit.",
+        "description": "Требует сессию. Постранично, по времени регистрации, затем по id. limit выше 200 не отклоняется, а приводится к 200. Общего числа записей в ответе нет: конец списка — страница короче limit.",
         "operationId": "listRepositories",
         "security": [
           {
@@ -469,11 +484,11 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "description": "Размер страницы; больше 200 приводится к 200.",
+              "description": "Размер страницы; по умолчанию 50, больше 200 приводится к 200.",
               "default": 50,
               "title": "Limit"
             },
-            "description": "Размер страницы; больше 200 приводится к 200."
+            "description": "Размер страницы; по умолчанию 50, больше 200 приводится к 200."
           },
           {
             "name": "offset",
@@ -481,12 +496,13 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 9223372036854775807,
               "minimum": 0,
-              "description": "Сколько записей пропустить.",
+              "description": "Сколько записей пропустить от начала списка.",
               "default": 0,
               "title": "Offset"
             },
-            "description": "Сколько записей пропустить."
+            "description": "Сколько записей пропустить от начала списка."
           }
         ],
         "responses": {
@@ -559,7 +575,7 @@
           "pull-requests"
         ],
         "summary": "Список запросов на изменение репозитория",
-        "description": "Постранично, по номеру запроса на изменение. Пагинация та же, что у списка репозиториев.",
+        "description": "Требует сессию. Постранично, по номеру запроса на изменение. Пагинация та же, что у списка репозиториев: limit выше 200 приводится к 200. Репозитория нет — 404.",
         "operationId": "listPullRequests",
         "security": [
           {
@@ -574,8 +590,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "Идентификатор репозитория в сервисе.",
               "title": "Repository Id"
-            }
+            },
+            "description": "Идентификатор репозитория в сервисе."
           },
           {
             "name": "limit",
@@ -584,11 +602,11 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "description": "Размер страницы; больше 200 приводится к 200.",
+              "description": "Размер страницы; по умолчанию 50, больше 200 приводится к 200.",
               "default": 50,
               "title": "Limit"
             },
-            "description": "Размер страницы; больше 200 приводится к 200."
+            "description": "Размер страницы; по умолчанию 50, больше 200 приводится к 200."
           },
           {
             "name": "offset",
@@ -596,12 +614,13 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 9223372036854775807,
               "minimum": 0,
-              "description": "Сколько записей пропустить.",
+              "description": "Сколько записей пропустить от начала списка.",
               "default": 0,
               "title": "Offset"
             },
-            "description": "Сколько записей пропустить."
+            "description": "Сколько записей пропустить от начала списка."
           }
         ],
         "responses": {
@@ -689,7 +708,7 @@
           "reviews"
         ],
         "summary": "Запустить ревью вручную",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы; план ручного запуска — PIPELINE_SPEC.md §4. Сейчас ревью запускает только вебхук. Когда ручка заработает: 202 с ReviewJob, 409 REVIEW_ALREADY_ACTIVE, если по этому коммиту прогон уже идёт.",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы; план ручного запуска — PIPELINE_SPEC.md §4. Сейчас ревью запускает только вебхук. Когда ручка заработает: 202 с ReviewJob, 409 REVIEW_ALREADY_ACTIVE, если по этому коммиту прогон уже идёт. Требует сессию и Origin сервиса; Origin проверяется раньше сессии и разбора тела.",
         "operationId": "createReview",
         "requestBody": {
           "content": {
@@ -821,7 +840,7 @@
           "reviews"
         ],
         "summary": "Прогон ревью вместе с находками",
-        "description": "Находки — в стабильном порядке: по времени создания, затем по id. Прогон без находок — 200 с пустым findings.",
+        "description": "Требует сессию. Находки — в стабильном порядке: по времени создания, затем по id. Прогон без находок — 200 с пустым findings.",
         "operationId": "getReview",
         "security": [
           {
@@ -836,8 +855,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "Идентификатор прогона ревью.",
               "title": "Review Run Id"
-            }
+            },
+            "description": "Идентификатор прогона ревью."
           }
         ],
         "responses": {
@@ -925,7 +946,7 @@
           "reviews"
         ],
         "summary": "Поток событий статуса прогона (Server-Sent Events)",
-        "description": "Первое событие после подключения — `status` со снимком текущего состояния, дальше — по событию `status` на каждую смену статуса и `ping` в тишине, не реже раза в 15 секунд. После терминального статуса сервер закрывает поток. Поток начинается со строки `retry: 3000`. Поток отражает состояние, а не журнал: несколько переходов между проверками приходят одним событием.",
+        "description": "Первое событие после подключения — `status` со снимком текущего состояния, дальше — по событию `status` на каждую смену статуса и `ping` в тишине, не реже раза в 15 секунд. После терминального статуса сервер закрывает поток. Поток начинается со строки `retry: 3000`. Поток отражает состояние, а не журнал: несколько переходов между проверками приходят одним событием. Требует сессию: она проверяется при подключении и затем каждые 5 секунд, по её окончании поток закрывается.",
         "operationId": "streamReviewEvents",
         "security": [
           {
@@ -940,8 +961,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "Идентификатор прогона ревью.",
               "title": "Review Run Id"
-            }
+            },
+            "description": "Идентификатор прогона ревью."
           }
         ],
         "responses": {
@@ -1110,10 +1133,16 @@
       "CreateReviewRequest": {
         "properties": {
           "provider": {
-            "$ref": "#/components/schemas/Provider"
+            "$ref": "#/components/schemas/Provider",
+            "description": "Хостинг репозитория.",
+            "examples": [
+              "github"
+            ]
           },
           "providerRepositoryId": {
             "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
             "title": "Providerrepositoryid",
             "description": "Идентификатор репозитория у провайдера (repositories.provider_id).",
             "examples": [
@@ -1122,14 +1151,20 @@
           },
           "pullRequestNumber": {
             "type": "integer",
+            "maximum": 2147483647.0,
             "minimum": 1.0,
             "title": "Pullrequestnumber",
+            "description": "Номер запроса на изменение у провайдера.",
             "examples": [
               123
             ]
           },
           "trigger": {
-            "$ref": "#/components/schemas/TriggerSource"
+            "$ref": "#/components/schemas/TriggerSource",
+            "description": "Источник запуска.",
+            "examples": [
+              "manual"
+            ]
           }
         },
         "additionalProperties": false,
@@ -1172,10 +1207,18 @@
           },
           "file_path": {
             "type": "string",
-            "title": "File Path"
+            "title": "File Path",
+            "description": "Путь файла от корня репозитория.",
+            "examples": [
+              "app/main.py"
+            ]
           },
           "side": {
-            "$ref": "#/components/schemas/DiffSide"
+            "$ref": "#/components/schemas/DiffSide",
+            "description": "Сторона диффа, к которой привязана находка.",
+            "examples": [
+              "new"
+            ]
           },
           "old_line": {
             "anyOf": [
@@ -1186,7 +1229,8 @@
                 "type": "null"
               }
             ],
-            "title": "Old Line"
+            "title": "Old Line",
+            "description": "Строка в старой версии файла, с 1; null, если находка на новой стороне."
           },
           "new_line": {
             "anyOf": [
@@ -1197,17 +1241,27 @@
                 "type": "null"
               }
             ],
-            "title": "New Line"
+            "title": "New Line",
+            "description": "Строка в новой версии файла, с 1; null, если находка на старой стороне."
           },
           "category": {
-            "$ref": "#/components/schemas/FindingCategory"
+            "$ref": "#/components/schemas/FindingCategory",
+            "description": "Ось ревью, к которой относится находка.",
+            "examples": [
+              "security"
+            ]
           },
           "severity": {
-            "$ref": "#/components/schemas/FindingSeverity"
+            "$ref": "#/components/schemas/FindingSeverity",
+            "description": "Насколько находка важна.",
+            "examples": [
+              "high"
+            ]
           },
           "message": {
             "type": "string",
-            "title": "Message"
+            "title": "Message",
+            "description": "Текст замечания."
           },
           "suggestion": {
             "anyOf": [
@@ -1218,7 +1272,8 @@
                 "type": "null"
               }
             ],
-            "title": "Suggestion"
+            "title": "Suggestion",
+            "description": "Предлагаемая правка; null, если её нет."
           },
           "confidence": {
             "anyOf": [
@@ -1229,7 +1284,8 @@
                 "type": "null"
               }
             ],
-            "title": "Confidence"
+            "title": "Confidence",
+            "description": "Уверенность модели в находке, обычно от 0 до 1; null, если модель её не дала."
           }
         },
         "type": "object",
@@ -1245,7 +1301,8 @@
           "suggestion",
           "confidence"
         ],
-        "title": "FindingResponse"
+        "title": "FindingResponse",
+        "description": "Находка ревью, привязанная к строке диффа."
       },
       "FindingSeverity": {
         "type": "string",
@@ -1408,14 +1465,16 @@
               "$ref": "#/components/schemas/MergeRequestResponse"
             },
             "type": "array",
-            "title": "Items"
+            "title": "Items",
+            "description": "Запросы на изменение страницы; меньше limit — значит, страница последняя."
           }
         },
         "type": "object",
         "required": [
           "items"
         ],
-        "title": "MergeRequestListResponse"
+        "title": "MergeRequestListResponse",
+        "description": "Страница списка запросов на изменение."
       },
       "MergeRequestResponse": {
         "properties": {
@@ -1426,44 +1485,81 @@
           },
           "number": {
             "type": "integer",
-            "title": "Number"
+            "exclusiveMinimum": 0.0,
+            "title": "Number",
+            "description": "Номер запроса на изменение у провайдера.",
+            "examples": [
+              42
+            ]
           },
           "title": {
             "type": "string",
-            "title": "Title"
+            "title": "Title",
+            "description": "Заголовок у провайдера."
           },
           "description": {
             "type": "string",
-            "title": "Description"
+            "title": "Description",
+            "description": "Описание запроса на изменение; пустая строка, если его нет."
           },
           "author": {
             "type": "string",
-            "title": "Author"
+            "title": "Author",
+            "description": "Логин автора у провайдера.",
+            "examples": [
+              "octocat"
+            ]
           },
           "source_branch": {
             "type": "string",
-            "title": "Source Branch"
+            "title": "Source Branch",
+            "description": "Ветка с изменениями.",
+            "examples": [
+              "feat/login"
+            ]
           },
           "target_branch": {
             "type": "string",
-            "title": "Target Branch"
+            "title": "Target Branch",
+            "description": "Ветка, в которую предлагается слить.",
+            "examples": [
+              "develop"
+            ]
           },
           "head_sha": {
             "type": "string",
-            "title": "Head Sha"
+            "title": "Head Sha",
+            "description": "Последний коммит ветки с изменениями.",
+            "examples": [
+              "a1b2c3d4e5f6789012345678abcdef0123456789"
+            ]
           },
           "state": {
-            "$ref": "#/components/schemas/MergeRequestState"
+            "$ref": "#/components/schemas/MergeRequestState",
+            "description": "Состояние у провайдера.",
+            "examples": [
+              "open"
+            ]
           },
           "created_at": {
             "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Created At"
+            "title": "Created At",
+            "description": "Когда сервис впервые записал запрос на изменение.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
           },
           "updated_at": {
             "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Updated At"
+            "title": "Updated At",
+            "description": "Когда запись последний раз менялась.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
           }
         },
         "type": "object",
@@ -1480,7 +1576,8 @@
           "created_at",
           "updated_at"
         ],
-        "title": "MergeRequestResponse"
+        "title": "MergeRequestResponse",
+        "description": "Запрос на изменение (pull request GitHub) — каким его видел сервис при последнем вебхуке."
       },
       "MergeRequestState": {
         "type": "string",
@@ -1794,14 +1891,16 @@
               "$ref": "#/components/schemas/RepositoryResponse"
             },
             "type": "array",
-            "title": "Items"
+            "title": "Items",
+            "description": "Репозитории страницы; меньше limit — значит, страница последняя."
           }
         },
         "type": "object",
         "required": [
           "items"
         ],
-        "title": "RepositoryListResponse"
+        "title": "RepositoryListResponse",
+        "description": "Страница списка репозиториев."
       },
       "RepositoryNotFoundProblem": {
         "properties": {
@@ -1882,33 +1981,60 @@
             "title": "Id"
           },
           "provider": {
-            "$ref": "#/components/schemas/Provider"
+            "$ref": "#/components/schemas/Provider",
+            "description": "Хостинг репозитория.",
+            "examples": [
+              "github"
+            ]
           },
           "provider_id": {
             "type": "string",
-            "title": "Provider Id"
+            "title": "Provider Id",
+            "description": "Идентификатор репозитория у провайдера.",
+            "examples": [
+              "123456789"
+            ]
           },
           "full_name": {
             "type": "string",
-            "title": "Full Name"
+            "title": "Full Name",
+            "description": "Полное имя у провайдера: владелец/репозиторий.",
+            "examples": [
+              "octo-org/api"
+            ]
           },
           "default_branch": {
             "type": "string",
-            "title": "Default Branch"
+            "title": "Default Branch",
+            "description": "Ветка по умолчанию у провайдера.",
+            "examples": [
+              "main"
+            ]
           },
           "auto_review_enabled": {
             "type": "boolean",
-            "title": "Auto Review Enabled"
+            "title": "Auto Review Enabled",
+            "description": "Ревью запускается автоматически по вебхуку."
           },
           "created_at": {
             "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Created At"
+            "title": "Created At",
+            "description": "Когда репозиторий зарегистрирован.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
           },
           "updated_at": {
             "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Updated At"
+            "title": "Updated At",
+            "description": "Когда запись последний раз менялась.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
           }
         },
         "type": "object",
@@ -1922,7 +2048,8 @@
           "created_at",
           "updated_at"
         ],
-        "title": "RepositoryResponse"
+        "title": "RepositoryResponse",
+        "description": "Репозиторий, зарегистрированный в сервисе: его запросы на изменение ревьюятся."
       },
       "ReviewAlreadyActiveProblem": {
         "properties": {
@@ -2012,15 +2139,21 @@
               "REVIEW_RUN_STALE",
               "INTERNAL_ERROR"
             ],
-            "title": "Code"
+            "title": "Code",
+            "description": "Код ошибки прогона.",
+            "examples": [
+              "LLM_TIMEOUT"
+            ]
           },
           "message": {
             "type": "string",
-            "title": "Message"
+            "title": "Message",
+            "description": "Что случилось — по-русски, для показа пользователю."
           },
           "retryable": {
             "type": "boolean",
-            "title": "Retryable"
+            "title": "Retryable",
+            "description": "Повторный запуск может пройти: сбой временный."
           },
           "scmProvider": {
             "anyOf": [
@@ -2044,7 +2177,7 @@
               }
             ],
             "title": "Providerattempt",
-            "description": "Попытка вызова LLM/SCM провайдера. Не путать с redelivery сообщения в очереди."
+            "description": "Попытка вызова LLM/SCM провайдера, с 1. Не путать с redelivery сообщения в очереди."
           }
         },
         "type": "object",
@@ -2062,23 +2195,40 @@
         "properties": {
           "id": {
             "type": "string",
+            "format": "uuid",
             "title": "Id",
             "description": "Идентификатор прогона (reviewRunId)."
           },
           "provider": {
-            "$ref": "#/components/schemas/Provider"
+            "$ref": "#/components/schemas/Provider",
+            "description": "Хостинг репозитория.",
+            "examples": [
+              "github"
+            ]
           },
           "providerRepositoryId": {
             "type": "string",
-            "title": "Providerrepositoryid"
+            "title": "Providerrepositoryid",
+            "description": "Идентификатор репозитория у провайдера (repositories.provider_id).",
+            "examples": [
+              "123456789"
+            ]
           },
           "pullRequestNumber": {
             "type": "integer",
             "minimum": 1.0,
-            "title": "Pullrequestnumber"
+            "title": "Pullrequestnumber",
+            "description": "Номер запроса на изменение у провайдера.",
+            "examples": [
+              42
+            ]
           },
           "trigger": {
-            "$ref": "#/components/schemas/TriggerSource"
+            "$ref": "#/components/schemas/TriggerSource",
+            "description": "Что запустило прогон.",
+            "examples": [
+              "webhook"
+            ]
           },
           "headCommitSha": {
             "anyOf": [
@@ -2089,7 +2239,11 @@
                 "type": "null"
               }
             ],
-            "title": "Headcommitsha"
+            "title": "Headcommitsha",
+            "description": "Коммит, который ревьюится.",
+            "examples": [
+              "a1b2c3d4e5f6789012345678abcdef0123456789"
+            ]
           },
           "baseCommitSha": {
             "anyOf": [
@@ -2100,20 +2254,30 @@
                 "type": "null"
               }
             ],
-            "title": "Basecommitsha"
+            "title": "Basecommitsha",
+            "description": "Коммит, относительно которого считается дифф; null, пока воркер его не узнал.",
+            "examples": [
+              "fedcba0987654321fedcba0987654321fedcba09"
+            ]
           },
           "status": {
-            "$ref": "#/components/schemas/ReviewRunStatus"
+            "$ref": "#/components/schemas/ReviewRunStatus",
+            "description": "Текущий статус прогона.",
+            "examples": [
+              "queued"
+            ]
           },
           "findingsCount": {
             "type": "integer",
             "minimum": 0.0,
-            "title": "Findingscount"
+            "title": "Findingscount",
+            "description": "Сколько находок записано; у нового прогона 0."
           },
           "rejectedFindings": {
             "type": "integer",
             "minimum": 0.0,
-            "title": "Rejectedfindings"
+            "title": "Rejectedfindings",
+            "description": "Сколько находок отброшено: привязка вне изменённых строк диффа."
           },
           "model": {
             "anyOf": [
@@ -2124,7 +2288,8 @@
                 "type": "null"
               }
             ],
-            "title": "Model"
+            "title": "Model",
+            "description": "Модель LLM, которая провела ревью; null до анализа."
           },
           "tokensUsed": {
             "anyOf": [
@@ -2136,7 +2301,8 @@
                 "type": "null"
               }
             ],
-            "title": "Tokensused"
+            "title": "Tokensused",
+            "description": "Токенов LLM потрачено; null до анализа."
           },
           "durationSeconds": {
             "anyOf": [
@@ -2148,34 +2314,55 @@
                 "type": "null"
               }
             ],
-            "title": "Durationseconds"
+            "title": "Durationseconds",
+            "description": "Длительность прогона в секундах; null, пока прогон не завершён."
           },
           "createdAt": {
             "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Createdat"
+            "title": "Createdat",
+            "description": "Когда прогон создан.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
           },
           "updatedAt": {
             "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Updatedat"
+            "title": "Updatedat",
+            "description": "Когда запись последний раз менялась.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
           },
           "lastProgressAt": {
             "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
             "title": "Lastprogressat",
-            "description": "Обновляется на каждом переходе состояния; по нему находят зависшие прогоны (§7.5 PIPELINE_SPEC.md)."
+            "description": "Обновляется на каждом переходе состояния; по нему находят зависшие прогоны (§7.5 PIPELINE_SPEC.md).",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
           },
           "failedStage": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ReviewRunStatus"
+                "type": "string",
+                "enum": [
+                  "building_context",
+                  "analysing",
+                  "publishing"
+                ]
               },
               {
                 "type": "null"
               }
             ],
-            "description": "Этап, на котором прогон упал (building_context, analysing, publishing); null, если не падал."
+            "title": "Failedstage",
+            "description": "Этап, на котором прогон упал; null, если прогон не падал."
           },
           "error": {
             "anyOf": [
@@ -2185,7 +2372,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "Ошибка прогона; null, если прогон не упал."
           }
         },
         "type": "object",
@@ -2195,16 +2383,22 @@
           "providerRepositoryId",
           "pullRequestNumber",
           "trigger",
+          "headCommitSha",
+          "baseCommitSha",
           "status",
           "findingsCount",
           "rejectedFindings",
+          "model",
+          "tokensUsed",
+          "durationSeconds",
           "createdAt",
           "updatedAt",
           "lastProgressAt",
+          "failedStage",
           "error"
         ],
         "title": "ReviewJob",
-        "description": "Публичная проекция прогона ревью (review_runs) в camelCase.\n\nНе путать с сообщением очереди: у него нет собственной идентичности, отдельной от id прогона."
+        "description": "Прогон ревью, поставленный в очередь, — публичная проекция записи review_runs.\n\nНе путать с сообщением очереди: у него нет собственной идентичности, отдельной от id прогона."
       },
       "ReviewNotFoundProblem": {
         "properties": {
@@ -2287,11 +2481,16 @@
           "merge_request_id": {
             "type": "string",
             "format": "uuid",
-            "title": "Merge Request Id"
+            "title": "Merge Request Id",
+            "description": "Запрос на изменение, к которому относится прогон."
           },
           "head_sha": {
             "type": "string",
-            "title": "Head Sha"
+            "title": "Head Sha",
+            "description": "Коммит, который ревьюится.",
+            "examples": [
+              "a1b2c3d4e5f6789012345678abcdef0123456789"
+            ]
           },
           "base_sha": {
             "anyOf": [
@@ -2302,13 +2501,25 @@
                 "type": "null"
               }
             ],
-            "title": "Base Sha"
+            "title": "Base Sha",
+            "description": "Коммит, относительно которого считается дифф; null, пока воркер его не узнал.",
+            "examples": [
+              "fedcba0987654321fedcba0987654321fedcba09"
+            ]
           },
           "status": {
-            "$ref": "#/components/schemas/ReviewRunStatus"
+            "$ref": "#/components/schemas/ReviewRunStatus",
+            "description": "Текущий статус прогона.",
+            "examples": [
+              "completed"
+            ]
           },
           "trigger": {
-            "$ref": "#/components/schemas/TriggerSource"
+            "$ref": "#/components/schemas/TriggerSource",
+            "description": "Что запустило прогон.",
+            "examples": [
+              "webhook"
+            ]
           },
           "model": {
             "anyOf": [
@@ -2319,7 +2530,8 @@
                 "type": "null"
               }
             ],
-            "title": "Model"
+            "title": "Model",
+            "description": "Модель LLM, которая провела ревью; null до анализа."
           },
           "tokens_used": {
             "anyOf": [
@@ -2330,7 +2542,8 @@
                 "type": "null"
               }
             ],
-            "title": "Tokens Used"
+            "title": "Tokens Used",
+            "description": "Токенов LLM потрачено; null до анализа."
           },
           "duration_seconds": {
             "anyOf": [
@@ -2341,7 +2554,8 @@
                 "type": "null"
               }
             ],
-            "title": "Duration Seconds"
+            "title": "Duration Seconds",
+            "description": "Длительность прогона в секундах; null, пока не завершён."
           },
           "failure_reason": {
             "anyOf": [
@@ -2352,40 +2566,63 @@
                 "type": "null"
               }
             ],
-            "title": "Failure Reason"
+            "title": "Failure Reason",
+            "description": "Почему прогон упал; null, если не падал."
           },
           "failed_stage": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ReviewRunStatus"
+                "type": "string",
+                "enum": [
+                  "building_context",
+                  "analysing",
+                  "publishing"
+                ]
               },
               {
                 "type": "null"
               }
             ],
-            "description": "Этап, на котором прогон упал (building_context, analysing, publishing); null, если не падал."
+            "title": "Failed Stage",
+            "description": "Этап, на котором прогон упал; null, если прогон не падал."
           },
           "last_progress_at": {
             "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Last Progress At"
+            "title": "Last Progress At",
+            "description": "Время последнего перехода состояния.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
           },
           "created_at": {
             "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Created At"
+            "title": "Created At",
+            "description": "Когда прогон создан.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
           },
           "updated_at": {
             "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Updated At"
+            "title": "Updated At",
+            "description": "Когда запись последний раз менялась.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
           },
           "findings": {
             "items": {
               "$ref": "#/components/schemas/FindingResponse"
             },
             "type": "array",
-            "title": "Findings"
+            "title": "Findings",
+            "description": "Находки прогона: по времени создания, затем по id."
           }
         },
         "type": "object",
@@ -2406,7 +2643,8 @@
           "updated_at",
           "findings"
         ],
-        "title": "ReviewRunResponse"
+        "title": "ReviewRunResponse",
+        "description": "Прогон ревью вместе с его находками."
       },
       "ReviewRunStatus": {
         "description": "Жизненный цикл одной попытки отревьюить коммит.",
@@ -2648,11 +2886,19 @@
       "UserResponse": {
         "properties": {
           "provider": {
-            "$ref": "#/components/schemas/Provider"
+            "$ref": "#/components/schemas/Provider",
+            "description": "Провайдер, через которого выполнен вход.",
+            "examples": [
+              "github"
+            ]
           },
           "login": {
             "type": "string",
-            "title": "Login"
+            "title": "Login",
+            "description": "Логин у провайдера.",
+            "examples": [
+              "octocat"
+            ]
           },
           "name": {
             "anyOf": [
@@ -2663,7 +2909,8 @@
                 "type": "null"
               }
             ],
-            "title": "Name"
+            "title": "Name",
+            "description": "Отображаемое имя у провайдера; null, если не задано."
           },
           "avatar_url": {
             "anyOf": [
@@ -2674,7 +2921,12 @@
                 "type": "null"
               }
             ],
-            "title": "Avatar Url"
+            "format": "uri",
+            "title": "Avatar Url",
+            "description": "Адрес аватара у провайдера; null, если его нет.",
+            "examples": [
+              "https://avatars.githubusercontent.com/u/1"
+            ]
           }
         },
         "type": "object",
@@ -2684,7 +2936,8 @@
           "name",
           "avatar_url"
         ],
-        "title": "UserResponse"
+        "title": "UserResponse",
+        "description": "Пользователь кабинета — учётная запись у провайдера входа."
       },
       "ValidationErrorItem": {
         "properties": {
@@ -2800,7 +3053,8 @@
           "status": {
             "type": "string",
             "const": "acknowledged",
-            "title": "Status"
+            "title": "Status",
+            "description": "Событие треда принято."
           }
         },
         "type": "object",
@@ -2815,7 +3069,8 @@
           "status": {
             "type": "string",
             "const": "ignored",
-            "title": "Status"
+            "title": "Status",
+            "description": "Доставка принята и проигнорирована."
           }
         },
         "type": "object",
@@ -2900,27 +3155,44 @@
         "description": "Данные события `status` потока: `event: status`, `data: <JSON в одну строку>`.\n\nСобытие `ping` приходит с `data: {}`. Тело ответа — текст SSE, а не этот JSON; в схему\nмодель попадает отдельным компонентом (`app/api/openapi.py`, `extra_models`).",
         "properties": {
           "review_run_id": {
+            "description": "Прогон, о котором событие.",
+            "format": "uuid",
             "title": "Review Run Id",
             "type": "string"
           },
           "status": {
-            "$ref": "#/components/schemas/ReviewRunStatus"
+            "$ref": "#/components/schemas/ReviewRunStatus",
+            "description": "Статус прогона на момент события.",
+            "examples": [
+              "analysing"
+            ]
           },
           "last_progress_at": {
+            "description": "Время последнего перехода состояния.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ],
             "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "title": "Last Progress At",
             "type": "string"
           },
           "failed_stage": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ReviewRunStatus"
+                "enum": [
+                  "building_context",
+                  "analysing",
+                  "publishing"
+                ],
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "Этап, на котором прогон упал (building_context, analysing, publishing); null, если не падал."
+            "description": "Этап, на котором прогон упал; null, если прогон не падал.",
+            "title": "Failed Stage"
           },
           "failure_reason": {
             "anyOf": [
@@ -2931,6 +3203,7 @@
                 "type": "null"
               }
             ],
+            "description": "Почему прогон упал; null, если не падал.",
             "title": "Failure Reason"
           }
         },
@@ -2948,7 +3221,7 @@
     "securitySchemes": {
       "session": {
         "type": "apiKey",
-        "description": "Сессия в httpOnly cookie, ставится callback'ом входа. Изменяющие запросы (POST, PUT, PATCH, DELETE) дополнительно сверяют `Origin` с адресом сервиса, иначе `403 ORIGIN_FORBIDDEN`.",
+        "description": "Сессия в httpOnly cookie, ставится callback'ом входа. Изменяющие запросы (POST, PUT, PATCH, DELETE) под /api/v1, кроме вебхуков, дополнительно сверяют `Origin` с адресом сервиса — раньше сессии и разбора тела, иначе `403 ORIGIN_FORBIDDEN`.",
         "in": "cookie",
         "name": "session"
       }

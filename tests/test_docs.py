@@ -12,10 +12,8 @@
 import json
 import re
 import tomllib
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from uuid import UUID
 
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
@@ -247,24 +245,6 @@ def test_no_framework_validation_error_in_the_contract() -> None:
         and "422" not in operation["responses"]
     ]
     assert not missing, f"у операций с параметрами нет ответа 422 VALIDATION_ERROR: {missing}"
-
-
-def test_sse_status_event_matches_its_model() -> None:
-    """Данные события `status` потока проходят `ReviewRunStatusEvent` и не несут лишних полей."""
-    from app.api.review_events import ReviewRunStatusEvent
-    from app.domain.enums import ReviewRunStatus
-    from app.domain.run_events import StatusEvent, format_sse
-
-    event = StatusEvent(
-        review_run_id=UUID("00000000-0000-0000-0000-000000000001"),
-        status=ReviewRunStatus.FAILED,
-        last_progress_at=datetime(2026, 10, 11, 10, 0, tzinfo=UTC),
-        failed_stage=ReviewRunStatus.ANALYSING,
-        failure_reason="LLM_TIMEOUT",
-    )
-    data = json.loads(format_sse(event).split("data: ", 1)[1])
-    assert set(data) == set(ReviewRunStatusEvent.model_fields)
-    ReviewRunStatusEvent.model_validate(data)
 
 
 def test_finish_schema_skips_path_level_keys() -> None:

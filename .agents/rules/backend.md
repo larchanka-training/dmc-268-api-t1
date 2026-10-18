@@ -79,11 +79,28 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
   и `description` по-русски, `responses` — все её ошибки моделями из `app/api/problems.py`
   через готовые словари `ERRORS_*` из `app/api/errors.py` (`{**ERRORS_404_REVIEW, **ERRORS_422}`).
   Ответ `default` со всем каталогом (`AnyProblem`) подключён ко всему приложению. Типы полей —
-  настоящие: enum домена, `UUID`, `datetime`, а не `str`.
+  настоящие: enum домена, `UUID`, а не `str`. У поля, чей смысл не очевиден из имени, —
+  `Field(description=…)` (единицы, когда `null`, откуда берётся), у полей с форматом — `examples`;
+  docstring модели — описание сущности в схеме. У операции — `summary`, `description` (сессия,
+  `Origin`, пагинация) и `response_description`.
+- **Ручка возвращает модель ответа**, а не словарь и не `JSONResponse` с данными: тело проходит
+  модель и совпадает со схемой. Особый статус — в декораторе (`status_code=`); если нужны
+  заголовки — `Response` с телом `model.model_dump(mode="json", by_alias=True)`. `JSONResponse`
+  собирает только `problem_response`; это проверяет `tests/api/test_contract_guards.py`.
+- **Время — только `UtcDatetime`** из `app/api/schemas.py`: принимает время с зоной, отдаёт UTC
+  с `Z` (`2026-10-11T10:00:00Z`). `datetime` в модели ответа — ошибка, её ловит тот же тест.
+  Ответ в camelCase — от `CamelCaseResponse`, тело запроса — от `CamelCaseRequest` (только
+  camelCase, без лишних полей, без приведения типов; enum-полю — `Field(strict=False)`).
+- **Статус HTTP в коде — только `HTTPStatus`**: `status_code=HTTPStatus.ACCEPTED`,
+  `ApiError(HTTPStatus.NOT_FOUND, …)`, ключи `responses`, `Literal[HTTPStatus.X]` в моделях ошибок.
+- **`Origin` проверяет middleware** (`app/api/origin.py`) — у `POST`/`PUT`/`PATCH`/`DELETE` под
+  `/api/v1/`, кроме вебхуков, раньше разбора тела и сессии. Зависимостью роута его не проверяем;
+  в `responses` такой ручки — `ERRORS_403_ORIGIN`. Пагинация — `Limit`/`Offset` из
+  `app/api/pagination.py`.
 - **Тип содержимого ошибок и `X-Trace-ID`** схеме дописывает `app/api/openapi.py` — в одном
   месте, у роутов их не пишем. Ответ ошибки без модели там же роняет сборку схемы.
 - **Запланированная ручка** — роут-заглушка с полной схемой запроса и ответов, отвечает
-  `501 NOT_IMPLEMENTED` (`raise ApiError(501, ErrorCode.NOT_IMPLEMENTED, …)`); в `description` —
+  `501 NOT_IMPLEMENTED` (`raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, …)`); в `description` —
   «Не реализовано: отвечает 501 NOT_IMPLEMENTED» и ссылка на задачу, если она есть.
 - **После правки** ручки или модели — `uv run python scripts/export_openapi.py`, файл — в тот
   же коммит. Pre-commit хук `export-openapi` делает это сам при коммите с правкой в `app/`:

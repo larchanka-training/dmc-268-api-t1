@@ -11,6 +11,7 @@
 """
 
 from enum import StrEnum
+from http import HTTPStatus
 from typing import Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel
@@ -116,7 +117,7 @@ class ValidationProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.VALIDATION_ERROR,
             "Запрос не прошёл проверку",
-            422,
+            HTTPStatus.UNPROCESSABLE_CONTENT,
             "Параметры запроса не прошли проверку, ошибок: 1.",
             "/api/v1/repositories",
             errors=[{"where": "query.limit", "reason": "ожидается целое число"}],
@@ -125,7 +126,7 @@ class ValidationProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:validation-error"] = "urn:dmc-268:problem:validation-error"
     title: Literal["Запрос не прошёл проверку"] = "Запрос не прошёл проверку"
-    status: Literal[422] = 422
+    status: Literal[HTTPStatus.UNPROCESSABLE_CONTENT] = HTTPStatus.UNPROCESSABLE_CONTENT
     code: Literal[ErrorCode.VALIDATION_ERROR] = ErrorCode.VALIDATION_ERROR
     errors: list[ValidationErrorItem] = Field(min_length=1, description="Где ошибка и почему.")
 
@@ -137,7 +138,7 @@ class ReviewNotFoundProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.REVIEW_NOT_FOUND,
             "Прогон ревью не найден",
-            404,
+            HTTPStatus.NOT_FOUND,
             "Прогона ревью с таким id нет.",
             "/api/v1/reviews/0b9d6c1e-6a7f-4b8e-9c3d-2e1f0a9b8c7d",
         )
@@ -145,7 +146,7 @@ class ReviewNotFoundProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:review-not-found"] = "urn:dmc-268:problem:review-not-found"
     title: Literal["Прогон ревью не найден"] = "Прогон ревью не найден"
-    status: Literal[404] = 404
+    status: Literal[HTTPStatus.NOT_FOUND] = HTTPStatus.NOT_FOUND
     code: Literal[ErrorCode.REVIEW_NOT_FOUND] = ErrorCode.REVIEW_NOT_FOUND
 
 
@@ -156,7 +157,7 @@ class RepositoryNotFoundProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.REPOSITORY_NOT_FOUND,
             "Репозиторий не найден",
-            404,
+            HTTPStatus.NOT_FOUND,
             "Репозитория с таким id нет.",
             "/api/v1/repositories/0b9d6c1e-6a7f-4b8e-9c3d-2e1f0a9b8c7d/pull-requests",
         )
@@ -164,7 +165,7 @@ class RepositoryNotFoundProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:repository-not-found"] = "urn:dmc-268:problem:repository-not-found"
     title: Literal["Репозиторий не найден"] = "Репозиторий не найден"
-    status: Literal[404] = 404
+    status: Literal[HTTPStatus.NOT_FOUND] = HTTPStatus.NOT_FOUND
     code: Literal[ErrorCode.REPOSITORY_NOT_FOUND] = ErrorCode.REPOSITORY_NOT_FOUND
 
 
@@ -175,7 +176,7 @@ class ProviderNotSupportedProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.PROVIDER_NOT_SUPPORTED,
             "Провайдер не поддержан",
-            404,
+            HTTPStatus.NOT_FOUND,
             "Вход через этого провайдера не поддержан.",
             "/api/v1/auth/bitbucket/login",
         )
@@ -183,7 +184,7 @@ class ProviderNotSupportedProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:provider-not-supported"] = "urn:dmc-268:problem:provider-not-supported"
     title: Literal["Провайдер не поддержан"] = "Провайдер не поддержан"
-    status: Literal[404, 501]
+    status: Literal[HTTPStatus.NOT_FOUND, HTTPStatus.NOT_IMPLEMENTED]
     code: Literal[ErrorCode.PROVIDER_NOT_SUPPORTED] = ErrorCode.PROVIDER_NOT_SUPPORTED
 
 
@@ -197,7 +198,7 @@ class ReviewAlreadyActiveProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.REVIEW_ALREADY_ACTIVE,
             "Прогон по этому коммиту уже идёт",
-            409,
+            HTTPStatus.CONFLICT,
             "По этому коммиту уже идёт прогон ревью.",
             "/api/v1/reviews",
         )
@@ -205,7 +206,7 @@ class ReviewAlreadyActiveProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:review-already-active"] = "urn:dmc-268:problem:review-already-active"
     title: Literal["Прогон по этому коммиту уже идёт"] = "Прогон по этому коммиту уже идёт"
-    status: Literal[409] = 409
+    status: Literal[HTTPStatus.CONFLICT] = HTTPStatus.CONFLICT
     code: Literal[ErrorCode.REVIEW_ALREADY_ACTIVE] = ErrorCode.REVIEW_ALREADY_ACTIVE
 
 
@@ -216,7 +217,7 @@ class WebhookSignatureInvalidProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.WEBHOOK_SIGNATURE_INVALID,
             "Подпись вебхука не прошла проверку",
-            401,
+            HTTPStatus.UNAUTHORIZED,
             "Подписи X-Hub-Signature-256 нет, или она не совпала с телом доставки.",
             "/api/v1/webhooks/github",
         )
@@ -224,7 +225,7 @@ class WebhookSignatureInvalidProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:webhook-signature-invalid"] = "urn:dmc-268:problem:webhook-signature-invalid"
     title: Literal["Подпись вебхука не прошла проверку"] = "Подпись вебхука не прошла проверку"
-    status: Literal[401] = 401
+    status: Literal[HTTPStatus.UNAUTHORIZED] = HTTPStatus.UNAUTHORIZED
     code: Literal[ErrorCode.WEBHOOK_SIGNATURE_INVALID] = ErrorCode.WEBHOOK_SIGNATURE_INVALID
 
 
@@ -235,7 +236,7 @@ class ScmUnavailableProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.SCM_UNAVAILABLE,
             "Провайдер VCS недоступен",
-            502,
+            HTTPStatus.BAD_GATEWAY,
             "Провайдер VCS не ответил или ответил ошибкой; прогон не создан.",
             "/api/v1/webhooks/github",
         )
@@ -243,7 +244,7 @@ class ScmUnavailableProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:scm-unavailable"] = "urn:dmc-268:problem:scm-unavailable"
     title: Literal["Провайдер VCS недоступен"] = "Провайдер VCS недоступен"
-    status: Literal[502] = 502
+    status: Literal[HTTPStatus.BAD_GATEWAY] = HTTPStatus.BAD_GATEWAY
     code: Literal[ErrorCode.SCM_UNAVAILABLE] = ErrorCode.SCM_UNAVAILABLE
 
 
@@ -254,7 +255,7 @@ class UnauthenticatedProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.UNAUTHENTICATED,
             "Требуется вход",
-            401,
+            HTTPStatus.UNAUTHORIZED,
             "Нет действительной сессии.",
             "/api/v1/auth/me",
         )
@@ -262,7 +263,7 @@ class UnauthenticatedProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:unauthenticated"] = "urn:dmc-268:problem:unauthenticated"
     title: Literal["Требуется вход"] = "Требуется вход"
-    status: Literal[401] = 401
+    status: Literal[HTTPStatus.UNAUTHORIZED] = HTTPStatus.UNAUTHORIZED
     code: Literal[ErrorCode.UNAUTHENTICATED] = ErrorCode.UNAUTHENTICATED
 
 
@@ -273,7 +274,7 @@ class OriginForbiddenProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.ORIGIN_FORBIDDEN,
             "Запрос с чужого Origin",
-            403,
+            HTTPStatus.FORBIDDEN,
             "Изменяющий запрос пришёл без Origin или с Origin другого сайта.",
             "/api/v1/auth/logout",
         )
@@ -281,7 +282,7 @@ class OriginForbiddenProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:origin-forbidden"] = "urn:dmc-268:problem:origin-forbidden"
     title: Literal["Запрос с чужого Origin"] = "Запрос с чужого Origin"
-    status: Literal[403] = 403
+    status: Literal[HTTPStatus.FORBIDDEN] = HTTPStatus.FORBIDDEN
     code: Literal[ErrorCode.ORIGIN_FORBIDDEN] = ErrorCode.ORIGIN_FORBIDDEN
 
 
@@ -290,13 +291,13 @@ class RouteNotFoundProblem(Problem):
 
     model_config = ConfigDict(
         json_schema_extra=_example(
-            ErrorCode.ROUTE_NOT_FOUND, "Путь не найден", 404, "По этому пути ресурса нет.", "/api/v1/nope"
+            ErrorCode.ROUTE_NOT_FOUND, "Путь не найден", HTTPStatus.NOT_FOUND, "По этому пути ресурса нет.", "/api/v1/nope"
         )
     )
 
     type: Literal["urn:dmc-268:problem:route-not-found"] = "urn:dmc-268:problem:route-not-found"
     title: Literal["Путь не найден"] = "Путь не найден"
-    status: Literal[404] = 404
+    status: Literal[HTTPStatus.NOT_FOUND] = HTTPStatus.NOT_FOUND
     code: Literal[ErrorCode.ROUTE_NOT_FOUND] = ErrorCode.ROUTE_NOT_FOUND
 
 
@@ -307,7 +308,7 @@ class MethodNotAllowedProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.METHOD_NOT_ALLOWED,
             "Метод не разрешён",
-            405,
+            HTTPStatus.METHOD_NOT_ALLOWED,
             "Метод для этого пути не разрешён; разрешённые — в заголовке Allow.",
             "/api/v1/webhooks/github",
         )
@@ -315,7 +316,7 @@ class MethodNotAllowedProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:method-not-allowed"] = "urn:dmc-268:problem:method-not-allowed"
     title: Literal["Метод не разрешён"] = "Метод не разрешён"
-    status: Literal[405] = 405
+    status: Literal[HTTPStatus.METHOD_NOT_ALLOWED] = HTTPStatus.METHOD_NOT_ALLOWED
     code: Literal[ErrorCode.METHOD_NOT_ALLOWED] = ErrorCode.METHOD_NOT_ALLOWED
 
 
@@ -326,7 +327,7 @@ class NotImplementedProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.NOT_IMPLEMENTED,
             "Не реализовано",
-            501,
+            HTTPStatus.NOT_IMPLEMENTED,
             "Ручной запуск ревью ещё не реализован.",
             "/api/v1/reviews",
         )
@@ -334,7 +335,7 @@ class NotImplementedProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:not-implemented"] = "urn:dmc-268:problem:not-implemented"
     title: Literal["Не реализовано"] = "Не реализовано"
-    status: Literal[501] = 501
+    status: Literal[HTTPStatus.NOT_IMPLEMENTED] = HTTPStatus.NOT_IMPLEMENTED
     code: Literal[ErrorCode.NOT_IMPLEMENTED] = ErrorCode.NOT_IMPLEMENTED
 
 
@@ -349,7 +350,7 @@ class HttpErrorProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.HTTP_ERROR,
             "Ошибка запроса",
-            429,
+            HTTPStatus.TOO_MANY_REQUESTS,
             "Запрос отклонён со статусом 429.",
             "/api/v1/repositories",
         )
@@ -370,7 +371,7 @@ class InternalErrorProblem(Problem):
         json_schema_extra=_example(
             ErrorCode.INTERNAL_ERROR,
             "Внутренняя ошибка сервера",
-            500,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
             "Сервер не смог обработать запрос. Если ошибка повторяется, сообщите trace_id.",
             "/api/v1/repositories",
         )
@@ -378,7 +379,7 @@ class InternalErrorProblem(Problem):
 
     type: Literal["urn:dmc-268:problem:internal-error"] = "urn:dmc-268:problem:internal-error"
     title: Literal["Внутренняя ошибка сервера"] = "Внутренняя ошибка сервера"
-    status: Literal[500] = 500
+    status: Literal[HTTPStatus.INTERNAL_SERVER_ERROR] = HTTPStatus.INTERNAL_SERVER_ERROR
     code: Literal[ErrorCode.INTERNAL_ERROR] = ErrorCode.INTERNAL_ERROR
 
 

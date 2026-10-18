@@ -306,6 +306,103 @@ def test_planned_endpoint_checks_origin_session_and_body_first(client: TestClien
     assert problem["errors"] == [{"where": "body.pullRequestNumber", "reason": "должно быть не меньше 1"}]
 
 
+REVIEW_BODY = {"provider": "github", "providerRepositoryId": "1", "pullRequestNumber": 1, "trigger": "manual"}
+JSON = {"content-type": "application/json"}
+
+
+def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None:
+    """Битый JSON без `Origin` — `403`, а не `422`: `Origin` проверяет middleware до разбора тела."""
+    response = client.post("/api/v1/reviews", content=b"{bad", headers=JSON)
+    assert_problem(response, 403, "ORIGIN_FORBIDDEN", "/api/v1/reviews")
+    response = client.post("/api/v1/reviews", content=b"{bad", headers={**JSON, "Origin": "https://evil.example"})
+    assert_problem(response, 403, "ORIGIN_FORBIDDEN", "/api/v1/reviews")
+
+
+def test_origin_is_checked_before_routing(client: TestClient) -> None:
+    """Изменяющий запрос под /api/v1 без `Origin` получает `403` даже на неизвестный путь."""
+    assert_problem(client.post("/api/v1/nope"), 403, "ORIGIN_FORBIDDEN", "/api/v1/nope")
+    # Безопасные методы и пути вне /api/v1 проверка не трогает.
+    assert_problem(client.get("/api/v1/nope"), 404, "ROUTE_NOT_FOUND", "/api/v1/nope")
+    assert_problem(client.post("/nope"), 404, "ROUTE_NOT_FOUND", "/nope")
+
+
+def test_with_origin_a_malformed_body_without_session_is_422(client: TestClient) -> None:
+    """Порядок после `Origin`: FastAPI разбирает JSON раньше зависимостей, поэтому битое тело
+    без сессии — `422`; разобранное тело без сессии — уже `401` (проверка выше)."""
+    response = client.post("/api/v1/reviews", content=b"{bad", headers={**JSON, "Origin": ORIGIN})
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
+    assert problem["errors"][0]["reason"] == "тело запроса — не JSON"
+
+
+def test_logout_checks_origin_in_middleware(client: TestClient) -> None:
+    response = client.post("/api/v1/auth/logout")
+    assert_problem(response, 403, "ORIGIN_FORBIDDEN", "/api/v1/auth/logout")
+    assert "set-cookie" not in response.headers
+    assert client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN}).status_code == 204
+
+
+def test_extra_field_name_is_not_echoed() -> None:
+    key = "<img src=x onerror=alert(1)>"
+    response = _signed_in_client().post("/api/v1/reviews", json={**REVIEW_BODY, key: 1}, headers={"Origin": ORIGIN})
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
+    assert problem["errors"] == [{"where": "body", "reason": "лишнее поле"}]
+    assert "onerror" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"pullRequestNumber": "5"}, {"where": "body.pullRequestNumber", "reason": "ожидается целое число"}),
+        ({"pullRequestNumber": True}, {"where": "body.pullRequestNumber", "reason": "ожидается целое число"}),
+        ({"providerRepositoryId": 1}, {"where": "body.providerRepositoryId", "reason": "ожидается строка"}),
+        (
+            {"providerRepositoryId": ""},
+            {"where": "body.providerRepositoryId", "reason": "длина строки должна быть не меньше 1"},
+        ),
+        (
+            {"providerRepositoryId": "x" * 256},
+            {"where": "body.providerRepositoryId", "reason": "длина строки должна быть не больше 255"},
+        ),
+        (
+            {"pullRequestNumber": 2**31},
+            {"where": "body.pullRequestNumber", "reason": "должно быть не больше 2147483647"},
+        ),
+        ({"provider": "bitbucket"}, {"where": "body.provider", "reason": "значение не из допустимого списка"}),
+    ],
+)
+def test_review_request_body_is_strict(change: dict[str, Any], error: dict[str, str]) -> None:
+    """Тело без приведения типов и в границах колонок; enum — строкой из списка."""
+    response = _signed_in_client().post("/api/v1/reviews", json={**REVIEW_BODY, **change}, headers={"Origin": ORIGIN})
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
+    assert problem["errors"] == [error]
+
+
+def test_review_request_body_is_camel_case_only() -> None:
+    body = {"provider": "github", "provider_repository_id": "1", "pull_request_number": 1, "trigger": "manual"}
+    response = _signed_in_client().post("/api/v1/reviews", json=body, headers={"Origin": ORIGIN})
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
+    assert {"where": "body.providerRepositoryId", "reason": "обязательный параметр не передан"} in problem["errors"]
+    assert {"where": "body", "reason": "лишнее поле"} in problem["errors"]
+
+
+@pytest.mark.parametrize(
+    "path", ["/api/v1/repositories", "/api/v1/repositories/00000000-0000-0000-0000-000000000001/pull-requests"]
+)
+@pytest.mark.parametrize(
+    ("offset", "reason"),
+    [
+        (str(2**63), "должно быть не больше 9223372036854775807"),
+        ("1" + "0" * 4300, "число слишком большое"),
+    ],
+)
+def test_offset_beyond_bigint_is_422(path: str, offset: str, reason: str) -> None:
+    """`OFFSET` в PostgreSQL — bigint: больше база не примет, поэтому `422`, а не `500`."""
+    response = _signed_in_client().get(path, params={"offset": offset})
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", path)
+    assert problem["errors"] == [{"where": "query.offset", "reason": reason}]
+    assert offset not in response.text
+
+
 def test_server_bodies_match_their_models(client: TestClient) -> None:
     """Тела, которые сервер отдаёт на деле, проходят модель своего кода (`AnyProblem`).
 
