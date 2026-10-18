@@ -228,6 +228,17 @@ def test_duplicate_is_rejected_and_counted() -> None:
     assert screening.rejected == 1
 
 
+def test_same_rule_check_in_another_category_is_rejected_and_counted() -> None:
+    """Одно нарушение пункта, названное двумя категориями, публикуется один раз."""
+    rule = LlmRuleRef("Error Handling Standards", 1)
+    screening = _screen(
+        _candidate(10, rule=rule),
+        _candidate(10, rule=rule, category=FindingCategory.READABILITY, message="Иначе сказано."),
+    )
+    assert [f.message for f in screening.kept] == ["Ошибка глотается."]
+    assert screening.rejected == 1
+
+
 def test_same_line_in_another_category_is_not_a_duplicate() -> None:
     screening = _screen(_candidate(10), _candidate(10, category=FindingCategory.SECURITY))
     assert len(screening.kept) == 2
