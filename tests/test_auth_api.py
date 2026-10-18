@@ -289,6 +289,16 @@ def test_a_mutating_request_from_elsewhere_is_403_and_changes_nothing(stand, hea
     assert len(stand.uow.sessions.stored) == 1
 
 
+@pytest.mark.parametrize("headers", [{}, {"Origin": "https://evil.example"}])
+def test_a_mutating_request_from_elsewhere_without_a_session_is_403(stand, headers) -> None:
+    # `Origin` проверяется раньше сессии: не `401` и не идемпотентный `204` выхода.
+    response = stand.client().post("/api/v1/auth/logout", headers=headers)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "ORIGIN_FORBIDDEN"
+    assert "set-cookie" not in response.headers
+
+
 def test_webhooks_need_neither_a_session_nor_an_origin(stand) -> None:
     response = stand.client().post("/api/v1/webhooks/github", content=b"{}")
 
