@@ -9,12 +9,14 @@
   Отклонённое замечание отклоняется целиком: ссылка на правило, которого
   модель не видела, - типичный след «правила», подложенного в дифф.
 - `apply_verdicts` - вердикты верификатора. Возвращает подмножество исходных
-  объектов, поэтому изменить поле замечания верификатору нечем.
+  объектов, поэтому изменить поле замечания верификатору нечем, а серьёзную
+  находку безопасности он отбросить не может.
 
 Идентификаторы и время приходят аргументами: тест сверяет точные значения.
 """
 
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -31,26 +33,51 @@ from app.domain.entities import (
     ShownRule,
     Verdict,
 )
-from app.domain.enums import VerifierVerdict
+from app.domain.enums import FindingCategory, FindingSeverity, VerifierVerdict
 from app.domain.prompt import candidate_ids
 from app.domain.result import Result
 from app.domain.untrusted import sanitize
 
-# Начало префикса атрибуции, который модель всё же написала сама: слова и имя
-# правила в кавычках. Атрибуцию строит сервис из проверенной ссылки, поэтому в
-# тексте замечания её быть не должно: иначе замечание без ссылки выглядело бы
-# как замечание по правилу. Имя - до закрывающей кавычки своей пары, за которой
-# идёт пересказ в скобках или двоеточие: апостроф внутри имени его не обрывает.
-# Скобки пересказа регулярным выражением не разобрать (вложенность любая),
-# их считает `_without_model_prefix`.
+# Префикс атрибуции, который модель всё же написала сама, ищется не в тексте, а
+# в его скелете (`_skeleton`): иначе его прячут символ нулевой ширины, латинская
+# `o` в «Согласно» или `**` вокруг. Атрибуцию строит сервис из проверенной
+# ссылки, поэтому в тексте замечания её быть не должно: иначе замечание без
+# ссылки выглядело бы как замечание по правилу.
+#
+# Разметка Markdown, которая может стоять до префикса и вокруг его частей.
+_MARKUP_CHARS = "*_>#`~"
+_MARKUP = rf"[\s{re.escape(_MARKUP_CHARS)}]*"
+# Голова префикса: слова и имя правила в кавычках. Имя - до закрывающей кавычки
+# своей пары, за которой идёт пересказ в скобках или разделитель: апостроф
+# внутри имени его не обрывает. Скобки пересказа регулярным выражением не
+# разобрать (вложенность любая), их считает `_prefix_end`.
 _PREFIX_HEAD = re.compile(
-    r"""
-    \A\s*согласно\s+пользовательскому\s+правилу\s*
+    rf"""
+    {_MARKUP}согласно\s*пользовательскому\s*правилу\s*
     (?:«.*?»|".*?"|„.*?[“”]|“.*?”|'.*?')
-    (?=\s*[(:])
+    (?={_MARKUP}[(:\-\u2013\u2014])
     """,
-    re.IGNORECASE | re.VERBOSE,
+    re.VERBOSE,
 )
+# Двоеточие, дефис, короткое и длинное тире.
+_SEPARATORS = (":", "-", "\u2013", "\u2014")
+# Начало текста, которое читается как префикс, даже если снять его не вышло:
+# без имени в кавычках, без разделителя. Такое замечание не публикуется.
+_ATTRIBUTION_START = re.compile(rf"{_MARKUP}согласно\s*пользовательск\w*\s*правил")
+# Латинские и греческие буквы (после `casefold`), которые на глаз не отличить
+# от кириллических в словах префикса.
+_LOOKALIKES = str.maketrans(
+    {
+        "a": "а", "b": "в", "c": "с", "e": "е", "h": "н", "k": "к", "m": "м",
+        "o": "о", "p": "р", "t": "т", "x": "х", "y": "у",
+        "α": "а", "β": "в", "ε": "е", "η": "н", "κ": "к", "μ": "м",
+        "ο": "о", "ρ": "р", "τ": "т", "χ": "х", "υ": "у",
+    }
+)  # fmt: skip
+
+# Цель атаки через дифф - подавить именно такую находку, а верификатор читает
+# тот же недоверенный контекст: отбросить её он не может (`review-verification`).
+_UNDROPPABLE_SECURITY = frozenset({FindingSeverity.HIGH, FindingSeverity.CRITICAL})
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +112,7 @@ def screen_findings(
         path = paths.get(candidate.anchor.file_path, candidate.anchor.file_path)
         anchor = validate_anchor(replace(candidate.anchor, file_path=path), hunk_list)
         rule = _resolve(candidate.rule, path, rules)
-        message = _without_model_prefix(candidate.message).strip()
+        message = (_without_model_prefix(candidate.message) or "").strip()
         if not anchor.ok or not rule.ok or not message:
             rejected += 1
             continue
@@ -108,18 +135,62 @@ def screen_findings(
     return Screening(kept=tuple(kept), rejected=rejected + len(duplicates))
 
 
-def _without_model_prefix(message: str) -> str:
-    """Текст замечания без префикса атрибуции; не похожий на префикс - как есть."""
-    head = _PREFIX_HEAD.match(message)
+def _without_model_prefix(message: str) -> str | None:
+    """Текст замечания без префиксов атрибуции; `None`, если префикс не снять.
+
+    Префикс снимается, пока он есть: второй, спрятанный за первым, иначе
+    опубликовался бы с атрибуцией чужого правила. Текст без префикса - как есть.
+    """
+    rest = message
+    while (end := _prefix_end(rest)) is not None:
+        rest = rest[end:]
+    skeleton, _ = _skeleton(rest)
+    return None if _ATTRIBUTION_START.match(skeleton) else rest
+
+
+def _prefix_end(text: str) -> int | None:
+    """Индекс в `text` сразу за префиксом атрибуции в его начале; нет префикса - `None`."""
+    skeleton, origins = _skeleton(text)
+    head = _PREFIX_HEAD.match(skeleton)
     if head is None:
-        return message
-    rest = message[head.end() :].lstrip()
-    if rest.startswith("("):
-        close = _closing_parenthesis(rest)
+        return None
+    position = _after_markup(skeleton, head.end())
+    if skeleton.startswith("(", position):
+        close = _closing_parenthesis(skeleton[position:])
         if close is None:
-            return message
-        rest = rest[close + 1 :].lstrip()
-    return rest[1:] if rest.startswith(":") else message
+            return None
+        position = _after_markup(skeleton, position + close + 1)
+    if not skeleton.startswith(_SEPARATORS, position):
+        return None
+    # Режется исходный текст: сразу за символом, давшим разделитель.
+    return origins[position] + 1
+
+
+def _after_markup(skeleton: str, position: int) -> int:
+    """Первая позиция с `position`, где не пробел и не разметка Markdown."""
+    while position < len(skeleton) and (
+        skeleton[position].isspace() or skeleton[position] in _MARKUP_CHARS
+    ):
+        position += 1
+    return position
+
+
+def _skeleton(text: str) -> tuple[str, tuple[int, ...]]:
+    """Текст для поиска префикса и индекс исходного символа для каждого символа скелета.
+
+    Символы `Cf` (zero-width, bidi) выбрасываются, остальные проходят NFKC,
+    `casefold` и замену похожих букв на кириллические. Поиск идёт по скелету,
+    а режется исходный текст: в замечание попадают слова модели как есть.
+    """
+    chars: list[str] = []
+    origins: list[int] = []
+    for index, char in enumerate(text):
+        if unicodedata.category(char) == "Cf":
+            continue
+        for folded in unicodedata.normalize("NFKC", char).casefold().translate(_LOOKALIKES):
+            chars.append(folded)
+            origins.append(index)
+    return "".join(chars), tuple(origins)
 
 
 def _closing_parenthesis(text: str) -> int | None:
@@ -155,17 +226,42 @@ def _resolve(
     )
 
 
-def apply_verdicts(
-    candidates: Sequence[Finding], verdicts: Mapping[str, Verdict]
-) -> tuple[tuple[Finding, ...], int]:
-    """Оставить замечания с вердиктом `keep`; вернуть их и число отброшенных.
+@dataclass(frozen=True, slots=True)
+class AppliedVerdicts:
+    """Итог вердиктов: что сохранить и что с какой причиной верификатор хотел отбросить.
+
+    `overruled` - замечания, которые верификатор отбросить не может: они есть
+    и в `kept`, причина его `drop` нужна логу прогона.
+    """
+
+    kept: tuple[Finding, ...]
+    dropped: tuple[tuple[Finding, str], ...]
+    overruled: tuple[tuple[Finding, str], ...]
+
+
+def apply_verdicts(candidates: Sequence[Finding], verdicts: Mapping[str, Verdict]) -> AppliedVerdicts:
+    """Оставить замечания с вердиктом `keep` и те, что отбрасывать нельзя.
 
     Полноту вердиктов проверяет `check_verdicts` до вызова: здесь у каждого
     кандидата вердикт есть.
     """
-    kept = tuple(
-        finding
-        for candidate_id, finding in zip(candidate_ids(len(candidates)), candidates, strict=True)
-        if verdicts[candidate_id].verdict is VerifierVerdict.KEEP
+    kept: list[Finding] = []
+    dropped: list[tuple[Finding, str]] = []
+    overruled: list[tuple[Finding, str]] = []
+    for candidate_id, finding in zip(candidate_ids(len(candidates)), candidates, strict=True):
+        verdict = verdicts[candidate_id]
+        if verdict.verdict is VerifierVerdict.KEEP:
+            kept.append(finding)
+        elif _droppable(finding):
+            dropped.append((finding, verdict.reason))
+        else:
+            kept.append(finding)
+            overruled.append((finding, verdict.reason))
+    return AppliedVerdicts(tuple(kept), tuple(dropped), tuple(overruled))
+
+
+def _droppable(finding: Finding) -> bool:
+    return not (
+        finding.category is FindingCategory.SECURITY
+        and finding.severity in _UNDROPPABLE_SECURITY
     )
-    return kept, len(candidates) - len(kept)

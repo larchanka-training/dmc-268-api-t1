@@ -7,7 +7,16 @@
 
 
 class LlmError(RuntimeError):
-    """Модель недоступна или ответила не так, как требует запрос."""
+    """Модель недоступна или ответила не так, как требует запрос.
+
+    `tokens_used` - сколько вызов успел израсходовать до сбоя: модель могла
+    ответить, а ответ не принят. Прогон учитывает их в затратах. Сбой до
+    ответа модели - 0.
+    """
+
+    def __init__(self, message: str = "", *, tokens_used: int = 0) -> None:
+        super().__init__(message)
+        self.tokens_used = tokens_used
 
 
 class LlmOutputError(LlmError):

@@ -4,12 +4,14 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import count
+from typing import NoReturn
 from uuid import UUID
 
 import pytest
+from pydantic import BaseModel
 
 from app.application.context_assembly import ContextLimits
-from app.application.ports.llm_gateway import LlmTask
+from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.review_pipeline import run_review
 from app.domain.entities import MergeRequest, ReviewJob, ReviewRun, RuleRef
 from app.domain.enums import (
@@ -241,10 +243,38 @@ def test_last_progress_at_follows_the_clock_on_every_transition() -> None:
 
     _run(uow, gateway)
 
-    # building_context, analysing, итог анализа, publishing, completed
-    assert len(seen) == 5
+    # building_context, analysing, отметка после ревью, итог анализа, publishing, completed
+    assert len(seen) == 6
     assert seen == sorted(seen)
-    assert len(set(seen)) == 5
+    assert len(set(seen)) == 6
+
+
+def test_progress_is_recorded_between_the_review_and_the_verifier() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    clock = _Clock()
+    scripted = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка")),
+            verification_response(("F1", "keep")),
+        ]
+    )
+    progress_at_call: list[datetime] = []
+    reads_at_call: list[int] = []
+
+    class _Watching:
+        def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
+            progress_at_call.append(_completed(uow).last_progress_at)
+            reads_at_call.append(clock.reads)
+            return scripted.complete(request)
+
+    _run(uow, _Watching(), now=clock.now)
+
+    at_review, at_verify = progress_at_call
+    # Отметка перед верификатором - последнее показание часов до его вызова,
+    # то есть после ответа на ревью, а не переход в analysing.
+    assert at_verify > at_review
+    assert at_verify == NOW + timedelta(seconds=reads_at_call[1])
 
 
 def test_a_rejected_anchor_keeps_the_other_findings_and_the_count() -> None:
@@ -422,6 +452,104 @@ def test_verifier_that_skips_a_finding_is_treated_as_unavailable() -> None:
     assert run.verification is VerificationOutcome.UNAVAILABLE
     assert len(uow.findings.list_for_run(JOB.review_run_id)) == 2
     assert run.tokens_used == 13
+
+
+def test_tokens_of_a_verifier_that_never_answered_by_the_schema_are_counted() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка"), tokens=1000),
+            LlmOutputError("verdicts: Field required", tokens_used=300),
+        ]
+    )
+
+    _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.COMPLETED
+    assert run.verification is VerificationOutcome.UNAVAILABLE
+    assert run.tokens_used == 1300
+
+
+def test_tokens_of_a_review_that_never_answered_by_the_schema_are_counted() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway([LlmOutputError("findings: Field required", tokens_used=700)])
+
+    with pytest.raises(LlmOutputError):
+        _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    assert run.tokens_used == 700
+
+
+class _FailingPublication(RecordingVcsGateway):
+    def publish_pull_request_review(self, *args: object, **kwargs: object) -> NoReturn:
+        raise VcsError("GitHub недоступен")
+
+
+def test_a_publication_failure_keeps_the_model_and_the_tokens() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "x"), tokens=1000, model="qwen"),
+            verification_response(("F1", "keep"), tokens=400),
+        ]
+    )
+
+    with pytest.raises(VcsError):
+        _run(uow, gateway, vcs_gateway=_FailingPublication())
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    assert run.failed_stage is ReviewRunStatus.PUBLISHING
+    assert (run.model, run.tokens_used) == ("qwen", 1400)
+
+
+DEFAULT_SUMMARY = "Критичных проблем в диффе не обнаружено."
+
+
+def test_summary_is_the_default_one_when_the_verifier_dropped_everything() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = RecordingVcsGateway()
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "выдуманное")),
+            verification_response(("F1", "drop")),
+        ]
+    )
+
+    _run(uow, gateway, vcs_gateway=vcs)
+
+    ((summary, inline),) = vcs.publications
+    assert inline == ()
+    assert DEFAULT_SUMMARY in summary
+    assert "Есть замечания." not in summary
+
+
+def test_summary_of_the_model_stays_when_some_findings_survive() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = RecordingVcsGateway()
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(
+                finding_json(CHANGED_FILE, 1, "первое", category="correctness"),
+                finding_json(CHANGED_FILE, 1, "второе", category="performance"),
+            ),
+            verification_response(("F1", "keep"), ("F2", "drop")),
+        ]
+    )
+
+    _run(uow, gateway, vcs_gateway=vcs)
+
+    ((summary, inline),) = vcs.publications
+    assert len(inline) == 1
+    assert "Есть замечания." in summary
 
 
 def test_tokens_add_up_and_the_model_comes_from_the_review() -> None:
