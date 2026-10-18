@@ -88,6 +88,7 @@ paths:
         тоже. Операция оставлена как план ручного запуска (PIPELINE_SPEC.md §4);
         сейчас ревью запускает только вебхук.
       operationId: createReview
+      x-not-implemented: true
       requestBody:
         required: true
         content:
