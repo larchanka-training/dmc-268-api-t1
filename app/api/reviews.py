@@ -3,17 +3,15 @@
 Один связный ответ, не два эндпоинта: прогон без находок бессмысленно
 смотреть отдельно от них (design.md change'а add-review-rest-api).
 
-`ReviewJob` — публичная проекция прогона в camelCase: её отдают ручной запуск и
-приём вебхука (`app/api/webhooks.py`).
+`ReviewJob` — общая модель ответа ручного запуска и приёма вебхука, лежит в
+`app/api/schemas.py`.
 """
 
 from datetime import datetime
-from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic.alias_generators import to_camel
 
 from app.api.dependencies import get_unit_of_work
 from app.api.errors import (
@@ -25,6 +23,7 @@ from app.api.errors import (
     ApiError,
 )
 from app.api.problems import ErrorCode
+from app.api.schemas import CamelCaseModel, ReviewJob
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
 from app.domain.enums import (
@@ -53,11 +52,7 @@ router = APIRouter(
 )
 
 
-class _CamelCase(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, validate_by_name=True)
-
-
-class CreateReviewRequest(_CamelCase):
+class CreateReviewRequest(CamelCaseModel):
     """Запрос ручного запуска ревью запроса на изменение."""
 
     model_config = ConfigDict(extra="forbid")
@@ -69,73 +64,6 @@ class CreateReviewRequest(_CamelCase):
     )
     pull_request_number: int = Field(ge=1, examples=[123])
     trigger: TriggerSource
-
-
-ReviewErrorCode = Literal[
-    "SCM_AUTH_ERROR",
-    "PR_NOT_FOUND",
-    "REPOSITORY_NOT_FOUND",
-    "SCM_UNAVAILABLE",
-    "CONTEXT_PARSING_ERROR",
-    "LLM_RATE_LIMITED",
-    "LLM_TIMEOUT",
-    "LLM_UNAVAILABLE",
-    "LLM_INVALID_OUTPUT",
-    "REVIEW_RUN_STALE",
-    "INTERNAL_ERROR",
-]
-
-
-class ReviewError(_CamelCase):
-    """Структурированная ошибка прогона (§8 PIPELINE_SPEC.md) — не ошибка HTTP-запроса.
-
-    Коды SCM_* провайдер-нейтральны: второй провайдер не ломает контракт.
-    """
-
-    code: ReviewErrorCode
-    message: str
-    retryable: bool
-    scm_provider: Provider | None = Field(
-        description=(
-            "Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null. Называется scmProvider, "
-            "а не provider: поле про сторону SCM, providerAttempt считает попытки и LLM, и SCM."
-        )
-    )
-    provider_attempt: int | None = Field(
-        ge=1,
-        description="Попытка вызова LLM/SCM провайдера. Не путать с redelivery сообщения в очереди.",
-    )
-
-
-class ReviewJob(_CamelCase):
-    """Публичная проекция прогона ревью (review_runs) в camelCase.
-
-    Не путать с сообщением очереди: у него нет собственной идентичности, отдельной от id прогона.
-    """
-
-    id: str = Field(description="Идентификатор прогона (reviewRunId).")
-    provider: Provider
-    provider_repository_id: str
-    pull_request_number: int = Field(ge=1)
-    trigger: TriggerSource
-    head_commit_sha: str | None = None
-    base_commit_sha: str | None = None
-    status: ReviewRunStatus
-    findings_count: int = Field(ge=0)
-    rejected_findings: int = Field(ge=0)
-    model: str | None = None
-    tokens_used: int | None = Field(default=None, ge=0)
-    duration_seconds: float | None = Field(default=None, ge=0)
-    created_at: datetime
-    updated_at: datetime
-    last_progress_at: datetime = Field(
-        description="Обновляется на каждом переходе состояния; по нему находят зависшие прогоны (§7.5 PIPELINE_SPEC.md)."
-    )
-    failed_stage: ReviewRunStatus | None = Field(
-        default=None,
-        description="Этап, на котором прогон упал (building_context, analysing, publishing); null, если не падал.",
-    )
-    error: ReviewError | None
 
 
 class FindingResponse(BaseModel):

@@ -43,7 +43,7 @@ from app.api.errors import (
     ApiError,
 )
 from app.api.problems import ErrorCode
-from app.api.reviews import ReviewJob
+from app.api.schemas import ReviewJob
 from app.application.sync_thread_resolution import handle_review_thread_webhook
 from app.application.use_cases.handle_webhook import (
     WebhookOutcome,
@@ -189,7 +189,7 @@ def _scm_unavailable() -> ApiError:
 
 
 def _review_job_payload(outcome: WebhookOutcome) -> dict[str, Any]:
-    """Проекция прогона в публичную схему `ReviewJob` (`app/api/reviews.py`).
+    """Проекция прогона в публичную схему `ReviewJob` (`app/api/schemas.py`).
 
     `findingsCount` у свежего прогона всегда 0: находки появляются позже,
     при обработке задачи воркером, и в этот эндпоинт больше не возвращаются.

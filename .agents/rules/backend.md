@@ -26,7 +26,7 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 | Требования к поведению (источник правды) | `openspec/specs/*/spec.md` |
 | Слои, порты, миграции, модель угроз | [`docs/BACKEND_ARCHITECTURE.md`](../../docs/BACKEND_ARCHITECTURE.md) |
 | Модель данных | [`docs/erd.md`](../../docs/erd.md) |
-| Контракт HTTP API | роуты и модели `app/api`; экспорт — [`docs/openapi/openapi.json`](../../docs/openapi/openapi.json) |
+| Контракт HTTP API | роуты и модели `app/api` (модель одной ручки — в её модуле, общая для нескольких — в `app/api/schemas.py`, ошибки — в `app/api/problems.py`); экспорт — [`docs/openapi/openapi.json`](../../docs/openapi/openapi.json) |
 | Границы сервисов | `docs/SYSTEM_DESIGN.md` (готовится) |
 | Принципы реализации (DRY, KISS, YAGNI) | `openspec/config.yaml`, `operations.apply.guidance` |
 

@@ -19,7 +19,7 @@ from httpx import Client, Response
 from pydantic import ValidationError
 
 from app.api.factory import create_app
-from app.api.reviews import ReviewJob
+from app.api.schemas import ReviewJob
 from app.config import Settings
 from app.domain.vcs_errors import VcsError
 
