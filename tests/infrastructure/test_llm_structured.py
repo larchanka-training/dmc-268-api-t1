@@ -146,18 +146,37 @@ def test_transport_failure_after_an_invalid_answer_carries_its_tokens() -> None:
     assert error.value.tokens_used == 100
 
 
-def test_truncated_answer_fails_at_once_without_a_retry() -> None:
+def test_truncated_answer_is_retried_with_the_length_limit_named() -> None:
+    replies = [
+        RawReply(text='{"schemaVersion": "1", "find', model="m", tokens=4_200, truncated=True),
+        RawReply(text=VALID, model="m", tokens=900),
+    ]
     calls: list[tuple[PromptMessage, ...]] = []
 
     def send(messages: Sequence[PromptMessage]) -> RawReply:
         calls.append(tuple(messages))
+        return replies.pop(0)
+
+    response = complete_structured(send, REQUEST, max_attempts=2)
+
+    assert isinstance(response.content, ReviewOutput)
+    assert response.tokens_used == 5_100
+    assert calls[1][-1] == PromptMessage(
+        PromptRole.USER,
+        "Предыдущий ответ не прошёл проверку схемы:\n"
+        "- ответ обрезан пределом длины (4096 токенов)\n\n"
+        "Ответь заново одним JSON-объектом по схеме, короче.",
+    )
+
+
+def test_every_attempt_truncated_names_the_length_limit() -> None:
+    def send(messages: Sequence[PromptMessage]) -> RawReply:
         return RawReply(text='{"schemaVersion": "1", "find', model="m", tokens=4_200, truncated=True)
 
     with pytest.raises(LlmOutputError, match="обрезан пределом длины \\(4096") as error:
-        complete_structured(send, REQUEST, max_attempts=3)
+        complete_structured(send, REQUEST, max_attempts=2)
 
-    assert len(calls) == 1
-    assert error.value.tokens_used == 4_200
+    assert error.value.tokens_used == 8_400
 
 
 def test_complete_answer_marked_as_cut_by_the_provider_is_accepted() -> None:

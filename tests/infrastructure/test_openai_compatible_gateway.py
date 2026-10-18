@@ -13,7 +13,7 @@ from app.application.llm_schema import ReviewOutput
 from app.application.ports.llm_gateway import LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
-from app.domain.llm_errors import LlmError, LlmOutputError
+from app.domain.llm_errors import LlmError
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -153,16 +153,18 @@ def test_answer_off_the_schema_is_retried_through_the_shared_loop() -> None:
     assert response.tokens_used == 3_000
 
 
-def test_answer_cut_by_max_tokens_is_not_retried() -> None:
+def test_answer_cut_by_max_tokens_is_retried_naming_the_limit() -> None:
     cut = _reply('{"schemaVersion": "1", "fin')
     cut["choices"][0]["finish_reason"] = "length"
     handler, seen = _recording(httpx.Response(200, json=cut), httpx.Response(200, json=_reply()))
 
-    with pytest.raises(LlmOutputError, match="обрезан пределом длины") as error:
-        _gateway(handler).complete(REQUEST)
+    response = _gateway(handler).complete(REQUEST)
 
-    assert len(seen) == 1
-    assert error.value.tokens_used == 1_500
+    assert len(seen) == 2
+    retry = json.loads(seen[1].content)["messages"][-1]["content"]
+    assert "обрезан пределом длины (4096 токенов)" in retry
+    assert "не JSON" not in retry
+    assert response.tokens_used == 3_000
 
 
 @pytest.mark.parametrize(

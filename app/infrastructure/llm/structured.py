@@ -46,9 +46,8 @@ def complete_structured[T: BaseModel](
     """Получить ответ по `request.response_model` не больше чем за `max_attempts` вызовов.
 
     Сбой транспорта (`LlmError` из `send`) не повторяется: это решение
-    адаптера и составного фоллбэка, а не цикла проверки. Обрезанный ответ,
-    не прошедший схему, тоже не повторяется. Любой сбой несёт токены,
-    израсходованные к нему.
+    адаптера и составного фоллбэка, а не цикла проверки. Любой сбой несёт
+    токены, израсходованные к нему.
     """
     messages: tuple[PromptMessage, ...] = request.messages
     tokens = 0
@@ -66,13 +65,13 @@ def complete_structured[T: BaseModel](
             # Оборванный JSON валидным не бывает, а полный ответ провайдер
             # тоже помечает обрезанным, если модель дописала после объекта
             # пробелы до предела: признак решает только судьбу непрошедшего.
+            # Такой ответ повторяется с подсказкой о пределе, а не «ответ не
+            # JSON»: живой прогон показал, что второй ответ укладывается.
             if reply.truncated:
-                raise LlmOutputError(
-                    f"ответ обрезан пределом длины ({request.max_output_tokens} токенов)",
-                    tokens_used=tokens,
-                ) from None
-            violations = _violations(error)
-            messages = (*request.messages, _retry_message(violations))
+                violations = [f"ответ обрезан пределом длины ({request.max_output_tokens} токенов)"]
+            else:
+                violations = _violations(error)
+            messages = (*request.messages, _retry_message(violations, shorter=reply.truncated))
             continue
         return LlmResponse(model=reply.model, tokens_used=tokens, content=content)
     raise LlmOutputError(
@@ -92,10 +91,9 @@ def _violations(error: ValidationError) -> list[str]:
     return found
 
 
-def _retry_message(violations: Sequence[str]) -> PromptMessage:
+def _retry_message(violations: Sequence[str], *, shorter: bool = False) -> PromptMessage:
     listed = "\n".join(f"- {violation}" for violation in violations)
+    ask = "Ответь заново одним JSON-объектом по схеме" + (", короче." if shorter else ".")
     return PromptMessage(
-        PromptRole.USER,
-        f"Предыдущий ответ не прошёл проверку схемы:\n{listed}\n\n"
-        "Ответь заново одним JSON-объектом по схеме.",
+        PromptRole.USER, f"Предыдущий ответ не прошёл проверку схемы:\n{listed}\n\n{ask}"
     )
