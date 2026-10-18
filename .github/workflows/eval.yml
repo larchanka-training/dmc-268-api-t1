@@ -13,7 +13,7 @@ on:
     inputs:
       repetitions:
         description: Повторов каждого кейса (разброс метрик между повторами - в отчёте)
-        default: "1"
+        default: "3"
         required: true
       configs:
         description: Конфигурации правил через запятую
@@ -35,7 +35,7 @@ concurrency:
 jobs:
   rules:
     runs-on: ubuntu-latest
-    # 7 кейсов × 4 конфигурации × 2 вызова модели на повтор.
+    # 7 кейсов × 4 конфигурации × до 2 вызовов модели на повтор; один повтор - около 2.5 мин.
     timeout-minutes: 60
     services:
       postgres:
@@ -68,7 +68,8 @@ jobs:
       EUROROUTER_BASE_URL: ${{ vars.AI_DMC268_URL }}
       # Та же модель, что в llm-live.yml: метрики сравнимы только при одной модели.
       EUROROUTER_MODEL: qwen3-coder-30b-a3b
-      EVAL_REPETITIONS: ${{ inputs.repetitions || '1' }}
+      # Три прогона на кейс - из docs/testing/LLM_EVAL.md §5: один повтор разброса не покажет.
+      EVAL_REPETITIONS: ${{ inputs.repetitions || '3' }}
       EVAL_CONFIGS: ${{ inputs.configs || 'absent,rules,empty,adversarial' }}
       EVAL_REPORT_DIR: eval-report
     steps:
