@@ -107,12 +107,18 @@
       Проверка: по каждому кейсу - `<<<` встречается только в строках-границах сервиса, сырых маркеров чат-шаблонов в запросе нет, опубликованные находки соответствуют требованиям `review-verification`; при отключённом экранировании маркеров три кейса падают (мутационная проверка).
       Кейс «повтор адаптера с дописанным сообщением не меняет исходные» - обязанность адаптера (`review-prompt-assembly`), проверяется тестами адаптера в задаче «LLM Gateway».
 - [x] 13.2 `uv run ruff check . && uv run mypy . && uv run lint-imports && uv run pytest`; с `TEST_DATABASE_URL` - интеграционные без пропусков; `uv run alembic heads` - одна голова; `npx @fission-ai/openspec@1.14.2 validate --all --strict`.
-- [ ] 13.3 Вживую: `docker compose up -d --build`, вебхук с PR, где на `base_sha` лежит `.review/rules.md` с правилом, а дифф содержит инъекцию; заглушка доводит прогон до `completed`, в `context_payloads` маркеры экранированы, `GET /api/v1/reviews/<id>` отдаёт `verification: "not_required"`.
+- [x] 13.3 Вживую: `docker compose up -d --build`, вебхук с PR, где на `base_sha` лежит `.review/rules.md` с правилом, а дифф содержит инъекцию; заглушка доводит прогон до `completed`, в `context_payloads` маркеры экранированы, `GET /api/v1/reviews/<id>` отдаёт `verification: "not_required"`.
       Сделано на собранном образе против одноразовых Postgres и RabbitMQ: миграция (тогда `0005`) применяется в контейнере; воркер стартует с промптами из образа и не стартует без них (`PromptFileError: нет файла промпта system.md`); ручка прогона отдаёт `verification`, `verifier_dropped_findings` и `rule` с `check_text`; база отвергает частичную ссылку на правило.
-      Не сделано: путь вебхука до `completed` требует реквизитов GitHub App - без них вебхук падает ещё до прогона (500 вместо обещанных в `docker-compose.yml` 502: `jwt.InvalidKeyError` не переводится в `VcsError`, отдельный баг вне этого change).
+      Путь вебхука до `completed` - против фейкового `api.github.com` (после слияния `develop` с #47 и #66): полный стек `docker compose` (API, воркер, Postgres, RabbitMQ), контейнеры резолвят `api.github.com` в HTTPS-фейк по алиасу сети и доверяют тестовому CA через `SSL_CERT_FILE`, реквизиты App - одноразовый ключ; код сервиса не менялся.
+      - подписанный вебхук `pull_request opened` - `202`, прогон создан; миграция `0006` применена в контейнере;
+      - воркер получил installation token, дифф `base...head`, `.review/rules.md` с `base_sha`, файл для AST с `head_sha`, метаданные PR;
+      - в `context_payloads` правило загружено и привязано к файлу, `[INST]` в пункте → `<U+005B>INST]`, `<|im_start|>system` в диффе → `<U+003C>|im_start|>system`, поддельная `<<<end id=…>>>` экранирована, строк-границ в блоке hunk ровно две, сырых маркеров в пакете нет;
+      - прогон `completed`, `verification: not_required`, модель `stub-llm`; `GET /api/v1/reviews/<id>` (с сессией - ручка требует вход после #47) отдаёт `verification: "not_required"`;
+      - опубликованы сводка ревью (`COMMENT` на `head_sha`) и merge gate (check-run `dmc-268-ai-review`, `success`).
+      Против настоящего GitHub App не проверено: у App `botyanya` права только на чтение (`contents`, `metadata`, `pull_requests`) и не настроен вебхук - публикация получила бы `403`; это настройка App, а не код change.
+      Баг вне change: `jwt.InvalidKeyError` при пустом ключе App не переводится в `VcsError` - вебхук отвечает 500 вместо 502.
 
 ## Workflow follow-up
 
-- Если задача «LLM Gateway» уже в работе - сообщить её исполнителю о design D10 этого change сразу после коммита групп 1-2: контракт порта, модели ответа и точки расширения для метаданных, few-shot и бюджета.
-- Если задача ещё не заведена - завести её с текстом, согласованным с design D10.
-- Синхронизировать спеки и заархивировать change (`openspec archive`) в том же PR до мерджа.
+- Задача «LLM Gateway» заведена как #64 с текстом по design D10 и сделана поверх этого change (PR #65, change `add-llm-gateway`).
+- Спеки синхронизированы, change заархивирован (`openspec archive`) в этом же PR до мерджа.
