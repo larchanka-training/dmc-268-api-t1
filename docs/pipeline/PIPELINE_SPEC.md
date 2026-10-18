@@ -386,12 +386,17 @@ retryable LLM-ошибок (почти вся таблица §6) осталос
 MVP endpoints:
 
 ```text
-POST /reviews
+GET  /repositories
+GET  /repositories/{repositoryId}/pull-requests
 GET  /reviews/{reviewId}
-GET  /reviews/{reviewId}/findings
-GET  /reviews
+GET  /reviews/{reviewId}/events
 POST /webhooks/{provider}
+POST /reviews                    # не реализовано, требования в openspec нет
 ```
+
+Находки прогона приходят в ответе `GET /reviews/{reviewId}`, отдельного
+`/reviews/{reviewId}/findings` нет (спека `review-rest-api`). Списка прогонов `GET /reviews`
+тоже нет.
 
 Аутентификация пользователя (`POST /auth/oauth/token`, `POST /auth/refresh`) сюда не
 входит — proposal, см. §9.1.
@@ -420,8 +425,9 @@ POST /webhooks/{provider}
 вебхуки на `/api/v1/webhooks/{provider}`.
 
 Ошибки HTTP-слоя — `ApiError` с закрытым списком `code`: `VALIDATION_ERROR`,
-`REVIEW_NOT_FOUND`, `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `SCM_UNAVAILABLE`,
+`REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `SCM_UNAVAILABLE`,
 `PROVIDER_NOT_SUPPORTED`, `UNAUTHENTICATED`, `ORIGIN_FORBIDDEN`. Каждый ответ с `ApiError` в `openapi.yaml` называет свой код.
+`404` и `422` ручек чтения сейчас отдаются телами FastAPI (`{"detail": …}`), а не `ApiError`.
 
 Источник истины для HTTP-контракта: `openapi.yaml`.
 

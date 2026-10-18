@@ -14,9 +14,79 @@ servers:
       Фронт ходит на /api/v1/..., хостинг шлёт вебхуки на /api/v1/webhooks/{provider}.
 
 paths:
+  /repositories:
+    get:
+      summary: Список зарегистрированных репозиториев
+      description: >
+        Постранично, по времени регистрации, затем по id. limit выше 200 не
+        отклоняется, а приводится к 200. Общего числа записей в ответе нет: конец
+        списка — страница короче limit.
+      operationId: listRepositories
+      tags:
+        - repositories
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Страница репозиториев
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepositoryList"
+        "401":
+          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /repositories/{repositoryId}/pull-requests:
+    parameters:
+      - $ref: "#/components/parameters/RepositoryId"
+    get:
+      summary: Список запросов на изменение репозитория
+      description: >
+        Постранично, по номеру запроса на изменение. Пагинация та же, что у
+        GET /repositories. Списка запросов на изменение по всем репозиториям нет.
+      operationId: listPullRequests
+      tags:
+        - pull-requests
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Страница запросов на изменение
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PullRequestList"
+        "401":
+          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: >
+            Репозитория нет. Тело — HTTPError (`{"detail": "repository not found"}`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HTTPError"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
   /reviews:
     post:
       summary: Создать задачу ревью
+      description: >
+        Не реализовано: роута в app/api нет, требования в openspec/specs нет, задачи
+        тоже. Операция оставлена как план ручного запуска (PIPELINE_SPEC.md §4);
+        сейчас ревью запускает только вебхук.
       operationId: createReview
       requestBody:
         required: true
@@ -52,38 +122,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-    get:
-      summary: Получить список задач ревью
-      operationId: listReviews
-      responses:
-        "200":
-          description: Список ReviewJob
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/ReviewJob"
-        "401":
-          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
 
   /reviews/{reviewId}:
     parameters:
       - $ref: "#/components/parameters/ReviewId"
     get:
-      summary: Получить состояние ReviewJob
+      summary: Получить прогон ревью вместе с находками
+      description: >
+        Один ответ, а не два эндпоинта: прогон и все его находки (спека
+        review-rest-api). Находки идут в стабильном порядке — по времени создания,
+        затем по id. Прогон без находок — 200 с пустым findings. Поля — в snake_case,
+        как их отдаёт сервер.
       operationId: getReview
       responses:
         "200":
-          description: Текущее состояние задачи
+          description: Прогон и его находки
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ReviewJob"
+                $ref: "#/components/schemas/ReviewRun"
         "401":
           description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
           content:
@@ -91,11 +148,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "404":
-          description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
 
   /reviews/{reviewId}/events:
     parameters:
@@ -141,39 +196,14 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "404":
-          description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND); поток не открывается
+          description: >
+            Прогон не найден, поток не открывается. Тело — HTTPError (`{"detail": "review run not found"}`).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiError"
-
-  /reviews/{reviewId}/findings:
-    parameters:
-      - $ref: "#/components/parameters/ReviewId"
-    get:
-      summary: Получить результаты ревью
-      operationId: getReviewFindings
-      responses:
-        "200":
-          description: Findings
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Finding"
-        "401":
-          description: Нет действительной сессии (ApiError.code = UNAUTHENTICATED)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "404":
-          description: ReviewJob не найден (ApiError.code = REVIEW_NOT_FOUND)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
+                $ref: "#/components/schemas/HTTPError"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
 
   /webhooks/{provider}:
     parameters:
@@ -196,13 +226,15 @@ paths:
             хостинг считает неудачной доставкой, повторяет её и после серии отказов
             может отключить вебхук, поэтому 409 здесь не отдаём. Доставка, которая
             ревью не запускает, — тоже 202, но с телом WebhookIgnored: записей нет,
-            очередь не тронута (спека webhook-intake).
+            очередь не тронута (спека webhook-intake). Событие
+            pull_request_review_thread — 202 с телом WebhookAcknowledged.
           content:
             application/json:
               schema:
                 oneOf:
                   - $ref: "#/components/schemas/ReviewJob"
                   - $ref: "#/components/schemas/WebhookIgnored"
+                  - $ref: "#/components/schemas/WebhookAcknowledged"
         "401":
           description: Подпись доставки не прошла проверку (ApiError.code = WEBHOOK_SIGNATURE_INVALID)
           content:
@@ -226,6 +258,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
 
   /auth/{provider}/login:
     parameters:
@@ -248,7 +282,10 @@ paths:
           example: /app/reviews/42
       responses:
         "302":
-          description: Редирект на страницу авторизации провайдера с параметром state.
+          description: >
+            Редирект на страницу авторизации провайдера с параметром state. Если вход
+            у провайдера не настроен (пусты идентификатор приложения или публичный
+            адрес сервиса) — редирект на /login?error=provider_unavailable без cookie.
           headers:
             Location:
               schema:
@@ -366,8 +403,53 @@ components:
       name: reviewId
       in: path
       required: true
+      description: Идентификатор прогона ревью (review_runs.id); не UUID — 422.
       schema:
         type: string
+        format: uuid
+    RepositoryId:
+      name: repositoryId
+      in: path
+      required: true
+      description: Идентификатор репозитория в сервисе (repositories.id); не UUID — 422.
+      schema:
+        type: string
+        format: uuid
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Размер страницы. Больше 200 приводится к 200, меньше 1 — 422.
+      schema:
+        type: integer
+        minimum: 1
+        default: 50
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: Сколько записей пропустить.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  responses:
+    NotFound:
+      description: >
+        Прогон не найден. Тело — HTTPError (`{"detail": "review run not found"}`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HTTPError"
+    ValidationFailed:
+      description: >
+        Параметр пути или запроса не прошёл проверку FastAPI (не UUID, limit меньше 1,
+        provider вне Provider). Тело — HTTPValidationError, не ApiError.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HTTPValidationError"
 
   schemas:
     Provider:
@@ -534,6 +616,9 @@ components:
 
     Finding:
       type: object
+      description: >
+        Находка на выходе модели (finding.schema.json, llm_review_output.schema.json).
+        В ответах REST не отдаётся: GET /reviews/{reviewId} возвращает ReviewRunFinding.
       additionalProperties: false
       required:
         - filePath
@@ -648,10 +733,10 @@ components:
           type: string
           description: >
             Закрытый список, как и ReviewError.code. Каждый ответ с ApiError называет
-            свой код в description — это сверяет tests/test_docs.py.
+            свой код в description — это сверяет tests/test_docs.py. 404 и 422 ручек
+            чтения отдаются не ApiError, а телами FastAPI: HTTPError и HTTPValidationError.
           enum:
             - VALIDATION_ERROR
-            - REVIEW_NOT_FOUND
             - REVIEW_ALREADY_ACTIVE
             - WEBHOOK_SIGNATURE_INVALID
             - SCM_UNAVAILABLE
@@ -674,6 +759,300 @@ components:
           type: string
           enum:
             - ignored
+
+    WebhookAcknowledged:
+      type: object
+      additionalProperties: false
+      description: >
+        Тело 202 для события pull_request_review_thread: отметка закрытия треда
+        принята (спека webhook-intake, «Вебхук закрытия треда ревью»).
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - acknowledged
+
+    HTTPError:
+      type: object
+      description: Тело HTTPException FastAPI — 404 ручек чтения и входа.
+      required:
+        - detail
+      properties:
+        detail:
+          type: string
+
+    HTTPValidationError:
+      type: object
+      description: Тело 422 FastAPI при ошибке проверки параметров.
+      required:
+        - detail
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            required:
+              - loc
+              - msg
+              - type
+            properties:
+              loc:
+                type: array
+                items:
+                  oneOf:
+                    - type: string
+                    - type: integer
+              msg:
+                type: string
+              type:
+                type: string
+
+    Repository:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - provider
+        - provider_id
+        - full_name
+        - default_branch
+        - auto_review_enabled
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        provider:
+          $ref: "#/components/schemas/Provider"
+        provider_id:
+          type: string
+          description: Идентификатор репозитория у провайдера.
+        full_name:
+          type: string
+          example: octo/hello
+        default_branch:
+          type: string
+        auto_review_enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    RepositoryList:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Repository"
+
+    PullRequestState:
+      type: string
+      enum:
+        - open
+        - closed
+        - merged
+
+    PullRequest:
+      type: object
+      additionalProperties: false
+      description: Запрос на изменение (merge_requests).
+      required:
+        - id
+        - number
+        - title
+        - description
+        - author
+        - source_branch
+        - target_branch
+        - head_sha
+        - state
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: integer
+          minimum: 1
+        title:
+          type: string
+        description:
+          type: string
+        author:
+          type: string
+        source_branch:
+          type: string
+        target_branch:
+          type: string
+        head_sha:
+          type: string
+        state:
+          $ref: "#/components/schemas/PullRequestState"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PullRequestList:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PullRequest"
+
+    ReviewRun:
+      type: object
+      additionalProperties: false
+      description: Ответ GET /reviews/{reviewId} — прогон и все его находки, в snake_case.
+      required:
+        - id
+        - merge_request_id
+        - head_sha
+        - base_sha
+        - status
+        - trigger
+        - model
+        - tokens_used
+        - duration_seconds
+        - failure_reason
+        - failed_stage
+        - last_progress_at
+        - created_at
+        - updated_at
+        - findings
+      properties:
+        id:
+          type: string
+          format: uuid
+        merge_request_id:
+          type: string
+          format: uuid
+        head_sha:
+          type: string
+        base_sha:
+          type:
+            - string
+            - "null"
+        status:
+          $ref: "#/components/schemas/ReviewStatus"
+        trigger:
+          $ref: "#/components/schemas/TriggerSource"
+        model:
+          type:
+            - string
+            - "null"
+        tokens_used:
+          type:
+            - integer
+            - "null"
+        duration_seconds:
+          type:
+            - number
+            - "null"
+        failure_reason:
+          type:
+            - string
+            - "null"
+        failed_stage:
+          type:
+            - string
+            - "null"
+          enum:
+            - building_context
+            - analysing
+            - publishing
+            - null
+        last_progress_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReviewRunFinding"
+
+    ReviewRunFinding:
+      type: object
+      additionalProperties: false
+      description: >
+        Находка прогона в ответе GET /reviews/{reviewId} (таблица findings). Не путать
+        с Finding — контрактом находки на выходе модели.
+      required:
+        - id
+        - file_path
+        - side
+        - old_line
+        - new_line
+        - category
+        - severity
+        - message
+        - suggestion
+        - confidence
+      properties:
+        id:
+          type: string
+          format: uuid
+        file_path:
+          type: string
+        side:
+          type: string
+          enum:
+            - old
+            - new
+        old_line:
+          type:
+            - integer
+            - "null"
+        new_line:
+          type:
+            - integer
+            - "null"
+        category:
+          type: string
+          enum:
+            - security
+            - correctness
+            - performance
+            - readability
+        severity:
+          type: string
+          enum:
+            - low
+            - medium
+            - high
+            - critical
+        message:
+          type: string
+        suggestion:
+          type:
+            - string
+            - "null"
+        confidence:
+          type:
+            - number
+            - "null"
 
     CurrentUser:
       type: object
