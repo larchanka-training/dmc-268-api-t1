@@ -86,6 +86,8 @@ tests/eval/
   runner.py        прогон, матчинг, метрики
 ```
 
+Первый корпус - eval правил владельца `.review/rules.md` в `tests/eval/rules/` (описание и результаты - [RULES_E2E_REPORT](RULES_E2E_REPORT.md) §3).
+
 Датасет синтетический и лежит в репозитории: чужой код в тестовых данных — тот же риск,
 что исходники в `context_payloads`.
 

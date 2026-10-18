@@ -117,12 +117,16 @@ Cookie сессии ставится с `Secure`: вход работает по
 Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
 ```bash
-uv run pytest -m "not live"                         # чистые тесты, база не нужна
-TEST_DATABASE_URL=... uv run pytest -m "not live"   # вместе с адаптерами и миграциями
+uv run pytest                                       # чистые тесты, база не нужна
+TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest   # вместе с адаптерами, брокером и E2E
 ```
 
+Маркеры `live`, `eval` и `load` исключены в `addopts` (`pyproject.toml`), поэтому
+ключ `-m` в обычном прогоне не нужен: явный `-m` перекрывает это исключение.
+
 Тесты, которым нужен PostgreSQL, помечены `integration` и пропускаются, если
-`TEST_DATABASE_URL` не задан.
+`TEST_DATABASE_URL` не задан; сквозным (`tests/e2e/`), обвязке eval и малому
+нагрузочному прогону нужен ещё и RabbitMQ в `TEST_RABBITMQ_URL`.
 
 Эта переменная намеренно не `DATABASE_URL`, и никакого отката на неё нет.
 Подготовка тестовой базы удаляет её схему, так что если направить тесты на базу,
@@ -146,6 +150,12 @@ export TEST_DATABASE_URL="postgresql+psycopg://dmc:dmc@localhost:5432/dmc268_tes
 EUROROUTER_API_KEYS=... EUROROUTER_BASE_URL=https://api.eurouter.ai/api/v1 \
 EUROROUTER_MODEL=qwen3-coder-30b-a3b uv run pytest -m live tests/live
 ```
+
+Сквозной стенд (`tests/e2e/stack.py`) прогоняет подписанный вебхук через API, базу, RabbitMQ и воркер до публикации в GitHub; GitHub подменён на уровне HTTP, модель - за портом.
+На нём же стоят eval правил и нагрузочный прогон; сценарии и результаты - в [`docs/testing/RULES_E2E_REPORT.md`](docs/testing/RULES_E2E_REPORT.md).
+
+- Eval правил на живой модели (маркер `eval`): `gh workflow run "LLM eval"` или локально с ключами EUrouter и сервисами `uv run pytest -s -m eval tests/eval`; отчёт - в `EVAL_REPORT_DIR`.
+- Полный нагрузочный прогон (маркер `load`): `gh workflow run Load` или локально `uv run pytest -s -m load tests/load`; профиль и пороги - переменными `LOAD_*` (см. `tests/load/test_load.py`).
 
 ## Проверки
 
