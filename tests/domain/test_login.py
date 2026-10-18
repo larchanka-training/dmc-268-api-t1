@@ -5,7 +5,16 @@ from app.domain.login import DEFAULT_REDIRECT, safe_redirect
 
 @pytest.mark.parametrize(
     "value",
-    ["/app/", "/app/reviews/42", "/app/reviews/42?tab=findings#f-3", "/app/repos/a.b"],
+    [
+        "/app/",
+        "/app/reviews/42",
+        "/app/reviews/42?tab=findings#f-3",
+        "/app/repos/a.b",
+        # Процент-кодирование пути остаётся как есть: проверяется, но не переписывается.
+        "/app/repos/my%20repo",
+        "/app/a%25b",
+        "/app/100%",
+    ],
 )
 def test_a_path_under_app_is_kept(value: str) -> None:
     assert safe_redirect(value) == value
@@ -25,6 +34,9 @@ def test_a_path_under_app_is_kept(value: str) -> None:
         "/app/\\evil.example",
         "/app/../api/v1/auth/logout",
         "/app/%2e%2e/login",
+        "/app/a%2F%2Fevil.example",
+        # `//` ищется во всей строке, включая query: лишняя строгость дешевле разбора.
+        "/app/x?next=//evil.example",
         "/app/x\r\nSet-Cookie: a=b",
         "app/reviews",
     ],
