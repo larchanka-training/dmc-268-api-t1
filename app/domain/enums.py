@@ -98,6 +98,9 @@ class RulesStatus(StrEnum):
 
     LOADED = "loaded"
     ABSENT = "absent"
+    # Файл есть, но разбор не принял ни одного правила: пустой, одна проза
+    # или все разделы отклонены.
+    EMPTY = "empty"
     TOO_LARGE = "too_large"
     UNAVAILABLE = "unavailable"
 
