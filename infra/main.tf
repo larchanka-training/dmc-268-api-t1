@@ -228,10 +228,14 @@ resource "docker_container" "api" {
     name = docker_network.dmc268.name
   }
 
-  # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера.
+  # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера,
+  # OAuth и origin — у входа и проверки сессии.
   env = concat(local.app_env, [
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
+    "GITHUB_APP_CLIENT_ID=${var.github_app_client_id}",
+    "GITHUB_APP_CLIENT_SECRET=${var.github_app_client_secret}",
+    "PUBLIC_ORIGIN=${var.public_origin}",
   ])
 
   ports {

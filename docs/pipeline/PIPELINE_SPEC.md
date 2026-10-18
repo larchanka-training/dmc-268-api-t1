@@ -421,39 +421,15 @@ POST /webhooks/{provider}
 
 Ошибки HTTP-слоя — `ApiError` с закрытым списком `code`: `VALIDATION_ERROR`,
 `REVIEW_NOT_FOUND`, `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `SCM_UNAVAILABLE`,
-`PROVIDER_NOT_SUPPORTED`, `AUTH_CODE_INVALID`, `AUTH_REFRESH_INVALID`. Каждый ответ с `ApiError` в `openapi.yaml` называет свой код.
+`PROVIDER_NOT_SUPPORTED`, `UNAUTHENTICATED`, `ORIGIN_FORBIDDEN`. Каждый ответ с `ApiError` в `openapi.yaml` называет свой код.
 
 Источник истины для HTTP-контракта: `openapi.yaml`.
 
-### 9.1. Аутентификация (proposal)
+### 9.1. Аутентификация
 
-`POST /reviews` подразумевает пользователя: кто-то должен ходить в SCM его правами и иметь
-право запускать ревью по конкретному репозиторию. Ни в одном из перечисленных выше
-endpoint'ов, ни в текущих OpenSpec-спеках этого нет — аутентификация здесь фиксируется как
-предложение и, как и `ReviewError.code` (§8), должна пройти отдельный OpenSpec-change до
-Contract v1 (см. §1).
-
-```text
-POST /auth/oauth/token
-POST /auth/refresh
-```
-
-- `POST /auth/oauth/token` обменивает код OAuth-редиректа провайдера (`provider` +
-  `code`) на сессию.
-- `POST /auth/refresh` обновляет access-токен по refresh-куке, без тела запроса.
-- Обе ручки отдают access-токен в теле ответа (`AuthSession.accessToken`,
-  `expiresIn` в секундах) и переиздают refresh-токен `Set-Cookie`-заголовком:
-  `HttpOnly; Secure; SameSite=Strict`, `Path=/api/v1/auth/refresh` — кука не читается
-  скриптом и не уходит ни на один другой путь API.
-- Транспорт сессии на Frontend: access-токен — в памяти вкладки, не в
-  `localStorage`; при перезагрузке — тихий `POST /auth/refresh` по куке. Это
-  решение бэкенда, а не фронта, потому что `Set-Cookie` ставит только сервер.
-- Ошибки — `ApiError`: `AUTH_CODE_INVALID` (код OAuth недействителен/истёк),
-  `AUTH_REFRESH_INVALID` (refresh-кука отсутствует, истекла или отозвана).
-
-Единый origin у Frontend и API через reverse-proxy (что и делает `SameSite=Strict`
-рабочим без CORS) в контракт не входит — это устройство инфраструктуры конкретного
-деплоя, а не публичный API.
+Вход через GitHub выполняет бэкенд, сессия живёт в httpOnly cookie и хранится на
+сервере. Требования — спека `user-auth` (`openspec/specs/user-auth/spec.md`), ручки —
+`openapi.yaml`, обоснование выбора — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
 
 ---
 

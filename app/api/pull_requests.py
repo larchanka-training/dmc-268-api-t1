@@ -14,9 +14,15 @@ from pydantic import BaseModel
 
 from app.api.dependencies import get_unit_of_work
 from app.api.repositories import DEFAULT_LIMIT, MAX_LIMIT
+from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
 
-router = APIRouter(prefix="/api/v1/repositories", tags=["pull-requests"])
+router = APIRouter(
+    prefix="/api/v1/repositories",
+    tags=["pull-requests"],
+    dependencies=SESSION_REQUIRED,
+    responses=SESSION_RESPONSES,
+)
 
 
 class MergeRequestResponse(BaseModel):

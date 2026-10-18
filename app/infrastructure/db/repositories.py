@@ -5,9 +5,11 @@
 чистой функцией — это единственные места, где появляется правило. Они отмечены.
 """
 
+import datetime as dt
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.domain.entities import (
@@ -18,7 +20,9 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    User,
 )
+from app.domain.entities import Session as UserSession
 from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
 from app.infrastructure.db import mappers as m
@@ -29,6 +33,8 @@ from app.infrastructure.db.models import (
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
+    SessionRow,
+    UserRow,
 )
 
 
@@ -407,3 +413,83 @@ class SqlAlchemyPublishedCommentRepo:
             .returning(PublishedCommentRow.id)
         ).first()
         return updated_id is not None
+
+
+class SqlAlchemyUserRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get(self, user_id: UUID) -> User | None:
+        row = self._session.get(UserRow, user_id)
+        return m.user_to_domain(row) if row else None
+
+    def find_by_provider(self, provider: Provider, provider_user_id: str) -> User | None:
+        row = self._session.scalars(
+            select(UserRow).where(
+                UserRow.provider == provider,
+                UserRow.provider_user_id == provider_user_id,
+            )
+        ).one_or_none()
+        return m.user_to_domain(row) if row else None
+
+    def add(self, user: User) -> bool:
+        # `ON CONFLICT DO NOTHING`: при параллельной вставке той же пары
+        # вторая транзакция ждёт коммита первой и получает 0 строк, а не
+        # `IntegrityError`.
+        # `no_autoflush`: ожидающая сессия с этим пользователем не должна
+        # уйти в базу раньше самого пользователя.
+        with self._session.no_autoflush:
+            inserted = self._session.execute(
+                pg_insert(UserRow)
+                .values(
+                    id=user.id,
+                    provider=user.provider,
+                    provider_user_id=user.provider_user_id,
+                    login=user.login,
+                    name=user.name,
+                    avatar_url=user.avatar_url,
+                    created_at=user.created_at,
+                    updated_at=user.updated_at,
+                )
+                .on_conflict_do_nothing(constraint="uq_users_provider_user_id")
+                .returning(UserRow.id)
+            ).first()
+        return inserted is not None
+
+    def update(self, user: User) -> None:
+        row = self._session.get(UserRow, user.id)
+        if row is None:
+            raise LookupError(f"user {user.id} is not stored")
+        row.login = user.login
+        row.name = user.name
+        row.avatar_url = user.avatar_url
+        row.updated_at = user.updated_at
+
+
+class SqlAlchemySessionRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def find_by_token_hash(self, token_hash: bytes) -> UserSession | None:
+        row = self._session.scalars(
+            select(SessionRow).where(SessionRow.token_hash == token_hash)
+        ).one_or_none()
+        return m.session_to_domain(row) if row else None
+
+    def add(self, session: UserSession) -> None:
+        self._session.add(
+            SessionRow(
+                id=session.id,
+                token_hash=session.token_hash,
+                user_id=session.user_id,
+                created_at=session.created_at,
+                expires_at=session.expires_at,
+            )
+        )
+
+    def delete(self, session_id: UUID) -> None:
+        self._session.execute(delete(SessionRow).where(SessionRow.id == session_id))
+
+    def delete_expired(self, now: dt.datetime) -> int:
+        result = self._session.execute(delete(SessionRow).where(SessionRow.expires_at <= now))
+        return int(result.rowcount)  # type: ignore[attr-defined]

@@ -7,6 +7,7 @@
 """
 
 from dataclasses import replace
+from datetime import datetime
 from types import TracebackType
 from typing import Any, Self
 from uuid import UUID
@@ -20,6 +21,8 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    Session,
+    User,
 )
 from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
@@ -302,6 +305,75 @@ class FakePublishedCommentRepo:
         return True
 
 
+class FakeUserRepo:
+    def __init__(self) -> None:
+        self._by_id: dict[UUID, User] = {}
+
+    def snapshot(self) -> dict[UUID, User]:
+        return dict(self._by_id)
+
+    def restore(self, state: dict[UUID, User]) -> None:
+        self._by_id = dict(state)
+
+    def get(self, user_id: UUID) -> User | None:
+        return self._by_id.get(user_id)
+
+    def find_by_provider(self, provider: Provider, provider_user_id: str) -> User | None:
+        return next(
+            (
+                u
+                for u in self._by_id.values()
+                if u.provider == provider and u.provider_user_id == provider_user_id
+            ),
+            None,
+        )
+
+    def add(self, user: User) -> bool:
+        if self.find_by_provider(user.provider, user.provider_user_id) is not None:
+            return False
+        self._by_id[user.id] = user
+        return True
+
+    def update(self, user: User) -> None:
+        if user.id not in self._by_id:
+            raise LookupError(f"user {user.id} is not stored")
+        # Как SQL-адаптер: меняются только профиль, ключ и created_at — нет.
+        stored = self._by_id[user.id]
+        self._by_id[user.id] = replace(
+            stored, login=user.login, name=user.name, avatar_url=user.avatar_url
+        )
+
+
+class FakeSessionRepo:
+    def __init__(self) -> None:
+        self._by_id: dict[UUID, Session] = {}
+
+    @property
+    def stored(self) -> list[Session]:
+        return list(self._by_id.values())
+
+    def snapshot(self) -> dict[UUID, Session]:
+        return dict(self._by_id)
+
+    def restore(self, state: dict[UUID, Session]) -> None:
+        self._by_id = dict(state)
+
+    def find_by_token_hash(self, token_hash: bytes) -> Session | None:
+        return next((s for s in self._by_id.values() if s.token_hash == token_hash), None)
+
+    def add(self, session: Session) -> None:
+        self._by_id[session.id] = session
+
+    def delete(self, session_id: UUID) -> None:
+        self._by_id.pop(session_id, None)
+
+    def delete_expired(self, now: datetime) -> int:
+        expired = [s.id for s in self._by_id.values() if now >= s.expires_at]
+        for session_id in expired:
+            del self._by_id[session_id]
+        return len(expired)
+
+
 class FakeUnitOfWork(UnitOfWork):
     """Держит состояние между повторными входами в `with` — как настоящая база.
 
@@ -329,6 +401,8 @@ class FakeUnitOfWork(UnitOfWork):
         self.findings: FakeFindingRepo = self._fakes.findings
         self.published_comments: FakePublishedCommentRepo = self._fakes.published_comments
         self.published_comments.bind_findings(self.findings)
+        self.users: FakeUserRepo = self._fakes.users
+        self.sessions: FakeSessionRepo = self._fakes.sessions
         self.committed = 0
         self.rolled_back = 0
         self._committed_state: list[Any] | None = None
@@ -384,6 +458,8 @@ class _Fakes:
         self.context_payloads = FakeContextPayloadRepo()
         self.findings = FakeFindingRepo(self.review_runs)
         self.published_comments = FakePublishedCommentRepo(self.review_runs)
+        self.users = FakeUserRepo()
+        self.sessions = FakeSessionRepo()
 
     def _all(self) -> list[Any]:
         return [
@@ -393,6 +469,8 @@ class _Fakes:
             self.context_payloads,
             self.findings,
             self.published_comments,
+            self.users,
+            self.sessions,
         ]
 
     def snapshot(self) -> list[Any]:
