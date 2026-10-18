@@ -28,15 +28,10 @@ from app.application.ports.vcs_gateway import VcsGateway
 from app.application.publish_review import publish_review
 from app.application.use_cases.build_review_context import build_review_context
 from app.domain.entities import ContextPayload, Finding, ReviewJob, ReviewRun
-from app.domain.enums import (
-    TERMINAL_STATUSES,
-    ReviewRunStatus,
-    VerificationOutcome,
-    VerifierVerdict,
-)
+from app.domain.enums import TERMINAL_STATUSES, ReviewRunStatus, VerificationOutcome
 from app.domain.lifecycle import advance
 from app.domain.llm_errors import LlmError
-from app.domain.prompt import PromptTexts, candidate_ids
+from app.domain.prompt import PromptTexts
 from app.domain.verification import apply_verdicts, screen_findings
 
 logger = logging.getLogger(__name__)
@@ -58,8 +53,10 @@ def _mark_failed(uow: UnitOfWork, run_id: UUID, exc: Exception, now: datetime) -
     Копия прогона в памяти могла разойтись с базой (строка ушла вперёд), и
     переход от неё бросил бы сам. Терминальный прогон не трогаем. Сбой этой
     записи (например, база недоступна) логируется и не подменяет исходное
-    исключение — зависший прогон выметет `sweep_stale_runs`.
+    исключение - зависший прогон выметет `sweep_stale_runs`. Токены, которые
+    успел израсходовать сбойный вызов модели, добавляются к затратам прогона.
     """
+    spent = exc.tokens_used if isinstance(exc, LlmError) else 0
     try:
         with uow:
             run = uow.review_runs.get(run_id)
@@ -69,6 +66,8 @@ def _mark_failed(uow: UnitOfWork, run_id: UUID, exc: Exception, now: datetime) -
                 advance(run, ReviewRunStatus.FAILED, now).unwrap(),
                 failure_reason=str(exc) or type(exc).__name__,
             )
+            if spent:
+                failed = replace(failed, tokens_used=(failed.tokens_used or 0) + spent)
             uow.review_runs.update(failed)
             uow.commit()
     except Exception:
@@ -147,15 +146,25 @@ def run_review(
             now=now(),
             new_id=new_id,
         )
+        # Два долгих вызова модели подряд не должны выглядеть для `find_stale`
+        # одним прогоном без прогресса.
+        run = _record_progress(uow, run, now())
         verification = _verify(
             context, prompt_texts, llm_gateway, llm_limits, screening.kept, run.id
         )
+        if result.findings and not verification.findings:
+            # Сводка модели описывает замечания, которых в публикации не будет:
+            # публикация возьмёт стандартную.
+            result = replace(result, summary=None)
+        # Модель и затраты - вместе с замечаниями: сбой публикации их не стирает.
         run = replace(
             run,
             last_progress_at=now(),
             rejected_findings=run.rejected_findings + screening.rejected,
             verification=verification.outcome,
             verifier_dropped_findings=verification.dropped,
+            model=result.model,
+            tokens_used=result.tokens_used + verification.tokens_used,
         )
         with uow:
             for finding in verification.findings:
@@ -175,12 +184,7 @@ def run_review(
             new_id=new_id,
         )
 
-        run = replace(
-            run,
-            model=result.model,
-            tokens_used=result.tokens_used + verification.tokens_used,
-            duration_seconds=monotonic() - started_at,
-        )
+        run = replace(run, duration_seconds=monotonic() - started_at)
         _transition(uow, run, ReviewRunStatus.COMPLETED, now())
     except Exception as exc:
         _mark_failed(uow, job.review_run_id, exc, now())
@@ -213,13 +217,15 @@ def _verify(
         return _Verification((), VerificationOutcome.NOT_REQUIRED, 0, 0)
     try:
         answer = request_verification(context, texts, gateway, candidates, limits=limits)
-    except LlmError:
+    except LlmError as error:
         logger.warning(
             "верификатор недоступен для прогона %s, публикуются замечания после отсева",
             run_id,
             exc_info=True,
         )
-        return _Verification(tuple(candidates), VerificationOutcome.UNAVAILABLE, 0, 0)
+        return _Verification(
+            tuple(candidates), VerificationOutcome.UNAVAILABLE, 0, error.tokens_used
+        )
     if not answer.verdicts.ok:
         logger.warning(
             "ответ верификатора для прогона %s не принят: %s", run_id, answer.verdicts.error
@@ -227,16 +233,38 @@ def _verify(
         return _Verification(
             tuple(candidates), VerificationOutcome.UNAVAILABLE, 0, answer.tokens_used
         )
-    verdicts = answer.verdicts.unwrap()
-    for candidate_id, finding in zip(candidate_ids(len(candidates)), candidates, strict=True):
-        if verdicts[candidate_id].verdict is VerifierVerdict.DROP:
-            logger.info(
-                "прогон %s: верификатор отбросил замечание %s:%s (%s): %s",
-                run_id,
-                finding.anchor.file_path,
-                finding.anchor.new_line or finding.anchor.old_line,
-                finding.category,
-                verdicts[candidate_id].reason,
-            )
-    kept, dropped = apply_verdicts(candidates, verdicts)
-    return _Verification(kept, VerificationOutcome.VERIFIED, dropped, answer.tokens_used)
+    applied = apply_verdicts(candidates, answer.verdicts.unwrap())
+    for finding, reason in applied.dropped:
+        logger.info(
+            "прогон %s: верификатор отбросил замечание %s (%s/%s): %s",
+            run_id,
+            _where(finding),
+            finding.category,
+            finding.severity,
+            reason,
+        )
+    for finding, reason in applied.overruled:
+        logger.warning(
+            "прогон %s: верификатор хотел отбросить замечание %s (%s/%s), оно оставлено: %s",
+            run_id,
+            _where(finding),
+            finding.category,
+            finding.severity,
+            reason,
+        )
+    return _Verification(
+        applied.kept, VerificationOutcome.VERIFIED, len(applied.dropped), answer.tokens_used
+    )
+
+
+def _where(finding: Finding) -> str:
+    return f"{finding.anchor.file_path}:{finding.anchor.new_line or finding.anchor.old_line}"
+
+
+def _record_progress(uow: UnitOfWork, run: ReviewRun, now: datetime) -> ReviewRun:
+    """Записать `last_progress_at` без смены состояния."""
+    run = replace(run, last_progress_at=now)
+    with uow:
+        uow.review_runs.update(run)
+        uow.commit()
+    return run
