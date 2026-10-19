@@ -37,6 +37,7 @@ SECRET_TEXT = "секрет-из-исключения"
 TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
 OPENAPI_JSON = Path(__file__).resolve().parent.parent / "docs" / "openapi" / "openapi.json"
 REVIEW_BODY = {"provider": "github", "providerRepositoryId": "1", "pullRequestNumber": 1, "trigger": "manual"}
+CONNECT_BODY = {"provider": "github", "providerId": "123456789"}
 JSON = {"content-type": "application/json"}
 
 
@@ -282,6 +283,30 @@ def test_planned_endpoint_checks_origin_session_and_body_first(client: TestClien
     )
     problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
     assert problem["errors"] == [{"where": "body.pullRequestNumber", "reason": "должно быть не меньше 1"}]
+
+
+def test_planned_repository_endpoints_answer_not_implemented() -> None:
+    """Список доступных репозиториев и подключение описаны в схеме, а отвечают `501`."""
+    client = _signed_in_client()
+    response = client.get("/api/v1/repositories/available")
+    assert_problem(response, 501, "NOT_IMPLEMENTED", "/api/v1/repositories/available")
+    response = client.post("/api/v1/repositories", json=CONNECT_BODY, headers={"Origin": ORIGIN})
+    assert_problem(response, 501, "NOT_IMPLEMENTED", "/api/v1/repositories")
+
+
+def test_planned_repository_endpoints_check_session_origin_and_body_first(client: TestClient) -> None:
+    """Заглушки подключения проверяют `Origin`, сессию и тело, как реализованные ручки."""
+    response = client.get("/api/v1/repositories/available")
+    assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/repositories/available")
+    response = client.post("/api/v1/repositories", json=CONNECT_BODY)
+    assert_problem(response, 403, "ORIGIN_FORBIDDEN", "/api/v1/repositories")
+    response = client.post("/api/v1/repositories", json=CONNECT_BODY, headers={"Origin": ORIGIN})
+    assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/repositories")
+    response = _signed_in_client().post(
+        "/api/v1/repositories", json={**CONNECT_BODY, "providerId": ""}, headers={"Origin": ORIGIN}
+    )
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/repositories")
+    assert problem["errors"] == [{"where": "body.providerId", "reason": "длина строки должна быть не меньше 1"}]
 
 
 def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None:
