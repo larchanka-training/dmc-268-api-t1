@@ -834,7 +834,7 @@
           "reviews"
         ],
         "summary": "Прогон ревью вместе с находками",
-        "description": "Требует сессию. Находки — в стабильном порядке: по времени создания, затем по id. Прогон без находок — 200 с пустым findings.",
+        "description": "Требует сессию. Находки — в стабильном порядке: по времени создания, затем по id. Прогон без находок — 200 с пустым findings. Опубликованные комментарии — по времени публикации, затем по id; пока прогон ничего не опубликовал — пустой published_comments.",
         "operationId": "getReview",
         "security": [
           {
@@ -857,7 +857,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Прогон и его находки.",
+            "description": "Прогон, его запрос на изменение, находки и опубликованные комментарии.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1123,6 +1123,16 @@
             "WEBHOOK_SIGNATURE_INVALID": "#/components/schemas/WebhookSignatureInvalidProblem"
           }
         }
+      },
+      "CommentKind": {
+        "type": "string",
+        "enum": [
+          "summary",
+          "inline",
+          "thread_reply"
+        ],
+        "title": "CommentKind",
+        "description": "Форма комментария, публикуемого обратно на хостинг."
       },
       "CreateReviewRequest": {
         "properties": {
@@ -1491,11 +1501,6 @@
             "title": "Title",
             "description": "Заголовок у провайдера."
           },
-          "description": {
-            "type": "string",
-            "title": "Description",
-            "description": "Описание запроса на изменение; пустая строка, если его нет."
-          },
           "author": {
             "type": "string",
             "title": "Author",
@@ -1520,19 +1525,24 @@
               "develop"
             ]
           },
+          "state": {
+            "$ref": "#/components/schemas/MergeRequestState",
+            "description": "Состояние у провайдера.",
+            "examples": [
+              "open"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "description": "Описание запроса на изменение; пустая строка, если его нет."
+          },
           "head_sha": {
             "type": "string",
             "title": "Head Sha",
             "description": "Последний коммит ветки с изменениями.",
             "examples": [
               "a1b2c3d4e5f6789012345678abcdef0123456789"
-            ]
-          },
-          "state": {
-            "$ref": "#/components/schemas/MergeRequestState",
-            "description": "Состояние у провайдера.",
-            "examples": [
-              "open"
             ]
           },
           "created_at": {
@@ -1561,12 +1571,12 @@
           "id",
           "number",
           "title",
-          "description",
           "author",
           "source_branch",
           "target_branch",
-          "head_sha",
           "state",
+          "description",
+          "head_sha",
           "created_at",
           "updated_at"
         ],
@@ -1582,6 +1592,93 @@
         ],
         "title": "MergeRequestState",
         "description": "Состояние запроса на изменения на хостинге, сведённое к общему для обоих.\n\n`locked` у GitLab и closed с `merged_at` у GitHub адаптер провайдера\nпереводит в эти значения ещё до того, как они попадут в хранилище."
+      },
+      "MergeRequestSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "number": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Number",
+            "description": "Номер запроса на изменение у провайдера.",
+            "examples": [
+              42
+            ]
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "description": "Заголовок у провайдера."
+          },
+          "author": {
+            "type": "string",
+            "title": "Author",
+            "description": "Логин автора у провайдера.",
+            "examples": [
+              "octocat"
+            ]
+          },
+          "source_branch": {
+            "type": "string",
+            "title": "Source Branch",
+            "description": "Ветка с изменениями.",
+            "examples": [
+              "feat/login"
+            ]
+          },
+          "target_branch": {
+            "type": "string",
+            "title": "Target Branch",
+            "description": "Ветка, в которую предлагается слить.",
+            "examples": [
+              "develop"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/MergeRequestState",
+            "description": "Состояние у провайдера.",
+            "examples": [
+              "open"
+            ]
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url",
+            "description": "Страница запроса на изменение у провайдера; строится из провайдера, полного имени репозитория и номера. null, если формат ссылки провайдера не поддержан.",
+            "examples": [
+              "https://github.com/octo-org/api/pull/42"
+            ]
+          },
+          "repository": {
+            "$ref": "#/components/schemas/RepositorySummary",
+            "description": "Репозиторий запроса на изменение."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "number",
+          "title",
+          "author",
+          "source_branch",
+          "target_branch",
+          "state",
+          "url",
+          "repository"
+        ],
+        "title": "MergeRequestSummary",
+        "description": "Запрос на изменение, который ревьюит прогон, вместе с его репозиторием."
       },
       "MethodNotAllowedProblem": {
         "properties": {
@@ -1878,6 +1975,63 @@
           }
         ]
       },
+      "PublishedCommentResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "finding_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finding Id",
+            "description": "Находка, к которой относится комментарий или ответ в тред; null у сводки."
+          },
+          "provider_comment_id": {
+            "type": "string",
+            "title": "Provider Comment Id",
+            "description": "Идентификатор комментария у провайдера.",
+            "examples": [
+              "2345678901"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CommentKind",
+            "description": "Форма комментария: сводка, комментарий к строке или ответ в тред.",
+            "examples": [
+              "inline"
+            ]
+          },
+          "published_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Published At",
+            "description": "Когда комментарий опубликован.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "finding_id",
+          "provider_comment_id",
+          "kind",
+          "published_at"
+        ],
+        "title": "PublishedCommentResponse",
+        "description": "Комментарий, который прогон опубликовал на хостинге."
+      },
       "RepositoryListResponse": {
         "properties": {
           "items": {
@@ -1981,20 +2135,20 @@
               "github"
             ]
           },
-          "provider_id": {
-            "type": "string",
-            "title": "Provider Id",
-            "description": "Идентификатор репозитория у провайдера.",
-            "examples": [
-              "123456789"
-            ]
-          },
           "full_name": {
             "type": "string",
             "title": "Full Name",
             "description": "Полное имя у провайдера: владелец/репозиторий.",
             "examples": [
               "octo-org/api"
+            ]
+          },
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id",
+            "description": "Идентификатор репозитория у провайдера.",
+            "examples": [
+              "123456789"
             ]
           },
           "default_branch": {
@@ -2035,8 +2189,8 @@
         "required": [
           "id",
           "provider",
-          "provider_id",
           "full_name",
+          "provider_id",
           "default_branch",
           "auto_review_enabled",
           "created_at",
@@ -2044,6 +2198,38 @@
         ],
         "title": "RepositoryResponse",
         "description": "Репозиторий, зарегистрированный в сервисе: его запросы на изменение ревьюятся."
+      },
+      "RepositorySummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "Хостинг репозитория.",
+            "examples": [
+              "github"
+            ]
+          },
+          "full_name": {
+            "type": "string",
+            "title": "Full Name",
+            "description": "Полное имя у провайдера: владелец/репозиторий.",
+            "examples": [
+              "octo-org/api"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "full_name"
+        ],
+        "title": "RepositorySummary",
+        "description": "Репозиторий запроса на изменение: ровно то, что нужно, чтобы его назвать и сослаться."
       },
       "ReviewAlreadyActiveProblem": {
         "properties": {
@@ -2478,6 +2664,10 @@
             "title": "Merge Request Id",
             "description": "Запрос на изменение, к которому относится прогон."
           },
+          "merge_request": {
+            "$ref": "#/components/schemas/MergeRequestSummary",
+            "description": "Запрос на изменение прогона: тот же, что merge_request_id."
+          },
           "head_sha": {
             "type": "string",
             "title": "Head Sha",
@@ -2538,6 +2728,12 @@
             ],
             "title": "Tokens Used",
             "description": "Токенов LLM потрачено; null до анализа."
+          },
+          "rejected_findings": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Rejected Findings",
+            "description": "Сколько находок отброшено: привязка вне изменённых строк диффа."
           },
           "duration_seconds": {
             "anyOf": [
@@ -2617,25 +2813,36 @@
             "type": "array",
             "title": "Findings",
             "description": "Находки прогона: по времени создания, затем по id."
+          },
+          "published_comments": {
+            "items": {
+              "$ref": "#/components/schemas/PublishedCommentResponse"
+            },
+            "type": "array",
+            "title": "Published Comments",
+            "description": "Комментарии, опубликованные прогоном на хостинге: по времени публикации, затем по id."
           }
         },
         "type": "object",
         "required": [
           "id",
           "merge_request_id",
+          "merge_request",
           "head_sha",
           "base_sha",
           "status",
           "trigger",
           "model",
           "tokens_used",
+          "rejected_findings",
           "duration_seconds",
           "failure_reason",
           "failed_stage",
           "last_progress_at",
           "created_at",
           "updated_at",
-          "findings"
+          "findings",
+          "published_comments"
         ],
         "title": "ReviewRunResponse",
         "description": "Прогон ревью вместе с его находками."

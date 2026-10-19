@@ -29,12 +29,15 @@ from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
     CamelCaseRequest,
     FailedStage,
+    MergeRequestBase,
+    RepositoryBase,
     ReviewJob,
     UtcDatetime,
 )
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
 from app.domain.enums import (
+    CommentKind,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -42,6 +45,7 @@ from app.domain.enums import (
     ReviewRunStatus,
     TriggerSource,
 )
+from app.domain.provider_links import merge_request_url
 
 # Задачи на реализацию ручного запуска пока нет — ссылка появится в описании операции.
 _CREATE_REVIEW_DESCRIPTION = (
@@ -96,11 +100,43 @@ class FindingResponse(BaseModel):
     )
 
 
+class RepositorySummary(RepositoryBase):
+    """Репозиторий запроса на изменение: ровно то, что нужно, чтобы его назвать и сослаться."""
+
+
+class MergeRequestSummary(MergeRequestBase):
+    """Запрос на изменение, который ревьюит прогон, вместе с его репозиторием."""
+
+    url: str | None = Field(
+        description=(
+            "Страница запроса на изменение у провайдера; строится из провайдера, полного имени "
+            "репозитория и номера. null, если формат ссылки провайдера не поддержан."
+        ),
+        examples=["https://github.com/octo-org/api/pull/42"],
+    )
+    repository: RepositorySummary = Field(description="Репозиторий запроса на изменение.")
+
+
+class PublishedCommentResponse(BaseModel):
+    """Комментарий, который прогон опубликовал на хостинге."""
+
+    id: UUID
+    finding_id: UUID | None = Field(
+        description="Находка, к которой относится комментарий или ответ в тред; null у сводки."
+    )
+    provider_comment_id: str = Field(description="Идентификатор комментария у провайдера.", examples=["2345678901"])
+    kind: CommentKind = Field(
+        description="Форма комментария: сводка, комментарий к строке или ответ в тред.", examples=["inline"]
+    )
+    published_at: UtcDatetime = Field(description="Когда комментарий опубликован.")
+
+
 class ReviewRunResponse(BaseModel):
     """Прогон ревью вместе с его находками."""
 
     id: UUID
     merge_request_id: UUID = Field(description="Запрос на изменение, к которому относится прогон.")
+    merge_request: MergeRequestSummary = Field(description="Запрос на изменение прогона: тот же, что merge_request_id.")
     head_sha: str = Field(
         description="Коммит, который ревьюится.", examples=["a1b2c3d4e5f6789012345678abcdef0123456789"]
     )
@@ -112,6 +148,7 @@ class ReviewRunResponse(BaseModel):
     trigger: TriggerSource = Field(description="Что запустило прогон.", examples=["webhook"])
     model: str | None = Field(description="Модель LLM, которая провела ревью; null до анализа.")
     tokens_used: int | None = Field(description="Токенов LLM потрачено; null до анализа.")
+    rejected_findings: int = Field(ge=0, description="Сколько находок отброшено: привязка вне изменённых строк диффа.")
     duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
     failure_reason: str | None = Field(description="Почему прогон упал; null, если не падал.")
     failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
@@ -119,6 +156,9 @@ class ReviewRunResponse(BaseModel):
     created_at: UtcDatetime = Field(description="Когда прогон создан.")
     updated_at: UtcDatetime = Field(description="Когда запись последний раз менялась.")
     findings: list[FindingResponse] = Field(description="Находки прогона: по времени создания, затем по id.")
+    published_comments: list[PublishedCommentResponse] = Field(
+        description="Комментарии, опубликованные прогоном на хостинге: по времени публикации, затем по id."
+    )
 
 
 @router.post(
@@ -138,10 +178,11 @@ def create_review(body: CreateReviewRequest) -> ReviewJob:
     "/{review_run_id}",
     response_model=ReviewRunResponse,
     summary="Прогон ревью вместе с находками",
-    response_description="Прогон и его находки.",
+    response_description="Прогон, его запрос на изменение, находки и опубликованные комментарии.",
     description=(
         "Требует сессию. Находки — в стабильном порядке: по времени создания, затем по id. Прогон без находок — "
-        "200 с пустым findings."
+        "200 с пустым findings. Опубликованные комментарии — по времени публикации, затем по id; пока прогон "
+        "ничего не опубликовал — пустой published_comments."
     ),
     responses={**ERRORS_404_REVIEW, **ERRORS_422},
 )
@@ -153,7 +194,26 @@ def get_review(
     if run is None:
         raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
 
+    # Запрос на изменение и репозиторий держат внешние ключи с RESTRICT: их отсутствие —
+    # нарушение целостности базы, а не «не найдено», поэтому 500, а не 404.
+    merge_request = uow.merge_requests.get(run.merge_request_id)
+    if merge_request is None:
+        raise RuntimeError(f"У прогона {run.id} нет запроса на изменение {run.merge_request_id}.")
+    repository = uow.repositories.get(merge_request.repository_id)
+    if repository is None:
+        raise RuntimeError(f"У запроса на изменение {merge_request.id} нет репозитория {merge_request.repository_id}.")
+
     findings = uow.findings.list_for_run(review_run_id)
+    comments = uow.published_comments.list_for_run(review_run_id)
     return ReviewRunResponse.model_validate(
-        {**asdict(run), "findings": [{**asdict(f), **asdict(f.anchor)} for f in findings]}
+        {
+            **asdict(run),
+            "merge_request": {
+                **asdict(merge_request),
+                "url": merge_request_url(repository.provider, repository.full_name, merge_request.number),
+                "repository": asdict(repository),
+            },
+            "findings": [{**asdict(f), **asdict(f.anchor)} for f in findings],
+            "published_comments": [asdict(c) for c in comments],
+        }
     )

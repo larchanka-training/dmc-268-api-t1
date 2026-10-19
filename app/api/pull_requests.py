@@ -11,16 +11,15 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path
-from pydantic import BaseModel, Field, PositiveInt
+from pydantic import BaseModel, Field
 
 from app.api.dependencies import get_unit_of_work
 from app.api.errors import ERRORS_404_REPOSITORY, ERRORS_422, ApiError
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
-from app.api.schemas import UtcDatetime
+from app.api.schemas import MergeRequestBase, UtcDatetime
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
-from app.domain.enums import MergeRequestState
 
 router = APIRouter(
     prefix="/api/v1/repositories",
@@ -30,20 +29,13 @@ router = APIRouter(
 )
 
 
-class MergeRequestResponse(BaseModel):
+class MergeRequestResponse(MergeRequestBase):
     """Запрос на изменение (pull request GitHub) — каким его видел сервис при последнем вебхуке."""
 
-    id: UUID
-    number: PositiveInt = Field(description="Номер запроса на изменение у провайдера.", examples=[42])
-    title: str = Field(description="Заголовок у провайдера.")
     description: str = Field(description="Описание запроса на изменение; пустая строка, если его нет.")
-    author: str = Field(description="Логин автора у провайдера.", examples=["octocat"])
-    source_branch: str = Field(description="Ветка с изменениями.", examples=["feat/login"])
-    target_branch: str = Field(description="Ветка, в которую предлагается слить.", examples=["develop"])
     head_sha: str = Field(
         description="Последний коммит ветки с изменениями.", examples=["a1b2c3d4e5f6789012345678abcdef0123456789"]
     )
-    state: MergeRequestState = Field(description="Состояние у провайдера.", examples=["open"])
     created_at: UtcDatetime = Field(description="Когда сервис впервые записал запрос на изменение.")
     updated_at: UtcDatetime = Field(description="Когда запись последний раз менялась.")
 
