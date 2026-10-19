@@ -8,11 +8,21 @@ from fastapi.testclient import TestClient
 from app.api.dependencies import get_unit_of_work
 from app.api.factory import create_app
 from app.config import Settings
-from app.domain.entities import DiffAnchor, Finding, ReviewRun
+from app.domain.entities import (
+    DiffAnchor,
+    Finding,
+    MergeRequest,
+    PublishedComment,
+    Repository,
+    ReviewRun,
+)
 from app.domain.enums import (
+    CommentKind,
     DiffSide,
     FindingCategory,
     FindingSeverity,
+    MergeRequestState,
+    Provider,
     ReviewRunStatus,
     TriggerSource,
 )
@@ -41,6 +51,56 @@ def _client(uow: FakeUnitOfWork) -> TestClient:
     return TestClient(app)
 
 
+def _merge_request(uow: FakeUnitOfWork, provider: Provider = Provider.GITHUB) -> MergeRequest:
+    repository = Repository(
+        id=new_id(),
+        provider=provider,
+        provider_id="123",
+        full_name="octo-org/api",
+        default_branch="main",
+        auto_review_enabled=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    uow.repositories.add(repository)
+    merge_request = MergeRequest(
+        id=new_id(),
+        repository_id=repository.id,
+        number=42,
+        title="Вход через GitHub",
+        description="",
+        author="octocat",
+        source_branch="feat/login",
+        target_branch="develop",
+        head_sha="abc123",
+        state=MergeRequestState.OPEN,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    uow.merge_requests.add(merge_request)
+    return merge_request
+
+
+def _add_run(uow: FakeUnitOfWork, **overrides: object) -> ReviewRun:
+    """Прогон вместе с его запросом на изменение и репозиторием — как гарантирует внешний ключ."""
+    run = _run(merge_request_id=_merge_request(uow).id, **overrides)
+    uow.review_runs.add(run)
+    return run
+
+
+def _comment(run: ReviewRun, published_at: datetime, kind: CommentKind = CommentKind.INLINE) -> PublishedComment:
+    return PublishedComment(
+        id=new_id(),
+        review_run_id=run.id,
+        provider_comment_id=str(new_id().int % 10**10),
+        kind=kind,
+        published_at=published_at,
+        created_at=published_at,
+        updated_at=published_at,
+        finding_id=None if kind is CommentKind.SUMMARY else new_id(),
+    )
+
+
 def _run(**overrides: object) -> ReviewRun:
     fields = {
         "id": new_id(),
@@ -60,8 +120,7 @@ def _run(**overrides: object) -> ReviewRun:
 
 def test_returns_a_run_with_its_findings() -> None:
     uow = FakeUnitOfWork()
-    run = _run()
-    uow.review_runs.add(run)
+    run = _add_run(uow)
     uow.findings.add(
         Finding(
             id=new_id(),
@@ -88,8 +147,7 @@ def test_returns_a_run_with_its_findings() -> None:
 
 def test_a_run_with_no_findings_returns_an_empty_list() -> None:
     uow = FakeUnitOfWork()
-    run = _run()
-    uow.review_runs.add(run)
+    run = _add_run(uow)
     client = _client(uow)
 
     response = client.get(f"/api/v1/reviews/{run.id}")
@@ -122,8 +180,7 @@ def test_a_malformed_id_is_a_validation_error() -> None:
 
 def test_a_running_run_reports_its_last_progress_and_no_failed_stage() -> None:
     uow = FakeUnitOfWork()
-    run = _run(status=ReviewRunStatus.ANALYSING, model=None, tokens_used=None)
-    uow.review_runs.add(run)
+    run = _add_run(uow, status=ReviewRunStatus.ANALYSING, model=None, tokens_used=None)
     client = _client(uow)
 
     body = client.get(f"/api/v1/reviews/{run.id}").json()
@@ -134,15 +191,98 @@ def test_a_running_run_reports_its_last_progress_and_no_failed_stage() -> None:
 
 def test_a_failed_run_reports_the_stage_it_failed_in() -> None:
     uow = FakeUnitOfWork()
-    run = _run(
+    run = _add_run(
+        uow,
         status=ReviewRunStatus.FAILED,
         failed_stage=ReviewRunStatus.ANALYSING,
         failure_reason="модель недоступна",
     )
-    uow.review_runs.add(run)
     client = _client(uow)
 
     body = client.get(f"/api/v1/reviews/{run.id}").json()
 
     assert body["failed_stage"] == "analysing"
     assert body["failure_reason"] == "модель недоступна"
+
+
+def test_a_run_carries_its_rejected_findings_count() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, rejected_findings=3)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["rejected_findings"] == 3
+
+
+def test_a_run_carries_a_summary_of_its_merge_request() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    merge_request = uow.merge_requests.get(run.merge_request_id)
+    assert merge_request is not None
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["merge_request_id"] == str(merge_request.id)
+    assert body["merge_request"] == {
+        "id": str(merge_request.id),
+        "number": 42,
+        "title": "Вход через GitHub",
+        "author": "octocat",
+        "source_branch": "feat/login",
+        "target_branch": "develop",
+        "state": "open",
+        "url": "https://github.com/octo-org/api/pull/42",
+        "repository": {
+            "id": str(merge_request.repository_id),
+            "full_name": "octo-org/api",
+            "provider": "github",
+        },
+    }
+
+
+def test_a_merge_request_outside_github_has_no_url() -> None:
+    uow = FakeUnitOfWork()
+    run = _run(merge_request_id=_merge_request(uow, Provider.GITLAB).id)
+    uow.review_runs.add(run)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["merge_request"]["url"] is None
+    assert body["merge_request"]["repository"]["provider"] == "gitlab"
+
+
+def test_published_comments_come_in_publication_order() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    later = _comment(run, datetime(2026, 9, 29, 0, 5, tzinfo=UTC))
+    summary = _comment(run, NOW, CommentKind.SUMMARY)
+    uow.published_comments.add(later)
+    uow.published_comments.add(summary)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["published_comments"] == [
+        {
+            "id": str(summary.id),
+            "finding_id": None,
+            "provider_comment_id": summary.provider_comment_id,
+            "kind": "summary",
+            "published_at": "2026-09-29T00:00:00Z",
+        },
+        {
+            "id": str(later.id),
+            "finding_id": str(later.finding_id),
+            "provider_comment_id": later.provider_comment_id,
+            "kind": "inline",
+            "published_at": "2026-09-29T00:05:00Z",
+        },
+    ]
+
+
+def test_a_run_that_published_nothing_has_no_comments() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["published_comments"] == []

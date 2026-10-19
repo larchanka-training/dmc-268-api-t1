@@ -12,10 +12,12 @@ from app.domain.entities import (
     Finding,
     Hunk,
     MergeRequest,
+    PublishedComment,
     Repository,
     ReviewRun,
 )
 from app.domain.enums import (
+    CommentKind,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -422,3 +424,58 @@ def test_a_failed_run_keeps_the_stage_it_failed_in(uow) -> None:
         stored = work.review_runs.get(run.id)
     assert stored.status is ReviewRunStatus.FAILED
     assert stored.failed_stage is ReviewRunStatus.BUILDING_CONTEXT
+
+
+def test_published_comments_of_a_run_come_in_publication_order(uow) -> None:
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        run, other_run = a_run(mr.id), replace(a_run(mr.id), head_sha="def456")
+        work.review_runs.add(run)
+        work.review_runs.add(other_run)
+        work.commit()
+    findings = [
+        Finding(
+            id=new_id(),
+            review_run_id=run.id,
+            anchor=DiffAnchor("app/main.py", DiffSide.NEW, new_line=line),
+            category=FindingCategory.SECURITY,
+            severity=FindingSeverity.HIGH,
+            message="m",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        for line in (1, 2, 3)
+    ]
+
+    def comment(review_run_id, finding_id, kind, published_at, provider_comment_id):
+        return PublishedComment(
+            id=new_id(),
+            review_run_id=review_run_id,
+            finding_id=finding_id,
+            provider_comment_id=provider_comment_id,
+            kind=kind,
+            published_at=published_at,
+            created_at=published_at,
+            updated_at=published_at,
+        )
+
+    # Вставка — не в порядке публикации; у двух инлайнов одно время, их разводит id.
+    later = comment(run.id, findings[2].id, CommentKind.INLINE, LATER, "c3")
+    same_a = comment(run.id, findings[0].id, CommentKind.THREAD_REPLY, NOW, "c1")
+    same_b = comment(run.id, findings[1].id, CommentKind.INLINE, NOW, "c2")
+    foreign = comment(other_run.id, None, CommentKind.SUMMARY, NOW, "c4")
+    with uow as work:
+        for finding in findings:
+            work.findings.add(finding)
+        for c in (later, same_a, same_b, foreign):
+            work.published_comments.add(c)
+        work.commit()
+
+    with uow as work:
+        stored = work.published_comments.list_for_run(run.id)
+
+    same_time = sorted((same_a, same_b), key=lambda c: c.id)
+    assert [c.id for c in stored] == [*(c.id for c in same_time), later.id]

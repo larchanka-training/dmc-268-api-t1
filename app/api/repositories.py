@@ -4,7 +4,6 @@
 """
 
 from http import HTTPStatus
-from uuid import UUID
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -18,7 +17,7 @@ from app.api.errors import (
 )
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
-from app.api.schemas import CamelCaseRequest, UtcDatetime
+from app.api.schemas import CamelCaseRequest, RepositoryBase, UtcDatetime
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
 from app.domain.enums import Provider
@@ -45,13 +44,10 @@ router = APIRouter(
 )
 
 
-class RepositoryResponse(BaseModel):
+class RepositoryResponse(RepositoryBase):
     """Репозиторий, зарегистрированный в сервисе: его запросы на изменение ревьюятся."""
 
-    id: UUID
-    provider: Provider = Field(description="Хостинг репозитория.", examples=["github"])
     provider_id: str = Field(description="Идентификатор репозитория у провайдера.", examples=["123456789"])
-    full_name: str = Field(description="Полное имя у провайдера: владелец/репозиторий.", examples=["octo-org/api"])
     default_branch: str = Field(description="Ветка по умолчанию у провайдера.", examples=["main"])
     auto_review_enabled: bool = Field(description="Ревью запускается автоматически по вебхуку.")
     created_at: UtcDatetime = Field(description="Когда репозиторий зарегистрирован.")
