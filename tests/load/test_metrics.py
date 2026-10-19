@@ -1,5 +1,6 @@
 """Метрики нагрузочного прогона - чистые функции, без стенда."""
 
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -10,7 +11,9 @@ from .scenario import (
     LoadProfile,
     LoadResult,
     RunTiming,
+    _Workers,
     percentile,
+    report_markdown,
     summarize,
 )
 
@@ -82,3 +85,24 @@ def test_summary_flags_a_redelivery_that_created_a_second_run_and_a_missing_revi
     assert summary["server_errors"] == 1
     assert summary["pull_requests_with_extra_runs"] == [1]
     assert summary["pull_requests_without_one_review_per_run"] == [2]
+
+
+def test_report_has_no_throughput_line_when_intake_took_no_time() -> None:
+    markdown = report_markdown(_result(intake_seconds=0.0))
+
+    assert "Пропускная способность" not in markdown
+    assert "\n\n\n" not in markdown
+
+
+def test_report_keeps_the_throughput_line_otherwise() -> None:
+    assert "Пропускная способность приёма: 6.0 вебхуков/с." in report_markdown(_result())
+
+
+def test_leaving_workers_that_never_started_does_not_replace_the_original_error() -> None:
+    # Отправка вебхуков упала до `__enter__`: `join` незапущенного потока дал бы RuntimeError.
+    workers = _Workers.__new__(_Workers)
+    workers._started = False
+    workers._threads = [threading.Thread(target=lambda: None)]
+    workers._workers = []
+
+    workers.__exit__()

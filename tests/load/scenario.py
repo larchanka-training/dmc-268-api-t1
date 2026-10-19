@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse
 from app.infrastructure.llm.stub import StubLlmGateway
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
+from app.infrastructure.queue.rabbitmq import DLQ_NAME
 from app.worker.factory import (
     Worker,
     build_review_handler,
@@ -221,6 +222,7 @@ class _Workers:
         texts = load_checked_prompt_texts(stack.settings, DEFAULT_PROMPTS_DIR)
         self._workers: list[Worker] = []
         self._threads: list[threading.Thread] = []
+        self._started = False
         self.errors: list[BaseException] = []
         for index in range(count):
             container = stack.container(SlowStubLlm(model_latency_seconds))
@@ -245,11 +247,15 @@ class _Workers:
             self.errors.append(error)
 
     def __enter__(self) -> Self:
+        self._started = True
         for thread in self._threads:
             thread.start()
         return self
 
     def __exit__(self, *_: object) -> None:
+        # Отправка могла упасть до старта: `join` незапущенного потока подменил бы исходную ошибку.
+        if not self._started:
+            return
         # `Worker.run` в finally отменяет консьюмера ещё раз, и pika предупреждает
         # о повторной отмене: для остановки снаружи это штатно, а не сбой.
         pika_log = logging.getLogger("pika.adapters.blocking_connection")
@@ -351,7 +357,7 @@ def run_load(stack: Stack, profile: LoadProfile) -> LoadResult:
         reviews_per_pr={pr: len(stack.github.reviews_of(pr)) for pr in pulls},
         unfinished_runs=stack.unfinished_runs(),
         queue_left=stack.queue_depth(),
-        dlq_left=stack.queue_depth("review_jobs.dlq"),
+        dlq_left=stack.queue_depth(DLQ_NAME),
         intake_seconds=intake_seconds,
         drain_seconds=drain_seconds,
     )
@@ -392,7 +398,7 @@ def report_markdown(result: LoadResult) -> str:
         + " | ".join(seconds(e2e[k]) for k in ("p50", "p95", "p99", "max"))
         + " |",
         "",
-        f"- Пропускная способность приёма: {throughput:.1f} вебхуков/с." if throughput else "",
+        f"- Пропускная способность приёма: {throughput:.1f} вебхуков/с." if throughput else None,
         f"- Очередь разобрана за {result.drain_seconds:.1f} с от первой доставки.",
         f"- Коды ответов: {summary['status_codes']}; ответов 5xx: {summary['server_errors']}.",
         f"- Прогоны по статусам: {summary['runs_by_status']}; незавершённых: {summary['unfinished_runs']}.",

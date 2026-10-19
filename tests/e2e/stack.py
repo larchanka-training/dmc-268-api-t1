@@ -66,6 +66,8 @@ WEBHOOK_SECRET = "e2e-webhook-secret"
 WEBHOOK_PATH = "/api/v1/webhooks/github"
 # Дольше любого шага прогона на заглушке модели; превышение - зависание, а не медленный тест.
 WORK_TIMEOUT_SECONDS = 60.0
+# Сколько ждём остановки воркера после отмены консьюмера.
+CANCEL_JOIN_SECONDS = 10.0
 
 
 def sign(body: bytes, secret: str = WEBHOOK_SECRET) -> str:
@@ -183,6 +185,10 @@ class Stack:
         thread.start()
         thread.join(timeout)
         if thread.is_alive():
+            # Без отмены консьюмера поток крутит цикл до конца сессии и заберёт сообщение
+            # следующего теста со старой фейковой моделью.
+            worker.connection.add_callback_threadsafe(worker.channel.cancel)
+            thread.join(CANCEL_JOIN_SECONDS)
             raise AssertionError(f"воркер не обработал {messages} сообщений за {timeout:g} с")
         if errors:
             raise errors[0]

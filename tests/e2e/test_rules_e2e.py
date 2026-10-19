@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from app.domain.enums import ReviewRunStatus, VerificationOutcome
 from app.domain.llm_errors import LlmError
 from app.domain.repo_rules import RULES_PATH
+from app.infrastructure.queue.rabbitmq import DLQ_NAME
 
 from ..conftest import requires_broker, requires_db
 from ..fakes.github_api import PullRequest
@@ -375,4 +376,4 @@ def test_e2e_05_a_model_failure_fails_the_run_without_publishing_anything(stack:
     assert run.failure_reason == "ни один провайдер модели не ответил"
     assert stack.github.reviews_of(PR) == []
     assert stack.github.check_runs == []
-    assert stack.queue_depth("review_jobs.dlq") == 1
+    assert stack.queue_depth(DLQ_NAME) == 1

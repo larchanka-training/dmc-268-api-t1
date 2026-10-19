@@ -40,10 +40,10 @@ def test_rules_eval_on_the_live_model(stack: Stack, tmp_path: Path) -> None:
         name="Eurorouter",
         max_attempts=settings.llm_max_attempts,
     )
-    configs = [c.strip() for c in os.environ.get("EVAL_CONFIGS", ",".join(CONFIGS)).split(",")]
+    configs = [c.strip() for c in (os.environ.get("EVAL_CONFIGS") or ",".join(CONFIGS)).split(",")]
     unknown = set(configs) - set(CONFIGS)
     assert not unknown, f"неизвестные конфигурации: {sorted(unknown)}"
-    repetitions = int(os.environ.get("EVAL_REPETITIONS", "1"))
+    repetitions = int(os.environ.get("EVAL_REPETITIONS") or 1)
     cases = load_corpus()
     # Два вызова модели на прогон, каждый - до таймаута на каждую попытку, и запас на остальное.
     timeout = 2 * settings.llm_timeout_seconds * settings.llm_max_attempts + 60
@@ -56,7 +56,7 @@ def test_rules_eval_on_the_live_model(stack: Stack, tmp_path: Path) -> None:
         "repetitions": repetitions,
         "cases": len(cases),
     }
-    out = Path(os.environ.get("EVAL_REPORT_DIR", tmp_path))
+    out = Path(os.environ.get("EVAL_REPORT_DIR") or tmp_path)
     out.mkdir(parents=True, exist_ok=True)
     markdown = to_markdown(results, configs, meta)
     (out / "rules-eval.md").write_text(markdown, encoding="utf-8")
