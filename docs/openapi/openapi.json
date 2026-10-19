@@ -457,7 +457,199 @@
         "security": []
       }
     },
+    "/api/v1/repositories/available": {
+      "get": {
+        "tags": [
+          "repositories"
+        ],
+        "summary": "Репозитории, доступные для подключения",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #41). Когда ручка заработает: репозитории установки GitHub App, доступные вошедшему пользователю, с отметкой, подключён ли репозиторий к сервису. Требует сессию.",
+        "operationId": "listAvailableRepositories",
+        "responses": {
+          "200": {
+            "description": "Репозитории установки GitHub App.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AvailableRepositoryListResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "501": {
+            "description": "Ручка ещё не реализована.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/repositories": {
+      "post": {
+        "tags": [
+          "repositories"
+        ],
+        "summary": "Подключить репозиторий",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #41). Когда ручка заработает: 201 с зарегистрированным репозиторием; подключать может только пользователь с правами admin на репозиторий у провайдера. Требует сессию и Origin сервиса; Origin проверяется раньше сессии и разбора тела.",
+        "operationId": "connectRepository",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectRepositoryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Репозиторий зарегистрирован.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "403": {
+            "description": "`Origin` изменяющего запроса отсутствует или не совпадает с адресом сервиса.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginForbiddenProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "501": {
+            "description": "Ручка ещё не реализована.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      },
       "get": {
         "tags": [
           "repositories"
@@ -1123,6 +1315,103 @@
             "WEBHOOK_SIGNATURE_INVALID": "#/components/schemas/WebhookSignatureInvalidProblem"
           }
         }
+      },
+      "AvailableRepositoryListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AvailableRepositoryResponse"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "Репозитории установки GitHub App."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "AvailableRepositoryListResponse",
+        "description": "Репозитории, доступные для подключения."
+      },
+      "AvailableRepositoryResponse": {
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "Хостинг репозитория.",
+            "examples": [
+              "github"
+            ]
+          },
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id",
+            "description": "Идентификатор репозитория у провайдера.",
+            "examples": [
+              "123456789"
+            ]
+          },
+          "full_name": {
+            "type": "string",
+            "title": "Full Name",
+            "description": "Полное имя у провайдера: владелец/репозиторий.",
+            "examples": [
+              "octo-org/api"
+            ]
+          },
+          "default_branch": {
+            "type": "string",
+            "title": "Default Branch",
+            "description": "Ветка по умолчанию у провайдера.",
+            "examples": [
+              "main"
+            ]
+          },
+          "already_connected": {
+            "type": "boolean",
+            "title": "Already Connected",
+            "description": "Репозиторий уже зарегистрирован в сервисе."
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "provider_id",
+          "full_name",
+          "default_branch",
+          "already_connected"
+        ],
+        "title": "AvailableRepositoryResponse",
+        "description": "Репозиторий у провайдера, который вошедший пользователь может подключить к сервису."
+      },
+      "ConnectRepositoryRequest": {
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "Хостинг репозитория.",
+            "examples": [
+              "github"
+            ]
+          },
+          "providerId": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Providerid",
+            "description": "Идентификатор репозитория у провайдера (из списка доступных).",
+            "examples": [
+              "123456789"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "providerId"
+        ],
+        "title": "ConnectRepositoryRequest",
+        "description": "Запрос на подключение репозитория к сервису."
       },
       "CreateReviewRequest": {
         "properties": {
