@@ -1,4 +1,4 @@
-# Runs the same three checks CI runs, before a commit is created rather than
+# Runs the same checks CI runs, before a commit is created rather than
 # after it is pushed. `language: system` on purpose: each hook calls straight
 # into this project's own uv-managed venv, so the hook and CI always resolve
 # the exact tool versions pinned in uv.lock — never a second, drifting copy
@@ -34,3 +34,13 @@ repos:
         language: system
         pass_filenames: false
         files: ^openspec/
+
+      # Схема API строится из кода: правка ручки, модели или enum'а домена меняет
+      # docs/openapi/openapi.json. Хук перезаписывает файл; если он изменился,
+      # pre-commit останавливает коммит — остаётся добавить файл и повторить.
+      - id: export-openapi
+        name: export openapi.json
+        entry: uv run python scripts/export_openapi.py
+        language: system
+        pass_filenames: false
+        files: ^(app/|scripts/export_openapi\.py$|docs/openapi/openapi\.json$|uv\.lock$|pyproject\.toml$)

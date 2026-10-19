@@ -105,6 +105,19 @@ def test_unknown_run_is_404() -> None:
     response = client.get(f"/api/v1/reviews/{new_id()}")
 
     assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "REVIEW_NOT_FOUND"
+
+
+def test_a_malformed_id_is_a_validation_error() -> None:
+    response = _client(FakeUnitOfWork()).get("/api/v1/reviews/not-a-uuid")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "VALIDATION_ERROR"
+    assert body["errors"] == [{"where": "path.review_run_id", "reason": "ожидается UUID"}]
+    assert "not-a-uuid" not in body["detail"]
+    assert "not-a-uuid" not in str(body["errors"])
 
 
 def test_a_running_run_reports_its_last_progress_and_no_failed_stage() -> None:

@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-10-18
+# Поведение сервиса не меняется: правится документ контракта
+# docs/openapi/openapi.yaml под уже работающие роуты. Требования к ручкам уже
+# лежат в спеках review-rest-api, webhook-intake и user-auth.
+skip_specs: true

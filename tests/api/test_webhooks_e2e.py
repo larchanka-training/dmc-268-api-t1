@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -123,6 +124,10 @@ def stored_state(
     return merge_request, runs
 
 
+def utc_z(moment: datetime) -> str:
+    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) -> None:
     response = post_webhook(flow.client, "opened")
 
@@ -140,7 +145,8 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
     assert run.status is ReviewRunStatus.QUEUED
     assert run.trigger is TriggerSource.WEBHOOK
 
-    # Тело 202 — публичная проекция ReviewJob из openapi.yaml, camelCase.
+    # Тело 202 — публичная проекция ReviewJob (app/api/schemas.py), camelCase, все поля;
+    # время — в UTC с `Z`, как во всех ответах API.
     assert job == {
         "id": str(run.id),
         "provider": "github",
@@ -152,9 +158,13 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
         "baseCommitSha": BASE_SHA,
         "findingsCount": 0,
         "rejectedFindings": 0,
-        "createdAt": run.created_at.isoformat(),
-        "updatedAt": run.updated_at.isoformat(),
-        "lastProgressAt": run.last_progress_at.isoformat(),
+        "model": None,
+        "tokensUsed": None,
+        "durationSeconds": None,
+        "createdAt": utc_z(run.created_at),
+        "updatedAt": utc_z(run.updated_at),
+        "lastProgressAt": utc_z(run.last_progress_at),
+        "failedStage": None,
         "error": None,
     }
 

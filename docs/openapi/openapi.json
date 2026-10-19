@@ -1,0 +1,3233 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "PR Review API",
+    "description": "Контракт Backend API для запуска автоматического ревью Pull Request и получения состояния и\nрезультатов. Схема строится из кода; `docs/openapi/openapi.json` — её экспорт.\n\nВсе пути — под `/api/v1`: префикс ставит само приложение, а не reverse-proxy. Ошибки —\nRFC 9457 Problem Details (`application/problem+json`), клиент ветвится по `code`. На каждом\nответе — заголовок `X-Trace-ID`, в теле ошибки то же значение в `trace_id`.\n",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/webhooks/{provider}": {
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Принять webhook-доставку от хостинга и поставить ревью в очередь",
+        "description": "Без сессии и без проверки Origin: доставку подтверждает подпись. ReviewJob создан или, если для этого коммита уже есть нетерминальный, возвращён существующий. Дубль — не ошибка: не-2xx хостинг считает неудачной доставкой и повторяет её, поэтому 409 здесь не отдаём.",
+        "operationId": "receiveWebhook",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Provider",
+              "description": "Хостинг, приславший доставку."
+            },
+            "description": "Хостинг, приславший доставку."
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Доставка принята: ReviewJob создан или найден существующий; WebhookIgnored — доставка ревью не запускает; WebhookAcknowledged — событие pull_request_review_thread.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReviewJob"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WebhookIgnored"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WebhookAcknowledged"
+                    }
+                  ],
+                  "title": "Response Receivewebhook"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Подписи доставки нет или она не прошла проверку; записей нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookSignatureInvalidProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "501": {
+            "description": "Провайдер есть в `Provider`, но приёмник вебхуков для него не написан.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderNotSupportedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "502": {
+            "description": "Провайдер VCS недоступен или ответил ошибкой; прогон не создан.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmUnavailableProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/{provider}/login": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Начать вход через провайдера",
+        "description": "Открыт без сессии. Ставит cookie oauth_state со state и проверенным redirect и перенаправляет на страницу авторизации провайдера. redirect принимается, только если это путь под /app/ не длиннее 1000 байт в UTF-8; иначе после входа — /app/.",
+        "operationId": "beginLogin",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Провайдер входа, например github.",
+              "title": "Provider"
+            },
+            "description": "Провайдер входа, например github."
+          },
+          {
+            "name": "redirect",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Куда вернуть после входа: путь под /app/.",
+              "title": "Redirect"
+            },
+            "description": "Куда вернуть после входа: путь под /app/."
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Редирект на страницу авторизации провайдера с параметром state. Если вход у провайдера не настроен — редирект на /login?error=provider_unavailable без cookie.",
+            "headers": {
+              "Location": {
+                "description": "Куда перенаправлен браузер.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Вход через этого провайдера не поддержан.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderNotSupportedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/{provider}/callback": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Завершить вход",
+        "description": "Сюда провайдер возвращает браузер. Открыт без сессии. state сверяется с cookie oauth_state, code обменивается на профиль, пользователь находится или создаётся, создаётся сессия. Любая ошибка — редирект на /login?error=<код>: state_mismatch, denied, provider_unavailable.",
+        "operationId": "finishLogin",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Провайдер входа, например github.",
+              "title": "Provider"
+            },
+            "description": "Провайдер входа, например github."
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Код авторизации от провайдера.",
+              "title": "Code"
+            },
+            "description": "Код авторизации от провайдера."
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "state, выданный при начале входа.",
+              "title": "State"
+            },
+            "description": "state, выданный при начале входа."
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Ошибка от провайдера, например отказ пользователя.",
+              "title": "Error"
+            },
+            "description": "Ошибка от провайдера, например отказ пользователя."
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Успех — редирект на redirect из oauth_state или на /app/ и cookie session. Ошибка — редирект на /login?error=<код>, сессии нет. oauth_state удаляется в обоих случаях.",
+            "headers": {
+              "Location": {
+                "description": "Куда перенаправлен браузер.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Вход через этого провайдера не поддержан.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderNotSupportedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Пользователь текущей сессии",
+        "description": "Требует сессию. По ответу кабинет решает, показывать ли страницу входа.",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "Профиль пользователя.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Выйти",
+        "description": "Удаляет сессию текущей cookie: следующий запрос с ней из любой вкладки получает 401. Идемпотентен: без cookie и с cookie неизвестной сессии тоже 204, cookie session удаляется. Сессия не нужна, проверяется только Origin.",
+        "operationId": "endSession",
+        "responses": {
+          "204": {
+            "description": "Сессия удалена, cookie session удалена.",
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "403": {
+            "description": "`Origin` изменяющего запроса отсутствует или не совпадает с адресом сервиса.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginForbiddenProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/repositories": {
+      "get": {
+        "tags": [
+          "repositories"
+        ],
+        "summary": "Список зарегистрированных репозиториев",
+        "description": "Требует сессию. Постранично, по времени регистрации, затем по id. limit выше 200 не отклоняется, а приводится к 200. Общего числа записей в ответе нет: конец списка — страница короче limit.",
+        "operationId": "listRepositories",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Размер страницы; по умолчанию 50, больше 200 приводится к 200.",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "Размер страницы; по умолчанию 50, больше 200 приводится к 200."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "description": "Сколько записей пропустить от начала списка.",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "Сколько записей пропустить от начала списка."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница репозиториев.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryListResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/{repository_id}/pull-requests": {
+      "get": {
+        "tags": [
+          "pull-requests"
+        ],
+        "summary": "Список запросов на изменение репозитория",
+        "description": "Требует сессию. Постранично, по номеру запроса на изменение. Пагинация та же, что у списка репозиториев: limit выше 200 приводится к 200. Репозитория нет — 404.",
+        "operationId": "listPullRequests",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repository_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор репозитория в сервисе.",
+              "title": "Repository Id"
+            },
+            "description": "Идентификатор репозитория в сервисе."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Размер страницы; по умолчанию 50, больше 200 приводится к 200.",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "Размер страницы; по умолчанию 50, больше 200 приводится к 200."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "description": "Сколько записей пропустить от начала списка.",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "Сколько записей пропустить от начала списка."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница запросов на изменение.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeRequestListResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Репозитория с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/reviews": {
+      "post": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Запустить ревью вручную",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы; план ручного запуска — PIPELINE_SPEC.md §4. Сейчас ревью запускает только вебхук. Когда ручка заработает: 202 с ReviewJob, 409 REVIEW_ALREADY_ACTIVE, если по этому коммиту прогон уже идёт. Требует сессию и Origin сервиса; Origin проверяется раньше сессии и разбора тела.",
+        "operationId": "createReview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "ReviewJob создан и поставлен в очередь.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewJob"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "403": {
+            "description": "`Origin` изменяющего запроса отсутствует или не совпадает с адресом сервиса.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginForbiddenProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "409": {
+            "description": "По этому коммиту уже идёт прогон ревью.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewAlreadyActiveProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "501": {
+            "description": "Ручка ещё не реализована.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/reviews/{review_run_id}": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Прогон ревью вместе с находками",
+        "description": "Требует сессию. Находки — в стабильном порядке: по времени создания, затем по id. Прогон без находок — 200 с пустым findings.",
+        "operationId": "getReview",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "review_run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор прогона ревью.",
+              "title": "Review Run Id"
+            },
+            "description": "Идентификатор прогона ревью."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Прогон и его находки.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRunResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Прогона ревью с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/reviews/{review_run_id}/events": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Поток событий статуса прогона (Server-Sent Events)",
+        "description": "Первое событие после подключения — `status` со снимком текущего состояния, дальше — по событию `status` на каждую смену статуса и `ping` в тишине, не реже раза в 15 секунд. После терминального статуса сервер закрывает поток. Поток начинается со строки `retry: 3000`. Поток отражает состояние, а не журнал: несколько переходов между проверками приходят одним событием. Требует сессию: она проверяется при подключении и затем каждые 5 секунд, по её окончании поток закрывается.",
+        "operationId": "streamReviewEvents",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "review_run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор прогона ревью.",
+              "title": "Review Run Id"
+            },
+            "description": "Идентификатор прогона ревью."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Поток событий; данные события `status` — ReviewRunStatusEvent.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Текст SSE: `event: status` с JSON ReviewRunStatusEvent в `data` или `event: ping`."
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-cache"
+                }
+              },
+              "X-Accel-Buffering": {
+                "description": "Отключает буферизацию ответа в nginx.",
+                "schema": {
+                  "type": "string",
+                  "const": "no"
+                }
+              },
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Прогона ревью с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnyProblem": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ValidationProblem"
+          },
+          {
+            "$ref": "#/components/schemas/ReviewNotFoundProblem"
+          },
+          {
+            "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+          },
+          {
+            "$ref": "#/components/schemas/ProviderNotSupportedProblem"
+          },
+          {
+            "$ref": "#/components/schemas/ReviewAlreadyActiveProblem"
+          },
+          {
+            "$ref": "#/components/schemas/WebhookSignatureInvalidProblem"
+          },
+          {
+            "$ref": "#/components/schemas/ScmUnavailableProblem"
+          },
+          {
+            "$ref": "#/components/schemas/UnauthenticatedProblem"
+          },
+          {
+            "$ref": "#/components/schemas/OriginForbiddenProblem"
+          },
+          {
+            "$ref": "#/components/schemas/RouteNotFoundProblem"
+          },
+          {
+            "$ref": "#/components/schemas/MethodNotAllowedProblem"
+          },
+          {
+            "$ref": "#/components/schemas/NotImplementedProblem"
+          },
+          {
+            "$ref": "#/components/schemas/HttpErrorProblem"
+          },
+          {
+            "$ref": "#/components/schemas/InternalErrorProblem"
+          }
+        ],
+        "title": "AnyProblem",
+        "description": "Любая ошибка — по модели на код, выбор по `code`.\n\nКоды, которые возможны на любом запросе: `ROUTE_NOT_FOUND` (такого пути нет),\n`METHOD_NOT_ALLOWED` (метод не объявлен), `HTTP_ERROR` (прочий отказ фреймворка) и\n`INTERNAL_ERROR` (сбой сервера). Остальные коды операция объявляет в своих ответах.",
+        "discriminator": {
+          "propertyName": "code",
+          "mapping": {
+            "HTTP_ERROR": "#/components/schemas/HttpErrorProblem",
+            "INTERNAL_ERROR": "#/components/schemas/InternalErrorProblem",
+            "METHOD_NOT_ALLOWED": "#/components/schemas/MethodNotAllowedProblem",
+            "NOT_IMPLEMENTED": "#/components/schemas/NotImplementedProblem",
+            "ORIGIN_FORBIDDEN": "#/components/schemas/OriginForbiddenProblem",
+            "PROVIDER_NOT_SUPPORTED": "#/components/schemas/ProviderNotSupportedProblem",
+            "REPOSITORY_NOT_FOUND": "#/components/schemas/RepositoryNotFoundProblem",
+            "REVIEW_ALREADY_ACTIVE": "#/components/schemas/ReviewAlreadyActiveProblem",
+            "REVIEW_NOT_FOUND": "#/components/schemas/ReviewNotFoundProblem",
+            "ROUTE_NOT_FOUND": "#/components/schemas/RouteNotFoundProblem",
+            "SCM_UNAVAILABLE": "#/components/schemas/ScmUnavailableProblem",
+            "UNAUTHENTICATED": "#/components/schemas/UnauthenticatedProblem",
+            "VALIDATION_ERROR": "#/components/schemas/ValidationProblem",
+            "WEBHOOK_SIGNATURE_INVALID": "#/components/schemas/WebhookSignatureInvalidProblem"
+          }
+        }
+      },
+      "CreateReviewRequest": {
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "Хостинг репозитория.",
+            "examples": [
+              "github"
+            ]
+          },
+          "providerRepositoryId": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Providerrepositoryid",
+            "description": "Идентификатор репозитория у провайдера (repositories.provider_id).",
+            "examples": [
+              "123456789"
+            ]
+          },
+          "pullRequestNumber": {
+            "type": "integer",
+            "maximum": 2147483647.0,
+            "minimum": 1.0,
+            "title": "Pullrequestnumber",
+            "description": "Номер запроса на изменение у провайдера.",
+            "examples": [
+              123
+            ]
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSource",
+            "description": "Источник запуска.",
+            "examples": [
+              "manual"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "providerRepositoryId",
+          "pullRequestNumber",
+          "trigger"
+        ],
+        "title": "CreateReviewRequest",
+        "description": "Запрос ручного запуска ревью запроса на изменение."
+      },
+      "DiffSide": {
+        "type": "string",
+        "enum": [
+          "old",
+          "new"
+        ],
+        "title": "DiffSide",
+        "description": "К какой стороне диффа относится координата строки."
+      },
+      "FindingCategory": {
+        "type": "string",
+        "enum": [
+          "security",
+          "correctness",
+          "performance",
+          "readability"
+        ],
+        "title": "FindingCategory",
+        "description": "Оси ревью, к которым может относиться замечание."
+      },
+      "FindingResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "file_path": {
+            "type": "string",
+            "title": "File Path",
+            "description": "Путь файла от корня репозитория.",
+            "examples": [
+              "app/main.py"
+            ]
+          },
+          "side": {
+            "$ref": "#/components/schemas/DiffSide",
+            "description": "Сторона диффа, к которой привязана находка.",
+            "examples": [
+              "new"
+            ]
+          },
+          "old_line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Line",
+            "description": "Строка в старой версии файла, с 1; null, если находка на новой стороне."
+          },
+          "new_line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Line",
+            "description": "Строка в новой версии файла, с 1; null, если находка на старой стороне."
+          },
+          "category": {
+            "$ref": "#/components/schemas/FindingCategory",
+            "description": "Ось ревью, к которой относится находка.",
+            "examples": [
+              "security"
+            ]
+          },
+          "severity": {
+            "$ref": "#/components/schemas/FindingSeverity",
+            "description": "Насколько находка важна.",
+            "examples": [
+              "high"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Текст замечания."
+          },
+          "suggestion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggestion",
+            "description": "Предлагаемая правка; null, если её нет."
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence",
+            "description": "Уверенность модели в находке, обычно от 0 до 1; null, если модель её не дала."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "file_path",
+          "side",
+          "old_line",
+          "new_line",
+          "category",
+          "severity",
+          "message",
+          "suggestion",
+          "confidence"
+        ],
+        "title": "FindingResponse",
+        "description": "Находка ревью, привязанная к строке диффа."
+      },
+      "FindingSeverity": {
+        "type": "string",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "critical"
+        ],
+        "title": "FindingSeverity",
+        "description": "Насколько замечание важно."
+      },
+      "HttpErrorProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:http-error",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:http-error"
+          },
+          "title": {
+            "type": "string",
+            "const": "Ошибка запроса",
+            "title": "Title",
+            "default": "Ошибка запроса"
+          },
+          "status": {
+            "type": "integer",
+            "maximum": 599.0,
+            "minimum": 400.0,
+            "title": "Status",
+            "description": "HTTP-статус ответа."
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "HTTP_ERROR",
+            "title": "Code",
+            "default": "HTTP_ERROR"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "HttpErrorProblem",
+        "description": "`HTTP_ERROR`: прочий отказ фреймворка или зависимости со статусом, у которого нет своего кода.\n\nНапример, `400` на неразборчивое тело или `429`. Статус — как у отказа, его заголовки\n(`Retry-After` и др.) сохраняются.",
+        "examples": [
+          {
+            "code": "HTTP_ERROR",
+            "detail": "Запрос отклонён со статусом 429.",
+            "instance": "/api/v1/repositories",
+            "status": 429,
+            "title": "Ошибка запроса",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:http-error"
+          }
+        ]
+      },
+      "InternalErrorProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:internal-error",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:internal-error"
+          },
+          "title": {
+            "type": "string",
+            "const": "Внутренняя ошибка сервера",
+            "title": "Title",
+            "default": "Внутренняя ошибка сервера"
+          },
+          "status": {
+            "type": "integer",
+            "const": 500,
+            "title": "Status",
+            "default": 500
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "INTERNAL_ERROR",
+            "title": "Code",
+            "default": "INTERNAL_ERROR"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "InternalErrorProblem",
+        "description": "`500 INTERNAL_ERROR`: необработанная ошибка сервера.\n\nДеталей в теле нет; сервер пишет строку лога с `trace_id`, методом и путём — искать по `trace_id`.",
+        "examples": [
+          {
+            "code": "INTERNAL_ERROR",
+            "detail": "Сервер не смог обработать запрос. Если ошибка повторяется, сообщите trace_id.",
+            "instance": "/api/v1/repositories",
+            "status": 500,
+            "title": "Внутренняя ошибка сервера",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:internal-error"
+          }
+        ]
+      },
+      "MergeRequestListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MergeRequestResponse"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "Запросы на изменение страницы; меньше limit — значит, страница последняя."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "MergeRequestListResponse",
+        "description": "Страница списка запросов на изменение."
+      },
+      "MergeRequestResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "number": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Number",
+            "description": "Номер запроса на изменение у провайдера.",
+            "examples": [
+              42
+            ]
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "description": "Заголовок у провайдера."
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "description": "Описание запроса на изменение; пустая строка, если его нет."
+          },
+          "author": {
+            "type": "string",
+            "title": "Author",
+            "description": "Логин автора у провайдера.",
+            "examples": [
+              "octocat"
+            ]
+          },
+          "source_branch": {
+            "type": "string",
+            "title": "Source Branch",
+            "description": "Ветка с изменениями.",
+            "examples": [
+              "feat/login"
+            ]
+          },
+          "target_branch": {
+            "type": "string",
+            "title": "Target Branch",
+            "description": "Ветка, в которую предлагается слить.",
+            "examples": [
+              "develop"
+            ]
+          },
+          "head_sha": {
+            "type": "string",
+            "title": "Head Sha",
+            "description": "Последний коммит ветки с изменениями.",
+            "examples": [
+              "a1b2c3d4e5f6789012345678abcdef0123456789"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/MergeRequestState",
+            "description": "Состояние у провайдера.",
+            "examples": [
+              "open"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "Когда сервис впервые записал запрос на изменение.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "Когда запись последний раз менялась.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "number",
+          "title",
+          "description",
+          "author",
+          "source_branch",
+          "target_branch",
+          "head_sha",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "MergeRequestResponse",
+        "description": "Запрос на изменение (pull request GitHub) — каким его видел сервис при последнем вебхуке."
+      },
+      "MergeRequestState": {
+        "type": "string",
+        "enum": [
+          "open",
+          "closed",
+          "merged"
+        ],
+        "title": "MergeRequestState",
+        "description": "Состояние запроса на изменения на хостинге, сведённое к общему для обоих.\n\n`locked` у GitLab и closed с `merged_at` у GitHub адаптер провайдера\nпереводит в эти значения ещё до того, как они попадут в хранилище."
+      },
+      "MethodNotAllowedProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:method-not-allowed",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:method-not-allowed"
+          },
+          "title": {
+            "type": "string",
+            "const": "Метод не разрешён",
+            "title": "Title",
+            "default": "Метод не разрешён"
+          },
+          "status": {
+            "type": "integer",
+            "const": 405,
+            "title": "Status",
+            "default": 405
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "METHOD_NOT_ALLOWED",
+            "title": "Code",
+            "default": "METHOD_NOT_ALLOWED"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "MethodNotAllowedProblem",
+        "description": "`405 METHOD_NOT_ALLOWED`: путь есть, а метод для него не объявлен; разрешённые — в заголовке `Allow`.",
+        "examples": [
+          {
+            "code": "METHOD_NOT_ALLOWED",
+            "detail": "Метод для этого пути не разрешён; разрешённые — в заголовке Allow.",
+            "instance": "/api/v1/webhooks/github",
+            "status": 405,
+            "title": "Метод не разрешён",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:method-not-allowed"
+          }
+        ]
+      },
+      "NotImplementedProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:not-implemented",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:not-implemented"
+          },
+          "title": {
+            "type": "string",
+            "const": "Не реализовано",
+            "title": "Title",
+            "default": "Не реализовано"
+          },
+          "status": {
+            "type": "integer",
+            "const": 501,
+            "title": "Status",
+            "default": 501
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "NOT_IMPLEMENTED",
+            "title": "Code",
+            "default": "NOT_IMPLEMENTED"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "NotImplementedProblem",
+        "description": "`501 NOT_IMPLEMENTED`: ручка описана в контракте, но ещё не реализована.",
+        "examples": [
+          {
+            "code": "NOT_IMPLEMENTED",
+            "detail": "Ручной запуск ревью ещё не реализован.",
+            "instance": "/api/v1/reviews",
+            "status": 501,
+            "title": "Не реализовано",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:not-implemented"
+          }
+        ]
+      },
+      "OriginForbiddenProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:origin-forbidden",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:origin-forbidden"
+          },
+          "title": {
+            "type": "string",
+            "const": "Запрос с чужого Origin",
+            "title": "Title",
+            "default": "Запрос с чужого Origin"
+          },
+          "status": {
+            "type": "integer",
+            "const": 403,
+            "title": "Status",
+            "default": 403
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "ORIGIN_FORBIDDEN",
+            "title": "Code",
+            "default": "ORIGIN_FORBIDDEN"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "OriginForbiddenProblem",
+        "description": "`403 ORIGIN_FORBIDDEN`: изменяющий запрос пришёл без `Origin` или с чужим; запрос не выполнен.",
+        "examples": [
+          {
+            "code": "ORIGIN_FORBIDDEN",
+            "detail": "Изменяющий запрос пришёл без Origin или с Origin другого сайта.",
+            "instance": "/api/v1/auth/logout",
+            "status": 403,
+            "title": "Запрос с чужого Origin",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:origin-forbidden"
+          }
+        ]
+      },
+      "Provider": {
+        "type": "string",
+        "enum": [
+          "github",
+          "gitlab"
+        ],
+        "title": "Provider",
+        "description": "Хостинг системы контроля версий, где живёт репозиторий."
+      },
+      "ProviderNotSupportedProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:provider-not-supported",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:provider-not-supported"
+          },
+          "title": {
+            "type": "string",
+            "const": "Провайдер не поддержан",
+            "title": "Title",
+            "default": "Провайдер не поддержан"
+          },
+          "status": {
+            "type": "integer",
+            "enum": [
+              404,
+              501
+            ],
+            "title": "Status"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "PROVIDER_NOT_SUPPORTED",
+            "title": "Code",
+            "default": "PROVIDER_NOT_SUPPORTED"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "ProviderNotSupportedProblem",
+        "description": "`PROVIDER_NOT_SUPPORTED`: вход через провайдера — `404`, приём вебхуков от него — `501`.",
+        "examples": [
+          {
+            "code": "PROVIDER_NOT_SUPPORTED",
+            "detail": "Вход через этого провайдера не поддержан.",
+            "instance": "/api/v1/auth/bitbucket/login",
+            "status": 404,
+            "title": "Провайдер не поддержан",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:provider-not-supported"
+          }
+        ]
+      },
+      "RepositoryListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RepositoryResponse"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "Репозитории страницы; меньше limit — значит, страница последняя."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "RepositoryListResponse",
+        "description": "Страница списка репозиториев."
+      },
+      "RepositoryNotFoundProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:repository-not-found",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:repository-not-found"
+          },
+          "title": {
+            "type": "string",
+            "const": "Репозиторий не найден",
+            "title": "Title",
+            "default": "Репозиторий не найден"
+          },
+          "status": {
+            "type": "integer",
+            "const": 404,
+            "title": "Status",
+            "default": 404
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "REPOSITORY_NOT_FOUND",
+            "title": "Code",
+            "default": "REPOSITORY_NOT_FOUND"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "RepositoryNotFoundProblem",
+        "description": "`404 REPOSITORY_NOT_FOUND`: репозитория с таким id нет.",
+        "examples": [
+          {
+            "code": "REPOSITORY_NOT_FOUND",
+            "detail": "Репозитория с таким id нет.",
+            "instance": "/api/v1/repositories/0b9d6c1e-6a7f-4b8e-9c3d-2e1f0a9b8c7d/pull-requests",
+            "status": 404,
+            "title": "Репозиторий не найден",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:repository-not-found"
+          }
+        ]
+      },
+      "RepositoryResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "Хостинг репозитория.",
+            "examples": [
+              "github"
+            ]
+          },
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id",
+            "description": "Идентификатор репозитория у провайдера.",
+            "examples": [
+              "123456789"
+            ]
+          },
+          "full_name": {
+            "type": "string",
+            "title": "Full Name",
+            "description": "Полное имя у провайдера: владелец/репозиторий.",
+            "examples": [
+              "octo-org/api"
+            ]
+          },
+          "default_branch": {
+            "type": "string",
+            "title": "Default Branch",
+            "description": "Ветка по умолчанию у провайдера.",
+            "examples": [
+              "main"
+            ]
+          },
+          "auto_review_enabled": {
+            "type": "boolean",
+            "title": "Auto Review Enabled",
+            "description": "Ревью запускается автоматически по вебхуку."
+          },
+          "created_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "Когда репозиторий зарегистрирован.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "Когда запись последний раз менялась.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "provider_id",
+          "full_name",
+          "default_branch",
+          "auto_review_enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RepositoryResponse",
+        "description": "Репозиторий, зарегистрированный в сервисе: его запросы на изменение ревьюятся."
+      },
+      "ReviewAlreadyActiveProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:review-already-active",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:review-already-active"
+          },
+          "title": {
+            "type": "string",
+            "const": "Прогон по этому коммиту уже идёт",
+            "title": "Title",
+            "default": "Прогон по этому коммиту уже идёт"
+          },
+          "status": {
+            "type": "integer",
+            "const": 409,
+            "title": "Status",
+            "default": 409
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "REVIEW_ALREADY_ACTIVE",
+            "title": "Code",
+            "default": "REVIEW_ALREADY_ACTIVE"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "ReviewAlreadyActiveProblem",
+        "description": "`409 REVIEW_ALREADY_ACTIVE`: ручной запуск, когда прогон по этому коммиту уже идёт.\n\nВебхук на тот же случай отвечает `202` с существующим прогоном.",
+        "examples": [
+          {
+            "code": "REVIEW_ALREADY_ACTIVE",
+            "detail": "По этому коммиту уже идёт прогон ревью.",
+            "instance": "/api/v1/reviews",
+            "status": 409,
+            "title": "Прогон по этому коммиту уже идёт",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:review-already-active"
+          }
+        ]
+      },
+      "ReviewError": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "SCM_AUTH_ERROR",
+              "PR_NOT_FOUND",
+              "REPOSITORY_NOT_FOUND",
+              "SCM_UNAVAILABLE",
+              "CONTEXT_PARSING_ERROR",
+              "LLM_RATE_LIMITED",
+              "LLM_TIMEOUT",
+              "LLM_UNAVAILABLE",
+              "LLM_INVALID_OUTPUT",
+              "REVIEW_RUN_STALE",
+              "INTERNAL_ERROR"
+            ],
+            "title": "Code",
+            "description": "Код ошибки прогона.",
+            "examples": [
+              "LLM_TIMEOUT"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Что случилось — по-русски, для показа пользователю."
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable",
+            "description": "Повторный запуск может пройти: сбой временный."
+          },
+          "scmProvider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null. Называется scmProvider, а не provider: поле про сторону SCM, providerAttempt считает попытки и LLM, и SCM."
+          },
+          "providerAttempt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providerattempt",
+            "description": "Попытка вызова LLM/SCM провайдера, с 1. Не путать с redelivery сообщения в очереди."
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "scmProvider",
+          "providerAttempt"
+        ],
+        "title": "ReviewError",
+        "description": "Структурированная ошибка прогона (§8 PIPELINE_SPEC.md) — не ошибка HTTP-запроса.\n\nКоды SCM_* провайдер-нейтральны: второй провайдер не ломает контракт."
+      },
+      "ReviewJob": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id",
+            "description": "Идентификатор прогона (reviewRunId)."
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "Хостинг репозитория.",
+            "examples": [
+              "github"
+            ]
+          },
+          "providerRepositoryId": {
+            "type": "string",
+            "title": "Providerrepositoryid",
+            "description": "Идентификатор репозитория у провайдера (repositories.provider_id).",
+            "examples": [
+              "123456789"
+            ]
+          },
+          "pullRequestNumber": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Pullrequestnumber",
+            "description": "Номер запроса на изменение у провайдера.",
+            "examples": [
+              42
+            ]
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSource",
+            "description": "Что запустило прогон.",
+            "examples": [
+              "webhook"
+            ]
+          },
+          "headCommitSha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headcommitsha",
+            "description": "Коммит, который ревьюится.",
+            "examples": [
+              "a1b2c3d4e5f6789012345678abcdef0123456789"
+            ]
+          },
+          "baseCommitSha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basecommitsha",
+            "description": "Коммит, относительно которого считается дифф; null, пока воркер его не узнал.",
+            "examples": [
+              "fedcba0987654321fedcba0987654321fedcba09"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReviewRunStatus",
+            "description": "Текущий статус прогона.",
+            "examples": [
+              "queued"
+            ]
+          },
+          "findingsCount": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Findingscount",
+            "description": "Сколько находок записано; у нового прогона 0."
+          },
+          "rejectedFindings": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Rejectedfindings",
+            "description": "Сколько находок отброшено: привязка вне изменённых строк диффа."
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model",
+            "description": "Модель LLM, которая провела ревью; null до анализа."
+          },
+          "tokensUsed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokensused",
+            "description": "Токенов LLM потрачено; null до анализа."
+          },
+          "durationSeconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Durationseconds",
+            "description": "Длительность прогона в секундах; null, пока прогон не завершён."
+          },
+          "createdAt": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Createdat",
+            "description": "Когда прогон создан.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "updatedAt": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Updatedat",
+            "description": "Когда запись последний раз менялась.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "lastProgressAt": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Lastprogressat",
+            "description": "Обновляется на каждом переходе состояния; по нему находят зависшие прогоны (§7.5 PIPELINE_SPEC.md).",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "failedStage": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "building_context",
+                  "analysing",
+                  "publishing"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failedstage",
+            "description": "Этап, на котором прогон упал; null, если прогон не падал."
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Ошибка прогона; null, если прогон не упал."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "providerRepositoryId",
+          "pullRequestNumber",
+          "trigger",
+          "headCommitSha",
+          "baseCommitSha",
+          "status",
+          "findingsCount",
+          "rejectedFindings",
+          "model",
+          "tokensUsed",
+          "durationSeconds",
+          "createdAt",
+          "updatedAt",
+          "lastProgressAt",
+          "failedStage",
+          "error"
+        ],
+        "title": "ReviewJob",
+        "description": "Прогон ревью, поставленный в очередь, — публичная проекция записи review_runs.\n\nНе путать с сообщением очереди: у него нет собственной идентичности, отдельной от id прогона."
+      },
+      "ReviewNotFoundProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:review-not-found",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:review-not-found"
+          },
+          "title": {
+            "type": "string",
+            "const": "Прогон ревью не найден",
+            "title": "Title",
+            "default": "Прогон ревью не найден"
+          },
+          "status": {
+            "type": "integer",
+            "const": 404,
+            "title": "Status",
+            "default": 404
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "REVIEW_NOT_FOUND",
+            "title": "Code",
+            "default": "REVIEW_NOT_FOUND"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "ReviewNotFoundProblem",
+        "description": "`404 REVIEW_NOT_FOUND`: прогона ревью с таким id нет.",
+        "examples": [
+          {
+            "code": "REVIEW_NOT_FOUND",
+            "detail": "Прогона ревью с таким id нет.",
+            "instance": "/api/v1/reviews/0b9d6c1e-6a7f-4b8e-9c3d-2e1f0a9b8c7d",
+            "status": 404,
+            "title": "Прогон ревью не найден",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:review-not-found"
+          }
+        ]
+      },
+      "ReviewRunResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "merge_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Merge Request Id",
+            "description": "Запрос на изменение, к которому относится прогон."
+          },
+          "head_sha": {
+            "type": "string",
+            "title": "Head Sha",
+            "description": "Коммит, который ревьюится.",
+            "examples": [
+              "a1b2c3d4e5f6789012345678abcdef0123456789"
+            ]
+          },
+          "base_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Sha",
+            "description": "Коммит, относительно которого считается дифф; null, пока воркер его не узнал.",
+            "examples": [
+              "fedcba0987654321fedcba0987654321fedcba09"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReviewRunStatus",
+            "description": "Текущий статус прогона.",
+            "examples": [
+              "completed"
+            ]
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSource",
+            "description": "Что запустило прогон.",
+            "examples": [
+              "webhook"
+            ]
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model",
+            "description": "Модель LLM, которая провела ревью; null до анализа."
+          },
+          "tokens_used": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens Used",
+            "description": "Токенов LLM потрачено; null до анализа."
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds",
+            "description": "Длительность прогона в секундах; null, пока не завершён."
+          },
+          "failure_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Reason",
+            "description": "Почему прогон упал; null, если не падал."
+          },
+          "failed_stage": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "building_context",
+                  "analysing",
+                  "publishing"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed Stage",
+            "description": "Этап, на котором прогон упал; null, если прогон не падал."
+          },
+          "last_progress_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Last Progress At",
+            "description": "Время последнего перехода состояния.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "Когда прогон создан.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "Когда запись последний раз менялась.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/FindingResponse"
+            },
+            "type": "array",
+            "title": "Findings",
+            "description": "Находки прогона: по времени создания, затем по id."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "merge_request_id",
+          "head_sha",
+          "base_sha",
+          "status",
+          "trigger",
+          "model",
+          "tokens_used",
+          "duration_seconds",
+          "failure_reason",
+          "failed_stage",
+          "last_progress_at",
+          "created_at",
+          "updated_at",
+          "findings"
+        ],
+        "title": "ReviewRunResponse",
+        "description": "Прогон ревью вместе с его находками."
+      },
+      "ReviewRunStatus": {
+        "description": "Жизненный цикл одной попытки отревьюить коммит.",
+        "enum": [
+          "queued",
+          "building_context",
+          "analysing",
+          "publishing",
+          "completed",
+          "failed",
+          "cancelled"
+        ],
+        "title": "ReviewRunStatus",
+        "type": "string"
+      },
+      "RouteNotFoundProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:route-not-found",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:route-not-found"
+          },
+          "title": {
+            "type": "string",
+            "const": "Путь не найден",
+            "title": "Title",
+            "default": "Путь не найден"
+          },
+          "status": {
+            "type": "integer",
+            "const": 404,
+            "title": "Status",
+            "default": 404
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "ROUTE_NOT_FOUND",
+            "title": "Code",
+            "default": "ROUTE_NOT_FOUND"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "RouteNotFoundProblem",
+        "description": "`404 ROUTE_NOT_FOUND`: такого пути нет, в том числе вне `/api/v1`.",
+        "examples": [
+          {
+            "code": "ROUTE_NOT_FOUND",
+            "detail": "По этому пути ресурса нет.",
+            "instance": "/api/v1/nope",
+            "status": 404,
+            "title": "Путь не найден",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:route-not-found"
+          }
+        ]
+      },
+      "ScmUnavailableProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:scm-unavailable",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:scm-unavailable"
+          },
+          "title": {
+            "type": "string",
+            "const": "Провайдер VCS недоступен",
+            "title": "Title",
+            "default": "Провайдер VCS недоступен"
+          },
+          "status": {
+            "type": "integer",
+            "const": 502,
+            "title": "Status",
+            "default": 502
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "SCM_UNAVAILABLE",
+            "title": "Code",
+            "default": "SCM_UNAVAILABLE"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "ScmUnavailableProblem",
+        "description": "`502 SCM_UNAVAILABLE`: провайдер VCS не ответил или ответил ошибкой при приёме вебхука.",
+        "examples": [
+          {
+            "code": "SCM_UNAVAILABLE",
+            "detail": "Провайдер VCS не ответил или ответил ошибкой; прогон не создан.",
+            "instance": "/api/v1/webhooks/github",
+            "status": 502,
+            "title": "Провайдер VCS недоступен",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:scm-unavailable"
+          }
+        ]
+      },
+      "TriggerSource": {
+        "type": "string",
+        "enum": [
+          "webhook",
+          "manual",
+          "mention"
+        ],
+        "title": "TriggerSource",
+        "description": "Из-за чего был создан прогон ревью."
+      },
+      "UnauthenticatedProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:unauthenticated",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:unauthenticated"
+          },
+          "title": {
+            "type": "string",
+            "const": "Требуется вход",
+            "title": "Title",
+            "default": "Требуется вход"
+          },
+          "status": {
+            "type": "integer",
+            "const": 401,
+            "title": "Status",
+            "default": 401
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "UNAUTHENTICATED",
+            "title": "Code",
+            "default": "UNAUTHENTICATED"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "UnauthenticatedProblem",
+        "description": "`401 UNAUTHENTICATED`: нет действительной сессии; пришедшая недействительная cookie удаляется.",
+        "examples": [
+          {
+            "code": "UNAUTHENTICATED",
+            "detail": "Нет действительной сессии.",
+            "instance": "/api/v1/auth/me",
+            "status": 401,
+            "title": "Требуется вход",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:unauthenticated"
+          }
+        ]
+      },
+      "UserResponse": {
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "Провайдер, через которого выполнен вход.",
+            "examples": [
+              "github"
+            ]
+          },
+          "login": {
+            "type": "string",
+            "title": "Login",
+            "description": "Логин у провайдера.",
+            "examples": [
+              "octocat"
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name",
+            "description": "Отображаемое имя у провайдера; null, если не задано."
+          },
+          "avatar_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "format": "uri",
+            "title": "Avatar Url",
+            "description": "Адрес аватара у провайдера; null, если его нет.",
+            "examples": [
+              "https://avatars.githubusercontent.com/u/1"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "login",
+          "name",
+          "avatar_url"
+        ],
+        "title": "UserResponse",
+        "description": "Пользователь кабинета — учётная запись у провайдера входа."
+      },
+      "ValidationErrorItem": {
+        "properties": {
+          "where": {
+            "type": "string",
+            "title": "Where",
+            "description": "Часть запроса и имя через точку: `query.limit`, `path.review_run_id`, `body.trigger`."
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Почему — по-русски, без самого значения."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "where",
+          "reason"
+        ],
+        "title": "ValidationErrorItem",
+        "description": "Одна ошибка проверки: где и почему, без самого значения."
+      },
+      "ValidationProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:validation-error",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:validation-error"
+          },
+          "title": {
+            "type": "string",
+            "const": "Запрос не прошёл проверку",
+            "title": "Title",
+            "default": "Запрос не прошёл проверку"
+          },
+          "status": {
+            "type": "integer",
+            "const": 422,
+            "title": "Status",
+            "default": 422
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "VALIDATION_ERROR",
+            "title": "Code",
+            "default": "VALIDATION_ERROR"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationErrorItem"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Errors",
+            "description": "Где ошибка и почему."
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id",
+          "errors"
+        ],
+        "title": "ValidationProblem",
+        "description": "`422 VALIDATION_ERROR`: параметр пути, запроса или тело не прошли проверку.",
+        "examples": [
+          {
+            "code": "VALIDATION_ERROR",
+            "detail": "Параметры запроса не прошли проверку, ошибок: 1.",
+            "errors": [
+              {
+                "reason": "ожидается целое число",
+                "where": "query.limit"
+              }
+            ],
+            "instance": "/api/v1/repositories",
+            "status": 422,
+            "title": "Запрос не прошёл проверку",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:validation-error"
+          }
+        ]
+      },
+      "WebhookAcknowledged": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "acknowledged",
+            "title": "Status",
+            "description": "Событие треда принято."
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "WebhookAcknowledged",
+        "description": "Тело `202` для события pull_request_review_thread: отметка закрытия треда принята."
+      },
+      "WebhookIgnored": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ignored",
+            "title": "Status",
+            "description": "Доставка принята и проигнорирована."
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "WebhookIgnored",
+        "description": "Тело `202` для доставки, которая ревью не запускает: действие reopened, closed или\nнеизвестное, незарегистрированный репозиторий, тело без события."
+      },
+      "WebhookSignatureInvalidProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:webhook-signature-invalid",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:webhook-signature-invalid"
+          },
+          "title": {
+            "type": "string",
+            "const": "Подпись вебхука не прошла проверку",
+            "title": "Title",
+            "default": "Подпись вебхука не прошла проверку"
+          },
+          "status": {
+            "type": "integer",
+            "const": 401,
+            "title": "Status",
+            "default": 401
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "WEBHOOK_SIGNATURE_INVALID",
+            "title": "Code",
+            "default": "WEBHOOK_SIGNATURE_INVALID"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "WebhookSignatureInvalidProblem",
+        "description": "`401 WEBHOOK_SIGNATURE_INVALID`: подписи вебхука нет или она не сошлась.",
+        "examples": [
+          {
+            "code": "WEBHOOK_SIGNATURE_INVALID",
+            "detail": "Подписи X-Hub-Signature-256 нет, или она не совпала с телом доставки.",
+            "instance": "/api/v1/webhooks/github",
+            "status": 401,
+            "title": "Подпись вебхука не прошла проверку",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:webhook-signature-invalid"
+          }
+        ]
+      },
+      "ReviewRunStatusEvent": {
+        "description": "Данные события `status` потока: `event: status`, `data: <JSON в одну строку>`.\n\nСобытие `ping` приходит с `data: {}`. Тело ответа — текст SSE, а не этот JSON; в схему\nмодель попадает отдельным компонентом (`app/api/openapi.py`, `extra_models`).",
+        "properties": {
+          "review_run_id": {
+            "description": "Прогон, о котором событие.",
+            "format": "uuid",
+            "title": "Review Run Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReviewRunStatus",
+            "description": "Статус прогона на момент события.",
+            "examples": [
+              "analysing"
+            ]
+          },
+          "last_progress_at": {
+            "description": "Время последнего перехода состояния.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ],
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "title": "Last Progress At",
+            "type": "string"
+          },
+          "failed_stage": {
+            "anyOf": [
+              {
+                "enum": [
+                  "building_context",
+                  "analysing",
+                  "publishing"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Этап, на котором прогон упал; null, если прогон не падал.",
+            "title": "Failed Stage"
+          },
+          "failure_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Почему прогон упал; null, если не падал.",
+            "title": "Failure Reason"
+          }
+        },
+        "required": [
+          "review_run_id",
+          "status",
+          "last_progress_at",
+          "failed_stage",
+          "failure_reason"
+        ],
+        "title": "ReviewRunStatusEvent",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "session": {
+        "type": "apiKey",
+        "description": "Сессия в httpOnly cookie, ставится callback'ом входа. Изменяющие запросы (POST, PUT, PATCH, DELETE) под /api/v1, кроме вебхуков, дополнительно сверяют `Origin` с адресом сервиса — раньше сессии и разбора тела, иначе `403 ORIGIN_FORBIDDEN`.",
+        "in": "cookie",
+        "name": "session"
+      }
+    },
+    "headers": {
+      "X-Trace-ID": {
+        "description": "Trace id запроса — 32 строчных hex-символа, формат trace-id из W3C Trace Context, не все нули. Сервер выдаёт его на каждый запрос сам; входящие `X-Trace-ID`, `X-Request-ID` и `traceparent` не принимаются. В теле ошибки — то же значение в `trace_id`, в логе сервера о сбое — тоже.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    }
+  }
+}

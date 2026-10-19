@@ -183,7 +183,7 @@ provider + providerRepositoryId + pullRequestNumber + headCommitSha
 (`uq_review_runs_one_active_per_commit`) — API не создаёт второй `ReviewRun`, а отвечает
 по-разному в зависимости от того, кто прислал дубль:
 
-- `POST /reviews` (ручной запуск) — `409` с `ApiError.code = REVIEW_ALREADY_ACTIVE`:
+- `POST /reviews` (ручной запуск) — `409` с `code = REVIEW_ALREADY_ACTIVE`:
   человек должен увидеть, что прогон уже идёт;
 - `POST /webhooks/{provider}` — `202` с уже существующим `ReviewJob`: повторная доставка
   вебхука штатна, а не-2xx хостинг считает неудачей и повторяет доставку снова.
@@ -200,7 +200,9 @@ provider + providerRepositoryId + pullRequestNumber + headCommitSha
 
 LLM не имеет права определять публичную модель данных.
 
-Каждый Finding валидируется по `docs/openapi/finding.schema.json`.
+Каждый Finding в ответе LLM валидируется по `docs/openapi/finding.schema.json` — схеме вывода
+LLM (на неё ссылается `docs/openapi/llm_review_output.schema.json`), а не схеме API: находку
+в API описывает `FindingResponse` в схеме из кода (`docs/openapi/openapi.json`).
 
 При invalid output:
 
@@ -386,15 +388,21 @@ retryable LLM-ошибок (почти вся таблица §6) осталос
 MVP endpoints:
 
 ```text
-POST /reviews
-GET  /reviews/{reviewId}
-GET  /reviews/{reviewId}/findings
-GET  /reviews
+GET  /repositories
+GET  /repositories/{repository_id}/pull-requests
+GET  /reviews/{review_run_id}
+GET  /reviews/{review_run_id}/events
 POST /webhooks/{provider}
+POST /reviews                    # заглушка: схема описана, отвечает 501 NOT_IMPLEMENTED
+GET  /auth/{provider}/login
+GET  /auth/{provider}/callback
+GET  /auth/me
+POST /auth/logout
 ```
 
-Аутентификация пользователя (`POST /auth/oauth/token`, `POST /auth/refresh`) сюда не
-входит — proposal, см. §9.1.
+Находки прогона приходят в ответе `GET /reviews/{review_run_id}`, отдельного
+`/reviews/{review_run_id}/findings` нет (спека `review-rest-api`). Списка прогонов `GET /reviews`
+тоже нет. Вход и сессия (`/auth/...`) — §9.1.
 
 `POST /webhooks/{provider}` принимает доставки от хостинга (см.
 `docs/BACKEND_ARCHITECTURE.md`, «Подлинность webhook'ов»):
@@ -407,7 +415,7 @@ POST /webhooks/{provider}
 - доставка, которая ревью не запускает (действие `reopened`, `closed` или неизвестное,
   незарегистрированный репозиторий), — `202` с телом `WebhookIgnored` (`{"status": "ignored"}`):
   записей нет, очередь не тронута;
-- сбой VCS при получении диффа или метаданных — `502` с `ApiError.code = SCM_UNAVAILABLE`,
+- сбой VCS при получении диффа или метаданных — `502` с `code = SCM_UNAVAILABLE`,
   прогон не создаётся; провайдер из `Provider`, для которого приёмника ещё нет, — `501` с
   `PROVIDER_NOT_SUPPORTED`.
 
@@ -415,21 +423,62 @@ POST /webhooks/{provider}
 (соответствует `UNIQUE (provider, provider_id)` в таблице `repositories`), а не строкой вида
 `owner/repository` — `full_name` в этой таблице намеренно не уникален. Обязателен `trigger`.
 
-Все пути — относительно `/api/v1` (`servers` в `openapi.yaml`): префикс ставит само
+Все пути — под `/api/v1` (пути в схеме уже с префиксом): префикс ставит само
 приложение, а не reverse-proxy, поэтому фронт ходит на `/api/v1/reviews`, а хостинг шлёт
 вебхуки на `/api/v1/webhooks/{provider}`.
 
-Ошибки HTTP-слоя — `ApiError` с закрытым списком `code`: `VALIDATION_ERROR`,
-`REVIEW_NOT_FOUND`, `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `SCM_UNAVAILABLE`,
-`PROVIDER_NOT_SUPPORTED`, `UNAUTHENTICATED`, `ORIGIN_FORBIDDEN`. Каждый ответ с `ApiError` в `openapi.yaml` называет свой код.
+Ошибки HTTP-слоя — RFC 9457 Problem Details, тип содержимого `application/problem+json`:
 
-Источник истины для HTTP-контракта: `openapi.yaml`.
+```json
+{
+  "type": "urn:dmc-268:problem:validation-error",
+  "title": "Запрос не прошёл проверку",
+  "status": 422,
+  "detail": "Параметры запроса не прошли проверку, ошибок: 1.",
+  "instance": "/api/v1/repositories",
+  "code": "VALIDATION_ERROR",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "errors": [{"where": "query.limit", "reason": "ожидается целое число"}]
+}
+```
+
+- `type` — `urn:dmc-268:problem:<код в kebab-case>`, `title` — короткое описание по-русски;
+  оба постоянны для кода. `detail` — что случилось в этом запросе, без значений из запроса.
+  `instance` — путь запроса без query в том виде, в каком он пришёл, — закодированный
+  (`/api/v1/a%20b`), то есть URI-reference; запрет повторять переданное значение относится
+  к `detail` и `errors`.
+- `code` — расширение с закрытым списком `ErrorCode`: клиент ветвится по нему, а не по
+  тексту. Коды: `VALIDATION_ERROR`, `REVIEW_NOT_FOUND`, `REPOSITORY_NOT_FOUND`,
+  `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `SCM_UNAVAILABLE`,
+  `PROVIDER_NOT_SUPPORTED`, `UNAUTHENTICATED`, `ORIGIN_FORBIDDEN`, `ROUTE_NOT_FOUND` (`404`
+  неизвестного пути), `METHOD_NOT_ALLOWED` (`405`, разрешённые методы — в `Allow`),
+  `NOT_IMPLEMENTED` (`501` запланированной ручки, описанной в схеме заранее),
+  `HTTP_ERROR` (прочий `HTTPException` фреймворка или зависимости — статус и заголовки
+  исключения, например `429` с `Retry-After`), `INTERNAL_ERROR` (`500`, без деталей исключения). Модель
+  на каждый код — в `app/api/problems.py`, в схеме — объединение `AnyProblem` с
+  discriminator по `code`; у каждой операции в схеме — её коды и `default` с `AnyProblem`.
+- `trace_id` — 32 строчных hex-символа (формат trace-id W3C Trace Context, не все нули),
+  который сервер выдаёт каждому запросу сам и отдаёт заголовком `X-Trace-ID` на любом
+  ответе, не только на ошибке. Входящие `X-Trace-ID`, `X-Request-ID` и `traceparent` не
+  принимаются. На `500` сервер пишет одну строку лога уровня error с `trace_id`, методом и
+  путём — по `trace_id` из сообщения пользователя её и ищут; стектрейс пишет uvicorn.
+  Когда подключим OpenTelemetry, значением станет trace id OTel — формат тот же.
+- Дополнительные данные есть только у `VALIDATION_ERROR`: `errors` — `where` (часть запроса
+  и имя параметра) и `reason` (причина по-русски).
+
+`404` ручек — код по сущности, ошибка проверки параметров — `422` с `VALIDATION_ERROR`.
+Ошибки прогона (`ReviewError`) — другой контракт: это поле `ReviewJob`, а не тело
+HTTP-ошибки.
+
+Источник истины для HTTP-контракта — код: роуты и модели `app/api`, из которых FastAPI
+строит схему (`/openapi.json`). `docs/openapi/openapi.json` — её экспорт
+(`uv run python scripts/export_openapi.py`), руками не правится; CI проверяет, что он свежий.
 
 ### 9.1. Аутентификация
 
 Вход через GitHub выполняет бэкенд, сессия живёт в httpOnly cookie и хранится на
 сервере. Требования — спека `user-auth` (`openspec/specs/user-auth/spec.md`), ручки —
-`openapi.yaml`, обоснование выбора — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
+`docs/openapi/openapi.json`, обоснование выбора — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
 
 ---
 
@@ -459,10 +508,9 @@ POST /webhooks/{provider}
 - словарь состояний, категорий и сущностей совпадает с `review-data-model` и
   `ai-review-prompting` дословно, а не переопределён параллельно;
 - `PIPELINE_SPEC.md` согласован;
-- `openapi.yaml` согласован;
-- `docs/openapi/review-job.schema.json` согласован;
-- `docs/openapi/finding.schema.json` согласован;
-- `docs/openapi/error.schema.json` согласован;
+- схема API (`docs/openapi/openapi.json`, экспорт из кода) согласована, `ReviewJob` и
+  `ReviewError` — в ней;
+- схема находки в выводе LLM (`docs/openapi/finding.schema.json`) согласована;
 - определены retryable/non-retryable ошибки;
 - определена стратегия timeout;
 - определена деградация при LLM outage;

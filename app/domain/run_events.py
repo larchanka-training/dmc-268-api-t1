@@ -1,13 +1,13 @@
-"""Поток событий статуса прогона: что отправить и как это записать.
+"""Поток событий статуса прогона: что отправить.
 
-Обе функции чистые. Время приходит числом секунд, а не читается с часов,
+Функция чистая. Время приходит числом секунд, а не читается с часов,
 поэтому «пятнадцать секунд тишины» тест проверяет без ожидания. Цикл, который
-их зовёт, живёт в `app/application/review_run_events.py`.
+её зовёт, живёт в `app/application/review_run_events.py`, запись события в текст
+SSE — `format_sse` в `app/api/review_events.py`.
 """
 
-import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import UUID
 
 from app.domain.entities import ReviewRun
@@ -66,29 +66,3 @@ def next_event(
     if idle_seconds >= PING_AFTER_SECONDS:
         return Decision(event=PingEvent(), close=False)
     return Decision(event=None, close=False)
-
-
-def format_sse(event: RunEvent) -> str:
-    """Записать событие в формате Server-Sent Events.
-
-    Именованное событие, а не комментарий: комментарии `EventSource` до кода
-    клиента не доводит. JSON — в одну строку: перенос внутри `data` разбил бы
-    событие на несколько полей.
-    """
-    if isinstance(event, PingEvent):
-        return "event: ping\ndata: {}\n\n"
-    data = {
-        "review_run_id": str(event.review_run_id),
-        "status": event.status.value,
-        "last_progress_at": _iso_utc(event.last_progress_at),
-        "failed_stage": event.failed_stage.value if event.failed_stage else None,
-        "failure_reason": event.failure_reason,
-    }
-    body = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-    return f"event: status\ndata: {body}\n\n"
-
-
-def _iso_utc(moment: datetime) -> str:
-    # База отдаёт время в зоне сессии; клиенту оно уходит в UTC с `Z`, как в
-    # остальных ответах API.
-    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")

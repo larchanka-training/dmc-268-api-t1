@@ -1,19 +1,20 @@
 """Чтение зарегистрированных репозиториев.
 
-Транспорт: разбор запроса, вызов порта, формат ответа. Пагинация —
-`limit`/`offset`, превышение потолка приводится к потолку, а не 400: см.
-design.md change'а add-review-rest-api.
+Транспорт: разбор запроса, вызов порта, формат ответа. Пагинация — `app/api/pagination.py`.
 """
 
-from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
 
 from app.api.dependencies import get_unit_of_work
+from app.api.errors import ERRORS_422
+from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
+from app.api.schemas import UtcDatetime
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
+from app.domain.enums import Provider
 
 # Сессия — на весь роутер: исключения видны здесь, а не в middleware.
 router = APIRouter(
@@ -23,44 +24,46 @@ router = APIRouter(
     responses=SESSION_RESPONSES,
 )
 
-DEFAULT_LIMIT = 50
-MAX_LIMIT = 200
-
 
 class RepositoryResponse(BaseModel):
+    """Репозиторий, зарегистрированный в сервисе: его запросы на изменение ревьюятся."""
+
     id: UUID
-    provider: str
-    provider_id: str
-    full_name: str
-    default_branch: str
-    auto_review_enabled: bool
-    created_at: datetime
-    updated_at: datetime
+    provider: Provider = Field(description="Хостинг репозитория.", examples=["github"])
+    provider_id: str = Field(description="Идентификатор репозитория у провайдера.", examples=["123456789"])
+    full_name: str = Field(description="Полное имя у провайдера: владелец/репозиторий.", examples=["octo-org/api"])
+    default_branch: str = Field(description="Ветка по умолчанию у провайдера.", examples=["main"])
+    auto_review_enabled: bool = Field(description="Ревью запускается автоматически по вебхуку.")
+    created_at: UtcDatetime = Field(description="Когда репозиторий зарегистрирован.")
+    updated_at: UtcDatetime = Field(description="Когда запись последний раз менялась.")
 
 
 class RepositoryListResponse(BaseModel):
-    items: list[RepositoryResponse]
+    """Страница списка репозиториев."""
+
+    items: list[RepositoryResponse] = Field(
+        description="Репозитории страницы; меньше limit — значит, страница последняя."
+    )
 
 
-@router.get("", response_model=RepositoryListResponse)
+@router.get(
+    "",
+    response_model=RepositoryListResponse,
+    summary="Список зарегистрированных репозиториев",
+    response_description="Страница репозиториев.",
+    description=(
+        "Требует сессию. Постранично, по времени регистрации, затем по id. limit выше 200 не "
+        "отклоняется, а приводится к 200. Общего числа записей в ответе нет: конец списка — "
+        "страница короче limit."
+    ),
+    responses=ERRORS_422,
+)
 def list_repositories(
-    limit: int = Query(default=DEFAULT_LIMIT, ge=1),
-    offset: int = Query(default=0, ge=0),
+    limit: Limit = DEFAULT_LIMIT,
+    offset: Offset = 0,
     uow: UnitOfWork = Depends(get_unit_of_work),
 ) -> RepositoryListResponse:
-    repositories = uow.repositories.list_all(min(limit, MAX_LIMIT), offset)
+    repositories = uow.repositories.list_all(page_size(limit), offset)
     return RepositoryListResponse(
-        items=[
-            RepositoryResponse(
-                id=r.id,
-                provider=r.provider.value,
-                provider_id=r.provider_id,
-                full_name=r.full_name,
-                default_branch=r.default_branch,
-                auto_review_enabled=r.auto_review_enabled,
-                created_at=r.created_at,
-                updated_at=r.updated_at,
-            )
-            for r in repositories
-        ]
+        items=[RepositoryResponse.model_validate(r, from_attributes=True) for r in repositories]
     )

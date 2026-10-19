@@ -6,16 +6,21 @@
 `repository_id`.
 """
 
-from datetime import datetime
+from http import HTTPStatus
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Path
+from pydantic import BaseModel, Field, PositiveInt
 
 from app.api.dependencies import get_unit_of_work
-from app.api.repositories import DEFAULT_LIMIT, MAX_LIMIT
+from app.api.errors import ERRORS_404_REPOSITORY, ERRORS_422, ApiError
+from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
+from app.api.problems import ErrorCode
+from app.api.schemas import UtcDatetime
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
+from app.domain.enums import MergeRequestState
 
 router = APIRouter(
     prefix="/api/v1/repositories",
@@ -26,51 +31,52 @@ router = APIRouter(
 
 
 class MergeRequestResponse(BaseModel):
+    """Запрос на изменение (pull request GitHub) — каким его видел сервис при последнем вебхуке."""
+
     id: UUID
-    number: int
-    title: str
-    description: str
-    author: str
-    source_branch: str
-    target_branch: str
-    head_sha: str
-    state: str
-    created_at: datetime
-    updated_at: datetime
+    number: PositiveInt = Field(description="Номер запроса на изменение у провайдера.", examples=[42])
+    title: str = Field(description="Заголовок у провайдера.")
+    description: str = Field(description="Описание запроса на изменение; пустая строка, если его нет.")
+    author: str = Field(description="Логин автора у провайдера.", examples=["octocat"])
+    source_branch: str = Field(description="Ветка с изменениями.", examples=["feat/login"])
+    target_branch: str = Field(description="Ветка, в которую предлагается слить.", examples=["develop"])
+    head_sha: str = Field(
+        description="Последний коммит ветки с изменениями.", examples=["a1b2c3d4e5f6789012345678abcdef0123456789"]
+    )
+    state: MergeRequestState = Field(description="Состояние у провайдера.", examples=["open"])
+    created_at: UtcDatetime = Field(description="Когда сервис впервые записал запрос на изменение.")
+    updated_at: UtcDatetime = Field(description="Когда запись последний раз менялась.")
 
 
 class MergeRequestListResponse(BaseModel):
-    items: list[MergeRequestResponse]
+    """Страница списка запросов на изменение."""
+
+    items: list[MergeRequestResponse] = Field(
+        description="Запросы на изменение страницы; меньше limit — значит, страница последняя."
+    )
 
 
-@router.get("/{repository_id}/pull-requests", response_model=MergeRequestListResponse)
+@router.get(
+    "/{repository_id}/pull-requests",
+    response_model=MergeRequestListResponse,
+    summary="Список запросов на изменение репозитория",
+    response_description="Страница запросов на изменение.",
+    description=(
+        "Требует сессию. Постранично, по номеру запроса на изменение. Пагинация та же, что у "
+        "списка репозиториев: limit выше 200 приводится к 200. Репозитория нет — 404."
+    ),
+    responses={**ERRORS_404_REPOSITORY, **ERRORS_422},
+)
 def list_pull_requests(
-    repository_id: UUID,
-    limit: int = Query(default=DEFAULT_LIMIT, ge=1),
-    offset: int = Query(default=0, ge=0),
+    repository_id: Annotated[UUID, Path(description="Идентификатор репозитория в сервисе.")],
+    limit: Limit = DEFAULT_LIMIT,
+    offset: Offset = 0,
     uow: UnitOfWork = Depends(get_unit_of_work),
 ) -> MergeRequestListResponse:
     if uow.repositories.get(repository_id) is None:
-        raise HTTPException(status_code=404, detail="repository not found")
+        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REPOSITORY_NOT_FOUND, "Репозитория с таким id нет.")
 
-    merge_requests = uow.merge_requests.list_for_repository(
-        repository_id, min(limit, MAX_LIMIT), offset
-    )
+    merge_requests = uow.merge_requests.list_for_repository(repository_id, page_size(limit), offset)
     return MergeRequestListResponse(
-        items=[
-            MergeRequestResponse(
-                id=mr.id,
-                number=mr.number,
-                title=mr.title,
-                description=mr.description,
-                author=mr.author,
-                source_branch=mr.source_branch,
-                target_branch=mr.target_branch,
-                head_sha=mr.head_sha,
-                state=mr.state.value,
-                created_at=mr.created_at,
-                updated_at=mr.updated_at,
-            )
-            for mr in merge_requests
-        ]
+        items=[MergeRequestResponse.model_validate(mr, from_attributes=True) for mr in merge_requests]
     )

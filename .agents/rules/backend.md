@@ -13,6 +13,7 @@ uv run lint-imports                     # направление зависим�
 uv run pytest                           # тесты без базы
 uv run alembic upgrade head             # применить миграции
 uv run alembic heads                    # должна быть ровно одна голова
+uv run python scripts/export_openapi.py # экспорт контракта API в docs/openapi/openapi.json
 ```
 
 Тесты с базой: маркер `integration`, переменная `TEST_DATABASE_URL`, отдельная база — подготовка
@@ -25,6 +26,7 @@ uv run alembic heads                    # должна быть ровно од�
 | Требования к поведению (источник правды) | `openspec/specs/*/spec.md` |
 | Слои, порты, миграции, модель угроз | [`docs/BACKEND_ARCHITECTURE.md`](../../docs/BACKEND_ARCHITECTURE.md) |
 | Модель данных | [`docs/erd.md`](../../docs/erd.md) |
+| Контракт HTTP API | роуты и модели `app/api` (модель одной ручки — в её модуле, общая для нескольких — в `app/api/schemas.py`, ошибки — в `app/api/problems.py`); экспорт — [`docs/openapi/openapi.json`](../../docs/openapi/openapi.json) |
 | Границы сервисов | `docs/SYSTEM_DESIGN.md` (готовится) |
 | Принципы реализации (DRY, KISS, YAGNI) | `openspec/config.yaml`, `operations.apply.guidance` |
 
@@ -66,6 +68,69 @@ uv run alembic heads                    # должна быть ровно од�
 
 Порт не пишется, пока его никто не вызывает: интерфейс раньше первого адаптера — догадка о
 сигнатуре.
+
+## HTTP API и контракт
+
+Контракт `/api/v1` — код: схему OpenAPI строит FastAPI из роутов и моделей, сервер отдаёт её по
+`/openapi.json` и в `/docs`. `docs/openapi/openapi.json` — экспорт этой схемы для фронтенда
+(генерация типов) и ревью; руками не правится.
+
+- **Ручка описывается в роуте целиком.** `response_model` — pydantic-модель ответа, `summary`
+  и `description` по-русски, `responses` — все её ошибки моделями из `app/api/problems.py`
+  через готовые словари `ERRORS_*` из `app/api/errors.py` (`{**ERRORS_404_REVIEW, **ERRORS_422}`).
+  Ответ `default` со всем каталогом (`AnyProblem`) подключён ко всему приложению. Типы полей —
+  настоящие: enum домена, `UUID`, а не `str`. У поля, чей смысл не очевиден из имени, —
+  `Field(description=…)` (единицы, когда `null`, откуда берётся), у полей с форматом — `examples`;
+  docstring модели — описание сущности в схеме. У операции — `summary`, `description` (сессия,
+  `Origin`, пагинация) и `response_description`.
+- **Ручка возвращает модель ответа**, а не словарь и не `JSONResponse` с данными: тело проходит
+  модель и совпадает со схемой. Особый статус — в декораторе (`status_code=`); если нужны
+  заголовки — `Response` с телом `model.model_dump(mode="json", by_alias=True)`. `JSONResponse`
+  собирает только `problem_response`; это проверяет `tests/api/test_contract_guards.py`.
+- **Время — только `UtcDatetime`** из `app/api/schemas.py`: принимает время с зоной, отдаёт UTC
+  с `Z` (`2026-10-11T10:00:00Z`). `datetime` в модели ответа — ошибка, её ловит тот же тест.
+  Ответ в camelCase — от `CamelCaseResponse`, тело запроса — от `CamelCaseRequest` (только
+  camelCase, без лишних полей, без приведения типов; enum-полю — `Field(strict=False)`).
+- **Статус HTTP в коде — только `HTTPStatus`**: `status_code=HTTPStatus.ACCEPTED`,
+  `ApiError(HTTPStatus.NOT_FOUND, …)`, ключи `responses`, `Literal[HTTPStatus.X]` в моделях ошибок.
+- **`Origin` проверяет middleware** (`app/api/origin.py`) — у `POST`/`PUT`/`PATCH`/`DELETE` под
+  `/api/v1/`, кроме вебхуков, раньше разбора тела и сессии. Зависимостью роута его не проверяем;
+  в `responses` такой ручки — `ERRORS_403_ORIGIN`. Пагинация — `Limit`/`Offset` из
+  `app/api/pagination.py`.
+- **Тип содержимого ошибок и `X-Trace-ID`** схеме дописывает `app/api/openapi.py` — в одном
+  месте, у роутов их не пишем. Ответ ошибки без модели там же роняет сборку схемы.
+- **Запланированная ручка** — роут-заглушка с полной схемой запроса и ответов, отвечает
+  `501 NOT_IMPLEMENTED` (`raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, …)`); в `description` —
+  «Не реализовано: отвечает 501 NOT_IMPLEMENTED» и ссылка на задачу, если она есть.
+- **После правки** ручки или модели — `uv run python scripts/export_openapi.py`, файл — в тот
+  же коммит. Pre-commit хук `export-openapi` делает это сам при коммите с правкой в `app/`:
+  если файл изменился, коммит останавливается — добавьте файл и повторите. CI запускает
+  экспорт с `--check` и падает на устаревшем файле; то же проверяет `tests/test_docs.py`.
+
+### Ошибки — RFC 9457 Problem Details
+
+Любая ошибка приложения — `application/problem+json` по
+[RFC 9457](https://www.rfc-editor.org/rfc/rfc9457): `type` (`urn:dmc-268:problem:<код>`),
+`title` (постоянный для кода), `status`, `detail` (этот случай, без эха ввода), `instance`,
+плюс расширения `code` и `trace_id`; у `VALIDATION_ERROR` — ещё `errors: [{where, reason}]`.
+`instance` — путь запроса как пришёл, закодированный (`/api/v1/a%20b`); запрет на эхо ввода — про
+`detail` и `errors`. `trace_id` — 32 hex (trace-id W3C), его же сервер отдаёт заголовком `X-Trace-ID`
+на любом ответе и пишет в строку лога о `500`; входящим `X-Trace-ID`/`X-Request-ID`/`traceparent`
+не доверяем.
+
+- **Отказ в ручке** — `raise ApiError(статус, ErrorCode.<КОД>, detail)` из `app/api/errors.py`.
+  `HTTPException` и свой `JSONResponse` с ошибкой не пишем: `HTTPException` фреймворка и
+  зависимостей обработчик отдаёт общим `HTTP_ERROR` со статусом исключения, без своего кода.
+- **Тело строит модель кода.** `problem_response` собирает тело через модель из
+  `app/api/problems.py`, поэтому ответ и схема не расходятся: статус, которого модель кода не
+  допускает, — ошибка в коде.
+- **Новый код** — значение в `ErrorCode`, модель `<Что>Problem(Problem)` с константами `type`,
+  `title`, `code`, `status` и примером, вариант в объединении `AnyProblem`, словарь `ERRORS_*` для
+  `responses`. Пример — `.agents/templates/backend/endpoint.md`.
+- **Сверку** делает `tests/test_docs.py`: каждый код — в объединении с discriminator по `code`,
+  каждый ответ 4xx/5xx и `default` — `application/problem+json` с моделью ошибки, `422` — не
+  `HTTPValidationError`. `tests/test_problem_details.py` прогоняет настоящие ответы сервера через
+  `AnyProblem`.
 
 ## Тесты
 

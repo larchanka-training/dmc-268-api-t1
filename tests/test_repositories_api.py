@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_unit_of_work
 from app.api.factory import create_app
-from app.api.repositories import MAX_LIMIT
+from app.api.pagination import MAX_LIMIT
 from app.config import Settings
 from app.domain.entities import Repository
 from app.domain.enums import Provider
@@ -73,3 +73,23 @@ def test_limit_above_the_ceiling_is_capped_not_rejected() -> None:
 
     assert response.status_code == 200
     assert len(response.json()["items"]) == MAX_LIMIT
+
+
+def test_a_non_integer_limit_is_a_validation_error_without_the_input() -> None:
+    response = _client(FakeUnitOfWork()).get("/api/v1/repositories", params={"limit": "<b>abc</b>"})
+
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["code"] == "VALIDATION_ERROR"
+    assert body["errors"] == [{"where": "query.limit", "reason": "ожидается целое число"}]
+    assert "abc" not in response.text
+
+
+def test_a_limit_below_one_is_a_validation_error() -> None:
+    response = _client(FakeUnitOfWork()).get("/api/v1/repositories", params={"limit": 0})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "VALIDATION_ERROR"
+    assert body["errors"] == [{"where": "query.limit", "reason": "должно быть не меньше 1"}]
