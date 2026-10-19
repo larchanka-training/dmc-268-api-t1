@@ -2,7 +2,7 @@
 
 Контейнеры подменяются целиком: `app.state.container` получает заглушку с
 фейковыми портами, поэтому тесты отвечают на вопрос «что делает HTTP-слой» —
-подпись, коды ответов, маппинг исходов use case в контракт `openapi.yaml` —
+подпись, коды ответов, маппинг исходов use case в ответы ручки —
 и не трогают базу и брокер. Подписи считаются здесь независимо
 (hmac + hashlib), а не функцией `verify_hmac`, чтобы тест не сверял
 реализацию с ней же.
@@ -11,7 +11,9 @@
 import hashlib
 import hmac
 import json
+import re
 from dataclasses import dataclass
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,10 +21,20 @@ from httpx import Client, Response
 from pydantic import ValidationError
 
 from app.api.factory import create_app
+from app.api.schemas import UTC_DATETIME_PATTERN, ReviewJob
 from app.config import Settings
+from app.domain.entities import MergeRequest, PublishedComment
+from app.domain.enums import CommentKind, MergeRequestState, Provider
 from app.domain.vcs_errors import VcsError
 
-from ..fakes import FakeQueue, FakeUow, FakeVcs, webhook_payload
+from ..fakes import (
+    NOW,
+    REGISTERED_PROVIDER_ID,
+    FakeQueue,
+    FakeUow,
+    FakeVcs,
+    webhook_payload,
+)
 
 SECRET = "test-webhook-secret"
 SIGNATURE_HEADER = "X-Hub-Signature-256"
@@ -114,7 +126,12 @@ def test_valid_opened_returns_202_with_review_job_projection() -> None:
     assert job["provider"] == "github"
     assert job["status"] == "queued"
     assert job["trigger"] == "webhook"
-    assert job["headCommitSha"] == run.head_sha
+    assert job["head_commit_sha"] == run.head_sha
+    # Тело — модель ReviewJob целиком: все поля, время в UTC с `Z`.
+    assert set(job) == set(ReviewJob.model_fields)
+    assert ReviewJob.model_validate(job).id == run.id
+    for key in ("created_at", "updated_at", "last_progress_at"):
+        assert re.fullmatch(UTC_DATETIME_PATTERN, job[key]), job[key]
     assert container.uow.commits == 1
     assert len(container.queue.jobs) == 1
 
@@ -144,10 +161,8 @@ def test_missing_signature_is_rejected_with_401() -> None:
     client, container = make_client()
     response = post_webhook(client, "opened", signature=None)
     assert response.status_code == 401
-    assert response.json() == {
-        "code": "WEBHOOK_SIGNATURE_INVALID",
-        "message": "invalid webhook signature",
-    }
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "WEBHOOK_SIGNATURE_INVALID"
     assert container.uow.review_runs.added == []
     assert container.queue.jobs == []
 
@@ -244,10 +259,8 @@ def test_vcs_failure_returns_502_without_records() -> None:
     )
     response = post_webhook(client, "opened")
     assert response.status_code == 502
-    assert response.json() == {
-        "code": "SCM_UNAVAILABLE",
-        "message": "VCS provider unavailable",
-    }
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
     assert container.uow.review_runs.added == []
     assert container.queue.jobs == []
 
@@ -271,3 +284,85 @@ def test_empty_secret_does_not_reach_the_endpoint() -> None:
             rabbitmq_url="amqp://guest:guest@localhost//",
             github_webhook_secret="",
         )
+
+
+# --- pull_request_review_thread: отметка закрытия треда ---------------------------
+
+ROOT_COMMENT_ID = "77"
+
+
+def thread_payload(action: str = "resolved") -> dict[str, object]:
+    """Тред с комментарием, который опубликовал сервис, в PR из `webhook_payload`."""
+    pull_request_event = webhook_payload("opened")
+    return {
+        "action": action,
+        "thread": {"comments": [{"id": int(ROOT_COMMENT_ID)}]},
+        "pull_request": pull_request_event["pull_request"],
+        "repository": pull_request_event["repository"],
+        "installation": pull_request_event["installation"],
+    }
+
+
+def with_published_thread(uow: FakeUow) -> PublishedComment:
+    """Запрос на изменение и корневой inline-комментарий сервиса в нём."""
+    repository = uow.repositories.find_by_provider(Provider.GITHUB, REGISTERED_PROVIDER_ID)
+    assert repository is not None
+    pull_request = webhook_payload("opened")["pull_request"]
+    uow.merge_requests.add(
+        MergeRequest(
+            id=uuid4(),
+            repository_id=repository.id,
+            number=pull_request["number"],
+            title="t",
+            description="",
+            author="a",
+            source_branch="s",
+            target_branch="t",
+            head_sha=pull_request["head"]["sha"],
+            state=MergeRequestState.OPEN,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    comment = PublishedComment(
+        id=uuid4(),
+        review_run_id=uuid4(),
+        provider_comment_id=ROOT_COMMENT_ID,
+        kind=CommentKind.INLINE,
+        published_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    uow.published_comments.add(comment)
+    return comment
+
+
+def post_thread_event(client: Client, action: str = "resolved") -> Response:
+    body = json.dumps(thread_payload(action)).encode("utf-8")
+    return post_webhook(client, body=body, event="pull_request_review_thread")
+
+
+def test_thread_resolved_on_github_is_acknowledged_and_recorded() -> None:
+    """Сценарий «Тред закрыт вручную на GitHub» (webhook-intake)."""
+    client, container = make_client()
+    comment = with_published_thread(container.uow)
+
+    response = post_thread_event(client, "resolved")
+
+    assert response.status_code == 202
+    assert response.json() == {"status": "acknowledged"}
+    stored = container.uow.published_comments.get(comment.id)
+    assert stored is not None and stored.thread_resolved is True
+    assert container.uow.review_runs.added == []
+    assert container.queue.jobs == []
+
+
+def test_thread_event_with_vcs_failure_is_502_scm_unavailable() -> None:
+    client, container = make_client(vcs=FakeVcs(error=VcsError("HTTP 502")))
+    with_published_thread(container.uow)
+
+    response = post_thread_event(client, "resolved")
+
+    assert response.status_code == 502
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "SCM_UNAVAILABLE"

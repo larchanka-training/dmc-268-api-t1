@@ -46,6 +46,8 @@ jobs:
       # сообщил бы одну ошибку на две несвязанные проблемы.
       - run: uv run lint-imports
       - run: uv run mypy .
+      # Контракт API — экспорт схемы из кода; устаревший docs/openapi/openapi.json — провал.
+      - run: uv run python scripts/export_openapi.py --check
 
   # Ошибка в спеке иначе всплывает только при архиве change: требование без
   # сценария, MODIFIED, теряющий сценарии, ADDED уже существующего требования.

@@ -87,7 +87,15 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
-`GET /health` отвечает `{"status": "ok"}`. Сгенерированная документация API лежит на `/docs`.
+`GET /health` отвечает `{"status": "ok"}`. Контракт API строится из кода: сервер отдаёт схему по
+`/openapi.json` и в Swagger UI на `/docs`, её экспорт лежит в `docs/openapi/openapi.json` — по нему
+фронтенд генерирует типы. После правки ручки или модели ответа обновите экспорт, CI проверяет, что
+он свежий:
+
+```bash
+uv run python scripts/export_openapi.py           # записать docs/openapi/openapi.json
+uv run python scripts/export_openapi.py --check   # то же, что в CI: rc=1, если файл устарел
+```
 
 Ручки `/api/v1`, кроме вебхуков и входа, требуют сессию. Для входа через GitHub
 нужны `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` и `PUBLIC_ORIGIN`

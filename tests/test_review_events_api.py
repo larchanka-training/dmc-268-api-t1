@@ -1,5 +1,6 @@
 """Контракт `GET /api/v1/reviews/{id}/events`. Без БД и без настоящего ожидания."""
 
+import re
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
@@ -66,7 +67,8 @@ def test_unknown_run_is_404_and_no_stream_opens() -> None:
     response = _client(None).get(f"/api/v1/reviews/{RUN_ID}/events")
 
     assert response.status_code == 404
-    assert response.headers["content-type"] == "application/json"
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "REVIEW_NOT_FOUND"
 
 
 def test_the_stream_forbids_caching_and_proxy_buffering() -> None:
@@ -76,6 +78,15 @@ def test_the_stream_forbids_caching_and_proxy_buffering() -> None:
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.headers["cache-control"] == "no-cache"
     assert response.headers["x-accel-buffering"] == "no"
+
+
+def test_the_stream_carries_a_trace_id() -> None:
+    """Поток SSE идёт через тот же middleware, что и прочие ответы: `X-Trace-ID` есть и здесь."""
+    response = _client(replace(RUN, status=S.COMPLETED)).get(f"/api/v1/reviews/{RUN_ID}/events")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert re.fullmatch(r"[0-9a-f]{32}", response.headers["X-Trace-ID"])
 
 
 def test_a_finished_run_gets_the_retry_hint_one_snapshot_and_the_stream_ends() -> None:
@@ -117,6 +128,7 @@ def test_a_malformed_id_is_rejected_before_any_read() -> None:
     response = _client(RUN).get("/api/v1/reviews/not-a-uuid/events")
 
     assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
 
 
 class _CountingContainer:

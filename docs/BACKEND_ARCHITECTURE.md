@@ -119,16 +119,19 @@ compile-time зависимости от слоя приложения.
 
 ### Сессия на ручках
 
-Сессию проверяют две зависимости FastAPI из `app/api/session.py`, собранные в
-`SESSION_REQUIRED` и подключённые на уровне роутера, а не middleware: какие ручки
-открыты, видно в объявлении маршрутов.
+Две проверки, по порядку:
 
-- `require_origin` — изменяющие запросы (`POST`, `PUT`, `PATCH`, `DELETE`) проходят,
-  только если `Origin` равен `PUBLIC_ORIGIN`; иначе `403 ORIGIN_FORBIDDEN`. Стоит
-  первой, чтобы чужой запрос отклонялся без похода в базу.
-- `current_user` — пользователь сессии из cookie `session` через use case
-  `authenticate`; без действительной сессии `401 UNAUTHENTICATED`, а пришедшая
-  недействительная cookie удаляется в том же ответе.
+- `OriginMiddleware` (`app/api/origin.py`) — изменяющие запросы (`POST`, `PUT`, `PATCH`,
+  `DELETE`) под `/api/v1/`, кроме приёма вебхуков, проходят, только если `Origin` равен
+  `PUBLIC_ORIGIN`; иначе `403 ORIGIN_FORBIDDEN`. Middleware, а не зависимость: FastAPI
+  разбирает JSON тела раньше зависимостей, а чужой запрос должен получить `403` до
+  разбора тела, сессии и базы.
+- `current_user` из `app/api/session.py` — зависимость в `SESSION_REQUIRED`, подключённая
+  на уровне роутера: какие ручки открыты, видно в объявлении маршрутов. Пользователь
+  сессии из cookie `session` через use case `authenticate`; без действительной сессии
+  `401 UNAUTHENTICATED`, а пришедшая недействительная cookie удаляется в том же ответе.
+  Битый JSON тела FastAPI отклоняет `422` раньше зависимостей, поэтому со своим `Origin`
+  и без сессии он получает `422`, а не `401`.
 
 Открыты без сессии: `/webhooks/*` (подпись), `/auth/{provider}/login`,
 `/auth/{provider}/callback` и `/health`. `POST /auth/logout` сессии не требует,

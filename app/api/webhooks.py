@@ -1,4 +1,4 @@
-"""Эндпоинт приёма вебхуков по контракту `docs/openapi/openapi.yaml`.
+"""Эндпоинт приёма вебхуков.
 
 Порядок строго по спеке: сырое тело читается до любого разбора, подпись из
 заголовка `X-Hub-Signature-256` проверяется чистой функцией `verify_hmac`,
@@ -13,9 +13,8 @@
 хостинга не ошибка (контракт: «ReviewJob создан или найден существующий»), а
 не-2xx он считает неудачной доставкой и повторяет её; игнор (`reopened`,
 незарегистрированный репозиторий, неизвестное действие) — 202
-`{"status": "ignored"}` по спеке вебхуков. Тела ошибок — `ApiError`
-(`code` + `message`), как в контракте, поэтому без `HTTPException` с его
-`{"detail": …}`.
+`{"status": "ignored"}` по спеке вебхуков. Ошибки — `ApiError`, тело —
+Problem Details из `app/api/errors.py`.
 
 Тело читается из `Request`, а не параметром `Body`: FastAPI для JSON-типа
 контента разбирает тело до проверки типов, что нарушило бы сценарий «подпись
@@ -28,13 +27,23 @@ GitLab приёмником пока не поддержан: маршрут к�
 
 import json
 from datetime import UTC, datetime
-from typing import Any
+from http import HTTPStatus
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Path, Request
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import get_container
+from app.api.errors import (
+    ERRORS_401_WEBHOOK_SIGNATURE,
+    ERRORS_422,
+    ERRORS_501_WEBHOOK_PROVIDER,
+    ERRORS_502_SCM,
+    ApiError,
+)
+from app.api.problems import ErrorCode
+from app.api.schemas import ReviewJob
 from app.application.sync_thread_resolution import handle_review_thread_webhook
 from app.application.use_cases.handle_webhook import (
     WebhookOutcome,
@@ -63,17 +72,56 @@ TRIGGERING_EVENT = "pull_request"
 REVIEW_THREAD_EVENT = "pull_request_review_thread"
 
 
-def _api_error(status_code: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content={"code": code, "message": message})
+class WebhookIgnored(BaseModel):
+    """Тело `202` для доставки, которая ревью не запускает: действие reopened, closed или
+    неизвестное, незарегистрированный репозиторий, тело без события."""
+
+    status: Literal["ignored"] = Field(description="Доставка принята и проигнорирована.")
 
 
-@router.post("/webhooks/{provider}", status_code=202)
-async def receive_webhook(provider: Provider, request: Request) -> Response:
+class WebhookAcknowledged(BaseModel):
+    """Тело `202` для события pull_request_review_thread: отметка закрытия треда принята."""
+
+    status: Literal["acknowledged"] = Field(description="Событие треда принято.")
+
+
+_IGNORED = WebhookIgnored(status="ignored")
+_ACKNOWLEDGED = WebhookAcknowledged(status="acknowledged")
+
+
+@router.post(
+    "/webhooks/{provider}",
+    status_code=HTTPStatus.ACCEPTED,
+    response_model=ReviewJob | WebhookIgnored | WebhookAcknowledged,
+    tags=["webhooks"],
+    # Без сессии: доставку подтверждает подпись.
+    openapi_extra={"security": []},
+    response_description=(
+        "Доставка принята: ReviewJob создан или найден существующий; WebhookIgnored — доставка "
+        "ревью не запускает; WebhookAcknowledged — событие pull_request_review_thread."
+    ),
+    summary="Принять webhook-доставку от хостинга и поставить ревью в очередь",
+    description=(
+        "Без сессии и без проверки Origin: доставку подтверждает подпись. ReviewJob создан или, "
+        "если для этого коммита уже есть нетерминальный, возвращён существующий. Дубль — не "
+        "ошибка: не-2xx хостинг считает неудачной доставкой и повторяет её, поэтому 409 здесь "
+        "не отдаём."
+    ),
+    responses={
+        **ERRORS_401_WEBHOOK_SIGNATURE,
+        **ERRORS_422,
+        **ERRORS_501_WEBHOOK_PROVIDER,
+        **ERRORS_502_SCM,
+    },
+)
+async def receive_webhook(
+    provider: Annotated[Provider, Path(description="Хостинг, приславший доставку.")], request: Request
+) -> ReviewJob | WebhookIgnored | WebhookAcknowledged:
     if provider not in SUPPORTED_PROVIDERS:
-        return _api_error(
-            501,
-            "PROVIDER_NOT_SUPPORTED",
-            f"провайдер {provider.value} приёмником вебхуков не поддержан",
+        raise ApiError(
+            HTTPStatus.NOT_IMPLEMENTED,
+            ErrorCode.PROVIDER_NOT_SUPPORTED,
+            "Приёмник вебхуков для этого провайдера не реализован.",
         )
     container = get_container(request)
     body = await request.body()
@@ -82,7 +130,11 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
     # Пустой секрет не подписывает ничего: все вебхуки отклоняются, в том
     # числе «подписанные» пустым ключом.
     if not secret or signature is None or not verify_hmac(body, signature, secret):
-        return _api_error(401, "WEBHOOK_SIGNATURE_INVALID", "invalid webhook signature")
+        raise ApiError(
+            HTTPStatus.UNAUTHORIZED,
+            ErrorCode.WEBHOOK_SIGNATURE_INVALID,
+            "Подписи X-Hub-Signature-256 нет, или она не совпала с телом доставки.",
+        )
 
     event_type = request.headers.get(EVENT_HEADER)
 
@@ -91,9 +143,9 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
     except json.JSONDecodeError:
         # Подпись валидна, но тело — не JSON: события из него не извлечь,
         # поэтому это игнор, а не ошибка.
-        return JSONResponse(status_code=202, content={"status": "ignored"})
+        return _IGNORED
     if not isinstance(payload, dict):
-        return JSONResponse(status_code=202, content={"status": "ignored"})
+        return _IGNORED
 
     if event_type == REVIEW_THREAD_EVENT:
         try:
@@ -105,14 +157,14 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
                 now=lambda: datetime.now(UTC),
             )
         except VcsError:
-            return _api_error(502, "SCM_UNAVAILABLE", "VCS provider unavailable")
-        return JSONResponse(status_code=202, content={"status": "acknowledged"})
+            raise _scm_unavailable()
+        return _ACKNOWLEDGED
 
     # Гейт события стоит до разбора тела: подписанная доставка другого события
     # с pull-request-совместимой формой (`pull_request_target`) не должна ни
     # создавать записи, ни доходить до use case.
     if event_type != TRIGGERING_EVENT:
-        return JSONResponse(status_code=202, content={"status": "ignored"})
+        return _IGNORED
 
     outcome = await run_in_threadpool(
         handle_webhook_event,
@@ -124,36 +176,48 @@ async def receive_webhook(provider: Provider, request: Request) -> Response:
         new_id=new_id,
     )
     if outcome.kind == "failure":
-        return _api_error(502, "SCM_UNAVAILABLE", "VCS provider unavailable")
+        raise _scm_unavailable()
     if outcome.kind == "ignored":
-        return JSONResponse(status_code=202, content={"status": "ignored"})
+        return _IGNORED
     if outcome.kind in _JOB_OUTCOMES:
-        return JSONResponse(status_code=202, content=_review_job_payload(outcome))
+        return _review_job(outcome)
     raise RuntimeError(f"неожиданный исход use case: {outcome.kind!r}")
 
 
-def _review_job_payload(outcome: WebhookOutcome) -> dict[str, Any]:
-    """Проекция прогона в публичную схему `ReviewJob` из `openapi.yaml`.
+def _scm_unavailable() -> ApiError:
+    return ApiError(
+        HTTPStatus.BAD_GATEWAY,
+        ErrorCode.SCM_UNAVAILABLE,
+        "Провайдер VCS не ответил или ответил ошибкой; прогон не создан.",
+    )
 
-    `findingsCount` у свежего прогона всегда 0: находки появляются позже,
+
+def _review_job(outcome: WebhookOutcome) -> ReviewJob:
+    """Проекция прогона в публичную модель `ReviewJob` (`app/api/schemas.py`).
+
+    `findings_count` у свежего прогона всегда 0: находки появляются позже,
     при обработке задачи воркером, и в этот эндпоинт больше не возвращаются.
     """
     run, merge_request, repository = outcome.run, outcome.merge_request, outcome.repository
     if run is None or merge_request is None or repository is None:
         raise RuntimeError(f"исход {outcome.kind!r} без записей для проекции ReviewJob")
-    return {
-        "id": str(run.id),
-        "provider": repository.provider.value,
-        "providerRepositoryId": repository.provider_id,
-        "pullRequestNumber": merge_request.number,
-        "trigger": run.trigger.value,
-        "status": run.status.value,
-        "headCommitSha": run.head_sha,
-        "baseCommitSha": run.base_sha,
-        "findingsCount": 0,
-        "rejectedFindings": run.rejected_findings,
-        "createdAt": run.created_at.isoformat(),
-        "updatedAt": run.updated_at.isoformat(),
-        "lastProgressAt": run.last_progress_at.isoformat(),
-        "error": None,
-    }
+    return ReviewJob(
+        id=run.id,
+        provider=repository.provider,
+        provider_repository_id=repository.provider_id,
+        pull_request_number=merge_request.number,
+        trigger=run.trigger,
+        status=run.status,
+        head_commit_sha=run.head_sha,
+        base_commit_sha=run.base_sha,
+        findings_count=0,
+        rejected_findings=run.rejected_findings,
+        model=run.model,
+        tokens_used=run.tokens_used,
+        duration_seconds=run.duration_seconds,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        last_progress_at=run.last_progress_at,
+        failed_stage=run.failed_stage,
+        error=None,
+    )
