@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larchanka-training.github.io/dmc-268-api-t1/schemas/llm_verification_output.schema.json",
+  "title": "LlmVerificationOutput",
+  "description": "Ответ верификатора (второй проход, Reflection Pass) на замечания первого прохода. Вердикт - ровно один на каждый переданный идентификатор; это проверяет сервис, схема этого не выражает.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "verdicts"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1"
+    },
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "verdict", "reason"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Идентификатор замечания из запроса верификации (F1, F2, ...)."
+          },
+          "verdict": {
+            "type": "string",
+            "enum": ["keep", "drop"]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Почему замечание оставлено или отброшено; пишется в лог прогона."
+          }
+        }
+      }
+    }
+  }
+}

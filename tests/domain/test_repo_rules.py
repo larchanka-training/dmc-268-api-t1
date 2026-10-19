@@ -63,6 +63,41 @@ def test_rule_without_checks_is_rejected_and_others_survive() -> None:
     assert rejected == (RejectedRule(name="Naming", reason="нет проверок"),)
 
 
+def test_repeated_rule_name_is_rejected_and_the_first_rule_stays() -> None:
+    """Имя - ключ ссылки замечания на правило, поэтому оно уникально в файле."""
+    repeated = FULL_RULE + "\n## Error Handling Standards\n\n- pattern: `**/*.py`\n\n1. Другое\n"
+    accepted, rejected = parse_rules_markdown(repeated)
+    assert accepted == (ERROR_HANDLING,)
+    assert rejected == (
+        RejectedRule(name="Error Handling Standards", reason="имя правила повторяется"),
+    )
+
+
+def test_rejected_rule_does_not_take_its_name() -> None:
+    text = """\
+## Naming
+
+- pattern: app/**
+
+Пишите хорошие имена.
+
+## Naming
+
+- pattern: app/**
+
+1. Имя функции - глагол
+"""
+    accepted, rejected = parse_rules_markdown(text)
+    assert accepted == (RepoRule("Naming", ("app/**",), (), ("Имя функции - глагол",)),)
+    assert rejected == (RejectedRule(name="Naming", reason="нет проверок"),)
+
+
+def test_checks_are_numbered_by_position_not_by_the_author() -> None:
+    text = "## Naming\n\n- pattern: app/**\n\n1. первая\n1. вторая\n5. третья\n"
+    ((rule,), _) = parse_rules_markdown(text)
+    assert rule.checks == ("первая", "вторая", "третья")
+
+
 def test_rule_without_exclude_is_accepted_and_excludes_nothing() -> None:
     text = """\
 ## All sources

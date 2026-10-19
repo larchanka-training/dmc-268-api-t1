@@ -102,6 +102,32 @@ class RulesStatus(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class VerificationOutcome(StrEnum):
+    """Чем закончился второй проход модели (Reflection Pass) для прогона.
+
+    `unavailable` - fail-open: верификатор упал или ответил не по схеме, и
+    опубликованы замечания, прошедшие только детерминированный отсев.
+    """
+
+    VERIFIED = "verified"
+    NOT_REQUIRED = "not_required"
+    UNAVAILABLE = "unavailable"
+
+
+class VerifierVerdict(StrEnum):
+    """Решение верификатора по одному замечанию первого прохода."""
+
+    KEEP = "keep"
+    DROP = "drop"
+
+
+class PromptRole(StrEnum):
+    """Роль сообщения в запросе к модели."""
+
+    SYSTEM = "system"
+    USER = "user"
+
+
 class Language(StrEnum):
     """Язык файла, для которого есть грамматика AST-окружения."""
 

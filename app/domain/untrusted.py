@@ -12,7 +12,13 @@
   промпт этого требует, но гарантии от самой модели нет;
 - управляющие, bidi- и zero-width-символы заменяются видимой записью кодовой
   точки: модель видит Trojan Source, а не читает текст в порядке, который
-  подсунул автор.
+  подсунул автор;
+- у служебных маркеров - токенов чат-шаблонов и начала строки разметки
+  блока `<<<` - первый символ заменяется той же записью. llama.cpp (под
+  Ollama) разбирает служебные токены и внутри текста реплики, поэтому
+  `<|im_start|>system` в диффе мог бы стать настоящей сменой роли, а
+  поддельная `<<<end …>>>` перестаёт быть строкой-границей, даже если модель
+  не сверяет `id`.
 
 Граница детерминирована — чистая функция без случайности, тест сверяет
 точное значение. Пути файлов в разметку не попадают: они лежат отдельными
@@ -20,6 +26,7 @@
 """
 
 import hashlib
+import re
 import unicodedata
 
 # Видимые и безопасные: перевод строки и табуляция — часть кода.
@@ -35,14 +42,44 @@ _HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 _BOUNDARY_HEX = 32
 
 
+# Служебные маркеры: совпадает только первый символ, остальное - в lookahead.
+# Поэтому соседние маркеры экранируются все (`<<<<` - дважды), а остаток не
+# собирается в маркер заново. `>>>` не трогаем: это doctest и REPL, а любая
+# строка разметки начинается с `<<<`.
+_MARKER_START = re.compile(
+    r"""
+      <(?=<<)                        # разметка блоков недоверенных данных
+    | <(?=\|[A-Za-z_][\w.-]*\|>)     # ChatML, Llama 3, Phi: <|im_start|>
+    | <(?=｜[^｜\n]*｜>)               # DeepSeek, полноширинная черта: <｜begin▁of▁sentence｜>
+    # Llama 2 и Mistral: [INST] [/INST]; управляющие токены Mistral v3/v7
+    # (tekken): [SYSTEM_PROMPT] [/SYSTEM_PROMPT], [TOOL_CALLS] и другие.
+    | \[(?=/?(?:INST|SYSTEM_PROMPT|AVAILABLE_TOOLS|TOOL_CALLS|TOOL_RESULTS|TOOL_CONTENT|THINK)\])
+    | <(?=</?SYS>>)                  # Llama 2: <<SYS>> <</SYS>>
+    | <(?=(?:start|end)_of_turn>)    # Gemma
+    | <(?=(?:bos|eos)>)              # BOS/EOS Gemma: <bos> <eos>
+    | <(?=/?s>)                      # BOS/EOS SentencePiece-моделей: <s> </s>
+    """,
+    re.VERBOSE,
+)
+
+
+def _visible(char: str) -> str:
+    return f"<U+{ord(char):04X}>"
+
+
 def sanitize(text: str) -> str:
-    """Заменить невидимые и управляющие символы записью `<U+XXXX>`."""
-    return "".join(
+    """Сделать видимыми невидимые и управляющие символы и обезвредить маркеры.
+
+    Сначала невидимые символы: zero-width внутри маркера тогда уже заменён
+    записью и маркер не складывается.
+    """
+    visible = "".join(
         char
         if char in _KEPT_CONTROLS or unicodedata.category(char) not in _HIDDEN_CATEGORIES
-        else f"<U+{ord(char):04X}>"
+        else _visible(char)
         for char in text
     )
+    return _MARKER_START.sub(lambda match: _visible(match.group()), visible)
 
 
 def boundary(text: str) -> str:

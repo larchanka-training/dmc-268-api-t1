@@ -16,9 +16,12 @@ import tomllib
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+from pydantic import BaseModel
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
+from app.application.llm_schema import ReviewOutput, VerificationOutput
 from app.domain.lifecycle import _ALLOWED
 from app.infrastructure.db import models  # noqa: F401
 from app.infrastructure.db.base import Base
@@ -32,6 +35,8 @@ README = ROOT / "README.md"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 PIPELINE_SPEC = ROOT / "docs" / "pipeline" / "PIPELINE_SPEC.md"
 OPENAPI = ROOT / "docs" / "openapi" / "openapi.json"
+LLM_REVIEW_SCHEMA = ROOT / "docs" / "openapi" / "llm_review_output.schema.json"
+LLM_VERIFICATION_SCHEMA = ROOT / "docs" / "openapi" / "llm_verification_output.schema.json"
 
 # Ограничения, которые стоит зафиксировать: в обоих есть правило про NULL,
 # которое легко потерять и невозможно заметить снаружи.
@@ -219,6 +224,84 @@ def can_fail_validation(parameter: dict[str, Any]) -> bool:
     return any(
         variant.get("type") not in ("string", "null") or set(variant) - {"type", "title", "description"}
         for variant in schema.get("anyOf", [schema])
+    )
+
+
+# Аннотации не влияют на то, что схема принимает, и расходятся по делу: в json-схемах
+# описания длиннее.
+ANNOTATIONS = {"description", "example", "title", "$schema", "$id"}
+
+
+def schema_shape(node: Any) -> Any:
+    """Схема без аннотаций, с раскрытыми $ref на соседние файлы и `required` без учёта порядка."""
+    if isinstance(node, list):
+        return [schema_shape(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    if "$ref" in node:
+        return schema_shape(json.loads((OPENAPI.parent / node["$ref"]).read_text()))
+    shape: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in ANNOTATIONS:
+            continue
+        if key == "properties":
+            # Здесь ключи - имена полей, а не ключевые слова: не фильтруем.
+            shape[key] = {name: schema_shape(prop) for name, prop in value.items()}
+        elif key == "required":
+            shape[key] = sorted(value)
+        else:
+            shape[key] = schema_shape(value)
+    return shape
+
+
+def json_schema_form(node: Any, defs: dict[str, Any]) -> Any:
+    """Одна запись для двух способов сказать одно и то же.
+
+    Pydantic пишет необязательное поле как `anyOf: [X, {type: null}]` с
+    `default`, выносит перечисления в `$defs`; документация пишет
+    `type: [T, "null"]` или `oneOf`. Что схема принимает, от записи не зависит.
+    """
+    if isinstance(node, list):
+        return [json_schema_form(item, defs) for item in node]
+    if not isinstance(node, dict):
+        return node
+    if "$ref" in node:
+        return json_schema_form(defs[node["$ref"].removeprefix("#/$defs/")], defs)
+    form: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in ANNOTATIONS or key in {"default", "$defs"}:
+            continue
+        if key == "properties":
+            form[key] = {name: json_schema_form(prop, defs) for name, prop in value.items()}
+        elif key == "required":
+            form[key] = sorted(value)
+        elif key == "oneOf":
+            form["anyOf"] = json_schema_form(value, defs)
+        else:
+            form[key] = json_schema_form(value, defs)
+    kind = form.get("type")
+    if isinstance(kind, list) and "null" in kind and len(kind) == 2:
+        (other,) = (t for t in kind if t != "null")
+        return {"anyOf": [{**form, "type": other}, {"type": "null"}]}
+    return form
+
+
+@pytest.mark.parametrize(
+    ("model", "path"),
+    [
+        (ReviewOutput, LLM_REVIEW_SCHEMA),
+        (VerificationOutput, LLM_VERIFICATION_SCHEMA),
+    ],
+)
+def test_llm_output_model_matches_documented_schema(model: type[BaseModel], path: Path) -> None:
+    """Модель ответа - то, что уходит провайдеру и проверяет ответ; документ - контракт команды."""
+    generated = model.model_json_schema()
+    code_form = json_schema_form(generated, generated.get("$defs", {}))
+    doc_form = json_schema_form(schema_shape(json.loads(path.read_text())), {})
+    assert code_form == doc_form, (
+        f"{path} has drifted from {model.__name__}.\n"
+        f"  code: {json.dumps(code_form, ensure_ascii=False, sort_keys=True)}\n"
+        f"  doc:  {json.dumps(doc_form, ensure_ascii=False, sort_keys=True)}"
     )
 
 

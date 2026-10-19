@@ -44,6 +44,7 @@ from app.domain.enums import (
     Provider,
     ReviewRunStatus,
     TriggerSource,
+    VerificationOutcome,
 )
 from app.domain.provider_links import merge_request_url
 
@@ -95,6 +96,14 @@ class CreateReviewRequest(StrictRequest):
     trigger: TriggerSource = Field(strict=False, description="Источник запуска.", examples=["manual"])
 
 
+class RuleRefResponse(BaseModel):
+    """Пункт правила владельца, по которому выпущена находка."""
+
+    name: str = Field(description="Имя правила из .review/rules.md.", examples=["Error Handling Standards"])
+    check: int = Field(description="Номер пункта правила, с 1.", examples=[2])
+    check_text: str = Field(description="Текст пункта на момент прогона.")
+
+
 class FindingResponse(BaseModel):
     """Находка ревью, привязанная к строке диффа."""
 
@@ -109,6 +118,9 @@ class FindingResponse(BaseModel):
     suggestion: str | None = Field(description="Предлагаемая правка; null, если её нет.")
     confidence: float | None = Field(
         description="Уверенность модели в находке, обычно от 0 до 1; null, если модель её не дала."
+    )
+    rule: RuleRefResponse | None = Field(
+        description="Пункт правила владельца, по которому выпущена находка; null - находка по стандартным критериям."
     )
 
 
@@ -161,6 +173,11 @@ class ReviewRunResponse(BaseModel):
     model: str | None = Field(description="Модель LLM, которая провела ревью; null до анализа.")
     tokens_used: int | None = Field(description="Токенов LLM потрачено; null до анализа.")
     rejected_findings: int = Field(ge=0, description="Сколько находок отброшено: привязка вне изменённых строк диффа.")
+    verification: VerificationOutcome | None = Field(
+        description="Итог второго прохода модели (Reflection Pass); null, пока анализ не завершён.",
+        examples=["verified"],
+    )
+    verifier_dropped_findings: int = Field(ge=0, description="Сколько находок отбросил верификатор.")
     duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
     failure_reason: str | None = Field(description="Почему прогон упал; null, если не падал.")
     failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)

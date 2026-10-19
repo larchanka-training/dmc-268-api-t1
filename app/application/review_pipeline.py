@@ -2,7 +2,10 @@
 
 Use case уровня application: знает порты (`UnitOfWork`, `LlmGateway`,
 `VcsGateway` и порты сборки контекста) и
-чистые функции домена (`advance`), не знает ни одного адаптера. Каждый
+чистые функции домена (`advance`, отсев замечаний), не знает ни одного
+адаптера. Анализ - два прохода модели (спека `review-verification`): ревью,
+детерминированный отсев, верификатор, который может только отбросить
+замечание. Сбой верификатора прогон не роняет (fail-open). Каждый
 переход — свой вход в `with uow:` и свой `commit`, поэтому прогресс,
 записанный до сбоя, не откатывается вместе с сбойным шагом: если воркер
 упадёт после `analysing`, база уже знает об этом, и `find_stale` сможет
@@ -10,12 +13,13 @@ Use case уровня application: знает порты (`UnitOfWork`, `LlmGate
 """
 
 import logging
-from collections.abc import Callable
-from dataclasses import replace
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime
 from uuid import UUID
 
 from app.application.context_assembly import ContextLimits
+from app.application.llm_review import request_review, request_verification
 from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
@@ -23,9 +27,12 @@ from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.publish_review import publish_review
 from app.application.use_cases.build_review_context import build_review_context
-from app.domain.entities import Finding, ReviewJob, ReviewRun
-from app.domain.enums import TERMINAL_STATUSES, ReviewRunStatus
+from app.domain.entities import ContextPayload, Finding, ReviewJob, ReviewRun
+from app.domain.enums import TERMINAL_STATUSES, ReviewRunStatus, VerificationOutcome
 from app.domain.lifecycle import advance
+from app.domain.llm_errors import LlmError
+from app.domain.prompt import PromptTexts
+from app.domain.verification import apply_verdicts, screen_findings
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +53,10 @@ def _mark_failed(uow: UnitOfWork, run_id: UUID, exc: Exception, now: datetime) -
     Копия прогона в памяти могла разойтись с базой (строка ушла вперёд), и
     переход от неё бросил бы сам. Терминальный прогон не трогаем. Сбой этой
     записи (например, база недоступна) логируется и не подменяет исходное
-    исключение — зависший прогон выметет `sweep_stale_runs`.
+    исключение - зависший прогон выметет `sweep_stale_runs`. Токены, которые
+    успел израсходовать сбойный вызов модели, добавляются к затратам прогона.
     """
+    spent = exc.tokens_used if isinstance(exc, LlmError) else 0
     try:
         with uow:
             run = uow.review_runs.get(run_id)
@@ -57,6 +66,8 @@ def _mark_failed(uow: UnitOfWork, run_id: UUID, exc: Exception, now: datetime) -
                 advance(run, ReviewRunStatus.FAILED, now).unwrap(),
                 failure_reason=str(exc) or type(exc).__name__,
             )
+            if spent:
+                failed = replace(failed, tokens_used=(failed.tokens_used or 0) + spent)
             uow.review_runs.update(failed)
             uow.commit()
     except Exception:
@@ -72,6 +83,7 @@ def run_review(
     definition_extractor: DefinitionExtractor,
     cache_store: CacheStore,
     context_limits: ContextLimits,
+    prompt_texts: PromptTexts,
     now: Callable[[], datetime],
     monotonic: Callable[[], float],
     new_id: Callable[[], UUID],
@@ -86,7 +98,8 @@ def run_review(
     Сбой любого шага переводит прогон в `failed` и **пробрасывается**: воркер
     отклоняет сообщение, и оно попадает в DLQ для разбора (`job-queue`).
     Сбои правил и AST-окружения шагом не считаются — их гасит сборка
-    контекста, деградируя пакет (`context-assembly`).
+    контекста, деградируя пакет (`context-assembly`). Сбой верификатора -
+    тоже: публикуются замечания, прошедшие отсев, итог - `unavailable`.
     """
     with uow:
         run = uow.review_runs.get(job.review_run_id)
@@ -123,25 +136,37 @@ def run_review(
 
         run = _transition(uow, run, ReviewRunStatus.ANALYSING, now())
 
-        result = llm_gateway.review(context)
+        result = request_review(context, prompt_texts, llm_gateway)
+        screening = screen_findings(
+            result.findings,
+            hunks=assembled.hunks,
+            shown_rules=assembled.rules,
+            review_run_id=run.id,
+            now=now(),
+            new_id=new_id,
+        )
+        # Два долгих вызова модели подряд не должны выглядеть для `find_stale`
+        # одним прогоном без прогресса.
+        run = _record_progress(uow, run, now())
+        verification = _verify(context, prompt_texts, llm_gateway, screening.kept, run.id)
+        if result.findings and not verification.findings:
+            # Сводка модели описывает замечания, которых в публикации не будет:
+            # публикация возьмёт стандартную.
+            result = replace(result, summary=None)
+        # Модель и затраты - вместе с замечаниями: сбой публикации их не стирает.
+        run = replace(
+            run,
+            last_progress_at=now(),
+            rejected_findings=run.rejected_findings + screening.rejected,
+            verification=verification.outcome,
+            verifier_dropped_findings=verification.dropped,
+            model=result.model,
+            tokens_used=result.tokens_used + verification.tokens_used,
+        )
         with uow:
-            for item in result.findings:
-                moment = now()
-                finding = Finding(
-                    id=new_id(),
-                    review_run_id=run.id,
-                    anchor=item.anchor,
-                    category=item.category,
-                    severity=item.severity,
-                    message=item.message,
-                    suggestion=item.suggestion,
-                    confidence=item.confidence,
-                    created_at=moment,
-                    updated_at=moment,
-                )
-                # Отклонённая привязка учтена в прогоне и не прерывает
-                # остальные находки.
-                uow.findings.add_validated(finding, assembled.hunks, moment)
+            for finding in verification.findings:
+                uow.findings.add(finding)
+            uow.review_runs.update(run)
             uow.commit()
 
         run = _transition(uow, run, ReviewRunStatus.PUBLISHING, now())
@@ -156,13 +181,86 @@ def run_review(
             new_id=new_id,
         )
 
-        run = replace(
-            run,
-            model=result.model,
-            tokens_used=result.tokens_used,
-            duration_seconds=monotonic() - started_at,
-        )
+        run = replace(run, duration_seconds=monotonic() - started_at)
         _transition(uow, run, ReviewRunStatus.COMPLETED, now())
     except Exception as exc:
         _mark_failed(uow, job.review_run_id, exc, now())
         raise
+
+
+@dataclass(frozen=True, slots=True)
+class _Verification:
+    findings: tuple[Finding, ...]
+    outcome: VerificationOutcome
+    dropped: int
+    tokens_used: int
+
+
+def _verify(
+    context: ContextPayload,
+    texts: PromptTexts,
+    gateway: LlmGateway,
+    candidates: Sequence[Finding],
+    run_id: UUID,
+) -> _Verification:
+    """Второй проход: оставить замечания, которые верификатор подтвердил.
+
+    Без кандидатов модель не вызывается. Сбой вызова или ответ, не покрывающий
+    кандидатов ровно по разу, - fail-open: кандидаты публикуются как есть, а
+    итог `unavailable` виден в прогоне. Прочие исключения не гасятся.
+    """
+    if not candidates:
+        return _Verification((), VerificationOutcome.NOT_REQUIRED, 0, 0)
+    try:
+        answer = request_verification(context, texts, gateway, candidates)
+    except LlmError as error:
+        logger.warning(
+            "верификатор недоступен для прогона %s, публикуются замечания после отсева",
+            run_id,
+            exc_info=True,
+        )
+        return _Verification(
+            tuple(candidates), VerificationOutcome.UNAVAILABLE, 0, error.tokens_used
+        )
+    if not answer.verdicts.ok:
+        logger.warning(
+            "ответ верификатора для прогона %s не принят: %s", run_id, answer.verdicts.error
+        )
+        return _Verification(
+            tuple(candidates), VerificationOutcome.UNAVAILABLE, 0, answer.tokens_used
+        )
+    applied = apply_verdicts(candidates, answer.verdicts.unwrap())
+    for finding, reason in applied.dropped:
+        logger.info(
+            "прогон %s: верификатор отбросил замечание %s (%s/%s): %s",
+            run_id,
+            _where(finding),
+            finding.category,
+            finding.severity,
+            reason,
+        )
+    for finding, reason in applied.overruled:
+        logger.warning(
+            "прогон %s: верификатор хотел отбросить замечание %s (%s/%s), оно оставлено: %s",
+            run_id,
+            _where(finding),
+            finding.category,
+            finding.severity,
+            reason,
+        )
+    return _Verification(
+        applied.kept, VerificationOutcome.VERIFIED, len(applied.dropped), answer.tokens_used
+    )
+
+
+def _where(finding: Finding) -> str:
+    return f"{finding.anchor.file_path}:{finding.anchor.new_line or finding.anchor.old_line}"
+
+
+def _record_progress(uow: UnitOfWork, run: ReviewRun, now: datetime) -> ReviewRun:
+    """Записать `last_progress_at` без смены состояния."""
+    run = replace(run, last_progress_at=now)
+    with uow:
+        uow.review_runs.update(run)
+        uow.commit()
+    return run

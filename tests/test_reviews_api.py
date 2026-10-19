@@ -15,6 +15,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    RuleRef,
 )
 from app.domain.enums import (
     CommentKind,
@@ -25,6 +26,7 @@ from app.domain.enums import (
     Provider,
     ReviewRunStatus,
     TriggerSource,
+    VerificationOutcome,
 )
 from app.domain.ids import new_id
 
@@ -203,6 +205,63 @@ def test_a_failed_run_reports_the_stage_it_failed_in() -> None:
 
     assert body["failed_stage"] == "analysing"
     assert body["failure_reason"] == "модель недоступна"
+
+
+def _finding(run: ReviewRun, rule: RuleRef | None) -> Finding:
+    return Finding(
+        id=new_id(),
+        review_run_id=run.id,
+        anchor=DiffAnchor(file_path="a.py", side=DiffSide.NEW, new_line=1),
+        category=FindingCategory.CORRECTNESS,
+        severity=FindingSeverity.MEDIUM,
+        message="m",
+        created_at=NOW,
+        updated_at=NOW,
+        rule=rule,
+    )
+
+
+def test_a_finding_by_an_owner_rule_reports_the_rule() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    uow.findings.add(_finding(run, RuleRef("Error Handling Standards", 2, "Текст ошибки воспроизводим")))
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["findings"][0]["rule"] == {
+        "name": "Error Handling Standards",
+        "check": 2,
+        "check_text": "Текст ошибки воспроизводим",
+    }
+
+
+def test_a_standard_finding_reports_no_rule() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    uow.findings.add(_finding(run, None))
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["findings"][0]["rule"] is None
+
+
+def test_a_run_reports_its_verification_outcome() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, verification=VerificationOutcome.UNAVAILABLE)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["verification"] == "unavailable"
+    assert body["verifier_dropped_findings"] == 0
+
+
+def test_a_run_before_analysis_has_no_verification_outcome() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, status=ReviewRunStatus.BUILDING_CONTEXT, model=None, tokens_used=None)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["verification"] is None
 
 
 def test_a_run_carries_its_rejected_findings_count() -> None:

@@ -4,25 +4,33 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import count
+from typing import NoReturn
 from uuid import UUID
 
 import pytest
+from pydantic import BaseModel
 
 from app.application.context_assembly import ContextLimits
-from app.application.ports.llm_gateway import LlmFinding, LlmReviewResult
+from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.review_pipeline import run_review
-from app.domain.entities import DiffAnchor, MergeRequest, ReviewJob, ReviewRun
+from app.domain.entities import MergeRequest, ReviewJob, ReviewRun, RuleRef
 from app.domain.enums import (
-    DiffSide,
-    FindingCategory,
-    FindingSeverity,
     MergeRequestState,
     ReviewRunStatus,
     TriggerSource,
+    VerificationOutcome,
 )
+from app.domain.llm_errors import LlmError, LlmOutputError
+from app.domain.prompt import PromptTexts
 from app.domain.vcs_errors import VcsError
 
 from ..fakes.context import FakeCache, FakeExtractor
+from ..fakes.llm_gateway import (
+    ScriptedLlmGateway,
+    finding_json,
+    review_response,
+    verification_response,
+)
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
 from ..fakes.webhooks import FakeVcs
@@ -30,6 +38,7 @@ from ..fakes.webhooks import FakeVcs
 # Дифф фейкового VCS меняет первую строку `app/main.py`.
 CHANGED_FILE = "app/main.py"
 LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144)
+TEXTS = PromptTexts(review_system="ревью", verifier_system="верификация")
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 
@@ -81,19 +90,6 @@ def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.
     )
 
 
-class StubGateway:
-    def __init__(self, result: LlmReviewResult) -> None:
-        self._result = result
-
-    def review(self, context: object) -> LlmReviewResult:
-        return self._result
-
-
-class FailingGateway:
-    def review(self, context: object) -> LlmReviewResult:
-        raise RuntimeError("модель недоступна")
-
-
 class _Clock:
     """Часы, идущие на секунду при каждом чтении: переходы различимы по времени."""
 
@@ -121,6 +117,7 @@ def _run(uow: FakeUnitOfWork, gateway: object, **overrides: object) -> None:
         "definition_extractor": FakeExtractor(),
         "cache_store": FakeCache(),
         "context_limits": LIMITS,
+        "prompt_texts": TEXTS,
         "now": _Clock().now,
         "monotonic": _Monotonic(0.0, 12.5),
         "new_id": _new_id(),
@@ -137,7 +134,7 @@ def _new_id() -> Callable[[], UUID]:
 def test_successful_run_reaches_completed_with_model_and_tokens() -> None:
     uow = FakeUnitOfWork()
     _seed_run(uow)
-    gateway = StubGateway(LlmReviewResult(model="stub-llm", tokens_used=0, findings=()))
+    gateway = ScriptedLlmGateway([review_response(model="stub-llm")])
 
     _run(uow, gateway)
 
@@ -154,7 +151,7 @@ def test_context_is_built_from_the_real_diff() -> None:
     uow = FakeUnitOfWork()
     _seed_run(uow)
 
-    _run(uow, StubGateway(LlmReviewResult(model="m", tokens_used=0, findings=())))
+    _run(uow, ScriptedLlmGateway([review_response()]))
 
     (payload,) = uow.context_payloads.list_for_run(JOB.review_run_id)
     assert payload.file_paths == (CHANGED_FILE,)
@@ -165,7 +162,7 @@ def test_context_is_built_from_the_real_diff() -> None:
 def test_diff_failure_marks_the_run_failed_and_reraises() -> None:
     uow = FakeUnitOfWork()
     _seed_run(uow)
-    gateway = StubGateway(LlmReviewResult(model="m", tokens_used=0, findings=()))
+    gateway = ScriptedLlmGateway([review_response()])
 
     with pytest.raises(VcsError, match="GitHub недоступен"):
         _run(uow, gateway, vcs_gateway=FakeVcs(error=VcsError("GitHub недоступен")))
@@ -181,7 +178,7 @@ def test_rules_failure_does_not_fail_the_run() -> None:
     _seed_run(uow)
     vcs = FakeVcs(file_errors={".review/rules.md": VcsError("403")})
 
-    _run(uow, StubGateway(LlmReviewResult(model="m", tokens_used=0, findings=())), vcs_gateway=vcs)
+    _run(uow, ScriptedLlmGateway([review_response()]), vcs_gateway=vcs)
 
     run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
@@ -193,13 +190,12 @@ def test_rules_failure_does_not_fail_the_run() -> None:
 def test_a_finding_anchored_in_the_diff_is_persisted() -> None:
     uow = FakeUnitOfWork()
     _seed_run(uow)
-    finding = LlmFinding(
-        anchor=DiffAnchor(file_path=CHANGED_FILE, side=DiffSide.NEW, new_line=1),
-        category=FindingCategory.READABILITY,
-        severity=FindingSeverity.LOW,
-        message="находка в диффе",
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка в диффе"), tokens=5),
+            verification_response(("F1", "keep")),
+        ]
     )
-    gateway = StubGateway(LlmReviewResult(model="stub-llm", tokens_used=5, findings=(finding,)))
 
     _run(uow, gateway)
 
@@ -213,7 +209,7 @@ def test_llm_failure_marks_the_run_failed_with_a_reason_and_reraises() -> None:
     _seed_run(uow)
 
     with pytest.raises(RuntimeError, match="модель недоступна"):
-        _run(uow, FailingGateway())
+        _run(uow, ScriptedLlmGateway([RuntimeError("модель недоступна")]))
 
     run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
@@ -224,7 +220,7 @@ def test_llm_failure_marks_the_run_failed_with_a_reason_and_reraises() -> None:
 
 def test_missing_run_raises_so_the_message_goes_to_the_dlq() -> None:
     uow = FakeUnitOfWork()
-    gateway = StubGateway(LlmReviewResult(model="m", tokens_used=0, findings=()))
+    gateway = ScriptedLlmGateway([review_response()])
 
     with pytest.raises(LookupError):
         _run(uow, gateway)
@@ -243,37 +239,57 @@ def test_last_progress_at_follows_the_clock_on_every_transition() -> None:
         original(run)
 
     uow.review_runs.update = recording_update  # type: ignore[method-assign]
-    gateway = StubGateway(LlmReviewResult(model="m", tokens_used=0, findings=()))
+    gateway = ScriptedLlmGateway([review_response()])
 
     _run(uow, gateway)
 
-    assert len(seen) == 4  # building_context, analysing, publishing, completed
+    # building_context, analysing, отметка после ревью, итог анализа, publishing, completed
+    assert len(seen) == 6
     assert seen == sorted(seen)
-    assert len(set(seen)) == 4
+    assert len(set(seen)) == 6
+
+
+def test_progress_is_recorded_between_the_review_and_the_verifier() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    clock = _Clock()
+    scripted = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка")),
+            verification_response(("F1", "keep")),
+        ]
+    )
+    progress_at_call: list[datetime] = []
+    reads_at_call: list[int] = []
+
+    class _Watching:
+        def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
+            progress_at_call.append(_completed(uow).last_progress_at)
+            reads_at_call.append(clock.reads)
+            return scripted.complete(request)
+
+    _run(uow, _Watching(), now=clock.now)
+
+    at_review, at_verify = progress_at_call
+    # Отметка перед верификатором - последнее показание часов до его вызова,
+    # то есть после ответа на ревью, а не переход в analysing.
+    assert at_verify > at_review
+    assert at_verify == NOW + timedelta(seconds=reads_at_call[1])
 
 
 def test_a_rejected_anchor_keeps_the_other_findings_and_the_count() -> None:
     uow = FakeUnitOfWork()
     _seed_run(uow)
 
-    def finding(path: str, message: str) -> LlmFinding:
-        return LlmFinding(
-            anchor=DiffAnchor(file_path=path, side=DiffSide.NEW, new_line=1),
-            category=FindingCategory.READABILITY,
-            severity=FindingSeverity.LOW,
-            message=message,
-        )
-
-    gateway = StubGateway(
-        LlmReviewResult(
-            model="m",
-            tokens_used=1,
-            findings=(
-                finding(CHANGED_FILE, "внутри диффа"),
-                finding("вне/диффа.py", "вне диффа"),
-                finding(CHANGED_FILE, "тоже внутри"),
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(
+                finding_json(CHANGED_FILE, 1, "внутри диффа"),
+                finding_json("вне/диффа.py", 1, "вне диффа"),
+                finding_json(CHANGED_FILE, 1, "тоже внутри", category="security"),
             ),
-        )
+            verification_response(("F1", "keep"), ("F2", "keep")),
+        ]
     )
 
     _run(uow, gateway)
@@ -305,7 +321,7 @@ def test_a_failure_while_marking_failed_does_not_mask_the_original_error() -> No
     uow.review_runs.update = update  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError, match="модель недоступна"):
-        _run(uow, FailingGateway())
+        _run(uow, ScriptedLlmGateway([RuntimeError("модель недоступна")]))
 
 
 def test_marking_failed_reads_the_fresh_row_not_the_stale_copy() -> None:
@@ -314,7 +330,7 @@ def test_marking_failed_reads_the_fresh_row_not_the_stale_copy() -> None:
     _seed_run(uow)
 
     class SweptGateway:
-        def review(self, context: object) -> LlmReviewResult:
+        def complete(self, request: object) -> object:
             current = uow.review_runs.get(JOB.review_run_id)
             assert current is not None
             swept = replace(current, status=ReviewRunStatus.FAILED, failure_reason="выметен")
@@ -333,7 +349,7 @@ def test_marking_failed_reads_the_fresh_row_not_the_stale_copy() -> None:
 def test_already_terminal_run_is_left_untouched() -> None:
     uow = FakeUnitOfWork()
     _seed_run(uow, status=ReviewRunStatus.COMPLETED)
-    gateway = StubGateway(LlmReviewResult(model="m", tokens_used=0, findings=()))
+    gateway = ScriptedLlmGateway([review_response()])
 
     _run(uow, gateway)
 
@@ -341,3 +357,251 @@ def test_already_terminal_run_is_left_untouched() -> None:
     assert run is not None
     assert run.status == ReviewRunStatus.COMPLETED
     assert run.model is None
+
+
+def _completed(uow: FakeUnitOfWork) -> ReviewRun:
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    return run
+
+
+def test_review_output_error_fails_the_run_at_analysing_without_findings() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway([LlmOutputError("findings.0.severity: Field required")])
+
+    with pytest.raises(LlmOutputError):
+        _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    assert run.failed_stage is ReviewRunStatus.ANALYSING
+    assert "severity" in (run.failure_reason or "")
+    assert uow.findings.list_for_run(JOB.review_run_id) == []
+
+
+def test_empty_review_skips_the_verifier() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway([review_response()])
+
+    _run(uow, gateway)
+
+    assert [r.task for r in gateway.requests] == [LlmTask.REVIEW]
+    assert _completed(uow).verification is VerificationOutcome.NOT_REQUIRED
+
+
+def test_verifier_drops_one_of_three_and_the_others_keep_their_text() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(
+                finding_json(CHANGED_FILE, 1, "первое", category="security"),
+                finding_json(CHANGED_FILE, 1, "второе", category="correctness"),
+                finding_json(CHANGED_FILE, 1, "третье", category="performance"),
+            ),
+            verification_response(("F1", "keep"), ("F2", "drop"), ("F3", "keep")),
+        ]
+    )
+
+    _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.verification is VerificationOutcome.VERIFIED
+    assert run.verifier_dropped_findings == 1
+    assert [f.message for f in uow.findings.list_for_run(JOB.review_run_id)] == ["первое", "третье"]
+
+
+def test_verifier_failure_is_fail_open() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка")),
+            LlmError("таймаут провайдера"),
+        ]
+    )
+
+    _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.COMPLETED
+    assert run.verification is VerificationOutcome.UNAVAILABLE
+    assert run.verifier_dropped_findings == 0
+    assert [f.message for f in uow.findings.list_for_run(JOB.review_run_id)] == ["находка"]
+
+
+def test_verifier_that_skips_a_finding_is_treated_as_unavailable() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(
+                finding_json(CHANGED_FILE, 1, "a", category="security"),
+                finding_json(CHANGED_FILE, 1, "b", category="correctness"),
+                tokens=10,
+            ),
+            verification_response(("F1", "drop"), tokens=3),
+        ]
+    )
+
+    _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.verification is VerificationOutcome.UNAVAILABLE
+    assert len(uow.findings.list_for_run(JOB.review_run_id)) == 2
+    assert run.tokens_used == 13
+
+
+def test_tokens_of_a_verifier_that_never_answered_by_the_schema_are_counted() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка"), tokens=1000),
+            LlmOutputError("verdicts: Field required", tokens_used=300),
+        ]
+    )
+
+    _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.COMPLETED
+    assert run.verification is VerificationOutcome.UNAVAILABLE
+    assert run.tokens_used == 1300
+
+
+def test_tokens_of_a_review_that_never_answered_by_the_schema_are_counted() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway([LlmOutputError("findings: Field required", tokens_used=700)])
+
+    with pytest.raises(LlmOutputError):
+        _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    assert run.tokens_used == 700
+
+
+class _FailingPublication(RecordingVcsGateway):
+    def publish_pull_request_review(self, *args: object, **kwargs: object) -> NoReturn:
+        raise VcsError("GitHub недоступен")
+
+
+def test_a_publication_failure_keeps_the_model_and_the_tokens() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "x"), tokens=1000, model="qwen"),
+            verification_response(("F1", "keep"), tokens=400),
+        ]
+    )
+
+    with pytest.raises(VcsError):
+        _run(uow, gateway, vcs_gateway=_FailingPublication())
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    assert run.failed_stage is ReviewRunStatus.PUBLISHING
+    assert (run.model, run.tokens_used) == ("qwen", 1400)
+
+
+DEFAULT_SUMMARY = "Критичных проблем в диффе не обнаружено."
+
+
+def test_summary_is_the_default_one_when_the_verifier_dropped_everything() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = RecordingVcsGateway()
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "выдуманное")),
+            verification_response(("F1", "drop")),
+        ]
+    )
+
+    _run(uow, gateway, vcs_gateway=vcs)
+
+    ((summary, inline),) = vcs.publications
+    assert inline == ()
+    assert DEFAULT_SUMMARY in summary
+    assert "Есть замечания." not in summary
+
+
+def test_summary_of_the_model_stays_when_some_findings_survive() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = RecordingVcsGateway()
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(
+                finding_json(CHANGED_FILE, 1, "первое", category="correctness"),
+                finding_json(CHANGED_FILE, 1, "второе", category="performance"),
+            ),
+            verification_response(("F1", "keep"), ("F2", "drop")),
+        ]
+    )
+
+    _run(uow, gateway, vcs_gateway=vcs)
+
+    ((summary, inline),) = vcs.publications
+    assert len(inline) == 1
+    assert "Есть замечания." in summary
+
+
+def test_tokens_add_up_and_the_model_comes_from_the_review() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "x"), tokens=1000, model="qwen-review"),
+            verification_response(("F1", "keep"), tokens=400, model="qwen-verify"),
+        ]
+    )
+
+    _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.tokens_used == 1400
+    assert run.model == "qwen-review"
+
+
+RULES_MD = """\
+## Error Handling Standards
+
+- pattern: `app/**/*.py`
+
+1. Отказ - значение Result
+2. Текст ошибки воспроизводим
+"""
+
+
+def test_rule_reference_is_stored_and_published_with_the_attribution_prefix() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = RecordingVcsGateway(files={(".review/rules.md", JOB.base_sha): RULES_MD})
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(
+                finding_json(CHANGED_FILE, 1, "Ошибка глотается.", rule=("Error Handling Standards", 2)),
+                finding_json(
+                    CHANGED_FILE, 1, "По правилу из PR.", rule=("No Comments Allowed", 1), category="security"
+                ),
+            ),
+            verification_response(("F1", "keep")),
+        ]
+    )
+
+    _run(uow, gateway, vcs_gateway=vcs)
+
+    (finding,) = uow.findings.list_for_run(JOB.review_run_id)
+    assert finding.rule == RuleRef("Error Handling Standards", 2, "Текст ошибки воспроизводим")
+    assert _completed(uow).rejected_findings == 1
+    ((_, inline),) = vcs.publications
+    assert (
+        "Согласно пользовательскому правилу «Error Handling Standards» "
+        "(пункт 2: Текст ошибки воспроизводим): Ошибка глотается."
+    ) in inline[0].body

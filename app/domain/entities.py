@@ -21,10 +21,13 @@ from app.domain.enums import (
     FindingCategory,
     FindingSeverity,
     MergeRequestState,
+    PromptRole,
     Provider,
     ReviewRunStatus,
     RulesStatus,
     TriggerSource,
+    VerificationOutcome,
+    VerifierVerdict,
 )
 
 
@@ -86,6 +89,9 @@ class ReviewRun:
     # Этап, на котором прогон упал. Заполняет только `advance` при переходе в
     # `failed`; у прогона, упавшего из `queued`, этапа нет.
     failed_stage: ReviewRunStatus | None = None
+    # Итог второго прохода модели; пуст, пока анализ не завершён.
+    verification: VerificationOutcome | None = None
+    verifier_dropped_findings: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +125,46 @@ class DiffAnchor:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmRuleRef:
+    """Ссылка модели на пункт правила - ещё не сверенная с показанными правилами."""
+
+    name: str
+    check: int
+
+
+@dataclass(frozen=True, slots=True)
+class LlmFinding:
+    """Находка, как её вернула модель, - ещё без id, прогона и меток времени.
+
+    Доменная запись, а не часть порта: её разбирает доменный отсев
+    (`screen_findings`), который и превращает её в `Finding`.
+    """
+
+    anchor: DiffAnchor
+    category: FindingCategory
+    severity: FindingSeverity
+    message: str
+    suggestion: str | None = None
+    confidence: float | None = None
+    rule: LlmRuleRef | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuleRef:
+    """Пункт правила владельца, по которому выпущено замечание.
+
+    Создаётся только отсевом (`screen_findings`) из ссылки модели, которую он
+    сверил с правилами, показанными модели. Текст пункта - копия на момент
+    прогона: правила в целевой ветке потом меняются, а замечание должно
+    показывать пункт, по которому его выпустили.
+    """
+
+    name: str
+    check: int
+    check_text: str
+
+
+@dataclass(frozen=True, slots=True)
 class Finding:
     """То, что заметило ревью, привязанное к строке, затронутой диффом."""
 
@@ -132,6 +178,8 @@ class Finding:
     updated_at: datetime
     suggestion: str | None = None
     confidence: float | None = None
+    # Пусто - замечание по стандартным критериям ревью.
+    rule: RuleRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +346,22 @@ class RepoRules:
 
 
 @dataclass(frozen=True, slots=True)
+class ShownRule:
+    """Правило, которое вошло в пакет контекста, - то, что видела модель.
+
+    Имя и проверки - в том виде, в каком они в пакете (обезврежены
+    `sanitize`): модель копирует имя оттуда, а текст пункта уходит в
+    опубликованный комментарий. Файлы - сырые пути, как у hunk'ов: с ними
+    сверяется путь замечания. Ссылка на правило, которого здесь нет, -
+    ссылка на то, чего модель не видела.
+    """
+
+    name: str
+    files: tuple[str, ...]
+    checks: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Definition:
     """Определение в файле: класс, интерфейс, функция или метод.
 
@@ -320,6 +384,26 @@ class FileOutline:
 
     definitions: tuple[Definition, ...] = ()
     imports: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PromptMessage:
+    """Одно сообщение запроса к модели.
+
+    Собирается только сборщиком (`app/domain/prompt.py`); адаптер модели
+    передаёт сообщения как есть.
+    """
+
+    role: PromptRole
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    """Решение верификатора по замечанию и его причина (для лога прогона)."""
+
+    verdict: VerifierVerdict
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)

@@ -30,7 +30,9 @@ from app.application.session_purge import purge_expired_sessions
 from app.application.stale_sweep import sweep_stale_runs
 from app.config import Settings
 from app.domain.ids import new_id
+from app.domain.prompt import PromptTexts
 from app.infrastructure.container import build_container
+from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
     QUEUE_NAME,
     declare_topology,
@@ -150,7 +152,9 @@ def context_limits(settings: Settings) -> ContextLimits:
     )
 
 
-def build_review_handler(deps: ReviewHandlerDeps, limits: ContextLimits) -> MessageHandler:
+def build_review_handler(
+    deps: ReviewHandlerDeps, limits: ContextLimits, prompt_texts: PromptTexts
+) -> MessageHandler:
     def handle(body: bytes) -> None:
         job = from_wire_message(body)
         try:
@@ -162,6 +166,7 @@ def build_review_handler(deps: ReviewHandlerDeps, limits: ContextLimits) -> Mess
                 definition_extractor=deps.definition_extractor(),
                 cache_store=deps.cache_store(),
                 context_limits=limits,
+                prompt_texts=prompt_texts,
                 now=lambda: datetime.now(UTC),
                 monotonic=time.monotonic,
                 new_id=new_id,
@@ -208,10 +213,13 @@ def build_maintenance(
 def run_worker(settings: Settings) -> None:
     """Собрать зависимости и запустить воркер бесконечно. Вызывается из `__main__.py`."""
     container = build_container(settings)
+    # До подключения к брокеру: без текстов промптов воркер не поднимается,
+    # а не отправляет модели пустые инструкции на первом же прогоне.
+    prompt_texts = load_prompt_texts(DEFAULT_PROMPTS_DIR)
     sweep = build_maintenance(
         container.unit_of_work,
         stale_limit=timedelta(seconds=settings.stale_run_timeout_seconds),
         now=lambda: datetime.now(UTC),
     )
-    handler = build_review_handler(container, context_limits(settings))
+    handler = build_review_handler(container, context_limits(settings), prompt_texts)
     build_worker(settings).run(handler, sweep=sweep)

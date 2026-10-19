@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 
-from app.domain.entities import DiffAnchor, Finding, Hunk, ReviewRun
+from app.domain.entities import DiffAnchor, Finding, Hunk, ReviewRun, RuleRef
 from app.domain.enums import (
     DiffSide,
     FindingCategory,
@@ -43,6 +43,7 @@ def make_finding(
     old_line: int | None = None,
     new_line: int | None = 10,
     category: FindingCategory = FindingCategory.SECURITY,
+    rule: RuleRef | None = None,
 ) -> Finding:
     return Finding(
         id=uid(n),
@@ -55,6 +56,7 @@ def make_finding(
         message="message",
         created_at=NOW,
         updated_at=NOW,
+        rule=rule,
     )
 
 

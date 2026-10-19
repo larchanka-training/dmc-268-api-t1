@@ -12,6 +12,9 @@ COPY app ./app
 # on startup.
 COPY alembic.ini ./
 COPY alembic ./alembic
+# Тексты промптов: воркер читает их при старте и без них не поднимается
+# (app/infrastructure/prompts.py ищет их рядом с пакетом app).
+COPY prompts ./prompts
 
 ENV PATH="/app/.venv/bin:$PATH"
 # Байткод не пишем: на стенде файловая система контейнера только для чтения,

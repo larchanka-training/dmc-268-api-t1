@@ -2006,6 +2006,17 @@
             ],
             "title": "Confidence",
             "description": "Уверенность модели в находке, обычно от 0 до 1; null, если модель её не дала."
+          },
+          "rule": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuleRefResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Пункт правила владельца, по которому выпущена находка; null - находка по стандартным критериям."
           }
         },
         "type": "object",
@@ -2019,7 +2030,8 @@
           "severity",
           "message",
           "suggestion",
-          "confidence"
+          "confidence",
+          "rule"
         ],
         "title": "FindingResponse",
         "description": "Находка ревью, привязанная к строке диффа."
@@ -3469,6 +3481,26 @@
             "title": "Rejected Findings",
             "description": "Сколько находок отброшено: привязка вне изменённых строк диффа."
           },
+          "verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Итог второго прохода модели (Reflection Pass); null, пока анализ не завершён.",
+            "examples": [
+              "verified"
+            ]
+          },
+          "verifier_dropped_findings": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Verifier Dropped Findings",
+            "description": "Сколько находок отбросил верификатор."
+          },
           "duration_seconds": {
             "anyOf": [
               {
@@ -3569,6 +3601,8 @@
           "model",
           "tokens_used",
           "rejected_findings",
+          "verification",
+          "verifier_dropped_findings",
           "duration_seconds",
           "failure_reason",
           "failed_stage",
@@ -3772,6 +3806,39 @@
             "type": "urn:dmc-268:problem:route-not-found"
           }
         ]
+      },
+      "RuleRefResponse": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Имя правила из .review/rules.md.",
+            "examples": [
+              "Error Handling Standards"
+            ]
+          },
+          "check": {
+            "type": "integer",
+            "title": "Check",
+            "description": "Номер пункта правила, с 1.",
+            "examples": [
+              2
+            ]
+          },
+          "check_text": {
+            "type": "string",
+            "title": "Check Text",
+            "description": "Текст пункта на момент прогона."
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "check",
+          "check_text"
+        ],
+        "title": "RuleRefResponse",
+        "description": "Пункт правила владельца, по которому выпущена находка."
       },
       "ScmUnavailableProblem": {
         "properties": {
@@ -4089,6 +4156,16 @@
             "type": "urn:dmc-268:problem:validation-error"
           }
         ]
+      },
+      "VerificationOutcome": {
+        "type": "string",
+        "enum": [
+          "verified",
+          "not_required",
+          "unavailable"
+        ],
+        "title": "VerificationOutcome",
+        "description": "Чем закончился второй проход модели (Reflection Pass) для прогона.\n\n`unavailable` - fail-open: верификатор упал или ответил не по схеме, и\nопубликованы замечания, прошедшие только детерминированный отсев."
       },
       "WebhookAcknowledged": {
         "properties": {
