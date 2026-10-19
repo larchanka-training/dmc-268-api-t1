@@ -151,6 +151,14 @@ class ReviewJob(CamelCaseResponse):
     error: ReviewError | None = Field(description="Ошибка прогона; null, если прогон не упал.")
 
 
+class RepositoryBase(BaseModel):
+    """Поля репозитория, общие для списка репозиториев и сводки в прогоне ревью."""
+
+    id: UUID
+    provider: Provider = Field(description="Хостинг репозитория.", examples=["github"])
+    full_name: str = Field(description="Полное имя у провайдера: владелец/репозиторий.", examples=["octo-org/api"])
+
+
 class MergeRequestBase(BaseModel):
     """Поля запроса на изменение, общие для списка запросов и сводки в прогоне ревью."""
 

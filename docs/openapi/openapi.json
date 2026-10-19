@@ -2135,20 +2135,20 @@
               "github"
             ]
           },
-          "provider_id": {
-            "type": "string",
-            "title": "Provider Id",
-            "description": "Идентификатор репозитория у провайдера.",
-            "examples": [
-              "123456789"
-            ]
-          },
           "full_name": {
             "type": "string",
             "title": "Full Name",
             "description": "Полное имя у провайдера: владелец/репозиторий.",
             "examples": [
               "octo-org/api"
+            ]
+          },
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id",
+            "description": "Идентификатор репозитория у провайдера.",
+            "examples": [
+              "123456789"
             ]
           },
           "default_branch": {
@@ -2189,8 +2189,8 @@
         "required": [
           "id",
           "provider",
-          "provider_id",
           "full_name",
+          "provider_id",
           "default_branch",
           "auto_review_enabled",
           "created_at",
@@ -2206,6 +2206,13 @@
             "format": "uuid",
             "title": "Id"
           },
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "Хостинг репозитория.",
+            "examples": [
+              "github"
+            ]
+          },
           "full_name": {
             "type": "string",
             "title": "Full Name",
@@ -2213,20 +2220,13 @@
             "examples": [
               "octo-org/api"
             ]
-          },
-          "provider": {
-            "$ref": "#/components/schemas/Provider",
-            "description": "Хостинг репозитория.",
-            "examples": [
-              "github"
-            ]
           }
         },
         "type": "object",
         "required": [
           "id",
-          "full_name",
-          "provider"
+          "provider",
+          "full_name"
         ],
         "title": "RepositorySummary",
         "description": "Репозиторий запроса на изменение: ровно то, что нужно, чтобы его назвать и сослаться."

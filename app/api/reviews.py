@@ -30,6 +30,7 @@ from app.api.schemas import (
     CamelCaseRequest,
     FailedStage,
     MergeRequestBase,
+    RepositoryBase,
     ReviewJob,
     UtcDatetime,
 )
@@ -99,12 +100,8 @@ class FindingResponse(BaseModel):
     )
 
 
-class RepositorySummary(BaseModel):
+class RepositorySummary(RepositoryBase):
     """Репозиторий запроса на изменение: ровно то, что нужно, чтобы его назвать и сослаться."""
-
-    id: UUID
-    full_name: str = Field(description="Полное имя у провайдера: владелец/репозиторий.", examples=["octo-org/api"])
-    provider: Provider = Field(description="Хостинг репозитория.", examples=["github"])
 
 
 class MergeRequestSummary(MergeRequestBase):
