@@ -1126,6 +1126,248 @@
         }
       }
     },
+    "/api/v1/reviews/{review_run_id}/diff": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Дифф прогона",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #82). Когда ручка заработает: полный дифф запроса на изменение у провайдера между base_sha и head_sha прогона; 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию.",
+        "operationId": "getReviewDiff",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "review_run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор прогона ревью.",
+              "title": "Review Run Id"
+            },
+            "description": "Идентификатор прогона ревью."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Изменённые файлы с ханками.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewDiffResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Прогона ревью с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "501": {
+            "description": "Ручка ещё не реализована.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/reviews/{review_run_id}/steps": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Шаги прогона",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #82). Когда ручка заработает: шаги прогона по порядку — этап, статус, время, токены, код ошибки; без запросов и ответов модели. 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию.",
+        "operationId": "getReviewSteps",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "review_run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор прогона ревью.",
+              "title": "Review Run Id"
+            },
+            "description": "Идентификатор прогона ревью."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Шаги воркера по порядку.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRunStepListResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Прогона ревью с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "501": {
+            "description": "Ручка ещё не реализована.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/reviews/{review_run_id}/events": {
       "get": {
         "tags": [
@@ -1470,6 +1712,191 @@
         ],
         "title": "CreateReviewRequest",
         "description": "Запрос ручного запуска ревью запроса на изменение."
+      },
+      "DiffFileResponse": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Путь файла от корня репозитория.",
+            "examples": [
+              "app/main.py"
+            ]
+          },
+          "previous_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Path",
+            "description": "Путь до переименования; null, если файл не переименован."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed"
+            ],
+            "title": "Status",
+            "description": "Что произошло с файлом."
+          },
+          "is_binary": {
+            "type": "boolean",
+            "title": "Is Binary",
+            "description": "Бинарный файл: ханков нет."
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language",
+            "description": "Язык для подсветки синтаксиса; null, если не определён."
+          },
+          "additions": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Additions",
+            "description": "Добавленных строк."
+          },
+          "deletions": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Deletions",
+            "description": "Удалённых строк."
+          },
+          "hunks": {
+            "items": {
+              "$ref": "#/components/schemas/DiffHunkResponse"
+            },
+            "type": "array",
+            "title": "Hunks",
+            "description": "Ханки файла по порядку."
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "previous_path",
+          "status",
+          "is_binary",
+          "language",
+          "additions",
+          "deletions",
+          "hunks"
+        ],
+        "title": "DiffFileResponse",
+        "description": "Изменённый файл запроса на изменение."
+      },
+      "DiffHunkResponse": {
+        "properties": {
+          "header": {
+            "type": "string",
+            "title": "Header",
+            "description": "Заголовок ханка после @@: обычно сигнатура окружающего кода."
+          },
+          "old_start": {
+            "type": "integer",
+            "title": "Old Start",
+            "description": "Первая строка ханка в старой версии файла."
+          },
+          "old_count": {
+            "type": "integer",
+            "title": "Old Count",
+            "description": "Строк ханка в старой версии файла."
+          },
+          "new_start": {
+            "type": "integer",
+            "title": "New Start",
+            "description": "Первая строка ханка в новой версии файла."
+          },
+          "new_count": {
+            "type": "integer",
+            "title": "New Count",
+            "description": "Строк ханка в новой версии файла."
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/DiffLineResponse"
+            },
+            "type": "array",
+            "title": "Lines",
+            "description": "Строки ханка по порядку."
+          }
+        },
+        "type": "object",
+        "required": [
+          "header",
+          "old_start",
+          "old_count",
+          "new_start",
+          "new_count",
+          "lines"
+        ],
+        "title": "DiffHunkResponse",
+        "description": "Ханк unified diff."
+      },
+      "DiffLineResponse": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "added",
+              "removed",
+              "context"
+            ],
+            "title": "Kind",
+            "description": "Добавлена, удалена или контекст."
+          },
+          "old_line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Line",
+            "description": "Номер в старой версии файла, с 1; null у добавленной строки."
+          },
+          "new_line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Line",
+            "description": "Номер в новой версии файла, с 1; null у удалённой строки."
+          },
+          "content": {
+            "type": "string",
+            "title": "Content",
+            "description": "Текст строки без префикса +, - или пробела."
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "old_line",
+          "new_line",
+          "content"
+        ],
+        "title": "DiffLineResponse",
+        "description": "Строка ханка."
       },
       "DiffSide": {
         "type": "string",
@@ -2591,6 +3018,24 @@
           }
         ]
       },
+      "ReviewDiffResponse": {
+        "properties": {
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/DiffFileResponse"
+            },
+            "type": "array",
+            "title": "Files",
+            "description": "Изменённые файлы, включая файлы без замечаний."
+          }
+        },
+        "type": "object",
+        "required": [
+          "files"
+        ],
+        "title": "ReviewDiffResponse",
+        "description": "Дифф запроса на изменение, который ревьюил прогон."
+      },
       "ReviewError": {
         "properties": {
           "code": {
@@ -3149,6 +3594,113 @@
         ],
         "title": "ReviewRunStatus",
         "type": "string"
+      },
+      "ReviewRunStepListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewRunStepResponse"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "Шаги по порядку начала."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ReviewRunStepListResponse",
+        "description": "Шаги прогона."
+      },
+      "ReviewRunStepResponse": {
+        "properties": {
+          "stage": {
+            "type": "string",
+            "enum": [
+              "fetching_diff",
+              "building_context",
+              "analysing",
+              "verifying",
+              "publishing"
+            ],
+            "title": "Stage",
+            "description": "Этап прогона.",
+            "examples": [
+              "analysing"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "failed"
+            ],
+            "title": "Status",
+            "description": "Состояние шага."
+          },
+          "started_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Started At",
+            "description": "Когда шаг начался.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds",
+            "description": "Длительность шага; null, пока шаг идёт."
+          },
+          "tokens_used": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens Used",
+            "description": "Токенов LLM потрачено на шаге; null, если шаг модель не вызывал."
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code",
+            "description": "Код ошибки шага; null, если шаг не падал.",
+            "examples": [
+              "LLM_TIMEOUT"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "stage",
+          "status",
+          "started_at",
+          "duration_seconds",
+          "tokens_used",
+          "error_code"
+        ],
+        "title": "ReviewRunStepResponse",
+        "description": "Шаг воркера в прогоне."
       },
       "RouteNotFoundProblem": {
         "properties": {

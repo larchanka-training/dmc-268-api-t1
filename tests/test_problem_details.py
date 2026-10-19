@@ -37,6 +37,7 @@ SECRET_TEXT = "секрет-из-исключения"
 TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
 OPENAPI_JSON = Path(__file__).resolve().parent.parent / "docs" / "openapi" / "openapi.json"
 REVIEW_BODY = {"provider": "github", "providerRepositoryId": "1", "pullRequestNumber": 1, "trigger": "manual"}
+RUN_ID = "0192f0c4-7a1e-7b3c-9d2e-4f5a6b7c8d9e"
 CONNECT_BODY = {"provider": "github", "providerId": "123456789"}
 JSON = {"content-type": "application/json"}
 
@@ -307,6 +308,22 @@ def test_planned_repository_endpoints_check_session_origin_and_body_first(client
     )
     problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/repositories")
     assert problem["errors"] == [{"where": "body.providerId", "reason": "длина строки должна быть не меньше 1"}]
+
+
+@pytest.mark.parametrize("part", ["diff", "steps"])
+def test_planned_review_run_parts_answer_not_implemented(part: str) -> None:
+    """Дифф и шаги прогона описаны в схеме, а отвечают `501`."""
+    path = f"/api/v1/reviews/{RUN_ID}/{part}"
+    assert_problem(_signed_in_client().get(path), 501, "NOT_IMPLEMENTED", path)
+
+
+@pytest.mark.parametrize("part", ["diff", "steps"])
+def test_planned_review_run_parts_check_session_and_id_first(client: TestClient, part: str) -> None:
+    """Заглушки проверяют сессию и id прогона, как реализованные ручки."""
+    path = f"/api/v1/reviews/{RUN_ID}/{part}"
+    assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
+    path = f"/api/v1/reviews/not-a-uuid/{part}"
+    assert_problem(_signed_in_client().get(path), 422, "VALIDATION_ERROR", path)
 
 
 def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None:

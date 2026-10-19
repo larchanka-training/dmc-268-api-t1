@@ -9,7 +9,7 @@
 
 from dataclasses import asdict
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path
@@ -54,6 +54,18 @@ _CREATE_REVIEW_DESCRIPTION = (
     "только вебхук. Когда ручка заработает: 202 с ReviewJob, 409 REVIEW_ALREADY_ACTIVE, "
     "если по этому коммиту прогон уже идёт. Требует сессию и Origin сервиса; Origin "
     "проверяется раньше сессии и разбора тела."
+)
+
+# Решения 2 и 4 в dmc-268-ui-t1#37; реализация — отдельными задачами, ссылка появится здесь.
+_DIFF_DESCRIPTION = (
+    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
+    "(задача #82). Когда ручка заработает: полный дифф запроса на изменение у провайдера между base_sha "
+    "и head_sha прогона; 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию."
+)
+_STEPS_DESCRIPTION = (
+    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
+    "(задача #82). Когда ручка заработает: шаги прогона по порядку — этап, статус, время, токены, код "
+    "ошибки; без запросов и ответов модели. 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию."
 )
 
 # Сессия — на весь роутер: исключения видны здесь, а не в middleware.
@@ -217,3 +229,89 @@ def get_review(
             "published_comments": [asdict(c) for c in comments],
         }
     )
+
+
+class DiffLineResponse(BaseModel):
+    """Строка ханка."""
+
+    kind: Literal["added", "removed", "context"] = Field(description="Добавлена, удалена или контекст.")
+    old_line: int | None = Field(description="Номер в старой версии файла, с 1; null у добавленной строки.")
+    new_line: int | None = Field(description="Номер в новой версии файла, с 1; null у удалённой строки.")
+    content: str = Field(description="Текст строки без префикса +, - или пробела.")
+
+
+class DiffHunkResponse(BaseModel):
+    """Ханк unified diff."""
+
+    header: str = Field(description="Заголовок ханка после @@: обычно сигнатура окружающего кода.")
+    old_start: int = Field(description="Первая строка ханка в старой версии файла.")
+    old_count: int = Field(description="Строк ханка в старой версии файла.")
+    new_start: int = Field(description="Первая строка ханка в новой версии файла.")
+    new_count: int = Field(description="Строк ханка в новой версии файла.")
+    lines: list[DiffLineResponse] = Field(description="Строки ханка по порядку.")
+
+
+class DiffFileResponse(BaseModel):
+    """Изменённый файл запроса на изменение."""
+
+    path: str = Field(description="Путь файла от корня репозитория.", examples=["app/main.py"])
+    previous_path: str | None = Field(description="Путь до переименования; null, если файл не переименован.")
+    status: Literal["added", "modified", "deleted", "renamed"] = Field(description="Что произошло с файлом.")
+    is_binary: bool = Field(description="Бинарный файл: ханков нет.")
+    language: str | None = Field(description="Язык для подсветки синтаксиса; null, если не определён.")
+    additions: int = Field(ge=0, description="Добавленных строк.")
+    deletions: int = Field(ge=0, description="Удалённых строк.")
+    hunks: list[DiffHunkResponse] = Field(description="Ханки файла по порядку.")
+
+
+class ReviewDiffResponse(BaseModel):
+    """Дифф запроса на изменение, который ревьюил прогон."""
+
+    files: list[DiffFileResponse] = Field(description="Изменённые файлы, включая файлы без замечаний.")
+
+
+class ReviewRunStepResponse(BaseModel):
+    """Шаг воркера в прогоне."""
+
+    stage: Literal["fetching_diff", "building_context", "analysing", "verifying", "publishing"] = Field(
+        description="Этап прогона.", examples=["analysing"]
+    )
+    status: Literal["running", "completed", "failed"] = Field(description="Состояние шага.")
+    started_at: UtcDatetime = Field(description="Когда шаг начался.")
+    duration_seconds: float | None = Field(description="Длительность шага; null, пока шаг идёт.")
+    tokens_used: int | None = Field(description="Токенов LLM потрачено на шаге; null, если шаг модель не вызывал.")
+    error_code: str | None = Field(description="Код ошибки шага; null, если шаг не падал.", examples=["LLM_TIMEOUT"])
+
+
+class ReviewRunStepListResponse(BaseModel):
+    """Шаги прогона."""
+
+    items: list[ReviewRunStepResponse] = Field(description="Шаги по порядку начала.")
+
+
+@router.get(
+    "/{review_run_id}/diff",
+    response_model=ReviewDiffResponse,
+    summary="Дифф прогона",
+    response_description="Изменённые файлы с ханками.",
+    description=_DIFF_DESCRIPTION,
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+)
+def get_review_diff(
+    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
+) -> ReviewDiffResponse:
+    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Дифф прогона ещё не реализован.")
+
+
+@router.get(
+    "/{review_run_id}/steps",
+    response_model=ReviewRunStepListResponse,
+    summary="Шаги прогона",
+    response_description="Шаги воркера по порядку.",
+    description=_STEPS_DESCRIPTION,
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+)
+def get_review_steps(
+    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
+) -> ReviewRunStepListResponse:
+    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Шаги прогона ещё не реализованы.")
