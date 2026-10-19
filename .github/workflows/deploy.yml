@@ -170,6 +170,8 @@ jobs:
           TF_VAR_github_app_client_secret: ${{ secrets.APP_CLIENT_SECRET_DMC268_T1 }}
           TF_VAR_registry_username: ${{ github.actor }}
           TF_VAR_registry_password: ${{ secrets.GITHUB_TOKEN }}
+          # Модели на стенде пока нет: заглушка выбрана явно, ревью пустые.
+          TF_VAR_llm_backend: stub
         run: |
           set -euo pipefail
           # Наружу не смотрит ничего из этого стека: снаружи API доступен через

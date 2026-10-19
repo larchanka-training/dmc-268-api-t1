@@ -8,17 +8,22 @@
 
 Жёсткий лимит (design D5). Бюджет — `max_tokens × 4` байт сериализованного
 тела; каркас оплачивается заранее, каждый элемент массива — своей длиной.
-Порядок: под правила резервируется то, что им нужно на файлах диффа (не
-больше их доли), затем hunk'и всех файлов в порядке диффа, затем правила —
+Порядок: первым - контекст PR (заголовок, описание, сообщения коммитов от
+нового к старому) в своей доле, неистраченное возвращается в общий бюджет
+(change `add-llm-gateway`, design D6); затем под правила резервируется то,
+что им нужно на файлах диффа (не больше их доли), затем hunk'и всех файлов
+в порядке диффа, затем правила —
 уже по файлам, чей дифф вошёл, — затем
 AST: сначала охватывающие определения всех файлов, потом импорты. Элемент,
-не поместившийся целиком, не обрезается, а перечисляется в `omitted`;
+не поместившийся целиком, не обрезается, а перечисляется в `omitted`. Одно
+исключение - описание PR: оно входит началом, обрезанным до остатка доли
+(change `llm-gateway-review-fixes`, design D6);
 под этот перечень заранее отложен резерв, остаток перечня считает
 `omitted_count`.
 
 Недоверенные данные (design D6). Каждый текст из репозитория — hunk,
-сигнатуры, импорты, проверки правил — лежит внутри `fence`; пути и имена
-— отдельными полями, обезвреженными `sanitize`.
+сигнатуры, импорты, проверки правил, текст автора PR — лежит внутри
+`fence`; пути и имена — отдельными полями, обезвреженными `sanitize`.
 """
 
 import hashlib
@@ -69,6 +74,23 @@ class ContextLimits:
     rules_cache_ttl_seconds: int
     ast_max_files: int
     ast_max_file_bytes: int
+    pr_context_max_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class PrContext:
+    """Текст автора PR для пакета; `None` - VCS не смогла его вернуть.
+
+    Пустая строка или пустой кортеж - текста нет (PR без описания), это не
+    сбой и в `omitted` не попадает. Заголовок и описание приходят одним
+    запросом, поэтому недоступны вместе.
+    """
+
+    title: str | None
+    description: str | None
+    # От нового к старому: при нехватке доли теряются старые коммиты. На PR
+    # длиннее 250 коммитов новых здесь нет: VCS их не отдаёт (`VcsGateway`).
+    commit_messages: tuple[str, ...] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +127,7 @@ def assemble_context(
     asts: Iterable[FileAst],
     skipped_asts: Iterable[SkippedAst],
     *,
+    pr_context: PrContext,
     limits: ContextLimits,
     review_run_id: UUID,
     now: datetime,
@@ -126,6 +149,7 @@ def assemble_context(
         "base_sha": job.base_sha,
         "head_sha": job.head_sha,
         "limits": {"max_tokens": limits.max_tokens},
+        "pull_request_context": [],
         "rules": {"status": rules.status.value, "source": RULES_PATH, "items": [], "rejected": []},
         "diff": [],
         "ast": [],
@@ -135,6 +159,24 @@ def assemble_context(
     limit_bytes = limits.max_tokens * BYTES_PER_TOKEN
     reserve = min(limit_bytes // 10, _OMITTED_RESERVE_MAX_BYTES)
     budget = Budget(limit_bytes - json_size(body) - reserve)
+
+    pr_items, unavailable = _pr_context_items(pr_context)
+    omitted += unavailable
+    pr_share = budget.split(
+        min(limits.pr_context_max_tokens * BYTES_PER_TOKEN, sum(Budget.cost(i) for i, _ in pr_items))
+    )
+    for item, omission in pr_items:
+        if pr_share.take(item):
+            body["pull_request_context"].append(item)
+        elif item["part"] == "description" and (
+            cut := _cut_description(pr_context.description or "", pr_share)
+        ):
+            pr_share.take(cut)
+            body["pull_request_context"].append(cut)
+        else:
+            omitted.append(omission)
+    budget.merge(pr_share)
+
     # Правила резервируют не всю свою долю, а сколько им нужно на всех
     # файлах диффа: без правил дифф получает весь бюджет. После диффа правила
     # привязываются к вошедшим файлам — подмножеству, — и в резерв укладываются.
@@ -227,6 +269,63 @@ def _rule_items(
     ]
     items += [({"name": sanitize(r.name), "reason": r.reason}, None) for r in rules.rejected]
     return items
+
+
+def _pr_context_items(
+    context: PrContext,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], list[dict[str, Any]]]:
+    """Элементы раздела `pull_request_context` с записью `omitted` на случай
+    нехватки доли - и записи о том, что VCS вернуть не смогла.
+
+    У текста автора PR нет пути, поэтому записи `omitted` без поля `path`.
+    """
+    items: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    unavailable: list[dict[str, Any]] = []
+    if context.title is None or context.description is None:
+        unavailable.append({"part": "pr_metadata", "reason": "unavailable"})
+    else:
+        for part, kind, text in (
+            ("title", "pr_title", context.title),
+            ("description", "pr_description", context.description),
+        ):
+            if text:
+                items.append(
+                    ({"part": part, "text": fence(kind, text)}, {"part": kind, "reason": "budget"})
+                )
+    if context.commit_messages is None:
+        unavailable.append({"part": "commit_messages", "reason": "unavailable"})
+    else:
+        for index, message in enumerate(context.commit_messages, start=1):
+            items.append(
+                (
+                    # `index` - место коммита в PR, с единицы от нового: по нему
+                    # подписывается сообщение, даже если новые не вошли.
+                    {"part": "commit", "index": index, "text": fence("commit_message", message)},
+                    {"part": "commit_message", "reason": "budget", "index": index},
+                )
+            )
+    return items, unavailable
+
+
+def _cut_description(text: str, share: Budget) -> dict[str, Any] | None:
+    """Блок самого длинного начала описания, который помещается в остаток доли.
+
+    Описание - первый контекст ревью, и выпадать целиком из-за длины ему
+    нельзя. Стоимость блока растёт с длиной начала, поэтому длина ищется
+    двоичным поиском; `None` - не помещается ни один символ.
+    """
+
+    def item(length: int) -> dict[str, Any]:
+        return {"part": "description", "text": fence("pr_description", text[:length]), "truncated": True}
+
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if Budget.cost(item(middle)) <= share.remaining:
+            low = middle
+        else:
+            high = middle - 1
+    return item(low) if low else None
 
 
 def _hunk_item(parsed: ParsedFile, hunk: Hunk) -> dict[str, Any]:

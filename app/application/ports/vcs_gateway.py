@@ -44,6 +44,19 @@ class VcsGateway(Protocol):
         """Свежие метаданные; базовый коммит берётся только отсюда."""
         ...
 
+    def fetch_pr_commit_messages(
+        self, repo_full_name: str, pr_number: int, installation_id: int
+    ) -> tuple[str, ...]:
+        """Сообщения коммитов PR от нового к старому - не больше, чем отдаёт VCS.
+
+        GitHub отдаёт не больше 250 коммитов PR, и это самые старые: на более
+        длинном PR новые коммиты не приходят. Крайний случай, не обходится.
+
+        Текст автора PR: в пакет контекста он попадает только блоком
+        недоверенных данных (change `add-llm-gateway`).
+        """
+        ...
+
     def fetch_file(
         self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
     ) -> str | None:

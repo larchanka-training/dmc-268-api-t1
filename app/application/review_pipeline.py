@@ -19,7 +19,7 @@ from datetime import datetime
 from uuid import UUID
 
 from app.application.context_assembly import ContextLimits
-from app.application.llm_review import request_review, request_verification
+from app.application.llm_review import LlmLimits, request_review, request_verification
 from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
@@ -83,6 +83,7 @@ def run_review(
     definition_extractor: DefinitionExtractor,
     cache_store: CacheStore,
     context_limits: ContextLimits,
+    llm_limits: LlmLimits,
     prompt_texts: PromptTexts,
     now: Callable[[], datetime],
     monotonic: Callable[[], float],
@@ -136,7 +137,7 @@ def run_review(
 
         run = _transition(uow, run, ReviewRunStatus.ANALYSING, now())
 
-        result = request_review(context, prompt_texts, llm_gateway)
+        result = request_review(context, prompt_texts, llm_gateway, limits=llm_limits)
         screening = screen_findings(
             result.findings,
             hunks=assembled.hunks,
@@ -148,7 +149,9 @@ def run_review(
         # Два долгих вызова модели подряд не должны выглядеть для `find_stale`
         # одним прогоном без прогресса.
         run = _record_progress(uow, run, now())
-        verification = _verify(context, prompt_texts, llm_gateway, screening.kept, run.id)
+        verification = _verify(
+            context, prompt_texts, llm_gateway, llm_limits, screening.kept, run.id
+        )
         if result.findings and not verification.findings:
             # Сводка модели описывает замечания, которых в публикации не будет:
             # публикация возьмёт стандартную.
@@ -200,6 +203,7 @@ def _verify(
     context: ContextPayload,
     texts: PromptTexts,
     gateway: LlmGateway,
+    limits: LlmLimits,
     candidates: Sequence[Finding],
     run_id: UUID,
 ) -> _Verification:
@@ -212,7 +216,7 @@ def _verify(
     if not candidates:
         return _Verification((), VerificationOutcome.NOT_REQUIRED, 0, 0)
     try:
-        answer = request_verification(context, texts, gateway, candidates)
+        answer = request_verification(context, texts, gateway, candidates, limits=limits)
     except LlmError as error:
         logger.warning(
             "верификатор недоступен для прогона %s, публикуются замечания после отсева",

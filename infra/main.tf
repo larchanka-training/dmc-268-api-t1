@@ -299,8 +299,19 @@ resource "docker_container" "worker" {
   # настройки; убрать его можно, когда настройки API и воркера разделятся.
   # Реквизиты App нужны: сборка контекста довыбирает дифф, `.review/rules.md`
   # и изменённые файлы через VCS-шлюз.
+  # Адаптер модели: без LLM_BACKEND воркер не стартует, и деплой падает на
+  # проверке устойчивой работы. Eurorouter подключается только вторым и только
+  # флагом llm_hosted_fallback: тогда код проверяемых репозиториев уходит
+  # hosted-провайдеру (docs/BACKEND_ARCHITECTURE.md, модель угроз).
   env = concat(local.app_env, [
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
+    "LLM_BACKEND=${var.llm_backend}",
+    "OLLAMA_BASE_URL=${var.ollama_base_url}",
+    "OLLAMA_MODEL=${var.ollama_model}",
+    "LLM_HOSTED_FALLBACK=${var.llm_hosted_fallback}",
+    "EUROROUTER_BASE_URL=${var.eurorouter_base_url}",
+    "EUROROUTER_MODEL=${var.eurorouter_model}",
+    "EUROROUTER_API_KEYS=${var.eurorouter_api_keys}",
   ])
 }

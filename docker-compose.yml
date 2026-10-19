@@ -84,6 +84,18 @@ services:
       # реквизитов App каждый прогон завершится failed на fetch_diff.
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      # Адаптер модели. stub - без похода к модели, ollama - локальная модель
+      # (профиль ollama ниже, модель - OLLAMA_MODEL). Значения по умолчанию нет
+      # намеренно: без LLM_BACKEND в .env воркер не стартует, а не публикует
+      # пустые ревью. Eurorouter подключается только вторым и только флагом
+      # LLM_HOSTED_FALLBACK=true: тогда код уходит hosted-провайдеру.
+      LLM_BACKEND: ${LLM_BACKEND:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+      LLM_HOSTED_FALLBACK: ${LLM_HOSTED_FALLBACK:-false}
+      EUROROUTER_BASE_URL: ${EUROROUTER_BASE_URL:-}
+      EUROROUTER_MODEL: ${EUROROUTER_MODEL:-}
+      EUROROUTER_API_KEYS: ${EUROROUTER_API_KEYS:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,8 +103,23 @@ services:
         condition: service_healthy
     command: ["python", "-m", "app.worker"]
 
+  # Локальная модель для прогона на своей машине, только с профилем:
+  #   docker compose --profile ollama up -d
+  #   docker compose exec ollama ollama pull qwen2.5-coder:7b
+  # и в .env: LLM_BACKEND=ollama, OLLAMA_MODEL=qwen2.5-coder:7b. Наружу порт не
+  # публикуется: воркер ходит к ней по сети compose. На стенде Ollama
+  # разворачивает отдельная задача.
+  ollama:
+    image: ollama/ollama:0.12.6
+    profiles: ["ollama"]
+    volumes:
+      - ollama_models:/root/.ollama
+
 volumes:
   postgres_data:
     # Новое имя при переходе с postgres:18-alpine (musl) на pgvector (glibc):
     # текстовые индексы старого тома под другой сортировкой неконсистентны.
     name: dmc268-postgres-pgvector-data
+  # Скачанные модели переживают пересоздание контейнера Ollama.
+  ollama_models:
+    name: dmc268-ollama-models

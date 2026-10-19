@@ -30,3 +30,11 @@ postgres_db      = "dmc268"
 postgres_port    = 5432
 rabbitmq_user    = "dmc268"
 rabbitmq_port    = 5672
+
+# --- модель воркера ---
+# stub - без похода к модели. Eurorouter включается только фоллбэком после
+# локальной модели: llm_hosted_fallback = true отправляет код проверяемых
+# репозиториев hosted-провайдеру. Ключи - через запятую, в CI из секрета.
+llm_backend         = "stub"
+ollama_model        = ""
+llm_hosted_fallback = false

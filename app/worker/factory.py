@@ -13,11 +13,13 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Protocol
 
 import pika
 
 from app.application.context_assembly import ContextLimits
+from app.application.llm_review import LlmLimits
 from app.application.ports import (
     CacheStore,
     DefinitionExtractor,
@@ -30,7 +32,7 @@ from app.application.session_purge import purge_expired_sessions
 from app.application.stale_sweep import sweep_stale_runs
 from app.config import Settings
 from app.domain.ids import new_id
-from app.domain.prompt import PromptTexts
+from app.domain.prompt import PromptTexts, check_window_config
 from app.infrastructure.container import build_container
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
@@ -149,11 +151,23 @@ def context_limits(settings: Settings) -> ContextLimits:
         rules_cache_ttl_seconds=settings.rules_cache_ttl_seconds,
         ast_max_files=settings.ast_max_files,
         ast_max_file_bytes=settings.ast_max_file_bytes,
+        pr_context_max_tokens=settings.pr_context_max_tokens,
+    )
+
+
+def llm_limits(settings: Settings) -> LlmLimits:
+    """Окно модели и резерв под ответ из настроек."""
+    return LlmLimits(
+        window_tokens=settings.llm_context_window_tokens,
+        max_output_tokens=settings.llm_max_output_tokens,
     )
 
 
 def build_review_handler(
-    deps: ReviewHandlerDeps, limits: ContextLimits, prompt_texts: PromptTexts
+    deps: ReviewHandlerDeps,
+    limits: ContextLimits,
+    model_limits: LlmLimits,
+    prompt_texts: PromptTexts,
 ) -> MessageHandler:
     def handle(body: bytes) -> None:
         job = from_wire_message(body)
@@ -166,6 +180,7 @@ def build_review_handler(
                 definition_extractor=deps.definition_extractor(),
                 cache_store=deps.cache_store(),
                 context_limits=limits,
+                llm_limits=model_limits,
                 prompt_texts=prompt_texts,
                 now=lambda: datetime.now(UTC),
                 monotonic=time.monotonic,
@@ -180,6 +195,45 @@ def build_review_handler(
             raise
 
     return handle
+
+
+class WorkerConfigError(RuntimeError):
+    """Конфигурация, с которой воркер заведомо не сможет работать."""
+
+
+def load_checked_prompt_texts(settings: Settings, root: Path) -> PromptTexts:
+    """Тексты промптов и проверка, что полный пакет с ними помещается в окно модели.
+
+    Без текстов воркер не поднимается, а не отправляет модели пустые
+    инструкции; с окном, в которое не помещается пакет на пределе лимита, -
+    тоже, а не роняет каждый крупный прогон (change `add-llm-gateway`, D5).
+    """
+    texts = load_prompt_texts(root)
+    fits = check_window_config(
+        texts,
+        context_max_tokens=settings.context_max_tokens,
+        max_output_tokens=settings.llm_max_output_tokens,
+        window_tokens=settings.llm_context_window_tokens,
+    )
+    if not fits.ok:
+        raise WorkerConfigError(fits.error)
+    return texts
+
+
+def check_model_deadline(settings: Settings) -> None:
+    """Один вызов модели в худшем случае короче порога зависшего прогона.
+
+    Иначе выметатель объявил бы мёртвым живой прогон, пока модель ещё
+    отвечает. Считается один вызов, а не два: между вызовом ревью и
+    верификатором прогон отмечает прогресс (change `llm-gateway-review-fixes`, D4).
+    """
+    worst = settings.llm_call_worst_case_seconds
+    if worst >= settings.stale_run_timeout_seconds:
+        raise WorkerConfigError(
+            f"вызов модели в худшем случае {worst:g} с (LLM_TIMEOUT_SECONDS × LLM_MAX_ATTEMPTS"
+            f" × провайдеры) не короче порога зависшего прогона"
+            f" {settings.stale_run_timeout_seconds} с (STALE_RUN_TIMEOUT_SECONDS)"
+        )
 
 
 def build_maintenance(
@@ -212,14 +266,22 @@ def build_maintenance(
 
 def run_worker(settings: Settings) -> None:
     """Собрать зависимости и запустить воркер бесконечно. Вызывается из `__main__.py`."""
+    # До подключения к брокеру: с непригодной конфигурацией воркер не поднимается.
+    # Заглушка модели выбирается только явно - иначе прогоны молча выходили бы
+    # пустыми (change `add-llm-gateway`, требование «Выбор заглушки явный»).
+    if settings.llm_backend is None:
+        raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
+    check_model_deadline(settings)
     container = build_container(settings)
-    # До подключения к брокеру: без текстов промптов воркер не поднимается,
-    # а не отправляет модели пустые инструкции на первом же прогоне.
-    prompt_texts = load_prompt_texts(DEFAULT_PROMPTS_DIR)
+    prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
+    # Собрать адаптер модели сразу: порядок провайдеров уходит в лог при старте.
+    container.llm_gateway()
     sweep = build_maintenance(
         container.unit_of_work,
         stale_limit=timedelta(seconds=settings.stale_run_timeout_seconds),
         now=lambda: datetime.now(UTC),
     )
-    handler = build_review_handler(container, context_limits(settings), prompt_texts)
+    handler = build_review_handler(
+        container, context_limits(settings), llm_limits(settings), prompt_texts
+    )
     build_worker(settings).run(handler, sweep=sweep)

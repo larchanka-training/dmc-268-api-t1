@@ -33,6 +33,14 @@ requires_broker = pytest.mark.skipif(
     reason="needs a live RabbitMQ; set TEST_RABBITMQ_URL",
 )
 
+# Живые тесты ходят в настоящий EUrouter с ключом организации (в CI - секрет
+# `AI_DMC268_T1`, workflow `llm-live.yml`). Основной прогон их исключает
+# маркером, поэтому пропуск без ключа не роняет правило «пропуск - провал».
+requires_eurorouter = pytest.mark.skipif(
+    not os.environ.get("EUROROUTER_API_KEYS"),
+    reason="needs the real EUrouter; set EUROROUTER_API_KEYS, EUROROUTER_BASE_URL, EUROROUTER_MODEL",
+)
+
 
 @pytest.fixture(scope="session")
 def engine():

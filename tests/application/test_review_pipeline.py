@@ -11,6 +11,7 @@ import pytest
 from pydantic import BaseModel
 
 from app.application.context_assembly import ContextLimits
+from app.application.llm_review import LlmLimits
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.review_pipeline import run_review
 from app.domain.entities import MergeRequest, ReviewJob, ReviewRun, RuleRef
@@ -20,7 +21,7 @@ from app.domain.enums import (
     TriggerSource,
     VerificationOutcome,
 )
-from app.domain.llm_errors import LlmError, LlmOutputError
+from app.domain.llm_errors import LlmError, LlmOutputError, PromptTooLargeError
 from app.domain.prompt import PromptTexts
 from app.domain.vcs_errors import VcsError
 
@@ -37,7 +38,8 @@ from ..fakes.webhooks import FakeVcs
 
 # Дифф фейкового VCS меняет первую строку `app/main.py`.
 CHANGED_FILE = "app/main.py"
-LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144)
+LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000)
+LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
 TEXTS = PromptTexts(review_system="ревью", verifier_system="верификация")
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
@@ -117,6 +119,7 @@ def _run(uow: FakeUnitOfWork, gateway: object, **overrides: object) -> None:
         "definition_extractor": FakeExtractor(),
         "cache_store": FakeCache(),
         "context_limits": LIMITS,
+        "llm_limits": LLM_LIMITS,
         "prompt_texts": TEXTS,
         "now": _Clock().now,
         "monotonic": _Monotonic(0.0, 12.5),
@@ -378,6 +381,37 @@ def test_review_output_error_fails_the_run_at_analysing_without_findings() -> No
     assert run.failed_stage is ReviewRunStatus.ANALYSING
     assert "severity" in (run.failure_reason or "")
     assert uow.findings.list_for_run(JOB.review_run_id) == []
+
+
+def test_review_over_the_model_window_fails_the_run_at_analysing() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway([])
+
+    with pytest.raises(PromptTooLargeError):
+        _run(uow, gateway, llm_limits=LlmLimits(window_tokens=100, max_output_tokens=50))
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    assert run.failed_stage is ReviewRunStatus.ANALYSING
+    assert "больше окна 100" in (run.failure_reason or "")
+    assert gateway.requests == []
+
+
+def test_verification_over_the_model_window_is_fail_open() -> None:
+    # Запрос ревью мал, а кандидат длиной ~75 тысяч токенов выводит запрос
+    # верификатора за окно 65 536.
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway([review_response(finding_json(CHANGED_FILE, 1, "x" * 300_000))])
+
+    _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.COMPLETED
+    assert run.verification is VerificationOutcome.UNAVAILABLE
+    assert [r.task for r in gateway.requests] == [LlmTask.REVIEW]
+    assert len(uow.findings.list_for_run(JOB.review_run_id)) == 1
 
 
 def test_empty_review_skips_the_verifier() -> None:

@@ -58,6 +58,7 @@ def pr_metadata(base_sha: str = "fedcba0987654321fedcba0987654321fedcba09") -> P
         head_sha="a1b2c3d4e5f6789012345678abcdef0123456789",
         base_sha=base_sha,
         title="feat: метаданные из VCS свежее payload'а",
+        description="",
         author="grinv",
         source_branch="feat/webhook-intake-rebased",
         target_branch="main",
@@ -88,6 +89,11 @@ class FakeVcs:
     # Сбой довыборки конкретного файла — не задевает дифф и метаданные.
     file_errors: dict[str, VcsError] = field(default_factory=dict)
     file_limits: list[int] = field(default_factory=list)
+    # Сообщения коммитов PR от нового к старому и сбой только их получения.
+    commit_messages: tuple[str, ...] = ()
+    commits_error: VcsError | None = None
+    # Сбой только метаданных PR - дифф при этом достаётся.
+    metadata_error: VcsError | None = None
     calls: list[tuple[Any, ...]] = field(default_factory=list)
 
     def fetch_diff(
@@ -102,9 +108,19 @@ class FakeVcs:
         self, repo_full_name: str, pr_number: int, installation_id: int
     ) -> PRMetadata:
         self.calls.append(("metadata", repo_full_name, pr_number, installation_id))
-        if self.error is not None:
-            raise self.error
+        error = self.metadata_error or self.error
+        if error is not None:
+            raise error
         return self.meta
+
+    def fetch_pr_commit_messages(
+        self, repo_full_name: str, pr_number: int, installation_id: int
+    ) -> tuple[str, ...]:
+        self.calls.append(("commits", repo_full_name, pr_number, installation_id))
+        error = self.commits_error or self.error
+        if error is not None:
+            raise error
+        return self.commit_messages
 
     def fetch_file(
         self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
