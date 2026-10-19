@@ -56,7 +56,7 @@ Review Worker
 ## 2. ReviewJob
 
 `ReviewJob` — публичная проекция хранимой сущности `ReviewRun` (см. `review-data-model`).
-Это не то же самое, что сообщение в очереди: сообщение несёт `reviewRunId`, у него нет
+Это не то же самое, что сообщение в очереди: сообщение несёт `review_run_id`, у него нет
 собственной идентичности, отдельной от прогона, который оно продвигает.
 
 ### State Machine
@@ -105,10 +105,10 @@ Worker не должен пропускать состояния. Изменен
 
 Backend:
 
-- валидирует запрос, включая `provider` + `providerRepositoryId` и `trigger`;
+- валидирует запрос, включая `provider` + `provider_repository_id` и `trigger`;
 - создаёт `ReviewRun` в состоянии `queued`;
 - сохраняет его;
-- отправляет `reviewRunId` в очередь (RabbitMQ, см. §6).
+- отправляет `review_run_id` в очередь (RabbitMQ, см. §6).
 
 ### building_context
 
@@ -147,7 +147,7 @@ Backend/Worker публикует результат на хостинг (см. 
 После успешной публикации:
 
 - Findings сохранены;
-- ReviewRun получает `completed`, фиксируются `model`, `tokensUsed`, `durationSeconds`;
+- ReviewRun получает `completed`, фиксируются `model`, `tokens_used`, `duration_seconds`;
 - результат доступен через Backend API.
 
 ### failed
@@ -175,10 +175,10 @@ Backend/Worker публикует результат на хостинг (см. 
 Рекомендуемый logical key:
 
 ```text
-provider + providerRepositoryId + pullRequestNumber + headCommitSha
+provider + provider_repository_id + pull_request_number + head_commit_sha
 ```
 
-Повторная попытка обработки существующего `ReviewRun` должна использовать тот же `reviewRunId`.
+Повторная попытка обработки существующего `ReviewRun` должна использовать тот же `review_run_id`.
 Не более одного нетерминального прогона на этот ключ уже гарантирует БД
 (`uq_review_runs_one_active_per_commit`) — API не создаёт второй `ReviewRun`, а отвечает
 по-разному в зависимости от того, кто прислал дубль:
@@ -239,7 +239,7 @@ JSON Schema validation
 
 Документ ранее смешивал в одном `attempt` три разных вещи. Разводим их:
 
-- **`providerAttempt`** — попытка вызвать внешнего провайдера (LLM или SCM) внутри одного
+- **`provider_attempt`** — попытка вызвать внешнего провайдера (LLM или SCM) внутри одного
   прохождения состояния. Инкрементируется клиентом провайдера, ограничена лимитом из этого
   раздела, попадает в публичную `ReviewError` (§8).
 - **redelivery сообщения** — брокер повторно доставляет то же сообщение очереди после
@@ -247,14 +247,14 @@ JSON Schema validation
   но фиксируется в наблюдаемости (§10) как `queueRedeliveryCount`.
 - **попытка задачи целиком** — не заводим отдельным счётчиком. Задача либо продвигается в
   рамках текущего `ReviewRun`, либо тот переходит в `failed`; повторный прогон того же
-  коммита — это новый `ReviewRun` с собственным `reviewRunId` (см. §4).
+  коммита — это новый `ReviewRun` с собственным `review_run_id` (см. §4).
 
 ### Visibility timeout и dead-letter
 
 - **Visibility timeout** — время, в течение которого RabbitMQ ждёт `ack` по сообщению;
   реализуется через настройку consumer'а и обрыв соединения при его превышении, а не
   отдельной pending-записью, как это устроено у Redis-очередей.
-- **Dead-letter** — сообщение, исчерпавшее `providerAttempt` или превысившее visibility
+- **Dead-letter** — сообщение, исчерпавшее `provider_attempt` или превысившее visibility
   timeout сверх допустимого числа redelivery, уходит в dead-letter exchange с отдельной
   политикой обработки (минимум — алертинг), а не удаляется молча.
 
@@ -262,12 +262,12 @@ JSON Schema validation
 
 | Ошибка | Retry | Поведение |
 |---|---|---|
-| LLM `429` | Да | exponential backoff + jitter, инкремент `providerAttempt` |
-| LLM `5xx` | Да | exponential backoff + jitter, инкремент `providerAttempt` |
-| Network timeout | Да | exponential backoff + jitter, инкремент `providerAttempt` |
+| LLM `429` | Да | exponential backoff + jitter, инкремент `provider_attempt` |
+| LLM `5xx` | Да | exponential backoff + jitter, инкремент `provider_attempt` |
+| Network timeout | Да | exponential backoff + jitter, инкремент `provider_attempt` |
 | Invalid JSON от LLM | Ограниченно | 1 repair/regeneration |
 | JSON Schema validation error | Ограниченно | 1 repair/regeneration |
-| SCM transient `5xx` | Да | bounded retry, инкремент `providerAttempt` |
+| SCM transient `5xx` | Да | bounded retry, инкремент `provider_attempt` |
 | SCM `401/403` | Нет | `failed` |
 | PR not found | Нет | `failed` |
 | Repository not found | Нет | `failed` |
@@ -275,7 +275,7 @@ JSON Schema validation
 
 Начальное предложение:
 
-- максимум 3 `providerAttempt` на вызов LLM/SCM;
+- максимум 3 `provider_attempt` на вызов LLM/SCM;
 - timeout на каждый LLM/SCM request;
 - exponential backoff;
 - jitter;
@@ -326,7 +326,7 @@ LLM Gateway должен позволять в будущем заменить �
   фоновым сборщиком с кодом ошибки `REVIEW_RUN_STALE` (§8).
 - Перевод в `failed` освобождает коммит: новый `ReviewRun` для того же
   (`merge_request_id`, `head_sha`) можно создать сразу после этого.
-- `lastProgressAt` отдаётся в `ReviewJob` (§9), чтобы Frontend мог показать зависшую задачу
+- `last_progress_at` отдаётся в `ReviewJob` (§9), чтобы Frontend мог показать зависшую задачу
   до того, как её подберёт сборщик.
 
 Конкретное значение лимита устаревания — предмет согласования с Queue/DevOps.
@@ -341,7 +341,7 @@ LLM Gateway должен позволять в будущем заменить �
 `gitlab` (`app/domain/enums.py`), значит поддержка второго провайдера — не гипотетическое
 будущее, а заявленный домен. Публичный enum ошибок не должен требовать breaking change
 при подключении второго провайдера, поэтому вместо `GITHUB_*` — `SCM_*` с полем
-`scmProvider`, а не просто `provider`: `providerAttempt` уже считает попытки и LLM, и SCM,
+`scm_provider`, а не просто `provider`: `provider_attempt` уже считает попытки и LLM, и SCM,
 и поле с именем `provider`, типизированное как `Provider` (`github`/`gitlab`), для
 retryable LLM-ошибок (почти вся таблица §6) осталось бы пустым, хотя формально называет
 отказавшую сторону.
@@ -353,17 +353,17 @@ retryable LLM-ошибок (почти вся таблица §6) осталос
   "code": "LLM_TIMEOUT",
   "message": "LLM provider did not respond within the configured timeout",
   "retryable": true,
-  "providerAttempt": 3,
-  "scmProvider": null
+  "provider_attempt": 3,
+  "scm_provider": null
 }
 ```
 
 Начальный набор кодов:
 
-- `SCM_AUTH_ERROR` (поле `scmProvider` заполнено)
+- `SCM_AUTH_ERROR` (поле `scm_provider` заполнено)
 - `PR_NOT_FOUND`
 - `REPOSITORY_NOT_FOUND`
-- `SCM_UNAVAILABLE` (поле `scmProvider` заполнено)
+- `SCM_UNAVAILABLE` (поле `scm_provider` заполнено)
 - `CONTEXT_PARSING_ERROR`
 - `LLM_RATE_LIMITED`
 - `LLM_TIMEOUT`
@@ -419,7 +419,7 @@ POST /auth/logout
   прогон не создаётся; провайдер из `Provider`, для которого приёмника ещё нет, — `501` с
   `PROVIDER_NOT_SUPPORTED`.
 
-`CreateReviewRequest` идентифицирует репозиторий парой `provider` + `providerRepositoryId`
+`CreateReviewRequest` идентифицирует репозиторий парой `provider` + `provider_repository_id`
 (соответствует `UNIQUE (provider, provider_id)` в таблице `repositories`), а не строкой вида
 `owner/repository` — `full_name` в этой таблице намеренно не уникален. Обязателен `trigger`.
 
@@ -486,12 +486,12 @@ HTTP-ошибки.
 
 Для каждого review необходимо иметь минимум:
 
-- `reviewRunId`;
-- provider + providerRepositoryId;
+- `review_run_id`;
+- provider + provider_repository_id;
 - PR number;
 - current state;
-- timestamps, включая `lastProgressAt`;
-- `providerAttempt`;
+- timestamps, включая `last_progress_at`;
+- `provider_attempt`;
 - `queueRedeliveryCount`;
 - error code;
 - LLM/provider request duration;

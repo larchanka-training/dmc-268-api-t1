@@ -145,26 +145,26 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
     assert run.status is ReviewRunStatus.QUEUED
     assert run.trigger is TriggerSource.WEBHOOK
 
-    # Тело 202 — публичная проекция ReviewJob (app/api/schemas.py), camelCase, все поля;
+    # Тело 202 — публичная проекция ReviewJob (app/api/schemas.py), snake_case, все поля;
     # время — в UTC с `Z`, как во всех ответах API.
     assert job == {
         "id": str(run.id),
         "provider": "github",
-        "providerRepositoryId": str(flow.repository.provider_id),
-        "pullRequestNumber": PR_NUMBER,
+        "provider_repository_id": str(flow.repository.provider_id),
+        "pull_request_number": PR_NUMBER,
         "trigger": "webhook",
         "status": "queued",
-        "headCommitSha": HEAD_SHA,
-        "baseCommitSha": BASE_SHA,
-        "findingsCount": 0,
-        "rejectedFindings": 0,
+        "head_commit_sha": HEAD_SHA,
+        "base_commit_sha": BASE_SHA,
+        "findings_count": 0,
+        "rejected_findings": 0,
         "model": None,
-        "tokensUsed": None,
-        "durationSeconds": None,
-        "createdAt": utc_z(run.created_at),
-        "updatedAt": utc_z(run.updated_at),
-        "lastProgressAt": utc_z(run.last_progress_at),
-        "failedStage": None,
+        "tokens_used": None,
+        "duration_seconds": None,
+        "created_at": utc_z(run.created_at),
+        "updated_at": utc_z(run.updated_at),
+        "last_progress_at": utc_z(run.last_progress_at),
+        "failed_stage": None,
         "error": None,
     }
 

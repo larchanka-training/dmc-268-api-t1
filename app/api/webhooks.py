@@ -195,7 +195,7 @@ def _scm_unavailable() -> ApiError:
 def _review_job(outcome: WebhookOutcome) -> ReviewJob:
     """Проекция прогона в публичную модель `ReviewJob` (`app/api/schemas.py`).
 
-    `findingsCount` у свежего прогона всегда 0: находки появляются позже,
+    `findings_count` у свежего прогона всегда 0: находки появляются позже,
     при обработке задачи воркером, и в этот эндпоинт больше не возвращаются.
     """
     run, merge_request, repository = outcome.run, outcome.merge_request, outcome.repository

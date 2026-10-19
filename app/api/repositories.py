@@ -17,7 +17,7 @@ from app.api.errors import (
 )
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
-from app.api.schemas import CamelCaseRequest, RepositoryBase, UtcDatetime
+from app.api.schemas import RepositoryBase, StrictRequest, UtcDatetime
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
 from app.domain.enums import Provider
@@ -78,7 +78,7 @@ class AvailableRepositoryListResponse(BaseModel):
     items: list[AvailableRepositoryResponse] = Field(description="Репозитории установки GitHub App.")
 
 
-class ConnectRepositoryRequest(CamelCaseRequest):
+class ConnectRepositoryRequest(StrictRequest):
     """Запрос на подключение репозитория к сервису."""
 
     # strict у модели не пропустил бы enum строкой; для enum-поля — точечно, как в CreateReviewRequest.

@@ -1645,11 +1645,11 @@
               "github"
             ]
           },
-          "providerId": {
+          "provider_id": {
             "type": "string",
             "maxLength": 255,
             "minLength": 1,
-            "title": "Providerid",
+            "title": "Provider Id",
             "description": "Идентификатор репозитория у провайдера (из списка доступных).",
             "examples": [
               "123456789"
@@ -1660,7 +1660,7 @@
         "type": "object",
         "required": [
           "provider",
-          "providerId"
+          "provider_id"
         ],
         "title": "ConnectRepositoryRequest",
         "description": "Запрос на подключение репозитория к сервису."
@@ -1674,21 +1674,21 @@
               "github"
             ]
           },
-          "providerRepositoryId": {
+          "provider_repository_id": {
             "type": "string",
             "maxLength": 255,
             "minLength": 1,
-            "title": "Providerrepositoryid",
+            "title": "Provider Repository Id",
             "description": "Идентификатор репозитория у провайдера (repositories.provider_id).",
             "examples": [
               "123456789"
             ]
           },
-          "pullRequestNumber": {
+          "pull_request_number": {
             "type": "integer",
             "maximum": 2147483647.0,
             "minimum": 1.0,
-            "title": "Pullrequestnumber",
+            "title": "Pull Request Number",
             "description": "Номер запроса на изменение у провайдера.",
             "examples": [
               123
@@ -1706,8 +1706,8 @@
         "type": "object",
         "required": [
           "provider",
-          "providerRepositoryId",
-          "pullRequestNumber",
+          "provider_repository_id",
+          "pull_request_number",
           "trigger"
         ],
         "title": "CreateReviewRequest",
@@ -3069,7 +3069,7 @@
             "title": "Retryable",
             "description": "Повторный запуск может пройти: сбой временный."
           },
-          "scmProvider": {
+          "scm_provider": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/Provider"
@@ -3078,9 +3078,9 @@
                 "type": "null"
               }
             ],
-            "description": "Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null. Называется scmProvider, а не provider: поле про сторону SCM, providerAttempt считает попытки и LLM, и SCM."
+            "description": "Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null. Называется scm_provider, а не provider: поле про сторону SCM, provider_attempt считает попытки и LLM, и SCM."
           },
-          "providerAttempt": {
+          "provider_attempt": {
             "anyOf": [
               {
                 "type": "integer",
@@ -3090,7 +3090,7 @@
                 "type": "null"
               }
             ],
-            "title": "Providerattempt",
+            "title": "Provider Attempt",
             "description": "Попытка вызова LLM/SCM провайдера, с 1. Не путать с redelivery сообщения в очереди."
           }
         },
@@ -3099,8 +3099,8 @@
           "code",
           "message",
           "retryable",
-          "scmProvider",
-          "providerAttempt"
+          "scm_provider",
+          "provider_attempt"
         ],
         "title": "ReviewError",
         "description": "Структурированная ошибка прогона (§8 PIPELINE_SPEC.md) — не ошибка HTTP-запроса.\n\nКоды SCM_* провайдер-нейтральны: второй провайдер не ломает контракт."
@@ -3111,7 +3111,7 @@
             "type": "string",
             "format": "uuid",
             "title": "Id",
-            "description": "Идентификатор прогона (reviewRunId)."
+            "description": "Идентификатор прогона (review_run_id)."
           },
           "provider": {
             "$ref": "#/components/schemas/Provider",
@@ -3120,18 +3120,18 @@
               "github"
             ]
           },
-          "providerRepositoryId": {
+          "provider_repository_id": {
             "type": "string",
-            "title": "Providerrepositoryid",
+            "title": "Provider Repository Id",
             "description": "Идентификатор репозитория у провайдера (repositories.provider_id).",
             "examples": [
               "123456789"
             ]
           },
-          "pullRequestNumber": {
+          "pull_request_number": {
             "type": "integer",
             "minimum": 1.0,
-            "title": "Pullrequestnumber",
+            "title": "Pull Request Number",
             "description": "Номер запроса на изменение у провайдера.",
             "examples": [
               42
@@ -3144,7 +3144,7 @@
               "webhook"
             ]
           },
-          "headCommitSha": {
+          "head_commit_sha": {
             "anyOf": [
               {
                 "type": "string"
@@ -3153,13 +3153,13 @@
                 "type": "null"
               }
             ],
-            "title": "Headcommitsha",
+            "title": "Head Commit Sha",
             "description": "Коммит, который ревьюится.",
             "examples": [
               "a1b2c3d4e5f6789012345678abcdef0123456789"
             ]
           },
-          "baseCommitSha": {
+          "base_commit_sha": {
             "anyOf": [
               {
                 "type": "string"
@@ -3168,7 +3168,7 @@
                 "type": "null"
               }
             ],
-            "title": "Basecommitsha",
+            "title": "Base Commit Sha",
             "description": "Коммит, относительно которого считается дифф; null, пока воркер его не узнал.",
             "examples": [
               "fedcba0987654321fedcba0987654321fedcba09"
@@ -3181,16 +3181,16 @@
               "queued"
             ]
           },
-          "findingsCount": {
+          "findings_count": {
             "type": "integer",
             "minimum": 0.0,
-            "title": "Findingscount",
+            "title": "Findings Count",
             "description": "Сколько находок записано; у нового прогона 0."
           },
-          "rejectedFindings": {
+          "rejected_findings": {
             "type": "integer",
             "minimum": 0.0,
-            "title": "Rejectedfindings",
+            "title": "Rejected Findings",
             "description": "Сколько находок отброшено: привязка вне изменённых строк диффа."
           },
           "model": {
@@ -3205,7 +3205,7 @@
             "title": "Model",
             "description": "Модель LLM, которая провела ревью; null до анализа."
           },
-          "tokensUsed": {
+          "tokens_used": {
             "anyOf": [
               {
                 "type": "integer",
@@ -3215,10 +3215,10 @@
                 "type": "null"
               }
             ],
-            "title": "Tokensused",
+            "title": "Tokens Used",
             "description": "Токенов LLM потрачено; null до анализа."
           },
-          "durationSeconds": {
+          "duration_seconds": {
             "anyOf": [
               {
                 "type": "number",
@@ -3228,40 +3228,40 @@
                 "type": "null"
               }
             ],
-            "title": "Durationseconds",
+            "title": "Duration Seconds",
             "description": "Длительность прогона в секундах; null, пока прогон не завершён."
           },
-          "createdAt": {
+          "created_at": {
             "type": "string",
             "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Createdat",
+            "title": "Created At",
             "description": "Когда прогон создан.",
             "examples": [
               "2026-10-11T10:00:00Z"
             ]
           },
-          "updatedAt": {
+          "updated_at": {
             "type": "string",
             "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Updatedat",
+            "title": "Updated At",
             "description": "Когда запись последний раз менялась.",
             "examples": [
               "2026-10-11T10:00:00Z"
             ]
           },
-          "lastProgressAt": {
+          "last_progress_at": {
             "type": "string",
             "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
-            "title": "Lastprogressat",
+            "title": "Last Progress At",
             "description": "Обновляется на каждом переходе состояния; по нему находят зависшие прогоны (§7.5 PIPELINE_SPEC.md).",
             "examples": [
               "2026-10-11T10:00:00Z"
             ]
           },
-          "failedStage": {
+          "failed_stage": {
             "anyOf": [
               {
                 "type": "string",
@@ -3275,7 +3275,7 @@
                 "type": "null"
               }
             ],
-            "title": "Failedstage",
+            "title": "Failed Stage",
             "description": "Этап, на котором прогон упал; null, если прогон не падал."
           },
           "error": {
@@ -3294,21 +3294,21 @@
         "required": [
           "id",
           "provider",
-          "providerRepositoryId",
-          "pullRequestNumber",
+          "provider_repository_id",
+          "pull_request_number",
           "trigger",
-          "headCommitSha",
-          "baseCommitSha",
+          "head_commit_sha",
+          "base_commit_sha",
           "status",
-          "findingsCount",
-          "rejectedFindings",
+          "findings_count",
+          "rejected_findings",
           "model",
-          "tokensUsed",
-          "durationSeconds",
-          "createdAt",
-          "updatedAt",
-          "lastProgressAt",
-          "failedStage",
+          "tokens_used",
+          "duration_seconds",
+          "created_at",
+          "updated_at",
+          "last_progress_at",
+          "failed_stage",
           "error"
         ],
         "title": "ReviewJob",

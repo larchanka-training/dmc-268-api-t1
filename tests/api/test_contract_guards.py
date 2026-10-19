@@ -23,8 +23,8 @@ SETTINGS = Settings(
     github_webhook_secret="test-secret",
     public_origin="https://review.example",
 )
-# Имя поля времени в обеих раскладках схемы: `created_at` и `createdAt`.
-TIME_FIELD = re.compile(r"(_at|At)$")
+# Имя поля времени: `created_at`, `last_progress_at`.
+TIME_FIELD = re.compile(r"_at$")
 
 
 def _walk(node: Any, where: str = "") -> list[tuple[str, dict[str, Any]]]:
@@ -41,7 +41,7 @@ def _walk(node: Any, where: str = "") -> list[tuple[str, dict[str, Any]]]:
 
 
 def test_every_date_time_in_the_schema_is_utc_datetime() -> None:
-    """У каждого `format: date-time` — `pattern` формы `UtcDatetime`, и поле `*_at`/`*At` — время.
+    """У каждого `format: date-time` — `pattern` формы `UtcDatetime`, и поле `*_at` — время.
 
     Поле `datetime` мимо `UtcDatetime` дало бы `date-time` без `pattern`, а время строкой —
     поле `*_at` без `date-time`.
