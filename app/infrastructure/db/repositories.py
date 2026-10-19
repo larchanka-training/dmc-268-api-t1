@@ -339,9 +339,10 @@ class SqlAlchemyPublishedCommentRepo:
 
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]:
         rows = self._session.scalars(
-            select(PublishedCommentRow).where(
-                PublishedCommentRow.review_run_id == review_run_id
-            )
+            select(PublishedCommentRow)
+            .where(PublishedCommentRow.review_run_id == review_run_id)
+            # Порядок публикации; id разводит комментарии с одним временем.
+            .order_by(PublishedCommentRow.published_at, PublishedCommentRow.id)
         ).all()
         return [m.published_comment_to_domain(row) for row in rows]
 

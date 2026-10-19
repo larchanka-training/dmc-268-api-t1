@@ -261,7 +261,10 @@ class FakePublishedCommentRepo:
         self._items = list(state)
 
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]:
-        return [c for c in self._items if c.review_run_id == review_run_id]
+        return sorted(
+            (c for c in self._items if c.review_run_id == review_run_id),
+            key=lambda c: (c.published_at, c.id),
+        )
 
     def list_open_threads_for_merge_request(
         self, merge_request_id: UUID

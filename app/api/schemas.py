@@ -15,11 +15,12 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PositiveInt,
     WithJsonSchema,
 )
 from pydantic.alias_generators import to_camel
 
-from app.domain.enums import Provider, ReviewRunStatus, TriggerSource
+from app.domain.enums import MergeRequestState, Provider, ReviewRunStatus, TriggerSource
 
 # Форма времени в каждом ответе: UTC, секунды, при наличии — микросекунды, суффикс `Z`.
 UTC_DATETIME_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$"
@@ -148,3 +149,15 @@ class ReviewJob(CamelCaseResponse):
     )
     failed_stage: FailedStage | None = Field(default=None, description=FAILED_STAGE_DESCRIPTION)
     error: ReviewError | None = Field(description="Ошибка прогона; null, если прогон не упал.")
+
+
+class MergeRequestBase(BaseModel):
+    """Поля запроса на изменение, общие для списка запросов и сводки в прогоне ревью."""
+
+    id: UUID
+    number: PositiveInt = Field(description="Номер запроса на изменение у провайдера.", examples=[42])
+    title: str = Field(description="Заголовок у провайдера.")
+    author: str = Field(description="Логин автора у провайдера.", examples=["octocat"])
+    source_branch: str = Field(description="Ветка с изменениями.", examples=["feat/login"])
+    target_branch: str = Field(description="Ветка, в которую предлагается слить.", examples=["develop"])
+    state: MergeRequestState = Field(description="Состояние у провайдера.", examples=["open"])
