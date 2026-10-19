@@ -41,6 +41,9 @@ dev = [
     "grimp<3.16",
     "mypy>=1.13",
     "pre-commit>=3.8",
+    # Корпус eval правил (tests/eval/rules/corpus.py) читает кейсы из YAML.
+    "pyyaml>=6.0.3",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.ruff]

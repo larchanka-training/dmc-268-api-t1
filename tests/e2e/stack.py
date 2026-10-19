@@ -181,13 +181,17 @@ class Stack:
             except BaseException as error:  # noqa: BLE001 — переносится в поток теста
                 errors.append(error)
 
+        def cancel() -> None:
+            # Число возвращённых сообщений не нужно; из чужого потока это единственный безопасный вызов.
+            worker.channel.cancel()
+
         thread = threading.Thread(target=consume, name="e2e-worker", daemon=True)
         thread.start()
         thread.join(timeout)
         if thread.is_alive():
             # Без отмены консьюмера поток крутит цикл до конца сессии и заберёт сообщение
             # следующего теста со старой фейковой моделью.
-            worker.connection.add_callback_threadsafe(worker.channel.cancel)
+            worker.connection.add_callback_threadsafe(cancel)
             thread.join(CANCEL_JOIN_SECONDS)
             raise AssertionError(f"воркер не обработал {messages} сообщений за {timeout:g} с")
         if errors:
