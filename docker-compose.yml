@@ -62,6 +62,11 @@ services:
       # API работает.
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      # OAuth того же GitHub App для входа и публичный origin интерфейса:
+      # пустые — вход не работает, изменяющие запросы с сессией получают 403.
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,6 +80,10 @@ services:
       DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
       GITHUB_WEBHOOK_SECRET: local-dev-secret
+      # Воркер сам достаёт дифф, правила и файлы через VCS-шлюз: без
+      # реквизитов App каждый прогон завершится failed на fetch_diff.
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

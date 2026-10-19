@@ -13,11 +13,13 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -31,6 +33,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.domain.enums import (
+    FAILURE_STAGES,
     TERMINAL_STATUSES,
     CommentKind,
     DiffSide,
@@ -44,6 +47,7 @@ from app.domain.enums import (
 from app.infrastructure.db.base import Base, TimestampMixin, UuidPrimaryKeyMixin
 
 _TERMINAL_SQL = ", ".join(f"'{s.value}'" for s in sorted(TERMINAL_STATUSES))
+_STAGES_SQL = ", ".join(f"'{s.value}'" for s in sorted(FAILURE_STAGES))
 
 
 def _enum(python_enum: type, name: str) -> SAEnum:
@@ -127,6 +131,13 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             unique=True,
             postgresql_where=text(f"status NOT IN ({_TERMINAL_SQL})"),
         ),
+        # Этап сбоя есть только у упавшего прогона и только из числа этапов
+        # обработки: правило `advance` держится против любого писателя.
+        CheckConstraint(
+            "failed_stage IS NULL"
+            f" OR (status = 'failed' AND failed_stage IN ({_STAGES_SQL}))",
+            name="ck_review_runs_failed_stage",
+        ),
     )
 
     merge_request_id: Mapped[uuid.UUID] = mapped_column(
@@ -146,6 +157,10 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
         DateTime(timezone=True), nullable=False
     )
     failure_reason: Mapped[str | None] = mapped_column(Text)
+    # Тот же enum-тип, что у `status`: отдельный повторил бы список статусов.
+    failed_stage: Mapped[ReviewRunStatus | None] = mapped_column(
+        _enum(ReviewRunStatus, "review_run_status")
+    )
     model: Mapped[str | None] = mapped_column(String(255))
     tokens_used: Mapped[int | None] = mapped_column(BigInteger)
     duration_seconds: Mapped[float | None] = mapped_column(Float)
@@ -248,3 +263,49 @@ class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     provider_comment_id: Mapped[str] = mapped_column(String(255), nullable=False)
     kind: Mapped[CommentKind] = mapped_column(_enum(CommentKind, "comment_kind"), nullable=False)
     published_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    thread_resolved: Mapped[bool] = mapped_column(default=False, server_default="false")
+    in_reply_to_provider_comment_id: Mapped[str | None] = mapped_column(String(255))
+    feedback_positive: Mapped[int] = mapped_column(default=0, server_default="0")
+    feedback_negative: Mapped[int] = mapped_column(default=0, server_default="0")
+
+
+class UserRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
+    """Пользователь кабинета. Логин, имя и аватар обновляются при каждом входе."""
+
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_user_id", name="uq_users_provider_user_id"),
+    )
+
+    provider: Mapped[Provider] = mapped_column(_enum(Provider, "provider"), nullable=False)
+    # Строка: тип идентификатора у провайдеров разный.
+    provider_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    login: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(255))
+    avatar_url: Mapped[str | None] = mapped_column(Text)
+
+    # Нужна только для порядка INSERT'ов в одном flush, как у repositories.
+    # Сессии удаляет база (CASCADE), а не ORM.
+    sessions: Mapped[list[SessionRow]] = relationship(
+        back_populates="user", passive_deletes="all"
+    )
+
+
+class SessionRow(Base, UuidPrimaryKeyMixin):
+    """Сессия входа. Ни updated_at, ни продления: срок жизни задаётся при входе."""
+
+    __tablename__ = "sessions"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_sessions_token_hash"),)
+
+    # SHA-256 от значения cookie; самого значения в базе нет. Уникальный
+    # индекс — путь поиска сессии на каждом запросе.
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Удаление пользователя гасит его сессии — в отличие от RESTRICT конвейера,
+    # сессия без пользователя ничего не значит.
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped[UserRow] = relationship(back_populates="sessions")

@@ -11,7 +11,7 @@ from datetime import datetime
 from types import MappingProxyType
 
 from app.domain.entities import ReviewRun
-from app.domain.enums import TERMINAL_STATUSES, ReviewRunStatus
+from app.domain.enums import FAILURE_STAGES, TERMINAL_STATUSES, ReviewRunStatus
 from app.domain.result import Result
 
 S = ReviewRunStatus
@@ -50,6 +50,17 @@ def advance(run: ReviewRun, requested: ReviewRunStatus, now: datetime) -> Result
     verdict = next_status(run.status, requested)
     if not verdict.ok:
         return Result.failure(verdict.error or "rejected")
+    # Этап сбоя пишется здесь, а не у вызывающих: в `failed` прогон попадает
+    # только через эту функцию, и правило остаётся одно.
+    failed_stage = (
+        run.status if requested is S.FAILED and run.status in FAILURE_STAGES else None
+    )
     return Result.success(
-        replace(run, status=requested, last_progress_at=now, updated_at=now)
+        replace(
+            run,
+            status=requested,
+            last_progress_at=now,
+            updated_at=now,
+            failed_stage=failed_stage,
+        )
     )

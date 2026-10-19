@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-10-18
+# Поведение сервиса не меняется: добавляется тест, который сверяет документ
+# контракта docs/openapi/openapi.yaml с роутами FastAPI, и правило в AGENTS.md
+# и .agents/rules/backend.md. Требования к ручкам уже лежат в спеках
+# review-rest-api, webhook-intake и user-auth.
+skip_specs: true

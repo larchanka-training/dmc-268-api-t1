@@ -14,6 +14,8 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    Session,
+    User,
 )
 from app.infrastructure.db.models import (
     ContextPayloadRow,
@@ -22,6 +24,8 @@ from app.infrastructure.db.models import (
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
+    SessionRow,
+    UserRow,
 )
 
 
@@ -67,6 +71,7 @@ def review_run_to_domain(row: ReviewRunRow) -> ReviewRun:
         created_at=row.created_at,
         updated_at=row.updated_at,
         failure_reason=row.failure_reason,
+        failed_stage=row.failed_stage,
         model=row.model,
         tokens_used=row.tokens_used,
         duration_seconds=row.duration_seconds,
@@ -122,4 +127,31 @@ def published_comment_to_domain(row: PublishedCommentRow) -> PublishedComment:
         created_at=row.created_at,
         updated_at=row.updated_at,
         finding_id=row.finding_id,
+        thread_resolved=row.thread_resolved,
+        in_reply_to_provider_comment_id=row.in_reply_to_provider_comment_id,
+        feedback_positive=row.feedback_positive,
+        feedback_negative=row.feedback_negative,
+    )
+
+
+def user_to_domain(row: UserRow) -> User:
+    return User(
+        id=row.id,
+        provider=row.provider,
+        provider_user_id=row.provider_user_id,
+        login=row.login,
+        name=row.name,
+        avatar_url=row.avatar_url,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def session_to_domain(row: SessionRow) -> Session:
+    return Session(
+        id=row.id,
+        token_hash=row.token_hash,
+        user_id=row.user_id,
+        created_at=row.created_at,
+        expires_at=row.expires_at,
     )

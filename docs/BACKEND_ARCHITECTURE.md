@@ -38,7 +38,8 @@ app/domain/          entities, enums, and the rules, as pure functions
 порядок слоёв. Второй не даёт точке входа разрастись: `app.main` не может
 обращаться к `domain`, `application` или `infrastructure` напрямую, только
 через `app.api`. Третий полностью запрещает `sqlalchemy`, `fastapi`, `httpx`,
-`ollama`, `pika`, `alembic` и `psycopg` в `domain` и `application`.
+`ollama`, `pika`, `alembic`, `psycopg` и пакеты `tree_sitter*` в `domain` и
+`application`.
 
 ```
 $ lint-imports
@@ -101,8 +102,13 @@ compile-time зависимости от слоя приложения.
 | `ContextPayloadRepo` | `SqlAlchemyContextPayloadRepo` | что было показано модели |
 | `FindingRepo` | `SqlAlchemyFindingRepo` | замечания с привязкой к диффу |
 | `PublishedCommentRepo` | `SqlAlchemyPublishedCommentRepo` | опубликованные комментарии |
+| `UserRepo` | `SqlAlchemyUserRepo` | пользователи кабинета по учётной записи у провайдера |
+| `SessionRepo` | `SqlAlchemySessionRepo` | сессии входа по хэшу cookie |
 | `UnitOfWork` | `SqlAlchemyUnitOfWork` | граница транзакции |
-| `VcsGateway` | `GitHubVcsGateway` | дифф и метаданные PR через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и exponential backoff внутри адаптера |
+| `VcsGateway` | `GitHubVcsGateway` | дифф, метаданные PR и содержимое файла на коммите (`fetch_file`, contents API; 404 — `None`) через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и exponential backoff внутри адаптера. Для `fetch_file` App нужно разрешение **Contents: read** |
+| `CacheStore` | `InMemoryCacheStore` | best-effort key/value с TTL в памяти процесса воркера, один экземпляр на composition root; промах не ошибка. Первый потребитель — правила `.review/rules.md` по ключу «репозиторий, base_sha». Redis — со второй репликой |
+| `DefinitionExtractor` | `TreeSitterDefinitionExtractor` | контур файла (определения с диапазонами строк, импорты) для AST-окружения изменённых строк; грамматики Python, TypeScript/TSX, JavaScript, Go. Какие определения показать модели, решает домен (`select_scopes`); tree-sitter запрещён во внутренних слоях контрактом import-linter |
+| `OAuthProvider` | `GitHubOAuthProvider` | вход через OAuth самого GitHub App: адрес авторизации и обмен `code` на профиль (`GET /user`); токен пользователя не выходит из адаптера, любой сбой — `OAuthProviderUnavailable`. Контейнер выдаёт провайдера по `{provider}` из пути, неизвестный — `404` |
 | `JobQueue` | `RabbitMQJobQueue` | задача ревью в RabbitMQ, один метод `enqueue`; тело — только доменные данные по §4.2 System Design, приоритет — свойство AMQP; очередь `review_jobs` с `x-max-priority` и DLX/DLQ-топологией, переиспользуемое соединение с publisher confirms внутри адаптера |
 | `LlmGateway` | `StubLlmGateway` **(заглушка)** | выполнить промпт анализа, вернуть структурированные замечания. Текущий адаптер — фиксированный ответ без похода к модели; реальный транспорт к Ollama меняет только адаптер, контракт порта (`review(context) -> LlmReviewResult`) уже готов его принять. |
 
@@ -110,6 +116,30 @@ compile-time зависимости от слоя приложения.
 адаптером. Тест проверяет, что у каждого объявленного порта есть адаптер и что
 ни один модуль в `api`, `application` или `domain` не ссылается на конкретную
 реализацию.
+
+### Сессия на ручках
+
+Две проверки, по порядку:
+
+- `OriginMiddleware` (`app/api/origin.py`) — изменяющие запросы (`POST`, `PUT`, `PATCH`,
+  `DELETE`) под `/api/v1/`, кроме приёма вебхуков, проходят, только если `Origin` равен
+  `PUBLIC_ORIGIN`; иначе `403 ORIGIN_FORBIDDEN`. Middleware, а не зависимость: FastAPI
+  разбирает JSON тела раньше зависимостей, а чужой запрос должен получить `403` до
+  разбора тела, сессии и базы.
+- `current_user` из `app/api/session.py` — зависимость в `SESSION_REQUIRED`, подключённая
+  на уровне роутера: какие ручки открыты, видно в объявлении маршрутов. Пользователь
+  сессии из cookie `session` через use case `authenticate`; без действительной сессии
+  `401 UNAUTHENTICATED`, а пришедшая недействительная cookie удаляется в том же ответе.
+  Битый JSON тела FastAPI отклоняет `422` раньше зависимостей, поэтому со своим `Origin`
+  и без сессии он получает `422`, а не `401`.
+
+Открыты без сессии: `/webhooks/*` (подпись), `/auth/{provider}/login`,
+`/auth/{provider}/callback` и `/health`. `POST /auth/logout` сессии не требует,
+только `Origin`: выход идемпотентен и всегда отвечает `204`.
+
+Истёкшие сессии стирает воркер в том же периодическом проходе, что выметает
+зависшие прогоны (`purge_expired_sessions`, раз в минуту). Индекса по
+`expires_at` нет: таблица мала, а проход не лежит на пути запроса.
 
 ### Спроектированы, но не реализованы
 
@@ -123,7 +153,6 @@ compile-time зависимости от слоя приложения.
 |---|---|---|
 | `IdempotencyStore` | PostgreSQL | захватить ключ через `INSERT ... ON CONFLICT DO NOTHING`, воспроизвести результат победившего запроса. Появится вместе с первым эндпоинтом, который принимает повторы. |
 | `RateLimiter` | PostgreSQL | счётчик с фиксированным окном на субъект, `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. |
-| `CacheStore` | TTL-словарь в памяти процесса | key/value по принципу best effort. Промах никогда не считается ошибкой. |
 
 Таблицы `accounts`, `idempotency_records` и `rate_limit_counters`
 спроектированы вместе с этими портами и появятся вместе с ними.
@@ -143,7 +172,8 @@ python -m app.worker      review consumer: minutes, bound by model latency
 ack/nack и dead-letter настоящие. Обработчик сообщения — `run_review`
 (`app/application/review_pipeline.py`): разбирает `ReviewJob` из сообщения,
 проводит прогон через `queued → building_context → analysing → publishing →
-completed`/`failed`, используя заготовку контекста и `LlmGateway`.
+completed`/`failed`: контекст собирает `build_review_context` (дифф,
+AST-окружение, правила владельца), анализ — `LlmGateway` (пока заглушка).
 
 У них общие домен, репозитории и база данных, а общаются они через очередь, а
 не по HTTP. Это модульный монолит, а не набор сервисов.
@@ -236,7 +266,8 @@ def upgrade() -> None:
 
 Если обязательная настройка не задана, старт явно падает и называет её.
 Обязательная сейчас одна, `DATABASE_URL`. Настройки `github_app_id`,
-`github_app_private_key`, `github_webhook_secret` и `rabbitmq_url`
+`github_app_private_key`, `github_webhook_secret`, `rabbitmq_url`,
+`github_app_client_id`, `github_app_client_secret` и `public_origin`
 опциональны с пустым дефолтом: приложение без GitHub-реквизитов поднимается
 и отвечает на запросы, не касающиеся вебхуков, а пустая настройка громко
 падает при первом использовании. Новые настройки появляются вместе с кодом,
@@ -294,6 +325,22 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 `validate_anchor` уже является одной из таких защит: замечание, выдуманное про
 файл вне диффа, не может быть сохранено.
 
+Сборка контекста (`app/application/context_assembly.py`) добавляет к этому три
+структурные меры. Каждый текст из репозитория — hunk'и, сигнатуры, импорты,
+проверки правил — лежит внутри блока `<<<untrusted kind=… id=…>>>`, граница
+которого — 128 бит sha256 от самого текста: закрыть блок досрочно можно,
+только подобрав текст с собственным тегом, — порядка 2^128 хэшей.
+**Допущение:** мера работает, пока модель сверяет `id` закрывающей строки с
+открывающей. Системный промпт этого требует, но это инструкция, а не
+механизм: модель, проигнорировавшая её, примет поддельный `<<<end …>>>` за
+конец блока. Поэтому блоки — одна из мер, а не единственная: модель без
+инструментов, вывод структурирован, находки сверяются с диффом. Управляющие, bidi- и zero-width-символы
+до этого заменяются видимой записью `<U+XXXX>` — Trojan Source становится
+видимым. Правила владельца (`.review/rules.md`) читаются только с `base_sha`
+целевой ветки: автор PR не может переписать критерии собственного ревью, а из
+файла в контекст попадают только распознанные поля правил, без прозы.
+Фильтр по фразам не вводится — проигрывает перефразированию.
+
 **Секреты в `context_payloads`.** Эта таблица хранит исходный код как есть.
 Разработчик, закоммитивший API-ключ, получает его копию в нашей базе, и она
 там остаётся. Секреты надо вычищать до вставки, и
@@ -307,6 +354,13 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 (`hmac.compare_digest`) по сырому телу запроса до разбора payload'а; без
 подписи или с неверной вебхук получает 401, и ни одной записи не появляется.
 Пустой секрет не принимает ничего: все доставки отклоняются.
+
+**Сессия пользователя.** Значение cookie `session` равносильно паролю. В базе —
+только SHA-256 от него, cookie `HttpOnly; Secure; SameSite=Lax`, выход удаляет
+сессию сразу. Токен пользователя GitHub после входа не хранится. Access-лог uvicorn
+пишет путь с query, а в query callback'а лежат `code` и `state`, поэтому
+`app/api/log_redaction.py` вырезает query на путях `/api/v1/auth/`. CSRF держат
+`SameSite=Lax` и проверка `Origin`. Обоснование — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
 
 **Область действия учётных данных.** Для публикации комментариев нужен доступ
 на запись. GitHub App с токенами на каждую установку ограничивает утечку одной
@@ -323,8 +377,16 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 автоматически.
 
 **Исчерпание ресурсов.** Change request может быть сколь угодно большим.
-Жёсткие лимиты на количество файлов, размер диффа в байтах и длительность
-прогона должны быть в сборщике контекста.
+Сборщик контекста держит жёсткий лимит `context_max_tokens` (по умолчанию
+32 000): оценка токенов (байты / 4, средняя, не верхняя граница)
+сериализованного пакета его никогда не превышает; это лимит пакета, а не окна
+модели — промпт и ответ требуют своего места, точный подсчёт придёт с
+токенизатором реального `LlmGateway`. Не
+поместившееся перечисляется в `omitted`. Довыборка файлов для AST ограничена
+`ast_max_files` и `ast_max_file_bytes`, правила — `rules_max_bytes`; лимит
+размера соблюдается во время загрузки (адаптер читает тело потоком и обрывает
+его), поэтому большой файл или сжатая «бомба» в память не попадают. Лимита на
+длительность прогона пока нет.
 
 **Self-hosted модель это свойство безопасности.** Ollama в нашей собственной
 сети убирает главный путь утечки данных. Переход на hosted API в будущем был

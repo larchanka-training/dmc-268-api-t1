@@ -21,11 +21,14 @@ from app.domain.entities import (
     Finding,
     Hunk,
     MergeRequest,
+    OpenReviewThread,
     PublishedComment,
     Repository,
     ReviewRun,
+    Session,
+    User,
 )
-from app.domain.enums import TERMINAL_STATUSES, Provider
+from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
 
 
@@ -243,8 +246,13 @@ class FakeFindingRepo:
 
 
 class FakePublishedCommentRepo:
-    def __init__(self) -> None:
+    def __init__(self, review_runs: FakeReviewRunRepo) -> None:
         self._items: list[PublishedComment] = []
+        self._review_runs = review_runs
+        self._findings: FakeFindingRepo | None = None
+
+    def bind_findings(self, findings: FakeFindingRepo) -> None:
+        self._findings = findings
 
     def snapshot(self) -> list[PublishedComment]:
         return list(self._items)
@@ -253,10 +261,141 @@ class FakePublishedCommentRepo:
         self._items = list(state)
 
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]:
-        return [c for c in self._items if c.review_run_id == review_run_id]
+        return sorted(
+            (c for c in self._items if c.review_run_id == review_run_id),
+            key=lambda c: (c.published_at, c.id),
+        )
+
+    def list_open_threads_for_merge_request(
+        self, merge_request_id: UUID
+    ) -> list[OpenReviewThread]:
+        if self._findings is None:
+            return []
+        runs = {
+            r.id: r
+            for r in self._review_runs.runs
+            if r.merge_request_id == merge_request_id
+        }
+        threads: list[OpenReviewThread] = []
+        for comment in self._items:
+            if comment.kind is not CommentKind.INLINE or comment.thread_resolved:
+                continue
+            run = runs.get(comment.review_run_id)
+            if run is None or comment.finding_id is None:
+                continue
+            finding = next(
+                (f for f in self._findings._items if f.id == comment.finding_id),
+                None,
+            )
+            if finding is None:
+                continue
+            threads.append(
+                OpenReviewThread(
+                    finding=finding,
+                    root_provider_comment_id=comment.provider_comment_id,
+                    root_published_comment_id=comment.id,
+                )
+            )
+        return threads
+
+    def get(self, published_comment_id: UUID) -> PublishedComment | None:
+        return next((c for c in self._items if c.id == published_comment_id), None)
+
+    def find_by_provider_comment_id(self, provider_comment_id: str) -> PublishedComment | None:
+        return next(
+            (c for c in self._items if c.provider_comment_id == provider_comment_id),
+            None,
+        )
 
     def add(self, comment: PublishedComment) -> None:
         self._items.append(comment)
+
+    def update(self, comment: PublishedComment) -> None:
+        for index, existing in enumerate(self._items):
+            if existing.id == comment.id:
+                self._items[index] = comment
+                return
+        raise LookupError(f"published comment {comment.id} is not stored")
+
+    def record_feedback(self, provider_comment_id: str, *, positive: bool) -> bool:
+        comment = self.find_by_provider_comment_id(provider_comment_id)
+        if comment is None:
+            return False
+        if positive:
+            updated = replace(comment, feedback_positive=comment.feedback_positive + 1)
+        else:
+            updated = replace(comment, feedback_negative=comment.feedback_negative + 1)
+        self.update(updated)
+        return True
+
+
+class FakeUserRepo:
+    def __init__(self) -> None:
+        self._by_id: dict[UUID, User] = {}
+
+    def snapshot(self) -> dict[UUID, User]:
+        return dict(self._by_id)
+
+    def restore(self, state: dict[UUID, User]) -> None:
+        self._by_id = dict(state)
+
+    def get(self, user_id: UUID) -> User | None:
+        return self._by_id.get(user_id)
+
+    def find_by_provider(self, provider: Provider, provider_user_id: str) -> User | None:
+        return next(
+            (
+                u
+                for u in self._by_id.values()
+                if u.provider == provider and u.provider_user_id == provider_user_id
+            ),
+            None,
+        )
+
+    def add(self, user: User) -> bool:
+        if self.find_by_provider(user.provider, user.provider_user_id) is not None:
+            return False
+        self._by_id[user.id] = user
+        return True
+
+    def update(self, user: User) -> None:
+        if user.id not in self._by_id:
+            raise LookupError(f"user {user.id} is not stored")
+        # Как SQL-адаптер: меняются только профиль, ключ и created_at — нет.
+        stored = self._by_id[user.id]
+        self._by_id[user.id] = replace(
+            stored, login=user.login, name=user.name, avatar_url=user.avatar_url
+        )
+
+
+class FakeSessionRepo:
+    def __init__(self) -> None:
+        self._by_id: dict[UUID, Session] = {}
+
+    @property
+    def stored(self) -> list[Session]:
+        return list(self._by_id.values())
+
+    def snapshot(self) -> dict[UUID, Session]:
+        return dict(self._by_id)
+
+    def restore(self, state: dict[UUID, Session]) -> None:
+        self._by_id = dict(state)
+
+    def find_by_token_hash(self, token_hash: bytes) -> Session | None:
+        return next((s for s in self._by_id.values() if s.token_hash == token_hash), None)
+
+    def add(self, session: Session) -> None:
+        self._by_id[session.id] = session
+
+    def delete(self, session_id: UUID) -> None:
+        self._by_id.pop(session_id, None)
+
+    def delete_expired(self, now: datetime) -> int:
+        expired = [s.id for s in self._by_id.values() if now >= s.expires_at]
+        for session_id in expired:
+            del self._by_id[session_id]
+        return len(expired)
 
 
 class FakeUnitOfWork(UnitOfWork):
@@ -284,9 +423,10 @@ class FakeUnitOfWork(UnitOfWork):
         self.review_runs: FakeReviewRunRepo = self._fakes.review_runs
         self.context_payloads: FakeContextPayloadRepo = self._fakes.context_payloads
         self.findings: FakeFindingRepo = self._fakes.findings
-        self.published_comments: FakePublishedCommentRepo = (
-            self._fakes.published_comments
-        )
+        self.published_comments: FakePublishedCommentRepo = self._fakes.published_comments
+        self.published_comments.bind_findings(self.findings)
+        self.users: FakeUserRepo = self._fakes.users
+        self.sessions: FakeSessionRepo = self._fakes.sessions
         self.committed = 0
         self.rolled_back = 0
         self._committed_state: list[Any] | None = None
@@ -341,7 +481,9 @@ class _Fakes:
         self.review_runs = FakeReviewRunRepo()
         self.context_payloads = FakeContextPayloadRepo()
         self.findings = FakeFindingRepo(self.review_runs)
-        self.published_comments = FakePublishedCommentRepo()
+        self.published_comments = FakePublishedCommentRepo(self.review_runs)
+        self.users = FakeUserRepo()
+        self.sessions = FakeSessionRepo()
 
     def _all(self) -> list[Any]:
         return [
@@ -351,6 +493,8 @@ class _Fakes:
             self.context_payloads,
             self.findings,
             self.published_comments,
+            self.users,
+            self.sessions,
         ]
 
     def snapshot(self) -> list[Any]:

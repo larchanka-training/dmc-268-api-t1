@@ -46,6 +46,29 @@ jobs:
       # сообщил бы одну ошибку на две несвязанные проблемы.
       - run: uv run lint-imports
       - run: uv run mypy .
+      # Контракт API — экспорт схемы из кода; устаревший docs/openapi/openapi.json — провал.
+      - run: uv run python scripts/export_openapi.py --check
+
+  # Ошибка в спеке иначе всплывает только при архиве change: требование без
+  # сценария, MODIFIED, теряющий сценарии, ADDED уже существующего требования.
+  # --strict ловит и слишком длинные требования. Версия openspec закреплена:
+  # новые проверки приходят с её обновлением, а не сами по себе. uv npm-пакеты
+  # не ставит, поэтому npx.
+  openspec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: npx --yes @fission-ai/openspec@1.14.2 validate --all --strict
+      # Change со всеми закрытыми задачами архивируется в том же PR — иначе его
+      # дельты не доходят до openspec/specs/. Открытые change — в summary.
+      # Явный `shell: bash` включает pipefail: сбой openspec не маскируется
+      # ошибкой разбора JSON в скрипте.
+      - run: npx --yes @fission-ai/openspec@1.14.2 list --json | python3 scripts/check_openspec_archived.py
+        shell: bash
 
   terraform:
     needs: syntax

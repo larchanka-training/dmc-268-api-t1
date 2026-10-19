@@ -164,6 +164,10 @@ jobs:
           TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
           TF_VAR_rabbitmq_password: ${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}
           TF_VAR_github_webhook_secret: ${{ secrets.WEBHOOK_SECRET_DMC268_T1 }}
+          TF_VAR_github_app_id: ${{ vars.APP_ID_DMC268_T1 }}
+          TF_VAR_github_app_private_key: ${{ secrets.APP_PRIVATE_KEY_DMC268_T1 }}
+          TF_VAR_github_app_client_id: ${{ vars.APP_CLIENT_ID_DMC268_T1 }}
+          TF_VAR_github_app_client_secret: ${{ secrets.APP_CLIENT_SECRET_DMC268_T1 }}
           TF_VAR_registry_username: ${{ github.actor }}
           TF_VAR_registry_password: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -174,6 +178,9 @@ jobs:
           # туннельная проверка живости и отладка.
           export TF_VAR_docker_host="ssh://${SSH_USER}@${HOST}"
           export TF_VAR_service_host="$HOST"
+          # Интерфейс отдаётся по HTTPS на тот же адрес (public_tls в dmc-268-ui-t1),
+          # и API приходят его запросы: с этим origin сверяется Origin.
+          export TF_VAR_public_origin="https://$HOST"
           export TF_VAR_bind_ip="127.0.0.1"
           export TF_VAR_internal_bind_ip="127.0.0.1"
 
@@ -248,6 +255,52 @@ jobs:
           echo "::error::/health не ответил за минуту"
           ssh -o BatchMode=yes "$SSH_USER@$HOST" \
             "docker logs --tail 50 dmc268-api 2>&1; echo '--- миграции ---'; docker logs --tail 30 dmc268-migrate 2>&1" || true
+          exit 1
+
+      # HTTP у воркера нет, поэтому живость — это состояние контейнера.
+      # «Запущен» мало: при падении Docker перезапускает его, и в момент
+      # проверки он снова запущен. Живым считаем контейнер, который 30 секунд
+      # подряд запущен и ни разу не перезапустился; опрос каждые 5 секунд
+      # видит и быстрый рестарт — по выросшему счётчику. Окно длиннее
+      # жизни процесса ловит любую петлю падений с периодом до 30 секунд:
+      # после падения процесса, прожившего больше 10 секунд, Docker сбрасывает
+      # задержку и поднимает его сразу, и короткое окно такую петлю пропускало.
+      # Рестарты в начале, пока брокер не готов (depends_on его не ждёт),
+      # окно не засчитывает и начинает заново; на всё — до 90 секунд.
+      - name: Проверить, что воркер работает
+        env:
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -uo pipefail
+          state() {
+            ssh -o BatchMode=yes "$SSH_USER@$HOST" \
+              "docker inspect -f '{{.State.Running}} {{.RestartCount}}' dmc268-worker 2>/dev/null" \
+              | grep -E '^(true|false) [0-9]+$' | tail -1
+          }
+
+          hold=30
+          started="$(date +%s)"
+          last=""
+          stable_since="$started"
+          while [ $(( $(date +%s) - started )) -lt 90 ]; do
+            now="$(date +%s)"
+            current="$(state)"
+            if [ -n "$current" ] && [ "${current%% *}" = "true" ] && [ "$current" = "$last" ]; then
+              if [ $(( now - stable_since )) -ge "$hold" ]; then
+                echo "воркер работает ${hold} с без рестартов, рестартов всего: ${current##* }"
+                exit 0
+              fi
+            else
+              [ -n "$last" ] && echo "воркер ещё не устоялся: было '${last}', стало '${current}'"
+              last="$current"
+              stable_since="$now"
+            fi
+            sleep 5
+          done
+
+          echo "::error::воркер не проработал ${hold} с без рестартов за полторы минуты"
+          ssh -o BatchMode=yes "$SSH_USER@$HOST" "docker logs --tail 50 dmc268-worker 2>&1" || true
           exit 1
 
       - name: Записать результат в summary

@@ -49,7 +49,7 @@ ln -s AGENTS.md CLAUDE.md                 # Claude Code читает CLAUDE.md
 
 ```bash
 uv sync --all-extras
-uv run pre-commit install   # перед каждым коммитом гоняет ruff, mypy и lint-imports
+uv run pre-commit install   # перед каждым коммитом гоняет ruff, mypy, lint-imports и openspec validate (нужен Node)
 ```
 
 ## Запуск
@@ -87,9 +87,28 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
-`GET /health` отвечает `{"status": "ok"}`. Сгенерированная документация API лежит на `/docs`.
+`GET /health` отвечает `{"status": "ok"}`. Контракт API строится из кода: сервер отдаёт схему по
+`/openapi.json` и в Swagger UI на `/docs`, её экспорт лежит в `docs/openapi/openapi.json` — по нему
+фронтенд генерирует типы. После правки ручки или модели ответа обновите экспорт, CI проверяет, что
+он свежий:
 
-Тот же стек — PostgreSQL, RabbitMQ и контейнер с API — описан ещё раз в
+```bash
+uv run python scripts/export_openapi.py           # записать docs/openapi/openapi.json
+uv run python scripts/export_openapi.py --check   # то же, что в CI: rc=1, если файл устарел
+```
+
+Ручки `/api/v1`, кроме вебхуков и входа, требуют сессию. Для входа через GitHub
+нужны `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` и `PUBLIC_ORIGIN`
+(см. `.env.example`), а callback `<PUBLIC_ORIGIN>/api/v1/auth/github/callback`
+должен быть зарегистрирован в настройках GitHub App. `PUBLIC_ORIGIN` — origin, на
+котором браузер открывает и кабинет, и API (на стенде они за одним nginx). Локально
+`http://localhost:8000` из `.env.example` подходит, когда API открывают напрямую.
+Для кабинета с настоящим бэкендом (`VITE_USE_MOCK_API=false`, dev-сервер на `:3000`
+проксирует `/api` сюда) ставьте `http://localhost:3000`.
+Cookie сессии ставится с `Secure`: вход работает по HTTPS и на `localhost`, по
+голому HTTP на другом хосте — нет.
+
+Тот же стек — PostgreSQL, RabbitMQ и контейнеры API и воркера — описан ещё раз в
 [`infra/`](infra/README.md), для сервера. Два описания одного стека уже дважды
 разъезжались и ломали стенд, поэтому факты, которые обязаны совпадать (миграции
 до приёма трафика, точка монтирования тома PostgreSQL, что публикуется наружу),
@@ -138,7 +157,7 @@ uv run lint-imports      # правило слоёв, см. документ п�
 например когда что-нибудь в `app/domain` тянется к SQLAlchemy. `mypy` работает в
 строгом режиме по `app/`; для `tests/` действует послабление
 (`[[tool.mypy.overrides]]` в `pyproject.toml`), потому что стиль pytest —
-нетипизированные фикстуры и `def test_x():` — там норма. Все три проверки
+нетипизированные фикстуры и `def test_x():` — там норма. Все три проверки, как и `openspec validate --strict`,
 работают и как хуки `pre-commit` (`uv run pre-commit install`, см. «Установка»),
 и в CI.
 
@@ -173,3 +192,13 @@ psql "$DATABASE_URL" -c "
 Повторная вставка того же `(provider, provider_id)` упадёт на уникальном
 индексе `uq_repositories_provider_id` — повторное внесение невозможно по
 конструкции.
+
+## Правила ревью и разрешения GitHub App
+
+Воркер довыбирает через contents API `.review/rules.md` (с коммита целевой
+ветки PR) и изменённые файлы (с `head_sha`) для AST-окружения, поэтому GitHub
+App нужно разрешение **Contents: read**. Без него прогон не падает: правила
+уходят в дефолтный фоллбэк (`rules.status = unavailable`), AST пропускается.
+Формат правил — [`prompts/review/custom-rules.md`](prompts/review/custom-rules.md),
+лимиты сборки контекста (`CONTEXT_MAX_TOKENS`, `RULES_MAX_BYTES`,
+`AST_MAX_FILES`, …) — в [`app/config.py`](app/config.py).

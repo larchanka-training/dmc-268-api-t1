@@ -56,7 +56,7 @@ Review Worker
 ## 2. ReviewJob
 
 `ReviewJob` — публичная проекция хранимой сущности `ReviewRun` (см. `review-data-model`).
-Это не то же самое, что сообщение в очереди: сообщение несёт `reviewRunId`, у него нет
+Это не то же самое, что сообщение в очереди: сообщение несёт `review_run_id`, у него нет
 собственной идентичности, отдельной от прогона, который оно продвигает.
 
 ### State Machine
@@ -105,10 +105,10 @@ Worker не должен пропускать состояния. Изменен
 
 Backend:
 
-- валидирует запрос, включая `provider` + `providerRepositoryId` и `trigger`;
+- валидирует запрос, включая `provider` + `provider_repository_id` и `trigger`;
 - создаёт `ReviewRun` в состоянии `queued`;
 - сохраняет его;
-- отправляет `reviewRunId` в очередь (RabbitMQ, см. §6).
+- отправляет `review_run_id` в очередь (RabbitMQ, см. §6).
 
 ### building_context
 
@@ -147,7 +147,7 @@ Backend/Worker публикует результат на хостинг (см. 
 После успешной публикации:
 
 - Findings сохранены;
-- ReviewRun получает `completed`, фиксируются `model`, `tokensUsed`, `durationSeconds`;
+- ReviewRun получает `completed`, фиксируются `model`, `tokens_used`, `duration_seconds`;
 - результат доступен через Backend API.
 
 ### failed
@@ -175,15 +175,15 @@ Backend/Worker публикует результат на хостинг (см. 
 Рекомендуемый logical key:
 
 ```text
-provider + providerRepositoryId + pullRequestNumber + headCommitSha
+provider + provider_repository_id + pull_request_number + head_commit_sha
 ```
 
-Повторная попытка обработки существующего `ReviewRun` должна использовать тот же `reviewRunId`.
+Повторная попытка обработки существующего `ReviewRun` должна использовать тот же `review_run_id`.
 Не более одного нетерминального прогона на этот ключ уже гарантирует БД
 (`uq_review_runs_one_active_per_commit`) — API не создаёт второй `ReviewRun`, а отвечает
 по-разному в зависимости от того, кто прислал дубль:
 
-- `POST /reviews` (ручной запуск) — `409` с `ApiError.code = REVIEW_ALREADY_ACTIVE`:
+- `POST /reviews` (ручной запуск) — `409` с `code = REVIEW_ALREADY_ACTIVE`:
   человек должен увидеть, что прогон уже идёт;
 - `POST /webhooks/{provider}` — `202` с уже существующим `ReviewJob`: повторная доставка
   вебхука штатна, а не-2xx хостинг считает неудачей и повторяет доставку снова.
@@ -200,7 +200,9 @@ provider + providerRepositoryId + pullRequestNumber + headCommitSha
 
 LLM не имеет права определять публичную модель данных.
 
-Каждый Finding валидируется по `docs/openapi/finding.schema.json`.
+Каждый Finding в ответе LLM валидируется по `docs/openapi/finding.schema.json` — схеме вывода
+LLM (на неё ссылается `docs/openapi/llm_review_output.schema.json`), а не схеме API: находку
+в API описывает `FindingResponse` в схеме из кода (`docs/openapi/openapi.json`).
 
 При invalid output:
 
@@ -237,7 +239,7 @@ JSON Schema validation
 
 Документ ранее смешивал в одном `attempt` три разных вещи. Разводим их:
 
-- **`providerAttempt`** — попытка вызвать внешнего провайдера (LLM или SCM) внутри одного
+- **`provider_attempt`** — попытка вызвать внешнего провайдера (LLM или SCM) внутри одного
   прохождения состояния. Инкрементируется клиентом провайдера, ограничена лимитом из этого
   раздела, попадает в публичную `ReviewError` (§8).
 - **redelivery сообщения** — брокер повторно доставляет то же сообщение очереди после
@@ -245,14 +247,14 @@ JSON Schema validation
   но фиксируется в наблюдаемости (§10) как `queueRedeliveryCount`.
 - **попытка задачи целиком** — не заводим отдельным счётчиком. Задача либо продвигается в
   рамках текущего `ReviewRun`, либо тот переходит в `failed`; повторный прогон того же
-  коммита — это новый `ReviewRun` с собственным `reviewRunId` (см. §4).
+  коммита — это новый `ReviewRun` с собственным `review_run_id` (см. §4).
 
 ### Visibility timeout и dead-letter
 
 - **Visibility timeout** — время, в течение которого RabbitMQ ждёт `ack` по сообщению;
   реализуется через настройку consumer'а и обрыв соединения при его превышении, а не
   отдельной pending-записью, как это устроено у Redis-очередей.
-- **Dead-letter** — сообщение, исчерпавшее `providerAttempt` или превысившее visibility
+- **Dead-letter** — сообщение, исчерпавшее `provider_attempt` или превысившее visibility
   timeout сверх допустимого числа redelivery, уходит в dead-letter exchange с отдельной
   политикой обработки (минимум — алертинг), а не удаляется молча.
 
@@ -260,12 +262,12 @@ JSON Schema validation
 
 | Ошибка | Retry | Поведение |
 |---|---|---|
-| LLM `429` | Да | exponential backoff + jitter, инкремент `providerAttempt` |
-| LLM `5xx` | Да | exponential backoff + jitter, инкремент `providerAttempt` |
-| Network timeout | Да | exponential backoff + jitter, инкремент `providerAttempt` |
+| LLM `429` | Да | exponential backoff + jitter, инкремент `provider_attempt` |
+| LLM `5xx` | Да | exponential backoff + jitter, инкремент `provider_attempt` |
+| Network timeout | Да | exponential backoff + jitter, инкремент `provider_attempt` |
 | Invalid JSON от LLM | Ограниченно | 1 repair/regeneration |
 | JSON Schema validation error | Ограниченно | 1 repair/regeneration |
-| SCM transient `5xx` | Да | bounded retry, инкремент `providerAttempt` |
+| SCM transient `5xx` | Да | bounded retry, инкремент `provider_attempt` |
 | SCM `401/403` | Нет | `failed` |
 | PR not found | Нет | `failed` |
 | Repository not found | Нет | `failed` |
@@ -273,7 +275,7 @@ JSON Schema validation
 
 Начальное предложение:
 
-- максимум 3 `providerAttempt` на вызов LLM/SCM;
+- максимум 3 `provider_attempt` на вызов LLM/SCM;
 - timeout на каждый LLM/SCM request;
 - exponential backoff;
 - jitter;
@@ -324,7 +326,7 @@ LLM Gateway должен позволять в будущем заменить �
   фоновым сборщиком с кодом ошибки `REVIEW_RUN_STALE` (§8).
 - Перевод в `failed` освобождает коммит: новый `ReviewRun` для того же
   (`merge_request_id`, `head_sha`) можно создать сразу после этого.
-- `lastProgressAt` отдаётся в `ReviewJob` (§9), чтобы Frontend мог показать зависшую задачу
+- `last_progress_at` отдаётся в `ReviewJob` (§9), чтобы Frontend мог показать зависшую задачу
   до того, как её подберёт сборщик.
 
 Конкретное значение лимита устаревания — предмет согласования с Queue/DevOps.
@@ -339,7 +341,7 @@ LLM Gateway должен позволять в будущем заменить �
 `gitlab` (`app/domain/enums.py`), значит поддержка второго провайдера — не гипотетическое
 будущее, а заявленный домен. Публичный enum ошибок не должен требовать breaking change
 при подключении второго провайдера, поэтому вместо `GITHUB_*` — `SCM_*` с полем
-`scmProvider`, а не просто `provider`: `providerAttempt` уже считает попытки и LLM, и SCM,
+`scm_provider`, а не просто `provider`: `provider_attempt` уже считает попытки и LLM, и SCM,
 и поле с именем `provider`, типизированное как `Provider` (`github`/`gitlab`), для
 retryable LLM-ошибок (почти вся таблица §6) осталось бы пустым, хотя формально называет
 отказавшую сторону.
@@ -351,17 +353,17 @@ retryable LLM-ошибок (почти вся таблица §6) осталос
   "code": "LLM_TIMEOUT",
   "message": "LLM provider did not respond within the configured timeout",
   "retryable": true,
-  "providerAttempt": 3,
-  "scmProvider": null
+  "provider_attempt": 3,
+  "scm_provider": null
 }
 ```
 
 Начальный набор кодов:
 
-- `SCM_AUTH_ERROR` (поле `scmProvider` заполнено)
+- `SCM_AUTH_ERROR` (поле `scm_provider` заполнено)
 - `PR_NOT_FOUND`
 - `REPOSITORY_NOT_FOUND`
-- `SCM_UNAVAILABLE` (поле `scmProvider` заполнено)
+- `SCM_UNAVAILABLE` (поле `scm_provider` заполнено)
 - `CONTEXT_PARSING_ERROR`
 - `LLM_RATE_LIMITED`
 - `LLM_TIMEOUT`
@@ -386,15 +388,21 @@ retryable LLM-ошибок (почти вся таблица §6) осталос
 MVP endpoints:
 
 ```text
-POST /reviews
-GET  /reviews/{reviewId}
-GET  /reviews/{reviewId}/findings
-GET  /reviews
+GET  /repositories
+GET  /repositories/{repository_id}/pull-requests
+GET  /reviews/{review_run_id}
+GET  /reviews/{review_run_id}/events
 POST /webhooks/{provider}
+POST /reviews                    # заглушка: схема описана, отвечает 501 NOT_IMPLEMENTED
+GET  /auth/{provider}/login
+GET  /auth/{provider}/callback
+GET  /auth/me
+POST /auth/logout
 ```
 
-Аутентификация пользователя (`POST /auth/oauth/token`, `POST /auth/refresh`) сюда не
-входит — proposal, см. §9.1.
+Находки прогона приходят в ответе `GET /reviews/{review_run_id}`, отдельного
+`/reviews/{review_run_id}/findings` нет (спека `review-rest-api`). Списка прогонов `GET /reviews`
+тоже нет. Вход и сессия (`/auth/...`) — §9.1.
 
 `POST /webhooks/{provider}` принимает доставки от хостинга (см.
 `docs/BACKEND_ARCHITECTURE.md`, «Подлинность webhook'ов»):
@@ -407,53 +415,70 @@ POST /webhooks/{provider}
 - доставка, которая ревью не запускает (действие `reopened`, `closed` или неизвестное,
   незарегистрированный репозиторий), — `202` с телом `WebhookIgnored` (`{"status": "ignored"}`):
   записей нет, очередь не тронута;
-- сбой VCS при получении диффа или метаданных — `502` с `ApiError.code = SCM_UNAVAILABLE`,
+- сбой VCS при получении диффа или метаданных — `502` с `code = SCM_UNAVAILABLE`,
   прогон не создаётся; провайдер из `Provider`, для которого приёмника ещё нет, — `501` с
   `PROVIDER_NOT_SUPPORTED`.
 
-`CreateReviewRequest` идентифицирует репозиторий парой `provider` + `providerRepositoryId`
+`CreateReviewRequest` идентифицирует репозиторий парой `provider` + `provider_repository_id`
 (соответствует `UNIQUE (provider, provider_id)` в таблице `repositories`), а не строкой вида
 `owner/repository` — `full_name` в этой таблице намеренно не уникален. Обязателен `trigger`.
 
-Все пути — относительно `/api/v1` (`servers` в `openapi.yaml`): префикс ставит само
+Все пути — под `/api/v1` (пути в схеме уже с префиксом): префикс ставит само
 приложение, а не reverse-proxy, поэтому фронт ходит на `/api/v1/reviews`, а хостинг шлёт
 вебхуки на `/api/v1/webhooks/{provider}`.
 
-Ошибки HTTP-слоя — `ApiError` с закрытым списком `code`: `VALIDATION_ERROR`,
-`REVIEW_NOT_FOUND`, `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `SCM_UNAVAILABLE`,
-`PROVIDER_NOT_SUPPORTED`, `AUTH_CODE_INVALID`, `AUTH_REFRESH_INVALID`. Каждый ответ с `ApiError` в `openapi.yaml` называет свой код.
+Ошибки HTTP-слоя — RFC 9457 Problem Details, тип содержимого `application/problem+json`:
 
-Источник истины для HTTP-контракта: `openapi.yaml`.
-
-### 9.1. Аутентификация (proposal)
-
-`POST /reviews` подразумевает пользователя: кто-то должен ходить в SCM его правами и иметь
-право запускать ревью по конкретному репозиторию. Ни в одном из перечисленных выше
-endpoint'ов, ни в текущих OpenSpec-спеках этого нет — аутентификация здесь фиксируется как
-предложение и, как и `ReviewError.code` (§8), должна пройти отдельный OpenSpec-change до
-Contract v1 (см. §1).
-
-```text
-POST /auth/oauth/token
-POST /auth/refresh
+```json
+{
+  "type": "urn:dmc-268:problem:validation-error",
+  "title": "Запрос не прошёл проверку",
+  "status": 422,
+  "detail": "Параметры запроса не прошли проверку, ошибок: 1.",
+  "instance": "/api/v1/repositories",
+  "code": "VALIDATION_ERROR",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "errors": [{"where": "query.limit", "reason": "ожидается целое число"}]
+}
 ```
 
-- `POST /auth/oauth/token` обменивает код OAuth-редиректа провайдера (`provider` +
-  `code`) на сессию.
-- `POST /auth/refresh` обновляет access-токен по refresh-куке, без тела запроса.
-- Обе ручки отдают access-токен в теле ответа (`AuthSession.accessToken`,
-  `expiresIn` в секундах) и переиздают refresh-токен `Set-Cookie`-заголовком:
-  `HttpOnly; Secure; SameSite=Strict`, `Path=/api/v1/auth/refresh` — кука не читается
-  скриптом и не уходит ни на один другой путь API.
-- Транспорт сессии на Frontend: access-токен — в памяти вкладки, не в
-  `localStorage`; при перезагрузке — тихий `POST /auth/refresh` по куке. Это
-  решение бэкенда, а не фронта, потому что `Set-Cookie` ставит только сервер.
-- Ошибки — `ApiError`: `AUTH_CODE_INVALID` (код OAuth недействителен/истёк),
-  `AUTH_REFRESH_INVALID` (refresh-кука отсутствует, истекла или отозвана).
+- `type` — `urn:dmc-268:problem:<код в kebab-case>`, `title` — короткое описание по-русски;
+  оба постоянны для кода. `detail` — что случилось в этом запросе, без значений из запроса.
+  `instance` — путь запроса без query в том виде, в каком он пришёл, — закодированный
+  (`/api/v1/a%20b`), то есть URI-reference; запрет повторять переданное значение относится
+  к `detail` и `errors`.
+- `code` — расширение с закрытым списком `ErrorCode`: клиент ветвится по нему, а не по
+  тексту. Коды: `VALIDATION_ERROR`, `REVIEW_NOT_FOUND`, `REPOSITORY_NOT_FOUND`,
+  `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `SCM_UNAVAILABLE`,
+  `PROVIDER_NOT_SUPPORTED`, `UNAUTHENTICATED`, `ORIGIN_FORBIDDEN`, `ROUTE_NOT_FOUND` (`404`
+  неизвестного пути), `METHOD_NOT_ALLOWED` (`405`, разрешённые методы — в `Allow`),
+  `NOT_IMPLEMENTED` (`501` запланированной ручки, описанной в схеме заранее),
+  `HTTP_ERROR` (прочий `HTTPException` фреймворка или зависимости — статус и заголовки
+  исключения, например `429` с `Retry-After`), `INTERNAL_ERROR` (`500`, без деталей исключения). Модель
+  на каждый код — в `app/api/problems.py`, в схеме — объединение `AnyProblem` с
+  discriminator по `code`; у каждой операции в схеме — её коды и `default` с `AnyProblem`.
+- `trace_id` — 32 строчных hex-символа (формат trace-id W3C Trace Context, не все нули),
+  который сервер выдаёт каждому запросу сам и отдаёт заголовком `X-Trace-ID` на любом
+  ответе, не только на ошибке. Входящие `X-Trace-ID`, `X-Request-ID` и `traceparent` не
+  принимаются. На `500` сервер пишет одну строку лога уровня error с `trace_id`, методом и
+  путём — по `trace_id` из сообщения пользователя её и ищут; стектрейс пишет uvicorn.
+  Когда подключим OpenTelemetry, значением станет trace id OTel — формат тот же.
+- Дополнительные данные есть только у `VALIDATION_ERROR`: `errors` — `where` (часть запроса
+  и имя параметра) и `reason` (причина по-русски).
 
-Единый origin у Frontend и API через reverse-proxy (что и делает `SameSite=Strict`
-рабочим без CORS) в контракт не входит — это устройство инфраструктуры конкретного
-деплоя, а не публичный API.
+`404` ручек — код по сущности, ошибка проверки параметров — `422` с `VALIDATION_ERROR`.
+Ошибки прогона (`ReviewError`) — другой контракт: это поле `ReviewJob`, а не тело
+HTTP-ошибки.
+
+Источник истины для HTTP-контракта — код: роуты и модели `app/api`, из которых FastAPI
+строит схему (`/openapi.json`). `docs/openapi/openapi.json` — её экспорт
+(`uv run python scripts/export_openapi.py`), руками не правится; CI проверяет, что он свежий.
+
+### 9.1. Аутентификация
+
+Вход через GitHub выполняет бэкенд, сессия живёт в httpOnly cookie и хранится на
+сервере. Требования — спека `user-auth` (`openspec/specs/user-auth/spec.md`), ручки —
+`docs/openapi/openapi.json`, обоснование выбора — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
 
 ---
 
@@ -461,12 +486,12 @@ POST /auth/refresh
 
 Для каждого review необходимо иметь минимум:
 
-- `reviewRunId`;
-- provider + providerRepositoryId;
+- `review_run_id`;
+- provider + provider_repository_id;
 - PR number;
 - current state;
-- timestamps, включая `lastProgressAt`;
-- `providerAttempt`;
+- timestamps, включая `last_progress_at`;
+- `provider_attempt`;
 - `queueRedeliveryCount`;
 - error code;
 - LLM/provider request duration;
@@ -483,10 +508,9 @@ POST /auth/refresh
 - словарь состояний, категорий и сущностей совпадает с `review-data-model` и
   `ai-review-prompting` дословно, а не переопределён параллельно;
 - `PIPELINE_SPEC.md` согласован;
-- `openapi.yaml` согласован;
-- `docs/openapi/review-job.schema.json` согласован;
-- `docs/openapi/finding.schema.json` согласован;
-- `docs/openapi/error.schema.json` согласован;
+- схема API (`docs/openapi/openapi.json`, экспорт из кода) согласована, `ReviewJob` и
+  `ReviewError` — в ней;
+- схема находки в выводе LLM (`docs/openapi/finding.schema.json`) согласована;
 - определены retryable/non-retryable ошибки;
 - определена стратегия timeout;
 - определена деградация при LLM outage;

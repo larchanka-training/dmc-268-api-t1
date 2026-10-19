@@ -12,6 +12,7 @@ from app.domain.entities import MergeRequest, Repository
 from app.domain.enums import MergeRequestState, Provider
 from app.domain.ids import new_id
 
+from .fakes.auth import sign_in
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -25,6 +26,7 @@ NOW = datetime(2026, 9, 29, tzinfo=UTC)
 
 def _client(uow: FakeUnitOfWork) -> TestClient:
     app = create_app(SETTINGS)
+    sign_in(app)
 
     def override_uow() -> Iterator[FakeUnitOfWork]:
         yield uow
@@ -79,3 +81,5 @@ def test_unknown_repository_is_404() -> None:
     response = client.get(f"/api/v1/repositories/{new_id()}/pull-requests")
 
     assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "REPOSITORY_NOT_FOUND"

@@ -9,7 +9,8 @@ import datetime as dt
 from collections.abc import Iterable
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.domain.diff import validate_anchor
@@ -18,11 +19,14 @@ from app.domain.entities import (
     Finding,
     Hunk,
     MergeRequest,
+    OpenReviewThread,
     PublishedComment,
     Repository,
     ReviewRun,
+    User,
 )
-from app.domain.enums import TERMINAL_STATUSES, Provider
+from app.domain.entities import Session as UserSession
+from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
@@ -32,6 +36,8 @@ from app.infrastructure.db.models import (
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
+    SessionRow,
+    UserRow,
 )
 
 
@@ -196,6 +202,7 @@ class SqlAlchemyReviewRunRepo:
                 created_at=run.created_at,
                 updated_at=run.updated_at,
                 failure_reason=run.failure_reason,
+                failed_stage=run.failed_stage,
                 model=run.model,
                 tokens_used=run.tokens_used,
                 duration_seconds=run.duration_seconds,
@@ -228,6 +235,7 @@ class SqlAlchemyReviewRunRepo:
         row.status = run.status
         row.last_progress_at = run.last_progress_at
         row.failure_reason = run.failure_reason
+        row.failed_stage = run.failed_stage
         row.model = run.model
         row.tokens_used = run.tokens_used
         row.duration_seconds = run.duration_seconds
@@ -331,11 +339,48 @@ class SqlAlchemyPublishedCommentRepo:
 
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]:
         rows = self._session.scalars(
-            select(PublishedCommentRow).where(
-                PublishedCommentRow.review_run_id == review_run_id
-            )
+            select(PublishedCommentRow)
+            .where(PublishedCommentRow.review_run_id == review_run_id)
+            # Порядок публикации; id разводит комментарии с одним временем.
+            .order_by(PublishedCommentRow.published_at, PublishedCommentRow.id)
         ).all()
         return [m.published_comment_to_domain(row) for row in rows]
+
+    def list_open_threads_for_merge_request(
+        self, merge_request_id: UUID
+    ) -> list[OpenReviewThread]:
+        stmt = (
+            select(PublishedCommentRow, FindingRow)
+            .join(ReviewRunRow, PublishedCommentRow.review_run_id == ReviewRunRow.id)
+            .join(FindingRow, PublishedCommentRow.finding_id == FindingRow.id)
+            .where(
+                ReviewRunRow.merge_request_id == merge_request_id,
+                PublishedCommentRow.kind == CommentKind.INLINE,
+                PublishedCommentRow.thread_resolved.is_(False),
+            )
+            .order_by(PublishedCommentRow.published_at, PublishedCommentRow.id)
+        )
+        rows = self._session.execute(stmt).all()
+        return [
+            OpenReviewThread(
+                finding=m.finding_to_domain(finding_row),
+                root_provider_comment_id=comment_row.provider_comment_id,
+                root_published_comment_id=comment_row.id,
+            )
+            for comment_row, finding_row in rows
+        ]
+
+    def get(self, published_comment_id: UUID) -> PublishedComment | None:
+        row = self._session.get(PublishedCommentRow, published_comment_id)
+        return m.published_comment_to_domain(row) if row is not None else None
+
+    def find_by_provider_comment_id(self, provider_comment_id: str) -> PublishedComment | None:
+        row = self._session.scalars(
+            select(PublishedCommentRow).where(
+                PublishedCommentRow.provider_comment_id == provider_comment_id
+            )
+        ).first()
+        return m.published_comment_to_domain(row) if row is not None else None
 
     def add(self, comment: PublishedComment) -> None:
         self._session.add(
@@ -346,5 +391,120 @@ class SqlAlchemyPublishedCommentRepo:
                 provider_comment_id=comment.provider_comment_id,
                 kind=comment.kind,
                 published_at=comment.published_at,
+                thread_resolved=comment.thread_resolved,
+                in_reply_to_provider_comment_id=comment.in_reply_to_provider_comment_id,
+                feedback_positive=comment.feedback_positive,
+                feedback_negative=comment.feedback_negative,
             )
         )
+
+    def update(self, comment: PublishedComment) -> None:
+        row = self._session.get(PublishedCommentRow, comment.id)
+        if row is None:
+            raise LookupError(f"published comment {comment.id} is not stored")
+        row.thread_resolved = comment.thread_resolved
+        row.in_reply_to_provider_comment_id = comment.in_reply_to_provider_comment_id
+        row.feedback_positive = comment.feedback_positive
+        row.feedback_negative = comment.feedback_negative
+        row.updated_at = comment.updated_at
+
+    def record_feedback(self, provider_comment_id: str, *, positive: bool) -> bool:
+        if positive:
+            values = {
+                PublishedCommentRow.feedback_positive: (
+                    PublishedCommentRow.feedback_positive + 1
+                )
+            }
+        else:
+            values = {
+                PublishedCommentRow.feedback_negative: (
+                    PublishedCommentRow.feedback_negative + 1
+                )
+            }
+        updated_id = self._session.scalars(
+            update(PublishedCommentRow)
+            .where(PublishedCommentRow.provider_comment_id == provider_comment_id)
+            .values(values)
+            .returning(PublishedCommentRow.id)
+        ).first()
+        return updated_id is not None
+
+
+class SqlAlchemyUserRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get(self, user_id: UUID) -> User | None:
+        row = self._session.get(UserRow, user_id)
+        return m.user_to_domain(row) if row else None
+
+    def find_by_provider(self, provider: Provider, provider_user_id: str) -> User | None:
+        row = self._session.scalars(
+            select(UserRow).where(
+                UserRow.provider == provider,
+                UserRow.provider_user_id == provider_user_id,
+            )
+        ).one_or_none()
+        return m.user_to_domain(row) if row else None
+
+    def add(self, user: User) -> bool:
+        # `ON CONFLICT DO NOTHING`: при параллельной вставке той же пары
+        # вторая транзакция ждёт коммита первой и получает 0 строк, а не
+        # `IntegrityError`.
+        # `no_autoflush`: ожидающая сессия с этим пользователем не должна
+        # уйти в базу раньше самого пользователя.
+        with self._session.no_autoflush:
+            inserted = self._session.execute(
+                pg_insert(UserRow)
+                .values(
+                    id=user.id,
+                    provider=user.provider,
+                    provider_user_id=user.provider_user_id,
+                    login=user.login,
+                    name=user.name,
+                    avatar_url=user.avatar_url,
+                    created_at=user.created_at,
+                    updated_at=user.updated_at,
+                )
+                .on_conflict_do_nothing(constraint="uq_users_provider_user_id")
+                .returning(UserRow.id)
+            ).first()
+        return inserted is not None
+
+    def update(self, user: User) -> None:
+        row = self._session.get(UserRow, user.id)
+        if row is None:
+            raise LookupError(f"user {user.id} is not stored")
+        row.login = user.login
+        row.name = user.name
+        row.avatar_url = user.avatar_url
+        row.updated_at = user.updated_at
+
+
+class SqlAlchemySessionRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def find_by_token_hash(self, token_hash: bytes) -> UserSession | None:
+        row = self._session.scalars(
+            select(SessionRow).where(SessionRow.token_hash == token_hash)
+        ).one_or_none()
+        return m.session_to_domain(row) if row else None
+
+    def add(self, session: UserSession) -> None:
+        self._session.add(
+            SessionRow(
+                id=session.id,
+                token_hash=session.token_hash,
+                user_id=session.user_id,
+                created_at=session.created_at,
+                expires_at=session.expires_at,
+            )
+        )
+
+    def delete(self, session_id: UUID) -> None:
+        self._session.execute(delete(SessionRow).where(SessionRow.id == session_id))
+
+    def delete_expired(self, now: dt.datetime) -> int:
+        result = self._session.execute(delete(SessionRow).where(SessionRow.expires_at <= now))
+        return int(result.rowcount)  # type: ignore[attr-defined]
