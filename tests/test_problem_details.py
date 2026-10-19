@@ -233,6 +233,13 @@ def test_session_401_clears_cookie(client: TestClient) -> None:
     assert set_cookie.startswith('session=""') and "Max-Age=0" in set_cookie
 
 
+def test_session_401_clears_empty_cookie(client: TestClient) -> None:
+    response = client.get("/api/v1/auth/me", headers={"Cookie": "session="})
+    assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/auth/me")
+    set_cookie = response.headers.get("set-cookie", "")
+    assert set_cookie.startswith('session=""') and "Max-Age=0" in set_cookie
+
+
 def test_session_401_without_cookie_sets_no_cookie(client: TestClient) -> None:
     response = client.get("/api/v1/repositories")
     assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/repositories")
@@ -347,6 +354,16 @@ def test_extra_field_name_is_not_echoed() -> None:
     problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
     assert problem["errors"] == [{"where": "body", "reason": "лишнее поле"}]
     assert "onerror" not in response.text
+
+
+def test_invalid_json_where_has_no_offset() -> None:
+    response = _signed_in_client().post(
+        "/api/v1/reviews",
+        content=b'{"x": ',
+        headers={"Origin": ORIGIN, "Content-Type": "application/json"},
+    )
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
+    assert problem["errors"] == [{"where": "body", "reason": "тело запроса — не JSON"}]
 
 
 @pytest.mark.parametrize(

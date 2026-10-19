@@ -1,3 +1,6 @@
+> Заменён change `openapi-from-code` до мёржа: PR #69 закрыт без мёржа, `openapi.yaml` и
+> сверка с ним в develop не попали. Архив оставлен как история решения.
+
 ## Why
 
 `docs/openapi/openapi.yaml` уже расходился с роутами FastAPI: в контракте были ручки,

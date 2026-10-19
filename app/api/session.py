@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from http import HTTPStatus
 
-from fastapi import Depends, Response, Security
+from fastapi import Depends, Request, Response, Security
 from fastapi.security import APIKeyCookie
 
 from app.api.dependencies import get_unit_of_work_factory
@@ -67,13 +67,15 @@ def clear_session_cookie(response: Response) -> None:
 
 
 def current_user(
+    request: Request,
     token: str | None = Security(_SESSION_SCHEME),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> User:
     """Пользователь сессии из cookie или `401`."""
     user = authenticate(uow_factory(), token, datetime.now(UTC))
     if user is None:
-        raise Unauthenticated(had_cookie=token is not None)
+        # Пустую `session=` схема отдаёт как None, а удалить её всё равно надо.
+        raise Unauthenticated(had_cookie=SESSION_COOKIE in request.cookies)
     return user
 
 

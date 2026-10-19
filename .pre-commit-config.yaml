@@ -43,4 +43,4 @@ repos:
         entry: uv run python scripts/export_openapi.py
         language: system
         pass_filenames: false
-        files: ^(app/|scripts/export_openapi\.py$|docs/openapi/openapi\.json$)
+        files: ^(app/|scripts/export_openapi\.py$|docs/openapi/openapi\.json$|uv\.lock$|pyproject\.toml$)

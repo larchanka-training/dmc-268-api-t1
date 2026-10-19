@@ -206,9 +206,10 @@ _REASONS = {
     "json_invalid": "тело запроса — не JSON",
 }
 _DEFAULT_REASON = "недопустимое значение"
-# Ошибки, у которых последний элемент `loc` — ключ, присланный клиентом (имя лишнего поля).
-# Его в ответ не повторяем: ключ — тоже ввод, а `where` указывает на объект, где он был.
-_CLIENT_KEY_ERRORS = frozenset({"extra_forbidden"})
+# Ошибки, у которых последний элемент `loc` — не поле схемы: имя лишнего поля (ввод клиента,
+# эхом не отдаём) или смещение в битом JSON (`body.5` читалось бы как поле `5`). `where`
+# указывает на объект, где ошибка, — без этого элемента.
+_LOC_TAIL_DROPPED = frozenset({"extra_forbidden", "json_invalid"})
 
 
 def _reason(error: dict[str, Any]) -> str:
@@ -235,7 +236,7 @@ def _reason(error: dict[str, Any]) -> str:
 
 def _where(error: dict[str, Any]) -> str:
     location = list(error.get("loc", ()))
-    if error.get("type") in _CLIENT_KEY_ERRORS and location:
+    if error.get("type") in _LOC_TAIL_DROPPED and location:
         location.pop()
     return ".".join(str(part) for part in location) or "запрос"
 
@@ -244,7 +245,7 @@ def validation_errors(errors: Sequence[Any]) -> list[dict[str, str]]:
     """`[{"where": "query.limit", "reason": "ожидается целое число"}]` — без самих значений.
 
     Ключи от клиента в `loc` попадают только у лишних полей: словарей с ключами клиента во
-    входных моделях нет. Появится такое поле — его тип ошибки добавляется в `_CLIENT_KEY_ERRORS`.
+    входных моделях нет. Появится такое поле — его тип ошибки добавляется в `_LOC_TAIL_DROPPED`.
     """
     return [{"where": _where(error), "reason": _reason(error)} for error in errors]
 
