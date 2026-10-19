@@ -43,13 +43,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     text = render()
+    current = OPENAPI_JSON.read_text(encoding="utf-8") if OPENAPI_JSON.exists() else None
     if args.check:
-        current = OPENAPI_JSON.read_text(encoding="utf-8") if OPENAPI_JSON.exists() else None
         if current != text:
             print(f"{OPENAPI_JSON.relative_to(ROOT)}: {STALE_MESSAGE}", file=sys.stderr)
             return 1
         return 0
-    current = OPENAPI_JSON.read_text(encoding="utf-8") if OPENAPI_JSON.exists() else None
     if current != text:
         OPENAPI_JSON.write_text(text, encoding="utf-8")
         print(f"{OPENAPI_JSON.relative_to(ROOT)} обновлён — добавьте его в коммит")

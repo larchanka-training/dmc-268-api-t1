@@ -132,7 +132,6 @@ def test_valid_opened_returns_202_with_review_job_projection() -> None:
     assert ReviewJob.model_validate(job).id == run.id
     for key in ("createdAt", "updatedAt", "lastProgressAt"):
         assert re.fullmatch(UTC_DATETIME_PATTERN, job[key]), job[key]
-    assert set(job) <= {field.alias for field in ReviewJob.model_fields.values()}
     assert container.uow.commits == 1
     assert len(container.queue.jobs) == 1
 

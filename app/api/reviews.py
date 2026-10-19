@@ -7,6 +7,7 @@
 `app/api/schemas.py`.
 """
 
+from dataclasses import asdict
 from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
@@ -153,35 +154,6 @@ def get_review(
         raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
 
     findings = uow.findings.list_for_run(review_run_id)
-    # Находки — вложенный маппинг (координаты из `anchor`), поэтому поле за полем.
-    return ReviewRunResponse(
-        id=run.id,
-        merge_request_id=run.merge_request_id,
-        head_sha=run.head_sha,
-        base_sha=run.base_sha,
-        status=run.status,
-        trigger=run.trigger,
-        model=run.model,
-        tokens_used=run.tokens_used,
-        duration_seconds=run.duration_seconds,
-        failure_reason=run.failure_reason,
-        failed_stage=run.failed_stage,
-        last_progress_at=run.last_progress_at,
-        created_at=run.created_at,
-        updated_at=run.updated_at,
-        findings=[
-            FindingResponse(
-                id=f.id,
-                file_path=f.anchor.file_path,
-                side=f.anchor.side,
-                old_line=f.anchor.old_line,
-                new_line=f.anchor.new_line,
-                category=f.category,
-                severity=f.severity,
-                message=f.message,
-                suggestion=f.suggestion,
-                confidence=f.confidence,
-            )
-            for f in findings
-        ],
+    return ReviewRunResponse.model_validate(
+        {**asdict(run), "findings": [{**asdict(f), **asdict(f.anchor)} for f in findings]}
     )

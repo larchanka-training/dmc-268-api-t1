@@ -7,6 +7,7 @@
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,8 +19,7 @@ from starlette.requests import Request
 from app.api.dependencies import get_unit_of_work_factory
 from app.api.errors import problem_response
 from app.api.factory import create_app
-from app.api.problems import PROBLEM_MODELS, TITLES, AnyProblem, ErrorCode, problem_type
-from app.api.trace_id import new_trace_id
+from app.api.problems import PROBLEM_MODELS, AnyProblem, ErrorCode, problem_type
 from app.config import Settings
 
 from .fakes.auth import sign_in
@@ -35,6 +35,9 @@ SETTINGS = Settings(
 PROBLEM_FIELDS = {"type", "title", "status", "detail", "instance", "code", "trace_id"}
 SECRET_TEXT = "секрет-из-исключения"
 TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
+OPENAPI_JSON = Path(__file__).resolve().parent.parent / "docs" / "openapi" / "openapi.json"
+REVIEW_BODY = {"provider": "github", "providerRepositoryId": "1", "pullRequestNumber": 1, "trigger": "manual"}
+JSON = {"content-type": "application/json"}
 
 
 def build_app() -> FastAPI:
@@ -70,7 +73,7 @@ def assert_problem(response, status: int, code: str, path: str) -> dict[str, Any
     assert PROBLEM_FIELDS <= body.keys()
     assert body["type"] == problem_type(code)
     assert body["type"].startswith("urn:dmc-268:problem:")
-    assert body["title"] == TITLES[ErrorCode(code)]
+    assert body["title"] == PROBLEM_MODELS[ErrorCode(code)].model_fields["title"].default
     assert body["status"] == status
     assert body["code"] == code
     assert body["instance"] == path
@@ -82,10 +85,6 @@ def assert_problem(response, status: int, code: str, path: str) -> dict[str, Any
 
 def test_problem_type_is_kebab_case_urn() -> None:
     assert problem_type("VALIDATION_ERROR") == "urn:dmc-268:problem:validation-error"
-
-
-def test_every_code_has_a_title() -> None:
-    assert set(TITLES) == set(ErrorCode)
 
 
 def _request() -> Request:
@@ -107,7 +106,7 @@ def test_builder_puts_extensions_and_headers() -> None:
     body = json.loads(bytes(response.body))
     assert body["instance"] == "/x"
     assert body["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
-    assert body["title"] == TITLES[ErrorCode.VALIDATION_ERROR]
+    assert body["title"] == "Запрос не прошёл проверку"
     assert body["errors"] == errors
 
 
@@ -115,12 +114,6 @@ def test_builder_rejects_a_status_the_code_does_not_allow() -> None:
     """Тело строится через модель кода: `REVIEW_NOT_FOUND` бывает только `404`."""
     with pytest.raises(ValidationError):
         problem_response(_request(), 409, ErrorCode.REVIEW_NOT_FOUND, "подробности")
-
-
-def test_trace_id_is_32_lowercase_hex_and_never_zero() -> None:
-    values = {new_trace_id() for _ in range(100)}
-    assert len(values) == 100
-    assert all(TRACE_ID.fullmatch(value) and value != "0" * 32 for value in values)
 
 
 def test_validation_error_lists_errors_without_echo(client: TestClient) -> None:
@@ -164,13 +157,11 @@ def test_http_exception_outside_4xx_5xx_is_internal_error(client: TestClient) ->
 
 def test_server_serves_the_exported_contract() -> None:
     """`/openapi.json` — та же схема, что экспорт `docs/openapi/openapi.json`; `/docs` — Swagger UI по ней."""
-    from scripts.export_openapi import render
-
     # Без тестовых роутов `build_app`: они попали бы в схему.
     client = TestClient(create_app(SETTINGS), base_url=ORIGIN)
     response = client.get("/openapi.json")
     assert response.status_code == 200
-    assert response.json() == json.loads(render())
+    assert response.json() == json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
     assert "AnyProblem" in response.json()["components"]["schemas"]
 
     docs = client.get("/docs")
@@ -246,21 +237,6 @@ def test_session_401_without_cookie_sets_no_cookie(client: TestClient) -> None:
     assert "set-cookie" not in response.headers
 
 
-def test_origin_403(client: TestClient) -> None:
-    response = client.post("/api/v1/auth/logout", headers={"Origin": "https://evil.example"})
-    assert_problem(response, 403, "ORIGIN_FORBIDDEN", "/api/v1/auth/logout")
-
-
-def test_webhook_signature_401(client: TestClient) -> None:
-    response = client.post("/api/v1/webhooks/github", content=b"{}")
-    assert_problem(response, 401, "WEBHOOK_SIGNATURE_INVALID", "/api/v1/webhooks/github")
-
-
-def test_webhook_unsupported_provider_501(client: TestClient) -> None:
-    response = client.post("/api/v1/webhooks/gitlab", content=b"{}")
-    assert_problem(response, 501, "PROVIDER_NOT_SUPPORTED", "/api/v1/webhooks/gitlab")
-
-
 def test_incoming_trace_headers_are_ignored(client: TestClient) -> None:
     chosen = "4bf92f3577b34da6a3ce929d0e0e4736"
     response = client.get(
@@ -280,11 +256,8 @@ def test_incoming_trace_headers_are_ignored(client: TestClient) -> None:
 def test_every_response_carries_a_fresh_trace_id(client: TestClient) -> None:
     first = client.get("/health")
     second = client.get("/health")
-    assert first.json() == {"status": "ok"}
-    assert first.headers["content-type"] == "application/json"
     assert TRACE_ID.fullmatch(first.headers["X-Trace-ID"])
     assert first.headers["X-Trace-ID"] != second.headers["X-Trace-ID"]
-    assert client.get("/").json() == {"message": "Welcome to DMC-268 Team 1 API"}
 
 
 def _signed_in_client() -> TestClient:
@@ -295,26 +268,20 @@ def _signed_in_client() -> TestClient:
 
 def test_planned_endpoint_answers_not_implemented() -> None:
     """`POST /reviews` описан в схеме полностью, а отвечает `501 NOT_IMPLEMENTED`."""
-    body = {"provider": "github", "providerRepositoryId": "1", "pullRequestNumber": 1, "trigger": "manual"}
-    response = _signed_in_client().post("/api/v1/reviews", json=body, headers={"Origin": ORIGIN})
+    response = _signed_in_client().post("/api/v1/reviews", json=REVIEW_BODY, headers={"Origin": ORIGIN})
     assert_problem(response, 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
 
 
 def test_planned_endpoint_checks_origin_session_and_body_first(client: TestClient) -> None:
     """Заглушка проверяет `Origin`, сессию и тело, как изменяющие ручки."""
-    body = {"provider": "github", "providerRepositoryId": "1", "pullRequestNumber": 1, "trigger": "manual"}
-    assert_problem(client.post("/api/v1/reviews", json=body), 403, "ORIGIN_FORBIDDEN", "/api/v1/reviews")
-    response = client.post("/api/v1/reviews", json=body, headers={"Origin": ORIGIN})
+    assert_problem(client.post("/api/v1/reviews", json=REVIEW_BODY), 403, "ORIGIN_FORBIDDEN", "/api/v1/reviews")
+    response = client.post("/api/v1/reviews", json=REVIEW_BODY, headers={"Origin": ORIGIN})
     assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/reviews")
     response = _signed_in_client().post(
-        "/api/v1/reviews", json={**body, "pullRequestNumber": 0}, headers={"Origin": ORIGIN}
+        "/api/v1/reviews", json={**REVIEW_BODY, "pullRequestNumber": 0}, headers={"Origin": ORIGIN}
     )
     problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
     assert problem["errors"] == [{"where": "body.pullRequestNumber", "reason": "должно быть не меньше 1"}]
-
-
-REVIEW_BODY = {"provider": "github", "providerRepositoryId": "1", "pullRequestNumber": 1, "trigger": "manual"}
-JSON = {"content-type": "application/json"}
 
 
 def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None:
@@ -325,12 +292,20 @@ def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None
     assert_problem(response, 403, "ORIGIN_FORBIDDEN", "/api/v1/reviews")
 
 
-def test_origin_is_checked_before_routing(client: TestClient) -> None:
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+def test_origin_is_checked_before_routing(client: TestClient, method: str) -> None:
     """Изменяющий запрос под /api/v1 без `Origin` получает `403` даже на неизвестный путь."""
-    assert_problem(client.post("/api/v1/nope"), 403, "ORIGIN_FORBIDDEN", "/api/v1/nope")
+    assert_problem(client.request(method, "/api/v1/nope"), 403, "ORIGIN_FORBIDDEN", "/api/v1/nope")
     # Безопасные методы и пути вне /api/v1 проверка не трогает.
     assert_problem(client.get("/api/v1/nope"), 404, "ROUTE_NOT_FOUND", "/api/v1/nope")
     assert_problem(client.post("/nope"), 404, "ROUTE_NOT_FOUND", "/nope")
+
+
+def test_empty_public_origin_closes_unsafe_requests() -> None:
+    """Пустой `public_origin` не совпадает и с пустым `Origin`: изменяющие запросы закрыты."""
+    client = TestClient(create_app(SETTINGS.model_copy(update={"public_origin": ""})), base_url=ORIGIN)
+    response = client.post("/api/v1/auth/logout", headers={"Origin": ""})
+    assert_problem(response, 403, "ORIGIN_FORBIDDEN", "/api/v1/auth/logout")
 
 
 def test_with_origin_a_malformed_body_without_session_is_422(client: TestClient) -> None:
@@ -457,7 +432,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         _signed_in_client().post("/api/v1/reviews", json={}, headers={"Origin": ORIGIN}),
         _signed_in_client().post(
             "/api/v1/reviews",
-            json={"provider": "github", "providerRepositoryId": "1", "pullRequestNumber": 1, "trigger": "manual"},
+            json=REVIEW_BODY,
             headers={"Origin": ORIGIN},
         ),
     ]

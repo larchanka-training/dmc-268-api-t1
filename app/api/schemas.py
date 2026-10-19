@@ -15,7 +15,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PlainSerializer,
     WithJsonSchema,
 )
 from pydantic.alias_generators import to_camel
@@ -30,17 +29,12 @@ def _to_utc(moment: datetime) -> datetime:
     return moment.astimezone(UTC)
 
 
-def _iso_utc(moment: datetime) -> str:
-    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
 # Время в моделях API — только этот тип: принимает время с зоной, хранит в UTC, в JSON
 # отдаёт `2026-10-11T10:00:00Z`. В схеме — `format: date-time` с `pattern` этой формы; по
 # `pattern` тест находит поле времени, объявленное мимо `UtcDatetime`.
 UtcDatetime = Annotated[
     AwareDatetime,
     AfterValidator(_to_utc),
-    PlainSerializer(_iso_utc, return_type=str, when_used="json"),
     WithJsonSchema(
         {
             "type": "string",

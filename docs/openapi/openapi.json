@@ -5,12 +5,6 @@
     "description": "Контракт Backend API для запуска автоматического ревью Pull Request и получения состояния и\nрезультатов. Схема строится из кода; `docs/openapi/openapi.json` — её экспорт.\n\nВсе пути — под `/api/v1`: префикс ставит само приложение, а не reverse-proxy. Ошибки —\nRFC 9457 Problem Details (`application/problem+json`), клиент ветвится по `code`. На каждом\nответе — заголовок `X-Trace-ID`, в теле ошибки то же значение в `trace_id`.\n",
     "version": "0.1.0"
   },
-  "servers": [
-    {
-      "url": "/",
-      "description": "Тот же origin, что у кабинета."
-    }
-  ],
   "paths": {
     "/api/v1/webhooks/{provider}": {
       "post": {

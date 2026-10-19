@@ -44,8 +44,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="0.1.0",
         description=_DESCRIPTION,
         redoc_url=None,
-        # Пути в схеме уже с `/api/v1`: сервер — тот же origin, без префикса.
-        servers=[{"url": "/", "description": "Тот же origin, что у кабинета."}],
         responses=ERRORS_DEFAULT,
         # operationId — имя функции роута в camelCase (`list_repositories` → `listRepositories`):
         # по нему фронт находит операцию в сгенерированных типах.

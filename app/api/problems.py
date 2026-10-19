@@ -12,7 +12,7 @@
 
 from enum import StrEnum
 from http import HTTPStatus
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, ClassVar, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
@@ -45,22 +45,29 @@ def problem_type(code: str) -> str:
     return _TYPE_PREFIX + code.lower().replace("_", "-")
 
 
-def _example(code: ErrorCode, title: str, status: int, detail: str, instance: str, **extra: Any) -> dict[str, Any]:
-    """`json_schema_extra` модели кода: один пример тела ответа."""
-    return {
-        "examples": [
-            {
-                "type": problem_type(code),
-                "title": title,
-                "status": status,
-                "detail": detail,
-                "instance": instance,
-                "code": code.value,
-                "trace_id": _TRACE_ID_EXAMPLE,
-                **extra,
-            }
-        ]
-    }
+def _example_from_defaults(schema: dict[str, Any], model: type[BaseModel]) -> None:
+    """`json_schema_extra` моделей кода: пример тела из констант модели и её `example`.
+
+    `type`, `title`, `code` и, где он один, `status` берутся из значений по умолчанию полей;
+    в `example` модели — только своё: `detail`, `instance`, статус, если их у кода несколько,
+    и поля сверх общих (`errors`).
+    """
+    example: dict[str, Any] | None = getattr(model, "example", None)
+    if example is None:
+        return
+    defaults = {name: field.default for name, field in model.model_fields.items() if not field.is_required()}
+    schema["examples"] = [
+        {
+            "type": defaults["type"],
+            "title": defaults["title"],
+            "status": int(example.get("status") or defaults["status"]),
+            "detail": example["detail"],
+            "instance": example["instance"],
+            "code": defaults["code"].value,
+            "trace_id": _TRACE_ID_EXAMPLE,
+            **{key: value for key, value in example.items() if key not in {"status", "detail", "instance"}},
+        }
+    ]
 
 
 class Problem(BaseModel):
@@ -71,7 +78,12 @@ class Problem(BaseModel):
     или `detail`) и `trace_id`.
     """
 
-    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    model_config = ConfigDict(
+        json_schema_serialization_defaults_required=True, json_schema_extra=_example_from_defaults
+    )
+
+    # Пример тела для схемы — только то, что не следует из констант модели (см. `_example_from_defaults`).
+    example: ClassVar[dict[str, Any] | None] = None
 
     type: str = Field(
         description="URI типа проблемы: `urn:dmc-268:problem:<код в kebab-case>`.",
@@ -113,16 +125,11 @@ class ValidationErrorItem(BaseModel):
 class ValidationProblem(Problem):
     """`422 VALIDATION_ERROR`: параметр пути, запроса или тело не прошли проверку."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.VALIDATION_ERROR,
-            "Запрос не прошёл проверку",
-            HTTPStatus.UNPROCESSABLE_CONTENT,
-            "Параметры запроса не прошли проверку, ошибок: 1.",
-            "/api/v1/repositories",
-            errors=[{"where": "query.limit", "reason": "ожидается целое число"}],
-        )
-    )
+    example = {
+        "detail": "Параметры запроса не прошли проверку, ошибок: 1.",
+        "instance": "/api/v1/repositories",
+        "errors": [{"where": "query.limit", "reason": "ожидается целое число"}],
+    }
 
     type: Literal["urn:dmc-268:problem:validation-error"] = "urn:dmc-268:problem:validation-error"
     title: Literal["Запрос не прошёл проверку"] = "Запрос не прошёл проверку"
@@ -134,15 +141,10 @@ class ValidationProblem(Problem):
 class ReviewNotFoundProblem(Problem):
     """`404 REVIEW_NOT_FOUND`: прогона ревью с таким id нет."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.REVIEW_NOT_FOUND,
-            "Прогон ревью не найден",
-            HTTPStatus.NOT_FOUND,
-            "Прогона ревью с таким id нет.",
-            "/api/v1/reviews/0b9d6c1e-6a7f-4b8e-9c3d-2e1f0a9b8c7d",
-        )
-    )
+    example = {
+        "detail": "Прогона ревью с таким id нет.",
+        "instance": "/api/v1/reviews/0b9d6c1e-6a7f-4b8e-9c3d-2e1f0a9b8c7d",
+    }
 
     type: Literal["urn:dmc-268:problem:review-not-found"] = "urn:dmc-268:problem:review-not-found"
     title: Literal["Прогон ревью не найден"] = "Прогон ревью не найден"
@@ -153,15 +155,10 @@ class ReviewNotFoundProblem(Problem):
 class RepositoryNotFoundProblem(Problem):
     """`404 REPOSITORY_NOT_FOUND`: репозитория с таким id нет."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.REPOSITORY_NOT_FOUND,
-            "Репозиторий не найден",
-            HTTPStatus.NOT_FOUND,
-            "Репозитория с таким id нет.",
-            "/api/v1/repositories/0b9d6c1e-6a7f-4b8e-9c3d-2e1f0a9b8c7d/pull-requests",
-        )
-    )
+    example = {
+        "detail": "Репозитория с таким id нет.",
+        "instance": "/api/v1/repositories/0b9d6c1e-6a7f-4b8e-9c3d-2e1f0a9b8c7d/pull-requests",
+    }
 
     type: Literal["urn:dmc-268:problem:repository-not-found"] = "urn:dmc-268:problem:repository-not-found"
     title: Literal["Репозиторий не найден"] = "Репозиторий не найден"
@@ -172,15 +169,11 @@ class RepositoryNotFoundProblem(Problem):
 class ProviderNotSupportedProblem(Problem):
     """`PROVIDER_NOT_SUPPORTED`: вход через провайдера — `404`, приём вебхуков от него — `501`."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.PROVIDER_NOT_SUPPORTED,
-            "Провайдер не поддержан",
-            HTTPStatus.NOT_FOUND,
-            "Вход через этого провайдера не поддержан.",
-            "/api/v1/auth/bitbucket/login",
-        )
-    )
+    example = {
+        "status": HTTPStatus.NOT_FOUND,
+        "detail": "Вход через этого провайдера не поддержан.",
+        "instance": "/api/v1/auth/bitbucket/login",
+    }
 
     type: Literal["urn:dmc-268:problem:provider-not-supported"] = "urn:dmc-268:problem:provider-not-supported"
     title: Literal["Провайдер не поддержан"] = "Провайдер не поддержан"
@@ -194,15 +187,10 @@ class ReviewAlreadyActiveProblem(Problem):
     Вебхук на тот же случай отвечает `202` с существующим прогоном.
     """
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.REVIEW_ALREADY_ACTIVE,
-            "Прогон по этому коммиту уже идёт",
-            HTTPStatus.CONFLICT,
-            "По этому коммиту уже идёт прогон ревью.",
-            "/api/v1/reviews",
-        )
-    )
+    example = {
+        "detail": "По этому коммиту уже идёт прогон ревью.",
+        "instance": "/api/v1/reviews",
+    }
 
     type: Literal["urn:dmc-268:problem:review-already-active"] = "urn:dmc-268:problem:review-already-active"
     title: Literal["Прогон по этому коммиту уже идёт"] = "Прогон по этому коммиту уже идёт"
@@ -213,15 +201,10 @@ class ReviewAlreadyActiveProblem(Problem):
 class WebhookSignatureInvalidProblem(Problem):
     """`401 WEBHOOK_SIGNATURE_INVALID`: подписи вебхука нет или она не сошлась."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.WEBHOOK_SIGNATURE_INVALID,
-            "Подпись вебхука не прошла проверку",
-            HTTPStatus.UNAUTHORIZED,
-            "Подписи X-Hub-Signature-256 нет, или она не совпала с телом доставки.",
-            "/api/v1/webhooks/github",
-        )
-    )
+    example = {
+        "detail": "Подписи X-Hub-Signature-256 нет, или она не совпала с телом доставки.",
+        "instance": "/api/v1/webhooks/github",
+    }
 
     type: Literal["urn:dmc-268:problem:webhook-signature-invalid"] = "urn:dmc-268:problem:webhook-signature-invalid"
     title: Literal["Подпись вебхука не прошла проверку"] = "Подпись вебхука не прошла проверку"
@@ -232,15 +215,10 @@ class WebhookSignatureInvalidProblem(Problem):
 class ScmUnavailableProblem(Problem):
     """`502 SCM_UNAVAILABLE`: провайдер VCS не ответил или ответил ошибкой при приёме вебхука."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.SCM_UNAVAILABLE,
-            "Провайдер VCS недоступен",
-            HTTPStatus.BAD_GATEWAY,
-            "Провайдер VCS не ответил или ответил ошибкой; прогон не создан.",
-            "/api/v1/webhooks/github",
-        )
-    )
+    example = {
+        "detail": "Провайдер VCS не ответил или ответил ошибкой; прогон не создан.",
+        "instance": "/api/v1/webhooks/github",
+    }
 
     type: Literal["urn:dmc-268:problem:scm-unavailable"] = "urn:dmc-268:problem:scm-unavailable"
     title: Literal["Провайдер VCS недоступен"] = "Провайдер VCS недоступен"
@@ -251,15 +229,10 @@ class ScmUnavailableProblem(Problem):
 class UnauthenticatedProblem(Problem):
     """`401 UNAUTHENTICATED`: нет действительной сессии; пришедшая недействительная cookie удаляется."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.UNAUTHENTICATED,
-            "Требуется вход",
-            HTTPStatus.UNAUTHORIZED,
-            "Нет действительной сессии.",
-            "/api/v1/auth/me",
-        )
-    )
+    example = {
+        "detail": "Нет действительной сессии.",
+        "instance": "/api/v1/auth/me",
+    }
 
     type: Literal["urn:dmc-268:problem:unauthenticated"] = "urn:dmc-268:problem:unauthenticated"
     title: Literal["Требуется вход"] = "Требуется вход"
@@ -270,15 +243,10 @@ class UnauthenticatedProblem(Problem):
 class OriginForbiddenProblem(Problem):
     """`403 ORIGIN_FORBIDDEN`: изменяющий запрос пришёл без `Origin` или с чужим; запрос не выполнен."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.ORIGIN_FORBIDDEN,
-            "Запрос с чужого Origin",
-            HTTPStatus.FORBIDDEN,
-            "Изменяющий запрос пришёл без Origin или с Origin другого сайта.",
-            "/api/v1/auth/logout",
-        )
-    )
+    example = {
+        "detail": "Изменяющий запрос пришёл без Origin или с Origin другого сайта.",
+        "instance": "/api/v1/auth/logout",
+    }
 
     type: Literal["urn:dmc-268:problem:origin-forbidden"] = "urn:dmc-268:problem:origin-forbidden"
     title: Literal["Запрос с чужого Origin"] = "Запрос с чужого Origin"
@@ -289,11 +257,10 @@ class OriginForbiddenProblem(Problem):
 class RouteNotFoundProblem(Problem):
     """`404 ROUTE_NOT_FOUND`: такого пути нет, в том числе вне `/api/v1`."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.ROUTE_NOT_FOUND, "Путь не найден", HTTPStatus.NOT_FOUND, "По этому пути ресурса нет.", "/api/v1/nope"
-        )
-    )
+    example = {
+        "detail": "По этому пути ресурса нет.",
+        "instance": "/api/v1/nope",
+    }
 
     type: Literal["urn:dmc-268:problem:route-not-found"] = "urn:dmc-268:problem:route-not-found"
     title: Literal["Путь не найден"] = "Путь не найден"
@@ -304,15 +271,10 @@ class RouteNotFoundProblem(Problem):
 class MethodNotAllowedProblem(Problem):
     """`405 METHOD_NOT_ALLOWED`: путь есть, а метод для него не объявлен; разрешённые — в заголовке `Allow`."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.METHOD_NOT_ALLOWED,
-            "Метод не разрешён",
-            HTTPStatus.METHOD_NOT_ALLOWED,
-            "Метод для этого пути не разрешён; разрешённые — в заголовке Allow.",
-            "/api/v1/webhooks/github",
-        )
-    )
+    example = {
+        "detail": "Метод для этого пути не разрешён; разрешённые — в заголовке Allow.",
+        "instance": "/api/v1/webhooks/github",
+    }
 
     type: Literal["urn:dmc-268:problem:method-not-allowed"] = "urn:dmc-268:problem:method-not-allowed"
     title: Literal["Метод не разрешён"] = "Метод не разрешён"
@@ -323,15 +285,10 @@ class MethodNotAllowedProblem(Problem):
 class NotImplementedProblem(Problem):
     """`501 NOT_IMPLEMENTED`: ручка описана в контракте, но ещё не реализована."""
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.NOT_IMPLEMENTED,
-            "Не реализовано",
-            HTTPStatus.NOT_IMPLEMENTED,
-            "Ручной запуск ревью ещё не реализован.",
-            "/api/v1/reviews",
-        )
-    )
+    example = {
+        "detail": "Ручной запуск ревью ещё не реализован.",
+        "instance": "/api/v1/reviews",
+    }
 
     type: Literal["urn:dmc-268:problem:not-implemented"] = "urn:dmc-268:problem:not-implemented"
     title: Literal["Не реализовано"] = "Не реализовано"
@@ -346,15 +303,11 @@ class HttpErrorProblem(Problem):
     (`Retry-After` и др.) сохраняются.
     """
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.HTTP_ERROR,
-            "Ошибка запроса",
-            HTTPStatus.TOO_MANY_REQUESTS,
-            "Запрос отклонён со статусом 429.",
-            "/api/v1/repositories",
-        )
-    )
+    example = {
+        "status": HTTPStatus.TOO_MANY_REQUESTS,
+        "detail": "Запрос отклонён со статусом 429.",
+        "instance": "/api/v1/repositories",
+    }
 
     type: Literal["urn:dmc-268:problem:http-error"] = "urn:dmc-268:problem:http-error"
     title: Literal["Ошибка запроса"] = "Ошибка запроса"
@@ -367,15 +320,10 @@ class InternalErrorProblem(Problem):
     Деталей в теле нет; сервер пишет строку лога с `trace_id`, методом и путём — искать по `trace_id`.
     """
 
-    model_config = ConfigDict(
-        json_schema_extra=_example(
-            ErrorCode.INTERNAL_ERROR,
-            "Внутренняя ошибка сервера",
-            HTTPStatus.INTERNAL_SERVER_ERROR,
-            "Сервер не смог обработать запрос. Если ошибка повторяется, сообщите trace_id.",
-            "/api/v1/repositories",
-        )
-    )
+    example = {
+        "detail": "Сервер не смог обработать запрос. Если ошибка повторяется, сообщите trace_id.",
+        "instance": "/api/v1/repositories",
+    }
 
     type: Literal["urn:dmc-268:problem:internal-error"] = "urn:dmc-268:problem:internal-error"
     title: Literal["Внутренняя ошибка сервера"] = "Внутренняя ошибка сервера"
@@ -417,4 +365,3 @@ PROBLEM_MODELS: dict[ErrorCode, type[Problem]] = {
     model.model_fields["code"].default: model
     for model in get_args(AnyProblem.model_fields["root"].annotation)
 }
-TITLES: dict[ErrorCode, str] = {code: model.model_fields["title"].default for code, model in PROBLEM_MODELS.items()}

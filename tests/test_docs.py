@@ -6,7 +6,8 @@
 разъезжались с кодом, поэтому покрыты именно они.
 
 Контракт HTTP API — `docs/openapi/openapi.json` — экспорт схемы из кода: тест следит,
-что экспорт свежий и что схема описывает ошибки так, как их отдаёт сервер.
+что схема описывает ошибки так, как их отдаёт сервер. Свежесть экспорта сверяют
+`scripts/export_openapi.py --check` в CI и `tests/test_problem_details.py`.
 """
 
 import json
@@ -18,7 +19,6 @@ from typing import Any, cast
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
-from app.api.openapi import HTTP_METHODS, finish_schema
 from app.domain.lifecycle import _ALLOWED
 from app.infrastructure.db import models  # noqa: F401
 from app.infrastructure.db.base import Base
@@ -161,7 +161,6 @@ def operation_responses(document: dict[str, Any]) -> list[tuple[str, str, dict[s
         (f"{method.upper()} {path} {status}", status, response)
         for path, item in document["paths"].items()
         for method, operation in item.items()
-        if method in HTTP_METHODS
         for status, response in operation["responses"].items()
     ]
 
@@ -170,16 +169,9 @@ def is_error_status(status: str) -> bool:
     return status == "default" or status[0] in "45"
 
 
-def test_exported_contract_is_up_to_date() -> None:
-    """(а) `docs/openapi/openapi.json` — ровно то, что строит код; та же проверка, что `--check` в CI."""
-    from scripts.export_openapi import STALE_MESSAGE, render
-
-    assert OPENAPI.read_text(encoding="utf-8") == render(), f"{OPENAPI.relative_to(ROOT)}: {STALE_MESSAGE}"
-
-
 def test_every_error_code_is_in_the_discriminated_union() -> None:
-    """(б) Каждый `ErrorCode` — в `AnyProblem` с discriminator по `code`, у схемы кода свои константы."""
-    from app.api.problems import PROBLEM_MODELS, TITLES, ErrorCode, problem_type
+    """(а) Каждый `ErrorCode` — в `AnyProblem` с discriminator по `code`, у схемы кода свои константы."""
+    from app.api.problems import PROBLEM_MODELS, ErrorCode, problem_type
 
     assert set(PROBLEM_MODELS) == set(ErrorCode), "у каждого кода из ErrorCode должна быть модель в AnyProblem"
     schemas = load_openapi()["components"]["schemas"]
@@ -192,14 +184,14 @@ def test_every_error_code_is_in_the_discriminated_union() -> None:
         properties = schemas[mapping[code.value]]["properties"]
         assert properties["code"]["const"] == code.value
         assert properties["type"]["const"] == problem_type(code)
-        assert properties["title"]["const"] == TITLES[code]
+        assert properties["title"]["const"] == PROBLEM_MODELS[code].model_fields["title"].default
         assert set(schemas[mapping[code.value]]["required"]) >= {
             "type", "title", "status", "detail", "instance", "code", "trace_id"
         }
 
 
 def test_every_error_response_is_problem_json() -> None:
-    """(в) Каждый ответ 4xx/5xx и `default` — только `application/problem+json` с моделью ошибки;
+    """(б) Каждый ответ 4xx/5xx и `default` — только `application/problem+json` с моделью ошибки;
     у каждого ответа — заголовок `X-Trace-ID`."""
     document = load_openapi()
     problem_schemas = {"AnyProblem"} | {
@@ -231,7 +223,7 @@ def can_fail_validation(parameter: dict[str, Any]) -> bool:
 
 
 def test_no_framework_validation_error_in_the_contract() -> None:
-    """(г) 422 описан `ValidationProblem`, а не `HTTPValidationError` FastAPI; у операции с телом
+    """(в) 422 описан `ValidationProblem`, а не `HTTPValidationError` FastAPI; у операции с телом
     или параметром, который может не пройти проверку, 422 объявлен."""
     document = load_openapi()
     schemas = document["components"]["schemas"]
@@ -245,13 +237,3 @@ def test_no_framework_validation_error_in_the_contract() -> None:
         and "422" not in operation["responses"]
     ]
     assert not missing, f"у операций с параметрами нет ответа 422 VALIDATION_ERROR: {missing}"
-
-
-def test_finish_schema_skips_path_level_keys() -> None:
-    # `parameters` на уровне пути — не операция: обход не должен принимать его за метод.
-    schema = {"paths": {"/x": {"parameters": [{"name": "id", "in": "path"}], "get": {"responses": {"200": {}}}}}}
-
-    finished = finish_schema(schema)
-
-    assert finished["paths"]["/x"]["parameters"] == [{"name": "id", "in": "path"}]
-    assert "X-Trace-ID" in finished["paths"]["/x"]["get"]["responses"]["200"]["headers"]

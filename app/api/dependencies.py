@@ -15,7 +15,6 @@ from fastapi import Depends, Path, Request
 from app.application.ports import UnitOfWork
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
-from app.config import Settings
 from app.domain.entities import ReviewRun
 from app.infrastructure.container import Container
 
@@ -26,10 +25,6 @@ def get_container(request: Request) -> Container:
     # пишет этот атрибут (см. `create_app`), поэтому приведение закрывает
     # границу `Any` здесь, а не пускает её в каждого, кто берёт эту зависимость.
     return cast(Container, request.app.state.container)
-
-
-def get_settings(request: Request) -> Settings:
-    return cast(Settings, request.app.state.settings)
 
 
 def get_unit_of_work(request: Request) -> Iterator[UnitOfWork]:

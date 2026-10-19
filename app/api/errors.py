@@ -52,7 +52,6 @@ from app.api.problems import (
     WebhookSignatureInvalidProblem,
 )
 from app.api.trace_id import HEADER as TRACE_ID_HEADER
-from app.api.trace_id import trace_id_of
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +137,7 @@ def problem_response(
     `type`, `title` и `code` берутся из модели; статус, не разрешённый моделью кода
     (например, `REVIEW_NOT_FOUND` с `409`), — ошибка в коде, `ValidationError`.
     """
-    trace_id = trace_id_of(request)
+    trace_id: str = request.state.trace_id
     fields: dict[str, Any] = {
         "status": status,
         "detail": detail,
@@ -188,21 +187,13 @@ _REASONS = {
     "extra_forbidden": "лишнее поле",
     "int_parsing": "ожидается целое число",
     "int_type": "ожидается целое число",
-    "int_from_float": "ожидается целое число",
     "int_parsing_size": "число слишком большое",
-    "float_parsing": "ожидается число",
-    "float_type": "ожидается число",
     "uuid_parsing": "ожидается UUID",
-    "uuid_type": "ожидается UUID",
     "enum": "значение не из допустимого списка",
     "literal_error": "значение не из допустимого списка",
     "string_type": "ожидается строка",
-    "bool_parsing": "ожидается логическое значение",
-    "bool_type": "ожидается логическое значение",
     "model_type": "ожидается объект",
     "model_attributes_type": "ожидается объект",
-    "dict_type": "ожидается объект",
-    "list_type": "ожидается массив",
     "json_invalid": "тело запроса — не JSON",
 }
 _DEFAULT_REASON = "недопустимое значение"
@@ -323,7 +314,7 @@ def _internal_error_handler(request: Request, error: Exception) -> Response:
     )
     logger.error(
         "Необработанное исключение: trace_id=%s %s %s",
-        trace_id_of(request),
+        request.state.trace_id,
         request.method,
         request_path(request),
     )

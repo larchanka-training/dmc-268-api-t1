@@ -200,7 +200,9 @@ provider + providerRepositoryId + pullRequestNumber + headCommitSha
 
 LLM не имеет права определять публичную модель данных.
 
-Каждый Finding валидируется по `docs/openapi/finding.schema.json`.
+Каждый Finding в ответе LLM валидируется по `docs/openapi/finding.schema.json` — схеме вывода
+LLM (на неё ссылается `docs/openapi/llm_review_output.schema.json`), а не схеме API: находку
+в API описывает `FindingResponse` в схеме из кода (`docs/openapi/openapi.json`).
 
 При invalid output:
 
@@ -387,19 +389,20 @@ MVP endpoints:
 
 ```text
 GET  /repositories
-GET  /repositories/{repositoryId}/pull-requests
-GET  /reviews/{reviewId}
-GET  /reviews/{reviewId}/events
+GET  /repositories/{repository_id}/pull-requests
+GET  /reviews/{review_run_id}
+GET  /reviews/{review_run_id}/events
 POST /webhooks/{provider}
 POST /reviews                    # заглушка: схема описана, отвечает 501 NOT_IMPLEMENTED
+GET  /auth/{provider}/login
+GET  /auth/{provider}/callback
+GET  /auth/me
+POST /auth/logout
 ```
 
-Находки прогона приходят в ответе `GET /reviews/{reviewId}`, отдельного
-`/reviews/{reviewId}/findings` нет (спека `review-rest-api`). Списка прогонов `GET /reviews`
-тоже нет.
-
-Аутентификация пользователя (`POST /auth/oauth/token`, `POST /auth/refresh`) сюда не
-входит — proposal, см. §9.1.
+Находки прогона приходят в ответе `GET /reviews/{review_run_id}`, отдельного
+`/reviews/{review_run_id}/findings` нет (спека `review-rest-api`). Списка прогонов `GET /reviews`
+тоже нет. Вход и сессия (`/auth/...`) — §9.1.
 
 `POST /webhooks/{provider}` принимает доставки от хостинга (см.
 `docs/BACKEND_ARCHITECTURE.md`, «Подлинность webhook'ов»):
@@ -507,7 +510,7 @@ HTTP-ошибки.
 - `PIPELINE_SPEC.md` согласован;
 - схема API (`docs/openapi/openapi.json`, экспорт из кода) согласована, `ReviewJob` и
   `ReviewError` — в ней;
-- `docs/openapi/finding.schema.json` согласован;
+- схема находки в выводе LLM (`docs/openapi/finding.schema.json`) согласована;
 - определены retryable/non-retryable ошибки;
 - определена стратегия timeout;
 - определена деградация при LLM outage;
