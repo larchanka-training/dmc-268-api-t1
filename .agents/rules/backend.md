@@ -85,12 +85,13 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
   `Origin`, пагинация) и `response_description`.
 - **Ручка возвращает модель ответа**, а не словарь и не `JSONResponse` с данными: тело проходит
   модель и совпадает со схемой. Особый статус — в декораторе (`status_code=`); если нужны
-  заголовки — `Response` с телом `model.model_dump(mode="json", by_alias=True)`. `JSONResponse`
+  заголовки — `Response` с телом `model.model_dump(mode="json")`. `JSONResponse`
   собирает только `problem_response`; это проверяет `tests/api/test_contract_guards.py`.
 - **Время — только `UtcDatetime`** из `app/api/schemas.py`: принимает время с зоной, отдаёт UTC
   с `Z` (`2026-10-11T10:00:00Z`). `datetime` в модели ответа — ошибка, её ловит тот же тест.
-  Ответ в camelCase — от `CamelCaseResponse`, тело запроса — от `CamelCaseRequest` (только
-  camelCase, без лишних полей, без приведения типов; enum-полю — `Field(strict=False)`).
+  Поля ответов и тел запросов — **snake_case**, один стиль во всём API. Тело запроса — от
+  `StrictRequest` (без лишних полей, без приведения типов; enum-полю — `Field(strict=False)`);
+  ответ с полями по умолчанию — от `AllFieldsResponse`, чтобы в схеме они были обязательными.
 - **Статус HTTP в коде — только `HTTPStatus`**: `status_code=HTTPStatus.ACCEPTED`,
   `ApiError(HTTPStatus.NOT_FOUND, …)`, ключи `responses`, `Literal[HTTPStatus.X]` в моделях ошибок.
 - **`Origin` проверяет middleware** (`app/api/origin.py`) — у `POST`/`PUT`/`PATCH`/`DELETE` под

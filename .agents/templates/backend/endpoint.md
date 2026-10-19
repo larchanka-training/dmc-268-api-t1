@@ -9,22 +9,22 @@ from http import HTTPStatus
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from app.api.errors import ERRORS_403_ORIGIN, ERRORS_409_<КОД>, ERRORS_422, ApiError
 from app.api.problems import ErrorCode
-from app.api.schemas import CamelCaseRequest, CamelCaseResponse, UtcDatetime
+from app.api.schemas import StrictRequest, UtcDatetime
 
 router = APIRouter(prefix="/api/v1/<область>", tags=["<область>"])
 
 
-class <Что>Request(CamelCaseRequest):
+class <Что>Request(StrictRequest):  # поля — snake_case, как в ответах
     """<что просит клиент>"""
 
     <поле>: str = Field(max_length=255, description="<смысл, если не очевиден из имени>")
 
 
-class <Что>Response(CamelCaseResponse):
+class <Что>Response(BaseModel):
     """<что это за сущность — попадёт в description схемы>"""
 
     id: UUID

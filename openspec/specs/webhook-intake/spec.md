@@ -306,4 +306,4 @@
 #### Scenario: Новый прогон
 
 - **WHEN** подписанный `pull_request` `opened` создал прогон
-- **THEN** тело `202` проходит модель `ReviewJob`, `model`, `tokensUsed`, `durationSeconds`, `failedStage` и `error` — `null`, `createdAt` оканчивается на `Z`
+- **THEN** тело `202` проходит модель `ReviewJob`, `model`, `tokens_used`, `duration_seconds`, `failed_stage` и `error` — `null`, `created_at` оканчивается на `Z`

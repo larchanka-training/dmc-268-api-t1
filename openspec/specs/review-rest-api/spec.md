@@ -237,12 +237,17 @@
 
 ### Requirement: Тело запроса проверяется строго
 
-Тело изменяющего запроса SHALL приниматься только с полями из схемы в camelCase и без приведения типов: число строкой, строка числом, snake_case и лишнее поле получают `422` `VALIDATION_ERROR`. Строки и числа SHALL укладываться в границы колонок. Имя лишнего поля SHALL NOT попадать в ответ: `where` указывает на объект, `reason` — «лишнее поле».
+Тело изменяющего запроса SHALL приниматься только с полями из схемы в snake_case и без приведения типов: число строкой, строка числом, ключ в camelCase и лишнее поле получают `422` `VALIDATION_ERROR`. Строки и числа SHALL укладываться в границы колонок. Имя лишнего поля SHALL NOT попадать в ответ: `where` указывает на объект, `reason` — «лишнее поле».
 
 #### Scenario: Число строкой
 
-- **WHEN** `POST /api/v1/reviews` с сессией и своим `Origin` пришёл с `"pullRequestNumber": "5"`
-- **THEN** ответ — `422` с `{"where": "body.pullRequestNumber", "reason": "ожидается целое число"}`
+- **WHEN** `POST /api/v1/reviews` с сессией и своим `Origin` пришёл с `"pull_request_number": "5"`
+- **THEN** ответ — `422` с `{"where": "body.pull_request_number", "reason": "ожидается целое число"}`
+
+#### Scenario: Ключ в camelCase
+
+- **WHEN** `POST /api/v1/reviews` пришёл с `"providerRepositoryId"` вместо `"provider_repository_id"`
+- **THEN** ответ — `422`: `provider_repository_id` не передан, а `providerRepositoryId` — лишнее поле
 
 #### Scenario: Лишнее поле
 
@@ -284,7 +289,7 @@
 
 #### Scenario: Подключение репозитория
 
-- **WHEN** вызывается `POST /api/v1/repositories` с сессией, своим `Origin` и телом `{"provider": "github", "providerId": "123456789"}`
+- **WHEN** вызывается `POST /api/v1/repositories` с сессией, своим `Origin` и телом `{"provider": "github", "provider_id": "123456789"}`
 - **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
 
 #### Scenario: Подключение без Origin
@@ -294,8 +299,8 @@
 
 #### Scenario: Подключение с пустым идентификатором
 
-- **WHEN** вызывается `POST /api/v1/repositories` с сессией, своим `Origin` и пустым `providerId`
-- **THEN** ответ — `422` с `{"where": "body.providerId", "reason": "длина строки должна быть не меньше 1"}`
+- **WHEN** вызывается `POST /api/v1/repositories` с сессией, своим `Origin` и пустым `provider_id`
+- **THEN** ответ — `422` с `{"where": "body.provider_id", "reason": "длина строки должна быть не меньше 1"}`
 
 ### Requirement: Дифф и шаги прогона описаны заглушками
 

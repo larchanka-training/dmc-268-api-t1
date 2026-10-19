@@ -126,11 +126,11 @@ def test_valid_opened_returns_202_with_review_job_projection() -> None:
     assert job["provider"] == "github"
     assert job["status"] == "queued"
     assert job["trigger"] == "webhook"
-    assert job["headCommitSha"] == run.head_sha
+    assert job["head_commit_sha"] == run.head_sha
     # Тело — модель ReviewJob целиком: все поля, время в UTC с `Z`.
-    assert set(job) == {field.alias for field in ReviewJob.model_fields.values()}
+    assert set(job) == set(ReviewJob.model_fields)
     assert ReviewJob.model_validate(job).id == run.id
-    for key in ("createdAt", "updatedAt", "lastProgressAt"):
+    for key in ("created_at", "updated_at", "last_progress_at"):
         assert re.fullmatch(UTC_DATETIME_PATTERN, job[key]), job[key]
     assert container.uow.commits == 1
     assert len(container.queue.jobs) == 1

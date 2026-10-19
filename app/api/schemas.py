@@ -18,7 +18,6 @@ from pydantic import (
     PositiveInt,
     WithJsonSchema,
 )
-from pydantic.alias_generators import to_camel
 
 from app.domain.enums import MergeRequestState, Provider, ReviewRunStatus, TriggerSource
 
@@ -52,25 +51,19 @@ FailedStage = Literal[ReviewRunStatus.BUILDING_CONTEXT, ReviewRunStatus.ANALYSIN
 FAILED_STAGE_DESCRIPTION = "Этап, на котором прогон упал; null, если прогон не падал."
 
 
-class CamelCaseResponse(BaseModel):
-    """База моделей ответа: снаружи camelCase, в коде snake_case.
+class AllFieldsResponse(BaseModel):
+    """База модели ответа, у которой есть поля со значением по умолчанию: в схеме они всё равно
+    обязательны — сервер отдаёт их всегда, nullable-поле приходит как `null`, а не пропадает."""
 
-    В схеме обязательны все поля, в том числе со значением по умолчанию: сервер отдаёт их
-    всегда, nullable-поле приходит как `null`, а не пропадает.
-    """
-
-    model_config = ConfigDict(
-        alias_generator=to_camel, validate_by_name=True, json_schema_serialization_defaults_required=True
-    )
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
 
 
-class CamelCaseRequest(BaseModel):
-    """База моделей тела запроса: только camelCase, без лишних полей (`additionalProperties:
-    false` в схеме) и без приведения типов — число строкой и строка числом не принимаются."""
+class StrictRequest(BaseModel):
+    """База моделей тела запроса: поля в snake_case, как в ответах, без лишних полей
+    (`additionalProperties: false` в схеме) и без приведения типов — число строкой и строка
+    числом не принимаются."""
 
-    model_config = ConfigDict(
-        alias_generator=to_camel, validate_by_name=False, validate_by_alias=True, extra="forbid", strict=True
-    )
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 ReviewErrorCode = Literal[
@@ -88,7 +81,7 @@ ReviewErrorCode = Literal[
 ]
 
 
-class ReviewError(CamelCaseResponse):
+class ReviewError(AllFieldsResponse):
     """Структурированная ошибка прогона (§8 PIPELINE_SPEC.md) — не ошибка HTTP-запроса.
 
     Коды SCM_* провайдер-нейтральны: второй провайдер не ломает контракт.
@@ -99,8 +92,8 @@ class ReviewError(CamelCaseResponse):
     retryable: bool = Field(description="Повторный запуск может пройти: сбой временный.")
     scm_provider: Provider | None = Field(
         description=(
-            "Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null. Называется scmProvider, "
-            "а не provider: поле про сторону SCM, providerAttempt считает попытки и LLM, и SCM."
+            "Заполнено для SCM_AUTH_ERROR/SCM_UNAVAILABLE, иначе null. Называется scm_provider, "
+            "а не provider: поле про сторону SCM, provider_attempt считает попытки и LLM, и SCM."
         )
     )
     provider_attempt: int | None = Field(
@@ -109,13 +102,13 @@ class ReviewError(CamelCaseResponse):
     )
 
 
-class ReviewJob(CamelCaseResponse):
+class ReviewJob(AllFieldsResponse):
     """Прогон ревью, поставленный в очередь, — публичная проекция записи review_runs.
 
     Не путать с сообщением очереди: у него нет собственной идентичности, отдельной от id прогона.
     """
 
-    id: UUID = Field(description="Идентификатор прогона (reviewRunId).")
+    id: UUID = Field(description="Идентификатор прогона (review_run_id).")
     provider: Provider = Field(description="Хостинг репозитория.", examples=["github"])
     provider_repository_id: str = Field(
         description="Идентификатор репозитория у провайдера (repositories.provider_id).", examples=["123456789"]

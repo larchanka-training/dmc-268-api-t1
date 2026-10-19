@@ -27,11 +27,11 @@ from app.api.errors import (
 from app.api.problems import ErrorCode
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
-    CamelCaseRequest,
     FailedStage,
     MergeRequestBase,
     RepositoryBase,
     ReviewJob,
+    StrictRequest,
     UtcDatetime,
 )
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
@@ -77,7 +77,7 @@ router = APIRouter(
 )
 
 
-class CreateReviewRequest(CamelCaseRequest):
+class CreateReviewRequest(StrictRequest):
     """Запрос ручного запуска ревью запроса на изменение."""
 
     # strict у модели не пропустил бы enum строкой: тело приходит разобранным JSON, а в

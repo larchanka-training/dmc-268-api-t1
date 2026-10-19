@@ -36,9 +36,9 @@ PROBLEM_FIELDS = {"type", "title", "status", "detail", "instance", "code", "trac
 SECRET_TEXT = "секрет-из-исключения"
 TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
 OPENAPI_JSON = Path(__file__).resolve().parent.parent / "docs" / "openapi" / "openapi.json"
-REVIEW_BODY = {"provider": "github", "providerRepositoryId": "1", "pullRequestNumber": 1, "trigger": "manual"}
+REVIEW_BODY = {"provider": "github", "provider_repository_id": "1", "pull_request_number": 1, "trigger": "manual"}
 RUN_ID = "0192f0c4-7a1e-7b3c-9d2e-4f5a6b7c8d9e"
-CONNECT_BODY = {"provider": "github", "providerId": "123456789"}
+CONNECT_BODY = {"provider": "github", "provider_id": "123456789"}
 JSON = {"content-type": "application/json"}
 
 
@@ -280,10 +280,10 @@ def test_planned_endpoint_checks_origin_session_and_body_first(client: TestClien
     response = client.post("/api/v1/reviews", json=REVIEW_BODY, headers={"Origin": ORIGIN})
     assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/reviews")
     response = _signed_in_client().post(
-        "/api/v1/reviews", json={**REVIEW_BODY, "pullRequestNumber": 0}, headers={"Origin": ORIGIN}
+        "/api/v1/reviews", json={**REVIEW_BODY, "pull_request_number": 0}, headers={"Origin": ORIGIN}
     )
     problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
-    assert problem["errors"] == [{"where": "body.pullRequestNumber", "reason": "должно быть не меньше 1"}]
+    assert problem["errors"] == [{"where": "body.pull_request_number", "reason": "должно быть не меньше 1"}]
 
 
 def test_planned_repository_endpoints_answer_not_implemented() -> None:
@@ -304,10 +304,10 @@ def test_planned_repository_endpoints_check_session_origin_and_body_first(client
     response = client.post("/api/v1/repositories", json=CONNECT_BODY, headers={"Origin": ORIGIN})
     assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/repositories")
     response = _signed_in_client().post(
-        "/api/v1/repositories", json={**CONNECT_BODY, "providerId": ""}, headers={"Origin": ORIGIN}
+        "/api/v1/repositories", json={**CONNECT_BODY, "provider_id": ""}, headers={"Origin": ORIGIN}
     )
     problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/repositories")
-    assert problem["errors"] == [{"where": "body.providerId", "reason": "длина строки должна быть не меньше 1"}]
+    assert problem["errors"] == [{"where": "body.provider_id", "reason": "длина строки должна быть не меньше 1"}]
 
 
 @pytest.mark.parametrize("part", ["diff", "steps"])
@@ -386,20 +386,20 @@ def test_invalid_json_where_has_no_offset() -> None:
 @pytest.mark.parametrize(
     ("change", "error"),
     [
-        ({"pullRequestNumber": "5"}, {"where": "body.pullRequestNumber", "reason": "ожидается целое число"}),
-        ({"pullRequestNumber": True}, {"where": "body.pullRequestNumber", "reason": "ожидается целое число"}),
-        ({"providerRepositoryId": 1}, {"where": "body.providerRepositoryId", "reason": "ожидается строка"}),
+        ({"pull_request_number": "5"}, {"where": "body.pull_request_number", "reason": "ожидается целое число"}),
+        ({"pull_request_number": True}, {"where": "body.pull_request_number", "reason": "ожидается целое число"}),
+        ({"provider_repository_id": 1}, {"where": "body.provider_repository_id", "reason": "ожидается строка"}),
         (
-            {"providerRepositoryId": ""},
-            {"where": "body.providerRepositoryId", "reason": "длина строки должна быть не меньше 1"},
+            {"provider_repository_id": ""},
+            {"where": "body.provider_repository_id", "reason": "длина строки должна быть не меньше 1"},
         ),
         (
-            {"providerRepositoryId": "x" * 256},
-            {"where": "body.providerRepositoryId", "reason": "длина строки должна быть не больше 255"},
+            {"provider_repository_id": "x" * 256},
+            {"where": "body.provider_repository_id", "reason": "длина строки должна быть не больше 255"},
         ),
         (
-            {"pullRequestNumber": 2**31},
-            {"where": "body.pullRequestNumber", "reason": "должно быть не больше 2147483647"},
+            {"pull_request_number": 2**31},
+            {"where": "body.pull_request_number", "reason": "должно быть не больше 2147483647"},
         ),
         ({"provider": "bitbucket"}, {"where": "body.provider", "reason": "значение не из допустимого списка"}),
     ],
@@ -411,11 +411,12 @@ def test_review_request_body_is_strict(change: dict[str, Any], error: dict[str, 
     assert problem["errors"] == [error]
 
 
-def test_review_request_body_is_camel_case_only() -> None:
-    body = {"provider": "github", "provider_repository_id": "1", "pull_request_number": 1, "trigger": "manual"}
+def test_review_request_body_is_snake_case_only() -> None:
+    """Тело — в snake_case, как ответы: camelCase-ключ — лишнее поле, а не синоним."""
+    body = {"provider": "github", "providerRepositoryId": "1", "pullRequestNumber": 1, "trigger": "manual"}
     response = _signed_in_client().post("/api/v1/reviews", json=body, headers={"Origin": ORIGIN})
     problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
-    assert {"where": "body.providerRepositoryId", "reason": "обязательный параметр не передан"} in problem["errors"]
+    assert {"where": "body.provider_repository_id", "reason": "обязательный параметр не передан"} in problem["errors"]
     assert {"where": "body", "reason": "лишнее поле"} in problem["errors"]
 
 
