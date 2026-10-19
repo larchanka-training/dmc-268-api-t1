@@ -24,6 +24,7 @@ dependencies = [
     "tree-sitter-javascript>=0.25.0",
     "tree-sitter-typescript>=0.23.2",
     "tree-sitter-go>=0.25.0",
+    "pydantic>=2.13",
 ]
 
 [project.optional-dependencies]
