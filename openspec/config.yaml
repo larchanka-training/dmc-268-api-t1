@@ -30,8 +30,11 @@ context: |
 rules:
   design:
     - "Prefer the boring construct; justify any abstraction that has no second caller today."
+    - "The HTTP API schema comes from code: an /api/v1 endpoint and all its responses are declared on the route (response_model, responses with error models from app/api/problems.py). docs/openapi/openapi.json is an export of that schema - never edited by hand; CI fails if it is stale. A planned endpoint is a stub route with its full schema that answers 501 NOT_IMPLEMENTED."
+    - "Every error response follows RFC 9457 Problem Details (application/problem+json) with the code and trace_id extensions (trace_id is also the X-Trace-ID header); a new error code gets an ErrorCode value and its own Problem model with constants and an example in app/api/problems.py."
   tasks:
     - "Each task names the pure function or adapter it produces, so the split between decision logic and I/O stays visible in the plan."
+    - "A change that adds or alters an /api/v1 endpoint or error ends its implementation tasks with regenerating docs/openapi/openapi.json (uv run python scripts/export_openapi.py)."
 
 operations:
   apply:
@@ -42,3 +45,4 @@ operations:
       - "Keep adapters thin - translation between the external shape and the domain shape, with no branching business rules."
       - "Every pure function gets a unit test that runs without a database, broker or network. Reserve integration tests for adapters."
       - "Do not repeat an enum, a transition table or a timestamp definition in more than one place."
+      - "Declare every endpoint response in code (response_model, responses with ERRORS_* from app/api/errors.py) and commit the regenerated docs/openapi/openapi.json with the route; never edit it by hand. Raise errors only as ApiError(status, ErrorCode.X, detail) from app/api/errors.py - never HTTPException or a hand-built JSON error body."
