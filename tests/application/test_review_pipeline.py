@@ -996,3 +996,36 @@ def test_a_failed_retry_write_hands_the_verifier_to_the_next_provider() -> None:
         (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, 7, None),
         (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None),
     ]
+
+
+def test_a_failed_step_commit_after_publishing_does_not_fail_the_run() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = RecordingVcsGateway()
+    failed = _failing_step_writes(
+        uow, lambda s: s.stage is ReviewRunStage.PUBLISHING and s.status is ReviewRunStepStatus.COMPLETED
+    )
+    gateway = ScriptedLlmGateway(
+        [review_response(finding_json(CHANGED_FILE, 1, "находка")), verification_response(("F1", "keep"))]
+    )
+
+    _run(uow, gateway, vcs_gateway=vcs)
+
+    assert len(failed) == 1
+    assert vcs.publications
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.COMPLETED
+    assert run.failure_reason is None
+    # Исход шага не записался: шаг остаётся `running` (его закрывает #91).
+    assert _steps(uow)[-1] == (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.RUNNING, None, None)
+
+
+def test_failed_step_starts_do_not_fail_the_run() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _failing_step_writes(uow, lambda s: s.status is ReviewRunStepStatus.RUNNING)
+
+    _run(uow, ScriptedLlmGateway([review_response(tokens=5)]))
+
+    assert _completed(uow).status is ReviewRunStatus.COMPLETED
+    assert _steps(uow) == []
