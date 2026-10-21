@@ -162,6 +162,9 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 ### Логи
 
 Структурированные логи с `trace_id` и `review_run_id` — задача #89; правила допишет она.
+Уже сейчас: OTel Logs SDK в Python — статус Development, логи через него не отправляем; заменим,
+когда станет Stable. `LoggingHandler` тогда — только из `opentelemetry-instrumentation-logging`:
+версия в `opentelemetry.sdk._logs` устарела с 1.40.0 и будет удалена.
 
 ## Тесты
 
