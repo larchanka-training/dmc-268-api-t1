@@ -17,6 +17,8 @@ locals {
   ]
 
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
+  # consumer_timeout RabbitMQ его не ограничивает: в 4.3 таймаут подтверждения
+  # есть только у quorum-очередей, а очередь review — classic.
   worker_stop_seconds = 2 * 300 * 2 * (var.llm_hosted_fallback ? 2 : 1) + 60
 }
 
