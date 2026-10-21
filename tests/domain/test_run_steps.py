@@ -58,6 +58,14 @@ def test_a_step_with_an_error_code_fails() -> None:
     assert step.tokens_used is None
 
 
+def test_an_empty_error_code_still_fails_the_step() -> None:
+    # Как CHECK в базе: упавший — шаг с кодом не `None`, а не с непустым кодом.
+    step = finish_step(_started(), duration_seconds=1.0, tokens_used=None, error_code="")
+
+    assert step.status is ReviewRunStepStatus.FAILED
+    assert step.error_code == ""
+
+
 def test_a_negative_duration_is_clamped_to_zero() -> None:
     assert (
         finish_step(

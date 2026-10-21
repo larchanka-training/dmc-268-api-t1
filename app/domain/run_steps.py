@@ -38,7 +38,10 @@ def finish_step(
     tokens_used: int | None,
     error_code: str | None = None,
 ) -> ReviewRunStep:
-    """Закрыть шаг: с кодом сбоя — `failed`, без него — `completed`.
+    """Закрыть шаг: с кодом сбоя — `failed`, без него (`None`) — `completed`.
+
+    Код проверяется на `None`, как в `ck_review_run_steps_error_code`: шаг с
+    любым кодом, даже пустым, — упавший, и база с доменом не расходятся.
 
     Отрицательная длительность (часы не монотонны) приводится к нулю: шаг
     не может закончиться раньше, чем начался.
@@ -46,7 +49,7 @@ def finish_step(
     return replace(
         step,
         status=ReviewRunStepStatus.FAILED
-        if error_code
+        if error_code is not None
         else ReviewRunStepStatus.COMPLETED,
         duration_seconds=max(duration_seconds, 0.0),
         tokens_used=tokens_used,
