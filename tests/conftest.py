@@ -117,8 +117,19 @@ def session(clean_db) -> Iterator[Session]:
         connection.close()
 
 
+@pytest.fixture(autouse=True)
+def _forget_spans() -> Iterator[None]:
+    """Спаны теста не копятся в памяти до конца сессии: экспортёр общий на все тесты."""
+    yield
+    SPAN_EXPORTER.clear()
+
+
 @pytest.fixture
 def spans() -> InMemorySpanExporter:
-    """Спаны, законченные за этот тест."""
+    """Спаны, законченные за этот тест.
+
+    Очистка и здесь, а не только после теста: фикстуры, поднятые раньше `spans`
+    (`clean_db` на инструментированном движке), уже могли закончить свои спаны.
+    """
     SPAN_EXPORTER.clear()
     return SPAN_EXPORTER
