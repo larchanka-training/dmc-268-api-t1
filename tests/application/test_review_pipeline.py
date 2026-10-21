@@ -17,11 +17,18 @@ from app.application.review_pipeline import run_review
 from app.domain.entities import MergeRequest, ReviewJob, ReviewRun, RuleRef
 from app.domain.enums import (
     MergeRequestState,
+    ReviewRunStage,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     TriggerSource,
     VerificationOutcome,
 )
-from app.domain.llm_errors import LlmError, LlmOutputError, PromptTooLargeError
+from app.domain.llm_errors import (
+    LlmError,
+    LlmOutputError,
+    LlmTimeoutError,
+    PromptTooLargeError,
+)
 from app.domain.prompt import PromptTexts
 from app.domain.vcs_errors import VcsError
 
@@ -104,11 +111,16 @@ class _Clock:
 
 
 class _Monotonic:
-    def __init__(self, *values: float) -> None:
-        self._values = iter(values)
+    """Монотонные часы, идущие на `step` секунд при каждом чтении; показания записываются."""
+
+    def __init__(self, step: float = 0.5) -> None:
+        self._step = step
+        self.readings: list[float] = []
 
     def __call__(self) -> float:
-        return next(self._values)
+        reading = len(self.readings) * self._step
+        self.readings.append(reading)
+        return reading
 
 
 def _run(uow: FakeUnitOfWork, gateway: object, **overrides: object) -> None:
@@ -122,7 +134,7 @@ def _run(uow: FakeUnitOfWork, gateway: object, **overrides: object) -> None:
         "llm_limits": LLM_LIMITS,
         "prompt_texts": TEXTS,
         "now": _Clock().now,
-        "monotonic": _Monotonic(0.0, 12.5),
+        "monotonic": _Monotonic(),
         "new_id": _new_id(),
     }
     kwargs.update(overrides)
@@ -138,15 +150,17 @@ def test_successful_run_reaches_completed_with_model_and_tokens() -> None:
     uow = FakeUnitOfWork()
     _seed_run(uow)
     gateway = ScriptedLlmGateway([review_response(model="stub-llm")])
+    monotonic = _Monotonic()
 
-    _run(uow, gateway)
+    _run(uow, gateway, monotonic=monotonic)
 
     run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.COMPLETED
     assert run.model == "stub-llm"
     assert run.tokens_used == 0
-    assert run.duration_seconds == 12.5
+    # Первое показание - начало прогона, последнее - его конец.
+    assert run.duration_seconds == monotonic.readings[-1] - monotonic.readings[0]
     assert uow.context_payloads.list_for_run(JOB.review_run_id)
 
 
@@ -639,3 +653,229 @@ def test_rule_reference_is_stored_and_published_with_the_attribution_prefix() ->
         "Согласно пользовательскому правилу «Error Handling Standards» "
         "(пункт 2: Текст ошибки воспроизводим): Ошибка глотается."
     ) in inline[0].body
+
+
+# --- шаги прогона ---------------------------------------------------------
+
+STAGES = [
+    ReviewRunStage.FETCHING_DIFF,
+    ReviewRunStage.BUILDING_CONTEXT,
+    ReviewRunStage.ANALYSING,
+    ReviewRunStage.VERIFYING,
+    ReviewRunStage.PUBLISHING,
+]
+
+
+def _steps(uow: FakeUnitOfWork) -> list[tuple[ReviewRunStage, ReviewRunStepStatus, int | None, str | None]]:
+    return [
+        (s.stage, s.status, s.tokens_used, s.error_code)
+        for s in uow.review_run_steps.list_for_run(JOB.review_run_id)
+    ]
+
+
+class _RetryingOnce:
+    """Модель, которая перед ответом на ревью один раз повторила вызов (40 токенов)."""
+
+    def __init__(self, scripted: ScriptedLlmGateway, error: LlmError) -> None:
+        self._scripted = scripted
+        self._error = error
+        self._retried = False
+
+    def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
+        if not self._retried:
+            self._retried = True
+            assert request.on_retry is not None
+            request.on_retry(self._error, 40)
+        return self._scripted.complete(request)
+
+
+def test_a_successful_run_records_every_stage_completed_in_order() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка"), tokens=5),
+            verification_response(("F1", "keep"), tokens=7),
+        ]
+    )
+
+    _run(uow, gateway)
+
+    assert _steps(uow) == [
+        (ReviewRunStage.FETCHING_DIFF, ReviewRunStepStatus.COMPLETED, None, None),
+        (ReviewRunStage.BUILDING_CONTEXT, ReviewRunStepStatus.COMPLETED, None, None),
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.COMPLETED, 5, None),
+        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, 7, None),
+        (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None),
+    ]
+    steps = uow.review_run_steps.list_for_run(JOB.review_run_id)
+    # Каждый шаг - между двумя показаниями монотонных часов, идущих на 0.5 с.
+    assert [s.duration_seconds for s in steps] == [0.5] * 5
+    started = [s.started_at for s in steps]
+    assert started == sorted(started) and len(set(started)) == 5
+
+
+def test_the_verifying_step_starts_at_the_progress_mark_before_the_verifier() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    seen: list[datetime] = []
+    original = uow.review_runs.update
+
+    def recording_update(run: ReviewRun) -> None:
+        seen.append(run.last_progress_at)
+        original(run)
+
+    uow.review_runs.update = recording_update  # type: ignore[method-assign]
+    gateway = ScriptedLlmGateway(
+        [review_response(finding_json(CHANGED_FILE, 1, "находка")), verification_response(("F1", "keep"))]
+    )
+
+    _run(uow, gateway)
+
+    # building_context, analysing, отметка после ревью - третья запись прогона.
+    progress_mark = seen[2]
+    (verifying,) = [
+        s for s in uow.review_run_steps.list_for_run(JOB.review_run_id) if s.stage is ReviewRunStage.VERIFYING
+    ]
+    assert verifying.started_at == progress_mark
+
+
+def test_a_verifier_that_was_not_needed_is_a_completed_step_without_tokens() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    _run(uow, ScriptedLlmGateway([review_response(tokens=5)]))
+
+    assert [stage for stage, *_ in _steps(uow)] == STAGES
+    assert _steps(uow)[3] == (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, None, None)
+
+
+def test_a_diff_failure_fails_the_fetching_step_with_its_code() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    with pytest.raises(VcsError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=FakeVcs(error=VcsError("GitHub недоступен")))
+
+    assert _steps(uow) == [
+        (ReviewRunStage.FETCHING_DIFF, ReviewRunStepStatus.FAILED, None, "SCM_UNAVAILABLE"),
+    ]
+    (step,) = uow.review_run_steps.list_for_run(JOB.review_run_id)
+    assert step.duration_seconds == 0.5
+
+
+def test_a_model_failure_fails_the_analysing_step_with_its_code_and_tokens() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    with pytest.raises(LlmTimeoutError):
+        _run(uow, ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=30)]))
+
+    assert _steps(uow)[2:] == [
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 30, "LLM_TIMEOUT"),
+    ]
+    assert _completed(uow).failed_stage is ReviewRunStatus.ANALYSING
+
+
+def test_a_program_error_fails_the_step_as_internal() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    with pytest.raises(RuntimeError):
+        _run(uow, ScriptedLlmGateway([RuntimeError("ошибка программы")]))
+
+    assert _steps(uow)[-1] == (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, None, "INTERNAL_ERROR")
+
+
+def test_a_review_over_the_window_fails_the_step_without_tokens() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    with pytest.raises(PromptTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), llm_limits=LlmLimits(window_tokens=100, max_output_tokens=50))
+
+    assert _steps(uow)[-1] == (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, None, "PROMPT_TOO_LARGE")
+
+
+def test_a_retried_review_is_a_failed_step_and_a_new_step_of_the_same_stage() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    scripted = ScriptedLlmGateway([review_response(tokens=100)])
+
+    _run(uow, _RetryingOnce(scripted, LlmOutputError("findings.0.severity: missing")))
+
+    assert _steps(uow)[2:4] == [
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 40, "LLM_INVALID_OUTPUT"),
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.COMPLETED, 60, None),
+    ]
+    first, second = uow.review_run_steps.list_for_run(JOB.review_run_id)[2:4]
+    assert second.started_at > first.started_at
+    assert _completed(uow).tokens_used == 100
+
+
+def test_a_retried_review_that_fails_again_records_both_attempts() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    scripted = ScriptedLlmGateway([LlmOutputError("всё ещё не по схеме", tokens_used=90)])
+
+    with pytest.raises(LlmOutputError):
+        _run(uow, _RetryingOnce(scripted, LlmOutputError("не по схеме")))
+
+    assert _steps(uow)[2:] == [
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 40, "LLM_INVALID_OUTPUT"),
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 50, "LLM_INVALID_OUTPUT"),
+    ]
+
+
+def test_a_failed_verifier_is_a_failed_step_but_the_run_goes_on() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка"), tokens=5),
+            LlmError("модель недоступна", tokens_used=3),
+        ]
+    )
+
+    _run(uow, gateway)
+
+    assert _steps(uow)[3:] == [
+        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.FAILED, 3, "LLM_UNAVAILABLE"),
+        (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None),
+    ]
+    assert _completed(uow).status is ReviewRunStatus.COMPLETED
+
+
+def test_verdicts_not_covering_the_candidates_fail_the_verifying_step() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка")),
+            verification_response(("F9", "keep"), tokens=4),
+        ]
+    )
+
+    _run(uow, gateway)
+
+    assert _steps(uow)[3] == (ReviewRunStage.VERIFYING, ReviewRunStepStatus.FAILED, 4, "LLM_INVALID_OUTPUT")
+    assert _completed(uow).verification is VerificationOutcome.UNAVAILABLE
+
+
+def test_a_failure_while_closing_the_step_does_not_mask_the_original_error() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    real_update = uow.review_run_steps.update
+
+    def update(step) -> None:
+        if step.status is ReviewRunStepStatus.FAILED:
+            raise ConnectionError("база недоступна")
+        real_update(step)
+
+    uow.review_run_steps.update = update  # type: ignore[method-assign]
+
+    with pytest.raises(LlmError, match="модель недоступна"):
+        _run(uow, ScriptedLlmGateway([LlmError("модель недоступна")]))
+
+    assert _completed(uow).status is ReviewRunStatus.FAILED
+    assert _steps(uow)[-1][:2] == (ReviewRunStage.ANALYSING, ReviewRunStepStatus.RUNNING)

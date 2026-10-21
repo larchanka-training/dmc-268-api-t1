@@ -14,6 +14,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunStep,
     RuleRef,
 )
 from app.domain.enums import (
@@ -23,12 +24,15 @@ from app.domain.enums import (
     FindingSeverity,
     MergeRequestState,
     Provider,
+    ReviewRunStage,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     TriggerSource,
     VerificationOutcome,
 )
 from app.domain.ids import new_id
 from app.domain.lifecycle import advance
+from app.domain.run_steps import finish_step, start_step
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 
 from ..conftest import requires_db
@@ -501,3 +505,76 @@ def test_published_comments_of_a_run_come_in_publication_order(uow) -> None:
 
     same_time = sorted((same_a, same_b), key=lambda c: c.id)
     assert [c.id for c in stored] == [*(c.id for c in same_time), later.id]
+
+
+def a_step(run_id, stage: ReviewRunStage, started_at: dt.datetime) -> ReviewRunStep:
+    return start_step(run_id, stage, started_at=started_at, step_id=new_id())
+
+
+def test_steps_of_a_run_come_in_start_order_and_keep_their_outcome(uow) -> None:
+    with uow as work:
+        _, mr, run = seeded(work)
+        other_run = replace(a_run(mr.id), head_sha="def456")
+        work.review_runs.add(other_run)
+        work.commit()
+    # Вставка не в порядке начала: порядок даёт started_at, а не очередь записи.
+    publishing = a_step(run.id, ReviewRunStage.PUBLISHING, LATER)
+    fetching = a_step(run.id, ReviewRunStage.FETCHING_DIFF, NOW)
+    first_try = a_step(run.id, ReviewRunStage.ANALYSING, NOW + dt.timedelta(minutes=1))
+    retry = a_step(run.id, ReviewRunStage.ANALYSING, NOW + dt.timedelta(minutes=2))
+    foreign = a_step(other_run.id, ReviewRunStage.FETCHING_DIFF, NOW)
+    with uow as work:
+        for step in (publishing, fetching, first_try, retry, foreign):
+            work.review_run_steps.add(step)
+        work.commit()
+    with uow as work:
+        work.review_run_steps.update(
+            finish_step(first_try, duration_seconds=1.5, tokens_used=40, error_code="LLM_INVALID_OUTPUT")
+        )
+        work.review_run_steps.update(finish_step(retry, duration_seconds=2.0, tokens_used=60))
+        work.commit()
+
+    with uow as work:
+        steps = work.review_run_steps.list_for_run(run.id)
+
+    assert [s.id for s in steps] == [fetching.id, first_try.id, retry.id, publishing.id]
+    failed, completed = steps[1], steps[2]
+    assert failed == replace(
+        first_try,
+        status=ReviewRunStepStatus.FAILED,
+        duration_seconds=1.5,
+        tokens_used=40,
+        error_code="LLM_INVALID_OUTPUT",
+    )
+    assert completed.status is ReviewRunStepStatus.COMPLETED
+    assert (completed.duration_seconds, completed.tokens_used, completed.error_code) == (2.0, 60, None)
+    assert steps[0].status is ReviewRunStepStatus.RUNNING
+    assert steps[0].started_at == NOW
+    assert steps[0].started_at.tzinfo is not None
+
+
+def test_steps_with_one_start_are_ordered_by_id(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+    steps = [a_step(run.id, ReviewRunStage.ANALYSING, NOW) for _ in range(3)]
+    with uow as work:
+        for step in reversed(steps):
+            work.review_run_steps.add(step)
+        work.commit()
+    with uow as work:
+        assert [s.id for s in work.review_run_steps.list_for_run(run.id)] == [s.id for s in steps]
+
+
+def test_a_run_without_steps_has_an_empty_list(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+    with uow as work:
+        assert work.review_run_steps.list_for_run(run.id) == []
+
+
+def test_updating_a_step_that_is_not_stored_is_an_error(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+    step = finish_step(a_step(run.id, ReviewRunStage.PUBLISHING, NOW), duration_seconds=1, tokens_used=None)
+    with uow as work, pytest.raises(LookupError):
+        work.review_run_steps.update(step)

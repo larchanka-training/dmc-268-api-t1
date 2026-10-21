@@ -8,7 +8,9 @@
 же запрос следующему провайдеру; после последнего пробрасывается его сбой.
 Прочие исключения - ошибки программы - не гасятся и дальше не передаются.
 Токены, которые сожгли сбойные провайдеры, прибавляются к ответу или к
-последнему сбою: прогон учитывает весь расход вызова.
+последнему сбою: прогон учитывает весь расход вызова. Переход к следующему
+провайдеру - повтор вызова: о нём узнаёт `request.on_retry`, а повторы внутри
+провайдера доходят до слушателя с токенами от начала всего вызова.
 """
 
 import logging
@@ -34,9 +36,11 @@ class FallbackLlmGateway:
         spent = 0
         for (name, provider), (next_name, _) in zip(heads, self._providers[1:], strict=True):
             try:
-                return _plus(provider.complete(request), spent)
+                return _plus(provider.complete(_shifted(request, spent)), spent)
             except LlmError as error:
                 spent += error.tokens_used
+                if request.on_retry is not None:
+                    request.on_retry(error, spent)
                 logger.warning(
                     "модель %s не ответила на %s (%s: %s), запрос уходит %s",
                     name,
@@ -46,7 +50,7 @@ class FallbackLlmGateway:
                     next_name,
                 )
         try:
-            return _plus(last.complete(request), spent)
+            return _plus(last.complete(_shifted(request, spent)), spent)
         except LlmError as error:
             error.tokens_used += spent
             raise
@@ -54,3 +58,11 @@ class FallbackLlmGateway:
 
 def _plus[T: BaseModel](response: LlmResponse[T], spent: int) -> LlmResponse[T]:
     return replace(response, tokens_used=response.tokens_used + spent) if spent else response
+
+
+def _shifted[T: BaseModel](request: LlmRequest[T], spent: int) -> LlmRequest[T]:
+    """Запрос, чей слушатель повтора считает токены от начала всего вызова."""
+    listener = request.on_retry
+    if listener is None or not spent:
+        return request
+    return replace(request, on_retry=lambda error, tokens: listener(error, spent + tokens))

@@ -3,7 +3,12 @@
 Живёт в домене по той же причине, что и `vcs_errors`: слой приложения ловит
 её, не завися от инфраструктуры, а адаптеры провайдеров бросают её или её
 подклассы, не завися от слоя приложения.
+
+`code` у каждого класса — машиночитаемый код сбоя из каталога ошибок прогона
+(§8 PIPELINE_SPEC.md); его пишет шаг прогона (`review_run_steps.error_code`).
 """
+
+from typing import ClassVar
 
 
 class LlmError(RuntimeError):
@@ -13,6 +18,8 @@ class LlmError(RuntimeError):
     ответить, а ответ не принят. Прогон учитывает их в затратах. Сбой до
     ответа модели - 0.
     """
+
+    code: ClassVar[str] = "LLM_UNAVAILABLE"
 
     def __init__(self, message: str = "", *, tokens_used: int = 0) -> None:
         super().__init__(message)
@@ -26,6 +33,14 @@ class LlmOutputError(LlmError):
     валидации, по которой видно поле и значение.
     """
 
+    code: ClassVar[str] = "LLM_INVALID_OUTPUT"
+
+
+class LlmTimeoutError(LlmError):
+    """Провайдер не ответил за таймаут вызова."""
+
+    code: ClassVar[str] = "LLM_TIMEOUT"
+
 
 class PromptTooLargeError(LlmError):
     """Запрос вместе с резервом ответа не помещается в окно модели.
@@ -33,4 +48,9 @@ class PromptTooLargeError(LlmError):
     Бросается до отправки: запрос, который модель обрезала бы, не уходит ни
     одному провайдеру. Подкласс `LlmError`, поэтому пайплайн обрабатывает его
     как любой сбой модели: ревью - `failed`, верификатор - `unavailable`.
+
+    Своего кода в начальном каталоге §8 нет: модель тут ни при чём, запрос
+    не ушёл никому.
     """
+
+    code: ClassVar[str] = "PROMPT_TOO_LARGE"

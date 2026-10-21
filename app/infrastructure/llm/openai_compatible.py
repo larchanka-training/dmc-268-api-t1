@@ -25,7 +25,7 @@ from pydantic import BaseModel, SecretStr
 
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse
 from app.domain.entities import PromptMessage
-from app.domain.llm_errors import LlmError
+from app.domain.llm_errors import LlmError, LlmTimeoutError
 from app.infrastructure.llm.structured import RawReply, complete_structured
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ class OpenAiCompatibleGateway:
                 headers={"Authorization": f"Bearer {key.get_secret_value()}"},
             )
         except httpx.TimeoutException as error:
-            raise LlmError(f"{self._name}: таймаут ({type(error).__name__})") from None
+            raise LlmTimeoutError(f"{self._name}: таймаут ({type(error).__name__})") from None
         except httpx.RequestError as error:
             raise LlmError(f"{self._name} недоступен ({type(error).__name__})") from None
 

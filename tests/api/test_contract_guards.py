@@ -12,9 +12,10 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from app.api.factory import create_app
+from app.api.reviews import ReviewRunStepResponse
 from app.api.schemas import UTC_DATETIME_PATTERN, FailedStage, UtcDatetime
 from app.config import Settings
-from app.domain.enums import FAILURE_STAGES
+from app.domain.enums import FAILURE_STAGES, ReviewRunStage, ReviewRunStepStatus
 
 API_DIR = Path(__file__).resolve().parents[2] / "app" / "api"
 SETTINGS = Settings(
@@ -71,6 +72,13 @@ def test_routes_do_not_hand_build_json_bodies() -> None:
 
 def test_failed_stage_is_the_domain_failure_stages() -> None:
     assert set(get_args(FailedStage)) == FAILURE_STAGES
+
+
+def test_step_stage_and_status_are_the_domain_enums() -> None:
+    """Литералы схемы шага - те же значения, что enum домена и тип в базе."""
+    fields = ReviewRunStepResponse.model_fields
+    assert list(get_args(fields["stage"].annotation)) == [s.value for s in ReviewRunStage]
+    assert list(get_args(fields["status"].annotation)) == [s.value for s in ReviewRunStepStatus]
 
 
 class _Moment(BaseModel):

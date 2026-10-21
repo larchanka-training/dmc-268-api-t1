@@ -18,6 +18,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunStep,
     Session,
     User,
 )
@@ -60,6 +61,16 @@ class ReviewRunRepo(Protocol):
     def add(self, run: ReviewRun) -> None: ...
 
     def update(self, run: ReviewRun) -> None: ...
+
+
+class ReviewRunStepRepo(Protocol):
+    def list_for_run(self, review_run_id: UUID) -> list[ReviewRunStep]:
+        """Шаги прогона по порядку начала; при равном начале - по id."""
+        ...
+
+    def add(self, step: ReviewRunStep) -> None: ...
+
+    def update(self, step: ReviewRunStep) -> None: ...
 
 
 class ContextPayloadRepo(Protocol):

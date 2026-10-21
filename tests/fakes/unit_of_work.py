@@ -21,6 +21,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunStep,
     Session,
     User,
 )
@@ -181,6 +182,33 @@ class FakeReviewRunRepo:
             if not verdict.ok:
                 raise ValueError(verdict.error)
         self._by_id[run.id] = run
+
+
+class FakeReviewRunStepRepo:
+    def __init__(self) -> None:
+        self._by_id: dict[UUID, ReviewRunStep] = {}
+
+    @property
+    def steps(self) -> list[ReviewRunStep]:
+        """Все шаги в порядке начала — как их отдаёт SQL-адаптер."""
+        return sorted(self._by_id.values(), key=lambda s: (s.started_at, s.id))
+
+    def snapshot(self) -> dict[UUID, ReviewRunStep]:
+        return dict(self._by_id)
+
+    def restore(self, state: dict[UUID, ReviewRunStep]) -> None:
+        self._by_id = dict(state)
+
+    def list_for_run(self, review_run_id: UUID) -> list[ReviewRunStep]:
+        return [s for s in self.steps if s.review_run_id == review_run_id]
+
+    def add(self, step: ReviewRunStep) -> None:
+        self._by_id[step.id] = step
+
+    def update(self, step: ReviewRunStep) -> None:
+        if step.id not in self._by_id:
+            raise LookupError(f"review run step {step.id} is not stored")
+        self._by_id[step.id] = step
 
 
 class FakeContextPayloadRepo:
@@ -400,6 +428,7 @@ class FakeUnitOfWork(UnitOfWork):
         self.repositories: FakeRepositoryRepo = self._fakes.repositories
         self.merge_requests: FakeMergeRequestRepo = self._fakes.merge_requests
         self.review_runs: FakeReviewRunRepo = self._fakes.review_runs
+        self.review_run_steps: FakeReviewRunStepRepo = self._fakes.review_run_steps
         self.context_payloads: FakeContextPayloadRepo = self._fakes.context_payloads
         self.findings: FakeFindingRepo = self._fakes.findings
         self.published_comments: FakePublishedCommentRepo = self._fakes.published_comments
@@ -458,6 +487,7 @@ class _Fakes:
         self.repositories = FakeRepositoryRepo()
         self.merge_requests = FakeMergeRequestRepo()
         self.review_runs = FakeReviewRunRepo()
+        self.review_run_steps = FakeReviewRunStepRepo()
         self.context_payloads = FakeContextPayloadRepo()
         self.findings = FakeFindingRepo(self.review_runs)
         self.published_comments = FakePublishedCommentRepo(self.review_runs)
@@ -469,6 +499,7 @@ class _Fakes:
             self.repositories,
             self.merge_requests,
             self.review_runs,
+            self.review_run_steps,
             self.context_payloads,
             self.findings,
             self.published_comments,

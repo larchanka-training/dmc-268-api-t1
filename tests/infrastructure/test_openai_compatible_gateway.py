@@ -13,7 +13,7 @@ from app.application.llm_schema import ReviewOutput
 from app.application.ports.llm_gateway import LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
-from app.domain.llm_errors import LlmError
+from app.domain.llm_errors import LlmError, LlmTimeoutError
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -186,7 +186,7 @@ def test_timeout_is_a_model_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("boom", request=request)
 
-    with pytest.raises(LlmError, match="таймаут"):
+    with pytest.raises(LlmTimeoutError, match="таймаут"):
         _gateway(handler).complete(REQUEST)
 
 

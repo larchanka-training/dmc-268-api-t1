@@ -6,6 +6,8 @@
 сбоя для логирования и тестов.
 """
 
+from typing import ClassVar
+
 from app.domain.vcs_errors import VcsError
 
 __all__ = ["VcsAuthError", "VcsError", "VcsNotFoundError", "VcsUnavailableError"]
@@ -19,6 +21,8 @@ class VcsUnavailableError(VcsError):
 class VcsAuthError(VcsError):
     """Ошибка аутентификации: не удалось получить installation token
     или выданный токен отклонён GitHub'ом."""
+
+    code: ClassVar[str] = "SCM_AUTH_ERROR"
 
 
 class VcsNotFoundError(VcsError):

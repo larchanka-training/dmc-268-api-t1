@@ -10,6 +10,10 @@ Use case уровня application: знает порты (`UnitOfWork`, `LlmGate
 записанный до сбоя, не откатывается вместе с сбойным шагом: если воркер
 упадёт после `analysing`, база уже знает об этом, и `find_stale` сможет
 когда-нибудь освободить коммит.
+
+Ход прогона мельче статуса: начало и исход каждого этапа (`fetching_diff`,
+`building_context`, `analysing`, `verifying`, `publishing`) пишет
+`StepRecorder`, повтор вызова модели — отдельным шагом.
 """
 
 import logging
@@ -23,14 +27,23 @@ from app.application.llm_review import LlmLimits, request_review, request_verifi
 from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
-from app.application.ports.llm_gateway import LlmGateway
+from app.application.ports.llm_gateway import LlmGateway, RetryListener
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.publish_review import publish_review
-from app.application.use_cases.build_review_context import build_review_context
+from app.application.review_run_steps import StepRecorder, spent_tokens
+from app.application.use_cases.build_review_context import (
+    build_review_context,
+    fetch_review_diff,
+)
 from app.domain.entities import ContextPayload, Finding, ReviewJob, ReviewRun
-from app.domain.enums import TERMINAL_STATUSES, ReviewRunStatus, VerificationOutcome
+from app.domain.enums import (
+    TERMINAL_STATUSES,
+    ReviewRunStage,
+    ReviewRunStatus,
+    VerificationOutcome,
+)
 from app.domain.lifecycle import advance
-from app.domain.llm_errors import LlmError
+from app.domain.llm_errors import LlmError, LlmOutputError
 from app.domain.prompt import PromptTexts
 from app.domain.verification import apply_verdicts, screen_findings
 
@@ -94,7 +107,8 @@ def run_review(
     Часы приходят функциями, как `new_id`: каждый переход берёт свой `now()`,
     поэтому `last_progress_at` отражает реальный прогресс (по нему
     `find_stale` отличает зависший прогон от идущего), а `duration_seconds` —
-    разность монотонных часов, которую тест проверяет точно.
+    разность монотонных часов, которую тест проверяет точно. Длительность
+    шага — та же разность на его границах.
 
     Сбой любого шага переводит прогон в `failed` и **пробрасывается**: воркер
     отклоняет сообщение, и оно попадает в DLQ для разбора (`job-queue`).
@@ -116,12 +130,19 @@ def run_review(
         return
 
     started_at = monotonic()
+    steps = StepRecorder(uow, run.id, now=now, monotonic=monotonic, new_id=new_id)
 
     try:
         run = _transition(uow, run, ReviewRunStatus.BUILDING_CONTEXT, now())
 
+        steps.start(ReviewRunStage.FETCHING_DIFF)
+        diff = fetch_review_diff(job, vcs_gateway)
+        steps.finish()
+
+        steps.start(ReviewRunStage.BUILDING_CONTEXT)
         assembled = build_review_context(
             job,
+            diff,
             vcs=vcs_gateway,
             extractor=definition_extractor,
             cache=cache_store,
@@ -134,10 +155,14 @@ def run_review(
         with uow:
             uow.context_payloads.add(context)
             uow.commit()
+        steps.finish()
 
         run = _transition(uow, run, ReviewRunStatus.ANALYSING, now())
 
-        result = request_review(context, prompt_texts, llm_gateway, limits=llm_limits)
+        steps.start(ReviewRunStage.ANALYSING)
+        result = request_review(
+            context, prompt_texts, llm_gateway, limits=llm_limits, on_retry=steps.retry
+        )
         screening = screen_findings(
             result.findings,
             hunks=assembled.hunks,
@@ -146,11 +171,23 @@ def run_review(
             now=now(),
             new_id=new_id,
         )
+        steps.finish(tokens_used=result.tokens_used)
         # Два долгих вызова модели подряд не должны выглядеть для `find_stale`
         # одним прогоном без прогресса.
-        run = _record_progress(uow, run, now())
+        moment = now()
+        run = _record_progress(uow, run, moment)
+        steps.start(ReviewRunStage.VERIFYING, at=moment)
         verification = _verify(
-            context, prompt_texts, llm_gateway, llm_limits, screening.kept, run.id
+            context,
+            prompt_texts,
+            llm_gateway,
+            llm_limits,
+            screening.kept,
+            run.id,
+            on_retry=steps.retry,
+        )
+        steps.finish(
+            tokens_used=verification.step_tokens, error_code=verification.error_code
         )
         if result.findings and not verification.findings:
             # Сводка модели описывает замечания, которых в публикации не будет:
@@ -174,6 +211,7 @@ def run_review(
 
         run = _transition(uow, run, ReviewRunStatus.PUBLISHING, now())
 
+        steps.start(ReviewRunStage.PUBLISHING)
         publish_review(
             job,
             run,
@@ -183,10 +221,12 @@ def run_review(
             now=now(),
             new_id=new_id,
         )
+        steps.finish()
 
         run = replace(run, duration_seconds=monotonic() - started_at)
         _transition(uow, run, ReviewRunStatus.COMPLETED, now())
     except Exception as exc:
+        steps.fail(exc)
         _mark_failed(uow, job.review_run_id, exc, now())
         raise
 
@@ -197,6 +237,10 @@ class _Verification:
     outcome: VerificationOutcome
     dropped: int
     tokens_used: int
+    # Для шага `verifying`: токены, если модель вызывалась, и код сбоя, если
+    # второй проход не удался (прогон при этом не падает).
+    step_tokens: int | None = None
+    error_code: str | None = None
 
 
 def _verify(
@@ -206,6 +250,8 @@ def _verify(
     limits: LlmLimits,
     candidates: Sequence[Finding],
     run_id: UUID,
+    *,
+    on_retry: RetryListener | None = None,
 ) -> _Verification:
     """Второй проход: оставить замечания, которые верификатор подтвердил.
 
@@ -216,7 +262,9 @@ def _verify(
     if not candidates:
         return _Verification((), VerificationOutcome.NOT_REQUIRED, 0, 0)
     try:
-        answer = request_verification(context, texts, gateway, candidates, limits=limits)
+        answer = request_verification(
+            context, texts, gateway, candidates, limits=limits, on_retry=on_retry
+        )
     except LlmError as error:
         logger.warning(
             "верификатор недоступен для прогона %s, публикуются замечания после отсева",
@@ -224,14 +272,24 @@ def _verify(
             exc_info=True,
         )
         return _Verification(
-            tuple(candidates), VerificationOutcome.UNAVAILABLE, 0, error.tokens_used
+            tuple(candidates),
+            VerificationOutcome.UNAVAILABLE,
+            0,
+            error.tokens_used,
+            step_tokens=spent_tokens(error),
+            error_code=error.code,
         )
     if not answer.verdicts.ok:
         logger.warning(
             "ответ верификатора для прогона %s не принят: %s", run_id, answer.verdicts.error
         )
         return _Verification(
-            tuple(candidates), VerificationOutcome.UNAVAILABLE, 0, answer.tokens_used
+            tuple(candidates),
+            VerificationOutcome.UNAVAILABLE,
+            0,
+            answer.tokens_used,
+            step_tokens=answer.tokens_used,
+            error_code=LlmOutputError.code,
         )
     applied = apply_verdicts(candidates, answer.verdicts.unwrap())
     for finding, reason in applied.dropped:
@@ -253,7 +311,11 @@ def _verify(
             reason,
         )
     return _Verification(
-        applied.kept, VerificationOutcome.VERIFIED, len(applied.dropped), answer.tokens_used
+        applied.kept,
+        VerificationOutcome.VERIFIED,
+        len(applied.dropped),
+        answer.tokens_used,
+        step_tokens=answer.tokens_used,
     )
 
 

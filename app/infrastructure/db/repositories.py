@@ -20,6 +20,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunStep,
     User,
 )
 from app.domain.entities import Session as UserSession
@@ -33,6 +34,7 @@ from app.infrastructure.db.models import (
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
+    ReviewRunStepRow,
     SessionRow,
     UserRow,
 )
@@ -240,6 +242,44 @@ class SqlAlchemyReviewRunRepo:
         row.rejected_findings = run.rejected_findings
         row.verification = run.verification
         row.verifier_dropped_findings = run.verifier_dropped_findings
+
+
+class SqlAlchemyReviewRunStepRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def list_for_run(self, review_run_id: UUID) -> list[ReviewRunStep]:
+        rows = self._session.scalars(
+            select(ReviewRunStepRow)
+            .where(ReviewRunStepRow.review_run_id == review_run_id)
+            # Порядок начала; id — UUIDv7, разводит шаги с одним временем.
+            .order_by(ReviewRunStepRow.started_at, ReviewRunStepRow.id)
+        ).all()
+        return [m.review_run_step_to_domain(row) for row in rows]
+
+    def add(self, step: ReviewRunStep) -> None:
+        self._session.add(
+            ReviewRunStepRow(
+                id=step.id,
+                review_run_id=step.review_run_id,
+                stage=step.stage,
+                status=step.status,
+                started_at=step.started_at,
+                duration_seconds=step.duration_seconds,
+                tokens_used=step.tokens_used,
+                error_code=step.error_code,
+            )
+        )
+
+    def update(self, step: ReviewRunStep) -> None:
+        row = self._session.get(ReviewRunStepRow, step.id)
+        if row is None:
+            raise LookupError(f"review run step {step.id} is not stored")
+        # Прогон, этап и начало у шага не меняются: меняется только исход.
+        row.status = step.status
+        row.duration_seconds = step.duration_seconds
+        row.tokens_used = step.tokens_used
+        row.error_code = step.error_code
 
 
 class SqlAlchemyContextPayloadRepo:

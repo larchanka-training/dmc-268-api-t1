@@ -11,7 +11,7 @@ from app.application.llm_schema import ReviewOutput
 from app.application.ports.llm_gateway import LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
-from app.domain.llm_errors import LlmError
+from app.domain.llm_errors import LlmError, LlmTimeoutError
 from app.infrastructure.llm.ollama import OllamaGateway
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -162,3 +162,11 @@ def test_transport_failure_is_a_model_failure(raised: type[httpx.RequestError], 
     # Исключение httpx держит запрос с кодом проверяемого репозитория.
     assert error.value.__cause__ is None
     assert error.value.__suppress_context__
+
+
+def test_timeout_is_classified_as_a_timeout() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("boom", request=request)
+
+    with pytest.raises(LlmTimeoutError, match="таймаут"):
+        _gateway(handler).complete(REQUEST)
