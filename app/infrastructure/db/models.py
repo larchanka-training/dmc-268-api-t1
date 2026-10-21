@@ -211,10 +211,13 @@ class ReviewRunStepRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             "tokens_used IS NULL OR tokens_used >= 0",
             name="ck_review_run_steps_tokens_non_negative",
         ),
+        # Шаги прогона читаются по порядку начала (`list_for_run`): индекс
+        # отдаёт их уже отсортированными. Он же служит внешнему ключу.
+        Index("ix_review_run_steps_run_order", "review_run_id", "started_at", "id"),
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("review_runs.id", ondelete="RESTRICT"), nullable=False, index=True
+        Uuid, ForeignKey("review_runs.id", ondelete="RESTRICT"), nullable=False
     )
     stage: Mapped[ReviewRunStage] = mapped_column(
         _enum(ReviewRunStage, "review_run_stage"), nullable=False

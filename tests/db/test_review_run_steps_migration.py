@@ -43,3 +43,10 @@ def test_the_steps_revision_downgrades_without_leftovers_and_upgrades_again(
         command.upgrade(config, "head")
     assert "review_run_steps" in inspect(migrated).get_table_names()
     assert _enum_types(migrated) == {"review_run_stage", "review_run_step_status"}
+
+
+def test_the_steps_revision_indexes_steps_in_reading_order(migrated) -> None:
+    indexes = inspect(migrated).get_indexes("review_run_steps")
+    assert [(i["name"], i["column_names"]) for i in indexes] == [
+        ("ix_review_run_steps_run_order", ["review_run_id", "started_at", "id"]),
+    ]

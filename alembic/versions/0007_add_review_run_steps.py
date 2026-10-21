@@ -63,14 +63,18 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['review_run_id'], ['review_runs.id'], ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('id')
     )
+    # Порядок `list_for_run`: шаги прогона читаются отсортированными по индексу.
     op.create_index(
-        op.f('ix_review_run_steps_review_run_id'), 'review_run_steps', ['review_run_id'], unique=False
+        'ix_review_run_steps_run_order',
+        'review_run_steps',
+        ['review_run_id', 'started_at', 'id'],
+        unique=False,
     )
 
 
 def downgrade() -> None:
     """Downgrade схемы."""
-    op.drop_index(op.f('ix_review_run_steps_review_run_id'), table_name='review_run_steps')
+    op.drop_index('ix_review_run_steps_run_order', table_name='review_run_steps')
     op.drop_table('review_run_steps')
     # Autogenerate типы не удаляет: без этого следующий upgrade упадёт на
     # создании существующих типов.
