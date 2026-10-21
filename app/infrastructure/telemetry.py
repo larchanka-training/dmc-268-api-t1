@@ -181,6 +181,13 @@ def instrument_engine(engine: Engine) -> None:
     `EngineTracer` — внутренний класс пакета, без обещаний совместимости: пакет держит
     верхняя граница в `pyproject.toml`, а если класс всё же переехал или сменил
     сигнатуру, сервис стартует без спанов SQL с одним предупреждением, а не падает.
+
+    TODO: убрать обход — перейти на `SQLAlchemyInstrumentor().instrument(engine=...)` и
+    снять верхнюю границу `<0.67`, когда выйдет первый релиз contrib с поддержкой
+    SQLAlchemy 2.1 (ожидаемо 0.67b0): PR open-telemetry/opentelemetry-python-contrib#5120
+    смёржен 2026-10-14, `_instruments` в `main` — `sqlalchemy >= 1.4.3, < 2.2.0`;
+    последний релиз, 0.66b1, вышел раньше и 2.1 не объявляет.
+    https://github.com/open-telemetry/opentelemetry-python-contrib/pull/5120
     """
     opt_in_stable_semconv()
     try:
