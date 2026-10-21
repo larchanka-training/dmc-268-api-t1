@@ -107,11 +107,13 @@ class Worker:
                 assert body is not None
                 assert method.delivery_tag is not None
                 exc: BaseException | None = None
-                with consuming_span(properties):
-                    try:
+                # Исключение ловится снаружи спана: он успевает записать его и
+                # закрыться со статусом ошибки, а не OK при nack в DLQ.
+                try:
+                    with consuming_span(properties):
                         handler(body)
-                    except Exception as caught:  # noqa: BLE001 — любая ошибка уводит сообщение в DLQ, а не роняет процесс
-                        exc = caught
+                except Exception as caught:  # noqa: BLE001 — любая ошибка уводит сообщение в DLQ, а не роняет процесс
+                    exc = caught
                 if should_ack(exc):
                     self.channel.basic_ack(method.delivery_tag)
                 else:
