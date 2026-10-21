@@ -17,9 +17,7 @@ locals {
   ]
 
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
-  # Не дольше consumer_timeout RabbitMQ (1800 с по умолчанию): дальше брокер сам
-  # закрывает канал, и подтверждение сообщения не дойдёт.
-  worker_stop_seconds = min(2 * 300 * 2 * (var.llm_hosted_fallback ? 2 : 1) + 60, 1800)
+  worker_stop_seconds = 2 * 300 * 2 * (var.llm_hosted_fallback ? 2 : 1) + 60
 }
 
 resource "docker_network" "dmc268" {
