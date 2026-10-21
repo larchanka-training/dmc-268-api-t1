@@ -25,14 +25,14 @@ dependencies = [
     "tree-sitter-typescript>=0.23.2",
     "tree-sitter-go>=0.25.0",
     "pydantic>=2.13",
-    "opentelemetry-api>=1.45.0",
-    "opentelemetry-sdk>=1.45.0",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
     # Пакеты contrib — бета, и обе зависят от `opentelemetry-instrumentation` и
     # semconv одной серии с точным `==`, а SDK — от той же semconv: серия
     # обновляется целиком и осознанно. `instrument_engine` к тому же зовёт
     # внутренний `EngineTracer`, у которого нет обещаний совместимости.
-    "opentelemetry-instrumentation-sqlalchemy>=0.66b0,<0.67",
-    "opentelemetry-instrumentation-httpx>=0.66b0,<0.67",
+    "opentelemetry-instrumentation-sqlalchemy>=0.66b1,<0.67",
+    "opentelemetry-instrumentation-httpx>=0.66b1,<0.67",
 ]
 
 [project.optional-dependencies]
