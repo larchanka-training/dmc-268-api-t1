@@ -152,7 +152,7 @@ export TEST_DATABASE_URL="postgresql+psycopg://dmc:dmc@localhost:5432/dmc268_tes
 
 ```bash
 EUROROUTER_API_KEYS=... EUROROUTER_BASE_URL=https://api.eurouter.ai/api/v1 \
-EUROROUTER_MODEL=qwen3-coder-30b-a3b uv run pytest -m live tests/live
+EUROROUTER_MODEL=qwen3-coder-next-80b uv run pytest -m live tests/live
 ```
 
 ## Проверки
