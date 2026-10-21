@@ -13,6 +13,7 @@ import pytest
 
 from app.application.ports.stage_tracer import StageSpan
 from app.application.review_run_steps import StepRecorder
+from app.domain.entities import ReviewRunStep
 from app.domain.enums import ReviewRunStage
 from app.domain.llm_errors import LlmOutputError, LlmTimeoutError
 from app.domain.vcs_errors import VcsError
@@ -150,4 +151,61 @@ def test_a_new_stage_closes_the_span_left_open_by_the_previous_one() -> None:
         ("start", ReviewRunStage.BUILDING_CONTEXT, None),
         ("end", ReviewRunStage.BUILDING_CONTEXT, None),
     ]
+    assert tracer.open == 0
+
+
+def _recorder(uow: FakeUnitOfWork, tracer: _RecordingTracer) -> StepRecorder:
+    return StepRecorder(
+        uow,
+        JOB.review_run_id,
+        now=lambda: datetime(2026, 10, 21, tzinfo=UTC),
+        monotonic=lambda: 0.0,
+        new_id=uuid4,
+        tracer=tracer,
+    )
+
+
+def test_the_outcome_is_written_while_the_stage_span_is_open() -> None:
+    """Запись исхода — запрос к базе этапа: идёт до закрытия его спана."""
+    uow = FakeUnitOfWork()
+    tracer = _RecordingTracer()
+    store = uow.review_run_steps.update
+
+    def update(step: ReviewRunStep) -> None:
+        tracer.events.append(("write", ReviewRunStage.FETCHING_DIFF, None))
+        store(step)
+
+    uow.review_run_steps.update = update  # type: ignore[method-assign]
+    recorder = _recorder(uow, tracer)
+
+    recorder.start(ReviewRunStage.FETCHING_DIFF)
+    recorder.finish()
+
+    assert tracer.events == [
+        ("start", ReviewRunStage.FETCHING_DIFF, None),
+        ("write", ReviewRunStage.FETCHING_DIFF, None),
+        ("end", ReviewRunStage.FETCHING_DIFF, None),
+    ]
+
+
+@pytest.mark.parametrize("error", [RuntimeError("база недоступна"), KeyboardInterrupt()])
+def test_the_span_closes_even_if_writing_the_outcome_fails(error: BaseException) -> None:
+    """Сбой записи исхода — обычный (его глотает журнал) или BaseException — спан закрывает."""
+    uow = FakeUnitOfWork()
+    tracer = _RecordingTracer()
+
+    def update(step: ReviewRunStep) -> None:
+        raise error
+
+    uow.review_run_steps.update = update  # type: ignore[method-assign]
+    recorder = _recorder(uow, tracer)
+    recorder.start(ReviewRunStage.FETCHING_DIFF)
+
+    if isinstance(error, Exception):
+        recorder.finish(error_code="SCM_UNAVAILABLE")
+    else:
+        with pytest.raises(type(error)):
+            recorder.finish(error_code="SCM_UNAVAILABLE")
+
+    assert _spans(tracer) == [(ReviewRunStage.FETCHING_DIFF, "SCM_UNAVAILABLE")]
     assert tracer.open == 0

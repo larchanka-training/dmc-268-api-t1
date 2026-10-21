@@ -128,8 +128,7 @@ class StepRecorder:
         self._started = self._monotonic()
 
     def _end_span(self, error_code: str | None) -> None:
-        # Спан закрывается до записи исхода и независимо от неё; повторное
-        # закрытие его уже не найдёт.
+        # Повторное закрытие спан уже не найдёт.
         span, self._span = self._span, None
         if span is not None:
             span.end(error_code)
@@ -139,17 +138,21 @@ class StepRecorder:
         # Доля считается и для шага, который не записан: иначе токены этой
         # попытки достались бы следующей.
         share = self._share(tokens_used)
-        self._end_span(error_code)
         step, self._step = self._step, None
-        if step is None:
-            return
-        closed = finish_step(
-            step,
-            duration_seconds=self._monotonic() - self._started,
-            tokens_used=share,
-            error_code=error_code,
-        )
-        self._write(closed, "исход", lambda: self._uow.review_run_steps.update(closed))
+        try:
+            if step is None:
+                return
+            closed = finish_step(
+                step,
+                duration_seconds=self._monotonic() - self._started,
+                tokens_used=share,
+                error_code=error_code,
+            )
+            self._write(closed, "исход", lambda: self._uow.review_run_steps.update(closed))
+        finally:
+            # Спан закрывается после записи исхода — её запросы к базе ложатся
+            # в спан этапа — и при любом её исходе.
+            self._end_span(error_code)
 
     def _write(self, step: ReviewRunStep, what: str, write: Callable[[], None]) -> bool:
         """Записать шаг своим коммитом; сбой — в лог, наружу не выходит."""
