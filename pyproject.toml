@@ -25,6 +25,10 @@ dependencies = [
     "tree-sitter-typescript>=0.23.2",
     "tree-sitter-go>=0.25.0",
     "pydantic>=2.13",
+    "opentelemetry-api>=1.45.0",
+    "opentelemetry-sdk>=1.45.0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.66b0",
+    "opentelemetry-instrumentation-httpx>=0.66b0",
 ]
 
 [project.optional-dependencies]
@@ -119,6 +123,8 @@ forbidden_modules = [
     # Парсер AST — только за портом DefinitionExtractor (спека context-assembly).
     "tree_sitter", "tree_sitter_python", "tree_sitter_javascript",
     "tree_sitter_typescript", "tree_sitter_go",
+    # Трассировка — только за портом StageTracer (спека observability).
+    "opentelemetry",
 ]
 
 [dependency-groups]

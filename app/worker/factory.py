@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 import pika
+from opentelemetry import trace
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
@@ -37,8 +38,16 @@ from app.infrastructure.container import build_container
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
     QUEUE_NAME,
+    consuming_span,
     declare_topology,
     from_wire_message,
+)
+from app.infrastructure.telemetry import (
+    REVIEW_RUN_ID,
+    WORKER_SERVICE,
+    OtelStageTracer,
+    configure_tracing,
+    instrument_engine,
 )
 from app.worker.handling import should_ack
 
@@ -80,7 +89,7 @@ class Worker:
         processed = 0
         last_sweep: float | None = None
         try:
-            for method, _properties, body in self.channel.consume(
+            for method, properties, body in self.channel.consume(
                 QUEUE_NAME, inactivity_timeout=1
             ):
                 if sweep is not None and (
@@ -98,10 +107,11 @@ class Worker:
                 assert body is not None
                 assert method.delivery_tag is not None
                 exc: BaseException | None = None
-                try:
-                    handler(body)
-                except Exception as caught:  # noqa: BLE001 — любая ошибка уводит сообщение в DLQ, а не роняет процесс
-                    exc = caught
+                with consuming_span(properties):
+                    try:
+                        handler(body)
+                    except Exception as caught:  # noqa: BLE001 — любая ошибка уводит сообщение в DLQ, а не роняет процесс
+                        exc = caught
                 if should_ack(exc):
                     self.channel.basic_ack(method.delivery_tag)
                 else:
@@ -169,8 +179,11 @@ def build_review_handler(
     model_limits: LlmLimits,
     prompt_texts: PromptTexts,
 ) -> MessageHandler:
+    stage_tracer = OtelStageTracer()
+
     def handle(body: bytes) -> None:
         job = from_wire_message(body)
+        trace.get_current_span().set_attribute(REVIEW_RUN_ID, str(job.review_run_id))
         try:
             run_review(
                 job,
@@ -185,6 +198,7 @@ def build_review_handler(
                 now=lambda: datetime.now(UTC),
                 monotonic=time.monotonic,
                 new_id=new_id,
+                stage_tracer=stage_tracer,
             )
         except Exception:
             # Сообщение уйдёт в DLQ; по job_id видно, какая это постановка
@@ -272,7 +286,9 @@ def run_worker(settings: Settings) -> None:
     if settings.llm_backend is None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
     check_model_deadline(settings)
+    configure_tracing(WORKER_SERVICE)
     container = build_container(settings)
+    instrument_engine(container.engine)
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
     # Собрать адаптер модели сразу: порядок провайдеров уходит в лог при старте.
     container.llm_gateway()

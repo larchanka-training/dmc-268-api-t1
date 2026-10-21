@@ -28,6 +28,7 @@ from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
 from app.application.ports.llm_gateway import LlmGateway, RetryListener
+from app.application.ports.stage_tracer import NO_STAGE_TRACING, StageTracer
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.publish_review import publish_review
 from app.application.review_run_steps import StepRecorder, spent_tokens
@@ -102,6 +103,7 @@ def run_review(
     now: Callable[[], datetime],
     monotonic: Callable[[], float],
     new_id: Callable[[], UUID],
+    stage_tracer: StageTracer = NO_STAGE_TRACING,
 ) -> None:
     """Довести прогон до терминального состояния.
 
@@ -110,6 +112,8 @@ def run_review(
     `find_stale` отличает зависший прогон от идущего), а `duration_seconds` —
     разность монотонных часов, которую тест проверяет точно. Длительность
     шага — та же разность на его границах.
+    `stage_tracer` открывает спан трассировки на каждый шаг; это телеметрия,
+    результат прогона от неё не зависит.
 
     Сбой любого шага переводит прогон в `failed` и **пробрасывается**: воркер
     отклоняет сообщение, и оно попадает в DLQ для разбора (`job-queue`).
@@ -131,7 +135,9 @@ def run_review(
         return
 
     started_at = monotonic()
-    steps = StepRecorder(uow, run.id, now=now, monotonic=monotonic, new_id=new_id)
+    steps = StepRecorder(
+        uow, run.id, now=now, monotonic=monotonic, new_id=new_id, tracer=stage_tracer
+    )
 
     try:
         run = _transition(uow, run, ReviewRunStatus.BUILDING_CONTEXT, now())

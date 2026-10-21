@@ -35,6 +35,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     from app.api import openapi
     from app.api.errors import ERRORS_DEFAULT
+    from app.infrastructure import telemetry
     from app.infrastructure.container import build_container
 
     # Схема — из роутов и моделей (`app/api/openapi.py`); ответ `default` с каталогом
@@ -53,7 +54,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     openapi.install(app, extra_models=[ReviewRunStatusEvent])
     app.state.settings = settings
+    # До контейнера: провайдер трейсов нужен телеметрии FastAPI с первого запроса.
+    telemetry.configure_tracing(telemetry.API_SERVICE)
     app.state.container = build_container(settings)
+    telemetry.instrument_engine(app.state.container.engine)
 
     from app.api import errors, log_redaction
     from app.api.auth import router as auth_router

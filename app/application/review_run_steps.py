@@ -12,6 +12,10 @@
 повтора порта модели (`RetryListener`), закрывает неудачную попытку упавшей
 и открывает новую. Токены вызова модели адаптер сообщает нарастающим итогом
 от начала вызова; шаг получает свою долю — разность с уже записанным.
+
+Шаг — ещё и спан трассировки (`StageTracer`): спан открывается вместе с шагом и
+закрывается вместе с его исходом. Это телеметрия для команды; источником шагов
+для API остаётся база.
 """
 
 import logging
@@ -20,6 +24,7 @@ from datetime import datetime
 from uuid import UUID
 
 from app.application.ports import UnitOfWork
+from app.application.ports.stage_tracer import NO_STAGE_TRACING, StageSpan, StageTracer
 from app.domain.entities import ReviewRunStep
 from app.domain.enums import ReviewRunStage
 from app.domain.llm_errors import LlmError, PromptTooLargeError
@@ -55,6 +60,7 @@ class StepRecorder:
         now: Callable[[], datetime],
         monotonic: Callable[[], float],
         new_id: Callable[[], UUID],
+        tracer: StageTracer = NO_STAGE_TRACING,
     ) -> None:
         self._uow = uow
         self._run_id = review_run_id
@@ -64,6 +70,9 @@ class StepRecorder:
         # Открытый этап и его записанный шаг: шага нет, если не записалось начало.
         self._stage: ReviewRunStage | None = None
         self._step: ReviewRunStep | None = None
+        # Спан открытого шага: открывается и закрывается в тех же точках, что шаг.
+        self._tracer = tracer
+        self._span: StageSpan | None = None
         self._started = 0.0
         # Токены текущего вызова модели, уже отнесённые к шагам этого этапа.
         self._recorded_tokens = 0
@@ -104,20 +113,29 @@ class StepRecorder:
             self.finish(tokens_used=spent_tokens(error), error_code=error_code(error))
 
     def _open(self, started_at: datetime) -> None:
-        step = start_step(
-            self._run_id, self._current_stage(), started_at=started_at, step_id=self._new_id()
-        )
+        stage = self._current_stage()
+        # Спан — телеметрия, а не журнал: открывается, даже если шаг не запишется.
+        self._span = self._tracer.start(self._run_id, stage)
+        step = start_step(self._run_id, stage, started_at=started_at, step_id=self._new_id())
         if not self._write(step, "начало", lambda: self._uow.review_run_steps.add(step)):
             return
         # Открытым шаг считается только записанный: иначе закрывать нечего.
         self._step = step
         self._started = self._monotonic()
 
+    def _end_span(self, error_code: str | None) -> None:
+        # Спан закрывается до записи исхода и независимо от неё; повторное
+        # закрытие его уже не найдёт.
+        span, self._span = self._span, None
+        if span is not None:
+            span.end(error_code)
+
     def _close(self, *, tokens_used: int | None, error_code: str | None) -> None:
         self._current_stage()
         # Доля считается и для шага, который не записан: иначе токены этой
         # попытки достались бы следующей.
         share = self._share(tokens_used)
+        self._end_span(error_code)
         step, self._step = self._step, None
         if step is None:
             return

@@ -6,15 +6,26 @@
 уровне AMQP, это не бизнес-правило). `from_wire_message` использует воркер
 (`app/worker/factory.py`), чтобы разобрать сообщение, полученное из очереди,
 обратно в `ReviewJob`.
+
+Контекст трассировки (W3C `traceparent`) идёт в заголовках AMQP, а не в теле:
+тело — только доменные данные. Обе стороны — здесь: `_publish` кладёт контекст
+спана публикации, `consuming_span` воркера достаёт его и продолжает трейс.
+Заголовкам нашей очереди доверяем: писать в неё может только API. Автоинструментирование
+pika не берём: для генератора `channel.consume()` оно закрывает спан приёма сразу и
+держит его контекст текущим до следующего сообщения, то есть и на простое цикла.
 """
 
 import contextlib
 import json
 import threading
+from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
 import pika
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pika import spec
 from pika.exceptions import AMQPConnectionError, ChannelWrongStateError
 from pika.exchange_type import ExchangeType
@@ -30,6 +41,11 @@ MAX_PRIORITY = 9
 # реализованы") — фиксированный дефолт до тех пор, см. design.md
 # change'а add-rabbitmq-job-queue.
 DEFAULT_PRIORITY = 5
+
+# Явный пропагатор, а не глобальный: глобальный пуст, чтобы не доверять
+# `traceparent` HTTP-клиентов (`app/infrastructure/telemetry.py`).
+_PROPAGATOR = TraceContextTextMapPropagator()
+_tracer = trace.get_tracer(__name__)
 
 
 def to_wire_message(job: ReviewJob) -> dict[str, Any]:
@@ -88,6 +104,29 @@ def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel)
     )
 
 
+@contextlib.contextmanager
+def consuming_span(properties: spec.BasicProperties | None) -> Iterator[None]:
+    """Спан обработки сообщения воркером — продолжение трейса, начатого при публикации.
+
+    Нет заголовка `traceparent` (сообщение старше трассировки, его переложили руками)
+    или он битый — спан начинает новый трейс, обработка идёт как обычно.
+    """
+    headers = (properties.headers if properties is not None else None) or {}
+    # pika отдаёт строковый заголовок `str`, а не декодируемый в UTF-8 — `bytes`.
+    carrier = {
+        key: value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+        for key, value in headers.items()
+        if isinstance(value, str | bytes)
+    }
+    with _tracer.start_as_current_span(
+        f"{QUEUE_NAME} process",
+        context=_PROPAGATOR.extract(carrier),
+        kind=SpanKind.CONSUMER,
+        attributes={"messaging.system": "rabbitmq"},
+    ):
+        yield
+
+
 class RabbitMQJobQueue:
     """Реализация порта `JobQueue`.
 
@@ -141,17 +180,28 @@ class RabbitMQJobQueue:
         self._channel = None
 
     def _publish(self, job: ReviewJob) -> None:
-        self._channel_ready().basic_publish(
-            exchange="",
-            routing_key=QUEUE_NAME,
-            body=json.dumps(to_wire_message(job)).encode("utf-8"),
-            properties=pika.BasicProperties(
-                content_type="application/json",
-                delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
-                priority=DEFAULT_PRIORITY,
-            ),
-            mandatory=True,
-        )
+        with _tracer.start_as_current_span(
+            f"{QUEUE_NAME} publish",
+            kind=SpanKind.PRODUCER,
+            attributes={
+                "messaging.system": "rabbitmq",
+                "review_run_id": str(job.review_run_id),
+            },
+        ):
+            headers: dict[str, str] = {}
+            _PROPAGATOR.inject(headers)
+            self._channel_ready().basic_publish(
+                exchange="",
+                routing_key=QUEUE_NAME,
+                body=json.dumps(to_wire_message(job)).encode("utf-8"),
+                properties=pika.BasicProperties(
+                    content_type="application/json",
+                    delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
+                    priority=DEFAULT_PRIORITY,
+                    headers=headers,
+                ),
+                mandatory=True,
+            )
 
     def enqueue(self, job: ReviewJob) -> None:
         # `BlockingConnection` шлёт heartbeat, только пока по нему что-то идёт:

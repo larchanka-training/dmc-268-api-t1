@@ -1,0 +1,184 @@
+"""Трассировка OpenTelemetry: провайдер, инструментирование и адаптер `StageTracer`.
+
+Телеметрия — для команды: где тормозит, что падает. Пользователю она не показывается,
+ни один ответ API из неё не строится; длительность, токены и шаги прогона кабинет берёт
+из базы (спека `observability`).
+
+Что включено:
+
+- SDK-провайдер трейсов в API и воркере (`configure_tracing`). Он нужен, даже когда
+  спаны никуда не уходят: без него у спанов нет настоящего trace id, а `X-Trace-ID` — это
+  trace id спана запроса;
+- HTTP-сервер — встроенная телеметрия FastAPI (она берёт глобальный провайдер сама,
+  отдельный пакет инструментирования не нужен); httpx (вызовы GitHub и модели) и
+  SQLAlchemy — пакеты `opentelemetry-instrumentation-*`;
+- спаны этапов прогона — `OtelStageTracer`, адаптер порта, который зовёт `StepRecorder`.
+
+Экспорт не настраиваем: по умолчанию спаны не уходят никуда и ошибок экспорта в логе
+нет. `OTEL_TRACES_EXPORTER=console` печатает их в stdout — для отладки. Остальные
+значения, в том числе `otlp`, пока не поддержаны: экспорт в хранилище трейсов — задача
+#89. Автонастройку FastAPI (`FASTAPI_OTEL_AUTO_CONFIGURE`) не включаем.
+
+Глобальный пропагатор пустой: входящему `traceparent` от HTTP-клиента не доверяем
+(запрос всегда начинает новый трейс), а httpx не отдаёт наш trace id GitHub и
+провайдерам модели. Контекст между API и воркером идёт только через заголовки AMQP
+нашей очереди — пропагатором W3C в `app/infrastructure/queue/rabbitmq.py`.
+"""
+
+import logging
+import os
+from contextvars import Token
+from uuid import UUID
+
+from opentelemetry import context as otel_context
+from opentelemetry import metrics, propagate, trace
+from opentelemetry.context import Context
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.sqlalchemy.engine import EngineTracer
+from opentelemetry.propagators.textmap import (
+    CarrierT,
+    Getter,
+    Setter,
+    TextMapPropagator,
+    default_getter,
+    default_setter,
+)
+from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from opentelemetry.trace import Status, StatusCode
+from sqlalchemy import Engine
+
+from app.domain.enums import ReviewRunStage
+
+logger = logging.getLogger(__name__)
+
+API_SERVICE = "dmc-268-api"
+WORKER_SERVICE = "dmc-268-worker"
+
+# Имя атрибута — как у поля в API и в логах: по нему трейс ищется от прогона.
+REVIEW_RUN_ID = "review_run_id"
+
+_tracer = trace.get_tracer(__name__)
+
+
+class _NoPropagation(TextMapPropagator):
+    """Пропагатор, который ничего не берёт из заголовков и ничего в них не кладёт.
+
+    Пустой `CompositePropagator` не годится: его `extract` без контекста отдаёт
+    `None`, а FastAPI ждёт контекст. Здесь — пустой контекст, то есть новый трейс.
+    """
+
+    def extract(
+        self,
+        carrier: CarrierT,
+        context: Context | None = None,
+        getter: Getter[CarrierT] = default_getter,
+    ) -> Context:
+        return context if context is not None else Context()
+
+    def inject(
+        self,
+        carrier: CarrierT,
+        context: Context | None = None,
+        setter: Setter[CarrierT] = default_setter,
+    ) -> None:
+        return None
+
+    @property
+    def fields(self) -> set[str]:
+        return set()
+
+
+def configure_tracing(service_name: str) -> None:
+    """Поставить пустой пропагатор, SDK-провайдер трейсов и инструментирование.
+
+    Провайдер глобальный и ставится один раз на процесс; если он уже стоит (второй
+    вызов или тест со своим `InMemorySpanExporter`), его не трогаем. `OTEL_SERVICE_NAME`
+    переопределяет `service_name`.
+    """
+    # Пропагатор ставится всегда, и поверх `OTEL_PROPAGATORS`: доверие к входящим
+    # заголовкам — правило сервиса, а не настройка окружения.
+    propagate.set_global_textmap(_NoPropagation())
+    instrument_httpx()
+    if not isinstance(trace.get_tracer_provider(), TracerProvider):
+        trace.set_tracer_provider(build_tracer_provider(service_name))
+
+
+def build_tracer_provider(service_name: str) -> TracerProvider:
+    """SDK-провайдер с экспортом из `OTEL_TRACES_EXPORTER`: `console` или никакого."""
+    attributes = (
+        {} if os.environ.get("OTEL_SERVICE_NAME") else {SERVICE_NAME: service_name}
+    )
+    provider = TracerProvider(resource=Resource.create(attributes))
+    exporter = os.environ.get("OTEL_TRACES_EXPORTER", "none").strip().lower()
+    if exporter == "console":
+        provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+    elif exporter not in ("", "none"):
+        logger.warning(
+            "OTEL_TRACES_EXPORTER=%s не поддержан: спаны не экспортируются (поддержан console)",
+            exporter,
+        )
+    return provider
+
+
+def instrument_httpx() -> None:
+    """Спаны на исходящие запросы httpx: GitHub и провайдеры модели."""
+    instrumentor = HTTPXClientInstrumentor()
+    if not instrumentor.is_instrumented_by_opentelemetry:
+        instrumentor.instrument()
+
+
+def instrument_engine(engine: Engine) -> None:
+    """Спаны на запросы к базе через `engine`.
+
+    Слушатели событий вешаются на этот движок напрямую (`EngineTracer`), а не через
+    `SQLAlchemyInstrumentor().instrument()`: тот объявляет `sqlalchemy < 2.1` и на нашей
+    2.1 молча ничего не делает, а с пропуском проверки ещё и подменяет
+    `create_async_engine`, которому нужен `greenlet`. События движка
+    (`before_cursor_execute` и т. п.) в 2.1 те же — спаны запросов проверяет сквозной
+    тест трейса. Счётчик соединений — no-op: метрик в сервисе нет.
+    """
+    tracer = trace.get_tracer("opentelemetry.instrumentation.sqlalchemy")
+    connections = metrics.get_meter(__name__).create_up_down_counter(
+        "db.client.connections.usage", unit="connections"
+    )
+    EngineTracer(tracer, engine, connections)  # type: ignore[no-untyped-call]  # пакет без аннотаций
+
+
+def current_trace_id() -> str | None:
+    """Trace id текущего спана — 32 строчных hex; `None`, если спана нет."""
+    span_context = trace.get_current_span().get_span_context()
+    if not span_context.is_valid:
+        return None
+    return trace.format_trace_id(span_context.trace_id)
+
+
+class _OtelStageSpan:
+    def __init__(self, span: trace.Span, token: Token[Context]) -> None:
+        self._span = span
+        self._token = token
+
+    def end(self, error_code: str | None) -> None:
+        if error_code is not None:
+            self._span.set_attribute("error.type", error_code)
+            self._span.set_status(Status(StatusCode.ERROR, error_code))
+        self._span.end()
+        otel_context.detach(self._token)
+
+
+class OtelStageTracer:
+    """Адаптер `StageTracer`: спан `review.<этап>` с атрибутом `review_run_id`.
+
+    Спан этапа делается текущим, пока этап идёт: запросы httpx и SQLAlchemy этапа
+    ложатся в трейс его детьми. Шаги идут строго по одному, поэтому снятие контекста
+    в `end` не нарушает порядок.
+    """
+
+    def start(self, review_run_id: UUID, stage: ReviewRunStage) -> _OtelStageSpan:
+        span = _tracer.start_span(
+            f"review.{stage.value}",
+            attributes={REVIEW_RUN_ID: str(review_run_id), "review.stage": stage.value},
+        )
+        token = otel_context.attach(trace.set_span_in_context(span))
+        return _OtelStageSpan(span, token)

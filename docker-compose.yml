@@ -67,6 +67,8 @@ services:
       GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
       GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      # Спаны OpenTelemetry по умолчанию никуда не уходят; console — в stdout.
+      OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
     depends_on:
       postgres:
         condition: service_healthy
@@ -96,6 +98,7 @@ services:
       EUROROUTER_BASE_URL: ${EUROROUTER_BASE_URL:-}
       EUROROUTER_MODEL: ${EUROROUTER_MODEL:-}
       EUROROUTER_API_KEYS: ${EUROROUTER_API_KEYS:-}
+      OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
     depends_on:
       postgres:
         condition: service_healthy
