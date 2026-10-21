@@ -111,6 +111,9 @@ services:
       rabbitmq:
         condition: service_healthy
     command: ["python", "-m", "app.worker"]
+    # Как в infra: без init воркер — PID 1, а ему ядро не доставляет сигналы с
+    # обработчиком по умолчанию, и второй SIGTERM не остановил бы его сразу.
+    init: true
     # По SIGTERM воркер дорабатывает сообщение в работе. Худший случай — два
     # вызова модели (ревью и верификатор) × LLM_TIMEOUT_SECONDS (300) ×
     # LLM_MAX_ATTEMPTS (2) × два провайдера с LLM_HOSTED_FALLBACK = 2400 с,
