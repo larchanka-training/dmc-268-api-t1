@@ -5,7 +5,10 @@
 
 import ast
 import asyncio
+import os
 import re
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -132,17 +135,56 @@ def test_the_query_outside_auth_stays_in_the_request_span(
     assert attributes["url.query"] == "page=2"
 
 
-def test_without_a_span_the_trace_id_is_random_in_the_same_format(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Трассировка выключена (`OTEL_SDK_DISABLED`) — спана нет, `X-Trace-ID` всё равно есть."""
-    monkeypatch.setattr("app.api.trace_id.current_trace_id", lambda: None)
-    client = TestClient(_app())
+# Глобальный провайдер ставится один раз на процесс, и в тестах это провайдер из
+# `tests/conftest.py`; `OTEL_SDK_DISABLED` SDK читает при создании провайдера. Поэтому
+# настоящий выключенный режим — в отдельном процессе: глобальное состояние этого не
+# трогается.
+_DISABLED_SCRIPT = """
+from fastapi.testclient import TestClient
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-    first, second = client.get("/health"), client.get("/health")
+from app.api.factory import create_app
+from app.config import Settings
 
-    assert re.fullmatch(r"[0-9a-f]{32}", first.headers["X-Trace-ID"])
-    assert first.headers["X-Trace-ID"] != second.headers["X-Trace-ID"]
+app = create_app(
+    Settings(
+        database_url="postgresql+psycopg://test:test@localhost/test",
+        rabbitmq_url="amqp://guest:guest@localhost//",
+        github_webhook_secret="test-secret",
+    )
+)
+provider = trace.get_tracer_provider()
+assert isinstance(provider, TracerProvider)
+exporter = InMemorySpanExporter()
+provider.add_span_processor(SimpleSpanProcessor(exporter))
+client = TestClient(app)
+ids = [client.get("/health").headers["X-Trace-ID"] for _ in range(2)]
+print(len(exporter.get_finished_spans()), *ids)
+"""
+
+
+def test_with_tracing_disabled_the_trace_id_is_random_in_the_same_format() -> None:
+    """Настоящий `OTEL_SDK_DISABLED=true`: спанов нет, `X-Trace-ID` есть и у каждого свой."""
+    env = {**os.environ, "OTEL_SDK_DISABLED": "true", "OTEL_TRACES_EXPORTER": "none"}
+    result = subprocess.run(
+        [sys.executable, "-c", _DISABLED_SCRIPT],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    finished, first, second = result.stdout.split()
+    assert finished == "0"  # трассировка действительно выключена
+    assert re.fullmatch(r"[0-9a-f]{32}", first)
+    assert re.fullmatch(r"[0-9a-f]{32}", second)
+    assert first != second
 
 
 def test_outgoing_requests_do_not_carry_our_trace_context() -> None:

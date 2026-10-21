@@ -34,6 +34,7 @@ from app.api.factory import create_app
 from app.config import Settings
 from app.domain.entities import ReviewJob
 from app.domain.enums import ReviewRunStage
+from app.domain.llm_errors import LlmTimeoutError
 from app.infrastructure import telemetry
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue, consuming_span
 from app.infrastructure.telemetry import (
@@ -42,6 +43,10 @@ from app.infrastructure.telemetry import (
     current_trace_id,
 )
 from app.worker import factory as worker_factory
+
+from ..application.test_review_pipeline import _run, _seed_run
+from ..fakes.llm_gateway import ScriptedLlmGateway
+from ..fakes.unit_of_work import FakeUnitOfWork
 
 RUN_ID = UUID(int=2)
 JOB = ReviewJob(
@@ -516,3 +521,67 @@ def test_httpx_spans_carry_the_stable_attribute_names(
     assert attributes["http.response.status_code"] == 200
     assert "http.method" not in attributes
     assert "http.url" not in attributes
+
+
+class _Recording(BaseHTTPRequestHandler):
+    """Запоминает заголовки запросов на сервере `server.received`."""
+
+    def do_GET(self) -> None:
+        self.server.received.append(dict(self.headers))  # type: ignore[attr-defined]
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format: str, *args: Any) -> None: ...
+
+
+def test_an_outgoing_request_leaves_without_traceparent(
+    spans: InMemorySpanExporter,
+) -> None:
+    """Запрос httpx при активном спане уходит без нашего контекста — и при этом в трейсе."""
+    telemetry.configure_tracing(telemetry.WORKER_SERVICE)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Recording)
+    server.received = []  # type: ignore[attr-defined]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with trace.get_tracer(__name__).start_as_current_span("review.analysing") as parent:
+            httpx.get(f"http://127.0.0.1:{server.server_port}/ping")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    (headers,) = server.received  # type: ignore[attr-defined]
+    assert not {"traceparent", "tracestate"} & {name.lower() for name in headers}
+    (request,) = [s for s in spans.get_finished_spans() if s.kind is SpanKind.CLIENT]
+    assert request.parent is not None
+    assert request.parent.span_id == parent.get_span_context().span_id
+
+
+def test_a_pipeline_failing_on_a_stage_closes_its_otel_span_as_an_error(
+    spans: InMemorySpanExporter,
+) -> None:
+    """Настоящий `OtelStageTracer`: упавший этап — ERROR, после выхода контекст чистый."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    with pytest.raises(LlmTimeoutError):
+        _run(
+            uow,
+            ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=30)]),
+            stage_tracer=OtelStageTracer(),
+        )
+
+    stages = [s for s in spans.get_finished_spans() if s.name.startswith("review.")]
+    assert [s.name for s in stages] == [
+        "review.fetching_diff",
+        "review.building_context",
+        "review.analysing",
+    ]
+    assert [s.status.status_code for s in stages] == [
+        StatusCode.UNSET,
+        StatusCode.UNSET,
+        StatusCode.ERROR,
+    ]
+    assert (stages[-1].attributes or {})["error.type"] == "LLM_TIMEOUT"
+    assert not trace.get_current_span().get_span_context().is_valid

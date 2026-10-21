@@ -94,15 +94,20 @@ def test_sweep_is_throttled_by_the_interval() -> None:
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "review_run_id"),
     [
-        pytest.param(b"{not json", id="битое сообщение"),
-        # Прогона в базе нет — `run_review` падает `LookupError`.
-        pytest.param(json.dumps(to_wire_message(JOB)).encode("utf-8"), id="нет прогона"),
+        # Сообщение не разобрано — прогон неизвестен, атрибута нет.
+        pytest.param(b"{not json", None, id="битое сообщение"),
+        # Прогона в базе нет — `run_review` падает `LookupError`; id из сообщения известен.
+        pytest.param(
+            json.dumps(to_wire_message(JOB)).encode("utf-8"),
+            str(JOB.review_run_id),
+            id="нет прогона",
+        ),
     ],
 )
 def test_a_failed_message_closes_its_span_with_the_error(
-    spans: InMemorySpanExporter, body: bytes
+    spans: InMemorySpanExporter, body: bytes, review_run_id: str | None
 ) -> None:
     channel = RecordingChannel([(SimpleNamespace(delivery_tag=1), None, body)])
     handler = build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, LLM_LIMITS, TEXTS)
@@ -113,6 +118,7 @@ def test_a_failed_message_closes_its_span_with_the_error(
     (process,) = [s for s in spans.get_finished_spans() if s.kind is SpanKind.CONSUMER]
     assert process.status.status_code is StatusCode.ERROR
     assert [event.name for event in process.events] == ["exception"]
+    assert (process.attributes or {}).get("review_run_id") == review_run_id
 
 
 def test_a_processed_message_closes_its_span_ok(spans: InMemorySpanExporter) -> None:
