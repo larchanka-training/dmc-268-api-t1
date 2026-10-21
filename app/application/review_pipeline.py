@@ -45,6 +45,7 @@ from app.domain.enums import (
 from app.domain.lifecycle import advance
 from app.domain.llm_errors import LlmError, LlmOutputError
 from app.domain.prompt import PromptTexts
+from app.domain.run_steps import error_code
 from app.domain.verification import apply_verdicts, screen_findings
 
 logger = logging.getLogger(__name__)
@@ -163,14 +164,21 @@ def run_review(
         result = request_review(
             context, prompt_texts, llm_gateway, limits=llm_limits, on_retry=steps.retry
         )
-        screening = screen_findings(
-            result.findings,
-            hunks=assembled.hunks,
-            shown_rules=assembled.rules,
-            review_run_id=run.id,
-            now=now(),
-            new_id=new_id,
-        )
+        # Отсев - часть этапа `analysing`: он разбирает ответ модели. Сбой
+        # после ответа закрывает шаг с уже известными токенами - иначе их
+        # не узнать: исключение отсева токенов не несёт.
+        try:
+            screening = screen_findings(
+                result.findings,
+                hunks=assembled.hunks,
+                shown_rules=assembled.rules,
+                review_run_id=run.id,
+                now=now(),
+                new_id=new_id,
+            )
+        except Exception as exc:
+            steps.finish(tokens_used=result.tokens_used, error_code=error_code(exc))
+            raise
         steps.finish(tokens_used=result.tokens_used)
         # Два долгих вызова модели подряд не должны выглядеть для `find_stale`
         # одним прогоном без прогресса.

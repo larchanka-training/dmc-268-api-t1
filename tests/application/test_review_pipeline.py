@@ -1029,3 +1029,24 @@ def test_failed_step_starts_do_not_fail_the_run() -> None:
 
     assert _completed(uow).status is ReviewRunStatus.COMPLETED
     assert _steps(uow) == []
+
+
+def test_a_screening_failure_keeps_the_review_tokens_on_the_analysing_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    def broken_screening(*args: object, **kwargs: object) -> NoReturn:
+        raise RuntimeError("отсев сломан")
+
+    monkeypatch.setattr("app.application.review_pipeline.screen_findings", broken_screening)
+
+    with pytest.raises(RuntimeError, match="отсев сломан"):
+        _run(uow, ScriptedLlmGateway([review_response(tokens=25)]))
+
+    # Отсев - часть этапа: шаг один, упавший, с токенами ответа модели.
+    assert _steps(uow)[2:] == [
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 25, "INTERNAL_ERROR"),
+    ]
+    assert _completed(uow).status is ReviewRunStatus.FAILED
