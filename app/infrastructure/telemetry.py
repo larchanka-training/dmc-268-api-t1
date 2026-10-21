@@ -67,6 +67,14 @@ REVIEW_RUN_ID = "review_run_id"
 
 _tracer = trace.get_tracer(__name__)
 
+# Стабильные имена атрибутов semconv у пакетов contrib: `db.query.text` вместо
+# `db.statement`, `http.request.method` и `url.full` вместо `http.method` и `http.url`.
+# Пакеты читают `OTEL_SEMCONV_STABILITY_OPT_IN` один раз на процесс, при первом
+# инструментировании, — поэтому значение по умолчанию ставится в коде до него, а не
+# только в окружении; заданное явно не перетирается. `database`, а не `database/dup`:
+# только новые имена, без дубля старых.
+SEMCONV_STABILITY_OPT_IN = "database,http"
+
 # Провайдер, который поставил `configure_tracing`: его и закрывает `shutdown_tracing`.
 # Чужой провайдер (тест со своим экспортёром) не закрываем.
 _installed: TracerProvider | None = None
@@ -111,6 +119,7 @@ def configure_tracing(service_name: str) -> None:
     # Пропагатор ставится всегда, и поверх `OTEL_PROPAGATORS`: доверие к входящим
     # заголовкам — правило сервиса, а не настройка окружения.
     propagate.set_global_textmap(_NoPropagation())
+    opt_in_stable_semconv()
     instrument_httpx()
     if not isinstance(trace.get_tracer_provider(), TracerProvider):
         provider = build_tracer_provider(service_name)
@@ -146,6 +155,11 @@ def build_tracer_provider(service_name: str) -> TracerProvider:
     return provider
 
 
+def opt_in_stable_semconv() -> None:
+    """`OTEL_SEMCONV_STABILITY_OPT_IN` по умолчанию — до первого инструментирования."""
+    os.environ.setdefault("OTEL_SEMCONV_STABILITY_OPT_IN", SEMCONV_STABILITY_OPT_IN)
+
+
 def instrument_httpx() -> None:
     """Спаны на исходящие запросы httpx: GitHub и провайдеры модели."""
     instrumentor = HTTPXClientInstrumentor()
@@ -167,6 +181,7 @@ def instrument_engine(engine: Engine) -> None:
     верхняя граница в `pyproject.toml`, а если класс всё же переехал или сменил
     сигнатуру, сервис стартует без спанов SQL с одним предупреждением, а не падает.
     """
+    opt_in_stable_semconv()
     try:
         # Импорт здесь, а не наверху модуля: переезд класса — тоже `ImportError` этого вызова.
         from opentelemetry.instrumentation.sqlalchemy.engine import EngineTracer

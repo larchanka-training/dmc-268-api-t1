@@ -248,6 +248,9 @@ OTEL_TRACES_EXPORTER=console uv run python -m app.worker
 ```
 
 `OTEL_SERVICE_NAME` переопределяет имя сервиса (`dmc-268-api`, `dmc-268-worker`),
-`OTEL_SDK_DISABLED=true` выключает трассировку. Экспорт в хранилище трейсов — #89.
+`OTEL_SDK_DISABLED=true` выключает трассировку. Атрибуты спанов SQL и httpx — стабильные
+имена semconv (`db.query.text`, `http.request.method`, `url.full`): без
+`OTEL_SEMCONV_STABILITY_OPT_IN` код ставит `database,http` сам. Экспорт в хранилище
+трейсов — #89.
 Это телеметрия для команды: данные прогона для кабинета — длительность, токены,
 шаги — берутся из базы.

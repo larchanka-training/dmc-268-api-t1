@@ -5,19 +5,29 @@
 
 import io
 import logging
+import os
 import sys
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pika
 import pytest
 from fastapi.testclient import TestClient
 from opentelemetry import trace
+from opentelemetry.instrumentation._semconv import (
+    _OpenTelemetrySemanticConventionStability,
+)
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import engine as sqlalchemy_engine
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode
+from sqlalchemy import create_engine, text
 
 from app.api.factory import create_app
 from app.config import Settings
@@ -372,3 +382,80 @@ def test_the_api_closes_tracing_when_the_app_shuts_down(
         assert closed == []
 
     assert closed == [True]
+
+
+# --- стабильные имена semconv ----------------------------------------------------------
+
+
+@pytest.fixture
+def fresh_semconv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пакеты contrib ещё не читали `OTEL_SEMCONV_STABILITY_OPT_IN` — как в новом процессе."""
+    monkeypatch.delenv("OTEL_SEMCONV_STABILITY_OPT_IN", raising=False)
+    monkeypatch.setattr(_OpenTelemetrySemanticConventionStability, "_initialized", False)
+    monkeypatch.setattr(
+        _OpenTelemetrySemanticConventionStability, "_OTEL_SEMCONV_STABILITY_SIGNAL_MAPPING", {}
+    )
+
+
+def test_an_explicit_semconv_opt_in_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_SEMCONV_STABILITY_OPT_IN", "database/dup")
+
+    telemetry.opt_in_stable_semconv()
+
+    assert os.environ["OTEL_SEMCONV_STABILITY_OPT_IN"] == "database/dup"
+
+
+def test_sql_spans_carry_only_the_stable_attribute_names(
+    fresh_semconv: None, spans: InMemorySpanExporter
+) -> None:
+    engine = create_engine("sqlite://")
+    telemetry.instrument_engine(engine)
+
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+
+    (query,) = [s for s in spans.get_finished_spans() if s.kind is SpanKind.CLIENT]
+    attributes = query.attributes or {}
+    assert attributes["db.query.text"] == "SELECT 1"
+    assert attributes["db.system.name"] == "sqlite"
+    assert "db.statement" not in attributes
+    assert "db.system" not in attributes
+
+
+class _Ok(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format: str, *args: Any) -> None: ...
+
+
+@pytest.fixture
+def http_server() -> Iterator[str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Ok)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_httpx_spans_carry_the_stable_attribute_names(
+    fresh_semconv: None, spans: InMemorySpanExporter, http_server: str
+) -> None:
+    # Режим httpx-инструментор запоминает при `instrument()` — переинструментируем.
+    HTTPXClientInstrumentor().uninstrument()
+    telemetry.configure_tracing(telemetry.API_SERVICE)
+
+    httpx.get(f"{http_server}/ping")
+
+    (request,) = [s for s in spans.get_finished_spans() if s.kind is SpanKind.CLIENT]
+    attributes = request.attributes or {}
+    assert attributes["http.request.method"] == "GET"
+    assert attributes["url.full"] == f"{http_server}/ping"
+    assert attributes["http.response.status_code"] == 200
+    assert "http.method" not in attributes
+    assert "http.url" not in attributes
