@@ -210,8 +210,31 @@ class RabbitMQJobQueue:
         self._connection = None
         self._channel = None
 
-    def _publish(self, job: ReviewJob) -> None:
-        with _tracer.start_as_current_span(
+    def _publish(self, job: ReviewJob, headers: dict[str, str]) -> None:
+        self._channel_ready().basic_publish(
+            exchange="",
+            routing_key=QUEUE_NAME,
+            body=json.dumps(to_wire_message(job)).encode("utf-8"),
+            properties=pika.BasicProperties(
+                content_type="application/json",
+                delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
+                priority=DEFAULT_PRIORITY,
+                headers=headers,
+            ),
+            mandatory=True,
+        )
+
+    def enqueue(self, job: ReviewJob) -> None:
+        # `BlockingConnection` шлёт heartbeat, только пока по нему что-то идёт:
+        # после простоя без вебхуков брокер закрывает соединение, а `is_closed`
+        # узнаёт об этом лишь при следующей записи. GitHub доставку не
+        # повторяет, поэтому обрыв соединения переживаем здесь: переподключаемся
+        # и публикуем ещё раз, один раз. `UnroutableError`/`NackError` — ответ
+        # брокера, а не обрыв, и сюда не попадают.
+        # Спан — одна публикация с точки зрения вызывающего, вместе с повтором:
+        # обрыв, который пережил повтор, не ошибка, и ERROR спан получает, только
+        # если упала и вторая попытка.
+        with self._lock, _tracer.start_as_current_span(
             f"publish {QUEUE_NAME}",
             kind=SpanKind.PRODUCER,
             attributes={
@@ -223,29 +246,8 @@ class RabbitMQJobQueue:
         ):
             headers: dict[str, str] = {}
             _PROPAGATOR.inject(headers)
-            self._channel_ready().basic_publish(
-                exchange="",
-                routing_key=QUEUE_NAME,
-                body=json.dumps(to_wire_message(job)).encode("utf-8"),
-                properties=pika.BasicProperties(
-                    content_type="application/json",
-                    delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
-                    priority=DEFAULT_PRIORITY,
-                    headers=headers,
-                ),
-                mandatory=True,
-            )
-
-    def enqueue(self, job: ReviewJob) -> None:
-        # `BlockingConnection` шлёт heartbeat, только пока по нему что-то идёт:
-        # после простоя без вебхуков брокер закрывает соединение, а `is_closed`
-        # узнаёт об этом лишь при следующей записи. GitHub доставку не
-        # повторяет, поэтому обрыв соединения переживаем здесь: переподключаемся
-        # и публикуем ещё раз, один раз. `UnroutableError`/`NackError` — ответ
-        # брокера, а не обрыв, и сюда не попадают.
-        with self._lock:
             try:
-                self._publish(job)
+                self._publish(job, headers)
             except (AMQPConnectionError, ChannelWrongStateError):
                 self._drop_connection()
-                self._publish(job)
+                self._publish(job, headers)

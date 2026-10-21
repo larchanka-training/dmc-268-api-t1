@@ -162,6 +162,47 @@ def test_queue_spans_follow_the_messaging_semantic_conventions(
     }
 
 
+class _StaleChannel(_Channel):
+    def basic_publish(self, **kwargs: Any) -> None:
+        raise pika.exceptions.StreamLostError("broker closed the idle connection")
+
+
+def _publish_through(
+    monkeypatch: pytest.MonkeyPatch, *channels: _Channel
+) -> RabbitMQJobQueue:
+    queue = RabbitMQJobQueue("amqp://guest:guest@localhost//")
+    pending = list(channels)
+    monkeypatch.setattr(queue, "_channel_ready", lambda: pending[0])
+    monkeypatch.setattr(queue, "_drop_connection", lambda: pending.pop(0))
+    return queue
+
+
+def test_a_publish_that_survives_a_reconnect_is_one_span_without_an_error(
+    spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel = _Channel()
+    _publish_through(monkeypatch, _StaleChannel(), channel).enqueue(JOB)
+
+    (publish,) = spans.get_finished_spans()
+    assert publish.status.status_code is StatusCode.UNSET
+    # Повтор несёт тот же traceparent: воркер продолжит этот спан.
+    (message,) = channel.published
+    traceparent = message["properties"].headers["traceparent"]
+    assert traceparent.split("-")[2] == trace.format_span_id(_context(publish).span_id)
+
+
+def test_a_publish_that_fails_twice_is_one_span_with_an_error(
+    spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = _publish_through(monkeypatch, _StaleChannel(), _StaleChannel())
+
+    with pytest.raises(pika.exceptions.StreamLostError):
+        queue.enqueue(JOB)
+
+    (publish,) = spans.get_finished_spans()
+    assert publish.status.status_code is StatusCode.ERROR
+
+
 def test_the_message_body_stays_domain_data_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
