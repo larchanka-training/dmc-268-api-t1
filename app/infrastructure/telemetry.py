@@ -19,6 +19,9 @@
 значения, в том числе `otlp`, пока не поддержаны: экспорт в хранилище трейсов — задача
 #89. Автонастройку FastAPI (`FASTAPI_OTEL_AUTO_CONFIGURE`) не включаем.
 
+Query серверного спана на путях входа скрывается (`redact_query`, `QueryRedaction`): в
+нём `code` и `state` callback'а OAuth.
+
 Глобальный пропагатор пустой: входящему `traceparent` от HTTP-клиента не доверяем
 (запрос всегда начинает новый трейс), а httpx не отдаёт наш trace id GitHub и
 провайдерам модели. Контекст между API и воркером идёт только через заголовки AMQP
@@ -29,6 +32,7 @@ import logging
 import os
 from contextvars import Token
 from uuid import UUID
+from weakref import WeakKeyDictionary
 
 from opentelemetry import context as otel_context
 from opentelemetry import metrics, propagate, trace
@@ -44,7 +48,7 @@ from opentelemetry.propagators.textmap import (
     default_setter,
 )
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import Span, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.trace import Status, StatusCode
 from sqlalchemy import Engine
@@ -144,6 +148,56 @@ def instrument_engine(engine: Engine) -> None:
         "db.client.connections.usage", unit="connections"
     )
     EngineTracer(tracer, engine, connections)  # type: ignore[no-untyped-call]  # пакет без аннотаций
+
+
+# Атрибуты серверного спана FastAPI (semconv HTTP).
+_URL_PATH = "url.path"
+_URL_QUERY = "url.query"
+
+
+class QueryRedaction(SpanProcessor):
+    """Заменяет `url.query` спана на `marker`, если `url.path` начинается с `path_prefix`.
+
+    Встроенная телеметрия FastAPI кладёт query в атрибуты сразу, при создании спана
+    (`start_span(attributes=...)`), и скрывает только свой короткий список параметров —
+    `code` и `state` callback'а входа в него не входят. Штатного хука на атрибуты у
+    `FastAPI(telemetry=...)` нет, а `exclude` выключил бы спан запроса целиком, и с ним
+    `X-Trace-ID`. `on_start` SDK вызывает сразу после создания спана, пока тот
+    изменяем и задолго до экспорта (`on_end`): исходное значение не уходит никуда.
+    """
+
+    def __init__(self, path_prefix: str, marker: str) -> None:
+        self._path_prefix = path_prefix
+        self._marker = marker
+
+    def on_start(self, span: Span, parent_context: Context | None = None) -> None:
+        attributes = span.attributes or {}
+        path = attributes.get(_URL_PATH)
+        if (
+            _URL_QUERY in attributes
+            and isinstance(path, str)
+            and path.startswith(self._path_prefix)
+        ):
+            span.set_attribute(_URL_QUERY, self._marker)
+
+
+# Какие скрытия уже стоят на провайдере: повторный `create_app` (в тестах) не плодит
+# процессоры.
+_redactions: WeakKeyDictionary[TracerProvider, set[tuple[str, str]]] = WeakKeyDictionary()
+
+
+def redact_query(path_prefix: str, marker: str) -> None:
+    """Скрывать query серверных спанов на путях `path_prefix` — `QueryRedaction`.
+
+    Ставится на глобальный SDK-провайдер, поэтому зовётся после `configure_tracing`.
+    """
+    provider = trace.get_tracer_provider()
+    if not isinstance(provider, TracerProvider):
+        return
+    installed = _redactions.setdefault(provider, set())
+    if (path_prefix, marker) not in installed:
+        provider.add_span_processor(QueryRedaction(path_prefix, marker))
+        installed.add((path_prefix, marker))
 
 
 def current_trace_id() -> str | None:

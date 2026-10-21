@@ -103,6 +103,35 @@ def test_an_incoming_traceparent_is_ignored(spans: InMemorySpanExporter) -> None
     assert response.headers["X-Trace-ID"] == _trace_id(server)
 
 
+def test_the_auth_callback_query_is_hidden_in_the_request_span(
+    spans: InMemorySpanExporter,
+) -> None:
+    """`code` и `state` callback'а OAuth не попадают в атрибуты спана, как и в access-лог."""
+    client = TestClient(_app(), follow_redirects=False)
+
+    response = client.get(
+        "/api/v1/auth/github/callback",
+        params={"code": "code-secret-1", "state": "state-secret-1"},
+    )
+
+    server = _server_span(spans)
+    assert server.attributes is not None
+    assert server.attributes["url.query"] == "<скрыто>"
+    values = " ".join(str(value) for value in server.attributes.values())
+    assert "code-secret-1" not in values and "state-secret-1" not in values
+    assert response.headers["X-Trace-ID"] == _trace_id(server)
+
+
+def test_the_query_outside_auth_stays_in_the_request_span(
+    spans: InMemorySpanExporter,
+) -> None:
+    TestClient(_app()).get("/health", params={"page": "2"})
+
+    attributes = _server_span(spans).attributes
+    assert attributes is not None
+    assert attributes["url.query"] == "page=2"
+
+
 def test_without_a_span_the_trace_id_is_random_in_the_same_format(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

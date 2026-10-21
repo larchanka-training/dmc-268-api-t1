@@ -70,6 +70,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.api.webhooks import router as webhooks_router
 
     log_redaction.install()
+    # Тот же query на путях входа скрыт и в серверном спане запроса.
+    telemetry.redact_query(log_redaction.AUTH_PREFIX, log_redaction.REDACTED)
     errors.install(app)
     # Последний добавленный — внешний: trace id ставится раньше, чем Origin может отказать.
     app.add_middleware(OriginMiddleware, public_origin=settings.public_origin)

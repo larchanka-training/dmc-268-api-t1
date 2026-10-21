@@ -424,7 +424,8 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 только SHA-256 от него, cookie `HttpOnly; Secure; SameSite=Lax`, выход удаляет
 сессию сразу. Токен пользователя GitHub после входа не хранится. Access-лог uvicorn
 пишет путь с query, а в query callback'а лежат `code` и `state`, поэтому
-`app/api/log_redaction.py` вырезает query на путях `/api/v1/auth/`. CSRF держат
+`app/api/log_redaction.py` вырезает query на путях `/api/v1/auth/`; в серверном спане
+запроса тот же query скрывает `QueryRedaction` из `app/infrastructure/telemetry.py`. CSRF держат
 `SameSite=Lax` и проверка `Origin`. Обоснование — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
 
 **Область действия учётных данных.** Для публикации комментариев нужен доступ
