@@ -57,6 +57,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
         responses=ERRORS_DEFAULT,
         lifespan=lifespan,
+        # Провайдер ставит `configure_tracing`. `auto_configure` при заданном
+        # `OTEL_EXPORTER_OTLP_ENDPOINT` повесил бы на него второй экспортёр — выключен
+        # явно, а не только отсутствием `FASTAPI_OTEL_AUTO_CONFIGURE`. Встроенный
+        # OTel-лог исключений FastAPI не используем: стектрейс `500` пишет наш
+        # обработчик (#89).
+        telemetry={"auto_configure": False, "logs": False},
         # operationId — имя функции роута в camelCase (`list_repositories` → `listRepositories`):
         # по нему фронт находит операцию в сгенерированных типах.
         generate_unique_id_function=lambda route: to_camel(route.name),

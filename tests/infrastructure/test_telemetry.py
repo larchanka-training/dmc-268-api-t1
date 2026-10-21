@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import threading
+import types
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -370,6 +371,46 @@ def test_shutdown_leaves_a_foreign_provider_alone(
 
     trace.get_tracer("test").start_span("after-shutdown").end()
     assert [s.name for s in spans.get_finished_spans()] == ["after-shutdown"]
+
+
+class _OtlpSpanExporter(InMemorySpanExporter):
+    def __init__(self, endpoint: str) -> None:
+        super().__init__()
+
+
+@pytest.fixture
+def otlp_exporter_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Экспортёр OTLP «установлен»: без него автонастройка FastAPI только пишет
+    предупреждение и ничего не добавляет — тест не отличил бы её от выключенной."""
+    prefix = "opentelemetry.exporter.otlp.proto.http"
+    for module, name in [
+        ("trace_exporter", "OTLPSpanExporter"),
+        ("_log_exporter", "OTLPLogExporter"),
+        ("metric_exporter", "OTLPMetricExporter"),
+    ]:
+        stub = types.ModuleType(f"{prefix}.{module}")
+        setattr(stub, name, _OtlpSpanExporter)
+        monkeypatch.setitem(sys.modules, f"{prefix}.{module}", stub)
+    # Метрики и логи FastAPI не настраиваем — проверяется только экспорт спанов.
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "none")
+    monkeypatch.setenv("OTEL_LOGS_EXPORTER", "none")
+
+
+def test_fastapi_does_not_add_exporters_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, otlp_exporter_installed: None
+) -> None:
+    # Даже с явной просьбой окружения: `telemetry=` в `create_app` её перекрывает.
+    monkeypatch.setenv("FASTAPI_OTEL_AUTO_CONFIGURE", "true")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.invalid:4318")
+    provider = trace.get_tracer_provider()
+    assert isinstance(provider, TracerProvider)
+    app = create_app(SETTINGS)
+    before = provider._active_span_processor._span_processors
+
+    with TestClient(app) as client:
+        client.get("/health")
+
+    assert provider._active_span_processor._span_processors == before
 
 
 def test_the_api_closes_tracing_when_the_app_shuts_down(

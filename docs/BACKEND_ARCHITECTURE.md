@@ -339,8 +339,8 @@ def upgrade() -> None:
 - **Экспорт** не настроен: по умолчанию спаны никуда не уходят и ошибок экспорта
   в логе нет. `OTEL_TRACES_EXPORTER=console` печатает их в stdout для отладки.
   Хранилище трейсов, OTLP, структурированные логи с trace id и метрики — задача
-  #89; автонастройку экспортёров FastAPI (`FASTAPI_OTEL_AUTO_CONFIGURE`) не
-  включаем.
+  #89; автонастройка экспортёров FastAPI и его OTel-лог исключений выключены
+  явно (`telemetry={"auto_configure": False, "logs": False}` в `create_app`).
 - **Атрибуты** SQL и httpx — стабильные имена semconv:
   `OTEL_SEMCONV_STABILITY_OPT_IN=database,http` по умолчанию ставит код до первого
   инструментирования (пакеты читают переменную один раз на процесс).
