@@ -51,6 +51,7 @@ from app.infrastructure.telemetry import (
     OtelStageTracer,
     configure_tracing,
     instrument_engine,
+    record_current_exception,
     shutdown_tracing,
     sweep_span,
 )
@@ -312,7 +313,8 @@ def build_maintenance(
 ) -> Callable[[], None]:
     """Периодический проход: зависшие прогоны и истёкшие сессии.
 
-    Шаги независимы: сбой одного логируется и не мешает другому.
+    Шаги независимы: сбой одного логируется, отмечается ошибкой на текущем спане
+    (`review.sweep`) и не мешает другому.
     """
 
     def maintenance() -> None:
@@ -320,13 +322,15 @@ def build_maintenance(
             swept = sweep_stale_runs(uow_factory(), now=now(), limit=stale_limit)
             if swept:
                 logger.warning("зависших прогонов переведено в failed: %d", swept)
-        except Exception:
+        except Exception as exc:
+            record_current_exception(exc)
             logger.exception("проход по зависшим прогонам завершился ошибкой")
         try:
             purged = purge_expired_sessions(uow_factory(), now=now())
             if purged:
                 logger.info("истёкших сессий удалено: %d", purged)
-        except Exception:
+        except Exception as exc:
+            record_current_exception(exc)
             logger.exception("удаление истёкших сессий завершилось ошибкой")
 
     return maintenance

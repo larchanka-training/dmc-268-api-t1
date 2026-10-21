@@ -259,11 +259,24 @@ def redact_query(path_prefix: str, marker: str) -> None:
 def sweep_span() -> Iterator[None]:
     """Спан периодического прохода воркера (зависшие прогоны, истёкшие сессии).
 
-    Без него каждый запрос к базе прохода — отдельный корневой трейс. Исключение
-    прохода спан записывает и закрывается со статусом ошибки.
+    Без него каждый запрос к базе прохода — отдельный корневой трейс. Исключение,
+    вылетевшее из прохода, спан записывает и закрывается со статусом ошибки; сбой шага,
+    который проход ловит сам, чтобы выполнить следующий, отмечается на спане
+    `record_current_exception`.
     """
     with _tracer.start_as_current_span("review.sweep"):
         yield
+
+
+def record_current_exception(exc: BaseException) -> None:
+    """Отметить текущий спан ошибкой: событие `exception` и статус ERROR.
+
+    Для исключения, которое поймано и дальше не идёт: `start_as_current_span` отмечает
+    только вылетевшие из своего блока. Описание статуса — как у него.
+    """
+    span = trace.get_current_span()
+    span.record_exception(exc)
+    span.set_status(Status(StatusCode.ERROR, f"{type(exc).__name__}: {exc}"))
 
 
 def current_trace_id() -> str | None:

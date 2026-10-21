@@ -9,13 +9,13 @@ from uuid import UUID
 
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import SpanKind, StatusCode
 from sqlalchemy import create_engine
 
 from app.domain.entities import ReviewRun, Session
 from app.domain.enums import ReviewRunStatus, TriggerSource
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.infrastructure.telemetry import instrument_engine
+from app.infrastructure.telemetry import instrument_engine, sweep_span
 from app.worker.factory import build_maintenance
 
 from ..conftest import requires_db
@@ -92,6 +92,33 @@ def test_a_failing_step_is_logged_and_does_not_stop_the_other(caplog, monkeypatc
     assert calls == 2
     assert uow.sessions.stored == []
     assert "проход по зависшим прогонам завершился ошибкой" in caplog.text
+
+
+def test_a_failing_step_marks_the_pass_span_as_an_error(
+    spans: InMemorySpanExporter,
+) -> None:
+    uow = FakeUnitOfWork()
+    uow.sessions.add(_session(1, NOW - timedelta(days=1)))
+    calls = 0
+
+    def uow_factory() -> FakeUnitOfWork:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("база недоступна")
+        return uow
+
+    with sweep_span():
+        build_maintenance(uow_factory, stale_limit=LIMIT, now=lambda: NOW)()
+
+    # Второй шаг выполнен, хотя спан уже отмечен ошибкой первого.
+    assert uow.sessions.stored == []
+    (pass_span,) = [s for s in spans.get_finished_spans() if s.name == "review.sweep"]
+    assert pass_span.status.status_code is StatusCode.ERROR
+    (event,) = pass_span.events
+    assert event.name == "exception"
+    assert event.attributes is not None
+    assert event.attributes["exception.type"] == "RuntimeError"
 
 
 @pytest.mark.integration
