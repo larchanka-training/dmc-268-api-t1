@@ -115,7 +115,9 @@ services:
     # вызова модели (ревью и верификатор) × LLM_TIMEOUT_SECONDS (300) ×
     # LLM_MAX_ATTEMPTS (2) × два провайдера с LLM_HOSTED_FALLBACK = 2400 с,
     # плюс минута на GitHub и базу. Без этого через 10 с пришёл бы SIGKILL.
-    stop_grace_period: 41m
+    # Дольше consumer_timeout RabbitMQ (30 мин по умолчанию) ждать незачем:
+    # брокер сам закроет канал, и подтверждение не дойдёт.
+    stop_grace_period: 30m
 
   # Локальная модель для прогона на своей машине, только с профилем:
   #   docker compose --profile ollama up -d
