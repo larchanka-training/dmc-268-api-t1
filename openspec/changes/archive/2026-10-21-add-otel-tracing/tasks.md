@@ -9,6 +9,7 @@
 - [x] 2.1 `traceparent` в заголовках AMQP: спан публикации в `_publish`, `consuming_span` в consume-цикле воркера, `review_run_id` на спане обработки. Проверка: `tests/infrastructure/test_telemetry.py`
 - [x] 2.2 Порт `StageTracer`, спаны в точках `StepRecorder`, адаптер `OtelStageTracer`; `opentelemetry` в запрещённых вендорах внутренних слоёв. Проверка: `tests/application/test_stage_tracing.py`, `uv run lint-imports`
 - [x] 2.3 Сквозной трейс вебхук → очередь → этапы воркера на настоящих базе и брокере. Проверка: `tests/test_tracing_e2e.py`
+- [x] 2.4 Штатная остановка: `stop_on_signals` и `stop` в consume-цикле воркера, `shutdown_tracing` после цикла и в lifespan API. Проверка: `tests/worker/test_worker_loop.py`, `tests/infrastructure/test_telemetry.py`
 
 ## 3. Документация и проверки
 

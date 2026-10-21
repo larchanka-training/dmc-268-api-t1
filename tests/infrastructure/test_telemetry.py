@@ -11,9 +11,10 @@ from uuid import UUID
 
 import pika
 import pytest
+from fastapi.testclient import TestClient
 from opentelemetry import trace
 from opentelemetry.instrumentation.sqlalchemy import engine as sqlalchemy_engine
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode
@@ -295,3 +296,51 @@ def test_an_incompatible_engine_tracer_does_not_stop_the_worker(
     assert started == [True]
     [record] = _engine_warnings(caplog)
     assert record.levelname == "WARNING"
+
+
+# --- остановка процесса --------------------------------------------------------------
+
+
+class _RecordingProcessor(SpanProcessor):
+    def __init__(self) -> None:
+        self.shut_down = False
+
+    def shutdown(self) -> None:
+        self.shut_down = True
+
+
+def test_shutdown_closes_only_the_provider_configure_tracing_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    own = TracerProvider(shutdown_on_exit=False)
+    processor = _RecordingProcessor()
+    own.add_span_processor(processor)
+    monkeypatch.setattr(telemetry, "_installed", own)
+
+    telemetry.shutdown_tracing()
+
+    assert processor.shut_down
+
+
+def test_shutdown_leaves_a_foreign_provider_alone(
+    monkeypatch: pytest.MonkeyPatch, spans: InMemorySpanExporter
+) -> None:
+    # Глобальный провайдер поставил `tests/conftest.py`, а не `configure_tracing`.
+    monkeypatch.setattr(telemetry, "_installed", None)
+
+    telemetry.shutdown_tracing()
+
+    trace.get_tracer("test").start_span("after-shutdown").end()
+    assert [s.name for s in spans.get_finished_spans()] == ["after-shutdown"]
+
+
+def test_the_api_closes_tracing_when_the_app_shuts_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[bool] = []
+    monkeypatch.setattr(telemetry, "shutdown_tracing", lambda: closed.append(True))
+
+    with TestClient(create_app(SETTINGS)):
+        assert closed == []
+
+    assert closed == [True]

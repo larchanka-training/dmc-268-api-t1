@@ -5,6 +5,9 @@
 находится вне проверяемого ими графа.
 """
 
+import contextlib
+from collections.abc import AsyncIterator
+
 from fastapi import FastAPI
 
 from app.config import Settings
@@ -38,6 +41,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.infrastructure import telemetry
     from app.infrastructure.container import build_container
 
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        yield
+        # uvicorn на SIGTERM доводит lifespan до конца: спаны выгружаются здесь,
+        # до выхода процесса.
+        telemetry.shutdown_tracing()
+
     # Схема — из роутов и моделей (`app/api/openapi.py`); ответ `default` с каталогом
     # ошибок — у каждой операции. ReDoc не нужен — хватает одного просмотрщика.
     app = FastAPI(
@@ -46,6 +56,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description=_DESCRIPTION,
         redoc_url=None,
         responses=ERRORS_DEFAULT,
+        lifespan=lifespan,
         # operationId — имя функции роута в camelCase (`list_repositories` → `listRepositories`):
         # по нему фронт находит операцию в сгенерированных типах.
         generate_unique_id_function=lambda route: to_camel(route.name),

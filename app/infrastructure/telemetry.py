@@ -67,6 +67,10 @@ REVIEW_RUN_ID = "review_run_id"
 
 _tracer = trace.get_tracer(__name__)
 
+# Провайдер, который поставил `configure_tracing`: его и закрывает `shutdown_tracing`.
+# Чужой провайдер (тест со своим экспортёром) не закрываем.
+_installed: TracerProvider | None = None
+
 
 class _NoPropagation(TextMapPropagator):
     """Пропагатор, который ничего не берёт из заголовков и ничего в них не кладёт.
@@ -103,12 +107,26 @@ def configure_tracing(service_name: str) -> None:
     вызов или тест со своим `InMemorySpanExporter`), его не трогаем. `OTEL_SERVICE_NAME`
     переопределяет `service_name`.
     """
+    global _installed
     # Пропагатор ставится всегда, и поверх `OTEL_PROPAGATORS`: доверие к входящим
     # заголовкам — правило сервиса, а не настройка окружения.
     propagate.set_global_textmap(_NoPropagation())
     instrument_httpx()
     if not isinstance(trace.get_tracer_provider(), TracerProvider):
-        trace.set_tracer_provider(build_tracer_provider(service_name))
+        provider = build_tracer_provider(service_name)
+        trace.set_tracer_provider(provider)
+        _installed = provider
+
+
+def shutdown_tracing() -> None:
+    """Выгрузить накопленные спаны и закрыть провайдер, который поставил `configure_tracing`.
+
+    Зовётся при остановке: в lifespan API и при выходе воркера. `atexit` SDK закрыл бы
+    провайдер и сам, но только при обычном выходе интерпретатора — смерть от SIGTERM
+    с обработчиком по умолчанию его не вызывает, и спаны батч-процессора пропадают.
+    """
+    if _installed is not None:
+        _installed.shutdown()
 
 
 def build_tracer_provider(service_name: str) -> TracerProvider:

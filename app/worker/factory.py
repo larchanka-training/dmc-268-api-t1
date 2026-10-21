@@ -8,12 +8,15 @@
 Ack/nack-решение — чистая `should_ack`, здесь только вызовы канала.
 """
 
+import contextlib
 import logging
+import signal
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import FrameType
 from typing import Protocol
 
 import pika
@@ -48,6 +51,7 @@ from app.infrastructure.telemetry import (
     OtelStageTracer,
     configure_tracing,
     instrument_engine,
+    shutdown_tracing,
     sweep_span,
 )
 from app.worker.handling import should_ack
@@ -60,6 +64,42 @@ MessageHandler = Callable[[bytes], None]
 # consume-цикла (простой раз в секунду или очередное сообщение) и сам
 # ограничивается этим интервалом.
 SWEEP_INTERVAL_SECONDS = 60.0
+
+# Сигналы штатной остановки: SIGTERM шлёт `docker stop`, SIGINT — Ctrl+C.
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+
+
+@dataclass(slots=True)
+class StopRequest:
+    """Просьба остановить воркер: выставляет обработчик сигнала, читает consume-цикл."""
+
+    requested: bool = False
+
+
+@contextlib.contextmanager
+def stop_on_signals() -> Iterator[StopRequest]:
+    """На время блока SIGTERM и SIGINT не убивают процесс, а просят цикл остановиться.
+
+    Обработчик Python выполняет в главном потоке между байткодами — посреди обработки
+    сообщения или ожидания брокера, — поэтому он только ставит флаг и возвращает прежние
+    обработчики: второй сигнал действует как обычно (SIGTERM завершает процесс сразу,
+    SIGINT бросает `KeyboardInterrupt`). После блока прежние обработчики возвращаются.
+    """
+    stop = StopRequest()
+    previous = {signum: signal.getsignal(signum) for signum in STOP_SIGNALS}
+
+    def request_stop(signum: int, frame: FrameType | None) -> None:
+        stop.requested = True
+        for restored, handler in previous.items():
+            signal.signal(restored, handler)
+
+    for signum in STOP_SIGNALS:
+        signal.signal(signum, request_stop)
+    try:
+        yield stop
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +114,7 @@ class Worker:
         limit: int | None = None,
         sweep: Callable[[], object] | None = None,
         sweep_interval: float = SWEEP_INTERVAL_SECONDS,
+        stop: StopRequest | None = None,
     ) -> None:
         """Потреблять `review_jobs`.
 
@@ -86,6 +127,11 @@ class Worker:
 
         `sweep` — периодический проход по зависшим прогонам; его сбой
         логируется и не останавливает потребление.
+
+        `stop` — просьба остановиться (`stop_on_signals`). Сообщение в работе
+        дорабатывает и подтверждается, следующее не берётся; на простое цикл
+        выходит на ближайшем такте, не позже `inactivity_timeout`. Сообщение,
+        которое брокер уже прислал в буфер, `cancel()` возвращает в очередь.
         """
         processed = 0
         last_sweep: float | None = None
@@ -93,6 +139,8 @@ class Worker:
             for method, properties, body in self.channel.consume(
                 QUEUE_NAME, inactivity_timeout=1
             ):
+                if method is None and stop is not None and stop.requested:
+                    break
                 if sweep is not None and (
                     last_sweep is None or time.monotonic() - last_sweep >= sweep_interval
                 ):
@@ -122,6 +170,8 @@ class Worker:
                     self.channel.basic_nack(method.delivery_tag, requeue=False)
                 processed += 1
                 if limit is not None and processed >= limit:
+                    break
+                if stop is not None and stop.requested:
                     break
         finally:
             self.channel.cancel()
@@ -304,4 +354,8 @@ def run_worker(settings: Settings) -> None:
     handler = build_review_handler(
         container, context_limits(settings), llm_limits(settings), prompt_texts
     )
-    build_worker(settings).run(handler, sweep=sweep)
+    with stop_on_signals() as stop:
+        try:
+            build_worker(settings).run(handler, sweep=sweep, stop=stop)
+        finally:
+            shutdown_tracing()
