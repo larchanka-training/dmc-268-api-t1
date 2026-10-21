@@ -106,7 +106,7 @@ def test_the_worker_continues_the_trace_of_the_publish(
     properties = _published_properties(monkeypatch)
     assert set(properties.headers or {}) == {"traceparent"}
 
-    with consuming_span(properties):
+    with consuming_span(properties, delivery_tag=1):
         trace_id_inside = current_trace_id()
 
     publish, process = spans.get_finished_spans()
@@ -116,6 +116,34 @@ def test_the_worker_continues_the_trace_of_the_publish(
     assert process.parent is not None
     assert process.parent.span_id == _context(publish).span_id
     assert trace_id_inside == trace.format_trace_id(_context(publish).trace_id)
+
+
+def test_queue_spans_follow_the_messaging_semantic_conventions(
+    spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with consuming_span(_published_properties(monkeypatch), delivery_tag=7):
+        pass
+
+    publish, process = spans.get_finished_spans()
+    destination = {
+        "messaging.system": "rabbitmq",
+        "messaging.destination.name": "review_jobs",
+        "messaging.rabbitmq.destination.routing_key": "review_jobs",
+    }
+    assert publish.name == "publish review_jobs"
+    assert dict(publish.attributes or {}) == {
+        **destination,
+        "messaging.operation.name": "publish",
+        "messaging.operation.type": "send",
+        "review_run_id": str(RUN_ID),
+    }
+    assert process.name == "process review_jobs"
+    assert dict(process.attributes or {}) == {
+        **destination,
+        "messaging.operation.name": "process",
+        "messaging.operation.type": "process",
+        "messaging.rabbitmq.message.delivery_tag": 7,
+    }
 
 
 def test_the_message_body_stays_domain_data_only(
@@ -141,7 +169,7 @@ def test_the_message_body_stays_domain_data_only(
 def test_a_message_without_a_valid_traceparent_starts_a_new_trace(
     spans: InMemorySpanExporter, properties: pika.BasicProperties | None
 ) -> None:
-    with consuming_span(properties):
+    with consuming_span(properties, delivery_tag=1):
         pass
 
     (process,) = spans.get_finished_spans()
@@ -156,7 +184,7 @@ def test_a_traceparent_header_in_bytes_is_read_too(
         headers={"traceparent": headers["traceparent"].encode()}
     )
 
-    with consuming_span(as_bytes):
+    with consuming_span(as_bytes, delivery_tag=1):
         pass
 
     publish, process = spans.get_finished_spans()

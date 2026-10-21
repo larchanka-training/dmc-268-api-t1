@@ -47,6 +47,16 @@ DEFAULT_PRIORITY = 5
 _PROPAGATOR = TraceContextTextMapPropagator()
 _tracer = trace.get_tracer(__name__)
 
+# Атрибуты спанов очереди — semconv messaging для RabbitMQ (статус Development).
+# Публикуем в default exchange с routing key = имя очереди: по semconv пустой
+# exchange опускается, а у потребителя совпавшие routing key и очередь пишутся
+# один раз, поэтому `messaging.destination.name` с обеих сторон — имя очереди.
+_MESSAGING_ATTRIBUTES = {
+    "messaging.system": "rabbitmq",
+    "messaging.destination.name": QUEUE_NAME,
+    "messaging.rabbitmq.destination.routing_key": QUEUE_NAME,
+}
+
 
 def to_wire_message(job: ReviewJob) -> dict[str, Any]:
     return {
@@ -105,8 +115,14 @@ def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel)
 
 
 @contextlib.contextmanager
-def consuming_span(properties: spec.BasicProperties | None) -> Iterator[None]:
+def consuming_span(
+    properties: spec.BasicProperties | None, delivery_tag: int
+) -> Iterator[None]:
     """Спан обработки сообщения воркером — продолжение трейса, начатого при публикации.
+
+    Контекст сообщения — родитель спана, а не link: сообщение обрабатывается одно, и
+    спан обработки корневой в воркере, semconv это допускает для одиночного сообщения.
+    Если трейсы «запрос → прогон» станут неудобно длинными — перейти на link.
 
     Нет заголовка `traceparent` (сообщение старше трассировки, его переложили руками)
     или он битый — спан начинает новый трейс, обработка идёт как обычно. Исключение
@@ -121,10 +137,15 @@ def consuming_span(properties: spec.BasicProperties | None) -> Iterator[None]:
         if isinstance(value, str | bytes)
     }
     with _tracer.start_as_current_span(
-        f"{QUEUE_NAME} process",
+        f"process {QUEUE_NAME}",
         context=_PROPAGATOR.extract(carrier),
         kind=SpanKind.CONSUMER,
-        attributes={"messaging.system": "rabbitmq"},
+        attributes={
+            **_MESSAGING_ATTRIBUTES,
+            "messaging.operation.name": "process",
+            "messaging.operation.type": "process",
+            "messaging.rabbitmq.message.delivery_tag": delivery_tag,
+        },
     ):
         yield
 
@@ -183,10 +204,12 @@ class RabbitMQJobQueue:
 
     def _publish(self, job: ReviewJob) -> None:
         with _tracer.start_as_current_span(
-            f"{QUEUE_NAME} publish",
+            f"publish {QUEUE_NAME}",
             kind=SpanKind.PRODUCER,
             attributes={
-                "messaging.system": "rabbitmq",
+                **_MESSAGING_ATTRIBUTES,
+                "messaging.operation.name": "publish",
+                "messaging.operation.type": "send",
                 "review_run_id": str(job.review_run_id),
             },
         ):

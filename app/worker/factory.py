@@ -160,7 +160,7 @@ class Worker:
                 # Исключение ловится снаружи спана: он успевает записать его и
                 # закрыться со статусом ошибки, а не OK при nack в DLQ.
                 try:
-                    with consuming_span(properties):
+                    with consuming_span(properties, method.delivery_tag):
                         handler(body)
                 except Exception as caught:  # noqa: BLE001 — любая ошибка уводит сообщение в DLQ, а не роняет процесс
                     exc = caught

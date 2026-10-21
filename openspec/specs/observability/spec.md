@@ -47,6 +47,15 @@ API и воркер SHALL создавать спаны OpenTelemetry: API — �
 - **WHEN** сообщение очереди не разбирается или его прогона нет в базе, и воркер отклоняет его в DLQ
 - **THEN** спан обработки закрыт со статусом ошибки и событием `exception`
 
+### Requirement: Спаны очереди — по semantic conventions messaging
+
+Имена и атрибуты спанов публикации и обработки SHALL следовать semantic conventions messaging для RabbitMQ: имя — `{messaging.operation.name} {destination}`, атрибуты `messaging.system`, `messaging.operation.name`, `messaging.operation.type`, `messaging.destination.name` и `messaging.rabbitmq.destination.routing_key`, у обработки — ещё `messaging.rabbitmq.message.delivery_tag`.
+
+#### Scenario: Публикация и обработка задачи
+
+- **WHEN** API публикует задачу в `review_jobs` (default exchange, routing key — имя очереди), а воркер её обрабатывает
+- **THEN** спан публикации — `publish review_jobs`, `PRODUCER`, `messaging.operation.type` — `send`; спан обработки — `process review_jobs`, `CONSUMER`, `messaging.operation.type` — `process`, с delivery tag сообщения; у обоих `messaging.system` — `rabbitmq`, `messaging.destination.name` и routing key — `review_jobs`
+
 ### Requirement: Каждый шаг прогона — спан этапа
 
 Воркер SHALL открывать спан `review.<этап>` с атрибутом `review_run_id` в тот момент, когда начинает шаг прогона, и закрывать его вместе с исходом шага. Упавший шаг SHALL закрывать спан со статусом ошибки и кодом ошибки шага; повтор этапа SHALL быть отдельным спаном того же этапа. Без настроенной трассировки шаги SHALL записываться так же, как с ней.
