@@ -7,8 +7,9 @@
 
 Ключей несколько (design D4). Каждый вызов начинает со следующего ключа по
 кругу; ключ, отвергнутый провайдером или упёршийся в лимит (`401`, `403`,
-`429`), сменяется следующим в том же вызове. Ошибка сервера, таймаут и обрыв
-соединения - сбой провайдера сразу: ключ тут ни при чём.
+`429`), сменяется следующим в том же вызове. Отвергнуты все - сбой провайдера;
+если все по `429` - сбой «лимит запросов» (`LLM_RATE_LIMITED`). Ошибка сервера,
+таймаут и обрыв соединения - сбой провайдера сразу: ключ тут ни при чём.
 
 Ключи не попадают ни в текст ошибки, ни в лог: тексты строятся из кода
 ответа и номера ключа, а описание ошибки провайдера очищается от ключей.
@@ -25,7 +26,7 @@ from pydantic import BaseModel, SecretStr
 
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse
 from app.domain.entities import PromptMessage
-from app.domain.llm_errors import LlmError, LlmTimeoutError
+from app.domain.llm_errors import LlmError, LlmRateLimitedError, LlmTimeoutError
 from app.infrastructure.llm.structured import RawReply, complete_structured
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,9 @@ class OpenAiCompatibleGateway:
                 )
             return self._reply(response)
         codes = ", ".join(str(code) for code in rejected)
+        if all(code == httpx.codes.TOO_MANY_REQUESTS for code in rejected):
+            # Все ключи упёрлись в лимит: сбой временный, у него свой код.
+            raise LlmRateLimitedError(f"{self._name}: лимит запросов на всех ключах (HTTP {codes})")
         raise LlmError(f"{self._name}: все ключи отвергнуты (HTTP {codes})")
 
     def _post(self, body: dict[str, Any], key: SecretStr) -> httpx.Response:

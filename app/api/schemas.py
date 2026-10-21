@@ -76,6 +76,7 @@ ReviewErrorCode = Literal[
     "LLM_TIMEOUT",
     "LLM_UNAVAILABLE",
     "LLM_INVALID_OUTPUT",
+    "PROMPT_TOO_LARGE",
     "REVIEW_RUN_STALE",
     "INTERNAL_ERROR",
 ]

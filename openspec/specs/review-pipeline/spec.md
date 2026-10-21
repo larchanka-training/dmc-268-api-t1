@@ -276,6 +276,11 @@ GitHub и SHALL выставить check run `dmc-268-ai-review` на `head_sha`
 - **WHEN** VCS не отдаёт дифф
 - **THEN** единственный шаг прогона — `fetching_diff` в статусе `failed` с `error_code = SCM_UNAVAILABLE`
 
+#### Scenario: Дифф не найден
+
+- **WHEN** VCS отвечает на запрос диффа «не найдено» (404)
+- **THEN** единственный шаг прогона — `fetching_diff` в статусе `failed` с `error_code = PR_NOT_FOUND`
+
 #### Scenario: Упавший верификатор
 
 - **WHEN** верификатор недоступен

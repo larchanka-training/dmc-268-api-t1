@@ -28,4 +28,13 @@ class VcsAuthError(VcsError):
 class VcsNotFoundError(VcsError):
     """GitHub ответил 404. Для диффа и метаданных — сбой, для `fetch_file`
     — штатный исход «файла на коммите нет», который адаптер переводит в
-    `None`."""
+    `None`.
+
+    Код — `PR_NOT_FOUND`: 404 на `compare` GitHub отдаёт одним телом и на
+    неизвестный коммит (force-push убрал `head_sha`), и на репозиторий,
+    которого нет или к которому у установки App больше нет доступа. Отличить
+    `REPOSITORY_NOT_FOUND` можно только лишним запросом к репозиторию;
+    дифф прогона ищется по коммитам PR, поэтому выбран код PR.
+    """
+
+    code: ClassVar[str] = "PR_NOT_FOUND"

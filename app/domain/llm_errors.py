@@ -42,6 +42,12 @@ class LlmTimeoutError(LlmError):
     code: ClassVar[str] = "LLM_TIMEOUT"
 
 
+class LlmRateLimitedError(LlmError):
+    """Провайдер отказал по лимиту запросов (HTTP 429) на каждом ключе вызова."""
+
+    code: ClassVar[str] = "LLM_RATE_LIMITED"
+
+
 class PromptTooLargeError(LlmError):
     """Запрос вместе с резервом ответа не помещается в окно модели.
 
@@ -49,8 +55,8 @@ class PromptTooLargeError(LlmError):
     одному провайдеру. Подкласс `LlmError`, поэтому пайплайн обрабатывает его
     как любой сбой модели: ревью - `failed`, верификатор - `unavailable`.
 
-    Своего кода в начальном каталоге §8 нет: модель тут ни при чём, запрос
-    не ушёл никому.
+    Код — свой, `PROMPT_TOO_LARGE`, а не `LLM_*`: модель тут ни при чём,
+    запрос не ушёл никому.
     """
 
     code: ClassVar[str] = "PROMPT_TOO_LARGE"

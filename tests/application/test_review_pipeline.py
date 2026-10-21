@@ -32,12 +32,14 @@ from app.domain.enums import (
 from app.domain.llm_errors import (
     LlmError,
     LlmOutputError,
+    LlmRateLimitedError,
     LlmTimeoutError,
     PromptTooLargeError,
 )
 from app.domain.prompt import PromptTexts
 from app.domain.vcs_errors import VcsError
 from app.infrastructure.llm.fallback import FallbackLlmGateway
+from app.infrastructure.vcs.errors import VcsNotFoundError
 
 from ..fakes.context import FakeCache, FakeExtractor
 from ..fakes.llm_gateway import (
@@ -769,6 +771,29 @@ def test_a_diff_failure_fails_the_fetching_step_with_its_code() -> None:
     ]
     (step,) = uow.review_run_steps.list_for_run(JOB.review_run_id)
     assert step.duration_seconds == 0.5
+
+
+def test_a_missing_diff_fails_the_fetching_step_as_pr_not_found() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    missing = VcsNotFoundError("GitHub API: HTTP 404 на GET /repos/owner/repo/compare/...")
+
+    with pytest.raises(VcsNotFoundError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=FakeVcs(error=missing))
+
+    assert _steps(uow) == [
+        (ReviewRunStage.FETCHING_DIFF, ReviewRunStepStatus.FAILED, None, "PR_NOT_FOUND"),
+    ]
+
+
+def test_a_rate_limited_review_fails_the_analysing_step_with_its_code() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    with pytest.raises(LlmRateLimitedError):
+        _run(uow, ScriptedLlmGateway([LlmRateLimitedError("лимит запросов на всех ключах")]))
+
+    assert _steps(uow)[-1] == (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 0, "LLM_RATE_LIMITED")
 
 
 def test_a_model_failure_fails_the_analysing_step_with_its_code_and_tokens() -> None:

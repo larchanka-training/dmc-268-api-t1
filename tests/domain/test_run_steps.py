@@ -9,6 +9,7 @@ from app.domain.enums import ReviewRunStage, ReviewRunStepStatus
 from app.domain.llm_errors import (
     LlmError,
     LlmOutputError,
+    LlmRateLimitedError,
     LlmTimeoutError,
     PromptTooLargeError,
 )
@@ -80,13 +81,14 @@ def test_a_negative_duration_is_clamped_to_zero() -> None:
     [
         (LlmError("модель недоступна"), "LLM_UNAVAILABLE"),
         (LlmTimeoutError("таймаут"), "LLM_TIMEOUT"),
+        (LlmRateLimitedError("лимит"), "LLM_RATE_LIMITED"),
         (LlmOutputError("не по схеме"), "LLM_INVALID_OUTPUT"),
         (PromptTooLargeError("больше окна"), "PROMPT_TOO_LARGE"),
         (VcsError("GitHub недоступен"), "SCM_UNAVAILABLE"),
         (VcsFileTooLargeError("слишком большой"), "SCM_UNAVAILABLE"),
         (RuntimeError("ошибка программы"), INTERNAL_ERROR),
     ],
-    ids=["llm", "timeout", "output", "too-large", "vcs", "vcs-subclass", "other"],
+    ids=["llm", "timeout", "rate-limited", "output", "too-large", "vcs", "vcs-subclass", "other"],
 )
 def test_the_error_code_comes_from_the_failure_class(
     error: Exception, code: str
