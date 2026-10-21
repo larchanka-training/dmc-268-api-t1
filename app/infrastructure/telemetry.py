@@ -12,7 +12,8 @@
 - HTTP-сервер — встроенная телеметрия FastAPI (она берёт глобальный провайдер сама,
   отдельный пакет инструментирования не нужен); httpx (вызовы GitHub и модели) и
   SQLAlchemy — пакеты `opentelemetry-instrumentation-*`;
-- спаны этапов прогона — `OtelStageTracer`, адаптер порта, который зовёт `StepRecorder`.
+- спаны этапов прогона — `OtelStageTracer`, адаптер порта, который зовёт `StepRecorder`;
+- спан периодического прохода воркера — `sweep_span`.
 
 Экспорт не настраиваем: по умолчанию спаны не уходят никуда и ошибок экспорта в логе
 нет. `OTEL_TRACES_EXPORTER=console` печатает их в stdout — для отладки. Остальные
@@ -28,8 +29,10 @@ Query серверного спана на путях входа скрывае�
 нашей очереди — пропагатором W3C в `app/infrastructure/queue/rabbitmq.py`.
 """
 
+import contextlib
 import logging
 import os
+from collections.abc import Iterator
 from contextvars import Token
 from uuid import UUID
 from weakref import WeakKeyDictionary
@@ -209,6 +212,17 @@ def redact_query(path_prefix: str, marker: str) -> None:
     if (path_prefix, marker) not in installed:
         provider.add_span_processor(QueryRedaction(path_prefix, marker))
         installed.add((path_prefix, marker))
+
+
+@contextlib.contextmanager
+def sweep_span() -> Iterator[None]:
+    """Спан периодического прохода воркера (зависшие прогоны, истёкшие сессии).
+
+    Без него каждый запрос к базе прохода — отдельный корневой трейс. Исключение
+    прохода спан записывает и закрывается со статусом ошибки.
+    """
+    with _tracer.start_as_current_span("review.sweep"):
+        yield
 
 
 def current_trace_id() -> str | None:

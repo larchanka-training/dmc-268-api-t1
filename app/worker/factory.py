@@ -48,6 +48,7 @@ from app.infrastructure.telemetry import (
     OtelStageTracer,
     configure_tracing,
     instrument_engine,
+    sweep_span,
 )
 from app.worker.handling import should_ack
 
@@ -97,7 +98,8 @@ class Worker:
                 ):
                     last_sweep = time.monotonic()
                     try:
-                        sweep()
+                        with sweep_span():
+                            sweep()
                     except Exception:
                         logger.exception("проход по зависшим прогонам завершился ошибкой")
                 if method is None:
