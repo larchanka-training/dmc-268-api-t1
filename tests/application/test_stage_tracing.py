@@ -6,11 +6,13 @@ OTel несёт `review_run_id` и ложится в трейс воркера �
 """
 
 from dataclasses import dataclass, field
-from uuid import UUID
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
 
 import pytest
 
 from app.application.ports.stage_tracer import StageSpan
+from app.application.review_run_steps import StepRecorder
 from app.domain.enums import ReviewRunStage
 from app.domain.llm_errors import LlmOutputError, LlmTimeoutError
 from app.domain.vcs_errors import VcsError
@@ -124,3 +126,28 @@ def test_without_a_tracer_steps_are_recorded_as_before() -> None:
     _run(uow, ScriptedLlmGateway([review_response()]))
 
     assert [stage for stage, _, _, _ in _steps(uow)] == STAGES
+
+
+def test_a_new_stage_closes_the_span_left_open_by_the_previous_one() -> None:
+    """`start` без `finish` прежнего этапа: его спан закрывается до открытия нового."""
+    tracer = _RecordingTracer()
+    recorder = StepRecorder(
+        FakeUnitOfWork(),
+        JOB.review_run_id,
+        now=lambda: datetime(2026, 10, 21, tzinfo=UTC),
+        monotonic=lambda: 0.0,
+        new_id=uuid4,
+        tracer=tracer,
+    )
+
+    recorder.start(ReviewRunStage.FETCHING_DIFF)
+    recorder.start(ReviewRunStage.BUILDING_CONTEXT)
+    recorder.finish()
+
+    assert tracer.events == [
+        ("start", ReviewRunStage.FETCHING_DIFF, None),
+        ("end", ReviewRunStage.FETCHING_DIFF, None),
+        ("start", ReviewRunStage.BUILDING_CONTEXT, None),
+        ("end", ReviewRunStage.BUILDING_CONTEXT, None),
+    ]
+    assert tracer.open == 0

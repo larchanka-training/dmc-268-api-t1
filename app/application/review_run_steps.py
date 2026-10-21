@@ -114,6 +114,10 @@ class StepRecorder:
 
     def _open(self, started_at: datetime) -> None:
         stage = self._current_stage()
+        # Прежний этап не закрыли (`start` без `finish`): его спан закрывается здесь,
+        # до нового, иначе он не закрылся бы никогда, а снятие контекста нарушило бы
+        # порядок. Шаг этого этапа, как при сбое записи, остаётся `running`.
+        self._end_span(None)
         # Спан — телеметрия, а не журнал: открывается, даже если шаг не запишется.
         self._span = self._tracer.start(self._run_id, stage)
         step = start_step(self._run_id, stage, started_at=started_at, step_id=self._new_id())
