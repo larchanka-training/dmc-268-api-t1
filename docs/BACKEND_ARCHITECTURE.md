@@ -319,7 +319,9 @@ def upgrade() -> None:
   `X-Trace-ID` и `trace_id` в problem+json, в том числе у `500`, — trace id
   спана запроса. httpx (GitHub, модель) — `opentelemetry-instrumentation-httpx`,
   запросы к базе — `EngineTracer` из `opentelemetry-instrumentation-sqlalchemy`
-  на движке контейнера.
+  на движке контейнера. Класс внутренний: пакеты contrib держит верхняя граница
+  серии в `pyproject.toml`, а несовместимый `EngineTracer` выключает спаны SQL с
+  предупреждением и не мешает старту.
 - **Через очередь.** Контекст — заголовок AMQP `traceparent` (W3C), тело
   сообщения не меняется. Публикацию и приём делает адаптер очереди
   (`_publish`, `consuming_span`), а не автоинструментирование pika: для

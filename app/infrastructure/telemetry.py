@@ -38,7 +38,6 @@ from opentelemetry import context as otel_context
 from opentelemetry import metrics, propagate, trace
 from opentelemetry.context import Context
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-from opentelemetry.instrumentation.sqlalchemy.engine import EngineTracer
 from opentelemetry.propagators.textmap import (
     CarrierT,
     Getter,
@@ -142,12 +141,24 @@ def instrument_engine(engine: Engine) -> None:
     `create_async_engine`, которому нужен `greenlet`. События движка
     (`before_cursor_execute` и т. п.) в 2.1 те же — спаны запросов проверяет сквозной
     тест трейса. Счётчик соединений — no-op: метрик в сервисе нет.
+
+    `EngineTracer` — внутренний класс пакета, без обещаний совместимости: пакет держит
+    верхняя граница в `pyproject.toml`, а если класс всё же переехал или сменил
+    сигнатуру, сервис стартует без спанов SQL с одним предупреждением, а не падает.
     """
-    tracer = trace.get_tracer("opentelemetry.instrumentation.sqlalchemy")
-    connections = metrics.get_meter(__name__).create_up_down_counter(
-        "db.client.connections.usage", unit="connections"
-    )
-    EngineTracer(tracer, engine, connections)  # type: ignore[no-untyped-call]  # пакет без аннотаций
+    try:
+        # Импорт здесь, а не наверху модуля: переезд класса — тоже `ImportError` этого вызова.
+        from opentelemetry.instrumentation.sqlalchemy.engine import EngineTracer
+
+        tracer = trace.get_tracer("opentelemetry.instrumentation.sqlalchemy")
+        connections = metrics.get_meter(__name__).create_up_down_counter(
+            "db.client.connections.usage", unit="connections"
+        )
+        EngineTracer(tracer, engine, connections)  # type: ignore[no-untyped-call]  # пакет без аннотаций
+    except (ImportError, TypeError, AttributeError):
+        logger.warning(
+            "спаны запросов к базе выключены: EngineTracer несовместим", exc_info=True
+        )
 
 
 # Атрибуты серверного спана FastAPI (semconv HTTP).

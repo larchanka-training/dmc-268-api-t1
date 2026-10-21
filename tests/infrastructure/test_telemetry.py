@@ -5,17 +5,21 @@
 
 import io
 import logging
+import sys
 from typing import Any
 from uuid import UUID
 
 import pika
 import pytest
 from opentelemetry import trace
+from opentelemetry.instrumentation.sqlalchemy import engine as sqlalchemy_engine
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode
 
+from app.api.factory import create_app
+from app.config import Settings
 from app.domain.entities import ReviewJob
 from app.domain.enums import ReviewRunStage
 from app.infrastructure import telemetry
@@ -25,6 +29,7 @@ from app.infrastructure.telemetry import (
     build_tracer_provider,
     current_trace_id,
 )
+from app.worker import factory as worker_factory
 
 RUN_ID = UUID(int=2)
 JOB = ReviewJob(
@@ -223,3 +228,70 @@ def test_an_unsupported_exporter_warns_once_and_exports_nothing(
     assert record.levelname == "WARNING"
     assert "otlp" in record.getMessage()
     assert console.getvalue() == ""
+
+
+# --- SQL-спаны через внутренний `EngineTracer` --------------------------------------
+
+SETTINGS = Settings(
+    database_url="postgresql+psycopg://test:test@localhost/test",
+    rabbitmq_url="amqp://guest:guest@localhost//",
+    github_webhook_secret="test-secret",
+    llm_backend="stub",
+)
+
+
+def _broken(error: type[Exception]) -> Any:
+    def engine_tracer(*args: object) -> None:
+        raise error("EngineTracer сменил сигнатуру")
+
+    return engine_tracer
+
+
+@pytest.fixture(params=[ImportError, TypeError, AttributeError])
+def broken_engine_tracer(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> type[Exception]:
+    """`EngineTracer` несовместим: класс переехал (`ImportError`) или сменил интерфейс."""
+    error: type[Exception] = request.param
+    if error is ImportError:
+        # `None` в `sys.modules` — так `import` падает `ImportError`.
+        monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation.sqlalchemy.engine", None)
+    else:
+        monkeypatch.setattr(sqlalchemy_engine, "EngineTracer", _broken(error))
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+    return error
+
+
+def _engine_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "EngineTracer" in r.getMessage()]
+
+
+def test_an_incompatible_engine_tracer_does_not_stop_the_api(
+    broken_engine_tracer: type[Exception], caplog: pytest.LogCaptureFixture
+) -> None:
+    create_app(SETTINGS)
+
+    [record] = _engine_warnings(caplog)
+    assert record.levelname == "WARNING"
+
+
+def test_an_incompatible_engine_tracer_does_not_stop_the_worker(
+    broken_engine_tracer: type[Exception],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[bool] = []
+
+    class _Worker:
+        def run(self, handler: object, **kwargs: object) -> None:
+            started.append(True)
+
+    monkeypatch.setattr(worker_factory, "build_worker", lambda settings: _Worker())
+
+    worker_factory.run_worker(SETTINGS)
+
+    assert started == [True]
+    [record] = _engine_warnings(caplog)
+    assert record.levelname == "WARNING"
