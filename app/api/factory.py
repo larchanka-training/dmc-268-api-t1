@@ -43,10 +43,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        yield
         # uvicorn на SIGTERM доводит lifespan до конца: спаны выгружаются здесь,
-        # до выхода процесса.
-        telemetry.shutdown_tracing()
+        # до выхода процесса, — и когда остановка прервана исключением.
+        try:
+            yield
+        finally:
+            telemetry.shutdown_tracing()
 
     # Схема — из роутов и моделей (`app/api/openapi.py`); ответ `default` с каталогом
     # ошибок — у каждой операции. ReDoc не нужен — хватает одного просмотрщика.
