@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import NoReturn
+from typing import Any, NoReturn
 from uuid import UUID
 
 import pytest
@@ -14,7 +14,13 @@ from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.review_pipeline import run_review
-from app.domain.entities import MergeRequest, ReviewJob, ReviewRun, RuleRef
+from app.domain.entities import (
+    MergeRequest,
+    ReviewJob,
+    ReviewRun,
+    ReviewRunStep,
+    RuleRef,
+)
 from app.domain.enums import (
     MergeRequestState,
     ReviewRunStage,
@@ -31,6 +37,7 @@ from app.domain.llm_errors import (
 )
 from app.domain.prompt import PromptTexts
 from app.domain.vcs_errors import VcsError
+from app.infrastructure.llm.fallback import FallbackLlmGateway
 
 from ..fakes.context import FakeCache, FakeExtractor
 from ..fakes.llm_gateway import (
@@ -879,3 +886,113 @@ def test_a_failure_while_closing_the_step_does_not_mask_the_original_error() -> 
 
     assert _completed(uow).status is ReviewRunStatus.FAILED
     assert _steps(uow)[-1][:2] == (ReviewRunStage.ANALYSING, ReviewRunStepStatus.RUNNING)
+
+
+def _failing_step_writes(
+    uow: FakeUnitOfWork, fails: Callable[[ReviewRunStep], bool]
+) -> list[ReviewRunStep]:
+    """Запись шага, для которого `fails` истинно, падает как сбой базы; такие шаги — в списке."""
+    failed: list[ReviewRunStep] = []
+    real_add, real_update = uow.review_run_steps.add, uow.review_run_steps.update
+
+    def guarded(write: Callable[[ReviewRunStep], None]) -> Callable[[ReviewRunStep], None]:
+        def wrapper(step: ReviewRunStep) -> None:
+            if fails(step):
+                failed.append(step)
+                raise ConnectionError("база недоступна")
+            write(step)
+
+        return wrapper
+
+    uow.review_run_steps.add = guarded(real_add)  # type: ignore[method-assign,assignment]
+    uow.review_run_steps.update = guarded(real_update)  # type: ignore[method-assign,assignment]
+    return failed
+
+
+def _fallback(
+    local: list[LlmResponse[Any] | Exception], hosted: list[LlmResponse[Any] | Exception]
+) -> FallbackLlmGateway:
+    return FallbackLlmGateway(
+        [("local", ScriptedLlmGateway(local)), ("hosted", ScriptedLlmGateway(hosted))]
+    )
+
+
+def test_a_failed_retry_write_hands_the_review_to_the_next_provider() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    failed = _failing_step_writes(
+        uow, lambda s: s.stage is ReviewRunStage.ANALYSING and s.status is ReviewRunStepStatus.FAILED
+    )
+    gateway = _fallback(
+        [LlmError("локальная модель недоступна", tokens_used=10)],
+        [review_response(tokens=5)],
+    )
+
+    _run(uow, gateway)
+
+    assert [s.error_code for s in failed] == ["LLM_UNAVAILABLE"]
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.COMPLETED
+    assert run.tokens_used == 15
+    # Неудавшаяся попытка не закрылась и осталась `running`; повтор записан своим шагом.
+    assert _steps(uow)[2:] == [
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.RUNNING, None, None),
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.COMPLETED, 5, None),
+        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, None, None),
+        (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None),
+    ]
+
+
+def test_a_failed_retry_start_write_keeps_the_review_going() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    analysing_adds = 0
+
+    def second_analysing_start(step: ReviewRunStep) -> bool:
+        nonlocal analysing_adds
+        if step.stage is not ReviewRunStage.ANALYSING or step.status is not ReviewRunStepStatus.RUNNING:
+            return False
+        analysing_adds += 1
+        return analysing_adds == 2
+
+    _failing_step_writes(uow, second_analysing_start)
+    gateway = _fallback([LlmError("локальная модель недоступна", tokens_used=10)], [review_response(tokens=5)])
+
+    _run(uow, gateway)
+
+    assert _completed(uow).status is ReviewRunStatus.COMPLETED
+    # Начало повтора не записалось — закрывать нечего; следующие этапы пишутся как обычно.
+    assert _steps(uow)[2:] == [
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 10, "LLM_UNAVAILABLE"),
+        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, None, None),
+        (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None),
+    ]
+
+
+def test_a_failed_retry_write_hands_the_verifier_to_the_next_provider() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    failed = _failing_step_writes(
+        uow, lambda s: s.stage is ReviewRunStage.VERIFYING and s.status is ReviewRunStepStatus.FAILED
+    )
+    gateway = _fallback(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка"), tokens=5),
+            LlmError("локальная модель недоступна", tokens_used=2),
+        ],
+        [verification_response(("F1", "keep"), tokens=7)],
+    )
+
+    _run(uow, gateway)
+
+    assert [s.error_code for s in failed] == ["LLM_UNAVAILABLE"]
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.COMPLETED
+    # Верификатор ответил через резервного провайдера: fail-open не понадобился.
+    assert run.verification is VerificationOutcome.VERIFIED
+    assert run.tokens_used == 5 + 2 + 7
+    assert _steps(uow)[3:] == [
+        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.RUNNING, None, None),
+        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, 7, None),
+        (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None),
+    ]

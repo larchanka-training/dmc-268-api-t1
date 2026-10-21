@@ -36,7 +36,14 @@ def spent_tokens(error: BaseException) -> int | None:
 
 
 class StepRecorder:
-    """Шаги одного прогона. Открыт не больше одного шага за раз."""
+    """Шаги одного прогона. Открыт не больше одного этапа за раз.
+
+    Журнал шагов вторичен: сбой записи шага логируется и не прерывает ни
+    прогон, ни вызов модели, из которого пришёл повтор. Этап при этом остаётся
+    открытым, и следующий `finish` или `retry` его закрывает: шаг, чьё начало
+    не записалось, просто не закрывается (закрывать нечего), а незакрытый
+    из-за сбоя шаг остаётся `running`.
+    """
 
     def __init__(
         self,
@@ -52,72 +59,95 @@ class StepRecorder:
         self._now = now
         self._monotonic = monotonic
         self._new_id = new_id
+        # Открытый этап и его записанный шаг: шага нет, если не записалось начало.
+        self._stage: ReviewRunStage | None = None
         self._step: ReviewRunStep | None = None
         self._started = 0.0
-        # Токены текущего вызова модели, уже записанные в шаги этого этапа.
+        # Токены текущего вызова модели, уже отнесённые к шагам этого этапа.
         self._recorded_tokens = 0
 
     def start(self, stage: ReviewRunStage, *, at: datetime | None = None) -> None:
         """Открыть шаг этапа. `at` — начало, если вызывающий уже прочёл часы."""
+        self._stage = stage
         self._recorded_tokens = 0
-        self._open(stage, self._now() if at is None else at)
+        self._open(self._now() if at is None else at)
 
     def finish(
         self, *, tokens_used: int | None = None, error_code: str | None = None
     ) -> None:
-        """Закрыть открытый шаг: с `error_code` — упавшим, без него — завершённым.
+        """Закрыть открытый этап: с `error_code` — упавшим, без него — завершённым.
 
         `tokens_used` — нарастающий итог вызова модели этапа; `None` — шаг
         модель не вызывал.
         """
-        step = self._current()
-        closed = finish_step(
-            step,
-            duration_seconds=self._monotonic() - self._started,
-            tokens_used=self._share(tokens_used),
-            error_code=error_code,
-        )
-        with self._uow:
-            self._uow.review_run_steps.update(closed)
-            self._uow.commit()
-        self._step = None
+        self._close(tokens_used=tokens_used, error_code=error_code)
+        self._stage = None
 
     def retry(self, error: LlmError, tokens_so_far: int) -> None:
-        """Попытка вызова модели не удалась, вызов пробует снова: новый шаг того же этапа."""
-        stage = self._current().stage
-        self.finish(tokens_used=tokens_so_far, error_code=error.code)
-        self._open(stage, self._now())
+        """Попытка вызова модели не удалась, вызов пробует снова: новый шаг того же этапа.
+
+        Зовётся изнутри вызова модели, поэтому сбой записи не выходит наружу:
+        вызов уходит следующей попытке или провайдеру, как без журнала.
+        """
+        self._close(tokens_used=tokens_so_far, error_code=error.code)
+        self._open(self._now())
 
     def fail(self, error: BaseException) -> None:
-        """Закрыть открытый шаг упавшим из-за `error`; нет открытого — ничего.
+        """Закрыть открытый этап упавшим из-за `error`; нет открытого — ничего.
 
         Зовётся на пути сбоя прогона, поэтому сбой этой записи логируется и
         не подменяет исходное исключение. Шаг останется `running`.
         """
-        if self._step is None:
+        if self._stage is None:
             return
         try:
             self.finish(tokens_used=spent_tokens(error), error_code=error_code(error))
         except Exception:
-            logger.exception(
-                "не удалось закрыть шаг %s прогона %s", self._step.id, self._run_id
-            )
+            logger.exception("не удалось закрыть этап %s прогона %s", self._stage, self._run_id)
 
-    def _open(self, stage: ReviewRunStage, started_at: datetime) -> None:
+    def _open(self, started_at: datetime) -> None:
         step = start_step(
-            self._run_id, stage, started_at=started_at, step_id=self._new_id()
+            self._run_id, self._current_stage(), started_at=started_at, step_id=self._new_id()
         )
-        with self._uow:
-            self._uow.review_run_steps.add(step)
-            self._uow.commit()
+        if not self._write(step, "начало", lambda: self._uow.review_run_steps.add(step)):
+            return
         # Открытым шаг считается только записанный: иначе закрывать нечего.
         self._step = step
         self._started = self._monotonic()
 
-    def _current(self) -> ReviewRunStep:
-        if self._step is None:
-            raise RuntimeError(f"у прогона {self._run_id} нет открытого шага")
-        return self._step
+    def _close(self, *, tokens_used: int | None, error_code: str | None) -> None:
+        self._current_stage()
+        # Доля считается и для шага, который не записан: иначе токены этой
+        # попытки достались бы следующей.
+        share = self._share(tokens_used)
+        step, self._step = self._step, None
+        if step is None:
+            return
+        closed = finish_step(
+            step,
+            duration_seconds=self._monotonic() - self._started,
+            tokens_used=share,
+            error_code=error_code,
+        )
+        self._write(closed, "исход", lambda: self._uow.review_run_steps.update(closed))
+
+    def _write(self, step: ReviewRunStep, what: str, write: Callable[[], None]) -> bool:
+        """Записать шаг своим коммитом; сбой — в лог, наружу не выходит."""
+        try:
+            with self._uow:
+                write()
+                self._uow.commit()
+        except Exception:
+            logger.exception(
+                "не удалось записать %s шага %s прогона %s", what, step.id, self._run_id
+            )
+            return False
+        return True
+
+    def _current_stage(self) -> ReviewRunStage:
+        if self._stage is None:
+            raise RuntimeError(f"у прогона {self._run_id} нет открытого этапа")
+        return self._stage
 
     def _share(self, tokens_so_far: int | None) -> int | None:
         if tokens_so_far is None:
