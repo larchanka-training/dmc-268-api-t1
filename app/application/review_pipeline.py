@@ -243,6 +243,9 @@ def run_review(
         steps.fail(exc)
         _mark_failed(uow, job.review_run_id, exc, now())
         raise
+    except BaseException as exc:
+        steps.interrupt(exc)
+        raise
 
 
 @dataclass(frozen=True, slots=True)

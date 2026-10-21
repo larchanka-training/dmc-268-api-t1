@@ -7,6 +7,7 @@ OTel несёт `review_run_id` и ложится в трейс воркера �
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import NoReturn
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,7 +15,7 @@ import pytest
 from app.application.ports.stage_tracer import StageSpan
 from app.application.review_run_steps import StepRecorder
 from app.domain.entities import ReviewRunStep
-from app.domain.enums import ReviewRunStage
+from app.domain.enums import ReviewRunStage, ReviewRunStepStatus
 from app.domain.llm_errors import LlmOutputError, LlmTimeoutError
 from app.domain.vcs_errors import VcsError
 
@@ -118,6 +119,27 @@ def test_a_model_failure_leaves_no_span_open() -> None:
 
     assert _spans(tracer)[-1] == (ReviewRunStage.ANALYSING, "LLM_TIMEOUT")
     assert tracer.open == 0
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(1)])
+def test_an_interrupted_stage_closes_its_span_and_leaves_the_step_running(
+    error: BaseException,
+) -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    tracer = _RecordingTracer()
+
+    class _Interrupting:
+        def complete(self, request: object) -> NoReturn:
+            raise error
+
+    with pytest.raises(type(error)):
+        _run(uow, _Interrupting(), stage_tracer=tracer)
+
+    assert _spans(tracer)[-1] == (ReviewRunStage.ANALYSING, "INTERNAL_ERROR")
+    assert tracer.open == 0
+    # Процесс завершается: исход шага не пишется, прогон доведёт выметатель.
+    assert _steps(uow)[-1][:2] == (ReviewRunStage.ANALYSING, ReviewRunStepStatus.RUNNING)
 
 
 def test_without_a_tracer_steps_are_recorded_as_before() -> None:

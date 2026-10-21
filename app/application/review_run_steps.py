@@ -112,6 +112,15 @@ class StepRecorder:
         if self._stage is not None:
             self.finish(tokens_used=spent_tokens(error), error_code=error_code(error))
 
+    def interrupt(self, error: BaseException) -> None:
+        """Закрыть спан открытого этапа упавшим: прогон прерван не `Exception`.
+
+        `KeyboardInterrupt` или `SystemExit` завершают процесс: шаг и прогон в базе
+        не трогаются — прогон переведёт в `failed` выметатель, как после смерти
+        воркера. Без этого спан этапа не закрылся бы и не попал в трейс.
+        """
+        self._end_span(error_code(error))
+
     def _open(self, started_at: datetime) -> None:
         stage = self._current_stage()
         # Прежний этап не закрыли (`start` без `finish`): его спан закрывается здесь,
