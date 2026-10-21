@@ -297,7 +297,7 @@ SETTINGS = Settings(
 
 
 def _broken(error: type[Exception]) -> Any:
-    def engine_tracer(*args: object) -> None:
+    def engine_tracer(*args: object, **kwargs: object) -> None:
         raise error("EngineTracer сменил сигнатуру")
 
     return engine_tracer

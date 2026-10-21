@@ -198,7 +198,9 @@ def instrument_engine(engine: Engine) -> None:
         connections = metrics.get_meter(__name__).create_up_down_counter(
             "db.client.connections.usage", unit="connections"
         )
-        EngineTracer(tracer, engine, connections)  # type: ignore[no-untyped-call]  # пакет без аннотаций
+        # Именем, а не позицией: если параметры сдвинутся, вызов упадёт `TypeError`, а
+        # не отдаст счётчик в чужой параметр (следом идёт `enable_commenter`).
+        EngineTracer(tracer, engine, connections_usage=connections)  # type: ignore[no-untyped-call]  # пакет без аннотаций
     except (ImportError, TypeError, AttributeError):
         logger.warning(
             "спаны запросов к базе выключены: EngineTracer несовместим", exc_info=True
