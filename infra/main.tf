@@ -203,6 +203,11 @@ resource "docker_container" "api" {
   image   = docker_image.api.image_id
   restart = "unless-stopped"
 
+  # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
+  # принудительно (SIGKILL): lifespan не завершается, спаны не выгружаются.
+  # С ним — сначала SIGTERM и ожидание остановки; 10 с — как у `docker stop`.
+  destroy_grace_seconds = 10
+
   # Те же основания, что у migrate: образ один.
   read_only     = true
   tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=64m" }
