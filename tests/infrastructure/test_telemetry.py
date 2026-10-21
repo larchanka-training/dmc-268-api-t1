@@ -169,6 +169,22 @@ def test_the_message_body_stays_domain_data_only(
     assert b"traceparent" not in channel.published[0]["body"]
 
 
+@pytest.mark.parametrize("error", [ValueError("сбой"), KeyboardInterrupt(), SystemExit(1)])
+def test_a_failure_of_processing_marks_the_process_span_as_an_error(
+    spans: InMemorySpanExporter, error: BaseException
+) -> None:
+    """И `Exception`, и `KeyboardInterrupt`/`SystemExit`: ERROR, событие, исключение наружу."""
+    with pytest.raises(type(error)), consuming_span(None, delivery_tag=1):
+        raise error
+
+    (process,) = spans.get_finished_spans()
+    assert process.status.status_code is StatusCode.ERROR
+    (event,) = process.events
+    assert event.name == "exception"
+    assert event.attributes is not None
+    assert event.attributes["exception.type"] == type(error).__name__
+
+
 @pytest.mark.parametrize(
     "properties",
     [

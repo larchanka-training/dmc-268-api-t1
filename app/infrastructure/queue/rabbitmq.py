@@ -31,6 +31,7 @@ from pika.exceptions import AMQPConnectionError, ChannelWrongStateError
 from pika.exchange_type import ExchangeType
 
 from app.domain.entities import ReviewJob
+from app.infrastructure.telemetry import record_current_exception
 
 QUEUE_NAME = "review_jobs"
 DLX_NAME = "review_jobs.dlx"
@@ -127,7 +128,8 @@ def consuming_span(
     Нет заголовка `traceparent` (сообщение старше трассировки, его переложили руками)
     или он битый — спан начинает новый трейс, обработка идёт как обычно. Исключение
     обработки выходит наружу через контекст-менеджер: спан записывает его событием
-    `exception` и закрывается со статусом ошибки.
+    `exception` и закрывается со статусом ошибки. `KeyboardInterrupt` и `SystemExit` —
+    тоже: их отмечаем сами, `start_as_current_span` видит только `Exception`.
     """
     headers = (properties.headers if properties is not None else None) or {}
     # pika отдаёт строковый заголовок `str`, а не декодируемый в UTF-8 — `bytes`.
@@ -147,7 +149,13 @@ def consuming_span(
             "messaging.rabbitmq.message.delivery_tag": delivery_tag,
         },
     ):
-        yield
+        try:
+            yield
+        except Exception:
+            raise
+        except BaseException as exc:
+            record_current_exception(exc)
+            raise
 
 
 class RabbitMQJobQueue:
