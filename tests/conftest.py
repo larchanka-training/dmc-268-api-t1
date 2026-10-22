@@ -14,11 +14,23 @@ import os
 from collections.abc import Iterator
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.infrastructure.db import models  # noqa: F401  (регистрирует таблицы)
 from app.infrastructure.db.base import Base
+
+# Провайдер трейсов глобальный и ставится один раз на процесс — до первого
+# `create_app`: тогда `configure_tracing` его не подменяет, и спаны всех тестов
+# ложатся в память (фикстура `spans`), а не уходят наружу.
+SPAN_EXPORTER = InMemorySpanExporter()
+_provider = TracerProvider()
+_provider.add_span_processor(SimpleSpanProcessor(SPAN_EXPORTER))
+trace.set_tracer_provider(_provider)
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 TEST_RABBITMQ_URL = os.environ.get("TEST_RABBITMQ_URL")
@@ -103,3 +115,21 @@ def session(clean_db) -> Iterator[Session]:
         if transaction.is_active:
             transaction.rollback()
         connection.close()
+
+
+@pytest.fixture(autouse=True)
+def _forget_spans() -> Iterator[None]:
+    """Спаны теста не копятся в памяти до конца сессии: экспортёр общий на все тесты."""
+    yield
+    SPAN_EXPORTER.clear()
+
+
+@pytest.fixture
+def spans() -> InMemorySpanExporter:
+    """Спаны, законченные за этот тест.
+
+    Очистка и здесь, а не только после теста: фикстуры, поднятые раньше `spans`
+    (`clean_db` на инструментированном движке), уже могли закончить свои спаны.
+    """
+    SPAN_EXPORTER.clear()
+    return SPAN_EXPORTER
