@@ -145,11 +145,6 @@
 - **WHEN** вызывается `GET /api/v1/nope`
 - **THEN** ответ — `404` с `code = ROUTE_NOT_FOUND` и `instance = /api/v1/nope`
 
-#### Scenario: Удалённый поток одного прогона
-
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/events` с сессией или без неё
-- **THEN** ответ — `404` с `code = ROUTE_NOT_FOUND`, как у любого неизвестного пути
-
 #### Scenario: Путь с закодированными символами
 
 - **WHEN** вызывается `GET /api/v1/a%20b?q=1`

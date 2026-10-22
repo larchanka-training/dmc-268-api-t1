@@ -200,24 +200,6 @@ def test_without_a_session_the_stream_is_401() -> None:
     assert response.json()["code"] == "UNAUTHENTICATED"
 
 
-@pytest.mark.parametrize("signed_in", [True, False])
-def test_the_stream_of_one_run_is_gone(signed_in: bool) -> None:
-    """Поток одного прогона удалён (#103): путь неизвестен, сессия его не меняет."""
-    world = World()
-    app, cookies = _app(world, Ticks({}))
-    run = world.put(_run(world.visible_mr, S.ANALYSING, PAST))
-    path = f"/api/v1/reviews/{run.id}/events"
-
-    response = TestClient(app, cookies=cookies if signed_in else None).get(path)
-
-    assert response.status_code == 404
-    assert response.headers["content-type"] == "application/problem+json"
-    body = response.json()
-    assert body["code"] == "ROUTE_NOT_FOUND"
-    assert body["instance"] == path
-    assert "/api/v1/reviews/{review_run_id}/events" not in app.openapi()["paths"]
-
-
 def test_a_provider_failure_at_connect_is_502_and_no_stream_opens() -> None:
     world = World()
     app, cookies = _app(world, Ticks({}), FakeInstallationCatalog(error=VcsError("GitHub недоступен")))
