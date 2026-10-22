@@ -65,17 +65,20 @@ def _transition(
     return new_run
 
 
-def _mark_failed(uow: UnitOfWork, run_id: UUID, exc: Exception, now: datetime) -> None:
+def _mark_failed(
+    uow: UnitOfWork, run_id: UUID, exc: Exception, now: datetime, *, unrecorded_tokens: int = 0
+) -> None:
     """Перевести прогон в failed по свежей строке из базы.
 
     Копия прогона в памяти могла разойтись с базой (строка ушла вперёд), и
     переход от неё бросил бы сам. Терминальный прогон не трогаем. Сбой этой
     записи (например, база недоступна) логируется и не подменяет исходное
-    исключение - зависший прогон выметет `sweep_stale_runs`. Токены, которые
-    успел израсходовать сбойный вызов модели, добавляются к затратам прогона.
+    исключение - зависший прогон выметет `sweep_stale_runs`. К затратам
+    прогона добавляются токены, которые успел израсходовать сбойный вызов
+    модели, и `unrecorded_tokens` - токены ответов, ещё не записанные в прогон.
     Шаги, оставшиеся `running`, закрываются следом (`close_abandoned_steps`).
     """
-    spent = exc.tokens_used if isinstance(exc, LlmError) else 0
+    spent = unrecorded_tokens + (exc.tokens_used if isinstance(exc, LlmError) else 0)
     try:
         with uow:
             run = uow.review_runs.get(run_id)
@@ -139,6 +142,9 @@ def run_review(
 
     started_at = monotonic()
     steps = StepRecorder(uow, run.id, now=now, monotonic=monotonic, new_id=new_id)
+    # Токены ответов модели, которые ещё не записаны в прогон: при сбое их
+    # добавляет `_mark_failed`.
+    unrecorded_tokens = 0
 
     try:
         run = _transition(uow, run, ReviewRunStatus.BUILDING_CONTEXT, now())
@@ -165,12 +171,14 @@ def run_review(
             uow.commit()
         steps.finish()
 
-        run = _transition(uow, run, ReviewRunStatus.ANALYSING, now())
-
+        # Каждая запись прогона - внутри открытого шага: её сбой падает в шаг
+        # с кодом, а не оставляет прогон `failed` при одних `completed`-шагах.
         steps.start(ReviewRunStage.ANALYSING)
+        run = _transition(uow, run, ReviewRunStatus.ANALYSING, now())
         result = request_review(
             context, prompt_texts, llm_gateway, limits=llm_limits, on_retry=steps.retry
         )
+        unrecorded_tokens = result.tokens_used
         # Отсев - часть этапа `analysing`: он разбирает ответ модели. Сбой
         # после ответа закрывает шаг с уже известными токенами - иначе их
         # не узнать: исключение отсева токенов не несёт.
@@ -190,8 +198,8 @@ def run_review(
         # Два долгих вызова модели подряд не должны выглядеть для `find_stale`
         # одним прогоном без прогресса.
         moment = now()
-        run = _record_progress(uow, run, moment)
         steps.start(ReviewRunStage.VERIFYING, at=moment)
+        run = _record_progress(uow, run, moment)
         verification = _verify(
             context,
             prompt_texts,
@@ -204,10 +212,13 @@ def run_review(
         steps.finish(
             tokens_used=verification.step_tokens, error_code=verification.error_code
         )
+        unrecorded_tokens += verification.tokens_used
         if result.findings and not verification.findings:
             # Сводка модели описывает замечания, которых в публикации не будет:
             # публикация возьмёт стандартную.
             result = replace(result, summary=None)
+        # Запись замечаний и переход - уже публикация: их сбой - шаг `publishing`.
+        steps.start(ReviewRunStage.PUBLISHING)
         # Модель и затраты - вместе с замечаниями: сбой публикации их не стирает.
         run = replace(
             run,
@@ -223,10 +234,9 @@ def run_review(
                 uow.findings.add(finding)
             uow.review_runs.update(run)
             uow.commit()
+        unrecorded_tokens = 0
 
         run = _transition(uow, run, ReviewRunStatus.PUBLISHING, now())
-
-        steps.start(ReviewRunStage.PUBLISHING)
         publish_review(
             job,
             run,
@@ -242,7 +252,9 @@ def run_review(
         _transition(uow, run, ReviewRunStatus.COMPLETED, now())
     except Exception as exc:
         steps.fail(exc)
-        _mark_failed(uow, job.review_run_id, exc, now())
+        _mark_failed(
+            uow, job.review_run_id, exc, now(), unrecorded_tokens=unrecorded_tokens
+        )
         raise
 
 

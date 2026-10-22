@@ -1123,3 +1123,74 @@ def test_a_failed_run_leaves_no_running_steps_when_closing_its_step_failed() -> 
         None,
         "REVIEW_RUN_STALE",
     )
+
+
+def test_a_failure_saving_the_findings_fails_the_publishing_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    def broken_add(finding: object) -> NoReturn:
+        raise RuntimeError("нарушено ограничение")
+
+    monkeypatch.setattr(uow.findings, "add", broken_add)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка"), tokens=5),
+            verification_response(("F1", "keep"), tokens=7),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="нарушено ограничение"):
+        _run(uow, gateway)
+
+    assert _steps(uow)[3:] == [
+        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, 7, None),
+        (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.FAILED, None, "INTERNAL_ERROR"),
+    ]
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    # Токены ответов, не дошедшие до прогона вместе с замечаниями, не теряются.
+    assert run.tokens_used == 12
+
+
+def test_a_failed_transition_to_analysing_fails_the_analysing_step() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    real_update = uow.review_runs.update
+
+    def update(run: ReviewRun) -> None:
+        if run.status is ReviewRunStatus.ANALYSING:
+            raise ConnectionError("база недоступна")
+        real_update(run)
+
+    uow.review_runs.update = update  # type: ignore[method-assign]
+
+    with pytest.raises(ConnectionError):
+        _run(uow, ScriptedLlmGateway([review_response()]))
+
+    assert _steps(uow)[-1] == (
+        ReviewRunStage.ANALYSING,
+        ReviewRunStepStatus.FAILED,
+        None,
+        "INTERNAL_ERROR",
+    )
+    assert _completed(uow).status is ReviewRunStatus.FAILED
+
+
+def test_a_screening_failure_counts_the_review_tokens_in_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    def broken_screening(*args: object, **kwargs: object) -> NoReturn:
+        raise RuntimeError("отсев сломан")
+
+    monkeypatch.setattr("app.application.review_pipeline.screen_findings", broken_screening)
+
+    with pytest.raises(RuntimeError):
+        _run(uow, ScriptedLlmGateway([review_response(tokens=25)]))
+
+    assert _completed(uow).tokens_used == 25
