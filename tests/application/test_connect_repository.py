@@ -20,8 +20,8 @@ from ..fakes.unit_of_work import FakeUnitOfWork
 
 NOW = datetime(2026, 10, 22, 9, 30, tzinfo=UTC)
 NEW_ID = UUID("01920000-0000-7000-8000-000000000041")
-API = InstallationRepository(provider_id="101", full_name="octo-org/api", default_branch="main", installation_id=7)
-WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", default_branch="trunk", installation_id=8)
+API = InstallationRepository(provider_id="101", full_name="octo-org/api", default_branch="main", installation_id=7, private=True)
+WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", default_branch="trunk", installation_id=8, private=True)
 
 
 def _registered(provider_id: str) -> Repository:

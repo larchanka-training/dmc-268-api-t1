@@ -51,6 +51,13 @@ def _translate_role(role_name: str | None, permission: str) -> RepositoryRole | 
     return _KNOWN_ROLES.get(name, RepositoryRole.CUSTOM)
 
 
+def _strict_bool(value: object) -> bool:
+    """`private` из ответа GitHub; не булево — неожиданное тело, а не «публичный»."""
+    if not isinstance(value, bool):
+        raise TypeError("private — не булево")
+    return value
+
+
 class GitHubInstallationCatalog:
     """Репозитории установок GitHub App и права пользователя на них."""
 
@@ -67,6 +74,12 @@ class GitHubInstallationCatalog:
         return repositories
 
     def user_role(self, repository: InstallationRepository, login: str) -> RepositoryRole | None:
+        # У приватного репозитория ответ ручки прав для постороннего не равен
+        # 404 или `none` — на стенде он давал доступ к чужим приватным
+        # репозиториям. Поэтому сначала прямая проверка «есть ли у пользователя
+        # доступ»: 204 — есть, 404 — нет (change `repository-visibility-private`).
+        if repository.private and not self._is_collaborator(repository, login):
+            return None
         url = f"/repos/{repository.full_name}/collaborators/{login}/permission"
         try:
             response = self._gateway._get(url, repository.installation_id, _JSON_ACCEPT)
@@ -82,6 +95,16 @@ class GitHubInstallationCatalog:
         except (ValueError, KeyError, TypeError, AttributeError) as error:
             raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}: {error!r}") from error
         return _translate_role(role_name, permission)
+
+    def _is_collaborator(self, repository: InstallationRepository, login: str) -> bool:
+        url = f"/repos/{repository.full_name}/collaborators/{login}"
+        try:
+            response = self._gateway._get(url, repository.installation_id, _JSON_ACCEPT)
+        except VcsNotFoundError:
+            return False
+        if response.status_code != 204:
+            raise VcsError(f"GitHub API: HTTP {response.status_code} вместо 204 на GET {url}")
+        return True
 
     def _installation_ids(self) -> list[int]:
         ids: list[int] = []
@@ -113,6 +136,7 @@ class GitHubInstallationCatalog:
                         full_name=item["full_name"],
                         default_branch=item["default_branch"],
                         installation_id=installation_id,
+                        private=_strict_bool(item["private"]),
                     )
                     for item in batch
                 )

@@ -57,6 +57,9 @@ class InstallationRepository:
     full_name: str
     default_branch: str
     installation_id: int
+    # Приватный репозиторий видят только те, у кого есть к нему доступ;
+    # публичный — все (change `repository-visibility-private`).
+    private: bool
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,7 +3,8 @@
 Один `httpx.MockTransport` обслуживает и выдачу installation tokens, и
 запросы каталога. Формы ответов — из документации GitHub REST:
 `GET /app/installations` (массив), `GET /installation/repositories`
-(`{"total_count", "repositories"}`), `GET /repos/{owner}/{repo}/collaborators/{username}/permission`.
+(`{"total_count", "repositories"}`), `GET /repos/{owner}/{repo}/collaborators/{username}`
+(204 или 404), `GET /repos/{owner}/{repo}/collaborators/{username}/permission`.
 """
 
 from collections.abc import Callable
@@ -43,7 +44,7 @@ def token_response(request: httpx.Request) -> httpx.Response | None:
 
 
 def repo_json(n: int) -> dict[str, Any]:
-    return {"id": n, "full_name": f"octo-org/repo-{n}", "default_branch": "main"}
+    return {"id": n, "full_name": f"octo-org/repo-{n}", "default_branch": "main", "private": n % 2 == 0}
 
 
 def test_lists_repositories_of_every_installation_page_by_page(rsa_key_pair: RsaKeyPair) -> None:
@@ -75,8 +76,9 @@ def test_lists_repositories_of_every_installation_page_by_page(rsa_key_pair: Rsa
 
     assert len(repositories) == 101
     assert repositories[0] == InstallationRepository(
-        provider_id="1", full_name="octo-org/repo-1", default_branch="main", installation_id=500
+        provider_id="1", full_name="octo-org/repo-1", default_branch="main", installation_id=500, private=False
     )
+    assert repositories[1].private is True
     assert repositories[-1].provider_id == "1000"
     assert "/app/installations?per_page=100&page=1" in seen
     assert "/app/installations?per_page=100&page=2" in seen
@@ -113,7 +115,7 @@ def test_the_role_comes_from_role_name_then_permission(
         assert request.headers["Authorization"] == "Bearer tok-7"
         return httpx.Response(200, json=body)
 
-    repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7)
+    repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7, private=False)
     assert make_catalog(rsa_key_pair, handler).user_role(repository, "octocat") is expected
 
 
@@ -121,7 +123,7 @@ def test_a_user_who_is_not_a_collaborator_has_no_access(rsa_key_pair: RsaKeyPair
     def handler(request: httpx.Request) -> httpx.Response:
         return token_response(request) or httpx.Response(404, json={"message": "Not Found"})
 
-    repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7)
+    repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7, private=False)
     assert make_catalog(rsa_key_pair, handler).user_role(repository, "stranger") is None
 
 
@@ -129,7 +131,7 @@ def test_a_role_body_without_permission_is_a_vcs_error(rsa_key_pair: RsaKeyPair)
     def handler(request: httpx.Request) -> httpx.Response:
         return token_response(request) or httpx.Response(200, json={"role_name": "admin"})
 
-    repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7)
+    repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7, private=False)
     with pytest.raises(VcsError):
         make_catalog(rsa_key_pair, handler).user_role(repository, "octocat")
 
@@ -174,7 +176,7 @@ def test_a_failing_permission_request_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -
     def handler(request: httpx.Request) -> httpx.Response:
         return token_response(request) or httpx.Response(500)
 
-    repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7)
+    repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7, private=False)
     with pytest.raises(VcsUnavailableError):
         make_catalog(rsa_key_pair, handler).user_role(repository, "octocat")
 
@@ -190,3 +192,68 @@ def test_a_missing_private_key_is_an_auth_error() -> None:
     catalog = GitHubInstallationCatalog(auth, client, GitHubVcsGateway(auth, client))
     with pytest.raises(VcsAuthError):
         catalog.list_repositories()
+
+
+PRIVATE = InstallationRepository("101", "octo-org/secret", "main", installation_id=7, private=True)
+
+
+def test_a_stranger_does_not_see_a_private_repository_whatever_the_role_endpoint_says(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """Регрессия стенда: ручка прав отдавала постороннему не 404 и не `none`."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (token := token_response(request)) is not None:
+            return token
+        seen.append(request.url.path)
+        if request.url.path == "/repos/octo-org/secret/collaborators/stranger":
+            return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(200, json={"permission": "read", "role_name": "read"})
+
+    assert make_catalog(rsa_key_pair, handler).user_role(PRIVATE, "stranger") is None
+    assert seen == ["/repos/octo-org/secret/collaborators/stranger"]
+
+
+def test_a_collaborator_of_a_private_repository_gets_the_role(rsa_key_pair: RsaKeyPair) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (token := token_response(request)) is not None:
+            return token
+        if request.url.path == "/repos/octo-org/secret/collaborators/octocat":
+            return httpx.Response(204)
+        assert request.url.path == "/repos/octo-org/secret/collaborators/octocat/permission"
+        return httpx.Response(200, json={"permission": "write", "role_name": "maintain"})
+
+    assert make_catalog(rsa_key_pair, handler).user_role(PRIVATE, "octocat") is RepositoryRole.MAINTAIN
+
+
+def test_a_public_repository_skips_the_collaborator_check(rsa_key_pair: RsaKeyPair) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (token := token_response(request)) is not None:
+            return token
+        assert request.url.path == "/repos/octo-org/api/collaborators/stranger/permission"
+        return httpx.Response(200, json={"permission": "read", "role_name": "read"})
+
+    public = InstallationRepository("101", "octo-org/api", "main", installation_id=7, private=False)
+    assert make_catalog(rsa_key_pair, handler).user_role(public, "stranger") is RepositoryRole.READ
+
+
+def test_an_unexpected_collaborator_check_status_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return token_response(request) or httpx.Response(200, json={})
+
+    with pytest.raises(VcsError):
+        make_catalog(rsa_key_pair, handler).user_role(PRIVATE, "octocat")
+
+
+def test_a_repository_without_a_boolean_private_flag_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (token := token_response(request)) is not None:
+            return token
+        if request.url.path == "/app/installations":
+            return httpx.Response(200, json=[{"id": 7}])
+        repo = {"id": 1, "full_name": "octo-org/api", "default_branch": "main"}
+        return httpx.Response(200, json={"repositories": [repo]})
+
+    with pytest.raises(VcsError):
+        make_catalog(rsa_key_pair, handler).list_repositories()

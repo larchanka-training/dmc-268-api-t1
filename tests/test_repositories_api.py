@@ -46,8 +46,8 @@ def _repository(n: int) -> Repository:
 
 
 ORIGIN = "https://review.example"
-API = InstallationRepository(provider_id="101", full_name="octo-org/api", default_branch="main", installation_id=7)
-WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", default_branch="trunk", installation_id=7)
+API = InstallationRepository(provider_id="101", full_name="octo-org/api", default_branch="main", installation_id=7, private=True)
+WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", default_branch="trunk", installation_id=7, private=True)
 
 
 def _client(
