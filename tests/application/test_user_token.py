@@ -247,3 +247,47 @@ def test_revoking_quietly_swallows_a_failure_without_logging_the_token(caplog: p
     assert oauth.revoked == [Secret("ghu_login_access")]
     assert "не отозван" in caplog.text
     assert "ghu_login_access" not in caplog.text
+
+
+def test_an_old_token_that_expires_mid_listing_is_refreshed_not_the_session_closed() -> None:
+    """Refresh не удался, взят прежний токен; он истёк посреди обхода — `401`. Токен
+    не сменился, но refresh token жив: обмен и один повтор, сессия жива."""
+    oauth = FakeOAuthProvider()
+    uow = _uow(token_from_grant(EXPIRING_GRANT, LOGIN))
+    seen: list[Secret] = []
+
+    def call(token: Secret) -> str:
+        seen.append(token)
+        if token == Secret("ghu_login_access"):
+            raise ProviderTokenRejected("401")
+        return "ok"
+
+    assert call_with_user_token(uow, oauth, SESSION_ID, LOGIN + timedelta(hours=1), call) == "ok"
+    assert seen == [Secret("ghu_login_access"), Secret("ghu_refreshed_access")]
+    assert oauth.refreshes == [Secret("ghr_login_refresh")]
+    assert uow.provider_tokens.locked == [SESSION_ID]
+    assert [s.id for s in uow.sessions.stored] == [SESSION_ID]
+
+
+def test_a_401_on_a_token_that_cannot_be_refreshed_closes_the_session() -> None:
+    oauth = FakeOAuthProvider()
+    uow = _uow(ProviderToken(Secret("ghu_forever"), None, None, None))
+
+    def reject(token: Secret) -> None:
+        raise ProviderTokenRejected("401")
+
+    with pytest.raises(SessionClosed):
+        call_with_user_token(uow, oauth, SESSION_ID, LOGIN, reject)
+    assert oauth.refreshes == []
+    assert uow.sessions.stored == []
+
+
+def test_a_token_with_less_than_a_minute_left_is_not_used_when_refresh_fails() -> None:
+    oauth = FakeOAuthProvider()
+    oauth.refresh_error = OAuthProviderUnavailable("GitHub ответил 503 (обновление токена)")
+    uow = _uow(token_from_grant(EXPIRING_GRANT, LOGIN))
+    last_minute = LOGIN + timedelta(hours=8) - timedelta(seconds=30)
+
+    with pytest.raises(OAuthProviderUnavailable):
+        _seen(uow, oauth, last_minute)
+    assert [s.id for s in uow.sessions.stored] == [SESSION_ID]

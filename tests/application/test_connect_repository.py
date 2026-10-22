@@ -184,3 +184,29 @@ def test_a_github_failure_on_connect_writes_nothing() -> None:
     with pytest.raises(VcsError):
         _connect(FakeInstallationCatalog(error=VcsError("HTTP 503")), uow)
     assert uow.repositories.stored == {}
+
+
+def test_connect_asks_github_exactly_twice() -> None:
+    """Репозиторий по id токеном пользователя, затем установка приложения — без обхода списка."""
+    catalog = FakeInstallationCatalog([API])
+    assert isinstance(_connect(catalog, _signed_in()), Repository)
+    assert catalog.calls == ["user_repository", "app_installed"]
+
+
+def test_a_visible_repository_without_the_app_is_refused_like_an_invisible_one() -> None:
+    uow = _signed_in()
+    not_installed = _connect(FakeInstallationCatalog([API], not_installed={"octo-org/api"}), uow)
+    invisible = _connect(FakeInstallationCatalog([WEB]), uow)
+    assert not_installed is invisible is ConnectRefusal.NOT_IN_INSTALLATION
+    assert uow.repositories.stored == {}
+
+
+def test_the_installation_is_not_checked_for_a_repository_the_user_cannot_see() -> None:
+    """Порядок: сначала доступ пользователя — на чужой репозиторий ответ не зависит от установки."""
+    catalog = FakeInstallationCatalog([WEB])
+    _connect(catalog, _signed_in(), "101")
+    assert catalog.calls == ["user_repository"]
+
+
+def test_without_rights_on_an_installed_repository_it_is_403() -> None:
+    assert _connect(FakeInstallationCatalog([WEB]), _signed_in(), "202") is ConnectRefusal.MANAGE_REQUIRED

@@ -17,7 +17,11 @@ from app.application.use_cases.auth import (
 from app.domain.entities import User
 from app.domain.enums import Provider
 from app.domain.login import LoginError
-from app.domain.provider_token import ProviderTokenUnavailable, token_from_grant
+from app.domain.provider_token import (
+    ProviderTokenBusy,
+    ProviderTokenUnavailable,
+    token_from_grant,
+)
 from app.domain.session import hash_token
 
 from ..fakes.oauth import EXPIRING_GRANT, OCTOCAT, FakeOAuthProvider
@@ -312,3 +316,27 @@ def test_login_is_refused_when_the_token_cannot_be_stored(caplog: pytest.LogCapt
     assert uow.sessions.stored == []
     assert "USER_TOKEN_ENCRYPTION_KEY" in caplog.text
     assert "ghu_login_access" not in caplog.text
+
+
+def test_logout_reads_the_token_under_the_lock() -> None:
+    """Параллельный refresh не подменит токен между чтением и удалением: отзывается последний."""
+    uow = FakeUnitOfWork()
+    login(uow, FakeOAuthProvider())
+    [session] = uow.sessions.stored
+
+    logout(uow, "cookie-1")
+
+    assert uow.provider_tokens.locked == [session.id]
+
+
+def test_logout_still_ends_the_session_when_a_refresh_holds_the_token() -> None:
+    uow = FakeUnitOfWork()
+    login(uow, FakeOAuthProvider())
+
+    def busy(session_id: UUID) -> object:
+        raise ProviderTokenBusy("токен сессии обновляет параллельный запрос")
+
+    uow.provider_tokens.get_for_update = busy  # type: ignore[method-assign,assignment]
+
+    assert logout(uow, "cookie-1") is None
+    assert uow.sessions.stored == []

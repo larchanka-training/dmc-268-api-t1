@@ -352,6 +352,16 @@ def test_an_invisible_repository_looks_exactly_like_a_missing_one() -> None:
     assert invisible.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
 
 
+def test_a_repository_without_the_app_looks_exactly_like_an_invisible_one() -> None:
+    """Приложение не установлено (или установка приостановлена) — тот же 404, что «не виден»."""
+    not_installed = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([API], not_installed={API.full_name})))
+    invisible = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([WEB])))
+
+    assert not_installed.status_code == invisible.status_code == 404
+    strip = lambda body: {k: v for k, v in body.items() if k != "trace_id"}
+    assert strip(not_installed.json()) == strip(invisible.json())
+
+
 def test_connecting_a_gitlab_repository_is_404() -> None:
     response = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([API])), provider="gitlab")
 

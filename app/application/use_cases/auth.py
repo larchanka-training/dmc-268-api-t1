@@ -21,7 +21,11 @@ from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.unit_of_work import UnitOfWork
 from app.domain.entities import OAuthProfile, Secret, User
 from app.domain.login import LoginError, OAuthProviderUnavailable, safe_redirect
-from app.domain.provider_token import ProviderTokenUnavailable, token_from_grant
+from app.domain.provider_token import (
+    ProviderTokenBusy,
+    ProviderTokenUnavailable,
+    token_from_grant,
+)
 from app.domain.session import hash_token, is_expired, open_session
 
 _log = logging.getLogger(__name__)
@@ -156,8 +160,11 @@ def logout(uow: UnitOfWork, token: str | None) -> Secret | None:
 
     Возвращает access token удалённой сессии — его стоит отозвать у
     провайдера (best-effort, `revoke_quietly`), — или `None`, если отзывать
-    нечего: нет cookie, сессии, токена или он не читается. Нет cookie или
-    сессии — нечего удалять, не ошибка.
+    нечего: нет cookie, сессии, токена или он не читается. Токен читается
+    под блокировкой записи: параллельный refresh не подменит его между
+    чтением и удалением, и отзывается тот токен, что жил последним. Если
+    чужой refresh держит запись дольше предела, сессия всё равно удаляется,
+    а отзыва нет. Нет cookie или сессии — нечего удалять, не ошибка.
     """
     if not token:
         return None
@@ -166,13 +173,23 @@ def logout(uow: UnitOfWork, token: str | None) -> Secret | None:
         if session is None:
             return None
         try:
-            stored = work.provider_tokens.get(session.id)
+            stored = work.provider_tokens.get_for_update(session.id)
+        except ProviderTokenBusy:
+            busy = True
         except ProviderTokenUnavailable:
-            stored = None
+            busy, stored = False, None
+        else:
+            busy = False
+        if not busy:
+            work.sessions.delete(session.id)
+            work.commit()
+            return None if stored is None else stored.access_token
+    # Транзакция с ошибкой блокировки откатана; удаление дождётся чужого refresh.
+    _log.info("выход: токен обновляется параллельно, отзыва не будет")
+    with uow as work:
         work.sessions.delete(session.id)
         work.commit()
-    return None if stored is None else stored.access_token
-
+    return None
 
 def _upsert_user(
     work: UnitOfWork,

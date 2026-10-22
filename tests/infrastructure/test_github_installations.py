@@ -19,19 +19,30 @@ from collections.abc import Callable
 from typing import Any
 
 import httpx
+import jwt
 import pytest
 
 from app.domain.entities import InstallationRepository, RepositoryPermissions, Secret
 from app.domain.provider_token import ProviderTokenRejected
 from app.infrastructure.vcs.errors import VcsError, VcsUnavailableError
+from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from app.infrastructure.vcs.github_installations import GitHubInstallationCatalog
+from tests.infrastructure.conftest import RsaKeyPair
 
 TOKEN = Secret("ghu_user_token_value")
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
-def make_catalog(handler: Handler) -> GitHubInstallationCatalog:
-    return GitHubInstallationCatalog(httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(handler)))
+def make_catalog(handler: Handler, app_auth: GitHubAppAuth | None = None) -> GitHubInstallationCatalog:
+    client = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    return GitHubInstallationCatalog(client, app_auth or _UnusedAppAuth())  # type: ignore[arg-type]
+
+
+class _UnusedAppAuth:
+    """Списку JWT приложения не нужен: вызов — ошибка теста."""
+
+    def app_jwt(self) -> str:
+        raise AssertionError("JWT приложения не должен запрашиваться")
 
 
 def installation(installation_id: int, suspended_at: str | None = None) -> dict[str, Any]:
@@ -97,7 +108,11 @@ def test_pages_by_100_until_a_short_page() -> None:
     result = make_catalog(router(installations, repositories, seen)).list_repositories(TOKEN)
 
     assert len(result) == 250
-    assert seen[:2] == ["/user/installations?per_page=100&page=1", "/user/installations?per_page=100&page=2"]
+    # Обход ленивый: страницы установок перемежаются с репозиториями.
+    assert [s for s in seen if s.startswith("/user/installations?")] == [
+        "/user/installations?per_page=100&page=1",
+        "/user/installations?per_page=100&page=2",
+    ]
     assert [s for s in seen if s.startswith("/user/installations/1/")] == [
         "/user/installations/1/repositories?per_page=100&page=1",
         "/user/installations/1/repositories?per_page=100&page=2",
@@ -253,3 +268,121 @@ def test_paging_never_exceeds_fifty_pages(caplog: pytest.LogCaptureFixture) -> N
 def test_a_page_without_total_count_is_unexpected() -> None:
     with pytest.raises(VcsError):
         make_catalog(lambda request: httpx.Response(200, json={"installations": []})).list_repositories(TOKEN)
+
+
+def test_a_secondary_rate_limit_403_with_only_a_message_is_unavailable() -> None:
+    """Вторичный лимит бывает `403` без `retry-after` и `x-ratelimit-remaining: 0`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/installations":
+            return httpx.Response(200, json={"total_count": 1, "installations": [installation(7)]})
+        return httpx.Response(403, json={"message": "You have exceeded a secondary Rate Limit. Please wait."})
+
+    with pytest.raises(VcsUnavailableError):
+        make_catalog(handler).list_repositories(TOKEN)
+
+
+def test_skipped_installations_are_one_warning_without_the_token(caplog: pytest.LogCaptureFixture) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer ghu_user_token_value"
+        if request.url.path == "/user/installations":
+            body = [installation(6, suspended_at="2026-10-01T00:00:00Z"), installation(7), installation(8)]
+            return httpx.Response(200, json={"total_count": 3, "installations": body})
+        if request.url.path.startswith("/user/installations/7/"):
+            return httpx.Response(403, json={"message": "Resource protected by organization SAML enforcement."})
+        return httpx.Response(200, json={"total_count": 1, "repositories": [repo_json(2)]})
+
+    with caplog.at_level(logging.INFO):
+        make_catalog(handler).list_repositories(TOKEN)
+
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "6" in warning.getMessage() and "7" in warning.getMessage()
+    assert "ghu_user_token_value" not in caplog.text
+
+
+# Подключение: два прямых запроса вместо обхода списка. Формы ответов — из
+# документации GitHub REST: «Get a repository» (`GET /repositories/{id}` — тот же
+# объект, что `GET /repos/{owner}/{repo}`, с `permissions` пользователя) и «Get a
+# repository installation for the authenticated app» (`GET /repos/{owner}/{repo}/installation`,
+# объект установки с `suspended_at`), https://docs.github.com/en/rest/apps/apps.
+
+
+def test_user_repository_reads_one_repository_with_the_user_token() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        assert request.headers["Authorization"] == "Bearer ghu_user_token_value"
+        return httpx.Response(200, json=repo_json(42, maintain=True))
+
+    found = make_catalog(handler).user_repository(TOKEN, "42")
+
+    assert found == InstallationRepository("42", "octo-org/repo-42", "main", RepositoryPermissions(admin=False, maintain=True))
+    assert seen == ["/repositories/42"]
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_a_repository_the_user_cannot_see_is_none(status: int) -> None:
+    assert make_catalog(lambda request: httpx.Response(status, json={"message": "Not Found"})).user_repository(TOKEN, "42") is None
+
+
+def test_a_non_numeric_id_is_none_without_asking_github() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("запроса быть не должно")
+
+    assert make_catalog(handler).user_repository(TOKEN, "../user") is None
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(401, json={"message": "Bad credentials"}),
+        httpx.Response(200, json=repo_json(42) | {"permissions": None}),
+        httpx.Response(403, json={"message": "API rate limit exceeded"}),
+        httpx.Response(502),
+    ],
+)
+def test_user_repository_failures_are_typed(response: httpx.Response) -> None:
+    with pytest.raises((ProviderTokenRejected, VcsError)):
+        make_catalog(lambda request: response).user_repository(TOKEN, "42")
+
+
+def _installation_handler(response: httpx.Response, rsa_key_pair: RsaKeyPair, seen: list[str]) -> Handler:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        # JWT приложения, подписанный его ключом: iss — App ID.
+        claims = jwt.decode(request.headers["Authorization"].removeprefix("Bearer "), rsa_key_pair.public_pem, algorithms=["RS256"])
+        assert claims["iss"] == "123456"
+        return response
+
+    return handler
+
+
+def _app_catalog(response: httpx.Response, rsa_key_pair: RsaKeyPair, seen: list[str]) -> GitHubInstallationCatalog:
+    handler = _installation_handler(response, rsa_key_pair, seen)
+    client = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    return GitHubInstallationCatalog(client, GitHubAppAuth("123456", rsa_key_pair.private_pem, client))
+
+
+def test_app_installed_asks_with_the_app_jwt(rsa_key_pair: RsaKeyPair) -> None:
+    seen: list[str] = []
+    catalog = _app_catalog(httpx.Response(200, json=installation(7)), rsa_key_pair, seen)
+
+    assert catalog.app_installed("octo-org/api") is True
+    assert seen == ["/repos/octo-org/api/installation"]
+
+
+def test_not_installed_or_suspended_is_false(rsa_key_pair: RsaKeyPair) -> None:
+    seen: list[str] = []
+    assert _app_catalog(httpx.Response(404, json={"message": "Not Found"}), rsa_key_pair, seen).app_installed("o/r") is False
+    suspended = httpx.Response(200, json=installation(7, suspended_at="2026-10-01T00:00:00Z"))
+    assert _app_catalog(suspended, rsa_key_pair, seen).app_installed("o/r") is False
+
+
+@pytest.mark.parametrize(
+    "response",
+    [httpx.Response(401), httpx.Response(403), httpx.Response(500), httpx.Response(200, json={"id": None}), httpx.Response(200, json=[])],
+)
+def test_app_installed_failures_are_vcs_errors(response: httpx.Response, rsa_key_pair: RsaKeyPair) -> None:
+    with pytest.raises(VcsError):
+        _app_catalog(response, rsa_key_pair, []).app_installed("o/r")

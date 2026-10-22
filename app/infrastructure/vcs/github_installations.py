@@ -14,25 +14,38 @@ repositories accessible to the user access token»). Доступ решает G
 в ней всё равно не работают, и её отказ не должен ронять весь список.
 Установка, исчезнувшая между запросами или закрытая для токена (`404` или
 `403` на её репозитории, например SSO организации не авторизован), — тоже.
-Постранично до `total_count`, не больше 50 страниц.
+Постранично до `total_count`, не больше 50 страниц. Пропущенные установки —
+одно предупреждение в логе с их id.
+
+Подключение не обходит список: `user_repository` — `GET /repositories/{id}`
+токеном пользователя (не виден — `None`), `app_installed` —
+`GET /repos/{full_name}/installation` с JWT приложения (`404` или
+приостановленная установка — `False`). Два запроса на подключение
+(change `user-token-listing-edges`).
 
 `401` — токен отозван или истёк: `ProviderTokenRejected`, сессию закрывает
-use case. Сеть, `429`, `5xx`, `403` лимита (`x-ratelimit-remaining: 0` или
-`retry-after`) — `VcsUnavailableError`; прочие статусы и
+use case. Сеть, `429`, `5xx`, `403` лимита (`x-ratelimit-remaining: 0`, `retry-after`
+или «rate limit» в `message`) — `VcsUnavailableError`; прочие статусы и
 неожиданное тело, включая `null` в обязательных полях, — `VcsError`: всё это
 `502`, а не `500`. Повторов нет: список пользователь запросит заново сам.
 Токен — только в заголовке запроса; в сообщениях об ошибках его нет.
 """
 
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
 
-from app.domain.entities import InstallationRepository, RepositoryPermissions, Secret
+from app.domain.entities import (
+    InstallationRepository,
+    RepositoryPermissions,
+    Secret,
+)
 from app.domain.provider_token import ProviderTokenRejected
 from app.infrastructure.oauth.bearer import BearerAuth
-from app.infrastructure.vcs.errors import VcsError, VcsUnavailableError
+from app.infrastructure.vcs.errors import VcsAuthError, VcsError, VcsUnavailableError
+from app.infrastructure.vcs.github_auth import GitHubAppAuth
 
 _JSON_ACCEPT = "application/vnd.github+json"
 _API_VERSION = "2022-11-28"
@@ -55,54 +68,94 @@ class _Inaccessible(Exception):
 class GitHubInstallationCatalog:
     """Репозитории установок GitHub App, видимые владельцу токена, с его правами."""
 
-    def __init__(self, client: httpx.Client) -> None:
-        """`client` — с `base_url` GitHub API; авторизация — токеном из каждого вызова."""
+    def __init__(self, client: httpx.Client, app_auth: GitHubAppAuth) -> None:
+        """`client` — с `base_url` GitHub API; авторизация — токеном пользователя из
+        каждого вызова, а проверка установки — JWT приложения из `app_auth`."""
         self._client = client
+        self._app_auth = app_auth
 
     def list_repositories(self, access_token: Secret) -> list[InstallationRepository]:
+        skipped: dict[str, list[int]] = {}
         repositories: list[InstallationRepository] = []
-        for installation_id in self._installation_ids(access_token):
-            try:
-                repositories.extend(self._installation_repositories(access_token, installation_id))
-            except _Inaccessible as skipped:
-                # 404 — установка исчезла между запросами; 403 — например, SSO
-                # организации не авторизован для этого токена. Остальные
-                # установки пользователю всё равно видны.
-                _log.info("установка %s пропущена: HTTP %s", installation_id, skipped.status)
-                continue
+        try:
+            for installation_id, suspended in self._installations(access_token):
+                if suspended:
+                    skipped.setdefault("приостановлена", []).append(installation_id)
+                    continue
+                try:
+                    for batch in self._installation_repositories(access_token, installation_id):
+                        repositories.extend(batch)
+                except _Inaccessible as failure:
+                    # 404 — установка исчезла между запросами; 403 — например, SSO
+                    # организации не авторизован для этого токена. Остальные
+                    # установки пользователю всё равно видны.
+                    skipped.setdefault(f"HTTP {failure.status}", []).append(installation_id)
+        finally:
+            if skipped:
+                # Только id установок и причины: токена здесь нет.
+                _log.warning("установки пропущены: %s", "; ".join(f"{why}: {ids}" for why, ids in skipped.items()))
         return repositories
 
-    def _installation_ids(self, access_token: Secret) -> list[int]:
-        ids: list[int] = []
+    def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
+        """`GET /repositories/{id}` токеном пользователя («Get a repository»): `404` или
+        `403` не из-за лимита — пользователь репозитория не видит."""
+        if not provider_id.isdigit():
+            # Id репозитория GitHub — число; иное не отправляем в путь запроса.
+            return None
+        url = f"/repositories/{provider_id}"
         try:
-            pages = self._pages(access_token, "/user/installations", "installations")
-        except _Inaccessible as failure:
-            raise VcsError(f"GitHub API: HTTP {failure.status} на GET /user/installations") from None
-        for page in pages:
-            try:
-                ids.extend(int(_strict(item, "id", int)) for item in page if item.get("suspended_at") is None)
-            except (AttributeError, KeyError, TypeError) as error:
-                raise VcsError(f"GitHub API вернул установку без id на GET /user/installations: {error!r}") from None
-        return ids
+            item = self._get(access_token, url)
+        except _Inaccessible:
+            return None
+        try:
+            return _repository(item)
+        except (AttributeError, KeyError, TypeError) as error:
+            raise VcsError(f"GitHub API вернул неожиданный репозиторий на GET {url}: {error!r}") from None
 
-    def _installation_repositories(self, access_token: Secret, installation_id: int) -> list[InstallationRepository]:
+    def app_installed(self, full_name: str) -> bool:
+        """`GET /repos/{owner}/{repo}/installation` с JWT приложения («Get a repository
+        installation for the authenticated app»): `404` — не установлено,
+        `suspended_at` не `null` — установка приостановлена, тоже «нет»."""
+        url = f"/repos/{full_name}/installation"
+        try:
+            body = self._get(None, url)
+        except _Inaccessible as failure:
+            if failure.status == 404:
+                return False
+            raise VcsError(f"GitHub API: HTTP {failure.status} на GET {url}") from None
+        if not isinstance(body, dict) or not isinstance(body.get("id"), int):
+            raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}")
+        return body.get("suspended_at") is None
+
+    def _installations(self, access_token: Secret) -> Iterator[tuple[int, bool]]:
+        """Пары (id установки, приостановлена ли)."""
+        url = "/user/installations"
+        try:
+            for page in self._pages(access_token, url, "installations"):
+                try:
+                    batch = [(_strict(item, "id", int), item.get("suspended_at") is not None) for item in page]
+                except (AttributeError, KeyError, TypeError) as error:
+                    raise VcsError(f"GitHub API вернул установку без id на GET {url}: {error!r}") from None
+                yield from batch
+        except _Inaccessible as failure:
+            raise VcsError(f"GitHub API: HTTP {failure.status} на GET {url}") from None
+
+    def _installation_repositories(self, access_token: Secret, installation_id: int) -> Iterator[list[InstallationRepository]]:
         url = f"/user/installations/{installation_id}/repositories"
-        repositories: list[InstallationRepository] = []
         for page in self._pages(access_token, url, "repositories"):
             try:
-                repositories.extend(_repository(item) for item in page)
+                yield [_repository(item) for item in page]
             except (AttributeError, KeyError, TypeError) as error:
                 raise VcsError(f"GitHub API вернул неожиданный репозиторий на GET {url}: {error!r}") from None
-        return repositories
 
-    def _pages(self, access_token: Secret, url: str, key: str) -> list[list[dict[str, Any]]]:
-        """Страницы списка `key` из ответов вида `{"total_count", key: [...]}`.
+    def _pages(self, access_token: Secret, url: str, key: str) -> Iterator[list[dict[str, Any]]]:
+        """Страницы списка `key` из ответов вида `{"total_count", key: [...]}`, лениво.
 
         Конец — набрано `total_count`, короткая или пустая страница; не больше
         `_MAX_PAGES` страниц: ответ, который не кончается, не держит запрос
-        вечно. Упёрлись в предел — список усечён, и это видно в логе.
+        вечно. Упёрлись в предел — список усечён, и это видно в логе. Нужно
+        только списку: подключение ищет репозиторий прямым запросом.
         """
-        pages: list[list[dict[str, Any]]] = []
         seen = 0
         for page in range(1, _MAX_PAGES + 1):
             body = self._get(access_token, f"{url}?per_page={_PER_PAGE}&page={page}")
@@ -112,22 +165,26 @@ class GitHubInstallationCatalog:
             total = body.get("total_count")
             if not isinstance(total, int) or isinstance(total, bool):
                 raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}: нет total_count")
-            pages.append(batch)
+            yield batch
             seen += len(batch)
             if seen >= total or len(batch) < _PER_PAGE:
-                return pages
+                return
         _log.warning("GET %s: больше %d страниц, список усечён", url, _MAX_PAGES)
-        return pages
 
-    def _get(self, access_token: Secret, url: str) -> Any:
+    def _get(self, access_token: Secret | None, url: str) -> Any:
+        """GET токеном пользователя или, без него, JWT приложения."""
         headers = {"Accept": _JSON_ACCEPT, "X-GitHub-Api-Version": _API_VERSION}
+        # Токен — через `httpx.Auth`: открытого значения нет в локальных переменных.
+        # JWT подписывается здесь: пустой или битый ключ App — `VcsAuthError`, `502`.
+        auth = BearerAuth(access_token if access_token is not None else Secret(self._app_auth.app_jwt()))
         try:
-            # Токен — через `httpx.Auth`: открытого значения нет в локальных переменных.
-            response = self._client.get(url, headers=headers, auth=BearerAuth(access_token))
+            response = self._client.get(url, headers=headers, auth=auth)
         except httpx.RequestError as error:
             # `from None`: исходное исключение держит запрос с токеном в заголовке.
             raise VcsUnavailableError(f"GitHub API недоступен на GET {url}: {type(error).__name__}") from None
         status = response.status_code
+        if status == 401 and access_token is None:
+            raise VcsAuthError(f"GitHub API отверг JWT приложения на GET {url}")
         if status == 401:
             raise ProviderTokenRejected(f"GitHub API отверг токен пользователя на GET {url}")
         if status == 429 or status >= 500 or (status == 403 and _rate_limited(response)):
@@ -143,9 +200,19 @@ class GitHubInstallationCatalog:
 
 
 def _rate_limited(response: httpx.Response) -> bool:
-    """`403` из-за лимита GitHub, а не из-за доступа: так GitHub помечает первичный
-    и вторичный лимиты («Rate limits for the REST API»)."""
-    return response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers
+    """`403` из-за лимита GitHub, а не из-за доступа («Rate limits for the REST API»).
+
+    Первичный лимит — `x-ratelimit-remaining: 0`; вторичный — `retry-after`
+    или, бывает, только «rate limit» в `message` тела.
+    """
+    if response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers:
+        return True
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    message = body.get("message") if isinstance(body, dict) else None
+    return isinstance(message, str) and "rate limit" in message.lower()
 
 
 def _repository(item: dict[str, Any]) -> InstallationRepository:

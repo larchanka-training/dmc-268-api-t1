@@ -14,6 +14,9 @@ from app.domain.login import OAuthProviderUnavailable
 # Обновляем заранее: список репозиториев — несколько запросов подряд, и токен,
 # истекающий посреди них, дал бы `401` на полпути.
 REFRESH_MARGIN = timedelta(minutes=5)
+# Прежний токен берём при сбое обновления, только если до истечения больше
+# минуты: иначе он истечёт посреди обхода страниц.
+USABLE_MARGIN = timedelta(seconds=60)
 
 
 class ProviderTokenRejected(RuntimeError):
@@ -53,8 +56,8 @@ def needs_refresh(token: ProviderToken, now: datetime) -> bool:
 
 
 def is_usable(token: ProviderToken, now: datetime) -> bool:
-    """Access token ещё действует: срока нет или он не наступил. Запас обновления не учитывается."""
-    return token.access_expires_at is None or now < token.access_expires_at
+    """Access token поживёт ещё хотя бы `USABLE_MARGIN`: можно идти с ним, если обновить не вышло."""
+    return token.access_expires_at is None or now < token.access_expires_at - USABLE_MARGIN
 
 
 def can_refresh(token: ProviderToken, now: datetime) -> bool:

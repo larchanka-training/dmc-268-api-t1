@@ -140,7 +140,7 @@ def build_container(settings: Settings) -> Container:
         _token_cipher=_token_cipher(settings),
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
-        _installation_catalog=GitHubInstallationCatalog(httpx.Client(base_url=_GITHUB_API, timeout=_GITHUB_USER_TIMEOUT)),
+        _installation_catalog=_build_installation_catalog(settings),
         _oauth_providers={
             "github": GitHubOAuthProvider(
                 settings.github_app_client_id,
@@ -153,6 +153,15 @@ def build_container(settings: Settings) -> Container:
         _llm_gateway=None,
         _definition_extractor=None,
     )
+
+
+def _build_installation_catalog(settings: Settings) -> GitHubInstallationCatalog:
+    """Свой клиент и свой `GitHubAppAuth`: каталогу нужен только JWT приложения
+    (проверка установки), кэш installation tokens шлюза ему не нужен.
+    Конструирование — без сети."""
+    client = httpx.Client(base_url=_GITHUB_API, timeout=_GITHUB_USER_TIMEOUT)
+    auth = GitHubAppAuth(settings.github_app_id, settings.github_app_private_key.get_secret_value(), client)
+    return GitHubInstallationCatalog(client, auth)
 
 
 def _token_cipher(settings: Settings) -> TokenCipher | None:

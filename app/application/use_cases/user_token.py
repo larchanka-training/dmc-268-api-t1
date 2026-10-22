@@ -53,24 +53,23 @@ def call_with_user_token[T](
 ) -> T:
     """Вызвать `call` с действующим токеном пользователя сессии.
 
-    Отказ провайдера в токене (`ProviderTokenRejected` из `call`) закрывает
-    сессию так же, как отсутствующий или необновляемый токен. Но сначала токен
-    перечитывается: параллельный запрос мог только что обменять refresh token,
-    и тогда отказ относится к старому access token — вызов повторяется один
-    раз с новым (design D4 change `user-token-hardening`).
+    Отказ провайдера в токене (`ProviderTokenRejected` из `call`) — не сразу
+    закрытие сессии. Под блокировкой записи токена: параллельный запрос уже
+    сменил токен — берём его; не сменил, но refresh token жив — обмениваем.
+    Затем вызов повторяется один раз. Закрывается сессия, только если обновить
+    нечем или повтор тоже отвергнут (design D1 change `user-token-listing-edges`).
     """
     access_token = _access_token(uow, oauth, session_id, now)
     try:
         return call(access_token)
     except ProviderTokenRejected:
-        replaced = _replaced(uow, session_id, access_token)
-    if replaced is not None:
-        try:
-            return call(replaced)
-        except ProviderTokenRejected:
-            pass
-    _close(uow, session_id, "провайдер отверг токен пользователя")
-    raise SessionClosed
+        pass
+    retry_token = _guarded(uow, session_id, lambda: _refreshed(uow, oauth, session_id, now, rejected=access_token))
+    try:
+        return call(retry_token)
+    except ProviderTokenRejected:
+        _close(uow, session_id, "провайдер отверг токен пользователя и после обновления")
+        raise SessionClosed from None
 
 
 def revoke_quietly(oauth: OAuthProvider, access_token: Secret) -> None:
@@ -85,54 +84,58 @@ def revoke_quietly(oauth: OAuthProvider, access_token: Secret) -> None:
         _log.warning("токен провайдера не отозван при выходе: %s", failure)
 
 
-def _replaced(uow: UnitOfWork, session_id: UUID, used: Secret) -> Secret | None:
-    """Access token сессии, если он уже не тот, что отверг провайдер."""
+def _guarded[T](uow: UnitOfWork, session_id: UUID, read: Callable[[], T]) -> T:
+    """`read` с закрытием сессии, если токен не читается (нет ключа, другой ключ)."""
     try:
-        with uow as work:
-            token = work.provider_tokens.get(session_id)
-    except ProviderTokenUnavailable:
-        return None
-    if token is None or token.access_token == used:
-        return None
-    return token.access_token
-
-
-def _access_token(uow: UnitOfWork, oauth: OAuthProvider, session_id: UUID, now: datetime) -> Secret:
-    try:
-        with uow as work:
-            token = work.provider_tokens.get(session_id)
-        if token is not None and not needs_refresh(token, now):
-            return token.access_token
-        if token is None:
-            _close(uow, session_id, "у сессии нет токена провайдера (открыта до его хранения)")
-            raise SessionClosed
-        try:
-            return _refreshed(uow, oauth, session_id, now)
-        except OAuthProviderUnavailable:
-            # Обновляем заранее, за запас до истечения: пока access token
-            # действует, временный сбой GitHub или долгая чужая блокировка не
-            # повод отвечать `502` (design D4 change `user-token-hardening`).
-            if is_usable(token, now):
-                _log.warning("токен провайдера не обновлён, используется прежний до его истечения")
-                return token.access_token
-            raise
+        return read()
     except ProviderTokenUnavailable as failure:
         _close(uow, session_id, f"токен провайдера не читается: {failure}")
         raise SessionClosed from None
 
 
-def _refreshed(uow: UnitOfWork, oauth: OAuthProvider, session_id: UUID, now: datetime) -> Secret:
+def _access_token(uow: UnitOfWork, oauth: OAuthProvider, session_id: UUID, now: datetime) -> Secret:
+    return _guarded(uow, session_id, lambda: _fresh_or_refreshed(uow, oauth, session_id, now))
+
+
+def _fresh_or_refreshed(uow: UnitOfWork, oauth: OAuthProvider, session_id: UUID, now: datetime) -> Secret:
+    with uow as work:
+        token = work.provider_tokens.get(session_id)
+    if token is not None and not needs_refresh(token, now):
+        return token.access_token
+    if token is None:
+        _close(uow, session_id, "у сессии нет токена провайдера (открыта до его хранения)")
+        raise SessionClosed
+    try:
+        return _refreshed(uow, oauth, session_id, now)
+    except OAuthProviderUnavailable:
+        # Обновляем заранее, за запас до истечения: пока access token
+        # поживёт ещё минуту, временный сбой GitHub или долгая чужая блокировка
+        # не повод отвечать `502` (design D2 change `user-token-hardening`).
+        # Истечёт посреди обхода — `401`, и `call_with_user_token` обновит снова.
+        if is_usable(token, now):
+            _log.warning("токен провайдера не обновлён, используется прежний до его истечения")
+            return token.access_token
+        raise
+
+
+def _refreshed(
+    uow: UnitOfWork, oauth: OAuthProvider, session_id: UUID, now: datetime, rejected: Secret | None = None
+) -> Secret:
     """Обменять refresh token, держа запись токена до коммита (design D4).
 
+    `rejected` — access token, который провайдер только что отверг: тогда
+    обмен нужен, если токен в записи всё ещё он, независимо от срока.
     Чужая блокировка дольше предела — `ProviderTokenBusy` из `get_for_update`.
     """
     with uow as work:
         token = work.provider_tokens.get_for_update(session_id)
-        if token is not None and not needs_refresh(token, now):
+        if token is not None and (
+            token.access_token != rejected if rejected is not None else not needs_refresh(token, now)
+        ):
             # Параллельный запрос той же сессии обновил токен, пока мы ждали.
             return token.access_token
         if token is None or token.refresh_token is None or not can_refresh(token, now):
-            reason = "токен провайдера истёк и не обновляется"
+            reason = "токен провайдера не действует и не обновляется"
         else:
             try:
                 grant = oauth.refresh(token.refresh_token)

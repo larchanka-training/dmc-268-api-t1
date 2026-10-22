@@ -9,8 +9,9 @@
 
 Что пользователь видит, решает GitHub: список — ответ `/user/installations…`
 по токену пользователя, то есть пересечение «доступно приложению» и
-«доступно пользователю». Подключать — с правом admin или maintain
-(`app/domain/repository_access.py`, change `repositories-via-user-token`).
+«доступно пользователю». Подключение — `GET /repositories/{id}` токеном
+пользователя и проверка установки приложения на репозитории. Подключать — с
+правом admin или maintain (`app/domain/repository_access.py`).
 """
 
 from dataclasses import dataclass
@@ -53,7 +54,7 @@ def list_available_repositories(
     catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, now: datetime
 ) -> list[AvailableRepository]:
     """Репозитории установок, видимые пользователю, с отметкой, зарегистрирован ли каждый."""
-    repositories = _user_repositories(catalog, uow, user, now)
+    repositories = call_with_user_token(uow, user.oauth, user.session_id, now, catalog.list_repositories)
     with uow:
         return [
             AvailableRepository(
@@ -76,16 +77,22 @@ def connect_repository(
 ) -> Repository | ConnectRefusal:
     """Зарегистрировать репозиторий установки от имени пользователя сессии.
 
-    Порядок проверок: нет среди видимых пользователю — `NOT_IN_INSTALLATION`
-    (и «нет в установках», и «не виден пользователю» — один отказ, без
-    различия), нет права admin или maintain — `MANAGE_REQUIRED`, уже
-    подключён — `ALREADY_CONNECTED`. Права проверяются раньше «уже подключён»:
+    Два запроса к провайдеру вместо обхода всех установок: репозиторий по id
+    токеном пользователя и установка приложения на нём. Порядок проверок: не
+    виден пользователю или приложение не установлено (приостановлено) —
+    `NOT_IN_INSTALLATION`, один отказ без различия; нет права admin или
+    maintain — `MANAGE_REQUIRED`; уже подключён — `ALREADY_CONNECTED`. Права проверяются раньше «уже подключён»:
     пользователь без прав не узнаёт, подключён ли репозиторий.
     """
     if provider is not Provider.GITHUB:
         return ConnectRefusal.NOT_IN_INSTALLATION
-    found = next((r for r in _user_repositories(catalog, uow, user, now) if r.provider_id == provider_id), None)
-    if found is None:
+    # Сначала доступ пользователя, потом установка приложения: на чужой
+    # репозиторий ответ один и тот же, установлено туда приложение или нет
+    # (design D3 change `user-token-listing-edges`).
+    found = call_with_user_token(
+        uow, user.oauth, user.session_id, now, lambda token: catalog.user_repository(token, provider_id)
+    )
+    if found is None or not catalog.app_installed(found.full_name):
         return ConnectRefusal.NOT_IN_INSTALLATION
     if not can_connect(found.permissions):
         return ConnectRefusal.MANAGE_REQUIRED
@@ -108,8 +115,3 @@ def connect_repository(
         uow.commit()
     return repository
 
-
-def _user_repositories(
-    catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, now: datetime
-) -> list[InstallationRepository]:
-    return call_with_user_token(uow, user.oauth, user.session_id, now, catalog.list_repositories)
