@@ -174,12 +174,10 @@ def _build_installation_catalog(settings: Settings) -> GitHubInstallationCatalog
 
 
 def _token_cipher(settings: Settings) -> TokenCipher | None:
+    # Предупреждение о пустом ключе пишет только API (`app/api/factory.py`):
+    # контейнер собирает и воркер, а ему ключ не нужен и не передаётся.
     key = settings.user_token_key
-    if key is None:
-        # Видно в логе старта: вход на таком стенде будет отказывать.
-        logger.warning("USER_TOKEN_ENCRYPTION_KEY не задан: вход отказывает, токены не хранятся")
-        return None
-    return TokenCipher(key)
+    return None if key is None else TokenCipher(key)
 
 
 # Подключение в нашей сети или к hosted-провайдеру дольше этого - сбой, а не

@@ -142,11 +142,21 @@ def test_the_container_caches_its_lazy_adapters() -> None:
 
 
 def test_without_a_token_key_the_unit_of_work_refuses_tokens(caplog: pytest.LogCaptureFixture) -> None:
-    """Ключ не задан — токены не пишутся (вход откажет), и это видно в логе старта."""
-    with caplog.at_level(logging.WARNING, logger="app.infrastructure.container"):
+    """Ключ не задан — токены не пишутся (вход откажет). Контейнер собирает и воркер,
+    которому ключ не передаётся: предупреждения от контейнера нет."""
+    with caplog.at_level(logging.WARNING):
         container = build_container(SETTINGS)
-    assert "USER_TOKEN_ENCRYPTION_KEY не задан" in caplog.text
+    assert "USER_TOKEN_ENCRYPTION_KEY" not in caplog.text
     assert container.unit_of_work()._cipher is None  # type: ignore[attr-defined]
+
+
+def test_without_a_token_key_the_api_warns_at_startup(caplog: pytest.LogCaptureFixture) -> None:
+    """Вход на таком стенде откажет — это видно в логе старта API."""
+    from app.api.factory import create_app
+
+    with caplog.at_level(logging.WARNING, logger="app.api.factory"):
+        create_app(SETTINGS)
+    assert "USER_TOKEN_ENCRYPTION_KEY не задан" in caplog.text
 
 
 def test_with_a_token_key_the_unit_of_work_encrypts(caplog: pytest.LogCaptureFixture) -> None:

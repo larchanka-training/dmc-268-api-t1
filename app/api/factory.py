@@ -6,11 +6,14 @@
 """
 
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 
 from app.config import Settings
+
+_log = logging.getLogger(__name__)
 
 _DESCRIPTION = """\
 Контракт Backend API для запуска автоматического ревью Pull Request и получения состояния и
@@ -76,6 +79,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # До контейнера: провайдер трейсов нужен телеметрии FastAPI с первого запроса.
     telemetry.configure_tracing(telemetry.API_SERVICE)
     app.state.container = build_container(settings)
+    if settings.user_token_key is None:
+        # Видно в логе старта API: вход на таком стенде будет отказывать. Не в
+        # контейнере — его собирает и воркер, которому ключ не передаётся.
+        _log.warning("USER_TOKEN_ENCRYPTION_KEY не задан: вход отказывает, токены не хранятся")
     telemetry.instrument_engine(app.state.container.engine)
 
     from app.api import errors, log_redaction
