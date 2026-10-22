@@ -163,6 +163,7 @@ jobs:
           TF_VAR_api_image: ${{ needs.image.outputs.image }}
           TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
           TF_VAR_rabbitmq_password: ${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}
+          TF_VAR_postgres_replication_password: ${{ secrets.PG_REPLICATION_PASSWORD_DMC268_T1 }}
           TF_VAR_github_webhook_secret: ${{ secrets.WEBHOOK_SECRET_DMC268_T1 }}
           TF_VAR_github_app_id: ${{ vars.APP_ID_DMC268_T1 }}
           TF_VAR_github_app_private_key: ${{ secrets.APP_PRIVATE_KEY_DMC268_T1 }}
@@ -177,14 +178,14 @@ jobs:
           # Наружу не смотрит ничего из этого стека: снаружи API доступен через
           # `/api/` на публичном входе интерфейса, который ходит к нему по
           # внутренней docker-сети. Порт остаётся на петле — от неё зависят
-          # туннельная проверка живости и отладка.
+          # туннельная проверка живости и отладка. База и брокер портов на
+          # хосте не публикуют вовсе: они только во внутренней сети стека.
           export TF_VAR_docker_host="ssh://${SSH_USER}@${HOST}"
           export TF_VAR_service_host="$HOST"
           # Интерфейс отдаётся по HTTPS на тот же адрес (public_tls в dmc-268-ui-t1),
           # и API приходят его запросы: с этим origin сверяется Origin.
           export TF_VAR_public_origin="https://$HOST"
           export TF_VAR_bind_ip="127.0.0.1"
-          export TF_VAR_internal_bind_ip="127.0.0.1"
 
           tofu init -input=false -no-color
 
@@ -303,6 +304,32 @@ jobs:
 
           echo "::error::воркер не проработал ${hold} с без рестартов за полторы минуты"
           ssh -o BatchMode=yes "$SSH_USER@$HOST" "docker logs --tail 50 dmc268-worker 2>&1" || true
+          exit 1
+
+      # Реплика, которая запущена, но не получает поток, внешне неотличима от
+      # рабочей: контейнер жив, на запросы отвечает. Поэтому проверяем со
+      # стороны основного сервера — слот активен и поток в состоянии streaming.
+      # Первая сборка на пустом томе копирует базу целиком, отсюда пять минут.
+      - name: Проверить, что реплика получает поток
+        env:
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -uo pipefail
+          query="select r.state from pg_stat_replication r join pg_replication_slots s on s.active_pid = r.pid where s.slot_name = 'dmc268_replica'"
+          for _ in $(seq 1 60); do
+            state="$(ssh -o BatchMode=yes "$SSH_USER@$HOST" \
+              "docker exec dmc268-postgres psql -U dmc268 -d dmc268 -tAc \"$query\"" 2>/dev/null | tr -d '[:space:]')"
+            if [ "$state" = "streaming" ]; then
+              echo "реплика получает поток"
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "::error::реплика не перешла в streaming за пять минут (состояние: '${state:-нет соединения}')"
+          ssh -o BatchMode=yes "$SSH_USER@$HOST" \
+            "docker logs --tail 50 dmc268-postgres-replica 2>&1; echo '--- настройка репликации ---'; docker logs --tail 30 dmc268-replication-setup 2>&1" || true
           exit 1
 
       - name: Записать результат в summary

@@ -9,13 +9,48 @@
 - Локальный демон: `docker_host = "unix:///var/run/docker.sock"` (у Docker Desktop на macOS часто `unix:///Users/<вы>/.docker/run/docker.sock`).
 - Удалённый сервер: `docker_host = "ssh://user@server"` (нужны SSH-доступ и Docker на удалённом хосте).
 
-PostgreSQL и RabbitMQ публикуются на `internal_bind_ip`, API — на `bind_ip`; в деплое оба равны `127.0.0.1`. Другого значения конфигурация не примет: обе переменные проверяются на адрес петли (`127.0.0.0/8` или `::1`), и ошибка всплывает на `plan`. В URL для клиентов используется `service_host`, его нельзя ставить в `0.0.0.0`.
+API публикуется на `bind_ip`, в деплое это `127.0.0.1`. Другого значения конфигурация не примет: переменная проверяется на адрес петли (`127.0.0.0/8` или `::1`), и ошибка всплывает на `plan`. В URL для клиентов используется `service_host`, его нельзя ставить в `0.0.0.0`. PostgreSQL, реплика и RabbitMQ портов на хосте не публикуют вовсе — см. «Сети».
+
+## Сети
+
+Контейнеры разнесены по трём docker-сетям, каждый видит только тех, с кем говорит:
+
+| Сеть | Кто в ней | Зачем |
+| --- | --- | --- |
+| `dmc268` | интерфейс (из `dmc-268-ui-t1`), `api` | публичный вход: nginx интерфейса проксирует `/api/` в API. Имя прежнее — интерфейс подключается к ней по имени |
+| `dmc268-backend` (`internal`) | `postgres`, `postgres-replica`, `postgres-backup`, `rabbitmq`, `migrate`, `replication-setup`, `api`, `worker` | данные. У сети нет шлюза: из неё не выйти в интернет, а интерфейса в ней нет |
+| `dmc268-egress` | `worker` | исходящие запросы воркера к GitHub API и провайдеру модели |
+
+API — единственный, кто стоит и во входе, и в данных. С `internal`-сети Docker не публикует порты, поэтому у базы и брокера портов на хосте нет: для отладки — `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268` и `docker exec dmc268-rabbitmq rabbitmq-diagnostics status`. Изоляцию по описанию проверяет `tests/test_infra_isolation.py`.
+
+## Реплика и резервные копии
+
+**Горячая реплика** `dmc268-postgres-replica` — физическая потоковая репликация с основного сервера по слоту `dmc268_replica`, только чтение. Приложение в неё не ходит; с неё снимаются резервные копии.
+
+- Роль `replicator` и слот заводит одноразовый контейнер `dmc268-replication-setup` (`postgres/replication-setup.sql`) на каждом деплое, идемпотентно: init-скрипты образа на уже заведённом томе не выполняются. Пароль роли — секрет `PG_REPLICATION_PASSWORD_DMC268_T1`; смена секрета доходит до базы обычным деплоем.
+- Пустой том реплики — первая сборка через `pg_basebackup` (`postgres/replica-entrypoint.sh`), непустой — продолжение потока с места остановки. Пересобрать реплику с нуля: `docker rm -f dmc268-postgres-replica && docker volume rm dmc268-postgres-replica-data`, затем деплой.
+- Слот держит WAL для отставшей реплики, но не больше `postgres_max_slot_wal_keep_size` (2 ГБ): иначе упавшая реплика заполнила бы диск основного сервера. Реплика, перешагнувшая потолок, теряет поток — её пересобирают, как выше.
+- Деплой проверяет со стороны основного сервера, что слот активен и поток в состоянии `streaming`.
+- Доступ к базе (`postgres/pg_hba.conf`, вне каталога данных) — только из подсети самого сервера (`samenet`), то есть из `dmc268-backend`.
+
+Реплика на том же сервере: она спасает от сбоя процесса или тома основной базы, но не от падения самого сервера.
+
+**Резервные копии** снимает `dmc268-postgres-backup`: `pg_dump -Fc` с реплики при старте и затем раз в сутки, в том `dmc268-postgres-backups`, хранение — `backup_keep_days` (7 дней). Контейнер становится `unhealthy`, если свежей копии нет дольше 26 часов. Копии лежат на том же диске — от потери сервера не спасают; вынос копий за пределы сервера — отдельная задача.
+
+Восстановление в основную базу (API и воркер на это время остановить):
+
+```bash
+docker run --rm --network dmc268-backend -v dmc268-postgres-backups:/backups:ro \
+  -e PGPASSWORD=<пароль> pgvector/pgvector:pg18 \
+  pg_restore -h dmc268-postgres -U dmc268 -d dmc268 --clean --if-exists /backups/<файл>.dump
+```
 
 ## Ограничения контейнеров
 
 - `api` и `migrate` работают не от root (`USER` в `Dockerfile`), с файловой системой только для чтения (запись — только в `/tmp`), без capabilities и с `no-new-privileges`.
 - `postgres` и `rabbitmq` — только `no-new-privileges`: их entrypoint стартует от root, чтобы подготовить каталог данных, и сам переходит на служебного пользователя.
-- У каждого контейнера потолок памяти без свопа (`postgres` 1 ГБ, `rabbitmq`, `api` и `worker` по 512 МБ, `migrate` 256 МБ) и ротация логов: три файла по 10 МБ.
+- У каждого контейнера потолок памяти без свопа (`postgres` 1 ГБ, `postgres-replica`, `rabbitmq`, `api` и `worker` по 512 МБ, `migrate` и `postgres-backup` по 256 МБ, `replication-setup` 64 МБ) и ротация логов: три файла по 10 МБ. Вместе — около 3,6 ГБ, без учёта интерфейса и хранилища состояния.
+- `replication-setup` и `postgres-backup` — как `migrate`: файловая система только для чтения, без capabilities. `postgres-replica` — как `postgres`: только `no-new-privileges`.
 
 Смена любого из этих атрибутов пересоздаёт контейнер. Данные PostgreSQL и RabbitMQ лежат в томах и замену переживают.
 
@@ -52,6 +87,7 @@ Eurorouter подключается только фоллбэком после �
 | --- | --- |
 | `api_image` | тег собранного образа |
 | `postgres_password`, `rabbitmq_password` | секреты `PG_PASSWORD_DMC268_T1`, `RABBITMQ_PASSWORD_DMC268_T1` |
+| `postgres_replication_password` | секрет `PG_REPLICATION_PASSWORD_DMC268_T1`, не короче 16 символов |
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `registry_username`, `registry_password` | `github.actor` и `GITHUB_TOKEN`, живут один прогон |
 | `docker_host`, `service_host` | собираются из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
@@ -112,6 +148,6 @@ cd infra && tofu fmt -check && tofu init -backend=false && tofu validate
 
 `tofu destroy` удалит стек, но **не** контейнер хранилища состояния — он не входит в этот стек намеренно. Полная зачистка описана ниже, в разделе про хранилище.
 
-Выходы: `api_url`; чувствительные: `postgres_url`, `rabbitmq_url` (пароли в URL кодируются через `urlencode`).
+Выход: `api_url`. URL базы и брокера наружу не отдаются: портов на хосте у них нет.
 
 Этот стек только для API. UI деплоится отдельно из `dmc-268-ui-t1/infra/`.

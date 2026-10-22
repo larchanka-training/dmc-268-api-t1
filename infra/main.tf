@@ -17,8 +17,29 @@ locals {
   ]
 }
 
+# Три сети вместо одной общей — каждый контейнер видит только тех, с кем говорит.
+#
+# dmc268 — сеть публичного входа: интерфейс и API. Имя прежнее: контейнер
+# интерфейса подключается к ней по имени (data "docker_network" в dmc-268-ui-t1),
+# и переименование развело бы стеки.
 resource "docker_network" "dmc268" {
   name = "dmc268"
+}
+
+# Сеть данных: база, реплика, брокер и те, кто с ними работает. internal — у
+# сети нет шлюза: из неё не выйти в интернет, а интерфейс в неё не подключён,
+# поэтому база и брокер недоступны ни снаружи, ни с публичного входа.
+# Публиковать порт с такой сети Docker не умеет, поэтому у базы и брокера
+# портов на хосте больше нет: отладка — через `docker exec`.
+resource "docker_network" "backend" {
+  name     = "dmc268-backend"
+  internal = true
+}
+
+# Исходящая сеть воркера: GitHub API и провайдер модели. Отдельно от сети
+# входа, чтобы воркер не был виден интерфейсу; портов воркер не публикует.
+resource "docker_network" "egress" {
+  name = "dmc268-egress"
 }
 
 # Имя со сборкой образа: при переходе с postgres:18-alpine (musl) на
@@ -34,6 +55,19 @@ resource "docker_volume" "postgres" {
 # минорную версию на этом же томе.
 resource "docker_volume" "rabbitmq" {
   name = "dmc268-rabbitmq-v4-data"
+}
+
+# Свой том у реплики: это полная физическая копия основного каталога данных.
+# Удалённый том реплика пересоберёт сама (pg_basebackup при пустом каталоге).
+resource "docker_volume" "postgres_replica" {
+  name = "dmc268-postgres-replica-data"
+}
+
+# Резервные копии лежат на том же диске сервера: от сбоя диска или сервера
+# они не спасают, только от ошибочного удаления данных и испорченной базы.
+# Вынос копий за пределы сервера — отдельная задача.
+resource "docker_volume" "postgres_backups" {
+  name = "dmc268-postgres-backups"
 }
 
 resource "docker_image" "postgres" {
@@ -71,7 +105,7 @@ resource "docker_container" "postgres" {
   log_opts      = local.log_opts
 
   networks_advanced {
-    name = docker_network.dmc268.name
+    name = docker_network.backend.name
   }
 
   env = [
@@ -80,10 +114,20 @@ resource "docker_container" "postgres" {
     "POSTGRES_DB=${var.postgres_db}",
   ]
 
-  ports {
-    internal = 5432
-    external = var.postgres_port
-    ip       = var.internal_bind_ip
+  # wal_level=replica и max_wal_senders у PostgreSQL 18 уже такие, какие нужны
+  # реплике; задаём только то, чего нет по умолчанию. max_slot_wal_keep_size —
+  # потолок WAL, который удержит слот реплики: без него упавшая реплика копила
+  # бы WAL на основном сервере, пока не кончится диск. Перешагнувшая потолок
+  # реплика теряет слот и пересобирается с пустого тома.
+  command = [
+    "postgres",
+    "-c", "hba_file=/etc/postgresql/pg_hba.conf",
+    "-c", "max_slot_wal_keep_size=${var.postgres_max_slot_wal_keep_size}",
+  ]
+
+  upload {
+    file    = "/etc/postgresql/pg_hba.conf"
+    content = file("${path.module}/postgres/pg_hba.conf")
   }
 
   volumes {
@@ -117,19 +161,13 @@ resource "docker_container" "rabbitmq" {
   log_opts      = local.log_opts
 
   networks_advanced {
-    name = docker_network.dmc268.name
+    name = docker_network.backend.name
   }
 
   env = [
     "RABBITMQ_DEFAULT_USER=${var.rabbitmq_user}",
     "RABBITMQ_DEFAULT_PASS=${var.rabbitmq_password}",
   ]
-
-  ports {
-    internal = 5672
-    external = var.rabbitmq_port
-    ip       = var.internal_bind_ip
-  }
 
   volumes {
     volume_name    = docker_volume.rabbitmq.name
@@ -174,7 +212,7 @@ resource "docker_container" "migrate" {
   depends_on = [docker_container.postgres]
 
   networks_advanced {
-    name = docker_network.dmc268.name
+    name = docker_network.backend.name
   }
 
   env = local.app_env
@@ -224,8 +262,16 @@ resource "docker_container" "api" {
     docker_container.migrate,
   ]
 
+  # API — единственный, кто стоит в обеих сетях: запросы приходят из сети
+  # входа, база и брокер — в сети данных. Сеть входа не internal: через неё
+  # же API ходит в GitHub (OAuth, метаданные PR), и на ней опубликован порт
+  # для проверки живости через туннель.
   networks_advanced {
     name = docker_network.dmc268.name
+  }
+
+  networks_advanced {
+    name = docker_network.backend.name
   }
 
   # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера,
@@ -292,7 +338,11 @@ resource "docker_container" "worker" {
   ]
 
   networks_advanced {
-    name = docker_network.dmc268.name
+    name = docker_network.backend.name
+  }
+
+  networks_advanced {
+    name = docker_network.egress.name
   }
 
   # Секрет вебхука воркеру не нужен, но без него не загрузятся общие
@@ -314,4 +364,190 @@ resource "docker_container" "worker" {
     "EUROROUTER_MODEL=${var.eurorouter_model}",
     "EUROROUTER_API_KEYS=${var.eurorouter_api_keys}",
   ])
+}
+
+# Роль replicator и слот для реплики. Одноразовый контейнер по образцу
+# migrate: init-скрипты образа на уже заведённом томе не выполняются, поэтому
+# объекты кластера заводятся здесь, идемпотентно, на каждом деплое.
+resource "docker_container" "replication_setup" {
+  name  = "dmc268-replication-setup"
+  image = docker_image.postgres.image_id
+
+  must_run = false
+  attach   = true
+  logs     = true
+
+  read_only     = true
+  tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=16m" }
+  security_opts = ["no-new-privileges:true"]
+  user          = "postgres"
+  memory        = 64
+  memory_swap   = 64
+  log_driver    = "json-file"
+  log_opts      = local.log_opts
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  depends_on = [docker_container.postgres]
+
+  networks_advanced {
+    name = docker_network.backend.name
+  }
+
+  # SQL приходит переменной окружения, а не файлом: upload в контейнер с
+  # файловой системой только для чтения Docker не пускает.
+  env = [
+    "PGHOST=dmc268-postgres",
+    "PGUSER=${var.postgres_user}",
+    "PGPASSWORD=${var.postgres_password}",
+    "PGDATABASE=${var.postgres_db}",
+    "REPLICATION_PASSWORD=${var.postgres_replication_password}",
+    "SETUP_SQL=${file("${path.module}/postgres/replication-setup.sql")}",
+  ]
+
+  # Как у migrate: depends_on не ждёт готовности базы, поэтому повторяем.
+  command = [
+    "sh", "-c",
+    "for i in $(seq 1 30); do printf '%s\\n' \"$SETUP_SQL\" | psql -v replication_password=\"$REPLICATION_PASSWORD\" -f - && exit 0; sleep 2; done; exit 1",
+  ]
+
+  lifecycle {
+    postcondition {
+      condition     = self.exit_code == 0
+      error_message = "Роль или слот для реплики не заведены — деплой остановлен до старта реплики."
+    }
+
+    # Сменившийся пароль или SQL должны дойти до базы и тогда, когда сам
+    # контейнер не менялся (образ postgres закреплён): пересоздаём его.
+    replace_triggered_by = [terraform_data.replication_setup_inputs]
+  }
+}
+
+resource "terraform_data" "replication_setup_inputs" {
+  input = sha256(join("\n", [
+    var.postgres_replication_password,
+    file("${path.module}/postgres/replication-setup.sql"),
+  ]))
+}
+
+# Горячая реплика: физическая потоковая репликация с основного сервера по слоту
+# dmc268_replica. Только чтение; приложение в неё не ходит, с неё снимаются
+# резервные копии. Защищает от сбоя процесса или тома основной базы, но не от
+# падения сервера — реплика на том же хосте (решение задачи: prod — нынешний VPS).
+resource "docker_container" "postgres_replica" {
+  name    = "dmc268-postgres-replica"
+  image   = docker_image.postgres.image_id
+  restart = "unless-stopped"
+
+  # Как у основного сервера: entrypoint стартует от root и сам переходит на
+  # пользователя postgres.
+  security_opts = ["no-new-privileges:true"]
+  memory        = var.postgres_replica_memory
+  memory_swap   = var.postgres_replica_memory
+  log_driver    = "json-file"
+  log_opts      = local.log_opts
+
+  depends_on = [docker_container.replication_setup]
+
+  networks_advanced {
+    name = docker_network.backend.name
+  }
+
+  env = [
+    "PRIMARY_HOST=dmc268-postgres",
+    "REPLICATION_PASSWORD=${var.postgres_replication_password}",
+  ]
+
+  entrypoint = ["sh", "/opt/dmc268/replica-entrypoint.sh"]
+  # hot_standby_feedback — чтобы долгий pg_dump на реплике не обрывался
+  # конфликтом с очисткой на основном сервере.
+  command = [
+    "postgres",
+    "-c", "hba_file=/etc/postgresql/pg_hba.conf",
+    "-c", "hot_standby_feedback=on",
+  ]
+
+  upload {
+    file    = "/opt/dmc268/replica-entrypoint.sh"
+    content = file("${path.module}/postgres/replica-entrypoint.sh")
+  }
+
+  upload {
+    file    = "/etc/postgresql/pg_hba.conf"
+    content = file("${path.module}/postgres/pg_hba.conf")
+  }
+
+  volumes {
+    volume_name    = docker_volume.postgres_replica.name
+    container_path = "/var/lib/postgresql"
+  }
+
+  # Готовность — не просто открытый порт: сервер обязан быть в режиме
+  # восстановления, то есть именно репликой. Реплика, по ошибке поднявшаяся
+  # самостоятельным сервером, должна быть unhealthy.
+  healthcheck {
+    test     = ["CMD-SHELL", "pg_isready -U ${var.postgres_user} -d ${var.postgres_db} && [ \"$(psql -U ${var.postgres_user} -d ${var.postgres_db} -tAc 'select pg_is_in_recovery()')\" = t ]"]
+    interval = "30s"
+    timeout  = "5s"
+    retries  = 5
+    # Первая сборка копирует базу целиком.
+    start_period = "5m0s"
+  }
+}
+
+# Резервные копии: pg_dump с реплики раз в сутки, хранение — backup_keep_days.
+resource "docker_container" "postgres_backup" {
+  name    = "dmc268-postgres-backup"
+  image   = docker_image.postgres.image_id
+  restart = "unless-stopped"
+
+  # Скрипт — аргументом sh -c, а не файлом: upload в контейнер с файловой
+  # системой только для чтения Docker не пускает.
+  entrypoint = ["sh", "-c", file("${path.module}/postgres/backup.sh")]
+
+  # Свой скрипт, своя роль: root только как владелец тома с копиями, без
+  # capabilities и с файловой системой образа только для чтения.
+  read_only     = true
+  tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=16m" }
+  security_opts = ["no-new-privileges:true"]
+  memory        = 256
+  memory_swap   = 256
+  log_driver    = "json-file"
+  log_opts      = local.log_opts
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  depends_on = [docker_container.postgres_replica]
+
+  networks_advanced {
+    name = docker_network.backend.name
+  }
+
+  env = [
+    "PGHOST=dmc268-postgres-replica",
+    "PGUSER=${var.postgres_user}",
+    "PGPASSWORD=${var.postgres_password}",
+    "PGDATABASE=${var.postgres_db}",
+    "BACKUP_KEEP_DAYS=${var.backup_keep_days}",
+    "BACKUP_INTERVAL_SECONDS=86400",
+  ]
+
+  volumes {
+    volume_name    = docker_volume.postgres_backups.name
+    container_path = "/backups"
+  }
+
+  # Живость копирования — свежая копия, а не живой процесс: цикл может крутить
+  # ошибки pg_dump бесконечно. Порог — сутки плюс два часа запаса.
+  healthcheck {
+    test         = ["CMD-SHELL", "find /backups -name '*.dump' -mmin -1560 | grep -q ."]
+    interval     = "10m0s"
+    timeout      = "10s"
+    retries      = 1
+    start_period = "15m0s"
+  }
 }
