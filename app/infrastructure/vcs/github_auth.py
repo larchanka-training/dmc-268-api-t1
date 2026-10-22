@@ -55,7 +55,7 @@ class GitHubAppAuth:
         try:
             response = self._client.post(
                 f"/app/installations/{installation_id}/access_tokens",
-                headers={"Authorization": f"Bearer {self._build_jwt()}"},
+                headers={"Authorization": f"Bearer {self.app_jwt()}"},
             )
         except httpx.RequestError as error:
             raise VcsUnavailableError(
@@ -77,14 +77,23 @@ class GitHubAppAuth:
                 f" для {installation_id}: {error!r}"
             ) from error
 
-    def _build_jwt(self) -> str:
+    def app_jwt(self) -> str:
+        """JWT приложения — для запросов от имени App, а не установки
+        (`/app/installations`, выдача installation token).
+
+        Ключ, который не подписывает (пустой на стенде без реквизитов App,
+        битый PEM), — сбой аутентификации у провайдера, а не 500.
+        """
         issued_at = int(time.time())
-        return jwt.encode(
-            {
-                "iss": self._app_id,
-                "iat": issued_at,
-                "exp": issued_at + _JWT_TTL_SECONDS,
-            },
-            self._private_key,
-            algorithm="RS256",
-        )
+        try:
+            return jwt.encode(
+                {
+                    "iss": self._app_id,
+                    "iat": issued_at,
+                    "exp": issued_at + _JWT_TTL_SECONDS,
+                },
+                self._private_key,
+                algorithm="RS256",
+            )
+        except (jwt.PyJWTError, ValueError, TypeError) as error:
+            raise VcsAuthError(f"не удалось подписать JWT GitHub App: {error!r}") from error
