@@ -31,9 +31,11 @@ from ..fakes.unit_of_work import FakeUnitOfWork
 NOW = datetime(2026, 10, 22, 9, 30, tzinfo=UTC)
 NEW_ID = UUID("01920000-0000-7000-8000-000000000041")
 SESSION_ID = UUID(int=0x5E)
-READ = RepositoryPermissions(admin=False, maintain=False)
-ADMIN = RepositoryPermissions(admin=True, maintain=False)
-MAINTAIN = RepositoryPermissions(admin=False, maintain=True)
+READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
+ADMIN = RepositoryPermissions(admin=True, maintain=False, push=False, triage=False)
+MAINTAIN = RepositoryPermissions(admin=False, maintain=True, push=False, triage=False)
+WRITE = RepositoryPermissions(admin=False, maintain=False, push=True, triage=False)
+TRIAGE = RepositoryPermissions(admin=False, maintain=False, push=False, triage=True)
 
 
 def _repo(provider_id: str, name: str, permissions: RepositoryPermissions) -> InstallationRepository:
@@ -42,6 +44,7 @@ def _repo(provider_id: str, name: str, permissions: RepositoryPermissions) -> In
 
 API = _repo("101", "api", ADMIN)
 WEB = _repo("202", "web", READ)
+DOCS = _repo("303", "docs", WRITE)
 
 
 def _signed_in() -> FakeUnitOfWork:
@@ -133,16 +136,26 @@ def test_maintain_connects() -> None:
     assert isinstance(outcome, Repository)
 
 
-def test_without_admin_or_maintain_it_is_refused_and_nothing_is_written() -> None:
+@pytest.mark.parametrize("permissions", [WRITE, TRIAGE])
+def test_without_admin_or_maintain_it_is_refused_and_nothing_is_written(permissions: RepositoryPermissions) -> None:
     uow = _signed_in()
-    assert _connect(FakeInstallationCatalog([WEB]), uow, "202") is ConnectRefusal.MANAGE_REQUIRED
+    assert _connect(FakeInstallationCatalog([_repo("303", "docs", permissions)]), uow, "303") is ConnectRefusal.MANAGE_REQUIRED
     assert uow.repositories.stored == {}
 
 
 def test_without_rights_the_user_does_not_learn_it_is_connected() -> None:
     uow = _signed_in()
-    uow.repositories.add(_registered("202"))
-    assert _connect(FakeInstallationCatalog([WEB]), uow, "202") is ConnectRefusal.MANAGE_REQUIRED
+    uow.repositories.add(_registered("303"))
+    assert _connect(FakeInstallationCatalog([DOCS]), uow, "303") is ConnectRefusal.MANAGE_REQUIRED
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_a_repository_with_only_pull_is_invisible_whether_or_not_the_app_is_installed(installed: bool) -> None:
+    """Чужой публичный репозиторий GitHub отдаёт по id любому, с одним `pull`: это не
+    доступ. Отказ — как у невидимого, установка не запрашивается, оракула установки нет."""
+    catalog = FakeInstallationCatalog([WEB], not_installed=set() if installed else {WEB.full_name})
+    assert _connect(catalog, _signed_in(), "202") is ConnectRefusal.NOT_IN_INSTALLATION
+    assert catalog.calls == ["user_repository"]
 
 
 def test_invisible_and_missing_repositories_get_the_same_refusal() -> None:
@@ -209,4 +222,4 @@ def test_the_installation_is_not_checked_for_a_repository_the_user_cannot_see() 
 
 
 def test_without_rights_on_an_installed_repository_it_is_403() -> None:
-    assert _connect(FakeInstallationCatalog([WEB]), _signed_in(), "202") is ConnectRefusal.MANAGE_REQUIRED
+    assert _connect(FakeInstallationCatalog([DOCS]), _signed_in(), "303") is ConnectRefusal.MANAGE_REQUIRED

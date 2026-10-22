@@ -242,7 +242,12 @@ class _Repository(_GitHubModel):
             provider_id=str(self.id),
             full_name=self.full_name,
             default_branch=self.default_branch,
-            permissions=RepositoryPermissions(admin=self.permissions.admin, maintain=self.permissions.maintain),
+            permissions=RepositoryPermissions(
+                admin=self.permissions.admin,
+                maintain=self.permissions.maintain,
+                push=self.permissions.push,
+                triage=self.permissions.triage,
+            ),
         )
 
 

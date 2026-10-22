@@ -58,7 +58,7 @@ def installation(installation_id: int, suspended_at: str | None = None) -> dict[
     }
 
 
-def repo_json(n: int, *, admin: bool = False, maintain: bool = False) -> dict[str, Any]:
+def repo_json(n: int, *, admin: bool = False, maintain: bool = False, push: bool = False, triage: bool = False) -> dict[str, Any]:
     return {
         "id": n,
         "node_id": "MDEwOlJlcG9zaXRvcnkxMjk2MjY5",
@@ -66,7 +66,7 @@ def repo_json(n: int, *, admin: bool = False, maintain: bool = False) -> dict[st
         "full_name": f"octo-org/repo-{n}",
         "private": True,
         "default_branch": "main",
-        "permissions": {"admin": admin, "maintain": maintain, "push": admin or maintain, "triage": True, "pull": True},
+        "permissions": {"admin": admin, "maintain": maintain, "push": push, "triage": triage, "pull": True},
     }
 
 
@@ -90,12 +90,14 @@ def router(installations: list[dict[str, Any]], repositories: dict[int, list[dic
 
 
 def test_lists_repositories_of_every_installation_with_user_permissions() -> None:
-    catalog = make_catalog(router([installation(7), installation(8)], {7: [repo_json(1, admin=True)], 8: [repo_json(2, maintain=True), repo_json(3)]}))
+    catalog = make_catalog(router([installation(7), installation(8)], {7: [repo_json(1, admin=True)], 8: [repo_json(2, maintain=True), repo_json(3), repo_json(4, push=True), repo_json(5, triage=True)]}))
 
     assert catalog.list_repositories(TOKEN) == [
-        InstallationRepository("1", "octo-org/repo-1", "main", RepositoryPermissions(admin=True, maintain=False)),
-        InstallationRepository("2", "octo-org/repo-2", "main", RepositoryPermissions(admin=False, maintain=True)),
-        InstallationRepository("3", "octo-org/repo-3", "main", RepositoryPermissions(admin=False, maintain=False)),
+        InstallationRepository("1", "octo-org/repo-1", "main", RepositoryPermissions(admin=True, maintain=False, push=False, triage=False)),
+        InstallationRepository("2", "octo-org/repo-2", "main", RepositoryPermissions(admin=False, maintain=True, push=False, triage=False)),
+        InstallationRepository("3", "octo-org/repo-3", "main", RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)),
+        InstallationRepository("4", "octo-org/repo-4", "main", RepositoryPermissions(admin=False, maintain=False, push=True, triage=False)),
+        InstallationRepository("5", "octo-org/repo-5", "main", RepositoryPermissions(admin=False, maintain=False, push=False, triage=True)),
     ]
 
 
@@ -144,7 +146,7 @@ def test_permissions_without_maintain_as_in_the_docs_example_mean_no_maintain() 
     item["permissions"] = {"admin": False, "push": False, "pull": True}
     catalog = make_catalog(router([installation(7)], {7: [item]}))
 
-    assert catalog.list_repositories(TOKEN)[0].permissions == RepositoryPermissions(admin=False, maintain=False)
+    assert catalog.list_repositories(TOKEN)[0].permissions == RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
 
 
 def test_a_401_means_the_token_is_rejected() -> None:
@@ -317,7 +319,7 @@ def test_user_repository_reads_one_repository_with_the_user_token() -> None:
 
     found = make_catalog(handler).user_repository(TOKEN, "42")
 
-    assert found == InstallationRepository("42", "octo-org/repo-42", "main", RepositoryPermissions(admin=False, maintain=True))
+    assert found == InstallationRepository("42", "octo-org/repo-42", "main", RepositoryPermissions(admin=False, maintain=True, push=False, triage=False))
     assert seen == ["/repositories/42"]
 
 

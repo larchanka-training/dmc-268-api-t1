@@ -65,7 +65,7 @@ PATH = "/api/v1/events"
 FUTURE = datetime.now(UTC) + timedelta(hours=1)
 PAST = datetime.now(UTC) - timedelta(hours=1)
 
-READ = RepositoryPermissions(admin=False, maintain=False)
+READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
 # GitHub по токену пользователя отдаёт только VISIBLE; HIDDEN подключён в сервисе, но пользователю не виден.
 VISIBLE = InstallationRepository("101", "octo-org/api", "main", READ)
 HIDDEN = InstallationRepository("202", "octo-org/secret", "main", READ)

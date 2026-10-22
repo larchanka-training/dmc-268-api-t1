@@ -711,7 +711,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     from .fakes import FakeUow, FakeVcs
     from .fakes.installation_catalog import FakeInstallationCatalog
     from .test_pull_requests_api import _client as pull_requests_client
-    from .test_repositories_api import API, WEB
+    from .test_repositories_api import API, WRITER
     from .test_repositories_api import _client as repositories_client
     from .test_repositories_api import _connect as connect_repository
     from .test_repositories_api import _repository as registered_repository
@@ -730,7 +730,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         ),
         post_webhook(scm_down, "opened"),
         connect_repository(repositories_client(FakeUnitOfWork(), FakeInstallationCatalog([API])), "999"),
-        connect_repository(repositories_client(FakeUnitOfWork(), FakeInstallationCatalog([WEB])), WEB.provider_id),
+        connect_repository(repositories_client(FakeUnitOfWork(), FakeInstallationCatalog([WRITER])), WRITER.provider_id),
         connect_repository(repositories_client(connected, FakeInstallationCatalog([API]))),
         client.get("/api/v1/nope"),
         client.get("/api/v1/a%20b"),

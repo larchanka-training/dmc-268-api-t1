@@ -445,7 +445,7 @@
 
 ### Requirement: Отказы подключения репозитория
 
-Подключать репозиторий SHALL только пользователь с `permissions.admin` или `permissions.maintain`. Порядок: не `github`, не виден пользователю, приложение не установлено или приостановлено — `404 REPOSITORY_NOT_IN_INSTALLATION` (установка проверяется после доступа); нет admin и maintain — `403 REPOSITORY_MANAGE_REQUIRED`; уже зарегистрирован — `409 REPOSITORY_ALREADY_CONNECTED`. Все `404` SHALL быть одинаковы; без прав SHALL NOT быть видно, подключён ли репозиторий.
+Подключать репозиторий SHALL только пользователь с `permissions.admin` или `permissions.maintain`. Порядок: не `github`, не виден пользователю или из прав только `pull`, приложение не установлено или приостановлено — `404 REPOSITORY_NOT_IN_INSTALLATION` (установка — после доступа); нет admin и maintain — `403 REPOSITORY_MANAGE_REQUIRED`; уже зарегистрирован — `409 REPOSITORY_ALREADY_CONNECTED`. Все `404` SHALL быть одинаковы; без прав SHALL NOT быть видно, подключён ли репозиторий.
 
 #### Scenario: Подключение с ролью maintain
 
@@ -454,8 +454,13 @@
 
 #### Scenario: Подключение без прав admin
 
-- **WHEN** GitHub отдаёт репозиторий пользователю с `permissions.admin = false` и `permissions.maintain = false`
+- **WHEN** GitHub отдаёт репозиторий пользователю с `permissions.push = true` или `permissions.triage = true`, но с `permissions.admin = false` и `permissions.maintain = false`
 - **THEN** ответ — `403` с `code = REPOSITORY_MANAGE_REQUIRED`, записи нет
+
+#### Scenario: Репозиторий только с правом чтения
+
+- **WHEN** GitHub отдаёт репозиторий по id с `permissions.push`, `triage`, `maintain` и `admin` равными `false` — так он отдаёт любому чужой публичный репозиторий
+- **THEN** ответ — `404` с `code = REPOSITORY_NOT_IN_INSTALLATION`, тело совпадает с ответом на отсутствующий репозиторий, кроме `trace_id`, установка приложения не запрашивается, и ответ не зависит от того, установлено ли туда приложение
 
 #### Scenario: Подключение уже подключённого без прав
 

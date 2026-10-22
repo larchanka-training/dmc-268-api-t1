@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import (
@@ -65,11 +66,13 @@ def _repository(n: int) -> Repository:
 
 
 ORIGIN = "https://review.example"
-ADMIN = RepositoryPermissions(admin=True, maintain=False)
-MAINTAIN = RepositoryPermissions(admin=False, maintain=True)
-READ = RepositoryPermissions(admin=False, maintain=False)
+ADMIN = RepositoryPermissions(admin=True, maintain=False, push=False, triage=False)
+MAINTAIN = RepositoryPermissions(admin=False, maintain=True, push=False, triage=False)
+READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
+WRITE = RepositoryPermissions(admin=False, maintain=False, push=True, triage=False)
 API = InstallationRepository(provider_id="101", full_name="octo-org/api", default_branch="main", permissions=ADMIN)
 WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", default_branch="trunk", permissions=READ)
+WRITER = InstallationRepository(provider_id="303", full_name="octo-org/docs", default_branch="main", permissions=WRITE)
 
 
 def _client(
@@ -255,6 +258,7 @@ def test_the_user_token_never_reaches_the_response() -> None:
 
 
 def test_a_read_only_user_sees_the_repository_but_cannot_connect_it() -> None:
+    """Только `pull`: в списке есть (его отдал GitHub), подключение — `404`, как у невидимого."""
     uow = FakeUnitOfWork()
     client = _client(uow, FakeInstallationCatalog([WEB]))
 
@@ -263,9 +267,23 @@ def test_a_read_only_user_sees_the_repository_but_cannot_connect_it() -> None:
 
     assert listed.status_code == 200
     assert [item["full_name"] for item in listed.json()["items"]] == ["octo-org/web"]
-    assert connected.status_code == 403
-    assert connected.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    assert connected.status_code == 404
+    assert connected.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
     assert uow.repositories.stored == {}
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_a_public_repository_without_explicit_rights_looks_exactly_like_a_missing_one(installed: bool) -> None:
+    """`GET /repositories/{id}` отдаёт чужой публичный репозиторий с одним `pull`: ответ
+    не зависит от того, установлено ли туда приложение, и совпадает с ответом на отсутствующий."""
+    catalog = FakeInstallationCatalog([WEB], not_installed=set() if installed else {WEB.full_name})
+    public = _connect(_client(FakeUnitOfWork(), catalog), WEB.provider_id)
+    missing = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([])), "999")
+
+    assert public.status_code == missing.status_code == 404
+    strip = lambda body: {k: v for k, v in body.items() if k not in {"trace_id", "instance"}}
+    assert strip(public.json()) == strip(missing.json())
+    assert "app_installed" not in catalog.calls
 
 
 def test_a_maintainer_connects_a_repository() -> None:
@@ -387,7 +405,7 @@ def test_an_admin_connects_a_repository() -> None:
 
 def test_connecting_without_manage_rights_is_403() -> None:
     uow = FakeUnitOfWork()
-    response = _connect(_client(uow, FakeInstallationCatalog([WEB])), "202")
+    response = _connect(_client(uow, FakeInstallationCatalog([WRITER])), WRITER.provider_id)
 
     assert response.status_code == 403
     assert response.headers["content-type"] == "application/problem+json"
@@ -435,9 +453,9 @@ def test_connecting_twice_is_409() -> None:
 
 def test_connecting_a_connected_repository_without_manage_rights_is_403_not_409() -> None:
     uow = FakeUnitOfWork()
-    uow.repositories.add(_repository(202))
+    uow.repositories.add(_repository(303))
 
-    response = _connect(_client(uow, FakeInstallationCatalog([WEB])), "202")
+    response = _connect(_client(uow, FakeInstallationCatalog([WRITER])), WRITER.provider_id)
 
     assert response.status_code == 403
     assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"

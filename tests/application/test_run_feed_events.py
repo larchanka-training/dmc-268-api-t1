@@ -29,7 +29,7 @@ from app.domain.run_feed import RunEventType, RunFeedEvent, RunFeedState, open_f
 from ..fakes.unit_of_work import FakeUnitOfWork
 
 CONNECTED = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
-READ = RepositoryPermissions(admin=False, maintain=False)
+READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
 REPOSITORY = Repository(
     id=UUID(int=1),
     provider=Provider.GITHUB,

@@ -51,11 +51,14 @@ class Repository:
 class RepositoryPermissions:
     """Права пользователя на репозиторий так, как их отдаёт провайдер.
 
-    Только то, что читает решение о подключении (`app/domain/repository_access.py`).
+    Только то, что читают решения о подключении (`app/domain/repository_access.py`):
+    `pull` не нужен — его GitHub отдаёт любому на публичный репозиторий.
     """
 
     admin: bool
     maintain: bool
+    push: bool
+    triage: bool
 
 
 @dataclass(frozen=True, slots=True)
