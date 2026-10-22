@@ -399,6 +399,31 @@ def test_an_incompatible_engine_tracer_does_not_stop_the_worker(
     assert record.levelname == "WARNING"
 
 
+def test_the_installed_engine_tracer_still_produces_sql_spans(
+    spans: InMemorySpanExporter,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Сторож обновления пакета: фоллбэк `instrument_engine` молча выключает спаны SQL,
+    # и без этой проверки переезд `EngineTracer` заметили бы только по пустым трейсам.
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+    engine = create_engine("sqlite://")
+    telemetry.instrument_engine(engine)
+
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+
+    assert not _engine_warnings(caplog), (
+        "EngineTracer из opentelemetry-instrumentation-sqlalchemy несовместим — "
+        "спаны SQL пропали; см. TODO в telemetry.instrument_engine"
+    )
+    assert [s for s in spans.get_finished_spans() if s.kind is SpanKind.CLIENT], (
+        "после instrument_engine запрос к базе не дал спана — спаны SQL пропали"
+    )
+
+
 # --- остановка процесса --------------------------------------------------------------
 
 
