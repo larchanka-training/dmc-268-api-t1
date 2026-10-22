@@ -416,7 +416,7 @@ def test_planned_repository_settings_save_answers_not_implemented() -> None:
     for body in (
         SETTINGS_BODY,
         {**SETTINGS_BODY, "branch_filter": []},
-        {**SETTINGS_BODY, "branch_filter": ["x" * 200] * 50},
+        {**SETTINGS_BODY, "branch_filter": [f"{n:02d}" + "x" * 198 for n in range(50)]},
     ):
         response = client.put(SETTINGS_PATH, json=body, headers={"Origin": ORIGIN})
         assert_problem(response, 501, "NOT_IMPLEMENTED", SETTINGS_PATH)
@@ -469,12 +469,22 @@ def test_planned_repository_settings_put_checks_origin_and_session_first(client:
         ),
         (
             SETTINGS_PATH,
+            {**SETTINGS_BODY, "branch_filter": ["main", "   "]},
+            {"where": "body.branch_filter.1", "reason": "длина строки должна быть не меньше 1"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "branch_filter": ["main", "release/*", " main "]},
+            {"where": "body.branch_filter", "reason": "паттерны веток повторяются"},
+        ),
+        (
+            SETTINGS_PATH,
             {**SETTINGS_BODY, "branch_filter": ["x" * 201]},
             {"where": "body.branch_filter.0", "reason": "длина строки должна быть не больше 200"},
         ),
         (
             SETTINGS_PATH,
-            {**SETTINGS_BODY, "branch_filter": ["main"] * 51},
+            {**SETTINGS_BODY, "branch_filter": [f"release/{n}" for n in range(51)]},
             {"where": "body.branch_filter", "reason": "элементов должно быть не больше 50"},
         ),
     ],

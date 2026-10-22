@@ -12,7 +12,8 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path
-from pydantic import BaseModel, Field, RootModel, StringConstraints
+from pydantic import BaseModel, Field, RootModel, StringConstraints, field_validator
+from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
     get_installation_catalog,
@@ -259,7 +260,10 @@ def list_repositories(
 BRANCH_PATTERN_MAX_LENGTH = 200
 BRANCH_FILTER_MAX_ITEMS = 50
 
-BranchPattern = Annotated[str, StringConstraints(min_length=1, max_length=BRANCH_PATTERN_MAX_LENGTH)]
+# Пробелы по краям отрезаются: паттерн из одних пробелов — пустой и отклоняется.
+BranchPattern = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=BRANCH_PATTERN_MAX_LENGTH)
+]
 RepositoryIdPath = Annotated[UUID, Path(description="Идентификатор репозитория в сервисе.")]
 
 _AUTO_REVIEW_DESCRIPTION = (
@@ -293,12 +297,20 @@ class RepositorySettingsUpdate(StrictRequest):
         max_length=BRANCH_FILTER_MAX_ITEMS,
         description=(
             f"{_BRANCH_FILTER_DESCRIPTION} Не больше {BRANCH_FILTER_MAX_ITEMS} паттернов, каждый — "
-            f"непустой, не длиннее {BRANCH_PATTERN_MAX_LENGTH} символов."
+            f"непустой после обрезки пробелов, не длиннее {BRANCH_PATTERN_MAX_LENGTH} символов, без повторов."
         ),
         examples=[["main", "release/*"]],
     )
     # strict у модели не пропустил бы enum строкой; для enum-поля — точечно, как в ConnectRepositoryRequest.
     min_severity: FindingSeverity = Field(strict=False, description=_MIN_SEVERITY_DESCRIPTION, examples=["critical"])
+
+    @field_validator("branch_filter")
+    @classmethod
+    def _patterns_are_unique(cls, patterns: list[str]) -> list[str]:
+        """Повтор паттерна — ошибка, а не молчаливая склейка: форма должна показать, что не так."""
+        if len(set(patterns)) != len(patterns):
+            raise PydanticCustomError("duplicate_patterns", "паттерны веток повторяются")
+        return patterns
 
 
 class RepoRule(BaseModel):
@@ -306,8 +318,12 @@ class RepoRule(BaseModel):
 
     name: str = Field(description="Имя правила — заголовок раздела.", examples=["Миграции"])
     patterns: list[str] = Field(description="Glob-паттерны файлов, к которым правило применяется.", examples=[["migrations/**"]])
-    excludes: list[str] = Field(description="Glob-паттерны исключений; пустой список — не исключено ничего.")
-    checks: list[str] = Field(description="Проверки правила — пункты раздела.")
+    excludes: list[str] = Field(
+        description="Glob-паттерны исключений; пустой список — не исключено ничего.", examples=[["**/tests/**"]]
+    )
+    checks: list[str] = Field(
+        description="Проверки правила — пункты раздела.", examples=[["Миграция обратима: есть downgrade"]]
+    )
 
 
 class RejectedRule(BaseModel):
