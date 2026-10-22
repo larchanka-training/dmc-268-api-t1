@@ -386,3 +386,45 @@ def test_not_installed_or_suspended_is_false(rsa_key_pair: RsaKeyPair) -> None:
 def test_app_installed_failures_are_vcs_errors(response: httpx.Response, rsa_key_pair: RsaKeyPair) -> None:
     with pytest.raises(VcsError):
         _app_catalog(response, rsa_key_pair, []).app_installed("o/r")
+
+
+def test_extra_github_fields_are_ignored() -> None:
+    item = repo_json(1) | {"owner": {"login": "octo-org"}, "topics": ["x"], "unknown_future_field": {"a": 1}}
+    item["permissions"] = item["permissions"] | {"new_role": True}
+    catalog = make_catalog(router([installation(7) | {"html_url": "https://github.com/x"}], {7: [item]}))
+
+    assert [r.provider_id for r in catalog.list_repositories(TOKEN)] == ["1"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda item: item.update(default_branch=None),
+        lambda item: item.update(id=True),
+        lambda item: item.update(id="1"),
+        lambda item: item["permissions"].update(push=None),
+    ],
+)
+def test_strict_types_reject_and_the_message_carries_no_values(mutate: Callable[[dict[str, Any]], None]) -> None:
+    item = repo_json(1) | {"full_name": "secret-org/secret-name"}
+    item["permissions"] = dict(item["permissions"])
+    mutate(item)
+
+    with pytest.raises(VcsError) as raised:
+        make_catalog(router([installation(7)], {7: [item]})).list_repositories(TOKEN)
+
+    message = str(raised.value)
+    assert "repositories.0." in message
+    assert "secret-org" not in message and "secret-name" not in message
+
+
+def test_a_bool_installation_id_is_rejected() -> None:
+    body = {"total_count": 1, "installations": [installation(7) | {"id": True}]}
+    with pytest.raises(VcsError):
+        make_catalog(lambda request: httpx.Response(200, json=body)).list_repositories(TOKEN)
+
+
+def test_a_malformed_suspended_at_is_rejected(rsa_key_pair: RsaKeyPair) -> None:
+    response = httpx.Response(200, json=installation(7, suspended_at="вчера"))
+    with pytest.raises(VcsError):
+        _app_catalog(response, rsa_key_pair, []).app_installed("o/r")

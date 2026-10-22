@@ -26,16 +26,22 @@ repositories accessible to the user access token»). Доступ решает G
 `401` — токен отозван или истёк: `ProviderTokenRejected`, сессию закрывает
 use case. Сеть, `429`, `5xx`, `403` лимита (`x-ratelimit-remaining: 0`, `retry-after`
 или «rate limit» в `message`) — `VcsUnavailableError`; прочие статусы и
-неожиданное тело, включая `null` в обязательных полях, — `VcsError`: всё это
+неожиданное тело — `VcsError`: всё это
 `502`, а не `500`. Повторов нет: список пользователь запросит заново сам.
 Токен — только в заголовке запроса; в сообщениях об ошибках его нет.
+
+Тела ответов разбирают приватные модели pydantic (`_GitHubModel`): строгие
+типы (`null`, `bool` вместо числа, строка вместо числа — ошибка), лишние поля
+GitHub игнорируются. Ошибка разбора — `VcsError` с путями полей и видами
+ошибок, без значений. Наружу адаптер отдаёт только доменные типы.
 """
 
 import logging
 from collections.abc import Iterator
-from typing import Any
+from datetime import datetime
 
 import httpx
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.domain.entities import (
     InstallationRepository,
@@ -78,8 +84,9 @@ class GitHubInstallationCatalog:
         skipped: dict[str, list[int]] = {}
         repositories: list[InstallationRepository] = []
         try:
-            for installation_id, suspended in self._installations(access_token):
-                if suspended:
+            for installation in self._installations(access_token):
+                installation_id = installation.id
+                if installation.suspended_at is not None:
                     skipped.setdefault("приостановлена", []).append(installation_id)
                     continue
                 try:
@@ -104,13 +111,9 @@ class GitHubInstallationCatalog:
             return None
         url = f"/repositories/{provider_id}"
         try:
-            item = self._get(access_token, url)
+            return self._get(access_token, url, _Repository).to_domain()
         except _Inaccessible:
             return None
-        try:
-            return _repository(item)
-        except (AttributeError, KeyError, TypeError) as error:
-            raise VcsError(f"GitHub API вернул неожиданный репозиторий на GET {url}: {error!r}") from None
 
     def app_installed(self, full_name: str) -> bool:
         """`GET /repos/{owner}/{repo}/installation` с JWT приложения («Get a repository
@@ -118,38 +121,28 @@ class GitHubInstallationCatalog:
         `suspended_at` не `null` — установка приостановлена, тоже «нет»."""
         url = f"/repos/{full_name}/installation"
         try:
-            body = self._get(None, url)
+            installation = self._get(None, url, _Installation)
         except _Inaccessible as failure:
             if failure.status == 404:
                 return False
             raise VcsError(f"GitHub API: HTTP {failure.status} на GET {url}") from None
-        if not isinstance(body, dict) or not isinstance(body.get("id"), int):
-            raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}")
-        return body.get("suspended_at") is None
+        return installation.suspended_at is None
 
-    def _installations(self, access_token: Secret) -> Iterator[tuple[int, bool]]:
-        """Пары (id установки, приостановлена ли)."""
+    def _installations(self, access_token: Secret) -> Iterator[_Installation]:
         url = "/user/installations"
         try:
-            for page in self._pages(access_token, url, "installations"):
-                try:
-                    batch = [(_strict(item, "id", int), item.get("suspended_at") is not None) for item in page]
-                except (AttributeError, KeyError, TypeError) as error:
-                    raise VcsError(f"GitHub API вернул установку без id на GET {url}: {error!r}") from None
-                yield from batch
+            for page in self._pages(access_token, url, _InstallationPage):
+                yield from page.installations
         except _Inaccessible as failure:
             raise VcsError(f"GitHub API: HTTP {failure.status} на GET {url}") from None
 
     def _installation_repositories(self, access_token: Secret, installation_id: int) -> Iterator[list[InstallationRepository]]:
         url = f"/user/installations/{installation_id}/repositories"
-        for page in self._pages(access_token, url, "repositories"):
-            try:
-                yield [_repository(item) for item in page]
-            except (AttributeError, KeyError, TypeError) as error:
-                raise VcsError(f"GitHub API вернул неожиданный репозиторий на GET {url}: {error!r}") from None
+        for page in self._pages(access_token, url, _RepositoryPage):
+            yield [repository.to_domain() for repository in page.repositories]
 
-    def _pages(self, access_token: Secret, url: str, key: str) -> Iterator[list[dict[str, Any]]]:
-        """Страницы списка `key` из ответов вида `{"total_count", key: [...]}`, лениво.
+    def _pages[P: _Page](self, access_token: Secret, url: str, model: type[P]) -> Iterator[P]:
+        """Страницы ответа вида `{"total_count", <список>: [...]}`, лениво.
 
         Конец — набрано `total_count`, короткая или пустая страница; не больше
         `_MAX_PAGES` страниц: ответ, который не кончается, не держит запрос
@@ -157,22 +150,16 @@ class GitHubInstallationCatalog:
         только списку: подключение ищет репозиторий прямым запросом.
         """
         seen = 0
-        for page in range(1, _MAX_PAGES + 1):
-            body = self._get(access_token, f"{url}?per_page={_PER_PAGE}&page={page}")
-            batch = body.get(key) if isinstance(body, dict) else None
-            if not isinstance(batch, list) or not all(isinstance(item, dict) for item in batch):
-                raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}: нет массива {key}")
-            total = body.get("total_count")
-            if not isinstance(total, int) or isinstance(total, bool):
-                raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}: нет total_count")
-            yield batch
-            seen += len(batch)
-            if seen >= total or len(batch) < _PER_PAGE:
+        for page_number in range(1, _MAX_PAGES + 1):
+            page = self._get(access_token, f"{url}?per_page={_PER_PAGE}&page={page_number}", model)
+            yield page
+            seen += page.size
+            if seen >= page.total_count or page.size < _PER_PAGE:
                 return
         _log.warning("GET %s: больше %d страниц, список усечён", url, _MAX_PAGES)
 
-    def _get(self, access_token: Secret | None, url: str) -> Any:
-        """GET токеном пользователя или, без него, JWT приложения."""
+    def _get[M: BaseModel](self, access_token: Secret | None, url: str, model: type[M]) -> M:
+        """GET токеном пользователя или, без него, JWT приложения; тело — по `model`."""
         headers = {"Accept": _JSON_ACCEPT, "X-GitHub-Api-Version": _API_VERSION}
         # Токен — через `httpx.Auth`: открытого значения нет в локальных переменных.
         # JWT подписывается здесь: пустой или битый ключ App — `VcsAuthError`, `502`.
@@ -194,9 +181,14 @@ class GitHubInstallationCatalog:
         if response.is_error:
             raise VcsError(f"GitHub API: HTTP {status} на GET {url}")
         try:
-            return response.json()
-        except ValueError:
-            raise VcsError(f"GitHub API вернул не-JSON на GET {url}") from None
+            return model.model_validate_json(response.content)
+        except ValidationError as error:
+            # Пути полей и виды ошибок, без значений: в теле могут быть данные пользователя.
+            problems = ", ".join(
+                f"{'.'.join(str(part) for part in item['loc']) or '<тело>'}: {item['type']}"
+                for item in error.errors(include_url=False, include_input=False, include_context=False)
+            )
+            raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}: {problems}") from None
 
 
 def _rate_limited(response: httpx.Response) -> bool:
@@ -208,33 +200,79 @@ def _rate_limited(response: httpx.Response) -> bool:
     if response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers:
         return True
     try:
-        body = response.json()
-    except ValueError:
+        message = _ErrorBody.model_validate_json(response.content).message
+    except ValidationError:
         return False
-    message = body.get("message") if isinstance(body, dict) else None
-    return isinstance(message, str) and "rate limit" in message.lower()
+    return message is not None and "rate limit" in message.lower()
 
 
-def _repository(item: dict[str, Any]) -> InstallationRepository:
-    permissions = item["permissions"]
-    if not isinstance(permissions, dict):
-        raise TypeError("permissions — не объект")
-    return InstallationRepository(
-        provider_id=str(_strict(item, "id", int)),
-        full_name=_strict(item, "full_name", str),
-        default_branch=_strict(item, "default_branch", str),
-        permissions=RepositoryPermissions(
-            admin=_strict(permissions, "admin", bool),
-            # В примере ответа документации у `permissions` только admin, push и
-            # pull; настоящий ответ несёт и maintain. Нет поля — права maintain нет.
-            maintain=_strict(permissions, "maintain", bool) if "maintain" in permissions else False,
-        ),
-    )
+class _GitHubModel(BaseModel):
+    """Тело ответа GitHub: строгие типы, лишние поля игнорируются (их у GitHub много)."""
+
+    model_config = ConfigDict(strict=True, extra="ignore", frozen=True)
 
 
-def _strict[T](item: dict[str, Any], name: str, kind: type[T]) -> T:
-    """Поле ответа ровно этого типа; `null`, `bool` вместо числа и прочее — `TypeError`."""
-    value = item[name]
-    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
-        raise TypeError(f"{name} — не {kind.__name__}")
-    return value
+class _Installation(_GitHubModel):
+    """Установка из `GET /user/installations` и `GET /repos/{owner}/{repo}/installation`."""
+
+    id: int
+    # Нет поля — не приостановлена: в документации оно есть всегда, `null` у живой.
+    suspended_at: datetime | None = None
+
+
+class _Permissions(_GitHubModel):
+    """Права пользователя на репозиторий. В примере ответа документации — только
+    admin, push и pull; maintain и triage настоящий ответ несёт, нет поля — права нет."""
+
+    admin: bool
+    maintain: bool = False
+    push: bool
+    triage: bool = False
+    pull: bool
+
+
+class _Repository(_GitHubModel):
+    id: int
+    full_name: str
+    default_branch: str
+    permissions: _Permissions
+
+    def to_domain(self) -> InstallationRepository:
+        return InstallationRepository(
+            provider_id=str(self.id),
+            full_name=self.full_name,
+            default_branch=self.default_branch,
+            permissions=RepositoryPermissions(admin=self.permissions.admin, maintain=self.permissions.maintain),
+        )
+
+
+class _Page(_GitHubModel):
+    total_count: int
+
+    @property
+    def size(self) -> int:
+        raise NotImplementedError
+
+
+class _InstallationPage(_Page):
+    installations: list[_Installation]
+
+    @property
+    def size(self) -> int:
+        return len(self.installations)
+
+
+class _RepositoryPage(_Page):
+    repositories: list[_Repository]
+
+    @property
+    def size(self) -> int:
+        return len(self.repositories)
+
+
+class _ErrorBody(BaseModel):
+    """Тело ошибки GitHub — только `message`; разбор нестрогий: важен лишь текст."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    message: str | None = None
