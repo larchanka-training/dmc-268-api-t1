@@ -21,6 +21,7 @@ from app.api.errors import problem_response
 from app.api.factory import create_app
 from app.api.problems import PROBLEM_MODELS, AnyProblem, ErrorCode, problem_type
 from app.config import Settings
+from app.domain.enums import RulesStatus
 
 from .fakes.auth import sign_in
 from .fakes.unit_of_work import FakeUnitOfWork
@@ -395,6 +396,150 @@ def test_review_list_and_stream_are_in_the_exported_contract() -> None:
         "run.finished": row,
     }
     assert components["ReviewRunsStreamEventType"]["enum"] == ["run.created", "run.status_changed", "run.finished", "ping"]
+
+
+REPO_ID = "0192f0c4-7a1e-7b3c-9d2e-4f5a6b7c8d9f"
+SETTINGS_PATH = f"/api/v1/repositories/{REPO_ID}/settings"
+RULES_PATH = f"/api/v1/repositories/{REPO_ID}/rules"
+SETTINGS_BODY = {"auto_review_enabled": True, "branch_filter": ["main", "release/*"], "min_severity": "high"}
+
+
+@pytest.mark.parametrize("path", [SETTINGS_PATH, RULES_PATH])
+def test_planned_repository_reads_answer_not_implemented(path: str) -> None:
+    """Настройки и статус rules.md описаны в схеме, а отвечают `501`."""
+    assert_problem(_signed_in_client().get(path), 501, "NOT_IMPLEMENTED", path)
+
+
+def test_planned_repository_settings_save_answers_not_implemented() -> None:
+    """Допустимое тело — в том числе пустой фильтр и ровно предельные паттерны — доходит до `501`."""
+    client = _signed_in_client()
+    for body in (
+        SETTINGS_BODY,
+        {**SETTINGS_BODY, "branch_filter": []},
+        {**SETTINGS_BODY, "branch_filter": ["x" * 200] * 50},
+    ):
+        response = client.put(SETTINGS_PATH, json=body, headers={"Origin": ORIGIN})
+        assert_problem(response, 501, "NOT_IMPLEMENTED", SETTINGS_PATH)
+
+
+@pytest.mark.parametrize("path", [SETTINGS_PATH, RULES_PATH])
+def test_planned_repository_reads_check_session_and_id_first(client: TestClient, path: str) -> None:
+    assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
+    bad = path.replace(REPO_ID, "not-a-uuid")
+    problem = assert_problem(_signed_in_client().get(bad), 422, "VALIDATION_ERROR", bad)
+    assert problem["errors"] == [{"where": "path.repository_id", "reason": "ожидается UUID"}]
+
+
+def test_planned_repository_settings_put_checks_origin_and_session_first(client: TestClient) -> None:
+    """Без `Origin` — `403`, без сессии — `401`; неверное тело в обоих случаях не разбирается."""
+    bad_body = {**SETTINGS_BODY, "min_severity": "unknown"}
+    assert_problem(client.put(SETTINGS_PATH, json=bad_body), 403, "ORIGIN_FORBIDDEN", SETTINGS_PATH)
+    response = client.put(SETTINGS_PATH, json=bad_body, headers={"Origin": "https://evil.example"})
+    assert_problem(response, 403, "ORIGIN_FORBIDDEN", SETTINGS_PATH)
+    # Без `Origin` и с сессией — тоже `403`: проверка `Origin` для PUT стоит раньше сессии.
+    response = _signed_in_client().put(SETTINGS_PATH, json=SETTINGS_BODY)
+    assert_problem(response, 403, "ORIGIN_FORBIDDEN", SETTINGS_PATH)
+    response = client.put(SETTINGS_PATH, json=bad_body, headers={"Origin": ORIGIN})
+    assert_problem(response, 401, "UNAUTHENTICATED", SETTINGS_PATH)
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "error"),
+    [
+        (
+            "/api/v1/repositories/not-a-uuid/settings",
+            SETTINGS_BODY,
+            {"where": "path.repository_id", "reason": "ожидается UUID"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "min_severity": "blocker"},
+            {"where": "body.min_severity", "reason": "значение не из допустимого списка"},
+        ),
+        (SETTINGS_PATH, {**SETTINGS_BODY, "extra": 1}, {"where": "body", "reason": "лишнее поле"}),
+        (
+            SETTINGS_PATH,
+            {"auto_review_enabled": True, "branch_filter": []},
+            {"where": "body.min_severity", "reason": "обязательный параметр не передан"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "branch_filter": ["main", ""]},
+            {"where": "body.branch_filter.1", "reason": "длина строки должна быть не меньше 1"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "branch_filter": ["x" * 201]},
+            {"where": "body.branch_filter.0", "reason": "длина строки должна быть не больше 200"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "branch_filter": ["main"] * 51},
+            {"where": "body.branch_filter", "reason": "элементов должно быть не больше 50"},
+        ),
+    ],
+)
+def test_planned_repository_settings_save_checks_id_and_body_first(
+    path: str, body: dict[str, Any], error: dict[str, str]
+) -> None:
+    """Заглушка записи проверяет id и тело раньше, чем ответить `501`."""
+    response = _signed_in_client().put(path, json=body, headers={"Origin": ORIGIN})
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", path)
+    assert problem["errors"] == [error]
+
+
+def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
+    """Фронтенд берёт типы из `docs/openapi/openapi.json`: ручки, тело и варианты статуса правил там есть."""
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    settings = schema["paths"]["/api/v1/repositories/{repository_id}/settings"]
+    rules = schema["paths"]["/api/v1/repositories/{repository_id}/rules"]
+    assert set(settings) == {"get", "put"}
+    assert set(rules) == {"get"}
+
+    def ok_schema(operation: dict[str, Any]) -> Any:
+        return operation["responses"]["200"]["content"]["application/json"]["schema"]
+
+    assert ok_schema(settings["get"]) == ok_schema(settings["put"]) == {
+        "$ref": "#/components/schemas/RepositorySettingsResponse"
+    }
+    assert ok_schema(rules["get"]) == {"$ref": "#/components/schemas/RulesStatusResponse"}
+    assert settings["put"]["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/RepositorySettingsUpdate"
+    }
+    assert {"401", "403", "404", "422", "501"} <= set(settings["put"]["responses"])
+    assert {"401", "404", "422", "501"} <= set(settings["get"]["responses"])
+    assert {"401", "404", "422", "501"} <= set(rules["get"]["responses"])
+
+    components = schema["components"]["schemas"]
+    fields = {"auto_review_enabled", "branch_filter", "min_severity"}
+    assert set(components["RepositorySettingsResponse"]["required"]) == fields
+    update = components["RepositorySettingsUpdate"]
+    assert set(update["required"]) == fields
+    assert update["additionalProperties"] is False
+    assert update["properties"]["min_severity"]["$ref"] == "#/components/schemas/FindingSeverity"
+
+    variants = {
+        "loaded": "RulesLoaded",
+        "absent": "RulesAbsent",
+        "too_large": "RulesTooLarge",
+        "unavailable": "RulesUnavailable",
+    }
+    # Варианты — ровно исходы загрузки правил домена.
+    assert set(variants) == {status.value for status in RulesStatus}
+    rules_status = components["RulesStatusResponse"]
+    assert rules_status["discriminator"] == {
+        "propertyName": "status",
+        "mapping": {status: f"#/components/schemas/{name}" for status, name in variants.items()},
+    }
+    assert len(rules_status["oneOf"]) == 4
+    for status, name in variants.items():
+        assert components[name]["properties"]["status"]["const"] == status
+        assert {"status", "branch", "path"} <= set(components[name]["required"])
+    assert set(components["RulesLoaded"]["required"]) == {
+        "status", "branch", "path", "rules", "rejected", "fetched_at"
+    }
+    assert set(components["RepoRule"]["required"]) == {"name", "patterns", "excludes", "checks"}
+    assert set(components["RejectedRule"]["required"]) == {"name", "reason"}
 
 
 def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None:
