@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import Depends, Path, Request
 
 from app.application.ports import UnitOfWork
+from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
 from app.domain.entities import ReviewRun
@@ -34,6 +35,10 @@ def get_unit_of_work(request: Request) -> Iterator[UnitOfWork]:
 
 def get_job_queue(container: Container = Depends(get_container)) -> JobQueue:
     return container.job_queue()
+
+
+def get_installation_catalog(container: Container = Depends(get_container)) -> InstallationCatalog:
+    return container.installation_catalog()
 
 
 def get_unit_of_work_factory(

@@ -46,6 +46,20 @@ class Repository:
 
 
 @dataclass(frozen=True, slots=True)
+class InstallationRepository:
+    """Репозиторий в установке GitHub App — то, что можно подключить к сервису.
+
+    `installation_id` не хранится в `repositories`: его даёт список установок
+    приложения (change `implement-repository-connect`, design D1).
+    """
+
+    provider_id: str
+    full_name: str
+    default_branch: str
+    installation_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class MergeRequest:
     """Запрос на изменения на хостинге. Пул-реквест GitHub тоже сюда."""
 

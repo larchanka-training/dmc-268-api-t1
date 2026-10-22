@@ -100,6 +100,21 @@ def test_entities_round_trip_through_the_ports(uow) -> None:
     assert stored.id == repo.id
 
 
+def test_adding_a_taken_repository_reports_false_instead_of_raising(uow) -> None:
+    """Гонка двух подключений: проигравший получает `False`, а не `IntegrityError`."""
+    first = a_repository()
+    twin = replace(a_repository(), full_name="acme/twin")
+    with uow as work:
+        assert work.repositories.add(first) is True
+        work.commit()
+    with uow as work:
+        assert work.repositories.add(twin) is False
+        work.commit()
+    with uow as work:
+        stored = work.repositories.find_by_provider(Provider.GITHUB, "1")
+    assert stored == first
+
+
 def test_a_failed_unit_of_work_rolls_everything_back(uow) -> None:
     with uow as work:
         work.repositories.add(a_repository())
