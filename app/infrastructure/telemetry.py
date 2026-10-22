@@ -15,11 +15,13 @@
 - спаны этапов прогона — `OtelStageTracer`, адаптер порта, который зовёт `StepRecorder`;
 - спан периодического прохода воркера — `sweep_span`.
 
-Экспорт не настраиваем: по умолчанию спаны не уходят никуда и ошибок экспорта в логе
-нет. `OTEL_TRACES_EXPORTER=console` печатает их в stdout — для отладки. Остальные
-значения, в том числе `otlp`, пока не поддержаны: экспорт в хранилище трейсов — задача
-#89. Автонастройка экспортёров FastAPI и его OTel-лог исключений выключены явно
-(`create_app`, `telemetry=`).
+Экспорт включается окружением, без правки кода: `OTEL_TRACES_EXPORTER` — список
+значений через запятую; `console` печатает законченные спаны в stdout, `otlp`
+отправляет их OTLP/HTTP — endpoint из `OTEL_EXPORTER_OTLP_ENDPOINT` читает сам
+экспортёр (приём делает коллектор телеметрии). Без настройки спаны никуда не
+уходят и ошибок экспорта в логе нет; неподдержанное значение выключает только
+свой экспортёр и предупреждает при старте. Автонастройка экспортёров FastAPI и
+его OTel-лог исключений выключены явно (`create_app`, `telemetry=`).
 
 Query серверного спана на путях входа скрывается (`redact_query`, `QueryRedaction`): в
 нём `code` и `state` callback'а OAuth.
@@ -33,7 +35,7 @@ Query серверного спана на путях входа скрывае�
 import contextlib
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextvars import Token
 from uuid import UUID
 from weakref import WeakKeyDictionary
@@ -41,6 +43,7 @@ from weakref import WeakKeyDictionary
 from opentelemetry import context as otel_context
 from opentelemetry import metrics, propagate, trace
 from opentelemetry.context import Context
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.propagators.textmap import (
     CarrierT,
@@ -51,8 +54,13 @@ from opentelemetry.propagators.textmap import (
     default_setter,
 )
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-from opentelemetry.sdk.trace import Span, SpanProcessor, TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from opentelemetry.sdk.trace import Span, SpanLimits, SpanProcessor, TracerProvider
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    ConsoleSpanExporter,
+    SpanExporter,
+)
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON, ParentBased
 from opentelemetry.trace import Status, StatusCode
 from sqlalchemy import Engine
 
@@ -82,6 +90,44 @@ SEMCONV_STABILITY_OPT_IN = "database,http"
 # Провайдер, который поставил `configure_tracing`: его и закрывает `shutdown_tracing`.
 # Чужой провайдер (тест со своим экспортёром) не закрываем.
 _installed: TracerProvider | None = None
+
+# Сэмплирование закреплено кодом — `parentbased_always_on`: корневые спаны всегда
+# записываются, дети наследуют решение родителя. Явная передача в провайдер не даёт
+# переменной `OTEL_TRACES_SAMPLER` выключить трейсинг молча.
+PARENTBASED_ALWAYS_ON = ParentBased(ALWAYS_ON)
+
+# Дефолт лимита длины значений атрибутов спана: без него `url.full` с длинными
+# путями и тексты ошибок раздували бы спан и трафик экспорта.
+DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT = 4096
+
+# Значение `OTEL_TRACES_EXPORTER` → фабрика экспортёра. Фабрика — функция, а не
+# класс: класс ищется в модуле в момент вызова, и тесты подменяют его потоком.
+# `otlp` берёт endpoint из `OTEL_EXPORTER_OTLP_ENDPOINT` сам.
+_EXPORTER_FACTORIES: dict[str, Callable[[], SpanExporter]] = {
+    "console": lambda: ConsoleSpanExporter(),
+    "otlp": lambda: OTLPSpanExporter(),
+}
+
+
+def _attribute_value_length_limit() -> int:
+    """Лимит длины значений атрибутов: `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` или дефолт.
+
+    Нецелое или отрицательное значение не роняет старт приложения — предупреждение
+    и дефолт, как у неподдержанного экспортёра.
+    """
+    raw = os.environ.get("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "").strip()
+    try:
+        limit = int(raw) if raw else DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT
+        if limit >= 0:
+            return limit
+    except ValueError:
+        pass
+    logger.warning(
+        "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=%s не целое неотрицательное число — лимит %d",
+        raw,
+        DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT,
+    )
+    return DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT
 
 
 class _NoPropagation(TextMapPropagator):
@@ -142,20 +188,51 @@ def shutdown_tracing() -> None:
         _installed.shutdown()
 
 
+def parse_exporters(value: str) -> list[str]:
+    """Разобрать `OTEL_TRACES_EXPORTER`: значения через запятую, без повторов.
+
+    Разбор по спецификации OTel: каждое значение `strip().lower()`; функция чистая и
+    валидацию поддержанности не делает — мусор остаётся в списке, а предупреждение
+    про него пишет `build_tracer_provider`. Пустое значение — пустой список.
+    """
+    exporters: list[str] = []
+    for item in value.split(","):
+        name = item.strip().lower()
+        if name and name not in exporters:
+            exporters.append(name)
+    return exporters
+
+
 def build_tracer_provider(service_name: str) -> TracerProvider:
-    """SDK-провайдер с экспортом из `OTEL_TRACES_EXPORTER`: `console` или никакого."""
+    """SDK-провайдер с экспортом из `OTEL_TRACES_EXPORTER` — списком через запятую.
+
+    Процессор ставится на каждый поддержанный экспортёр; неподдержанное значение
+    выключает только свой экспортёр и получает одно предупреждение при старте.
+    `none` и пустое значение — экспорт выключен, без предупреждений. Сэмплирование —
+    явно `parentbased_always_on` (см. `PARENTBASED_ALWAYS_ON`), лимит длины значений
+    атрибутов — `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` с дефолтом в коде.
+    """
     attributes = (
         {} if os.environ.get("OTEL_SERVICE_NAME") else {SERVICE_NAME: service_name}
     )
-    provider = TracerProvider(resource=Resource.create(attributes))
-    exporter = os.environ.get("OTEL_TRACES_EXPORTER", "none").strip().lower()
-    if exporter == "console":
-        provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
-    elif exporter not in ("", "none"):
-        logger.warning(
-            "OTEL_TRACES_EXPORTER=%s не поддержан: спаны не экспортируются (поддержан console)",
-            exporter,
-        )
+    provider = TracerProvider(
+        sampler=PARENTBASED_ALWAYS_ON,
+        resource=Resource.create(attributes),
+        span_limits=SpanLimits(max_attribute_length=_attribute_value_length_limit()),
+    )
+    for name in parse_exporters(os.environ.get("OTEL_TRACES_EXPORTER", "")):
+        if name == "none":
+            continue  # явное «без экспорта» по спецификации OTel
+        factory = _EXPORTER_FACTORIES.get(name)
+        if factory is None:
+            logger.warning(
+                "OTEL_TRACES_EXPORTER=%s не поддержан: спаны этому экспортёру не"
+                " уходят (поддержаны %s)",
+                name,
+                ", ".join(sorted(_EXPORTER_FACTORIES)),
+            )
+            continue
+        provider.add_span_processor(BatchSpanProcessor(factory()))
     return provider
 
 

@@ -19,14 +19,20 @@ import pika
 import pytest
 from fastapi.testclient import TestClient
 from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation._semconv import (
     _OpenTelemetrySemanticConventionStability,
 )
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import engine as sqlalchemy_engine
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    ConsoleSpanExporter,
+    SimpleSpanProcessor,
+)
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.trace.sampling import ParentBased
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode
 from sqlalchemy import create_engine, text
 
@@ -312,6 +318,58 @@ def test_the_console_exporter_prints_spans(
     assert '"name": "export-check"' in console.getvalue()
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("console,otlp", ["console", "otlp"]),
+        (" Console , OTLP ", ["console", "otlp"]),
+        ("console,console,otlp,otlp", ["console", "otlp"]),
+        # Мусор остаётся в списке: функция чистая, поддержанность решает провайдер.
+        ("console,zipkin", ["console", "zipkin"]),
+        ("", []),
+        (" , , ", []),
+    ],
+)
+def test_parse_exporters_normalizes_the_list(value: str, expected: list[str]) -> None:
+    assert telemetry.parse_exporters(value) == expected
+
+
+def test_a_processor_is_added_per_supported_exporter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`console,otlp` — по процессору на экспортёр: печать в stdout и OTLP/HTTP."""
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console,otlp")
+
+    provider = build_tracer_provider("dmc-268-api")
+
+    exporters = [
+        processor.span_exporter
+        for processor in provider._active_span_processor._span_processors
+        if isinstance(processor, BatchSpanProcessor)
+    ]
+    assert [type(exporter) for exporter in exporters] == [
+        ConsoleSpanExporter,
+        OTLPSpanExporter,
+    ]
+
+
+def test_an_unsupported_value_turns_off_only_itself(
+    monkeypatch: pytest.MonkeyPatch, console: io.StringIO, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`console,zipkin`: console работает, про `zipkin` — одно предупреждение, спаны не теряются."""
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console,zipkin")
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+
+    provider = build_tracer_provider("dmc-268-api")
+    _emit(provider)
+
+    [warning] = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "zipkin" in warning.getMessage()
+    assert '"name": "export-check"' in console.getvalue()
+
+
 def test_an_unsupported_exporter_warns_once_and_exports_nothing(
     monkeypatch: pytest.MonkeyPatch,
     console: io.StringIO,
@@ -322,14 +380,109 @@ def test_an_unsupported_exporter_warns_once_and_exports_nothing(
     monkeypatch.setattr(
         logging.getLogger("app.infrastructure.telemetry"), "disabled", False
     )
-    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "otlp")
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "zipkin")
 
     _emit(build_tracer_provider("dmc-268-api"))
 
     [record] = caplog.records
     assert record.levelname == "WARNING"
-    assert "otlp" in record.getMessage()
+    assert "zipkin" in record.getMessage()
     assert console.getvalue() == ""
+
+
+def test_sampling_is_pinned_to_parentbased_always_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Сэмплирование закреплено кодом: спаны всегда записываются, env их не выключает."""
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "always_off")
+
+    provider = build_tracer_provider("dmc-268-api")
+    span = provider.get_tracer("test").start_span("sampling-check")
+    span.end()
+
+    assert isinstance(provider.sampler, ParentBased)
+    context = span.get_span_context()
+    assert context.trace_flags.sampled
+
+
+def _span_with_long_attribute(provider: TracerProvider) -> str:
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    provider.get_tracer("test").start_span(
+        "limit-check", attributes={"url.full": "x" * 10_000}
+    ).end()
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes is not None
+    value = span.attributes["url.full"]
+    assert isinstance(value, str)
+    return value
+
+
+def test_attribute_values_are_truncated_to_the_limit_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "10")
+
+    value = _span_with_long_attribute(build_tracer_provider("dmc-268-api"))
+
+    assert value == "x" * 10
+
+
+def test_attribute_values_are_truncated_to_the_default_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Без переменной лимит задаёт код: раздувание `url.full` и текстов ошибок ограничено."""
+    monkeypatch.delenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", raising=False)
+
+    value = _span_with_long_attribute(build_tracer_provider("dmc-268-api"))
+
+    assert value == "x" * 4096
+
+
+def test_a_negative_attribute_length_limit_does_not_stop_the_start(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Отрицательный лимит не роняет старт: предупреждение и дефолт, как у мусора."""
+    monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "-5")
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+
+    value = _span_with_long_attribute(build_tracer_provider("dmc-268-api"))
+
+    [warning] = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING" and "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT" in r.getMessage()
+    ]
+    assert "-5" in warning.getMessage()
+    assert value == "x" * 4096
+
+
+def test_the_span_resource_names_the_version_and_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`service.name` — из кода; `service.version` и окружение — из `OTEL_RESOURCE_ATTRIBUTES`.
+
+    `Resource.create` мержит переменную сам: спан несёт всё сразу, окружение задаёт
+    версию и среду (compose и `infra/`), код — только имя сервиса.
+    """
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.setenv(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "service.version=abc123def,deployment.environment.name=local",
+    )
+    provider = build_tracer_provider("dmc-268-api")
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    provider.get_tracer("test").start_span("resource-check").end()
+
+    (span,) = exporter.get_finished_spans()
+    attributes = dict(span.resource.attributes)
+    assert attributes["service.name"] == "dmc-268-api"
+    assert attributes["service.version"] == "abc123def"
+    assert attributes["deployment.environment.name"] == "local"
 
 
 # --- SQL-спаны через внутренний `EngineTracer` --------------------------------------

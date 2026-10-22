@@ -89,15 +89,31 @@ def test_trace_id_of_an_error_is_the_trace_id_of_the_request_span(
 def test_a_successful_response_carries_the_trace_id_of_its_span(
     spans: InMemorySpanExporter,
 ) -> None:
-    response = TestClient(_app()).get("/health")
+    # `/health` теперь вне трейсинга — обычный путь обязан нести trace id спана.
+    response = TestClient(_app()).get("/")
 
     assert response.status_code == 200
     assert response.headers["X-Trace-ID"] == _trace_id(_server_span(spans))
 
 
+def test_health_check_creates_no_span(spans: InMemorySpanExporter) -> None:
+    """Health-check опрашивают Docker и деплой: спанов на нём нет, трейс не шумит.
+
+    Другой путь спан создаёт — трейсинг выключен только для проверок живости.
+    """
+    client = TestClient(_app())
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert spans.get_finished_spans() == ()
+    assert client.get("/").status_code == 200
+    assert [s.kind for s in spans.get_finished_spans() if s.kind is SpanKind.SERVER]
+
+
 def test_an_incoming_traceparent_is_ignored(spans: InMemorySpanExporter) -> None:
     response = TestClient(_app()).get(
-        "/health", headers={"traceparent": FOREIGN_TRACEPARENT, "X-Trace-ID": "f" * 32}
+        "/", headers={"traceparent": FOREIGN_TRACEPARENT, "X-Trace-ID": "f" * 32}
     )
 
     server = _server_span(spans)
@@ -128,7 +144,7 @@ def test_the_auth_callback_query_is_hidden_in_the_request_span(
 def test_the_query_outside_auth_stays_in_the_request_span(
     spans: InMemorySpanExporter,
 ) -> None:
-    TestClient(_app()).get("/health", params={"page": "2"})
+    TestClient(_app()).get("/", params={"page": "2"})
 
     attributes = _server_span(spans).attributes
     assert attributes is not None
@@ -161,7 +177,9 @@ assert isinstance(provider, TracerProvider)
 exporter = InMemorySpanExporter()
 provider.add_span_processor(SimpleSpanProcessor(exporter))
 client = TestClient(app)
-ids = [client.get("/health").headers["X-Trace-ID"] for _ in range(2)]
+# `/` — трассируемый путь: health-check из телеметрии исключён и спана не даст,
+# даже если SDK включён, — на нём «0 спанов» ничего бы не доказывал.
+ids = [client.get("/").headers["X-Trace-ID"] for _ in range(2)]
 # Маркер: остальной stdout процесса — JSON-записи логов (configure_logging),
 # числовая строка одна, но не единственная.
 print("RESULT", len(exporter.get_finished_spans()), *ids)
