@@ -13,7 +13,11 @@ from app.application.use_cases.user_token import call_with_user_token
 from app.domain.entities import ProviderGrant, ProviderToken, Secret, User
 from app.domain.enums import Provider
 from app.domain.ids import new_id
-from app.domain.provider_token import ProviderTokenUnavailable, token_from_grant
+from app.domain.provider_token import (
+    ProviderTokenBusy,
+    ProviderTokenUnavailable,
+    token_from_grant,
+)
 from app.domain.session import open_session
 from app.infrastructure.db.token_cipher import TokenCipher
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -161,3 +165,18 @@ def test_migration_0007_downgrades_and_upgrades_cleanly(migrated) -> None:
     finally:
         command.upgrade(config, "head")
     assert "provider_tokens" in inspect(migrated).get_table_names()
+
+
+def test_waiting_for_a_parallel_refresh_is_bounded(clean_db, monkeypatch) -> None:
+    """Чужая блокировка строки токена дольше предела — `ProviderTokenBusy`, а не вечное ожидание."""
+    from app.infrastructure.db import repositories
+
+    monkeypatch.setattr(repositories, "_LOCK_TIMEOUT", "200ms")
+    session_id = _signed_in(clean_db, token_from_grant(GRANT, NOW))
+
+    with _uow(clean_db) as holder:
+        assert holder.provider_tokens.get_for_update(session_id) is not None
+        started = time.monotonic()
+        with _uow(clean_db) as waiter, pytest.raises(ProviderTokenBusy):
+            waiter.provider_tokens.get_for_update(session_id)
+        assert time.monotonic() - started < 5

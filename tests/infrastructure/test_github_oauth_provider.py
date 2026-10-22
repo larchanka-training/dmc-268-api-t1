@@ -8,6 +8,8 @@ GitHub Apps: «Generating a user access token for a GitHub App» (с истеч�
 ошибка — `200` с `{"error": "bad_refresh_token"}`).
 """
 
+import base64
+import json
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -199,3 +201,41 @@ def test_a_network_failure_on_refresh_leaks_nothing() -> None:
 
 def test_the_provider_repr_hides_the_app_secret() -> None:
     assert "client-secret" not in repr(provider(_transport_error))
+
+
+def _revoke_with(response: httpx.Response | Exception, seen: list[httpx.Request] | None = None) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(request)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    provider(handle).revoke(Secret("ghu_to-revoke"))
+
+
+def test_revoke_deletes_one_token_with_the_app_basic_auth() -> None:
+    """«Delete an app token»: `DELETE /applications/{client_id}/token`, basic auth
+    client_id:client_secret, тело `{"access_token": …}`, ответ `204`."""
+    seen: list[httpx.Request] = []
+
+    _revoke_with(httpx.Response(204), seen)
+
+    [request] = seen
+    assert (request.method, str(request.url)) == ("DELETE", "https://api.github.com/applications/Iv1.client/token")
+    assert request.headers["Authorization"] == "Basic " + base64.b64encode(b"Iv1.client:client-secret").decode()
+    assert json.loads(request.content) == {"access_token": "ghu_to-revoke"}
+
+
+@pytest.mark.parametrize("status", [404, 422])
+def test_revoking_an_already_invalid_token_is_fine(status: int) -> None:
+    _revoke_with(httpx.Response(status))
+
+
+@pytest.mark.parametrize("failure", [httpx.Response(500), httpx.Response(401), httpx.ConnectError("нет сети")])
+def test_a_failed_revoke_is_provider_unavailable_without_secrets(failure: httpx.Response | Exception) -> None:
+    with pytest.raises(OAuthProviderUnavailable) as raised:
+        _revoke_with(failure)
+    assert "ghu_to-revoke" not in str(raised.value)
+    assert "client-secret" not in str(raised.value)
+    assert raised.value.__cause__ is None

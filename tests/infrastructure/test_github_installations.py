@@ -14,6 +14,7 @@ https://docs.github.com/en/rest/apps/installations — раздел «Installati
 Против настоящего GitHub не проверено: это делает проверка на стенде.
 """
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -192,3 +193,63 @@ def test_an_unexpected_body_is_a_vcs_error_not_a_crash(handler: Handler) -> None
     with pytest.raises(VcsError) as caught:
         make_catalog(handler).list_repositories(TOKEN)
     assert "ghu_user_token_value" not in str(caught.value)
+
+
+def test_an_installation_closed_for_the_token_is_skipped_not_fatal() -> None:
+    """`403` на репозиториях одной установки — например, SSO организации не
+    авторизован для токена: остальные установки видны, список не падает."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/installations":
+            return httpx.Response(200, json={"total_count": 2, "installations": [installation(7), installation(8)]})
+        if request.url.path.startswith("/user/installations/7/"):
+            return httpx.Response(403, json={"message": "Resource protected by organization SAML enforcement."})
+        return httpx.Response(200, json={"total_count": 1, "repositories": [repo_json(2)]})
+
+    assert [r.provider_id for r in make_catalog(handler).list_repositories(TOKEN)] == ["2"]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1700000000"}, {"retry-after": "60"}],
+)
+@pytest.mark.parametrize("path", ["/user/installations", "/user/installations/7/repositories"])
+def test_a_rate_limit_403_is_unavailable_not_skipped(headers: dict[str, str], path: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == path:
+            return httpx.Response(403, headers=headers, json={"message": "API rate limit exceeded"})
+        return httpx.Response(200, json={"total_count": 1, "installations": [installation(7)]})
+
+    with pytest.raises(VcsUnavailableError):
+        make_catalog(handler).list_repositories(TOKEN)
+
+
+def test_paging_stops_at_total_count_without_an_extra_request() -> None:
+    seen: list[str] = []
+    catalog = make_catalog(router([installation(7)], {7: [repo_json(n) for n in range(100)]}, seen))
+
+    assert len(catalog.list_repositories(TOKEN)) == 100
+    assert seen == ["/user/installations?per_page=100&page=1", "/user/installations/7/repositories?per_page=100&page=1"]
+
+
+def test_paging_never_exceeds_fifty_pages(caplog: pytest.LogCaptureFixture) -> None:
+    """Ответ, который не кончается (total_count растёт, страницы полные), не держит запрос вечно."""
+    pages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/installations":
+            return httpx.Response(200, json={"total_count": 1, "installations": [installation(7)]})
+        pages.append(request.url.params["page"])
+        return httpx.Response(200, json={"total_count": 10**9, "repositories": [repo_json(n) for n in range(100)]})
+
+    with caplog.at_level(logging.WARNING):
+        result = make_catalog(handler).list_repositories(TOKEN)
+
+    assert len(pages) == 50
+    assert len(result) == 5000
+    assert "усечён" in caplog.text
+
+
+def test_a_page_without_total_count_is_unexpected() -> None:
+    with pytest.raises(VcsError):
+        make_catalog(lambda request: httpx.Response(200, json={"installations": []})).list_repositories(TOKEN)

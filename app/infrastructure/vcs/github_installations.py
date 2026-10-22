@@ -12,31 +12,44 @@ repositories accessible to the user access token»). Доступ решает G
 
 Приостановленная установка (`suspended_at` не `null`) пропускается: ревью
 в ней всё равно не работают, и её отказ не должен ронять весь список.
-Установка, исчезнувшая между запросами (`404` на её репозитории), — тоже.
+Установка, исчезнувшая между запросами или закрытая для токена (`404` или
+`403` на её репозитории, например SSO организации не авторизован), — тоже.
+Постранично до `total_count`, не больше 50 страниц.
 
 `401` — токен отозван или истёк: `ProviderTokenRejected`, сессию закрывает
-use case. Сеть, `429`, `5xx` — `VcsUnavailableError`; прочие статусы и
+use case. Сеть, `429`, `5xx`, `403` лимита (`x-ratelimit-remaining: 0` или
+`retry-after`) — `VcsUnavailableError`; прочие статусы и
 неожиданное тело, включая `null` в обязательных полях, — `VcsError`: всё это
 `502`, а не `500`. Повторов нет: список пользователь запросит заново сам.
 Токен — только в заголовке запроса; в сообщениях об ошибках его нет.
 """
 
+import logging
 from typing import Any
 
 import httpx
 
 from app.domain.entities import InstallationRepository, RepositoryPermissions, Secret
 from app.domain.provider_token import ProviderTokenRejected
+from app.infrastructure.oauth.bearer import BearerAuth
 from app.infrastructure.vcs.errors import VcsError, VcsUnavailableError
 
 _JSON_ACCEPT = "application/vnd.github+json"
 _API_VERSION = "2022-11-28"
 # Максимум страницы у GitHub: страница короче — последняя.
 _PER_PAGE = 100
+# Предел страниц одного списка: 5000 установок или репозиториев одной установки.
+_MAX_PAGES = 50
+
+_log = logging.getLogger(__name__)
 
 
-class _NotFound(Exception):
-    """`404` на запросе: решает вызывающий метод адаптера."""
+class _Inaccessible(Exception):
+    """`403` (не лимит) или `404` на запросе: решает вызывающий метод адаптера."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(status)
+        self.status = status
 
 
 class GitHubInstallationCatalog:
@@ -51,7 +64,11 @@ class GitHubInstallationCatalog:
         for installation_id in self._installation_ids(access_token):
             try:
                 repositories.extend(self._installation_repositories(access_token, installation_id))
-            except _NotFound:
+            except _Inaccessible as skipped:
+                # 404 — установка исчезла между запросами; 403 — например, SSO
+                # организации не авторизован для этого токена. Остальные
+                # установки пользователю всё равно видны.
+                _log.info("установка %s пропущена: HTTP %s", installation_id, skipped.status)
                 continue
         return repositories
 
@@ -59,8 +76,8 @@ class GitHubInstallationCatalog:
         ids: list[int] = []
         try:
             pages = self._pages(access_token, "/user/installations", "installations")
-        except _NotFound:
-            raise VcsError("GitHub API: HTTP 404 на GET /user/installations") from None
+        except _Inaccessible as failure:
+            raise VcsError(f"GitHub API: HTTP {failure.status} на GET /user/installations") from None
         for page in pages:
             try:
                 ids.extend(int(_strict(item, "id", int)) for item in page if item.get("suspended_at") is None)
@@ -79,42 +96,56 @@ class GitHubInstallationCatalog:
         return repositories
 
     def _pages(self, access_token: Secret, url: str, key: str) -> list[list[dict[str, Any]]]:
-        """Страницы списка `key` из ответов вида `{"total_count", key: [...]}`."""
+        """Страницы списка `key` из ответов вида `{"total_count", key: [...]}`.
+
+        Конец — набрано `total_count`, короткая или пустая страница; не больше
+        `_MAX_PAGES` страниц: ответ, который не кончается, не держит запрос
+        вечно. Упёрлись в предел — список усечён, и это видно в логе.
+        """
         pages: list[list[dict[str, Any]]] = []
-        page = 1
-        while True:
+        seen = 0
+        for page in range(1, _MAX_PAGES + 1):
             body = self._get(access_token, f"{url}?per_page={_PER_PAGE}&page={page}")
             batch = body.get(key) if isinstance(body, dict) else None
             if not isinstance(batch, list) or not all(isinstance(item, dict) for item in batch):
                 raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}: нет массива {key}")
+            total = body.get("total_count")
+            if not isinstance(total, int) or isinstance(total, bool):
+                raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}: нет total_count")
             pages.append(batch)
-            if len(batch) < _PER_PAGE:
+            seen += len(batch)
+            if seen >= total or len(batch) < _PER_PAGE:
                 return pages
-            page += 1
+        _log.warning("GET %s: больше %d страниц, список усечён", url, _MAX_PAGES)
+        return pages
 
     def _get(self, access_token: Secret, url: str) -> Any:
-        headers = {
-            "Authorization": f"Bearer {access_token.reveal()}",
-            "Accept": _JSON_ACCEPT,
-            "X-GitHub-Api-Version": _API_VERSION,
-        }
+        headers = {"Accept": _JSON_ACCEPT, "X-GitHub-Api-Version": _API_VERSION}
         try:
-            response = self._client.get(url, headers=headers)
+            # Токен — через `httpx.Auth`: открытого значения нет в локальных переменных.
+            response = self._client.get(url, headers=headers, auth=BearerAuth(access_token))
         except httpx.RequestError as error:
             # `from None`: исходное исключение держит запрос с токеном в заголовке.
             raise VcsUnavailableError(f"GitHub API недоступен на GET {url}: {type(error).__name__}") from None
-        if response.status_code == 401:
+        status = response.status_code
+        if status == 401:
             raise ProviderTokenRejected(f"GitHub API отверг токен пользователя на GET {url}")
-        if response.status_code == 404:
-            raise _NotFound
-        if response.status_code == 429 or response.status_code >= 500:
-            raise VcsUnavailableError(f"GitHub API: HTTP {response.status_code} на GET {url}")
+        if status == 429 or status >= 500 or (status == 403 and _rate_limited(response)):
+            raise VcsUnavailableError(f"GitHub API: HTTP {status} на GET {url}")
+        if status in (403, 404):
+            raise _Inaccessible(status)
         if response.is_error:
-            raise VcsError(f"GitHub API: HTTP {response.status_code} на GET {url}")
+            raise VcsError(f"GitHub API: HTTP {status} на GET {url}")
         try:
             return response.json()
         except ValueError:
             raise VcsError(f"GitHub API вернул не-JSON на GET {url}") from None
+
+
+def _rate_limited(response: httpx.Response) -> bool:
+    """`403` из-за лимита GitHub, а не из-за доступа: так GitHub помечает первичный
+    и вторичный лимиты («Rate limits for the REST API»)."""
+    return response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers
 
 
 def _repository(item: dict[str, Any]) -> InstallationRepository:

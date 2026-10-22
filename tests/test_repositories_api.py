@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.api.dependencies import (
     get_installation_catalog,
-    get_token_refresher,
+    get_token_provider,
     get_unit_of_work,
     get_unit_of_work_factory,
 )
@@ -94,7 +94,7 @@ def _client(
     app.dependency_overrides[get_unit_of_work] = override_uow
     app.dependency_overrides[get_unit_of_work_factory] = lambda: lambda: uow
     app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog()
-    app.dependency_overrides[get_token_refresher] = lambda: oauth or FakeOAuthProvider()
+    app.dependency_overrides[get_token_provider] = lambda: oauth or FakeOAuthProvider()
     client = TestClient(app, base_url=ORIGIN)
     if signed_in:
         client.cookies.set(SESSION_COOKIE, COOKIE)

@@ -276,13 +276,13 @@ def test_login_stores_the_provider_token_with_the_session() -> None:
     assert uow.provider_tokens.stored == {session.id: token_from_grant(EXPIRING_GRANT, NOW)}
 
 
-def test_logout_removes_the_provider_token_with_the_session() -> None:
+def test_logout_removes_the_provider_token_and_hands_it_back_for_revocation() -> None:
     uow = FakeUnitOfWork()
     login(uow, FakeOAuthProvider())
 
-    logout(uow, "cookie-1")
-
+    assert logout(uow, "cookie-1") == EXPIRING_GRANT.access_token
     assert uow.provider_tokens.stored == {}
+    assert logout(uow, "cookie-1") is None
 
 
 def test_a_new_login_drops_the_token_of_the_replaced_session() -> None:

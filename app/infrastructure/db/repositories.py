@@ -8,8 +8,10 @@
 import datetime as dt
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from psycopg.errors import LockNotAvailable
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.domain.entities import (
@@ -27,7 +29,7 @@ from app.domain.entities import (
 from app.domain.entities import Session as UserSession
 from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
-from app.domain.provider_token import ProviderTokenUnavailable
+from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
@@ -513,6 +515,8 @@ class SqlAlchemySessionRepo:
 
 
 _ACCESS = "access_token"
+# Предел ожидания чужой блокировки токена при refresh; дальше — `ProviderTokenBusy`.
+_LOCK_TIMEOUT = "15s"
 _REFRESH = "refresh_token"
 
 
@@ -532,14 +536,22 @@ class SqlAlchemyProviderTokenRepo:
         return self._to_domain(row) if row else None
 
     def get_for_update(self, session_id: UUID) -> ProviderToken | None:
-        # populate_existing: строка могла остаться в identity map от `get`
-        # до блокировки, а читать надо то, что записал победитель гонки.
-        row = self._session.scalars(
-            select(ProviderTokenRow)
-            .where(ProviderTokenRow.session_id == session_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).one_or_none()
+        # Ждём чужой refresh не дольше `_LOCK_TIMEOUT` (только эта транзакция):
+        # его держатель ждёт GitHub, и бесконечное ожидание висело бы на пуле.
+        self._session.execute(text(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'"))
+        try:
+            # populate_existing: строка могла остаться в identity map от `get`
+            # до блокировки, а читать надо то, что записал победитель гонки.
+            row = self._session.scalars(
+                select(ProviderTokenRow)
+                .where(ProviderTokenRow.session_id == session_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).one_or_none()
+        except OperationalError as error:
+            if isinstance(error.orig, LockNotAvailable):
+                raise ProviderTokenBusy("токен сессии обновляет параллельный запрос") from None
+            raise
         return self._to_domain(row) if row else None
 
     def save(self, session_id: UUID, token: ProviderToken) -> None:

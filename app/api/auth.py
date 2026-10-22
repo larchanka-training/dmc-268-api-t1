@@ -15,11 +15,15 @@ from http import HTTPStatus
 from typing import Any
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from app.api.dependencies import get_oauth_provider, get_unit_of_work_factory
+from app.api.dependencies import (
+    get_oauth_provider,
+    get_token_provider,
+    get_unit_of_work_factory,
+)
 from app.api.errors import (
     ERRORS_403_ORIGIN,
     ERRORS_404_LOGIN_PROVIDER,
@@ -40,6 +44,7 @@ from app.application.use_cases.auth import (
     logout,
     start_login,
 )
+from app.application.use_cases.user_token import revoke_quietly
 from app.domain.entities import User
 from app.domain.enums import Provider
 from app.domain.ids import new_id
@@ -207,7 +212,9 @@ def me(user: User = Depends(current_user)) -> UserResponse:
     openapi_extra=_PUBLIC,
     summary="Выйти",
     description=(
-        "Удаляет сессию текущей cookie: следующий запрос с ней из любой вкладки получает 401. "
+        "Удаляет сессию текущей cookie вместе с сохранённым токеном GitHub: следующий запрос с "
+        "ней из любой вкладки получает 401. Токен после ответа отзывается у GitHub (best-effort: "
+        "сбой отзыва выходу не мешает). "
         "Идемпотентен: без cookie и с cookie неизвестной сессии тоже 204, cookie session "
         "удаляется. Сессия не нужна, проверяется только Origin."
     ),
@@ -215,9 +222,14 @@ def me(user: User = Depends(current_user)) -> UserResponse:
 )
 def end_session(
     request: Request,
+    background: BackgroundTasks,
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+    token_provider: OAuthProvider = Depends(get_token_provider),
 ) -> Response:
-    logout(uow_factory(), request.cookies.get(SESSION_COOKIE))
+    revocable = logout(uow_factory(), request.cookies.get(SESSION_COOKIE))
+    if revocable is not None:
+        # После ответа: выход не ждёт GitHub, и его сбой выходу не мешает.
+        background.add_task(revoke_quietly, token_provider, revocable)
     response = Response(status_code=HTTPStatus.NO_CONTENT)
     clear_session_cookie(response)
     return response

@@ -9,6 +9,7 @@
 from datetime import datetime, timedelta
 
 from app.domain.entities import ProviderGrant, ProviderToken
+from app.domain.login import OAuthProviderUnavailable
 
 # Обновляем заранее: список репозиториев — несколько запросов подряд, и токен,
 # истекающий посреди них, дал бы `401` на полпути.
@@ -28,6 +29,14 @@ class ProviderTokenUnavailable(RuntimeError):
     запись зашифрована другим ключом. Значения токена в сообщении нет."""
 
 
+class ProviderTokenBusy(OAuthProviderUnavailable):
+    """Запись токена держит параллельный refresh дольше предела ожидания блокировки.
+
+    Наследник `OAuthProviderUnavailable`: блокировку держит запрос, который
+    ждёт GitHub, — для вызывающего это тот же сбой провайдера (`502`).
+    """
+
+
 def token_from_grant(grant: ProviderGrant, now: datetime) -> ProviderToken:
     """Токен с абсолютными сроками из ответа провайдера, полученного в момент `now`."""
     return ProviderToken(
@@ -41,6 +50,11 @@ def token_from_grant(grant: ProviderGrant, now: datetime) -> ProviderToken:
 def needs_refresh(token: ProviderToken, now: datetime) -> bool:
     """Пора ли обменять refresh token: access token истёк или истечёт в пределах запаса."""
     return token.access_expires_at is not None and now >= token.access_expires_at - REFRESH_MARGIN
+
+
+def is_usable(token: ProviderToken, now: datetime) -> bool:
+    """Access token ещё действует: срока нет или он не наступил. Запас обновления не учитывается."""
+    return token.access_expires_at is None or now < token.access_expires_at
 
 
 def can_refresh(token: ProviderToken, now: datetime) -> bool:

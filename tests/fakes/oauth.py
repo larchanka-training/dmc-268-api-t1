@@ -43,8 +43,10 @@ class FakeOAuthProvider:
         self.unavailable = False
         # Исход refresh: `None` — выдать `refreshed`, иначе бросить это исключение.
         self.refresh_error: Exception | None = None
+        self.revoke_error: Exception | None = None
         self.exchanged: list[str] = []
         self.refreshes: list[Secret] = []
+        self.revoked: list[Secret] = []
 
     def authorize_url(self, state: str) -> str:
         return f"https://github.com/login/oauth/authorize?state={state}"
@@ -60,6 +62,11 @@ class FakeOAuthProvider:
         if self.refresh_error is not None:
             raise self.refresh_error
         return self.refreshed
+
+    def revoke(self, access_token: Secret) -> None:
+        self.revoked.append(access_token)
+        if self.revoke_error is not None:
+            raise self.revoke_error
 
 
 def rejecting() -> ProviderTokenRejected:

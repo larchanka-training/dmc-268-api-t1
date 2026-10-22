@@ -19,7 +19,7 @@ from uuid import UUID
 
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.unit_of_work import UnitOfWork
-from app.domain.entities import OAuthProfile, User
+from app.domain.entities import OAuthProfile, Secret, User
 from app.domain.login import LoginError, OAuthProviderUnavailable, safe_redirect
 from app.domain.provider_token import ProviderTokenUnavailable, token_from_grant
 from app.domain.session import hash_token, is_expired, open_session
@@ -151,18 +151,27 @@ def authenticate(uow: UnitOfWork, token: str | None, now: datetime) -> SignedIn 
         return None if user is None else SignedIn(user=user, session_id=session.id)
 
 
-def logout(uow: UnitOfWork, token: str | None) -> None:
+def logout(uow: UnitOfWork, token: str | None) -> Secret | None:
     """Удалить сессию этой cookie, а с ней каскадом и токен провайдера.
 
-    Нет cookie или сессии — нечего удалять, не ошибка.
+    Возвращает access token удалённой сессии — его стоит отозвать у
+    провайдера (best-effort, `revoke_quietly`), — или `None`, если отзывать
+    нечего: нет cookie, сессии, токена или он не читается. Нет cookie или
+    сессии — нечего удалять, не ошибка.
     """
     if not token:
-        return
+        return None
     with uow as work:
         session = work.sessions.find_by_token_hash(hash_token(token))
-        if session is not None:
-            work.sessions.delete(session.id)
-            work.commit()
+        if session is None:
+            return None
+        try:
+            stored = work.provider_tokens.get(session.id)
+        except ProviderTokenUnavailable:
+            stored = None
+        work.sessions.delete(session.id)
+        work.commit()
+    return None if stored is None else stored.access_token
 
 
 def _upsert_user(

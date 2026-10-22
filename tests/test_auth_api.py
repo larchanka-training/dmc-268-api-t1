@@ -14,6 +14,7 @@ from app.api.dependencies import (
     get_oauth_provider,
     get_run_reader,
     get_sleep,
+    get_token_provider,
     get_unit_of_work_factory,
 )
 from app.api.factory import create_app
@@ -22,6 +23,7 @@ from app.config import Settings
 from app.domain.entities import ReviewRun
 from app.domain.enums import ReviewRunStatus, TriggerSource
 from app.domain.ids import new_id
+from app.domain.login import OAuthProviderUnavailable
 from app.infrastructure.oauth.github import GitHubOAuthProvider
 
 from .fakes.oauth import FakeOAuthProvider
@@ -43,6 +45,7 @@ class Stand:
         self.app = create_app(SETTINGS)
         self.app.dependency_overrides[get_unit_of_work_factory] = lambda: lambda: self.uow
         self.app.dependency_overrides[get_oauth_provider] = self._provider
+        self.app.dependency_overrides[get_token_provider] = lambda: self.provider
 
     def _provider(self, provider: str) -> FakeOAuthProvider | None:
         return self.provider if provider == "github" else None
@@ -342,6 +345,26 @@ def test_login_keeps_the_provider_token_and_logout_drops_it(stand) -> None:
     client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
 
     assert stand.uow.provider_tokens.stored == {}
+    # Отзыв у GitHub — после ответа, тем токеном, что был у сессии.
+    assert [t.reveal() for t in stand.provider.revoked] == ["ghu_login_access"]
+
+
+def test_a_failed_revoke_does_not_spoil_logout(stand, caplog) -> None:
+    caplog.set_level(logging.DEBUG)
+    stand.provider.revoke_error = OAuthProviderUnavailable("GitHub ответил 503 (отзыв токена)")
+    client = stand.client()
+    sign_in(client)
+
+    response = client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+
+    assert response.status_code == 204
+    assert stand.uow.sessions.stored == []
+    assert "ghu_login_access" not in caplog.text
+
+
+def test_logout_without_a_session_revokes_nothing(stand) -> None:
+    stand.client().post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+    assert stand.provider.revoked == []
 
 
 def test_the_access_log_hides_the_callback_query() -> None:

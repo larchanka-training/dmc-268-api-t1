@@ -6,10 +6,15 @@ from uuid import UUID
 
 import pytest
 
-from app.application.use_cases.user_token import SessionClosed, call_with_user_token
+from app.application.use_cases.user_token import (
+    SessionClosed,
+    call_with_user_token,
+    revoke_quietly,
+)
 from app.domain.entities import ProviderToken, Secret
 from app.domain.login import OAuthProviderUnavailable
 from app.domain.provider_token import (
+    ProviderTokenBusy,
     ProviderTokenRejected,
     ProviderTokenUnavailable,
     token_from_grant,
@@ -166,3 +171,79 @@ def test_tokens_stay_out_of_the_log(caplog: pytest.LogCaptureFixture) -> None:
     assert "сессия закрыта" in caplog.text
     for value in ("ghu_login_access", "ghr_login_refresh", "ghu_refreshed_access"):
         assert value not in caplog.text
+
+
+def test_a_401_right_after_a_parallel_refresh_retries_with_the_new_token() -> None:
+    """GitHub отверг старый access token, потому что параллельный запрос только что
+    обменял refresh token: вызов повторяется один раз с новым, сессия жива."""
+    uow = _uow(token_from_grant(EXPIRING_GRANT, LOGIN))
+    winner = token_from_grant(FakeOAuthProvider().refreshed, LOGIN)
+    seen: list[Secret] = []
+
+    def call(token: Secret) -> str:
+        seen.append(token)
+        if token == Secret("ghu_login_access"):
+            uow.provider_tokens.save(SESSION_ID, winner)
+            raise ProviderTokenRejected("401")
+        return "ok"
+
+    assert call_with_user_token(uow, FakeOAuthProvider(), SESSION_ID, LOGIN, call) == "ok"
+    assert seen == [Secret("ghu_login_access"), Secret("ghu_refreshed_access")]
+    assert [s.id for s in uow.sessions.stored] == [SESSION_ID]
+
+
+def test_a_401_on_the_new_token_too_closes_the_session() -> None:
+    uow = _uow(token_from_grant(EXPIRING_GRANT, LOGIN))
+    winner = token_from_grant(FakeOAuthProvider().refreshed, LOGIN)
+    calls: list[Secret] = []
+
+    def call(token: Secret) -> None:
+        calls.append(token)
+        uow.provider_tokens.save(SESSION_ID, winner)
+        raise ProviderTokenRejected("401")
+
+    with pytest.raises(SessionClosed):
+        call_with_user_token(uow, FakeOAuthProvider(), SESSION_ID, LOGIN, call)
+    assert len(calls) == 2
+    assert uow.sessions.stored == []
+
+
+def test_github_unavailable_on_refresh_keeps_using_a_token_that_is_still_valid() -> None:
+    """Refresh — за 5 минут до истечения: пока access token действует, сбой
+    обмена не превращается в `502`."""
+    oauth = FakeOAuthProvider()
+    oauth.refresh_error = OAuthProviderUnavailable("GitHub ответил 503 (обновление токена)")
+    token = token_from_grant(EXPIRING_GRANT, LOGIN)
+    uow = _uow(token)
+    almost_expired = LOGIN + timedelta(hours=8) - timedelta(minutes=2)
+
+    assert _seen(uow, oauth, almost_expired) == Secret("ghu_login_access")
+    assert len(oauth.refreshes) == 1
+    assert uow.provider_tokens.get(SESSION_ID) == token
+
+
+def test_a_long_parallel_refresh_falls_back_to_a_still_valid_token() -> None:
+    uow = _uow(token_from_grant(EXPIRING_GRANT, LOGIN))
+
+    def busy(session_id: UUID) -> ProviderToken | None:
+        raise ProviderTokenBusy("токен сессии обновляет параллельный запрос")
+
+    uow.provider_tokens.get_for_update = busy  # type: ignore[method-assign]
+    almost_expired = LOGIN + timedelta(hours=8) - timedelta(minutes=2)
+
+    assert _seen(uow, FakeOAuthProvider(), almost_expired) == Secret("ghu_login_access")
+    with pytest.raises(OAuthProviderUnavailable):
+        _seen(uow, FakeOAuthProvider(), LATER)
+    assert [s.id for s in uow.sessions.stored] == [SESSION_ID]
+
+
+def test_revoking_quietly_swallows_a_failure_without_logging_the_token(caplog: pytest.LogCaptureFixture) -> None:
+    oauth = FakeOAuthProvider()
+    oauth.revoke_error = OAuthProviderUnavailable("GitHub ответил 503 (отзыв токена)")
+
+    with caplog.at_level(logging.DEBUG):
+        revoke_quietly(oauth, Secret("ghu_login_access"))
+
+    assert oauth.revoked == [Secret("ghu_login_access")]
+    assert "не отозван" in caplog.text
+    assert "ghu_login_access" not in caplog.text

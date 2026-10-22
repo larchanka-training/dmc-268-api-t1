@@ -39,6 +39,10 @@ from app.infrastructure.vcs.github_installations import GitHubInstallationCatalo
 logger = logging.getLogger(__name__)
 
 _GITHUB_API = "https://api.github.com"
+# Запросы от имени пользователя (вход, refresh, отзыв, список репозиториев):
+# таймаут на каждую фазу httpx, подключение — короче. Refresh держит
+# блокировку строки токена, и худший случай — сумма фаз, а не 10 секунд.
+_GITHUB_USER_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # Callback входа: путь роутера `/auth`, зарегистрированный в настройках GitHub App.
 _OAUTH_CALLBACK_PATH = "/api/v1/auth/{provider}/callback"
 
@@ -136,13 +140,13 @@ def build_container(settings: Settings) -> Container:
         _token_cipher=_token_cipher(settings),
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
-        _installation_catalog=GitHubInstallationCatalog(httpx.Client(base_url=_GITHUB_API, timeout=10.0)),
+        _installation_catalog=GitHubInstallationCatalog(httpx.Client(base_url=_GITHUB_API, timeout=_GITHUB_USER_TIMEOUT)),
         _oauth_providers={
             "github": GitHubOAuthProvider(
                 settings.github_app_client_id,
                 settings.github_app_client_secret.get_secret_value(),
                 settings.public_origin + _OAUTH_CALLBACK_PATH.format(provider="github"),
-                httpx.Client(timeout=10.0),
+                httpx.Client(timeout=_GITHUB_USER_TIMEOUT),
             ),
         },
         _cache_store=InMemoryCacheStore(),

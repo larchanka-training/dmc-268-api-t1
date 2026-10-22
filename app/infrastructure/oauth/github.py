@@ -29,10 +29,14 @@ from app.domain.entities import OAuthLogin, OAuthProfile, ProviderGrant, Secret
 from app.domain.enums import Provider
 from app.domain.login import OAuthProviderUnavailable
 from app.domain.provider_token import ProviderTokenRejected
+from app.infrastructure.oauth.bearer import BearerAuth
 
 _AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _TOKEN_URL = "https://github.com/login/oauth/access_token"
-_USER_URL = "https://api.github.com/user"
+_API_URL = "https://api.github.com"
+_USER_URL = f"{_API_URL}/user"
+# Ответы «Delete an app token», после которых токена у GitHub больше нет.
+_REVOKED = frozenset({204, 404, 422})
 # Код ошибки обмена refresh token, означающий «этот refresh token больше не
 # действует»; остальные коды — неверная настройка приложения, а не сессии.
 _BAD_REFRESH_TOKEN = "bad_refresh_token"
@@ -72,15 +76,12 @@ class GitHubOAuthProvider:
         )
         if isinstance(grant, str):
             raise OAuthProviderUnavailable(f"GitHub не выдал токен пользователя: {grant}")
-        token = grant.access_token.reveal()
         user = self._json(
             "профиль",
             lambda: self._client.get(
                 _USER_URL,
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": f"Bearer {token}",
-                },
+                headers={"Accept": "application/vnd.github+json"},
+                auth=BearerAuth(grant.access_token),
             ),
         )
         try:
@@ -104,6 +105,27 @@ class GitHubOAuthProvider:
         if isinstance(grant, str):
             raise OAuthProviderUnavailable(f"GitHub не обновил токен пользователя: {grant}")
         return grant
+
+    def revoke(self, access_token: Secret) -> None:
+        """`DELETE /applications/{client_id}/token` с basic auth приложения.
+
+        «Delete an app token» (документация GitHub REST, OAuth authorizations):
+        отзывает один токен, а не всю авторизацию приложения. `204` — отозван,
+        `404` и `422` — токен уже недействителен, это тоже успех.
+        """
+        url = f"{_API_URL}/applications/{self._client_id}/token"
+        try:
+            response = self._client.request(
+                "DELETE",
+                url,
+                headers={"Accept": "application/vnd.github+json"},
+                auth=(self._client_id, self._client_secret),
+                json={"access_token": access_token.reveal()},
+            )
+        except httpx.RequestError as error:
+            raise OAuthProviderUnavailable(f"GitHub недоступен (отзыв токена): {type(error).__name__}") from None
+        if response.status_code not in _REVOKED:
+            raise OAuthProviderUnavailable(f"GitHub ответил {response.status_code} (отзыв токена)")
 
     def _grant(self, step: str, fields: dict[str, str]) -> ProviderGrant | str:
         """Токен из ответа `POST /login/oauth/access_token` или код `error` ответа."""

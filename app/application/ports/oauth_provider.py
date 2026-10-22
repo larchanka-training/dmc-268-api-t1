@@ -29,3 +29,7 @@ class OAuthProvider(Protocol):
     def refresh(self, refresh_token: Secret) -> ProviderGrant:
         """Обменять refresh token на новый токен пользователя."""
         ...
+
+    def revoke(self, access_token: Secret) -> None:
+        """Отозвать токен пользователя у провайдера; сбой — `OAuthProviderUnavailable`."""
+        ...

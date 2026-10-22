@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.api.dependencies import (
     get_installation_catalog,
-    get_token_refresher,
+    get_token_provider,
     get_unit_of_work,
     get_unit_of_work_factory,
 )
@@ -158,7 +158,7 @@ class ConnectRepositoryRequest(StrictRequest):
 def list_available_repositories(
     signed_in: SignedIn = Depends(current_session),
     catalog: InstallationCatalog = Depends(get_installation_catalog),
-    oauth: OAuthProvider = Depends(get_token_refresher),
+    oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> AvailableRepositoryListResponse:
     user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
@@ -201,7 +201,7 @@ def connect_repository(
     body: ConnectRepositoryRequest,
     signed_in: SignedIn = Depends(current_session),
     catalog: InstallationCatalog = Depends(get_installation_catalog),
-    oauth: OAuthProvider = Depends(get_token_refresher),
+    oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositoryResponse:
     user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)

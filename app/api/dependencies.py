@@ -42,8 +42,8 @@ def get_installation_catalog(container: Container = Depends(get_container)) -> I
     return container.installation_catalog()
 
 
-def get_token_refresher(container: Container = Depends(get_container)) -> OAuthProvider:
-    """Провайдер, выдавший токен сессии и обновляющий его: сессии кабинета — только GitHub."""
+def get_token_provider(container: Container = Depends(get_container)) -> OAuthProvider:
+    """Провайдер, выдавший токен сессии, — обновляет и отзывает его: сессии кабинета — только GitHub."""
     provider = container.oauth_provider(Provider.GITHUB.value)
     if provider is None:
         raise RuntimeError("провайдер входа github не собран в контейнере")
