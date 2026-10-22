@@ -118,7 +118,8 @@ resource "docker_container" "postgres" {
   # реплике; задаём только то, чего нет по умолчанию. max_slot_wal_keep_size —
   # потолок WAL, который удержит слот реплики: без него упавшая реплика копила
   # бы WAL на основном сервере, пока не кончится диск. Перешагнувшая потолок
-  # реплика теряет слот и пересобирается с пустого тома.
+  # реплика теряет слот; при следующем старте она заметит это сама и
+  # пересоберётся (infra/postgres/replica-entrypoint.sh).
   command = [
     "postgres",
     "-c", "hba_file=/etc/postgresql/pg_hba.conf",
@@ -366,9 +367,11 @@ resource "docker_container" "worker" {
   ])
 }
 
-# Роль replicator и слот для реплики. Одноразовый контейнер по образцу
-# migrate: init-скрипты образа на уже заведённом томе не выполняются, поэтому
-# объекты кластера заводятся здесь, идемпотентно, на каждом деплое.
+# Роль replicator для реплики. Одноразовый контейнер по образцу migrate:
+# init-скрипты образа на уже заведённом томе не выполняются, поэтому роль
+# заводится здесь, идемпотентно. Запускается не на каждом деплое, а когда
+# сменились пароль или SQL либо пересоздана основная база — её контейнер или
+# том (см. replace_triggered_by). Слот заводит сама реплика.
 resource "docker_container" "replication_setup" {
   name  = "dmc268-replication-setup"
   image = docker_image.postgres.image_id
@@ -410,18 +413,23 @@ resource "docker_container" "replication_setup" {
   # Как у migrate: depends_on не ждёт готовности базы, поэтому повторяем.
   command = [
     "sh", "-c",
-    "for i in $(seq 1 30); do printf '%s\\n' \"$SETUP_SQL\" | psql -v replication_password=\"$REPLICATION_PASSWORD\" -f - && exit 0; sleep 2; done; exit 1",
+    "for i in $(seq 1 30); do printf '%s\\n' \"$SETUP_SQL\" | psql -f - && exit 0; sleep 2; done; exit 1",
   ]
 
   lifecycle {
     postcondition {
       condition     = self.exit_code == 0
-      error_message = "Роль или слот для реплики не заведены — деплой остановлен до старта реплики."
+      error_message = "Роль replicator не заведена — деплой остановлен до старта реплики."
     }
 
     # Сменившийся пароль или SQL должны дойти до базы и тогда, когда сам
-    # контейнер не менялся (образ postgres закреплён): пересоздаём его.
-    replace_triggered_by = [terraform_data.replication_setup_inputs]
+    # контейнер не менялся (образ postgres закреплён). Заново заведённая
+    # основная база роли не знает — пересоздаём и тогда.
+    replace_triggered_by = [
+      terraform_data.replication_setup_inputs,
+      docker_container.postgres.id,
+      docker_volume.postgres.id,
+    ]
   }
 }
 
@@ -442,8 +450,10 @@ resource "docker_container" "postgres_replica" {
   restart = "unless-stopped"
 
   # Как у основного сервера: entrypoint стартует от root и сам переходит на
-  # пользователя postgres.
+  # пользователя postgres. init — чтобы SIGTERM при деплое доходил до процесса
+  # и во время пересборки, пока PID 1 был бы sh, игнорирующий сигналы.
   security_opts = ["no-new-privileges:true"]
+  init          = true
   memory        = var.postgres_replica_memory
   memory_swap   = var.postgres_replica_memory
   log_driver    = "json-file"
@@ -484,20 +494,28 @@ resource "docker_container" "postgres_replica" {
     container_path = "/var/lib/postgresql"
   }
 
-  # Готовность — не просто открытый порт: сервер обязан быть в режиме
-  # восстановления, то есть именно репликой. Реплика, по ошибке поднявшаяся
-  # самостоятельным сервером, должна быть unhealthy.
+  # Здорова — значит получает поток. Отставшая реплика отвечает на запросы и
+  # остаётся в режиме восстановления, но её данные замерли на моменте обрыва:
+  # такая реплика должна быть unhealthy, а не выглядеть рабочей.
   healthcheck {
-    test     = ["CMD-SHELL", "pg_isready -U ${var.postgres_user} -d ${var.postgres_db} && [ \"$(psql -U ${var.postgres_user} -d ${var.postgres_db} -tAc 'select pg_is_in_recovery()')\" = t ]"]
+    test     = ["CMD-SHELL", "[ \"$(psql -U ${var.postgres_user} -d ${var.postgres_db} -XtAc 'select status from pg_stat_wal_receiver')\" = streaming ]"]
     interval = "30s"
     timeout  = "5s"
     retries  = 5
     # Первая сборка копирует базу целиком.
     start_period = "5m0s"
   }
+
+  # Заново заведённая основная база — другой кластер: перезапуск контейнера
+  # даёт entrypoint заметить это и пересобрать реплику. Сам по себе Terraform
+  # реплику бы не тронул — её конфигурация не менялась.
+  lifecycle {
+    replace_triggered_by = [docker_volume.postgres.id]
+  }
 }
 
-# Резервные копии: pg_dump с реплики раз в сутки, хранение — backup_keep_days.
+# Резервные копии: pg_dump раз в сутки — с реплики, а если она не получает
+# поток, с основного сервера; хранение — backup_keep_days.
 resource "docker_container" "postgres_backup" {
   name    = "dmc268-postgres-backup"
   image   = docker_image.postgres.image_id
@@ -528,7 +546,8 @@ resource "docker_container" "postgres_backup" {
   }
 
   env = [
-    "PGHOST=dmc268-postgres-replica",
+    "REPLICA_HOST=dmc268-postgres-replica",
+    "PRIMARY_HOST=dmc268-postgres",
     "PGUSER=${var.postgres_user}",
     "PGPASSWORD=${var.postgres_password}",
     "PGDATABASE=${var.postgres_db}",

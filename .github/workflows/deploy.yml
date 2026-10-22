@@ -308,18 +308,26 @@ jobs:
 
       # Реплика, которая запущена, но не получает поток, внешне неотличима от
       # рабочей: контейнер жив, на запросы отвечает. Поэтому проверяем со
-      # стороны основного сервера — слот активен и поток в состоянии streaming.
+      # стороны основного сервера — слот активен, и держит его именно реплика
+      # (application_name dmc268_replica), а не pg_basebackup первой сборки,
+      # у которого свой walsender в том же состоянии streaming.
       # Первая сборка на пустом томе копирует базу целиком, отсюда пять минут.
+      # Пользователь и база — из окружения контейнера, запрос — через stdin:
+      # так в командной строке нет ни кавычек запроса, ни захардкоженных имён.
       - name: Проверить, что реплика получает поток
         env:
           SSH_USER: ${{ secrets.VPS_DMC268_U }}
           HOST: ${{ vars.VPS_DMC268_IP_T1 }}
         run: |
           set -uo pipefail
-          query="select r.state from pg_stat_replication r join pg_replication_slots s on s.active_pid = r.pid where s.slot_name = 'dmc268_replica'"
-          for _ in $(seq 1 60); do
-            state="$(ssh -o BatchMode=yes "$SSH_USER@$HOST" \
-              "docker exec dmc268-postgres psql -U dmc268 -d dmc268 -tAc \"$query\"" 2>/dev/null | tr -d '[:space:]')"
+          query="select r.state from pg_stat_replication r join pg_replication_slots s on s.active_pid = r.pid where s.slot_name = 'dmc268_replica' and r.application_name = 'dmc268_replica'"
+          remote="docker exec -i dmc268-postgres sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -XtA'"
+          state=""
+          deadline=$(( $(date +%s) + 300 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            state="$(printf '%s\n' "$query" \
+              | ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" "$remote" 2>/dev/null \
+              | tr -d '[:space:]')"
             if [ "$state" = "streaming" ]; then
               echo "реплика получает поток"
               exit 0
@@ -328,7 +336,7 @@ jobs:
           done
 
           echo "::error::реплика не перешла в streaming за пять минут (состояние: '${state:-нет соединения}')"
-          ssh -o BatchMode=yes "$SSH_USER@$HOST" \
+          ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" \
             "docker logs --tail 50 dmc268-postgres-replica 2>&1; echo '--- настройка репликации ---'; docker logs --tail 30 dmc268-replication-setup 2>&1" || true
           exit 1
 

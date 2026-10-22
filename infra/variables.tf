@@ -117,7 +117,7 @@ variable "llm_backend" {
 
 variable "ollama_base_url" {
   type        = string
-  description = "Адрес Ollama в сети стека (OLLAMA_BASE_URL)."
+  description = "Адрес Ollama (OLLAMA_BASE_URL). Контейнер Ollama подключается к сети dmc268-backend — воркер ходит к нему оттуда; к dmc268-egress — только если Ollama сама скачивает модели."
   default     = "http://dmc268-ollama:11434"
 }
 

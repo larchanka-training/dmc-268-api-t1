@@ -14,9 +14,24 @@ import re
 from pathlib import Path
 
 INFRA = Path("infra/main.tf")
+NOT_A_NETWORK_REFERENCE = "<не ссылка на docker_network>"
 
-# Контейнеры с данными: только сеть данных, никаких портов на хосте.
+# Контейнеры с данными: никаких портов на хосте.
 DATA_CONTAINERS = ("postgres", "postgres_replica", "rabbitmq", "postgres_backup")
+
+# Ровно эти сети у каждого контейнера стека (спека `backend-delivery`, «Сети
+# стека разделены по назначению»). Новый контейнер обязан попасть сюда — иначе
+# его сети никто не сверит.
+EXPECTED_NETWORKS = {
+    "postgres": {"backend"},
+    "postgres_replica": {"backend"},
+    "postgres_backup": {"backend"},
+    "rabbitmq": {"backend"},
+    "migrate": {"backend"},
+    "replication_setup": {"backend"},
+    "api": {"dmc268", "backend"},
+    "worker": {"backend", "egress"},
+}
 
 
 def resource_block(text: str, kind: str, name: str) -> str | None:
@@ -34,11 +49,13 @@ def container_networks(text: str, name: str) -> frozenset[str] | None:
     block = resource_block(text, "docker_container", name)
     if block is None:
         return None
-    return frozenset(
-        re.findall(
-            r"networks_advanced\s*\{\s*name\s*=\s*docker_network\.(\w+)\.name", block
-        )
-    )
+    networks = set()
+    # Блок целиком, а не «name сразу после скобки»: поле name может идти и после
+    # aliases или ipv4_address.
+    for body in re.findall(r"networks_advanced\s*\{([^{}]*)\}", block):
+        name = re.search(r"\bname\s*=\s*docker_network\.(\w+)\.name", body)
+        networks.add(name.group(1) if name else NOT_A_NETWORK_REFERENCE)
+    return frozenset(networks)
 
 
 def container_publishes_ports(text: str, name: str) -> bool | None:
@@ -68,13 +85,17 @@ def test_extractors_find_facts_that_are_present() -> None:
         "  networks_advanced {\n"
         "    name = docker_network.backend.name\n"
         "  }\n"
+        "  networks_advanced {\n"
+        '    aliases = ["db"]\n'
+        "    name    = docker_network.egress.name\n"
+        "  }\n"
         "  ports {\n"
         "    internal = 5432\n"
         "  }\n"
         "}\n"
     )
     assert network_is_internal(sample, "backend") is True
-    assert container_networks(sample, "postgres") == frozenset({"backend"})
+    assert container_networks(sample, "postgres") == frozenset({"backend", "egress"})
     assert container_publishes_ports(sample, "postgres") is True
 
 
@@ -92,17 +113,6 @@ def test_data_network_has_no_way_out() -> None:
     )
 
 
-def test_data_containers_live_only_in_the_data_network() -> None:
-    text = INFRA.read_text()
-    for name in DATA_CONTAINERS:
-        networks = container_networks(text, name)
-        assert networks is not None, f"контейнер {name} не найден в infra/main.tf"
-        assert networks == frozenset({"backend"}), (
-            f"{name} подключён к {sorted(networks)}: контейнеры с данными — только "
-            "во внутренней сети, иначе их видит интерфейс"
-        )
-
-
 def test_data_containers_publish_no_host_ports() -> None:
     text = INFRA.read_text()
     for name in DATA_CONTAINERS:
@@ -111,18 +121,24 @@ def test_data_containers_publish_no_host_ports() -> None:
         assert not publishes, f"{name} публикует порт на хосте"
 
 
-def test_only_api_bridges_the_entry_and_data_networks() -> None:
-    """Интерфейс подключается к сети `dmc268`; в ней из нашего стека — только API."""
+def test_every_container_is_in_exactly_its_networks() -> None:
+    """Сети каждого контейнера — ровно ожидаемые, без лишних и недостающих.
+
+    В том числе: в сети входа `dmc268`, к которой подключается интерфейс, из
+    нашего стека только API, а воркер ходит наружу через `egress`.
+    """
     text = INFRA.read_text()
-    containers = re.findall(
-        r"^resource\s+\"docker_container\"\s+\"(\w+)\"", text, re.MULTILINE
+    containers = set(
+        re.findall(r"^resource\s+\"docker_container\"\s+\"(\w+)\"", text, re.MULTILINE)
     )
     assert containers, "контейнеры не найдены в infra/main.tf"
-    in_entry = {
-        name
-        for name in containers
-        if "dmc268" in (container_networks(text, name) or ())
-    }
-    assert in_entry == {"api"}, (
-        f"в сети входа dmc268 кроме API: {sorted(in_entry - {'api'})}"
+    assert containers == set(EXPECTED_NETWORKS), (
+        f"контейнеры в infra/main.tf и в EXPECTED_NETWORKS разошлись: "
+        f"нет в тесте {sorted(containers - set(EXPECTED_NETWORKS))}, "
+        f"нет в main.tf {sorted(set(EXPECTED_NETWORKS) - containers)}"
     )
+    for name, expected in EXPECTED_NETWORKS.items():
+        networks = container_networks(text, name)
+        assert networks == expected, (
+            f"{name}: сети {sorted(networks or ())}, ожидались {sorted(expected)}"
+        )
