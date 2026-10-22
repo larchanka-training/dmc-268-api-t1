@@ -8,7 +8,7 @@
 
 - [x] 2.1 Удалить тесты старого потока: `tests/test_review_events_api.py`, `tests/api/test_sse_format.py`, `tests/application/test_review_run_events.py`, `tests/domain/test_run_events.py`, SSE-тест в `tests/api/test_tracing.py`
 - [x] 2.2 Перенести на `GET /api/v1/events`: `X-Trace-ID` потока равен trace id спана, выход в другой вкладке закрывает поток и повторное подключение — `401`, проверка сессии по часам при медленном чтении, значения интервалов
-- [x] 2.3 `GET /api/v1/reviews/{review_run_id}/events` — `404` `ROUTE_NOT_FOUND` с сессией и без, пути нет в схеме
+- [x] 2.3 Отдельной проверки удалённого пути нет: путь неизвестен, как любой другой (решено при ревью #117)
 
 ## 3. Документы
 
