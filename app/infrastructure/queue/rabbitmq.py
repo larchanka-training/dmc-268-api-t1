@@ -31,7 +31,7 @@ from pika.exceptions import AMQPConnectionError, ChannelWrongStateError
 from pika.exchange_type import ExchangeType
 
 from app.domain.entities import ReviewJob
-from app.infrastructure.telemetry import record_current_exception
+from app.infrastructure.telemetry import REVIEW_RUN_ID, record_current_exception
 
 QUEUE_NAME = "review_jobs"
 DLX_NAME = "review_jobs.dlx"
@@ -241,7 +241,7 @@ class RabbitMQJobQueue:
                 **_MESSAGING_ATTRIBUTES,
                 "messaging.operation.name": "publish",
                 "messaging.operation.type": "send",
-                "review_run_id": str(job.review_run_id),
+                REVIEW_RUN_ID: str(job.review_run_id),
             },
         ):
             headers: dict[str, str] = {}
