@@ -19,7 +19,7 @@
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from uuid import UUID
 
@@ -43,18 +43,28 @@ def spent_tokens(error: BaseException) -> int | None:
     return error.tokens_used
 
 
-def close_abandoned_steps(uow: UnitOfWork, review_run_id: UUID, *, now: datetime) -> None:
-    """Закрыть шаги упавшего прогона, оставшиеся `running`, своим коммитом.
+def close_abandoned_steps(
+    uow: UnitOfWork,
+    review_run_id: UUID,
+    *,
+    now: datetime,
+    known: Mapping[UUID, ReviewRunStep] | None = None,
+) -> None:
+    """Закрыть шаги терминального прогона, оставшиеся `running`, своим коммитом.
 
-    Зовётся после перевода прогона в `failed`: шаг брошенной попытки (воркер
-    умер, сообщение доставлено снова или выметено) или шаг, чей исход не
-    записался, иначе остался бы `running` навсегда. Отдельный коммит, а не
-    общий с прогоном: журнал вторичен, и сбой его записи не должен мешать
-    перевести прогон в `failed` — он логируется и наружу не выходит.
+    Зовётся после перевода прогона в `failed` или `completed`: шаг брошенной
+    попытки (воркер умер, сообщение доставлено снова или выметено) или шаг,
+    чей исход не записался, иначе остался бы `running` навсегда. Исход,
+    который воркер знает (`StepRecorder.unwritten`), записывается как есть,
+    прочие шаги закрываются `REVIEW_RUN_STALE`. Отдельный коммит, а не общий
+    с прогоном: журнал вторичен, и сбой его записи не должен мешать перевести
+    прогон в терминальное состояние — он логируется и наружу не выходит.
     """
     try:
         with uow:
-            for step in abandon_steps(uow.review_run_steps.list_for_run(review_run_id), now=now):
+            for step in abandon_steps(
+                uow.review_run_steps.list_for_run(review_run_id), now=now, known=known
+            ):
                 uow.review_run_steps.update(step)
             uow.commit()
     except Exception:
@@ -67,7 +77,8 @@ class StepRecorder:
     Сбой записи шага логируется и наружу не выходит. Этап при этом остаётся
     открытым, и следующий `finish` или `retry` его закрывает: шаг, чьё начало
     не записалось, просто не закрывается (закрывать нечего), а незакрытый
-    из-за сбоя шаг остаётся `running`.
+    из-за сбоя шаг остаётся `running`, и его исход хранится в `unwritten` до
+    `close_abandoned_steps`.
     """
 
     def __init__(
@@ -94,6 +105,13 @@ class StepRecorder:
         self._started = 0.0
         # Токены текущего вызова модели, уже отнесённые к шагам этого этапа.
         self._recorded_tokens = 0
+        # Исходы шагов, которые не записались: их пишет `close_abandoned_steps`.
+        self._unwritten: dict[UUID, ReviewRunStep] = {}
+
+    @property
+    def unwritten(self) -> Mapping[UUID, ReviewRunStep]:
+        """Исходы закрытых шагов, чья запись не удалась, по id шага."""
+        return dict(self._unwritten)
 
     def start(self, stage: ReviewRunStage, *, at: datetime | None = None) -> None:
         """Открыть шаг этапа. `at` — начало, если вызывающий уже прочёл часы."""
@@ -175,7 +193,8 @@ class StepRecorder:
                 tokens_used=share,
                 error_code=error_code,
             )
-            self._write(closed, "исход", lambda: self._uow.review_run_steps.update(closed))
+            if not self._write(closed, "исход", lambda: self._uow.review_run_steps.update(closed)):
+                self._unwritten[closed.id] = closed
         finally:
             # Спан закрывается после записи исхода — её запросы к базе ложатся
             # в спан этапа — и при любом её исходе.
