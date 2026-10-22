@@ -50,8 +50,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         generate_unique_id_function=lambda route: to_camel(route.name),
     )
     from app.api.review_events import ReviewRunStatusEvent
+    from app.api.reviews import ReviewRunFinishedEvent, ReviewRunStatusChangedEvent
 
-    openapi.install(app, extra_models=[ReviewRunStatusEvent])
+    openapi.install(app, extra_models=[ReviewRunStatusEvent, ReviewRunStatusChangedEvent, ReviewRunFinishedEvent])
     app.state.settings = settings
     app.state.container = build_container(settings)
 

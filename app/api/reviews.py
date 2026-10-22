@@ -9,10 +9,12 @@
 
 from dataclasses import asdict
 from http import HTTPStatus
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Query
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.dependencies import get_unit_of_work
@@ -24,9 +26,11 @@ from app.api.errors import (
     ERRORS_501_NOT_IMPLEMENTED,
     ApiError,
 )
+from app.api.pagination import DEFAULT_LIMIT, Limit, Offset
 from app.api.problems import ErrorCode
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
+    STREAM_HEADERS_DOC,
     FailedStage,
     MergeRequestBase,
     RepositoryBase,
@@ -67,6 +71,43 @@ _STEPS_DESCRIPTION = (
     "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
     "(задача #82). Когда ручка заработает: шаги прогона по порядку — этап, статус, время, токены, код "
     "ошибки; без запросов и ответов модели. 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию."
+)
+
+# Видимость прогонов — решение А в dmc-268-ui-t1#43: одно правило на список и поток.
+_VISIBILITY = (
+    "Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub "
+    "(любая роль), — то же правило, что у GET /repositories/available."
+)
+_LIST_DESCRIPTION = (
+    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
+    "(задача #103). Требует сессию; параметры запроса проверяются до ответа 501. Когда ручка "
+    "заработает: снимок списка прогонов ревью, сначала новые — по created_at по убыванию, затем по id. "
+    + _VISIBILITY
+    + " Фильтры складываются через «и»: status — один или несколько статусов (параметр повторяется); "
+    "active=true — только активные (queued, building_context, analysing, publishing), active=false — "
+    "только завершённые (completed, failed, cancelled), вместе со status — пересечение; repository_id — "
+    "прогоны одного репозитория; author — точное совпадение логина автора запроса на изменение; "
+    "q — поиск без учёта регистра по заголовку, номеру (42 или #42), автору и исходной ветке запроса "
+    "на изменение, пустая строка — без поиска; created_from (включительно) и created_to "
+    "(исключительно) — диапазон по created_at прогона, created_from позже created_to — 422 "
+    "VALIDATION_ERROR. Постранично: limit выше 200 не отклоняется, а приводится к 200. total — "
+    "сколько прогонов подходит под фильтры без учёта limit и offset. Находок и комментариев в строке "
+    "нет: они — в GET /reviews/{review_run_id}. Изменения после снимка приходят потоком "
+    "GET /reviews/events."
+)
+_STREAM_DESCRIPTION = (
+    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
+    "(задача #103). Требует сессию. Когда ручка заработает: один поток Server-Sent Events на весь "
+    "кабинет — изменения прогонов ревью после снимка GET /reviews. Тип события — в поле `event:`, "
+    "данные — JSON модели из схемы в `data:` одной строкой: `run.created` — ReviewRunListItem (новый "
+    "прогон, та же строка, что в списке), `run.status_changed` — ReviewRunStatusChangedEvent, "
+    "`run.finished` — ReviewRunFinishedEvent (прогон пришёл в итоговый статус completed, failed или "
+    "cancelled), `ping` с `data: {}` — в тишине, не реже раза в 15 секунд. Поток начинается со "
+    "строки `retry: 3000`. " + _VISIBILITY + " События уходят в момент коммита записи прогона "
+    "(PostgreSQL NOTIFY из транзакции записи): откаченная запись события не даёт. Истории сервер "
+    "не хранит: событие, пропущенное при обрыве, не повторяется, поэтому после переподключения "
+    "клиент перезапрашивает GET /reviews. При обрыве своей подписки на уведомления сервер сам "
+    "закрывает поток, чтобы клиент перезапросил список."
 )
 
 # Сессия — на весь роутер: исключения видны здесь, а не в middleware.
@@ -190,6 +231,84 @@ class ReviewRunResponse(BaseModel):
     )
 
 
+class ReviewRunListItem(BaseModel):
+    """Прогон ревью строкой списка: без находок и комментариев.
+
+    Те же данные — у события `run.created` потока GET /reviews/events.
+    """
+
+    id: UUID
+    status: ReviewRunStatus = Field(description="Текущий статус прогона.", examples=["analysing"])
+    trigger: TriggerSource = Field(description="Что запустило прогон.", examples=["webhook"])
+    head_sha: str = Field(
+        description="Коммит, который ревьюится.", examples=["a1b2c3d4e5f6789012345678abcdef0123456789"]
+    )
+    created_at: UtcDatetime = Field(description="Когда прогон создан.")
+    updated_at: UtcDatetime = Field(description="Когда запись последний раз менялась.")
+    duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
+    failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
+    findings_count: int = Field(ge=0, description="Сколько находок у прогона.")
+    merge_request: MergeRequestSummary = Field(description="Запрос на изменение, который ревьюит прогон.")
+
+
+class ReviewRunListResponse(BaseModel):
+    """Страница списка прогонов ревью."""
+
+    items: list[ReviewRunListItem] = Field(description="Прогоны: по created_at по убыванию, затем по id.")
+    total: int = Field(
+        ge=0, description="Сколько прогонов подходит под фильтры, без учёта limit и offset."
+    )
+
+
+class ReviewRunStatusChangedEvent(BaseModel):
+    """Данные события `run.status_changed` потока GET /reviews/events: прогон сменил статус.
+
+    Тело ответа — текст SSE, а не этот JSON; в схему модель попадает отдельным компонентом
+    (`app/api/openapi.py`, `extra_models`).
+    """
+
+    id: UUID = Field(description="Прогон, о котором событие.")
+    status: ReviewRunStatus = Field(description="Новый статус прогона.", examples=["analysing"])
+    failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
+
+
+class ReviewRunFinishedEvent(BaseModel):
+    """Данные события `run.finished` потока GET /reviews/events: прогон пришёл в итоговый статус.
+
+    Тело ответа — текст SSE, а не этот JSON; в схему модель попадает отдельным компонентом
+    (`app/api/openapi.py`, `extra_models`).
+    """
+
+    id: UUID = Field(description="Прогон, о котором событие.")
+    status: ReviewRunStatus = Field(
+        description="Итоговый статус прогона: completed, failed или cancelled.", examples=["completed"]
+    )
+    duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, если не измерена.")
+    findings_count: int = Field(ge=0, description="Сколько находок у прогона.")
+
+
+_STREAM_DOC: dict[int | str, dict[str, Any]] = {
+    HTTPStatus.OK: {
+        "description": (
+            "Поток событий; данные: `run.created` — ReviewRunListItem, `run.status_changed` — "
+            "ReviewRunStatusChangedEvent, `run.finished` — ReviewRunFinishedEvent."
+        ),
+        "content": {
+            "text/event-stream": {
+                "schema": {
+                    "type": "string",
+                    "description": (
+                        "Текст SSE: `event: run.created`, `run.status_changed` или `run.finished` с JSON "
+                        "модели события в `data` или `event: ping`."
+                    ),
+                }
+            }
+        },
+        "headers": STREAM_HEADERS_DOC,
+    },
+}
+
+
 @router.post(
     "",
     status_code=HTTPStatus.ACCEPTED,
@@ -201,6 +320,72 @@ class ReviewRunResponse(BaseModel):
 )
 def create_review(body: CreateReviewRequest) -> ReviewJob:
     raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Ручной запуск ревью ещё не реализован.")
+
+
+def _reject_reversed_range(created_from: UtcDatetime | None, created_to: UtcDatetime | None) -> None:
+    """Начало диапазона позже конца — `422`, как ошибка проверки параметра."""
+    if created_from is not None and created_to is not None and created_from > created_to:
+        raise RequestValidationError(
+            [{"type": "range_reversed", "loc": ("query", "created_to"), "msg": "", "input": None}]
+        )
+
+
+# `/events` и список объявлены раньше `/{review_run_id}`: маршруты сверяются по порядку,
+# и `events` иначе попал бы в параметр пути и получил 422 «ожидается UUID».
+@router.get(
+    "",
+    response_model=ReviewRunListResponse,
+    summary="Список прогонов ревью",
+    response_description="Страница прогонов и общее число подходящих под фильтры.",
+    description=_LIST_DESCRIPTION,
+    responses={**ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+)
+def list_reviews(
+    status: Annotated[
+        list[ReviewRunStatus] | None,
+        Query(description="Статусы прогона; параметр повторяется: ?status=queued&status=analysing."),
+    ] = None,
+    active: Annotated[
+        bool | None,
+        Query(description="true — только активные прогоны, false — только завершённые; не задан — все."),
+    ] = None,
+    repository_id: Annotated[UUID | None, Query(description="Только прогоны этого репозитория.")] = None,
+    author: Annotated[
+        str | None,
+        Query(max_length=255, description="Логин автора запроса на изменение, точное совпадение."),
+    ] = None,
+    q: Annotated[
+        str | None,
+        Query(
+            max_length=200,
+            description=(
+                "Поиск без учёта регистра по заголовку, номеру (42 или #42), автору и исходной ветке "
+                "запроса на изменение; пустая строка — без поиска."
+            ),
+        ),
+    ] = None,
+    created_from: Annotated[
+        UtcDatetime | None, Query(description="Прогоны, созданные не раньше этого времени (включительно).")
+    ] = None,
+    created_to: Annotated[
+        UtcDatetime | None, Query(description="Прогоны, созданные раньше этого времени (исключительно).")
+    ] = None,
+    limit: Limit = DEFAULT_LIMIT,
+    offset: Offset = 0,
+) -> ReviewRunListResponse:
+    _reject_reversed_range(created_from, created_to)
+    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Список прогонов ревью ещё не реализован.")
+
+
+@router.get(
+    "/events",
+    response_class=StreamingResponse,
+    summary="Поток изменений прогонов ревью (Server-Sent Events)",
+    description=_STREAM_DESCRIPTION,
+    responses={**_STREAM_DOC, **ERRORS_501_NOT_IMPLEMENTED},
+)
+def stream_reviews_events() -> StreamingResponse:
+    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Поток изменений прогонов ещё не реализован.")
 
 
 @router.get(

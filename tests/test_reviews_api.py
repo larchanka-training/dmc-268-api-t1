@@ -345,3 +345,18 @@ def test_a_run_that_published_nothing_has_no_comments() -> None:
     body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
 
     assert body["published_comments"] == []
+
+
+def test_events_path_is_not_taken_for_a_run_id() -> None:
+    """`/reviews/events` — общий поток, а не прогон с id `events`; `/reviews/{uuid}` — по-прежнему прогон."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    client = _client(uow)
+
+    stream = client.get("/api/v1/reviews/events")
+    by_id = client.get(f"/api/v1/reviews/{run.id}")
+
+    assert stream.status_code == 501
+    assert stream.json()["code"] == "NOT_IMPLEMENTED"
+    assert by_id.status_code == 200
+    assert by_id.json()["id"] == str(run.id)

@@ -6,7 +6,7 @@
 """
 
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -49,6 +49,16 @@ UtcDatetime = Annotated[
 # (равенство множеств проверяет тест).
 FailedStage = Literal[ReviewRunStatus.BUILDING_CONTEXT, ReviewRunStatus.ANALYSING, ReviewRunStatus.PUBLISHING]
 FAILED_STAGE_DESCRIPTION = "Этап, на котором прогон упал; null, если прогон не падал."
+
+# Заголовки ответа потока Server-Sent Events в схеме: против кэша и буфера прокси.
+# Общие для потоков прогонов (`app/api/review_events.py`, `app/api/reviews.py`).
+STREAM_HEADERS_DOC: dict[str, Any] = {
+    "Cache-Control": {"schema": {"type": "string", "const": "no-cache"}},
+    "X-Accel-Buffering": {
+        "description": "Отключает буферизацию ответа в nginx.",
+        "schema": {"type": "string", "const": "no"},
+    },
+}
 
 
 class AllFieldsResponse(BaseModel):
