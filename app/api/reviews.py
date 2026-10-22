@@ -89,7 +89,8 @@ _LIST_DESCRIPTION = (
     + " Фильтры складываются через «и»: status — один или несколько статусов (параметр повторяется); "
     "active=true — только активные (queued, building_context, analysing, publishing), active=false — "
     "только завершённые (completed, failed, cancelled), вместе со status — пересечение; repository_id — "
-    "прогоны одного репозитория, невидимый или несуществующий репозиторий даёт пустой список, а не 404; "
+    "прогоны одного или нескольких репозиториев (параметр повторяется), невидимый или несуществующий "
+    "репозиторий не даёт 404, его прогонов просто нет в списке; "
     "author — точное совпадение логина автора запроса на изменение; q — подстрока без учёта регистра "
     "в заголовке, авторе или исходной ветке запроса на изменение либо точное совпадение номера "
     "(42 или #42). У q и author пустая "
@@ -306,7 +307,10 @@ class ReviewRunListQuery(BaseModel):
     active: bool | None = Field(
         default=None, description="true — только активные прогоны, false — только завершённые; не задан — все."
     )
-    repository_id: UUID | None = Field(default=None, description="Только прогоны этого репозитория.")
+    repository_id: list[UUID] | None = Field(
+        default=None,
+        description="Прогоны этих репозиториев; параметр повторяется: ?repository_id=…&repository_id=….",
+    )
     author: str | None = _optional_text(255, "Логин автора запроса на изменение, точное совпадение.")
     q: str | None = _optional_text(
         200,
