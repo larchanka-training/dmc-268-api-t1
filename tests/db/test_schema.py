@@ -25,6 +25,7 @@ TABLES = [
     "published_comments",
     "users",
     "sessions",
+    "provider_tokens",
 ]
 
 
@@ -45,7 +46,9 @@ def test_timestamps_carry_a_time_zone(table: str) -> None:
 
 @pytest.mark.parametrize("table", TABLES)
 def test_primary_key_is_a_native_uuid_without_a_database_default(table: str) -> None:
-    line = next(line for line in ddl(table).splitlines() if line.strip().startswith("id "))
+    # У `provider_tokens` ключ — `session_id`: токен принадлежит сессии.
+    [key] = Base.metadata.tables[table].primary_key.columns
+    line = next(line for line in ddl(table).splitlines() if line.strip().startswith(f"{key.name} "))
     assert "UUID" in line
     assert "DEFAULT" not in line
 
@@ -124,6 +127,15 @@ def test_a_session_is_found_by_a_unique_token_hash() -> None:
     statement = ddl("sessions")
     assert "token_hash BYTEA NOT NULL" in statement
     assert "CONSTRAINT uq_sessions_token_hash UNIQUE (token_hash)" in statement
+
+
+def test_deleting_a_session_deletes_its_provider_token() -> None:
+    assert "REFERENCES sessions (id) ON DELETE CASCADE" in ddl("provider_tokens")
+
+
+def test_provider_tokens_hold_only_ciphertext_columns() -> None:
+    columns = Base.metadata.tables["provider_tokens"].columns
+    assert {c.name for c in columns if "token" in c.name} == {"access_token_encrypted", "refresh_token_encrypted"}
 
 
 def test_deleting_a_user_deletes_their_sessions() -> None:

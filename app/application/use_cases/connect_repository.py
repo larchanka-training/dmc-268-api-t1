@@ -1,12 +1,16 @@
 """Подключение репозитория к сервису: список доступных и регистрация.
 
-Провайдер скрыт за портом `InstallationCatalog`, хранение — за `UnitOfWork`.
-Время и id новой записи приходят аргументами. Запросы к провайдеру идут вне
-транзакции: соединение с базой не ждёт GitHub. Сбой провайдера (`VcsError`)
-проходит наверх — его переводит слой API. Видеть в списке пользователь может
-репозитории, к которым у него есть любой доступ у провайдера, подключать — с
-ролью admin или maintain (`app/domain/repository_access.py`, change
-`repository-access-roles`).
+Провайдер скрыт за портом `InstallationCatalog`, токен пользователя — за
+`call_with_user_token` (`app/application/use_cases/user_token.py`), хранение —
+за `UnitOfWork`. Время и id новой записи приходят аргументами. Запросы к
+провайдеру идут вне транзакции, кроме обмена refresh token: соединение с
+базой не ждёт GitHub. Сбой провайдера (`VcsError`, `OAuthProviderUnavailable`)
+и закрытая сессия (`SessionClosed`) проходят наверх — их переводит слой API.
+
+Что пользователь видит, решает GitHub: список — ответ `/user/installations…`
+по токену пользователя, то есть пересечение «доступно приложению» и
+«доступно пользователю». Подключать — с правом admin или maintain
+(`app/domain/repository_access.py`, change `repositories-via-user-token`).
 """
 
 from dataclasses import dataclass
@@ -15,10 +19,12 @@ from enum import StrEnum
 from uuid import UUID
 
 from app.application.ports.installation_catalog import InstallationCatalog
+from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.unit_of_work import UnitOfWork
+from app.application.use_cases.user_token import call_with_user_token
 from app.domain.entities import InstallationRepository, Repository
 from app.domain.enums import Provider
-from app.domain.repository_access import can_connect, can_see
+from app.domain.repository_access import can_connect
 
 
 class ConnectRefusal(StrEnum):
@@ -35,19 +41,19 @@ class AvailableRepository:
     already_connected: bool
 
 
-def list_available_repositories(
-    catalog: InstallationCatalog, uow: UnitOfWork, login: str
-) -> list[AvailableRepository]:
-    """Репозитории установок, к которым у `login` есть доступ у провайдера, с отметкой,
-    зарегистрирован ли каждый.
+@dataclass(frozen=True, slots=True)
+class UserContext:
+    """Чьими правами спрашиваем провайдера: сессия, к которой привязан токен."""
 
-    Остальные в список не попадают: пользователь видит только то, что и так видит
-    у провайдера, и имена чужих приватных репозиториев ему не раскрываются. Роль —
-    запрос на каждый репозиторий, последовательно; сбой любого из них проходит
-    наверх: частичный список выдал бы сбой GitHub за отсутствие доступа. Стоимость
-    и отказ от кэша — design D2 change `repository-access-roles`.
-    """
-    repositories = [r for r in catalog.list_repositories() if can_see(catalog.user_role(r, login))]
+    oauth: OAuthProvider
+    session_id: UUID
+
+
+def list_available_repositories(
+    catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, now: datetime
+) -> list[AvailableRepository]:
+    """Репозитории установок, видимые пользователю, с отметкой, зарегистрирован ли каждый."""
+    repositories = _user_repositories(catalog, uow, user, now)
     with uow:
         return [
             AvailableRepository(
@@ -62,25 +68,26 @@ def list_available_repositories(
 def connect_repository(
     catalog: InstallationCatalog,
     uow: UnitOfWork,
+    user: UserContext,
     provider: Provider,
     provider_id: str,
-    login: str,
     repository_id: UUID,
     now: datetime,
 ) -> Repository | ConnectRefusal:
-    """Зарегистрировать репозиторий установки от имени пользователя `login`.
+    """Зарегистрировать репозиторий установки от имени пользователя сессии.
 
-    Порядок проверок — design D4 change `repository-access-roles`: нет в
-    установке, нет роли admin или maintain, уже подключён. Права проверяются
-    раньше «уже подключён»: пользователь без прав получает отказ по правам и не
-    узнаёт, подключён ли репозиторий.
+    Порядок проверок: нет среди видимых пользователю — `NOT_IN_INSTALLATION`
+    (и «нет в установках», и «не виден пользователю» — один отказ, без
+    различия), нет права admin или maintain — `MANAGE_REQUIRED`, уже
+    подключён — `ALREADY_CONNECTED`. Права проверяются раньше «уже подключён»:
+    пользователь без прав не узнаёт, подключён ли репозиторий.
     """
     if provider is not Provider.GITHUB:
         return ConnectRefusal.NOT_IN_INSTALLATION
-    found = next((r for r in catalog.list_repositories() if r.provider_id == provider_id), None)
+    found = next((r for r in _user_repositories(catalog, uow, user, now) if r.provider_id == provider_id), None)
     if found is None:
         return ConnectRefusal.NOT_IN_INSTALLATION
-    if not can_connect(catalog.user_role(found, login)):
+    if not can_connect(found.permissions):
         return ConnectRefusal.MANAGE_REQUIRED
     repository = Repository(
         id=repository_id,
@@ -100,3 +107,9 @@ def connect_repository(
             return ConnectRefusal.ALREADY_CONNECTED
         uow.commit()
     return repository
+
+
+def _user_repositories(
+    catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, now: datetime
+) -> list[InstallationRepository]:
+    return call_with_user_token(uow, user.oauth, user.session_id, now, catalog.list_repositories)

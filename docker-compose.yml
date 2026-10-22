@@ -67,6 +67,9 @@ services:
       GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
       GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      # Ключ шифрования токенов пользователя (openssl rand -base64 32): пустой —
+      # вход отказывает, токен открытым не хранится никогда.
+      USER_TOKEN_ENCRYPTION_KEY: ${USER_TOKEN_ENCRYPTION_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

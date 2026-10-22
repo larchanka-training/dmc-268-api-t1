@@ -6,7 +6,8 @@ cookie приходят аргументами: случайность — де�
 
 `complete_login` возвращает исход, а не бросает исключение: каждая ошибка
 входа — штатный редирект на `/login?error=…`, и роутер переводит исход в
-ответ без `try`. Токен пользователя не покидает адаптер провайдера.
+ответ без `try`. Токен пользователя сохраняется при сессии — в той же
+транзакции, зашифрованным (change `repositories-via-user-token`).
 """
 
 import hmac
@@ -20,6 +21,7 @@ from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.unit_of_work import UnitOfWork
 from app.domain.entities import OAuthProfile, User
 from app.domain.login import LoginError, OAuthProviderUnavailable, safe_redirect
+from app.domain.provider_token import ProviderTokenUnavailable, token_from_grant
 from app.domain.session import hash_token, is_expired, open_session
 
 _log = logging.getLogger(__name__)
@@ -45,6 +47,14 @@ class LoginSucceeded:
 @dataclass(frozen=True, slots=True)
 class LoginFailed:
     error: LoginError
+
+
+@dataclass(frozen=True, slots=True)
+class SignedIn:
+    """Пользователь действующей сессии и её id — к сессии привязан токен провайдера."""
+
+    user: User
+    session_id: UUID
 
 
 def start_login(
@@ -78,10 +88,12 @@ def complete_login(
     new_id: Callable[[], UUID],
     previous_token: str | None = None,
 ) -> LoginSucceeded | LoginFailed:
-    """Сверить `state`, получить профиль, записать пользователя и сессию.
+    """Сверить `state`, получить профиль и токен, записать пользователя, сессию и токен.
 
     `previous_token` — cookie сессии, с которой пришёл запрос: новый вход
-    отзывает её в той же транзакции, чтобы старые сессии не копились.
+    отзывает её в той же транзакции, чтобы старые сессии не копились (а с ней
+    каскадом и её токен). Токен записать нельзя (не задан ключ шифрования) —
+    входа нет: сессия без токена не открыла бы список репозиториев.
     """
     # Байты, а не `str`: `compare_digest` на нелатинском `str` бросает `TypeError`.
     # В логе причина без значений `state`, `code` и секретов: по ней видно,
@@ -99,25 +111,32 @@ def complete_login(
         _log.warning("вход не завершён: провайдер вернул error=%r без code", (error or "")[:100])
         return LoginFailed(LoginError.PROVIDER_UNAVAILABLE)
     try:
-        profile = provider.exchange_code(code)
+        login = provider.exchange_code(code)
     except OAuthProviderUnavailable as failure:
         _log.warning("вход не завершён: %s", failure)
         return LoginFailed(LoginError.PROVIDER_UNAVAILABLE)
 
     # Провайдер опрошен до транзакции: соединение не ждёт ответа GitHub.
-    with uow as work:
-        user = _upsert_user(work, provider, profile, now, new_id)
-        if previous_token:
-            previous = work.sessions.find_by_token_hash(hash_token(previous_token))
-            if previous is not None:
-                work.sessions.delete(previous.id)
-        work.sessions.add(open_session(new_id(), user.id, token, now))
-        work.commit()
+    try:
+        with uow as work:
+            user = _upsert_user(work, provider, login.profile, now, new_id)
+            if previous_token:
+                previous = work.sessions.find_by_token_hash(hash_token(previous_token))
+                if previous is not None:
+                    work.sessions.delete(previous.id)
+            session = open_session(new_id(), user.id, token, now)
+            work.sessions.add(session)
+            work.provider_tokens.save(session.id, token_from_grant(login.grant, now))
+            work.commit()
+    except ProviderTokenUnavailable as failure:
+        # Транзакция откатана: ни пользователя, ни сессии без токена.
+        _log.warning("вход не завершён: %s", failure)
+        return LoginFailed(LoginError.PROVIDER_UNAVAILABLE)
     return LoginSucceeded(token=token, redirect=safe_redirect(redirect))
 
 
-def authenticate(uow: UnitOfWork, token: str | None, now: datetime) -> User | None:
-    """Пользователь действующей сессии; истёкшая сессия удаляется."""
+def authenticate(uow: UnitOfWork, token: str | None, now: datetime) -> SignedIn | None:
+    """Пользователь действующей сессии и её id; истёкшая сессия удаляется."""
     if not token:
         return None
     with uow as work:
@@ -128,11 +147,15 @@ def authenticate(uow: UnitOfWork, token: str | None, now: datetime) -> User | No
             work.sessions.delete(session.id)
             work.commit()
             return None
-        return work.users.get(session.user_id)
+        user = work.users.get(session.user_id)
+        return None if user is None else SignedIn(user=user, session_id=session.id)
 
 
 def logout(uow: UnitOfWork, token: str | None) -> None:
-    """Удалить сессию этой cookie. Нет cookie или сессии — нечего удалять, не ошибка."""
+    """Удалить сессию этой cookie, а с ней каскадом и токен провайдера.
+
+    Нет cookie или сессии — нечего удалять, не ошибка.
+    """
     if not token:
         return
     with uow as work:

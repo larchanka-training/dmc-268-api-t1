@@ -1,23 +1,18 @@
-"""Что пользователь может делать с репозиторием установки, по его роли у провайдера.
+"""Кто может подключить репозиторий к сервису — по правам, которые отдал провайдер.
 
-Чистые функции: роль приходит аргументом, `None` — доступа к репозиторию нет
-(change `repository-access-roles`, design D1 и D3). Это уточнение решения 3A
-из larchanka-training/dmc-268-ui-t1#37: видеть в списке — любой доступ,
-подключать — admin или maintain.
+Чистая функция: права приходят аргументом. Видеть репозиторий в списке
+пользователь может, если GitHub вернул его в ответе по токену пользователя,
+подключать — с правом admin или maintain (решение 3A из
+larchanka-training/dmc-268-ui-t1#37, change `repositories-via-user-token`).
 """
 
-from app.domain.enums import RepositoryRole
-
-# Maintain по замыслу GitHub — управление репозиторием без опасных настроек
-# (удаление, видимость, передача, доступы); подключение к ревью — такое действие.
-_CONNECTING_ROLES = frozenset({RepositoryRole.ADMIN, RepositoryRole.MAINTAIN})
+from app.domain.entities import RepositoryPermissions
 
 
-def can_see(role: RepositoryRole | None) -> bool:
-    """Показывать ли репозиторий в списке: пользователь и так видит его у провайдера."""
-    return role is not None
+def can_connect(permissions: RepositoryPermissions) -> bool:
+    """Может ли пользователь подключить репозиторий к сервису.
 
-
-def can_connect(role: RepositoryRole | None) -> bool:
-    """Может ли пользователь подключить репозиторий к сервису."""
-    return role in _CONNECTING_ROLES
+    Maintain по замыслу GitHub — управление репозиторием без опасных настроек
+    (удаление, видимость, передача, доступы); подключение к ревью — такое действие.
+    """
+    return permissions.admin or permissions.maintain

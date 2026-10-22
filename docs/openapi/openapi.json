@@ -463,11 +463,11 @@
           "repositories"
         ],
         "summary": "Репозитории, доступные для подключения",
-        "description": "Требует сессию. Репозитории установок GitHub App, к которым у вошедшего пользователя есть доступ в GitHub (любая роль, в том числе read), с отметкой `already_connected` — зарегистрирован ли репозиторий в сервисе. Пользователь видит только то, что и так видит в GitHub; остальные репозитории установок в ответ не попадают, это не ошибка. Подключить из списка можно только с ролью admin или maintain, иначе подключение ответит `403 REPOSITORY_MANAGE_REQUIRED`. Роль проверяется запросом к GitHub на каждый репозиторий установок. Если GitHub не ответил или ответил ошибкой, в том числе на запрос роли, — `502 SCM_UNAVAILABLE`.",
+        "description": "Требует сессию. Репозитории установок GitHub App, доступные вошедшему пользователю, с отметкой `already_connected` — зарегистрирован ли репозиторий в сервисе. Список отдаёт GitHub по токену пользователя, сохранённому при входе (`GET /user/installations` и `GET /user/installations/{id}/repositories`): это пересечение «доступно приложению» и «доступно пользователю», остальные репозитории установок в ответ не попадают, это не ошибка. Подключить из списка можно только с правом admin или maintain, иначе подключение ответит `403 REPOSITORY_MANAGE_REQUIRED`. Токен пользователя отозван, истёк без возможности обновления или его нет (сессия открыта до хранения токенов) — `401 UNAUTHENTICATED`, сессия закрывается, cookie удаляется: нужен новый вход. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`.",
         "operationId": "listAvailableRepositories",
         "responses": {
           "200": {
-            "description": "Репозитории установок GitHub App, к которым у пользователя есть доступ.",
+            "description": "Репозитории установок GitHub App, доступные пользователю.",
             "content": {
               "application/json": {
                 "schema": {
@@ -540,7 +540,7 @@
           "repositories"
         ],
         "summary": "Подключить репозиторий",
-        "description": "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. Регистрирует репозиторий установки GitHub App с `auto_review_enabled = true`; `full_name` и `default_branch` — из данных установки. Проверки по порядку: провайдер не `github` или репозитория нет среди репозиториев установок — `404 REPOSITORY_NOT_IN_INSTALLATION`; у пользователя нет роли admin или maintain на репозитории в GitHub — `403 REPOSITORY_MANAGE_REQUIRED`; репозиторий уже подключён — `409 REPOSITORY_ALREADY_CONNECTED`. Пользователь без прав получает `403` и не узнаёт, подключён ли репозиторий. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, репозиторий не записан.",
+        "description": "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. Регистрирует репозиторий установки GitHub App с `auto_review_enabled = true`; `full_name` и `default_branch` — из ответа GitHub. Репозиторий ищется в том же списке, что отдаёт `GET /repositories/available`, по токену пользователя. Проверки по порядку: провайдер не `github` или репозитория нет в списке (нет в установках или не виден пользователю — без различия) — `404 REPOSITORY_NOT_IN_INSTALLATION`; у пользователя нет права admin или maintain на репозиторий в GitHub — `403 REPOSITORY_MANAGE_REQUIRED`; репозиторий уже подключён — `409 REPOSITORY_ALREADY_CONNECTED`. Пользователь без прав получает `403` и не узнаёт, подключён ли репозиторий. Токен пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, репозиторий не записан.",
         "operationId": "connectRepository",
         "security": [
           {
@@ -634,7 +634,7 @@
             }
           },
           "404": {
-            "description": "Репозитория нет среди репозиториев установок GitHub App, или провайдер не `github`.",
+            "description": "Репозитория нет среди репозиториев установок GitHub App, доступных пользователю (нет в установках или не виден ему — без различия), или провайдер не `github`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1982,7 +1982,7 @@
             },
             "type": "array",
             "title": "Items",
-            "description": "Репозитории установки GitHub App."
+            "description": "Репозитории установок GitHub App, доступные пользователю."
           }
         },
         "type": "object",
@@ -3327,7 +3327,7 @@
         "examples": [
           {
             "code": "REPOSITORY_MANAGE_REQUIRED",
-            "detail": "Подключать репозиторий может только пользователь с правами admin или maintain на него.",
+            "detail": "Подключать репозиторий может только пользователь с правом admin или maintain на него.",
             "instance": "/api/v1/repositories",
             "status": 403,
             "title": "Нужны права admin или maintain на репозиторий",
@@ -3469,7 +3469,7 @@
         "examples": [
           {
             "code": "REPOSITORY_NOT_IN_INSTALLATION",
-            "detail": "Репозитория нет среди репозиториев установок GitHub App.",
+            "detail": "Репозитория нет среди репозиториев установок GitHub App, доступных пользователю.",
             "instance": "/api/v1/repositories",
             "status": 404,
             "title": "Репозиторий не из установки приложения",

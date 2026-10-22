@@ -124,8 +124,8 @@ async def stream_review_events(
     token = request.cookies.get(SESSION_COOKIE)
 
     async def session_alive() -> bool:
-        user = await run_in_threadpool(authenticate, uow_factory(), token, datetime.now(UTC))
-        return user is not None
+        signed_in = await run_in_threadpool(authenticate, uow_factory(), token, datetime.now(UTC))
+        return signed_in is not None
 
     # Чтение синхронное, обработчик — нет: поток живёт минуты и не должен
     # занимать ни поток пула, ни event loop на время запроса к базе.

@@ -18,7 +18,7 @@ from app.api.dependencies import get_unit_of_work_factory
 from app.api.errors import ERRORS_401_SESSION, ApiError
 from app.api.problems import ErrorCode
 from app.application.ports import UnitOfWork
-from app.application.use_cases.auth import authenticate
+from app.application.use_cases.auth import SignedIn, authenticate
 from app.domain.entities import User
 from app.domain.session import SESSION_LIFETIME
 
@@ -66,17 +66,26 @@ def clear_session_cookie(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
 
 
-def current_user(
+def current_session(
     request: Request,
     token: str | None = Security(_SESSION_SCHEME),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
-) -> User:
-    """Пользователь сессии из cookie или `401`."""
-    user = authenticate(uow_factory(), token, datetime.now(UTC))
-    if user is None:
+) -> SignedIn:
+    """Пользователь и id сессии из cookie или `401`."""
+    signed_in = authenticate(uow_factory(), token, datetime.now(UTC))
+    if signed_in is None:
         # Пустую `session=` схема отдаёт как None, а удалить её всё равно надо.
         raise Unauthenticated(had_cookie=SESSION_COOKIE in request.cookies)
-    return user
+    return signed_in
+
+
+def current_user(signed_in: SignedIn = Depends(current_session)) -> User:
+    """Пользователь сессии из cookie или `401`.
+
+    FastAPI кэширует зависимость в пределах запроса: ручка, которой нужен и
+    id сессии, сессию второй раз не читает.
+    """
+    return signed_in.user
 
 
 # `Origin` к этому моменту уже проверен middleware.

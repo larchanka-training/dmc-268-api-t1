@@ -16,6 +16,7 @@ from app.application.ports.repositories import (
     ContextPayloadRepo,
     FindingRepo,
     MergeRequestRepo,
+    ProviderTokenRepo,
     PublishedCommentRepo,
     RepositoryRepo,
     ReviewRunRepo,
@@ -38,6 +39,7 @@ class UnitOfWork(Protocol):
     published_comments: PublishedCommentRepo
     users: UserRepo
     sessions: SessionRepo
+    provider_tokens: ProviderTokenRepo
 
     def __enter__(self) -> Self: ...
 

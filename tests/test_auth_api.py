@@ -315,16 +315,33 @@ def test_neither_the_session_cookie_nor_the_code_reaches_the_app_logs(stand, cap
     caplog.set_level(logging.DEBUG)
     client = stand.client()
 
-    sign_in(client, code="code-secret-1")
+    responses = [sign_in(client, code="code-secret-1")]
     token = client.cookies["session"]
-    client.get("/api/v1/auth/me")
-    client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+    responses.append(client.get("/api/v1/auth/me"))
+    responses.append(client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN}))
 
     # Запросы пишет сам тестовый клиент — это не логи приложения.
     app_logs = "\n".join(r.getMessage() for r in caplog.records if r.name != "httpx")
     assert "code-secret-1" not in app_logs
     assert token not in app_logs
     assert "set-cookie" not in app_logs.lower()
+    # Токен пользователя GitHub сохранён при сессии, но не уходит ни в лог, ни в браузер.
+    for secret in ("ghu_login_access", "ghr_login_refresh"):
+        assert secret not in app_logs
+        for response in responses:
+            assert secret not in response.text
+            assert secret not in str(response.headers)
+
+
+def test_login_keeps_the_provider_token_and_logout_drops_it(stand) -> None:
+    client = stand.client()
+
+    sign_in(client)
+    [session] = stand.uow.sessions.stored
+    assert stand.uow.provider_tokens.get(session.id) is not None
+    client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+
+    assert stand.uow.provider_tokens.stored == {}
 
 
 def test_the_access_log_hides_the_callback_query() -> None:

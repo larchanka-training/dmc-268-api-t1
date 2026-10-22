@@ -21,6 +21,7 @@ from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.vcs_gateway import VcsGateway
 from app.config import Settings
 from app.infrastructure.cache.memory import InMemoryCacheStore
+from app.infrastructure.db.token_cipher import TokenCipher
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.ollama import OllamaGateway
@@ -48,6 +49,9 @@ class Container:
 
     engine: Engine
     settings: Settings
+    # Ключ шифрования токенов пользователя; `None` — не задан, и токены не
+    # пишутся и не читаются (вход отказывает), остальное работает.
+    _token_cipher: TokenCipher | None
     # Один экземпляр на процесс, а не фабрика: `RabbitMQJobQueue` сам держит
     # переиспользуемое AMQP-соединение, и это работает, только если каждый
     # запрос получает один и тот же объект, а не новый на каждый вызов
@@ -58,9 +62,9 @@ class Container:
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
     _vcs_gateway: VcsGateway | None
-    # Собирается вместе со шлюзом и делит с ним `GitHubAppAuth` и HTTP-клиент:
-    # кэш installation tokens один на процесс.
-    _installation_catalog: InstallationCatalog | None
+    # Репозитории, видимые пользователю, — запросы с его токеном; App-реквизиты
+    # и кэш installation tokens ему не нужны. Конструирование — без сети.
+    _installation_catalog: InstallationCatalog
     # Провайдеры входа по имени из пути `/auth/{provider}`. Конструирование —
     # без сети, поэтому они собираются сразу, а не лениво.
     _oauth_providers: Mapping[str, OAuthProvider]
@@ -74,7 +78,7 @@ class Container:
     _definition_extractor: DefinitionExtractor | None
 
     def unit_of_work(self) -> UnitOfWork:
-        return SqlAlchemyUnitOfWork(self.engine)
+        return SqlAlchemyUnitOfWork(self.engine, self._token_cipher)
 
     def job_queue(self) -> JobQueue:
         """Выдать очередь задач; соединение с брокером открывается лениво,
@@ -93,28 +97,19 @@ class Container:
         """Собрать VCS-шлюз при первом обращении; конструирование — без сети."""
         gateway = self._vcs_gateway
         if gateway is None:
-            gateway, _ = self._build_github()
+            client = httpx.Client(base_url=_GITHUB_API)
+            auth = GitHubAppAuth(
+                self.settings.github_app_id,
+                self.settings.github_app_private_key.get_secret_value(),
+                client,
+            )
+            gateway = GitHubVcsGateway(auth, client)
+            object.__setattr__(self, "_vcs_gateway", gateway)
         return gateway
 
     def installation_catalog(self) -> InstallationCatalog:
-        """Каталог установок GitHub App; собирается лениво, как VCS-шлюз."""
-        catalog = self._installation_catalog
-        if catalog is None:
-            _, catalog = self._build_github()
-        return catalog
-
-    def _build_github(self) -> tuple[VcsGateway, InstallationCatalog]:
-        client = httpx.Client(base_url=_GITHUB_API)
-        auth = GitHubAppAuth(
-            self.settings.github_app_id,
-            self.settings.github_app_private_key.get_secret_value(),
-            client,
-        )
-        gateway = GitHubVcsGateway(auth, client)
-        catalog = GitHubInstallationCatalog(auth, client, gateway)
-        object.__setattr__(self, "_vcs_gateway", gateway)
-        object.__setattr__(self, "_installation_catalog", catalog)
-        return gateway, catalog
+        """Репозитории установок GitHub App, видимые пользователю по его токену."""
+        return self._installation_catalog
 
     def oauth_provider(self, name: str) -> OAuthProvider | None:
         """Провайдер входа по имени из пути; неизвестное имя — `None`."""
@@ -138,9 +133,10 @@ def build_container(settings: Settings) -> Container:
     return Container(
         engine=create_engine(settings.database_url, future=True, pool_pre_ping=True),
         settings=settings,
+        _token_cipher=_token_cipher(settings),
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
-        _installation_catalog=None,
+        _installation_catalog=GitHubInstallationCatalog(httpx.Client(base_url=_GITHUB_API, timeout=10.0)),
         _oauth_providers={
             "github": GitHubOAuthProvider(
                 settings.github_app_client_id,
@@ -153,6 +149,15 @@ def build_container(settings: Settings) -> Container:
         _llm_gateway=None,
         _definition_extractor=None,
     )
+
+
+def _token_cipher(settings: Settings) -> TokenCipher | None:
+    key = settings.user_token_key
+    if key is None:
+        # Видно в логе старта: вход на таком стенде будет отказывать.
+        logger.warning("USER_TOKEN_ENCRYPTION_KEY не задан: вход отказывает, токены не хранятся")
+        return None
+    return TokenCipher(key)
 
 
 # Подключение в нашей сети или к hosted-провайдеру дольше этого - сбой, а не

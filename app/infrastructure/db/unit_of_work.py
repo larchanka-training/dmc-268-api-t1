@@ -11,6 +11,7 @@ from app.application.ports.repositories import (
     ContextPayloadRepo,
     FindingRepo,
     MergeRequestRepo,
+    ProviderTokenRepo,
     PublishedCommentRepo,
     RepositoryRepo,
     ReviewRunRepo,
@@ -22,12 +23,14 @@ from app.infrastructure.db.repositories import (
     SqlAlchemyContextPayloadRepo,
     SqlAlchemyFindingRepo,
     SqlAlchemyMergeRequestRepo,
+    SqlAlchemyProviderTokenRepo,
     SqlAlchemyPublishedCommentRepo,
     SqlAlchemyRepositoryRepo,
     SqlAlchemyReviewRunRepo,
     SqlAlchemySessionRepo,
     SqlAlchemyUserRepo,
 )
+from app.infrastructure.db.token_cipher import TokenCipher
 
 # Частичные уникальные индексы гонки доставок: их отказ переводится в
 # портовое исключение, отказ любого другого ограничения идёт наружу как есть.
@@ -40,10 +43,15 @@ _RACE_CONSTRAINTS = (
 
 
 class SqlAlchemyUnitOfWork:
-    """Открывает сессию на входе и откатывает её, если не был вызван `commit`."""
+    """Открывает сессию на входе и откатывает её, если не был вызван `commit`.
 
-    def __init__(self, engine: Engine) -> None:
+    `cipher` — ключ шифрования токенов пользователя; без него токены не
+    пишутся и не читаются (`ProviderTokenUnavailable`), остальное работает.
+    """
+
+    def __init__(self, engine: Engine, cipher: TokenCipher | None = None) -> None:
         self._factory = sessionmaker(bind=engine, future=True, expire_on_commit=False)
+        self._cipher = cipher
         self._session: Session | None = None
 
     def __enter__(self) -> Self:
@@ -63,6 +71,7 @@ class SqlAlchemyUnitOfWork:
         )
         self.users: UserRepo = SqlAlchemyUserRepo(session)
         self.sessions: SessionRepo = SqlAlchemySessionRepo(session)
+        self.provider_tokens: ProviderTokenRepo = SqlAlchemyProviderTokenRepo(session, self._cipher)
         return self
 
     def __exit__(

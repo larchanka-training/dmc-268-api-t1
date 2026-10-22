@@ -1,13 +1,22 @@
-"""Вход через OAuth самого GitHub App.
+"""Вход через OAuth самого GitHub App и обновление токена пользователя.
 
-Два запроса: обмен `code` на токен пользователя секретом приложения и
-`GET /user` с этим токеном. Токен живёт только внутри `exchange_code` и
-наружу не выходит. У OAuth GitHub App нет scope: приложение получает только
-профиль.
+Вход — два запроса: обмен `code` на токен пользователя (user access token
+GitHub App) секретом приложения и `GET /user` с этим токеном. Профиль и
+токен уходят вызывающему: токен хранится при сессии зашифрованным
+(change `repositories-via-user-token`). У OAuth GitHub App нет scope: что
+токен может, решают разрешения приложения и доступ пользователя.
+
+Если у App включено истечение токенов, обмен отдаёт ещё `expires_in`,
+`refresh_token` и `refresh_token_expires_in`; `refresh` обменивает refresh
+token на новую пару тем же `POST /login/oauth/access_token` с
+`grant_type=refresh_token` («Refreshing user access tokens», документация
+GitHub Apps).
 
 Любой сбой — сеть, статус, ответ без нужных полей, `error` в ответе обмена
 (неверный `code` GitHub отдаёт со статусом 200) — `OAuthProviderUnavailable`.
-В сообщение не попадают ни `code`, ни токен, ни секрет.
+Исключение — `bad_refresh_token` при обновлении: refresh token отозван, истёк
+или уже израсходован, это `ProviderTokenRejected`, и пользователь входит
+заново. В сообщение не попадают ни `code`, ни токены, ни секрет.
 """
 
 from collections.abc import Callable
@@ -16,13 +25,17 @@ from urllib.parse import urlencode
 
 import httpx
 
-from app.domain.entities import OAuthProfile
+from app.domain.entities import OAuthLogin, OAuthProfile, ProviderGrant, Secret
 from app.domain.enums import Provider
 from app.domain.login import OAuthProviderUnavailable
+from app.domain.provider_token import ProviderTokenRejected
 
 _AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _TOKEN_URL = "https://github.com/login/oauth/access_token"
 _USER_URL = "https://api.github.com/user"
+# Код ошибки обмена refresh token, означающий «этот refresh token больше не
+# действует»; остальные коды — неверная настройка приложения, а не сессии.
+_BAD_REFRESH_TOKEN = "bad_refresh_token"
 
 
 class GitHubOAuthProvider:
@@ -48,8 +61,18 @@ class GitHubOAuthProvider:
         )
         return f"{_AUTHORIZE_URL}?{query}"
 
-    def exchange_code(self, code: str) -> OAuthProfile:
-        token = self._exchange(code)
+    def __repr__(self) -> str:
+        # Секрет приложения в repr не попадает — и в трейсбек с локальными тоже.
+        return f"GitHubOAuthProvider(client_id={self._client_id!r})"
+
+    def exchange_code(self, code: str) -> OAuthLogin:
+        grant = self._grant(
+            "обмен code",
+            {"code": code, "redirect_uri": self._callback_url},
+        )
+        if isinstance(grant, str):
+            raise OAuthProviderUnavailable(f"GitHub не выдал токен пользователя: {grant}")
+        token = grant.access_token.reveal()
         user = self._json(
             "профиль",
             lambda: self._client.get(
@@ -61,7 +84,7 @@ class GitHubOAuthProvider:
             ),
         )
         try:
-            return OAuthProfile(
+            profile = OAuthProfile(
                 provider_user_id=str(user["id"]),
                 login=user["login"],
                 name=user.get("name"),
@@ -69,27 +92,48 @@ class GitHubOAuthProvider:
             )
         except (KeyError, TypeError) as error:
             raise OAuthProviderUnavailable("GitHub вернул профиль без id или login") from error
+        return OAuthLogin(profile=profile, grant=grant)
 
-    def _exchange(self, code: str) -> str:
+    def refresh(self, refresh_token: Secret) -> ProviderGrant:
+        grant = self._grant(
+            "обновление токена",
+            {"grant_type": "refresh_token", "refresh_token": refresh_token.reveal()},
+        )
+        if grant == _BAD_REFRESH_TOKEN:
+            raise ProviderTokenRejected("GitHub отверг refresh token")
+        if isinstance(grant, str):
+            raise OAuthProviderUnavailable(f"GitHub не обновил токен пользователя: {grant}")
+        return grant
+
+    def _grant(self, step: str, fields: dict[str, str]) -> ProviderGrant | str:
+        """Токен из ответа `POST /login/oauth/access_token` или код `error` ответа."""
         body = self._json(
-            "обмен code",
+            step,
             lambda: self._client.post(
                 _TOKEN_URL,
                 headers={"Accept": "application/json"},
-                data={
-                    "client_id": self._client_id,
-                    "client_secret": self._client_secret,
-                    "code": code,
-                    "redirect_uri": self._callback_url,
-                },
+                data={"client_id": self._client_id, "client_secret": self._client_secret, **fields},
             ),
         )
-        token = body.get("access_token") if isinstance(body, dict) else None
+        if not isinstance(body, dict):
+            raise OAuthProviderUnavailable(f"GitHub ответил не объектом ({step})")
+        token = body.get("access_token")
         if not isinstance(token, str) or not token:
             # `error` — код вроде bad_verification_code, секретов в нём нет.
-            reason = body.get("error") if isinstance(body, dict) else None
-            raise OAuthProviderUnavailable(f"GitHub не выдал токен пользователя: {reason}")
-        return token
+            # Строкой в сообщение — только код из известного алфавита.
+            reason = body.get("error")
+            return reason if isinstance(reason, str) and reason.isidentifier() else "без кода ошибки"
+        refresh = body.get("refresh_token")
+        expires_in = _seconds(body, "expires_in", step)
+        refresh_expires_in = _seconds(body, "refresh_token_expires_in", step)
+        if refresh is not None and (not isinstance(refresh, str) or not refresh):
+            raise OAuthProviderUnavailable(f"GitHub вернул refresh_token не строкой ({step})")
+        return ProviderGrant(
+            access_token=Secret(token),
+            expires_in=expires_in,
+            refresh_token=Secret(refresh) if refresh else None,
+            refresh_token_expires_in=refresh_expires_in if refresh else None,
+        )
 
     @staticmethod
     def _json(step: str, send: Callable[[], httpx.Response]) -> Any:
@@ -107,3 +151,14 @@ class GitHubOAuthProvider:
             return response.json()
         except ValueError:
             raise OAuthProviderUnavailable(f"GitHub ответил не JSON ({step})") from None
+
+
+def _seconds(body: dict[str, Any], name: str, step: str) -> int | None:
+    """Срок в секундах из ответа обмена: нет поля — без истечения."""
+    value = body.get(name)
+    if value is None:
+        return None
+    # bool — подкласс int, а `true` сроком не бывает.
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise OAuthProviderUnavailable(f"GitHub вернул {name} не положительным числом ({step})")
+    return value

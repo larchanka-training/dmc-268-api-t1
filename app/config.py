@@ -4,10 +4,15 @@
 (см. BACKEND_ARCHITECTURE.md, раздел «Конфигурация»).
 """
 
+import base64
+import binascii
 from typing import Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Длина ключа AES-256-GCM шифрования токенов пользователя.
+USER_TOKEN_KEY_BYTES = 32
 
 
 class Settings(BaseSettings):
@@ -18,7 +23,9 @@ class Settings(BaseSettings):
     раньше.
     """
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # hide_input_in_errors: ошибка проверки настройки не печатает её значение —
+    # битый ключ или секрет не попадает в лог упавшего старта.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     database_url: str = Field(
         description="PostgreSQL DSN, e.g. postgresql+psycopg://user:pass@host/db",
@@ -71,6 +78,29 @@ class Settings(BaseSettings):
         default="",
         description="Публичный origin сервиса, например https://review.example; из PUBLIC_ORIGIN",
     )
+
+    # Ключ шифрования токенов пользователя GitHub в базе (AES-256-GCM):
+    # 32 байта в base64, `openssl rand -base64 32`. Пустой — вход отказывает
+    # (токен открытым не пишется никогда), битый — старт падает здесь же.
+    user_token_encryption_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Ключ шифрования токенов пользователя, base64 32 байт; из USER_TOKEN_ENCRYPTION_KEY",
+    )
+
+    @field_validator("user_token_encryption_key")
+    @classmethod
+    def _check_token_key(cls, value: SecretStr) -> SecretStr:
+        raw = value.get_secret_value()
+        if raw.strip():
+            # Только проверка формата; сообщение — без значения ключа.
+            _decode_token_key(raw)
+        return value
+
+    @property
+    def user_token_key(self) -> bytes | None:
+        """Ключ шифрования токенов пользователя; `None` — не задан."""
+        raw = self.user_token_encryption_key.get_secret_value()
+        return _decode_token_key(raw) if raw.strip() else None
 
     @field_validator("public_origin")
     @classmethod
@@ -216,6 +246,20 @@ class Settings(BaseSettings):
         """Ключи Eurorouter по одному, без пустых и пробелов вокруг."""
         raw = self.eurorouter_api_keys.get_secret_value()
         return tuple(SecretStr(key.strip()) for key in raw.split(",") if key.strip())
+
+
+def _decode_token_key(value: str) -> bytes:
+    """Ключ из base64 ровно 32 байт; иначе `ValueError` без значения ключа."""
+    try:
+        key = base64.b64decode(value.strip(), validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("USER_TOKEN_ENCRYPTION_KEY — не base64 (openssl rand -base64 32)") from None
+    if len(key) != USER_TOKEN_KEY_BYTES:
+        raise ValueError(
+            f"USER_TOKEN_ENCRYPTION_KEY — {USER_TOKEN_KEY_BYTES} байта в base64, а не {len(key)}"
+            " (openssl rand -base64 32)"
+        )
+    return key
 
 
 def load_settings() -> Settings:

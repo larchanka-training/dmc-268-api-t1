@@ -173,7 +173,7 @@ class RepositoryNotInInstallationProblem(Problem):
     """`404 REPOSITORY_NOT_IN_INSTALLATION`: репозитория нет среди репозиториев установок GitHub App."""
 
     example = {
-        "detail": "Репозитория нет среди репозиториев установок GitHub App.",
+        "detail": "Репозитория нет среди репозиториев установок GitHub App, доступных пользователю.",
         "instance": "/api/v1/repositories",
     }
 
@@ -205,7 +205,7 @@ class RepositoryManageRequiredProblem(Problem):
     """`403 REPOSITORY_MANAGE_REQUIRED`: у пользователя нет прав admin или maintain на репозиторий у провайдера."""
 
     example = {
-        "detail": "Подключать репозиторий может только пользователь с правами admin или maintain на него.",
+        "detail": "Подключать репозиторий может только пользователь с правом admin или maintain на него.",
         "instance": "/api/v1/repositories",
     }
 
