@@ -6,20 +6,32 @@
 уровне AMQP, это не бизнес-правило). `from_wire_message` использует воркер
 (`app/worker/factory.py`), чтобы разобрать сообщение, полученное из очереди,
 обратно в `ReviewJob`.
+
+Контекст трассировки (W3C `traceparent`) идёт в заголовках AMQP, а не в теле:
+тело — только доменные данные. Обе стороны — здесь: `_publish` кладёт контекст
+спана публикации, `consuming_span` воркера достаёт его и продолжает трейс.
+Заголовкам нашей очереди доверяем: писать в неё может только API. Автоинструментирование
+pika не берём: для генератора `channel.consume()` оно закрывает спан приёма сразу и
+держит его контекст текущим до следующего сообщения, то есть и на простое цикла.
 """
 
 import contextlib
 import json
 import threading
+from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
 import pika
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pika import spec
 from pika.exceptions import AMQPConnectionError, ChannelWrongStateError
 from pika.exchange_type import ExchangeType
 
 from app.domain.entities import ReviewJob
+from app.infrastructure.telemetry import REVIEW_RUN_ID, record_current_exception
 
 QUEUE_NAME = "review_jobs"
 DLX_NAME = "review_jobs.dlx"
@@ -30,6 +42,21 @@ MAX_PRIORITY = 9
 # реализованы") — фиксированный дефолт до тех пор, см. design.md
 # change'а add-rabbitmq-job-queue.
 DEFAULT_PRIORITY = 5
+
+# Явный пропагатор, а не глобальный: глобальный пуст, чтобы не доверять
+# `traceparent` HTTP-клиентов (`app/infrastructure/telemetry.py`).
+_PROPAGATOR = TraceContextTextMapPropagator()
+_tracer = trace.get_tracer(__name__)
+
+# Атрибуты спанов очереди — semconv messaging для RabbitMQ (статус Development).
+# Публикуем в default exchange с routing key = имя очереди: по semconv пустой
+# exchange опускается, а у потребителя совпавшие routing key и очередь пишутся
+# один раз, поэтому `messaging.destination.name` с обеих сторон — имя очереди.
+_MESSAGING_ATTRIBUTES = {
+    "messaging.system": "rabbitmq",
+    "messaging.destination.name": QUEUE_NAME,
+    "messaging.rabbitmq.destination.routing_key": QUEUE_NAME,
+}
 
 
 def to_wire_message(job: ReviewJob) -> dict[str, Any]:
@@ -88,6 +115,49 @@ def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel)
     )
 
 
+@contextlib.contextmanager
+def consuming_span(
+    properties: spec.BasicProperties | None, delivery_tag: int
+) -> Iterator[None]:
+    """Спан обработки сообщения воркером — продолжение трейса, начатого при публикации.
+
+    Контекст сообщения — родитель спана, а не link: сообщение обрабатывается одно, и
+    спан обработки корневой в воркере, semconv это допускает для одиночного сообщения.
+    Если трейсы «запрос → прогон» станут неудобно длинными — перейти на link.
+
+    Нет заголовка `traceparent` (сообщение старше трассировки, его переложили руками)
+    или он битый — спан начинает новый трейс, обработка идёт как обычно. Исключение
+    обработки выходит наружу через контекст-менеджер: спан записывает его событием
+    `exception` и закрывается со статусом ошибки. `KeyboardInterrupt` и `SystemExit` —
+    тоже: их отмечаем сами, `start_as_current_span` видит только `Exception`.
+    """
+    headers = (properties.headers if properties is not None else None) or {}
+    # pika отдаёт строковый заголовок `str`, а не декодируемый в UTF-8 — `bytes`.
+    carrier = {
+        key: value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+        for key, value in headers.items()
+        if isinstance(value, str | bytes)
+    }
+    with _tracer.start_as_current_span(
+        f"process {QUEUE_NAME}",
+        context=_PROPAGATOR.extract(carrier),
+        kind=SpanKind.CONSUMER,
+        attributes={
+            **_MESSAGING_ATTRIBUTES,
+            "messaging.operation.name": "process",
+            "messaging.operation.type": "process",
+            "messaging.rabbitmq.message.delivery_tag": delivery_tag,
+        },
+    ):
+        try:
+            yield
+        except Exception:
+            raise
+        except BaseException as exc:
+            record_current_exception(exc)
+            raise
+
+
 class RabbitMQJobQueue:
     """Реализация порта `JobQueue`.
 
@@ -140,7 +210,7 @@ class RabbitMQJobQueue:
         self._connection = None
         self._channel = None
 
-    def _publish(self, job: ReviewJob) -> None:
+    def _publish(self, job: ReviewJob, headers: dict[str, str]) -> None:
         self._channel_ready().basic_publish(
             exchange="",
             routing_key=QUEUE_NAME,
@@ -149,6 +219,7 @@ class RabbitMQJobQueue:
                 content_type="application/json",
                 delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
                 priority=DEFAULT_PRIORITY,
+                headers=headers,
             ),
             mandatory=True,
         )
@@ -160,9 +231,23 @@ class RabbitMQJobQueue:
         # повторяет, поэтому обрыв соединения переживаем здесь: переподключаемся
         # и публикуем ещё раз, один раз. `UnroutableError`/`NackError` — ответ
         # брокера, а не обрыв, и сюда не попадают.
-        with self._lock:
+        # Спан — одна публикация с точки зрения вызывающего, вместе с повтором:
+        # обрыв, который пережил повтор, не ошибка, и ERROR спан получает, только
+        # если упала и вторая попытка.
+        with self._lock, _tracer.start_as_current_span(
+            f"publish {QUEUE_NAME}",
+            kind=SpanKind.PRODUCER,
+            attributes={
+                **_MESSAGING_ATTRIBUTES,
+                "messaging.operation.name": "publish",
+                "messaging.operation.type": "send",
+                REVIEW_RUN_ID: str(job.review_run_id),
+            },
+        ):
+            headers: dict[str, str] = {}
+            _PROPAGATOR.inject(headers)
             try:
-                self._publish(job)
+                self._publish(job, headers)
             except (AMQPConnectionError, ChannelWrongStateError):
                 self._drop_connection()
-                self._publish(job)
+                self._publish(job, headers)

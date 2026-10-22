@@ -116,8 +116,9 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 плюс расширения `code` и `trace_id`; у `VALIDATION_ERROR` — ещё `errors: [{where, reason}]`.
 `instance` — путь запроса как пришёл, закодированный (`/api/v1/a%20b`); запрет на эхо ввода — про
 `detail` и `errors`. `trace_id` — 32 hex (trace-id W3C), его же сервер отдаёт заголовком `X-Trace-ID`
-на любом ответе и пишет в строку лога о `500`; входящим `X-Trace-ID`/`X-Request-ID`/`traceparent`
-не доверяем.
+на любом ответе и пишет в строку лога о `500`; входящим от HTTP-клиента
+`X-Trace-ID`/`X-Request-ID`/`traceparent` не доверяем, `traceparent` из нашей очереди — принимаем
+(«Наблюдаемость»).
 
 - **Отказ в ручке** — `raise ApiError(статус, ErrorCode.<КОД>, detail)` из `app/api/errors.py`.
   `HTTPException` и свой `JSONResponse` с ошибкой не пишем: `HTTPException` фреймворка и
@@ -132,6 +133,42 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
   каждый ответ 4xx/5xx и `default` — `application/problem+json` с моделью ошибки, `422` — не
   `HTTPValidationError`. `tests/test_problem_details.py` прогоняет настоящие ответы сервера через
   `AnyProblem`.
+
+## Наблюдаемость
+
+Требования — спека `observability`, устройство — `app/infrastructure/telemetry.py`.
+
+### Трассировка
+
+- **Одна сущность — одно имя везде**: `review_run_id` (полный, не `run_id`) — одинаково в
+  атрибутах спанов, полях логов и API.
+- **Имена спанов**: этапы прогона — `review.<этап>`, проход очистки — `review.sweep`; очередь —
+  по semconv messaging: `publish review_jobs` и `process review_jobs` с `messaging.system`,
+  `messaging.operation.name`/`.type`, `messaging.destination.name`,
+  `messaging.rabbitmq.destination.routing_key`, у обработки — `messaging.rabbitmq.message.delivery_tag`.
+- **Атрибуты**: стандартные — только стабильные имена semconv (код ставит
+  `OTEL_SEMCONV_STABILITY_OPT_IN=database,http`), синонимы не изобретаем; своё, чего в semconv
+  нет, — в пространстве `review.*` (`review.stage`).
+- **В атрибуты не кладём** промпты и ответы модели, код из диффа, токены доступа; query путей
+  входа скрывает `QueryRedaction`. Текст исключения уходит в спан (`record_exception`,
+  статус), поэтому движок SQLAlchemy создаётся с `hide_parameters=True`: параметры запроса не
+  попадают в текст ошибки.
+- **OTel — только в `app/infrastructure`** и в проводке: `app/api/factory.py`,
+  `app/api/trace_id.py`, `app/worker`. `app/domain` и `app/application` пишут спаны через порт
+  `StageTracer`; запрет проверяет `lint-imports`.
+- **Доверие контексту**: входящему HTTP `traceparent` не доверяем (глобальный пропагатор пуст),
+  `traceparent` из нашей очереди принимаем — писать в неё может только API. Валидный HTTP
+  `traceparent` — только span link серверного спана (`link_client_trace`, `link.source = "client"`),
+  не родитель: trace id и сэмплирование остаются нашими.
+- **Граница**: телеметрия — для команды. Данные продукта (шаги, токены, длительность) — из базы,
+  ответы API из телеметрии не строятся.
+
+### Логи
+
+Структурированные логи с `trace_id` и `review_run_id` — задача #89; правила допишет она.
+Уже сейчас: OTel Logs SDK в Python — статус Development, логи через него не отправляем; заменим,
+когда станет Stable. `LoggingHandler` тогда — только из `opentelemetry-instrumentation-logging`:
+версия в `opentelemetry.sdk._logs` устарела с 1.40.0 и будет удалена.
 
 ## Тесты
 

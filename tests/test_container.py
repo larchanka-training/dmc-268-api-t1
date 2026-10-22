@@ -39,6 +39,7 @@ PORT_TO_ADAPTER: dict[str, Adapter] = {
         "db/repositories.py", "SqlAlchemyContextPayloadRepo"
     ),
     "FindingRepo": Adapter("db/repositories.py", "SqlAlchemyFindingRepo"),
+    "InstallationCatalog": Adapter("vcs/github_installations.py", "GitHubInstallationCatalog"),
     "JobQueue": Adapter("queue/rabbitmq.py", "RabbitMQJobQueue"),
     "LlmGateway": Adapter("llm/stub.py", "StubLlmGateway"),
     "MergeRequestRepo": Adapter("db/repositories.py", "SqlAlchemyMergeRequestRepo"),
@@ -48,6 +49,7 @@ PORT_TO_ADAPTER: dict[str, Adapter] = {
     ),
     "RepositoryRepo": Adapter("db/repositories.py", "SqlAlchemyRepositoryRepo"),
     "ReviewRunRepo": Adapter("db/repositories.py", "SqlAlchemyReviewRunRepo"),
+    "ReviewRunStepRepo": Adapter("db/repositories.py", "SqlAlchemyReviewRunStepRepo"),
     "SessionRepo": Adapter("db/repositories.py", "SqlAlchemySessionRepo"),
     "UnitOfWork": Adapter("db/unit_of_work.py", "SqlAlchemyUnitOfWork"),
     "UserRepo": Adapter("db/repositories.py", "SqlAlchemyUserRepo"),
@@ -133,6 +135,16 @@ def test_the_container_caches_its_lazy_adapters() -> None:
     Удалите `object.__setattr__` в контейнере — тест красный."""
     container = build_container(SETTINGS)
     assert container.vcs_gateway() is container.vcs_gateway()
+    assert container.installation_catalog() is container.installation_catalog()
+
+
+def test_the_installation_catalog_shares_the_gateway_token_cache() -> None:
+    """Каталог и шлюз — один `GitHubAppAuth`: installation token, взятый
+    списком установок, не запрашивается заново публикацией ревью."""
+    container = build_container(SETTINGS)
+    catalog = container.installation_catalog()
+    gateway = container.vcs_gateway()
+    assert catalog._auth is gateway._auth  # type: ignore[attr-defined]
 
 
 def test_the_container_hands_out_oauth_providers_by_path_name() -> None:

@@ -118,7 +118,10 @@ jobs:
     runs-on: ubuntu-latest
     # С запасом на холодный tofu init и минуту ожидания /health. Зависший
     # apply держит блокировку состояния, поэтому лучше упасть раньше шести часов.
-    timeout-minutes: 30
+    # Но не раньше, чем воркер доработает сообщение: при пересоздании apply ждёт
+    # его до destroy_grace_seconds — до 41 мин (local.worker_stop_seconds в
+    # infra/main.tf); job, убитый посреди apply, оставил бы блокировку висеть.
+    timeout-minutes: 60
     # packages: read обязателен — образ тянется из приватного пакета, и его
     # забирает docker-провайдер тем же GITHUB_TOKEN. Без него реестр отвечает
     # «denied», а не чем-нибудь понятным.

@@ -18,6 +18,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunStep,
     Session,
     User,
 )
@@ -31,7 +32,13 @@ class RepositoryRepo(Protocol):
 
     def list_all(self, limit: int, offset: int) -> list[Repository]: ...
 
-    def add(self, repository: Repository) -> None: ...
+    def add(self, repository: Repository) -> bool:
+        """Вставить репозиторий; `False` — пара провайдер + id уже занята.
+
+        Два параллельных подключения одного репозитория не должны давать
+        ошибку базы: проигравший получает `False` и отвечает конфликтом.
+        """
+        ...
 
     def update(self, repository: Repository) -> None: ...
 
@@ -60,6 +67,16 @@ class ReviewRunRepo(Protocol):
     def add(self, run: ReviewRun) -> None: ...
 
     def update(self, run: ReviewRun) -> None: ...
+
+
+class ReviewRunStepRepo(Protocol):
+    def list_for_run(self, review_run_id: UUID) -> list[ReviewRunStep]:
+        """Шаги прогона по порядку начала; при равном начале - по id."""
+        ...
+
+    def add(self, step: ReviewRunStep) -> None: ...
+
+    def update(self, step: ReviewRunStep) -> None: ...
 
 
 class ContextPayloadRepo(Protocol):

@@ -47,6 +47,28 @@ class ReviewRunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ReviewRunStage(StrEnum):
+    """Этап работы воркера над прогоном — то, что показывает «ход прогона».
+
+    Мельче статуса прогона: в `building_context` воркер сначала получает дифф,
+    потом собирает контекст, в `analysing` — ревью, потом верификация.
+    """
+
+    FETCHING_DIFF = "fetching_diff"
+    BUILDING_CONTEXT = "building_context"
+    ANALYSING = "analysing"
+    VERIFYING = "verifying"
+    PUBLISHING = "publishing"
+
+
+class ReviewRunStepStatus(StrEnum):
+    """Состояние одного шага прогона."""
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class FindingCategory(StrEnum):
     """Оси ревью, к которым может относиться замечание."""
 
@@ -164,3 +186,19 @@ TERMINAL_STATUSES: frozenset[ReviewRunStatus] = frozenset(
         ReviewRunStatus.CANCELLED,
     }
 )
+
+
+class RepositoryRole(StrEnum):
+    """Роль пользователя на репозитории у провайдера.
+
+    Имена — роли GitHub. `CUSTOM` — пользовательская роль организации: доступ
+    к репозиторию она даёт, а что разрешает, по имени не сказать. Отсутствие
+    доступа — не роль, а `None` там, где роль ожидается.
+    """
+
+    ADMIN = "admin"
+    MAINTAIN = "maintain"
+    WRITE = "write"
+    TRIAGE = "triage"
+    READ = "read"
+    CUSTOM = "custom"

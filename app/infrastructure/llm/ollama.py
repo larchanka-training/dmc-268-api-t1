@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse
 from app.domain.entities import PromptMessage
-from app.domain.llm_errors import LlmError
+from app.domain.llm_errors import LlmError, LlmTimeoutError
 from app.infrastructure.llm.structured import RawReply, complete_structured
 
 
@@ -57,7 +57,7 @@ class OllamaGateway:
         try:
             response = self._client.post("/api/chat", json=body)
         except httpx.TimeoutException as error:
-            raise LlmError(f"Ollama: таймаут ({type(error).__name__})") from None
+            raise LlmTimeoutError(f"Ollama: таймаут ({type(error).__name__})") from None
         except httpx.RequestError as error:
             raise LlmError(f"Ollama недоступна ({type(error).__name__})") from None
         if response.status_code != httpx.codes.OK:

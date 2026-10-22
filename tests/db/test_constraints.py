@@ -17,7 +17,9 @@ from app.domain.enums import (
     FindingSeverity,
     MergeRequestState,
     Provider,
+    ReviewRunStage,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     TriggerSource,
 )
 from app.domain.ids import new_id
@@ -28,6 +30,7 @@ from app.infrastructure.db.models import (
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
+    ReviewRunStepRow,
 )
 
 from ..conftest import requires_db
@@ -491,3 +494,86 @@ def test_a_negative_verifier_drop_count_is_refused(session) -> None:
     run.verifier_dropped_findings = -1
     with pytest.raises(IntegrityError):
         session.flush()
+
+
+def add_step(session, run, *, status=ReviewRunStepStatus.RUNNING, duration=None, error_code=None, tokens=None):
+    row = ReviewRunStepRow(
+        id=new_id(),
+        review_run_id=run.id,
+        stage=ReviewRunStage.ANALYSING,
+        status=status,
+        started_at=NOW,
+        duration_seconds=duration,
+        tokens_used=tokens,
+        error_code=error_code,
+    )
+    session.add(row)
+    return row
+
+
+def test_deleting_a_run_with_steps_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    add_step(session, run)
+    session.flush()
+    delete_is_refused(session, run)
+
+
+def test_a_running_step_with_a_duration_is_refused(session) -> None:
+    add_step(session, make_run(session, make_mr(session, make_repo(session))), duration=1.0)
+    with pytest.raises(IntegrityError, match="ck_review_run_steps_duration"):
+        session.flush()
+
+
+def test_a_finished_step_without_a_duration_is_refused(session) -> None:
+    add_step(
+        session, make_run(session, make_mr(session, make_repo(session))), status=ReviewRunStepStatus.COMPLETED
+    )
+    with pytest.raises(IntegrityError, match="ck_review_run_steps_duration"):
+        session.flush()
+
+
+def test_a_failed_step_without_an_error_code_is_refused(session) -> None:
+    add_step(
+        session,
+        make_run(session, make_mr(session, make_repo(session))),
+        status=ReviewRunStepStatus.FAILED,
+        duration=1.0,
+    )
+    with pytest.raises(IntegrityError, match="ck_review_run_steps_error_code"):
+        session.flush()
+
+
+def test_a_completed_step_with_an_error_code_is_refused(session) -> None:
+    add_step(
+        session,
+        make_run(session, make_mr(session, make_repo(session))),
+        status=ReviewRunStepStatus.COMPLETED,
+        duration=1.0,
+        error_code="LLM_TIMEOUT",
+    )
+    with pytest.raises(IntegrityError, match="ck_review_run_steps_error_code"):
+        session.flush()
+
+
+def test_negative_step_tokens_are_refused(session) -> None:
+    add_step(
+        session,
+        make_run(session, make_mr(session, make_repo(session))),
+        status=ReviewRunStepStatus.COMPLETED,
+        duration=1.0,
+        tokens=-1,
+    )
+    with pytest.raises(IntegrityError, match="ck_review_run_steps_tokens_non_negative"):
+        session.flush()
+
+
+def test_a_step_stage_outside_the_enum_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    with pytest.raises(DataError):
+        session.execute(
+            text(
+                "INSERT INTO review_run_steps (id, review_run_id, stage, status, started_at)"
+                " VALUES (:id, :run, 'thinking', 'running', now())"
+            ),
+            {"id": new_id(), "run": run.id},
+        )

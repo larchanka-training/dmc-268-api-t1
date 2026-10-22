@@ -20,6 +20,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunStep,
     User,
 )
 from app.domain.entities import Session as UserSession
@@ -33,6 +34,7 @@ from app.infrastructure.db.models import (
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
+    ReviewRunStepRow,
     SessionRow,
     UserRow,
 )
@@ -68,17 +70,28 @@ class SqlAlchemyRepositoryRepo:
         ).all()
         return [m.repository_to_domain(row) for row in rows]
 
-    def add(self, repository: Repository) -> None:
-        self._session.add(
-            RepositoryRow(
-                id=repository.id,
-                provider=repository.provider,
-                provider_id=repository.provider_id,
-                full_name=repository.full_name,
-                default_branch=repository.default_branch,
-                auto_review_enabled=repository.auto_review_enabled,
-            )
-        )
+    def add(self, repository: Repository) -> bool:
+        # `ON CONFLICT DO NOTHING`, как у пользователей: параллельное
+        # подключение того же репозитория ждёт коммита первого и получает
+        # 0 строк, а не `IntegrityError`. Время записи — то, что пришло в
+        # сущности: ответ подключения совпадает с записью.
+        with self._session.no_autoflush:
+            inserted = self._session.execute(
+                pg_insert(RepositoryRow)
+                .values(
+                    id=repository.id,
+                    provider=repository.provider,
+                    provider_id=repository.provider_id,
+                    full_name=repository.full_name,
+                    default_branch=repository.default_branch,
+                    auto_review_enabled=repository.auto_review_enabled,
+                    created_at=repository.created_at,
+                    updated_at=repository.updated_at,
+                )
+                .on_conflict_do_nothing(constraint="uq_repositories_provider_id")
+                .returning(RepositoryRow.id)
+            ).first()
+        return inserted is not None
 
     def update(self, repository: Repository) -> None:
         row = self._session.get(RepositoryRow, repository.id)
@@ -240,6 +253,44 @@ class SqlAlchemyReviewRunRepo:
         row.rejected_findings = run.rejected_findings
         row.verification = run.verification
         row.verifier_dropped_findings = run.verifier_dropped_findings
+
+
+class SqlAlchemyReviewRunStepRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def list_for_run(self, review_run_id: UUID) -> list[ReviewRunStep]:
+        rows = self._session.scalars(
+            select(ReviewRunStepRow)
+            .where(ReviewRunStepRow.review_run_id == review_run_id)
+            # Порядок начала; id — UUIDv7, разводит шаги с одним временем.
+            .order_by(ReviewRunStepRow.started_at, ReviewRunStepRow.id)
+        ).all()
+        return [m.review_run_step_to_domain(row) for row in rows]
+
+    def add(self, step: ReviewRunStep) -> None:
+        self._session.add(
+            ReviewRunStepRow(
+                id=step.id,
+                review_run_id=step.review_run_id,
+                stage=step.stage,
+                status=step.status,
+                started_at=step.started_at,
+                duration_seconds=step.duration_seconds,
+                tokens_used=step.tokens_used,
+                error_code=step.error_code,
+            )
+        )
+
+    def update(self, step: ReviewRunStep) -> None:
+        row = self._session.get(ReviewRunStepRow, step.id)
+        if row is None:
+            raise LookupError(f"review run step {step.id} is not stored")
+        # Прогон, этап и начало у шага не меняются: меняется только исход.
+        row.status = step.status
+        row.duration_seconds = step.duration_seconds
+        row.tokens_used = step.tokens_used
+        row.error_code = step.error_code
 
 
 class SqlAlchemyContextPayloadRepo:

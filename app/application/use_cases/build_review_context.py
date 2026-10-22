@@ -1,9 +1,11 @@
 """Сценарий сборки контекста прогона: всё I/O в одном месте (design D7).
 
-`fetch_diff` → `parse_diff` → контекст PR (заголовок, описание, сообщения
-коммитов) → правила целевой ветки → содержимое изменённых файлов на
-`head_sha` и их контуры → чистая `assemble_context`. Сбой получения диффа
-пробрасывается: без диффа ревьюить нечего, прогон уходит в `failed` и DLQ.
+`fetch_review_diff` → `parse_diff` → контекст PR (заголовок, описание,
+сообщения коммитов) → правила целевой ветки → содержимое изменённых файлов
+на `head_sha` и их контуры → чистая `assemble_context`. Получение диффа —
+отдельная функция: у прогона это отдельный шаг (`fetching_diff`). Сбой
+получения диффа пробрасывается: без диффа ревьюить нечего, прогон уходит в
+`failed` и DLQ.
 Контекст PR, правила и AST — best-effort: сбой на них деградирует пакет
 (причина — в `omitted` и `rules.status`), но не прогон.
 """
@@ -33,8 +35,16 @@ from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 logger = logging.getLogger(__name__)
 
 
+def fetch_review_diff(job: ReviewJob, vcs: VcsGateway) -> str:
+    """Unified diff запроса на изменение между `base_sha` и `head_sha` задачи."""
+    return vcs.fetch_diff(
+        job.repository_full_name, job.base_sha, job.head_sha, job.installation_id
+    )
+
+
 def build_review_context(
     job: ReviewJob,
+    diff: str,
     *,
     vcs: VcsGateway,
     extractor: DefinitionExtractor,
@@ -44,9 +54,6 @@ def build_review_context(
     now: datetime,
     new_id: Callable[[], UUID],
 ) -> AssembledContext:
-    diff = vcs.fetch_diff(
-        job.repository_full_name, job.base_sha, job.head_sha, job.installation_id
-    )
     files = parse_diff(diff)
     pr_context = _fetch_pr_context(job, vcs)
     rules = load_repo_rules(
