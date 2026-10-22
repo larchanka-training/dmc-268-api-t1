@@ -23,7 +23,7 @@ from app.application.ports import UnitOfWork
 from app.domain.entities import ReviewRunStep
 from app.domain.enums import ReviewRunStage
 from app.domain.llm_errors import LlmError, PromptTooLargeError
-from app.domain.run_steps import error_code, finish_step, start_step
+from app.domain.run_steps import abandon_steps, error_code, finish_step, start_step
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,24 @@ def spent_tokens(error: BaseException) -> int | None:
     if isinstance(error, PromptTooLargeError) or not isinstance(error, LlmError):
         return None
     return error.tokens_used
+
+
+def close_abandoned_steps(uow: UnitOfWork, review_run_id: UUID, *, now: datetime) -> None:
+    """Закрыть шаги упавшего прогона, оставшиеся `running`, своим коммитом.
+
+    Зовётся после перевода прогона в `failed`: шаг брошенной попытки (воркер
+    умер, сообщение доставлено снова или выметено) или шаг, чей исход не
+    записался, иначе остался бы `running` навсегда. Отдельный коммит, а не
+    общий с прогоном: журнал вторичен, и сбой его записи не должен мешать
+    перевести прогон в `failed` — он логируется и наружу не выходит.
+    """
+    try:
+        with uow:
+            for step in abandon_steps(uow.review_run_steps.list_for_run(review_run_id), now=now):
+                uow.review_run_steps.update(step)
+            uow.commit()
+    except Exception:
+        logger.exception("не удалось закрыть брошенные шаги прогона %s", review_run_id)
 
 
 class StepRecorder:

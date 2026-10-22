@@ -30,7 +30,11 @@ from app.application.ports.definition_extractor import DefinitionExtractor
 from app.application.ports.llm_gateway import LlmGateway, RetryListener
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.publish_review import publish_review
-from app.application.review_run_steps import StepRecorder, spent_tokens
+from app.application.review_run_steps import (
+    StepRecorder,
+    close_abandoned_steps,
+    spent_tokens,
+)
 from app.application.use_cases.build_review_context import (
     build_review_context,
     fetch_review_diff,
@@ -69,6 +73,7 @@ def _mark_failed(uow: UnitOfWork, run_id: UUID, exc: Exception, now: datetime) -
     записи (например, база недоступна) логируется и не подменяет исходное
     исключение - зависший прогон выметет `sweep_stale_runs`. Токены, которые
     успел израсходовать сбойный вызов модели, добавляются к затратам прогона.
+    Шаги, оставшиеся `running`, закрываются следом (`close_abandoned_steps`).
     """
     spent = exc.tokens_used if isinstance(exc, LlmError) else 0
     try:
@@ -86,6 +91,8 @@ def _mark_failed(uow: UnitOfWork, run_id: UUID, exc: Exception, now: datetime) -
             uow.commit()
     except Exception:
         logger.exception("не удалось перевести прогон %s в failed", run_id)
+        return
+    close_abandoned_steps(uow, run_id, now=now)
 
 
 def run_review(
