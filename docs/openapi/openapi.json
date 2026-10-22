@@ -800,6 +800,112 @@
         }
       }
     },
+    "/api/v1/repositories/{repository_id}": {
+      "get": {
+        "tags": [
+          "repositories"
+        ],
+        "summary": "Зарегистрированный репозиторий",
+        "description": "Требует сессию. Один зарегистрированный репозиторий по id — та же форма, что строка GET /repositories. 404 REPOSITORY_NOT_FOUND, если репозитория нет.",
+        "operationId": "getRepository",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repository_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор репозитория в сервисе.",
+              "title": "Repository Id"
+            },
+            "description": "Идентификатор репозитория в сервисе."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Репозиторий.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Репозитория с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repositories/{repository_id}/settings": {
       "get": {
         "tags": [
@@ -4054,7 +4160,7 @@
           },
           "min_severity": {
             "$ref": "#/components/schemas/FindingSeverity",
-            "description": "Минимальная важность публикуемого замечания: менее важные не публикуются. Без сохранённых настроек — critical.",
+            "description": "Порог важности: нерешённое замечание с severity не ниже порога блокирует merge gate, и бот запрашивает изменения. Публикуются все замечания, порог их не отсекает. Без сохранённых настроек — critical.",
             "examples": [
               "critical"
             ]
@@ -4098,7 +4204,7 @@
           },
           "min_severity": {
             "$ref": "#/components/schemas/FindingSeverity",
-            "description": "Минимальная важность публикуемого замечания: менее важные не публикуются. Без сохранённых настроек — critical.",
+            "description": "Порог важности: нерешённое замечание с severity не ниже порога блокирует merge gate, и бот запрашивает изменения. Публикуются все замечания, порог их не отсекает. Без сохранённых настроек — critical.",
             "examples": [
               "critical"
             ]

@@ -271,7 +271,8 @@ _BRANCH_FILTER_DESCRIPTION = (
     "(так и без сохранённых настроек)."
 )
 _MIN_SEVERITY_DESCRIPTION = (
-    "Минимальная важность публикуемого замечания: менее важные не публикуются. Без сохранённых "
+    "Порог важности: нерешённое замечание с severity не ниже порога блокирует merge gate, и бот "
+    "запрашивает изменения. Публикуются все замечания, порог их не отсекает. Без сохранённых "
     "настроек — critical."
 )
 
@@ -354,6 +355,26 @@ class RulesStatusResponse(
     ]
 ):
     """Чем закончилась загрузка `.review/rules.md`; вариант — по `status`."""
+
+
+@router.get(
+    "/{repository_id}",
+    response_model=RepositoryResponse,
+    summary="Зарегистрированный репозиторий",
+    response_description="Репозиторий.",
+    description=(
+        "Требует сессию. Один зарегистрированный репозиторий по id — та же форма, что строка "
+        "GET /repositories. 404 REPOSITORY_NOT_FOUND, если репозитория нет."
+    ),
+    responses={**ERRORS_404_REPOSITORY, **ERRORS_422},
+)
+def get_repository(
+    repository_id: RepositoryIdPath, uow: UnitOfWork = Depends(get_unit_of_work)
+) -> RepositoryResponse:
+    repository = uow.repositories.get(repository_id)
+    if repository is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REPOSITORY_NOT_FOUND, "Репозитория с таким id нет.")
+    return RepositoryResponse.model_validate(repository, from_attributes=True)
 
 
 @router.get(
