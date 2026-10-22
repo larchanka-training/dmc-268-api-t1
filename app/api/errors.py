@@ -27,12 +27,13 @@
 import logging
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.problems import (
@@ -43,7 +44,10 @@ from app.api.problems import (
     OriginForbiddenProblem,
     Problem,
     ProviderNotSupportedProblem,
+    RepositoryAlreadyConnectedProblem,
+    RepositoryManageRequiredProblem,
     RepositoryNotFoundProblem,
+    RepositoryNotInInstallationProblem,
     ReviewAlreadyActiveProblem,
     ReviewNotFoundProblem,
     ScmUnavailableProblem,
@@ -97,6 +101,26 @@ ERRORS_501_WEBHOOK_PROVIDER = _doc(
 )
 ERRORS_502_SCM = _doc(
     HTTPStatus.BAD_GATEWAY, ScmUnavailableProblem, "Провайдер VCS недоступен или ответил ошибкой; прогон не создан."
+)
+ERRORS_502_SCM_REPOSITORIES = _doc(
+    HTTPStatus.BAD_GATEWAY, ScmUnavailableProblem, "GitHub не ответил или ответил ошибкой; репозиторий не подключён."
+)
+ERRORS_404_NOT_IN_INSTALLATION = _doc(
+    HTTPStatus.NOT_FOUND,
+    RepositoryNotInInstallationProblem,
+    "Репозитория нет среди репозиториев установок GitHub App, или провайдер не `github`.",
+)
+ERRORS_409_ALREADY_CONNECTED = _doc(
+    HTTPStatus.CONFLICT, RepositoryAlreadyConnectedProblem, "Репозиторий уже подключён, в том числе параллельным запросом; отвечается только пользователю с правами admin или maintain."
+)
+# Один статус — две причины: `Origin` проверяет middleware, права — ручка. Модель ответа —
+# объединение с discriminator по `code`, в схеме это `oneOf`; ключ `responses` у статуса
+# один, поэтому `{**ERRORS_403_ORIGIN, **…}` не годится — второй словарь затёр бы первый.
+ERRORS_403_ORIGIN_OR_MANAGE = _doc(
+    HTTPStatus.FORBIDDEN,
+    Annotated[OriginForbiddenProblem | RepositoryManageRequiredProblem, Field(discriminator="code")],
+    "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; "
+    "`REPOSITORY_MANAGE_REQUIRED` — у пользователя нет прав admin или maintain на репозиторий у провайдера.",
 )
 ERRORS_501_NOT_IMPLEMENTED = _doc(HTTPStatus.NOT_IMPLEMENTED, NotImplementedProblem, "Ручка ещё не реализована.")
 

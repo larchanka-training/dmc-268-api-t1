@@ -1,5 +1,6 @@
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
+from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.oauth_provider import OAuthProvider
@@ -22,6 +23,7 @@ __all__ = [
     "ContextPayloadRepo",
     "DefinitionExtractor",
     "FindingRepo",
+    "InstallationCatalog",
     "JobQueue",
     "LlmGateway",
     "MergeRequestRepo",

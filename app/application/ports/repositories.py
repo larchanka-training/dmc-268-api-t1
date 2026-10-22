@@ -32,7 +32,13 @@ class RepositoryRepo(Protocol):
 
     def list_all(self, limit: int, offset: int) -> list[Repository]: ...
 
-    def add(self, repository: Repository) -> None: ...
+    def add(self, repository: Repository) -> bool:
+        """Вставить репозиторий; `False` — пара провайдер + id уже занята.
+
+        Два параллельных подключения одного репозитория не должны давать
+        ошибку базы: проигравший получает `False` и отвечает конфликтом.
+        """
+        ...
 
     def update(self, repository: Repository) -> None: ...
 
