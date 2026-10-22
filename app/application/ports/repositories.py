@@ -80,9 +80,10 @@ class ReviewRunRepo(Protocol):
     ) -> list[ReviewRunListEntry]:
         """Изменённые прогоны репозиториев `repository_ids` — строками списка, одним запросом.
 
-        Две части: до `limit` прогонов новее `after` по `(updated_at, id)` и до `limit`
-        прогонов из окна перепроверки — `updated_at` позже `recheck_from`, но не новее
-        `after`. Порядок — по `(updated_at, id)`. Пустой `repository_ids` — пустой ответ.
+        Две части: до `limit` прогонов новее `after` по `(updated_at, id)` и все прогоны из
+        окна перепроверки — `updated_at` позже `recheck_from`, но не новее `after` (окно
+        ограничено временем, а не числом строк). Порядок — по `(updated_at, id)`. Пустой
+        `repository_ids` — пустой ответ.
         """
         ...
 

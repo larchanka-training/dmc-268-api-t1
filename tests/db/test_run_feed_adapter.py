@@ -176,7 +176,8 @@ def test_the_recheck_window_returns_rows_at_or_below_the_cursor(uow, world) -> N
     assert [e.run.id for e in entries] == [late.id, at_cursor.id, fresh.id]
 
 
-def test_each_part_has_its_own_limit_so_a_full_window_does_not_stall_the_cursor(uow, world) -> None:
+def test_the_limit_bounds_only_the_part_above_the_cursor(uow, world) -> None:
+    """Окно перепроверки читается целиком: запоздавшая строка за `limit` уже виденными не теряется."""
     seen, _, seen_mr, _ = world
     window = [_run(seen_mr, _at(-1 + n / 10)) for n in range(3)]
     fresh = [_run(seen_mr, _at(1 + n)) for n in range(3)]
@@ -184,7 +185,7 @@ def test_each_part_has_its_own_limit_so_a_full_window_does_not_stall_the_cursor(
 
     entries = _changed(uow, FeedCursor(_at(0), UUID(int=0)), _at(-5), {seen.id}, limit=2)
 
-    assert [e.run.id for e in entries] == [window[0].id, window[1].id, fresh[0].id, fresh[1].id]
+    assert [e.run.id for e in entries] == [*(w.id for w in window), fresh[0].id, fresh[1].id]
 
 
 def test_repositories_by_provider_ids(uow, world) -> None:

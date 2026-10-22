@@ -198,7 +198,7 @@ class FakeReviewRunRepo:
         repository_ids: Collection[UUID],
         limit: int,
     ) -> list[ReviewRunListEntry]:
-        # Как SQL-адаптер: две части со своим limit, порядок по (updated_at, id).
+        # Как SQL-адаптер: limit только у части новее курсора, окно — целиком.
         entries: list[ReviewRunListEntry] = []
         for run in self._by_id.values():
             merge_request = self._merge_requests.get(run.merge_request_id)
@@ -214,7 +214,7 @@ class FakeReviewRunRepo:
             e
             for e in entries
             if e.run.updated_at > recheck_from and FeedCursor(e.run.updated_at, e.run.id) <= after
-        ][:limit]
+        ]
         return sorted(fresh + late, key=lambda e: (e.run.updated_at, e.run.id))
 
     def add(self, run: ReviewRun) -> None:

@@ -208,11 +208,13 @@ class SqlAlchemyReviewRunRepo:
         repository_ids: Collection[UUID],
         limit: int,
     ) -> list[ReviewRunListEntry]:
-        """Один запрос: id обеих частей — `UNION ALL` двух выборок с `LIMIT`, к ним
-        запрос на изменение, репозиторий и число находок `COUNT … GROUP BY` по пачке.
+        """Один запрос: id обеих частей — `UNION ALL` двух выборок, к ним запрос на
+        изменение, репозиторий и число находок `COUNT … GROUP BY` по пачке.
 
-        У каждой части свой `LIMIT`: окно перепроверки, полное уже виденных строк, не
-        мешает курсору идти вперёд. Обе части идут по индексу `(updated_at, id)`.
+        `LIMIT` — только у части новее курсора. Окно перепроверки читается целиком: оно и
+        так ограничено `RECHECK` по времени, а с `LIMIT` запоздавшая строка за первыми
+        `limit` уже виденными в окне не вернулась бы никогда. Обе части идут по индексу
+        `(updated_at, id)`.
         """
         if not repository_ids:
             return []
@@ -223,9 +225,8 @@ class SqlAlchemyReviewRunRepo:
             .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
             .where(MergeRequestRow.repository_id.in_(repository_ids))
             .order_by(ReviewRunRow.updated_at, ReviewRunRow.id)
-            .limit(limit)
         )
-        fresh = visible.where(key > cursor).subquery("fresh")
+        fresh = visible.where(key > cursor).limit(limit).subquery("fresh")
         late = visible.where(ReviewRunRow.updated_at > recheck_from, key <= cursor).subquery("late")
         # CTE, а не подзапрос: на неё ссылаются и выборка, и подсчёт находок, а CTE с
         # двумя ссылками PostgreSQL вычисляет один раз.
