@@ -10,6 +10,7 @@ GitHub Apps: «Generating a user access token for a GitHub App» (с истеч�
 
 import base64
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 
+from app.application.use_cases.user_token import revoke_quietly
 from app.domain.entities import OAuthProfile, ProviderGrant, Secret
 from app.domain.login import OAuthProviderUnavailable
 from app.domain.provider_token import ProviderTokenRejected
@@ -227,15 +229,30 @@ def test_revoke_deletes_one_token_with_the_app_basic_auth() -> None:
     assert json.loads(request.content) == {"access_token": "ghu_to-revoke"}
 
 
-@pytest.mark.parametrize("status", [404, 422])
-def test_revoking_an_already_invalid_token_is_fine(status: int) -> None:
-    _revoke_with(httpx.Response(status))
+def test_revoking_an_already_invalid_token_is_fine() -> None:
+    _revoke_with(httpx.Response(404))
 
 
-@pytest.mark.parametrize("failure", [httpx.Response(500), httpx.Response(401), httpx.ConnectError("нет сети")])
+@pytest.mark.parametrize(
+    "failure", [httpx.Response(500), httpx.Response(401), httpx.Response(422), httpx.ConnectError("нет сети")]
+)
 def test_a_failed_revoke_is_provider_unavailable_without_secrets(failure: httpx.Response | Exception) -> None:
     with pytest.raises(OAuthProviderUnavailable) as raised:
         _revoke_with(failure)
     assert "ghu_to-revoke" not in str(raised.value)
     assert "client-secret" not in str(raised.value)
     assert raised.value.__cause__ is None
+
+
+def test_a_422_on_revoke_is_logged_as_a_failed_revoke(caplog: pytest.LogCaptureFixture) -> None:
+    """`422` у «Delete an app token» — ошибка запроса: в логе WARNING о несостоявшемся
+    отзыве, а не тихий успех. Наружу сбой не выходит — отзыв best-effort."""
+    github = provider(lambda request: httpx.Response(422, json={"message": "Validation Failed"}))
+
+    with caplog.at_level(logging.WARNING, logger="app.application.use_cases.user_token"):
+        revoke_quietly(github, Secret("ghu_to-revoke"))
+
+    [record] = caplog.records
+    assert record.levelno == logging.WARNING
+    assert "не отозван" in record.getMessage() and "422" in record.getMessage()
+    assert "ghu_to-revoke" not in caplog.text

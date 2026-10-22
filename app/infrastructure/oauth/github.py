@@ -35,8 +35,9 @@ _AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _TOKEN_URL = "https://github.com/login/oauth/access_token"
 _API_URL = "https://api.github.com"
 _USER_URL = f"{_API_URL}/user"
-# Ответы «Delete an app token», после которых токена у GitHub больше нет.
-_REVOKED = frozenset({204, 404, 422})
+# Ответы «Delete an app token», после которых токена у GitHub больше нет. `422`
+# у этой ручки — ошибка запроса (Validation failed), а не «уже отозван»: это сбой.
+_REVOKED = frozenset({204, 404})
 # Код ошибки обмена refresh token, означающий «этот refresh token больше не
 # действует»; остальные коды — неверная настройка приложения, а не сессии.
 _BAD_REFRESH_TOKEN = "bad_refresh_token"
@@ -111,7 +112,8 @@ class GitHubOAuthProvider:
 
         «Delete an app token» (документация GitHub REST, OAuth authorizations):
         отзывает один токен, а не всю авторизацию приложения. `204` — отозван,
-        `404` и `422` — токен уже недействителен, это тоже успех.
+        `404` — токен уже недействителен, это тоже успех. `422` — ошибка запроса:
+        сбой отзыва, как и прочие статусы.
         """
         url = f"{_API_URL}/applications/{self._client_id}/token"
         try:
