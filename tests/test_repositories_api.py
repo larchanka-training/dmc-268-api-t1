@@ -1,19 +1,26 @@
-"""Контракт `GET /api/v1/repositories`. Без БД — фейковый `UnitOfWork`."""
+"""Контракт `/api/v1/repositories`. Без БД — фейковый `UnitOfWork` и фейковый каталог установок."""
 
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
+import httpx
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_unit_of_work
+from app.api.dependencies import (
+    get_installation_catalog,
+    get_unit_of_work,
+    get_unit_of_work_factory,
+)
 from app.api.factory import create_app
 from app.api.pagination import MAX_LIMIT
 from app.config import Settings
-from app.domain.entities import Repository
+from app.domain.entities import InstallationRepository, Repository
 from app.domain.enums import Provider
 from app.domain.ids import new_id
+from app.domain.vcs_errors import VcsError
 
-from .fakes.auth import sign_in
+from .fakes.auth import SIGNED_IN, sign_in
+from .fakes.installation_catalog import FakeInstallationCatalog
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -38,15 +45,32 @@ def _repository(n: int) -> Repository:
     )
 
 
-def _client(uow: FakeUnitOfWork) -> TestClient:
-    app = create_app(SETTINGS)
-    sign_in(app)
+ORIGIN = "https://review.example"
+API = InstallationRepository(provider_id="101", full_name="octo-org/api", default_branch="main", installation_id=7)
+WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", default_branch="trunk", installation_id=7)
+
+
+def _client(
+    uow: FakeUnitOfWork, catalog: FakeInstallationCatalog | None = None, *, signed_in: bool = True
+) -> TestClient:
+    app = create_app(SETTINGS.model_copy(update={"public_origin": ORIGIN}))
+    if signed_in:
+        sign_in(app)
 
     def override_uow() -> Iterator[FakeUnitOfWork]:
         yield uow
 
     app.dependency_overrides[get_unit_of_work] = override_uow
-    return TestClient(app)
+    app.dependency_overrides[get_unit_of_work_factory] = lambda: lambda: uow
+    app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog()
+    return TestClient(app, base_url=ORIGIN)
+
+
+def _connect(client: TestClient, provider_id: str = "101", provider: str = "github") -> httpx.Response:
+    response: httpx.Response = client.post(
+        "/api/v1/repositories", json={"provider": provider, "provider_id": provider_id}, headers={"Origin": ORIGIN}
+    )
+    return response
 
 
 def test_returns_registered_repositories() -> None:
@@ -93,3 +117,120 @@ def test_a_limit_below_one_is_a_validation_error() -> None:
     body = response.json()
     assert body["code"] == "VALIDATION_ERROR"
     assert body["errors"] == [{"where": "query.limit", "reason": "должно быть не меньше 1"}]
+
+
+def test_available_repositories_are_marked_when_already_connected() -> None:
+    uow = FakeUnitOfWork()
+    uow.repositories.add(_repository(101))
+    client = _client(uow, FakeInstallationCatalog([API, WEB]))
+
+    response = client.get("/api/v1/repositories/available")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "provider": "github",
+                "provider_id": "101",
+                "full_name": "octo-org/api",
+                "default_branch": "main",
+                "already_connected": True,
+            },
+            {
+                "provider": "github",
+                "provider_id": "202",
+                "full_name": "octo-org/web",
+                "default_branch": "trunk",
+                "already_connected": False,
+            },
+        ]
+    }
+
+
+def test_available_repositories_answer_502_when_github_fails() -> None:
+    client = _client(FakeUnitOfWork(), FakeInstallationCatalog(error=VcsError("GitHub API: HTTP 503")))
+
+    response = client.get("/api/v1/repositories/available")
+
+    assert response.status_code == 502
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+
+
+def test_available_repositories_require_a_session() -> None:
+    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API]), signed_in=False).get(
+        "/api/v1/repositories/available"
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"
+
+
+def test_an_admin_connects_a_repository() -> None:
+    uow = FakeUnitOfWork()
+    client = _client(uow, FakeInstallationCatalog([API, WEB], admins={("octo-org/web", SIGNED_IN.login)}))
+
+    response = _connect(client, "202")
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["provider"] == "github"
+    assert body["provider_id"] == "202"
+    assert body["full_name"] == "octo-org/web"
+    assert body["default_branch"] == "trunk"
+    assert body["auto_review_enabled"] is True
+    assert body["created_at"].endswith("Z")
+    stored = uow.repositories.find_by_provider(Provider.GITHUB, "202")
+    assert stored is not None
+    assert str(stored.id) == body["id"]
+
+
+def test_connecting_without_admin_rights_is_403() -> None:
+    uow = FakeUnitOfWork()
+    response = _connect(_client(uow, FakeInstallationCatalog([API])))
+
+    assert response.status_code == 403
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "REPOSITORY_ADMIN_REQUIRED"
+    assert uow.repositories.stored == {}
+
+
+def test_connecting_a_repository_outside_the_installation_is_404() -> None:
+    response = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([API])), "999")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
+
+
+def test_connecting_a_gitlab_repository_is_404() -> None:
+    response = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([API])), provider="gitlab")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
+
+
+def test_connecting_twice_is_409() -> None:
+    uow = FakeUnitOfWork()
+    uow.repositories.add(_repository(101))
+    client = _client(uow, FakeInstallationCatalog([API], admins={("octo-org/api", SIGNED_IN.login)}))
+
+    response = _connect(client)
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "REPOSITORY_ALREADY_CONNECTED"
+
+
+def test_connecting_answers_502_when_github_fails() -> None:
+    uow = FakeUnitOfWork()
+    response = _connect(_client(uow, FakeInstallationCatalog(error=VcsError("GitHub API: HTTP 503"))))
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+    assert uow.repositories.stored == {}
+
+
+def test_connecting_requires_a_session() -> None:
+    response = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([API]), signed_in=False))
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"

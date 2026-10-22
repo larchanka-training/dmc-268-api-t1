@@ -27,6 +27,9 @@ class ErrorCode(StrEnum):
     VALIDATION_ERROR = "VALIDATION_ERROR"
     REVIEW_NOT_FOUND = "REVIEW_NOT_FOUND"
     REPOSITORY_NOT_FOUND = "REPOSITORY_NOT_FOUND"
+    REPOSITORY_NOT_IN_INSTALLATION = "REPOSITORY_NOT_IN_INSTALLATION"
+    REPOSITORY_ALREADY_CONNECTED = "REPOSITORY_ALREADY_CONNECTED"
+    REPOSITORY_ADMIN_REQUIRED = "REPOSITORY_ADMIN_REQUIRED"
     PROVIDER_NOT_SUPPORTED = "PROVIDER_NOT_SUPPORTED"
     REVIEW_ALREADY_ACTIVE = "REVIEW_ALREADY_ACTIVE"
     WEBHOOK_SIGNATURE_INVALID = "WEBHOOK_SIGNATURE_INVALID"
@@ -166,6 +169,52 @@ class RepositoryNotFoundProblem(Problem):
     code: Literal[ErrorCode.REPOSITORY_NOT_FOUND] = ErrorCode.REPOSITORY_NOT_FOUND
 
 
+class RepositoryNotInInstallationProblem(Problem):
+    """`404 REPOSITORY_NOT_IN_INSTALLATION`: репозитория нет среди репозиториев установок GitHub App."""
+
+    example = {
+        "detail": "Репозитория нет среди репозиториев установок GitHub App.",
+        "instance": "/api/v1/repositories",
+    }
+
+    type: Literal["urn:dmc-268:problem:repository-not-in-installation"] = (
+        "urn:dmc-268:problem:repository-not-in-installation"
+    )
+    title: Literal["Репозиторий не из установки приложения"] = "Репозиторий не из установки приложения"
+    status: Literal[HTTPStatus.NOT_FOUND] = HTTPStatus.NOT_FOUND
+    code: Literal[ErrorCode.REPOSITORY_NOT_IN_INSTALLATION] = ErrorCode.REPOSITORY_NOT_IN_INSTALLATION
+
+
+class RepositoryAlreadyConnectedProblem(Problem):
+    """`409 REPOSITORY_ALREADY_CONNECTED`: репозиторий уже зарегистрирован в сервисе."""
+
+    example = {
+        "detail": "Репозиторий уже подключён.",
+        "instance": "/api/v1/repositories",
+    }
+
+    type: Literal["urn:dmc-268:problem:repository-already-connected"] = (
+        "urn:dmc-268:problem:repository-already-connected"
+    )
+    title: Literal["Репозиторий уже подключён"] = "Репозиторий уже подключён"
+    status: Literal[HTTPStatus.CONFLICT] = HTTPStatus.CONFLICT
+    code: Literal[ErrorCode.REPOSITORY_ALREADY_CONNECTED] = ErrorCode.REPOSITORY_ALREADY_CONNECTED
+
+
+class RepositoryAdminRequiredProblem(Problem):
+    """`403 REPOSITORY_ADMIN_REQUIRED`: у пользователя нет прав admin на репозиторий у провайдера."""
+
+    example = {
+        "detail": "Подключать репозиторий может только пользователь с правами admin на него.",
+        "instance": "/api/v1/repositories",
+    }
+
+    type: Literal["urn:dmc-268:problem:repository-admin-required"] = "urn:dmc-268:problem:repository-admin-required"
+    title: Literal["Нужны права admin на репозиторий"] = "Нужны права admin на репозиторий"
+    status: Literal[HTTPStatus.FORBIDDEN] = HTTPStatus.FORBIDDEN
+    code: Literal[ErrorCode.REPOSITORY_ADMIN_REQUIRED] = ErrorCode.REPOSITORY_ADMIN_REQUIRED
+
+
 class ProviderNotSupportedProblem(Problem):
     """`PROVIDER_NOT_SUPPORTED`: вход через провайдера — `404`, приём вебхуков от него — `501`."""
 
@@ -213,7 +262,7 @@ class WebhookSignatureInvalidProblem(Problem):
 
 
 class ScmUnavailableProblem(Problem):
-    """`502 SCM_UNAVAILABLE`: провайдер VCS не ответил или ответил ошибкой при приёме вебхука."""
+    """`502 SCM_UNAVAILABLE`: провайдер VCS не ответил или ответил ошибкой — при приёме вебхука или подключении репозитория."""
 
     example = {
         "detail": "Провайдер VCS не ответил или ответил ошибкой; прогон не создан.",
@@ -337,6 +386,9 @@ class AnyProblem(
             ValidationProblem
             | ReviewNotFoundProblem
             | RepositoryNotFoundProblem
+            | RepositoryNotInInstallationProblem
+            | RepositoryAlreadyConnectedProblem
+            | RepositoryAdminRequiredProblem
             | ProviderNotSupportedProblem
             | ReviewAlreadyActiveProblem
             | WebhookSignatureInvalidProblem

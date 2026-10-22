@@ -1,39 +1,77 @@
-"""Чтение зарегистрированных репозиториев.
+"""Зарегистрированные репозитории: чтение и подключение.
 
-Транспорт: разбор запроса, вызов порта, формат ответа. Пагинация — `app/api/pagination.py`.
+Транспорт: разбор запроса, вызов порта или use case, формат ответа. Пагинация —
+`app/api/pagination.py`. Правила подключения — `app/application/use_cases/connect_repository.py`.
 """
 
+from collections.abc import Callable
+from datetime import UTC, datetime
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from app.api.dependencies import get_unit_of_work
+from app.api.dependencies import (
+    get_installation_catalog,
+    get_unit_of_work,
+    get_unit_of_work_factory,
+)
 from app.api.errors import (
-    ERRORS_403_ORIGIN,
+    ERRORS_403_ORIGIN_OR_ADMIN,
+    ERRORS_404_NOT_IN_INSTALLATION,
+    ERRORS_409_ALREADY_CONNECTED,
     ERRORS_422,
-    ERRORS_501_NOT_IMPLEMENTED,
+    ERRORS_502_SCM_REPOSITORIES,
     ApiError,
 )
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
 from app.api.schemas import RepositoryBase, StrictRequest, UtcDatetime
-from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
-from app.application.ports import UnitOfWork
-from app.domain.enums import Provider
+from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES, current_user
+from app.application.ports import InstallationCatalog, UnitOfWork
 
-# Реализация — задача #41; форма — вариант A решения 3 в dmc-268-ui-t1#37.
+# Под своими именами: имена функций роутов — operationId в схеме, их держат типы фронтенда.
+from app.application.use_cases import connect_repository as connecting
+from app.domain.entities import User
+from app.domain.enums import Provider
+from app.domain.ids import new_id
+from app.domain.vcs_errors import VcsError
+
+# Форма — вариант A решения 3 в dmc-268-ui-t1#37; поведение — change `implement-repository-connect`.
 _AVAILABLE_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #41). Когда ручка заработает: репозитории установки GitHub App, доступные вошедшему "
-    "пользователю, с отметкой, подключён ли репозиторий к сервису. Требует сессию."
+    "Требует сессию. Репозитории всех установок GitHub App с отметкой `already_connected` — "
+    "зарегистрирован ли репозиторий в сервисе. По правам вошедшего пользователя список не "
+    "фильтруется: запрос прав на каждый репозиторий при каждом показе дорог, права проверяет "
+    "подключение. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`."
 )
 _CONNECT_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #41). Когда ручка заработает: 201 с зарегистрированным репозиторием; подключать может "
-    "только пользователь с правами admin на репозиторий у провайдера. Требует сессию и Origin "
-    "сервиса; Origin проверяется раньше сессии и разбора тела."
+    "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. "
+    "Регистрирует репозиторий установки GitHub App с `auto_review_enabled = true`; `full_name` "
+    "и `default_branch` — из данных установки. Проверки по порядку: провайдер не `github` или "
+    "репозитория нет среди репозиториев установок — `404 REPOSITORY_NOT_IN_INSTALLATION`; "
+    "репозиторий уже подключён — `409 REPOSITORY_ALREADY_CONNECTED`; у пользователя нет прав "
+    "admin на репозиторий у GitHub — `403 REPOSITORY_ADMIN_REQUIRED`. Если GitHub не ответил "
+    "или ответил ошибкой — `502 SCM_UNAVAILABLE`, репозиторий не записан."
 )
+_SCM_UNAVAILABLE_DETAIL = "GitHub не ответил или ответил ошибкой."
+# Отказ use case — ответ ручки.
+_REFUSALS: dict[connecting.ConnectRefusal, tuple[HTTPStatus, ErrorCode, str]] = {
+    connecting.ConnectRefusal.NOT_IN_INSTALLATION: (
+        HTTPStatus.NOT_FOUND,
+        ErrorCode.REPOSITORY_NOT_IN_INSTALLATION,
+        "Репозитория нет среди репозиториев установок GitHub App.",
+    ),
+    connecting.ConnectRefusal.ALREADY_CONNECTED: (
+        HTTPStatus.CONFLICT,
+        ErrorCode.REPOSITORY_ALREADY_CONNECTED,
+        "Репозиторий уже подключён.",
+    ),
+    connecting.ConnectRefusal.ADMIN_REQUIRED: (
+        HTTPStatus.FORBIDDEN,
+        ErrorCode.REPOSITORY_ADMIN_REQUIRED,
+        "Подключать репозиторий может только пользователь с правами admin на него.",
+    ),
+}
 
 # Сессия — на весь роутер: исключения видны здесь, а не в middleware.
 router = APIRouter(
@@ -95,13 +133,29 @@ class ConnectRepositoryRequest(StrictRequest):
     "/available",
     response_model=AvailableRepositoryListResponse,
     summary="Репозитории, доступные для подключения",
-    response_description="Репозитории установки GitHub App.",
+    response_description="Репозитории установок GitHub App.",
     description=_AVAILABLE_DESCRIPTION,
-    responses=ERRORS_501_NOT_IMPLEMENTED,
+    responses=ERRORS_502_SCM_REPOSITORIES,
 )
-def list_available_repositories() -> AvailableRepositoryListResponse:
-    raise ApiError(
-        HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Список доступных репозиториев ещё не реализован."
+def list_available_repositories(
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> AvailableRepositoryListResponse:
+    try:
+        available = connecting.list_available_repositories(catalog, uow_factory())
+    except VcsError as error:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
+    return AvailableRepositoryListResponse(
+        items=[
+            AvailableRepositoryResponse(
+                provider=Provider.GITHUB,
+                provider_id=item.repository.provider_id,
+                full_name=item.repository.full_name,
+                default_branch=item.repository.default_branch,
+                already_connected=item.already_connected,
+            )
+            for item in available
+        ]
     )
 
 
@@ -112,10 +166,29 @@ def list_available_repositories() -> AvailableRepositoryListResponse:
     summary="Подключить репозиторий",
     response_description="Репозиторий зарегистрирован.",
     description=_CONNECT_DESCRIPTION,
-    responses={**ERRORS_403_ORIGIN, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+    responses={
+        **ERRORS_403_ORIGIN_OR_ADMIN,
+        **ERRORS_404_NOT_IN_INSTALLATION,
+        **ERRORS_409_ALREADY_CONNECTED,
+        **ERRORS_422,
+        **ERRORS_502_SCM_REPOSITORIES,
+    },
 )
-def connect_repository(body: ConnectRepositoryRequest) -> RepositoryResponse:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Подключение репозитория ещё не реализовано.")
+def connect_repository(
+    body: ConnectRepositoryRequest,
+    user: User = Depends(current_user),
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> RepositoryResponse:
+    try:
+        outcome = connecting.connect_repository(
+            catalog, uow_factory(), body.provider, body.provider_id, user.login, new_id(), datetime.now(UTC)
+        )
+    except VcsError as error:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
+    if isinstance(outcome, connecting.ConnectRefusal):
+        raise ApiError(*_REFUSALS[outcome])
+    return RepositoryResponse.model_validate(outcome, from_attributes=True)
 
 
 @router.get(

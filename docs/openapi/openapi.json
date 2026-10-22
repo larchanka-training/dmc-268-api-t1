@@ -463,11 +463,11 @@
           "repositories"
         ],
         "summary": "Репозитории, доступные для подключения",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #41). Когда ручка заработает: репозитории установки GitHub App, доступные вошедшему пользователю, с отметкой, подключён ли репозиторий к сервису. Требует сессию.",
+        "description": "Требует сессию. Репозитории всех установок GitHub App с отметкой `already_connected` — зарегистрирован ли репозиторий в сервисе. По правам вошедшего пользователя список не фильтруется: запрос прав на каждый репозиторий при каждом показе дорог, права проверяет подключение. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`.",
         "operationId": "listAvailableRepositories",
         "responses": {
           "200": {
-            "description": "Репозитории установки GitHub App.",
+            "description": "Репозитории установок GitHub App.",
             "content": {
               "application/json": {
                 "schema": {
@@ -511,12 +511,12 @@
               }
             }
           },
-          "501": {
-            "description": "Ручка ещё не реализована.",
+          "502": {
+            "description": "GitHub не ответил или ответил ошибкой; репозиторий не подключён.",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NotImplementedProblem"
+                  "$ref": "#/components/schemas/ScmUnavailableProblem"
                 }
               }
             },
@@ -540,7 +540,7 @@
           "repositories"
         ],
         "summary": "Подключить репозиторий",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #41). Когда ручка заработает: 201 с зарегистрированным репозиторием; подключать может только пользователь с правами admin на репозиторий у провайдера. Требует сессию и Origin сервиса; Origin проверяется раньше сессии и разбора тела.",
+        "description": "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. Регистрирует репозиторий установки GitHub App с `auto_review_enabled = true`; `full_name` и `default_branch` — из данных установки. Проверки по порядку: провайдер не `github` или репозитория нет среди репозиториев установок — `404 REPOSITORY_NOT_IN_INSTALLATION`; репозиторий уже подключён — `409 REPOSITORY_ALREADY_CONNECTED`; у пользователя нет прав admin на репозиторий у GitHub — `403 REPOSITORY_ADMIN_REQUIRED`. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, репозиторий не записан.",
         "operationId": "connectRepository",
         "security": [
           {
@@ -604,11 +604,56 @@
             }
           },
           "403": {
-            "description": "`Origin` изменяющего запроса отсутствует или не совпадает с адресом сервиса.",
+            "description": "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; `REPOSITORY_ADMIN_REQUIRED` — у пользователя нет прав admin на репозиторий у провайдера.",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OriginForbiddenProblem"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/OriginForbiddenProblem"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RepositoryAdminRequiredProblem"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "code",
+                    "mapping": {
+                      "ORIGIN_FORBIDDEN": "#/components/schemas/OriginForbiddenProblem",
+                      "REPOSITORY_ADMIN_REQUIRED": "#/components/schemas/RepositoryAdminRequiredProblem"
+                    }
+                  },
+                  "title": "Response 403 Connectrepository"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Репозитория нет среди репозиториев установок GitHub App, или провайдер не `github`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryNotInInstallationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "409": {
+            "description": "Репозиторий уже подключён, в том числе параллельным запросом.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryAlreadyConnectedProblem"
                 }
               }
             },
@@ -633,12 +678,12 @@
               }
             }
           },
-          "501": {
-            "description": "Ручка ещё не реализована.",
+          "502": {
+            "description": "GitHub не ответил или ответил ошибкой; репозиторий не подключён.",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NotImplementedProblem"
+                  "$ref": "#/components/schemas/ScmUnavailableProblem"
                 }
               }
             },
@@ -1503,6 +1548,15 @@
             "$ref": "#/components/schemas/RepositoryNotFoundProblem"
           },
           {
+            "$ref": "#/components/schemas/RepositoryNotInInstallationProblem"
+          },
+          {
+            "$ref": "#/components/schemas/RepositoryAlreadyConnectedProblem"
+          },
+          {
+            "$ref": "#/components/schemas/RepositoryAdminRequiredProblem"
+          },
+          {
             "$ref": "#/components/schemas/ProviderNotSupportedProblem"
           },
           {
@@ -1547,7 +1601,10 @@
             "NOT_IMPLEMENTED": "#/components/schemas/NotImplementedProblem",
             "ORIGIN_FORBIDDEN": "#/components/schemas/OriginForbiddenProblem",
             "PROVIDER_NOT_SUPPORTED": "#/components/schemas/ProviderNotSupportedProblem",
+            "REPOSITORY_ADMIN_REQUIRED": "#/components/schemas/RepositoryAdminRequiredProblem",
+            "REPOSITORY_ALREADY_CONNECTED": "#/components/schemas/RepositoryAlreadyConnectedProblem",
             "REPOSITORY_NOT_FOUND": "#/components/schemas/RepositoryNotFoundProblem",
+            "REPOSITORY_NOT_IN_INSTALLATION": "#/components/schemas/RepositoryNotInInstallationProblem",
             "REVIEW_ALREADY_ACTIVE": "#/components/schemas/ReviewAlreadyActiveProblem",
             "REVIEW_NOT_FOUND": "#/components/schemas/ReviewNotFoundProblem",
             "ROUTE_NOT_FOUND": "#/components/schemas/RouteNotFoundProblem",
@@ -2760,6 +2817,148 @@
         "title": "PublishedCommentResponse",
         "description": "Комментарий, который прогон опубликовал на хостинге."
       },
+      "RepositoryAdminRequiredProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:repository-admin-required",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:repository-admin-required"
+          },
+          "title": {
+            "type": "string",
+            "const": "Нужны права admin на репозиторий",
+            "title": "Title",
+            "default": "Нужны права admin на репозиторий"
+          },
+          "status": {
+            "type": "integer",
+            "const": 403,
+            "title": "Status",
+            "default": 403
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "REPOSITORY_ADMIN_REQUIRED",
+            "title": "Code",
+            "default": "REPOSITORY_ADMIN_REQUIRED"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "RepositoryAdminRequiredProblem",
+        "description": "`403 REPOSITORY_ADMIN_REQUIRED`: у пользователя нет прав admin на репозиторий у провайдера.",
+        "examples": [
+          {
+            "code": "REPOSITORY_ADMIN_REQUIRED",
+            "detail": "Подключать репозиторий может только пользователь с правами admin на него.",
+            "instance": "/api/v1/repositories",
+            "status": 403,
+            "title": "Нужны права admin на репозиторий",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:repository-admin-required"
+          }
+        ]
+      },
+      "RepositoryAlreadyConnectedProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:repository-already-connected",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:repository-already-connected"
+          },
+          "title": {
+            "type": "string",
+            "const": "Репозиторий уже подключён",
+            "title": "Title",
+            "default": "Репозиторий уже подключён"
+          },
+          "status": {
+            "type": "integer",
+            "const": 409,
+            "title": "Status",
+            "default": 409
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "REPOSITORY_ALREADY_CONNECTED",
+            "title": "Code",
+            "default": "REPOSITORY_ALREADY_CONNECTED"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "RepositoryAlreadyConnectedProblem",
+        "description": "`409 REPOSITORY_ALREADY_CONNECTED`: репозиторий уже зарегистрирован в сервисе.",
+        "examples": [
+          {
+            "code": "REPOSITORY_ALREADY_CONNECTED",
+            "detail": "Репозиторий уже подключён.",
+            "instance": "/api/v1/repositories",
+            "status": 409,
+            "title": "Репозиторий уже подключён",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:repository-already-connected"
+          }
+        ]
+      },
       "RepositoryListResponse": {
         "properties": {
           "items": {
@@ -2846,6 +3045,77 @@
             "title": "Репозиторий не найден",
             "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
             "type": "urn:dmc-268:problem:repository-not-found"
+          }
+        ]
+      },
+      "RepositoryNotInInstallationProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:repository-not-in-installation",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:repository-not-in-installation"
+          },
+          "title": {
+            "type": "string",
+            "const": "Репозиторий не из установки приложения",
+            "title": "Title",
+            "default": "Репозиторий не из установки приложения"
+          },
+          "status": {
+            "type": "integer",
+            "const": 404,
+            "title": "Status",
+            "default": 404
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "REPOSITORY_NOT_IN_INSTALLATION",
+            "title": "Code",
+            "default": "REPOSITORY_NOT_IN_INSTALLATION"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "RepositoryNotInInstallationProblem",
+        "description": "`404 REPOSITORY_NOT_IN_INSTALLATION`: репозитория нет среди репозиториев установок GitHub App.",
+        "examples": [
+          {
+            "code": "REPOSITORY_NOT_IN_INSTALLATION",
+            "detail": "Репозитория нет среди репозиториев установок GitHub App.",
+            "instance": "/api/v1/repositories",
+            "status": 404,
+            "title": "Репозиторий не из установки приложения",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:repository-not-in-installation"
           }
         ]
       },
@@ -3898,7 +4168,7 @@
           "trace_id"
         ],
         "title": "ScmUnavailableProblem",
-        "description": "`502 SCM_UNAVAILABLE`: провайдер VCS не ответил или ответил ошибкой при приёме вебхука.",
+        "description": "`502 SCM_UNAVAILABLE`: провайдер VCS не ответил или ответил ошибкой — при приёме вебхука или подключении репозитория.",
         "examples": [
           {
             "code": "SCM_UNAVAILABLE",

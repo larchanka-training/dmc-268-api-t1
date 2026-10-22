@@ -14,6 +14,7 @@ import httpx
 from sqlalchemy import Engine, create_engine
 
 from app.application.ports import CacheStore, DefinitionExtractor, UnitOfWork
+from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.oauth_provider import OAuthProvider
@@ -32,6 +33,7 @@ from app.infrastructure.parsing.tree_sitter_extractor import (
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
+from app.infrastructure.vcs.github_installations import GitHubInstallationCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,9 @@ class Container:
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
     _vcs_gateway: VcsGateway | None
+    # Собирается вместе со шлюзом и делит с ним `GitHubAppAuth` и HTTP-клиент:
+    # кэш installation tokens один на процесс.
+    _installation_catalog: InstallationCatalog | None
     # Провайдеры входа по имени из пути `/auth/{provider}`. Конструирование —
     # без сети, поэтому они собираются сразу, а не лениво.
     _oauth_providers: Mapping[str, OAuthProvider]
@@ -88,15 +93,28 @@ class Container:
         """Собрать VCS-шлюз при первом обращении; конструирование — без сети."""
         gateway = self._vcs_gateway
         if gateway is None:
-            client = httpx.Client(base_url=_GITHUB_API)
-            auth = GitHubAppAuth(
-                self.settings.github_app_id,
-                self.settings.github_app_private_key.get_secret_value(),
-                client,
-            )
-            gateway = GitHubVcsGateway(auth, client)
-            object.__setattr__(self, "_vcs_gateway", gateway)
+            gateway, _ = self._build_github()
         return gateway
+
+    def installation_catalog(self) -> InstallationCatalog:
+        """Каталог установок GitHub App; собирается лениво, как VCS-шлюз."""
+        catalog = self._installation_catalog
+        if catalog is None:
+            _, catalog = self._build_github()
+        return catalog
+
+    def _build_github(self) -> tuple[VcsGateway, InstallationCatalog]:
+        client = httpx.Client(base_url=_GITHUB_API)
+        auth = GitHubAppAuth(
+            self.settings.github_app_id,
+            self.settings.github_app_private_key.get_secret_value(),
+            client,
+        )
+        gateway = GitHubVcsGateway(auth, client)
+        catalog = GitHubInstallationCatalog(auth, client, gateway)
+        object.__setattr__(self, "_vcs_gateway", gateway)
+        object.__setattr__(self, "_installation_catalog", catalog)
+        return gateway, catalog
 
     def oauth_provider(self, name: str) -> OAuthProvider | None:
         """Провайдер входа по имени из пути; неизвестное имя — `None`."""
@@ -122,6 +140,7 @@ def build_container(settings: Settings) -> Container:
         settings=settings,
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
+        _installation_catalog=None,
         _oauth_providers={
             "github": GitHubOAuthProvider(
                 settings.github_app_client_id,

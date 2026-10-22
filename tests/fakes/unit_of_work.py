@@ -61,8 +61,11 @@ class FakeRepositoryRepo:
         ordered = sorted(self._by_id.values(), key=lambda r: (r.created_at, r.id))
         return ordered[offset : offset + limit]
 
-    def add(self, repository: Repository) -> None:
+    def add(self, repository: Repository) -> bool:
+        if self.find_by_provider(repository.provider, repository.provider_id) is not None:
+            return False
         self._by_id[repository.id] = repository
+        return True
 
     def update(self, repository: Repository) -> None:
         if repository.id not in self._by_id:
