@@ -48,9 +48,14 @@ def test_every_date_time_in_the_schema_is_utc_datetime() -> None:
     `pattern`: принимается любая зона.
     """
     schema = create_app(SETTINGS).openapi()
+    # Ровно параметры операций: путь из `_walk` — `/paths/<путь со слешами>/<метод>/parameters/…`,
+    # поэтому префиксы собираются из самой схемы, а не угадываются шаблоном.
+    parameters = tuple(
+        f"/paths/{path}/{method}/parameters/" for path, item in schema["paths"].items() for method in item
+    )
     problems = []
     for where, node in _walk(schema):
-        if "/parameters/" in where:
+        if where.startswith(parameters):
             continue
         if node.get("format") == "date-time" and node.get("pattern") != UTC_DATETIME_PATTERN:
             problems.append(f"{where}: date-time не через UtcDatetime")

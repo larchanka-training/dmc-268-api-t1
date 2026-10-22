@@ -5,6 +5,7 @@
 второй потребитель, чтобы ручки не импортировали друг друга.
 """
 
+import re
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -13,11 +14,13 @@ from pydantic import (
     AfterValidator,
     AwareDatetime,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     PositiveInt,
     WithJsonSchema,
 )
+from pydantic_core import PydanticCustomError
 
 from app.domain.enums import MergeRequestState, Provider, ReviewRunStatus, TriggerSource
 
@@ -45,9 +48,20 @@ UtcDatetime = Annotated[
     ),
 ]
 
-# Время во входных параметрах: любая зона, приводится к UTC. В схеме — `date-time` без
-# `pattern` ответа: на вход годится и `+03:00`, `Z` обязателен только в ответах.
-UtcDatetimeParam = Annotated[AwareDatetime, AfterValidator(_to_utc)]
+# Начало строки ISO 8601 с датой и временем. Без этой проверки pydantic принял бы и
+# unix-время числом в строке (`1760000000`).
+_ISO_DATETIME_START = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}")
+
+
+def _iso_8601_only(value: object) -> object:
+    if isinstance(value, str) and not _ISO_DATETIME_START.match(value):
+        raise PydanticCustomError("datetime_not_iso", "ожидается время в ISO 8601")
+    return value
+
+
+# Время во входных параметрах: строка ISO 8601 с любой зоной, приводится к UTC. В схеме —
+# `date-time` без `pattern` ответа: на вход годится и `+03:00`, `Z` обязателен только в ответах.
+UtcDatetimeParam = Annotated[AwareDatetime, BeforeValidator(_iso_8601_only), AfterValidator(_to_utc)]
 
 # Этап, на котором прогон может упасть, — те же значения, что `FAILURE_STAGES` домена
 # (равенство множеств проверяет тест).

@@ -15,7 +15,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, Field, RootModel, ValidationInfo, field_validator
 from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import get_unit_of_work
@@ -90,33 +90,40 @@ _LIST_DESCRIPTION = (
     "active=true — только активные (queued, building_context, analysing, publishing), active=false — "
     "только завершённые (completed, failed, cancelled), вместе со status — пересечение; repository_id — "
     "прогоны одного репозитория, невидимый или несуществующий репозиторий даёт пустой список, а не 404; "
-    "author — точное совпадение логина автора запроса на изменение; q — поиск без учёта регистра по "
-    "заголовку, номеру (42 или #42), автору и исходной ветке запроса на изменение. У q и author пустая "
+    "author — точное совпадение логина автора запроса на изменение; q — подстрока без учёта регистра "
+    "в заголовке, авторе или исходной ветке запроса на изменение либо точное совпадение номера "
+    "(42 или #42). У q и author пустая "
     "строка — без фильтра. created_from (включительно) и created_to (исключительно) — диапазон по "
     "created_at прогона, время с зоной (в ответах — UTC с Z); created_from позже created_to — 422 "
     "VALIDATION_ERROR в query.created_to. Постранично: limit выше 200 не отклоняется, а приводится к "
     "200. total — сколько прогонов подходит под фильтры без учёта limit и offset. findings_count — "
     "то же, что число элементов findings в GET /reviews/{review_run_id}: находки, оставшиеся после "
     "отсева и верификатора, а не опубликованные комментарии. Самих находок и комментариев в строке "
-    "нет. Изменения после снимка приходят потоком GET /reviews/events."
+    "нет. Изменения после снимка приходят потоком GET /reviews/events; поток фильтры не учитывает, "
+    "поэтому при активных фильтрах или не на первой странице клиент на событие перезапрашивает "
+    "страницу, а без фильтров на первой странице — делает upsert строки."
 )
 _STREAM_DESCRIPTION = (
     "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
     "(задача #103). Требует сессию. Когда ручка заработает: один поток Server-Sent Events на весь "
-    "кабинет — изменения прогонов ревью к снимку GET /reviews. Тип события — в поле `event:`, данные "
-    "любого события прогона — ReviewRunListItem, полная строка списка, JSON в `data:` одной строкой. "
-    "Тип — подсказка, что случилось: `run.created` — новый прогон, `run.status_changed` — прогон "
-    "сменил статус, но не на итоговый, `run.finished` — прогон пришёл в итоговый статус (completed, "
-    "failed или cancelled); при переходе в итоговый статус приходит только `run.finished`. Клиент "
-    "применяет любое событие одинаково: upsert строки по id, из двух версий строки побеждает та, у "
-    "которой updated_at больше. Порядок клиента: сначала подписаться на поток, затем запросить снимок "
-    "GET /reviews — событие, пришедшее раньше снимка, не потеряется, а более старая версия строки "
-    "проиграет по updated_at. `ping` с `data: {}` — в тишине, не реже раза в 15 секунд. Поток "
-    "начинается со строки `retry: 3000`. " + _VISIBILITY + " События уходят в момент коммита записи "
-    "прогона (PostgreSQL NOTIFY из транзакции записи): откаченная запись события не даёт. Истории "
-    "сервер не хранит: событие, пропущенное при обрыве, не повторяется, поэтому после переподключения "
-    "клиент перезапрашивает GET /reviews. При обрыве своей подписки на уведомления сервер сам "
-    "закрывает поток, чтобы клиент перезапросил список."
+    "кабинет — изменения прогонов ревью к снимку GET /reviews. Имя события — в поле `event:`, "
+    "значения — ReviewRunsStreamEventType; данные любого события прогона — ReviewRunListItem, полная "
+    "строка списка, JSON в `data:` одной строкой. Имя — подсказка, что случилось: `run.created` — "
+    "новый прогон, `run.status_changed` — прогон сменил статус, но не на итоговый, `run.finished` — "
+    "прогон пришёл в итоговый статус (completed, failed или cancelled); при переходе в итоговый "
+    "статус приходит только `run.finished`. Клиент применяет любое событие одинаково: upsert строки "
+    "по id, из двух версий строки побеждает та, у которой updated_at больше, при равном updated_at — "
+    "пришедшая позже. Порядок клиента: подписаться на поток и запросить снимок GET /reviews после "
+    "события `open` у EventSource — событие, пришедшее раньше снимка, не потеряется, а более старая "
+    "версия строки проиграет по updated_at. Поток не фильтруется: в нём все видимые прогоны. При "
+    "активных фильтрах списка или не на первой странице клиент на событие перезапрашивает страницу, "
+    "без фильтров на первой странице — делает upsert. Событий удаления и потери видимости нет: такие "
+    "строки обновятся при перезапросе. `ping` с `data: {}` — в тишине, не реже раза в 15 секунд. "
+    "Поток начинается со строки `retry: 3000`. " + _VISIBILITY + " События уходят в момент коммита "
+    "записи прогона (PostgreSQL NOTIFY из транзакции записи): откаченная запись события не даёт. "
+    "Истории сервер не хранит: событие, пропущенное при обрыве, не повторяется, поэтому после "
+    "переподключения клиент перезапрашивает GET /reviews. При обрыве своей подписки на уведомления "
+    "сервер сам закрывает поток, чтобы клиент перезапросил список."
 )
 
 # Сессия — на весь роутер: исключения видны здесь, а не в middleware.
@@ -254,7 +261,10 @@ class ReviewRunListItem(BaseModel):
     )
     created_at: UtcDatetime = Field(description="Когда прогон создан.")
     updated_at: UtcDatetime = Field(
-        description="Когда запись последний раз менялась; из двух версий строки новее та, где оно больше."
+        description=(
+            "Когда запись последний раз менялась; из двух версий строки новее та, где оно больше, "
+            "при равном — пришедшая позже."
+        )
     )
     duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
     failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
@@ -299,7 +309,9 @@ class ReviewRunListQuery(BaseModel):
     repository_id: UUID | None = Field(default=None, description="Только прогоны этого репозитория.")
     author: str | None = _optional_text(255, "Логин автора запроса на изменение, точное совпадение.")
     q: str | None = _optional_text(
-        200, "Поиск без учёта регистра по заголовку, номеру (42 или #42), автору и исходной ветке запроса на изменение."
+        200,
+        "Подстрока без учёта регистра в заголовке, авторе или исходной ветке запроса на изменение "
+        "либо точное совпадение номера (42 или #42).",
     )
     created_from: UtcDatetimeParam | None = Field(
         default=None, description="Прогоны, созданные не раньше этого времени (включительно); время с зоной."
@@ -318,6 +330,16 @@ class ReviewRunListQuery(BaseModel):
         if created_to is not None and created_from is not None and created_from > created_to:
             raise PydanticCustomError("range_reversed", "created_from позже created_to")
         return created_to
+
+
+class ReviewRunsStreamEventType(
+    RootModel[Literal["run.created", "run.status_changed", "run.finished", "ping"]]
+):
+    """Имя события потока GET /reviews/events — значение поля `event:` в тексте SSE.
+
+    У `run.*` данные — ReviewRunListItem, у `ping` — `{}`. Тело ответа — текст SSE, поэтому
+    в схему модель попадает отдельным компонентом (`app/api/openapi.py`, `extra_models`).
+    """
 
 
 _STREAM_DOC: dict[int | str, dict[str, Any]] = {

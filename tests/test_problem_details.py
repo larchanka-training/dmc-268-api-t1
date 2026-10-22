@@ -338,7 +338,8 @@ def test_planned_review_list_checks_session_before_query(client: TestClient) -> 
     [
         ({"status": ["queued", "unknown"]}, {"where": "query.status.1", "reason": "значение не из допустимого списка"}),
         ({"q": "x" * 201}, {"where": "query.q", "reason": "длина строки должна быть не больше 200"}),
-        ({"created_from": "2026-10-11T10:00:00"}, {"where": "query.created_from", "reason": "недопустимое значение"}),
+        ({"created_from": "2026-10-11T10:00:00"}, {"where": "query.created_from", "reason": "ожидается время с зоной"}),
+        ({"created_to": "1760000000"}, {"where": "query.created_to", "reason": "ожидается время в ISO 8601"}),
         (
             {"created_from": "2026-10-12T00:00:00Z", "created_to": "2026-10-11T00:00:00Z"},
             {"where": "query.created_to", "reason": "начало диапазона позже его конца"},
@@ -393,6 +394,7 @@ def test_review_list_and_stream_are_in_the_exported_contract() -> None:
         "run.status_changed": row,
         "run.finished": row,
     }
+    assert components["ReviewRunsStreamEventType"]["enum"] == ["run.created", "run.status_changed", "run.finished", "ping"]
 
 
 def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None:

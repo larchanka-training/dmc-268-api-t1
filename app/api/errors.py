@@ -221,6 +221,9 @@ _REASONS = {
     "json_invalid": "тело запроса — не JSON",
     # Свой тип `PydanticCustomError`: диапазон, где начало позже конца (`ReviewRunListQuery`).
     "range_reversed": "начало диапазона позже его конца",
+    "timezone_aware": "ожидается время с зоной",
+    # Свой тип `PydanticCustomError`: время во входе — только строка ISO 8601 (`UtcDatetimeParam`).
+    "datetime_not_iso": "ожидается время в ISO 8601",
 }
 _DEFAULT_REASON = "недопустимое значение"
 # Ошибки, у которых последний элемент `loc` — не поле схемы: имя лишнего поля (ввод клиента,
