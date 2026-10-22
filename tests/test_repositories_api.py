@@ -151,14 +151,17 @@ def test_limit_above_the_ceiling_is_capped_not_rejected() -> None:
 
 
 def test_a_non_integer_limit_is_a_validation_error_without_the_input() -> None:
-    response = _client(FakeUnitOfWork()).get("/api/v1/repositories", params={"limit": "<b>abc</b>"})
+    response = _client(FakeUnitOfWork()).get("/api/v1/repositories", params={"limit": "<b>qzq</b>"})
 
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
     body = response.json()
     assert body["code"] == "VALIDATION_ERROR"
     assert body["errors"] == [{"where": "query.limit", "reason": "ожидается целое число"}]
-    assert "abc" not in response.text
+    # Маркер не из шестнадцатеричных символов: trace_id в ответе случайный hex и иногда
+    # содержал «abc», тест падал без причины.
+    assert "qzq" not in response.text
+    assert "<b>" not in response.text
 
 
 def test_a_limit_below_one_is_a_validation_error() -> None:
