@@ -149,6 +149,33 @@ def test_a_stop_request_lets_the_current_message_finish_and_takes_no_more() -> N
     assert channel.cancelled and connection.closed
 
 
+def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
+    # Сигнал пришёл на простое или в окно ожидания, и тут же доставлено сообщение.
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    connection = FakeConnection()
+    handled: list[bytes] = []
+
+    _worker(channel, connection).run(handled.append, stop=StopRequest(requested=True))
+
+    assert handled == []
+    assert channel.acked == []  # не подтверждено: брокер вернёт его в очередь
+    assert channel.cancelled and connection.closed
+
+
+def test_a_message_after_a_stop_during_the_sweep_is_not_taken() -> None:
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    stop = StopRequest()
+    handled: list[bytes] = []
+
+    def sweep() -> None:
+        stop.requested = True  # сигнал пришёл посреди прохода очистки
+
+    _worker(channel).run(handled.append, sweep=sweep, sweep_interval=0, stop=stop)
+
+    assert handled == []
+    assert channel.acked == []
+
+
 class IdleChannel(FakeChannel):
     """Пустая очередь: только такты простоя, бесконечно."""
 
