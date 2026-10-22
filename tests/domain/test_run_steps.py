@@ -120,6 +120,19 @@ def test_abandoned_running_steps_fail_as_stale_with_the_wall_clock_duration() ->
     assert closed.tokens_used is None
 
 
+def test_an_abandoned_step_with_a_known_outcome_is_closed_with_it() -> None:
+    running = _started()
+    other = start_step(RUN_ID, ReviewRunStage.ANALYSING, started_at=NOW, step_id=UUID(int=4))
+    outcome = finish_step(running, duration_seconds=7.0, tokens_used=12, error_code="LLM_TIMEOUT")
+
+    closed = abandon_steps(
+        [running, other], now=NOW + timedelta(minutes=1), known={STEP_ID: outcome}
+    )
+
+    assert closed[0] == outcome
+    assert closed[1].error_code == ABANDONED
+
+
 def test_an_abandoned_step_never_gets_a_negative_duration() -> None:
     (closed,) = abandon_steps([_started()], now=NOW - timedelta(seconds=5))
 

@@ -17,7 +17,7 @@ Use case уровня application: знает порты (`UnitOfWork`, `LlmGate
 """
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from uuid import UUID
@@ -39,7 +39,13 @@ from app.application.use_cases.build_review_context import (
     build_review_context,
     fetch_review_diff,
 )
-from app.domain.entities import ContextPayload, Finding, ReviewJob, ReviewRun
+from app.domain.entities import (
+    ContextPayload,
+    Finding,
+    ReviewJob,
+    ReviewRun,
+    ReviewRunStep,
+)
 from app.domain.enums import (
     TERMINAL_STATUSES,
     ReviewRunStage,
@@ -66,7 +72,13 @@ def _transition(
 
 
 def _mark_failed(
-    uow: UnitOfWork, run_id: UUID, exc: Exception, now: datetime, *, unrecorded_tokens: int = 0
+    uow: UnitOfWork,
+    run_id: UUID,
+    exc: Exception,
+    now: datetime,
+    *,
+    unrecorded_tokens: int = 0,
+    unwritten_steps: Mapping[UUID, ReviewRunStep] | None = None,
 ) -> None:
     """Перевести прогон в failed по свежей строке из базы.
 
@@ -76,7 +88,9 @@ def _mark_failed(
     исключение - зависший прогон выметет `sweep_stale_runs`. К затратам
     прогона добавляются токены, которые успел израсходовать сбойный вызов
     модели, и `unrecorded_tokens` - токены ответов, ещё не записанные в прогон.
-    Шаги, оставшиеся `running`, закрываются следом (`close_abandoned_steps`).
+    Шаги, оставшиеся `running`, закрываются следом (`close_abandoned_steps`):
+    шаг из `unwritten_steps` - своим незаписанным исходом, прочие -
+    `REVIEW_RUN_STALE`.
     """
     spent = unrecorded_tokens + (exc.tokens_used if isinstance(exc, LlmError) else 0)
     try:
@@ -95,7 +109,7 @@ def _mark_failed(
     except Exception:
         logger.exception("не удалось перевести прогон %s в failed", run_id)
         return
-    close_abandoned_steps(uow, run_id, now=now)
+    close_abandoned_steps(uow, run_id, now=now, known=unwritten_steps)
 
 
 def run_review(
@@ -253,7 +267,12 @@ def run_review(
     except Exception as exc:
         steps.fail(exc)
         _mark_failed(
-            uow, job.review_run_id, exc, now(), unrecorded_tokens=unrecorded_tokens
+            uow,
+            job.review_run_id,
+            exc,
+            now(),
+            unrecorded_tokens=unrecorded_tokens,
+            unwritten_steps=steps.unwritten,
         )
         raise
 

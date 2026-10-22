@@ -1098,8 +1098,8 @@ def test_a_redelivered_run_closes_the_step_the_dead_worker_left_running() -> Non
     assert abandoned.duration_seconds is not None and abandoned.duration_seconds > 0
 
 
-def test_a_failed_run_leaves_no_running_steps_when_closing_its_step_failed() -> None:
-    """Исход упавшего шага не записался - шаг закрывает перевод прогона в failed."""
+def test_a_failed_run_closes_its_step_with_the_known_code_when_the_outcome_write_failed() -> None:
+    """Исход упавшего шага не записался - перевод прогона в failed пишет его с настоящим кодом."""
     uow = FakeUnitOfWork()
     _seed_run(uow)
     writes = {"failed": 0}
@@ -1120,8 +1120,8 @@ def test_a_failed_run_leaves_no_running_steps_when_closing_its_step_failed() -> 
     assert _steps(uow)[-1] == (
         ReviewRunStage.ANALYSING,
         ReviewRunStepStatus.FAILED,
-        None,
-        "REVIEW_RUN_STALE",
+        0,
+        "LLM_UNAVAILABLE",
     )
 
 
