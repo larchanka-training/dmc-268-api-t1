@@ -263,7 +263,11 @@ def run_review(
         steps.finish()
 
         run = replace(run, duration_seconds=monotonic() - started_at)
-        _transition(uow, run, ReviewRunStatus.COMPLETED, now())
+        moment = now()
+        _transition(uow, run, ReviewRunStatus.COMPLETED, moment)
+        # Шаг, чей исход не записался, или брошенная попытка прошлой доставки
+        # иначе остались бы `running` у завершённого прогона.
+        close_abandoned_steps(uow, run.id, now=moment, known=steps.unwritten)
     except Exception as exc:
         steps.fail(exc)
         _mark_failed(

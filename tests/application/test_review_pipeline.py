@@ -917,13 +917,17 @@ def test_a_failure_while_closing_the_step_does_not_mask_the_original_error() -> 
 def _failing_step_writes(
     uow: FakeUnitOfWork, fails: Callable[[ReviewRunStep], bool]
 ) -> list[ReviewRunStep]:
-    """Запись шага, для которого `fails` истинно, падает как сбой базы; такие шаги — в списке."""
+    """Первая запись шага, для которой `fails` истинно, падает как сбой базы; такие шаги — в списке.
+
+    Сбой разовый, как у кратковременного сбоя базы: повторная запись того же
+    шага в том же виде проходит.
+    """
     failed: list[ReviewRunStep] = []
     real_add, real_update = uow.review_run_steps.add, uow.review_run_steps.update
 
     def guarded(write: Callable[[ReviewRunStep], None]) -> Callable[[ReviewRunStep], None]:
         def wrapper(step: ReviewRunStep) -> None:
-            if fails(step):
+            if fails(step) and step not in failed:
                 failed.append(step)
                 raise ConnectionError("база недоступна")
             write(step)
@@ -960,9 +964,10 @@ def test_a_failed_retry_write_hands_the_review_to_the_next_provider() -> None:
     run = _completed(uow)
     assert run.status is ReviewRunStatus.COMPLETED
     assert run.tokens_used == 15
-    # Неудавшаяся попытка не закрылась и осталась `running`; повтор записан своим шагом.
+    # Исход неудавшейся попытки не записался сразу - его пишет завершение прогона;
+    # повтор записан своим шагом.
     assert _steps(uow)[2:] == [
-        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.RUNNING, None, None),
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 10, "LLM_UNAVAILABLE"),
         (ReviewRunStage.ANALYSING, ReviewRunStepStatus.COMPLETED, 5, None),
         (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, None, None),
         (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None),
@@ -1018,7 +1023,7 @@ def test_a_failed_retry_write_hands_the_verifier_to_the_next_provider() -> None:
     assert run.verification is VerificationOutcome.VERIFIED
     assert run.tokens_used == 5 + 2 + 7
     assert _steps(uow)[3:] == [
-        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.RUNNING, None, None),
+        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.FAILED, 2, "LLM_UNAVAILABLE"),
         (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, 7, None),
         (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None),
     ]
@@ -1042,9 +1047,10 @@ def test_a_failed_step_commit_after_publishing_does_not_fail_the_run() -> None:
     run = _completed(uow)
     assert run.status is ReviewRunStatus.COMPLETED
     assert run.failure_reason is None
-    # Исход шага не записался, а прогон завершён: шаг остаётся `running` -
-    # брошенные шаги закрываются только у упавшего прогона.
-    assert _steps(uow)[-1] == (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.RUNNING, None, None)
+    # Исход шага не записался сразу: его пишет завершение прогона, и шагов
+    # `running` у завершённого прогона нет.
+    assert _steps(uow)[-1] == (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None)
+    assert all(s[1] is not ReviewRunStepStatus.RUNNING for s in _steps(uow))
 
 
 def test_failed_step_starts_do_not_fail_the_run() -> None:
