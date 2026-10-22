@@ -44,8 +44,8 @@ from app.api.problems import (
     OriginForbiddenProblem,
     Problem,
     ProviderNotSupportedProblem,
-    RepositoryAdminRequiredProblem,
     RepositoryAlreadyConnectedProblem,
+    RepositoryManageRequiredProblem,
     RepositoryNotFoundProblem,
     RepositoryNotInInstallationProblem,
     ReviewAlreadyActiveProblem,
@@ -111,16 +111,16 @@ ERRORS_404_NOT_IN_INSTALLATION = _doc(
     "Репозитория нет среди репозиториев установок GitHub App, или провайдер не `github`.",
 )
 ERRORS_409_ALREADY_CONNECTED = _doc(
-    HTTPStatus.CONFLICT, RepositoryAlreadyConnectedProblem, "Репозиторий уже подключён, в том числе параллельным запросом."
+    HTTPStatus.CONFLICT, RepositoryAlreadyConnectedProblem, "Репозиторий уже подключён, в том числе параллельным запросом; отвечается только пользователю с правами admin или maintain."
 )
 # Один статус — две причины: `Origin` проверяет middleware, права — ручка. Модель ответа —
 # объединение с discriminator по `code`, в схеме это `oneOf`; ключ `responses` у статуса
 # один, поэтому `{**ERRORS_403_ORIGIN, **…}` не годится — второй словарь затёр бы первый.
-ERRORS_403_ORIGIN_OR_ADMIN = _doc(
+ERRORS_403_ORIGIN_OR_MANAGE = _doc(
     HTTPStatus.FORBIDDEN,
-    Annotated[OriginForbiddenProblem | RepositoryAdminRequiredProblem, Field(discriminator="code")],
+    Annotated[OriginForbiddenProblem | RepositoryManageRequiredProblem, Field(discriminator="code")],
     "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; "
-    "`REPOSITORY_ADMIN_REQUIRED` — у пользователя нет прав admin на репозиторий у провайдера.",
+    "`REPOSITORY_MANAGE_REQUIRED` — у пользователя нет прав admin или maintain на репозиторий у провайдера.",
 )
 ERRORS_501_NOT_IMPLEMENTED = _doc(HTTPStatus.NOT_IMPLEMENTED, NotImplementedProblem, "Ручка ещё не реализована.")
 

@@ -164,3 +164,19 @@ TERMINAL_STATUSES: frozenset[ReviewRunStatus] = frozenset(
         ReviewRunStatus.CANCELLED,
     }
 )
+
+
+class RepositoryRole(StrEnum):
+    """Роль пользователя на репозитории у провайдера.
+
+    Имена — роли GitHub. `CUSTOM` — пользовательская роль организации: доступ
+    к репозиторию она даёт, а что разрешает, по имени не сказать. Отсутствие
+    доступа — не роль, а `None` там, где роль ожидается.
+    """
+
+    ADMIN = "admin"
+    MAINTAIN = "maintain"
+    WRITE = "write"
+    TRIAGE = "triage"
+    READ = "read"
+    CUSTOM = "custom"

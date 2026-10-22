@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from app.domain.entities import InstallationRepository
+from app.domain.enums import RepositoryRole
 from app.infrastructure.vcs.errors import (
     VcsAuthError,
     VcsError,
@@ -31,9 +32,23 @@ from app.infrastructure.vcs.github_auth import GitHubAppAuth
 _JSON_ACCEPT = "application/vnd.github+json"
 # Максимум страницы у GitHub: страница короче — последняя.
 _PER_PAGE = 100
-# Права, которых достаточно для подключения: у GitHub `permission` — одно из
-# admin, maintain, write, triage, read, none.
-_ADMIN = "admin"
+# Ответ «доступа нет» у GitHub в `role_name` и `permission`.
+_NO_ACCESS = "none"
+_KNOWN_ROLES = {role.value: role for role in RepositoryRole if role is not RepositoryRole.CUSTOM}
+
+
+def _translate_role(role_name: str | None, permission: str) -> RepositoryRole | None:
+    """Роль из ответа GitHub «Get repository permissions for a user».
+
+    `permission` — устаревшие базовые роли admin, write, read, none: maintain в
+    нём отдаётся как write, triage — как read. Полное имя роли, включая
+    пользовательские, — в `role_name`; без него — `permission`. Незнакомое имя —
+    пользовательская роль: доступ есть, что он разрешает — неизвестно.
+    """
+    name = role_name if role_name is not None else permission
+    if name == _NO_ACCESS:
+        return None
+    return _KNOWN_ROLES.get(name, RepositoryRole.CUSTOM)
 
 
 class GitHubInstallationCatalog:
@@ -51,19 +66,22 @@ class GitHubInstallationCatalog:
             repositories.extend(self._installation_repositories(installation_id))
         return repositories
 
-    def is_admin(self, repository: InstallationRepository, login: str) -> bool:
+    def user_role(self, repository: InstallationRepository, login: str) -> RepositoryRole | None:
         url = f"/repos/{repository.full_name}/collaborators/{login}/permission"
         try:
             response = self._gateway._get(url, repository.installation_id, _JSON_ACCEPT)
         except VcsNotFoundError:
-            # Не коллаборатор (или GitHub не раскрывает репозиторий) — не admin.
-            return False
+            # Не коллаборатор (или GitHub не раскрывает репозиторий) — доступа нет.
+            return None
         try:
             data: dict[str, Any] = response.json()
+            role_name = data.get("role_name")
             permission = data["permission"]
-        except (ValueError, KeyError, TypeError) as error:
+            if not isinstance(permission, str) or not isinstance(role_name, str | None):
+                raise TypeError("роль — не строка")
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
             raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}: {error!r}") from error
-        return bool(permission == _ADMIN)
+        return _translate_role(role_name, permission)
 
     def _installation_ids(self) -> list[int]:
         ids: list[int] = []

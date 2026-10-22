@@ -14,6 +14,7 @@ import jwt
 import pytest
 
 from app.domain.entities import InstallationRepository
+from app.domain.enums import RepositoryRole
 from app.infrastructure.vcs.errors import VcsAuthError, VcsError, VcsUnavailableError
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
@@ -82,25 +83,55 @@ def test_lists_repositories_of_every_installation_page_by_page(rsa_key_pair: Rsa
     assert "/installation/repositories?per_page=100&page=2" in seen
 
 
-@pytest.mark.parametrize(("permission", "expected"), [("admin", True), ("write", False), ("maintain", False)])
-def test_admin_is_the_admin_permission_only(rsa_key_pair: RsaKeyPair, permission: str, expected: bool) -> None:
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # Формы ответа — из документации GitHub «Get repository permissions for a user»:
+        # maintain в `permission` отдаётся как write, triage — как read; полное имя роли —
+        # в `role_name`.
+        ({"permission": "admin", "role_name": "admin"}, RepositoryRole.ADMIN),
+        ({"permission": "write", "role_name": "maintain"}, RepositoryRole.MAINTAIN),
+        ({"permission": "write", "role_name": "write"}, RepositoryRole.WRITE),
+        ({"permission": "read", "role_name": "triage"}, RepositoryRole.TRIAGE),
+        ({"permission": "read", "role_name": "read"}, RepositoryRole.READ),
+        ({"permission": "write", "role_name": "custom-release-manager"}, RepositoryRole.CUSTOM),
+        ({"permission": "none", "role_name": "none"}, None),
+        # Без `role_name` — только устаревшее поле: maintain в нём не отличить от write.
+        ({"permission": "admin"}, RepositoryRole.ADMIN),
+        ({"permission": "write"}, RepositoryRole.WRITE),
+        ({"permission": "read"}, RepositoryRole.READ),
+        ({"permission": "none"}, None),
+    ],
+)
+def test_the_role_comes_from_role_name_then_permission(
+    rsa_key_pair: RsaKeyPair, body: dict[str, str], expected: RepositoryRole | None
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if (token := token_response(request)) is not None:
             return token
         assert request.url.path == "/repos/octo-org/api/collaborators/octocat/permission"
         assert request.headers["Authorization"] == "Bearer tok-7"
-        return httpx.Response(200, json={"permission": permission, "role_name": permission})
+        return httpx.Response(200, json=body)
 
     repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7)
-    assert make_catalog(rsa_key_pair, handler).is_admin(repository, "octocat") is expected
+    assert make_catalog(rsa_key_pair, handler).user_role(repository, "octocat") is expected
 
 
-def test_a_user_who_is_not_a_collaborator_is_not_admin(rsa_key_pair: RsaKeyPair) -> None:
+def test_a_user_who_is_not_a_collaborator_has_no_access(rsa_key_pair: RsaKeyPair) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return token_response(request) or httpx.Response(404, json={"message": "Not Found"})
 
     repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7)
-    assert make_catalog(rsa_key_pair, handler).is_admin(repository, "stranger") is False
+    assert make_catalog(rsa_key_pair, handler).user_role(repository, "stranger") is None
+
+
+def test_a_role_body_without_permission_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return token_response(request) or httpx.Response(200, json={"role_name": "admin"})
+
+    repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7)
+    with pytest.raises(VcsError):
+        make_catalog(rsa_key_pair, handler).user_role(repository, "octocat")
 
 
 def test_a_failing_installations_request_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
@@ -145,7 +176,7 @@ def test_a_failing_permission_request_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -
 
     repository = InstallationRepository("101", "octo-org/api", "main", installation_id=7)
     with pytest.raises(VcsUnavailableError):
-        make_catalog(rsa_key_pair, handler).is_admin(repository, "octocat")
+        make_catalog(rsa_key_pair, handler).user_role(repository, "octocat")
 
 
 def test_a_missing_private_key_is_an_auth_error() -> None:

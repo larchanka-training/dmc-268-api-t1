@@ -463,11 +463,11 @@
           "repositories"
         ],
         "summary": "Репозитории, доступные для подключения",
-        "description": "Требует сессию. Репозитории всех установок GitHub App с отметкой `already_connected` — зарегистрирован ли репозиторий в сервисе. По правам вошедшего пользователя список не фильтруется: запрос прав на каждый репозиторий при каждом показе дорог, права проверяет подключение. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`.",
+        "description": "Требует сессию. Репозитории установок GitHub App, к которым у вошедшего пользователя есть доступ в GitHub (любая роль, в том числе read), с отметкой `already_connected` — зарегистрирован ли репозиторий в сервисе. Пользователь видит только то, что и так видит в GitHub; остальные репозитории установок в ответ не попадают, это не ошибка. Подключить из списка можно только с ролью admin или maintain, иначе подключение ответит `403 REPOSITORY_MANAGE_REQUIRED`. Роль проверяется запросом к GitHub на каждый репозиторий установок. Если GitHub не ответил или ответил ошибкой, в том числе на запрос роли, — `502 SCM_UNAVAILABLE`.",
         "operationId": "listAvailableRepositories",
         "responses": {
           "200": {
-            "description": "Репозитории установок GitHub App.",
+            "description": "Репозитории установок GitHub App, к которым у пользователя есть доступ.",
             "content": {
               "application/json": {
                 "schema": {
@@ -540,7 +540,7 @@
           "repositories"
         ],
         "summary": "Подключить репозиторий",
-        "description": "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. Регистрирует репозиторий установки GitHub App с `auto_review_enabled = true`; `full_name` и `default_branch` — из данных установки. Проверки по порядку: провайдер не `github` или репозитория нет среди репозиториев установок — `404 REPOSITORY_NOT_IN_INSTALLATION`; репозиторий уже подключён — `409 REPOSITORY_ALREADY_CONNECTED`; у пользователя нет прав admin на репозиторий у GitHub — `403 REPOSITORY_ADMIN_REQUIRED`. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, репозиторий не записан.",
+        "description": "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. Регистрирует репозиторий установки GitHub App с `auto_review_enabled = true`; `full_name` и `default_branch` — из данных установки. Проверки по порядку: провайдер не `github` или репозитория нет среди репозиториев установок — `404 REPOSITORY_NOT_IN_INSTALLATION`; у пользователя нет роли admin или maintain на репозитории в GitHub — `403 REPOSITORY_MANAGE_REQUIRED`; репозиторий уже подключён — `409 REPOSITORY_ALREADY_CONNECTED`. Пользователь без прав получает `403` и не узнаёт, подключён ли репозиторий. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, репозиторий не записан.",
         "operationId": "connectRepository",
         "security": [
           {
@@ -604,7 +604,7 @@
             }
           },
           "403": {
-            "description": "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; `REPOSITORY_ADMIN_REQUIRED` — у пользователя нет прав admin на репозиторий у провайдера.",
+            "description": "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; `REPOSITORY_MANAGE_REQUIRED` — у пользователя нет прав admin или maintain на репозиторий у провайдера.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -613,14 +613,14 @@
                       "$ref": "#/components/schemas/OriginForbiddenProblem"
                     },
                     {
-                      "$ref": "#/components/schemas/RepositoryAdminRequiredProblem"
+                      "$ref": "#/components/schemas/RepositoryManageRequiredProblem"
                     }
                   ],
                   "discriminator": {
                     "propertyName": "code",
                     "mapping": {
                       "ORIGIN_FORBIDDEN": "#/components/schemas/OriginForbiddenProblem",
-                      "REPOSITORY_ADMIN_REQUIRED": "#/components/schemas/RepositoryAdminRequiredProblem"
+                      "REPOSITORY_MANAGE_REQUIRED": "#/components/schemas/RepositoryManageRequiredProblem"
                     }
                   },
                   "title": "Response 403 Connectrepository"
@@ -649,7 +649,7 @@
             }
           },
           "409": {
-            "description": "Репозиторий уже подключён, в том числе параллельным запросом.",
+            "description": "Репозиторий уже подключён, в том числе параллельным запросом; отвечается только пользователю с правами admin или maintain.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1554,7 +1554,7 @@
             "$ref": "#/components/schemas/RepositoryAlreadyConnectedProblem"
           },
           {
-            "$ref": "#/components/schemas/RepositoryAdminRequiredProblem"
+            "$ref": "#/components/schemas/RepositoryManageRequiredProblem"
           },
           {
             "$ref": "#/components/schemas/ProviderNotSupportedProblem"
@@ -1601,8 +1601,8 @@
             "NOT_IMPLEMENTED": "#/components/schemas/NotImplementedProblem",
             "ORIGIN_FORBIDDEN": "#/components/schemas/OriginForbiddenProblem",
             "PROVIDER_NOT_SUPPORTED": "#/components/schemas/ProviderNotSupportedProblem",
-            "REPOSITORY_ADMIN_REQUIRED": "#/components/schemas/RepositoryAdminRequiredProblem",
             "REPOSITORY_ALREADY_CONNECTED": "#/components/schemas/RepositoryAlreadyConnectedProblem",
+            "REPOSITORY_MANAGE_REQUIRED": "#/components/schemas/RepositoryManageRequiredProblem",
             "REPOSITORY_NOT_FOUND": "#/components/schemas/RepositoryNotFoundProblem",
             "REPOSITORY_NOT_IN_INSTALLATION": "#/components/schemas/RepositoryNotInInstallationProblem",
             "REVIEW_ALREADY_ACTIVE": "#/components/schemas/ReviewAlreadyActiveProblem",
@@ -2817,77 +2817,6 @@
         "title": "PublishedCommentResponse",
         "description": "Комментарий, который прогон опубликовал на хостинге."
       },
-      "RepositoryAdminRequiredProblem": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "urn:dmc-268:problem:repository-admin-required",
-            "title": "Type",
-            "default": "urn:dmc-268:problem:repository-admin-required"
-          },
-          "title": {
-            "type": "string",
-            "const": "Нужны права admin на репозиторий",
-            "title": "Title",
-            "default": "Нужны права admin на репозиторий"
-          },
-          "status": {
-            "type": "integer",
-            "const": 403,
-            "title": "Status",
-            "default": 403
-          },
-          "detail": {
-            "type": "string",
-            "title": "Detail",
-            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
-          },
-          "instance": {
-            "type": "string",
-            "format": "uri-reference",
-            "title": "Instance",
-            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
-          },
-          "code": {
-            "type": "string",
-            "const": "REPOSITORY_ADMIN_REQUIRED",
-            "title": "Code",
-            "default": "REPOSITORY_ADMIN_REQUIRED"
-          },
-          "trace_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Trace Id",
-            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
-            "examples": [
-              "4bf92f3577b34da6a3ce929d0e0e4736"
-            ]
-          }
-        },
-        "type": "object",
-        "required": [
-          "type",
-          "title",
-          "status",
-          "detail",
-          "instance",
-          "code",
-          "trace_id"
-        ],
-        "title": "RepositoryAdminRequiredProblem",
-        "description": "`403 REPOSITORY_ADMIN_REQUIRED`: у пользователя нет прав admin на репозиторий у провайдера.",
-        "examples": [
-          {
-            "code": "REPOSITORY_ADMIN_REQUIRED",
-            "detail": "Подключать репозиторий может только пользователь с правами admin на него.",
-            "instance": "/api/v1/repositories",
-            "status": 403,
-            "title": "Нужны права admin на репозиторий",
-            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-            "type": "urn:dmc-268:problem:repository-admin-required"
-          }
-        ]
-      },
       "RepositoryAlreadyConnectedProblem": {
         "properties": {
           "type": {
@@ -2976,6 +2905,77 @@
         ],
         "title": "RepositoryListResponse",
         "description": "Страница списка репозиториев."
+      },
+      "RepositoryManageRequiredProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:repository-manage-required",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:repository-manage-required"
+          },
+          "title": {
+            "type": "string",
+            "const": "Нужны права admin или maintain на репозиторий",
+            "title": "Title",
+            "default": "Нужны права admin или maintain на репозиторий"
+          },
+          "status": {
+            "type": "integer",
+            "const": 403,
+            "title": "Status",
+            "default": 403
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "REPOSITORY_MANAGE_REQUIRED",
+            "title": "Code",
+            "default": "REPOSITORY_MANAGE_REQUIRED"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "RepositoryManageRequiredProblem",
+        "description": "`403 REPOSITORY_MANAGE_REQUIRED`: у пользователя нет прав admin или maintain на репозиторий у провайдера.",
+        "examples": [
+          {
+            "code": "REPOSITORY_MANAGE_REQUIRED",
+            "detail": "Подключать репозиторий может только пользователь с правами admin или maintain на него.",
+            "instance": "/api/v1/repositories",
+            "status": 403,
+            "title": "Нужны права admin или maintain на репозиторий",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:repository-manage-required"
+          }
+        ]
       },
       "RepositoryNotFoundProblem": {
         "properties": {

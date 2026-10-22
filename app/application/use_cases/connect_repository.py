@@ -3,7 +3,10 @@
 Провайдер скрыт за портом `InstallationCatalog`, хранение — за `UnitOfWork`.
 Время и id новой записи приходят аргументами. Запросы к провайдеру идут вне
 транзакции: соединение с базой не ждёт GitHub. Сбой провайдера (`VcsError`)
-проходит наверх — его переводит слой API.
+проходит наверх — его переводит слой API. Видеть в списке пользователь может
+репозитории, к которым у него есть любой доступ у провайдера, подключать — с
+ролью admin или maintain (`app/domain/repository_access.py`, change
+`repository-access-roles`).
 """
 
 from dataclasses import dataclass
@@ -15,6 +18,7 @@ from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.unit_of_work import UnitOfWork
 from app.domain.entities import InstallationRepository, Repository
 from app.domain.enums import Provider
+from app.domain.repository_access import can_connect, can_see
 
 
 class ConnectRefusal(StrEnum):
@@ -22,7 +26,7 @@ class ConnectRefusal(StrEnum):
 
     NOT_IN_INSTALLATION = "not_in_installation"
     ALREADY_CONNECTED = "already_connected"
-    ADMIN_REQUIRED = "admin_required"
+    MANAGE_REQUIRED = "manage_required"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,13 +35,19 @@ class AvailableRepository:
     already_connected: bool
 
 
-def list_available_repositories(catalog: InstallationCatalog, uow: UnitOfWork) -> list[AvailableRepository]:
-    """Репозитории установок с отметкой, зарегистрирован ли каждый.
+def list_available_repositories(
+    catalog: InstallationCatalog, uow: UnitOfWork, login: str
+) -> list[AvailableRepository]:
+    """Репозитории установок, к которым у `login` есть доступ у провайдера, с отметкой,
+    зарегистрирован ли каждый.
 
-    По правам пользователя список не фильтруется: запрос прав на каждый
-    репозиторий при каждом показе дорог, права проверяет подключение.
+    Остальные в список не попадают: пользователь видит только то, что и так видит
+    у провайдера, и имена чужих приватных репозиториев ему не раскрываются. Роль —
+    запрос на каждый репозиторий, последовательно; сбой любого из них проходит
+    наверх: частичный список выдал бы сбой GitHub за отсутствие доступа. Стоимость
+    и отказ от кэша — design D2 change `repository-access-roles`.
     """
-    repositories = catalog.list_repositories()
+    repositories = [r for r in catalog.list_repositories() if can_see(catalog.user_role(r, login))]
     with uow:
         return [
             AvailableRepository(
@@ -60,20 +70,18 @@ def connect_repository(
 ) -> Repository | ConnectRefusal:
     """Зарегистрировать репозиторий установки от имени пользователя `login`.
 
-    Порядок проверок — design D4: нет в установке, уже подключён, не admin.
-    Уже подключённый проверяется раньше прав: это экономит запрос к провайдеру
-    и ничего не раскрывает — список доступных отдаёт отметку всем.
+    Порядок проверок — design D4 change `repository-access-roles`: нет в
+    установке, нет роли admin или maintain, уже подключён. Права проверяются
+    раньше «уже подключён»: пользователь без прав получает отказ по правам и не
+    узнаёт, подключён ли репозиторий.
     """
     if provider is not Provider.GITHUB:
         return ConnectRefusal.NOT_IN_INSTALLATION
     found = next((r for r in catalog.list_repositories() if r.provider_id == provider_id), None)
     if found is None:
         return ConnectRefusal.NOT_IN_INSTALLATION
-    with uow:
-        if uow.repositories.find_by_provider(provider, provider_id) is not None:
-            return ConnectRefusal.ALREADY_CONNECTED
-    if not catalog.is_admin(found, login):
-        return ConnectRefusal.ADMIN_REQUIRED
+    if not can_connect(catalog.user_role(found, login)):
+        return ConnectRefusal.MANAGE_REQUIRED
     repository = Repository(
         id=repository_id,
         provider=provider,
@@ -85,6 +93,8 @@ def connect_repository(
         updated_at=now,
     )
     with uow:
+        if uow.repositories.find_by_provider(provider, provider_id) is not None:
+            return ConnectRefusal.ALREADY_CONNECTED
         # Параллельное подключение могло успеть между проверкой и вставкой.
         if not uow.repositories.add(repository):
             return ConnectRefusal.ALREADY_CONNECTED

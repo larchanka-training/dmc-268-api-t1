@@ -15,7 +15,7 @@ from app.api.factory import create_app
 from app.api.pagination import MAX_LIMIT
 from app.config import Settings
 from app.domain.entities import InstallationRepository, Repository
-from app.domain.enums import Provider
+from app.domain.enums import Provider, RepositoryRole
 from app.domain.ids import new_id
 from app.domain.vcs_errors import VcsError
 
@@ -122,7 +122,8 @@ def test_a_limit_below_one_is_a_validation_error() -> None:
 def test_available_repositories_are_marked_when_already_connected() -> None:
     uow = FakeUnitOfWork()
     uow.repositories.add(_repository(101))
-    client = _client(uow, FakeInstallationCatalog([API, WEB]))
+    managers = {("octo-org/api", SIGNED_IN.login), ("octo-org/web", SIGNED_IN.login)}
+    client = _client(uow, FakeInstallationCatalog([API, WEB], managers=managers))
 
     response = client.get("/api/v1/repositories/available")
 
@@ -147,6 +148,43 @@ def test_available_repositories_are_marked_when_already_connected() -> None:
     }
 
 
+def test_a_read_only_user_sees_the_repository_but_cannot_connect_it() -> None:
+    catalog = FakeInstallationCatalog([API, WEB], roles={("octo-org/web", SIGNED_IN.login): RepositoryRole.READ})
+    uow = FakeUnitOfWork()
+    client = _client(uow, catalog)
+
+    listed = client.get("/api/v1/repositories/available")
+    connected = _connect(client, WEB.provider_id)
+
+    assert listed.status_code == 200
+    assert [item["full_name"] for item in listed.json()["items"]] == ["octo-org/web"]
+    assert connected.status_code == 403
+    assert connected.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    assert uow.repositories.stored == {}
+
+
+def test_a_maintainer_connects_a_repository() -> None:
+    catalog = FakeInstallationCatalog([API], roles={("octo-org/api", SIGNED_IN.login): RepositoryRole.MAINTAIN})
+
+    assert _connect(_client(FakeUnitOfWork(), catalog)).status_code == 201
+
+
+def test_available_repositories_are_empty_without_access_anywhere() -> None:
+    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API, WEB])).get("/api/v1/repositories/available")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
+def test_available_repositories_answer_502_when_the_permission_check_fails() -> None:
+    catalog = FakeInstallationCatalog([API], permission_error=VcsError("GitHub API: HTTP 503"))
+
+    response = _client(FakeUnitOfWork(), catalog).get("/api/v1/repositories/available")
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+
+
 def test_available_repositories_answer_502_when_github_fails() -> None:
     client = _client(FakeUnitOfWork(), FakeInstallationCatalog(error=VcsError("GitHub API: HTTP 503")))
 
@@ -166,9 +204,9 @@ def test_available_repositories_require_a_session() -> None:
     assert response.json()["code"] == "UNAUTHENTICATED"
 
 
-def test_an_admin_connects_a_repository() -> None:
+def test_a_manager_connects_a_repository() -> None:
     uow = FakeUnitOfWork()
-    client = _client(uow, FakeInstallationCatalog([API, WEB], admins={("octo-org/web", SIGNED_IN.login)}))
+    client = _client(uow, FakeInstallationCatalog([API, WEB], managers={("octo-org/web", SIGNED_IN.login)}))
 
     response = _connect(client, "202")
 
@@ -185,13 +223,13 @@ def test_an_admin_connects_a_repository() -> None:
     assert str(stored.id) == body["id"]
 
 
-def test_connecting_without_admin_rights_is_403() -> None:
+def test_connecting_without_manage_rights_is_403() -> None:
     uow = FakeUnitOfWork()
     response = _connect(_client(uow, FakeInstallationCatalog([API])))
 
     assert response.status_code == 403
     assert response.headers["content-type"] == "application/problem+json"
-    assert response.json()["code"] == "REPOSITORY_ADMIN_REQUIRED"
+    assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
     assert uow.repositories.stored == {}
 
 
@@ -212,12 +250,22 @@ def test_connecting_a_gitlab_repository_is_404() -> None:
 def test_connecting_twice_is_409() -> None:
     uow = FakeUnitOfWork()
     uow.repositories.add(_repository(101))
-    client = _client(uow, FakeInstallationCatalog([API], admins={("octo-org/api", SIGNED_IN.login)}))
+    client = _client(uow, FakeInstallationCatalog([API], managers={("octo-org/api", SIGNED_IN.login)}))
 
     response = _connect(client)
 
     assert response.status_code == 409
     assert response.json()["code"] == "REPOSITORY_ALREADY_CONNECTED"
+
+
+def test_connecting_a_connected_repository_without_manage_rights_is_403_not_409() -> None:
+    uow = FakeUnitOfWork()
+    uow.repositories.add(_repository(101))
+
+    response = _connect(_client(uow, FakeInstallationCatalog([API])))
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
 
 
 def test_connecting_answers_502_when_github_fails() -> None:

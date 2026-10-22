@@ -29,7 +29,7 @@ class ErrorCode(StrEnum):
     REPOSITORY_NOT_FOUND = "REPOSITORY_NOT_FOUND"
     REPOSITORY_NOT_IN_INSTALLATION = "REPOSITORY_NOT_IN_INSTALLATION"
     REPOSITORY_ALREADY_CONNECTED = "REPOSITORY_ALREADY_CONNECTED"
-    REPOSITORY_ADMIN_REQUIRED = "REPOSITORY_ADMIN_REQUIRED"
+    REPOSITORY_MANAGE_REQUIRED = "REPOSITORY_MANAGE_REQUIRED"
     PROVIDER_NOT_SUPPORTED = "PROVIDER_NOT_SUPPORTED"
     REVIEW_ALREADY_ACTIVE = "REVIEW_ALREADY_ACTIVE"
     WEBHOOK_SIGNATURE_INVALID = "WEBHOOK_SIGNATURE_INVALID"
@@ -201,18 +201,18 @@ class RepositoryAlreadyConnectedProblem(Problem):
     code: Literal[ErrorCode.REPOSITORY_ALREADY_CONNECTED] = ErrorCode.REPOSITORY_ALREADY_CONNECTED
 
 
-class RepositoryAdminRequiredProblem(Problem):
-    """`403 REPOSITORY_ADMIN_REQUIRED`: у пользователя нет прав admin на репозиторий у провайдера."""
+class RepositoryManageRequiredProblem(Problem):
+    """`403 REPOSITORY_MANAGE_REQUIRED`: у пользователя нет прав admin или maintain на репозиторий у провайдера."""
 
     example = {
-        "detail": "Подключать репозиторий может только пользователь с правами admin на него.",
+        "detail": "Подключать репозиторий может только пользователь с правами admin или maintain на него.",
         "instance": "/api/v1/repositories",
     }
 
-    type: Literal["urn:dmc-268:problem:repository-admin-required"] = "urn:dmc-268:problem:repository-admin-required"
-    title: Literal["Нужны права admin на репозиторий"] = "Нужны права admin на репозиторий"
+    type: Literal["urn:dmc-268:problem:repository-manage-required"] = "urn:dmc-268:problem:repository-manage-required"
+    title: Literal["Нужны права admin или maintain на репозиторий"] = "Нужны права admin или maintain на репозиторий"
     status: Literal[HTTPStatus.FORBIDDEN] = HTTPStatus.FORBIDDEN
-    code: Literal[ErrorCode.REPOSITORY_ADMIN_REQUIRED] = ErrorCode.REPOSITORY_ADMIN_REQUIRED
+    code: Literal[ErrorCode.REPOSITORY_MANAGE_REQUIRED] = ErrorCode.REPOSITORY_MANAGE_REQUIRED
 
 
 class ProviderNotSupportedProblem(Problem):
@@ -388,7 +388,7 @@ class AnyProblem(
             | RepositoryNotFoundProblem
             | RepositoryNotInInstallationProblem
             | RepositoryAlreadyConnectedProblem
-            | RepositoryAdminRequiredProblem
+            | RepositoryManageRequiredProblem
             | ProviderNotSupportedProblem
             | ReviewAlreadyActiveProblem
             | WebhookSignatureInvalidProblem

@@ -9,6 +9,7 @@
 from typing import Protocol
 
 from app.domain.entities import InstallationRepository
+from app.domain.enums import RepositoryRole
 
 
 class InstallationCatalog(Protocol):
@@ -16,6 +17,6 @@ class InstallationCatalog(Protocol):
         """Репозитории всех установок приложения."""
         ...
 
-    def is_admin(self, repository: InstallationRepository, login: str) -> bool:
-        """Есть ли у пользователя `login` права admin на репозиторий у провайдера."""
+    def user_role(self, repository: InstallationRepository, login: str) -> RepositoryRole | None:
+        """Роль `login` на репозитории у провайдера; `None` — доступа нет."""
         ...
