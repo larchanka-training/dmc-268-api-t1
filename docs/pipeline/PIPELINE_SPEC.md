@@ -393,7 +393,7 @@ MVP endpoints:
 GET  /repositories
 GET  /repositories/{repository_id}/pull-requests
 GET  /reviews/{review_run_id}
-GET  /reviews/{review_run_id}/events
+GET  /events                      # общий поток событий кабинета (SSE)
 POST /webhooks/{provider}
 POST /reviews                    # заглушка: схема описана, отвечает 501 NOT_IMPLEMENTED
 GET  /auth/{provider}/login

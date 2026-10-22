@@ -14,12 +14,17 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from uuid import UUID
 
 from app.application.ports import UnitOfWork
-from app.application.review_run_events import POLL_SECONDS, SESSION_CHECK_SECONDS
 from app.application.use_cases.connect_repository import AvailableRepository
 from app.domain.entities import ReviewRunListEntry
 from app.domain.enums import Provider
 from app.domain.run_events import PING_AFTER_SECONDS, PingEvent
 from app.domain.run_feed import RunFeedEvent, RunFeedState, advance_feed
+
+# Спека обещает событие не позже двух секунд после записи статуса.
+POLL_SECONDS = 1.0
+# Спека `user-auth`: сессия перепроверяется каждые 5 секунд по монотонным часам,
+# поэтому поток закрывается не позже чем через 5 секунд и один круг опроса после выхода.
+SESSION_CHECK_SECONDS = 5.0
 
 type FeedItem = RunFeedEvent | PingEvent
 

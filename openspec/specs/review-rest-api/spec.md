@@ -54,6 +54,10 @@
 возвращающий прогон ревью вместе со всеми его находками в одном ответе.
 Запрос к несуществующему прогону SHALL быть отклонён кодом 404.
 
+Ответ SHALL содержать время последнего прогресса прогона
+(`last_progress_at`) и этап сбоя (`failed_stage`); у прогона, который не
+падал, этап сбоя SHALL быть `null`.
+
 #### Scenario: Существующий прогон возвращается с находками
 
 - **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` для
@@ -73,6 +77,19 @@
   `review_run_id`, которого нет в системе
 - **THEN** ответ — 404
 
+#### Scenario: Ответ содержит время последнего прогресса
+
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` для идущего
+  прогона
+- **THEN** ответ содержит `last_progress_at` — время его последнего перехода,
+  а `failed_stage` равен `null`
+
+#### Scenario: Упавший прогон отдаёт этап сбоя
+
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` для прогона,
+  упавшего на этапе `analysing`
+- **THEN** ответ содержит `failed_stage: "analysing"` и причину сбоя
+
 ### Requirement: Находки прогона отдаются в стабильном порядке
 
 `GET /api/v1/reviews/{review_run_id}` SHALL возвращать находки прогона в
@@ -85,7 +102,7 @@
 
 ### Requirement: Ручки чтения требуют сессию
 
-Ручки чтения REST API — репозитории, запросы на изменение, прогоны ревью, их находки и поток статуса прогона — SHALL требовать действительную сессию пользователя и без неё SHALL отвечать `401` с `code = UNAUTHENTICATED`.
+Ручки чтения REST API — репозитории, запросы на изменение, прогоны ревью, их находки и общий поток событий `GET /api/v1/events` — SHALL требовать действительную сессию пользователя и без неё SHALL отвечать `401` с `code = UNAUTHENTICATED`.
 
 #### Scenario: Запрос без сессии
 
@@ -103,7 +120,7 @@
 
 #### Scenario: Несуществующий прогон
 
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` или `GET /api/v1/reviews/{review_run_id}/events` для прогона, которого нет
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` для прогона, которого нет
 - **THEN** ответ — `404` `application/problem+json` с `code = REVIEW_NOT_FOUND`
 
 #### Scenario: Несуществующий репозиторий
@@ -182,8 +199,8 @@
 
 #### Scenario: Поток статуса прогона
 
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/events` с сессией для существующего прогона
-- **THEN** ответ — `text/event-stream` с заголовком `X-Trace-ID`
+- **WHEN** вызывается `GET /api/v1/events` с сессией
+- **THEN** ответ — `text/event-stream` с заголовком `X-Trace-ID`, равным trace id серверного спана запроса
 
 ### Requirement: Сбой сервера оставляет строку лога с trace id
 
@@ -230,12 +247,12 @@
 
 ### Requirement: Время в ответах — UTC с Z
 
-Каждое поле времени в JSON-ответах API и в данных событий потока статуса SHALL отдаваться в UTC в форме `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`. В схеме OpenAPI такое поле SHALL быть `format: date-time` с `pattern` этой формы.
+Каждое поле времени в JSON-ответах API и в данных событий общего потока SHALL отдаваться в UTC в форме `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`. В схеме OpenAPI такое поле SHALL быть `format: date-time` с `pattern` этой формы.
 
 #### Scenario: Время прогона
 
 - **WHEN** прогон записан со временем `2026-10-11T13:00:00+03:00`
-- **THEN** в ответе и в событии `status` поле времени — `2026-10-11T10:00:00Z`
+- **THEN** в ответе и в данных события `run.*` поле времени — `2026-10-11T10:00:00Z`
 
 ### Requirement: Offset списков в пределах bigint
 
