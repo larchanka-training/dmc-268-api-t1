@@ -14,7 +14,7 @@
 
 ## What Changes
 
-- Токен пользователя (user access token GitHub App, а при включённом истечении — и refresh token со сроками) сохраняется при сессии, только зашифрованным (AES-256-GCM, ключ — новая настройка `USER_TOKEN_ENCRYPTION_KEY`, на стенде — секрет `USER_TOKEN_KEY_DMC268_T1`). Таблица `provider_tokens`, миграция `0007`.
+- Токен пользователя (user access token GitHub App, а при включённом истечении — и refresh token со сроками) сохраняется при сессии, только зашифрованным (AES-256-GCM, ключ — новая настройка `USER_TOKEN_ENCRYPTION_KEY`, на стенде — секрет `USER_TOKEN_KEY_DMC268_T1`). Таблица `provider_tokens`, миграция `0009`.
 - Истёкший токен обменивается по refresh token; отказ GitHub в токене или refresh token, отсутствие токена (сессия открыта до этой правки) — `401 UNAUTHENTICATED`, сессия закрывается.
 - Выход, вход поверх сессии и уборка истёкших сессий удаляют токен вместе с сессией.
 - `GET /repositories/available` — через `/user/installations…` по токену пользователя; `POST /repositories` ищет репозиторий в том же списке: нет его — `404` (без различия «нет в установке» и «не виден»), без `permissions.admin`/`maintain` — `403`.
@@ -31,6 +31,6 @@
 
 - Домен: `Secret`, `ProviderGrant`, `ProviderToken`, `RepositoryPermissions`, `app/domain/provider_token.py`, `app/domain/repository_access.py` (переписан), удалён `RepositoryRole`.
 - Приложение: порт `ProviderTokenRepo`, порты `OAuthProvider` (`exchange_code` → `OAuthLogin`, `refresh`) и `InstallationCatalog` (`list_repositories(access_token)`), use case `user_token.py`.
-- Инфраструктура: `token_cipher.py`, `SqlAlchemyProviderTokenRepo`, миграция `0007_add_provider_tokens.py`, адаптеры GitHub OAuth и каталога.
+- Инфраструктура: `token_cipher.py`, `SqlAlchemyProviderTokenRepo`, миграция `0009_add_provider_tokens.py`, адаптеры GitHub OAuth и каталога.
 - Деплой: `infra/` (переменная `user_token_encryption_key` с проверкой формата), `deploy.yml`, `docker-compose.yml`, `.env.example`, README.
 - Пользователи с сессией, открытой до деплоя, на экране репозиториев войдут заново.

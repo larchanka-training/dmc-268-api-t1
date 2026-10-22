@@ -150,7 +150,7 @@ def test_two_parallel_refreshes_of_one_session_spend_the_refresh_token_once(clea
     assert seen == ["ghu_refreshed", "ghu_refreshed"]
 
 
-def test_migration_0007_downgrades_and_upgrades_cleanly(migrated) -> None:
+def test_migration_0009_downgrades_and_upgrades_cleanly(migrated) -> None:
     from alembic.config import Config
 
     from alembic import command
@@ -159,7 +159,7 @@ def test_migration_0007_downgrades_and_upgrades_cleanly(migrated) -> None:
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL.replace("%", "%%"))
     try:
-        command.downgrade(config, "0006")
+        command.downgrade(config, "0008")
         assert "provider_tokens" not in inspect(migrated).get_table_names()
         assert "sessions" in inspect(migrated).get_table_names()
     finally:

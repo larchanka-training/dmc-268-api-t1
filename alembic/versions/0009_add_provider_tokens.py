@@ -1,7 +1,7 @@
 """токен пользователя у провайдера при сессии входа
 
-Revision ID: 0007
-Revises: 0006
+Revision ID: 0009
+Revises: 0008
 Create Date: 2026-10-23 12:00:00.000000
 
 """
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # Идентификаторы ревизии, используются Alembic.
-revision: str = '0007'
-down_revision: str | Sequence[str] | None = '0006'
+revision: str = '0009'
+down_revision: str | Sequence[str] | None = '0008'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
