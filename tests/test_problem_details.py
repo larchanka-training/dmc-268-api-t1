@@ -317,6 +317,86 @@ def test_planned_review_run_parts_check_session_and_id_first(client: TestClient,
     assert_problem(_signed_in_client().get(path), 422, "VALIDATION_ERROR", path)
 
 
+def test_planned_review_list_answers_not_implemented() -> None:
+    """Список прогонов описан в схеме, а отвечает `501`; поток — в `tests/test_reviews_api.py`."""
+    assert_problem(_signed_in_client().get("/api/v1/reviews"), 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
+
+
+@pytest.mark.parametrize("path", ["/api/v1/reviews", "/api/v1/reviews/events"])
+def test_planned_review_list_and_stream_check_session_first(client: TestClient, path: str) -> None:
+    assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
+
+
+def test_planned_review_list_checks_session_before_query(client: TestClient) -> None:
+    """Без сессии неверные параметры не разбираются: `401`, а не `422`."""
+    response = client.get("/api/v1/reviews", params={"status": "unknown", "limit": "0"})
+    assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/reviews")
+
+
+@pytest.mark.parametrize(
+    ("params", "error"),
+    [
+        ({"status": ["queued", "unknown"]}, {"where": "query.status.1", "reason": "значение не из допустимого списка"}),
+        ({"q": "x" * 201}, {"where": "query.q", "reason": "длина строки должна быть не больше 200"}),
+        ({"created_from": "2026-10-11T10:00:00"}, {"where": "query.created_from", "reason": "ожидается время с зоной"}),
+        ({"created_to": "1760000000"}, {"where": "query.created_to", "reason": "ожидается время в ISO 8601"}),
+        (
+            {"created_from": "2026-10-12T00:00:00Z", "created_to": "2026-10-11T00:00:00Z"},
+            {"where": "query.created_to", "reason": "начало диапазона позже его конца"},
+        ),
+    ],
+)
+def test_planned_review_list_checks_query_first(params: dict[str, Any], error: dict[str, str]) -> None:
+    """Заглушка списка проверяет параметры раньше, чем ответить `501`."""
+    response = _signed_in_client().get("/api/v1/reviews", params=params)
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
+    assert problem["errors"] == [error]
+
+
+def test_planned_review_list_accepts_every_filter() -> None:
+    """Все фильтры вместе, пустые `q` и `author`, время с любой зоной проходят проверку: дальше — `501`."""
+    params = {
+        "status": ["queued", "analysing"],
+        "active": "true",
+        "repository_id": RUN_ID,
+        "author": "",
+        "q": "",
+        "created_from": "2026-10-11T03:00:00+03:00",
+        "created_to": "2026-10-11T00:00:00Z",
+        "limit": "20",
+        "offset": "40",
+    }
+    response = _signed_in_client().get("/api/v1/reviews", params=params)
+    assert_problem(response, 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
+
+
+def test_review_list_and_stream_are_in_the_exported_contract() -> None:
+    """Фронтенд берёт типы из `docs/openapi/openapi.json`: параметры, `total` и данные событий там есть."""
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    list_op = schema["paths"]["/api/v1/reviews"]["get"]
+    assert {p["name"] for p in list_op["parameters"]} == {
+        "status", "active", "repository_id", "author", "q", "created_from", "created_to", "limit", "offset"
+    }
+    assert list_op["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ReviewRunListResponse"
+    }
+    components = schema["components"]["schemas"]
+    assert set(components["ReviewRunListResponse"]["required"]) == {"items", "total"}
+    assert {"id", "status", "updated_at", "failed_stage", "findings_count", "merge_request"} <= set(
+        components["ReviewRunListItem"]["required"]
+    )
+    stream = schema["paths"]["/api/v1/reviews/events"]["get"]["responses"]["200"]["content"]
+    assert set(stream) == {"text/event-stream"}
+    row = {"$ref": "#/components/schemas/ReviewRunListItem"}
+    events = stream["text/event-stream"]["x-sse-events"]
+    assert {name: events[name] for name in ("run.created", "run.status_changed", "run.finished")} == {
+        "run.created": row,
+        "run.status_changed": row,
+        "run.finished": row,
+    }
+    assert components["ReviewRunsStreamEventType"]["enum"] == ["run.created", "run.status_changed", "run.finished", "ping"]
+
+
 def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None:
     """Битый JSON без `Origin` — `403`, а не `422`: `Origin` проверяет middleware до разбора тела."""
     response = client.post("/api/v1/reviews", content=b"{bad", headers=JSON)
