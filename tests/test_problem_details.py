@@ -404,9 +404,12 @@ def test_review_list_is_in_the_exported_contract() -> None:
 EVENTS_PATH = "/api/v1/events"
 
 
-def test_events_stream_answers_not_implemented() -> None:
-    """Общий поток описан в схеме, а отвечает `501`; `401` без сессии проверен выше."""
-    assert_problem(_signed_in_client().get(EVENTS_PATH), 501, "NOT_IMPLEMENTED", EVENTS_PATH)
+def test_events_stream_documents_its_answers() -> None:
+    """Поток реализован: в схеме 200, 401 и 502, но не 501. `401` без сессии проверен выше."""
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    responses = schema["paths"][EVENTS_PATH]["get"]["responses"]
+    assert {"200", "401", "502"} <= set(responses)
+    assert "501" not in responses
 
 
 def test_events_stream_is_in_the_exported_contract() -> None:

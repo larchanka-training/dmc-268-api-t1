@@ -16,6 +16,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunListEntry,
     RuleRef,
 )
 from app.domain.enums import (
@@ -434,13 +435,15 @@ def test_old_events_path_is_a_run_id_now() -> None:
 
 
 def test_list_item_is_built_from_the_run_its_merge_request_and_findings() -> None:
-    """Строка списка для потока событий: прогон, запрос на изменение со ссылкой и число находок."""
+    """Строка списка для потока событий: прогон, запрос на изменение со ссылкой и число находок из записи пачки."""
     uow = FakeUnitOfWork()
     run = _add_run(uow)
-    uow.findings.add(_finding(run, rule=None))
-    uow.findings.add(_finding(run, rule=None))
+    merge_request = uow.merge_requests.get(run.merge_request_id)
+    assert merge_request is not None
+    repository = uow.repositories.get(merge_request.repository_id)
+    assert repository is not None
 
-    item = review_run_list_item(uow, run)
+    item = review_run_list_item(ReviewRunListEntry(run, merge_request, repository, findings_count=2))
 
     assert item.id == run.id
     assert item.last_progress_at == NOW

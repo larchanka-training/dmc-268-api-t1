@@ -40,7 +40,7 @@ from app.api.schemas import (
 )
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
-from app.domain.entities import ReviewRun
+from app.domain.entities import MergeRequest, Repository, ReviewRun, ReviewRunListEntry
 from app.domain.enums import (
     CommentKind,
     DiffSide,
@@ -389,6 +389,10 @@ def _merge_request_summary(uow: UnitOfWork, run: ReviewRun) -> dict[str, Any]:
     repository = uow.repositories.get(merge_request.repository_id)
     if repository is None:
         raise RuntimeError(f"У запроса на изменение {merge_request.id} нет репозитория {merge_request.repository_id}.")
+    return _summary(merge_request, repository)
+
+
+def _summary(merge_request: MergeRequest, repository: Repository) -> dict[str, Any]:
     return {
         **asdict(merge_request),
         "url": merge_request_url(repository.provider, repository.full_name, merge_request.number),
@@ -396,13 +400,13 @@ def _merge_request_summary(uow: UnitOfWork, run: ReviewRun) -> dict[str, Any]:
     }
 
 
-def review_run_list_item(uow: UnitOfWork, run: ReviewRun) -> ReviewRunListItem:
-    """Строка списка прогона: прогон, его запрос на изменение и число находок."""
+def review_run_list_item(entry: ReviewRunListEntry) -> ReviewRunListItem:
+    """Строка списка из записи, собранной одним запросом на пачку (`list_changed`)."""
     return ReviewRunListItem.model_validate(
         {
-            **asdict(run),
-            "merge_request": _merge_request_summary(uow, run),
-            "findings_count": len(uow.findings.list_for_run(run.id)),
+            **asdict(entry.run),
+            "merge_request": _summary(entry.merge_request, entry.repository),
+            "findings_count": entry.findings_count,
         }
     )
 
