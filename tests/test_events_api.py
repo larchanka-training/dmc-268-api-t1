@@ -46,12 +46,13 @@ from app.domain.enums import (
 )
 from app.domain.enums import ReviewRunStatus as S
 from app.domain.ids import new_id
-from app.domain.provider_token import token_from_grant
+from app.domain.login import OAuthProviderUnavailable
+from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.vcs_errors import VcsError
 
 from .fakes.auth import SIGNED_IN_SESSION_ID, sign_in_with_session
 from .fakes.installation_catalog import FakeInstallationCatalog
-from .fakes.oauth import EXPIRING_GRANT, FakeOAuthProvider
+from .fakes.oauth import EXPIRING_GRANT, FakeOAuthProvider, rejecting
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -161,11 +162,14 @@ def _app(
     ticks: Ticks,
     catalog: FakeInstallationCatalog | None = None,
     oauth: FakeOAuthProvider | None = None,
+    *,
+    with_token: bool = True,
 ) -> tuple[FastAPI, dict[str, str]]:
     app = create_app(SETTINGS)
     cookies = sign_in_with_session(app, world.uow)
     # Токен пользователя, сохранённый при входе: видимость считается им.
-    world.uow.provider_tokens.save(SIGNED_IN_SESSION_ID, token_from_grant(EXPIRING_GRANT, datetime.now(UTC)))
+    if with_token:
+        world.uow.provider_tokens.save(SIGNED_IN_SESSION_ID, token_from_grant(EXPIRING_GRANT, datetime.now(UTC)))
     app.dependency_overrides[get_untraced_unit_of_work_factory] = lambda: lambda: world.uow
     app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog([VISIBLE])
     app.dependency_overrides[get_token_provider] = lambda: oauth or FakeOAuthProvider()
@@ -221,6 +225,111 @@ def test_a_provider_failure_at_connect_is_502_and_no_stream_opens() -> None:
     assert response.status_code == 502
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json()["code"] == "SCM_UNAVAILABLE"
+
+
+# --- токен пользователя при подключении: ответ до начала потока -------------------
+
+
+def _session_cookie_cleared(response: Any) -> bool:
+    return any(
+        header.startswith("session=") and "Max-Age=0" in header for header in response.headers.get_list("set-cookie")
+    )
+
+
+def _expired_but_refreshable(world: World) -> None:
+    """Access token сессии истёк давно, refresh token бессрочный: подключение начнёт с обмена."""
+    expired = replace(token_from_grant(EXPIRING_GRANT, PAST - timedelta(days=30)), refresh_expires_at=None)
+    world.uow.provider_tokens.save(SIGNED_IN_SESSION_ID, expired)
+
+
+def _assert_closed_with_401(response: Any, world: World) -> None:
+    assert response.status_code == 401
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "UNAUTHENTICATED"
+    assert _session_cookie_cleared(response)
+    assert "retry:" not in response.text
+    assert world.uow.sessions.stored == []
+
+
+def test_a_session_without_a_stored_token_is_401_and_no_stream_opens() -> None:
+    """Сессия, открытая до хранения токенов: видимость посчитать нечем — 401, сессия закрыта."""
+    world = World()
+    app, cookies = _app(world, Ticks({}), with_token=False)
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    _assert_closed_with_401(response, world)
+
+
+def test_a_token_revoked_at_github_is_401_and_no_stream_opens() -> None:
+    world = World()
+    app, cookies = _app(world, Ticks({}), FakeInstallationCatalog(error=ProviderTokenRejected("401")))
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    _assert_closed_with_401(response, world)
+
+
+def test_a_rejected_refresh_at_connect_is_401_and_no_stream_opens() -> None:
+    world = World()
+    oauth = FakeOAuthProvider()
+    oauth.refresh_error = rejecting()
+    app, cookies = _app(world, Ticks({}), oauth=oauth)
+    _expired_but_refreshable(world)
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    _assert_closed_with_401(response, world)
+    assert len(oauth.refreshes) == 1
+
+
+def test_github_unavailable_on_refresh_at_connect_is_502_and_keeps_the_session() -> None:
+    world = World()
+    oauth = FakeOAuthProvider()
+    oauth.refresh_error = OAuthProviderUnavailable("GitHub ответил 503 (обновление токена)")
+    app, cookies = _app(world, Ticks({}), oauth=oauth)
+    _expired_but_refreshable(world)
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+    assert "retry:" not in response.text
+    assert len(world.uow.sessions.stored) == 1
+
+
+def test_an_expired_token_is_refreshed_at_connect_and_the_stream_opens() -> None:
+    """Обмен refresh token при подключении: видимость считается новым токеном, поток открыт."""
+    world = World()
+    oauth = FakeOAuthProvider()
+    catalog = FakeInstallationCatalog([VISIBLE])
+    ticks = Ticks({1: world.end_session})
+    app, cookies = _app(world, ticks, catalog, oauth)
+    _expired_but_refreshable(world)
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    assert response.status_code == 200
+    assert response.text.startswith("retry: 3000\n\n")
+    assert len(oauth.refreshes) == 1
+    assert catalog.tokens == [oauth.refreshed.access_token]
+
+
+def test_the_session_check_in_the_stream_does_not_touch_the_user_token() -> None:
+    """Проверка раз в 5 секунд — только сессия: GitHub не спрашивается, токен не обменивается."""
+    world = World()
+    oauth = FakeOAuthProvider()
+    catalog = FakeInstallationCatalog([VISIBLE])
+    ticks = Ticks({6: world.end_session})
+    app, cookies = _app(world, ticks, catalog, oauth)
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    assert response.text == "retry: 3000\n\n"
+    # Первая проверка сессии прошла, вторая закрыла поток; к GitHub — только при подключении.
+    assert ticks.now == 10
+    assert catalog.calls == ["list_repositories"]
+    assert oauth.refreshes == []
 
 
 def test_the_stream_starts_with_retry_and_forbids_caching_and_buffering() -> None:
