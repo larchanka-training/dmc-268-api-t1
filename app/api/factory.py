@@ -70,8 +70,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         generate_unique_id_function=lambda route: to_camel(route.name),
     )
     from app.api.review_events import ReviewRunStatusEvent
+    from app.api.reviews import ReviewRunsStreamEventType
 
-    openapi.install(app, extra_models=[ReviewRunStatusEvent])
+    openapi.install(app, extra_models=[ReviewRunStatusEvent, ReviewRunsStreamEventType])
     app.state.settings = settings
     # До контейнера: провайдер трейсов нужен телеметрии FastAPI с первого запроса.
     telemetry.configure_tracing(telemetry.API_SERVICE)
