@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_unit_of_work
 from app.api.factory import create_app
+from app.api.reviews import review_run_list_item
 from app.config import Settings
 from app.domain.entities import (
     DiffAnchor,
@@ -424,17 +425,25 @@ def test_steps_of_an_unknown_run_are_404() -> None:
     assert response.json()["instance"] == f"/api/v1/reviews/{run_id}/steps"
 
 
-def test_events_path_is_not_taken_for_a_run_id() -> None:
-    """`/reviews/events` — общий поток, а не прогон с id `events`; `/reviews/{uuid}` — по-прежнему прогон."""
+def test_old_events_path_is_a_run_id_now() -> None:
+    """Поток переехал на `/events`: `/reviews/events` — прогон с неверным id, `422`, а не поток."""
+    response = _client(FakeUnitOfWork()).get("/api/v1/reviews/events")
+
+    assert response.status_code == 422
+    assert response.json()["errors"] == [{"where": "path.review_run_id", "reason": "ожидается UUID"}]
+
+
+def test_list_item_is_built_from_the_run_its_merge_request_and_findings() -> None:
+    """Строка списка для потока событий: прогон, запрос на изменение со ссылкой и число находок."""
     uow = FakeUnitOfWork()
     run = _add_run(uow)
-    client = _client(uow)
+    uow.findings.add(_finding(run, rule=None))
+    uow.findings.add(_finding(run, rule=None))
 
-    stream = client.get("/api/v1/reviews/events")
-    by_id = client.get(f"/api/v1/reviews/{run.id}")
+    item = review_run_list_item(uow, run)
 
-    assert stream.status_code == 501
-    assert stream.headers["content-type"] == "application/problem+json"
-    assert stream.json()["code"] == "NOT_IMPLEMENTED"
-    assert by_id.status_code == 200
-    assert by_id.json()["id"] == str(run.id)
+    assert item.id == run.id
+    assert item.last_progress_at == NOW
+    assert item.findings_count == 2
+    assert item.merge_request.url == "https://github.com/octo-org/api/pull/42"
+    assert item.merge_request.repository.full_name == "octo-org/api"
