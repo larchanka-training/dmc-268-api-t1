@@ -22,15 +22,15 @@ DATA_CONTAINERS = ("postgres", "postgres_replica", "rabbitmq", "postgres_backup"
 # Ровно эти сети у каждого контейнера стека (спека `backend-delivery`, «Сети
 # стека разделены по назначению»). Новый контейнер обязан попасть сюда — иначе
 # его сети никто не сверит.
-EXPECTED_NETWORKS = {
-    "postgres": {"backend"},
-    "postgres_replica": {"backend"},
-    "postgres_backup": {"backend"},
-    "rabbitmq": {"backend"},
-    "migrate": {"backend"},
-    "replication_setup": {"backend"},
-    "api": {"dmc268", "backend"},
-    "worker": {"backend", "egress"},
+EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
+    "postgres": frozenset({"backend"}),
+    "postgres_replica": frozenset({"backend"}),
+    "postgres_backup": frozenset({"backend"}),
+    "rabbitmq": frozenset({"backend"}),
+    "migrate": frozenset({"backend"}),
+    "replication_setup": frozenset({"backend"}),
+    "api": frozenset({"dmc268", "backend"}),
+    "worker": frozenset({"backend", "egress"}),
 }
 
 
@@ -49,12 +49,12 @@ def container_networks(text: str, name: str) -> frozenset[str] | None:
     block = resource_block(text, "docker_container", name)
     if block is None:
         return None
-    networks = set()
+    networks: set[str] = set()
     # Блок целиком, а не «name сразу после скобки»: поле name может идти и после
     # aliases или ipv4_address.
     for body in re.findall(r"networks_advanced\s*\{([^{}]*)\}", block):
-        name = re.search(r"\bname\s*=\s*docker_network\.(\w+)\.name", body)
-        networks.add(name.group(1) if name else NOT_A_NETWORK_REFERENCE)
+        ref = re.search(r"\bname\s*=\s*docker_network\.(\w+)\.name", body)
+        networks.add(ref.group(1) if ref else NOT_A_NETWORK_REFERENCE)
     return frozenset(networks)
 
 
