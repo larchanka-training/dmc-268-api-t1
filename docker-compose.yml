@@ -79,7 +79,9 @@ services:
     # exec: uvicorn заменяет sh и становится PID 1 — иначе SIGTERM от
     # `docker stop` достаётся sh, который его игнорирует, и через грейс-период
     # приходит SIGKILL: lifespan не завершается, спаны не выгружаются.
-    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    # --timeout-graceful-shutdown — по той же причине: открытый поток SSE иначе
+    # держал бы остановку до конца прогона (подробно — в Dockerfile у CMD).
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5"]
 
   worker:
     build: .

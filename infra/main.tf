@@ -211,6 +211,8 @@ resource "docker_container" "api" {
   # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
   # принудительно (SIGKILL): lifespan не завершается, спаны не выгружаются.
   # С ним — сначала SIGTERM и ожидание остановки; 10 с — как у `docker stop`.
+  # Укладываемся благодаря `--timeout-graceful-shutdown 5` в CMD образа: открытые
+  # потоки SSE uvicorn рвёт через 5 с, остальное время — на lifespan.
   destroy_grace_seconds = 10
 
   # Те же основания, что у migrate: образ один.
