@@ -5,6 +5,7 @@
 идентификаторы приходят аргументами, поэтому тест сверяет точные значения.
 """
 
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
@@ -16,6 +17,9 @@ from app.domain.vcs_errors import VcsError
 
 # Код сбоя, у которого нет своего класса: ошибка программы, а не внешней системы.
 INTERNAL_ERROR = "INTERNAL_ERROR"
+# Код шага, брошенного без исхода: воркер, который его вёл, умер или не записал
+# исход, а прогон уже упал. Тот же код у прогона, выметенного как зависший (§8).
+ABANDONED = "REVIEW_RUN_STALE"
 
 
 def start_step(
@@ -65,3 +69,23 @@ def error_code(error: BaseException) -> str:
     if isinstance(error, LlmError | VcsError):
         return error.code
     return INTERNAL_ERROR
+
+
+def abandon_steps(steps: Iterable[ReviewRunStep], *, now: datetime) -> list[ReviewRunStep]:
+    """Закрыть брошенные шаги: каждый `running` — `failed` с кодом `REVIEW_RUN_STALE`.
+
+    Монотонных показаний воркера, начавшего шаг, уже нет, поэтому длительность —
+    от начала шага до `now` по стенным часам. Сколько токенов шаг успел
+    израсходовать, неизвестно — `None`. Закрытые шаги не меняются и не
+    возвращаются.
+    """
+    return [
+        finish_step(
+            step,
+            duration_seconds=(now - step.started_at).total_seconds(),
+            tokens_used=None,
+            error_code=ABANDONED,
+        )
+        for step in steps
+        if step.status is ReviewRunStepStatus.RUNNING
+    ]

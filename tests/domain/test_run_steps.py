@@ -1,6 +1,6 @@
 """Шаги прогона: начало, исход и код сбоя. Ни часов, ни базы."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -13,7 +13,14 @@ from app.domain.llm_errors import (
     LlmTimeoutError,
     PromptTooLargeError,
 )
-from app.domain.run_steps import INTERNAL_ERROR, error_code, finish_step, start_step
+from app.domain.run_steps import (
+    ABANDONED,
+    INTERNAL_ERROR,
+    abandon_steps,
+    error_code,
+    finish_step,
+    start_step,
+)
 from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 
 NOW = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
@@ -94,3 +101,26 @@ def test_the_error_code_comes_from_the_failure_class(
     error: Exception, code: str
 ) -> None:
     assert error_code(error) == code
+
+
+def test_abandoned_running_steps_fail_as_stale_with_the_wall_clock_duration() -> None:
+    running = _started()
+    done = finish_step(
+        start_step(RUN_ID, ReviewRunStage.FETCHING_DIFF, started_at=NOW, step_id=UUID(int=3)),
+        duration_seconds=1.0,
+        tokens_used=None,
+    )
+
+    (closed,) = abandon_steps([done, running], now=NOW + timedelta(minutes=2))
+
+    assert closed.id == STEP_ID
+    assert closed.status is ReviewRunStepStatus.FAILED
+    assert closed.error_code == ABANDONED == "REVIEW_RUN_STALE"
+    assert closed.duration_seconds == 120.0
+    assert closed.tokens_used is None
+
+
+def test_an_abandoned_step_never_gets_a_negative_duration() -> None:
+    (closed,) = abandon_steps([_started()], now=NOW - timedelta(seconds=5))
+
+    assert closed.duration_seconds == 0.0

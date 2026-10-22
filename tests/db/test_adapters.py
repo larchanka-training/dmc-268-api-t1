@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from app.application.ports.unit_of_work import ActiveRunConflict
+from app.application.stale_sweep import sweep_stale_runs
 from app.domain.entities import (
     ContextPayload,
     DiffAnchor,
@@ -578,3 +579,27 @@ def test_updating_a_step_that_is_not_stored_is_an_error(uow) -> None:
     step = finish_step(a_step(run.id, ReviewRunStage.PUBLISHING, NOW), duration_seconds=1, tokens_used=None)
     with uow as work, pytest.raises(LookupError):
         work.review_run_steps.update(step)
+
+
+def test_a_swept_run_has_no_running_steps_left(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+        work.review_runs.update(advance(run, ReviewRunStatus.BUILDING_CONTEXT, NOW).unwrap())
+        work.commit()
+    abandoned = a_step(run.id, ReviewRunStage.BUILDING_CONTEXT, NOW)
+    with uow as work:
+        work.review_run_steps.add(abandoned)
+        work.commit()
+
+    assert sweep_stale_runs(uow, now=NOW + dt.timedelta(hours=1), limit=dt.timedelta(minutes=30)) == 1
+
+    with uow as work:
+        assert work.review_runs.get(run.id).status is ReviewRunStatus.FAILED
+        (step,) = work.review_run_steps.list_for_run(run.id)
+    assert step == replace(
+        abandoned,
+        status=ReviewRunStepStatus.FAILED,
+        duration_seconds=3600.0,
+        tokens_used=None,
+        error_code="REVIEW_RUN_STALE",
+    )
