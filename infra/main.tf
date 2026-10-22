@@ -19,6 +19,9 @@ locals {
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
   # consumer_timeout RabbitMQ его не ограничивает: в 4.3 таймаут подтверждения
   # есть только у quorum-очередей, а очередь review — classic.
+  # Деплой ждёт остановку воркера в `tofu apply`: timeout-minutes job deploy в
+  # .github/workflows/deploy.yml обязан быть больше максимума (2460 с) с запасом.
+  # Та же формула — у stop_grace_period воркера в docker-compose.yml.
   worker_stop_seconds = 2 * 300 * 2 * (var.llm_hosted_fallback ? 2 : 1) + 60
 }
 
