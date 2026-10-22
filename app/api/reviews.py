@@ -293,6 +293,10 @@ def _optional_text(max_length: int, description: str) -> Any:
     return Field(default=None, max_length=max_length, description=f"{description} Пустая строка — без фильтра.")
 
 
+# Предел значений фильтра по репозиториям: каждое уходит в `IN (…)` запроса списка.
+REPOSITORY_FILTER_MAX_ITEMS = 50
+
+
 class ReviewRunListQuery(BaseModel):
     """Параметры запроса списка прогонов.
 
@@ -309,7 +313,11 @@ class ReviewRunListQuery(BaseModel):
     )
     repository_id: list[UUID] | None = Field(
         default=None,
-        description="Прогоны этих репозиториев; параметр повторяется: ?repository_id=…&repository_id=….",
+        max_length=REPOSITORY_FILTER_MAX_ITEMS,
+        description=(
+            "Прогоны этих репозиториев; параметр повторяется: ?repository_id=…&repository_id=…, "
+            f"не больше {REPOSITORY_FILTER_MAX_ITEMS} значений."
+        ),
     )
     author: str | None = _optional_text(255, "Логин автора запроса на изменение, точное совпадение.")
     q: str | None = _optional_text(

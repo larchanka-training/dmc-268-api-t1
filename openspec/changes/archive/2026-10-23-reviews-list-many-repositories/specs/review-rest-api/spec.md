@@ -2,7 +2,7 @@
 
 ### Requirement: Параметры списка прогонов проверяются раньше 501
 
-`GET /api/v1/reviews` SHALL проверять параметры фильтров и пагинации раньше ответа `501`. `status` и `repository_id` SHALL принимать несколько значений, параметр повторяется. У `q` и `author` пустая строка SHALL означать «без фильтра». `created_from` и `created_to` SHALL принимать только строку ISO 8601 с зоной, любой. `created_from` позже `created_to` SHALL отклоняться кодом `422` вместе с остальными ошибками параметров.
+`GET /api/v1/reviews` SHALL проверять параметры фильтров и пагинации раньше ответа `501`. `status` и `repository_id` SHALL принимать несколько значений, параметр повторяется; `repository_id` — не больше 50. У `q` и `author` пустая строка SHALL означать «без фильтра». `created_from` и `created_to` SHALL принимать только строку ISO 8601 с зоной, любой. `created_from` позже `created_to` SHALL отклоняться кодом `422` вместе с остальными ошибками параметров.
 
 #### Scenario: Обратный диапазон дат
 
@@ -33,3 +33,8 @@
 
 - **WHEN** вызывается `GET /api/v1/reviews` с сессией и `repository_id` дважды, второй раз не UUID
 - **THEN** ответ — `422` с `code = VALIDATION_ERROR` и ошибкой в `query.repository_id.1`
+
+#### Scenario: Больше 50 репозиториев
+
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией и 51 значением `repository_id`
+- **THEN** ответ — `422` с причиной «элементов должно быть не больше 50» в `query.repository_id`

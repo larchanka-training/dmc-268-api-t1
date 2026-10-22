@@ -1127,16 +1127,17 @@
                   "items": {
                     "type": "string",
                     "format": "uuid"
-                  }
+                  },
+                  "maxItems": 50
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "Прогоны этих репозиториев; параметр повторяется: ?repository_id=…&repository_id=….",
+              "description": "Прогоны этих репозиториев; параметр повторяется: ?repository_id=…&repository_id=…, не больше 50 значений.",
               "title": "Repository Id"
             },
-            "description": "Прогоны этих репозиториев; параметр повторяется: ?repository_id=…&repository_id=…."
+            "description": "Прогоны этих репозиториев; параметр повторяется: ?repository_id=…&repository_id=…, не больше 50 значений."
           },
           {
             "name": "author",

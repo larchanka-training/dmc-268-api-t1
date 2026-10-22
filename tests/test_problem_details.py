@@ -339,6 +339,10 @@ def test_planned_review_list_checks_session_before_query(client: TestClient) -> 
     [
         ({"status": ["queued", "unknown"]}, {"where": "query.status.1", "reason": "значение не из допустимого списка"}),
         ({"repository_id": [RUN_ID, "nope"]}, {"where": "query.repository_id.1", "reason": "ожидается UUID"}),
+        (
+            {"repository_id": [str(UUID(int=n)) for n in range(51)]},
+            {"where": "query.repository_id", "reason": "элементов должно быть не больше 50"},
+        ),
         ({"q": "x" * 201}, {"where": "query.q", "reason": "длина строки должна быть не больше 200"}),
         ({"created_from": "2026-10-11T10:00:00"}, {"where": "query.created_from", "reason": "ожидается время с зоной"}),
         ({"created_to": "1760000000"}, {"where": "query.created_to", "reason": "ожидается время в ISO 8601"}),
@@ -383,7 +387,11 @@ def test_review_list_and_stream_are_in_the_exported_contract() -> None:
         "$ref": "#/components/schemas/ReviewRunListResponse"
     }
     repository_ids = next(p for p in list_op["parameters"] if p["name"] == "repository_id")
-    assert repository_ids["schema"]["anyOf"][0] == {"type": "array", "items": {"type": "string", "format": "uuid"}}
+    assert repository_ids["schema"]["anyOf"][0] == {
+        "type": "array",
+        "items": {"type": "string", "format": "uuid"},
+        "maxItems": 50,
+    }
     components = schema["components"]["schemas"]
     assert set(components["ReviewRunListResponse"]["required"]) == {"items", "total"}
     assert {"id", "status", "updated_at", "failed_stage", "findings_count", "merge_request"} <= set(
