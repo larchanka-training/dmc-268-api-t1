@@ -25,7 +25,12 @@ from app.api.dependencies import (
 )
 from app.api.errors import ERRORS_404_REVIEW, ERRORS_422, ApiError
 from app.api.problems import ErrorCode
-from app.api.schemas import FAILED_STAGE_DESCRIPTION, FailedStage, UtcDatetime
+from app.api.schemas import (
+    FAILED_STAGE_DESCRIPTION,
+    STREAM_HEADERS_DOC,
+    FailedStage,
+    UtcDatetime,
+)
 from app.api.session import SESSION_COOKIE, SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
 from app.application.review_run_events import review_run_events
@@ -89,13 +94,7 @@ _STREAM_DOC: dict[int | str, dict[str, Any]] = {
                 }
             }
         },
-        "headers": {
-            "Cache-Control": {"schema": {"type": "string", "const": "no-cache"}},
-            "X-Accel-Buffering": {
-                "description": "Отключает буферизацию ответа в nginx.",
-                "schema": {"type": "string", "const": "no"},
-            },
-        },
+        "headers": STREAM_HEADERS_DOC,
     },
 }
 
