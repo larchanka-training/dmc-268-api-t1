@@ -6,6 +6,7 @@
 тест на реальной базе видели одно и то же поведение.
 """
 
+from collections.abc import Collection
 from dataclasses import replace
 from datetime import datetime
 from types import TracebackType
@@ -21,12 +22,14 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunListEntry,
     ReviewRunStep,
     Session,
     User,
 )
 from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
+from app.domain.run_feed import FeedCursor
 
 
 class FakeRepositoryRepo:
@@ -61,6 +64,13 @@ class FakeRepositoryRepo:
         # Порядок как у SQL-адаптера: `(created_at, id)`.
         ordered = sorted(self._by_id.values(), key=lambda r: (r.created_at, r.id))
         return ordered[offset : offset + limit]
+
+    def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
+        wanted = set(provider_ids)
+        return sorted(
+            (r for r in self._by_id.values() if r.provider == provider and r.provider_id in wanted),
+            key=lambda r: r.id,
+        )
 
     def add(self, repository: Repository) -> bool:
         if self.find_by_provider(repository.provider, repository.provider_id) is not None:
@@ -169,6 +179,43 @@ class FakeReviewRunRepo:
 
     def list_unfinished(self) -> list[ReviewRun]:
         return [r for r in self._by_id.values() if r.status not in TERMINAL_STATUSES]
+
+    def bind(
+        self,
+        merge_requests: FakeMergeRequestRepo,
+        repositories: FakeRepositoryRepo,
+        findings: FakeFindingRepo,
+    ) -> None:
+        """Связать с соседними фейками: `list_changed` собирает строку списка, как JOIN."""
+        self._merge_requests = merge_requests
+        self._repositories = repositories
+        self._findings = findings
+
+    def list_changed(
+        self,
+        after: FeedCursor,
+        recheck_from: datetime,
+        repository_ids: Collection[UUID],
+        limit: int,
+    ) -> list[ReviewRunListEntry]:
+        # Как SQL-адаптер: limit только у части новее курсора, окно — целиком.
+        entries: list[ReviewRunListEntry] = []
+        for run in self._by_id.values():
+            merge_request = self._merge_requests.get(run.merge_request_id)
+            if merge_request is None or merge_request.repository_id not in repository_ids:
+                continue
+            repository = self._repositories.get(merge_request.repository_id)
+            assert repository is not None
+            count = len(self._findings.list_for_run(run.id))
+            entries.append(ReviewRunListEntry(run, merge_request, repository, count))
+        entries.sort(key=lambda e: (e.run.updated_at, e.run.id))
+        fresh = [e for e in entries if FeedCursor(e.run.updated_at, e.run.id) > after][:limit]
+        late = [
+            e
+            for e in entries
+            if e.run.updated_at > recheck_from and FeedCursor(e.run.updated_at, e.run.id) <= after
+        ]
+        return sorted(fresh + late, key=lambda e: (e.run.updated_at, e.run.id))
 
     def add(self, run: ReviewRun) -> None:
         self.added.append(run)
@@ -493,6 +540,7 @@ class _Fakes:
         self.review_run_steps = FakeReviewRunStepRepo()
         self.context_payloads = FakeContextPayloadRepo()
         self.findings = FakeFindingRepo(self.review_runs)
+        self.review_runs.bind(self.merge_requests, self.repositories, self.findings)
         self.published_comments = FakePublishedCommentRepo(self.review_runs)
         self.users = FakeUserRepo()
         self.sessions = FakeSessionRepo()

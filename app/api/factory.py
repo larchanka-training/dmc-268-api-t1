@@ -69,10 +69,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # по нему фронт находит операцию в сгенерированных типах.
         generate_unique_id_function=lambda route: to_camel(route.name),
     )
+    from app.api.events import StreamEventType
     from app.api.review_events import ReviewRunStatusEvent
-    from app.api.reviews import ReviewRunsStreamEventType
 
-    openapi.install(app, extra_models=[ReviewRunStatusEvent, ReviewRunsStreamEventType])
+    openapi.install(app, extra_models=[ReviewRunStatusEvent, StreamEventType])
     app.state.settings = settings
     # До контейнера: провайдер трейсов нужен телеметрии FastAPI с первого запроса.
     telemetry.configure_tracing(telemetry.API_SERVICE)
@@ -81,6 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     from app.api import errors, log_redaction
     from app.api.auth import router as auth_router
+    from app.api.events import router as events_router
     from app.api.origin import OriginMiddleware
     from app.api.pull_requests import router as pull_requests_router
     from app.api.repositories import router as repositories_router
@@ -103,6 +104,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(pull_requests_router)
     app.include_router(reviews_router)
     app.include_router(review_events_router)
+    app.include_router(events_router)
 
     # Служебные ручки вне `/api/v1` — не часть контракта.
     @app.get("/", include_in_schema=False)

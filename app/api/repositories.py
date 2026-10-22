@@ -170,6 +170,23 @@ class ConnectRepositoryRequest(StrictRequest):
     )
 
 
+def available_repositories(
+    user: User = Depends(current_user),
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> list[connecting.AvailableRepository]:
+    """Репозитории, видимые пользователю у провайдера, или `502 SCM_UNAVAILABLE`.
+
+    Зависимость, а не код ручки: тот же список задаёт видимость прогонов в потоке
+    GET /events (`app/api/events.py`). Правило одно — поменяется здесь, поменяется
+    у обоих.
+    """
+    try:
+        return connecting.list_available_repositories(catalog, uow_factory(), user.login)
+    except VcsError as error:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
+
+
 @router.get(
     "/available",
     response_model=AvailableRepositoryListResponse,
@@ -179,14 +196,8 @@ class ConnectRepositoryRequest(StrictRequest):
     responses=ERRORS_502_SCM_REPOSITORIES,
 )
 def list_available_repositories(
-    user: User = Depends(current_user),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
-    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+    available: list[connecting.AvailableRepository] = Depends(available_repositories),
 ) -> AvailableRepositoryListResponse:
-    try:
-        available = connecting.list_available_repositories(catalog, uow_factory(), user.login)
-    except VcsError as error:
-        raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
     return AvailableRepositoryListResponse(
         items=[
             AvailableRepositoryResponse(

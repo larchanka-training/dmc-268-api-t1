@@ -319,11 +319,11 @@ def test_review_run_parts_check_session_and_id_first(client: TestClient, part: s
 
 
 def test_planned_review_list_answers_not_implemented() -> None:
-    """Список прогонов описан в схеме, а отвечает `501`; поток — в `tests/test_reviews_api.py`."""
+    """Список прогонов описан в схеме, а отвечает `501`."""
     assert_problem(_signed_in_client().get("/api/v1/reviews"), 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
 
 
-@pytest.mark.parametrize("path", ["/api/v1/reviews", "/api/v1/reviews/events"])
+@pytest.mark.parametrize("path", ["/api/v1/reviews", "/api/v1/events"])
 def test_planned_review_list_and_stream_check_session_first(client: TestClient, path: str) -> None:
     assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
 
@@ -376,8 +376,8 @@ def test_planned_review_list_accepts_every_filter() -> None:
     assert_problem(response, 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
 
 
-def test_review_list_and_stream_are_in_the_exported_contract() -> None:
-    """Фронтенд берёт типы из `docs/openapi/openapi.json`: параметры, `total` и данные событий там есть."""
+def test_review_list_is_in_the_exported_contract() -> None:
+    """Фронтенд берёт типы из `docs/openapi/openapi.json`: параметры, `total` и поля строки там есть."""
     schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
     list_op = schema["paths"]["/api/v1/reviews"]["get"]
     assert {p["name"] for p in list_op["parameters"]} == {
@@ -397,16 +397,40 @@ def test_review_list_and_stream_are_in_the_exported_contract() -> None:
     assert {"id", "status", "updated_at", "failed_stage", "findings_count", "merge_request"} <= set(
         components["ReviewRunListItem"]["required"]
     )
-    stream = schema["paths"]["/api/v1/reviews/events"]["get"]["responses"]["200"]["content"]
+    assert "last_progress_at" in components["ReviewRunListItem"]["required"]
+    assert "/api/v1/reviews/events" not in schema["paths"]
+
+
+EVENTS_PATH = "/api/v1/events"
+
+
+def test_events_stream_documents_its_answers() -> None:
+    """Поток реализован: в схеме 200, 401 и 502, но не 501. `401` без сессии проверен выше."""
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    responses = schema["paths"][EVENTS_PATH]["get"]["responses"]
+    assert {"200", "401", "502"} <= set(responses)
+    assert "501" not in responses
+
+
+def test_events_stream_is_in_the_exported_contract() -> None:
+    """Путь без параметров, тип содержимого и данные событий потока — в `docs/openapi/openapi.json`."""
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    operation = schema["paths"][EVENTS_PATH]["get"]
+    assert "parameters" not in operation
+    components = schema["components"]["schemas"]
+    stream = operation["responses"]["200"]["content"]
     assert set(stream) == {"text/event-stream"}
     row = {"$ref": "#/components/schemas/ReviewRunListItem"}
     events = stream["text/event-stream"]["x-sse-events"]
-    assert {name: events[name] for name in ("run.created", "run.status_changed", "run.finished")} == {
+    assert events == {
         "run.created": row,
         "run.status_changed": row,
         "run.finished": row,
+        "ping": {"type": "object", "maxProperties": 0},
     }
-    assert components["ReviewRunsStreamEventType"]["enum"] == ["run.created", "run.status_changed", "run.finished", "ping"]
+    assert components["StreamEventType"]["enum"] == ["run.created", "run.status_changed", "run.finished", "ping"]
+    assert "ReviewRunsStreamEventType" not in components
+    assert "StreamResource" not in components
 
 
 REPO_ID = "0192f0c4-7a1e-7b3c-9d2e-4f5a6b7c8d9f"

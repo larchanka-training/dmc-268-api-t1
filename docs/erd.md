@@ -4,8 +4,9 @@
 `alembic/versions/0001_baseline_schema.py`, пользователи и сессии — ревизией
 `0005_add_users_and_sessions.py`, ссылка замечания на правило и итог
 верификации — `0006_add_rule_ref_and_verification.py`, шаги прогона —
-`0007_add_review_run_steps.py`; отдельный тест следит, чтобы таблицы
-на этой диаграмме и модели не расходились.
+`0007_add_review_run_steps.py`, индекс `review_runs (updated_at, id)` под курсор
+общего потока событий — `0008_add_review_runs_updated_at_index.py`; отдельный тест
+следит, чтобы таблицы на этой диаграмме и модели не расходились.
 
 `ReviewRun` в тикете называется `ReviewJob`. Имя поменяли, потому что «job»
 будет называться и сообщение в RabbitMQ, а когда долгоживущая строка в базе и

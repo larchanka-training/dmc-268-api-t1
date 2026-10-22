@@ -14,8 +14,7 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Query
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, RootModel, ValidationInfo, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import get_unit_of_work
@@ -31,7 +30,6 @@ from app.api.pagination import DEFAULT_LIMIT, Limit, Offset
 from app.api.problems import ErrorCode
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
-    STREAM_HEADERS_DOC,
     FailedStage,
     MergeRequestBase,
     RepositoryBase,
@@ -42,6 +40,7 @@ from app.api.schemas import (
 )
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
 from app.application.ports import UnitOfWork
+from app.domain.entities import MergeRequest, Repository, ReviewRun, ReviewRunListEntry
 from app.domain.enums import (
     CommentKind,
     DiffSide,
@@ -76,8 +75,8 @@ _STEPS_DESCRIPTION = (
     "404 REVIEW_NOT_FOUND, если прогона нет."
 )
 
-# Видимость прогонов — решение А в dmc-268-ui-t1#43: одно правило на список и поток.
-_VISIBILITY = (
+# Видимость прогонов — решение А в dmc-268-ui-t1#43: одно правило на список и поток GET /events.
+VISIBILITY_RULE = (
     "Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub "
     "(любая роль), — то же правило, что у GET /repositories/available."
 )
@@ -86,7 +85,7 @@ _LIST_DESCRIPTION = (
     "(задача #103). Требует сессию; параметры запроса проверяются до ответа 501. Когда ручка "
     "заработает: снимок списка прогонов ревью, сначала новые — по created_at по убыванию, при равном "
     "created_at — по id по убыванию. "
-    + _VISIBILITY
+    + VISIBILITY_RULE
     + " Фильтры складываются через «и»: status — один или несколько статусов (параметр повторяется); "
     "active=true — только активные (queued, building_context, analysing, publishing), active=false — "
     "только завершённые (completed, failed, cancelled), вместе со status — пересечение; repository_id — "
@@ -101,33 +100,10 @@ _LIST_DESCRIPTION = (
     "200. total — сколько прогонов подходит под фильтры без учёта limit и offset. findings_count — "
     "то же, что число элементов findings в GET /reviews/{review_run_id}: находки, оставшиеся после "
     "отсева и верификатора, а не опубликованные комментарии. Самих находок и комментариев в строке "
-    "нет. Изменения после снимка приходят потоком GET /reviews/events; поток фильтры не учитывает, "
+    "нет. Изменения после снимка приходят потоком GET /events; поток фильтры не учитывает, "
     "поэтому при активных фильтрах или не на первой странице клиент на событие перезапрашивает "
     "страницу, а без фильтров на первой странице — делает upsert строки."
 )
-_STREAM_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #103). Требует сессию. Когда ручка заработает: один поток Server-Sent Events на весь "
-    "кабинет — изменения прогонов ревью к снимку GET /reviews. Имя события — в поле `event:`, "
-    "значения — ReviewRunsStreamEventType; данные любого события прогона — ReviewRunListItem, полная "
-    "строка списка, JSON в `data:` одной строкой. Имя — подсказка, что случилось: `run.created` — "
-    "новый прогон, `run.status_changed` — прогон сменил статус, но не на итоговый, `run.finished` — "
-    "прогон пришёл в итоговый статус (completed, failed или cancelled); при переходе в итоговый "
-    "статус приходит только `run.finished`. Клиент применяет любое событие одинаково: upsert строки "
-    "по id, из двух версий строки побеждает та, у которой updated_at больше, при равном updated_at — "
-    "пришедшая позже. Порядок клиента: подписаться на поток и запросить снимок GET /reviews после "
-    "события `open` у EventSource — событие, пришедшее раньше снимка, не потеряется, а более старая "
-    "версия строки проиграет по updated_at. Поток не фильтруется: в нём все видимые прогоны. При "
-    "активных фильтрах списка или не на первой странице клиент на событие перезапрашивает страницу, "
-    "без фильтров на первой странице — делает upsert. Событий удаления и потери видимости нет: такие "
-    "строки обновятся при перезапросе. `ping` с `data: {}` — в тишине, не реже раза в 15 секунд. "
-    "Поток начинается со строки `retry: 3000`. " + _VISIBILITY + " События уходят в момент коммита "
-    "записи прогона (PostgreSQL NOTIFY из транзакции записи): откаченная запись события не даёт. "
-    "Истории сервер не хранит: событие, пропущенное при обрыве, не повторяется, поэтому после "
-    "переподключения клиент перезапрашивает GET /reviews. При обрыве своей подписки на уведомления "
-    "сервер сам закрывает поток, чтобы клиент перезапросил список."
-)
-
 # Сессия — на весь роутер: исключения видны здесь, а не в middleware.
 router = APIRouter(
     prefix="/api/v1/reviews",
@@ -252,7 +228,7 @@ class ReviewRunResponse(BaseModel):
 class ReviewRunListItem(BaseModel):
     """Прогон ревью строкой списка: без находок и комментариев.
 
-    Те же данные — у каждого события прогона в потоке GET /reviews/events.
+    Те же данные — у каждого события прогона `run.*` в потоке GET /events.
     """
 
     id: UUID
@@ -268,6 +244,7 @@ class ReviewRunListItem(BaseModel):
             "при равном — пришедшая позже."
         )
     )
+    last_progress_at: UtcDatetime = Field(description="Время последнего перехода состояния.")
     duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
     failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
     findings_count: int = Field(
@@ -345,42 +322,6 @@ class ReviewRunListQuery(BaseModel):
         return created_to
 
 
-class ReviewRunsStreamEventType(
-    RootModel[Literal["run.created", "run.status_changed", "run.finished", "ping"]]
-):
-    """Имя события потока GET /reviews/events — значение поля `event:` в тексте SSE.
-
-    У `run.*` данные — ReviewRunListItem, у `ping` — `{}`. Тело ответа — текст SSE, поэтому
-    в схему модель попадает отдельным компонентом (`app/api/openapi.py`, `extra_models`).
-    """
-
-
-_STREAM_DOC: dict[int | str, dict[str, Any]] = {
-    HTTPStatus.OK: {
-        "description": "Поток событий; данные каждого события прогона — ReviewRunListItem.",
-        "content": {
-            "text/event-stream": {
-                "schema": {
-                    "type": "string",
-                    "description": (
-                        "Текст SSE: `event: run.created`, `run.status_changed` или `run.finished` с JSON "
-                        "ReviewRunListItem в `data` или `event: ping` с `data: {}`."
-                    ),
-                },
-                # Какие данные у какого события — ссылками на модели, а не только текстом.
-                "x-sse-events": {
-                    "run.created": {"$ref": "#/components/schemas/ReviewRunListItem"},
-                    "run.status_changed": {"$ref": "#/components/schemas/ReviewRunListItem"},
-                    "run.finished": {"$ref": "#/components/schemas/ReviewRunListItem"},
-                    "ping": {"type": "object", "maxProperties": 0},
-                },
-            }
-        },
-        "headers": STREAM_HEADERS_DOC,
-    },
-}
-
-
 @router.post(
     "",
     status_code=HTTPStatus.ACCEPTED,
@@ -394,8 +335,6 @@ def create_review(body: CreateReviewRequest) -> ReviewJob:
     raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Ручной запуск ревью ещё не реализован.")
 
 
-# `/events` и список объявлены раньше `/{review_run_id}`: маршруты сверяются по порядку,
-# и `events` иначе попал бы в параметр пути и получил 422 «ожидается UUID».
 @router.get(
     "",
     response_model=ReviewRunListResponse,
@@ -406,17 +345,6 @@ def create_review(body: CreateReviewRequest) -> ReviewJob:
 )
 def list_reviews(query: Annotated[ReviewRunListQuery, Query()]) -> ReviewRunListResponse:
     raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Список прогонов ревью ещё не реализован.")
-
-
-@router.get(
-    "/events",
-    response_class=StreamingResponse,
-    summary="Поток изменений прогонов ревью (Server-Sent Events)",
-    description=_STREAM_DESCRIPTION,
-    responses={**_STREAM_DOC, **ERRORS_501_NOT_IMPLEMENTED},
-)
-def stream_reviews_events() -> StreamingResponse:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Поток изменений прогонов ещё не реализован.")
 
 
 @router.get(
@@ -439,6 +367,20 @@ def get_review(
     if run is None:
         raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
 
+    findings = uow.findings.list_for_run(review_run_id)
+    comments = uow.published_comments.list_for_run(review_run_id)
+    return ReviewRunResponse.model_validate(
+        {
+            **asdict(run),
+            "merge_request": _merge_request_summary(uow, run),
+            "findings": [{**asdict(f), **asdict(f.anchor)} for f in findings],
+            "published_comments": [asdict(c) for c in comments],
+        }
+    )
+
+
+def _merge_request_summary(uow: UnitOfWork, run: ReviewRun) -> dict[str, Any]:
+    """Запрос на изменение прогона с его репозиторием — данные для MergeRequestSummary."""
     # Запрос на изменение и репозиторий держат внешние ключи с RESTRICT: их отсутствие —
     # нарушение целостности базы, а не «не найдено», поэтому 500, а не 404.
     merge_request = uow.merge_requests.get(run.merge_request_id)
@@ -447,19 +389,24 @@ def get_review(
     repository = uow.repositories.get(merge_request.repository_id)
     if repository is None:
         raise RuntimeError(f"У запроса на изменение {merge_request.id} нет репозитория {merge_request.repository_id}.")
+    return _summary(merge_request, repository)
 
-    findings = uow.findings.list_for_run(review_run_id)
-    comments = uow.published_comments.list_for_run(review_run_id)
-    return ReviewRunResponse.model_validate(
+
+def _summary(merge_request: MergeRequest, repository: Repository) -> dict[str, Any]:
+    return {
+        **asdict(merge_request),
+        "url": merge_request_url(repository.provider, repository.full_name, merge_request.number),
+        "repository": asdict(repository),
+    }
+
+
+def review_run_list_item(entry: ReviewRunListEntry) -> ReviewRunListItem:
+    """Строка списка из записи, собранной одним запросом на пачку (`list_changed`)."""
+    return ReviewRunListItem.model_validate(
         {
-            **asdict(run),
-            "merge_request": {
-                **asdict(merge_request),
-                "url": merge_request_url(repository.provider, repository.full_name, merge_request.number),
-                "repository": asdict(repository),
-            },
-            "findings": [{**asdict(f), **asdict(f.anchor)} for f in findings],
-            "published_comments": [asdict(c) for c in comments],
+            **asdict(entry.run),
+            "merge_request": _summary(entry.merge_request, entry.repository),
+            "findings_count": entry.findings_count,
         }
     )
 
