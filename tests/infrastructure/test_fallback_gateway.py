@@ -1,6 +1,7 @@
 """`FallbackLlmGateway`: провайдеры по порядку, первый ответ, сбой последнего."""
 
 import logging
+from dataclasses import replace
 
 import pytest
 
@@ -104,3 +105,38 @@ def test_other_exceptions_are_not_swallowed() -> None:
 def test_gateway_without_providers_is_rejected_at_construction() -> None:
     with pytest.raises(ValueError, match="хотя бы один провайдер"):
         FallbackLlmGateway(())
+
+
+class _RetriesOnce:
+    """Провайдер, который сам повторил вызов один раз (100 токенов), потом ответил по сценарию."""
+
+    def __init__(self, answer: object) -> None:
+        self._scripted = ScriptedLlmGateway([answer])  # type: ignore[list-item]
+
+    def complete(self, request):
+        assert request.on_retry is not None
+        request.on_retry(LlmOutputError("не по схеме"), 100)
+        return self._scripted.complete(request)
+
+
+def test_handover_and_retries_inside_providers_reach_the_listener_with_running_tokens() -> None:
+    heard: list[tuple[str, int]] = []
+    request = replace(REQUEST, on_retry=lambda error, tokens: heard.append((str(error), tokens)))
+    local = _RetriesOnce(LlmOutputError("Ollama: не по схеме", tokens_used=200))
+    hosted = _RetriesOnce(review_response(model="mistral", tokens=300))
+
+    response = FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(request)
+
+    # Повтор внутри Ollama, переход к Eurorouter, повтор внутри Eurorouter: токены -
+    # от начала всего вызова, итог ответа - тоже.
+    assert heard == [("не по схеме", 100), ("Ollama: не по схеме", 200), ("не по схеме", 300)]
+    assert response.tokens_used == 500
+
+
+def test_a_request_without_a_listener_reaches_providers_unchanged() -> None:
+    local = ScriptedLlmGateway([LlmError("Ollama недоступна", tokens_used=10)])
+    hosted = ScriptedLlmGateway([review_response()])
+
+    FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(REQUEST)
+
+    assert hosted.requests[0] is REQUEST

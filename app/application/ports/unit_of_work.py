@@ -19,6 +19,7 @@ from app.application.ports.repositories import (
     PublishedCommentRepo,
     RepositoryRepo,
     ReviewRunRepo,
+    ReviewRunStepRepo,
     SessionRepo,
     UserRepo,
 )
@@ -33,6 +34,7 @@ class UnitOfWork(Protocol):
     repositories: RepositoryRepo
     merge_requests: MergeRequestRepo
     review_runs: ReviewRunRepo
+    review_run_steps: ReviewRunStepRepo
     context_payloads: ContextPayloadRepo
     findings: FindingRepo
     published_comments: PublishedCommentRepo

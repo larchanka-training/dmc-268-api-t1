@@ -1657,7 +1657,7 @@
           "reviews"
         ],
         "summary": "Шаги прогона",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #82). Когда ручка заработает: шаги прогона по порядку — этап, статус, время, токены, код ошибки; без запросов и ответов модели. 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию.",
+        "description": "Требует сессию. Шаги воркера по порядку начала (при равном начале — по id): этап, статус, начало, длительность, токены, код ошибки; без запросов и ответов модели. Повтор этапа (новая попытка вызова модели) — отдельный шаг того же этапа. Прогон, у которого шагов ещё нет, — 200 с пустым items; 404 REVIEW_NOT_FOUND, если прогона нет.",
         "operationId": "getReviewSteps",
         "security": [
           {
@@ -1745,21 +1745,6 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/ValidationProblem"
-                }
-              }
-            },
-            "headers": {
-              "X-Trace-ID": {
-                "$ref": "#/components/headers/X-Trace-ID"
-              }
-            }
-          },
-          "501": {
-            "description": "Ручка ещё не реализована.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NotImplementedProblem"
                 }
               }
             },
@@ -3691,6 +3676,7 @@
               "LLM_TIMEOUT",
               "LLM_UNAVAILABLE",
               "LLM_INVALID_OUTPUT",
+              "PROMPT_TOO_LARGE",
               "REVIEW_RUN_STALE",
               "INTERNAL_ERROR"
             ],
@@ -4465,7 +4451,7 @@
               }
             ],
             "title": "Tokens Used",
-            "description": "Токенов LLM потрачено на шаге; null, если шаг модель не вызывал."
+            "description": "Токенов LLM потрачено на шаге; null, если шаг модель не вызывал или расход неизвестен (брошенный шаг)."
           },
           "error_code": {
             "anyOf": [

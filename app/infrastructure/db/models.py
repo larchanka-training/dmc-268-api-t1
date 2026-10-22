@@ -41,7 +41,9 @@ from app.domain.enums import (
     FindingSeverity,
     MergeRequestState,
     Provider,
+    ReviewRunStage,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     TriggerSource,
     VerificationOutcome,
 )
@@ -180,6 +182,53 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
 
     merge_request: Mapped[MergeRequestRow] = relationship(back_populates="review_runs")
+
+
+class ReviewRunStepRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
+    """Шаг воркера в прогоне — «ход прогона» в кабинете.
+
+    Повтор этапа — отдельная строка. Запросов и ответов модели здесь нет:
+    они остаются в `context_payloads` и в логах, а шаг — только исход.
+    """
+
+    __tablename__ = "review_run_steps"
+    __table_args__ = (
+        # Длительности нет ровно у идущего шага, кода сбоя — у всех, кроме
+        # упавшего: закрыть шаг наполовину не может ни один писатель.
+        CheckConstraint(
+            "(status = 'running') = (duration_seconds IS NULL)",
+            name="ck_review_run_steps_duration",
+        ),
+        CheckConstraint(
+            "(status = 'failed') = (error_code IS NOT NULL)",
+            name="ck_review_run_steps_error_code",
+        ),
+        CheckConstraint(
+            "duration_seconds IS NULL OR duration_seconds >= 0",
+            name="ck_review_run_steps_duration_non_negative",
+        ),
+        CheckConstraint(
+            "tokens_used IS NULL OR tokens_used >= 0",
+            name="ck_review_run_steps_tokens_non_negative",
+        ),
+        # Шаги прогона читаются по порядку начала (`list_for_run`): индекс
+        # отдаёт их уже отсортированными. Он же служит внешнему ключу.
+        Index("ix_review_run_steps_run_order", "review_run_id", "started_at", "id"),
+    )
+
+    review_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("review_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    stage: Mapped[ReviewRunStage] = mapped_column(
+        _enum(ReviewRunStage, "review_run_stage"), nullable=False
+    )
+    status: Mapped[ReviewRunStepStatus] = mapped_column(
+        _enum(ReviewRunStepStatus, "review_run_step_status"), nullable=False
+    )
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    tokens_used: Mapped[int | None] = mapped_column(BigInteger)
+    error_code: Mapped[str | None] = mapped_column(String(64))
 
 
 class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):

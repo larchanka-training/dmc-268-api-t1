@@ -47,12 +47,14 @@ def complete_structured[T: BaseModel](
 
     Сбой транспорта (`LlmError` из `send`) не повторяется: это решение
     адаптера и составного фоллбэка, а не цикла проверки. Любой сбой несёт
-    токены, израсходованные к нему.
+    токены, израсходованные к нему. Перед каждым повтором цикл сообщает
+    `request.on_retry`, что попытка не прошла схему, - с токенами к этому
+    моменту.
     """
     messages: tuple[PromptMessage, ...] = request.messages
     tokens = 0
     violations: list[str] = []
-    for _ in range(max_attempts):
+    for attempt in range(1, max_attempts + 1):
         try:
             reply = send(messages)
         except LlmError as error:
@@ -71,6 +73,8 @@ def complete_structured[T: BaseModel](
                 violations = [f"ответ обрезан пределом длины ({request.max_output_tokens} токенов)"]
             else:
                 violations = _violations(error)
+            if attempt < max_attempts and request.on_retry is not None:
+                request.on_retry(LlmOutputError("; ".join(violations)), tokens)
             messages = (*request.messages, _retry_message(violations, shorter=reply.truncated))
             continue
         return LlmResponse(model=reply.model, tokens_used=tokens, content=content)

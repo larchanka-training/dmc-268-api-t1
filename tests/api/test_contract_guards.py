@@ -12,9 +12,21 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from app.api.factory import create_app
-from app.api.schemas import UTC_DATETIME_PATTERN, FailedStage, UtcDatetime
+from app.api.reviews import ReviewRunStepResponse
+from app.api.schemas import (
+    UTC_DATETIME_PATTERN,
+    FailedStage,
+    ReviewErrorCode,
+    UtcDatetime,
+)
 from app.config import Settings
-from app.domain.enums import FAILURE_STAGES
+from app.domain.enums import FAILURE_STAGES, ReviewRunStage, ReviewRunStepStatus
+from app.domain.llm_errors import LlmError
+from app.domain.run_steps import INTERNAL_ERROR
+from app.domain.vcs_errors import VcsError
+from app.infrastructure.vcs import (
+    errors as vcs_errors,  # noqa: F401 - наследники VcsError
+)
 
 API_DIR = Path(__file__).resolve().parents[2] / "app" / "api"
 SETTINGS = Settings(
@@ -79,6 +91,27 @@ def test_routes_do_not_hand_build_json_bodies() -> None:
 
 def test_failed_stage_is_the_domain_failure_stages() -> None:
     assert set(get_args(FailedStage)) == FAILURE_STAGES
+
+
+def test_step_stage_and_status_are_the_domain_enums() -> None:
+    """Литералы схемы шага - те же значения, что enum домена и тип в базе."""
+    fields = ReviewRunStepResponse.model_fields
+    assert list(get_args(fields["stage"].annotation)) == [s.value for s in ReviewRunStage]
+    assert list(get_args(fields["status"].annotation)) == [s.value for s in ReviewRunStepStatus]
+
+
+def _codes(base: type[LlmError | VcsError]) -> set[str]:
+    classes: list[type[Any]] = [base]
+    for cls in classes:
+        classes.extend(cls.__subclasses__())
+    return {cls.code for cls in classes}
+
+
+def test_every_step_error_code_is_in_the_run_error_catalog() -> None:
+    """Код шага - из каталога ошибок прогона (§8): иначе кабинет его не знает."""
+    codes = _codes(LlmError) | _codes(VcsError) | {INTERNAL_ERROR}
+    assert {"LLM_RATE_LIMITED", "PROMPT_TOO_LARGE", "PR_NOT_FOUND"} <= codes
+    assert codes <= set(get_args(ReviewErrorCode))
 
 
 class _Moment(BaseModel):

@@ -70,9 +70,10 @@ _DIFF_DESCRIPTION = (
     "и head_sha прогона; 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию."
 )
 _STEPS_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #82). Когда ручка заработает: шаги прогона по порядку — этап, статус, время, токены, код "
-    "ошибки; без запросов и ответов модели. 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию."
+    "Требует сессию. Шаги воркера по порядку начала (при равном начале — по id): этап, статус, начало, "
+    "длительность, токены, код ошибки; без запросов и ответов модели. Повтор этапа (новая попытка вызова "
+    "модели) — отдельный шаг того же этапа. Прогон, у которого шагов ещё нет, — 200 с пустым items; "
+    "404 REVIEW_NOT_FOUND, если прогона нет."
 )
 
 # Видимость прогонов — решение А в dmc-268-ui-t1#43: одно правило на список и поток.
@@ -499,7 +500,7 @@ class ReviewRunStepResponse(BaseModel):
     status: Literal["running", "completed", "failed"] = Field(description="Состояние шага.")
     started_at: UtcDatetime = Field(description="Когда шаг начался.")
     duration_seconds: float | None = Field(description="Длительность шага; null, пока шаг идёт.")
-    tokens_used: int | None = Field(description="Токенов LLM потрачено на шаге; null, если шаг модель не вызывал.")
+    tokens_used: int | None = Field(description="Токенов LLM потрачено на шаге; null, если шаг модель не вызывал или расход неизвестен (брошенный шаг).")
     error_code: str | None = Field(description="Код ошибки шага; null, если шаг не падал.", examples=["LLM_TIMEOUT"])
 
 
@@ -529,9 +530,13 @@ def get_review_diff(
     summary="Шаги прогона",
     response_description="Шаги воркера по порядку.",
     description=_STEPS_DESCRIPTION,
-    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+    responses={**ERRORS_404_REVIEW, **ERRORS_422},
 )
 def get_review_steps(
     review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
+    uow: UnitOfWork = Depends(get_unit_of_work),
 ) -> ReviewRunStepListResponse:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Шаги прогона ещё не реализованы.")
+    if uow.review_runs.get(review_run_id) is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
+    steps = uow.review_run_steps.list_for_run(review_run_id)
+    return ReviewRunStepListResponse.model_validate({"items": [asdict(step) for step in steps]})

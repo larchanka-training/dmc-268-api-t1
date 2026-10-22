@@ -20,6 +20,7 @@ TABLES = [
     "repositories",
     "merge_requests",
     "review_runs",
+    "review_run_steps",
     "context_payloads",
     "findings",
     "published_comments",
@@ -63,6 +64,13 @@ def test_one_active_run_per_commit_is_a_partial_unique_index() -> None:
         assert terminal.value in statement
 
 
+def test_steps_are_indexed_in_the_order_list_for_run_reads_them() -> None:
+    indexes = Base.metadata.tables["review_run_steps"].indexes
+    assert {(i.name, tuple(c.name for c in i.columns)) for i in indexes} == {
+        ("ix_review_run_steps_run_order", ("review_run_id", "started_at", "id")),
+    }
+
+
 def test_enum_columns_are_native_postgres_types() -> None:
     statement = ddl("findings")
     assert "finding_category" in statement
@@ -77,6 +85,7 @@ def test_children_restrict_deletion_of_their_parent() -> None:
     for table in (
         "merge_requests",
         "review_runs",
+        "review_run_steps",
         "context_payloads",
         "findings",
         "published_comments",
@@ -84,6 +93,12 @@ def test_children_restrict_deletion_of_their_parent() -> None:
         statement = ddl(table)
         assert "ON DELETE RESTRICT" in statement
         assert "CASCADE" not in statement
+
+
+def test_step_stage_and_status_are_native_enums() -> None:
+    statement = ddl("review_run_steps")
+    assert "stage review_run_stage NOT NULL" in statement
+    assert "status review_run_step_status NOT NULL" in statement
 
 
 def test_merge_request_state_is_a_native_enum() -> None:

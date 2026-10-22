@@ -14,6 +14,7 @@ from app.application.ports.repositories import (
     PublishedCommentRepo,
     RepositoryRepo,
     ReviewRunRepo,
+    ReviewRunStepRepo,
     SessionRepo,
     UserRepo,
 )
@@ -25,6 +26,7 @@ from app.infrastructure.db.repositories import (
     SqlAlchemyPublishedCommentRepo,
     SqlAlchemyRepositoryRepo,
     SqlAlchemyReviewRunRepo,
+    SqlAlchemyReviewRunStepRepo,
     SqlAlchemySessionRepo,
     SqlAlchemyUserRepo,
 )
@@ -56,6 +58,7 @@ class SqlAlchemyUnitOfWork:
         self.repositories: RepositoryRepo = SqlAlchemyRepositoryRepo(session)
         self.merge_requests: MergeRequestRepo = SqlAlchemyMergeRequestRepo(session)
         self.review_runs: ReviewRunRepo = SqlAlchemyReviewRunRepo(session)
+        self.review_run_steps: ReviewRunStepRepo = SqlAlchemyReviewRunStepRepo(session)
         self.context_payloads: ContextPayloadRepo = SqlAlchemyContextPayloadRepo(session)
         self.findings: FindingRepo = SqlAlchemyFindingRepo(session)
         self.published_comments: PublishedCommentRepo = SqlAlchemyPublishedCommentRepo(
