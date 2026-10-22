@@ -71,7 +71,7 @@ erDiagram
         review_run_step_status status "running, completed, failed"
         timestamptz started_at
         float duration_seconds "null, пока шаг идёт"
-        bigint tokens_used "null, если шаг модель не вызывал"
+        bigint tokens_used "null, если шаг модель не вызывал или расход неизвестен"
         text error_code "код из каталога ошибок прогона; только у упавшего шага"
         uuid id PK
         timestamptz created_at

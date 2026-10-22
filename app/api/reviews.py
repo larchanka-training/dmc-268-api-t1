@@ -297,7 +297,7 @@ class ReviewRunStepResponse(BaseModel):
     status: Literal["running", "completed", "failed"] = Field(description="Состояние шага.")
     started_at: UtcDatetime = Field(description="Когда шаг начался.")
     duration_seconds: float | None = Field(description="Длительность шага; null, пока шаг идёт.")
-    tokens_used: int | None = Field(description="Токенов LLM потрачено на шаге; null, если шаг модель не вызывал.")
+    tokens_used: int | None = Field(description="Токенов LLM потрачено на шаге; null, если шаг модель не вызывал или расход неизвестен (брошенный шаг).")
     error_code: str | None = Field(description="Код ошибки шага; null, если шаг не падал.", examples=["LLM_TIMEOUT"])
 
 
