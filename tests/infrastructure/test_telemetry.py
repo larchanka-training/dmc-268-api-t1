@@ -29,6 +29,7 @@ from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 
 from app.api.factory import create_app
 from app.config import Settings
@@ -36,6 +37,7 @@ from app.domain.entities import ReviewJob
 from app.domain.enums import ReviewRunStage
 from app.domain.llm_errors import LlmTimeoutError
 from app.infrastructure import telemetry
+from app.infrastructure.container import build_container
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue, consuming_span
 from app.infrastructure.telemetry import (
     OtelStageTracer,
@@ -422,6 +424,27 @@ def test_the_installed_engine_tracer_still_produces_sql_spans(
     assert [s for s in spans.get_finished_spans() if s.kind is SpanKind.CLIENT], (
         "после instrument_engine запрос к базе не дал спана — спаны SQL пропали"
     )
+
+
+def test_a_failed_query_does_not_put_its_parameters_into_the_process_span(
+    spans: InMemorySpanExporter,
+) -> None:
+    # Параметр запроса — код из диффа; ошибка запроса выходит из обработки сообщения.
+    secret = "def leaked_from_diff(): ..."
+    engine = build_container(SETTINGS.model_copy(update={"database_url": "sqlite://"})).engine
+    with (
+        engine.connect() as connection,
+        pytest.raises(OperationalError),
+        consuming_span(None, delivery_tag=1),
+    ):
+        connection.execute(text("SELECT * FROM no_such_table WHERE x = :x"), {"x": secret})
+
+    (process,) = [s for s in spans.get_finished_spans() if s.kind is SpanKind.CONSUMER]
+    assert process.status.status_code is StatusCode.ERROR
+    recorded = [process.status.description or ""] + [
+        str(value) for event in process.events for value in (event.attributes or {}).values()
+    ]
+    assert not [value for value in recorded if secret in value]
 
 
 # --- остановка процесса --------------------------------------------------------------

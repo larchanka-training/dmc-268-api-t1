@@ -117,8 +117,13 @@ def build_container(settings: Settings) -> Container:
     # pool_pre_ping: соединение, умершее в простое (перезапуск сервера, idle
     # timeout, NAT сбросил поток), обнаруживается при выдаче из пула и
     # заменяется, а не всплывает OperationalError на следующем запросе.
+    # hide_parameters: текст ошибки SQLAlchemy не несёт `[parameters: …]` — в
+    # параметрах бывает код из диффа, а текст ошибки попадает в лог и в спан
+    # (`record_exception`, статус спана).
     return Container(
-        engine=create_engine(settings.database_url, future=True, pool_pre_ping=True),
+        engine=create_engine(
+            settings.database_url, future=True, pool_pre_ping=True, hide_parameters=True
+        ),
         settings=settings,
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
