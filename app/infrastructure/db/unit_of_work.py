@@ -1,5 +1,6 @@
 """Граница транзакции и единственное место, где создаётся сессия."""
 
+from contextlib import ExitStack
 from types import TracebackType
 from typing import Self
 
@@ -19,6 +20,7 @@ from app.application.ports.repositories import (
     UserRepo,
 )
 from app.application.ports.unit_of_work import ActiveRunConflict
+from app.infrastructure import telemetry
 from app.infrastructure.db.repositories import (
     SqlAlchemyContextPayloadRepo,
     SqlAlchemyFindingRepo,
@@ -104,3 +106,35 @@ class SqlAlchemyUnitOfWork:
     def rollback(self) -> None:
         if self._session is not None:
             self._session.rollback()
+
+
+class UntracedUnitOfWork(SqlAlchemyUnitOfWork):
+    """Та же единица работы, но её запросы не дают спанов (`telemetry.untraced`).
+
+    Для опроса базы в потоке событий: он идёт раз в секунду всё время жизни
+    соединения, и спаны SQL раздули бы трейс запроса. Сбой запроса при этом
+    по-прежнему всплывает исключением и отмечается на спане запроса.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        super().__init__(engine)
+        self._quiet = ExitStack()
+
+    def __enter__(self) -> Self:
+        self._quiet.enter_context(telemetry.untraced())
+        try:
+            return super().__enter__()
+        except BaseException:
+            self._quiet.close()
+            raise
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        try:
+            super().__exit__(exc_type, exc, tb)
+        finally:
+            self._quiet.close()

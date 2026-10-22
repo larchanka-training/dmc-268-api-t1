@@ -114,6 +114,17 @@ class ReviewRun:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewRunListEntry:
+    """Прогон строкой списка: сам прогон, его запрос на изменение, репозиторий и
+    число находок. Собирается одним запросом на пачку, а не чтением на прогон."""
+
+    run: ReviewRun
+    merge_request: MergeRequest
+    repository: Repository
+    findings_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewRunStep:
     """Один шаг воркера в прогоне: этап, его исход, время и затраты.
 

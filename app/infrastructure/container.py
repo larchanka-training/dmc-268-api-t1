@@ -21,7 +21,7 @@ from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.vcs_gateway import VcsGateway
 from app.config import Settings
 from app.infrastructure.cache.memory import InMemoryCacheStore
-from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork, UntracedUnitOfWork
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.ollama import OllamaGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
@@ -75,6 +75,10 @@ class Container:
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine)
+
+    def untraced_unit_of_work(self) -> UnitOfWork:
+        """Единица работы без спанов SQL — для опроса в потоке событий."""
+        return UntracedUnitOfWork(self.engine)
 
     def job_queue(self) -> JobQueue:
         """Выдать очередь задач; соединение с брокером открывается лениво,

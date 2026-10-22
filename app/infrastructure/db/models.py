@@ -145,6 +145,9 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             "verifier_dropped_findings >= 0",
             name="ck_review_runs_verifier_dropped",
         ),
+        # Курсор общего потока событий: опрос «изменённые после (updated_at, id)»
+        # раз в секунду на соединение читает диапазон индекса, а не всю таблицу.
+        Index("ix_review_runs_updated_at_id", "updated_at", "id"),
     )
 
     merge_request_id: Mapped[uuid.UUID] = mapped_column(

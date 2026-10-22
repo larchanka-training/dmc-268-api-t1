@@ -6,9 +6,10 @@
 """
 
 import datetime as dt
+from collections.abc import Collection
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, literal, select, tuple_, union_all, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -20,12 +21,14 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunListEntry,
     ReviewRunStep,
     User,
 )
 from app.domain.entities import Session as UserSession
 from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
+from app.domain.run_feed import FeedCursor
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
@@ -67,6 +70,16 @@ class SqlAlchemyRepositoryRepo:
             .order_by(RepositoryRow.created_at, RepositoryRow.id)
             .limit(limit)
             .offset(offset)
+        ).all()
+        return [m.repository_to_domain(row) for row in rows]
+
+    def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
+        if not provider_ids:
+            return []
+        rows = self._session.scalars(
+            select(RepositoryRow)
+            .where(RepositoryRow.provider == provider, RepositoryRow.provider_id.in_(provider_ids))
+            .order_by(RepositoryRow.id)
         ).all()
         return [m.repository_to_domain(row) for row in rows]
 
@@ -187,6 +200,64 @@ class SqlAlchemyReviewRunRepo:
             select(ReviewRunRow).where(ReviewRunRow.status.not_in(TERMINAL_STATUSES))
         ).all()
         return [m.review_run_to_domain(row) for row in rows]
+
+    def list_changed(
+        self,
+        after: FeedCursor,
+        recheck_from: dt.datetime,
+        repository_ids: Collection[UUID],
+        limit: int,
+    ) -> list[ReviewRunListEntry]:
+        """Один запрос: id обеих частей — `UNION ALL` двух выборок с `LIMIT`, к ним
+        запрос на изменение, репозиторий и число находок `COUNT … GROUP BY` по пачке.
+
+        У каждой части свой `LIMIT`: окно перепроверки, полное уже виденных строк, не
+        мешает курсору идти вперёд. Обе части идут по индексу `(updated_at, id)`.
+        """
+        if not repository_ids:
+            return []
+        key = tuple_(ReviewRunRow.updated_at, ReviewRunRow.id)
+        cursor = tuple_(literal(after.updated_at), literal(after.id))
+        visible = (
+            select(ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .where(MergeRequestRow.repository_id.in_(repository_ids))
+            .order_by(ReviewRunRow.updated_at, ReviewRunRow.id)
+            .limit(limit)
+        )
+        fresh = visible.where(key > cursor).subquery("fresh")
+        late = visible.where(ReviewRunRow.updated_at > recheck_from, key <= cursor).subquery("late")
+        # CTE, а не подзапрос: на неё ссылаются и выборка, и подсчёт находок, а CTE с
+        # двумя ссылками PostgreSQL вычисляет один раз.
+        picked = union_all(select(fresh.c.id), select(late.c.id)).cte("picked")
+        counts = (
+            select(FindingRow.review_run_id, func.count().label("findings_count"))
+            .where(FindingRow.review_run_id.in_(select(picked.c.id)))
+            .group_by(FindingRow.review_run_id)
+            .subquery("counts")
+        )
+        rows = self._session.execute(
+            select(
+                ReviewRunRow,
+                MergeRequestRow,
+                RepositoryRow,
+                func.coalesce(counts.c.findings_count, 0),
+            )
+            .join(picked, picked.c.id == ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .join(RepositoryRow, RepositoryRow.id == MergeRequestRow.repository_id)
+            .outerjoin(counts, counts.c.review_run_id == ReviewRunRow.id)
+            .order_by(ReviewRunRow.updated_at, ReviewRunRow.id)
+        ).all()
+        return [
+            ReviewRunListEntry(
+                run=m.review_run_to_domain(run),
+                merge_request=m.merge_request_to_domain(merge_request),
+                repository=m.repository_to_domain(repository),
+                findings_count=findings_count,
+            )
+            for run, merge_request, repository, findings_count in rows
+        ]
 
     def add(self, run: ReviewRun) -> None:
         """Вставить прогон, перенеся все поля, которые в нём уже есть.
