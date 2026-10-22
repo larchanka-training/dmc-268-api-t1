@@ -359,3 +359,8 @@
 
 - **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/steps` без сессии
 - **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+#### Scenario: Брошенный шаг без токенов
+
+- **WHEN** прогон упал, а его шаг закрыт как брошенный (`error_code = REVIEW_RUN_STALE`)
+- **THEN** у шага `status = failed` и `tokens_used = null`: сколько токенов он израсходовал, неизвестно
