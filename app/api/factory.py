@@ -40,6 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.api.errors import ERRORS_DEFAULT
     from app.infrastructure import telemetry
     from app.infrastructure.container import build_container
+    from app.infrastructure.logging import configure_logging
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -73,6 +74,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     openapi.install(app, extra_models=[ReviewRunStatusEvent])
     app.state.settings = settings
+    # Логи — до первого запроса и до трассировки: её предупреждения при старте
+    # тоже должны выйти JSON-записями.
+    configure_logging(telemetry.API_SERVICE)
     # До контейнера: провайдер трейсов нужен телеметрии FastAPI с первого запроса.
     telemetry.configure_tracing(telemetry.API_SERVICE)
     app.state.container = build_container(settings)

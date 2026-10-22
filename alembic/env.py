@@ -12,15 +12,21 @@ from alembic import context
 from app.config import load_settings
 from app.infrastructure.db import models  # noqa: F401  (регистрирует таблицы)
 from app.infrastructure.db.base import Base
+from app.infrastructure.logging import configure_logging
+from app.infrastructure.telemetry import MIGRATE_SERVICE
 
 config = context.config
 
+# Логи миграций — тем же JSON, что API и воркер. `fileConfig` ниже снимает все
+# root-хендлеры (стандартное поведение logging.config), поэтому после него
+# вызов повторяется: на root не остаётся никого, вернуть может только наш
+# JSON-хендлер. `disable_existing_loggers=False` — чтобы логгеры, созданные
+# раньше fileConfig (внутри процесса тестов это логгеры приложения), не
+# гасились: проверки «в логе нет ключа» не проходили бы впустую.
+configure_logging(MIGRATE_SERVICE)
 if config.config_file_name is not None:
-    # Не выключать логгеры, созданные до миграций: по умолчанию `fileConfig`
-    # глушит каждый уже существующий логгер. Миграции идут и внутри процесса
-    # тестов - тогда логи приложения, созданные раньше, молча пропадали бы, а
-    # проверки «в логе нет ключа» проходили бы впустую.
     fileConfig(config.config_file_name, disable_existing_loggers=False)
+    configure_logging(MIGRATE_SERVICE)
 
 target_metadata = Base.metadata
 

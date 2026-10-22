@@ -62,6 +62,9 @@ logger = logging.getLogger(__name__)
 
 API_SERVICE = "dmc-268-api"
 WORKER_SERVICE = "dmc-268-worker"
+# Отдельное имя процессу миграций: в трейсе деплоя видно, что делал `migrate`,
+# а не API или воркер (change `add-observability-stack`, задачи 1.1 и 5.1).
+MIGRATE_SERVICE = "dmc-268-migrate"
 
 # Имя атрибута — как у поля в API и в логах: по нему трейс ищется от прогона.
 REVIEW_RUN_ID = "review_run_id"
