@@ -219,7 +219,7 @@ _REASONS = {
     "model_type": "ожидается объект",
     "model_attributes_type": "ожидается объект",
     "json_invalid": "тело запроса — не JSON",
-    # Не тип pydantic: так ручка отклоняет диапазон, где начало позже конца.
+    # Свой тип `PydanticCustomError`: диапазон, где начало позже конца (`ReviewRunListQuery`).
     "range_reversed": "начало диапазона позже его конца",
 }
 _DEFAULT_REASON = "недопустимое значение"

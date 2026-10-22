@@ -317,15 +317,20 @@ def test_planned_review_run_parts_check_session_and_id_first(client: TestClient,
     assert_problem(_signed_in_client().get(path), 422, "VALIDATION_ERROR", path)
 
 
-@pytest.mark.parametrize("path", ["/api/v1/reviews", "/api/v1/reviews/events"])
-def test_planned_review_list_and_stream_answer_not_implemented(path: str) -> None:
-    """Список прогонов и общий поток описаны в схеме, а отвечают `501`."""
-    assert_problem(_signed_in_client().get(path), 501, "NOT_IMPLEMENTED", path)
+def test_planned_review_list_answers_not_implemented() -> None:
+    """Список прогонов описан в схеме, а отвечает `501`; поток — в `tests/test_reviews_api.py`."""
+    assert_problem(_signed_in_client().get("/api/v1/reviews"), 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
 
 
 @pytest.mark.parametrize("path", ["/api/v1/reviews", "/api/v1/reviews/events"])
 def test_planned_review_list_and_stream_check_session_first(client: TestClient, path: str) -> None:
     assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
+
+
+def test_planned_review_list_checks_session_before_query(client: TestClient) -> None:
+    """Без сессии неверные параметры не разбираются: `401`, а не `422`."""
+    response = client.get("/api/v1/reviews", params={"status": "unknown", "limit": "0"})
+    assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/reviews")
 
 
 @pytest.mark.parametrize(
@@ -348,14 +353,14 @@ def test_planned_review_list_checks_query_first(params: dict[str, Any], error: d
 
 
 def test_planned_review_list_accepts_every_filter() -> None:
-    """Все фильтры вместе и пустой `q` проходят проверку: дальше — `501`."""
+    """Все фильтры вместе, пустые `q` и `author`, время с любой зоной проходят проверку: дальше — `501`."""
     params = {
         "status": ["queued", "analysing"],
         "active": "true",
         "repository_id": RUN_ID,
-        "author": "octocat",
+        "author": "",
         "q": "",
-        "created_from": "2026-10-11T00:00:00Z",
+        "created_from": "2026-10-11T03:00:00+03:00",
         "created_to": "2026-10-11T00:00:00Z",
         "limit": "20",
         "offset": "40",
@@ -365,21 +370,29 @@ def test_planned_review_list_accepts_every_filter() -> None:
 
 
 def test_review_list_and_stream_are_in_the_exported_contract() -> None:
-    """Фронтенд берёт типы из `docs/openapi/openapi.json`: параметры, `total` и модели событий там есть."""
+    """Фронтенд берёт типы из `docs/openapi/openapi.json`: параметры, `total` и данные событий там есть."""
     schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
     list_op = schema["paths"]["/api/v1/reviews"]["get"]
-    assert [p["name"] for p in list_op["parameters"]] == [
+    assert {p["name"] for p in list_op["parameters"]} == {
         "status", "active", "repository_id", "author", "q", "created_from", "created_to", "limit", "offset"
-    ]
+    }
     assert list_op["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ReviewRunListResponse"
     }
     components = schema["components"]["schemas"]
-    assert components["ReviewRunListResponse"]["required"] == ["items", "total"]
-    assert "merge_request" in components["ReviewRunListItem"]["required"]
-    stream_op = schema["paths"]["/api/v1/reviews/events"]["get"]
-    assert set(stream_op["responses"]["200"]["content"]) == {"text/event-stream"}
-    assert {"ReviewRunStatusChangedEvent", "ReviewRunFinishedEvent"} <= components.keys()
+    assert set(components["ReviewRunListResponse"]["required"]) == {"items", "total"}
+    assert {"id", "status", "updated_at", "failed_stage", "findings_count", "merge_request"} <= set(
+        components["ReviewRunListItem"]["required"]
+    )
+    stream = schema["paths"]["/api/v1/reviews/events"]["get"]["responses"]["200"]["content"]
+    assert set(stream) == {"text/event-stream"}
+    row = {"$ref": "#/components/schemas/ReviewRunListItem"}
+    events = stream["text/event-stream"]["x-sse-events"]
+    assert {name: events[name] for name in ("run.created", "run.status_changed", "run.finished")} == {
+        "run.created": row,
+        "run.status_changed": row,
+        "run.finished": row,
+    }
 
 
 def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None:

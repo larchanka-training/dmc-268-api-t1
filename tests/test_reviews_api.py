@@ -357,6 +357,7 @@ def test_events_path_is_not_taken_for_a_run_id() -> None:
     by_id = client.get(f"/api/v1/reviews/{run.id}")
 
     assert stream.status_code == 501
+    assert stream.headers["content-type"] == "application/problem+json"
     assert stream.json()["code"] == "NOT_IMPLEMENTED"
     assert by_id.status_code == 200
     assert by_id.json()["id"] == str(run.id)

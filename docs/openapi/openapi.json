@@ -1069,7 +1069,7 @@
           "reviews"
         ],
         "summary": "Список прогонов ревью",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #103). Требует сессию; параметры запроса проверяются до ответа 501. Когда ручка заработает: снимок списка прогонов ревью, сначала новые — по created_at по убыванию, затем по id. Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub (любая роль), — то же правило, что у GET /repositories/available. Фильтры складываются через «и»: status — один или несколько статусов (параметр повторяется); active=true — только активные (queued, building_context, analysing, publishing), active=false — только завершённые (completed, failed, cancelled), вместе со status — пересечение; repository_id — прогоны одного репозитория; author — точное совпадение логина автора запроса на изменение; q — поиск без учёта регистра по заголовку, номеру (42 или #42), автору и исходной ветке запроса на изменение, пустая строка — без поиска; created_from (включительно) и created_to (исключительно) — диапазон по created_at прогона, created_from позже created_to — 422 VALIDATION_ERROR. Постранично: limit выше 200 не отклоняется, а приводится к 200. total — сколько прогонов подходит под фильтры без учёта limit и offset. Находок и комментариев в строке нет: они — в GET /reviews/{review_run_id}. Изменения после снимка приходят потоком GET /reviews/events.",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #103). Требует сессию; параметры запроса проверяются до ответа 501. Когда ручка заработает: снимок списка прогонов ревью, сначала новые — по created_at по убыванию, при равном created_at — по id по убыванию. Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub (любая роль), — то же правило, что у GET /repositories/available. Фильтры складываются через «и»: status — один или несколько статусов (параметр повторяется); active=true — только активные (queued, building_context, analysing, publishing), active=false — только завершённые (completed, failed, cancelled), вместе со status — пересечение; repository_id — прогоны одного репозитория, невидимый или несуществующий репозиторий даёт пустой список, а не 404; author — точное совпадение логина автора запроса на изменение; q — поиск без учёта регистра по заголовку, номеру (42 или #42), автору и исходной ветке запроса на изменение. У q и author пустая строка — без фильтра. created_from (включительно) и created_to (исключительно) — диапазон по created_at прогона, время с зоной (в ответах — UTC с Z); created_from позже created_to — 422 VALIDATION_ERROR в query.created_to. Постранично: limit выше 200 не отклоняется, а приводится к 200. total — сколько прогонов подходит под фильтры без учёта limit и offset. findings_count — то же, что число элементов findings в GET /reviews/{review_run_id}: находки, оставшиеся после отсева и верификатора, а не опубликованные комментарии. Самих находок и комментариев в строке нет. Изменения после снимка приходят потоком GET /reviews/events.",
         "operationId": "listReviews",
         "security": [
           {
@@ -1149,10 +1149,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Логин автора запроса на изменение, точное совпадение.",
+              "description": "Логин автора запроса на изменение, точное совпадение. Пустая строка — без фильтра.",
               "title": "Author"
             },
-            "description": "Логин автора запроса на изменение, точное совпадение."
+            "description": "Логин автора запроса на изменение, точное совпадение. Пустая строка — без фильтра."
           },
           {
             "name": "q",
@@ -1168,10 +1168,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Поиск без учёта регистра по заголовку, номеру (42 или #42), автору и исходной ветке запроса на изменение; пустая строка — без поиска.",
+              "description": "Поиск без учёта регистра по заголовку, номеру (42 или #42), автору и исходной ветке запроса на изменение. Пустая строка — без фильтра.",
               "title": "Q"
             },
-            "description": "Поиск без учёта регистра по заголовку, номеру (42 или #42), автору и исходной ветке запроса на изменение; пустая строка — без поиска."
+            "description": "Поиск без учёта регистра по заголовку, номеру (42 или #42), автору и исходной ветке запроса на изменение. Пустая строка — без фильтра."
           },
           {
             "name": "created_from",
@@ -1181,20 +1181,16 @@
               "anyOf": [
                 {
                   "type": "string",
-                  "format": "date-time",
-                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
-                  "examples": [
-                    "2026-10-11T10:00:00Z"
-                  ]
+                  "format": "date-time"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "Прогоны, созданные не раньше этого времени (включительно).",
+              "description": "Прогоны, созданные не раньше этого времени (включительно); время с зоной.",
               "title": "Created From"
             },
-            "description": "Прогоны, созданные не раньше этого времени (включительно)."
+            "description": "Прогоны, созданные не раньше этого времени (включительно); время с зоной."
           },
           {
             "name": "created_to",
@@ -1204,20 +1200,16 @@
               "anyOf": [
                 {
                   "type": "string",
-                  "format": "date-time",
-                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
-                  "examples": [
-                    "2026-10-11T10:00:00Z"
-                  ]
+                  "format": "date-time"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "Прогоны, созданные раньше этого времени (исключительно).",
+              "description": "Прогоны, созданные раньше этого времени (исключительно); время с зоной.",
               "title": "Created To"
             },
-            "description": "Прогоны, созданные раньше этого времени (исключительно)."
+            "description": "Прогоны, созданные раньше этого времени (исключительно); время с зоной."
           },
           {
             "name": "limit",
@@ -1332,11 +1324,11 @@
           "reviews"
         ],
         "summary": "Поток изменений прогонов ревью (Server-Sent Events)",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #103). Требует сессию. Когда ручка заработает: один поток Server-Sent Events на весь кабинет — изменения прогонов ревью после снимка GET /reviews. Тип события — в поле `event:`, данные — JSON модели из схемы в `data:` одной строкой: `run.created` — ReviewRunListItem (новый прогон, та же строка, что в списке), `run.status_changed` — ReviewRunStatusChangedEvent, `run.finished` — ReviewRunFinishedEvent (прогон пришёл в итоговый статус completed, failed или cancelled), `ping` с `data: {}` — в тишине, не реже раза в 15 секунд. Поток начинается со строки `retry: 3000`. Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub (любая роль), — то же правило, что у GET /repositories/available. События уходят в момент коммита записи прогона (PostgreSQL NOTIFY из транзакции записи): откаченная запись события не даёт. Истории сервер не хранит: событие, пропущенное при обрыве, не повторяется, поэтому после переподключения клиент перезапрашивает GET /reviews. При обрыве своей подписки на уведомления сервер сам закрывает поток, чтобы клиент перезапросил список.",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #103). Требует сессию. Когда ручка заработает: один поток Server-Sent Events на весь кабинет — изменения прогонов ревью к снимку GET /reviews. Тип события — в поле `event:`, данные любого события прогона — ReviewRunListItem, полная строка списка, JSON в `data:` одной строкой. Тип — подсказка, что случилось: `run.created` — новый прогон, `run.status_changed` — прогон сменил статус, но не на итоговый, `run.finished` — прогон пришёл в итоговый статус (completed, failed или cancelled); при переходе в итоговый статус приходит только `run.finished`. Клиент применяет любое событие одинаково: upsert строки по id, из двух версий строки побеждает та, у которой updated_at больше. Порядок клиента: сначала подписаться на поток, затем запросить снимок GET /reviews — событие, пришедшее раньше снимка, не потеряется, а более старая версия строки проиграет по updated_at. `ping` с `data: {}` — в тишине, не реже раза в 15 секунд. Поток начинается со строки `retry: 3000`. Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub (любая роль), — то же правило, что у GET /repositories/available. События уходят в момент коммита записи прогона (PostgreSQL NOTIFY из транзакции записи): откаченная запись события не даёт. Истории сервер не хранит: событие, пропущенное при обрыве, не повторяется, поэтому после переподключения клиент перезапрашивает GET /reviews. При обрыве своей подписки на уведомления сервер сам закрывает поток, чтобы клиент перезапросил список.",
         "operationId": "streamReviewsEvents",
         "responses": {
           "200": {
-            "description": "Поток событий; данные: `run.created` — ReviewRunListItem, `run.status_changed` — ReviewRunStatusChangedEvent, `run.finished` — ReviewRunFinishedEvent.",
+            "description": "Поток событий; данные каждого события прогона — ReviewRunListItem.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1359,7 +1351,22 @@
               "text/event-stream": {
                 "schema": {
                   "type": "string",
-                  "description": "Текст SSE: `event: run.created`, `run.status_changed` или `run.finished` с JSON модели события в `data` или `event: ping`."
+                  "description": "Текст SSE: `event: run.created`, `run.status_changed` или `run.finished` с JSON ReviewRunListItem в `data` или `event: ping` с `data: {}`."
+                },
+                "x-sse-events": {
+                  "run.created": {
+                    "$ref": "#/components/schemas/ReviewRunListItem"
+                  },
+                  "run.status_changed": {
+                    "$ref": "#/components/schemas/ReviewRunListItem"
+                  },
+                  "run.finished": {
+                    "$ref": "#/components/schemas/ReviewRunListItem"
+                  },
+                  "ping": {
+                    "type": "object",
+                    "maxProperties": 0
+                  }
                 }
               }
             }
@@ -4063,7 +4070,7 @@
             "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
             "format": "date-time",
             "title": "Updated At",
-            "description": "Когда запись последний раз менялась.",
+            "description": "Когда запись последний раз менялась; из двух версий строки новее та, где оно больше.",
             "examples": [
               "2026-10-11T10:00:00Z"
             ]
@@ -4101,7 +4108,7 @@
             "type": "integer",
             "minimum": 0.0,
             "title": "Findings Count",
-            "description": "Сколько находок у прогона."
+            "description": "Сколько находок у прогона — столько же, сколько элементов findings в GET /reviews/{review_run_id}: после отсева и верификатора, не опубликованные комментарии."
           },
           "merge_request": {
             "$ref": "#/components/schemas/MergeRequestSummary",
@@ -4122,7 +4129,7 @@
           "merge_request"
         ],
         "title": "ReviewRunListItem",
-        "description": "Прогон ревью строкой списка: без находок и комментариев.\n\nТе же данные — у события `run.created` потока GET /reviews/events."
+        "description": "Прогон ревью строкой списка: без находок и комментариев.\n\nТе же данные — у каждого события прогона в потоке GET /reviews/events."
       },
       "ReviewRunListResponse": {
         "properties": {
@@ -4132,7 +4139,7 @@
             },
             "type": "array",
             "title": "Items",
-            "description": "Прогоны: по created_at по убыванию, затем по id."
+            "description": "Прогоны: по created_at по убыванию, при равном created_at — по id по убыванию."
           },
           "total": {
             "type": "integer",
@@ -5086,92 +5093,6 @@
           "failure_reason"
         ],
         "title": "ReviewRunStatusEvent",
-        "type": "object"
-      },
-      "ReviewRunStatusChangedEvent": {
-        "description": "Данные события `run.status_changed` потока GET /reviews/events: прогон сменил статус.\n\nТело ответа — текст SSE, а не этот JSON; в схему модель попадает отдельным компонентом\n(`app/api/openapi.py`, `extra_models`).",
-        "properties": {
-          "id": {
-            "description": "Прогон, о котором событие.",
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
-          },
-          "status": {
-            "$ref": "#/components/schemas/ReviewRunStatus",
-            "description": "Новый статус прогона.",
-            "examples": [
-              "analysing"
-            ]
-          },
-          "failed_stage": {
-            "anyOf": [
-              {
-                "enum": [
-                  "building_context",
-                  "analysing",
-                  "publishing"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Этап, на котором прогон упал; null, если прогон не падал.",
-            "title": "Failed Stage"
-          }
-        },
-        "required": [
-          "id",
-          "status",
-          "failed_stage"
-        ],
-        "title": "ReviewRunStatusChangedEvent",
-        "type": "object"
-      },
-      "ReviewRunFinishedEvent": {
-        "description": "Данные события `run.finished` потока GET /reviews/events: прогон пришёл в итоговый статус.\n\nТело ответа — текст SSE, а не этот JSON; в схему модель попадает отдельным компонентом\n(`app/api/openapi.py`, `extra_models`).",
-        "properties": {
-          "id": {
-            "description": "Прогон, о котором событие.",
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
-          },
-          "status": {
-            "$ref": "#/components/schemas/ReviewRunStatus",
-            "description": "Итоговый статус прогона: completed, failed или cancelled.",
-            "examples": [
-              "completed"
-            ]
-          },
-          "duration_seconds": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Длительность прогона в секундах; null, если не измерена.",
-            "title": "Duration Seconds"
-          },
-          "findings_count": {
-            "description": "Сколько находок у прогона.",
-            "minimum": 0,
-            "title": "Findings Count",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "id",
-          "status",
-          "duration_seconds",
-          "findings_count"
-        ],
-        "title": "ReviewRunFinishedEvent",
         "type": "object"
       }
     },

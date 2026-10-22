@@ -45,6 +45,10 @@ UtcDatetime = Annotated[
     ),
 ]
 
+# Время во входных параметрах: любая зона, приводится к UTC. В схеме — `date-time` без
+# `pattern` ответа: на вход годится и `+03:00`, `Z` обязателен только в ответах.
+UtcDatetimeParam = Annotated[AwareDatetime, AfterValidator(_to_utc)]
+
 # Этап, на котором прогон может упасть, — те же значения, что `FAILURE_STAGES` домена
 # (равенство множеств проверяет тест).
 FailedStage = Literal[ReviewRunStatus.BUILDING_CONTEXT, ReviewRunStatus.ANALYSING, ReviewRunStatus.PUBLISHING]
