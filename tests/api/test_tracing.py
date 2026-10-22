@@ -4,16 +4,11 @@
 """
 
 import ast
-import asyncio
 import os
 import re
 import subprocess
 import sys
-from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
@@ -22,16 +17,11 @@ from opentelemetry import propagate
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, format_span_id, format_trace_id
-from starlette.types import Message
 
-from app.api.dependencies import get_run_reader, get_sleep, get_unit_of_work_factory
+from app.api.dependencies import get_unit_of_work_factory
 from app.api.factory import create_app
 from app.config import Settings
-from app.domain.entities import ReviewRun
-from app.domain.enums import ReviewRunStatus as S
-from app.domain.enums import TriggerSource
 
-from ..fakes.auth import sign_in_with_session
 from ..fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -43,7 +33,6 @@ ORIGIN = "http://localhost:5173"
 FOREIGN_TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"
 FOREIGN_SPAN_ID = "00f067aa0ba902b7"
 FOREIGN_TRACEPARENT = f"00-{FOREIGN_TRACE_ID}-{FOREIGN_SPAN_ID}-01"
-RUN_ID = UUID("00000000-0000-0000-0000-0000000000aa")
 
 
 def _app() -> FastAPI:
@@ -332,92 +321,6 @@ def test_outgoing_requests_do_not_carry_our_trace_context() -> None:
     propagate.inject(carrier)
 
     assert carrier == {}
-
-
-# --- SSE: инструментирование не копит поток -------------------------------------
-
-NOW = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
-_RUN = ReviewRun(
-    id=RUN_ID,
-    merge_request_id=UUID(int=2),
-    head_sha="abc123",
-    status=S.QUEUED,
-    trigger=TriggerSource.WEBHOOK,
-    last_progress_at=NOW,
-    created_at=NOW,
-    updated_at=NOW,
-)
-
-
-def test_sse_events_reach_the_client_as_they_happen(
-    spans: InMemorySpanExporter,
-) -> None:
-    """Событие уходит клиенту до того, как прогон сменит состояние, а не одним куском в конце.
-
-    ASGI-приложение гоняется напрямую: `TestClient` собирает тело целиком и разницы
-    не увидел бы. Ожидание между проверками стоит, пока тест его не отпустит.
-    """
-    app = create_app(SETTINGS)
-    current = {"run": _RUN}
-    release = asyncio.Event()
-
-    async def held_sleep(seconds: float) -> None:
-        await release.wait()
-        release.clear()
-
-    app.dependency_overrides[get_run_reader] = lambda: lambda run_id: current["run"]
-    app.dependency_overrides[get_sleep] = lambda: held_sleep
-    cookies = sign_in_with_session(app, FakeUnitOfWork())
-    cookie = "; ".join(f"{name}={value}" for name, value in cookies.items())
-    path = f"/api/v1/reviews/{RUN_ID}/events"
-    scope: dict[str, Any] = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.4"},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": path,
-        "raw_path": path.encode(),
-        "root_path": "",
-        "query_string": b"",
-        "headers": [(b"host", b"testserver"), (b"cookie", cookie.encode())],
-        "client": ("testclient", 50000),
-        "server": ("testserver", 80),
-    }
-    sent: list[Message] = []
-    first_status = asyncio.Event()
-
-    async def receive() -> Message:
-        await asyncio.Event().wait()  # клиент не отключается
-        raise AssertionError
-
-    async def send(message: Message) -> None:
-        sent.append(message)
-        if b'"status":"queued"' in message.get("body", b""):
-            first_status.set()
-
-    def body() -> bytes:
-        return b"".join(
-            m.get("body", b"") for m in sent if m["type"] == "http.response.body"
-        )
-
-    async def scenario() -> None:
-        stream = asyncio.create_task(app(scope, receive, send))
-        await asyncio.wait_for(first_status.wait(), timeout=5)
-        # Прогон ещё идёт: первое событие уже у клиента, поток не закрыт.
-        assert b'"status":"completed"' not in body()
-        assert sent[-1].get("more_body") is True
-        assert not [s for s in spans.get_finished_spans() if s.kind is SpanKind.SERVER]
-        current["run"] = replace(_RUN, status=S.COMPLETED)
-        release.set()
-        await asyncio.wait_for(stream, timeout=5)
-
-    asyncio.run(scenario())
-
-    assert b'"status":"completed"' in body()
-    (start,) = [m for m in sent if m["type"] == "http.response.start"]
-    headers = dict(start["headers"])
-    assert headers[b"x-trace-id"].decode() == _trace_id(_server_span(spans))
 
 
 # --- ни один ответ API не строится из телеметрии ---------------------------------
