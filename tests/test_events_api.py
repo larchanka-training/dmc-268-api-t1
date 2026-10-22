@@ -344,8 +344,12 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
     run = world.put(_run(world.visible_mr, S.ANALYSING, PAST))
     release = asyncio.Event()
     gone = asyncio.Event()
+    # Поток вошёл в первое ожидание — значит, первый опрос уже прошёл, и запись после
+    # этого — изменение после подключения, а не часть снимка. Ждём это, а не настоящее время.
+    polling = asyncio.Event()
 
     async def held_sleep(seconds: float) -> None:
+        polling.set()
         await release.wait()
         release.clear()
 
@@ -380,7 +384,7 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
 
     async def scenario() -> None:
         stream = asyncio.create_task(app(scope, receive, send))
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(polling.wait(), timeout=5)
         world.put(replace(run, status=S.COMPLETED, updated_at=FUTURE))
         release.set()
         await asyncio.wait_for(changed.wait(), timeout=5)
