@@ -41,6 +41,7 @@ from app.domain.ids import new_id
 from app.domain.prompt import PromptTexts, check_window_config
 from app.domain.webhook_redelivery import RedeliveryPolicy
 from app.infrastructure.container import build_container
+from app.infrastructure.logging import configure_logging
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
     QUEUE_NAME,
@@ -438,6 +439,7 @@ def run_worker(settings: Settings) -> None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
     check_model_deadline(settings)
     check_sweep_thresholds(settings)
+    configure_logging(WORKER_SERVICE)
     configure_tracing(WORKER_SERVICE)
     container = build_container(settings)
     instrument_engine(container.engine)

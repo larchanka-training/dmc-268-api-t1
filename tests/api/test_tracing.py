@@ -307,7 +307,9 @@ exporter = InMemorySpanExporter()
 provider.add_span_processor(SimpleSpanProcessor(exporter))
 client = TestClient(app)
 ids = [client.get("/health").headers["X-Trace-ID"] for _ in range(2)]
-print(len(exporter.get_finished_spans()), *ids)
+# Маркер: остальной stdout процесса — JSON-записи логов (configure_logging),
+# числовая строка одна, но не единственная.
+print("RESULT", len(exporter.get_finished_spans()), *ids)
 """
 
 
@@ -325,7 +327,10 @@ def test_with_tracing_disabled_the_trace_id_is_random_in_the_same_format() -> No
     )
 
     assert result.returncode == 0, result.stderr
-    finished, first, second = result.stdout.split()
+    [line] = [
+        line for line in result.stdout.splitlines() if line.startswith("RESULT")
+    ]
+    _, finished, first, second = line.split()
     assert finished == "0"  # трассировка действительно выключена
     assert re.fullmatch(r"[0-9a-f]{32}", first)
     assert re.fullmatch(r"[0-9a-f]{32}", second)

@@ -2,19 +2,20 @@
 
 ## 1. Логи — JSON со trace-контекстом
 
-- [ ] 1.1 Модуль `app/infrastructure/logging.py`: чистая функция `record_to_fields(record)` (поля
+- [x] 1.1 Модуль `app/infrastructure/logging.py`: чистая функция `record_to_fields(record)` (поля
   JSON: `timestamp`, `severity`, `message`, `trace_id`/`span_id`/`trace_flags` lowercase hex,
   `service.name`, атрибуты из `extra`), `TraceContextFilter` (контекст из текущего спана) и
   `configure_logging(service_name)` c TODO на нативный OTel Logs. Вызовы — в `create_app`,
-  `app/worker/__main__.py`, `alembic/env.py`. Тест: запись внутри спана несёт его `trace_id`,
-  `span_id` и `review_run_id` из `extra`; запись вне спана — без trace-полей и не теряется
-- [ ] 1.2 Фильтр дубля uvicorn `UvicornDuplicateFilter` («Exception in ASGI application») на
+  `app/worker/factory.py` (`run_worker` — вход `__main__.py` остаётся тонким), `alembic/env.py`.
+  Тест: запись внутри спана несёт его `trace_id`, `span_id` и `review_run_id` из `extra`; запись
+  вне спана — без trace-полей и не теряется
+- [x] 1.2 Фильтр дубля uvicorn `UvicornDuplicateFilter` («Exception in ASGI application») на
   логгере `uvicorn.error`; логгеры `uvicorn.*` направлены на JSON-хендлер. Тест: дубль
   отсекается, остальные записи `uvicorn.error` проходят
-- [ ] 1.3 `_internal_error_handler` (`app/api/errors.py`): `logger.error(..., exc_info=error,
+- [x] 1.3 `_internal_error_handler` (`app/api/errors.py`): `logger.error(..., exc_info=error,
   extra={метод, путь без query})`. Тест под настоящим uvicorn: на `500` в логе ровно одна запись
   со стектрейсом, её `trace_id` равен `X-Trace-ID` ответа
-- [ ] 1.4 Тест запретного списка: в записи лога нет тел запросов к модели, кода из диффа, токенов
+- [x] 1.4 Тест запретного списка: в записи лога нет тел запросов к модели, кода из диффа, токенов
   доступа и query путей входа — на примерах вызова модели, ответа GitHub и callback входа
 
 ## 2. Экспорт спанов — список экспортёров
