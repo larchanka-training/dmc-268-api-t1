@@ -23,7 +23,9 @@ from app.domain.enums import (
     MergeRequestState,
     PromptRole,
     Provider,
+    ReviewRunStage,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     RulesStatus,
     TriggerSource,
     VerificationOutcome,
@@ -119,6 +121,39 @@ class ReviewRun:
     # Итог второго прохода модели; пуст, пока анализ не завершён.
     verification: VerificationOutcome | None = None
     verifier_dropped_findings: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewRunListEntry:
+    """Прогон строкой списка: сам прогон, его запрос на изменение, репозиторий и
+    число находок. Собирается одним запросом на пачку, а не чтением на прогон."""
+
+    run: ReviewRun
+    merge_request: MergeRequest
+    repository: Repository
+    findings_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewRunStep:
+    """Один шаг воркера в прогоне: этап, его исход, время и затраты.
+
+    Хранится как `review_run_steps`. Повтор этапа (новая попытка вызова модели)
+    — отдельный шаг того же этапа, поэтому у прогона их может быть несколько.
+    Запросов и ответов модели шаг не хранит.
+    """
+
+    id: UUID
+    review_run_id: UUID
+    stage: ReviewRunStage
+    status: ReviewRunStepStatus
+    started_at: datetime
+    # Пусто, пока шаг идёт.
+    duration_seconds: float | None = None
+    # Пусто у шага, который модель не вызывал.
+    tokens_used: int | None = None
+    # Машиночитаемый код сбоя (`run_steps.error_code`); пуст, если шаг не падал.
+    error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

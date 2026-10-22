@@ -28,6 +28,7 @@ from app.application.ports.llm_gateway import (
     LlmRequest,
     LlmReviewResult,
     LlmTask,
+    RetryListener,
 )
 from app.domain.entities import ContextPayload, Finding, PromptMessage, Verdict
 from app.domain.llm_errors import PromptTooLargeError
@@ -56,13 +57,19 @@ class VerificationAnswer:
 
 
 def request_review(
-    context: ContextPayload, texts: PromptTexts, gateway: LlmGateway, *, limits: LlmLimits
+    context: ContextPayload,
+    texts: PromptTexts,
+    gateway: LlmGateway,
+    *,
+    limits: LlmLimits,
+    on_retry: RetryListener | None = None,
 ) -> LlmReviewResult:
     request = LlmRequest(
         LlmTask.REVIEW,
         _fitting(build_review_prompt(texts, context.body), limits),
         ReviewOutput,
         max_output_tokens=limits.max_output_tokens,
+        on_retry=on_retry,
     )
     response = gateway.complete(request)
     return to_review_result(response.content, model=response.model, tokens_used=response.tokens_used)
@@ -75,12 +82,14 @@ def request_verification(
     candidates: Sequence[Finding],
     *,
     limits: LlmLimits,
+    on_retry: RetryListener | None = None,
 ) -> VerificationAnswer:
     request = LlmRequest(
         LlmTask.VERIFY,
         _fitting(build_verification_prompt(texts, context.body, candidates), limits),
         VerificationOutput,
         max_output_tokens=limits.max_output_tokens,
+        on_retry=on_retry,
     )
     response = gateway.complete(request)
     return VerificationAnswer(

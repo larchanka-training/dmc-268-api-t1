@@ -3,8 +3,10 @@
 Источник истины о структуре базы данных. Таблицы создаются миграцией
 `alembic/versions/0001_baseline_schema.py`, пользователи и сессии — ревизией
 `0005_add_users_and_sessions.py`, ссылка замечания на правило и итог
-верификации — `0006_add_rule_ref_and_verification.py`, токен пользователя у провайдера при
-сессии — `0007_add_provider_tokens.py`; отдельный тест следит, чтобы таблицы
+верификации — `0006_add_rule_ref_and_verification.py`, шаги прогона —
+`0007_add_review_run_steps.py`, индекс `review_runs (updated_at, id)` под курсор
+общего потока событий — `0008_add_review_runs_updated_at_index.py`, токен пользователя у
+провайдера при сессии — `0007_add_provider_tokens.py`; отдельный тест следит, чтобы таблицы
 на этой диаграмме и модели не расходились.
 
 `ReviewRun` в тикете называется `ReviewJob`. Имя поменяли, потому что «job»
@@ -15,6 +17,7 @@
 erDiagram
     repositories ||--o{ merge_requests : "содержит"
     merge_requests ||--o{ review_runs : "проверяется в"
+    review_runs ||--o{ review_run_steps : "прошёл"
     review_runs ||--o{ context_payloads : "получил на вход"
     review_runs ||--o{ findings : "выдал"
     review_runs ||--o{ published_comments : "опубликовал"
@@ -61,6 +64,18 @@ erDiagram
         int rejected_findings "замечания, отброшенные отсевом: строка вне диффа, невалидная ссылка на правило, дубль"
         review_verification verification "итог второго прохода модели: verified, not_required, unavailable; null до конца анализа"
         int verifier_dropped_findings "замечания, отброшенные верификатором"
+        uuid id PK
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    review_run_steps {
+        uuid review_run_id FK
+        review_run_stage stage "fetching_diff, building_context, analysing, verifying, publishing"
+        review_run_step_status status "running, completed, failed"
+        timestamptz started_at
+        float duration_seconds "null, пока шаг идёт"
+        bigint tokens_used "null, если шаг модель не вызывал или расход неизвестен"
+        text error_code "код из каталога ошибок прогона; только у упавшего шага"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
@@ -168,6 +183,16 @@ push. Новый прогон сверяется с ним, чтобы поня�
 называется `ReviewJob`; строка живёт дольше своего сообщения в очереди на всё
 время анализа и публикации и владеет их результатами.
 
+**`review_run_steps`**: ход прогона для кабинета — по строке на шаг воркера:
+этап, состояние, начало, длительность, токены и код ошибки. Этапы мельче
+статуса прогона: `building_context` прогона — это шаги `fetching_diff` и
+`building_context`, `analysing` — шаги `analysing` и `verifying`. Повтор этапа
+(новая попытка вызова модели: ответ не по схеме, переход к резервному
+провайдеру) — отдельная строка того же этапа, упавшая попытка остаётся
+`failed` со своим кодом. Запросов и ответов модели здесь нет: шаг — исход, а
+не телеметрия. Упавший верификатор — `failed`-шаг при завершённом прогоне:
+второй проход fail-open.
+
 **`context_payloads`**: ровно то, что было показано модели в рамках прогона, по
 порядку, по строке на чанк, если контекст не влезает в один запрос. Благодаря
 этому прогон воспроизводим: неудачное замечание можно отследить до входных
@@ -218,6 +243,7 @@ refresh под блокировкой `SELECT … FOR UPDATE`; удаляетс�
 | Чанки контекста сохраняют порядок | `UNIQUE (review_run_id, chunk_index)` |
 | Замечание не может повториться в одном прогоне | `UNIQUE NULLS NOT DISTINCT (review_run_id, file_path, side, old_line, new_line, category)`. Привязка заполняет только номер строки своей стороны, поэтому в ключе есть оба номера, а NULL считаются равными. Без любой из этих двух частей ограничение никогда не сработает на старой стороне, где `new_line` всегда NULL. |
 | Ссылка на правило заполнена целиком или пуста целиком | `ck_findings_rule_ref`: `rule_name`, `rule_check`, `rule_check_text` все `NULL` либо все заполнены и `rule_check >= 1`. Префикс атрибуции строится из всех трёх частей. |
+| Шаг закрыт целиком или идёт | `ck_review_run_steps_duration`: длительности нет ровно у `running`; `ck_review_run_steps_error_code`: код ошибки есть ровно у `failed`. Длительность и токены не отрицательны. |
 | Счётчик верификатора не отрицателен | `ck_review_runs_verifier_dropped`: `verifier_dropped_findings >= 0` |
 | Комментарий публикуется один раз за прогон | `UNIQUE NULLS NOT DISTINCT (review_run_id, finding_id)`. Именно правило для NULL распространяет это ограничение на итоговый комментарий прогона, у которого замечания нет. |
 | Учётная запись провайдера — один пользователь | `UNIQUE (provider, provider_user_id)` |

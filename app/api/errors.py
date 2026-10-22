@@ -105,6 +105,11 @@ ERRORS_502_SCM = _doc(
 ERRORS_502_SCM_REPOSITORIES = _doc(
     HTTPStatus.BAD_GATEWAY, ScmUnavailableProblem, "GitHub не ответил или ответил ошибкой; репозиторий не подключён."
 )
+ERRORS_502_SCM_EVENTS = _doc(
+    HTTPStatus.BAD_GATEWAY,
+    ScmUnavailableProblem,
+    "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев; поток не открыт.",
+)
 ERRORS_404_NOT_IN_INSTALLATION = _doc(
     HTTPStatus.NOT_FOUND,
     RepositoryNotInInstallationProblem,
@@ -221,6 +226,8 @@ _REASONS = {
     "json_invalid": "тело запроса — не JSON",
     # Свой тип `PydanticCustomError`: диапазон, где начало позже конца (`ReviewRunListQuery`).
     "range_reversed": "начало диапазона позже его конца",
+    # Свой тип `PydanticCustomError`: повтор паттерна в фильтре веток (`RepositorySettingsUpdate`).
+    "duplicate_patterns": "паттерны веток повторяются",
     "timezone_aware": "ожидается время с зоной",
     # Свой тип `PydanticCustomError`: время во входе — только строка ISO 8601 (`UtcDatetimeParam`).
     "datetime_not_iso": "ожидается время в ISO 8601",

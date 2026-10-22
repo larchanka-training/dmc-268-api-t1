@@ -5,7 +5,13 @@ from uuid import UUID
 
 from app.application.stale_sweep import sweep_stale_runs
 from app.domain.entities import ReviewRun
-from app.domain.enums import ReviewRunStatus, TriggerSource
+from app.domain.enums import (
+    ReviewRunStage,
+    ReviewRunStatus,
+    ReviewRunStepStatus,
+    TriggerSource,
+)
+from app.domain.run_steps import finish_step, start_step
 
 from ..fakes.unit_of_work import FakeUnitOfWork
 
@@ -62,3 +68,42 @@ def test_a_run_within_the_limit_and_a_terminal_run_are_left_alone() -> None:
     assert swept == 0
     assert uow.review_runs.get(UUID(int=1)).status == ReviewRunStatus.ANALYSING  # type: ignore[union-attr]
     assert uow.review_runs.get(UUID(int=2)).status == ReviewRunStatus.COMPLETED  # type: ignore[union-attr]
+
+
+def test_a_swept_run_closes_the_step_its_worker_left_running() -> None:
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.ANALYSING, timedelta(hours=1)))
+    started = NOW - timedelta(hours=1)
+    done = finish_step(
+        start_step(UUID(int=1), ReviewRunStage.BUILDING_CONTEXT, started_at=started, step_id=UUID(int=10)),
+        duration_seconds=2.0,
+        tokens_used=None,
+    )
+    uow.review_run_steps.add(done)
+    uow.review_run_steps.add(
+        start_step(UUID(int=1), ReviewRunStage.ANALYSING, started_at=started, step_id=UUID(int=11))
+    )
+
+    sweep_stale_runs(uow, now=NOW, limit=LIMIT)
+
+    kept, closed = uow.review_run_steps.list_for_run(UUID(int=1))
+    assert kept == done
+    assert closed.status is ReviewRunStepStatus.FAILED
+    assert closed.error_code == "REVIEW_RUN_STALE"
+    assert closed.duration_seconds == 3600.0
+
+
+def test_a_failure_closing_the_steps_does_not_undo_the_sweep() -> None:
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.ANALYSING, timedelta(hours=1)))
+    uow.review_run_steps.add(
+        start_step(UUID(int=1), ReviewRunStage.ANALYSING, started_at=NOW, step_id=UUID(int=11))
+    )
+
+    def broken(step: object) -> None:
+        raise ConnectionError("база недоступна")
+
+    uow.review_run_steps.update = broken  # type: ignore[method-assign]
+
+    assert sweep_stale_runs(uow, now=NOW, limit=LIMIT) == 1
+    assert uow.review_runs.get(UUID(int=1)).status == ReviewRunStatus.FAILED  # type: ignore[union-attr]

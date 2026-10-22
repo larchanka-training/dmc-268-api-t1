@@ -152,17 +152,28 @@
 
 ### Requirement: Каждый ответ несёт trace id
 
-Сервер SHALL выдавать каждому запросу собственный trace id — 32 строчных hex-символа в формате trace-id W3C Trace Context, не все нули — и отдавать его заголовком `X-Trace-ID` на любом ответе, включая поток SSE. Входящие `X-Trace-ID`, `X-Request-ID` и `traceparent` SHALL NOT приниматься. В теле ошибки `trace_id` SHALL совпадать с этим заголовком.
+Сервер SHALL выдавать каждому запросу собственный trace id — trace id серверного спана запроса, 32 строчных hex-символа (trace-id W3C Trace Context), не все нули — и отдавать его заголовком `X-Trace-ID` на любом ответе, включая поток SSE. Входящие `X-Trace-ID`, `X-Request-ID` и `traceparent` SHALL NOT приниматься: HTTP-запрос начинает новый трейс. В теле ошибки `trace_id` SHALL совпадать с этим заголовком.
 
 #### Scenario: Идентификатор в ошибке
 
 - **WHEN** запрос получает ответ с ошибкой
 - **THEN** `trace_id` в теле равен заголовку `X-Trace-ID`
 
+#### Scenario: Идентификатор — trace id спана запроса
+
+- **WHEN** запрос получает ответ `404` или `500`
+- **THEN** `X-Trace-ID` и `trace_id` в теле равны trace id серверного спана этого запроса, в том числе у `500`, который отдаётся снаружи всех middleware
+
+#### Scenario: Трассировка выключена
+
+- **WHEN** трассировка выключена (`OTEL_SDK_DISABLED=true`), и спана у запроса нет
+- **THEN** `X-Trace-ID` — случайный trace id того же формата, у двух запросов разный
+
 #### Scenario: Клиент прислал свой идентификатор
 
 - **WHEN** запрос пришёл с заголовками `X-Trace-ID`, `X-Request-ID` или `traceparent`
 - **THEN** в ответе один заголовок `X-Trace-ID`, и его значение — новый trace id сервера, а не присланный
+- **AND** у серверного спана запроса нет родителя
 
 #### Scenario: Успешный ответ
 
@@ -278,25 +289,6 @@
 - **WHEN** запрошен прогон без опубликованных комментариев
 - **THEN** `published_comments` — пустой список
 
-### Requirement: Дифф и шаги прогона описаны заглушками
-
-`GET /api/v1/reviews/{review_run_id}/diff` и `GET /api/v1/reviews/{review_run_id}/steps` SHALL быть описаны в схеме с полными моделями ответа и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализованы. Сессию и формат id прогона они SHALL проверять так же, как реализованные ручки.
-
-#### Scenario: Дифф прогона
-
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/diff` с сессией
-- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
-
-#### Scenario: Шаги прогона
-
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/steps` с сессией
-- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
-
-#### Scenario: Без сессии
-
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/diff` без сессии
-- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
-
 ### Requirement: Находка отдаёт ссылку на правило, прогон - итог верификации
 
 `GET /api/v1/reviews/{review_run_id}` SHALL отдавать у каждой находки поле `rule`: объект с именем правила (`name`), номером пункта (`check`) и текстом пункта (`check_text`) либо `null` для находки по стандартным критериям.
@@ -316,6 +308,49 @@
 
 - **WHEN** запрошен завершённый прогон, верификатор которого был недоступен
 - **THEN** `verification` равен `unavailable`, а `verifier_dropped_findings` - 0
+
+### Requirement: Дифф прогона описан заглушкой
+
+`GET /api/v1/reviews/{review_run_id}/diff` SHALL быть описан в схеме с полной моделью ответа и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализован. Сессию и формат id прогона он SHALL проверять так же, как реализованные ручки.
+
+#### Scenario: Дифф прогона
+
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/diff` с сессией
+- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
+
+#### Scenario: Дифф без сессии
+
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/diff` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+### Requirement: Шаги прогона отдаются по порядку начала
+
+`GET /api/v1/reviews/{review_run_id}/steps` SHALL отдавать шаги воркера в прогоне (`ReviewRunStepListResponse`) по порядку начала, при равном начале — по id. Каждый шаг SHALL содержать этап, статус, начало, длительность (`null`, пока шаг идёт), токены (`null`, если шаг модель не вызывал) и код ошибки (`null`, если шаг не падал) и SHALL NOT содержать запросов и ответов модели. Повтор этапа SHALL отдаваться отдельным шагом того же этапа. Ручка SHALL требовать сессию.
+
+#### Scenario: Шаги прогона по порядку
+
+- **WHEN** у прогона записаны шаги, и вызывается `GET /api/v1/reviews/{review_run_id}/steps` с сессией
+- **THEN** ответ — `200`, `items` — шаги этого прогона по времени начала, упавшая попытка этапа и её повтор — два шага
+
+#### Scenario: Прогон без шагов
+
+- **WHEN** прогон существует, но воркер ещё не начал ни одного шага
+- **THEN** ответ — `200` с пустым `items`
+
+#### Scenario: Несуществующий прогон
+
+- **WHEN** прогона с таким id нет
+- **THEN** ответ — `404` `application/problem+json` с `code = REVIEW_NOT_FOUND`
+
+#### Scenario: Шаги без сессии
+
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/steps` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+#### Scenario: Брошенный шаг без токенов
+
+- **WHEN** прогон упал, а его шаг закрыт как брошенный (`error_code = REVIEW_RUN_STALE`)
+- **THEN** у шага `status = failed` и `tokens_used = null`: сколько токенов он израсходовал, неизвестно
 
 ### Requirement: Список репозиториев, доступных для подключения
 
@@ -452,7 +487,7 @@
 
 ### Requirement: Список прогонов описан заглушкой
 
-`GET /api/v1/reviews` SHALL быть описан в схеме с полной моделью ответа и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализован; сессию SHALL требовать. Ответ SHALL содержать `items` — строки `ReviewRunListItem` с `MergeRequestSummary` и числом находок — и `total` — число прогонов под фильтрами без учёта `limit` и `offset`.
+`GET /api/v1/reviews` SHALL быть описан в схеме с полной моделью ответа и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализован; сессию SHALL требовать. Ответ SHALL содержать `items` — строки `ReviewRunListItem` с `MergeRequestSummary`, числом находок и обязательным `last_progress_at` — и `total` — число прогонов под фильтрами без учёта `limit` и `offset`.
 
 #### Scenario: Список прогонов
 
@@ -469,9 +504,14 @@
 - **WHEN** фронтенд читает `docs/openapi/openapi.json`
 - **THEN** в `ReviewRunListResponse` есть обязательные `items` и `total`
 
+#### Scenario: Время последнего перехода в строке списка
+
+- **WHEN** фронтенд читает `ReviewRunListItem` в `docs/openapi/openapi.json`
+- **THEN** `last_progress_at` — обязательное поле, время в UTC, как у `ReviewRunResponse`
+
 ### Requirement: Параметры списка прогонов проверяются раньше 501
 
-`GET /api/v1/reviews` SHALL проверять параметры фильтров и пагинации раньше ответа `501`. У `q` и `author` пустая строка SHALL означать «без фильтра». `created_from` и `created_to` SHALL принимать только строку ISO 8601 с зоной, любой. `created_from` позже `created_to` SHALL отклоняться кодом `422` вместе с остальными ошибками параметров.
+`GET /api/v1/reviews` SHALL проверять параметры фильтров и пагинации раньше ответа `501`. `status` и `repository_id` SHALL принимать несколько значений, параметр повторяется; `repository_id` — не больше 50. У `q` и `author` пустая строка SHALL означать «без фильтра». `created_from` и `created_to` SHALL принимать только строку ISO 8601 с зоной, любой. `created_from` позже `created_to` SHALL отклоняться кодом `422` вместе с остальными ошибками параметров.
 
 #### Scenario: Обратный диапазон дат
 
@@ -490,7 +530,7 @@
 
 #### Scenario: Все фильтры сразу
 
-- **WHEN** вызывается `GET /api/v1/reviews` с сессией и допустимыми `status` (несколько значений), `active`, `repository_id`, `created_from`, `created_to`, `limit`, `offset`, пустыми `q` и `author` и временем с зоной `+03:00`
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией и допустимыми `status` (несколько значений), `active`, `repository_id` (несколько значений), `created_from`, `created_to`, `limit`, `offset`, пустыми `q` и `author` и временем с зоной `+03:00`
 - **THEN** ответ — `501` с `code = NOT_IMPLEMENTED`
 
 #### Scenario: Без сессии параметры не проверяются
@@ -498,38 +538,179 @@
 - **WHEN** вызывается `GET /api/v1/reviews` без сессии и с неверными параметрами
 - **THEN** ответ — `401` с `code = UNAUTHENTICATED`
 
-### Requirement: Поток изменений прогонов описан заглушкой
+#### Scenario: Неверный id репозитория среди нескольких
 
-`GET /api/v1/reviews/events` SHALL быть описан в схеме как `text/event-stream` и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализован; сессию SHALL требовать. Данные событий `run.*` SHALL быть `ReviewRunListItem`, имена событий — enum `ReviewRunsStreamEventType`. При итоговом статусе SHALL приходить только `run.finished`. Путь SHALL NOT попадать в `GET /api/v1/reviews/{review_run_id}`.
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией и `repository_id` дважды, второй раз не UUID
+- **THEN** ответ — `422` с `code = VALIDATION_ERROR` и ошибкой в `query.repository_id.1`
 
-#### Scenario: Поток изменений
+#### Scenario: Больше 50 репозиториев
 
-- **WHEN** вызывается `GET /api/v1/reviews/events` с сессией
-- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`, а не `422` проверки id прогона
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией и 51 значением `repository_id`
+- **THEN** ответ — `422` с причиной «элементов должно быть не больше 50» в `query.repository_id`
 
-#### Scenario: Поток без сессии
+### Requirement: Настройки репозитория описаны заглушкой
 
-- **WHEN** вызывается `GET /api/v1/reviews/events` без сессии
+`GET` и `PUT /api/v1/repositories/{repository_id}/settings` SHALL быть описаны в схеме с полными моделями и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализованы. Ответ обеих — `RepositorySettingsResponse` с обязательными `auto_review_enabled`, `branch_filter` и `min_severity` из `FindingSeverity`. Обе SHALL требовать сессию, `PUT` — ещё `Origin` сервиса.
+
+#### Scenario: Чтение настроек
+
+- **WHEN** вызывается `GET /api/v1/repositories/{repository_id}/settings` с сессией и UUID в пути
+- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
+
+#### Scenario: Запись настроек
+
+- **WHEN** вызывается `PUT /api/v1/repositories/{repository_id}/settings` с сессией, своим `Origin` и допустимым телом, в том числе с пустым `branch_filter`
+- **THEN** ответ — `501` с `code = NOT_IMPLEMENTED`
+
+#### Scenario: Без сессии
+
+- **WHEN** вызывается `GET` или `PUT` настроек без сессии (у `PUT` — со своим `Origin`)
 - **THEN** ответ — `401` с `code = UNAUTHENTICATED`
 
-#### Scenario: Данные событий — строка списка
+#### Scenario: Запись без Origin
+
+- **WHEN** вызывается `PUT` настроек без `Origin` или с чужим `Origin`, с сессией или без
+- **THEN** ответ — `403` с `code = ORIGIN_FORBIDDEN`, тело не разбирается
+
+#### Scenario: Значения по умолчанию в контракте
+
+- **WHEN** фронтенд читает описание `GET` настроек в `docs/openapi/openapi.json`
+- **THEN** там указано: у репозитория без сохранённых настроек `auto_review_enabled = true`, `branch_filter = []` (все ветки), `min_severity = critical`
+
+#### Scenario: Отказ по роли описан
+
+- **WHEN** фронтенд читает `PUT` настроек в `docs/openapi/openapi.json`
+- **THEN** ответ `403` допускает `ORIGIN_FORBIDDEN` и `REPOSITORY_MANAGE_REQUIRED`, а `auto_review_enabled` описан как та же колонка, что в `RepositoryResponse`
+
+### Requirement: Тело записи настроек проверяется раньше 501
+
+`PUT /api/v1/repositories/{repository_id}/settings` SHALL принимать `RepositorySettingsUpdate` — полный набор настроек: все три поля обязательны, лишние поля запрещены. Паттерн в `branch_filter` SHALL быть непустым после обрезки пробелов и не длиннее 200 символов, без повторов, паттернов SHALL быть не больше 50. Id репозитория и тело SHALL проверяться раньше ответа `501`.
+
+#### Scenario: Неверный id
+
+- **WHEN** вызывается `PUT` настроек с сессией, своим `Origin` и не-UUID в пути
+- **THEN** ответ — `422` с `code = VALIDATION_ERROR` и ошибкой в `path.repository_id`
+
+#### Scenario: Неизвестная важность
+
+- **WHEN** в теле `min_severity` вне `FindingSeverity`
+- **THEN** ответ — `422` с ошибкой в `body.min_severity`
+
+#### Scenario: Лишнее или пропущенное поле
+
+- **WHEN** в теле есть поле вне модели или нет одного из трёх полей
+- **THEN** ответ — `422` с `code = VALIDATION_ERROR`
+
+#### Scenario: Пустой или длинный паттерн
+
+- **WHEN** в `branch_filter` есть пустая строка или строка длиннее 200 символов
+- **THEN** ответ — `422` с ошибкой в `body.branch_filter.<индекс>`
+
+#### Scenario: Слишком много паттернов
+
+- **WHEN** в `branch_filter` 51 паттерн
+- **THEN** ответ — `422` с ошибкой в `body.branch_filter`
+
+#### Scenario: Без сессии тело не проверяется
+
+- **WHEN** вызывается `PUT` настроек со своим `Origin`, без сессии и с неверным телом
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+#### Scenario: Паттерн из пробелов
+
+- **WHEN** в `branch_filter` есть паттерн `"   "`
+- **THEN** ответ — `422` с причиной «длина строки должна быть не меньше 1» в `body.branch_filter.<индекс>`
+
+#### Scenario: Повтор паттерна
+
+- **WHEN** в `branch_filter` есть `main` и ` main ` (совпадают после обрезки пробелов)
+- **THEN** ответ — `422` с причиной «паттерны веток повторяются» в `body.branch_filter`
+
+### Requirement: Статус правил репозитория описан заглушкой
+
+`GET /api/v1/repositories/{repository_id}/rules` SHALL быть описан в схеме с ответом `RulesStatusResponse` — объединением по `status` со значениями `RulesStatus` — и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализован. Ручка SHALL требовать сессию и проверять id репозитория раньше `501`.
+
+#### Scenario: Статус правил
+
+- **WHEN** вызывается `GET /api/v1/repositories/{repository_id}/rules` с сессией и UUID в пути
+- **THEN** ответ — `501` с `code = NOT_IMPLEMENTED`
+
+#### Scenario: Без сессии или с неверным id
+
+- **WHEN** вызывается ручка без сессии или с сессией и не-UUID в пути
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED` или `422` с ошибкой в `path.repository_id`
+
+#### Scenario: Варианты статуса в контракте
+
+- **WHEN** фронтенд читает `RulesStatusResponse` в `docs/openapi/openapi.json`
+- **THEN** у схемы дискриминатор `status` и четыре варианта: `loaded` (`branch`, `path`, `rules` из `RepoRule` с `name`, `patterns`, `excludes`, `checks`, `rejected` из `RejectedRule` с `name`, `reason`, `fetched_at` в UTC с `Z`), `absent`, `too_large`, `unavailable` (`branch`, `path`)
+
+### Requirement: Один репозиторий по id
+
+`GET /api/v1/repositories/{repository_id}` SHALL требовать сессию и SHALL отдавать зарегистрированный репозиторий в той же форме `RepositoryResponse`, что строка `GET /api/v1/repositories`. Репозитория нет — `404` с `code = REPOSITORY_NOT_FOUND`; id не UUID — `422`.
+
+#### Scenario: Репозиторий по id
+
+- **WHEN** репозиторий зарегистрирован, и вызывается `GET /api/v1/repositories/{repository_id}` с сессией
+- **THEN** ответ — `200`, тело совпадает со строкой этого репозитория в `GET /api/v1/repositories`
+
+#### Scenario: Репозиторий за пределами первой страницы списка
+
+- **WHEN** зарегистрировано больше репозиториев, чем помещается на страницу списка, и запрашивается последний по id
+- **THEN** ответ — `200` с этим репозиторием
+
+#### Scenario: Нет такого репозитория
+
+- **WHEN** репозитория с таким id нет
+- **THEN** ответ — `404` `application/problem+json` с `code = REPOSITORY_NOT_FOUND`
+
+#### Scenario: id не UUID
+
+- **WHEN** вызывается `GET /api/v1/repositories/repo-1` с сессией
+- **THEN** ответ — `422` с ошибкой в `path.repository_id`
+
+#### Scenario: Без сессии
+
+- **WHEN** вызывается `GET /api/v1/repositories/{repository_id}` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+### Requirement: Типы и видимость событий общего потока описаны
+
+Имя события `GET /api/v1/events` SHALL быть `<ресурс>.<действие>` в поле `event:`, данные — модель своего типа, перечисленная в `x-sse-events`. Клиент SHALL игнорировать незнакомые типы: новые добавляются без правки клиентов. Пользователь SHALL получать только видимые ему события; видимость задаёт правило типа события. Фильтров у потока нет.
+
+#### Scenario: Сегодняшние типы
 
 - **WHEN** фронтенд читает ответ потока и `components/schemas` в `docs/openapi/openapi.json`
-- **THEN** `run.created`, `run.status_changed` и `run.finished` ссылаются на `ReviewRunListItem`, а `ReviewRunsStreamEventType` перечисляет `run.created`, `run.status_changed`, `run.finished` и `ping`
+- **THEN** в `x-sse-events` есть `run.created`, `run.status_changed` и `run.finished` со ссылкой на `ReviewRunListItem` и `ping` с пустым объектом, а `StreamEventType` перечисляет эти четыре имени
 
-#### Scenario: Прогон по id
+#### Scenario: Итоговый статус
 
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` с id существующего прогона
-- **THEN** ответ — `200` с этим прогоном, как до появления потока
+- **WHEN** фронтенд читает описание потока
+- **THEN** в нём сказано, что при переходе прогона в итоговый статус приходит только `run.finished`
 
-### Requirement: Порядок версий строки в потоке прогонов описан
+#### Scenario: Видимость прогонов
 
-Описание `GET /api/v1/reviews/events` SHALL задавать правило для клиента: upsert строки по `id`; побеждает больший `updated_at`, при равном — версия, пришедшая позже; снимок `GET /api/v1/reviews` запрашивается после события `open`. Поток SHALL NOT учитывать фильтры списка: при активных фильтрах или не на первой странице клиент на событие перезапрашивает страницу.
+- **WHEN** пользователь подключается к потоку
+- **THEN** набор видимых репозиториев считается один раз тем же расчётом, что ответ `GET /repositories/available`, и до переподключения не пересчитывается; события `run.*` по прогонам остальных репозиториев не приходят
+
+#### Scenario: Сбой провайдера при подключении
+
+- **WHEN** GitHub не ответил или ответил ошибкой, пока считается набор видимых репозиториев
+- **THEN** ответ — `502` с `code = SCM_UNAVAILABLE`, поток не открывается
+
+#### Scenario: Незнакомый тип
+
+- **WHEN** фронтенд читает описание потока
+- **THEN** в нём сказано, что клиент игнорирует незнакомые типы событий
+
+### Requirement: Порядок версий строки в общем потоке событий описан
+
+Описание `GET /api/v1/events` SHALL задавать правило для клиента: upsert строки прогона по `id`; побеждает больший `updated_at`, при равном — версия, пришедшая позже. Источник событий SHALL быть описан: опрос базы раз в секунду; переход на PostgreSQL NOTIFY контракт не меняет. Истории нет: при подключении и после переподключения клиент перезапрашивает снимок REST.
 
 #### Scenario: Правило в контракте
 
-- **WHEN** фронтенд читает описание `GET /api/v1/reviews/events` в `docs/openapi/openapi.json`
-- **THEN** в нём есть правило выбора версии по `updated_at`, порядок «`open`, затем снимок» и перезапрос страницы при фильтрах
+- **WHEN** фронтенд читает описание `GET /api/v1/events` в `docs/openapi/openapi.json`
+- **THEN** в нём есть правило выбора версии по `updated_at`, источник событий — опрос раз в секунду, позже NOTIFY без изменения контракта, и перезапрос снимка `GET /reviews/{review_run_id}` или `GET /reviews` после события `open`
 
 ### Requirement: Истёкший токен пользователя обновляется
 
@@ -588,3 +769,67 @@
 
 - **WHEN** у сессии нет сохранённого токена
 - **THEN** ответ — `401` с `code = UNAUTHENTICATED`, сессия закрыта, пользователь входит заново
+
+### Requirement: Общий поток событий реализован
+
+`GET /api/v1/events` SHALL требовать сессию и отдавать `text/event-stream`, начиная со строки `retry: 3000`. Событие SHALL быть строкой `event: <тип>` и строкой `data:` с JSON в одну строку. Событие прогона SHALL приходить не позже чем через пару секунд после записи прогона, `ping` с `data: {}` — в тишине не реже раза в 15 секунд. Истории поток SHALL не отдавать. Сессия SHALL перепроверяться каждые 5 секунд; без неё поток SHALL закрываться.
+
+#### Scenario: Смена статуса доходит сразу
+
+- **WHEN** поток открыт, а воркер записал прогону видимого репозитория новый статус
+- **THEN** клиент получает событие на ближайшем опросе, раз в секунду, пока поток открыт
+
+#### Scenario: Новый прогон
+
+- **WHEN** после подключения создан прогон видимого репозитория и это его первое событие в соединении
+- **THEN** событие — `run.created` с данными `ReviewRunListItem`
+
+#### Scenario: Изменение без итогового статуса
+
+- **WHEN** прогон, уже показанный или созданный до подключения, изменился, а статус не итоговый — в том числе изменился только прогресс
+- **THEN** событие — `run.status_changed` с последней версией строки
+
+#### Scenario: Итоговый статус
+
+- **WHEN** прогон оказался в статусе `completed`, `failed` или `cancelled`, даже если это его первое событие
+- **THEN** событие — только `run.finished`
+
+#### Scenario: Истории нет
+
+- **WHEN** клиент подключается, а прогоны менялись до подключения
+- **THEN** событий по этим версиям нет, клиент берёт их снимком REST после `open`
+
+#### Scenario: Равный updated_at
+
+- **WHEN** два прогона записаны с одним `updated_at`, второй закоммичен после того, как поток увидел первый
+- **THEN** приходят события обоих, при любом порядке их id
+
+#### Scenario: Запоздавшая запись
+
+- **WHEN** запись прогона закоммичена позже соседней, а её `updated_at` меньше уже увиденного, но не больше чем на 5 секунд
+- **THEN** событие по ней приходит
+
+#### Scenario: Тишина
+
+- **WHEN** 15 секунд нет событий
+- **THEN** приходит `event: ping` с `data: {}`
+
+#### Scenario: Сессия истекла
+
+- **WHEN** сессия закончилась, пока поток открыт
+- **THEN** поток закрывается без события не позже чем через 5 секунд и один опрос
+
+#### Scenario: Без сессии
+
+- **WHEN** вызывается `GET /api/v1/events` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`, поток не открывается
+
+#### Scenario: Контракт ответов
+
+- **WHEN** фронтенд читает `GET /api/v1/events` в `docs/openapi/openapi.json`
+- **THEN** у операции нет параметров, есть ответы `200` `text/event-stream`, `401` и `502`, ответа `501` нет; пути `/api/v1/reviews/events` нет, а `GET /api/v1/reviews/events` отвечает `422` проверки id прогона
+
+#### Scenario: Трасса потока
+
+- **WHEN** поток открыт часами, а клиент затем закрывает соединение
+- **THEN** опрос базы не пишет спанов SQL, а спан запроса закрывается без статуса ERROR

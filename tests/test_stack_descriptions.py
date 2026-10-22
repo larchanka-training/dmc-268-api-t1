@@ -24,6 +24,7 @@ NOT_FOUND = "не найдено"
 
 COMPOSE = Path("docker-compose.yml")
 INFRA = Path("infra/main.tf")
+DOCKERFILE = Path("Dockerfile")
 
 
 # Образ сверяется целиком, а не по мажорному релизу: `postgres:18-alpine` и
@@ -111,6 +112,23 @@ def infra_worker_model_env(text: str) -> frozenset[str]:
     return frozenset(re.findall(rf"\"({_MODEL_ENV})=", block.group(1)))
 
 
+def uvicorn_graceful_timeout(text: str) -> int | None:
+    """`--timeout-graceful-shutdown` команды uvicorn — в строке shell или в списке exec."""
+    match = re.search(r"--timeout-graceful-shutdown\"?\s*,?\s*\"?(\d+)", text)
+    return int(match.group(1)) if match else None
+
+
+def infra_api_destroy_grace(text: str) -> int | None:
+    """`destroy_grace_seconds` контейнера API в Terraform."""
+    block = re.search(
+        r"resource\s+\"docker_container\"\s+\"api\"\s*\{(.*?)^\}",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    match = block and re.search(r"destroy_grace_seconds\s*=\s*(\d+)", block.group(1))
+    return int(match.group(1)) if match else None
+
+
 def test_extractors_find_facts_that_are_present() -> None:
     """Шаблон, переставший находить факт, обязан падать здесь, а не молчать."""
     assert (
@@ -156,6 +174,15 @@ def test_extractors_find_facts_that_are_present() -> None:
         "  ])\n}\n"
         'resource "docker_container" "api" {\n  env = ["OLLAMA_MODEL=x"]\n}\n'
     ) == frozenset({"LLM_BACKEND"})
+    assert uvicorn_graceful_timeout('"--port", "8000", "--timeout-graceful-shutdown", "5"]') == 5
+    assert uvicorn_graceful_timeout("exec uvicorn app.main:app --timeout-graceful-shutdown 7") == 7
+    assert (
+        infra_api_destroy_grace(
+            'resource "docker_container" "worker" {\n  destroy_grace_seconds = 99\n}\n'
+            'resource "docker_container" "api" {\n  destroy_grace_seconds = 10\n}\n'
+        )
+        == 10
+    )
 
 
 def test_extractors_report_absence_instead_of_a_blank() -> None:
@@ -168,6 +195,8 @@ def test_extractors_report_absence_instead_of_a_blank() -> None:
     assert not infra_applies_migrations('resource "docker_container" "migrate" {}')
     assert compose_worker_model_env("ничего похожего") == frozenset()
     assert infra_worker_model_env("ничего похожего") == frozenset()
+    assert uvicorn_graceful_timeout("ничего похожего") is None
+    assert infra_api_destroy_grace("ничего похожего") is None
 
 
 def test_both_descriptions_use_the_same_postgres_image() -> None:
@@ -212,3 +241,18 @@ def test_both_descriptions_give_the_worker_the_same_model_settings() -> None:
         f"переменные модели воркера разошлись: только в compose {sorted(compose - infra)}, "
         f"только в infra {sorted(infra - compose)}"
     )
+
+
+def test_the_api_stops_within_the_grace_period_despite_open_sse_streams() -> None:
+    """Поток SSE живёт до конца прогона; без предела uvicorn ждал бы его до SIGKILL.
+
+    Тогда lifespan не завершается и батч спанов теряется (спека `observability`).
+    """
+    grace = infra_api_destroy_grace(INFRA.read_text())
+    assert grace is not None, "destroy_grace_seconds контейнера API не найден в infra/main.tf"
+    for path in (DOCKERFILE, COMPOSE):
+        timeout = uvicorn_graceful_timeout(path.read_text())
+        assert timeout is not None, f"{path}: uvicorn без --timeout-graceful-shutdown"
+        assert timeout < grace, (
+            f"{path}: --timeout-graceful-shutdown {timeout} не меньше грейс-периода API {grace} с"
+        )

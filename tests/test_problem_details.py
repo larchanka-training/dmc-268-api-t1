@@ -9,6 +9,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -21,6 +22,7 @@ from app.api.errors import problem_response
 from app.api.factory import create_app
 from app.api.problems import PROBLEM_MODELS, AnyProblem, ErrorCode, problem_type
 from app.config import Settings
+from app.domain.enums import RulesStatus
 
 from .fakes.auth import sign_in
 from .fakes.unit_of_work import FakeUnitOfWork
@@ -301,16 +303,15 @@ def test_repository_connect_checks_session_origin_and_body_first(client: TestCli
     assert problem["errors"] == [{"where": "body.provider_id", "reason": "длина строки должна быть не меньше 1"}]
 
 
-@pytest.mark.parametrize("part", ["diff", "steps"])
-def test_planned_review_run_parts_answer_not_implemented(part: str) -> None:
-    """Дифф и шаги прогона описаны в схеме, а отвечают `501`."""
-    path = f"/api/v1/reviews/{RUN_ID}/{part}"
+def test_planned_review_run_diff_answers_not_implemented() -> None:
+    """Дифф прогона описан в схеме, а отвечает `501`."""
+    path = f"/api/v1/reviews/{RUN_ID}/diff"
     assert_problem(_signed_in_client().get(path), 501, "NOT_IMPLEMENTED", path)
 
 
 @pytest.mark.parametrize("part", ["diff", "steps"])
-def test_planned_review_run_parts_check_session_and_id_first(client: TestClient, part: str) -> None:
-    """Заглушки проверяют сессию и id прогона, как реализованные ручки."""
+def test_review_run_parts_check_session_and_id_first(client: TestClient, part: str) -> None:
+    """Дифф (заглушка) и шаги прогона проверяют сессию и id прогона до обращения к данным."""
     path = f"/api/v1/reviews/{RUN_ID}/{part}"
     assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
     path = f"/api/v1/reviews/not-a-uuid/{part}"
@@ -318,11 +319,11 @@ def test_planned_review_run_parts_check_session_and_id_first(client: TestClient,
 
 
 def test_planned_review_list_answers_not_implemented() -> None:
-    """Список прогонов описан в схеме, а отвечает `501`; поток — в `tests/test_reviews_api.py`."""
+    """Список прогонов описан в схеме, а отвечает `501`."""
     assert_problem(_signed_in_client().get("/api/v1/reviews"), 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
 
 
-@pytest.mark.parametrize("path", ["/api/v1/reviews", "/api/v1/reviews/events"])
+@pytest.mark.parametrize("path", ["/api/v1/reviews", "/api/v1/events"])
 def test_planned_review_list_and_stream_check_session_first(client: TestClient, path: str) -> None:
     assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
 
@@ -337,6 +338,11 @@ def test_planned_review_list_checks_session_before_query(client: TestClient) -> 
     ("params", "error"),
     [
         ({"status": ["queued", "unknown"]}, {"where": "query.status.1", "reason": "значение не из допустимого списка"}),
+        ({"repository_id": [RUN_ID, "nope"]}, {"where": "query.repository_id.1", "reason": "ожидается UUID"}),
+        (
+            {"repository_id": [str(UUID(int=n)) for n in range(51)]},
+            {"where": "query.repository_id", "reason": "элементов должно быть не больше 50"},
+        ),
         ({"q": "x" * 201}, {"where": "query.q", "reason": "длина строки должна быть не больше 200"}),
         ({"created_from": "2026-10-11T10:00:00"}, {"where": "query.created_from", "reason": "ожидается время с зоной"}),
         ({"created_to": "1760000000"}, {"where": "query.created_to", "reason": "ожидается время в ISO 8601"}),
@@ -358,7 +364,7 @@ def test_planned_review_list_accepts_every_filter() -> None:
     params = {
         "status": ["queued", "analysing"],
         "active": "true",
-        "repository_id": RUN_ID,
+        "repository_id": [RUN_ID, str(UUID(int=7))],
         "author": "",
         "q": "",
         "created_from": "2026-10-11T03:00:00+03:00",
@@ -370,8 +376,8 @@ def test_planned_review_list_accepts_every_filter() -> None:
     assert_problem(response, 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
 
 
-def test_review_list_and_stream_are_in_the_exported_contract() -> None:
-    """Фронтенд берёт типы из `docs/openapi/openapi.json`: параметры, `total` и данные событий там есть."""
+def test_review_list_is_in_the_exported_contract() -> None:
+    """Фронтенд берёт типы из `docs/openapi/openapi.json`: параметры, `total` и поля строки там есть."""
     schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
     list_op = schema["paths"]["/api/v1/reviews"]["get"]
     assert {p["name"] for p in list_op["parameters"]} == {
@@ -380,21 +386,205 @@ def test_review_list_and_stream_are_in_the_exported_contract() -> None:
     assert list_op["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ReviewRunListResponse"
     }
+    repository_ids = next(p for p in list_op["parameters"] if p["name"] == "repository_id")
+    assert repository_ids["schema"]["anyOf"][0] == {
+        "type": "array",
+        "items": {"type": "string", "format": "uuid"},
+        "maxItems": 50,
+    }
     components = schema["components"]["schemas"]
     assert set(components["ReviewRunListResponse"]["required"]) == {"items", "total"}
     assert {"id", "status", "updated_at", "failed_stage", "findings_count", "merge_request"} <= set(
         components["ReviewRunListItem"]["required"]
     )
-    stream = schema["paths"]["/api/v1/reviews/events"]["get"]["responses"]["200"]["content"]
+    assert "last_progress_at" in components["ReviewRunListItem"]["required"]
+    assert "/api/v1/reviews/events" not in schema["paths"]
+
+
+EVENTS_PATH = "/api/v1/events"
+
+
+def test_events_stream_documents_its_answers() -> None:
+    """Поток реализован: в схеме 200, 401 и 502, но не 501. `401` без сессии проверен выше."""
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    responses = schema["paths"][EVENTS_PATH]["get"]["responses"]
+    assert {"200", "401", "502"} <= set(responses)
+    assert "501" not in responses
+
+
+def test_events_stream_is_in_the_exported_contract() -> None:
+    """Путь без параметров, тип содержимого и данные событий потока — в `docs/openapi/openapi.json`."""
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    operation = schema["paths"][EVENTS_PATH]["get"]
+    assert "parameters" not in operation
+    components = schema["components"]["schemas"]
+    stream = operation["responses"]["200"]["content"]
     assert set(stream) == {"text/event-stream"}
     row = {"$ref": "#/components/schemas/ReviewRunListItem"}
     events = stream["text/event-stream"]["x-sse-events"]
-    assert {name: events[name] for name in ("run.created", "run.status_changed", "run.finished")} == {
+    assert events == {
         "run.created": row,
         "run.status_changed": row,
         "run.finished": row,
+        "ping": {"type": "object", "maxProperties": 0},
     }
-    assert components["ReviewRunsStreamEventType"]["enum"] == ["run.created", "run.status_changed", "run.finished", "ping"]
+    assert components["StreamEventType"]["enum"] == ["run.created", "run.status_changed", "run.finished", "ping"]
+    assert "ReviewRunsStreamEventType" not in components
+    assert "StreamResource" not in components
+
+
+REPO_ID = "0192f0c4-7a1e-7b3c-9d2e-4f5a6b7c8d9f"
+SETTINGS_PATH = f"/api/v1/repositories/{REPO_ID}/settings"
+RULES_PATH = f"/api/v1/repositories/{REPO_ID}/rules"
+SETTINGS_BODY = {"auto_review_enabled": True, "branch_filter": ["main", "release/*"], "min_severity": "high"}
+
+
+@pytest.mark.parametrize("path", [SETTINGS_PATH, RULES_PATH])
+def test_planned_repository_reads_answer_not_implemented(path: str) -> None:
+    """Настройки и статус rules.md описаны в схеме, а отвечают `501`."""
+    assert_problem(_signed_in_client().get(path), 501, "NOT_IMPLEMENTED", path)
+
+
+def test_planned_repository_settings_save_answers_not_implemented() -> None:
+    """Допустимое тело — в том числе пустой фильтр и ровно предельные паттерны — доходит до `501`."""
+    client = _signed_in_client()
+    for body in (
+        SETTINGS_BODY,
+        {**SETTINGS_BODY, "branch_filter": []},
+        {**SETTINGS_BODY, "branch_filter": [f"{n:02d}" + "x" * 198 for n in range(50)]},
+    ):
+        response = client.put(SETTINGS_PATH, json=body, headers={"Origin": ORIGIN})
+        assert_problem(response, 501, "NOT_IMPLEMENTED", SETTINGS_PATH)
+
+
+@pytest.mark.parametrize("path", [SETTINGS_PATH, RULES_PATH])
+def test_planned_repository_reads_check_session_and_id_first(client: TestClient, path: str) -> None:
+    assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
+    bad = path.replace(REPO_ID, "not-a-uuid")
+    problem = assert_problem(_signed_in_client().get(bad), 422, "VALIDATION_ERROR", bad)
+    assert problem["errors"] == [{"where": "path.repository_id", "reason": "ожидается UUID"}]
+
+
+def test_planned_repository_settings_put_checks_origin_and_session_first(client: TestClient) -> None:
+    """Без `Origin` — `403`, без сессии — `401`; неверное тело в обоих случаях не разбирается."""
+    bad_body = {**SETTINGS_BODY, "min_severity": "unknown"}
+    assert_problem(client.put(SETTINGS_PATH, json=bad_body), 403, "ORIGIN_FORBIDDEN", SETTINGS_PATH)
+    response = client.put(SETTINGS_PATH, json=bad_body, headers={"Origin": "https://evil.example"})
+    assert_problem(response, 403, "ORIGIN_FORBIDDEN", SETTINGS_PATH)
+    # Без `Origin` и с сессией — тоже `403`: проверка `Origin` для PUT стоит раньше сессии.
+    response = _signed_in_client().put(SETTINGS_PATH, json=SETTINGS_BODY)
+    assert_problem(response, 403, "ORIGIN_FORBIDDEN", SETTINGS_PATH)
+    response = client.put(SETTINGS_PATH, json=bad_body, headers={"Origin": ORIGIN})
+    assert_problem(response, 401, "UNAUTHENTICATED", SETTINGS_PATH)
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "error"),
+    [
+        (
+            "/api/v1/repositories/not-a-uuid/settings",
+            SETTINGS_BODY,
+            {"where": "path.repository_id", "reason": "ожидается UUID"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "min_severity": "blocker"},
+            {"where": "body.min_severity", "reason": "значение не из допустимого списка"},
+        ),
+        (SETTINGS_PATH, {**SETTINGS_BODY, "extra": 1}, {"where": "body", "reason": "лишнее поле"}),
+        (
+            SETTINGS_PATH,
+            {"auto_review_enabled": True, "branch_filter": []},
+            {"where": "body.min_severity", "reason": "обязательный параметр не передан"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "branch_filter": ["main", ""]},
+            {"where": "body.branch_filter.1", "reason": "длина строки должна быть не меньше 1"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "branch_filter": ["main", "   "]},
+            {"where": "body.branch_filter.1", "reason": "длина строки должна быть не меньше 1"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "branch_filter": ["main", "release/*", " main "]},
+            {"where": "body.branch_filter", "reason": "паттерны веток повторяются"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "branch_filter": ["x" * 201]},
+            {"where": "body.branch_filter.0", "reason": "длина строки должна быть не больше 200"},
+        ),
+        (
+            SETTINGS_PATH,
+            {**SETTINGS_BODY, "branch_filter": [f"release/{n}" for n in range(51)]},
+            {"where": "body.branch_filter", "reason": "элементов должно быть не больше 50"},
+        ),
+    ],
+)
+def test_planned_repository_settings_save_checks_id_and_body_first(
+    path: str, body: dict[str, Any], error: dict[str, str]
+) -> None:
+    """Заглушка записи проверяет id и тело раньше, чем ответить `501`."""
+    response = _signed_in_client().put(path, json=body, headers={"Origin": ORIGIN})
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", path)
+    assert problem["errors"] == [error]
+
+
+def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
+    """Фронтенд берёт типы из `docs/openapi/openapi.json`: ручки, тело и варианты статуса правил там есть."""
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    settings = schema["paths"]["/api/v1/repositories/{repository_id}/settings"]
+    rules = schema["paths"]["/api/v1/repositories/{repository_id}/rules"]
+    assert set(settings) == {"get", "put"}
+    assert set(rules) == {"get"}
+
+    def ok_schema(operation: dict[str, Any]) -> Any:
+        return operation["responses"]["200"]["content"]["application/json"]["schema"]
+
+    assert ok_schema(settings["get"]) == ok_schema(settings["put"]) == {
+        "$ref": "#/components/schemas/RepositorySettingsResponse"
+    }
+    assert ok_schema(rules["get"]) == {"$ref": "#/components/schemas/RulesStatusResponse"}
+    assert settings["put"]["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/RepositorySettingsUpdate"
+    }
+    assert {"401", "403", "404", "422", "501"} <= set(settings["put"]["responses"])
+    assert {"401", "404", "422", "501"} <= set(settings["get"]["responses"])
+    assert {"401", "404", "422", "501"} <= set(rules["get"]["responses"])
+
+    components = schema["components"]["schemas"]
+    fields = {"auto_review_enabled", "branch_filter", "min_severity"}
+    assert set(components["RepositorySettingsResponse"]["required"]) == fields
+    update = components["RepositorySettingsUpdate"]
+    assert set(update["required"]) == fields
+    assert update["additionalProperties"] is False
+    assert update["properties"]["min_severity"]["$ref"] == "#/components/schemas/FindingSeverity"
+
+    variants = {
+        "loaded": "RulesLoaded",
+        "absent": "RulesAbsent",
+        "too_large": "RulesTooLarge",
+        "unavailable": "RulesUnavailable",
+    }
+    # Варианты — ровно исходы загрузки правил домена.
+    assert set(variants) == {status.value for status in RulesStatus}
+    rules_status = components["RulesStatusResponse"]
+    assert rules_status["discriminator"] == {
+        "propertyName": "status",
+        "mapping": {status: f"#/components/schemas/{name}" for status, name in variants.items()},
+    }
+    assert len(rules_status["oneOf"]) == 4
+    for status, name in variants.items():
+        assert components[name]["properties"]["status"]["const"] == status
+        assert {"status", "branch", "path"} <= set(components[name]["required"])
+    assert set(components["RulesLoaded"]["required"]) == {
+        "status", "branch", "path", "rules", "rejected", "fetched_at"
+    }
+    assert set(components["RepoRule"]["required"]) == {"name", "patterns", "excludes", "checks"}
+    assert set(components["RejectedRule"]["required"]) == {"name", "reason"}
 
 
 def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None:

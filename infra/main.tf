@@ -15,6 +15,14 @@ locals {
     "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@dmc268-rabbitmq:5672/%2F",
     "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
   ]
+
+  # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
+  # consumer_timeout RabbitMQ его не ограничивает: в 4.3 таймаут подтверждения
+  # есть только у quorum-очередей, а очередь review — classic.
+  # Деплой ждёт остановку воркера в `tofu apply`: timeout-minutes job deploy в
+  # .github/workflows/deploy.yml обязан быть больше максимума (2460 с) с запасом.
+  # Та же формула — у stop_grace_period воркера в docker-compose.yml.
+  worker_stop_seconds = 2 * 300 * 2 * (var.llm_hosted_fallback ? 2 : 1) + 60
 }
 
 resource "docker_network" "dmc268" {
@@ -203,6 +211,13 @@ resource "docker_container" "api" {
   image   = docker_image.api.image_id
   restart = "unless-stopped"
 
+  # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
+  # принудительно (SIGKILL): lifespan не завершается, спаны не выгружаются.
+  # С ним — сначала SIGTERM и ожидание остановки; 10 с — как у `docker stop`.
+  # Укладываемся благодаря `--timeout-graceful-shutdown 5` в CMD образа: открытые
+  # потоки SSE uvicorn рвёт через 5 с, остальное время — на lifespan.
+  destroy_grace_seconds = 10
+
   # Те же основания, что у migrate: образ один.
   read_only     = true
   tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=64m" }
@@ -270,6 +285,14 @@ resource "docker_container" "worker" {
   image   = docker_image.api.image_id
   restart = "unless-stopped"
   command = ["python", "-m", "app.worker"]
+
+  # По SIGTERM воркер дорабатывает сообщение в работе. Худший случай — два
+  # вызова модели (ревью и верификатор) × LLM_TIMEOUT_SECONDS (300) ×
+  # LLM_MAX_ATTEMPTS (2) × провайдеры (два с фоллбэком), плюс минута на GitHub
+  # и базу. stop_timeout — для docker stop, destroy_grace_seconds — для
+  # пересоздания: без него провайдер удаляет контейнер сразу SIGKILL.
+  stop_timeout          = local.worker_stop_seconds
+  destroy_grace_seconds = local.worker_stop_seconds
 
   # Те же основания, что у migrate: образ один.
   read_only     = true

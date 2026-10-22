@@ -12,6 +12,7 @@ from app.application.ports.repositories import (
     PublishedCommentRepo,
     RepositoryRepo,
     ReviewRunRepo,
+    ReviewRunStepRepo,
     SessionRepo,
     UserRepo,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "PublishedCommentRepo",
     "RepositoryRepo",
     "ReviewRunRepo",
+    "ReviewRunStepRepo",
     "SessionRepo",
     "UnitOfWork",
     "UserRepo",

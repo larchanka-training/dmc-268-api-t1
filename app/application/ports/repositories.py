@@ -6,6 +6,7 @@
 SQLAlchemy.
 """
 
+from collections.abc import Collection
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -19,10 +20,13 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunListEntry,
+    ReviewRunStep,
     Session,
     User,
 )
 from app.domain.enums import Provider
+from app.domain.run_feed import FeedCursor
 
 
 class RepositoryRepo(Protocol):
@@ -31,6 +35,10 @@ class RepositoryRepo(Protocol):
     def find_by_provider(self, provider: Provider, provider_id: str) -> Repository | None: ...
 
     def list_all(self, limit: int, offset: int) -> list[Repository]: ...
+
+    def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
+        """Зарегистрированные репозитории провайдера из списка его id; незарегистрированных нет."""
+        ...
 
     def add(self, repository: Repository) -> bool:
         """Вставить репозиторий; `False` — пара провайдер + id уже занята.
@@ -64,9 +72,35 @@ class ReviewRunRepo(Protocol):
 
     def list_unfinished(self) -> list[ReviewRun]: ...
 
+    def list_changed(
+        self,
+        after: FeedCursor,
+        recheck_from: datetime,
+        repository_ids: Collection[UUID],
+        limit: int,
+    ) -> list[ReviewRunListEntry]:
+        """Изменённые прогоны репозиториев `repository_ids` — строками списка, одним запросом.
+
+        Две части: до `limit` прогонов новее `after` по `(updated_at, id)` и все прогоны из
+        окна перепроверки — `updated_at` позже `recheck_from`, но не новее `after` (окно
+        ограничено временем, а не числом строк). Порядок — по `(updated_at, id)`. Пустой
+        `repository_ids` — пустой ответ.
+        """
+        ...
+
     def add(self, run: ReviewRun) -> None: ...
 
     def update(self, run: ReviewRun) -> None: ...
+
+
+class ReviewRunStepRepo(Protocol):
+    def list_for_run(self, review_run_id: UUID) -> list[ReviewRunStep]:
+        """Шаги прогона по порядку начала; при равном начале - по id."""
+        ...
+
+    def add(self, step: ReviewRunStep) -> None: ...
+
+    def update(self, step: ReviewRunStep) -> None: ...
 
 
 class ContextPayloadRepo(Protocol):

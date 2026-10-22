@@ -270,3 +270,23 @@ Eurorouter (OpenAI-совместимый hosted-провайдер) подкл�
 
 Окно модели (`LLM_CONTEXT_WINDOW_TOKENS`) должно вмещать пакет контекста (`CONTEXT_MAX_TOKENS`), системный промпт и резерв ответа (`LLM_MAX_OUTPUT_TOKENS`): иначе воркер не стартует.
 Все переменные с пояснениями - в [`.env.example`](.env.example).
+
+## Трассировка
+
+API и воркер пишут спаны OpenTelemetry: HTTP-запрос, вызовы GitHub и модели,
+запросы к базе, публикация в очередь и обработка в воркере по этапам — один
+трейс на прогон; его trace id клиент видит в `X-Trace-ID`. По умолчанию спаны
+никуда не уходят. Посмотреть их локально:
+
+```bash
+OTEL_TRACES_EXPORTER=console uv run uvicorn app.main:app --reload
+OTEL_TRACES_EXPORTER=console uv run python -m app.worker
+```
+
+`OTEL_SERVICE_NAME` переопределяет имя сервиса (`dmc-268-api`, `dmc-268-worker`),
+`OTEL_SDK_DISABLED=true` выключает трассировку. Атрибуты спанов SQL и httpx — стабильные
+имена semconv (`db.query.text`, `http.request.method`, `url.full`): без
+`OTEL_SEMCONV_STABILITY_OPT_IN` код ставит `database,http` сам. Экспорт в хранилище
+трейсов — #89.
+Это телеметрия для команды: данные прогона для кабинета — длительность, токены,
+шаги — берутся из базы.

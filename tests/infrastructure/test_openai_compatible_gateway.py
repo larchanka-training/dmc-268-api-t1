@@ -13,7 +13,7 @@ from app.application.llm_schema import ReviewOutput
 from app.application.ports.llm_gateway import LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
-from app.domain.llm_errors import LlmError
+from app.domain.llm_errors import LlmError, LlmRateLimitedError, LlmTimeoutError
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -121,6 +121,26 @@ def test_every_key_rejected_is_a_provider_failure() -> None:
     assert len(seen) == 2
 
 
+def test_every_key_rate_limited_is_a_rate_limit_failure() -> None:
+    handler, seen = _recording(httpx.Response(429), httpx.Response(429))
+
+    with pytest.raises(LlmRateLimitedError, match="лимит запросов на всех ключах") as caught:
+        _gateway(handler).complete(REQUEST)
+
+    assert caught.value.code == "LLM_RATE_LIMITED"
+    assert len(seen) == 2
+
+
+def test_keys_rejected_for_mixed_reasons_are_a_plain_provider_failure() -> None:
+    handler, _ = _recording(httpx.Response(429), httpx.Response(401))
+
+    with pytest.raises(LlmError, match="все ключи отвергнуты") as caught:
+        _gateway(handler).complete(REQUEST)
+
+    assert type(caught.value) is LlmError
+    assert caught.value.code == "LLM_UNAVAILABLE"
+
+
 def test_consecutive_calls_start_from_different_keys() -> None:
     handler, seen = _recording(
         httpx.Response(200, json=_reply()), httpx.Response(200, json=_reply())
@@ -186,7 +206,7 @@ def test_timeout_is_a_model_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("boom", request=request)
 
-    with pytest.raises(LlmError, match="таймаут"):
+    with pytest.raises(LlmTimeoutError, match="таймаут"):
         _gateway(handler).complete(REQUEST)
 
 

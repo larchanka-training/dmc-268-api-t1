@@ -22,7 +22,7 @@ from app.application.ports.vcs_gateway import VcsGateway
 from app.config import Settings
 from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.db.token_cipher import TokenCipher
-from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork, UntracedUnitOfWork
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.ollama import OllamaGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
@@ -84,6 +84,10 @@ class Container:
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine, self._token_cipher)
 
+    def untraced_unit_of_work(self) -> UnitOfWork:
+        """Единица работы без спанов SQL — для опроса в потоке событий."""
+        return UntracedUnitOfWork(self.engine, self._token_cipher)
+
     def job_queue(self) -> JobQueue:
         """Выдать очередь задач; соединение с брокером открывается лениво,
         при первом `enqueue`, — старт без RabbitMQ не падает."""
@@ -134,8 +138,13 @@ def build_container(settings: Settings) -> Container:
     # pool_pre_ping: соединение, умершее в простое (перезапуск сервера, idle
     # timeout, NAT сбросил поток), обнаруживается при выдаче из пула и
     # заменяется, а не всплывает OperationalError на следующем запросе.
+    # hide_parameters: текст ошибки SQLAlchemy не несёт `[parameters: …]` — в
+    # параметрах бывает код из диффа, а текст ошибки попадает в лог и в спан
+    # (`record_exception`, статус спана).
     return Container(
-        engine=create_engine(settings.database_url, future=True, pool_pre_ping=True),
+        engine=create_engine(
+            settings.database_url, future=True, pool_pre_ping=True, hide_parameters=True
+        ),
         settings=settings,
         _token_cipher=_token_cipher(settings),
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),

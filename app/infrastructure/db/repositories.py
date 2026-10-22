@@ -6,10 +6,11 @@
 """
 
 import datetime as dt
+from collections.abc import Collection
 from uuid import UUID
 
 from psycopg.errors import LockNotAvailable
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, literal, select, text, tuple_, union_all, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -23,6 +24,8 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunListEntry,
+    ReviewRunStep,
     Secret,
     User,
 )
@@ -30,6 +33,7 @@ from app.domain.entities import Session as UserSession
 from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
 from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
+from app.domain.run_feed import FeedCursor
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
@@ -39,6 +43,7 @@ from app.infrastructure.db.models import (
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
+    ReviewRunStepRow,
     SessionRow,
     UserRow,
 )
@@ -72,6 +77,16 @@ class SqlAlchemyRepositoryRepo:
             .order_by(RepositoryRow.created_at, RepositoryRow.id)
             .limit(limit)
             .offset(offset)
+        ).all()
+        return [m.repository_to_domain(row) for row in rows]
+
+    def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
+        if not provider_ids:
+            return []
+        rows = self._session.scalars(
+            select(RepositoryRow)
+            .where(RepositoryRow.provider == provider, RepositoryRow.provider_id.in_(provider_ids))
+            .order_by(RepositoryRow.id)
         ).all()
         return [m.repository_to_domain(row) for row in rows]
 
@@ -193,6 +208,65 @@ class SqlAlchemyReviewRunRepo:
         ).all()
         return [m.review_run_to_domain(row) for row in rows]
 
+    def list_changed(
+        self,
+        after: FeedCursor,
+        recheck_from: dt.datetime,
+        repository_ids: Collection[UUID],
+        limit: int,
+    ) -> list[ReviewRunListEntry]:
+        """Один запрос: id обеих частей — `UNION ALL` двух выборок, к ним запрос на
+        изменение, репозиторий и число находок `COUNT … GROUP BY` по пачке.
+
+        `LIMIT` — только у части новее курсора. Окно перепроверки читается целиком: оно и
+        так ограничено `RECHECK` по времени, а с `LIMIT` запоздавшая строка за первыми
+        `limit` уже виденными в окне не вернулась бы никогда. Обе части идут по индексу
+        `(updated_at, id)`.
+        """
+        if not repository_ids:
+            return []
+        key = tuple_(ReviewRunRow.updated_at, ReviewRunRow.id)
+        cursor = tuple_(literal(after.updated_at), literal(after.id))
+        visible = (
+            select(ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .where(MergeRequestRow.repository_id.in_(repository_ids))
+            .order_by(ReviewRunRow.updated_at, ReviewRunRow.id)
+        )
+        fresh = visible.where(key > cursor).limit(limit).subquery("fresh")
+        late = visible.where(ReviewRunRow.updated_at > recheck_from, key <= cursor).subquery("late")
+        # CTE, а не подзапрос: на неё ссылаются и выборка, и подсчёт находок, а CTE с
+        # двумя ссылками PostgreSQL вычисляет один раз.
+        picked = union_all(select(fresh.c.id), select(late.c.id)).cte("picked")
+        counts = (
+            select(FindingRow.review_run_id, func.count().label("findings_count"))
+            .where(FindingRow.review_run_id.in_(select(picked.c.id)))
+            .group_by(FindingRow.review_run_id)
+            .subquery("counts")
+        )
+        rows = self._session.execute(
+            select(
+                ReviewRunRow,
+                MergeRequestRow,
+                RepositoryRow,
+                func.coalesce(counts.c.findings_count, 0),
+            )
+            .join(picked, picked.c.id == ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .join(RepositoryRow, RepositoryRow.id == MergeRequestRow.repository_id)
+            .outerjoin(counts, counts.c.review_run_id == ReviewRunRow.id)
+            .order_by(ReviewRunRow.updated_at, ReviewRunRow.id)
+        ).all()
+        return [
+            ReviewRunListEntry(
+                run=m.review_run_to_domain(run),
+                merge_request=m.merge_request_to_domain(merge_request),
+                repository=m.repository_to_domain(repository),
+                findings_count=findings_count,
+            )
+            for run, merge_request, repository, findings_count in rows
+        ]
+
     def add(self, run: ReviewRun) -> None:
         """Вставить прогон, перенеся все поля, которые в нём уже есть.
 
@@ -258,6 +332,44 @@ class SqlAlchemyReviewRunRepo:
         row.rejected_findings = run.rejected_findings
         row.verification = run.verification
         row.verifier_dropped_findings = run.verifier_dropped_findings
+
+
+class SqlAlchemyReviewRunStepRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def list_for_run(self, review_run_id: UUID) -> list[ReviewRunStep]:
+        rows = self._session.scalars(
+            select(ReviewRunStepRow)
+            .where(ReviewRunStepRow.review_run_id == review_run_id)
+            # Порядок начала; id — UUIDv7, разводит шаги с одним временем.
+            .order_by(ReviewRunStepRow.started_at, ReviewRunStepRow.id)
+        ).all()
+        return [m.review_run_step_to_domain(row) for row in rows]
+
+    def add(self, step: ReviewRunStep) -> None:
+        self._session.add(
+            ReviewRunStepRow(
+                id=step.id,
+                review_run_id=step.review_run_id,
+                stage=step.stage,
+                status=step.status,
+                started_at=step.started_at,
+                duration_seconds=step.duration_seconds,
+                tokens_used=step.tokens_used,
+                error_code=step.error_code,
+            )
+        )
+
+    def update(self, step: ReviewRunStep) -> None:
+        row = self._session.get(ReviewRunStepRow, step.id)
+        if row is None:
+            raise LookupError(f"review run step {step.id} is not stored")
+        # Прогон, этап и начало у шага не меняются: меняется только исход.
+        row.status = step.status
+        row.duration_seconds = step.duration_seconds
+        row.tokens_used = step.tokens_used
+        row.error_code = step.error_code
 
 
 class SqlAlchemyContextPayloadRepo:

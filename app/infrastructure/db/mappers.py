@@ -14,6 +14,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunStep,
     RuleRef,
     Session,
     User,
@@ -25,6 +26,7 @@ from app.infrastructure.db.models import (
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
+    ReviewRunStepRow,
     SessionRow,
     UserRow,
 )
@@ -79,6 +81,19 @@ def review_run_to_domain(row: ReviewRunRow) -> ReviewRun:
         rejected_findings=row.rejected_findings,
         verification=row.verification,
         verifier_dropped_findings=row.verifier_dropped_findings,
+    )
+
+
+def review_run_step_to_domain(row: ReviewRunStepRow) -> ReviewRunStep:
+    return ReviewRunStep(
+        id=row.id,
+        review_run_id=row.review_run_id,
+        stage=row.stage,
+        status=row.status,
+        started_at=row.started_at,
+        duration_seconds=row.duration_seconds,
+        tokens_used=row.tokens_used,
+        error_code=row.error_code,
     )
 
 

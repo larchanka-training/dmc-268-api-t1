@@ -129,6 +129,57 @@ def test_returns_registered_repositories() -> None:
     assert {item["full_name"] for item in body["items"]} == {"owner/repo-1", "owner/repo-2"}
 
 
+def test_one_repository_by_id_has_the_shape_of_a_list_row() -> None:
+    uow = FakeUnitOfWork()
+    repository = _repository(1)
+    uow.repositories.add(repository)
+    client = _client(uow)
+
+    one = client.get(f"/api/v1/repositories/{repository.id}")
+    row = client.get("/api/v1/repositories").json()["items"][0]
+
+    assert one.status_code == 200
+    assert one.json() == row
+
+
+def test_a_repository_beyond_the_first_page_is_found_by_id() -> None:
+    """Страница настроек не ищет репозиторий в первых 200 строках списка."""
+    uow = FakeUnitOfWork()
+    for n in range(MAX_LIMIT):
+        uow.repositories.add(_repository(n))
+    last = _repository(MAX_LIMIT)
+    uow.repositories.add(last)
+
+    response = _client(uow).get(f"/api/v1/repositories/{last.id}")
+
+    assert response.status_code == 200
+    assert response.json()["full_name"] == f"owner/repo-{MAX_LIMIT}"
+
+
+def test_an_unknown_repository_id_is_404() -> None:
+    repository_id = new_id()
+
+    response = _client(FakeUnitOfWork()).get(f"/api/v1/repositories/{repository_id}")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "REPOSITORY_NOT_FOUND"
+
+
+def test_a_repository_id_that_is_not_a_uuid_is_a_validation_error() -> None:
+    response = _client(FakeUnitOfWork()).get("/api/v1/repositories/repo-1")
+
+    assert response.status_code == 422
+    assert response.json()["errors"] == [{"where": "path.repository_id", "reason": "ожидается UUID"}]
+
+
+def test_one_repository_requires_a_session() -> None:
+    response = _client(FakeUnitOfWork(), signed_in=False).get(f"/api/v1/repositories/{new_id()}")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"
+
+
 def test_limit_above_the_ceiling_is_capped_not_rejected() -> None:
     uow = FakeUnitOfWork()
     for n in range(MAX_LIMIT + 5):
@@ -142,14 +193,17 @@ def test_limit_above_the_ceiling_is_capped_not_rejected() -> None:
 
 
 def test_a_non_integer_limit_is_a_validation_error_without_the_input() -> None:
-    response = _client(FakeUnitOfWork()).get("/api/v1/repositories", params={"limit": "<b>abc</b>"})
+    response = _client(FakeUnitOfWork()).get("/api/v1/repositories", params={"limit": "<b>qzq</b>"})
 
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
     body = response.json()
     assert body["code"] == "VALIDATION_ERROR"
     assert body["errors"] == [{"where": "query.limit", "reason": "ожидается целое число"}]
-    assert "abc" not in response.text
+    # Маркер не из шестнадцатеричных символов: trace_id в ответе случайный hex и иногда
+    # содержал «abc», тест падал без причины.
+    assert "qzq" not in response.text
+    assert "<b>" not in response.text
 
 
 def test_a_limit_below_one_is_a_validation_error() -> None:

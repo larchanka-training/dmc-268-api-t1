@@ -800,6 +800,513 @@
         }
       }
     },
+    "/api/v1/repositories/{repository_id}": {
+      "get": {
+        "tags": [
+          "repositories"
+        ],
+        "summary": "Зарегистрированный репозиторий",
+        "description": "Требует сессию. Один зарегистрированный репозиторий по id — та же форма, что строка GET /repositories. 404 REPOSITORY_NOT_FOUND, если репозитория нет.",
+        "operationId": "getRepository",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repository_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор репозитория в сервисе.",
+              "title": "Repository Id"
+            },
+            "description": "Идентификатор репозитория в сервисе."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Репозиторий.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Репозитория с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/{repository_id}/settings": {
+      "get": {
+        "tags": [
+          "repositories"
+        ],
+        "summary": "Настройки ревью репозитория",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #113). Требует сессию; id репозитория проверяется до ответа 501. Когда ручка заработает: настройки ревью репозитория; 404 REPOSITORY_NOT_FOUND, если репозитория нет. У репозитория без сохранённых настроек — значения по умолчанию: auto_review_enabled = true, branch_filter = [] (все ветки), min_severity = critical.",
+        "operationId": "getRepositorySettings",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repository_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор репозитория в сервисе.",
+              "title": "Repository Id"
+            },
+            "description": "Идентификатор репозитория в сервисе."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Настройки репозитория.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositorySettingsResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Репозитория с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "501": {
+            "description": "Ручка ещё не реализована.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "repositories"
+        ],
+        "summary": "Сохранить настройки ревью репозитория",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #113). Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела, id репозитория и тело — до ответа 501. Тело — полный набор настроек: все поля обязательны, запись заменяет прежние настройки целиком, повтор того же тела ничего не меняет. Когда ручка заработает: 200 с сохранёнными настройками; 404 REPOSITORY_NOT_FOUND, если репозитория нет; 403 REPOSITORY_MANAGE_REQUIRED, если у пользователя нет роли admin или maintain на репозитории у провайдера, — как при подключении, роль проверяется запросом к GitHub.",
+        "operationId": "saveRepositorySettings",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repository_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор репозитория в сервисе.",
+              "title": "Repository Id"
+            },
+            "description": "Идентификатор репозитория в сервисе."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepositorySettingsUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Настройки сохранены.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositorySettingsResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "403": {
+            "description": "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; `REPOSITORY_MANAGE_REQUIRED` — у пользователя нет прав admin или maintain на репозиторий у провайдера.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/OriginForbiddenProblem"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RepositoryManageRequiredProblem"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "code",
+                    "mapping": {
+                      "ORIGIN_FORBIDDEN": "#/components/schemas/OriginForbiddenProblem",
+                      "REPOSITORY_MANAGE_REQUIRED": "#/components/schemas/RepositoryManageRequiredProblem"
+                    }
+                  },
+                  "title": "Response 403 Saverepositorysettings"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Репозитория с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "501": {
+            "description": "Ручка ещё не реализована.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/{repository_id}/rules": {
+      "get": {
+        "tags": [
+          "repositories"
+        ],
+        "summary": "Статус правил ревью репозитория",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #113). Требует сессию; id репозитория проверяется до ответа 501. Когда ручка заработает: чем закончилась загрузка `.review/rules.md` с ветки по умолчанию репозитория — те же исходы, что у загрузки правил для прогона: loaded — файл разобран, в ответе принятые правила и отклонённые разделы; absent — файла нет; too_large — файл больше лимита и не разбирался; unavailable — провайдер не ответил. Кроме loaded, ревью идёт по стандартным критериям. 404 REPOSITORY_NOT_FOUND, если репозитория нет.",
+        "operationId": "getRepositoryRules",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repository_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор репозитория в сервисе.",
+              "title": "Repository Id"
+            },
+            "description": "Идентификатор репозитория в сервисе."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Исход загрузки `.review/rules.md`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RulesStatusResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Репозитория с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "501": {
+            "description": "Ручка ещё не реализована.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repositories/{repository_id}/pull-requests": {
       "get": {
         "tags": [
@@ -1069,7 +1576,7 @@
           "reviews"
         ],
         "summary": "Список прогонов ревью",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #103). Требует сессию; параметры запроса проверяются до ответа 501. Когда ручка заработает: снимок списка прогонов ревью, сначала новые — по created_at по убыванию, при равном created_at — по id по убыванию. Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub (любая роль), — то же правило, что у GET /repositories/available. Фильтры складываются через «и»: status — один или несколько статусов (параметр повторяется); active=true — только активные (queued, building_context, analysing, publishing), active=false — только завершённые (completed, failed, cancelled), вместе со status — пересечение; repository_id — прогоны одного репозитория, невидимый или несуществующий репозиторий даёт пустой список, а не 404; author — точное совпадение логина автора запроса на изменение; q — подстрока без учёта регистра в заголовке, авторе или исходной ветке запроса на изменение либо точное совпадение номера (42 или #42). У q и author пустая строка — без фильтра. created_from (включительно) и created_to (исключительно) — диапазон по created_at прогона, время с зоной (в ответах — UTC с Z); created_from позже created_to — 422 VALIDATION_ERROR в query.created_to. Постранично: limit выше 200 не отклоняется, а приводится к 200. total — сколько прогонов подходит под фильтры без учёта limit и offset. findings_count — то же, что число элементов findings в GET /reviews/{review_run_id}: находки, оставшиеся после отсева и верификатора, а не опубликованные комментарии. Самих находок и комментариев в строке нет. Изменения после снимка приходят потоком GET /reviews/events; поток фильтры не учитывает, поэтому при активных фильтрах или не на первой странице клиент на событие перезапрашивает страницу, а без фильтров на первой странице — делает upsert строки.",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #103). Требует сессию; параметры запроса проверяются до ответа 501. Когда ручка заработает: снимок списка прогонов ревью, сначала новые — по created_at по убыванию, при равном created_at — по id по убыванию. Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub (любая роль), — то же правило, что у GET /repositories/available. Фильтры складываются через «и»: status — один или несколько статусов (параметр повторяется); active=true — только активные (queued, building_context, analysing, publishing), active=false — только завершённые (completed, failed, cancelled), вместе со status — пересечение; repository_id — прогоны одного или нескольких репозиториев (параметр повторяется), невидимый или несуществующий репозиторий не даёт 404, его прогонов просто нет в списке; author — точное совпадение логина автора запроса на изменение; q — подстрока без учёта регистра в заголовке, авторе или исходной ветке запроса на изменение либо точное совпадение номера (42 или #42). У q и author пустая строка — без фильтра. created_from (включительно) и created_to (исключительно) — диапазон по created_at прогона, время с зоной (в ответах — UTC с Z); created_from позже created_to — 422 VALIDATION_ERROR в query.created_to. Постранично: limit выше 200 не отклоняется, а приводится к 200. total — сколько прогонов подходит под фильтры без учёта limit и offset. findings_count — то же, что число элементов findings в GET /reviews/{review_run_id}: находки, оставшиеся после отсева и верификатора, а не опубликованные комментарии. Самих находок и комментариев в строке нет. Изменения после снимка приходят потоком GET /events; поток фильтры не учитывает, поэтому при активных фильтрах или не на первой странице клиент на событие перезапрашивает страницу, а без фильтров на первой странице — делает upsert строки.",
         "operationId": "listReviews",
         "security": [
           {
@@ -1123,17 +1630,21 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string",
-                  "format": "uuid"
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "maxItems": 50
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "Только прогоны этого репозитория.",
+              "description": "Прогоны этих репозиториев; параметр повторяется: ?repository_id=…&repository_id=…, не больше 50 значений.",
               "title": "Repository Id"
             },
-            "description": "Только прогоны этого репозитория."
+            "description": "Прогоны этих репозиториев; параметр повторяется: ?repository_id=…&repository_id=…, не больше 50 значений."
           },
           {
             "name": "author",
@@ -1316,112 +1827,6 @@
             }
           }
         }
-      }
-    },
-    "/api/v1/reviews/events": {
-      "get": {
-        "tags": [
-          "reviews"
-        ],
-        "summary": "Поток изменений прогонов ревью (Server-Sent Events)",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #103). Требует сессию. Когда ручка заработает: один поток Server-Sent Events на весь кабинет — изменения прогонов ревью к снимку GET /reviews. Имя события — в поле `event:`, значения — ReviewRunsStreamEventType; данные любого события прогона — ReviewRunListItem, полная строка списка, JSON в `data:` одной строкой. Имя — подсказка, что случилось: `run.created` — новый прогон, `run.status_changed` — прогон сменил статус, но не на итоговый, `run.finished` — прогон пришёл в итоговый статус (completed, failed или cancelled); при переходе в итоговый статус приходит только `run.finished`. Клиент применяет любое событие одинаково: upsert строки по id, из двух версий строки побеждает та, у которой updated_at больше, при равном updated_at — пришедшая позже. Порядок клиента: подписаться на поток и запросить снимок GET /reviews после события `open` у EventSource — событие, пришедшее раньше снимка, не потеряется, а более старая версия строки проиграет по updated_at. Поток не фильтруется: в нём все видимые прогоны. При активных фильтрах списка или не на первой странице клиент на событие перезапрашивает страницу, без фильтров на первой странице — делает upsert. Событий удаления и потери видимости нет: такие строки обновятся при перезапросе. `ping` с `data: {}` — в тишине, не реже раза в 15 секунд. Поток начинается со строки `retry: 3000`. Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub (любая роль), — то же правило, что у GET /repositories/available. События уходят в момент коммита записи прогона (PostgreSQL NOTIFY из транзакции записи): откаченная запись события не даёт. Истории сервер не хранит: событие, пропущенное при обрыве, не повторяется, поэтому после переподключения клиент перезапрашивает GET /reviews. При обрыве своей подписки на уведомления сервер сам закрывает поток, чтобы клиент перезапросил список.",
-        "operationId": "streamReviewsEvents",
-        "responses": {
-          "200": {
-            "description": "Поток событий; данные каждого события прогона — ReviewRunListItem.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "type": "string",
-                  "const": "no-cache"
-                }
-              },
-              "X-Accel-Buffering": {
-                "description": "Отключает буферизацию ответа в nginx.",
-                "schema": {
-                  "type": "string",
-                  "const": "no"
-                }
-              },
-              "X-Trace-ID": {
-                "$ref": "#/components/headers/X-Trace-ID"
-              }
-            },
-            "content": {
-              "text/event-stream": {
-                "schema": {
-                  "type": "string",
-                  "description": "Текст SSE: `event: run.created`, `run.status_changed` или `run.finished` с JSON ReviewRunListItem в `data` или `event: ping` с `data: {}`."
-                },
-                "x-sse-events": {
-                  "run.created": {
-                    "$ref": "#/components/schemas/ReviewRunListItem"
-                  },
-                  "run.status_changed": {
-                    "$ref": "#/components/schemas/ReviewRunListItem"
-                  },
-                  "run.finished": {
-                    "$ref": "#/components/schemas/ReviewRunListItem"
-                  },
-                  "ping": {
-                    "type": "object",
-                    "maxProperties": 0
-                  }
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AnyProblem"
-                }
-              }
-            },
-            "headers": {
-              "X-Trace-ID": {
-                "$ref": "#/components/headers/X-Trace-ID"
-              }
-            }
-          },
-          "401": {
-            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UnauthenticatedProblem"
-                }
-              }
-            },
-            "headers": {
-              "X-Trace-ID": {
-                "$ref": "#/components/headers/X-Trace-ID"
-              }
-            }
-          },
-          "501": {
-            "description": "Ручка ещё не реализована.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NotImplementedProblem"
-                }
-              }
-            },
-            "headers": {
-              "X-Trace-ID": {
-                "$ref": "#/components/headers/X-Trace-ID"
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "session": []
-          }
-        ]
       }
     },
     "/api/v1/reviews/{review_run_id}": {
@@ -1657,7 +2062,7 @@
           "reviews"
         ],
         "summary": "Шаги прогона",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #82). Когда ручка заработает: шаги прогона по порядку — этап, статус, время, токены, код ошибки; без запросов и ответов модели. 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию.",
+        "description": "Требует сессию. Шаги воркера по порядку начала (при равном начале — по id): этап, статус, начало, длительность, токены, код ошибки; без запросов и ответов модели. Повтор этапа (новая попытка вызова модели) — отдельный шаг того же этапа. Прогон, у которого шагов ещё нет, — 200 с пустым items; 404 REVIEW_NOT_FOUND, если прогона нет.",
         "operationId": "getReviewSteps",
         "security": [
           {
@@ -1745,21 +2150,6 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/ValidationProblem"
-                }
-              }
-            },
-            "headers": {
-              "X-Trace-ID": {
-                "$ref": "#/components/headers/X-Trace-ID"
-              }
-            }
-          },
-          "501": {
-            "description": "Ручка ещё не реализована.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NotImplementedProblem"
                 }
               }
             },
@@ -1890,6 +2280,112 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Поток событий кабинета (Server-Sent Events)",
+        "description": "Требует сессию. Один поток Server-Sent Events на весь кабинет, без параметров: сейчас для прогонов ревью, дальше и для других ресурсов. Заменит поток одного прогона GET /reviews/{review_run_id}/events. Имя события — `<ресурс>.<действие>` в поле `event:`, значения — StreamEventType; данные — JSON модели своего типа в `data:` одной строкой, какая модель у какого типа — в `x-sse-events` ответа. Сейчас типы такие: `run.created` — прогон, созданный после подключения, при первом его событии в этом соединении; `run.status_changed` — прогон изменился, но не в итоговом статусе (в том числе только прогресс без смены статуса — клиент всё равно делает upsert по id); `run.finished` — прогон в итоговом статусе (completed, failed или cancelled), при переходе в итоговый статус приходит только `run.finished`, даже у прогона, созданного после подключения. Данные `run.*` — ReviewRunListItem, полная строка списка GET /reviews. `ping` с `data: {}` — в тишине, не реже раза в 15 секунд. Клиент игнорирует незнакомые типы событий: новые типы добавляются без правки клиентов. Фильтров у потока нет: клиент получает все видимые ему события и отбирает нужные сам. Видимость задаёт правило типа события, пользователь получает только видимые ему события. Для `run.*`: Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub (любая роль), — то же правило, что у GET /repositories/available. Набор видимых репозиториев считается при подключении тем же расчётом, что ответ GET /repositories/available, и до переподключения не пересчитывается: доступ, отобранный у провайдера, учитывается при переподключении. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, поток не открывается. Клиент применяет любое событие прогона одинаково: upsert по id, из двух версий побеждает та, у которой updated_at больше, при равном — пришедшая позже. Источник событий — опрос базы раз в секунду: событие приходит не позже чем через пару секунд после записи прогона, несколько изменений прогона между опросами приходят одним событием с последней версией. Позже источником станет PostgreSQL NOTIFY, контракт при этом не меняется. Истории поток не отдаёт: при подключении и после каждого переподключения клиент перезапрашивает снимок REST (GET /reviews/{review_run_id} или GET /reviews) после события `open` у EventSource; событие, пришедшее раньше снимка, не потеряется, а более старая версия строки проиграет по updated_at. Поток начинается со строки `retry: 3000`. Сессия проверяется при подключении и затем каждые 5 секунд, по её окончании поток закрывается.",
+        "operationId": "streamEvents",
+        "responses": {
+          "200": {
+            "description": "Поток событий; данные события — модель его типа, перечислены в x-sse-events.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-cache"
+                }
+              },
+              "X-Accel-Buffering": {
+                "description": "Отключает буферизацию ответа в nginx.",
+                "schema": {
+                  "type": "string",
+                  "const": "no"
+                }
+              },
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Текст SSE: `event: <ресурс>.<действие>` с JSON модели типа в `data`; сейчас `run.created`, `run.status_changed` и `run.finished` с ReviewRunListItem или `event: ping` с `data: {}`. Незнакомые типы клиент игнорирует."
+                },
+                "x-sse-events": {
+                  "run.created": {
+                    "$ref": "#/components/schemas/ReviewRunListItem"
+                  },
+                  "run.status_changed": {
+                    "$ref": "#/components/schemas/ReviewRunListItem"
+                  },
+                  "run.finished": {
+                    "$ref": "#/components/schemas/ReviewRunListItem"
+                  },
+                  "ping": {
+                    "type": "object",
+                    "maxProperties": 0
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "502": {
+            "description": "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев; поток не открыт.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmUnavailableProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     }
   },
@@ -3176,6 +3672,87 @@
         "title": "PublishedCommentResponse",
         "description": "Комментарий, который прогон опубликовал на хостинге."
       },
+      "RejectedRule": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Заголовок раздела."
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Чего разделу не хватило — по-русски, для показа пользователю."
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "reason"
+        ],
+        "title": "RejectedRule",
+        "description": "Раздел `.review/rules.md`, не ставший правилом."
+      },
+      "RepoRule": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Имя правила — заголовок раздела.",
+            "examples": [
+              "Миграции"
+            ]
+          },
+          "patterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Patterns",
+            "description": "Glob-паттерны файлов, к которым правило применяется.",
+            "examples": [
+              [
+                "migrations/**"
+              ]
+            ]
+          },
+          "excludes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Excludes",
+            "description": "Glob-паттерны исключений; пустой список — не исключено ничего.",
+            "examples": [
+              [
+                "**/tests/**"
+              ]
+            ]
+          },
+          "checks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Checks",
+            "description": "Проверки правила — пункты раздела.",
+            "examples": [
+              [
+                "Миграция обратима: есть downgrade"
+              ]
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "patterns",
+          "excludes",
+          "checks"
+        ],
+        "title": "RepoRule",
+        "description": "Правило владельца репозитория из `.review/rules.md`, принятое разбором."
+      },
       "RepositoryAlreadyConnectedProblem": {
         "properties": {
           "type": {
@@ -3556,6 +4133,92 @@
         "title": "RepositoryResponse",
         "description": "Репозиторий, зарегистрированный в сервисе: его запросы на изменение ревьюятся."
       },
+      "RepositorySettingsResponse": {
+        "properties": {
+          "auto_review_enabled": {
+            "type": "boolean",
+            "title": "Auto Review Enabled",
+            "description": "Ревью запускается автоматически по вебхуку. Та же колонка репозитория, что auto_review_enabled в RepositoryResponse, — второй копии нет. Без сохранённых настроек — true.",
+            "examples": [
+              true
+            ]
+          },
+          "branch_filter": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Branch Filter",
+            "description": "Glob-паттерны целевых веток запросов на изменение, которые ревьюятся; пустой список — все ветки (так и без сохранённых настроек).",
+            "examples": [
+              [
+                "main",
+                "release/*"
+              ]
+            ]
+          },
+          "min_severity": {
+            "$ref": "#/components/schemas/FindingSeverity",
+            "description": "Порог важности: нерешённое замечание с severity не ниже порога блокирует merge gate, и бот запрашивает изменения. Публикуются все замечания, порог их не отсекает. Без сохранённых настроек — critical.",
+            "examples": [
+              "critical"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "auto_review_enabled",
+          "branch_filter",
+          "min_severity"
+        ],
+        "title": "RepositorySettingsResponse",
+        "description": "Настройки ревью репозитория."
+      },
+      "RepositorySettingsUpdate": {
+        "properties": {
+          "auto_review_enabled": {
+            "type": "boolean",
+            "title": "Auto Review Enabled",
+            "description": "Ревью запускается автоматически по вебхуку. Та же колонка репозитория, что auto_review_enabled в RepositoryResponse, — второй копии нет. Без сохранённых настроек — true.",
+            "examples": [
+              true
+            ]
+          },
+          "branch_filter": {
+            "items": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 50,
+            "title": "Branch Filter",
+            "description": "Glob-паттерны целевых веток запросов на изменение, которые ревьюятся; пустой список — все ветки (так и без сохранённых настроек). Не больше 50 паттернов, каждый — непустой после обрезки пробелов, не длиннее 200 символов, без повторов.",
+            "examples": [
+              [
+                "main",
+                "release/*"
+              ]
+            ]
+          },
+          "min_severity": {
+            "$ref": "#/components/schemas/FindingSeverity",
+            "description": "Порог важности: нерешённое замечание с severity не ниже порога блокирует merge gate, и бот запрашивает изменения. Публикуются все замечания, порог их не отсекает. Без сохранённых настроек — critical.",
+            "examples": [
+              "critical"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "auto_review_enabled",
+          "branch_filter",
+          "min_severity"
+        ],
+        "title": "RepositorySettingsUpdate",
+        "description": "Новые настройки ревью репозитория — полный набор, заменяет прежний целиком."
+      },
       "RepositorySummary": {
         "properties": {
           "id": {
@@ -3691,6 +4354,7 @@
               "LLM_TIMEOUT",
               "LLM_UNAVAILABLE",
               "LLM_INVALID_OUTPUT",
+              "PROMPT_TOO_LARGE",
               "REVIEW_RUN_STALE",
               "INTERNAL_ERROR"
             ],
@@ -4075,6 +4739,16 @@
               "2026-10-11T10:00:00Z"
             ]
           },
+          "last_progress_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Last Progress At",
+            "description": "Время последнего перехода состояния.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
           "duration_seconds": {
             "anyOf": [
               {
@@ -4123,13 +4797,14 @@
           "head_sha",
           "created_at",
           "updated_at",
+          "last_progress_at",
           "duration_seconds",
           "failed_stage",
           "findings_count",
           "merge_request"
         ],
         "title": "ReviewRunListItem",
-        "description": "Прогон ревью строкой списка: без находок и комментариев.\n\nТе же данные — у каждого события прогона в потоке GET /reviews/events."
+        "description": "Прогон ревью строкой списка: без находок и комментариев.\n\nТе же данные — у каждого события прогона `run.*` в потоке GET /events."
       },
       "ReviewRunListResponse": {
         "properties": {
@@ -4465,7 +5140,7 @@
               }
             ],
             "title": "Tokens Used",
-            "description": "Токенов LLM потрачено на шаге; null, если шаг модель не вызывал."
+            "description": "Токенов LLM потрачено на шаге; null, если шаг модель не вызывал или расход неизвестен (брошенный шаг)."
           },
           "error_code": {
             "anyOf": [
@@ -4598,6 +5273,194 @@
         ],
         "title": "RuleRefResponse",
         "description": "Пункт правила владельца, по которому выпущена находка."
+      },
+      "RulesAbsent": {
+        "properties": {
+          "branch": {
+            "type": "string",
+            "title": "Branch",
+            "description": "Ветка, с которой читался файл, — ветка по умолчанию репозитория.",
+            "examples": [
+              "main"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Путь к файлу правил в репозитории.",
+            "examples": [
+              ".review/rules.md"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "const": "absent",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "branch",
+          "path",
+          "status"
+        ],
+        "title": "RulesAbsent",
+        "description": "Файла правил на ветке нет: ревью по стандартным критериям."
+      },
+      "RulesLoaded": {
+        "properties": {
+          "branch": {
+            "type": "string",
+            "title": "Branch",
+            "description": "Ветка, с которой читался файл, — ветка по умолчанию репозитория.",
+            "examples": [
+              "main"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Путь к файлу правил в репозитории.",
+            "examples": [
+              ".review/rules.md"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "const": "loaded",
+            "title": "Status"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/RepoRule"
+            },
+            "type": "array",
+            "title": "Rules",
+            "description": "Принятые правила по порядку в файле."
+          },
+          "rejected": {
+            "items": {
+              "$ref": "#/components/schemas/RejectedRule"
+            },
+            "type": "array",
+            "title": "Rejected",
+            "description": "Разделы, не ставшие правилами."
+          },
+          "fetched_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Fetched At",
+            "description": "Когда файл получен от провайдера.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "branch",
+          "path",
+          "status",
+          "rules",
+          "rejected",
+          "fetched_at"
+        ],
+        "title": "RulesLoaded",
+        "description": "Файл правил найден и разобран."
+      },
+      "RulesStatusResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RulesLoaded"
+          },
+          {
+            "$ref": "#/components/schemas/RulesAbsent"
+          },
+          {
+            "$ref": "#/components/schemas/RulesTooLarge"
+          },
+          {
+            "$ref": "#/components/schemas/RulesUnavailable"
+          }
+        ],
+        "title": "RulesStatusResponse",
+        "description": "Чем закончилась загрузка `.review/rules.md`; вариант — по `status`.",
+        "discriminator": {
+          "propertyName": "status",
+          "mapping": {
+            "absent": "#/components/schemas/RulesAbsent",
+            "loaded": "#/components/schemas/RulesLoaded",
+            "too_large": "#/components/schemas/RulesTooLarge",
+            "unavailable": "#/components/schemas/RulesUnavailable"
+          }
+        }
+      },
+      "RulesTooLarge": {
+        "properties": {
+          "branch": {
+            "type": "string",
+            "title": "Branch",
+            "description": "Ветка, с которой читался файл, — ветка по умолчанию репозитория.",
+            "examples": [
+              "main"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Путь к файлу правил в репозитории.",
+            "examples": [
+              ".review/rules.md"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "const": "too_large",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "branch",
+          "path",
+          "status"
+        ],
+        "title": "RulesTooLarge",
+        "description": "Файл правил больше лимита и не разбирался: ревью по стандартным критериям."
+      },
+      "RulesUnavailable": {
+        "properties": {
+          "branch": {
+            "type": "string",
+            "title": "Branch",
+            "description": "Ветка, с которой читался файл, — ветка по умолчанию репозитория.",
+            "examples": [
+              "main"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Путь к файлу правил в репозитории.",
+            "examples": [
+              ".review/rules.md"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "const": "unavailable",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "branch",
+          "path",
+          "status"
+        ],
+        "title": "RulesUnavailable",
+        "description": "Провайдер не отдал файл правил: ревью по стандартным критериям."
       },
       "ScmUnavailableProblem": {
         "properties": {
@@ -5095,15 +5958,15 @@
         "title": "ReviewRunStatusEvent",
         "type": "object"
       },
-      "ReviewRunsStreamEventType": {
-        "description": "Имя события потока GET /reviews/events — значение поля `event:` в тексте SSE.\n\nУ `run.*` данные — ReviewRunListItem, у `ping` — `{}`. Тело ответа — текст SSE, поэтому\nв схему модель попадает отдельным компонентом (`app/api/openapi.py`, `extra_models`).",
+      "StreamEventType": {
+        "description": "Имя события потока GET /events — значение поля `event:` в тексте SSE, `<ресурс>.<действие>`.\n\nУ `run.*` данные — ReviewRunListItem, у `ping` — `{}`. Список растёт: клиент игнорирует\nнезнакомые имена. Тело ответа — текст SSE, поэтому в схему модель попадает отдельным\nкомпонентом (`app/api/openapi.py`, `extra_models`).",
         "enum": [
           "run.created",
           "run.status_changed",
           "run.finished",
           "ping"
         ],
-        "title": "ReviewRunsStreamEventType",
+        "title": "StreamEventType",
         "type": "string"
       }
     },

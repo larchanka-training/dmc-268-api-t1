@@ -58,6 +58,18 @@ def get_unit_of_work_factory(
     return container.unit_of_work
 
 
+def get_untraced_unit_of_work_factory(
+    container: Container = Depends(get_container),
+) -> Callable[[], UnitOfWork]:
+    """Фабрика единиц работы без спанов SQL — для опроса в потоке событий GET /events.
+
+    Опрос идёт раз в секунду всё время жизни соединения: спаны на каждый запрос
+    раздули бы трейс запроса. Соединение берётся на одно чтение и сразу
+    возвращается, как у `get_run_reader`.
+    """
+    return container.untraced_unit_of_work
+
+
 def get_oauth_provider(
     provider: Annotated[str, Path(description="Провайдер входа, например github.")],
     container: Container = Depends(get_container),
