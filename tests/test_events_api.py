@@ -15,7 +15,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import SpanKind, StatusCode
+from opentelemetry.trace import SpanKind, StatusCode, format_trace_id
 from starlette.types import Message
 
 from app.api.dependencies import (
@@ -455,6 +455,9 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
 ) -> None:
     """Событие уходит, пока поток открыт; уход клиента — штатный конец, а не ERROR спана.
 
+    Трассировка не буферизует поток: событие у клиента раньше, чем закрыт спан запроса, а
+    `X-Trace-ID` потока — trace id этого спана, как у любого ответа.
+
     ASGI-приложение гоняется напрямую: `TestClient` собирает тело целиком. `spec_version`
     2.3 — как у uvicorn: уход клиента Starlette узнаёт из `http.disconnect`.
     """
@@ -512,6 +515,9 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
 
     (server,) = [s for s in spans.get_finished_spans() if s.kind is SpanKind.SERVER]
     assert server.status.status_code is StatusCode.UNSET
+    (start,) = [m for m in sent if m["type"] == "http.response.start"]
+    assert server.context is not None
+    assert dict(start["headers"])[b"x-trace-id"].decode() == format_trace_id(server.context.trace_id)
     assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
 
 

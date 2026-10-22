@@ -69,7 +69,7 @@ FailedStage = Literal[ReviewRunStatus.BUILDING_CONTEXT, ReviewRunStatus.ANALYSIN
 FAILED_STAGE_DESCRIPTION = "Этап, на котором прогон упал; null, если прогон не падал."
 
 # Заголовки ответа потока Server-Sent Events в схеме: против кэша и буфера прокси.
-# Общие для потоков прогонов (`app/api/review_events.py`, `app/api/reviews.py`).
+# Общие для описаний потока (`app/api/events.py`, `app/api/reviews.py`).
 STREAM_HEADERS_DOC: dict[str, Any] = {
     "Cache-Control": {"schema": {"type": "string", "const": "no-cache"}},
     "X-Accel-Buffering": {

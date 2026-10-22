@@ -2,10 +2,12 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from uuid import UUID
 
-from app.application.review_run_events import POLL_SECONDS, SESSION_CHECK_SECONDS
 from app.application.run_feed_events import (
+    POLL_SECONDS,
+    SESSION_CHECK_SECONDS,
     FeedItem,
     run_feed_events,
     visible_repository_ids,
@@ -78,9 +80,13 @@ class Script:
         self.now = 0.0
         self.session_checks = 0
         self.session_checks_alive: int | None = None
+        self.check_times: list[float] = []
+        # Сколько «секунд» занимает одно чтение пачки.
+        self.read_cost = 0.0
 
     async def read(self, state: RunFeedState) -> list[ReviewRunListEntry]:
         self.reads += 1
+        self.now += self.read_cost
         return self._batches.pop(0) if self._batches else []
 
     async def sleep(self, seconds: float) -> None:
@@ -91,6 +97,7 @@ class Script:
 
     async def session_alive(self) -> bool:
         self.session_checks += 1
+        self.check_times.append(self.now)
         return self.session_checks_alive is None or self.session_checks <= self.session_checks_alive
 
 
@@ -155,6 +162,29 @@ def test_an_expired_session_ends_the_stream_without_an_event() -> None:
     assert items == []
     assert script.session_checks == 1
     assert script.now == SESSION_CHECK_SECONDS
+
+
+def test_the_poll_and_session_intervals_are_the_promised_ones() -> None:
+    # Спека: событие не позже двух секунд после записи, сессия — раз в 5 секунд.
+    assert POLL_SECONDS == 1.0
+    assert SESSION_CHECK_SECONDS == 5.0
+
+
+def test_the_session_is_rechecked_by_the_clock_even_when_reads_are_slow() -> None:
+    script = Script()
+    script.read_cost = 2.0
+    script.session_checks_alive = 3
+
+    items = _collect(script, limit=10)
+
+    # Круг «ожидание 1 с + чтение 2 с»: время чтения копится в интервале, поэтому
+    # проверки идут по часам, а не через пять ожиданий (это было бы 15 с). Проверка
+    # делается после ожидания и запаздывает не больше чем на один круг.
+    assert script.session_checks == 4
+    gaps = [b - a for a, b in pairwise([0.0, *script.check_times])]
+    limit = SESSION_CHECK_SECONDS + POLL_SECONDS + script.read_cost
+    assert all(SESSION_CHECK_SECONDS <= gap <= limit for gap in gaps), gaps
+    assert all(item == PingEvent() for item in items)
 
 
 def test_visible_repository_ids_are_the_registered_ones_among_available() -> None:
