@@ -157,7 +157,9 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
   `app/api/trace_id.py`, `app/worker`. `app/domain` и `app/application` пишут спаны через порт
   `StageTracer`; запрет проверяет `lint-imports`.
 - **Доверие контексту**: входящему HTTP `traceparent` не доверяем (глобальный пропагатор пуст),
-  `traceparent` из нашей очереди принимаем — писать в неё может только API.
+  `traceparent` из нашей очереди принимаем — писать в неё может только API. Валидный HTTP
+  `traceparent` — только span link серверного спана (`link_client_trace`, `link.source = "client"`),
+  не родитель: trace id и сэмплирование остаются нашими.
 - **Граница**: телеметрия — для команды. Данные продукта (шаги, токены, длительность) — из базы,
   ответы API из телеметрии не строятся.
 

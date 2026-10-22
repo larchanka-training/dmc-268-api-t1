@@ -28,6 +28,10 @@ Query серверного спана на путях входа скрывае�
 (запрос всегда начинает новый трейс), а httpx не отдаёт наш trace id GitHub и
 провайдерам модели. Контекст между API и воркером идёт только через заголовки AMQP
 нашей очереди — пропагатором W3C в `app/infrastructure/queue/rabbitmq.py`.
+
+Валидный входящий `traceparent` всё же не теряется: серверный спан запроса получает на
+него span link (`link_client_trace`). Родителем контекст клиента не становится, поэтому
+trace id, `X-Trace-ID` и решение сэмплера от заголовка не зависят.
 """
 
 import contextlib
@@ -54,6 +58,7 @@ from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import Span, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.trace import Status, StatusCode
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from sqlalchemy import Engine
 
 from app.domain.enums import ReviewRunStage
@@ -107,6 +112,34 @@ class _NoPropagation(TextMapPropagator):
     @property
     def fields(self) -> set[str]:
         return set()
+
+
+# Атрибут ссылки на трейс клиента: откуда взят контекст. Своего имени в semconv нет.
+LINK_SOURCE = "link.source"
+LINK_SOURCE_CLIENT = "client"
+_TRACEPARENT = "traceparent"
+_W3C = TraceContextTextMapPropagator()
+
+
+def link_client_trace(traceparent: str | None) -> None:
+    """Добавить текущему спану ссылку на контекст клиента из `traceparent`.
+
+    Зовётся на серверном спане запроса (`TraceIdMiddleware`). Ссылка, а не родитель
+    (спека `observability`): trace id показывается людям в `X-Trace-ID` и должен быть
+    нашим, а флаг `sampled` клиента не должен управлять записью трейсов. Сэмплер решает
+    при создании спана, ссылка добавляется после — `parentbased_*` её не видит.
+
+    Разбирает стандартный пропагатор W3C, и только `traceparent`: `tracestate` и baggage
+    ему не передаются. Невалидный заголовок — без ссылки и без ошибки. Не записываемый
+    спан (сэмплер отказал, трассировка выключена) ссылку молча игнорирует.
+    """
+    if not traceparent:
+        return
+    client = trace.get_current_span(
+        _W3C.extract({_TRACEPARENT: traceparent})
+    ).get_span_context()
+    if client.is_valid:
+        trace.get_current_span().add_link(client, {LINK_SOURCE: LINK_SOURCE_CLIENT})
 
 
 def configure_tracing(service_name: str) -> None:
