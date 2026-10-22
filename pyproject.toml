@@ -33,6 +33,9 @@ dependencies = [
     # внутренний `EngineTracer`, у которого нет обещаний совместимости.
     "opentelemetry-instrumentation-sqlalchemy>=0.66b1,<0.67",
     "opentelemetry-instrumentation-httpx>=0.66b1,<0.67",
+    # OTLP/HTTP-экспортёры трейсов (затем и метрик) — ядро OTel, версия идёт
+    # в одной серии с SDK: обновляется вместе с ней.
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1",
 ]
 
 [project.optional-dependencies]

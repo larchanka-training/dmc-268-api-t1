@@ -20,16 +20,16 @@
 
 ## 2. Экспорт спанов — список экспортёров
 
-- [ ] 2.1 Зависимость `opentelemetry-exporter-otlp-proto-http` через `uv`; чистая функция
+- [x] 2.1 Зависимость `opentelemetry-exporter-otlp-proto-http` через `uv`; чистая функция
   `parse_exporters(value) -> list[str]` (запятая, пробелы, регистр, дубликаты, пустое значение).
   Тест разбора: `console,otlp` → оба; `console,zipkin` → `console` + мусор; `""` → пусто
-- [ ] 2.2 `build_tracer_provider`: процессор на каждый экспортёр (`console`, `otlp` —
+- [x] 2.2 `build_tracer_provider`: процессор на каждый экспортёр (`console`, `otlp` —
   `OTLPSpanExporter`), одно предупреждение на неподдержанное значение, явно
   `parentbased_always_on`, лимит длины атрибутов из `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`. Тест:
   конфигурация провайдера по `OTEL_TRACES_EXPORTER=console,otlp` и по мусорному значению
-- [ ] 2.3 Health-check вне трейсинга: опция исключения встроенной телеметрии FastAPI (или
+- [x] 2.3 Health-check вне трейсинга: опция исключения встроенной телеметрии FastAPI (или
   дропающий процессор, если опция не покрывает). Тест: запрос `/health` не создаёт спана
-- [ ] 2.4 Resource: `service.version` и `deployment.environment.name` из
+- [x] 2.4 Resource: `service.version` и `deployment.environment.name` из
   `OTEL_RESOURCE_ATTRIBUTES` мержатся к `service.name` из кода. Тест: спан несёт все три
   атрибута при заданном окружении
 
