@@ -1,0 +1,50 @@
+# Datasources Grafana и переходы лог <-> трейс по trace_id:
+# Loki -> Tempo — derived field достаёт trace_id из JSON-записи лога;
+# Tempo -> Loki — trace-to-logs, фильтр по trace_id из структурированных
+# метаданных OTLP-логов (allow_structured_metadata в loki.yaml).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      derivedFields:
+        # trace_id — поле JSON-записи app/infrastructure/logging.py.
+        - name: TraceID
+          matcherRegex: '"trace_id":"([0-9a-f]{32})"'
+          datasourceUid: tempo
+          # $$ — экранирование $ в provisioning-файлах Grafana.
+          url: "$${__value.raw}"
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      nodeGraph:
+        enabled: true
+      tracesToLogsV2:
+        datasourceUid: loki
+        # Логи записи шире окна спана: границы поиска сдвинуты на час в обе
+        # стороны.
+        spanStartTimeShift: "-1h"
+        spanEndTimeShift: "1h"
+        tags:
+          - key: service.name
+            value: service.name
+        filterByTraceID: true
+        filterBySpanID: false
