@@ -207,7 +207,7 @@ def test_an_invalid_traceparent_gives_no_link_and_the_same_response(
 
 # Сэмплер берётся из `OTEL_TRACES_SAMPLER` при создании провайдера, а в этом процессе
 # провайдер — из `tests/conftest.py`. Поэтому проверка сэмплера — в отдельном процессе,
-# где провайдер ставит сам `configure_tracing`.
+# где провайдер ставит сам `configure_telemetry`.
 _SAMPLER_SCRIPT = """
 import sys
 

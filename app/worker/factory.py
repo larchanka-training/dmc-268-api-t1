@@ -50,7 +50,7 @@ from app.infrastructure.telemetry import (
     REVIEW_RUN_ID,
     WORKER_SERVICE,
     OtelStageTracer,
-    configure_tracing,
+    configure_telemetry,
     instrument_engine,
     record_current_exception,
     shutdown_tracing,
@@ -353,7 +353,7 @@ def run_worker(settings: Settings) -> None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
     check_model_deadline(settings)
     configure_logging(WORKER_SERVICE)
-    configure_tracing(WORKER_SERVICE)
+    configure_telemetry(WORKER_SERVICE)
     container = build_container(settings)
     instrument_engine(container.engine)
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
