@@ -1,0 +1,152 @@
+# Коллектор телеметрии — один конфиг для локального стека (docker compose,
+# профиль observability) и стенда (infra/main.tf): различия окружений — только
+# переменные запуска (пути лог-файлов) и сетевые алиасы, совпадающие в обоих
+# окружениях. Образ зафиксирован тегом в docker-compose.yml и main.tf: у
+# приёмника file_log операторы stanza вне гарантий стабильности (beta), при
+# обновлении образа читаются breaking changes.
+
+receivers:
+  # Приём OTLP от сервисов приложения: трейсы и метрики SDK при
+  # OTEL_TRACES_EXPORTER=otlp / OTEL_METRICS_EXPORTER=otlp.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Логи сервисов из stdout: драйвер json-file пишет их в конверт
+  # {"log": "...", "time": "..."}, внутри конверта — JSON-запись из
+  # app/infrastructure/logging.py. Пути вынесены в переменную
+  # OTELCOL_LOG_FILES: id контейнеров различаются между окружениями.
+  file_log:
+    include:
+      - ${env:OTELCOL_LOG_FILES}
+    start_at: end
+    storage: file_storage
+    operators:
+      # Конверт Docker: время записи — из него. Docker пишет RFC3339Nano;
+      # layout — go-time шаблон того же формата.
+      - type: json_parser
+        id: docker
+        timestamp:
+          parse_from: attributes.time
+          layout_type: gotime
+          layout: "2006-01-02T15:04:05.999999999Z07:00"
+      # Внутренний JSON записи становится телом: он же — строка в Loki.
+      - type: move
+        from: attributes.log
+        to: body
+      # Поля записи по модели OTel. Имена полей — те, что stanza ждёт по
+      # умолчанию, и они совпадают с полями record_to_fields:
+      # attributes.trace_id / attributes.span_id / attributes.trace_flags и
+      # attributes.severity. Не-JSON строки (логи самих контейнеров стека)
+      # в Loki не идут.
+      - type: json_parser
+        id: app-json
+        on_error: drop
+        trace:
+          trace_id:
+            parse_from: attributes.trace_id
+          span_id:
+            parse_from: attributes.span_id
+          trace_flags:
+            parse_from: attributes.trace_flags
+        severity:
+          parse_from: attributes.severity
+
+processors:
+  # Потолок памяти коллектора; в infra контейнеру задан лимит с запасом
+  # (observability_memory_mb.collector).
+  memory_limiter:
+    check_interval: 1s
+    spike_limit_mib: 64
+    limit_mib: 256
+  batch:
+    timeout: 5s
+
+  # service.name из полей записи — в ресурс OTLP-лога: Loki берёт имя сервиса
+  # из ресурса (label service_name), иначе все записи идут как unknown_service.
+  groupbyattrs/service:
+    keys:
+      - service.name
+
+  # Редакция чувствительных данных — второй рубеж после SDK (первый — фильтры
+  # app/api/log_redaction.py и статус по имени типа в
+  # app/infrastructure/telemetry.py). Значение заменяется маркером <скрыто>,
+  # атрибут остаётся на месте: наличие атрибута и тип исключения сохраняются —
+  # диагноз в трейсе остаётся, секреты нет. Примеры из аудита #89 накрывает
+  # тест tests/infrastructure/test_collector_redaction.py.
+  transform/redact:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          # query и полный URL httpx-спанов: имя приватного репозитория,
+          # пути файлов и токены в них.
+          - set(attributes["url.query"], "<скрыто>") where attributes["url.query"] != nil
+          - set(attributes["url.full"], "<скрыто>") where attributes["url.full"] != nil
+          # Значения db.*: SQL-текст, имя базы и пользователя — psycopg кладёт
+          # значения ключей в тексты ошибок. Имена старых semconv оставлены на
+          # случай инструментария, который их ещё пишет.
+          - set(attributes["db.system"], "<скрыто>") where attributes["db.system"] != nil
+          - set(attributes["db.name"], "<скрыто>") where attributes["db.name"] != nil
+          - set(attributes["db.statement"], "<скрыто>") where attributes["db.statement"] != nil
+          - set(attributes["db.operation"], "<скрыто>") where attributes["db.operation"] != nil
+          - set(attributes["db.user"], "<скрыто>") where attributes["db.user"] != nil
+          - set(attributes["db.sql.table"], "<скрыто>") where attributes["db.sql.table"] != nil
+          - set(attributes["db.system.name"], "<скрыто>") where attributes["db.system.name"] != nil
+          - set(attributes["db.namespace"], "<скрыто>") where attributes["db.namespace"] != nil
+          - set(attributes["db.query.text"], "<скрыто>") where attributes["db.query.text"] != nil
+          - set(attributes["db.operation.name"], "<скрыто>") where attributes["db.operation.name"] != nil
+          # Описание статуса SQL-спанов: в DETAIL psycopg — значения ключей.
+          # Только заполненное описание: у успешных SQL-спанов статус Unset и
+          # описание пустое — бессмысленный маркер им не ставится. Сравнение
+          # с пустой строкой, а не с nil: геттер status.message возвращает
+          # Go-строку (для Unset — ""), и nil-сравнение по правилам OTTL
+          # (string против nil — «not equal») было бы всегда истинным.
+          # Описания статусов прочих спанов не трогаются: после #122 это имя
+          # типа исключения, диагноз в трейсе остаётся.
+          - set(status.message, "<скрыто>") where (attributes["db.system.name"] != nil or attributes["db.system"] != nil) and status.message != ""
+      # message и stacktrace события exception: там текст ответа провайдера
+      # модели и значения ключей из ошибок базы. exception.type сохраняется.
+      - context: spanevent
+        statements:
+          - set(attributes["exception.message"], "<скрыто>") where name == "exception"
+          - set(attributes["exception.stacktrace"], "<скрыто>") where name == "exception"
+
+exporters:
+  # Трейсы — в Tempo по OTLP/HTTP.
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
+  # Логи — в Loki: нативный приём OTLP.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+  # Метрики — exporter-порт коллектора: Prometheus скрейпит его (job collector).
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+extensions:
+  # Смещения file_log между рестартами: без них после перезапуска коллектора
+  # старые записи уходили бы в Loki повторно.
+  file_storage:
+    directory: /var/lib/otelcol/storage
+    create_directory: true
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [file_storage, health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact, batch]
+      exporters: [otlphttp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp, file_log]
+      processors: [memory_limiter, groupbyattrs/service, batch]
+      exporters: [otlphttp/loki]

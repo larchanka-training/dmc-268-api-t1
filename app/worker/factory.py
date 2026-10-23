@@ -35,9 +35,11 @@ from app.application.review_pipeline import run_review
 from app.application.session_purge import purge_expired_sessions
 from app.application.stale_sweep import sweep_stale_runs
 from app.config import Settings
+from app.domain.enums import ReviewRunStatus
 from app.domain.ids import new_id
 from app.domain.prompt import PromptTexts, check_window_config
 from app.infrastructure.container import build_container
+from app.infrastructure.logging import configure_logging
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
     QUEUE_NAME,
@@ -49,9 +51,10 @@ from app.infrastructure.telemetry import (
     REVIEW_RUN_ID,
     WORKER_SERVICE,
     OtelStageTracer,
-    configure_tracing,
+    configure_telemetry,
     instrument_engine,
     record_current_exception,
+    record_run_finished,
     shutdown_tracing,
     sweep_span,
 )
@@ -168,7 +171,7 @@ class Worker:
                 # Исключение ловится снаружи спана: он успевает записать его и
                 # закрыться со статусом ошибки, а не OK при nack в DLQ.
                 try:
-                    with consuming_span(properties, method.delivery_tag):
+                    with consuming_span(properties, method.delivery_tag, method.redelivered):
                         handler(body)
                 except Exception as caught:  # noqa: BLE001 — любая ошибка уводит сообщение в DLQ, а не роняет процесс
                     exc = caught
@@ -263,12 +266,18 @@ def build_review_handler(
                 stage_tracer=stage_tracer,
             )
         except Exception:
+            # Счётчик исходов — бизнес-метрика для алертов: пайплайн переводит
+            # прогон в failed сам и пробрасывает сбой сюда; повторная доставка
+            # уже терминального прогона возвращается молча и считается
+            # завершённой.
+            record_run_finished(ReviewRunStatus.FAILED.value)
             # Сообщение уйдёт в DLQ; по job_id видно, какая это постановка
             # прогона, по review_run_id — какой прогон.
             logger.exception(
                 "задача %s (прогон %s) завершилась ошибкой", job.id, job.review_run_id
             )
             raise
+        record_run_finished(ReviewRunStatus.COMPLETED.value)
 
     return handle
 
@@ -351,7 +360,8 @@ def run_worker(settings: Settings) -> None:
     if settings.llm_backend is None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
     check_model_deadline(settings)
-    configure_tracing(WORKER_SERVICE)
+    configure_logging(WORKER_SERVICE)
+    configure_telemetry(WORKER_SERVICE)
     container = build_container(settings)
     instrument_engine(container.engine)
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)

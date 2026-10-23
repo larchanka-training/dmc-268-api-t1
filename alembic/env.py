@@ -12,15 +12,27 @@ from alembic import context
 from app.config import load_settings
 from app.infrastructure.db import models  # noqa: F401  (регистрирует таблицы)
 from app.infrastructure.db.base import Base
+from app.infrastructure.logging import configure_logging
+from app.infrastructure.telemetry import (
+    MIGRATE_SERVICE,
+    configure_telemetry,
+    instrument_engine,
+    migrate_span,
+    shutdown_tracing,
+)
 
 config = context.config
 
+# Логи миграций — тем же JSON, что API и воркер. `fileConfig` ниже снимает все
+# root-хендлеры (стандартное поведение logging.config), поэтому после него
+# вызов повторяется: на root не остаётся никого, вернуть может только наш
+# JSON-хендлер. `disable_existing_loggers=False` — чтобы логгеры, созданные
+# раньше fileConfig (внутри процесса тестов это логгеры приложения), не
+# гасились: проверки «в логе нет ключа» не проходили бы впустую.
+configure_logging(MIGRATE_SERVICE)
 if config.config_file_name is not None:
-    # Не выключать логгеры, созданные до миграций: по умолчанию `fileConfig`
-    # глушит каждый уже существующий логгер. Миграции идут и внутри процесса
-    # тестов - тогда логи приложения, созданные раньше, молча пропадали бы, а
-    # проверки «в логе нет ключа» проходили бы впустую.
     fileConfig(config.config_file_name, disable_existing_loggers=False)
+    configure_logging(MIGRATE_SERVICE)
 
 target_metadata = Base.metadata
 
@@ -58,20 +70,35 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,
-            compare_server_default=True,
+    # Телеметрия процесса миграций: провайдер с service.name = dmc-268-migrate
+    # ставится до движка и спана. Без `OTEL_TRACES_EXPORTER` экспортёров нет —
+    # миграции проходят как раньше.
+    configure_telemetry(MIGRATE_SERVICE)
+    try:
+        connectable = engine_from_config(
+            config.get_section(config.config_ini_section, {}),
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
         )
-        with context.begin_transaction():
-            context.run_migrations()
+        # Спаны на запросы к базе: миграционные операторы ложатся в трейс детьми.
+        instrument_engine(connectable)
+        with (
+            migrate_span(),
+            connectable.connect() as connection,
+        ):
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                compare_type=True,
+                compare_server_default=True,
+            )
+            with context.begin_transaction():
+                context.run_migrations()
+    finally:
+        # Накопленные спаны выгружаются до выхода процесса — и при ошибке
+        # миграции тоже: упавший прогон деплоя тоже сигнал. Исключение
+        # наружу не глотается.
+        shutdown_tracing()
 
 
 if context.is_offline_mode():

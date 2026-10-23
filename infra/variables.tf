@@ -190,6 +190,56 @@ variable "api_image" {
   description = "Полная ссылка на образ API в реестре, с тегом по commit sha."
 }
 
+# Стенд и есть прод (#97): значение одно и то же у API, воркера и кабинета —
+# иначе фильтр по окружению в Grafana разъедется (#108).
+variable "deployment_environment_name" {
+  type        = string
+  description = "deployment.environment.name в OTEL_RESOURCE_ATTRIBUTES сервисов приложения."
+  default     = "production"
+
+  validation {
+    condition     = var.deployment_environment_name == "production"
+    error_message = "Стенд и есть прод (#97): значение должно быть production."
+  }
+}
+
+# Пять контейнеров стека на VPS — риск из design.md change'а
+# add-observability-stack; потолки памяти без свопа (как у postgres/api выше),
+# прод-размеры поднимаются этой переменной.
+variable "observability_memory_mb" {
+  type = object({
+    collector         = number
+    loki              = number
+    tempo             = number
+    prometheus        = number
+    grafana           = number
+    postgres_exporter = number
+  })
+  description = "Потолки памяти контейнеров стека наблюдаемости, МБ, без свопа."
+  default = {
+    collector         = 384
+    loki              = 768
+    tempo             = 768
+    prometheus        = 768
+    grafana           = 512
+    postgres_exporter = 128
+  }
+}
+
+variable "grafana_port" {
+  type        = number
+  description = "Порт Grafana на internal_bind_ip: наружу не публикуется, в UI заходят через SSH-туннель."
+  default     = 3000
+}
+
+# Без значения по умолчанию: локально Grafana без логина, на стенде — по
+# учётке; без пароля apply падает на чтении переменной.
+variable "grafana_admin_password" {
+  type        = string
+  description = "Пароль админа Grafana (GF_SECURITY_ADMIN_PASSWORD). Не коммитить."
+  sensitive   = true
+}
+
 variable "registry_username" {
   type        = string
   description = "Пользователь реестра образов. В CI — github.actor."

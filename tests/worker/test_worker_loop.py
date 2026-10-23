@@ -71,7 +71,7 @@ def _worker(channel: FakeChannel, connection: FakeConnection | None = None) -> W
 
 
 def test_sweep_runs_on_idle_ticks_and_a_failing_sweep_does_not_stop_consumption() -> None:
-    message = (SimpleNamespace(delivery_tag=1), None, b"{}")
+    message = (SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")
     channel = FakeChannel([(None, None, None), message])
     calls: list[int] = []
 
@@ -86,7 +86,7 @@ def test_sweep_runs_on_idle_ticks_and_a_failing_sweep_does_not_stop_consumption(
 
 
 def test_sweep_is_throttled_by_the_interval() -> None:
-    ticks = [(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1), None, b"{}")]
+    ticks = [(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")]
     channel = FakeChannel(ticks)
     calls: list[int] = []
 
@@ -113,7 +113,7 @@ def test_sweep_is_throttled_by_the_interval() -> None:
 def test_a_failed_message_closes_its_span_with_the_error(
     spans: InMemorySpanExporter, body: bytes, review_run_id: str | None
 ) -> None:
-    channel = RecordingChannel([(SimpleNamespace(delivery_tag=1), None, body)])
+    channel = RecordingChannel([(SimpleNamespace(delivery_tag=1, redelivered=False), None, body)])
     handler = build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, LLM_LIMITS, TEXTS)
 
     _worker(channel).run(handler, limit=1)
@@ -126,7 +126,7 @@ def test_a_failed_message_closes_its_span_with_the_error(
 
 
 def test_a_processed_message_closes_its_span_ok(spans: InMemorySpanExporter) -> None:
-    channel = FakeChannel([(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
 
     _worker(channel).run(lambda body: None, limit=1)
 
@@ -150,9 +150,9 @@ def test_a_stage_of_a_failed_message_does_not_leak_into_the_next_spans(
 
     channel = RecordingChannel(
         [
-            (SimpleNamespace(delivery_tag=1), None, b"fail"),
+            (SimpleNamespace(delivery_tag=1, redelivered=False), None, b"fail"),
             (None, None, None),
-            (SimpleNamespace(delivery_tag=2), None, b"ok"),
+            (SimpleNamespace(delivery_tag=2, redelivered=False), None, b"ok"),
         ]
     )
 
@@ -172,7 +172,7 @@ def test_a_stage_of_a_failed_message_does_not_leak_into_the_next_spans(
 
 
 def test_a_stop_request_lets_the_current_message_finish_and_takes_no_more() -> None:
-    first, second = [(SimpleNamespace(delivery_tag=tag), None, b"{}") for tag in (1, 2)]
+    first, second = [(SimpleNamespace(delivery_tag=tag, redelivered=False), None, b"{}") for tag in (1, 2)]
     channel = FakeChannel([first, second])
     connection = FakeConnection()
     stop = StopRequest()
@@ -188,7 +188,7 @@ def test_a_stop_request_lets_the_current_message_finish_and_takes_no_more() -> N
 
 def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
     # Сигнал пришёл на простое или в окно ожидания, и тут же доставлено сообщение.
-    channel = FakeChannel([(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
     connection = FakeConnection()
     handled: list[bytes] = []
 
@@ -200,7 +200,7 @@ def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
 
 
 def test_a_message_after_a_stop_during_the_sweep_is_not_taken() -> None:
-    channel = FakeChannel([(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
     stop = StopRequest()
     handled: list[bytes] = []
 

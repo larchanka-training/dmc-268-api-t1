@@ -10,6 +10,7 @@ import sys
 import threading
 import types
 from collections.abc import Iterator
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from uuid import UUID
@@ -19,13 +20,25 @@ import pika
 import pytest
 from fastapi.testclient import TestClient
 from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation._semconv import (
     _OpenTelemetrySemanticConventionStability,
 )
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import engine as sqlalchemy_engine
+from opentelemetry.sdk.metrics.export import (
+    ConsoleMetricExporter,
+    Histogram,
+    InMemoryMetricReader,
+    PeriodicExportingMetricReader,
+)
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    ConsoleSpanExporter,
+    SimpleSpanProcessor,
+)
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode
 from sqlalchemy import create_engine, text
@@ -49,6 +62,7 @@ from app.worker import factory as worker_factory
 from ..application.test_review_pipeline import _run, _seed_run
 from ..fakes.llm_gateway import ScriptedLlmGateway
 from ..fakes.unit_of_work import FakeUnitOfWork
+from ..metrics import metric_delta, metric_snapshot
 
 RUN_ID = UUID(int=2)
 JOB = ReviewJob(
@@ -161,7 +175,27 @@ def test_queue_spans_follow_the_messaging_semantic_conventions(
         "messaging.operation.name": "process",
         "messaging.operation.type": "process",
         "messaging.rabbitmq.message.delivery_tag": 7,
+        # Без `basic.deliver` в руках — первая попытка: повторной доставки нет.
+        "messaging.rabbitmq.message.redelivered": False,
     }
+
+
+@pytest.mark.parametrize("redelivered", [False, True])
+def test_the_process_span_marks_redelivery_as_a_boolean(
+    spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+    redelivered: bool,
+) -> None:
+    """`messaging.rabbitmq.message.redelivered` — всегда булев: попытки различимы в хранилище."""
+    with consuming_span(
+        _published_properties(monkeypatch), delivery_tag=1, redelivered=redelivered
+    ):
+        pass
+
+    (_, process) = spans.get_finished_spans()
+    assert process.attributes is not None
+    value = process.attributes["messaging.rabbitmq.message.redelivered"]
+    assert value is redelivered
 
 
 class _StaleChannel(_Channel):
@@ -382,6 +416,58 @@ def test_the_console_exporter_prints_spans(
     assert '"name": "export-check"' in console.getvalue()
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("console,otlp", ["console", "otlp"]),
+        (" Console , OTLP ", ["console", "otlp"]),
+        ("console,console,otlp,otlp", ["console", "otlp"]),
+        # Мусор остаётся в списке: функция чистая, поддержанность решает провайдер.
+        ("console,zipkin", ["console", "zipkin"]),
+        ("", []),
+        (" , , ", []),
+    ],
+)
+def test_parse_exporters_normalizes_the_list(value: str, expected: list[str]) -> None:
+    assert telemetry.parse_exporters(value) == expected
+
+
+def test_a_processor_is_added_per_supported_exporter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`console,otlp` — по процессору на экспортёр: печать в stdout и OTLP/HTTP."""
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console,otlp")
+
+    provider = build_tracer_provider("dmc-268-api")
+
+    exporters = [
+        processor.span_exporter
+        for processor in provider._active_span_processor._span_processors
+        if isinstance(processor, BatchSpanProcessor)
+    ]
+    assert [type(exporter) for exporter in exporters] == [
+        ConsoleSpanExporter,
+        OTLPSpanExporter,
+    ]
+
+
+def test_an_unsupported_value_turns_off_only_itself(
+    monkeypatch: pytest.MonkeyPatch, console: io.StringIO, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`console,zipkin`: console работает, про `zipkin` — одно предупреждение, спаны не теряются."""
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console,zipkin")
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+
+    provider = build_tracer_provider("dmc-268-api")
+    _emit(provider)
+
+    [warning] = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "zipkin" in warning.getMessage()
+    assert '"name": "export-check"' in console.getvalue()
+
+
 def test_an_unsupported_exporter_warns_once_and_exports_nothing(
     monkeypatch: pytest.MonkeyPatch,
     console: io.StringIO,
@@ -392,14 +478,229 @@ def test_an_unsupported_exporter_warns_once_and_exports_nothing(
     monkeypatch.setattr(
         logging.getLogger("app.infrastructure.telemetry"), "disabled", False
     )
-    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "otlp")
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "zipkin")
 
     _emit(build_tracer_provider("dmc-268-api"))
 
     [record] = caplog.records
     assert record.levelname == "WARNING"
-    assert "otlp" in record.getMessage()
+    assert "zipkin" in record.getMessage()
     assert console.getvalue() == ""
+
+
+def _span_with_long_attribute(provider: TracerProvider) -> str:
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    provider.get_tracer("test").start_span(
+        "limit-check", attributes={"url.full": "x" * 10_000}
+    ).end()
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes is not None
+    value = span.attributes["url.full"]
+    assert isinstance(value, str)
+    return value
+
+
+def test_attribute_values_are_truncated_to_the_limit_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "10")
+
+    value = _span_with_long_attribute(build_tracer_provider("dmc-268-api"))
+
+    assert value == "x" * 10
+
+
+def test_attribute_values_are_truncated_to_the_default_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Без переменной лимит задаёт код: раздувание `url.full` и текстов ошибок ограничено."""
+    monkeypatch.delenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", raising=False)
+
+    value = _span_with_long_attribute(build_tracer_provider("dmc-268-api"))
+
+    assert value == "x" * 4096
+
+
+def test_a_negative_attribute_length_limit_does_not_stop_the_start(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Отрицательный лимит не роняет старт: предупреждение и дефолт, как у мусора."""
+    monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "-5")
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+
+    value = _span_with_long_attribute(build_tracer_provider("dmc-268-api"))
+
+    [warning] = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING" and "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT" in r.getMessage()
+    ]
+    assert "-5" in warning.getMessage()
+    assert value == "x" * 4096
+
+
+def test_the_span_resource_names_the_version_and_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`service.name` — из кода; `service.version` и окружение — из `OTEL_RESOURCE_ATTRIBUTES`.
+
+    `Resource.create` мержит переменную сам: спан несёт всё сразу, окружение задаёт
+    версию и среду (compose и `infra/`), код — только имя сервиса.
+    """
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.setenv(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "service.version=abc123def,deployment.environment.name=local",
+    )
+    provider = build_tracer_provider("dmc-268-api")
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    provider.get_tracer("test").start_span("resource-check").end()
+
+    (span,) = exporter.get_finished_spans()
+    attributes = dict(span.resource.attributes)
+    assert attributes["service.name"] == "dmc-268-api"
+    assert attributes["service.version"] == "abc123def"
+    assert attributes["deployment.environment.name"] == "local"
+
+
+# --- экспорт метрик -----------------------------------------------------------------
+
+
+def test_metrics_without_configuration_go_nowhere(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Без `OTEL_METRICS_EXPORTER` ридеров нет: метрики никуда не уходят, в логе тихо.
+
+    Гейт обязателен: SDK по умолчанию сам ставит `otlp` — без него провайдер
+    стучался бы в localhost:4318.
+    """
+    monkeypatch.delenv("OTEL_METRICS_EXPORTER", raising=False)
+
+    provider = telemetry.build_meter_provider("dmc-268-api")
+
+    assert provider._metric_readers == []
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+def test_a_metric_reader_is_added_per_supported_exporter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`console,otlp` — по ридеру на экспортёр: печать в stdout и OTLP/HTTP."""
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "console,otlp")
+
+    provider = telemetry.build_meter_provider("dmc-268-api")
+
+    readers = [
+        reader
+        for reader in provider._metric_readers
+        if isinstance(reader, PeriodicExportingMetricReader)
+    ]
+    assert [type(reader._exporter) for reader in readers] == [
+        ConsoleMetricExporter,
+        OTLPMetricExporter,
+    ]
+
+
+def test_an_unsupported_metrics_exporter_warns_once_and_exports_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Мусорное значение выключает только свой экспортёр и предупреждает один раз."""
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "zipkin")
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+
+    provider = telemetry.build_meter_provider("dmc-268-api")
+
+    [record] = caplog.records
+    assert record.levelname == "WARNING"
+    assert "zipkin" in record.getMessage()
+    assert provider._metric_readers == []
+
+
+def test_the_metric_resource_names_the_version_and_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resource метрик — тот же, что у трейсов: имя из кода, версия и среда — из окружения."""
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.setenv(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "service.version=abc123def,deployment.environment.name=local",
+    )
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "otlp")
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(telemetry, "PeriodicExportingMetricReader", lambda exporter: reader)
+
+    provider = telemetry.build_meter_provider("dmc-268-api")
+    provider.get_meter("test").create_counter("resource-check").add(1)
+
+    data = reader.get_metrics_data()
+    assert data is not None
+    (resource_metrics,) = data.resource_metrics
+    attributes = dict(resource_metrics.resource.attributes)
+    assert attributes["service.name"] == "dmc-268-api"
+    assert attributes["service.version"] == "abc123def"
+    assert attributes["deployment.environment.name"] == "local"
+
+
+# --- бизнес-метрики -----------------------------------------------------------------
+
+
+def test_stage_durations_land_in_the_histogram(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Гистограмму этапов пишет `OtelStageTracer` при закрытии этапа — и для упавшего."""
+    before = metric_snapshot(metric_reader)
+    tracer = OtelStageTracer()
+
+    tracer.start(RUN_ID, ReviewRunStage.ANALYSING).end(None)
+    tracer.start(RUN_ID, ReviewRunStage.FETCHING_DIFF).end("SCM_UNAVAILABLE")
+
+    count, total = metric_delta(
+        metric_reader, before, "review_stage_duration", stage="analysing"
+    )
+    assert count == 1
+    assert total is not None and total > 0
+    count, total = metric_delta(
+        metric_reader, before, "review_stage_duration", stage="fetching_diff"
+    )
+    assert count == 1
+    assert total is not None and total > 0
+
+
+def _total_observations(reader: InMemoryMetricReader, name: str) -> float:
+    """Число наблюдений метрики по всем рядам: каждый запрос пишет ровно в один."""
+    data = reader.get_metrics_data()
+    if data is None:
+        return 0.0
+    total = 0.0
+    for resource_metrics in data.resource_metrics or ():
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                if metric.name == name and isinstance(metric.data, Histogram):
+                    total += sum(float(point.count) for point in metric.data.data_points)
+    return total
+
+
+def test_api_requests_produce_http_metrics(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """HTTP-метрики — встроенная телеметрия FastAPI: берёт глобальный провайдер сама.
+
+    Ручки `/metrics` нет — метрики уходит коллектору, а не скрейпятся с сервиса.
+    """
+    app = create_app(SETTINGS)
+    with TestClient(app) as client:
+        assert client.get("/metrics").status_code == HTTPStatus.NOT_FOUND
+        before = _total_observations(metric_reader, "http.server.request.duration")
+        client.get("/")
+
+    assert _total_observations(metric_reader, "http.server.request.duration") == before + 1
 
 
 # --- SQL-спаны через внутренний `EngineTracer` --------------------------------------
@@ -526,7 +827,7 @@ class _RecordingProcessor(SpanProcessor):
         self.shut_down = True
 
 
-def test_shutdown_closes_only_the_provider_configure_tracing_installed(
+def test_shutdown_closes_only_the_providers_configure_telemetry_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     own = TracerProvider(shutdown_on_exit=False)
@@ -542,7 +843,7 @@ def test_shutdown_closes_only_the_provider_configure_tracing_installed(
 def test_shutdown_leaves_a_foreign_provider_alone(
     monkeypatch: pytest.MonkeyPatch, spans: InMemorySpanExporter
 ) -> None:
-    # Глобальный провайдер поставил `tests/conftest.py`, а не `configure_tracing`.
+    # Глобальный провайдер поставил `tests/conftest.py`, а не `configure_telemetry`.
     monkeypatch.setattr(telemetry, "_installed", None)
 
     telemetry.shutdown_tracing()
@@ -667,7 +968,7 @@ def test_httpx_spans_carry_the_stable_attribute_names(
 ) -> None:
     # Режим httpx-инструментор запоминает при `instrument()` — переинструментируем.
     HTTPXClientInstrumentor().uninstrument()
-    telemetry.configure_tracing(telemetry.API_SERVICE)
+    telemetry.configure_telemetry(telemetry.API_SERVICE)
 
     httpx.get(f"{http_server}/ping")
 
@@ -696,7 +997,7 @@ def test_an_outgoing_request_leaves_without_traceparent(
     spans: InMemorySpanExporter,
 ) -> None:
     """Запрос httpx при активном спане уходит без нашего контекста — и при этом в трейсе."""
-    telemetry.configure_tracing(telemetry.WORKER_SERVICE)
+    telemetry.configure_telemetry(telemetry.WORKER_SERVICE)
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Recording)
     server.received = []  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -117,13 +117,18 @@ def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel)
 
 @contextlib.contextmanager
 def consuming_span(
-    properties: spec.BasicProperties | None, delivery_tag: int
+    properties: spec.BasicProperties | None, delivery_tag: int, redelivered: bool = False
 ) -> Iterator[None]:
     """Спан обработки сообщения воркером — продолжение трейса, начатого при публикации.
 
     Контекст сообщения — родитель спана, а не link: сообщение обрабатывается одно, и
     спан обработки корневой в воркере, semconv это допускает для одиночного сообщения.
     Если трейсы «запрос → прогон» станут неудобно длинными — перейти на link.
+
+    `redelivered` — флаг повторной доставки из `basic.deliver`: после смерти воркера
+    брокер возвращает неподтверждённое сообщение, и повторная попытка должна отличаться
+    от первой в хранилище трейсов. По semconv атрибут ставится всегда, поэтому по
+    умолчанию — `False` (первая попытка).
 
     Нет заголовка `traceparent` (сообщение старше трассировки, его переложили руками)
     или он битый — спан начинает новый трейс, обработка идёт как обычно. Исключение
@@ -148,6 +153,7 @@ def consuming_span(
             "messaging.operation.name": "process",
             "messaging.operation.type": "process",
             "messaging.rabbitmq.message.delivery_tag": delivery_tag,
+            "messaging.rabbitmq.message.redelivered": redelivered,
         },
     ):
         yield
