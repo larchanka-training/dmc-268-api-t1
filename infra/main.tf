@@ -16,6 +16,34 @@ locals {
     "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
   ]
 
+  # Версия сервиса для телеметрии — тег образа API: deploy.yml публикует образ
+  # с тегом по sha коммита, а git внутрь образа не попадает, поэтому версия
+  # приходит окружением (OTEL_RESOURCE_ATTRIBUTES).
+  service_version = try(regex(":(.+)$", var.api_image)[0], "unknown")
+
+  # Экспорт телеметрии сервисами приложения (change add-observability-stack):
+  # коллектор в той же сети. Таймаут OTLP меньше окна graceful shutdown API
+  # (5 с), чтобы выгрузка спанов при остановке успевала даже при недоступном
+  # коллекторе (замечание из #89).
+  telemetry_env = [
+    "OTEL_TRACES_EXPORTER=otlp",
+    "OTEL_METRICS_EXPORTER=otlp",
+    "OTEL_EXPORTER_OTLP_ENDPOINT=http://dmc268-otelcol:4318",
+    "OTEL_EXPORTER_OTLP_TIMEOUT=4000",
+    "OTEL_RESOURCE_ATTRIBUTES=service.version=${local.service_version},deployment.environment.name=${var.deployment_environment_name}",
+  ]
+
+  # Образы стека наблюдаемости — те же теги, что в docker-compose.yml: конфиги
+  # в observability/ общие, версии обновляются в обоих местах вместе (у
+  # file_log коллектора операторы stanza — beta, обновление с чтением breaking
+  # changes).
+  otelcol_image           = "otel/opentelemetry-collector-contrib:0.158.0"
+  loki_image              = "grafana/loki:3.7.9"
+  tempo_image             = "grafana/tempo:3.1.1"
+  prometheus_image        = "prom/prometheus:v3.15.1"
+  grafana_image           = "grafana/grafana:13.2.4"
+  postgres_exporter_image = "prometheuscommunity/postgres-exporter:v0.20.1"
+
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
   # consumer_timeout RabbitMQ его не ограничивает: в 4.4 таймаут подтверждения
   # есть только у quorum-очередей, а очередь review — classic.
@@ -188,7 +216,7 @@ resource "docker_container" "migrate" {
     name = docker_network.dmc268.name
   }
 
-  env = local.app_env
+  env = concat(local.app_env, local.telemetry_env)
 
   # depends_on у docker-провайдера задаёт только порядок создания, но не ждёт
   # готовности. Прежняя версия ждала открытия TCP-порта — этого мало:
@@ -249,7 +277,7 @@ resource "docker_container" "api" {
   # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера,
   # OAuth и origin — у входа и проверки сессии, ключ токенов пользователя — у
   # входа и ручек репозиториев.
-  env = concat(local.app_env, [
+  env = concat(local.app_env, local.telemetry_env, [
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
     "GITHUB_APP_CLIENT_ID=${var.github_app_client_id}",
@@ -332,7 +360,7 @@ resource "docker_container" "worker" {
   # проверке устойчивой работы. Eurorouter подключается только вторым и только
   # флагом llm_hosted_fallback: тогда код проверяемых репозиториев уходит
   # hosted-провайдеру (docs/BACKEND_ARCHITECTURE.md, модель угроз).
-  env = concat(local.app_env, [
+  env = concat(local.app_env, local.telemetry_env, [
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
     "LLM_BACKEND=${var.llm_backend}",
@@ -343,4 +371,284 @@ resource "docker_container" "worker" {
     "EUROROUTER_MODEL=${var.eurorouter_model}",
     "EUROROUTER_API_KEYS=${var.eurorouter_api_keys}",
   ])
+}
+
+# Стек наблюдаемости (change add-observability-stack): коллектор, Loki, Tempo,
+# Prometheus, Grafana и postgres-exporter — те же конфиги из observability/,
+# что и в локальном compose. Конфиги заливаются в контейнеры при создании
+# (upload), поэтому на сервере не нужен чекаут репозитория: tofu читает файлы
+# из рабочей копии и передаёт через Docker API. Правка конфига пересоздаёт
+# контейнер следующим apply. Алиасы сети повторяют имена сервисов compose —
+# одни и те же адреса работают в обоих окружениях (prometheus.yml, grafana
+# datasources, endpoint коллектора). Наружу из стека не смотрит ничего:
+# Grafana публикуется на internal_bind_ip и открывается SSH-туннелем.
+
+resource "docker_image" "otelcol" {
+  name         = local.otelcol_image
+  keep_locally = true
+}
+
+resource "docker_image" "loki" {
+  name         = local.loki_image
+  keep_locally = true
+}
+
+resource "docker_image" "tempo" {
+  name         = local.tempo_image
+  keep_locally = true
+}
+
+resource "docker_image" "prometheus" {
+  name         = local.prometheus_image
+  keep_locally = true
+}
+
+resource "docker_image" "grafana" {
+  name         = local.grafana_image
+  keep_locally = true
+}
+
+resource "docker_image" "postgres_exporter" {
+  name         = local.postgres_exporter_image
+  keep_locally = true
+}
+
+resource "docker_volume" "collector" {
+  name = "dmc268-collector-data"
+}
+
+resource "docker_volume" "loki" {
+  name = "dmc268-loki-data"
+}
+
+resource "docker_volume" "tempo" {
+  name = "dmc268-tempo-data"
+}
+
+resource "docker_volume" "prometheus" {
+  name = "dmc268-prometheus-data"
+}
+
+resource "docker_volume" "grafana" {
+  name = "dmc268-grafana-data"
+}
+
+# Коллектор от root: лог-файлы Docker на сервере читает только root (как
+# promtail), и он же создаёт каталог file_storage в томе. Образ по умолчанию —
+# пользователь 10001.
+resource "docker_container" "otelcol" {
+  name    = "dmc268-otelcol"
+  image   = docker_image.otelcol.image_id
+  restart = "unless-stopped"
+  user    = "0"
+
+  memory      = var.observability_memory_mb.collector
+  memory_swap = var.observability_memory_mb.collector
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  security_opts = ["no-new-privileges:true"]
+
+  # Логи контейнеров (json-file) — источник file_log приёмника, только чтение.
+  volumes {
+    host_path      = "/var/lib/docker/containers"
+    container_path = "/var/lib/docker/containers"
+    read_only      = true
+  }
+
+  volumes {
+    volume_name    = docker_volume.collector.name
+    container_path = "/var/lib/otelcol"
+  }
+
+  upload {
+    content = file("${path.module}/observability/otelcol.yaml")
+    file    = "/etc/otelcol-contrib/config.yaml"
+  }
+
+  env = [
+    # Все *-json.log контейнеров; не-JSON строки (логи самих контейнеров
+    # стека) коллектор отбрасывает — см. on_error: drop в конфиге.
+    "OTELCOL_LOG_FILES=/var/lib/docker/containers/*/*-json.log",
+  ]
+
+  networks_advanced {
+    name    = docker_network.dmc268.name
+    aliases = ["collector"]
+  }
+
+  depends_on = [
+    docker_container.loki,
+    docker_container.tempo,
+  ]
+}
+
+resource "docker_container" "loki" {
+  name    = "dmc268-loki"
+  image   = docker_image.loki.image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.loki
+  memory_swap = var.observability_memory_mb.loki
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  security_opts = ["no-new-privileges:true"]
+
+  upload {
+    content = file("${path.module}/observability/loki.yaml")
+    file    = "/etc/loki/config.yaml"
+  }
+
+  command = ["-config.file=/etc/loki/config.yaml"]
+
+  volumes {
+    volume_name    = docker_volume.loki.name
+    container_path = "/loki"
+  }
+
+  networks_advanced {
+    name    = docker_network.dmc268.name
+    aliases = ["loki"]
+  }
+}
+
+resource "docker_container" "tempo" {
+  name    = "dmc268-tempo"
+  image   = docker_image.tempo.image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.tempo
+  memory_swap = var.observability_memory_mb.tempo
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  security_opts = ["no-new-privileges:true"]
+
+  upload {
+    content = file("${path.module}/observability/tempo.yaml")
+    file    = "/etc/tempo/config.yaml"
+  }
+
+  command = ["-config.file=/etc/tempo/config.yaml"]
+
+  volumes {
+    volume_name    = docker_volume.tempo.name
+    container_path = "/var/tempo"
+  }
+
+  networks_advanced {
+    name    = docker_network.dmc268.name
+    aliases = ["tempo"]
+  }
+}
+
+resource "docker_container" "prometheus" {
+  name    = "dmc268-prometheus"
+  image   = docker_image.prometheus.image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.prometheus
+  memory_swap = var.observability_memory_mb.prometheus
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  security_opts = ["no-new-privileges:true"]
+
+  upload {
+    content = file("${path.module}/observability/prometheus.yml")
+    file    = "/etc/prometheus/prometheus.yml"
+  }
+
+  command = [
+    "--config.file=/etc/prometheus/prometheus.yml",
+    # Хранение метрик — 30 дней (как retention логов Loki).
+    "--storage.tsdb.retention.time=30d",
+  ]
+
+  volumes {
+    volume_name    = docker_volume.prometheus.name
+    container_path = "/prometheus"
+  }
+
+  networks_advanced {
+    name    = docker_network.dmc268.name
+    aliases = ["prometheus"]
+  }
+}
+
+# Доступ к Grafana — по учётке: анонимный вход выключен, пароль админа из
+# переменной (локальный compose, наоборот, поднимает Grafana без логина).
+resource "docker_container" "grafana" {
+  name    = "dmc268-grafana"
+  image   = docker_image.grafana.image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.grafana
+  memory_swap = var.observability_memory_mb.grafana
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  security_opts = ["no-new-privileges:true"]
+
+  upload {
+    content = file("${path.module}/observability/grafana/provisioning/datasources/datasources.yaml")
+    file    = "/etc/grafana/provisioning/datasources/datasources.yaml"
+  }
+
+  env = [
+    "GF_SECURITY_ADMIN_PASSWORD=${var.grafana_admin_password}",
+    "GF_AUTH_ANONYMOUS_ENABLED=false",
+    "GF_USERS_ALLOW_SIGN_UP=false",
+  ]
+
+  volumes {
+    volume_name    = docker_volume.grafana.name
+    container_path = "/var/lib/grafana"
+  }
+
+  ports {
+    internal = 3000
+    external = var.grafana_port
+    ip       = var.internal_bind_ip
+  }
+
+  networks_advanced {
+    name    = docker_network.dmc268.name
+    aliases = ["grafana"]
+  }
+
+  depends_on = [
+    docker_container.loki,
+    docker_container.tempo,
+    docker_container.prometheus,
+  ]
+}
+
+# Экспортёр метрик PostgreSQL (design, решение 3): кода не касается, скреится
+# Prometheus-ом (job postgres).
+resource "docker_container" "postgres_exporter" {
+  name    = "dmc268-postgres-exporter"
+  image   = docker_image.postgres_exporter.image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.postgres_exporter
+  memory_swap = var.observability_memory_mb.postgres_exporter
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  security_opts = ["no-new-privileges:true"]
+
+  env = [
+    "DATA_SOURCE_URI=dmc268-postgres:5432/${var.postgres_db}?sslmode=disable",
+    "DATA_SOURCE_USER=${var.postgres_user}",
+    "DATA_SOURCE_PASS=${var.postgres_password}",
+  ]
+
+  networks_advanced {
+    name    = docker_network.dmc268.name
+    aliases = ["postgres-exporter"]
+  }
+
+  depends_on = [docker_container.postgres]
 }
