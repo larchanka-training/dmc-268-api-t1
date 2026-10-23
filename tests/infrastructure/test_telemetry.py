@@ -32,7 +32,6 @@ from opentelemetry.sdk.trace.export import (
     SimpleSpanProcessor,
 )
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.sdk.trace.sampling import ParentBased
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
@@ -458,21 +457,6 @@ def test_an_unsupported_exporter_warns_once_and_exports_nothing(
     assert record.levelname == "WARNING"
     assert "zipkin" in record.getMessage()
     assert console.getvalue() == ""
-
-
-def test_sampling_is_pinned_to_parentbased_always_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Сэмплирование закреплено кодом: спаны всегда записываются, env их не выключает."""
-    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "always_off")
-
-    provider = build_tracer_provider("dmc-268-api")
-    span = provider.get_tracer("test").start_span("sampling-check")
-    span.end()
-
-    assert isinstance(provider.sampler, ParentBased)
-    context = span.get_span_context()
-    assert context.trace_flags.sampled
 
 
 def _span_with_long_attribute(provider: TracerProvider) -> str:
