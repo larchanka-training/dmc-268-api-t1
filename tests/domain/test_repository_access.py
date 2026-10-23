@@ -1,31 +1,41 @@
-"""Видеть и подключать репозиторий — по роли у провайдера."""
+"""Кто может подключить репозиторий — по `permissions` из ответа GitHub."""
 
 import pytest
 
-from app.domain.enums import RepositoryRole
-from app.domain.repository_access import can_connect, can_see
+from app.domain.entities import InstallationRepository, RepositoryPermissions
+from app.domain.repository_access import (
+    can_connect,
+    has_explicit_access,
+    visible_for_connect,
+)
 
 
-@pytest.mark.parametrize("role", list(RepositoryRole))
-def test_any_access_shows_the_repository(role: RepositoryRole) -> None:
-    assert can_see(role) is True
-
-
-def test_no_access_hides_the_repository() -> None:
-    assert can_see(None) is False
+def _permissions(*granted: str) -> RepositoryPermissions:
+    return RepositoryPermissions(**{name: name in granted for name in ("admin", "maintain", "push", "triage")})
 
 
 @pytest.mark.parametrize(
-    ("role", "expected"),
-    [
-        (RepositoryRole.ADMIN, True),
-        (RepositoryRole.MAINTAIN, True),
-        (RepositoryRole.WRITE, False),
-        (RepositoryRole.TRIAGE, False),
-        (RepositoryRole.READ, False),
-        (RepositoryRole.CUSTOM, False),
-        (None, False),
-    ],
+    ("granted", "expected"),
+    [(("admin", "maintain"), True), (("admin",), True), (("maintain",), True), (("push", "triage"), False), ((), False)],
 )
-def test_only_admin_and_maintain_connect(role: RepositoryRole | None, expected: bool) -> None:
-    assert can_connect(role) is expected
+def test_only_admin_or_maintain_connects(granted: tuple[str, ...], expected: bool) -> None:
+    assert can_connect(_permissions(*granted)) is expected
+
+
+@pytest.mark.parametrize(
+    ("granted", "expected"),
+    [(("admin",), True), (("maintain",), True), (("push",), True), (("triage",), True), ((), False)],
+)
+def test_only_pull_is_not_explicit_access(granted: tuple[str, ...], expected: bool) -> None:
+    """Один `pull` GitHub отдаёт любому на публичный репозиторий — это не доступ."""
+    assert has_explicit_access(_permissions(*granted)) is expected
+
+
+@pytest.mark.parametrize(
+    ("private", "granted", "expected"),
+    [(True, (), True), (False, (), False), (False, ("push",), True), (True, ("admin",), True)],
+)
+def test_a_private_repository_is_visible_with_read_a_public_one_is_not(private: bool, granted: tuple[str, ...], expected: bool) -> None:
+    """Приватный GitHub отдаёт только участнику — роль read уже доступ."""
+    repository = InstallationRepository("1", "octo-org/repo", "main", _permissions(*granted), private=private)
+    assert visible_for_connect(repository) is expected

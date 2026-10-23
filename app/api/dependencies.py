@@ -15,6 +15,7 @@ from app.application.ports import UnitOfWork
 from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
+from app.domain.enums import Provider
 from app.infrastructure.container import Container
 
 
@@ -37,6 +38,14 @@ def get_job_queue(container: Container = Depends(get_container)) -> JobQueue:
 
 def get_installation_catalog(container: Container = Depends(get_container)) -> InstallationCatalog:
     return container.installation_catalog()
+
+
+def get_token_provider(container: Container = Depends(get_container)) -> OAuthProvider:
+    """Провайдер, выдавший токен сессии, — обновляет и отзывает его: сессии кабинета — только GitHub."""
+    provider = container.oauth_provider(Provider.GITHUB.value)
+    if provider is None:
+        raise RuntimeError("провайдер входа github не собран в контейнере")
+    return provider
 
 
 def get_unit_of_work_factory(

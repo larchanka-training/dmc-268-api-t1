@@ -17,6 +17,7 @@ from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
     get_installation_catalog,
+    get_token_provider,
     get_unit_of_work,
     get_unit_of_work_factory,
 )
@@ -33,37 +34,55 @@ from app.api.errors import (
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
 from app.api.schemas import RepositoryBase, StrictRequest, UtcDatetime
-from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES, current_user
-from app.application.ports import InstallationCatalog, UnitOfWork
+from app.api.session import (
+    SESSION_REQUIRED,
+    SESSION_RESPONSES,
+    Unauthenticated,
+    current_session,
+)
+from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
 
 # Под своими именами: имена функций роутов — operationId в схеме, их держат типы фронтенда.
 from app.application.use_cases import connect_repository as connecting
-from app.domain.entities import User
+from app.application.use_cases.auth import SignedIn
+from app.application.use_cases.user_token import SessionClosed
 from app.domain.enums import FindingSeverity, Provider, RulesStatus
 from app.domain.ids import new_id
+from app.domain.login import OAuthProviderUnavailable
 from app.domain.repo_rules import RULES_PATH
 from app.domain.vcs_errors import VcsError
 
-# Форма — вариант A решения 3 в dmc-268-ui-t1#37; поведение — change `implement-repository-connect`.
+# Форма — вариант A решения 3 в dmc-268-ui-t1#37; поведение — change `repositories-via-user-token`.
 _AVAILABLE_DESCRIPTION = (
-    "Требует сессию. Репозитории установок GitHub App, к которым у вошедшего пользователя есть "
-    "доступ в GitHub (любая роль, в том числе read), с отметкой `already_connected` — "
-    "зарегистрирован ли репозиторий в сервисе. Пользователь видит только то, что и так видит в "
-    "GitHub; остальные репозитории установок в ответ не попадают, это не ошибка. Подключить из "
-    "списка можно только с ролью admin или maintain, иначе подключение ответит "
-    "`403 REPOSITORY_MANAGE_REQUIRED`. Роль проверяется запросом к GitHub на каждый репозиторий "
-    "установок. Если GitHub не ответил или ответил ошибкой, в том числе на запрос роли, — "
-    "`502 SCM_UNAVAILABLE`."
+    "Требует сессию. Репозитории установок GitHub App, доступные вошедшему пользователю, с "
+    "отметкой `already_connected` — зарегистрирован ли репозиторий в сервисе. Список отдаёт "
+    "GitHub по токену пользователя, сохранённому при входе (`GET /user/installations` и "
+    "`GET /user/installations/{id}/repositories`): это пересечение «доступно приложению» и "
+    "«доступно пользователю», остальные репозитории установок в ответ не попадают, это не "
+    "ошибка. Публичный репозиторий, на котором у пользователя нет роли, тоже не попадает. "
+    "Подключить из списка можно только с правом admin или maintain: с push или triage "
+    "подключение ответит `403 REPOSITORY_MANAGE_REQUIRED`, как и на приватном только с правом "
+    "чтения; на публичном только с правом чтения — `404 REPOSITORY_NOT_IN_INSTALLATION`. Токен пользователя отозван, истёк без "
+    "возможности обновления или его нет (сессия открыта до хранения токенов) — "
+    "`401 UNAUTHENTICATED`, сессия закрывается, cookie удаляется: нужен новый вход. Если "
+    "GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`."
 )
 _CONNECT_DESCRIPTION = (
     "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. "
     "Регистрирует репозиторий установки GitHub App с `auto_review_enabled = true`; `full_name` "
-    "и `default_branch` — из данных установки. Проверки по порядку: провайдер не `github` или "
-    "репозитория нет среди репозиториев установок — `404 REPOSITORY_NOT_IN_INSTALLATION`; у "
-    "пользователя нет роли admin или maintain на репозитории в GitHub — `403 REPOSITORY_MANAGE_REQUIRED`; "
-    "репозиторий уже подключён — `409 REPOSITORY_ALREADY_CONNECTED`. Пользователь без прав "
-    "получает `403` и не узнаёт, подключён ли репозиторий. Если GitHub не ответил или ответил "
-    "ошибкой — `502 SCM_UNAVAILABLE`, репозиторий не записан."
+    "и `default_branch` — из ответа GitHub. Два запроса к GitHub: репозиторий по id токеном "
+    "пользователя (`GET /repositories/{id}`), затем установка приложения на нём "
+    "(`GET /repos/{owner}/{repo}/installation`). Проверки по порядку: провайдер не `github`, "
+    "репозиторий не виден пользователю или публичный виден только с правом чтения (так GitHub "
+    "отдаёт любой публичный репозиторий), приложение на нём не установлено или установка "
+    "приостановлена — `404 REPOSITORY_NOT_IN_INSTALLATION`, один ответ без различия; у "
+    "пользователя нет права admin или "
+    "maintain на репозиторий в GitHub, в том числе роль read на приватном — "
+    "`403 REPOSITORY_MANAGE_REQUIRED`; репозиторий уже "
+    "подключён — `409 REPOSITORY_ALREADY_CONNECTED`. Пользователь без прав получает `403` и не "
+    "узнаёт, подключён ли репозиторий. Токен пользователя непригоден — `401 UNAUTHENTICATED`, "
+    "сессия закрывается. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, "
+    "репозиторий не записан."
 )
 # Настройки и статус rules.md — задача #113 (бэкенд-часть dmc-268-ui-t1#28): контракт первым,
 # реализация отдельно.
@@ -100,7 +119,7 @@ _REFUSALS: dict[connecting.ConnectRefusal, tuple[HTTPStatus, ErrorCode, str]] = 
     connecting.ConnectRefusal.NOT_IN_INSTALLATION: (
         HTTPStatus.NOT_FOUND,
         ErrorCode.REPOSITORY_NOT_IN_INSTALLATION,
-        "Репозитория нет среди репозиториев установок GitHub App.",
+        "Репозитория нет среди репозиториев установок GitHub App, доступных пользователю.",
     ),
     connecting.ConnectRefusal.ALREADY_CONNECTED: (
         HTTPStatus.CONFLICT,
@@ -110,7 +129,7 @@ _REFUSALS: dict[connecting.ConnectRefusal, tuple[HTTPStatus, ErrorCode, str]] = 
     connecting.ConnectRefusal.MANAGE_REQUIRED: (
         HTTPStatus.FORBIDDEN,
         ErrorCode.REPOSITORY_MANAGE_REQUIRED,
-        "Подключать репозиторий может только пользователь с правами admin или maintain на него.",
+        "Подключать репозиторий может только пользователь с правом admin или maintain на него.",
     ),
 }
 
@@ -154,7 +173,7 @@ class AvailableRepositoryResponse(BaseModel):
 class AvailableRepositoryListResponse(BaseModel):
     """Репозитории, доступные для подключения."""
 
-    items: list[AvailableRepositoryResponse] = Field(description="Репозитории установки GitHub App.")
+    items: list[AvailableRepositoryResponse] = Field(description="Репозитории установок GitHub App, доступные пользователю.")
 
 
 class ConnectRepositoryRequest(StrictRequest):
@@ -171,19 +190,24 @@ class ConnectRepositoryRequest(StrictRequest):
 
 
 def available_repositories(
-    user: User = Depends(current_user),
+    signed_in: SignedIn = Depends(current_session),
     catalog: InstallationCatalog = Depends(get_installation_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> list[connecting.AvailableRepository]:
-    """Репозитории, видимые пользователю у провайдера, или `502 SCM_UNAVAILABLE`.
+    """Репозитории, видимые пользователю у провайдера по его токену, или ошибка.
 
-    Зависимость, а не код ручки: тот же список задаёт видимость прогонов в потоке
-    GET /events (`app/api/events.py`). Правило одно — поменяется здесь, поменяется
-    у обоих.
+    Токен непригоден — сессия закрыта, `401 UNAUTHENTICATED`; GitHub недоступен —
+    `502 SCM_UNAVAILABLE`. Зависимость, а не код ручки: тот же список задаёт
+    видимость прогонов в потоке GET /events (`app/api/events.py`). Правило одно —
+    поменяется здесь, поменяется у обоих.
     """
+    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
     try:
-        return connecting.list_available_repositories(catalog, uow_factory(), user.login)
-    except VcsError as error:
+        return connecting.list_available_repositories(catalog, uow_factory(), user, datetime.now(UTC))
+    except SessionClosed:
+        raise Unauthenticated(had_cookie=True) from None
+    except (VcsError, OAuthProviderUnavailable) as error:
         raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
 
 
@@ -191,7 +215,7 @@ def available_repositories(
     "/available",
     response_model=AvailableRepositoryListResponse,
     summary="Репозитории, доступные для подключения",
-    response_description="Репозитории установок GitHub App, к которым у пользователя есть доступ.",
+    response_description="Репозитории установок GitHub App, доступные пользователю.",
     description=_AVAILABLE_DESCRIPTION,
     responses=ERRORS_502_SCM_REPOSITORIES,
 )
@@ -229,15 +253,19 @@ def list_available_repositories(
 )
 def connect_repository(
     body: ConnectRepositoryRequest,
-    user: User = Depends(current_user),
+    signed_in: SignedIn = Depends(current_session),
     catalog: InstallationCatalog = Depends(get_installation_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositoryResponse:
+    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
     try:
         outcome = connecting.connect_repository(
-            catalog, uow_factory(), body.provider, body.provider_id, user.login, new_id(), datetime.now(UTC)
+            catalog, uow_factory(), user, body.provider, body.provider_id, new_id(), datetime.now(UTC)
         )
-    except VcsError as error:
+    except SessionClosed:
+        raise Unauthenticated(had_cookie=True) from None
+    except (VcsError, OAuthProviderUnavailable) as error:
         raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
     if isinstance(outcome, connecting.ConnectRefusal):
         raise ApiError(*_REFUSALS[outcome])

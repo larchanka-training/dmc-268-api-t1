@@ -709,10 +709,9 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
 
     from .api.test_webhooks import make_client, post_webhook
     from .fakes import FakeUow, FakeVcs
-    from .fakes.auth import SIGNED_IN
     from .fakes.installation_catalog import FakeInstallationCatalog
     from .test_pull_requests_api import _client as pull_requests_client
-    from .test_repositories_api import API
+    from .test_repositories_api import API, WRITER
     from .test_repositories_api import _client as repositories_client
     from .test_repositories_api import _connect as connect_repository
     from .test_repositories_api import _repository as registered_repository
@@ -731,10 +730,8 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         ),
         post_webhook(scm_down, "opened"),
         connect_repository(repositories_client(FakeUnitOfWork(), FakeInstallationCatalog([API])), "999"),
-        connect_repository(repositories_client(FakeUnitOfWork(), FakeInstallationCatalog([API]))),
-        connect_repository(
-            repositories_client(connected, FakeInstallationCatalog([API], managers={(API.full_name, SIGNED_IN.login)}))
-        ),
+        connect_repository(repositories_client(FakeUnitOfWork(), FakeInstallationCatalog([WRITER])), WRITER.provider_id),
+        connect_repository(repositories_client(connected, FakeInstallationCatalog([API]))),
         client.get("/api/v1/nope"),
         client.get("/api/v1/a%20b"),
         client.delete("/api/v1/webhooks/github"),

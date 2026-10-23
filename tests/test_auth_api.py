@@ -14,6 +14,7 @@ from app.api.dependencies import (
     get_installation_catalog,
     get_oauth_provider,
     get_sleep,
+    get_token_provider,
     get_unit_of_work_factory,
     get_untraced_unit_of_work_factory,
 )
@@ -21,6 +22,7 @@ from app.api.factory import create_app
 from app.application.use_cases.auth import logout
 from app.config import Settings
 from app.domain.ids import new_id
+from app.domain.login import OAuthProviderUnavailable
 from app.infrastructure.oauth.github import GitHubOAuthProvider
 
 from .fakes.installation_catalog import FakeInstallationCatalog
@@ -43,6 +45,7 @@ class Stand:
         self.app = create_app(SETTINGS)
         self.app.dependency_overrides[get_unit_of_work_factory] = lambda: lambda: self.uow
         self.app.dependency_overrides[get_oauth_provider] = self._provider
+        self.app.dependency_overrides[get_token_provider] = lambda: self.provider
 
     def _provider(self, provider: str) -> FakeOAuthProvider | None:
         return self.provider if provider == "github" else None
@@ -315,16 +318,53 @@ def test_neither_the_session_cookie_nor_the_code_reaches_the_app_logs(stand, cap
     caplog.set_level(logging.DEBUG)
     client = stand.client()
 
-    sign_in(client, code="code-secret-1")
+    responses = [sign_in(client, code="code-secret-1")]
     token = client.cookies["session"]
-    client.get("/api/v1/auth/me")
-    client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+    responses.append(client.get("/api/v1/auth/me"))
+    responses.append(client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN}))
 
     # Запросы пишет сам тестовый клиент — это не логи приложения.
     app_logs = "\n".join(r.getMessage() for r in caplog.records if r.name != "httpx")
     assert "code-secret-1" not in app_logs
     assert token not in app_logs
     assert "set-cookie" not in app_logs.lower()
+    # Токен пользователя GitHub сохранён при сессии, но не уходит ни в лог, ни в браузер.
+    for secret in ("ghu_login_access", "ghr_login_refresh"):
+        assert secret not in app_logs
+        for response in responses:
+            assert secret not in response.text
+            assert secret not in str(response.headers)
+
+
+def test_login_keeps_the_provider_token_and_logout_drops_it(stand) -> None:
+    client = stand.client()
+
+    sign_in(client)
+    [session] = stand.uow.sessions.stored
+    assert stand.uow.provider_tokens.get(session.id) is not None
+    client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+
+    assert stand.uow.provider_tokens.stored == {}
+    # Отзыв у GitHub — после ответа, тем токеном, что был у сессии.
+    assert [t.reveal() for t in stand.provider.revoked] == ["ghu_login_access"]
+
+
+def test_a_failed_revoke_does_not_spoil_logout(stand, caplog) -> None:
+    caplog.set_level(logging.DEBUG)
+    stand.provider.revoke_error = OAuthProviderUnavailable("GitHub ответил 503 (отзыв токена)")
+    client = stand.client()
+    sign_in(client)
+
+    response = client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+
+    assert response.status_code == 204
+    assert stand.uow.sessions.stored == []
+    assert "ghu_login_access" not in caplog.text
+
+
+def test_logout_without_a_session_revokes_nothing(stand) -> None:
+    stand.client().post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+    assert stand.provider.revoked == []
 
 
 def test_the_access_log_hides_the_callback_query() -> None:

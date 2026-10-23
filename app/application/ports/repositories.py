@@ -16,6 +16,7 @@ from app.domain.entities import (
     Finding,
     MergeRequest,
     OpenReviewThread,
+    ProviderToken,
     PublishedComment,
     Repository,
     ReviewRun,
@@ -161,4 +162,25 @@ class SessionRepo(Protocol):
 
     def delete_expired(self, now: datetime) -> int:
         """Удалить сессии, срок которых истёк к `now`; вернуть их число."""
+        ...
+
+
+class ProviderTokenRepo(Protocol):
+    """Токен пользователя у провайдера при сессии входа.
+
+    Шифрование — дело адаптера: сюда и отсюда токен идёт открытым, в базе —
+    только шифротекст. Удаляется вместе с сессией (каскадом): отдельного
+    `delete` нет. Нет ключа шифрования или запись под другим ключом —
+    `ProviderTokenUnavailable`.
+    """
+
+    def get(self, session_id: UUID) -> ProviderToken | None: ...
+
+    def get_for_update(self, session_id: UUID) -> ProviderToken | None:
+        """Прочитать и держать запись до конца транзакции: refresh одной сессии —
+        по одному за раз (design D4)."""
+        ...
+
+    def save(self, session_id: UUID, token: ProviderToken) -> None:
+        """Записать или заменить токен сессии."""
         ...

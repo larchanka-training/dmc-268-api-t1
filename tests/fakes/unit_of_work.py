@@ -19,6 +19,7 @@ from app.domain.entities import (
     Finding,
     MergeRequest,
     OpenReviewThread,
+    ProviderToken,
     PublishedComment,
     Repository,
     ReviewRun,
@@ -455,6 +456,40 @@ class FakeSessionRepo:
         return len(expired)
 
 
+class FakeProviderTokenRepo:
+    """Токены по id сессии. Каскад базы — фильтром по живым сессиям: токен
+    удалённой сессии не виден, как и в настоящей базе; токен без сессии не
+    пишется (внешний ключ)."""
+
+    def __init__(self, sessions: FakeSessionRepo) -> None:
+        self._sessions = sessions
+        self._by_session: dict[UUID, ProviderToken] = {}
+        self.locked: list[UUID] = []
+
+    @property
+    def stored(self) -> dict[UUID, ProviderToken]:
+        live = {s.id for s in self._sessions.stored}
+        return {k: v for k, v in self._by_session.items() if k in live}
+
+    def snapshot(self) -> dict[UUID, ProviderToken]:
+        return dict(self._by_session)
+
+    def restore(self, state: dict[UUID, ProviderToken]) -> None:
+        self._by_session = dict(state)
+
+    def get(self, session_id: UUID) -> ProviderToken | None:
+        return self.stored.get(session_id)
+
+    def get_for_update(self, session_id: UUID) -> ProviderToken | None:
+        self.locked.append(session_id)
+        return self.get(session_id)
+
+    def save(self, session_id: UUID, token: ProviderToken) -> None:
+        if session_id not in {s.id for s in self._sessions.stored}:
+            raise LookupError(f"session {session_id} is not stored")
+        self._by_session[session_id] = token
+
+
 class FakeUnitOfWork(UnitOfWork):
     """Держит состояние между повторными входами в `with` — как настоящая база.
 
@@ -485,6 +520,7 @@ class FakeUnitOfWork(UnitOfWork):
         self.published_comments.bind_findings(self.findings)
         self.users: FakeUserRepo = self._fakes.users
         self.sessions: FakeSessionRepo = self._fakes.sessions
+        self.provider_tokens: FakeProviderTokenRepo = self._fakes.provider_tokens
         self.committed = 0
         self.rolled_back = 0
         self._committed_state: list[Any] | None = None
@@ -544,6 +580,7 @@ class _Fakes:
         self.published_comments = FakePublishedCommentRepo(self.review_runs)
         self.users = FakeUserRepo()
         self.sessions = FakeSessionRepo()
+        self.provider_tokens = FakeProviderTokenRepo(self.sessions)
 
     def _all(self) -> list[Any]:
         return [
@@ -556,6 +593,7 @@ class _Fakes:
             self.published_comments,
             self.users,
             self.sessions,
+            self.provider_tokens,
         ]
 
     def snapshot(self) -> list[Any]:

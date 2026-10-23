@@ -244,13 +244,16 @@ resource "docker_container" "api" {
   }
 
   # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера,
-  # OAuth и origin — у входа и проверки сессии.
+  # OAuth и origin — у входа и проверки сессии, ключ токенов пользователя — у
+  # входа и ручек репозиториев.
   env = concat(local.app_env, [
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
     "GITHUB_APP_CLIENT_ID=${var.github_app_client_id}",
     "GITHUB_APP_CLIENT_SECRET=${var.github_app_client_secret}",
     "PUBLIC_ORIGIN=${var.public_origin}",
+    # Ключ шифрования токенов пользователя GitHub — только API: воркер их не читает.
+    "USER_TOKEN_ENCRYPTION_KEY=${var.user_token_encryption_key}",
   ])
 
   ports {

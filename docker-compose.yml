@@ -67,6 +67,9 @@ services:
       GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
       GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      # Ключ шифрования токенов пользователя (openssl rand -base64 32): пустой —
+      # вход отказывает, токен открытым не хранится никогда.
+      USER_TOKEN_ENCRYPTION_KEY: ${USER_TOKEN_ENCRYPTION_KEY:-}
       # Спаны OpenTelemetry по умолчанию никуда не уходят; console — в stdout.
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
       # Стабильные имена атрибутов semconv для SQL и HTTP; то же значение ставит код.

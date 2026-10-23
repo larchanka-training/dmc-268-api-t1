@@ -17,9 +17,14 @@ from app.application.use_cases.auth import (
 from app.domain.entities import User
 from app.domain.enums import Provider
 from app.domain.login import LoginError
+from app.domain.provider_token import (
+    ProviderTokenBusy,
+    ProviderTokenUnavailable,
+    token_from_grant,
+)
 from app.domain.session import hash_token
 
-from ..fakes.oauth import OCTOCAT, FakeOAuthProvider
+from ..fakes.oauth import EXPIRING_GRANT, OCTOCAT, FakeOAuthProvider
 from ..fakes.unit_of_work import FakeUnitOfWork, FakeUserRepo
 
 NOW = dt.datetime(2026, 10, 17, 12, 0, tzinfo=dt.UTC)
@@ -176,9 +181,10 @@ def test_a_live_session_authenticates_its_user() -> None:
     uow = FakeUnitOfWork()
     login(uow, FakeOAuthProvider())
 
-    user = authenticate(uow, "cookie-1", LATER)
+    signed_in = authenticate(uow, "cookie-1", LATER)
 
-    assert user is not None and user.login == "octocat"
+    assert signed_in is not None and signed_in.user.login == "octocat"
+    assert signed_in.session_id == uow.sessions.stored[0].id
 
 
 @pytest.mark.parametrize("token", [None, "", "unknown"])
@@ -262,4 +268,75 @@ def test_a_lost_insert_race_with_no_row_to_find_is_an_error_and_creates_nothing(
     with pytest.raises(RuntimeError, match="не вставлен и не найден"):
         login(uow, FakeOAuthProvider())
 
+    assert uow.sessions.stored == []
+
+
+def test_login_stores_the_provider_token_with_the_session() -> None:
+    uow = FakeUnitOfWork()
+
+    login(uow, FakeOAuthProvider())
+
+    [session] = uow.sessions.stored
+    assert uow.provider_tokens.stored == {session.id: token_from_grant(EXPIRING_GRANT, NOW)}
+
+
+def test_logout_removes_the_provider_token_and_hands_it_back_for_revocation() -> None:
+    uow = FakeUnitOfWork()
+    login(uow, FakeOAuthProvider())
+
+    assert logout(uow, "cookie-1") == EXPIRING_GRANT.access_token
+    assert uow.provider_tokens.stored == {}
+    assert logout(uow, "cookie-1") is None
+
+
+def test_a_new_login_drops_the_token_of_the_replaced_session() -> None:
+    uow = FakeUnitOfWork()
+    login(uow, FakeOAuthProvider())
+    [old] = uow.sessions.stored
+
+    counter = iter(range(100, 200))
+    login(uow, FakeOAuthProvider(), token="cookie-2", previous_token="cookie-1", new_id=lambda: UUID(int=next(counter)))
+
+    assert old.id not in uow.provider_tokens.stored
+    assert len(uow.provider_tokens.stored) == 1
+
+
+def test_login_is_refused_when_the_token_cannot_be_stored(caplog: pytest.LogCaptureFixture) -> None:
+    """Нет ключа шифрования — входа нет: ни пользователя, ни сессии без токена."""
+    uow = FakeUnitOfWork()
+
+    def no_key(session_id: UUID, token: object) -> None:
+        raise ProviderTokenUnavailable("не задан USER_TOKEN_ENCRYPTION_KEY")
+
+    uow.provider_tokens.save = no_key  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING, logger="app.application.use_cases.auth"):
+        result = login(uow, FakeOAuthProvider())
+
+    assert result == LoginFailed(LoginError.PROVIDER_UNAVAILABLE)
+    assert uow.sessions.stored == []
+    assert "USER_TOKEN_ENCRYPTION_KEY" in caplog.text
+    assert "ghu_login_access" not in caplog.text
+
+
+def test_logout_reads_the_token_under_the_lock() -> None:
+    """Параллельный refresh не подменит токен между чтением и удалением: отзывается последний."""
+    uow = FakeUnitOfWork()
+    login(uow, FakeOAuthProvider())
+    [session] = uow.sessions.stored
+
+    logout(uow, "cookie-1")
+
+    assert uow.provider_tokens.locked == [session.id]
+
+
+def test_logout_still_ends_the_session_when_a_refresh_holds_the_token() -> None:
+    uow = FakeUnitOfWork()
+    login(uow, FakeOAuthProvider())
+
+    def busy(session_id: UUID) -> object:
+        raise ProviderTokenBusy("токен сессии обновляет параллельный запрос")
+
+    uow.provider_tokens.get_for_update = busy  # type: ignore[method-assign,assignment]
+
+    assert logout(uow, "cookie-1") is None
     assert uow.sessions.stored == []

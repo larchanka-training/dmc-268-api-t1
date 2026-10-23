@@ -387,3 +387,40 @@ class SessionRow(Base, UuidPrimaryKeyMixin):
     expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     user: Mapped[UserRow] = relationship(back_populates="sessions")
+    # Только для порядка INSERT'ов в одном flush: сессия и её токен пишутся
+    # одной транзакцией входа. Токен удаляет база (CASCADE), а не ORM.
+    provider_token: Mapped[ProviderTokenRow | None] = relationship(
+        back_populates="session", passive_deletes="all"
+    )
+
+
+class ProviderTokenRow(Base):
+    """Токен пользователя у провайдера при сессии входа — только шифротекстом.
+
+    Отдельная таблица, а не колонки `sessions`: строку сессии читает каждый
+    запрос, токен — только ручки репозиториев; блокировка на время refresh
+    берётся на эту строку, не на сессию; «токена нет» — отсутствие строки
+    (change `repositories-via-user-token`, design D1).
+    """
+
+    __tablename__ = "provider_tokens"
+    __table_args__ = (
+        CheckConstraint(
+            "refresh_expires_at IS NULL OR refresh_token_encrypted IS NOT NULL",
+            name="ck_provider_tokens_refresh_expiry_needs_token",
+        ),
+    )
+
+    # Сессия — ключ: у сессии не больше одного токена. Выход, вход поверх
+    # сессии и уборка истёкших удаляют токен вместе с сессией.
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("sessions.id", ondelete="CASCADE"), primary_key=True
+    )
+    # AES-256-GCM, формат — `app/infrastructure/db/token_cipher.py`.
+    access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # NULL — токен без истечения (у GitHub App выключено истечение токенов).
+    access_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    refresh_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
+    refresh_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    session: Mapped[SessionRow] = relationship(back_populates="provider_token")

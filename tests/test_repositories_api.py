@@ -1,26 +1,44 @@
-"""Контракт `/api/v1/repositories`. Без БД — фейковый `UnitOfWork` и фейковый каталог установок."""
+"""Контракт `/api/v1/repositories`. Без БД — фейковые `UnitOfWork`, каталог и провайдер входа.
+
+Сессия — настоящая проверка cookie (`current_session`) над фейковой базой: так
+видно, что непригодный токен закрывает сессию и удаляет cookie.
+"""
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
+from uuid import UUID
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import (
     get_installation_catalog,
+    get_token_provider,
     get_unit_of_work,
     get_unit_of_work_factory,
 )
 from app.api.factory import create_app
 from app.api.pagination import MAX_LIMIT
+from app.api.session import SESSION_COOKIE
 from app.config import Settings
-from app.domain.entities import InstallationRepository, Repository
-from app.domain.enums import Provider, RepositoryRole
+from app.domain.entities import (
+    InstallationRepository,
+    ProviderToken,
+    Repository,
+    RepositoryPermissions,
+)
+from app.domain.enums import Provider
 from app.domain.ids import new_id
+from app.domain.login import OAuthProviderUnavailable
+from app.domain.provider_token import ProviderTokenRejected, token_from_grant
+from app.domain.session import open_session
 from app.domain.vcs_errors import VcsError
 
-from .fakes.auth import SIGNED_IN, sign_in
+from .fakes.auth import SIGNED_IN
 from .fakes.installation_catalog import FakeInstallationCatalog
+from .fakes.oauth import EXPIRING_GRANT, FakeOAuthProvider, rejecting
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -30,6 +48,8 @@ SETTINGS = Settings(
 )
 
 NOW = datetime(2026, 9, 29, tzinfo=UTC)
+SESSION_ID = UUID(int=0x5E)
+COOKIE = "cookie-of-the-signed-in-user"
 
 
 def _repository(n: int) -> Repository:
@@ -46,16 +66,30 @@ def _repository(n: int) -> Repository:
 
 
 ORIGIN = "https://review.example"
-API = InstallationRepository(provider_id="101", full_name="octo-org/api", default_branch="main", installation_id=7, private=True)
-WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", default_branch="trunk", installation_id=7, private=True)
+ADMIN = RepositoryPermissions(admin=True, maintain=False, push=False, triage=False)
+MAINTAIN = RepositoryPermissions(admin=False, maintain=True, push=False, triage=False)
+READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
+WRITE = RepositoryPermissions(admin=False, maintain=False, push=True, triage=False)
+API = InstallationRepository(provider_id="101", full_name="octo-org/api", default_branch="main", permissions=ADMIN)
+WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", default_branch="trunk", permissions=READ)
+WRITER = InstallationRepository(provider_id="303", full_name="octo-org/docs", default_branch="main", permissions=WRITE)
 
 
 def _client(
-    uow: FakeUnitOfWork, catalog: FakeInstallationCatalog | None = None, *, signed_in: bool = True
+    uow: FakeUnitOfWork,
+    catalog: FakeInstallationCatalog | None = None,
+    *,
+    signed_in: bool = True,
+    with_token: bool = True,
+    oauth: FakeOAuthProvider | None = None,
 ) -> TestClient:
+    """Клиент с живой сессией в `uow` и токеном, выданным при входе только что."""
     app = create_app(SETTINGS.model_copy(update={"public_origin": ORIGIN}))
-    if signed_in:
-        sign_in(app)
+    now = datetime.now(UTC)
+    uow.users.add(SIGNED_IN)
+    uow.sessions.add(open_session(SESSION_ID, SIGNED_IN.id, COOKIE, now))
+    if with_token:
+        uow.provider_tokens.save(SESSION_ID, token_from_grant(EXPIRING_GRANT, now))
 
     def override_uow() -> Iterator[FakeUnitOfWork]:
         yield uow
@@ -63,7 +97,11 @@ def _client(
     app.dependency_overrides[get_unit_of_work] = override_uow
     app.dependency_overrides[get_unit_of_work_factory] = lambda: lambda: uow
     app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog()
-    return TestClient(app, base_url=ORIGIN)
+    app.dependency_overrides[get_token_provider] = lambda: oauth or FakeOAuthProvider()
+    client = TestClient(app, base_url=ORIGIN)
+    if signed_in:
+        client.cookies.set(SESSION_COOKIE, COOKIE)
+    return client
 
 
 def _connect(client: TestClient, provider_id: str = "101", provider: str = "github") -> httpx.Response:
@@ -71,6 +109,13 @@ def _connect(client: TestClient, provider_id: str = "101", provider: str = "gith
         "/api/v1/repositories", json={"provider": provider, "provider_id": provider_id}, headers={"Origin": ORIGIN}
     )
     return response
+
+
+def _session_cookie_cleared(response: httpx.Response) -> bool:
+    return any(
+        header.startswith(f"{SESSION_COOKIE}=") and "Max-Age=0" in header
+        for header in response.headers.get_list("set-cookie")
+    )
 
 
 def test_returns_registered_repositories() -> None:
@@ -176,8 +221,8 @@ def test_a_limit_below_one_is_a_validation_error() -> None:
 def test_available_repositories_are_marked_when_already_connected() -> None:
     uow = FakeUnitOfWork()
     uow.repositories.add(_repository(101))
-    managers = {("octo-org/api", SIGNED_IN.login), ("octo-org/web", SIGNED_IN.login)}
-    client = _client(uow, FakeInstallationCatalog([API, WEB], managers=managers))
+    catalog = FakeInstallationCatalog([API, WEB])
+    client = _client(uow, catalog)
 
     response = client.get("/api/v1/repositories/available")
 
@@ -200,53 +245,81 @@ def test_available_repositories_are_marked_when_already_connected() -> None:
             },
         ]
     }
+    assert [token.reveal() for token in catalog.tokens] == ["ghu_login_access"]
+
+
+def test_the_user_token_never_reaches_the_response() -> None:
+    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API])).get("/api/v1/repositories/available")
+
+    assert response.status_code == 200
+    for value in ("ghu_login_access", "ghr_login_refresh"):
+        assert value not in response.text
+        assert value not in str(response.headers)
 
 
 def test_a_read_only_user_sees_the_repository_but_cannot_connect_it() -> None:
-    catalog = FakeInstallationCatalog([API, WEB], roles={("octo-org/web", SIGNED_IN.login): RepositoryRole.READ})
+    """Только `pull`: в списке есть (его отдал GitHub), подключение — `404`, как у невидимого."""
     uow = FakeUnitOfWork()
-    client = _client(uow, catalog)
+    client = _client(uow, FakeInstallationCatalog([WEB]))
 
     listed = client.get("/api/v1/repositories/available")
     connected = _connect(client, WEB.provider_id)
 
     assert listed.status_code == 200
     assert [item["full_name"] for item in listed.json()["items"]] == ["octo-org/web"]
-    assert connected.status_code == 403
-    assert connected.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    assert connected.status_code == 404
+    assert connected.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
+    assert uow.repositories.stored == {}
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_a_public_repository_without_explicit_rights_looks_exactly_like_a_missing_one(installed: bool) -> None:
+    """`GET /repositories/{id}` отдаёт чужой публичный репозиторий с одним `pull`: ответ
+    не зависит от того, установлено ли туда приложение, и совпадает с ответом на отсутствующий."""
+    catalog = FakeInstallationCatalog([WEB], not_installed=set() if installed else {WEB.full_name})
+    public = _connect(_client(FakeUnitOfWork(), catalog), WEB.provider_id)
+    missing = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([])), "999")
+
+    assert public.status_code == missing.status_code == 404
+    strip = lambda body: {k: v for k, v in body.items() if k not in {"trace_id", "instance"}}
+    assert strip(public.json()) == strip(missing.json())
+    assert "app_installed" not in catalog.calls
+
+
+def test_a_private_repository_with_only_read_is_403() -> None:
+    """Приватный репозиторий GitHub отдаёт только участнику: с ролью read отказ —
+    `403 REPOSITORY_MANAGE_REQUIRED`, а не `404`."""
+    uow = FakeUnitOfWork()
+    response = _connect(_client(uow, FakeInstallationCatalog([replace(WEB, private=True)])), WEB.provider_id)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
     assert uow.repositories.stored == {}
 
 
 def test_a_maintainer_connects_a_repository() -> None:
-    catalog = FakeInstallationCatalog([API], roles={("octo-org/api", SIGNED_IN.login): RepositoryRole.MAINTAIN})
+    catalog = FakeInstallationCatalog([InstallationRepository("101", "octo-org/api", "main", MAINTAIN)])
 
     assert _connect(_client(FakeUnitOfWork(), catalog)).status_code == 201
 
 
-def test_available_repositories_are_empty_without_access_anywhere() -> None:
-    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API, WEB])).get("/api/v1/repositories/available")
+def test_available_repositories_are_empty_when_github_shows_nothing() -> None:
+    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([])).get("/api/v1/repositories/available")
 
     assert response.status_code == 200
     assert response.json() == {"items": []}
 
 
-def test_available_repositories_answer_502_when_the_permission_check_fails() -> None:
-    catalog = FakeInstallationCatalog([API], permission_error=VcsError("GitHub API: HTTP 503"))
-
-    response = _client(FakeUnitOfWork(), catalog).get("/api/v1/repositories/available")
-
-    assert response.status_code == 502
-    assert response.json()["code"] == "SCM_UNAVAILABLE"
-
-
 def test_available_repositories_answer_502_when_github_fails() -> None:
-    client = _client(FakeUnitOfWork(), FakeInstallationCatalog(error=VcsError("GitHub API: HTTP 503")))
+    uow = FakeUnitOfWork()
+    client = _client(uow, FakeInstallationCatalog(error=VcsError("GitHub API: HTTP 503")))
 
     response = client.get("/api/v1/repositories/available")
 
     assert response.status_code == 502
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json()["code"] == "SCM_UNAVAILABLE"
+    assert len(uow.sessions.stored) == 1
 
 
 def test_available_repositories_require_a_session() -> None:
@@ -258,9 +331,73 @@ def test_available_repositories_require_a_session() -> None:
     assert response.json()["code"] == "UNAUTHENTICATED"
 
 
-def test_a_manager_connects_a_repository() -> None:
+def test_a_session_without_a_stored_token_must_sign_in_again() -> None:
+    """Сессия, открытая до хранения токенов: 401, сессия закрыта, cookie удалена."""
     uow = FakeUnitOfWork()
-    client = _client(uow, FakeInstallationCatalog([API, WEB], managers={("octo-org/web", SIGNED_IN.login)}))
+    client = _client(uow, FakeInstallationCatalog([API]), with_token=False)
+
+    for response in (client.get("/api/v1/repositories/available"), _connect(_client(uow, with_token=False))):
+        assert response.status_code == 401
+        assert response.json()["code"] == "UNAUTHENTICATED"
+        assert _session_cookie_cleared(response)
+    assert uow.sessions.stored == []
+
+
+def test_a_revoked_token_closes_the_session() -> None:
+    uow = FakeUnitOfWork()
+    client = _client(uow, FakeInstallationCatalog(error=ProviderTokenRejected("401")))
+
+    response = client.get("/api/v1/repositories/available")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"
+    assert _session_cookie_cleared(response)
+    assert uow.sessions.stored == []
+    # Следующий запрос с той же cookie — уже без сессии.
+    client.cookies.set(SESSION_COOKIE, COOKIE)
+    assert client.get("/api/v1/auth/me").status_code == 401
+
+
+def _expired_but_refreshable() -> ProviderToken:
+    """Access token выдан давно и истёк, refresh token бессрочный."""
+    return replace(token_from_grant(EXPIRING_GRANT, datetime(2026, 1, 1, tzinfo=UTC)), refresh_expires_at=None)
+
+
+def test_a_failed_refresh_closes_the_session() -> None:
+    """Токен истёк, refresh token отвергнут — 401 и закрытая сессия."""
+    uow = FakeUnitOfWork()
+    oauth = FakeOAuthProvider()
+    oauth.refresh_error = rejecting()
+    client = _client(uow, FakeInstallationCatalog([API]), oauth=oauth)
+    uow.provider_tokens.save(SESSION_ID, _expired_but_refreshable())
+
+    response = _connect(client)
+
+    assert response.status_code == 401
+    assert _session_cookie_cleared(response)
+    assert uow.sessions.stored == []
+    assert uow.repositories.stored == {}
+    assert len(oauth.refreshes) == 1
+
+
+def test_github_unavailable_on_refresh_is_502_and_keeps_the_session() -> None:
+    uow = FakeUnitOfWork()
+    oauth = FakeOAuthProvider()
+    oauth.refresh_error = OAuthProviderUnavailable("GitHub ответил 503 (обновление токена)")
+    client = _client(uow, FakeInstallationCatalog([API]), oauth=oauth)
+    uow.provider_tokens.save(SESSION_ID, _expired_but_refreshable())
+
+    response = client.get("/api/v1/repositories/available")
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+    assert len(uow.sessions.stored) == 1
+
+
+def test_an_admin_connects_a_repository() -> None:
+    uow = FakeUnitOfWork()
+    web = InstallationRepository("202", "octo-org/web", "trunk", ADMIN)
+    client = _client(uow, FakeInstallationCatalog([API, web]))
 
     response = _connect(client, "202")
 
@@ -279,7 +416,7 @@ def test_a_manager_connects_a_repository() -> None:
 
 def test_connecting_without_manage_rights_is_403() -> None:
     uow = FakeUnitOfWork()
-    response = _connect(_client(uow, FakeInstallationCatalog([API])))
+    response = _connect(_client(uow, FakeInstallationCatalog([WRITER])), WRITER.provider_id)
 
     assert response.status_code == 403
     assert response.headers["content-type"] == "application/problem+json"
@@ -287,11 +424,25 @@ def test_connecting_without_manage_rights_is_403() -> None:
     assert uow.repositories.stored == {}
 
 
-def test_connecting_a_repository_outside_the_installation_is_404() -> None:
-    response = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([API])), "999")
+def test_an_invisible_repository_looks_exactly_like_a_missing_one() -> None:
+    """Репозиторий, который GitHub пользователю не отдал, и несуществующий — один ответ."""
+    invisible = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([WEB])), "101")
+    missing = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([WEB])), "999")
 
-    assert response.status_code == 404
-    assert response.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
+    assert invisible.status_code == missing.status_code == 404
+    strip = lambda body: {k: v for k, v in body.items() if k not in {"trace_id", "instance"}}
+    assert strip(invisible.json()) == strip(missing.json())
+    assert invisible.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
+
+
+def test_a_repository_without_the_app_looks_exactly_like_an_invisible_one() -> None:
+    """Приложение не установлено (или установка приостановлена) — тот же 404, что «не виден»."""
+    not_installed = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([API], not_installed={API.full_name})))
+    invisible = _connect(_client(FakeUnitOfWork(), FakeInstallationCatalog([WEB])))
+
+    assert not_installed.status_code == invisible.status_code == 404
+    strip = lambda body: {k: v for k, v in body.items() if k != "trace_id"}
+    assert strip(not_installed.json()) == strip(invisible.json())
 
 
 def test_connecting_a_gitlab_repository_is_404() -> None:
@@ -304,9 +455,8 @@ def test_connecting_a_gitlab_repository_is_404() -> None:
 def test_connecting_twice_is_409() -> None:
     uow = FakeUnitOfWork()
     uow.repositories.add(_repository(101))
-    client = _client(uow, FakeInstallationCatalog([API], managers={("octo-org/api", SIGNED_IN.login)}))
 
-    response = _connect(client)
+    response = _connect(_client(uow, FakeInstallationCatalog([API])))
 
     assert response.status_code == 409
     assert response.json()["code"] == "REPOSITORY_ALREADY_CONNECTED"
@@ -314,9 +464,9 @@ def test_connecting_twice_is_409() -> None:
 
 def test_connecting_a_connected_repository_without_manage_rights_is_403_not_409() -> None:
     uow = FakeUnitOfWork()
-    uow.repositories.add(_repository(101))
+    uow.repositories.add(_repository(303))
 
-    response = _connect(_client(uow, FakeInstallationCatalog([API])))
+    response = _connect(_client(uow, FakeInstallationCatalog([WRITER])), WRITER.provider_id)
 
     assert response.status_code == 403
     assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"

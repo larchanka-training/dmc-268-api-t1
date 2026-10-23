@@ -17,6 +17,7 @@ from app.domain.entities import (
     InstallationRepository,
     MergeRequest,
     Repository,
+    RepositoryPermissions,
     ReviewRun,
     ReviewRunListEntry,
 )
@@ -28,6 +29,7 @@ from app.domain.run_feed import RunEventType, RunFeedEvent, RunFeedState, open_f
 from ..fakes.unit_of_work import FakeUnitOfWork
 
 CONNECTED = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
 REPOSITORY = Repository(
     id=UUID(int=1),
     provider=Provider.GITHUB,
@@ -190,12 +192,12 @@ def test_visible_repository_ids_are_the_registered_ones_among_available() -> Non
     uow.repositories.add(REPOSITORY)
     available = [
         AvailableRepository(
-            InstallationRepository("101", "octo-org/api", "main", installation_id=7, private=True),
+            InstallationRepository("101", "octo-org/api", "main", READ),
             already_connected=True,
         ),
         # Доступен у провайдера, но не зарегистрирован: прогонов у него нет.
         AvailableRepository(
-            InstallationRepository("202", "octo-org/web", "main", installation_id=7, private=True),
+            InstallationRepository("202", "octo-org/web", "main", READ),
             already_connected=False,
         ),
     ]
