@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from app.application.repo_config_loader import load_repo_rules, rules_cache_key
 from app.domain.entities import RejectedRule, RepoRules
 from app.domain.enums import RulesStatus
@@ -60,6 +62,38 @@ def test_too_large_file_is_not_parsed_and_text_is_not_cached() -> None:
     assert vcs.file_limits == [10]
     (_, value, _), = cache.sets
     assert json.loads(value) == {"status": "too_large", "text": ""}
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "   \n\n", "# Правила проекта\n\nПишите аккуратно и проверяйте всё.\n"],
+    ids=["empty", "whitespace", "prose-only"],
+)
+def test_file_without_rule_sections_is_empty(text: str) -> None:
+    assert _load(FakeVcs(files={(PATH, BASE): text}), FakeCache()) == RepoRules(
+        status=RulesStatus.EMPTY
+    )
+
+
+def test_file_where_every_section_is_rejected_is_empty_and_keeps_the_reasons() -> None:
+    text = "## Broken\n\n- pattern: app/**\n\n## Nameless scope\n\n1. Проверка без паттерна\n"
+    assert _load(FakeVcs(files={(PATH, BASE): text}), FakeCache()) == RepoRules(
+        status=RulesStatus.EMPTY,
+        rejected=(
+            RejectedRule("Broken", "нет проверок"),
+            RejectedRule("Nameless scope", "нет паттерна (pattern)"),
+        ),
+    )
+
+
+def test_empty_file_is_cached_as_loaded_text() -> None:
+    """`empty` - итог разбора, а не довыборки: кэш хранит текст, как у `loaded`."""
+    vcs, cache = FakeVcs(files={(PATH, BASE): ""}), FakeCache()
+    _load(vcs, cache)
+    ((_, value, _),) = cache.sets
+    assert json.loads(value) == {"status": "loaded", "text": ""}
+    assert _load(vcs, cache).status is RulesStatus.EMPTY
+    assert len([c for c in vcs.calls if c[0] == "file"]) == 1
 
 
 def test_vcs_failure_falls_back_and_is_not_cached() -> None:

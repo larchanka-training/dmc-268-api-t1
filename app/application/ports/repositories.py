@@ -6,6 +6,7 @@
 SQLAlchemy.
 """
 
+from collections.abc import Collection
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -15,14 +16,17 @@ from app.domain.entities import (
     Finding,
     MergeRequest,
     OpenReviewThread,
+    ProviderToken,
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunListEntry,
     ReviewRunStep,
     Session,
     User,
 )
 from app.domain.enums import Provider
+from app.domain.run_feed import FeedCursor
 
 
 class RepositoryRepo(Protocol):
@@ -31,6 +35,10 @@ class RepositoryRepo(Protocol):
     def find_by_provider(self, provider: Provider, provider_id: str) -> Repository | None: ...
 
     def list_all(self, limit: int, offset: int) -> list[Repository]: ...
+
+    def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
+        """Зарегистрированные репозитории провайдера из списка его id; незарегистрированных нет."""
+        ...
 
     def add(self, repository: Repository) -> bool:
         """Вставить репозиторий; `False` — пара провайдер + id уже занята.
@@ -63,6 +71,22 @@ class ReviewRunRepo(Protocol):
     def find_active(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None: ...
 
     def list_unfinished(self) -> list[ReviewRun]: ...
+
+    def list_changed(
+        self,
+        after: FeedCursor,
+        recheck_from: datetime,
+        repository_ids: Collection[UUID],
+        limit: int,
+    ) -> list[ReviewRunListEntry]:
+        """Изменённые прогоны репозиториев `repository_ids` — строками списка, одним запросом.
+
+        Две части: до `limit` прогонов новее `after` по `(updated_at, id)` и все прогоны из
+        окна перепроверки — `updated_at` позже `recheck_from`, но не новее `after` (окно
+        ограничено временем, а не числом строк). Порядок — по `(updated_at, id)`. Пустой
+        `repository_ids` — пустой ответ.
+        """
+        ...
 
     def add(self, run: ReviewRun) -> None: ...
 
@@ -138,4 +162,25 @@ class SessionRepo(Protocol):
 
     def delete_expired(self, now: datetime) -> int:
         """Удалить сессии, срок которых истёк к `now`; вернуть их число."""
+        ...
+
+
+class ProviderTokenRepo(Protocol):
+    """Токен пользователя у провайдера при сессии входа.
+
+    Шифрование — дело адаптера: сюда и отсюда токен идёт открытым, в базе —
+    только шифротекст. Удаляется вместе с сессией (каскадом): отдельного
+    `delete` нет. Нет ключа шифрования или запись под другим ключом —
+    `ProviderTokenUnavailable`.
+    """
+
+    def get(self, session_id: UUID) -> ProviderToken | None: ...
+
+    def get_for_update(self, session_id: UUID) -> ProviderToken | None:
+        """Прочитать и держать запись до конца транзакции: refresh одной сессии —
+        по одному за раз (design D4)."""
+        ...
+
+    def save(self, session_id: UUID, token: ProviderToken) -> None:
+        """Записать или заменить токен сессии."""
         ...

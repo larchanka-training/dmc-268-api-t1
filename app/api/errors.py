@@ -105,10 +105,15 @@ ERRORS_502_SCM = _doc(
 ERRORS_502_SCM_REPOSITORIES = _doc(
     HTTPStatus.BAD_GATEWAY, ScmUnavailableProblem, "GitHub не ответил или ответил ошибкой; репозиторий не подключён."
 )
+ERRORS_502_SCM_EVENTS = _doc(
+    HTTPStatus.BAD_GATEWAY,
+    ScmUnavailableProblem,
+    "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя; поток не открыт.",
+)
 ERRORS_404_NOT_IN_INSTALLATION = _doc(
     HTTPStatus.NOT_FOUND,
     RepositoryNotInInstallationProblem,
-    "Репозитория нет среди репозиториев установок GitHub App, или провайдер не `github`.",
+    "Репозиторий не виден пользователю, приложение на нём не установлено или установка приостановлена — без различия; или провайдер не `github`.",
 )
 ERRORS_409_ALREADY_CONNECTED = _doc(
     HTTPStatus.CONFLICT, RepositoryAlreadyConnectedProblem, "Репозиторий уже подключён, в том числе параллельным запросом; отвечается только пользователю с правами admin или maintain."

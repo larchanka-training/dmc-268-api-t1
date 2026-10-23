@@ -46,6 +46,7 @@ from opentelemetry import context as otel_context
 from opentelemetry import metrics, propagate, trace
 from opentelemetry.context import Context
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.utils import suppress_instrumentation
 from opentelemetry.propagators.textmap import (
     CarrierT,
     Getter,
@@ -301,6 +302,16 @@ def sweep_span() -> Iterator[None]:
     """
     with _tracer.start_as_current_span("review.sweep"):
         yield
+
+
+def untraced() -> contextlib.AbstractContextManager[None]:
+    """Блок без спанов инструментирования (SQL, httpx) — для частого фонового опроса.
+
+    Поток событий опрашивает базу раз в секунду и живёт часами: спан на каждый запрос
+    раздул бы трейс запроса до тысяч дочерних спанов. Контекст OTel — `ContextVar`,
+    поэтому вход и выход должны быть в одном потоке выполнения.
+    """
+    return suppress_instrumentation()
 
 
 def record_current_exception(exc: BaseException) -> None:

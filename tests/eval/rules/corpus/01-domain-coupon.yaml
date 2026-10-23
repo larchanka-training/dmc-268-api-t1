@@ -1,0 +1,37 @@
+title: Купон в доменном коде - исключение вместо Result и часы внутри домена
+pull_request:
+  title: "feat: применение купона к цене"
+  description: Добавляет доменную функцию, которая применяет процентный купон к цене заказа.
+files:
+  app/domain/coupons.py: |
+    from dataclasses import dataclass
+    from datetime import datetime
+    from decimal import Decimal
+
+
+    @dataclass(frozen=True)
+    class Coupon:
+        code: str
+        percent: int
+        expires_at: datetime
+
+
+    def apply_coupon(price: Decimal, coupon: Coupon) -> Decimal:
+        if coupon.expires_at < datetime.now():
+            raise ValueError(f"купон {coupon.code} истёк {coupon.expires_at:%Y-%m-%d}")
+        if not 0 < coupon.percent <= 100:
+            raise ValueError(f"купон {coupon.code}: процент {coupon.percent} вне диапазона")
+        return price * (100 - coupon.percent) / 100
+expected:
+  - id: clock-now
+    path: app/domain/coupons.py
+    contains: "if coupon.expires_at < datetime.now():"
+    rule: [Clock Is Injected, 1]
+  - id: raise-expired
+    path: app/domain/coupons.py
+    contains: "raise ValueError(f\"купон {coupon.code} истёк"
+    rule: [Error Handling Standards, 1]
+  - id: raise-percent
+    path: app/domain/coupons.py
+    contains: "raise ValueError(f\"купон {coupon.code}: процент"
+    rule: [Error Handling Standards, 1]

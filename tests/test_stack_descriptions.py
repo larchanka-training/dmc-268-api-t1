@@ -244,7 +244,7 @@ def test_both_descriptions_give_the_worker_the_same_model_settings() -> None:
 
 
 def test_the_api_stops_within_the_grace_period_despite_open_sse_streams() -> None:
-    """Поток SSE живёт до конца прогона; без предела uvicorn ждал бы его до SIGKILL.
+    """Поток SSE живёт, пока открыта вкладка; без предела uvicorn ждал бы его до SIGKILL.
 
     Тогда lifespan не завершается и батч спанов теряется (спека `observability`).
     """

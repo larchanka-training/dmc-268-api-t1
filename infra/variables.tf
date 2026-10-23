@@ -165,6 +165,19 @@ variable "github_app_client_secret" {
   sensitive   = true
 }
 
+# Без значения по умолчанию и с проверкой формата: стенд без ключа не
+# поднимется молча с неработающим входом — apply упадёт здесь же.
+variable "user_token_encryption_key" {
+  type        = string
+  description = "Ключ шифрования токенов пользователя GitHub (USER_TOKEN_ENCRYPTION_KEY): 32 байта в base64, openssl rand -base64 32. Не коммитить."
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.user_token_encryption_key))
+    error_message = "user_token_encryption_key - 32 байта в base64 (44 символа, openssl rand -base64 32); секрет USER_TOKEN_KEY_DMC268_T1 не задан или битый."
+  }
+}
+
 variable "public_origin" {
   type        = string
   description = "Публичный origin интерфейса без завершающего / (PUBLIC_ORIGIN): сверка Origin и callback входа. Пустой — изменяющие запросы с сессией получают 403."

@@ -1,0 +1,33 @@
+title: Счёт - сумма во float и отладочный print
+pull_request:
+  title: "feat: итог счёта по строкам"
+  description: Считает итог счёта по строкам заказа и пишет его в лог.
+files:
+  app/billing/invoice.py: |
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+
+    def invoice_total(lines: list[tuple[str, int, int]]) -> int:
+        """Итог счёта в копейках: строка - (название, цена в копейках, количество)."""
+        total = 0
+        for name, price_kopecks, quantity in lines:
+            total += price_kopecks * quantity
+        logger.info("итого по счёту: %d коп.", total)
+        return total
+
+
+    def vat_amount(total_rubles: float, rate: float = 0.2) -> float:
+        vat = round(total_rubles * rate, 2)
+        print("НДС", vat, "с суммы", total_rubles)
+        return vat
+expected:
+  - id: float-money
+    path: app/billing/invoice.py
+    contains: "def vat_amount(total_rubles: float, rate: float = 0.2) -> float:"
+    rule: [Money Is Decimal, 1]
+  - id: print
+    path: app/billing/invoice.py
+    contains: "print(\"НДС\""
+    rule: [Logging, 1]

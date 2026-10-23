@@ -1,0 +1,25 @@
+title: Тесты под исключением правил - негативный кейс
+pull_request:
+  title: "test: НДС по строкам счёта"
+  description: Тесты к расчёту НДС в счёте.
+files:
+  app/tests/test_vat.py: |
+    import pytest
+
+    from app.billing.invoice import vat_amount
+
+
+    def _line_total(price: float, quantity: int) -> float:
+        if quantity <= 0:
+            raise ValueError(f"количество {quantity} должно быть положительным")
+        return price * quantity
+
+
+    def test_vat_is_rounded_to_kopecks() -> None:
+        assert vat_amount(_line_total(3.35, 3)) == pytest.approx(2.01)
+
+
+    def test_line_without_items_is_rejected() -> None:
+        with pytest.raises(ValueError, match="количество 0"):
+            _line_total(3.35, 0)
+expected: []

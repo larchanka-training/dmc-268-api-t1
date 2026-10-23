@@ -6,10 +6,13 @@
 """
 
 import datetime as dt
+from collections.abc import Collection
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from psycopg.errors import LockNotAvailable
+from sqlalchemy import delete, func, literal, select, text, tuple_, union_all, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.domain.entities import (
@@ -17,20 +20,26 @@ from app.domain.entities import (
     Finding,
     MergeRequest,
     OpenReviewThread,
+    ProviderToken,
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunListEntry,
     ReviewRunStep,
+    Secret,
     User,
 )
 from app.domain.entities import Session as UserSession
 from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
+from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
+from app.domain.run_feed import FeedCursor
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
     FindingRow,
     MergeRequestRow,
+    ProviderTokenRow,
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
@@ -38,6 +47,7 @@ from app.infrastructure.db.models import (
     SessionRow,
     UserRow,
 )
+from app.infrastructure.db.token_cipher import TokenCipher
 
 
 class SqlAlchemyRepositoryRepo:
@@ -67,6 +77,16 @@ class SqlAlchemyRepositoryRepo:
             .order_by(RepositoryRow.created_at, RepositoryRow.id)
             .limit(limit)
             .offset(offset)
+        ).all()
+        return [m.repository_to_domain(row) for row in rows]
+
+    def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
+        if not provider_ids:
+            return []
+        rows = self._session.scalars(
+            select(RepositoryRow)
+            .where(RepositoryRow.provider == provider, RepositoryRow.provider_id.in_(provider_ids))
+            .order_by(RepositoryRow.id)
         ).all()
         return [m.repository_to_domain(row) for row in rows]
 
@@ -187,6 +207,65 @@ class SqlAlchemyReviewRunRepo:
             select(ReviewRunRow).where(ReviewRunRow.status.not_in(TERMINAL_STATUSES))
         ).all()
         return [m.review_run_to_domain(row) for row in rows]
+
+    def list_changed(
+        self,
+        after: FeedCursor,
+        recheck_from: dt.datetime,
+        repository_ids: Collection[UUID],
+        limit: int,
+    ) -> list[ReviewRunListEntry]:
+        """Один запрос: id обеих частей — `UNION ALL` двух выборок, к ним запрос на
+        изменение, репозиторий и число находок `COUNT … GROUP BY` по пачке.
+
+        `LIMIT` — только у части новее курсора. Окно перепроверки читается целиком: оно и
+        так ограничено `RECHECK` по времени, а с `LIMIT` запоздавшая строка за первыми
+        `limit` уже виденными в окне не вернулась бы никогда. Обе части идут по индексу
+        `(updated_at, id)`.
+        """
+        if not repository_ids:
+            return []
+        key = tuple_(ReviewRunRow.updated_at, ReviewRunRow.id)
+        cursor = tuple_(literal(after.updated_at), literal(after.id))
+        visible = (
+            select(ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .where(MergeRequestRow.repository_id.in_(repository_ids))
+            .order_by(ReviewRunRow.updated_at, ReviewRunRow.id)
+        )
+        fresh = visible.where(key > cursor).limit(limit).subquery("fresh")
+        late = visible.where(ReviewRunRow.updated_at > recheck_from, key <= cursor).subquery("late")
+        # CTE, а не подзапрос: на неё ссылаются и выборка, и подсчёт находок, а CTE с
+        # двумя ссылками PostgreSQL вычисляет один раз.
+        picked = union_all(select(fresh.c.id), select(late.c.id)).cte("picked")
+        counts = (
+            select(FindingRow.review_run_id, func.count().label("findings_count"))
+            .where(FindingRow.review_run_id.in_(select(picked.c.id)))
+            .group_by(FindingRow.review_run_id)
+            .subquery("counts")
+        )
+        rows = self._session.execute(
+            select(
+                ReviewRunRow,
+                MergeRequestRow,
+                RepositoryRow,
+                func.coalesce(counts.c.findings_count, 0),
+            )
+            .join(picked, picked.c.id == ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .join(RepositoryRow, RepositoryRow.id == MergeRequestRow.repository_id)
+            .outerjoin(counts, counts.c.review_run_id == ReviewRunRow.id)
+            .order_by(ReviewRunRow.updated_at, ReviewRunRow.id)
+        ).all()
+        return [
+            ReviewRunListEntry(
+                run=m.review_run_to_domain(run),
+                merge_request=m.merge_request_to_domain(merge_request),
+                repository=m.repository_to_domain(repository),
+                findings_count=findings_count,
+            )
+            for run, merge_request, repository, findings_count in rows
+        ]
 
     def add(self, run: ReviewRun) -> None:
         """Вставить прогон, перенеся все поля, которые в нём уже есть.
@@ -545,3 +624,74 @@ class SqlAlchemySessionRepo:
     def delete_expired(self, now: dt.datetime) -> int:
         result = self._session.execute(delete(SessionRow).where(SessionRow.expires_at <= now))
         return int(result.rowcount)  # type: ignore[attr-defined]
+
+
+_ACCESS = "access_token"
+# Предел ожидания чужой блокировки токена при refresh; дальше — `ProviderTokenBusy`.
+_LOCK_TIMEOUT = "15s"
+_REFRESH = "refresh_token"
+
+
+class SqlAlchemyProviderTokenRepo:
+    """Токен пользователя при сессии; шифрует при записи и расшифровывает при чтении.
+
+    Без ключа (`cipher is None`) не пишет и не читает — `ProviderTokenUnavailable`:
+    открытым токен в базу не попадает никогда.
+    """
+
+    def __init__(self, session: Session, cipher: TokenCipher | None) -> None:
+        self._session = session
+        self._cipher = cipher
+
+    def get(self, session_id: UUID) -> ProviderToken | None:
+        row = self._session.get(ProviderTokenRow, session_id)
+        return self._to_domain(row) if row else None
+
+    def get_for_update(self, session_id: UUID) -> ProviderToken | None:
+        # Ждём чужой refresh не дольше `_LOCK_TIMEOUT` (только эта транзакция):
+        # его держатель ждёт GitHub, и бесконечное ожидание висело бы на пуле.
+        self._session.execute(text(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'"))
+        try:
+            # populate_existing: строка могла остаться в identity map от `get`
+            # до блокировки, а читать надо то, что записал победитель гонки.
+            row = self._session.scalars(
+                select(ProviderTokenRow)
+                .where(ProviderTokenRow.session_id == session_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).one_or_none()
+        except OperationalError as error:
+            if isinstance(error.orig, LockNotAvailable):
+                raise ProviderTokenBusy("токен сессии обновляет параллельный запрос") from None
+            raise
+        return self._to_domain(row) if row else None
+
+    def save(self, session_id: UUID, token: ProviderToken) -> None:
+        cipher = self._require_cipher()
+        row = self._session.get(ProviderTokenRow, session_id)
+        if row is None:
+            row = ProviderTokenRow(session_id=session_id)
+            self._session.add(row)
+        row.access_token_encrypted = cipher.encrypt(token.access_token.reveal(), session_id, _ACCESS)
+        row.access_expires_at = token.access_expires_at
+        row.refresh_token_encrypted = (
+            None
+            if token.refresh_token is None
+            else cipher.encrypt(token.refresh_token.reveal(), session_id, _REFRESH)
+        )
+        row.refresh_expires_at = token.refresh_expires_at
+
+    def _to_domain(self, row: ProviderTokenRow) -> ProviderToken:
+        cipher = self._require_cipher()
+        refresh = row.refresh_token_encrypted
+        return ProviderToken(
+            access_token=Secret(cipher.decrypt(row.access_token_encrypted, row.session_id, _ACCESS)),
+            access_expires_at=row.access_expires_at,
+            refresh_token=None if refresh is None else Secret(cipher.decrypt(refresh, row.session_id, _REFRESH)),
+            refresh_expires_at=row.refresh_expires_at,
+        )
+
+    def _require_cipher(self) -> TokenCipher:
+        if self._cipher is None:
+            raise ProviderTokenUnavailable("не задан USER_TOKEN_ENCRYPTION_KEY")
+        return self._cipher
