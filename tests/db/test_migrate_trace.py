@@ -37,7 +37,7 @@ def test_an_upgrade_leaves_a_trace_with_sql_children(
     try:
         # Реальные операторы миграций, а не пустой прогон по базе, уже стоящей
         # на head: откатываем последнюю ревизию и накатываем её под наблюдением.
-        command.downgrade(config, "0006")
+        command.downgrade(config, "-1")
         spans.clear()
         command.upgrade(config, "head")
         finished: tuple[ReadableSpan, ...] = spans.get_finished_spans()
