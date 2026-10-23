@@ -333,6 +333,17 @@ jobs:
           set -uo pipefail
           query="select r.state from pg_stat_replication r join pg_replication_slots s on s.active_pid = r.pid where s.slot_name = 'dmc268_replica' and r.application_name = 'dmc268_replica'"
           remote="docker exec -i dmc268-postgres sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -XtA'"
+          # Реплика, потерявшая поток между деплоями (например, слот потерян по
+          # max_slot_wal_keep_size), — unhealthy, но Docker такие контейнеры не
+          # перезапускает. Перезапуск даёт entrypoint пересобрать её; на другом
+          # кластере основного сервера она остановится, ничего не стерев.
+          health="$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" \
+            "docker inspect -f '{{.State.Health.Status}}' dmc268-postgres-replica" 2>/dev/null)"
+          if [ "$health" = "unhealthy" ]; then
+            echo "::warning::реплика unhealthy до проверки — перезапускаю"
+            ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" "docker restart dmc268-postgres-replica" >/dev/null
+          fi
+
           state=""
           deadline=$(( $(date +%s) + 300 ))
           while [ "$(date +%s)" -lt "$deadline" ]; do
