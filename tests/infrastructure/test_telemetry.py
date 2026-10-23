@@ -166,7 +166,27 @@ def test_queue_spans_follow_the_messaging_semantic_conventions(
         "messaging.operation.name": "process",
         "messaging.operation.type": "process",
         "messaging.rabbitmq.message.delivery_tag": 7,
+        # Без `basic.deliver` в руках — первая попытка: повторной доставки нет.
+        "messaging.rabbitmq.message.redelivered": False,
     }
+
+
+@pytest.mark.parametrize("redelivered", [False, True])
+def test_the_process_span_marks_redelivery_as_a_boolean(
+    spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+    redelivered: bool,
+) -> None:
+    """`messaging.rabbitmq.message.redelivered` — всегда булев: попытки различимы в хранилище."""
+    with consuming_span(
+        _published_properties(monkeypatch), delivery_tag=1, redelivered=redelivered
+    ):
+        pass
+
+    (_, process) = spans.get_finished_spans()
+    assert process.attributes is not None
+    value = process.attributes["messaging.rabbitmq.message.redelivered"]
+    assert value is redelivered
 
 
 class _StaleChannel(_Channel):

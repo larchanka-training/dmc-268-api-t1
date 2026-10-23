@@ -45,7 +45,7 @@
   отключении клиента (`ClientDisconnect`/`CancelledError`) — без ERROR: уход клиента штатно
   закрывает ответ (`_EventStream` в `app/api/events.py`). Тест: отключение до терминального
   статуса закрывает спан без ошибки
-- [ ] 3.3 `consuming_span(..., redelivered: bool)`: атрибут
+- [x] 3.3 `consuming_span(..., redelivered: bool)`: атрибут
   `messaging.rabbitmq.message.redelivered` из `basic.deliver`. Тест: повторная доставка
   (unack + redeliver на настоящем брокере) даёт спан с `redelivered=true`, первая — `false`
 
