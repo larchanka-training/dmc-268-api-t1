@@ -4,15 +4,11 @@
 
 ### Requirement: Экспорт спанов включается явно
 
-Без настройки сервис SHALL NOT отправлять спаны никуда и SHALL NOT писать в лог ошибки экспорта.
-`OTEL_TRACES_EXPORTER` SHALL разбираться как список значений через запятую — каждый экспортёр
-включается отдельно по спецификации OpenTelemetry. Поддержаны `console` (печать в stdout) и `otlp`
-(OTLP/HTTP на `OTEL_EXPORTER_OTLP_ENDPOINT` — приём делает коллектор телеметрии). Неподдержанное
-значение SHALL оставлять выключенным только свой экспортёр, с одним предупреждением при старте.
-Сэмплирование SHALL быть всегда включённым (`parentbased_always_on`); tail sampling вводится
-отдельным изменением, если вырастет объём. Запросы health-check SHALL не создавать спанов.
-`OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` SHALL быть задан: длинные значения атрибутов (URL с путями,
-тексты ошибок) обрезаются до экспорта.
+Экспорт спанов SHALL включаться переменной `OTEL_TRACES_EXPORTER` — списком значений через запятую,
+каждый экспортёр отдельно, по спецификации OpenTelemetry. Без настройки сервис SHALL NOT отправлять
+спаны никуда и SHALL NOT писать в лог ошибки экспорта. Поддержаны `console` (печать в stdout) и
+`otlp` (OTLP/HTTP на `OTEL_EXPORTER_OTLP_ENDPOINT`). Неподдержанное значение SHALL выключать только
+свой экспортёр — с одним предупреждением при старте.
 
 #### Scenario: Без настройки
 
@@ -40,15 +36,24 @@
 - **WHEN** опрашивается health-check сервиса
 - **THEN** серверный спан не создаётся и в хранилище трейсов health-check не появляется
 
+#### Scenario: Сэмплирование всегда включено
+
+- **WHEN** сервис работает с включённым экспортом
+- **THEN** сэмплер — `parentbased_always_on`, все корневые спаны записываются; tail sampling
+  вводится отдельным изменением, если вырастет объём
+
+#### Scenario: Лимит длины атрибутов
+
+- **WHEN** спан несёт длинное значение атрибута — URL с путями, текст ошибки
+- **THEN** значение обрезано до `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` до экспорта
+
 ### Requirement: Спаны очереди — по semantic conventions messaging
 
 Имена и атрибуты спанов публикации и обработки SHALL следовать semantic conventions messaging для
-RabbitMQ: имя — `{messaging.operation.name} {destination}`, атрибуты `messaging.system`,
-`messaging.operation.name`, `messaging.operation.type`, `messaging.destination.name` и
-`messaging.rabbitmq.destination.routing_key`, у обработки — ещё
-`messaging.rabbitmq.message.delivery_tag`. Спан обработки SHALL нести
-`messaging.rabbitmq.message.redelivered` — флаг повторной доставки из `basic.deliver`: повторная
-попытка после смерти воркера SHALL отличаться от первой попытки в хранилище трейсов.
+RabbitMQ: имя — `{messaging.operation.name} {destination}`, стандартные атрибуты `messaging.*` — по
+спецификации, полный перечень — в сценарии. Спан обработки SHALL нести
+`messaging.rabbitmq.message.delivery_tag` и признак повторной доставки
+`messaging.rabbitmq.message.redelivered` из `basic.deliver`.
 
 #### Scenario: Публикация и обработка задачи
 
@@ -69,10 +74,9 @@ RabbitMQ: имя — `{messaging.operation.name} {destination}`, атрибут�
 
 Трассировка запроса SHALL NOT буферизовать ответ: событие общего потока
 `GET /api/v1/events` SHALL уходить клиенту, как только оно записано, а спан запроса SHALL
-закрываться, когда поток закончился. Поток SHALL NOT раздувать трейс: количество спанов в трейсе
-запроса SHALL NOT расти с длительностью просмотра — опрос базы в цикле ожидания спанов не
-создаёт. Штатное закрытие потока клиентом — закрытие вкладки, разрыв соединения — SHALL закрывать
-спан запроса без статуса ошибки; статус ошибки SHALL получать только сбой на стороне сервиса.
+закрываться, когда поток закончился. Просмотр потока SHALL NOT раздувать трейс: число спанов
+SHALL NOT расти с длительностью просмотра. Штатное отключение клиента SHALL закрывать спан
+без статуса ошибки — статус ошибки только при сбое на стороне сервиса.
 
 #### Scenario: Событие до смены состояния
 
