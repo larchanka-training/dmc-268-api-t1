@@ -86,7 +86,7 @@
   c `service.version` и `deployment.environment.name=local`), плагин `rabbitmq_prometheus` у
   локального RabbitMQ. Проверка: локальный прогон ревью виден в Grafana целиком — лог, трейс,
   метрики
-- [ ] 6.5 `infra/` (Terraform): ресурсы пяти контейнеров стека в существующей сети с теми же
+- [x] 6.5 `infra/` (Terraform): ресурсы пяти контейнеров стека в существующей сети с теми же
   конфигами из `infra/observability/`, `postgres-exporter`, переменные стека (ресурсы, хранение,
   доступ Grafana); `service.version` — sha образа в выводах сборки. Проверка: `tofu plan` без
   изменений вне стека; применение на стенд — по готовности DevOps

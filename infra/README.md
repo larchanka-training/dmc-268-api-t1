@@ -71,6 +71,36 @@ Eurorouter подключается только фоллбэком после �
 
 Из этого стека наружу не смотрит ничего. API, PostgreSQL и RabbitMQ публикуются на петле сервера, воркер не публикуется вовсе; снаружи доступен только интерфейс, и API — через его `/api/`.
 
+## Стек наблюдаемости
+
+Рядом с API на стенде стоит стек телеметрии: OTel Collector (`dmc268-otelcol`), Loki (логи),
+Tempo (трейсы), Prometheus (метрики), Grafana (интерфейс, `grafana_port` на `internal_bind_ip`)
+и `postgres-exporter`. Конфиги лежат в `observability/` и **те же самые** используются локальным
+docker compose (профиль `observability`): различия окружений — только переменные и лимиты, не
+конфиги. Версии образов зафиксированы и обновляются в обоих местах вместе (в
+`main.tf` и в `docker-compose.yml`); у приёмника `file_log` коллектора операторы stanza — beta,
+обновление образа — с чтением breaking changes.
+
+Конфиги заливаются в контейнеры при создании (`upload` в `docker_container`): tofu читает их из
+рабочей копии и передаёт через Docker API, поэтому на сервере не нужен чекаут репозитория. Правка
+конфига пересоздаёт контейнер следующим `apply`; если провайдер не заметил изменение содержимого,
+контейнер пересоздают явно (`tofu apply -replace=docker_container.otelcol`). Локально тот же
+стек поднимается профилем: `OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp docker compose
+--profile observability up -d` (Grafana — http://127.0.0.1:3000 без логина).
+
+Экспорт телеметрии API, воркера и миграций включён окружением (`local.telemetry_env`):
+`service.version` берётся из тега `api_image` (это sha коммита сборки), окружение задаёт
+`deployment_environment_name` — `production`, потому что стенд и есть прод (#97), то же значение
+шлёт кабинет (#108). Коллектор читает `json-file`-логи контейнеров из `/var/lib/docker/containers`
+(только чтение, от root) и раскладывает по хранилищам; чувствительные данные он редактирует до
+отправки — правила в `observability/otelcol.yaml`, тест `tests/infrastructure/test_collector_redaction.py`.
+
+Переменные стека: `observability_memory_mb` (потолки памяти без свопа), `grafana_port`,
+`grafana_admin_password` (секрет; локально Grafana без логина, на стенде — по учётке),
+`deployment_environment_name`. RabbitMQ отдаёт метрики встроенным плагином
+`rabbitmq_prometheus` (порт 15692 в сети), PostgreSQL — контейнер `dmc268-postgres-exporter`;
+оба скреятся `prometheus.yml`. Применение стека на стенд — задача DevOps (#108).
+
 ## Хранилище состояния
 
 Состояние Terraform лежит не рядом с конфигурацией, а в S3-совместимом хранилище (RustFS) на том же сервере (`backend.tf`). Так оно переживает прогон раннера GitHub Actions, который исчезает вместе со своим диском.
