@@ -406,9 +406,10 @@ def upgrade() -> None:
   — тот же список, `none` по умолчанию. HTTP-метрики даёт встроенная телеметрия
   FastAPI, ручки `/metrics` нет — Prometheus собирает их через коллектор.
   Ручные — только сигналы алертов: `review_runs_total{status}` и
-  `review_stage_duration{stage}`; токены и стоимость LLM — в адаптере
-  LLM-шлюза, где известен usage. «Во что обошёлся прогон» остаётся SQL по
-  колонкам `review_runs`: метрики — для алертов, не для отчётов.
+  `review_stage_duration{stage}`; токены LLM — в адаптере шлюза, где известен
+  usage (`review_llm_tokens`); стоимость — отдельное изменение (#119).
+  «Во что обошёлся прогон» остаётся SQL по колонкам `review_runs`: метрики —
+  для алертов, не для отчётов.
 - **Логи** — JSON в stdout. `configure_logging(service_name)` ставит один
   JSON-хендлер: поля по модели данных OTel — `timestamp`, `severity`,
   `message`, `service.name`, атрибуты из `extra` верхним уровнем; trace-поля
