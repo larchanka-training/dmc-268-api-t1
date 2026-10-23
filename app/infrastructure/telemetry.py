@@ -14,6 +14,7 @@
   SQLAlchemy — пакеты `opentelemetry-instrumentation-*`;
 - спаны этапов прогона — `OtelStageTracer`, адаптер порта, который зовёт `StepRecorder`;
 - спан периодического прохода воркера — `sweep_span`;
+- спан прогона миграций — `migrate_span`, его открывает `alembic/env.py`;
 - бизнес-метрики для алертов: исходы прогонов (`record_run_finished`), длительность
   этапов (пишет `OtelStageTracer`), токены модели (`record_llm_tokens`).
 
@@ -487,6 +488,21 @@ def sweep_span() -> Iterator[None]:
     `record_current_exception`.
     """
     with error_status_span(_tracer, "review.sweep"):
+        yield
+
+
+@contextlib.contextmanager
+def migrate_span() -> Iterator[None]:
+    """Корневой спан прогона миграций: SQL-запросы миграций — его детьми.
+
+    Открывается в `alembic/env.py` на весь online-прогон: в трейсе деплоя видно,
+    сколько шли миграции и на каком операторе задержка (change
+    `add-observability-stack`, задача 5.1). Исключение, вылетевшее из прогона,
+    спан записывает и закрывается со статусом ошибки — упавший прогон деплоя
+    тоже сигнал; исключение наружу не глотается. Без настроенного экспорта
+    спаны никуда не уходят — миграции идут как раньше.
+    """
+    with error_status_span(_tracer, "migrate"):
         yield
 
 
