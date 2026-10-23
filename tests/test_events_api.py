@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -20,8 +20,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode, format_trace_id
+from sqlalchemy import Engine, Table, create_engine, text
+from sqlalchemy.pool import StaticPool
 from starlette.types import Message
 
+from app.api import events as events_api
 from app.api.dependencies import (
     get_clock,
     get_installation_catalog,
@@ -30,6 +33,7 @@ from app.api.dependencies import (
     get_untraced_unit_of_work_factory,
 )
 from app.api.factory import create_app
+from app.application.ports import UnitOfWork
 from app.application.ports.run_changes import RunChangesLost
 from app.config import Settings
 from app.domain.entities import (
@@ -54,6 +58,10 @@ from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
 from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.vcs_errors import VcsError
+from app.infrastructure import telemetry
+from app.infrastructure.db import models as db_models
+from app.infrastructure.db.base import Base
+from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork, UntracedUnitOfWork
 
 from .fakes.auth import SIGNED_IN_SESSION_ID, sign_in_with_session
 from .fakes.installation_catalog import FakeInstallationCatalog
@@ -535,6 +543,97 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
     assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
     # Клиент ушёл — подписка на изменения прогонов закрыта, слушатель не течёт.
     assert [s.closed for s in held.subscriptions] == [True]
+
+
+# Десять минут просмотра ленты: сигнал изменений раз в секунду, сессия кончается
+# на проверке после 605-го такта (проверки сессии идут на каждом пятом).
+TEN_MINUTES_OF_TICKS = 605
+
+
+def _feed_engine() -> Engine:
+    """Настоящий инструментированный движок для чтений ленты, как в проде.
+
+    SQLite в памяти под одним соединением на все потоки (`StaticPool`): чтения идут
+    через `run_in_threadpool`. Данных в базе нет и не нужно: пустые ответы цикла —
+    то же молчание ленты; важно, что каждое чтение по сигналу ходит настоящим
+    запросом. Таблицы — только те, что читает `list_changed` (у `context_payloads`
+    типы PostgreSQL).
+    """
+    engine = create_engine(
+        "sqlite://",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    # `__table__` декларативной модели mypy видит как `FromClause`; под DDL это Table.
+    tables = cast(
+        "list[Table]",
+        [
+            db_models.RepositoryRow.__table__,
+            db_models.MergeRequestRow.__table__,
+            db_models.ReviewRunRow.__table__,
+            db_models.FindingRow.__table__,
+        ],
+    )
+    Base.metadata.create_all(engine, tables=tables)
+    telemetry.instrument_engine(engine)
+    return engine
+
+
+def test_ten_minutes_of_watching_add_no_sql_spans_to_the_trace(
+    spans: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Сценарий «Долгий просмотр не растит трейс»: лента смотрится часами.
+
+    Десять минут — 605 сигналов изменений с шагом в секунду, часы теста идут ожиданием.
+    Чтения по сигналам и проверки сессии идут через untraced-фабрику
+    (`UntracedUnitOfWork` зависимостью, как в проде через PostgreSQL): ни одно чтение
+    не кладёт SQL-спан в трейс, спан потока один. Контроль до потока доказывает, что
+    движок спаны SQL даёт и экспортёр их видит, — иначе проверка ничего бы не ловила.
+    Проверка сессии — не предмет теста: она подменяется в модуле ручки, куда
+    `stream_events` её импортирует.
+    """
+    world = World()
+    engine = _feed_engine()
+    alive = {"signed_in": True}
+
+    def fake_authenticate(uow: object, token: str | None, now: object) -> object | None:
+        return object() if alive["signed_in"] else None
+
+    monkeypatch.setattr(events_api, "authenticate", fake_authenticate)
+
+    # Контроль: один запрос мимо подавления — ровно один SQL-спан.
+    with SqlAlchemyUnitOfWork(engine) as uow:
+        uow.session.execute(text("select 1"))
+    (control,) = spans.get_finished_spans()
+    assert control.kind is SpanKind.CLIENT
+
+    def session_gone() -> None:
+        """Сессия кончилась: поток закроется на ближайшей проверке."""
+        alive["signed_in"] = False
+
+    reads = {"count": 0}
+
+    def counted_untraced_factory() -> UnitOfWork:
+        reads["count"] += 1
+        return UntracedUnitOfWork(engine)
+
+    app, cookies = _app(world, Ticks({TEN_MINUTES_OF_TICKS: session_gone}))
+    app.dependency_overrides[get_untraced_unit_of_work_factory] = lambda: counted_untraced_factory
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    assert response.status_code == 200
+    # Каждое чтение по сигналу и каждая проверка сессии прошли через untraced-фабрику —
+    # точку, где включено подавление.
+    assert reads["count"] >= TEN_MINUTES_OF_TICKS
+
+    # Цикл действительно прокручен: минут тишины дают ping'и, а не один первый опрос.
+    assert response.text.count("event: ping") >= 10
+    finished = spans.get_finished_spans()
+    assert [s for s in finished if s.kind is SpanKind.CLIENT] == [control]
+    assert len([s for s in finished if s.kind is SpanKind.SERVER]) == 1
 
 
 def test_the_untraced_factory_is_wired_to_the_container() -> None:

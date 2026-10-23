@@ -35,7 +35,7 @@
 
 ## 3. Из аудита #92 — SSE и очередь
 
-- [ ] 3.1 Подавление SQL-спанов опроса в цикле общего потока `GET /api/v1/events` — ручка
+- [x] 3.1 Подавление SQL-спанов опроса в цикле общего потока `GET /api/v1/events` — ручка
   `stream_events` в `app/api/events.py`, цикл опроса — `run_feed_events` (бывший
   `review_run_events`). Механизм — существующий contextvar-флаг `untraced`
   (`UntracedUnitOfWork` зависимостью `untraced_uow_factory`), второго процессора не заводить.
