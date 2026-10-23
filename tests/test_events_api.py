@@ -465,6 +465,24 @@ def test_silence_gets_a_ping_at_least_every_fifteen_seconds() -> None:
 ASGI_SPEC_VERSION = "2.3"
 
 
+def _asgi_scope(cookie: str) -> dict[str, Any]:
+    """ASGI-scope потока: приложение гоняется напрямую, `TestClient` собирает тело целиком."""
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": ASGI_SPEC_VERSION},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": PATH,
+        "raw_path": PATH.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", b"testserver"), (b"cookie", cookie.encode())],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+
 def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_error(
     spans: InMemorySpanExporter,
 ) -> None:
@@ -492,20 +510,7 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
     app, cookies = _app(world, Ticks({}))
     app.dependency_overrides[get_sleep] = lambda: held_sleep
     cookie = "; ".join(f"{name}={value}" for name, value in cookies.items())
-    scope: dict[str, Any] = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": ASGI_SPEC_VERSION},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": PATH,
-        "raw_path": PATH.encode(),
-        "root_path": "",
-        "query_string": b"",
-        "headers": [(b"host", b"testserver"), (b"cookie", cookie.encode())],
-        "client": ("testclient", 50000),
-        "server": ("testserver", 80),
-    }
+    scope = _asgi_scope(cookie)
     sent: list[Message] = []
     changed = asyncio.Event()
 
@@ -537,6 +542,51 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
     (start,) = [m for m in sent if m["type"] == "http.response.start"]
     assert server.context is not None
     assert dict(start["headers"])[b"x-trace-id"].decode() == format_trace_id(server.context.trace_id)
+    assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
+
+
+def test_a_client_leaving_before_the_terminal_status_closes_the_span_without_error(
+    spans: InMemorySpanExporter,
+) -> None:
+    """Сценарий «Отключение клиента — не ошибка»: вкладка закрыта, прогон ещё идёт.
+
+    Прогон в работе, событий нет — клиент уходит из тишины до терминального статуса.
+    Отмена доезжает до генератора потока в ожидании (`CancelledError`), но спан запроса
+    закрывается штатно: уход клиента — не сбой сервиса.
+    """
+    world = World()
+    world.put(_run(world.visible_mr, S.ANALYSING, PAST))
+    gone = asyncio.Event()
+    # Поток вошёл в первое ожидание: первый опрос прошёл, дальше — тишина ленты.
+    polling = asyncio.Event()
+
+    async def held_sleep(seconds: float) -> None:
+        polling.set()
+        await gone.wait()
+
+    app, cookies = _app(world, Ticks({}))
+    app.dependency_overrides[get_sleep] = lambda: held_sleep
+    cookie = "; ".join(f"{name}={value}" for name, value in cookies.items())
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        await gone.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def scenario() -> None:
+        stream = asyncio.create_task(app(_asgi_scope(cookie), receive, send))
+        await asyncio.wait_for(polling.wait(), timeout=5)
+        assert not [s for s in spans.get_finished_spans() if s.kind is SpanKind.SERVER]
+        gone.set()
+        await asyncio.wait_for(stream, timeout=5)
+
+    asyncio.run(scenario())
+
+    (server,) = [s for s in spans.get_finished_spans() if s.kind is SpanKind.SERVER]
+    assert server.status.status_code is StatusCode.UNSET
     assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
 
 
