@@ -10,12 +10,11 @@
 """
 
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from uuid import UUID
 
 from app.application.ports import UnitOfWork
-from app.application.use_cases.connect_repository import AvailableRepository
-from app.domain.entities import ReviewRunListEntry
+from app.domain.entities import InstallationRepository, ReviewRunListEntry
 from app.domain.enums import Provider
 from app.domain.run_events import PING_AFTER_SECONDS, PingEvent
 from app.domain.run_feed import RunFeedEvent, RunFeedState, advance_feed
@@ -29,14 +28,14 @@ SESSION_CHECK_SECONDS = 5.0
 type FeedItem = RunFeedEvent | PingEvent
 
 
-def visible_repository_ids(uow: UnitOfWork, available: list[AvailableRepository]) -> frozenset[UUID]:
+def visible_repository_ids(uow: UnitOfWork, repositories: Iterable[InstallationRepository]) -> frozenset[UUID]:
     """Зарегистрированные репозитории из списка доступных пользователю.
 
-    Список — ответ `list_available_repositories`, того же use case, что у
+    Список — ответ `list_user_repositories`, того же запроса к GitHub, что у
     GET /repositories/available: правило видимости одно и живёт там. Здесь только
-    сопоставление с зарегистрированными по провайдеру и id у провайдера.
+    сопоставление с зарегистрированными по провайдеру и id у провайдера — одним запросом.
     """
-    provider_ids = [item.repository.provider_id for item in available]
+    provider_ids = [repository.provider_id for repository in repositories]
     with uow:
         return frozenset(r.id for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids))
 

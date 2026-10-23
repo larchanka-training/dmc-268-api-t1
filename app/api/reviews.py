@@ -35,7 +35,7 @@ from app.api.errors import (
 )
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
-from app.api.repositories import available_repositories
+from app.api.repositories import user_repositories
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
     FailedStage,
@@ -45,6 +45,7 @@ from app.api.schemas import (
     StrictRequest,
     UtcDatetime,
     UtcDatetimeParam,
+    without_nul,
 )
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES, current_session
 from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
@@ -322,6 +323,12 @@ class ReviewRunListQuery(BaseModel):
     limit: Limit = DEFAULT_LIMIT
     offset: Offset = 0
 
+    @field_validator("author", "q")
+    @classmethod
+    def _text_fits_postgres(cls, value: str | None) -> str | None:
+        """Текст фильтра уходит в SQL параметром: NUL отказал бы в базе ответом 500."""
+        return None if value is None else without_nul(value)
+
     @field_validator("created_to")
     @classmethod
     def _range_is_not_reversed(cls, created_to: datetime | None, info: ValidationInfo) -> datetime | None:
@@ -362,9 +369,9 @@ def list_reviews(
 ) -> ReviewRunListResponse:
     # Видимые репозитории — вызовом, а не зависимостью: зависимость FastAPI выполняется
     # и тогда, когда параметры запроса не прошли проверку, а 422 не должен стоить запроса в GitHub.
-    available = available_repositories(signed_in, catalog, oauth, uow_factory)
+    repositories = user_repositories(signed_in, catalog, oauth, uow_factory)
     run_filter = run_list_filter(
-        visible=visible_repository_ids(uow_factory(), available),
+        visible=visible_repository_ids(uow_factory(), repositories),
         repository_ids=query.repository_id,
         statuses=query.status,
         active=query.active,

@@ -236,6 +236,9 @@ _REASONS = {
     "timezone_aware": "ожидается время с зоной",
     # Свой тип `PydanticCustomError`: время во входе — только строка ISO 8601 (`UtcDatetimeParam`).
     "datetime_not_iso": "ожидается время в ISO 8601",
+    # Свои типы `PydanticCustomError` входных параметров (`app/api/schemas.py`).
+    "datetime_out_of_range": "время вне допустимого диапазона",
+    "string_nul": "строка не должна содержать символ NUL",
 }
 _DEFAULT_REASON = "недопустимое значение"
 # Ошибки, у которых последний элемент `loc` — не поле схемы: имя лишнего поля (ввод клиента,

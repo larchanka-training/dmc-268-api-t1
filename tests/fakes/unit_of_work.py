@@ -152,9 +152,9 @@ def _matches(entry: ReviewRunListEntry, run_filter: RunListFilter) -> bool:
     if run_filter.author is not None and merge_request.author != run_filter.author:
         return False
     if run_filter.text is not None:
-        needle = run_filter.text.casefold()
+        needle = run_filter.text.lower()
         haystack = (merge_request.title, merge_request.author, merge_request.source_branch)
-        if not any(needle in value.casefold() for value in haystack) and merge_request.number != run_filter.number:
+        if not any(needle in value.lower() for value in haystack) and merge_request.number != run_filter.number:
             return False
     if run_filter.created_from is not None and run.created_at < run_filter.created_from:
         return False
@@ -238,7 +238,7 @@ class FakeReviewRunRepo:
         return sorted(fresh + late, key=lambda e: (e.run.updated_at, e.run.id))
 
     def list_page(self, run_filter: RunListFilter, limit: int, offset: int) -> RunListPage:
-        # Как SQL-адаптер: ILIKE — подстрока без учёта регистра, номер — точное совпадение.
+        # Как SQL-адаптер: ILIKE — подстрока через lower(), не casefold(); номер — точное совпадение.
         entries = [entry for entry in self._entries() if _matches(entry, run_filter)]
         entries.sort(key=lambda e: (e.run.created_at, e.run.id), reverse=True)
         return RunListPage(entries=entries[offset : offset + limit], total=len(entries))

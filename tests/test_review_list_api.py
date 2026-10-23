@@ -1,5 +1,6 @@
 """Контракт `GET /api/v1/reviews`: видимость, фильтры, порядок и страницы. Без БД и сети."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -28,11 +29,13 @@ from app.domain.enums import (
 )
 from app.domain.enums import ReviewRunStatus as S
 from app.domain.ids import new_id
+from app.domain.login import OAuthProviderUnavailable
+from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.vcs_errors import VcsError
 
-from .fakes.auth import sign_in_with_session
+from .fakes.auth import SIGNED_IN_SESSION_ID, sign_in_with_session
 from .fakes.installation_catalog import FakeInstallationCatalog
-from .fakes.oauth import FakeOAuthProvider
+from .fakes.oauth import EXPIRING_GRANT, FakeOAuthProvider, rejecting
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -122,11 +125,13 @@ class World:
         )
 
 
-def _client(world: World, catalog: FakeInstallationCatalog | None = None) -> TestClient:
+def _client(
+    world: World, catalog: FakeInstallationCatalog | None = None, oauth: FakeOAuthProvider | None = None
+) -> TestClient:
     app = create_app(SETTINGS)
     cookies = sign_in_with_session(app, world.uow)
     app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog([API, WEB])
-    app.dependency_overrides[get_token_provider] = lambda: FakeOAuthProvider()
+    app.dependency_overrides[get_token_provider] = lambda: oauth or FakeOAuthProvider()
     return TestClient(app, cookies=cookies)
 
 
@@ -283,3 +288,81 @@ def test_invalid_query_is_rejected_before_asking_github() -> None:
     assert response.status_code == 422
     assert catalog.calls == []
 
+
+@pytest.mark.parametrize(
+    ("params", "error"),
+    [
+        (
+            {"created_from": "0001-01-01T00:00:00+01:00"},
+            {"where": "query.created_from", "reason": "время вне допустимого диапазона"},
+        ),
+        (
+            {"created_to": "9999-12-31T23:59:59-01:00"},
+            {"where": "query.created_to", "reason": "время вне допустимого диапазона"},
+        ),
+        ({"q": "a\x00b"}, {"where": "query.q", "reason": "строка не должна содержать символ NUL"}),
+        ({"author": "\x00"}, {"where": "query.author", "reason": "строка не должна содержать символ NUL"}),
+    ],
+)
+def test_values_the_database_cannot_take_are_422_not_500(params: dict[str, str], error: dict[str, str]) -> None:
+    """Дата за краем календаря после сдвига зоны и NUL в тексте отказали бы только в базе — ответом 500."""
+    catalog = FakeInstallationCatalog([API])
+
+    response = _client(World(), catalog).get(PATH, params=params)
+
+    assert response.status_code == 422
+    assert response.json()["errors"] == [error]
+    assert catalog.calls == []
+
+
+# --- токен пользователя: те же ответы, что у GET /repositories/available и GET /events ---
+
+
+def _expired_but_refreshable(world: World) -> None:
+    """Access token сессии истёк давно, refresh token бессрочный: запрос начнёт с обмена."""
+    expired = replace(token_from_grant(EXPIRING_GRANT, T0 - timedelta(days=30)), refresh_expires_at=None)
+    world.uow.provider_tokens.save(SIGNED_IN_SESSION_ID, expired)
+
+
+def _assert_closed_with_401(response: Any, world: World) -> None:
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"
+    assert any(
+        header.startswith("session=") and "Max-Age=0" in header for header in response.headers.get_list("set-cookie")
+    )
+    assert world.uow.sessions.stored == []
+
+
+def test_a_token_revoked_at_github_closes_the_session() -> None:
+    world = World()
+
+    response = _client(world, FakeInstallationCatalog(error=ProviderTokenRejected("401"))).get(PATH)
+
+    _assert_closed_with_401(response, world)
+
+
+def test_a_rejected_refresh_closes_the_session() -> None:
+    world = World()
+    oauth = FakeOAuthProvider()
+    oauth.refresh_error = rejecting()
+    client = _client(world, oauth=oauth)
+    _expired_but_refreshable(world)
+
+    response = client.get(PATH)
+
+    _assert_closed_with_401(response, world)
+    assert len(oauth.refreshes) == 1
+
+
+def test_github_unavailable_on_refresh_is_502_and_keeps_the_session() -> None:
+    world = World()
+    oauth = FakeOAuthProvider()
+    oauth.refresh_error = OAuthProviderUnavailable("GitHub ответил 503 (обновление токена)")
+    client = _client(world, oauth=oauth)
+    _expired_but_refreshable(world)
+
+    response = client.get(PATH)
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+    assert len(world.uow.sessions.stored) == 1

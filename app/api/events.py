@@ -27,7 +27,7 @@ from app.api.dependencies import (
     get_untraced_unit_of_work_factory,
 )
 from app.api.errors import ERRORS_502_SCM_EVENTS
-from app.api.repositories import available_repositories
+from app.api.repositories import user_repositories
 from app.api.reviews import VISIBILITY_RULE, review_run_list_item
 from app.api.schemas import STREAM_HEADERS_DOC
 from app.api.session import SESSION_COOKIE, SESSION_REQUIRED, SESSION_RESPONSES
@@ -38,8 +38,7 @@ from app.application.run_feed_events import (
     visible_repository_ids,
 )
 from app.application.use_cases.auth import authenticate
-from app.application.use_cases.connect_repository import AvailableRepository
-from app.domain.entities import ReviewRunListEntry
+from app.domain.entities import InstallationRepository, ReviewRunListEntry
 from app.domain.run_events import PingEvent
 from app.domain.run_feed import BATCH_LIMIT, RunFeedState, open_feed, start_feed
 
@@ -175,7 +174,7 @@ class _EventStream(StreamingResponse):
 )
 async def stream_events(
     request: Request,
-    available: list[AvailableRepository] = Depends(available_repositories),
+    repositories: list[InstallationRepository] = Depends(user_repositories),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
     untraced_uow_factory: Callable[[], UnitOfWork] = Depends(get_untraced_unit_of_work_factory),
     sleep: Callable[[float], Awaitable[None]] = Depends(get_sleep),
@@ -184,7 +183,7 @@ async def stream_events(
     token = request.cookies.get(SESSION_COOKIE)
     connected_at = datetime.now(UTC)
     # Набор видимых — один раз, до потока: сбой провайдера уже стал 502 в зависимости.
-    visible = await run_in_threadpool(visible_repository_ids, uow_factory(), available)
+    visible = await run_in_threadpool(visible_repository_ids, uow_factory(), repositories)
 
     def read_sync(state: RunFeedState) -> list[ReviewRunListEntry]:
         with untraced_uow_factory() as uow:

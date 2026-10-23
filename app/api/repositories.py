@@ -46,6 +46,7 @@ from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
 from app.application.use_cases import connect_repository as connecting
 from app.application.use_cases.auth import SignedIn
 from app.application.use_cases.user_token import SessionClosed
+from app.domain.entities import InstallationRepository
 from app.domain.enums import FindingSeverity, Provider, RulesStatus
 from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
@@ -190,26 +191,47 @@ class ConnectRepositoryRequest(StrictRequest):
     )
 
 
+def _as_user[T](signed_in: SignedIn, oauth: OAuthProvider, call: Callable[[connecting.UserContext], T]) -> T:
+    """Вызов провайдера токеном пользователя с переводом сбоев в ответы API.
+
+    Токен непригоден — сессия закрыта, `401 UNAUTHENTICATED`; GitHub недоступен —
+    `502 SCM_UNAVAILABLE`.
+    """
+    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
+    try:
+        return call(user)
+    except SessionClosed:
+        raise Unauthenticated(had_cookie=True) from None
+    except (VcsError, OAuthProviderUnavailable) as error:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
+
+
 def available_repositories(
     signed_in: SignedIn = Depends(current_session),
     catalog: InstallationCatalog = Depends(get_installation_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> list[connecting.AvailableRepository]:
-    """Репозитории, видимые пользователю у провайдера по его токену, или ошибка.
+    """Репозитории, видимые пользователю у провайдера по его токену, с отметкой подключённых."""
+    now = datetime.now(UTC)
+    return _as_user(
+        signed_in, oauth, lambda user: connecting.list_available_repositories(catalog, uow_factory(), user, now)
+    )
 
-    Токен непригоден — сессия закрыта, `401 UNAUTHENTICATED`; GitHub недоступен —
-    `502 SCM_UNAVAILABLE`. Зависимость, а не код ручки: тот же список задаёт
-    видимость прогонов в потоке GET /events (`app/api/events.py`). Правило одно —
-    поменяется здесь, поменяется у обоих.
+
+def user_repositories(
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> list[InstallationRepository]:
+    """Те же репозитории без отметки подключённых — видимость прогонов в GET /reviews и GET /events.
+
+    Запрос к GitHub тот же, что у GET /repositories/available: правило видимости одно —
+    поменяется здесь, поменяется у всех.
     """
-    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
-    try:
-        return connecting.list_available_repositories(catalog, uow_factory(), user, datetime.now(UTC))
-    except SessionClosed:
-        raise Unauthenticated(had_cookie=True) from None
-    except (VcsError, OAuthProviderUnavailable) as error:
-        raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
+    now = datetime.now(UTC)
+    return _as_user(signed_in, oauth, lambda user: connecting.list_user_repositories(catalog, uow_factory(), user, now))
 
 
 @router.get(
