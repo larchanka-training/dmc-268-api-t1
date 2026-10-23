@@ -480,6 +480,9 @@ class FakeProviderTokenRepo:
     def get(self, session_id: UUID) -> ProviderToken | None:
         return self.stored.get(session_id)
 
+    def exists(self, session_id: UUID) -> bool:
+        return session_id in self.stored
+
     def get_for_update(self, session_id: UUID) -> ProviderToken | None:
         self.locked.append(session_id)
         return self.get(session_id)
