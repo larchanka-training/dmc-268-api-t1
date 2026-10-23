@@ -3,6 +3,10 @@ services:
     # Postgres with built-in pgvector: the repository profile (RAG) stores its
     # vectors in the same database; migration 0003 creates the extension.
     image: pgvector/pgvector:pg18
+    # Имя контейнера совпадает со стендом (infra/main.tf): одинаковые имена
+    # хостов в конфигах стека наблюдаемости — postgres-exporter ходит по
+    # dmc268-postgres и локально, и на стенде.
+    container_name: dmc268-postgres
     environment:
       POSTGRES_USER: dmc268
       POSTGRES_PASSWORD: dmc268
@@ -37,8 +41,15 @@ services:
 
   rabbitmq:
     image: rabbitmq:4.3-alpine
+    # Имя контейнера совпадает со стендом: prometheus.yml скреет
+    # dmc268-rabbitmq в обоих окружениях.
+    container_name: dmc268-rabbitmq
     ports:
       - "5672:5672"
+      # Метрики rabbitmq_prometheus (плагин включён в самом образе 4.3) —
+      # наружу на петле для локальной проверки; в сети compose его скреит
+      # Prometheus.
+      - "127.0.0.1:15692:15692"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
@@ -72,8 +83,27 @@ services:
       USER_TOKEN_ENCRYPTION_KEY: ${USER_TOKEN_ENCRYPTION_KEY:-}
       # Спаны OpenTelemetry по умолчанию никуда не уходят; console — в stdout.
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+      # Метрики — тот же список экспортёров, что у трейсов (4.1).
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
+      # Экспорт включается окружением, без правки кода. С поднятым стеком
+      # (профиль observability ниже) запускают так:
+      #   OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp \
+      #   docker compose --profile observability up -d
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://collector:4318}
+      # Таймаут OTLP меньше окна graceful shutdown (5 с): выгрузка спанов при
+      # остановке успевает даже при недоступном коллекторе (замечание из #89).
+      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-4000}
+      # service.version — sha собранного образа: git внутрь контейнера не
+      # попадает, поэтому переменная с дефолтом (осмысленно —
+      # SERVICE_VERSION=$(git rev-parse --short HEAD) в .env).
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local}
       # Стабильные имена атрибутов semconv для SQL и HTTP; то же значение ставит код.
       OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
+    # Драйвер логов json-file, как в infra/main.tf: Docker Desktop по умолчанию
+    # пишет драйвером local (файлы local-logs/ в бинарном формате), а коллектор
+    # собирает именно json-file (<id>-json.log).
+    logging:
+      driver: json-file
     depends_on:
       postgres:
         condition: service_healthy
@@ -109,6 +139,11 @@ services:
       EUROROUTER_MODEL: ${EUROROUTER_MODEL:-}
       EUROROUTER_API_KEYS: ${EUROROUTER_API_KEYS:-}
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://collector:4318}
+      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-4000}
+      # Тот же resource, что у api; дефолты те же (см. комментарий там).
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local}
       OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
     depends_on:
       postgres:
@@ -116,6 +151,9 @@ services:
       rabbitmq:
         condition: service_healthy
     command: ["python", "-m", "app.worker"]
+    # Драйвер логов json-file, как у api выше и как в infra/main.tf.
+    logging:
+      driver: json-file
     # Как в infra: без init воркер — PID 1, а ему ядро не доставляет сигналы с
     # обработчиком по умолчанию, и второй SIGTERM не остановил бы его сразу.
     init: true
@@ -141,6 +179,96 @@ services:
     volumes:
       - ollama_models:/root/.ollama
 
+  # Стек наблюдаемости — те же конфиги из infra/observability/, что и на
+  # стенде (спека observability: различия окружений — переменные, не конфиги).
+  # Пять сервисов: коллектор, Loki (логи), Tempo (трейсы), Prometheus
+  # (метрики), Grafana (интерфейс), плюс postgres-exporter. Без профиля ничего
+  # из этого не поднимается. Экспорт включают переменные api/worker —
+  # см. комментарий у OTEL_TRACES_EXPORTER.
+  #
+  # Имена сервисов/контейнеров совпадают с алиасами сети в infra/main.tf,
+  # поэтому одни и те же конфиги резолвят хосты в обоих окружениях.
+  # Образы зафиксированы тегами (не latest): у file_log коллектора операторы
+  # stanza — beta, обновление образа — отдельная задача с чтением breaking
+  # changes.
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.158.0
+    profiles: ["observability"]
+    # От root: лог-файлы Docker на стенде читает только root (как promtail),
+    # и он же создаёт каталог file_storage в томе. Образ по умолчанию — 10001.
+    user: "0"
+    # Логи контейнеров (json-file) — источник file_log, только чтение;
+    # на Docker Desktop /var/lib/docker/containers монтируется изнутри ВМ.
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./infra/observability/otelcol.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - collector_data:/var/lib/otelcol
+    environment:
+      # Все *-json.log контейнеров; не-JSON строки (логи самих контейнеров
+      # стека) коллектор отбрасывает — см. on_error: drop в конфиге.
+      OTELCOL_LOG_FILES: /var/lib/docker/containers/*/*-json.log
+    depends_on:
+      - loki
+      - tempo
+
+  loki:
+    image: grafana/loki:3.7.9
+    profiles: ["observability"]
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./infra/observability/loki.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki
+
+  tempo:
+    image: grafana/tempo:3.1.1
+    profiles: ["observability"]
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./infra/observability/tempo.yaml:/etc/tempo/config.yaml:ro
+      - tempo_data:/var/tempo
+
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # Хранение метрик — 30 дней (как retention логов Loki).
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    profiles: ["observability"]
+    ports:
+      # Единственная точка стека, нужная человеку: http://127.0.0.1:3000.
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Локально — без входа: аноним с правами Admin. На стенде учётка —
+      # переменные infra: аноним выключен, пароль админа из секретов.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+    volumes:
+      - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+
+  # Экспортёр метрик PostgreSQL (design, решение 3): кода не касается,
+  # скреится Prometheus-ом (job postgres).
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.20.1
+    profiles: ["observability"]
+    environment:
+      # Реквизиты локальные, как у api/worker выше; на стенде — переменные infra.
+      DATA_SOURCE_URI: dmc268-postgres:5432/dmc268?sslmode=disable
+      DATA_SOURCE_USER: dmc268
+      DATA_SOURCE_PASS: dmc268
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
     # Новое имя при переходе с postgres:18-alpine (musl) на pgvector (glibc):
@@ -149,3 +277,14 @@ volumes:
   # Скачанные модели переживают пересоздание контейнера Ollama.
   ollama_models:
     name: dmc268-ollama-models
+  # Данные стека наблюдаемости переживают пересоздание контейнеров.
+  collector_data:
+    name: dmc268-collector-data
+  loki_data:
+    name: dmc268-loki-data
+  tempo_data:
+    name: dmc268-tempo-data
+  prometheus_data:
+    name: dmc268-prometheus-data
+  grafana_data:
+    name: dmc268-grafana-data

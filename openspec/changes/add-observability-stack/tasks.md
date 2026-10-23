@@ -71,17 +71,17 @@
 
 ## 6. Коллектор и стек — одинаково локально и на проде
 
-- [ ] 6.1 Каталог `infra/observability/`: `otelcol.yaml` (приём OTLP, `file_log` с `json_parser`
+- [x] 6.1 Каталог `infra/observability/`: `otelcol.yaml` (приём OTLP, `file_log` с `json_parser`
   `trace: {}` `severity`, `memory_limiter`, `batch`, `transform`), конфиги Loki, Tempo, Prometheus,
   provisioning Grafana; версии образов зафиксированы. Проверка: `docker compose --profile
   observability up` поднимает пять контейнеров, коллектор стартует без ошибок конфига
-- [ ] 6.2 OTTL-правила редакции: `url.query`/`url.full` httpx, значения `db.*` и description
+- [x] 6.2 OTTL-правила редакции: `url.query`/`url.full` httpx, значения `db.*` и description
   статуса SQL-спанов, message и stacktrace события `exception` на спанах обработки — маркер
   `<скрыто>`, атрибут остаётся. Тест на примерах из аудита #89 (DETAIL psycopg с ключами, текст
   ответа провайдера, URL приватного репозитория): после правил секретов нет
-- [ ] 6.3 Grafana: datasources Loki, Tempo, Prometheus с переходом лог ↔ трейс по `trace_id`.
+- [x] 6.3 Grafana: datasources Loki, Tempo, Prometheus с переходом лог ↔ трейс по `trace_id`.
   Проверка: локальный прогон — из записи лога с `trace_id` открывается трейс прогона в Tempo
-- [ ] 6.4 `docker-compose.yml`: сервисы стека под профилем `observability`, экспорт включён
+- [x] 6.4 `docker-compose.yml`: сервисы стека под профилем `observability`, экспорт включён
   окружением (`OTEL_TRACES_EXPORTER=otlp`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_ATTRIBUTES`
   c `service.version` и `deployment.environment.name=local`), плагин `rabbitmq_prometheus` у
   локального RabbitMQ. Проверка: локальный прогон ревью виден в Grafana целиком — лог, трейс,
