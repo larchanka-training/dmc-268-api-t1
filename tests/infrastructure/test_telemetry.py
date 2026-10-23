@@ -32,9 +32,9 @@ from opentelemetry.sdk.trace.export import (
     SimpleSpanProcessor,
 )
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.sdk.trace.sampling import ParentBased
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 
 from app.api.factory import create_app
 from app.config import Settings
@@ -42,6 +42,7 @@ from app.domain.entities import ReviewJob
 from app.domain.enums import ReviewRunStage
 from app.domain.llm_errors import LlmTimeoutError
 from app.infrastructure import telemetry
+from app.infrastructure.container import build_container
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue, consuming_span
 from app.infrastructure.telemetry import (
     OtelStageTracer,
@@ -238,6 +239,38 @@ def test_a_failure_of_processing_marks_the_process_span_as_an_error(
 
 
 @pytest.mark.parametrize(
+    "error",
+    [ValueError("HTTP 400: def leaked_from_diff(): ..."), SystemExit("код из диффа")],
+)
+def test_the_status_of_a_failed_process_span_names_only_the_exception_type(
+    spans: InMemorySpanExporter, error: BaseException
+) -> None:
+    """Описание статуса редакцию коллектора не проходит — текст только в событии."""
+    with pytest.raises(type(error)), consuming_span(None, delivery_tag=1):
+        raise error
+
+    (process,) = spans.get_finished_spans()
+    assert process.status.description == type(error).__name__
+    (event,) = process.events
+    assert event.attributes is not None
+    assert event.attributes["exception.message"] == str(error)
+
+
+def test_a_caught_exception_marks_the_current_span_with_its_type_only(
+    spans: InMemorySpanExporter,
+) -> None:
+    with trace.get_tracer("test").start_as_current_span("caught"):
+        telemetry.record_current_exception(RuntimeError("DETAIL: Key (login)=(octocat)"))
+
+    (span,) = spans.get_finished_spans()
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.status.description == "RuntimeError"
+    (event,) = span.events
+    assert event.attributes is not None
+    assert event.attributes["exception.message"] == "DETAIL: Key (login)=(octocat)"
+
+
+@pytest.mark.parametrize(
     "properties",
     [
         None,
@@ -306,6 +339,42 @@ def test_without_configuration_spans_go_nowhere(
     assert console.getvalue() == ""
     assert caplog.records == []
     assert provider.resource.attributes["service.name"] == "dmc-268-api"
+
+
+def test_without_configuration_every_trace_is_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
+
+    sampler = build_tracer_provider("dmc-268-api").sampler
+
+    assert sampler.get_description().startswith("ParentBased{root:AlwaysOnSampler")
+
+
+@pytest.mark.parametrize("ratio", ["traceidratio", "parentbased_traceidratio"])
+def test_a_ratio_sampler_is_not_applied_and_warned_about(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, ratio: str
+) -> None:
+    """`X-Trace-ID` видят люди: по каждому trace id должен находиться трейс."""
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", ratio)
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER_ARG", "0.1")
+
+    sampler = build_tracer_provider("dmc-268-api").sampler
+
+    assert sampler.get_description().startswith("ParentBased{root:AlwaysOnSampler")
+    (record,) = [r for r in caplog.records if "OTEL_TRACES_SAMPLER" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+
+
+def test_a_sampler_without_a_ratio_is_still_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "parentbased_always_off")
+
+    sampler = build_tracer_provider("dmc-268-api").sampler
+
+    assert sampler.get_description().startswith("ParentBased{root:AlwaysOffSampler")
 
 
 def test_the_console_exporter_prints_spans(
@@ -388,21 +457,6 @@ def test_an_unsupported_exporter_warns_once_and_exports_nothing(
     assert record.levelname == "WARNING"
     assert "zipkin" in record.getMessage()
     assert console.getvalue() == ""
-
-
-def test_sampling_is_pinned_to_parentbased_always_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Сэмплирование закреплено кодом: спаны всегда записываются, env их не выключает."""
-    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "always_off")
-
-    provider = build_tracer_provider("dmc-268-api")
-    span = provider.get_tracer("test").start_span("sampling-check")
-    span.end()
-
-    assert isinstance(provider.sampler, ParentBased)
-    context = span.get_span_context()
-    assert context.trace_flags.sampled
 
 
 def _span_with_long_attribute(provider: TracerProvider) -> str:
@@ -550,6 +604,52 @@ def test_an_incompatible_engine_tracer_does_not_stop_the_worker(
     assert started == [True]
     [record] = _engine_warnings(caplog)
     assert record.levelname == "WARNING"
+
+
+def test_the_installed_engine_tracer_still_produces_sql_spans(
+    spans: InMemorySpanExporter,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Сторож обновления пакета: фоллбэк `instrument_engine` молча выключает спаны SQL,
+    # и без этой проверки переезд `EngineTracer` заметили бы только по пустым трейсам.
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+    engine = create_engine("sqlite://")
+    telemetry.instrument_engine(engine)
+
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+
+    assert not _engine_warnings(caplog), (
+        "EngineTracer из opentelemetry-instrumentation-sqlalchemy несовместим — "
+        "спаны SQL пропали; см. TODO в telemetry.instrument_engine"
+    )
+    assert [s for s in spans.get_finished_spans() if s.kind is SpanKind.CLIENT], (
+        "после instrument_engine запрос к базе не дал спана — спаны SQL пропали"
+    )
+
+
+def test_a_failed_query_does_not_put_its_parameters_into_the_process_span(
+    spans: InMemorySpanExporter,
+) -> None:
+    # Параметр запроса — код из диффа; ошибка запроса выходит из обработки сообщения.
+    secret = "def leaked_from_diff(): ..."
+    engine = build_container(SETTINGS.model_copy(update={"database_url": "sqlite://"})).engine
+    with (
+        engine.connect() as connection,
+        pytest.raises(OperationalError),
+        consuming_span(None, delivery_tag=1),
+    ):
+        connection.execute(text("SELECT * FROM no_such_table WHERE x = :x"), {"x": secret})
+
+    (process,) = [s for s in spans.get_finished_spans() if s.kind is SpanKind.CONSUMER]
+    assert process.status.status_code is StatusCode.ERROR
+    recorded = [process.status.description or ""] + [
+        str(value) for event in process.events for value in (event.attributes or {}).values()
+    ]
+    assert not [value for value in recorded if secret in value]
 
 
 # --- остановка процесса --------------------------------------------------------------
