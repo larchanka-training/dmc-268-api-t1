@@ -4,7 +4,8 @@
 `infra/observability/otelcol.yaml` — том же для локального стека и стенда.
 Тест проверяет их на примерах из аудита #89, не поднимая стек: правила
 интерпретируются тем их подмножеством, которое конфиг использует —
-`set(..., "<скрыто>")` с условиями присутствия атрибута и имени события.
+`set(..., "<скрыто>")` с условиями присутствия атрибута, непустого статуса
+спана и имени события.
 Правило вне этого подмножества упадёт на разборе и потребует обновить тест
 вместе с собой; тихое выпадение атрибута из правил ловит проверка полноты
 покрытия. Валидация конфига самим коллектором — класс
@@ -57,30 +58,68 @@ _RULE = re.compile(
 _TARGET = re.compile(r'^attributes\["([^"]+)"\]$')
 _PRESENCE = re.compile(r'^attributes\["([^"]+)"\] != nil$')
 
+# Условие на статус спана; в контексте spanevent статуса нет — там оно
+# громко падает, а не тихо считается невыполненным.
+_SET_STATUS = "status.message != nil"
+# Событие не имеет статуса: подменяет его в вычислении условий.
+_EVENT_HAS_NO_STATUS = object()
+
+
+def _split_where(where: str) -> tuple[tuple[str, ...], ...]:
+    """Условия where в КНФ: конъюнкция групп-дизъюнкций.
+
+    Скобки в подмножестве — только вокруг or-группы, как в
+    `(A or B) and C`; and связывает сильнее or, поэтому разбор — сначала по
+    and, потом по or. Другая расстановка скобок падает громко: вычислителя
+    для неё в тесте нет.
+    """
+    for group in re.findall(r"\(([^()]*)\)", where):
+        if " and " in group:
+            message = f"скобки вокруг and вне подмножества теста: {where}"
+            raise ValueError(message)
+    without_parens = where.replace("(", " ").replace(")", " ")
+    return tuple(
+        tuple(part.strip() for part in conjunct.split(" or "))
+        for conjunct in without_parens.split(" and ")
+    )
+
 
 @dataclass
 class Rule:
-    """Разобранное правило `set(...) where ...` из trace_statements."""
+    """Разобранное правило `set(...) where ...` из trace_statements.
+
+    Условия — конъюнкция групп-дизъюнкций (`_split_where`): в группе
+    достаточно одного выполненного, между группами — нужны все.
+    """
 
     context: str
     target: str
     value: str
-    conditions: tuple[str, ...] = ()
+    conditions: tuple[tuple[str, ...], ...] = ()
 
-    def applies(self, name: str | None, attributes: dict[str, Any]) -> bool:
-        """Условия where объединены или: достаточно одного выполненного."""
-        if not self.conditions:
-            return True
-        return any(
-            _condition_holds(condition, name, attributes)
-            for condition in self.conditions
+    def applies(
+        self, name: str | None, attributes: dict[str, Any], status_message: Any
+    ) -> bool:
+        return all(
+            any(
+                _condition_holds(condition, name, attributes, status_message)
+                for condition in group
+            )
+            for group in self.conditions
         )
 
 
-def _condition_holds(condition: str, name: str | None, attributes: dict[str, Any]) -> bool:
+def _condition_holds(
+    condition: str, name: str | None, attributes: dict[str, Any], status_message: Any
+) -> bool:
     presence = _PRESENCE.fullmatch(condition)
     if presence is not None:
         return presence.group(1) in attributes
+    if condition == _SET_STATUS:
+        if status_message is _EVENT_HAS_NO_STATUS:
+            message = "условие status.message в контексте spanevent"
+            raise ValueError(message)
+        return status_message is not None
     if condition == 'name == "exception"':
         return name == "exception"
     message = f"правило использует условие вне подмножества теста: {condition}"
@@ -116,9 +155,7 @@ def parse_rules() -> list[Rule]:
             attribute = _TARGET.fullmatch(target)
             target = attribute.group(1) if attribute else target
             where = match.group("where")
-            conditions = (
-                tuple(part.strip() for part in where.split(" or ")) if where else ()
-            )
+            conditions = _split_where(where) if where else ()
             rules.append(Rule(context, target, match.group("value"), conditions))
     return rules
 
@@ -133,12 +170,12 @@ def apply_rules(rules: list[Rule], span: Span) -> Span:
     span_rules = [rule for rule in rules if rule.context == "span"]
     event_rules = [rule for rule in rules if rule.context == "spanevent"]
     for rule in span_rules:
-        if rule.applies(span.name, span.attributes):
+        if rule.applies(span.name, span.attributes, span.status_message):
             _set(span, rule)
     for event in span.events:
         attributes = event["attributes"]
         for rule in event_rules:
-            if rule.applies(event.get("name"), attributes):
+            if rule.applies(event.get("name"), attributes, _EVENT_HAS_NO_STATUS):
                 attributes[rule.target] = rule.value
     return span
 
@@ -230,6 +267,28 @@ def test_database_values_and_status_description_are_hidden(rules: list[Rule]) ->
     }
 
 
+def test_successful_sql_span_status_stays_unset(rules: list[Rule]) -> None:
+    """Успешный SQL-спан не получает бессмысленный маркер статуса.
+
+    У него статус Unset и описание пустое: условие «статус задан» защищает
+    от подстановки маркера в пустое описание, атрибуты при этом редактируются
+    как у любого SQL-спана.
+    """
+    span = apply_rules(
+        rules,
+        Span(
+            name="SELECT",
+            attributes={
+                "db.system.name": "postgresql",
+                "db.query.text": "SELECT * FROM users WHERE login = 'octocat'",
+            },
+            status_message=None,
+        ),
+    )
+    assert span.attributes["db.query.text"] == REDACTED
+    assert span.status_message is None
+
+
 def test_exception_event_message_and_stacktrace_hidden_type_kept(
     rules: list[Rule],
 ) -> None:
@@ -293,13 +352,13 @@ def test_spans_without_secrets_are_not_touched(rules: list[Rule]) -> None:
 class TestCollectorConfigValidation:
     """Конфиг валидируется самим коллектором.
 
-    Нужны Docker и подтянутый образ коллектора: `uv run pytest -m live
+    Нужны Docker и подтянутый образ коллектора: `uv run pytest -m docker
     tests/infrastructure/test_collector_redaction.py`. Поднятый стек
     (профиль observability) проверяет то же самое на каждом старте —
     с невалидным конфигом коллектор не запускается.
     """
 
-    @pytest.mark.live
+    @pytest.mark.docker
     def test_collector_accepts_the_config(self) -> None:
         image = compose_collector_image()
         mount = f"{COLLECTOR_CONFIG}:/etc/otelcol-contrib/config.yaml:ro"
