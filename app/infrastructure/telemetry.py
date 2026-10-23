@@ -39,6 +39,7 @@ import logging
 import os
 from collections.abc import Iterator
 from contextvars import Token
+from typing import Any
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
@@ -58,6 +59,7 @@ from opentelemetry.propagators.textmap import (
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import Span, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON, ParentBased, Sampler
 from opentelemetry.trace import Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from sqlalchemy import Engine
@@ -178,7 +180,7 @@ def build_tracer_provider(service_name: str) -> TracerProvider:
     attributes = (
         {} if os.environ.get("OTEL_SERVICE_NAME") else {SERVICE_NAME: service_name}
     )
-    provider = TracerProvider(resource=Resource.create(attributes))
+    provider = TracerProvider(resource=Resource.create(attributes), sampler=_sampler())
     exporter = os.environ.get("OTEL_TRACES_EXPORTER", "none").strip().lower()
     if exporter == "console":
         provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
@@ -188,6 +190,24 @@ def build_tracer_provider(service_name: str) -> TracerProvider:
             exporter,
         )
     return provider
+
+
+def _sampler() -> Sampler | None:
+    """Сэмплер из `OTEL_TRACES_SAMPLER`, кроме сэмплера по доле.
+
+    `X-Trace-ID` показывается людям, и по каждому trace id должен находиться трейс: доля
+    при старте трейса оставила бы часть кодов из ошибок без трейса. Долю отбирает хвостовое
+    сэмплирование в коллекторе. `None` — SDK берёт сэмплер из окружения сам.
+    """
+    name = os.environ.get("OTEL_TRACES_SAMPLER", "").strip().lower()
+    if "traceidratio" not in name:
+        return None
+    logger.warning(
+        "OTEL_TRACES_SAMPLER=%s не применяется: доля прячет трейсы по X-Trace-ID, "
+        "пишем parentbased_always_on",
+        name,
+    )
+    return ParentBased(ALWAYS_ON)
 
 
 def opt_in_stable_semconv() -> None:
@@ -300,7 +320,7 @@ def sweep_span() -> Iterator[None]:
     который проход ловит сам, чтобы выполнить следующий, отмечается на спане
     `record_current_exception`.
     """
-    with _tracer.start_as_current_span("review.sweep"):
+    with error_status_span(_tracer, "review.sweep"):
         yield
 
 
@@ -322,7 +342,38 @@ def record_current_exception(exc: BaseException) -> None:
     """
     span = trace.get_current_span()
     span.record_exception(exc)
-    span.set_status(Status(StatusCode.ERROR, f"{type(exc).__name__}: {exc}"))
+    span.set_status(error_status(exc))
+
+
+def error_status(exc: BaseException) -> Status:
+    """Статус ошибки с именем типа, без текста исключения.
+
+    Текст — только в событии `exception`: его чистит редакция коллектора, а описание
+    статуса — нет. В тексте бывает ответ провайдера модели или значения ключей из ошибки
+    базы.
+    """
+    return Status(StatusCode.ERROR, type(exc).__name__)
+
+
+@contextlib.contextmanager
+def error_status_span(
+    tracer: trace.Tracer, name: str, **kwargs: Any
+) -> Iterator[trace.Span]:
+    """Текущий спан, который при исключении закрывается со статусом `error_status`.
+
+    `start_as_current_span` сам пишет в описание статуса текст исключения — это
+    отключено, статус ставится по типу. Событие `exception` для `Exception` пишет сам
+    спан; `KeyboardInterrupt` и `SystemExit` он не видит — их отмечаем здесь целиком.
+    """
+    with tracer.start_as_current_span(name, set_status_on_exception=False, **kwargs) as span:
+        try:
+            yield span
+        except Exception as exc:
+            span.set_status(error_status(exc))
+            raise
+        except BaseException as exc:
+            record_current_exception(exc)
+            raise
 
 
 def current_trace_id() -> str | None:

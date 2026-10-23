@@ -234,6 +234,38 @@ def test_a_failure_of_processing_marks_the_process_span_as_an_error(
 
 
 @pytest.mark.parametrize(
+    "error",
+    [ValueError("HTTP 400: def leaked_from_diff(): ..."), SystemExit("код из диффа")],
+)
+def test_the_status_of_a_failed_process_span_names_only_the_exception_type(
+    spans: InMemorySpanExporter, error: BaseException
+) -> None:
+    """Описание статуса редакцию коллектора не проходит — текст только в событии."""
+    with pytest.raises(type(error)), consuming_span(None, delivery_tag=1):
+        raise error
+
+    (process,) = spans.get_finished_spans()
+    assert process.status.description == type(error).__name__
+    (event,) = process.events
+    assert event.attributes is not None
+    assert event.attributes["exception.message"] == str(error)
+
+
+def test_a_caught_exception_marks_the_current_span_with_its_type_only(
+    spans: InMemorySpanExporter,
+) -> None:
+    with trace.get_tracer("test").start_as_current_span("caught"):
+        telemetry.record_current_exception(RuntimeError("DETAIL: Key (login)=(octocat)"))
+
+    (span,) = spans.get_finished_spans()
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.status.description == "RuntimeError"
+    (event,) = span.events
+    assert event.attributes is not None
+    assert event.attributes["exception.message"] == "DETAIL: Key (login)=(octocat)"
+
+
+@pytest.mark.parametrize(
     "properties",
     [
         None,
@@ -302,6 +334,42 @@ def test_without_configuration_spans_go_nowhere(
     assert console.getvalue() == ""
     assert caplog.records == []
     assert provider.resource.attributes["service.name"] == "dmc-268-api"
+
+
+def test_without_configuration_every_trace_is_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
+
+    sampler = build_tracer_provider("dmc-268-api").sampler
+
+    assert sampler.get_description().startswith("ParentBased{root:AlwaysOnSampler")
+
+
+@pytest.mark.parametrize("ratio", ["traceidratio", "parentbased_traceidratio"])
+def test_a_ratio_sampler_is_not_applied_and_warned_about(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, ratio: str
+) -> None:
+    """`X-Trace-ID` видят люди: по каждому trace id должен находиться трейс."""
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", ratio)
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER_ARG", "0.1")
+
+    sampler = build_tracer_provider("dmc-268-api").sampler
+
+    assert sampler.get_description().startswith("ParentBased{root:AlwaysOnSampler")
+    (record,) = [r for r in caplog.records if "OTEL_TRACES_SAMPLER" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+
+
+def test_a_sampler_without_a_ratio_is_still_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "parentbased_always_off")
+
+    sampler = build_tracer_provider("dmc-268-api").sampler
+
+    assert sampler.get_description().startswith("ParentBased{root:AlwaysOffSampler")
 
 
 def test_the_console_exporter_prints_spans(

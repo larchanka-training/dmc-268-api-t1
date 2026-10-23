@@ -115,10 +115,25 @@ def test_a_failing_step_marks_the_pass_span_as_an_error(
     assert uow.sessions.stored == []
     (pass_span,) = [s for s in spans.get_finished_spans() if s.name == "review.sweep"]
     assert pass_span.status.status_code is StatusCode.ERROR
+    assert pass_span.status.description == "RuntimeError"
     (event,) = pass_span.events
     assert event.name == "exception"
     assert event.attributes is not None
     assert event.attributes["exception.type"] == "RuntimeError"
+
+
+def test_an_escaping_exception_marks_the_pass_span_with_its_type_only(
+    spans: InMemorySpanExporter,
+) -> None:
+    with pytest.raises(RuntimeError), sweep_span():
+        raise RuntimeError("DETAIL: Key (id)=(42) already exists")
+
+    (pass_span,) = [s for s in spans.get_finished_spans() if s.name == "review.sweep"]
+    assert pass_span.status.status_code is StatusCode.ERROR
+    assert pass_span.status.description == "RuntimeError"
+    (event,) = pass_span.events
+    assert event.attributes is not None
+    assert "already exists" in str(event.attributes["exception.message"])
 
 
 @pytest.mark.integration
