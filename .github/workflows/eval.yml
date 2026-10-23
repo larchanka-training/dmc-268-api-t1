@@ -71,7 +71,9 @@ jobs:
       EUROROUTER_API_KEYS: ${{ secrets.AI_DMC268_T1 }}
       EUROROUTER_BASE_URL: ${{ vars.AI_DMC268_URL }}
       # Та же модель, что в llm-live.yml: метрики сравнимы только при одной модели.
-      EUROROUTER_MODEL: qwen3-coder-30b-a3b
+      # Числа в docs/testing/RULES_E2E_REPORT.md сняты на qwen3-coder-30b-a3b, её
+      # провайдер с 21.10 отвергает запросы (#93), поэтому здесь запасная (#95).
+      EUROROUTER_MODEL: qwen3-coder-next-80b
       # Три прогона на кейс - из docs/testing/LLM_EVAL.md §5: один повтор разброса не покажет.
       # На PR хватает одного: он проверяет, что eval работает, а метрики снимают вручную.
       EVAL_REPETITIONS: ${{ inputs.repetitions || (github.event_name == 'pull_request' && '1') || '3' }}
