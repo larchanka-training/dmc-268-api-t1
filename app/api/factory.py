@@ -78,7 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
         responses=ERRORS_DEFAULT,
         lifespan=lifespan,
-        # Провайдер ставит `configure_tracing`. `auto_configure` при заданном
+        # Провайдеры ставит `configure_telemetry`. `auto_configure` при заданном
         # `OTEL_EXPORTER_OTLP_ENDPOINT` повесил бы на него второй экспортёр — выключен
         # явно, а не только отсутствием `FASTAPI_OTEL_AUTO_CONFIGURE`. Встроенный
         # OTel-лог исключений FastAPI не используем: стектрейс `500` пишет наш
@@ -96,8 +96,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Логи — до первого запроса и до трассировки: её предупреждения при старте
     # тоже должны выйти JSON-записями.
     configure_logging(telemetry.API_SERVICE)
-    # До контейнера: провайдер трейсов нужен телеметрии FastAPI с первого запроса.
-    telemetry.configure_tracing(telemetry.API_SERVICE)
+    # До контейнера: провайдеры трейсов и метрик нужны телеметрии FastAPI с первого запроса.
+    telemetry.configure_telemetry(telemetry.API_SERVICE)
     app.state.container = build_container(settings)
     if settings.user_token_key is None:
         # Видно в логе старта API: вход на таком стенде будет отказывать. Не в

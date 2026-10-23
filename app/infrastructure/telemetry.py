@@ -6,10 +6,10 @@
 
 Что включено:
 
-- SDK-провайдер трейсов в API и воркере (`configure_tracing`). Он нужен, даже когда
-  спаны никуда не уходят: без него у спанов нет настоящего trace id, а `X-Trace-ID` — это
-  trace id спана запроса;
-- HTTP-сервер — встроенная телеметрия FastAPI (она берёт глобальный провайдер сама,
+- SDK-провайдеры трейсов и метрик в API и воркере (`configure_telemetry`). Провайдер
+  трейсов нужен, даже когда спаны никуда не уходят: без него у спанов нет настоящего
+  trace id, а `X-Trace-ID` — это trace id спана запроса;
+- HTTP-сервер — встроенная телеметрия FastAPI (она берёт глобальные провайдеры сама,
   отдельный пакет инструментирования не нужен); httpx (вызовы GitHub и модели) и
   SQLAlchemy — пакеты `opentelemetry-instrumentation-*`;
 - спаны этапов прогона — `OtelStageTracer`, адаптер порта, который зовёт `StepRecorder`;
@@ -20,8 +20,11 @@
 отправляет их OTLP/HTTP — endpoint из `OTEL_EXPORTER_OTLP_ENDPOINT` читает сам
 экспортёр (приём делает коллектор телеметрии). Без настройки спаны никуда не
 уходят и ошибок экспорта в логе нет; неподдержанное значение выключает только
-свой экспортёр и предупреждает при старте. Автонастройка экспортёров FastAPI и
-его OTel-лог исключений выключены явно (`create_app`, `telemetry=`).
+свой экспортёр и предупреждает при старте. Метрики гейтит так же
+`OTEL_METRICS_EXPORTER`: по умолчанию (`none`) они собираются, но никуда не
+уходят — SDK без гейта сам ставит `otlp` и стучался бы в localhost:4318.
+Автонастройка экспортёров FastAPI и его OTel-лог исключений выключены явно
+(`create_app`, `telemetry=`).
 
 Query серверного спана на путях входа скрывается (`redact_query`, `QueryRedaction`): в
 нём `code` и `state` callback'а OAuth.
@@ -48,6 +51,7 @@ from weakref import WeakKeyDictionary
 from opentelemetry import context as otel_context
 from opentelemetry import metrics, propagate, trace
 from opentelemetry.context import Context
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.utils import suppress_instrumentation
@@ -58,6 +62,12 @@ from opentelemetry.propagators.textmap import (
     TextMapPropagator,
     default_getter,
     default_setter,
+)
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import (
+    ConsoleMetricExporter,
+    MetricExporter,
+    PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import Span, SpanLimits, SpanProcessor, TracerProvider
@@ -94,9 +104,10 @@ _tracer = trace.get_tracer(__name__)
 # только новые имена, без дубля старых.
 SEMCONV_STABILITY_OPT_IN = "database,http"
 
-# Провайдер, который поставил `configure_tracing`: его и закрывает `shutdown_tracing`.
-# Чужой провайдер (тест со своим экспортёром) не закрываем.
+# Провайдеры, которые поставил `configure_telemetry`: их и закрывает
+# `shutdown_tracing`. Чужие провайдеры (тест со своим экспортёром) не закрываем.
 _installed: TracerProvider | None = None
+_meter_installed: MeterProvider | None = None
 
 # Дефолт лимита длины значений атрибутов спана: без него `url.full` с длинными
 # путями и тексты ошибок раздували бы спан и трафик экспорта.
@@ -108,6 +119,13 @@ DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT = 4096
 _EXPORTER_FACTORIES: dict[str, Callable[[], SpanExporter]] = {
     "console": lambda: ConsoleSpanExporter(),
     "otlp": lambda: OTLPSpanExporter(),
+}
+
+# Значение `OTEL_METRICS_EXPORTER` → фабрика экспортёра метрик; тот же список
+# через запятую, что у трейсов.
+_METRIC_EXPORTER_FACTORIES: dict[str, Callable[[], MetricExporter]] = {
+    "console": lambda: ConsoleMetricExporter(),
+    "otlp": lambda: OTLPMetricExporter(),
 }
 
 
@@ -188,14 +206,14 @@ def link_client_trace(traceparent: str | None) -> None:
         trace.get_current_span().add_link(client, {LINK_SOURCE: LINK_SOURCE_CLIENT})
 
 
-def configure_tracing(service_name: str) -> None:
-    """Поставить пустой пропагатор, SDK-провайдер трейсов и инструментирование.
+def configure_telemetry(service_name: str) -> None:
+    """Поставить пустой пропагатор, SDK-провайдеры трейсов и метрик, инструментирование.
 
-    Провайдер глобальный и ставится один раз на процесс; если он уже стоит (второй
-    вызов или тест со своим `InMemorySpanExporter`), его не трогаем. `OTEL_SERVICE_NAME`
-    переопределяет `service_name`.
+    Провайдеры глобальные и ставятся один раз на процесс; если провайдер уже стоит
+    (второй вызов или тест со своим `InMemorySpanExporter`/`InMemoryMetricReader`),
+    его не трогаем. `OTEL_SERVICE_NAME` переопределяет `service_name`.
     """
-    global _installed
+    global _installed, _meter_installed
     # Пропагатор ставится всегда, и поверх `OTEL_PROPAGATORS`: доверие к входящим
     # заголовкам — правило сервиса, а не настройка окружения.
     propagate.set_global_textmap(_NoPropagation())
@@ -205,17 +223,29 @@ def configure_tracing(service_name: str) -> None:
         provider = build_tracer_provider(service_name)
         trace.set_tracer_provider(provider)
         _installed = provider
+    if not isinstance(metrics.get_meter_provider(), MeterProvider):
+        meter_provider = build_meter_provider(service_name)
+        metrics.set_meter_provider(meter_provider)
+        _meter_installed = meter_provider
+
+
+def configure_tracing(service_name: str) -> None:
+    """Прежнее имя `configure_telemetry` — оставлено вызовом, чтобы точки вызова не ломались."""
+    configure_telemetry(service_name)
 
 
 def shutdown_tracing() -> None:
-    """Выгрузить накопленные спаны и закрыть провайдер, который поставил `configure_tracing`.
+    """Выгрузить накопленные спаны и метрики, закрыть провайдеры `configure_telemetry`.
 
     Зовётся при остановке: в lifespan API и при выходе воркера. `atexit` SDK закрыл бы
-    провайдер и сам, но только при обычном выходе интерпретатора — смерть от SIGTERM
-    с обработчиком по умолчанию его не вызывает, и спаны батч-процессора пропадают.
+    провайдеры и сам, но только при обычном выходе интерпретатора — смерть от SIGTERM
+    с обработчиком по умолчанию его не вызывает, и спаны батч-процессора и метрики
+    периодического ридера пропадают.
     """
     if _installed is not None:
         _installed.shutdown()
+    if _meter_installed is not None:
+        _meter_installed.shutdown()
 
 
 def parse_exporters(value: str) -> list[str]:
@@ -264,6 +294,37 @@ def build_tracer_provider(service_name: str) -> TracerProvider:
             continue
         provider.add_span_processor(BatchSpanProcessor(factory()))
     return provider
+
+
+def build_meter_provider(service_name: str) -> MeterProvider:
+    """SDK-провайдер метрик с экспортом из `OTEL_METRICS_EXPORTER` — как у трейсов.
+
+    Ридер ставится на каждый поддержанный экспортёр; неподдержанное значение
+    выключает только свой экспортёр и получает одно предупреждение при старте.
+    `none` и пустое значение — экспорт выключен: ридеров нет, метрики никуда
+    не уходят и ошибок в логе нет. Гейт обязателен: SDK по умолчанию сам
+    ставит `otlp` и без него стучался бы в localhost:4318. Resource — тот же,
+    что у трейсов: `service.name` из кода, версия и окружение — из
+    `OTEL_RESOURCE_ATTRIBUTES`.
+    """
+    attributes = (
+        {} if os.environ.get("OTEL_SERVICE_NAME") else {SERVICE_NAME: service_name}
+    )
+    readers = []
+    for name in parse_exporters(os.environ.get("OTEL_METRICS_EXPORTER", "")):
+        if name == "none":
+            continue  # явное «без экспорта» по спецификации OTel
+        factory = _METRIC_EXPORTER_FACTORIES.get(name)
+        if factory is None:
+            logger.warning(
+                "OTEL_METRICS_EXPORTER=%s не поддержан: метрики этому экспортёру"
+                " не уходят (поддержаны %s)",
+                name,
+                ", ".join(sorted(_METRIC_EXPORTER_FACTORIES)),
+            )
+            continue
+        readers.append(PeriodicExportingMetricReader(factory()))
+    return MeterProvider(resource=Resource.create(attributes), metric_readers=readers)
 
 
 def _sampler() -> Sampler | None:
@@ -374,7 +435,7 @@ _redactions: WeakKeyDictionary[TracerProvider, set[tuple[str, str]]] = WeakKeyDi
 def redact_query(path_prefix: str, marker: str) -> None:
     """Скрывать query серверных спанов на путях `path_prefix` — `QueryRedaction`.
 
-    Ставится на глобальный SDK-провайдер, поэтому зовётся после `configure_tracing`.
+    Ставится на глобальный SDK-провайдер, поэтому зовётся после `configure_telemetry`.
     """
     provider = trace.get_tracer_provider()
     if not isinstance(provider, TracerProvider):
