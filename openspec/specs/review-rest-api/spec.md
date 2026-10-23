@@ -680,7 +680,7 @@
 #### Scenario: Варианты статуса в контракте
 
 - **WHEN** фронтенд читает `RulesStatusResponse` в `docs/openapi/openapi.json`
-- **THEN** у схемы дискриминатор `status` и четыре варианта: `loaded` (`branch`, `path`, `rules` из `RepoRule` с `name`, `patterns`, `excludes`, `checks`, `rejected` из `RejectedRule` с `name`, `reason`, `fetched_at` в UTC с `Z`), `absent`, `too_large`, `unavailable` (`branch`, `path`)
+- **THEN** у схемы дискриминатор `status` и пять вариантов: `loaded` (`branch`, `path`, `rules` из `RepoRule` с `name`, `patterns`, `excludes`, `checks`, `rejected` из `RejectedRule` с `name`, `reason`, `fetched_at` в UTC с `Z`), `empty` (`branch`, `path`, `rejected`, `fetched_at`), `absent`, `too_large`, `unavailable` (`branch`, `path`)
 
 ### Requirement: Один репозиторий по id
 

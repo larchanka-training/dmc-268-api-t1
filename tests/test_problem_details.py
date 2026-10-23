@@ -565,6 +565,7 @@ def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
 
     variants = {
         "loaded": "RulesLoaded",
+        "empty": "RulesEmpty",
         "absent": "RulesAbsent",
         "too_large": "RulesTooLarge",
         "unavailable": "RulesUnavailable",
@@ -576,13 +577,14 @@ def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
         "propertyName": "status",
         "mapping": {status: f"#/components/schemas/{name}" for status, name in variants.items()},
     }
-    assert len(rules_status["oneOf"]) == 4
+    assert len(rules_status["oneOf"]) == 5
     for status, name in variants.items():
         assert components[name]["properties"]["status"]["const"] == status
         assert {"status", "branch", "path"} <= set(components[name]["required"])
     assert set(components["RulesLoaded"]["required"]) == {
         "status", "branch", "path", "rules", "rejected", "fetched_at"
     }
+    assert set(components["RulesEmpty"]["required"]) == {"status", "branch", "path", "rejected", "fetched_at"}
     assert set(components["RepoRule"]["required"]) == {"name", "patterns", "excludes", "checks"}
     assert set(components["RejectedRule"]["required"]) == {"name", "reason"}
 

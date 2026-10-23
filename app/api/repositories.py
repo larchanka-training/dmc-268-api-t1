@@ -109,6 +109,7 @@ _RULES_DESCRIPTION = (
     "(задача #113). Требует сессию; id репозитория проверяется до ответа 501. Когда ручка заработает: "
     "чем закончилась загрузка `.review/rules.md` с ветки по умолчанию репозитория — те же исходы, что "
     "у загрузки правил для прогона: loaded — файл разобран, в ответе принятые правила и отклонённые "
+    "разделы; empty — файл разобран, но ни один раздел не стал правилом, в ответе отклонённые "
     "разделы; absent — файла нет; too_large — файл больше лимита и не разбирался; unavailable — "
     "провайдер не ответил. Кроме loaded, ревью идёт по стандартным критериям. 404 "
     "REPOSITORY_NOT_FOUND, если репозитория нет."
@@ -386,6 +387,14 @@ class RulesLoaded(_RulesFile):
     fetched_at: UtcDatetime = Field(description="Когда файл получен от провайдера.")
 
 
+class RulesEmpty(_RulesFile):
+    """Файл правил разобран, но ни один раздел не стал правилом: ревью по стандартным критериям."""
+
+    status: Literal[RulesStatus.EMPTY]
+    rejected: list[RejectedRule] = Field(description="Разделы, не ставшие правилами.")
+    fetched_at: UtcDatetime = Field(description="Когда файл получен от провайдера.")
+
+
 class RulesAbsent(_RulesFile):
     """Файла правил на ветке нет: ревью по стандартным критериям."""
 
@@ -406,7 +415,10 @@ class RulesUnavailable(_RulesFile):
 
 class RulesStatusResponse(
     RootModel[
-        Annotated[RulesLoaded | RulesAbsent | RulesTooLarge | RulesUnavailable, Field(discriminator="status")]
+        Annotated[
+            RulesLoaded | RulesEmpty | RulesAbsent | RulesTooLarge | RulesUnavailable,
+            Field(discriminator="status"),
+        ]
     ]
 ):
     """Чем закончилась загрузка `.review/rules.md`; вариант — по `status`."""

@@ -1192,7 +1192,7 @@
           "repositories"
         ],
         "summary": "Статус правил ревью репозитория",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #113). Требует сессию; id репозитория проверяется до ответа 501. Когда ручка заработает: чем закончилась загрузка `.review/rules.md` с ветки по умолчанию репозитория — те же исходы, что у загрузки правил для прогона: loaded — файл разобран, в ответе принятые правила и отклонённые разделы; absent — файла нет; too_large — файл больше лимита и не разбирался; unavailable — провайдер не ответил. Кроме loaded, ревью идёт по стандартным критериям. 404 REPOSITORY_NOT_FOUND, если репозитория нет.",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #113). Требует сессию; id репозитория проверяется до ответа 501. Когда ручка заработает: чем закончилась загрузка `.review/rules.md` с ветки по умолчанию репозитория — те же исходы, что у загрузки правил для прогона: loaded — файл разобран, в ответе принятые правила и отклонённые разделы; empty — файл разобран, но ни один раздел не стал правилом, в ответе отклонённые разделы; absent — файла нет; too_large — файл больше лимита и не разбирался; unavailable — провайдер не ответил. Кроме loaded, ревью идёт по стандартным критериям. 404 REPOSITORY_NOT_FOUND, если репозитория нет.",
         "operationId": "getRepositoryRules",
         "security": [
           {
@@ -5187,6 +5187,59 @@
         "title": "RulesAbsent",
         "description": "Файла правил на ветке нет: ревью по стандартным критериям."
       },
+      "RulesEmpty": {
+        "properties": {
+          "branch": {
+            "type": "string",
+            "title": "Branch",
+            "description": "Ветка, с которой читался файл, — ветка по умолчанию репозитория.",
+            "examples": [
+              "main"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Путь к файлу правил в репозитории.",
+            "examples": [
+              ".review/rules.md"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "const": "empty",
+            "title": "Status"
+          },
+          "rejected": {
+            "items": {
+              "$ref": "#/components/schemas/RejectedRule"
+            },
+            "type": "array",
+            "title": "Rejected",
+            "description": "Разделы, не ставшие правилами."
+          },
+          "fetched_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Fetched At",
+            "description": "Когда файл получен от провайдера.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "branch",
+          "path",
+          "status",
+          "rejected",
+          "fetched_at"
+        ],
+        "title": "RulesEmpty",
+        "description": "Файл правил разобран, но ни один раздел не стал правилом: ревью по стандартным критериям."
+      },
       "RulesLoaded": {
         "properties": {
           "branch": {
@@ -5255,6 +5308,9 @@
             "$ref": "#/components/schemas/RulesLoaded"
           },
           {
+            "$ref": "#/components/schemas/RulesEmpty"
+          },
+          {
             "$ref": "#/components/schemas/RulesAbsent"
           },
           {
@@ -5270,6 +5326,7 @@
           "propertyName": "status",
           "mapping": {
             "absent": "#/components/schemas/RulesAbsent",
+            "empty": "#/components/schemas/RulesEmpty",
             "loaded": "#/components/schemas/RulesLoaded",
             "too_large": "#/components/schemas/RulesTooLarge",
             "unavailable": "#/components/schemas/RulesUnavailable"

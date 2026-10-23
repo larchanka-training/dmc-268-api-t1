@@ -58,6 +58,7 @@ from app.worker.factory import (
 )
 
 from ..fakes.github_api import APP_ID, FakeGitHub, PullRequest, app_private_key
+from ..fakes.installation_catalog import FakeInstallationCatalog
 
 REPO_FULL_NAME = "acme/payments"
 REPO_PROVIDER_ID = "700100"
@@ -144,8 +145,11 @@ class Stack:
         return Container(
             engine=self.engine,
             settings=self.settings,
+            # Вход и подключение репозиториев стенд не проходит: токенов пользователя нет.
+            _token_cipher=None,
             _job_queue=RabbitMQJobQueue(self.rabbitmq_url),
             _vcs_gateway=GitHubVcsGateway(auth, client, sleep=lambda _: None),
+            _installation_catalog=FakeInstallationCatalog([]),
             _oauth_providers={},
             _cache_store=InMemoryCacheStore(),
             _llm_gateway=llm,
