@@ -64,7 +64,7 @@
 
 ## 5. Миграции — в трейсе деплоя
 
-- [ ] 5.1 `alembic/env.py` (online-режим): `configure_telemetry` с `service_name` =
+- [x] 5.1 `alembic/env.py` (online-режим): `configure_telemetry` с `service_name` =
   `dmc-268-migrate`, корневой спан `migrate`, `instrument_engine(engine)`, `shutdown_tracing()`
   в конце. Тест: `alembic upgrade head` даёт трейс с SQL-детьми и не меняет результат (миграционные
   тесты зелёные, `uv run alembic heads` — одна ревизия)
