@@ -101,10 +101,13 @@ processors:
           - set(attributes["db.operation.name"], "<скрыто>") where attributes["db.operation.name"] != nil
           # Описание статуса SQL-спанов: в DETAIL psycopg — значения ключей.
           # Только заполненное описание: у успешных SQL-спанов статус Unset и
-          # описание пустое — бессмысленный маркер им не ставится. Описания
-          # статусов прочих спанов не трогаются: после #122 это имя типа
-          # исключения, диагноз в трейсе остаётся.
-          - set(status.message, "<скрыто>") where (attributes["db.system.name"] != nil or attributes["db.system"] != nil) and status.message != nil
+          # описание пустое — бессмысленный маркер им не ставится. Сравнение
+          # с пустой строкой, а не с nil: геттер status.message возвращает
+          # Go-строку (для Unset — ""), и nil-сравнение по правилам OTTL
+          # (string против nil — «not equal») было бы всегда истинным.
+          # Описания статусов прочих спанов не трогаются: после #122 это имя
+          # типа исключения, диагноз в трейсе остаётся.
+          - set(status.message, "<скрыто>") where (attributes["db.system.name"] != nil or attributes["db.system"] != nil) and status.message != ""
       # message и stacktrace события exception: там текст ответа провайдера
       # модели и значения ключей из ошибок базы. exception.type сохраняется.
       - context: spanevent

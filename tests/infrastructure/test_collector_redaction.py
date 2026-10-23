@@ -5,7 +5,11 @@
 Тест проверяет их на примерах из аудита #89, не поднимая стек: правила
 интерпретируются тем их подмножеством, которое конфиг использует —
 `set(..., "<скрыто>")` с условиями присутствия атрибута, непустого статуса
-спана и имени события.
+спана и имени события. Условие на статус вычисляется по фактической
+семантике OTTL: строковый геттер `status.message` возвращает для Unset
+пустую строку, а не nil (`pkg/ottl/compare.go`: string x nil — всегда
+«not equal»), поэтому в конфиге — сравнение с `""`, а nil-сравнение
+запрещено громким падением.
 Правило вне этого подмножества упадёт на разборе и потребует обновить тест
 вместе с собой; тихое выпадение атрибута из правил ловит проверка полноты
 покрытия. Валидация конфига самим коллектором — класс
@@ -57,12 +61,24 @@ _RULE = re.compile(
 )
 _TARGET = re.compile(r'^attributes\["([^"]+)"\]$')
 _PRESENCE = re.compile(r'^attributes\["([^"]+)"\] != nil$')
+# Сравнение строкового геттера статуса с литералом: status.message != "...".
+_SET_STATUS_LITERAL = re.compile(r'^status\.message != "(?P<value>[^"]*)"$')
 
-# Условие на статус спана; в контексте spanevent статуса нет — там оно
-# громко падает, а не тихо считается невыполненным.
-_SET_STATUS = "status.message != nil"
 # Событие не имеет статуса: подменяет его в вычислении условий.
 _EVENT_HAS_NO_STATUS = object()
+
+
+def _runtime_status_message(status_message: Any) -> str:
+    """Описание статуса, каким его видит OTTL-геттер в рантайме.
+
+    Геттер `status.message` возвращает Go-строку: для спана с Unset-статусом
+    это пустая строка, а не nil (`pkg/ottl/contexts/internal/ctxspan`), —
+    поэтому `None` («статус не задан») в модели нормализуется к `""`.
+    """
+    if status_message is _EVENT_HAS_NO_STATUS:
+        message = "условие status.message в контексте spanevent"
+        raise ValueError(message)
+    return status_message if status_message is not None else ""
 
 
 def _split_where(where: str) -> tuple[tuple[str, ...], ...]:
@@ -112,16 +128,31 @@ class Rule:
 def _condition_holds(
     condition: str, name: str | None, attributes: dict[str, Any], status_message: Any
 ) -> bool:
+    # Presence-check атрибутов — семантика атрибутов: нет атрибута, геттер
+    # вернул nil. На строковый геттер статуса это НЕ переносится: тот всегда
+    # возвращает строку.
     presence = _PRESENCE.fullmatch(condition)
     if presence is not None:
         return presence.group(1) in attributes
-    if condition == _SET_STATUS:
-        if status_message is _EVENT_HAS_NO_STATUS:
-            message = "условие status.message в контексте spanevent"
-            raise ValueError(message)
-        return status_message is not None
+    literal = _SET_STATUS_LITERAL.fullmatch(condition)
+    if literal is not None:
+        # string x string — обычное сравнение по правилам OTTL
+        # (`pkg/ottl/compare.go`): "" != "" — false, непустое описание — true.
+        return _runtime_status_message(status_message) != literal.group("value")
     if condition == 'name == "exception"':
         return name == "exception"
+    if "status.message" in condition:
+        # В частности `status.message != nil`: в рантайме это no-op —
+        # string x nil по таблице сравнения OTTL всегда «not equal», а nil
+        # для строкового геттера вообще невозможен. Такое условие в конфиге
+        # не защищает ничего; в модели оно вне подмножества, чтобы не
+        # выглядело рабочим.
+        message = (
+            "сравнение статуса с nil — no-op в OTTL (string x nil всегда"
+            " not equal); используй сравнение с пустой строкой:"
+            f" {condition}"
+        )
+        raise ValueError(message)
     message = f"правило использует условие вне подмножества теста: {condition}"
     raise ValueError(message)
 
@@ -270,9 +301,9 @@ def test_database_values_and_status_description_are_hidden(rules: list[Rule]) ->
 def test_successful_sql_span_status_stays_unset(rules: list[Rule]) -> None:
     """Успешный SQL-спан не получает бессмысленный маркер статуса.
 
-    У него статус Unset и описание пустое: условие «статус задан» защищает
-    от подстановки маркера в пустое описание, атрибуты при этом редактируются
-    как у любого SQL-спана.
+    У него статус Unset: OTTL-геттер возвращает для него пустую строку (не
+    nil), сравнение с `""` ложно — маркер не подставляется. Атрибуты при
+    этом редактируются как у любого SQL-спана.
     """
     span = apply_rules(
         rules,
