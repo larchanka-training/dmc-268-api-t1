@@ -12,7 +12,6 @@ from app.application.run_feed_events import (
     run_feed_events,
     visible_repository_ids,
 )
-from app.application.use_cases.connect_repository import AvailableRepository
 from app.domain.entities import (
     InstallationRepository,
     MergeRequest,
@@ -191,15 +190,9 @@ def test_visible_repository_ids_are_the_registered_ones_among_available() -> Non
     uow = FakeUnitOfWork()
     uow.repositories.add(REPOSITORY)
     available = [
-        AvailableRepository(
-            InstallationRepository("101", "octo-org/api", "main", READ),
-            already_connected=True,
-        ),
+        InstallationRepository("101", "octo-org/api", "main", READ),
         # Доступен у провайдера, но не зарегистрирован: прогонов у него нет.
-        AvailableRepository(
-            InstallationRepository("202", "octo-org/web", "main", READ),
-            already_connected=False,
-        ),
+        InstallationRepository("202", "octo-org/web", "main", READ),
     ]
 
     assert visible_repository_ids(uow, available) == frozenset({REPOSITORY.id})

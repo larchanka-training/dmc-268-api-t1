@@ -27,6 +27,7 @@ from app.domain.entities import (
 )
 from app.domain.enums import Provider
 from app.domain.run_feed import FeedCursor
+from app.domain.run_list import RunListFilter, RunListPage
 
 
 class RepositoryRepo(Protocol):
@@ -85,6 +86,15 @@ class ReviewRunRepo(Protocol):
         окна перепроверки — `updated_at` позже `recheck_from`, но не новее `after` (окно
         ограничено временем, а не числом строк). Порядок — по `(updated_at, id)`. Пустой
         `repository_ids` — пустой ответ.
+        """
+        ...
+
+    def list_page(self, run_filter: RunListFilter, limit: int, offset: int) -> RunListPage:
+        """Страница прогонов под фильтром — строками списка — и их общее число.
+
+        Порядок — `created_at` по убыванию, при равном — `id` по убыванию. Число
+        запросов к базе не зависит от размера страницы. Пустой `repository_ids` или
+        пустой набор статусов — пустая страница и `total = 0`.
         """
         ...
 

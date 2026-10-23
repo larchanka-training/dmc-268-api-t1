@@ -31,6 +31,7 @@ from app.domain.entities import (
 from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
 from app.domain.run_feed import FeedCursor
+from app.domain.run_list import RunListFilter, RunListPage
 
 
 class FakeRepositoryRepo:
@@ -142,6 +143,24 @@ class FakeMergeRequestRepo:
         self._by_id[merge_request.id] = merge_request
 
 
+def _matches(entry: ReviewRunListEntry, run_filter: RunListFilter) -> bool:
+    run, merge_request = entry.run, entry.merge_request
+    if merge_request.repository_id not in run_filter.repository_ids:
+        return False
+    if run_filter.statuses is not None and run.status not in run_filter.statuses:
+        return False
+    if run_filter.author is not None and merge_request.author != run_filter.author:
+        return False
+    if run_filter.text is not None:
+        needle = run_filter.text.lower()
+        haystack = (merge_request.title, merge_request.author, merge_request.source_branch)
+        if not any(needle in value.lower() for value in haystack) and merge_request.number != run_filter.number:
+            return False
+    if run_filter.created_from is not None and run.created_at < run_filter.created_from:
+        return False
+    return run_filter.created_to is None or run.created_at < run_filter.created_to
+
+
 class FakeReviewRunRepo:
     def __init__(self) -> None:
         self._by_id: dict[UUID, ReviewRun] = {}
@@ -217,6 +236,22 @@ class FakeReviewRunRepo:
             if e.run.updated_at > recheck_from and FeedCursor(e.run.updated_at, e.run.id) <= after
         ]
         return sorted(fresh + late, key=lambda e: (e.run.updated_at, e.run.id))
+
+    def list_page(self, run_filter: RunListFilter, limit: int, offset: int) -> RunListPage:
+        # Как SQL-адаптер: ILIKE — подстрока через lower(), не casefold(); номер — точное совпадение.
+        entries = [entry for entry in self._entries() if _matches(entry, run_filter)]
+        entries.sort(key=lambda e: (e.run.created_at, e.run.id), reverse=True)
+        return RunListPage(entries=entries[offset : offset + limit], total=len(entries))
+
+    def _entries(self) -> list[ReviewRunListEntry]:
+        entries: list[ReviewRunListEntry] = []
+        for run in self._by_id.values():
+            merge_request = self._merge_requests.get(run.merge_request_id)
+            assert merge_request is not None
+            repository = self._repositories.get(merge_request.repository_id)
+            assert repository is not None
+            entries.append(ReviewRunListEntry(run, merge_request, repository, len(self._findings.list_for_run(run.id))))
+        return entries
 
     def add(self, run: ReviewRun) -> None:
         self.added.append(run)

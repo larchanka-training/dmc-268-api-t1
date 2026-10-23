@@ -7,13 +7,26 @@
 
 import datetime as dt
 from collections.abc import Collection
+from typing import Any
 from uuid import UUID
 
 from psycopg.errors import LockNotAvailable
-from sqlalchemy import delete, func, literal, select, text, tuple_, union_all, update
+from sqlalchemy import (
+    CTE,
+    ColumnElement,
+    delete,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+    tuple_,
+    union_all,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from app.domain.entities import (
     ContextPayload,
@@ -34,6 +47,7 @@ from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
 from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
 from app.domain.run_feed import FeedCursor
+from app.domain.run_list import RunListFilter, RunListPage
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
@@ -179,6 +193,26 @@ class SqlAlchemyMergeRequestRepo:
         row.state = merge_request.state
 
 
+def _run_list_conditions(run_filter: RunListFilter) -> list[ColumnElement[bool]]:
+    """Условия фильтра списка прогонов; запрос уже соединён с `merge_requests`."""
+    conditions: list[ColumnElement[bool]] = [MergeRequestRow.repository_id.in_(run_filter.repository_ids)]
+    if run_filter.statuses is not None:
+        conditions.append(ReviewRunRow.status.in_(run_filter.statuses))
+    if run_filter.author is not None:
+        conditions.append(MergeRequestRow.author == run_filter.author)
+    if run_filter.text is not None:
+        text_columns = (MergeRequestRow.title, MergeRequestRow.author, MergeRequestRow.source_branch)
+        matches = [column.icontains(run_filter.text, autoescape=True) for column in text_columns]
+        if run_filter.number is not None:
+            matches.append(MergeRequestRow.number == run_filter.number)
+        conditions.append(or_(*matches))
+    if run_filter.created_from is not None:
+        conditions.append(ReviewRunRow.created_at >= run_filter.created_from)
+    if run_filter.created_to is not None:
+        conditions.append(ReviewRunRow.created_at < run_filter.created_to)
+    return conditions
+
+
 class SqlAlchemyReviewRunRepo:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -235,9 +269,34 @@ class SqlAlchemyReviewRunRepo:
         )
         fresh = visible.where(key > cursor).limit(limit).subquery("fresh")
         late = visible.where(ReviewRunRow.updated_at > recheck_from, key <= cursor).subquery("late")
-        # CTE, а не подзапрос: на неё ссылаются и выборка, и подсчёт находок, а CTE с
-        # двумя ссылками PostgreSQL вычисляет один раз.
         picked = union_all(select(fresh.c.id), select(late.c.id)).cte("picked")
+        return self._entries(picked, ReviewRunRow.updated_at, ReviewRunRow.id)
+
+    def list_page(self, run_filter: RunListFilter, limit: int, offset: int) -> RunListPage:
+        """Два запроса: `COUNT` под фильтрами и страница строками списка, как у `list_changed`.
+
+        Порядок страницы — по индексу `(created_at, id)`. Подстрока `q` ищется `ILIKE` без
+        индекса, по прогонам видимых репозиториев; `%` и `_` из ввода экранируются
+        (`autoescape`) и шаблоном не становятся.
+        """
+        if not run_filter.repository_ids or run_filter.statuses == frozenset():
+            return RunListPage(entries=[], total=0)
+        matching = (
+            select(ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .where(*_run_list_conditions(run_filter))
+        )
+        total = self._session.scalar(select(func.count()).select_from(matching.subquery()))
+        newest_first = (ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+        page = matching.order_by(*newest_first).limit(limit).offset(offset).cte("page")
+        return RunListPage(entries=self._entries(page, *newest_first), total=total or 0)
+
+    def _entries(self, picked: CTE, *order_by: ColumnElement[Any] | InstrumentedAttribute[Any]) -> list[ReviewRunListEntry]:
+        """Прогоны из `picked` строками списка: запрос на изменение, репозиторий и число находок.
+
+        CTE, а не подзапрос: на неё ссылаются и выборка, и подсчёт находок, а CTE с
+        двумя ссылками PostgreSQL вычисляет один раз.
+        """
         counts = (
             select(FindingRow.review_run_id, func.count().label("findings_count"))
             .where(FindingRow.review_run_id.in_(select(picked.c.id)))
@@ -255,7 +314,7 @@ class SqlAlchemyReviewRunRepo:
             .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
             .join(RepositoryRow, RepositoryRow.id == MergeRequestRow.repository_id)
             .outerjoin(counts, counts.c.review_run_id == ReviewRunRow.id)
-            .order_by(ReviewRunRow.updated_at, ReviewRunRow.id)
+            .order_by(*order_by)
         ).all()
         return [
             ReviewRunListEntry(
