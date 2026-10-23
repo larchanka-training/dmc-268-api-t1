@@ -105,6 +105,6 @@
 
 ## 8. Финальные проверки
 
-- [ ] 8.1 Полный набор: `uv run ruff check .`, `uv run lint-imports`, `uv run mypy .`,
+- [x] 8.1 Полный набор: `uv run ruff check .`, `uv run lint-imports`, `uv run mypy .`,
   `uv run pytest`, `uv run python scripts/export_openapi.py --check`,
   `npx @fission-ai/openspec@1.14.2 validate --all --strict` — всё зелёное, пропущенных тестов нет
