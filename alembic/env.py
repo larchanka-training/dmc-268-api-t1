@@ -13,7 +13,13 @@ from app.config import load_settings
 from app.infrastructure.db import models  # noqa: F401  (регистрирует таблицы)
 from app.infrastructure.db.base import Base
 from app.infrastructure.logging import configure_logging
-from app.infrastructure.telemetry import MIGRATE_SERVICE
+from app.infrastructure.telemetry import (
+    MIGRATE_SERVICE,
+    configure_telemetry,
+    instrument_engine,
+    migrate_span,
+    shutdown_tracing,
+)
 
 config = context.config
 
@@ -64,20 +70,35 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,
-            compare_server_default=True,
+    # Телеметрия процесса миграций: провайдер с service.name = dmc-268-migrate
+    # ставится до движка и спана. Без `OTEL_TRACES_EXPORTER` экспортёров нет —
+    # миграции проходят как раньше.
+    configure_telemetry(MIGRATE_SERVICE)
+    try:
+        connectable = engine_from_config(
+            config.get_section(config.config_ini_section, {}),
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
         )
-        with context.begin_transaction():
-            context.run_migrations()
+        # Спаны на запросы к базе: миграционные операторы ложатся в трейс детьми.
+        instrument_engine(connectable)
+        with (
+            migrate_span(),
+            connectable.connect() as connection,
+        ):
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                compare_type=True,
+                compare_server_default=True,
+            )
+            with context.begin_transaction():
+                context.run_migrations()
+    finally:
+        # Накопленные спаны выгружаются до выхода процесса — и при ошибке
+        # миграции тоже: упавший прогон деплоя тоже сигнал. Исключение
+        # наружу не глотается.
+        shutdown_tracing()
 
 
 if context.is_offline_mode():
