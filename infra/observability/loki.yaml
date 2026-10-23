@@ -1,0 +1,42 @@
+# Логи — Loki single-binary с файловым хранением. Конфиг один для локального
+# стека и стенда; различия окружений (объём тома, лимит памяти) — переменные
+# docker compose и infra, не разные конфиги.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+
+schema_config:
+  configs:
+    # v13 поверх tsdb — рекомендуемая схема Loki 3.x.
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+limits_config:
+  # Структурированные метаданные: trace_id из OTLP-логов хранится и фильтруется
+  # — работает переход трейс → лог в Grafana.
+  allow_structured_metadata: true
+  # Хранение логов — 30 дней.
+  retention_period: 720h
