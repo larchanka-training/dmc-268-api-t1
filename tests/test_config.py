@@ -206,3 +206,52 @@ def test_hosted_keys_without_the_flag_are_allowed_but_unused() -> None:
 def test_model_transport_limits_must_be_positive(field: str) -> None:
     with pytest.raises(ValidationError):
         _llm_settings(**{field: 0})
+
+
+# `openssl rand -base64 32` — так ключ генерируется для стенда (README).
+TOKEN_KEY = "q83vEjRWeJq83vEjRWeJq83vEjRWeJq83vEjRWeJq80="
+
+
+def test_the_token_key_is_optional_and_unset_by_default() -> None:
+    assert make_settings().user_token_key is None
+
+
+def test_the_token_key_decodes_to_32_bytes_and_stays_hidden() -> None:
+    settings = Settings(
+        database_url=DATABASE_URL,
+        rabbitmq_url=RABBITMQ_URL,
+        github_webhook_secret=WEBHOOK_SECRET,
+        user_token_encryption_key=TOKEN_KEY,
+    )
+
+    assert settings.user_token_key is not None and len(settings.user_token_key) == 32
+    assert TOKEN_KEY not in repr(settings)
+    assert TOKEN_KEY not in str(settings)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not base64 at all!",
+        # 16 байт — ключ AES-128, а нужен AES-256.
+        "q83vEjRWeJq83vEjRWeJqw==",
+        # Секрет, вставленный вместо ключа, — без ключа в сообщении об ошибке.
+        "ghu_this-is-not-a-key-but-a-token-value",
+    ],
+)
+def test_a_malformed_token_key_fails_the_start_without_echoing_it(bad: str) -> None:
+    with pytest.raises(ValidationError) as raised:
+        Settings(
+            database_url=DATABASE_URL,
+            rabbitmq_url=RABBITMQ_URL,
+            github_webhook_secret=WEBHOOK_SECRET,
+            user_token_encryption_key=bad,
+        )
+    assert "USER_TOKEN_ENCRYPTION_KEY" in str(raised.value)
+    assert bad not in str(raised.value)
+
+
+def test_the_token_key_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USER_TOKEN_ENCRYPTION_KEY", TOKEN_KEY)
+    settings = Settings(database_url=DATABASE_URL, rabbitmq_url=RABBITMQ_URL, github_webhook_secret=WEBHOOK_SECRET)
+    assert settings.user_token_key is not None

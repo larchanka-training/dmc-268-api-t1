@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from app.application.ports.unit_of_work import ActiveRunConflict
+from app.application.stale_sweep import sweep_stale_runs
 from app.domain.entities import (
     ContextPayload,
     DiffAnchor,
@@ -102,6 +103,21 @@ def test_entities_round_trip_through_the_ports(uow) -> None:
     assert stored is not None
     assert stored.full_name == repo.full_name
     assert stored.id == repo.id
+
+
+def test_adding_a_taken_repository_reports_false_instead_of_raising(uow) -> None:
+    """Гонка двух подключений: проигравший получает `False`, а не `IntegrityError`."""
+    first = a_repository()
+    twin = replace(a_repository(), full_name="acme/twin")
+    with uow as work:
+        assert work.repositories.add(first) is True
+        work.commit()
+    with uow as work:
+        assert work.repositories.add(twin) is False
+        work.commit()
+    with uow as work:
+        stored = work.repositories.find_by_provider(Provider.GITHUB, "1")
+    assert stored == first
 
 
 def test_a_failed_unit_of_work_rolls_everything_back(uow) -> None:
@@ -578,3 +594,27 @@ def test_updating_a_step_that_is_not_stored_is_an_error(uow) -> None:
     step = finish_step(a_step(run.id, ReviewRunStage.PUBLISHING, NOW), duration_seconds=1, tokens_used=None)
     with uow as work, pytest.raises(LookupError):
         work.review_run_steps.update(step)
+
+
+def test_a_swept_run_has_no_running_steps_left(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+        work.review_runs.update(advance(run, ReviewRunStatus.BUILDING_CONTEXT, NOW).unwrap())
+        work.commit()
+    abandoned = a_step(run.id, ReviewRunStage.BUILDING_CONTEXT, NOW)
+    with uow as work:
+        work.review_run_steps.add(abandoned)
+        work.commit()
+
+    assert sweep_stale_runs(uow, now=NOW + dt.timedelta(hours=1), limit=dt.timedelta(minutes=30)) == 1
+
+    with uow as work:
+        assert work.review_runs.get(run.id).status is ReviewRunStatus.FAILED
+        (step,) = work.review_run_steps.list_for_run(run.id)
+    assert step == replace(
+        abandoned,
+        status=ReviewRunStepStatus.FAILED,
+        duration_seconds=3600.0,
+        tokens_used=None,
+        error_code="REVIEW_RUN_STALE",
+    )

@@ -131,9 +131,11 @@ class Worker:
         логируется и не останавливает потребление.
 
         `stop` — просьба остановиться (`stop_on_signals`). Сообщение в работе
-        дорабатывает и подтверждается, следующее не берётся; на простое цикл
-        выходит на ближайшем такте, не позже `inactivity_timeout`. Сообщение,
-        которое брокер уже прислал в буфер, `cancel()` возвращает в очередь.
+        дорабатывает и подтверждается, следующее не берётся, даже если брокер
+        уже выдал его циклу. На простое цикл выходит на ближайшем такте, не
+        позже `inactivity_timeout`. В `finally` `cancel()` возвращает в очередь
+        только сообщения из буфера pika (`pending_events`); уже выданное циклу,
+        но не подтверждённое брокер вернёт при `connection.close()`.
         """
         processed = 0
         last_sweep: float | None = None
@@ -141,7 +143,9 @@ class Worker:
             for method, properties, body in self.channel.consume(
                 QUEUE_NAME, inactivity_timeout=1
             ):
-                if method is None and stop is not None and stop.requested:
+                # Выданное, но не подтверждённое сообщение брокер вернёт в
+                # очередь при `connection.close()` в `finally`.
+                if stop is not None and stop.requested:
                     break
                 if sweep is not None and (
                     last_sweep is None or time.monotonic() - last_sweep >= sweep_interval
@@ -152,6 +156,9 @@ class Worker:
                             sweep()
                     except Exception:
                         logger.exception("проход по зависшим прогонам завершился ошибкой")
+                    # Сигнал мог прийти посреди прохода — сообщение этого такта не берём.
+                    if stop is not None and stop.requested:
+                        break
                 if method is None:
                     continue
                 # Стаб типизирует элементы кортежа независимо, поэтому

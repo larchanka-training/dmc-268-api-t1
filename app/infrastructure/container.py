@@ -14,13 +14,15 @@ import httpx
 from sqlalchemy import Engine, create_engine
 
 from app.application.ports import CacheStore, DefinitionExtractor, UnitOfWork
+from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.vcs_gateway import VcsGateway
 from app.config import Settings
 from app.infrastructure.cache.memory import InMemoryCacheStore
-from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.db.token_cipher import TokenCipher
+from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork, UntracedUnitOfWork
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.ollama import OllamaGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
@@ -32,10 +34,15 @@ from app.infrastructure.parsing.tree_sitter_extractor import (
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
+from app.infrastructure.vcs.github_installations import GitHubInstallationCatalog
 
 logger = logging.getLogger(__name__)
 
 _GITHUB_API = "https://api.github.com"
+# Запросы от имени пользователя (вход, refresh, отзыв, список репозиториев):
+# таймаут на каждую фазу httpx, подключение — короче. Refresh держит
+# блокировку строки токена, и худший случай — сумма фаз, а не 10 секунд.
+_GITHUB_USER_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # Callback входа: путь роутера `/auth`, зарегистрированный в настройках GitHub App.
 _OAUTH_CALLBACK_PATH = "/api/v1/auth/{provider}/callback"
 
@@ -46,6 +53,9 @@ class Container:
 
     engine: Engine
     settings: Settings
+    # Ключ шифрования токенов пользователя; `None` — не задан, и токены не
+    # пишутся и не читаются (вход отказывает), остальное работает.
+    _token_cipher: TokenCipher | None
     # Один экземпляр на процесс, а не фабрика: `RabbitMQJobQueue` сам держит
     # переиспользуемое AMQP-соединение, и это работает, только если каждый
     # запрос получает один и тот же объект, а не новый на каждый вызов
@@ -56,6 +66,9 @@ class Container:
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
     _vcs_gateway: VcsGateway | None
+    # Репозитории, видимые пользователю, — запросы с его токеном; App-реквизиты
+    # и кэш installation tokens ему не нужны. Конструирование — без сети.
+    _installation_catalog: InstallationCatalog
     # Провайдеры входа по имени из пути `/auth/{provider}`. Конструирование —
     # без сети, поэтому они собираются сразу, а не лениво.
     _oauth_providers: Mapping[str, OAuthProvider]
@@ -69,7 +82,11 @@ class Container:
     _definition_extractor: DefinitionExtractor | None
 
     def unit_of_work(self) -> UnitOfWork:
-        return SqlAlchemyUnitOfWork(self.engine)
+        return SqlAlchemyUnitOfWork(self.engine, self._token_cipher)
+
+    def untraced_unit_of_work(self) -> UnitOfWork:
+        """Единица работы без спанов SQL — для опроса в потоке событий."""
+        return UntracedUnitOfWork(self.engine, self._token_cipher)
 
     def job_queue(self) -> JobQueue:
         """Выдать очередь задач; соединение с брокером открывается лениво,
@@ -98,6 +115,10 @@ class Container:
             object.__setattr__(self, "_vcs_gateway", gateway)
         return gateway
 
+    def installation_catalog(self) -> InstallationCatalog:
+        """Репозитории установок GitHub App, видимые пользователю по его токену."""
+        return self._installation_catalog
+
     def oauth_provider(self, name: str) -> OAuthProvider | None:
         """Провайдер входа по имени из пути; неизвестное имя — `None`."""
         return self._oauth_providers.get(name)
@@ -117,23 +138,46 @@ def build_container(settings: Settings) -> Container:
     # pool_pre_ping: соединение, умершее в простое (перезапуск сервера, idle
     # timeout, NAT сбросил поток), обнаруживается при выдаче из пула и
     # заменяется, а не всплывает OperationalError на следующем запросе.
+    # hide_parameters: текст ошибки SQLAlchemy не несёт `[parameters: …]` — в
+    # параметрах бывает код из диффа, а текст ошибки попадает в лог и в спан
+    # (`record_exception`, статус спана).
     return Container(
-        engine=create_engine(settings.database_url, future=True, pool_pre_ping=True),
+        engine=create_engine(
+            settings.database_url, future=True, pool_pre_ping=True, hide_parameters=True
+        ),
         settings=settings,
+        _token_cipher=_token_cipher(settings),
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
+        _installation_catalog=_build_installation_catalog(settings),
         _oauth_providers={
             "github": GitHubOAuthProvider(
                 settings.github_app_client_id,
                 settings.github_app_client_secret.get_secret_value(),
                 settings.public_origin + _OAUTH_CALLBACK_PATH.format(provider="github"),
-                httpx.Client(timeout=10.0),
+                httpx.Client(timeout=_GITHUB_USER_TIMEOUT),
             ),
         },
         _cache_store=InMemoryCacheStore(),
         _llm_gateway=None,
         _definition_extractor=None,
     )
+
+
+def _build_installation_catalog(settings: Settings) -> GitHubInstallationCatalog:
+    """Свой клиент и свой `GitHubAppAuth`: каталогу нужен только JWT приложения
+    (проверка установки), кэш installation tokens шлюза ему не нужен.
+    Конструирование — без сети."""
+    client = httpx.Client(base_url=_GITHUB_API, timeout=_GITHUB_USER_TIMEOUT)
+    auth = GitHubAppAuth(settings.github_app_id, settings.github_app_private_key.get_secret_value(), client)
+    return GitHubInstallationCatalog(client, auth)
+
+
+def _token_cipher(settings: Settings) -> TokenCipher | None:
+    # Предупреждение о пустом ключе пишет только API (`app/api/factory.py`):
+    # контейнер собирает и воркер, а ему ключ не нужен и не передаётся.
+    key = settings.user_token_key
+    return None if key is None else TokenCipher(key)
 
 
 # Подключение в нашей сети или к hosted-провайдеру дольше этого - сбой, а не

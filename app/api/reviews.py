@@ -1,4 +1,4 @@
-"""Прогон ревью: чтение вместе с находками и ручной запуск (пока заглушка).
+"""Прогон ревью: список, чтение вместе с находками и ручной запуск (пока заглушка).
 
 Один связный ответ, не два эндпоинта: прогон без находок бессмысленно
 смотреть отдельно от них (design.md change'а add-review-rest-api).
@@ -7,24 +7,35 @@
 `app/api/schemas.py`.
 """
 
+from collections.abc import Callable
 from dataclasses import asdict
+from datetime import datetime
 from http import HTTPStatus
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Path, Query
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic_core import PydanticCustomError
 
-from app.api.dependencies import get_unit_of_work
+from app.api.dependencies import (
+    get_installation_catalog,
+    get_token_provider,
+    get_unit_of_work,
+    get_unit_of_work_factory,
+)
 from app.api.errors import (
     ERRORS_403_ORIGIN,
     ERRORS_404_REVIEW,
     ERRORS_409_REVIEW_ACTIVE,
     ERRORS_422,
     ERRORS_501_NOT_IMPLEMENTED,
+    ERRORS_502_SCM_REVIEWS,
     ApiError,
 )
+from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
+from app.api.repositories import user_repositories
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
     FailedStage,
@@ -33,9 +44,14 @@ from app.api.schemas import (
     ReviewJob,
     StrictRequest,
     UtcDatetime,
+    UtcDatetimeParam,
+    without_nul,
 )
-from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
-from app.application.ports import UnitOfWork
+from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES, current_session
+from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
+from app.application.run_feed_events import visible_repository_ids
+from app.application.use_cases.auth import SignedIn
+from app.domain.entities import MergeRequest, Repository, ReviewRun, ReviewRunListEntry
 from app.domain.enums import (
     CommentKind,
     DiffSide,
@@ -47,6 +63,7 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.provider_links import merge_request_url
+from app.domain.run_list import run_list_filter
 
 # Задачи на реализацию ручного запуска пока нет — ссылка появится в описании операции.
 _CREATE_REVIEW_DESCRIPTION = (
@@ -60,16 +77,46 @@ _CREATE_REVIEW_DESCRIPTION = (
 # Решения 2 и 4 в dmc-268-ui-t1#37; реализация — отдельными задачами, ссылка появится здесь.
 _DIFF_DESCRIPTION = (
     "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #82). Когда ручка заработает: полный дифф запроса на изменение у провайдера между base_sha "
-    "и head_sha прогона; 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию."
+    "(задача #82). Требует сессию; прогон проверяется до ответа 501 — 404 REVIEW_NOT_FOUND, если его нет "
+    "или он не виден пользователю. Когда ручка заработает: полный дифф запроса на изменение у провайдера "
+    "между base_sha и head_sha прогона."
 )
 _STEPS_DESCRIPTION = (
     "Требует сессию. Шаги воркера по порядку начала (при равном начале — по id): этап, статус, начало, "
     "длительность, токены, код ошибки; без запросов и ответов модели. Повтор этапа (новая попытка вызова "
     "модели) — отдельный шаг того же этапа. Прогон, у которого шагов ещё нет, — 200 с пустым items; "
-    "404 REVIEW_NOT_FOUND, если прогона нет."
+    "404 REVIEW_NOT_FOUND, если прогона нет или он не виден пользователю."
 )
 
+# Видимость прогонов — решение А в dmc-268-ui-t1#43: одно правило на список, поток GET /events и
+# ручки одного прогона (#127).
+VISIBILITY_RULE = (
+    "Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub "
+    "(любая роль; публичный репозиторий, на котором у пользователя роли нет, не виден), — то же "
+    "правило, что у GET /repositories/available."
+)
+_LIST_DESCRIPTION = (
+    "Требует сессию; параметры запроса проверяются раньше обращения к GitHub. Снимок списка прогонов "
+    "ревью, сначала новые — по created_at по убыванию, при равном created_at — по id по убыванию. "
+    + VISIBILITY_RULE
+    + " Фильтры складываются через «и»: status — один или несколько статусов (параметр повторяется); "
+    "active=true — только активные (queued, building_context, analysing, publishing), active=false — "
+    "только завершённые (completed, failed, cancelled), вместе со status — пересечение; repository_id — "
+    "прогоны одного или нескольких репозиториев (параметр повторяется), невидимый или несуществующий "
+    "репозиторий не даёт 404, его прогонов просто нет в списке; "
+    "author — точное совпадение логина автора запроса на изменение; q — подстрока без учёта регистра "
+    "в заголовке, авторе или исходной ветке запроса на изменение либо точное совпадение номера "
+    "(42 или #42). У q и author пустая "
+    "строка — без фильтра. created_from (включительно) и created_to (исключительно) — диапазон по "
+    "created_at прогона, время с зоной (в ответах — UTC с Z); created_from позже created_to — 422 "
+    "VALIDATION_ERROR в query.created_to. Постранично: limit выше 200 не отклоняется, а приводится к "
+    "200. total — сколько прогонов подходит под фильтры без учёта limit и offset. findings_count — "
+    "то же, что число элементов findings в GET /reviews/{review_run_id}: находки, оставшиеся после "
+    "отсева и верификатора, а не опубликованные комментарии. Самих находок и комментариев в строке "
+    "нет. Изменения после снимка приходят потоком GET /events; поток фильтры не учитывает, "
+    "поэтому при активных фильтрах или не на первой странице клиент на событие перезапрашивает "
+    "страницу, а без фильтров на первой странице — делает upsert строки."
+)
 # Сессия — на весь роутер: исключения видны здесь, а не в middleware.
 router = APIRouter(
     prefix="/api/v1/reviews",
@@ -191,6 +238,143 @@ class ReviewRunResponse(BaseModel):
     )
 
 
+class ReviewRunListItem(BaseModel):
+    """Прогон ревью строкой списка: без находок и комментариев.
+
+    Те же данные — у каждого события прогона `run.*` в потоке GET /events.
+    """
+
+    id: UUID
+    status: ReviewRunStatus = Field(description="Текущий статус прогона.", examples=["analysing"])
+    trigger: TriggerSource = Field(description="Что запустило прогон.", examples=["webhook"])
+    head_sha: str = Field(
+        description="Коммит, который ревьюится.", examples=["a1b2c3d4e5f6789012345678abcdef0123456789"]
+    )
+    created_at: UtcDatetime = Field(description="Когда прогон создан.")
+    updated_at: UtcDatetime = Field(
+        description=(
+            "Когда запись последний раз менялась; из двух версий строки новее та, где оно больше, "
+            "при равном — пришедшая позже."
+        )
+    )
+    last_progress_at: UtcDatetime = Field(description="Время последнего перехода состояния.")
+    duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
+    failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
+    findings_count: int = Field(
+        ge=0,
+        description=(
+            "Сколько находок у прогона — столько же, сколько элементов findings в GET /reviews/{review_run_id}: "
+            "после отсева и верификатора, не опубликованные комментарии."
+        ),
+    )
+    merge_request: MergeRequestSummary = Field(description="Запрос на изменение, который ревьюит прогон.")
+
+
+class ReviewRunListResponse(BaseModel):
+    """Страница списка прогонов ревью."""
+
+    items: list[ReviewRunListItem] = Field(
+        description="Прогоны: по created_at по убыванию, при равном created_at — по id по убыванию."
+    )
+    total: int = Field(ge=0, description="Сколько прогонов подходит под фильтры, без учёта limit и offset.")
+
+
+def _optional_text(max_length: int, description: str) -> Any:
+    """Текстовый фильтр: пустая строка — без фильтра, как отсутствующий параметр."""
+    return Field(default=None, max_length=max_length, description=f"{description} Пустая строка — без фильтра.")
+
+
+# Предел значений фильтра по репозиториям: каждое уходит в `IN (…)` запроса списка.
+REPOSITORY_FILTER_MAX_ITEMS = 50
+
+
+class ReviewRunListQuery(BaseModel):
+    """Параметры запроса списка прогонов.
+
+    Одной моделью, а не отдельными параметрами: проверка диапазона дат смотрит на два поля
+    сразу, и её ошибка приходит вместе с ошибками схемы, в `query.created_to`. FastAPI
+    раскладывает модель на параметры запроса, в схеме она отдельным компонентом не появляется.
+    """
+
+    status: list[ReviewRunStatus] | None = Field(
+        default=None, description="Статусы прогона; параметр повторяется: ?status=queued&status=analysing."
+    )
+    active: bool | None = Field(
+        default=None, description="true — только активные прогоны, false — только завершённые; не задан — все."
+    )
+    repository_id: list[UUID] | None = Field(
+        default=None,
+        max_length=REPOSITORY_FILTER_MAX_ITEMS,
+        description=(
+            "Прогоны этих репозиториев; параметр повторяется: ?repository_id=…&repository_id=…, "
+            f"не больше {REPOSITORY_FILTER_MAX_ITEMS} значений."
+        ),
+    )
+    author: str | None = _optional_text(255, "Логин автора запроса на изменение, точное совпадение.")
+    q: str | None = _optional_text(
+        200,
+        "Подстрока без учёта регистра в заголовке, авторе или исходной ветке запроса на изменение "
+        "либо точное совпадение номера (42 или #42).",
+    )
+    created_from: UtcDatetimeParam | None = Field(
+        default=None, description="Прогоны, созданные не раньше этого времени (включительно); время с зоной."
+    )
+    created_to: UtcDatetimeParam | None = Field(
+        default=None, description="Прогоны, созданные раньше этого времени (исключительно); время с зоной."
+    )
+    limit: Limit = DEFAULT_LIMIT
+    offset: Offset = 0
+
+    @field_validator("author", "q")
+    @classmethod
+    def _text_fits_postgres(cls, value: str | None) -> str | None:
+        """Текст фильтра уходит в SQL параметром: NUL отказал бы в базе ответом 500."""
+        return None if value is None else without_nul(value)
+
+    @field_validator("created_to")
+    @classmethod
+    def _range_is_not_reversed(cls, created_to: datetime | None, info: ValidationInfo) -> datetime | None:
+        """Начало диапазона позже конца — ошибка `created_to`; равные границы — пустой диапазон."""
+        created_from = info.data.get("created_from")
+        if created_to is not None and created_from is not None and created_from > created_to:
+            raise PydanticCustomError("range_reversed", "created_from позже created_to")
+        return created_to
+
+
+def visible_run(
+    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> ReviewRun:
+    """Прогон, если он виден пользователю, — по тому же правилу, что список и поток.
+
+    Невидимый прогон отвечает так же, как несуществующий, `404 REVIEW_NOT_FOUND`. GitHub
+    спрашиваем до чтения прогона и при любом id: иначе `502`, `401` или задержка ответа
+    выдали бы, что такой id есть.
+    """
+    visible = {r.provider_id for r in user_repositories(signed_in, catalog, oauth, uow_factory)}
+    with uow_factory() as uow:
+        run = uow.review_runs.get(review_run_id)
+        repository = None if run is None else _repository_of(uow, run)
+    # Кабинет видит репозитории только через GitHub: прогон репозитория другого провайдера не виден никому.
+    if run is None or repository is None or repository.provider is not Provider.GITHUB or repository.provider_id not in visible:
+        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
+    return run
+
+
+def _repository_of(uow: UnitOfWork, run: ReviewRun) -> Repository:
+    """Репозиторий прогона через его запрос на изменение; внешние ключи с RESTRICT — их отсутствие — 500."""
+    merge_request = uow.merge_requests.get(run.merge_request_id)
+    if merge_request is None:
+        raise RuntimeError(f"У прогона {run.id} нет запроса на изменение {run.merge_request_id}.")
+    repository = uow.repositories.get(merge_request.repository_id)
+    if repository is None:
+        raise RuntimeError(f"У запроса на изменение {merge_request.id} нет репозитория {merge_request.repository_id}.")
+    return repository
+
+
 @router.post(
     "",
     status_code=HTTPStatus.ACCEPTED,
@@ -205,25 +389,69 @@ def create_review(body: CreateReviewRequest) -> ReviewJob:
 
 
 @router.get(
+    "",
+    response_model=ReviewRunListResponse,
+    summary="Список прогонов ревью",
+    response_description="Страница прогонов и общее число подходящих под фильтры.",
+    description=_LIST_DESCRIPTION,
+    responses={**ERRORS_422, **ERRORS_502_SCM_REVIEWS},
+)
+def list_reviews(
+    query: Annotated[ReviewRunListQuery, Query()],
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> ReviewRunListResponse:
+    # Видимые репозитории — вызовом, а не зависимостью: зависимость FastAPI выполняется
+    # и тогда, когда параметры запроса не прошли проверку, а 422 не должен стоить запроса в GitHub.
+    repositories = user_repositories(signed_in, catalog, oauth, uow_factory)
+    run_filter = run_list_filter(
+        visible=visible_repository_ids(uow_factory(), repositories),
+        repository_ids=query.repository_id,
+        statuses=query.status,
+        active=query.active,
+        author=query.author,
+        q=query.q,
+        created_from=query.created_from,
+        created_to=query.created_to,
+    )
+    with uow_factory() as uow:
+        page = uow.review_runs.list_page(run_filter, page_size(query.limit), query.offset)
+    return ReviewRunListResponse(items=[review_run_list_item(entry) for entry in page.entries], total=page.total)
+
+
+@router.get(
     "/{review_run_id}",
     response_model=ReviewRunResponse,
     summary="Прогон ревью вместе с находками",
     response_description="Прогон, его запрос на изменение, находки и опубликованные комментарии.",
     description=(
-        "Требует сессию. Находки — в стабильном порядке: по времени создания, затем по id. Прогон без находок — "
-        "200 с пустым findings. Опубликованные комментарии — по времени публикации, затем по id; пока прогон "
-        "ничего не опубликовал — пустой published_comments."
+        "Требует сессию. 404 REVIEW_NOT_FOUND, если прогона нет или он не виден пользователю. Находки — в "
+        "стабильном порядке: по времени создания, затем по id. Прогон без находок — 200 с пустым findings. "
+        "Опубликованные комментарии — по времени публикации, затем по id; пока прогон ничего не опубликовал — "
+        "пустой published_comments."
     ),
-    responses={**ERRORS_404_REVIEW, **ERRORS_422},
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_502_SCM_REVIEWS},
 )
 def get_review(
-    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
+    run: ReviewRun = Depends(visible_run),
     uow: UnitOfWork = Depends(get_unit_of_work),
 ) -> ReviewRunResponse:
-    run = uow.review_runs.get(review_run_id)
-    if run is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
+    findings = uow.findings.list_for_run(run.id)
+    comments = uow.published_comments.list_for_run(run.id)
+    return ReviewRunResponse.model_validate(
+        {
+            **asdict(run),
+            "merge_request": _merge_request_summary(uow, run),
+            "findings": [{**asdict(f), **asdict(f.anchor)} for f in findings],
+            "published_comments": [asdict(c) for c in comments],
+        }
+    )
 
+
+def _merge_request_summary(uow: UnitOfWork, run: ReviewRun) -> dict[str, Any]:
+    """Запрос на изменение прогона с его репозиторием — данные для MergeRequestSummary."""
     # Запрос на изменение и репозиторий держат внешние ключи с RESTRICT: их отсутствие —
     # нарушение целостности базы, а не «не найдено», поэтому 500, а не 404.
     merge_request = uow.merge_requests.get(run.merge_request_id)
@@ -232,19 +460,24 @@ def get_review(
     repository = uow.repositories.get(merge_request.repository_id)
     if repository is None:
         raise RuntimeError(f"У запроса на изменение {merge_request.id} нет репозитория {merge_request.repository_id}.")
+    return _summary(merge_request, repository)
 
-    findings = uow.findings.list_for_run(review_run_id)
-    comments = uow.published_comments.list_for_run(review_run_id)
-    return ReviewRunResponse.model_validate(
+
+def _summary(merge_request: MergeRequest, repository: Repository) -> dict[str, Any]:
+    return {
+        **asdict(merge_request),
+        "url": merge_request_url(repository.provider, repository.full_name, merge_request.number),
+        "repository": asdict(repository),
+    }
+
+
+def review_run_list_item(entry: ReviewRunListEntry) -> ReviewRunListItem:
+    """Строка списка из записи, собранной одним запросом на пачку (`list_changed`)."""
+    return ReviewRunListItem.model_validate(
         {
-            **asdict(run),
-            "merge_request": {
-                **asdict(merge_request),
-                "url": merge_request_url(repository.provider, repository.full_name, merge_request.number),
-                "repository": asdict(repository),
-            },
-            "findings": [{**asdict(f), **asdict(f.anchor)} for f in findings],
-            "published_comments": [asdict(c) for c in comments],
+            **asdict(entry.run),
+            "merge_request": _summary(entry.merge_request, entry.repository),
+            "findings_count": entry.findings_count,
         }
     )
 
@@ -297,7 +530,7 @@ class ReviewRunStepResponse(BaseModel):
     status: Literal["running", "completed", "failed"] = Field(description="Состояние шага.")
     started_at: UtcDatetime = Field(description="Когда шаг начался.")
     duration_seconds: float | None = Field(description="Длительность шага; null, пока шаг идёт.")
-    tokens_used: int | None = Field(description="Токенов LLM потрачено на шаге; null, если шаг модель не вызывал.")
+    tokens_used: int | None = Field(description="Токенов LLM потрачено на шаге; null, если шаг модель не вызывал или расход неизвестен (брошенный шаг).")
     error_code: str | None = Field(description="Код ошибки шага; null, если шаг не падал.", examples=["LLM_TIMEOUT"])
 
 
@@ -313,11 +546,9 @@ class ReviewRunStepListResponse(BaseModel):
     summary="Дифф прогона",
     response_description="Изменённые файлы с ханками.",
     description=_DIFF_DESCRIPTION,
-    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED, **ERRORS_502_SCM_REVIEWS},
 )
-def get_review_diff(
-    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
-) -> ReviewDiffResponse:
+def get_review_diff(run: ReviewRun = Depends(visible_run)) -> ReviewDiffResponse:
     raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Дифф прогона ещё не реализован.")
 
 
@@ -327,13 +558,11 @@ def get_review_diff(
     summary="Шаги прогона",
     response_description="Шаги воркера по порядку.",
     description=_STEPS_DESCRIPTION,
-    responses={**ERRORS_404_REVIEW, **ERRORS_422},
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_502_SCM_REVIEWS},
 )
 def get_review_steps(
-    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
+    run: ReviewRun = Depends(visible_run),
     uow: UnitOfWork = Depends(get_unit_of_work),
 ) -> ReviewRunStepListResponse:
-    if uow.review_runs.get(review_run_id) is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
-    steps = uow.review_run_steps.list_for_run(review_run_id)
+    steps = uow.review_run_steps.list_for_run(run.id)
     return ReviewRunStepListResponse.model_validate({"items": [asdict(step) for step in steps]})

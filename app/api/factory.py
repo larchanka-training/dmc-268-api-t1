@@ -6,12 +6,15 @@
 """
 
 import contextlib
+import logging
 from collections.abc import AsyncIterator, MutableMapping
 from typing import Any
 
 from fastapi import FastAPI
 
 from app.config import Settings
+
+_log = logging.getLogger(__name__)
 
 _DESCRIPTION = """\
 Контракт Backend API для запуска автоматического ревью Pull Request и получения состояния и
@@ -84,9 +87,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # по нему фронт находит операцию в сгенерированных типах.
         generate_unique_id_function=lambda route: to_camel(route.name),
     )
-    from app.api.review_events import ReviewRunStatusEvent
+    from app.api.events import StreamEventType
 
-    openapi.install(app, extra_models=[ReviewRunStatusEvent])
+    openapi.install(app, extra_models=[StreamEventType])
     app.state.settings = settings
     # Логи — до первого запроса и до трассировки: её предупреждения при старте
     # тоже должны выйти JSON-записями.
@@ -94,14 +97,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # До контейнера: провайдер трейсов нужен телеметрии FastAPI с первого запроса.
     telemetry.configure_tracing(telemetry.API_SERVICE)
     app.state.container = build_container(settings)
+    if settings.user_token_key is None:
+        # Видно в логе старта API: вход на таком стенде будет отказывать. Не в
+        # контейнере — его собирает и воркер, которому ключ не передаётся.
+        _log.warning("USER_TOKEN_ENCRYPTION_KEY не задан: вход отказывает, токены не хранятся")
     telemetry.instrument_engine(app.state.container.engine)
 
     from app.api import errors, log_redaction
     from app.api.auth import router as auth_router
+    from app.api.events import router as events_router
     from app.api.origin import OriginMiddleware
     from app.api.pull_requests import router as pull_requests_router
     from app.api.repositories import router as repositories_router
-    from app.api.review_events import router as review_events_router
     from app.api.reviews import router as reviews_router
     from app.api.trace_id import TraceIdMiddleware
     from app.api.webhooks import router as webhooks_router
@@ -119,7 +126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(repositories_router)
     app.include_router(pull_requests_router)
     app.include_router(reviews_router)
-    app.include_router(review_events_router)
+    app.include_router(events_router)
 
     # Служебные ручки вне `/api/v1` — не часть контракта.
     @app.get("/", include_in_schema=False)

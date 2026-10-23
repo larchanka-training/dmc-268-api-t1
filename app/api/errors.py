@@ -27,12 +27,13 @@
 import logging
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.problems import (
@@ -43,7 +44,10 @@ from app.api.problems import (
     OriginForbiddenProblem,
     Problem,
     ProviderNotSupportedProblem,
+    RepositoryAlreadyConnectedProblem,
+    RepositoryManageRequiredProblem,
     RepositoryNotFoundProblem,
+    RepositoryNotInInstallationProblem,
     ReviewAlreadyActiveProblem,
     ReviewNotFoundProblem,
     ScmUnavailableProblem,
@@ -97,6 +101,36 @@ ERRORS_501_WEBHOOK_PROVIDER = _doc(
 )
 ERRORS_502_SCM = _doc(
     HTTPStatus.BAD_GATEWAY, ScmUnavailableProblem, "Провайдер VCS недоступен или ответил ошибкой; прогон не создан."
+)
+ERRORS_502_SCM_REPOSITORIES = _doc(
+    HTTPStatus.BAD_GATEWAY, ScmUnavailableProblem, "GitHub не ответил или ответил ошибкой; репозиторий не подключён."
+)
+ERRORS_502_SCM_EVENTS = _doc(
+    HTTPStatus.BAD_GATEWAY,
+    ScmUnavailableProblem,
+    "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя; поток не открыт.",
+)
+ERRORS_502_SCM_REVIEWS = _doc(
+    HTTPStatus.BAD_GATEWAY,
+    ScmUnavailableProblem,
+    "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",
+)
+ERRORS_404_NOT_IN_INSTALLATION = _doc(
+    HTTPStatus.NOT_FOUND,
+    RepositoryNotInInstallationProblem,
+    "Репозиторий не виден пользователю, приложение на нём не установлено или установка приостановлена — без различия; или провайдер не `github`.",
+)
+ERRORS_409_ALREADY_CONNECTED = _doc(
+    HTTPStatus.CONFLICT, RepositoryAlreadyConnectedProblem, "Репозиторий уже подключён, в том числе параллельным запросом; отвечается только пользователю с правами admin или maintain."
+)
+# Один статус — две причины: `Origin` проверяет middleware, права — ручка. Модель ответа —
+# объединение с discriminator по `code`, в схеме это `oneOf`; ключ `responses` у статуса
+# один, поэтому `{**ERRORS_403_ORIGIN, **…}` не годится — второй словарь затёр бы первый.
+ERRORS_403_ORIGIN_OR_MANAGE = _doc(
+    HTTPStatus.FORBIDDEN,
+    Annotated[OriginForbiddenProblem | RepositoryManageRequiredProblem, Field(discriminator="code")],
+    "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; "
+    "`REPOSITORY_MANAGE_REQUIRED` — у пользователя нет прав admin или maintain на репозиторий у провайдера.",
 )
 ERRORS_501_NOT_IMPLEMENTED = _doc(HTTPStatus.NOT_IMPLEMENTED, NotImplementedProblem, "Ручка ещё не реализована.")
 
@@ -195,6 +229,16 @@ _REASONS = {
     "model_type": "ожидается объект",
     "model_attributes_type": "ожидается объект",
     "json_invalid": "тело запроса — не JSON",
+    # Свой тип `PydanticCustomError`: диапазон, где начало позже конца (`ReviewRunListQuery`).
+    "range_reversed": "начало диапазона позже его конца",
+    # Свой тип `PydanticCustomError`: повтор паттерна в фильтре веток (`RepositorySettingsUpdate`).
+    "duplicate_patterns": "паттерны веток повторяются",
+    "timezone_aware": "ожидается время с зоной",
+    # Свой тип `PydanticCustomError`: время во входе — только строка ISO 8601 (`UtcDatetimeParam`).
+    "datetime_not_iso": "ожидается время в ISO 8601",
+    # Свои типы `PydanticCustomError` входных параметров (`app/api/schemas.py`).
+    "datetime_out_of_range": "время вне допустимого диапазона",
+    "string_nul": "строка не должна содержать символ NUL",
 }
 _DEFAULT_REASON = "недопустимое значение"
 # Ошибки, у которых последний элемент `loc` — не поле схемы: имя лишнего поля (ввод клиента,

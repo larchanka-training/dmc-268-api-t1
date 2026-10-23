@@ -30,6 +30,10 @@ Query серверного спана на путях входа скрывае�
 (запрос всегда начинает новый трейс), а httpx не отдаёт наш trace id GitHub и
 провайдерам модели. Контекст между API и воркером идёт только через заголовки AMQP
 нашей очереди — пропагатором W3C в `app/infrastructure/queue/rabbitmq.py`.
+
+Валидный входящий `traceparent` всё же не теряется: серверный спан запроса получает на
+него span link (`link_client_trace`). Родителем контекст клиента не становится, поэтому
+trace id, `X-Trace-ID` и решение сэмплера от заголовка не зависят.
 """
 
 import contextlib
@@ -37,6 +41,7 @@ import logging
 import os
 from collections.abc import Callable, Iterator
 from contextvars import Token
+from typing import Any
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
@@ -45,6 +50,7 @@ from opentelemetry import metrics, propagate, trace
 from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.utils import suppress_instrumentation
 from opentelemetry.propagators.textmap import (
     CarrierT,
     Getter,
@@ -60,8 +66,9 @@ from opentelemetry.sdk.trace.export import (
     ConsoleSpanExporter,
     SpanExporter,
 )
-from opentelemetry.sdk.trace.sampling import ALWAYS_ON, ParentBased
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON, ParentBased, Sampler
 from opentelemetry.trace import Status, StatusCode
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from sqlalchemy import Engine
 
 from app.domain.enums import ReviewRunStage
@@ -90,11 +97,6 @@ SEMCONV_STABILITY_OPT_IN = "database,http"
 # Провайдер, который поставил `configure_tracing`: его и закрывает `shutdown_tracing`.
 # Чужой провайдер (тест со своим экспортёром) не закрываем.
 _installed: TracerProvider | None = None
-
-# Сэмплирование закреплено кодом — `parentbased_always_on`: корневые спаны всегда
-# записываются, дети наследуют решение родителя. Явная передача в провайдер не даёт
-# переменной `OTEL_TRACES_SAMPLER` выключить трейсинг молча.
-PARENTBASED_ALWAYS_ON = ParentBased(ALWAYS_ON)
 
 # Дефолт лимита длины значений атрибутов спана: без него `url.full` с длинными
 # путями и тексты ошибок раздували бы спан и трафик экспорта.
@@ -158,6 +160,34 @@ class _NoPropagation(TextMapPropagator):
         return set()
 
 
+# Атрибут ссылки на трейс клиента: откуда взят контекст. Своего имени в semconv нет.
+LINK_SOURCE = "link.source"
+LINK_SOURCE_CLIENT = "client"
+_TRACEPARENT = "traceparent"
+_W3C = TraceContextTextMapPropagator()
+
+
+def link_client_trace(traceparent: str | None) -> None:
+    """Добавить текущему спану ссылку на контекст клиента из `traceparent`.
+
+    Зовётся на серверном спане запроса (`TraceIdMiddleware`). Ссылка, а не родитель
+    (спека `observability`): trace id показывается людям в `X-Trace-ID` и должен быть
+    нашим, а флаг `sampled` клиента не должен управлять записью трейсов. Сэмплер решает
+    при создании спана, ссылка добавляется после — `parentbased_*` её не видит.
+
+    Разбирает стандартный пропагатор W3C, и только `traceparent`: `tracestate` и baggage
+    ему не передаются. Невалидный заголовок — без ссылки и без ошибки. Не записываемый
+    спан (сэмплер отказал, трассировка выключена) ссылку молча игнорирует.
+    """
+    if not traceparent:
+        return
+    client = trace.get_current_span(
+        _W3C.extract({_TRACEPARENT: traceparent})
+    ).get_span_context()
+    if client.is_valid:
+        trace.get_current_span().add_link(client, {LINK_SOURCE: LINK_SOURCE_CLIENT})
+
+
 def configure_tracing(service_name: str) -> None:
     """Поставить пустой пропагатор, SDK-провайдер трейсов и инструментирование.
 
@@ -208,15 +238,15 @@ def build_tracer_provider(service_name: str) -> TracerProvider:
 
     Процессор ставится на каждый поддержанный экспортёр; неподдержанное значение
     выключает только свой экспортёр и получает одно предупреждение при старте.
-    `none` и пустое значение — экспорт выключен, без предупреждений. Сэмплирование —
-    явно `parentbased_always_on` (см. `PARENTBASED_ALWAYS_ON`), лимит длины значений
-    атрибутов — `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` с дефолтом в коде.
+    `none` и пустое значение — экспорт выключен, без предупреждений. Сэмплирование
+    решает `_sampler`, лимит длины значений атрибутов —
+    `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` с дефолтом в коде.
     """
     attributes = (
         {} if os.environ.get("OTEL_SERVICE_NAME") else {SERVICE_NAME: service_name}
     )
     provider = TracerProvider(
-        sampler=PARENTBASED_ALWAYS_ON,
+        sampler=_sampler(),
         resource=Resource.create(attributes),
         span_limits=SpanLimits(max_attribute_length=_attribute_value_length_limit()),
     )
@@ -234,6 +264,24 @@ def build_tracer_provider(service_name: str) -> TracerProvider:
             continue
         provider.add_span_processor(BatchSpanProcessor(factory()))
     return provider
+
+
+def _sampler() -> Sampler | None:
+    """Сэмплер из `OTEL_TRACES_SAMPLER`, кроме сэмплера по доле.
+
+    `X-Trace-ID` показывается людям, и по каждому trace id должен находиться трейс: доля
+    при старте трейса оставила бы часть кодов из ошибок без трейса. Долю отбирает хвостовое
+    сэмплирование в коллекторе. `None` — SDK берёт сэмплер из окружения сам.
+    """
+    name = os.environ.get("OTEL_TRACES_SAMPLER", "").strip().lower()
+    if "traceidratio" not in name:
+        return None
+    logger.warning(
+        "OTEL_TRACES_SAMPLER=%s не применяется: доля прячет трейсы по X-Trace-ID, "
+        "пишем parentbased_always_on",
+        name,
+    )
+    return ParentBased(ALWAYS_ON)
 
 
 def opt_in_stable_semconv() -> None:
@@ -346,8 +394,18 @@ def sweep_span() -> Iterator[None]:
     который проход ловит сам, чтобы выполнить следующий, отмечается на спане
     `record_current_exception`.
     """
-    with _tracer.start_as_current_span("review.sweep"):
+    with error_status_span(_tracer, "review.sweep"):
         yield
+
+
+def untraced() -> contextlib.AbstractContextManager[None]:
+    """Блок без спанов инструментирования (SQL, httpx) — для частого фонового опроса.
+
+    Поток событий опрашивает базу раз в секунду и живёт часами: спан на каждый запрос
+    раздул бы трейс запроса до тысяч дочерних спанов. Контекст OTel — `ContextVar`,
+    поэтому вход и выход должны быть в одном потоке выполнения.
+    """
+    return suppress_instrumentation()
 
 
 def record_current_exception(exc: BaseException) -> None:
@@ -358,7 +416,38 @@ def record_current_exception(exc: BaseException) -> None:
     """
     span = trace.get_current_span()
     span.record_exception(exc)
-    span.set_status(Status(StatusCode.ERROR, f"{type(exc).__name__}: {exc}"))
+    span.set_status(error_status(exc))
+
+
+def error_status(exc: BaseException) -> Status:
+    """Статус ошибки с именем типа, без текста исключения.
+
+    Текст — только в событии `exception`: его чистит редакция коллектора, а описание
+    статуса — нет. В тексте бывает ответ провайдера модели или значения ключей из ошибки
+    базы.
+    """
+    return Status(StatusCode.ERROR, type(exc).__name__)
+
+
+@contextlib.contextmanager
+def error_status_span(
+    tracer: trace.Tracer, name: str, **kwargs: Any
+) -> Iterator[trace.Span]:
+    """Текущий спан, который при исключении закрывается со статусом `error_status`.
+
+    `start_as_current_span` сам пишет в описание статуса текст исключения — это
+    отключено, статус ставится по типу. Событие `exception` для `Exception` пишет сам
+    спан; `KeyboardInterrupt` и `SystemExit` он не видит — их отмечаем здесь целиком.
+    """
+    with tracer.start_as_current_span(name, set_status_on_exception=False, **kwargs) as span:
+        try:
+            yield span
+        except Exception as exc:
+            span.set_status(error_status(exc))
+            raise
+        except BaseException as exc:
+            record_current_exception(exc)
+            raise
 
 
 def current_trace_id() -> str | None:

@@ -5,19 +5,22 @@
 второй потребитель, чтобы ручки не импортировали друг друга.
 """
 
+import re
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import (
     AfterValidator,
     AwareDatetime,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     PositiveInt,
     WithJsonSchema,
 )
+from pydantic_core import PydanticCustomError
 
 from app.domain.enums import MergeRequestState, Provider, ReviewRunStatus, TriggerSource
 
@@ -45,10 +48,52 @@ UtcDatetime = Annotated[
     ),
 ]
 
+# Начало строки ISO 8601 с датой и временем. Без этой проверки pydantic принял бы и
+# unix-время числом в строке (`1760000000`).
+_ISO_DATETIME_START = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}")
+
+
+def _iso_8601_only(value: object) -> object:
+    if isinstance(value, str) and not _ISO_DATETIME_START.match(value):
+        raise PydanticCustomError("datetime_not_iso", "ожидается время в ISO 8601")
+    return value
+
+
+def _param_to_utc(moment: datetime) -> datetime:
+    # На краю календаря сдвиг зоны выводит дату за год 1 или 9999: `OverflowError` — не
+    # `ValueError`, pydantic его не ловит, и вышел бы 500.
+    try:
+        return moment.astimezone(UTC)
+    except OverflowError:
+        raise PydanticCustomError("datetime_out_of_range", "время вне допустимого диапазона") from None
+
+
+# Время во входных параметрах: строка ISO 8601 с любой зоной, приводится к UTC. В схеме —
+# `date-time` без `pattern` ответа: на вход годится и `+03:00`, `Z` обязателен только в ответах.
+UtcDatetimeParam = Annotated[AwareDatetime, BeforeValidator(_iso_8601_only), AfterValidator(_param_to_utc)]
+
+
+def without_nul(value: str) -> str:
+    # PostgreSQL не хранит и не сравнивает NUL в тексте: psycopg отказал бы уже в базе, ответом 500.
+    if "\x00" in value:
+        raise PydanticCustomError("string_nul", "строка не должна содержать символ NUL")
+    return value
+
+
 # Этап, на котором прогон может упасть, — те же значения, что `FAILURE_STAGES` домена
 # (равенство множеств проверяет тест).
 FailedStage = Literal[ReviewRunStatus.BUILDING_CONTEXT, ReviewRunStatus.ANALYSING, ReviewRunStatus.PUBLISHING]
 FAILED_STAGE_DESCRIPTION = "Этап, на котором прогон упал; null, если прогон не падал."
+
+# Заголовки ответа потока Server-Sent Events в схеме: против кэша и буфера прокси.
+# Общие для описаний потока (`app/api/events.py`, `app/api/reviews.py`).
+STREAM_HEADERS_DOC: dict[str, Any] = {
+    "Cache-Control": {"schema": {"type": "string", "const": "no-cache"}},
+    "X-Accel-Buffering": {
+        "description": "Отключает буферизацию ответа в nginx.",
+        "schema": {"type": "string", "const": "no"},
+    },
+}
 
 
 class AllFieldsResponse(BaseModel):

@@ -1,0 +1,24 @@
+title: Уведомление - исключение проглочено молча
+pull_request:
+  title: "feat: уведомление о платеже во внешнюю систему"
+  description: После успешного платежа сервис отправляет уведомление партнёру.
+files:
+  app/integrations/notifier.py: |
+    import logging
+
+    import httpx
+
+    logger = logging.getLogger(__name__)
+
+
+    def notify_partner(url: str, payment_id: str) -> None:
+        logger.info("уведомление о платеже %s", payment_id)
+        try:
+            httpx.post(url, json={"payment_id": payment_id}, timeout=5.0)
+        except Exception:
+            pass
+expected:
+  - id: swallowed
+    path: app/integrations/notifier.py
+    contains: "except Exception:"
+    rule: [Error Handling Standards, 2]

@@ -11,6 +11,8 @@
 api_image         = "ghcr.io/larchanka-training/dmc-268-api-t1:CHANGE_ME_TAG"
 postgres_password = "CHANGE_ME_POSTGRES"
 rabbitmq_password = "CHANGE_ME_RABBITMQ"
+# Ключ шифрования токенов пользователя: `openssl rand -base64 32`.
+user_token_encryption_key = "CHANGE_ME_openssl_rand_base64_32_xxxxxxxxx="
 
 # --- учётные данные реестра образов ---
 # В CI — github.actor и GITHUB_TOKEN, живущие один прогон. Локально нужны

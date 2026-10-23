@@ -10,6 +10,9 @@ trace-id из W3C Trace Context). Спан запроса открывает в�
 каждый HTTP-запрос начинает новый трейс: глобальный пропагатор OpenTelemetry пуст
 (`app/infrastructure/telemetry.py`), и FastAPI не берёт родителя из заголовков.
 Доверяем только контексту из заголовков AMQP нашей очереди — это сторона воркера.
+Валидный `traceparent` клиента становится не родителем, а span link серверного спана
+(`link_client_trace`): из трейса API виден переход к трейсу браузера, а trace id
+остаётся нашим.
 
 Значение лежит в `request.state.trace_id` — для тела ошибки и для строки лога о `500`.
 Middleware пишет его в `scope["state"]`, а этот словарь видят и `OriginMiddleware`, и
@@ -22,9 +25,10 @@ Middleware на чистом ASGI, а не `BaseHTTPMiddleware`: тот обор
 
 import secrets
 
+from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.infrastructure.telemetry import current_trace_id
+from app.infrastructure.telemetry import current_trace_id, link_client_trace
 
 HEADER = "X-Trace-ID"
 _HEADER_BYTES = HEADER.lower().encode("latin-1")
@@ -39,7 +43,10 @@ class TraceIdMiddleware:
             await self.app(scope, receive, send)
             return
         trace_id = current_trace_id() or secrets.token_hex(16)
+        # До разбора заголовка: обработчику `500` нужен `trace_id`, даже если разбор упадёт.
         scope.setdefault("state", {})["trace_id"] = trace_id
+        # Спан запроса здесь уже текущий: ссылку получает именно он.
+        link_client_trace(Headers(scope=scope).get("traceparent"))
         value = trace_id.encode("latin-1")
 
         async def send_with_trace_id(message: Message) -> None:

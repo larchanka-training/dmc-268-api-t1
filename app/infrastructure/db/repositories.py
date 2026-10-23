@@ -6,31 +6,54 @@
 """
 
 import datetime as dt
+from collections.abc import Collection
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from psycopg.errors import LockNotAvailable
+from sqlalchemy import (
+    CTE,
+    ColumnElement,
+    delete,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+    tuple_,
+    union_all,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from app.domain.entities import (
     ContextPayload,
     Finding,
     MergeRequest,
     OpenReviewThread,
+    ProviderToken,
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunListEntry,
     ReviewRunStep,
+    Secret,
     User,
 )
 from app.domain.entities import Session as UserSession
 from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
+from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
+from app.domain.run_feed import FeedCursor
+from app.domain.run_list import RunListFilter, RunListPage
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
     FindingRow,
     MergeRequestRow,
+    ProviderTokenRow,
     PublishedCommentRow,
     RepositoryRow,
     ReviewRunRow,
@@ -38,6 +61,7 @@ from app.infrastructure.db.models import (
     SessionRow,
     UserRow,
 )
+from app.infrastructure.db.token_cipher import TokenCipher
 
 
 class SqlAlchemyRepositoryRepo:
@@ -70,17 +94,38 @@ class SqlAlchemyRepositoryRepo:
         ).all()
         return [m.repository_to_domain(row) for row in rows]
 
-    def add(self, repository: Repository) -> None:
-        self._session.add(
-            RepositoryRow(
-                id=repository.id,
-                provider=repository.provider,
-                provider_id=repository.provider_id,
-                full_name=repository.full_name,
-                default_branch=repository.default_branch,
-                auto_review_enabled=repository.auto_review_enabled,
-            )
-        )
+    def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
+        if not provider_ids:
+            return []
+        rows = self._session.scalars(
+            select(RepositoryRow)
+            .where(RepositoryRow.provider == provider, RepositoryRow.provider_id.in_(provider_ids))
+            .order_by(RepositoryRow.id)
+        ).all()
+        return [m.repository_to_domain(row) for row in rows]
+
+    def add(self, repository: Repository) -> bool:
+        # `ON CONFLICT DO NOTHING`, как у пользователей: параллельное
+        # подключение того же репозитория ждёт коммита первого и получает
+        # 0 строк, а не `IntegrityError`. Время записи — то, что пришло в
+        # сущности: ответ подключения совпадает с записью.
+        with self._session.no_autoflush:
+            inserted = self._session.execute(
+                pg_insert(RepositoryRow)
+                .values(
+                    id=repository.id,
+                    provider=repository.provider,
+                    provider_id=repository.provider_id,
+                    full_name=repository.full_name,
+                    default_branch=repository.default_branch,
+                    auto_review_enabled=repository.auto_review_enabled,
+                    created_at=repository.created_at,
+                    updated_at=repository.updated_at,
+                )
+                .on_conflict_do_nothing(constraint="uq_repositories_provider_id")
+                .returning(RepositoryRow.id)
+            ).first()
+        return inserted is not None
 
     def update(self, repository: Repository) -> None:
         row = self._session.get(RepositoryRow, repository.id)
@@ -148,6 +193,26 @@ class SqlAlchemyMergeRequestRepo:
         row.state = merge_request.state
 
 
+def _run_list_conditions(run_filter: RunListFilter) -> list[ColumnElement[bool]]:
+    """Условия фильтра списка прогонов; запрос уже соединён с `merge_requests`."""
+    conditions: list[ColumnElement[bool]] = [MergeRequestRow.repository_id.in_(run_filter.repository_ids)]
+    if run_filter.statuses is not None:
+        conditions.append(ReviewRunRow.status.in_(run_filter.statuses))
+    if run_filter.author is not None:
+        conditions.append(MergeRequestRow.author == run_filter.author)
+    if run_filter.text is not None:
+        text_columns = (MergeRequestRow.title, MergeRequestRow.author, MergeRequestRow.source_branch)
+        matches = [column.icontains(run_filter.text, autoescape=True) for column in text_columns]
+        if run_filter.number is not None:
+            matches.append(MergeRequestRow.number == run_filter.number)
+        conditions.append(or_(*matches))
+    if run_filter.created_from is not None:
+        conditions.append(ReviewRunRow.created_at >= run_filter.created_from)
+    if run_filter.created_to is not None:
+        conditions.append(ReviewRunRow.created_at < run_filter.created_to)
+    return conditions
+
+
 class SqlAlchemyReviewRunRepo:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -176,6 +241,90 @@ class SqlAlchemyReviewRunRepo:
             select(ReviewRunRow).where(ReviewRunRow.status.not_in(TERMINAL_STATUSES))
         ).all()
         return [m.review_run_to_domain(row) for row in rows]
+
+    def list_changed(
+        self,
+        after: FeedCursor,
+        recheck_from: dt.datetime,
+        repository_ids: Collection[UUID],
+        limit: int,
+    ) -> list[ReviewRunListEntry]:
+        """Один запрос: id обеих частей — `UNION ALL` двух выборок, к ним запрос на
+        изменение, репозиторий и число находок `COUNT … GROUP BY` по пачке.
+
+        `LIMIT` — только у части новее курсора. Окно перепроверки читается целиком: оно и
+        так ограничено `RECHECK` по времени, а с `LIMIT` запоздавшая строка за первыми
+        `limit` уже виденными в окне не вернулась бы никогда. Обе части идут по индексу
+        `(updated_at, id)`.
+        """
+        if not repository_ids:
+            return []
+        key = tuple_(ReviewRunRow.updated_at, ReviewRunRow.id)
+        cursor = tuple_(literal(after.updated_at), literal(after.id))
+        visible = (
+            select(ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .where(MergeRequestRow.repository_id.in_(repository_ids))
+            .order_by(ReviewRunRow.updated_at, ReviewRunRow.id)
+        )
+        fresh = visible.where(key > cursor).limit(limit).subquery("fresh")
+        late = visible.where(ReviewRunRow.updated_at > recheck_from, key <= cursor).subquery("late")
+        picked = union_all(select(fresh.c.id), select(late.c.id)).cte("picked")
+        return self._entries(picked, ReviewRunRow.updated_at, ReviewRunRow.id)
+
+    def list_page(self, run_filter: RunListFilter, limit: int, offset: int) -> RunListPage:
+        """Два запроса: `COUNT` под фильтрами и страница строками списка, как у `list_changed`.
+
+        Порядок страницы — по индексу `(created_at, id)`. Подстрока `q` ищется `ILIKE` без
+        индекса, по прогонам видимых репозиториев; `%` и `_` из ввода экранируются
+        (`autoescape`) и шаблоном не становятся.
+        """
+        if not run_filter.repository_ids or run_filter.statuses == frozenset():
+            return RunListPage(entries=[], total=0)
+        matching = (
+            select(ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .where(*_run_list_conditions(run_filter))
+        )
+        total = self._session.scalar(select(func.count()).select_from(matching.subquery()))
+        newest_first = (ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+        page = matching.order_by(*newest_first).limit(limit).offset(offset).cte("page")
+        return RunListPage(entries=self._entries(page, *newest_first), total=total or 0)
+
+    def _entries(self, picked: CTE, *order_by: ColumnElement[Any] | InstrumentedAttribute[Any]) -> list[ReviewRunListEntry]:
+        """Прогоны из `picked` строками списка: запрос на изменение, репозиторий и число находок.
+
+        CTE, а не подзапрос: на неё ссылаются и выборка, и подсчёт находок, а CTE с
+        двумя ссылками PostgreSQL вычисляет один раз.
+        """
+        counts = (
+            select(FindingRow.review_run_id, func.count().label("findings_count"))
+            .where(FindingRow.review_run_id.in_(select(picked.c.id)))
+            .group_by(FindingRow.review_run_id)
+            .subquery("counts")
+        )
+        rows = self._session.execute(
+            select(
+                ReviewRunRow,
+                MergeRequestRow,
+                RepositoryRow,
+                func.coalesce(counts.c.findings_count, 0),
+            )
+            .join(picked, picked.c.id == ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .join(RepositoryRow, RepositoryRow.id == MergeRequestRow.repository_id)
+            .outerjoin(counts, counts.c.review_run_id == ReviewRunRow.id)
+            .order_by(*order_by)
+        ).all()
+        return [
+            ReviewRunListEntry(
+                run=m.review_run_to_domain(run),
+                merge_request=m.merge_request_to_domain(merge_request),
+                repository=m.repository_to_domain(repository),
+                findings_count=findings_count,
+            )
+            for run, merge_request, repository, findings_count in rows
+        ]
 
     def add(self, run: ReviewRun) -> None:
         """Вставить прогон, перенеся все поля, которые в нём уже есть.
@@ -534,3 +683,79 @@ class SqlAlchemySessionRepo:
     def delete_expired(self, now: dt.datetime) -> int:
         result = self._session.execute(delete(SessionRow).where(SessionRow.expires_at <= now))
         return int(result.rowcount)  # type: ignore[attr-defined]
+
+
+_ACCESS = "access_token"
+# Предел ожидания чужой блокировки токена при refresh; дальше — `ProviderTokenBusy`.
+_LOCK_TIMEOUT = "15s"
+_REFRESH = "refresh_token"
+
+
+class SqlAlchemyProviderTokenRepo:
+    """Токен пользователя при сессии; шифрует при записи и расшифровывает при чтении.
+
+    Без ключа (`cipher is None`) не пишет и не читает — `ProviderTokenUnavailable`:
+    открытым токен в базу не попадает никогда.
+    """
+
+    def __init__(self, session: Session, cipher: TokenCipher | None) -> None:
+        self._session = session
+        self._cipher = cipher
+
+    def get(self, session_id: UUID) -> ProviderToken | None:
+        row = self._session.get(ProviderTokenRow, session_id)
+        return self._to_domain(row) if row else None
+
+    def exists(self, session_id: UUID) -> bool:
+        return self._session.scalar(
+            select(ProviderTokenRow.session_id).where(ProviderTokenRow.session_id == session_id)
+        ) is not None
+
+    def get_for_update(self, session_id: UUID) -> ProviderToken | None:
+        # Ждём чужой refresh не дольше `_LOCK_TIMEOUT` (только эта транзакция):
+        # его держатель ждёт GitHub, и бесконечное ожидание висело бы на пуле.
+        self._session.execute(text(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'"))
+        try:
+            # populate_existing: строка могла остаться в identity map от `get`
+            # до блокировки, а читать надо то, что записал победитель гонки.
+            row = self._session.scalars(
+                select(ProviderTokenRow)
+                .where(ProviderTokenRow.session_id == session_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).one_or_none()
+        except OperationalError as error:
+            if isinstance(error.orig, LockNotAvailable):
+                raise ProviderTokenBusy("токен сессии обновляет параллельный запрос") from None
+            raise
+        return self._to_domain(row) if row else None
+
+    def save(self, session_id: UUID, token: ProviderToken) -> None:
+        cipher = self._require_cipher()
+        row = self._session.get(ProviderTokenRow, session_id)
+        if row is None:
+            row = ProviderTokenRow(session_id=session_id)
+            self._session.add(row)
+        row.access_token_encrypted = cipher.encrypt(token.access_token.reveal(), session_id, _ACCESS)
+        row.access_expires_at = token.access_expires_at
+        row.refresh_token_encrypted = (
+            None
+            if token.refresh_token is None
+            else cipher.encrypt(token.refresh_token.reveal(), session_id, _REFRESH)
+        )
+        row.refresh_expires_at = token.refresh_expires_at
+
+    def _to_domain(self, row: ProviderTokenRow) -> ProviderToken:
+        cipher = self._require_cipher()
+        refresh = row.refresh_token_encrypted
+        return ProviderToken(
+            access_token=Secret(cipher.decrypt(row.access_token_encrypted, row.session_id, _ACCESS)),
+            access_expires_at=row.access_expires_at,
+            refresh_token=None if refresh is None else Secret(cipher.decrypt(refresh, row.session_id, _REFRESH)),
+            refresh_expires_at=row.refresh_expires_at,
+        )
+
+    def _require_cipher(self) -> TokenCipher:
+        if self._cipher is None:
+            raise ProviderTokenUnavailable("не задан USER_TOKEN_ENCRYPTION_KEY")
+        return self._cipher

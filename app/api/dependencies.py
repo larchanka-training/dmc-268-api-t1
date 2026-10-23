@@ -8,14 +8,14 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from typing import Annotated, cast
-from uuid import UUID
 
 from fastapi import Depends, Path, Request
 
 from app.application.ports import UnitOfWork
+from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
-from app.domain.entities import ReviewRun
+from app.domain.enums import Provider
 from app.infrastructure.container import Container
 
 
@@ -36,6 +36,18 @@ def get_job_queue(container: Container = Depends(get_container)) -> JobQueue:
     return container.job_queue()
 
 
+def get_installation_catalog(container: Container = Depends(get_container)) -> InstallationCatalog:
+    return container.installation_catalog()
+
+
+def get_token_provider(container: Container = Depends(get_container)) -> OAuthProvider:
+    """Провайдер, выдавший токен сессии, — обновляет и отзывает его: сессии кабинета — только GitHub."""
+    provider = container.oauth_provider(Provider.GITHUB.value)
+    if provider is None:
+        raise RuntimeError("провайдер входа github не собран в контейнере")
+    return provider
+
+
 def get_unit_of_work_factory(
     container: Container = Depends(get_container),
 ) -> Callable[[], UnitOfWork]:
@@ -44,29 +56,24 @@ def get_unit_of_work_factory(
     return container.unit_of_work
 
 
+def get_untraced_unit_of_work_factory(
+    container: Container = Depends(get_container),
+) -> Callable[[], UnitOfWork]:
+    """Фабрика единиц работы без спанов SQL — для опроса в потоке событий GET /events.
+
+    Опрос идёт раз в секунду всё время жизни соединения: спаны на каждый запрос
+    раздули бы трейс запроса. Соединение берётся на одно чтение и сразу
+    возвращается: поток живёт часами, и несколько открытых вкладок иначе исчерпали бы пул.
+    """
+    return container.untraced_unit_of_work
+
+
 def get_oauth_provider(
     provider: Annotated[str, Path(description="Провайдер входа, например github.")],
     container: Container = Depends(get_container),
 ) -> OAuthProvider | None:
     """Провайдер входа по `{provider}` из пути; неизвестный — `None`."""
     return container.oauth_provider(provider)
-
-
-def get_run_reader(
-    container: Container = Depends(get_container),
-) -> Callable[[UUID], ReviewRun | None]:
-    """Чтение прогона короткой единицей работы — для потока событий.
-
-    `get_unit_of_work` держит транзакцию и соединение до конца запроса, а
-    поток живёт минуты: несколько открытых вкладок исчерпали бы пул. Здесь
-    соединение берётся на одно чтение и сразу возвращается.
-    """
-
-    def read(run_id: UUID) -> ReviewRun | None:
-        with container.unit_of_work() as uow:
-            return uow.review_runs.get(run_id)
-
-    return read
 
 
 def get_sleep() -> Callable[[float], Awaitable[None]]:

@@ -16,10 +16,14 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanKind, StatusCode
 
 from app.config import Settings
+from app.domain.llm_errors import LlmTimeoutError
 from app.infrastructure.queue.rabbitmq import to_wire_message
+from app.infrastructure.telemetry import OtelStageTracer
 from app.worker import factory
 from app.worker.factory import StopRequest, Worker, build_review_handler
 
+from ..application.test_review_pipeline import _run, _seed_run
+from ..fakes.llm_gateway import ScriptedLlmGateway
 from ..fakes.unit_of_work import FakeUnitOfWork
 from .test_review_handler import JOB, LIMITS, LLM_LIMITS, TEXTS, _Deps
 
@@ -131,6 +135,39 @@ def test_a_processed_message_closes_its_span_ok(spans: InMemorySpanExporter) -> 
     assert not process.events
 
 
+def test_a_stage_of_a_failed_message_does_not_leak_into_the_next_spans(
+    spans: InMemorySpanExporter,
+) -> None:
+    # Первое сообщение падает посреди этапа `analysing`; проход очистки и обработка
+    # следующего сообщения обязаны начать свои трейсы, а не стать детьми упавшего этапа.
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateways = iter([ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=1)])])
+
+    def handler(body: bytes) -> None:
+        if body == b"fail":
+            _run(uow, next(gateways), stage_tracer=OtelStageTracer())
+
+    channel = RecordingChannel(
+        [
+            (SimpleNamespace(delivery_tag=1), None, b"fail"),
+            (None, None, None),
+            (SimpleNamespace(delivery_tag=2), None, b"ok"),
+        ]
+    )
+
+    _worker(channel).run(handler, limit=2, sweep=lambda: None, sweep_interval=0)
+
+    assert channel.nacked == [1] and channel.acked == [2]
+    finished = spans.get_finished_spans()
+    failed, processed = [s for s in finished if s.kind is SpanKind.CONSUMER]
+    (stage,) = [s for s in finished if s.name == "review.analysing"]
+    assert stage.status.status_code is StatusCode.ERROR
+    assert failed.status.status_code is StatusCode.ERROR
+    after_failure = [s for s in finished if s.name == "review.sweep"][1:] + [processed]
+    assert after_failure and all(s.parent is None for s in after_failure)
+
+
 # --- остановка по сигналу ------------------------------------------------------------
 
 
@@ -147,6 +184,33 @@ def test_a_stop_request_lets_the_current_message_finish_and_takes_no_more() -> N
 
     assert channel.acked == [1]  # сообщение в работе подтверждено, второе не взято
     assert channel.cancelled and connection.closed
+
+
+def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
+    # Сигнал пришёл на простое или в окно ожидания, и тут же доставлено сообщение.
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    connection = FakeConnection()
+    handled: list[bytes] = []
+
+    _worker(channel, connection).run(handled.append, stop=StopRequest(requested=True))
+
+    assert handled == []
+    assert channel.acked == []  # не подтверждено: брокер вернёт его в очередь
+    assert channel.cancelled and connection.closed
+
+
+def test_a_message_after_a_stop_during_the_sweep_is_not_taken() -> None:
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    stop = StopRequest()
+    handled: list[bytes] = []
+
+    def sweep() -> None:
+        stop.requested = True  # сигнал пришёл посреди прохода очистки
+
+    _worker(channel).run(handled.append, sweep=sweep, sweep_interval=0, stop=stop)
+
+    assert handled == []
+    assert channel.acked == []
 
 
 class IdleChannel(FakeChannel):

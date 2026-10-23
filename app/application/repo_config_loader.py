@@ -67,6 +67,15 @@ def load_repo_rules(
         logger.info("правила %s@%s: %s — дефолтный фоллбэк", repo_full_name, base_sha, status)
         return RepoRules(status=status)
     rules, rejected = parse_rules_markdown(text)
+    if not rules:
+        # Итог разбора, а не довыборки: в кэше лежит текст, статус выводится из него.
+        logger.info(
+            "правила %s@%s: ни одного принятого правила из %d разделов — дефолтный фоллбэк",
+            repo_full_name,
+            base_sha,
+            len(rejected),
+        )
+        return RepoRules(status=RulesStatus.EMPTY, rejected=rejected)
     if rejected:
         logger.info(
             "правила %s@%s: отклонено %d из %d",

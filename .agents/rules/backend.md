@@ -150,12 +150,21 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
   `OTEL_SEMCONV_STABILITY_OPT_IN=database,http`), синонимы не изобретаем; своё, чего в semconv
   нет, — в пространстве `review.*` (`review.stage`).
 - **В атрибуты не кладём** промпты и ответы модели, код из диффа, токены доступа; query путей
-  входа скрывает `QueryRedaction`.
+  входа скрывает `QueryRedaction`. Текст исключения уходит только в событие `exception` — его
+  чистит редакция коллектора. Описание статуса — только имя типа (`error_status`,
+  `error_status_span`): описание редакцию не проходит. Свой спан, который может закрыться
+  исключением, — через `error_status_span`, а не голый `start_as_current_span`. Движок
+  SQLAlchemy создаётся с `hide_parameters=True`: параметры запроса не попадают в текст ошибки.
+- **Сэмплирование**: `parentbased_always_on`; сэмплер по доле (`traceidratio`) не применяется —
+  по каждому `X-Trace-ID` должен находиться трейс. Долю отбирает хвостовое сэмплирование в
+  коллекторе.
 - **OTel — только в `app/infrastructure`** и в проводке: `app/api/factory.py`,
   `app/api/trace_id.py`, `app/worker`. `app/domain` и `app/application` пишут спаны через порт
   `StageTracer`; запрет проверяет `lint-imports`.
 - **Доверие контексту**: входящему HTTP `traceparent` не доверяем (глобальный пропагатор пуст),
-  `traceparent` из нашей очереди принимаем — писать в неё может только API.
+  `traceparent` из нашей очереди принимаем — писать в неё может только API. Валидный HTTP
+  `traceparent` — только span link серверного спана (`link_client_trace`, `link.source = "client"`),
+  не родитель: trace id и сэмплирование остаются нашими.
 - **Граница**: телеметрия — для команды. Данные продукта (шаги, токены, длительность) — из базы,
   ответы API из телеметрии не строятся.
 

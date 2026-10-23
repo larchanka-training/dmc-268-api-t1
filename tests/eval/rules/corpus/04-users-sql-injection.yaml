@@ -1,0 +1,28 @@
+title: Поиск пользователя - SQL-инъекция и print
+pull_request:
+  title: "feat: поиск пользователя по имени"
+  description: Репозиторий пользователей получает поиск по имени для экрана поддержки.
+files:
+  app/repositories/users.py: |
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+
+    def find_user(cursor, name: str) -> tuple[int, str] | None:
+        query = f"SELECT id, email FROM users WHERE name = '{name}'"
+
+        cursor.execute(query)
+        row = cursor.fetchone()
+
+        print("найден пользователь", row)
+        return row
+expected:
+  - id: sql-injection
+    path: app/repositories/users.py
+    contains: "query = f\"SELECT id, email FROM users"
+    category: security
+  - id: print
+    path: app/repositories/users.py
+    contains: "print(\"найден пользователь\""
+    rule: [Logging, 1]

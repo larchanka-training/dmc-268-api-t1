@@ -6,6 +6,7 @@
 тест на реальной базе видели одно и то же поведение.
 """
 
+from collections.abc import Collection
 from dataclasses import replace
 from datetime import datetime
 from types import TracebackType
@@ -18,15 +19,19 @@ from app.domain.entities import (
     Finding,
     MergeRequest,
     OpenReviewThread,
+    ProviderToken,
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunListEntry,
     ReviewRunStep,
     Session,
     User,
 )
 from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
 from app.domain.lifecycle import next_status
+from app.domain.run_feed import FeedCursor
+from app.domain.run_list import RunListFilter, RunListPage
 
 
 class FakeRepositoryRepo:
@@ -62,8 +67,18 @@ class FakeRepositoryRepo:
         ordered = sorted(self._by_id.values(), key=lambda r: (r.created_at, r.id))
         return ordered[offset : offset + limit]
 
-    def add(self, repository: Repository) -> None:
+    def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
+        wanted = set(provider_ids)
+        return sorted(
+            (r for r in self._by_id.values() if r.provider == provider and r.provider_id in wanted),
+            key=lambda r: r.id,
+        )
+
+    def add(self, repository: Repository) -> bool:
+        if self.find_by_provider(repository.provider, repository.provider_id) is not None:
+            return False
         self._by_id[repository.id] = repository
+        return True
 
     def update(self, repository: Repository) -> None:
         if repository.id not in self._by_id:
@@ -128,6 +143,24 @@ class FakeMergeRequestRepo:
         self._by_id[merge_request.id] = merge_request
 
 
+def _matches(entry: ReviewRunListEntry, run_filter: RunListFilter) -> bool:
+    run, merge_request = entry.run, entry.merge_request
+    if merge_request.repository_id not in run_filter.repository_ids:
+        return False
+    if run_filter.statuses is not None and run.status not in run_filter.statuses:
+        return False
+    if run_filter.author is not None and merge_request.author != run_filter.author:
+        return False
+    if run_filter.text is not None:
+        needle = run_filter.text.lower()
+        haystack = (merge_request.title, merge_request.author, merge_request.source_branch)
+        if not any(needle in value.lower() for value in haystack) and merge_request.number != run_filter.number:
+            return False
+    if run_filter.created_from is not None and run.created_at < run_filter.created_from:
+        return False
+    return run_filter.created_to is None or run.created_at < run_filter.created_to
+
+
 class FakeReviewRunRepo:
     def __init__(self) -> None:
         self._by_id: dict[UUID, ReviewRun] = {}
@@ -166,6 +199,59 @@ class FakeReviewRunRepo:
 
     def list_unfinished(self) -> list[ReviewRun]:
         return [r for r in self._by_id.values() if r.status not in TERMINAL_STATUSES]
+
+    def bind(
+        self,
+        merge_requests: FakeMergeRequestRepo,
+        repositories: FakeRepositoryRepo,
+        findings: FakeFindingRepo,
+    ) -> None:
+        """Связать с соседними фейками: `list_changed` собирает строку списка, как JOIN."""
+        self._merge_requests = merge_requests
+        self._repositories = repositories
+        self._findings = findings
+
+    def list_changed(
+        self,
+        after: FeedCursor,
+        recheck_from: datetime,
+        repository_ids: Collection[UUID],
+        limit: int,
+    ) -> list[ReviewRunListEntry]:
+        # Как SQL-адаптер: limit только у части новее курсора, окно — целиком.
+        entries: list[ReviewRunListEntry] = []
+        for run in self._by_id.values():
+            merge_request = self._merge_requests.get(run.merge_request_id)
+            if merge_request is None or merge_request.repository_id not in repository_ids:
+                continue
+            repository = self._repositories.get(merge_request.repository_id)
+            assert repository is not None
+            count = len(self._findings.list_for_run(run.id))
+            entries.append(ReviewRunListEntry(run, merge_request, repository, count))
+        entries.sort(key=lambda e: (e.run.updated_at, e.run.id))
+        fresh = [e for e in entries if FeedCursor(e.run.updated_at, e.run.id) > after][:limit]
+        late = [
+            e
+            for e in entries
+            if e.run.updated_at > recheck_from and FeedCursor(e.run.updated_at, e.run.id) <= after
+        ]
+        return sorted(fresh + late, key=lambda e: (e.run.updated_at, e.run.id))
+
+    def list_page(self, run_filter: RunListFilter, limit: int, offset: int) -> RunListPage:
+        # Как SQL-адаптер: ILIKE — подстрока через lower(), не casefold(); номер — точное совпадение.
+        entries = [entry for entry in self._entries() if _matches(entry, run_filter)]
+        entries.sort(key=lambda e: (e.run.created_at, e.run.id), reverse=True)
+        return RunListPage(entries=entries[offset : offset + limit], total=len(entries))
+
+    def _entries(self) -> list[ReviewRunListEntry]:
+        entries: list[ReviewRunListEntry] = []
+        for run in self._by_id.values():
+            merge_request = self._merge_requests.get(run.merge_request_id)
+            assert merge_request is not None
+            repository = self._repositories.get(merge_request.repository_id)
+            assert repository is not None
+            entries.append(ReviewRunListEntry(run, merge_request, repository, len(self._findings.list_for_run(run.id))))
+        return entries
 
     def add(self, run: ReviewRun) -> None:
         self.added.append(run)
@@ -405,6 +491,43 @@ class FakeSessionRepo:
         return len(expired)
 
 
+class FakeProviderTokenRepo:
+    """Токены по id сессии. Каскад базы — фильтром по живым сессиям: токен
+    удалённой сессии не виден, как и в настоящей базе; токен без сессии не
+    пишется (внешний ключ)."""
+
+    def __init__(self, sessions: FakeSessionRepo) -> None:
+        self._sessions = sessions
+        self._by_session: dict[UUID, ProviderToken] = {}
+        self.locked: list[UUID] = []
+
+    @property
+    def stored(self) -> dict[UUID, ProviderToken]:
+        live = {s.id for s in self._sessions.stored}
+        return {k: v for k, v in self._by_session.items() if k in live}
+
+    def snapshot(self) -> dict[UUID, ProviderToken]:
+        return dict(self._by_session)
+
+    def restore(self, state: dict[UUID, ProviderToken]) -> None:
+        self._by_session = dict(state)
+
+    def get(self, session_id: UUID) -> ProviderToken | None:
+        return self.stored.get(session_id)
+
+    def exists(self, session_id: UUID) -> bool:
+        return session_id in self.stored
+
+    def get_for_update(self, session_id: UUID) -> ProviderToken | None:
+        self.locked.append(session_id)
+        return self.get(session_id)
+
+    def save(self, session_id: UUID, token: ProviderToken) -> None:
+        if session_id not in {s.id for s in self._sessions.stored}:
+            raise LookupError(f"session {session_id} is not stored")
+        self._by_session[session_id] = token
+
+
 class FakeUnitOfWork(UnitOfWork):
     """Держит состояние между повторными входами в `with` — как настоящая база.
 
@@ -435,6 +558,7 @@ class FakeUnitOfWork(UnitOfWork):
         self.published_comments.bind_findings(self.findings)
         self.users: FakeUserRepo = self._fakes.users
         self.sessions: FakeSessionRepo = self._fakes.sessions
+        self.provider_tokens: FakeProviderTokenRepo = self._fakes.provider_tokens
         self.committed = 0
         self.rolled_back = 0
         self._committed_state: list[Any] | None = None
@@ -490,9 +614,11 @@ class _Fakes:
         self.review_run_steps = FakeReviewRunStepRepo()
         self.context_payloads = FakeContextPayloadRepo()
         self.findings = FakeFindingRepo(self.review_runs)
+        self.review_runs.bind(self.merge_requests, self.repositories, self.findings)
         self.published_comments = FakePublishedCommentRepo(self.review_runs)
         self.users = FakeUserRepo()
         self.sessions = FakeSessionRepo()
+        self.provider_tokens = FakeProviderTokenRepo(self.sessions)
 
     def _all(self) -> list[Any]:
         return [
@@ -505,6 +631,7 @@ class _Fakes:
             self.published_comments,
             self.users,
             self.sessions,
+            self.provider_tokens,
         ]
 
     def snapshot(self) -> list[Any]:

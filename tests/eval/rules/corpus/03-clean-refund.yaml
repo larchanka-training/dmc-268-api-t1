@@ -1,0 +1,31 @@
+title: Возврат платежа по всем правилам - негативный кейс
+pull_request:
+  title: "feat: расчёт суммы возврата"
+  description: Доменная функция проверяет запрос на возврат и возвращает сумму или причину отказа.
+files:
+  app/domain/refunds.py: |
+    from dataclasses import dataclass
+    from datetime import datetime, timedelta
+    from decimal import Decimal
+
+    from app.domain.result import Result
+
+    REFUND_WINDOW = timedelta(days=30)
+
+
+    @dataclass(frozen=True)
+    class Payment:
+        amount: Decimal
+        paid_at: datetime
+
+
+    def refund_amount(payment: Payment, requested: Decimal, now: datetime) -> Result[Decimal]:
+        """Сумма возврата или причина отказа; время приходит аргументом."""
+        if requested <= 0:
+            return Result.failure(f"сумма возврата {requested} должна быть положительной")
+        if requested > payment.amount:
+            return Result.failure(f"возврат {requested} больше платежа {payment.amount}")
+        if now - payment.paid_at > REFUND_WINDOW:
+            return Result.failure(f"платёж от {payment.paid_at:%Y-%m-%d} старше {REFUND_WINDOW.days} дней")
+        return Result.success(requested)
+expected: []

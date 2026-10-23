@@ -37,6 +37,7 @@ from app.domain.llm_errors import (
     PromptTooLargeError,
 )
 from app.domain.prompt import PromptTexts
+from app.domain.run_steps import start_step
 from app.domain.vcs_errors import VcsError
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.vcs.errors import VcsNotFoundError
@@ -916,13 +917,17 @@ def test_a_failure_while_closing_the_step_does_not_mask_the_original_error() -> 
 def _failing_step_writes(
     uow: FakeUnitOfWork, fails: Callable[[ReviewRunStep], bool]
 ) -> list[ReviewRunStep]:
-    """Запись шага, для которого `fails` истинно, падает как сбой базы; такие шаги — в списке."""
+    """Первая запись шага, для которой `fails` истинно, падает как сбой базы; такие шаги — в списке.
+
+    Сбой разовый, как у кратковременного сбоя базы: повторная запись того же
+    шага в том же виде проходит.
+    """
     failed: list[ReviewRunStep] = []
     real_add, real_update = uow.review_run_steps.add, uow.review_run_steps.update
 
     def guarded(write: Callable[[ReviewRunStep], None]) -> Callable[[ReviewRunStep], None]:
         def wrapper(step: ReviewRunStep) -> None:
-            if fails(step):
+            if fails(step) and step not in failed:
                 failed.append(step)
                 raise ConnectionError("база недоступна")
             write(step)
@@ -959,9 +964,10 @@ def test_a_failed_retry_write_hands_the_review_to_the_next_provider() -> None:
     run = _completed(uow)
     assert run.status is ReviewRunStatus.COMPLETED
     assert run.tokens_used == 15
-    # Неудавшаяся попытка не закрылась и осталась `running`; повтор записан своим шагом.
+    # Исход неудавшейся попытки не записался сразу - его пишет завершение прогона;
+    # повтор записан своим шагом.
     assert _steps(uow)[2:] == [
-        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.RUNNING, None, None),
+        (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 10, "LLM_UNAVAILABLE"),
         (ReviewRunStage.ANALYSING, ReviewRunStepStatus.COMPLETED, 5, None),
         (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, None, None),
         (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None),
@@ -1017,7 +1023,7 @@ def test_a_failed_retry_write_hands_the_verifier_to_the_next_provider() -> None:
     assert run.verification is VerificationOutcome.VERIFIED
     assert run.tokens_used == 5 + 2 + 7
     assert _steps(uow)[3:] == [
-        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.RUNNING, None, None),
+        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.FAILED, 2, "LLM_UNAVAILABLE"),
         (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, 7, None),
         (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None),
     ]
@@ -1041,8 +1047,10 @@ def test_a_failed_step_commit_after_publishing_does_not_fail_the_run() -> None:
     run = _completed(uow)
     assert run.status is ReviewRunStatus.COMPLETED
     assert run.failure_reason is None
-    # Исход шага не записался: шаг остаётся `running` (его закрывает #91).
-    assert _steps(uow)[-1] == (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.RUNNING, None, None)
+    # Исход шага не записался сразу: его пишет завершение прогона, и шагов
+    # `running` у завершённого прогона нет.
+    assert _steps(uow)[-1] == (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.COMPLETED, None, None)
+    assert all(s[1] is not ReviewRunStepStatus.RUNNING for s in _steps(uow))
 
 
 def test_failed_step_starts_do_not_fail_the_run() -> None:
@@ -1075,3 +1083,120 @@ def test_a_screening_failure_keeps_the_review_tokens_on_the_analysing_step(
         (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 25, "INTERNAL_ERROR"),
     ]
     assert _completed(uow).status is ReviewRunStatus.FAILED
+
+
+def test_a_redelivered_run_closes_the_step_the_dead_worker_left_running() -> None:
+    """Воркер умер посреди `analysing`, брокер доставил сообщение снова."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, status=ReviewRunStatus.ANALYSING)
+    uow.review_run_steps.add(
+        start_step(JOB.review_run_id, ReviewRunStage.ANALYSING, started_at=NOW, step_id=UUID(int=50))
+    )
+
+    with pytest.raises(ValueError):
+        _run(uow, ScriptedLlmGateway([review_response()]))
+
+    assert _completed(uow).status is ReviewRunStatus.FAILED
+    (abandoned,) = uow.review_run_steps.list_for_run(JOB.review_run_id)
+    assert abandoned.status is ReviewRunStepStatus.FAILED
+    assert abandoned.error_code == "REVIEW_RUN_STALE"
+    # Длительность - по стенным часам до момента сбоя: часы теста идут на секунду за чтение.
+    assert abandoned.duration_seconds is not None and abandoned.duration_seconds > 0
+
+
+def test_a_failed_run_closes_its_step_with_the_known_code_when_the_outcome_write_failed() -> None:
+    """Исход упавшего шага не записался - перевод прогона в failed пишет его с настоящим кодом."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    writes = {"failed": 0}
+    real_update = uow.review_run_steps.update
+
+    def update(step: ReviewRunStep) -> None:
+        if step.status is ReviewRunStepStatus.FAILED and not writes["failed"]:
+            writes["failed"] += 1
+            raise ConnectionError("база недоступна")
+        real_update(step)
+
+    uow.review_run_steps.update = update  # type: ignore[method-assign]
+
+    with pytest.raises(LlmError):
+        _run(uow, ScriptedLlmGateway([LlmError("модель недоступна")]))
+
+    assert _completed(uow).status is ReviewRunStatus.FAILED
+    assert _steps(uow)[-1] == (
+        ReviewRunStage.ANALYSING,
+        ReviewRunStepStatus.FAILED,
+        0,
+        "LLM_UNAVAILABLE",
+    )
+
+
+def test_a_failure_saving_the_findings_fails_the_publishing_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    def broken_add(finding: object) -> NoReturn:
+        raise RuntimeError("нарушено ограничение")
+
+    monkeypatch.setattr(uow.findings, "add", broken_add)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "находка"), tokens=5),
+            verification_response(("F1", "keep"), tokens=7),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="нарушено ограничение"):
+        _run(uow, gateway)
+
+    assert _steps(uow)[3:] == [
+        (ReviewRunStage.VERIFYING, ReviewRunStepStatus.COMPLETED, 7, None),
+        (ReviewRunStage.PUBLISHING, ReviewRunStepStatus.FAILED, None, "INTERNAL_ERROR"),
+    ]
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    # Токены ответов, не дошедшие до прогона вместе с замечаниями, не теряются.
+    assert run.tokens_used == 12
+
+
+def test_a_failed_transition_to_analysing_fails_the_analysing_step() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    real_update = uow.review_runs.update
+
+    def update(run: ReviewRun) -> None:
+        if run.status is ReviewRunStatus.ANALYSING:
+            raise ConnectionError("база недоступна")
+        real_update(run)
+
+    uow.review_runs.update = update  # type: ignore[method-assign]
+
+    with pytest.raises(ConnectionError):
+        _run(uow, ScriptedLlmGateway([review_response()]))
+
+    assert _steps(uow)[-1] == (
+        ReviewRunStage.ANALYSING,
+        ReviewRunStepStatus.FAILED,
+        None,
+        "INTERNAL_ERROR",
+    )
+    assert _completed(uow).status is ReviewRunStatus.FAILED
+
+
+def test_a_screening_failure_counts_the_review_tokens_in_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    def broken_screening(*args: object, **kwargs: object) -> NoReturn:
+        raise RuntimeError("отсев сломан")
+
+    monkeypatch.setattr("app.application.review_pipeline.screen_findings", broken_screening)
+
+    with pytest.raises(RuntimeError):
+        _run(uow, ScriptedLlmGateway([review_response(tokens=25)]))
+
+    assert _completed(uow).tokens_used == 25

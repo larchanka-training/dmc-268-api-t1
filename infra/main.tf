@@ -19,6 +19,9 @@ locals {
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
   # consumer_timeout RabbitMQ его не ограничивает: в 4.3 таймаут подтверждения
   # есть только у quorum-очередей, а очередь review — classic.
+  # Деплой ждёт остановку воркера в `tofu apply`: timeout-minutes job deploy в
+  # .github/workflows/deploy.yml обязан быть больше максимума (2460 с) с запасом.
+  # Та же формула — у stop_grace_period воркера в docker-compose.yml.
   worker_stop_seconds = 2 * 300 * 2 * (var.llm_hosted_fallback ? 2 : 1) + 60
 }
 
@@ -211,6 +214,8 @@ resource "docker_container" "api" {
   # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
   # принудительно (SIGKILL): lifespan не завершается, спаны не выгружаются.
   # С ним — сначала SIGTERM и ожидание остановки; 10 с — как у `docker stop`.
+  # Укладываемся благодаря `--timeout-graceful-shutdown 5` в CMD образа: открытые
+  # потоки SSE uvicorn рвёт через 5 с, остальное время — на lifespan.
   destroy_grace_seconds = 10
 
   # Те же основания, что у migrate: образ один.
@@ -239,13 +244,16 @@ resource "docker_container" "api" {
   }
 
   # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера,
-  # OAuth и origin — у входа и проверки сессии.
+  # OAuth и origin — у входа и проверки сессии, ключ токенов пользователя — у
+  # входа и ручек репозиториев.
   env = concat(local.app_env, [
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
     "GITHUB_APP_CLIENT_ID=${var.github_app_client_id}",
     "GITHUB_APP_CLIENT_SECRET=${var.github_app_client_secret}",
     "PUBLIC_ORIGIN=${var.public_origin}",
+    # Ключ шифрования токенов пользователя GitHub — только API: воркер их не читает.
+    "USER_TOKEN_ENCRYPTION_KEY=${var.user_token_encryption_key}",
   ])
 
   ports {

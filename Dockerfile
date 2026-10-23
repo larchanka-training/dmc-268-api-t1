@@ -28,4 +28,10 @@ RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin app
 USER app
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --timeout-graceful-shutdown: по SIGTERM uvicorn ждёт закрытия соединений, а поток
+# SSE (/api/v1/events) живёт, пока открыта вкладка кабинета, — часами. Без предела
+# через грейс-период остановки (10 с, infra/main.tf) пришёл бы SIGKILL, lifespan не
+# завершился бы и спаны не выгрузились. Через 5 с uvicorn рвёт оставшиеся потоки,
+# клиент переподключается. То же — в docker-compose.yml; сверяет
+# tests/test_stack_descriptions.py.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]

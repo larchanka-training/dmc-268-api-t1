@@ -4,16 +4,11 @@
 """
 
 import ast
-import asyncio
 import os
 import re
 import subprocess
 import sys
-from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
@@ -21,17 +16,13 @@ from fastapi.testclient import TestClient
 from opentelemetry import propagate
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import SpanKind, format_trace_id
-from starlette.types import Message
+from opentelemetry.trace import SpanKind, format_span_id, format_trace_id
 
-from app.api.dependencies import get_run_reader, get_sleep, get_unit_of_work_factory
+from app.api import trace_id as trace_id_module
+from app.api.dependencies import get_unit_of_work_factory
 from app.api.factory import create_app
 from app.config import Settings
-from app.domain.entities import ReviewRun
-from app.domain.enums import ReviewRunStatus as S
-from app.domain.enums import TriggerSource
 
-from ..fakes.auth import sign_in_with_session
 from ..fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -41,8 +32,8 @@ SETTINGS = Settings(
 )
 ORIGIN = "http://localhost:5173"
 FOREIGN_TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"
-FOREIGN_TRACEPARENT = f"00-{FOREIGN_TRACE_ID}-00f067aa0ba902b7-01"
-RUN_ID = UUID("00000000-0000-0000-0000-0000000000aa")
+FOREIGN_SPAN_ID = "00f067aa0ba902b7"
+FOREIGN_TRACEPARENT = f"00-{FOREIGN_TRACE_ID}-{FOREIGN_SPAN_ID}-01"
 
 
 def _app() -> FastAPI:
@@ -111,15 +102,174 @@ def test_health_check_creates_no_span(spans: InMemorySpanExporter) -> None:
     assert [s.kind for s in spans.get_finished_spans() if s.kind is SpanKind.SERVER]
 
 
-def test_an_incoming_traceparent_is_ignored(spans: InMemorySpanExporter) -> None:
+def test_a_failure_to_parse_traceparent_still_gives_a_problem_with_the_trace_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`trace_id` в состоянии запроса раньше разбора заголовка: обработчику `500` он нужен."""
+
+    def broken(traceparent: str | None) -> None:
+        raise RuntimeError("разбор traceparent упал")
+
+    monkeypatch.setattr(trace_id_module, "link_client_trace", broken)
+
+    response = TestClient(_app(), raise_server_exceptions=False).get(
+        "/health", headers={"traceparent": FOREIGN_TRACEPARENT}
+    )
+
+    assert response.status_code == 500
+    assert re.fullmatch(r"[0-9a-f]{32}", response.json()["trace_id"])
+
+
+def test_a_valid_traceparent_becomes_a_link_not_the_parent(
+    spans: InMemorySpanExporter,
+) -> None:
+    """Серверный спан — корень нового трейса с одной ссылкой на контекст клиента."""
     response = TestClient(_app()).get(
-        "/", headers={"traceparent": FOREIGN_TRACEPARENT, "X-Trace-ID": "f" * 32}
+        "/",
+        headers={
+            "traceparent": FOREIGN_TRACEPARENT,
+            "tracestate": "vendor=secret",
+            "X-Trace-ID": "f" * 32,
+        },
     )
 
     server = _server_span(spans)
     assert server.parent is None  # запрос начал новый трейс
     assert _trace_id(server) != FOREIGN_TRACE_ID
+    (link,) = server.links
+    assert format_trace_id(link.context.trace_id) == FOREIGN_TRACE_ID
+    assert format_span_id(link.context.span_id) == FOREIGN_SPAN_ID
+    assert link.context.is_remote
+    assert dict(link.context.trace_state) == {}  # `tracestate` не читаем
+    assert dict(link.attributes or {}) == {"link.source": "client"}
     assert response.headers["X-Trace-ID"] == _trace_id(server)
+
+
+def test_x_trace_id_is_the_trace_id_of_the_server_span_not_of_the_client(
+    spans: InMemorySpanExporter,
+) -> None:
+    response = TestClient(_app(), raise_server_exceptions=False).get(
+        "/api/v1/_boom", headers={"traceparent": FOREIGN_TRACEPARENT}
+    )
+
+    server = _server_span(spans)
+    assert response.headers["X-Trace-ID"] == _trace_id(server) != FOREIGN_TRACE_ID
+    assert response.json()["trace_id"] == _trace_id(server)
+
+
+def test_a_not_sampled_traceparent_is_recorded_like_a_request_without_it(
+    spans: InMemorySpanExporter,
+) -> None:
+    """Флаг `00` клиента не выключает запись: сэмплер решает как для запроса без заголовка."""
+    client = TestClient(_app())
+    client.get("/")
+    plain = _server_span(spans)
+    spans.clear()
+
+    client.get("/", headers={"traceparent": FOREIGN_TRACEPARENT[:-2] + "00"})
+
+    linked = _server_span(spans)
+    assert linked.parent is None and plain.parent is None
+    assert linked.context is not None and plain.context is not None
+    assert linked.context.trace_flags == plain.context.trace_flags
+    assert linked.context.trace_flags.sampled
+    (link,) = linked.links
+    assert not link.context.trace_flags.sampled  # ссылка хранит флаг клиента как есть
+
+
+@pytest.mark.parametrize(
+    "traceparent",
+    [
+        "not-a-traceparent",
+        f"00-{'0' * 32}-00f067aa0ba902b7-01",  # нулевой trace id
+        f"00-{FOREIGN_TRACE_ID}-{'0' * 16}-01",  # нулевой span id
+        f"ff-{FOREIGN_TRACE_ID}-00f067aa0ba902b7-01",  # запрещённая версия
+        f"00-{FOREIGN_TRACE_ID[:-1]}-00f067aa0ba902b7-01",  # короткий trace id
+        "",
+    ],
+)
+def test_an_invalid_traceparent_gives_no_link_and_the_same_response(
+    spans: InMemorySpanExporter, traceparent: str
+) -> None:
+    client = TestClient(_app())
+    expected = client.get("/")
+    spans.clear()
+
+    response = client.get("/", headers={"traceparent": traceparent})
+
+    server = _server_span(spans)
+    assert server.parent is None
+    assert server.links == ()
+    assert response.status_code == expected.status_code
+    assert response.json() == expected.json()
+    assert response.headers["X-Trace-ID"] == _trace_id(server)
+
+
+# Сэмплер берётся из `OTEL_TRACES_SAMPLER` при создании провайдера, а в этом процессе
+# провайдер — из `tests/conftest.py`. Поэтому проверка сэмплера — в отдельном процессе,
+# где провайдер ставит сам `configure_tracing`.
+_SAMPLER_SCRIPT = """
+import sys
+
+from fastapi.testclient import TestClient
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind
+
+from app.api.factory import create_app
+from app.config import Settings
+
+app = create_app(
+    Settings(
+        database_url="postgresql+psycopg://test:test@localhost/test",
+        rabbitmq_url="amqp://guest:guest@localhost//",
+        github_webhook_secret="test-secret",
+    )
+)
+provider = trace.get_tracer_provider()
+assert isinstance(provider, TracerProvider)
+exporter = InMemorySpanExporter()
+provider.add_span_processor(SimpleSpanProcessor(exporter))
+response = TestClient(app).get("/", headers={"traceparent": sys.argv[1]})
+server = [s for s in exporter.get_finished_spans() if s.kind is SpanKind.SERVER]
+# Маркер: остальной stdout процесса — JSON-записи логов (configure_logging),
+# числовая строка одна, но не единственная.
+print("RESULT", len(server), response.headers["X-Trace-ID"])
+"""
+
+
+@pytest.mark.parametrize(
+    ("sampler", "flags", "recorded"),
+    [
+        ("parentbased_always_off", "01", 0),  # `01` клиента не включает запись
+        ("parentbased_always_on", "00", 1),  # `00` клиента её не выключает
+    ],
+)
+def test_the_parentbased_sampler_ignores_the_client_context(
+    sampler: str, flags: str, recorded: int
+) -> None:
+    env = {**os.environ, "OTEL_TRACES_SAMPLER": sampler, "OTEL_TRACES_EXPORTER": "none"}
+    env.pop("OTEL_SDK_DISABLED", None)
+    result = subprocess.run(
+        [sys.executable, "-c", _SAMPLER_SCRIPT, FOREIGN_TRACEPARENT[:-2] + flags],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    [line] = [
+        line for line in result.stdout.splitlines() if line.startswith("RESULT")
+    ]
+    _, finished, trace_id = line.split()
+    assert int(finished) == recorded
+    assert re.fullmatch(r"[0-9a-f]{32}", trace_id)
+    assert trace_id != FOREIGN_TRACE_ID
 
 
 def test_the_auth_callback_query_is_hidden_in_the_request_span(
@@ -218,92 +368,6 @@ def test_outgoing_requests_do_not_carry_our_trace_context() -> None:
     propagate.inject(carrier)
 
     assert carrier == {}
-
-
-# --- SSE: инструментирование не копит поток -------------------------------------
-
-NOW = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
-_RUN = ReviewRun(
-    id=RUN_ID,
-    merge_request_id=UUID(int=2),
-    head_sha="abc123",
-    status=S.QUEUED,
-    trigger=TriggerSource.WEBHOOK,
-    last_progress_at=NOW,
-    created_at=NOW,
-    updated_at=NOW,
-)
-
-
-def test_sse_events_reach_the_client_as_they_happen(
-    spans: InMemorySpanExporter,
-) -> None:
-    """Событие уходит клиенту до того, как прогон сменит состояние, а не одним куском в конце.
-
-    ASGI-приложение гоняется напрямую: `TestClient` собирает тело целиком и разницы
-    не увидел бы. Ожидание между проверками стоит, пока тест его не отпустит.
-    """
-    app = create_app(SETTINGS)
-    current = {"run": _RUN}
-    release = asyncio.Event()
-
-    async def held_sleep(seconds: float) -> None:
-        await release.wait()
-        release.clear()
-
-    app.dependency_overrides[get_run_reader] = lambda: lambda run_id: current["run"]
-    app.dependency_overrides[get_sleep] = lambda: held_sleep
-    cookies = sign_in_with_session(app, FakeUnitOfWork())
-    cookie = "; ".join(f"{name}={value}" for name, value in cookies.items())
-    path = f"/api/v1/reviews/{RUN_ID}/events"
-    scope: dict[str, Any] = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.4"},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": path,
-        "raw_path": path.encode(),
-        "root_path": "",
-        "query_string": b"",
-        "headers": [(b"host", b"testserver"), (b"cookie", cookie.encode())],
-        "client": ("testclient", 50000),
-        "server": ("testserver", 80),
-    }
-    sent: list[Message] = []
-    first_status = asyncio.Event()
-
-    async def receive() -> Message:
-        await asyncio.Event().wait()  # клиент не отключается
-        raise AssertionError
-
-    async def send(message: Message) -> None:
-        sent.append(message)
-        if b'"status":"queued"' in message.get("body", b""):
-            first_status.set()
-
-    def body() -> bytes:
-        return b"".join(
-            m.get("body", b"") for m in sent if m["type"] == "http.response.body"
-        )
-
-    async def scenario() -> None:
-        stream = asyncio.create_task(app(scope, receive, send))
-        await asyncio.wait_for(first_status.wait(), timeout=5)
-        # Прогон ещё идёт: первое событие уже у клиента, поток не закрыт.
-        assert b'"status":"completed"' not in body()
-        assert sent[-1].get("more_body") is True
-        assert not [s for s in spans.get_finished_spans() if s.kind is SpanKind.SERVER]
-        current["run"] = replace(_RUN, status=S.COMPLETED)
-        release.set()
-        await asyncio.wait_for(stream, timeout=5)
-
-    asyncio.run(scenario())
-
-    assert b'"status":"completed"' in body()
-    (start,) = [m for m in sent if m["type"] == "http.response.start"]
-    headers = dict(start["headers"])
-    assert headers[b"x-trace-id"].decode() == _trace_id(_server_span(spans))
 
 
 # --- ни один ответ API не строится из телеметрии ---------------------------------

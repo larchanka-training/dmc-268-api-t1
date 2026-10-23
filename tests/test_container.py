@@ -1,5 +1,6 @@
 """Composition root связывает каждый порт ровно один раз — и только он."""
 
+import base64
 import inspect
 import logging
 import re
@@ -7,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from app.api.dependencies import get_unit_of_work
 from app.application import ports
@@ -39,10 +41,12 @@ PORT_TO_ADAPTER: dict[str, Adapter] = {
         "db/repositories.py", "SqlAlchemyContextPayloadRepo"
     ),
     "FindingRepo": Adapter("db/repositories.py", "SqlAlchemyFindingRepo"),
+    "InstallationCatalog": Adapter("vcs/github_installations.py", "GitHubInstallationCatalog"),
     "JobQueue": Adapter("queue/rabbitmq.py", "RabbitMQJobQueue"),
     "LlmGateway": Adapter("llm/stub.py", "StubLlmGateway"),
     "MergeRequestRepo": Adapter("db/repositories.py", "SqlAlchemyMergeRequestRepo"),
     "OAuthProvider": Adapter("oauth/github.py", "GitHubOAuthProvider"),
+    "ProviderTokenRepo": Adapter("db/repositories.py", "SqlAlchemyProviderTokenRepo"),
     "PublishedCommentRepo": Adapter(
         "db/repositories.py", "SqlAlchemyPublishedCommentRepo"
     ),
@@ -134,6 +138,33 @@ def test_the_container_caches_its_lazy_adapters() -> None:
     Удалите `object.__setattr__` в контейнере — тест красный."""
     container = build_container(SETTINGS)
     assert container.vcs_gateway() is container.vcs_gateway()
+    assert container.installation_catalog() is container.installation_catalog()
+
+
+def test_without_a_token_key_the_unit_of_work_refuses_tokens(caplog: pytest.LogCaptureFixture) -> None:
+    """Ключ не задан — токены не пишутся (вход откажет). Контейнер собирает и воркер,
+    которому ключ не передаётся: предупреждения от контейнера нет."""
+    with caplog.at_level(logging.WARNING):
+        container = build_container(SETTINGS)
+    assert "USER_TOKEN_ENCRYPTION_KEY" not in caplog.text
+    assert container.unit_of_work()._cipher is None  # type: ignore[attr-defined]
+
+
+def test_without_a_token_key_the_api_warns_at_startup(caplog: pytest.LogCaptureFixture) -> None:
+    """Вход на таком стенде откажет — это видно в логе старта API."""
+    from app.api.factory import create_app
+
+    with caplog.at_level(logging.WARNING, logger="app.api.factory"):
+        create_app(SETTINGS)
+    assert "USER_TOKEN_ENCRYPTION_KEY не задан" in caplog.text
+
+
+def test_with_a_token_key_the_unit_of_work_encrypts(caplog: pytest.LogCaptureFixture) -> None:
+    key = base64.b64encode(bytes(range(32))).decode()
+    with caplog.at_level(logging.WARNING, logger="app.infrastructure.container"):
+        container = build_container(SETTINGS.model_copy(update={"user_token_encryption_key": SecretStr(key)}))
+    assert "USER_TOKEN_ENCRYPTION_KEY" not in caplog.text
+    assert container.unit_of_work()._cipher is not None  # type: ignore[attr-defined]
 
 
 def test_the_container_hands_out_oauth_providers_by_path_name() -> None:
@@ -190,6 +221,8 @@ HOSTED = {
 
 def _built_gateway_log(caplog: pytest.LogCaptureFixture, **overrides: object) -> str:
     container = build_container(_model_settings(**overrides))
+    # Сборка контейнера пишет своё (например, что ключ токенов не задан) — не о модели.
+    caplog.clear()
     with caplog.at_level(logging.INFO, logger="app.infrastructure.container"):
         container.llm_gateway()
     return "\n".join(record.getMessage() for record in caplog.records)

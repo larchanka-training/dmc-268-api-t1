@@ -31,7 +31,7 @@ from pika.exceptions import AMQPConnectionError, ChannelWrongStateError
 from pika.exchange_type import ExchangeType
 
 from app.domain.entities import ReviewJob
-from app.infrastructure.telemetry import record_current_exception
+from app.infrastructure.telemetry import REVIEW_RUN_ID, error_status_span
 
 QUEUE_NAME = "review_jobs"
 DLX_NAME = "review_jobs.dlx"
@@ -128,8 +128,8 @@ def consuming_span(
     Нет заголовка `traceparent` (сообщение старше трассировки, его переложили руками)
     или он битый — спан начинает новый трейс, обработка идёт как обычно. Исключение
     обработки выходит наружу через контекст-менеджер: спан записывает его событием
-    `exception` и закрывается со статусом ошибки. `KeyboardInterrupt` и `SystemExit` —
-    тоже: их отмечаем сами, `start_as_current_span` видит только `Exception`.
+    `exception` и закрывается со статусом ошибки, в описании — только тип
+    (`error_status_span`). `KeyboardInterrupt` и `SystemExit` — тоже.
     """
     headers = (properties.headers if properties is not None else None) or {}
     # pika отдаёт строковый заголовок `str`, а не декодируемый в UTF-8 — `bytes`.
@@ -138,7 +138,8 @@ def consuming_span(
         for key, value in headers.items()
         if isinstance(value, str | bytes)
     }
-    with _tracer.start_as_current_span(
+    with error_status_span(
+        _tracer,
         f"process {QUEUE_NAME}",
         context=_PROPAGATOR.extract(carrier),
         kind=SpanKind.CONSUMER,
@@ -149,13 +150,7 @@ def consuming_span(
             "messaging.rabbitmq.message.delivery_tag": delivery_tag,
         },
     ):
-        try:
-            yield
-        except Exception:
-            raise
-        except BaseException as exc:
-            record_current_exception(exc)
-            raise
+        yield
 
 
 class RabbitMQJobQueue:
@@ -241,7 +236,7 @@ class RabbitMQJobQueue:
                 **_MESSAGING_ATTRIBUTES,
                 "messaging.operation.name": "publish",
                 "messaging.operation.type": "send",
-                "review_run_id": str(job.review_run_id),
+                REVIEW_RUN_ID: str(job.review_run_id),
             },
         ):
             headers: dict[str, str] = {}
