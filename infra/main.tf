@@ -18,8 +18,10 @@ locals {
 
   # Версия сервиса для телеметрии — тег образа API: deploy.yml публикует образ
   # с тегом по sha коммита, а git внутрь образа не попадает, поэтому версия
-  # приходит окружением (OTEL_RESOURCE_ATTRIBUTES).
-  service_version = try(regex(":(.+)$", var.api_image)[0], "unknown")
+  # приходит окружением (OTEL_RESOURCE_ATTRIBUTES). Тег — после последнего
+  # двоеточия и без слэшей: регитстри с портом (localhost:5000/repo:sha) не
+  # ломают разбор.
+  service_version = try(regex(":(?P<tag>[^/:]+)$", var.api_image)["tag"], "unknown")
 
   # Экспорт телеметрии сервисами приложения (change add-observability-stack):
   # коллектор в той же сети. Таймаут OTLP меньше окна graceful shutdown API
@@ -239,12 +241,14 @@ resource "docker_container" "api" {
   image   = docker_image.api.image_id
   restart = "unless-stopped"
 
-  # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
-  # принудительно (SIGKILL): lifespan не завершается, спаны не выгружаются.
-  # С ним — сначала SIGTERM и ожидание остановки; 10 с — как у `docker stop`.
-  # Укладываемся благодаря `--timeout-graceful-shutdown 5` в CMD образа: открытые
-  # потоки SSE uvicorn рвёт через 5 с, остальное время — на lifespan.
-  destroy_grace_seconds = 10
+  # Остановка api: SIGTERM и ожидание. Худший случай — 5 с graceful shutdown
+  # (рвутся потоки SSE) + 4 с выгрузки спанов (OTEL_EXPORTER_OTLP_TIMEOUT,
+  # local.telemetry_env) с запасом: без него дефолтные 10 с Docker — впритык,
+  # и lifespan оборвался бы до выгрузки спанов (замечание из #89 про обе
+  # половины). destroy_grace_seconds — то же окно при пересоздании провайдером;
+  # 15 с — как у stop_grace_period api в docker-compose.yml.
+  stop_timeout          = 15
+  destroy_grace_seconds = 15
 
   # Те же основания, что у migrate: образ один.
   read_only     = true
