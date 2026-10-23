@@ -11,7 +11,7 @@ from app.domain.llm_errors import LlmTimeoutError
 from app.infrastructure.llm.metered import MeteredLlmGateway
 
 from ..fakes.llm_gateway import ScriptedLlmGateway, review_response
-from .test_telemetry import _metric_delta, _metric_snapshot
+from ..metrics import metric_delta, metric_snapshot
 
 _MESSAGES = (PromptMessage(PromptRole.SYSTEM, "инструкции"),)
 
@@ -28,14 +28,14 @@ def test_tokens_of_a_successful_call_are_recorded_by_task_and_model(
     Токены повторов и фоллбэка уже просуммированы в ответе шлюза, поэтому
     обёртка видит весь расход один раз.
     """
-    before = _metric_snapshot(metric_reader)
+    before = metric_snapshot(metric_reader)
     gateway = MeteredLlmGateway(
         ScriptedLlmGateway([review_response(tokens=30, model="stub-llm")])
     )
 
     gateway.complete(_request())
 
-    tokens, _ = _metric_delta(
+    tokens, _ = metric_delta(
         metric_reader, before, "review_llm_tokens", task="review", model="stub-llm"
     )
     assert tokens == 30
@@ -43,7 +43,7 @@ def test_tokens_of_a_successful_call_are_recorded_by_task_and_model(
 
 def test_a_failed_call_is_not_recorded(metric_reader: InMemoryMetricReader) -> None:
     """Сбойного вызова в счётчике нет: его токены доходят до прогона через исключение."""
-    before = _metric_snapshot(metric_reader)
+    before = metric_snapshot(metric_reader)
     gateway = MeteredLlmGateway(
         ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=30)])
     )
@@ -51,7 +51,7 @@ def test_a_failed_call_is_not_recorded(metric_reader: InMemoryMetricReader) -> N
     with pytest.raises(LlmTimeoutError):
         gateway.complete(_request())
 
-    tokens, _ = _metric_delta(
+    tokens, _ = metric_delta(
         metric_reader, before, "review_llm_tokens", task="review", model="stub-llm"
     )
     assert tokens == 0

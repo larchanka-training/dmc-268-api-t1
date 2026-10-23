@@ -108,7 +108,11 @@ _meter = metrics.get_meter(__name__)
 # перечисления (`status`, `stage`, `task`, `model`); данные продукта — шаги и
 # токены прогона — остаются в базе, из телеметрии ответы не строятся.
 _review_runs_total = _meter.create_counter(
-    "review_runs_total", unit="{run}", description="Прогоны ревью по терминальному статусу."
+    "review_runs_total",
+    unit="{run}",
+    # Обработки сообщений, а не уникальные прогоны: повторная доставка уже
+    # терминального прогона пишется повторно.
+    description="Обработки задач прогона по терминальному статусу.",
 )
 _review_stage_duration = _meter.create_histogram(
     "review_stage_duration", unit="s", description="Длительность этапов прогона."
@@ -284,6 +288,19 @@ def parse_exporters(value: str) -> list[str]:
     return exporters
 
 
+def _service_resource(service_name: str) -> Resource:
+    """Resource трейсов и метрик: `service.name` из кода, остальное — из окружения.
+
+    `OTEL_SERVICE_NAME` переопределяет имя; `Resource.create` мержит
+    `OTEL_RESOURCE_ATTRIBUTES` сам — `service.version` и
+    `deployment.environment.name` задают compose и `infra/`, код не дублирует.
+    """
+    attributes = (
+        {} if os.environ.get("OTEL_SERVICE_NAME") else {SERVICE_NAME: service_name}
+    )
+    return Resource.create(attributes)
+
+
 def build_tracer_provider(service_name: str) -> TracerProvider:
     """SDK-провайдер с экспортом из `OTEL_TRACES_EXPORTER` — списком через запятую.
 
@@ -293,12 +310,9 @@ def build_tracer_provider(service_name: str) -> TracerProvider:
     решает `_sampler`, лимит длины значений атрибутов —
     `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` с дефолтом в коде.
     """
-    attributes = (
-        {} if os.environ.get("OTEL_SERVICE_NAME") else {SERVICE_NAME: service_name}
-    )
     provider = TracerProvider(
         sampler=_sampler(),
-        resource=Resource.create(attributes),
+        resource=_service_resource(service_name),
         span_limits=SpanLimits(max_attribute_length=_attribute_value_length_limit()),
     )
     for name in parse_exporters(os.environ.get("OTEL_TRACES_EXPORTER", "")):
@@ -325,12 +339,8 @@ def build_meter_provider(service_name: str) -> MeterProvider:
     `none` и пустое значение — экспорт выключен: ридеров нет, метрики никуда
     не уходят и ошибок в логе нет. Гейт обязателен: SDK по умолчанию сам
     ставит `otlp` и без него стучался бы в localhost:4318. Resource — тот же,
-    что у трейсов: `service.name` из кода, версия и окружение — из
-    `OTEL_RESOURCE_ATTRIBUTES`.
+    что у трейсов (`_service_resource`).
     """
-    attributes = (
-        {} if os.environ.get("OTEL_SERVICE_NAME") else {SERVICE_NAME: service_name}
-    )
     readers = []
     for name in parse_exporters(os.environ.get("OTEL_METRICS_EXPORTER", "")):
         if name == "none":
@@ -345,7 +355,7 @@ def build_meter_provider(service_name: str) -> MeterProvider:
             )
             continue
         readers.append(PeriodicExportingMetricReader(factory()))
-    return MeterProvider(resource=Resource.create(attributes), metric_readers=readers)
+    return MeterProvider(resource=_service_resource(service_name), metric_readers=readers)
 
 
 def _sampler() -> Sampler | None:
