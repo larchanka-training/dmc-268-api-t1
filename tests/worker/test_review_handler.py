@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
@@ -26,6 +27,7 @@ from ..fakes.context import FakeCache, FakeExtractor
 from ..fakes.llm_gateway import ScriptedLlmGateway, review_response
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
+from ..infrastructure.test_telemetry import _metric_delta, _metric_snapshot
 
 LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000)
 LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
@@ -139,3 +141,42 @@ def test_handler_logs_both_ids_when_the_run_fails(caplog: pytest.LogCaptureFixtu
     [record] = caplog.records
     assert str(JOB.id) in record.getMessage()
     assert str(JOB.review_run_id) in record.getMessage()
+
+
+def test_a_failed_run_grows_the_run_counter_by_status(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Упавший прогон растит `review_runs_total{status="failed"}` — сигнал для алертов.
+
+    Счётчик считает исходы обработки: пайплайн переводит прогон в `failed` сам
+    и пробрасывает сбой в обработчик.
+    """
+    before = _metric_snapshot(metric_reader)
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+
+    with pytest.raises(LookupError):
+        build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, LLM_LIMITS, TEXTS)(body)
+
+    failed, _ = _metric_delta(metric_reader, before, "review_runs_total", status="failed")
+    assert failed == 1
+    completed, _ = _metric_delta(
+        metric_reader, before, "review_runs_total", status="completed"
+    )
+    assert completed == 0
+
+
+def test_a_completed_run_grows_the_run_counter_by_status(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Дошедший до терминального статуса прогон растит `review_runs_total{status="completed"}`."""
+    before = _metric_snapshot(metric_reader)
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+
+    build_review_handler(_Deps(_seeded_uow()), LIMITS, LLM_LIMITS, TEXTS)(body)
+
+    completed, _ = _metric_delta(
+        metric_reader, before, "review_runs_total", status="completed"
+    )
+    assert completed == 1
+    failed, _ = _metric_delta(metric_reader, before, "review_runs_total", status="failed")
+    assert failed == 0

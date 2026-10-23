@@ -35,6 +35,7 @@ from app.application.review_pipeline import run_review
 from app.application.session_purge import purge_expired_sessions
 from app.application.stale_sweep import sweep_stale_runs
 from app.config import Settings
+from app.domain.enums import ReviewRunStatus
 from app.domain.ids import new_id
 from app.domain.prompt import PromptTexts, check_window_config
 from app.infrastructure.container import build_container
@@ -53,6 +54,7 @@ from app.infrastructure.telemetry import (
     configure_telemetry,
     instrument_engine,
     record_current_exception,
+    record_run_finished,
     shutdown_tracing,
     sweep_span,
 )
@@ -264,12 +266,18 @@ def build_review_handler(
                 stage_tracer=stage_tracer,
             )
         except Exception:
+            # Счётчик исходов — бизнес-метрика для алертов: пайплайн переводит
+            # прогон в failed сам и пробрасывает сбой сюда; повторная доставка
+            # уже терминального прогона возвращается молча и считается
+            # завершённой.
+            record_run_finished(ReviewRunStatus.FAILED.value)
             # Сообщение уйдёт в DLQ; по job_id видно, какая это постановка
             # прогона, по review_run_id — какой прогон.
             logger.exception(
                 "задача %s (прогон %s) завершилась ошибкой", job.id, job.review_run_id
             )
             raise
+        record_run_finished(ReviewRunStatus.COMPLETED.value)
 
     return handle
 

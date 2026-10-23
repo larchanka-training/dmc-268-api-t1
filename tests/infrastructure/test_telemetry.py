@@ -30,7 +30,9 @@ from opentelemetry.instrumentation.sqlalchemy import engine as sqlalchemy_engine
 from opentelemetry.sdk.metrics.export import (
     ConsoleMetricExporter,
     Histogram,
+    HistogramDataPoint,
     InMemoryMetricReader,
+    NumberDataPoint,
     PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
@@ -648,6 +650,68 @@ def test_the_metric_resource_names_the_version_and_the_environment(
 
 
 # --- бизнес-метрики -----------------------------------------------------------------
+
+
+type _Snapshot = dict[tuple[str, tuple[tuple[str, Any], ...]], tuple[float, float | None]]
+
+
+def _metric_snapshot(reader: InMemoryMetricReader) -> _Snapshot:
+    """Срез приборов: {(имя, метки): (значение|наблюдения, сумма|None)}.
+
+    Провайдер глобальный на сессию и приборы кумулятивны, поэтому тесты сверяют
+    приращение между двумя сборами (`_metric_delta`), а не абсолют. У счётчика
+    сумма — None; у гистограммы значение — число наблюдений, сумма — их итог.
+    """
+    snapshot: _Snapshot = {}
+    data = reader.get_metrics_data()
+    if data is None:
+        return snapshot
+    for resource_metrics in data.resource_metrics or ():
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                points = metric.data.data_points if metric.data is not None else ()
+                for point in points:
+                    key = (metric.name, tuple(sorted((point.attributes or {}).items())))
+                    if isinstance(point, HistogramDataPoint):
+                        snapshot[key] = (float(point.count), point.sum)
+                    elif isinstance(point, NumberDataPoint):
+                        snapshot[key] = (float(point.value), None)
+    return snapshot
+
+
+def _metric_delta(
+    reader: InMemoryMetricReader, before: _Snapshot, name: str, **attributes: str
+) -> tuple[float, float | None]:
+    """Приращение ряда (имя, метки) между срезами после действия в тесте."""
+    key = (name, tuple(sorted(attributes.items())))
+    value_before, sum_before = before.get(key, (0.0, None))
+    value_after, sum_after = _metric_snapshot(reader).get(key, (0.0, None))
+    if sum_after is None:
+        return value_after - value_before, None
+    assert sum_before is not None
+    return value_after - value_before, sum_after - sum_before
+
+
+def test_stage_durations_land_in_the_histogram(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Гистограмму этапов пишет `OtelStageTracer` при закрытии этапа — и для упавшего."""
+    before = _metric_snapshot(metric_reader)
+    tracer = OtelStageTracer()
+
+    tracer.start(RUN_ID, ReviewRunStage.ANALYSING).end(None)
+    tracer.start(RUN_ID, ReviewRunStage.FETCHING_DIFF).end("SCM_UNAVAILABLE")
+
+    count, total = _metric_delta(
+        metric_reader, before, "review_stage_duration", stage="analysing"
+    )
+    assert count == 1
+    assert total is not None and total > 0
+    count, total = _metric_delta(
+        metric_reader, before, "review_stage_duration", stage="fetching_diff"
+    )
+    assert count == 1
+    assert total is not None and total > 0
 
 
 def _total_observations(reader: InMemoryMetricReader, name: str) -> float:

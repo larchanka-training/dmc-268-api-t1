@@ -15,6 +15,7 @@ from app.application import ports
 from app.config import Settings
 from app.infrastructure.container import build_container, llm_http_timeout
 from app.infrastructure.llm.fallback import FallbackLlmGateway
+from app.infrastructure.llm.metered import MeteredLlmGateway
 from app.infrastructure.llm.stub import StubLlmGateway
 
 SETTINGS = Settings(
@@ -230,7 +231,8 @@ def _built_gateway_log(caplog: pytest.LogCaptureFixture, **overrides: object) ->
 
 def test_stub_is_handed_out_only_when_chosen() -> None:
     gateway = build_container(_model_settings(llm_backend="stub")).llm_gateway()
-    assert isinstance(gateway, StubLlmGateway)
+    assert isinstance(gateway, MeteredLlmGateway)
+    assert isinstance(gateway._gateway, StubLlmGateway)
 
 
 def test_container_without_a_chosen_backend_refuses_to_build_a_gateway() -> None:
@@ -260,5 +262,6 @@ def test_connection_to_a_model_host_times_out_long_before_the_answer_does() -> N
 def test_the_model_gateway_is_built_once() -> None:
     container = build_container(_model_settings(**LOCAL))
     gateway = container.llm_gateway()
-    assert isinstance(gateway, FallbackLlmGateway)
+    assert isinstance(gateway, MeteredLlmGateway)
+    assert isinstance(gateway._gateway, FallbackLlmGateway)
     assert container.llm_gateway() is gateway
