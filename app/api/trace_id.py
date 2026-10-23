@@ -42,10 +42,11 @@ class TraceIdMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        trace_id = current_trace_id() or secrets.token_hex(16)
+        # До разбора заголовка: обработчику `500` нужен `trace_id`, даже если разбор упадёт.
+        scope.setdefault("state", {})["trace_id"] = trace_id
         # Спан запроса здесь уже текущий: ссылку получает именно он.
         link_client_trace(Headers(scope=scope).get("traceparent"))
-        trace_id = current_trace_id() or secrets.token_hex(16)
-        scope.setdefault("state", {})["trace_id"] = trace_id
         value = trace_id.encode("latin-1")
 
         async def send_with_trace_id(message: Message) -> None:

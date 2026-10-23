@@ -6,12 +6,16 @@
 
 import asyncio
 import json
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
+import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -449,6 +453,11 @@ def test_silence_gets_a_ping_at_least_every_fifteen_seconds() -> None:
 
 # --- поток в реальном времени и телеметрия ---------------------------------------
 
+# Версия спецификации ASGI, которую объявляет uvicorn. Starlette слушает `http.disconnect`
+# только при версии ниже 2.4: выше уход клиента — `ClientDisconnect`, то есть ERROR спана.
+# Тест потока задаёт её сам, а соответствие настоящему uvicorn сверяет тест ниже.
+ASGI_SPEC_VERSION = "2.3"
+
 
 def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_error(
     spans: InMemorySpanExporter,
@@ -479,7 +488,7 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
     cookie = "; ".join(f"{name}={value}" for name, value in cookies.items())
     scope: dict[str, Any] = {
         "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "asgi": {"version": "3.0", "spec_version": ASGI_SPEC_VERSION},
         "http_version": "1.1",
         "method": "GET",
         "scheme": "http",
@@ -535,3 +544,35 @@ def test_the_untraced_factory_is_wired_to_the_container() -> None:
     factory = get_untraced_unit_of_work_factory(Container())  # type: ignore[arg-type]
 
     assert factory() is uow
+
+
+def test_uvicorn_declares_the_asgi_spec_version_the_stream_test_relies_on() -> None:
+    """Настоящий uvicorn с той же HTTP-реализацией, что в контейнере (`http="auto"`).
+
+    Объявит 2.4 и выше — Starlette перестанет слушать `http.disconnect`, и уход клиента из
+    потока станет ERROR: тест упадёт здесь, а не молча на стенде.
+    """
+    seen: dict[str, str] = {}
+
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        seen["spec_version"] = scope["asgi"].get("spec_version", "2.0")
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=0, lifespan="off", log_level="warning")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            assert time.monotonic() < deadline, "uvicorn не стартовал за 10 с"
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        httpx.get(f"http://127.0.0.1:{port}/")
+    finally:
+        server.should_exit = True
+        thread.join(10)
+
+    assert seen["spec_version"] == ASGI_SPEC_VERSION
