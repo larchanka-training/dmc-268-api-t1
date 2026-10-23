@@ -350,29 +350,18 @@ def visible_run(
 ) -> ReviewRun:
     """Прогон, если он виден пользователю, — по тому же правилу, что список и поток.
 
-    Невидимый прогон отвечает так же, как несуществующий, `404 REVIEW_NOT_FOUND`: ответ не
-    подтверждает, что такой id есть. Несуществующий — без запроса к GitHub.
+    Невидимый прогон отвечает так же, как несуществующий, `404 REVIEW_NOT_FOUND`. GitHub
+    спрашиваем до чтения прогона и при любом id: иначе `502`, `401` или задержка ответа
+    выдали бы, что такой id есть.
     """
+    visible = {r.provider_id for r in user_repositories(signed_in, catalog, oauth, uow_factory)}
     with uow_factory() as uow:
         run = uow.review_runs.get(review_run_id)
         repository = None if run is None else _repository_of(uow, run)
-    if run is None or repository is None or not _is_visible(repository, signed_in, catalog, oauth, uow_factory):
+    # Кабинет видит репозитории только через GitHub: прогон репозитория другого провайдера не виден никому.
+    if run is None or repository is None or repository.provider is not Provider.GITHUB or repository.provider_id not in visible:
         raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
     return run
-
-
-def _is_visible(
-    repository: Repository,
-    signed_in: SignedIn,
-    catalog: InstallationCatalog,
-    oauth: OAuthProvider,
-    uow_factory: Callable[[], UnitOfWork],
-) -> bool:
-    # Кабинет видит репозитории только через GitHub: прогон репозитория другого провайдера не виден никому.
-    if repository.provider is not Provider.GITHUB:
-        return False
-    repositories = user_repositories(signed_in, catalog, oauth, uow_factory)
-    return repository.provider_id in {r.provider_id for r in repositories}
 
 
 def _repository_of(uow: UnitOfWork, run: ReviewRun) -> Repository:

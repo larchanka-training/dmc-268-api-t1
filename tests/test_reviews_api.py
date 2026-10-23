@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -39,6 +40,7 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.ids import new_id
+from app.domain.provider_token import ProviderTokenRejected
 from app.domain.run_steps import finish_step, start_step
 from app.domain.vcs_errors import VcsError
 
@@ -485,8 +487,19 @@ def test_a_run_of_a_repository_hidden_on_github_is_404_like_a_missing_one(suffix
     missing = hidden.get(f"/api/v1/reviews/{new_id()}{suffix}")
 
     assert response.status_code == missing.status_code == 404
-    assert response.json()["code"] == missing.json()["code"] == "REVIEW_NOT_FOUND"
-    assert response.json()["detail"] == missing.json()["detail"]
+    assert response.json()["code"] == "REVIEW_NOT_FOUND"
+    assert _without_instance(response) == _without_instance(missing)
+    assert _headers(response) == _headers(missing)
+
+
+def _without_instance(response: Any) -> dict[str, Any]:
+    """Тело ответа без `instance` и `trace_id`: путь с id и трасса у двух ответов разные по определению."""
+    return {key: value for key, value in response.json().items() if key not in {"instance", "trace_id"}}
+
+
+def _headers(response: Any) -> dict[str, str]:
+    """Заголовки ответа без тех, что различаются у любых двух запросов."""
+    return {key: value for key, value in response.headers.items() if key.lower() not in {"x-trace-id", "content-length"}}
 
 
 @pytest.mark.parametrize("suffix", RUN_PATHS)
@@ -500,13 +513,45 @@ def test_a_run_outside_github_is_visible_to_nobody(suffix: str) -> None:
 
 
 @pytest.mark.parametrize("suffix", RUN_PATHS)
-def test_a_missing_run_is_404_without_asking_github(suffix: str) -> None:
+def test_a_missing_run_asks_github_like_an_existing_one(suffix: str) -> None:
+    """GitHub спрашиваем и для несуществующего id: иначе сбой GitHub или задержка выдали бы, что id есть."""
     catalog = FakeInstallationCatalog([VISIBLE])
 
     response = _client(FakeUnitOfWork(), catalog).get(f"/api/v1/reviews/{new_id()}{suffix}")
 
     assert response.status_code == 404
-    assert catalog.calls == []
+    assert catalog.calls != []
+
+
+@pytest.mark.parametrize("suffix", RUN_PATHS)
+def test_github_failure_hides_whether_the_run_exists(suffix: str) -> None:
+    """GitHub лёг — `502` и для существующего прогона, и для несуществующего."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    client = _client(uow, FakeInstallationCatalog(error=VcsError("GitHub недоступен")))
+
+    existing = client.get(f"/api/v1/reviews/{run.id}{suffix}")
+    missing = client.get(f"/api/v1/reviews/{new_id()}{suffix}")
+
+    assert existing.status_code == missing.status_code == 502
+    assert _without_instance(existing) == _without_instance(missing)
+
+
+@pytest.mark.parametrize("suffix", RUN_PATHS)
+def test_a_token_revoked_at_github_closes_the_session(suffix: str) -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+
+    response = _client(uow, FakeInstallationCatalog(error=ProviderTokenRejected("401"))).get(
+        f"/api/v1/reviews/{run.id}{suffix}"
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"
+    assert any(
+        header.startswith("session=") and "Max-Age=0" in header for header in response.headers.get_list("set-cookie")
+    )
+    assert uow.sessions.stored == []
 
 
 @pytest.mark.parametrize("suffix", RUN_PATHS)
