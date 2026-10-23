@@ -303,12 +303,6 @@ def test_repository_connect_checks_session_origin_and_body_first(client: TestCli
     assert problem["errors"] == [{"where": "body.provider_id", "reason": "длина строки должна быть не меньше 1"}]
 
 
-def test_planned_review_run_diff_answers_not_implemented() -> None:
-    """Дифф прогона описан в схеме, а отвечает `501`."""
-    path = f"/api/v1/reviews/{RUN_ID}/diff"
-    assert_problem(_signed_in_client().get(path), 501, "NOT_IMPLEMENTED", path)
-
-
 @pytest.mark.parametrize("part", ["diff", "steps"])
 def test_review_run_parts_check_session_and_id_first(client: TestClient, part: str) -> None:
     """Дифф (заглушка) и шаги прогона проверяют сессию и id прогона до обращения к данным."""
