@@ -125,11 +125,16 @@ RabbitMQ — плагин `rabbitmq_prometheus` (порт 15692), Postgres — �
 потока остаётся настоящим trace id. Исключение пути из трейсинга лишило бы спан и `trace_id`
 связи с логами; спан на итерацию меняет сотни SQL-спанов на сотни своих.
 
-Механизм — `SpanSuppression`: генератор потока ставит contextvar-флаг на время чтений
-(`run_in_threadpool` наследует контекст), span-процессор в `on_start` видит флаг в parent-context и
-дропает спан из экспорта. Тот же процессор в `on_end` нормализует статус серверного спана SSE-пути
-при отключении клиента (`ClientDisconnect`/`CancelledError`) — без ERROR; это инфраструктура, роуты
-OpenTelemetry не импортируют (страж спеки).
+Механизм — переиспользованное подавление `untraced` (`app/infrastructure/telemetry.py`):
+contextvar-флаг поверх `suppress_instrumentation`, который уже проверяют инструментирования SQL и
+httpx, — отдельный span-процессор дублировал бы готовое. Включение — из инфраструктурной обвязки,
+роуты OpenTelemetry не импортируют (страж спеки): `stream_events` получает `untraced_uow_factory`
+зависимостью (`get_untraced_unit_of_work_factory` → `UntracedUnitOfWork`), и каждое чтение цикла
+идёт внутри `telemetry.untraced()`; `run_in_threadpool` наследует контекст. Нормализация статуса в
+`on_end` не понадобилась: при отключении клиента (`ClientDisconnect`/`CancelledError`) `_EventStream`
+в `app/api/events.py` штатно досылает финальную часть ответа, а `CancelledError` отменённого
+генератора поглощает collapsing task group Starlette — исключение до спана запроса не доходит, и
+он закрывается без ERROR.
 
 ### 6. Красные флаги очереди и миграций
 
