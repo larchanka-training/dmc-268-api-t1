@@ -114,6 +114,7 @@ def test_values_that_fail_the_format_check_stay_out_of_the_system_message() -> N
         ("absent", "файла `.review/rules.md` в целевой ветке нет"),
         ("too_large", "файл `.review/rules.md` больше лимита и не разбирался"),
         ("unavailable", "файл `.review/rules.md` не удалось получить"),
+        ("empty", "в файле `.review/rules.md` нет ни одного принятого правила"),
         ("loaded", "ни одно правило не применимо к файлам диффа"),
     ],
 )

@@ -54,6 +54,7 @@ _NO_RULES_REASON = {
     RulesStatus.ABSENT.value: "файла `.review/rules.md` в целевой ветке нет",
     RulesStatus.TOO_LARGE.value: "файл `.review/rules.md` больше лимита и не разбирался",
     RulesStatus.UNAVAILABLE.value: "файл `.review/rules.md` не удалось получить",
+    RulesStatus.EMPTY.value: "в файле `.review/rules.md` нет ни одного принятого правила",
     RulesStatus.LOADED.value: "ни одно правило не применимо к файлам диффа",
 }
 

@@ -100,6 +100,23 @@ def clean_db(migrated):
 
 
 @pytest.fixture
+def stack(clean_db):
+    """Сквозной стенд `tests/e2e/stack.py` на чистой базе и пустых очередях.
+
+    Общий для E2E, eval и нагрузочного прогона: отличаются модель и объём.
+    """
+    if not TEST_RABBITMQ_URL:
+        pytest.skip("needs a live RabbitMQ; set TEST_RABBITMQ_URL")
+    from .e2e.stack import Stack
+
+    built = Stack.build(clean_db, TEST_RABBITMQ_URL)
+    try:
+        yield built
+    finally:
+        built.purge_queues()
+
+
+@pytest.fixture
 def session(clean_db) -> Iterator[Session]:
     """Сессия, откатывается после каждого теста, чтобы тесты не видели друг друга."""
     connection = clean_db.connect()
