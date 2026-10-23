@@ -13,7 +13,9 @@
   отдельный пакет инструментирования не нужен); httpx (вызовы GitHub и модели) и
   SQLAlchemy — пакеты `opentelemetry-instrumentation-*`;
 - спаны этапов прогона — `OtelStageTracer`, адаптер порта, который зовёт `StepRecorder`;
-- спан периодического прохода воркера — `sweep_span`.
+- спан периодического прохода воркера — `sweep_span`;
+- бизнес-метрики для алертов: исходы прогонов (`record_run_finished`), длительность
+  этапов (пишет `OtelStageTracer`), токены модели (`record_llm_tokens`).
 
 Экспорт включается окружением, без правки кода: `OTEL_TRACES_EXPORTER` — список
 значений через запятую; `console` печатает законченные спаны в stdout, `otlp`
@@ -42,6 +44,7 @@ trace id, `X-Trace-ID` и решение сэмплера от заголовк�
 import contextlib
 import logging
 import os
+import time
 from collections.abc import Callable, Iterator
 from contextvars import Token
 from typing import Any
@@ -95,6 +98,24 @@ MIGRATE_SERVICE = "dmc-268-migrate"
 REVIEW_RUN_ID = "review_run_id"
 
 _tracer = trace.get_tracer(__name__)
+
+# Метры бизнес-сигналов — из того же глобального провайдера, что и трейсы:
+# его ставит `configure_telemetry`, до этого инструменты — прокси без сбора.
+_meter = metrics.get_meter(__name__)
+
+# Бизнес-метрики — ручные сигналы для алертов (change `add-observability-stack`):
+# исходы прогонов, длительность этапов, расход токенов модели. Метки — только
+# перечисления (`status`, `stage`, `task`, `model`); данные продукта — шаги и
+# токены прогона — остаются в базе, из телеметрии ответы не строятся.
+_review_runs_total = _meter.create_counter(
+    "review_runs_total", unit="{run}", description="Прогоны ревью по терминальному статусу."
+)
+_review_stage_duration = _meter.create_histogram(
+    "review_stage_duration", unit="s", description="Длительность этапов прогона."
+)
+_review_llm_tokens = _meter.create_counter(
+    "review_llm_tokens", unit="{token}", description="Токены модели по задачам прогона."
+)
 
 # Стабильные имена атрибутов semconv у пакетов contrib: `db.query.text` вместо
 # `db.statement`, `http.request.method` и `url.full` вместо `http.method` и `http.url`.
@@ -480,6 +501,25 @@ def record_current_exception(exc: BaseException) -> None:
     span.set_status(error_status(exc))
 
 
+def record_run_finished(status: str) -> None:
+    """Отметить терминальный исход прогона в счётчике `review_runs_total`.
+
+    Бизнес-сигнал для алертов по исходам: пишет тот, кто довёл прогон до
+    терминального статуса, — обработчик воркера (`build_review_handler`).
+    """
+    _review_runs_total.add(1, {"status": status})
+
+
+def record_llm_tokens(task: str, model: str, tokens: int) -> None:
+    """Записать расход токенов модели в счётчик `review_llm_tokens`.
+
+    Бизнес-сигнал для алерта бюджета; по модели и задаче прогона (ревью,
+    верификация). Стоимость деньгами токен не выражается — её считает
+    отдельное изменение (#119), как и разбивку по типам токенов.
+    """
+    _review_llm_tokens.add(tokens, {"task": task, "model": model})
+
+
 def error_status(exc: BaseException) -> Status:
     """Статус ошибки с именем типа, без текста исключения.
 
@@ -520,9 +560,11 @@ def current_trace_id() -> str | None:
 
 
 class _OtelStageSpan:
-    def __init__(self, span: trace.Span, token: Token[Context]) -> None:
+    def __init__(self, span: trace.Span, token: Token[Context], stage: ReviewRunStage) -> None:
         self._span = span
         self._token = token
+        self._stage = stage
+        self._started = time.monotonic()
 
     def end(self, error_code: str | None) -> None:
         if error_code is not None:
@@ -530,6 +572,9 @@ class _OtelStageSpan:
             self._span.set_status(Status(StatusCode.ERROR, error_code))
         self._span.end()
         otel_context.detach(self._token)
+        _review_stage_duration.record(
+            time.monotonic() - self._started, {"stage": self._stage.value}
+        )
 
 
 class OtelStageTracer:
@@ -537,7 +582,8 @@ class OtelStageTracer:
 
     Спан этапа делается текущим, пока этап идёт: запросы httpx и SQLAlchemy этапа
     ложатся в трейс его детьми. Шаги идут строго по одному, поэтому снятие контекста
-    в `end` не нарушает порядок.
+    в `end` не нарушает порядок. Тем же адаптером пишется гистограмма
+    `review_stage_duration{stage}` — длительность этапа по монотонным часам.
     """
 
     def start(self, review_run_id: UUID, stage: ReviewRunStage) -> _OtelStageSpan:
@@ -546,4 +592,4 @@ class OtelStageTracer:
             attributes={REVIEW_RUN_ID: str(review_run_id), "review.stage": stage.value},
         )
         token = otel_context.attach(trace.set_span_in_context(span))
-        return _OtelStageSpan(span, token)
+        return _OtelStageSpan(span, token, stage)

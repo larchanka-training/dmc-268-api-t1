@@ -31,6 +31,7 @@ from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninf
 from app.infrastructure.db.token_cipher import TokenCipher
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork, UntracedUnitOfWork
 from app.infrastructure.llm.fallback import FallbackLlmGateway
+from app.infrastructure.llm.metered import MeteredLlmGateway
 from app.infrastructure.llm.ollama import OllamaGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 from app.infrastructure.llm.stub import StubLlmGateway
@@ -246,7 +247,7 @@ def _build_llm_gateway(settings: Settings) -> LlmGateway:
         raise RuntimeError("LLM_BACKEND не задан: выберите stub или ollama")
     if settings.llm_backend == "stub":
         logger.info("модель: заглушка без похода к модели")
-        return StubLlmGateway()
+        return MeteredLlmGateway(StubLlmGateway())
     timeout = llm_http_timeout(settings)
     providers: list[tuple[str, LlmGateway]] = [
         (
@@ -262,7 +263,7 @@ def _build_llm_gateway(settings: Settings) -> LlmGateway:
     local = f"модель: Ollama ({settings.ollama_model})"
     if not settings.llm_hosted_fallback:
         logger.info("%s; hosted-фоллбэк выключен", local)
-        return FallbackLlmGateway(providers)
+        return MeteredLlmGateway(FallbackLlmGateway(providers))
     providers.append(
         (
             "Eurorouter",
@@ -280,4 +281,4 @@ def _build_llm_gateway(settings: Settings) -> LlmGateway:
         local,
         settings.eurorouter_model,
     )
-    return FallbackLlmGateway(providers)
+    return MeteredLlmGateway(FallbackLlmGateway(providers))
