@@ -51,11 +51,13 @@
 
 ## 4. Метрики — OTel SDK в Prometheus
 
-- [ ] 4.1 `configure_telemetry` (переименование `configure_tracing`, точки вызова те же):
-  глобальный `MeterProvider` с `PeriodicExportingMetricReader(OTLPMetricExporter())`. Тест:
-  запросы в API дают HTTP-метрики встроенной телеметрии FastAPI; ручки `/metrics` нет,
+- [x] 4.1 `configure_telemetry` (переименование `configure_tracing`, точки вызова те же):
+  глобальный `MeterProvider` с `PeriodicExportingMetricReader(OTLPMetricExporter())`; экспорт
+  гейтит `OTEL_METRICS_EXPORTER` — тот же список через запятую, что у трейсов (`none` по
+  умолчанию, `otlp` и `console`, мусор — одно предупреждение). Тест: запросы в API дают
+  HTTP-метрики встроенной телеметрии FastAPI; ручки `/metrics` нет,
   `uv run python scripts/export_openapi.py --check` без изменений
-- [ ] 4.2 Адаптер бизнес-метрик рядом с `OtelStageTracer`: счётчик `review_runs_total{status}`,
+- [x] 4.2 Адаптер бизнес-метрик рядом с `OtelStageTracer`: счётчик `review_runs_total{status}`,
   гистограмма `review_stage_duration{stage}`; токены и стоимость LLM — в адаптере LLM-шлюза, где
   известен usage. Тест: упавший прогон вырос в счётчике по статусу, длительность этапа — в
   гистограмме; домен и application не импортируют OTel (страж `lint-imports`)
