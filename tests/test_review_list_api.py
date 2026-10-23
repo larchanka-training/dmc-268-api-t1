@@ -18,7 +18,14 @@ from app.domain.entities import (
     RepositoryPermissions,
     ReviewRun,
 )
-from app.domain.enums import DiffSide, FindingCategory, FindingSeverity, MergeRequestState, Provider, TriggerSource
+from app.domain.enums import (
+    DiffSide,
+    FindingCategory,
+    FindingSeverity,
+    MergeRequestState,
+    Provider,
+    TriggerSource,
+)
 from app.domain.enums import ReviewRunStatus as S
 from app.domain.ids import new_id
 from app.domain.vcs_errors import VcsError
