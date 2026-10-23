@@ -207,7 +207,8 @@ p95 длительности на MR ≈300 строк и деградация �
 | Запретный список в логах: нет тел запросов к модели, кода из диффа, токенов доступа, query путей входа — на примерах вызова модели, ответа GitHub и callback входа | `tests/infrastructure/test_logging.py` |
 | `500` под настоящим uvicorn: stdout — только JSON, ровно одна запись со стектрейсом, её `trace_id` равен `X-Trace-ID` ответа | `tests/api/test_internal_error_logging.py` |
 | SSE-трейс: «десять минут» просмотра добавляют ноль SQL-спанов, спан потока один; отключение клиента до терминального статуса закрывает спан без ошибки | `tests/test_events_api.py` |
-| Признак повторной доставки: unack + redeliver на настоящем брокере даёт спан с `redelivered=true`, первая доставка — `false` | `tests/infrastructure/test_telemetry.py` |
+| Признак повторной доставки — всегда булев атрибут `messaging.rabbitmq.message.redelivered`, попытки различимы при любом значении | `tests/infrastructure/test_telemetry.py` |
+| Повторная доставка на настоящем брокере: unack возвращает сообщение в очередь, спан первой попытки — `redelivered=false`, второй — `true`, трейс тот же, что у publish | `tests/queue/test_consuming_span_redelivery.py` |
 | Экспорт по окружению: `parse_exporters` (запятая, пробелы, регистр, дубликаты, пустое значение), `none` по умолчанию — трейсы и метрики никуда не уходят; HTTP-метрики встроенной телеметрии FastAPI, ручки `/metrics` нет; resource несёт `service.version` и окружение | `tests/infrastructure/test_telemetry.py` |
 | Бизнес-метрики: упавший и завершённый прогон растят `review_runs_total{status}`, длительность этапа — в гистограмме `review_stage_duration{stage}` | `tests/worker/test_review_handler.py`, `tests/infrastructure/test_telemetry.py` |
 | Миграции в трейсе: `alembic upgrade head` даёт корневой спан `migrate` с SQL-детьми и не меняет результат — база стоит на head, миграционные тесты зелёные | `tests/db/test_migrate_trace.py` |
