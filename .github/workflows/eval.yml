@@ -4,10 +4,10 @@ name: LLM eval
 # design D5): корпус PR из tests/eval/rules/ проходит сквозной стенд в
 # конфигурациях `.review/rules.md` absent, rules, empty, adversarial, отчёт с
 # Precision/Recall - артефакт прогона и сводка job. Каждый прогон - платные
-# вызовы EUrouter, поэтому запуск вручную. На PR - только когда меняется сам
-# eval на модели (корпус, конфигурации, прогон) или этот workflow, и с одним
-# повтором: новый workflow с одним workflow_dispatch нельзя запустить до мерджа
-# в ветку по умолчанию, а изменённый корпус надо измерить до мерджа. Полный
+# вызовы EUrouter, поэтому запуск вручную. На PR - только по метке `eval`, с
+# одним повтором: изменённый корпус надо измерить до мерджа, а фильтр `paths`
+# сравнивает весь дифф PR, и eval шёл бы на каждый пуш PR, хоть раз задевшего
+# корпус. Снять и снова поставить метку - новый прогон. Полный
 # прогон с тремя повторами - вручную. PR из форка пропускаем: секрета в нём нет.
 # Запросы синтетические: код проверяемых репозиториев наружу не уходит.
 on:
@@ -22,9 +22,7 @@ on:
         default: absent,rules,empty,adversarial
         required: true
   pull_request:
-    paths:
-      - "tests/eval/rules/**"
-      - ".github/workflows/eval.yml"
+    types: [labeled]
 
 # У токена прогона только чтение: workflow ничего не пишет в репозиторий.
 permissions:
@@ -37,7 +35,10 @@ concurrency:
 jobs:
   rules:
     # У PR из форка нет секретов: прогон без них закончился бы провалом «eval пропущен».
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Метка `eval` - явное согласие на платный прогон.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.label.name == 'eval' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     # 7 кейсов × 4 конфигурации × до 2 вызовов модели на повтор; один повтор - около 2.5 мин.
     timeout-minutes: 60
@@ -70,10 +71,6 @@ jobs:
       # Ключ и адрес выдала организация; GitHub маскирует секрет в логе.
       EUROROUTER_API_KEYS: ${{ secrets.AI_DMC268_T1 }}
       EUROROUTER_BASE_URL: ${{ vars.AI_DMC268_URL }}
-      # Та же модель, что в llm-live.yml: метрики сравнимы только при одной модели.
-      # Числа в docs/testing/RULES_E2E_REPORT.md сняты на qwen3-coder-30b-a3b, её
-      # провайдер с 21.10 отвергает запросы (#93), поэтому здесь запасная (#95).
-      EUROROUTER_MODEL: qwen3-coder-next-80b
       # Три прогона на кейс - из docs/testing/LLM_EVAL.md §5: один повтор разброса не покажет.
       # На PR хватает одного: он проверяет, что eval работает, а метрики снимают вручную.
       EVAL_REPETITIONS: ${{ inputs.repetitions || (github.event_name == 'pull_request' && '1') || '3' }}
@@ -81,6 +78,10 @@ jobs:
       EVAL_REPORT_DIR: eval-report
     steps:
       - uses: actions/checkout@v7
+      # Модель Eurorouter - та же, что в llm-live.yml, из одного файла: метрики
+      # сравнимы только при одной модели. Числа в docs/testing/RULES_E2E_REPORT.md
+      # сняты на прежней qwen3-coder-30b-a3b (#93, #95).
+      - run: echo "EUROROUTER_MODEL=$(cat .github/eurorouter-model)" >> "$GITHUB_ENV"
       # Точная версия: плавающих мажорных тегов у setup-uv нет.
       - uses: astral-sh/setup-uv@v10.2.0
         with:

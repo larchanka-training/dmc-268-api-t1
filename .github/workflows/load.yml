@@ -86,12 +86,14 @@ jobs:
     env:
       TEST_DATABASE_URL: postgresql+psycopg://dmc268:dmc268@localhost:5432/dmc268
       TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672/%2F
-      # На PR входов нет: пустые значения - профиль по умолчанию из test_load.py.
-      LOAD_PULL_REQUESTS: ${{ inputs.pull_requests }}
-      LOAD_REDELIVERIES: ${{ inputs.redeliveries }}
+      # На PR входов нет, и фильтр `paths` сравнивает весь дифф PR: прогон идёт на
+      # каждый пуш. Поэтому на PR уменьшенный профиль - проверка, что сценарий
+      # работает; полный профиль из test_load.py - вручную.
+      LOAD_PULL_REQUESTS: ${{ inputs.pull_requests || (github.event_name == 'pull_request' && '20') || '' }}
+      LOAD_REDELIVERIES: ${{ inputs.redeliveries || (github.event_name == 'pull_request' && '5') || '' }}
       LOAD_SENDERS: ${{ inputs.senders }}
-      LOAD_WORKERS: ${{ inputs.workers }}
-      LOAD_MODEL_LATENCY_SECONDS: ${{ inputs.model_latency_seconds }}
+      LOAD_WORKERS: ${{ inputs.workers || (github.event_name == 'pull_request' && '4') || '' }}
+      LOAD_MODEL_LATENCY_SECONDS: ${{ inputs.model_latency_seconds || (github.event_name == 'pull_request' && '0.05') || '' }}
       LOAD_GITHUB_LATENCY_SECONDS: ${{ inputs.github_latency_seconds }}
       LOAD_MAX_INTAKE_P95_MS: ${{ inputs.max_intake_p95_ms }}
       LOAD_MAX_END_TO_END_P95_SECONDS: ${{ inputs.max_end_to_end_p95_seconds }}
