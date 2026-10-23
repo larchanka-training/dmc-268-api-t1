@@ -99,16 +99,25 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local}
       # Стабильные имена атрибутов semconv для SQL и HTTP; то же значение ставит код.
       OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
-    # Драйвер логов json-file, как в infra/main.tf: Docker Desktop по умолчанию
-    # пишет драйвером local (файлы local-logs/ в бинарном формате), а коллектор
-    # собирает именно json-file (<id>-json.log).
+    # Драйвер логов json-file с той же ротацией, что в infra/main.tf
+    # (local.log_opts): Docker Desktop по умолчанию пишет драйвером local
+    # (файлы local-logs/ в бинарном формате), а коллектор собирает именно
+    # json-file (<id>-json.log); без ротации лог растёт, пока не кончится диск.
     logging:
       driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    # Худший случай остановки: 5 с graceful shutdown (рвутся потоки SSE) +
+    # 4 с выгрузки спанов (OTEL_EXPORTER_OTLP_TIMEOUT) с запасом. Без него
+    # дефолтные 10 с Docker — впритык, с ним lifespan гарантированно
+    # завершается и спаны выгружаются (замечание из #89 про обе половины).
+    stop_grace_period: 15s
     # exec: uvicorn заменяет sh и становится PID 1 — иначе SIGTERM от
     # `docker stop` достаётся sh, который его игнорирует, и через грейс-период
     # приходит SIGKILL: lifespan не завершается, спаны не выгружаются.
@@ -151,9 +160,13 @@ services:
       rabbitmq:
         condition: service_healthy
     command: ["python", "-m", "app.worker"]
-    # Драйвер логов json-file, как у api выше и как в infra/main.tf.
+    # Драйвер логов json-file с той же ротацией, что у api выше и в
+    # infra/main.tf.
     logging:
       driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     # Как в infra: без init воркер — PID 1, а ему ядро не доставляет сигналы с
     # обработчиком по умолчанию, и второй SIGTERM не остановил бы его сразу.
     init: true

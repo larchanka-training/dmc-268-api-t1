@@ -232,7 +232,7 @@ variable "grafana_port" {
   default     = 3000
 }
 
-# Без значения по умолчанию: локально Grafана без логина, на стенде — по
+# Без значения по умолчанию: локально Grafana без логина, на стенде — по
 # учётке; без пароля apply падает на чтении переменной.
 variable "grafana_admin_password" {
   type        = string
