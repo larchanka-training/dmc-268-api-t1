@@ -176,6 +176,11 @@ class ProviderTokenRepo(Protocol):
 
     def get(self, session_id: UUID) -> ProviderToken | None: ...
 
+    def exists(self, session_id: UUID) -> bool:
+        """Есть ли у сессии токен — без расшифровки и без ключа: проверка сессии на
+        каждом запросе (`authenticate`) не должна зависеть от шифрования."""
+        ...
+
     def get_for_update(self, session_id: UUID) -> ProviderToken | None:
         """Прочитать и держать запись до конца транзакции: refresh одной сессии —
         по одному за раз (design D4)."""

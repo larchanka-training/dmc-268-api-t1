@@ -140,14 +140,19 @@ def complete_login(
 
 
 def authenticate(uow: UnitOfWork, token: str | None, now: datetime) -> SignedIn | None:
-    """Пользователь действующей сессии и её id; истёкшая сессия удаляется."""
+    """Пользователь действующей сессии и её id; истёкшая сессия удаляется.
+
+    Сессия без токена провайдера (открыта до хранения токенов) — тоже: без токена не
+    работают ни список репозиториев, ни поток событий, и считать её вошедшей на одних
+    ручках и закрывать на других нельзя (#120).
+    """
     if not token:
         return None
     with uow as work:
         session = work.sessions.find_by_token_hash(hash_token(token))
         if session is None:
             return None
-        if is_expired(session, now):
+        if is_expired(session, now) or not work.provider_tokens.exists(session.id):
             work.sessions.delete(session.id)
             work.commit()
             return None

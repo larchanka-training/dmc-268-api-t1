@@ -242,6 +242,20 @@ def test_an_expired_session_is_401_and_deleted(stand) -> None:
     assert stand.uow.sessions.stored == []
 
 
+@pytest.mark.parametrize("path", ["/api/v1/auth/me", "/api/v1/repositories"])
+def test_a_session_without_a_provider_token_is_401_and_deleted_everywhere(stand, path) -> None:
+    """Раньше `/auth/me` отвечал такой сессии 200, а поток `/events` — 401 (#120)."""
+    client = stand.client()
+    sign_in(client)
+    stand.uow.provider_tokens.restore({})
+
+    response = client.get(path)
+
+    assert response.status_code == 401
+    assert "Max-Age=0" in set_cookies(response)["session"]
+    assert stand.uow.sessions.stored == []
+
+
 def test_logout_ends_the_session_in_every_tab(stand) -> None:
     tab_1 = stand.client()
     sign_in(tab_1)

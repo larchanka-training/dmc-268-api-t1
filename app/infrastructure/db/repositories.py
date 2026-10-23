@@ -647,6 +647,11 @@ class SqlAlchemyProviderTokenRepo:
         row = self._session.get(ProviderTokenRow, session_id)
         return self._to_domain(row) if row else None
 
+    def exists(self, session_id: UUID) -> bool:
+        return self._session.scalar(
+            select(ProviderTokenRow.session_id).where(ProviderTokenRow.session_id == session_id)
+        ) is not None
+
     def get_for_update(self, session_id: UUID) -> ProviderToken | None:
         # Ждём чужой refresh не дольше `_LOCK_TIMEOUT` (только эта транзакция):
         # его держатель ждёт GitHub, и бесконечное ожидание висело бы на пуле.

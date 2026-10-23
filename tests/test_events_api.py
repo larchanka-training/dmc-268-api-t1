@@ -170,10 +170,8 @@ def _app(
     with_token: bool = True,
 ) -> tuple[FastAPI, dict[str, str]]:
     app = create_app(SETTINGS)
-    cookies = sign_in_with_session(app, world.uow)
     # Токен пользователя, сохранённый при входе: видимость считается им.
-    if with_token:
-        world.uow.provider_tokens.save(SIGNED_IN_SESSION_ID, token_from_grant(EXPIRING_GRANT, datetime.now(UTC)))
+    cookies = sign_in_with_session(app, world.uow, with_token=with_token)
     app.dependency_overrides[get_untraced_unit_of_work_factory] = lambda: lambda: world.uow
     app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog([VISIBLE])
     app.dependency_overrides[get_token_provider] = lambda: oauth or FakeOAuthProvider()
