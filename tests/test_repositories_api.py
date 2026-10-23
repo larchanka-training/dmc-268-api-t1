@@ -286,6 +286,17 @@ def test_a_public_repository_without_explicit_rights_looks_exactly_like_a_missin
     assert "app_installed" not in catalog.calls
 
 
+def test_a_private_repository_with_only_read_is_403() -> None:
+    """Приватный репозиторий GitHub отдаёт только участнику: с ролью read отказ —
+    `403 REPOSITORY_MANAGE_REQUIRED`, а не `404`."""
+    uow = FakeUnitOfWork()
+    response = _connect(_client(uow, FakeInstallationCatalog([replace(WEB, private=True)])), WEB.provider_id)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    assert uow.repositories.stored == {}
+
+
 def test_a_maintainer_connects_a_repository() -> None:
     catalog = FakeInstallationCatalog([InstallationRepository("101", "octo-org/api", "main", MAINTAIN)])
 

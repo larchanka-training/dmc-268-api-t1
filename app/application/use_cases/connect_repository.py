@@ -25,7 +25,7 @@ from app.application.ports.unit_of_work import UnitOfWork
 from app.application.use_cases.user_token import call_with_user_token
 from app.domain.entities import InstallationRepository, Repository
 from app.domain.enums import Provider
-from app.domain.repository_access import can_connect, has_explicit_access
+from app.domain.repository_access import can_connect, visible_for_connect
 
 
 class ConnectRefusal(StrEnum):
@@ -79,8 +79,8 @@ def connect_repository(
 
     Два запроса к провайдеру вместо обхода всех установок: репозиторий по id
     токеном пользователя и установка приложения на нём. Порядок проверок: не
-    виден пользователю (в том числе только с правом чтения — так GitHub отдаёт
-    любой публичный репозиторий) или приложение не установлено (приостановлено) —
+    виден пользователю (в том числе публичный только с правом чтения — так GitHub
+    отдаёт любой публичный репозиторий) или приложение не установлено (приостановлено) —
     `NOT_IN_INSTALLATION`, один отказ без различия; нет права admin или
     maintain — `MANAGE_REQUIRED`; уже подключён — `ALREADY_CONNECTED`. Права проверяются раньше «уже подключён»:
     пользователь без прав не узнаёт, подключён ли репозиторий.
@@ -93,10 +93,10 @@ def connect_repository(
     found = call_with_user_token(
         uow, user.oauth, user.session_id, now, lambda token: catalog.user_repository(token, provider_id)
     )
-    # Только `pull` — так GitHub отдаёт любой публичный репозиторий кому угодно:
-    # не виден, как и в списке `/user/installations…`, и установку не проверяем
-    # (change `user-token-explicit-access`).
-    if found is None or not has_explicit_access(found.permissions) or not catalog.app_installed(found.full_name):
+    # Публичный только с `pull` — так GitHub отдаёт его кому угодно: не виден, и
+    # установку не проверяем (change `user-token-explicit-access`). Приватный с ролью
+    # read виден: дальше `403` (change `user-token-private-read`).
+    if found is None or not visible_for_connect(found) or not catalog.app_installed(found.full_name):
         return ConnectRefusal.NOT_IN_INSTALLATION
     if not can_connect(found.permissions):
         return ConnectRefusal.MANAGE_REQUIRED

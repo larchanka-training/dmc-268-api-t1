@@ -1,5 +1,6 @@
 """Подключение репозитория: use cases на фейках каталога, провайдера входа и unit of work."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -156,6 +157,21 @@ def test_a_repository_with_only_pull_is_invisible_whether_or_not_the_app_is_inst
     catalog = FakeInstallationCatalog([WEB], not_installed=set() if installed else {WEB.full_name})
     assert _connect(catalog, _signed_in(), "202") is ConnectRefusal.NOT_IN_INSTALLATION
     assert catalog.calls == ["user_repository"]
+
+
+def test_a_private_repository_with_only_read_needs_manage_rights() -> None:
+    """Приватный GitHub отдаёт только участнику: роль read — это доступ, отказ `403`."""
+    uow = _signed_in()
+    catalog = FakeInstallationCatalog([replace(WEB, private=True)])
+    assert _connect(catalog, uow, "202") is ConnectRefusal.MANAGE_REQUIRED
+    assert catalog.calls == ["user_repository", "app_installed"]
+    assert uow.repositories.stored == {}
+
+
+def test_a_private_repository_with_only_read_and_no_app_is_not_in_installation() -> None:
+    private = replace(WEB, private=True)
+    catalog = FakeInstallationCatalog([private], not_installed={private.full_name})
+    assert _connect(catalog, _signed_in(), "202") is ConnectRefusal.NOT_IN_INSTALLATION
 
 
 def test_invisible_and_missing_repositories_get_the_same_refusal() -> None:

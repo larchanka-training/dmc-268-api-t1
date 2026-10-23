@@ -68,13 +68,16 @@ class InstallationRepository:
     Список таких репозиториев отдаёт GitHub по токену пользователя: это
     пересечение «доступно приложению» и «доступно пользователю», с правами
     пользователя на каждый (change `repositories-via-user-token`).
-    `installation_id` не хранится и не нужен.
+    `installation_id` не хранится и не нужен. `private` — приватный ли репозиторий:
+    приватный GitHub отдаёт только тому, у кого на нём есть роль
+    (change `user-token-private-read`).
     """
 
     provider_id: str
     full_name: str
     default_branch: str
     permissions: RepositoryPermissions
+    private: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -235,6 +235,7 @@ class _Repository(_GitHubModel):
     id: int
     full_name: str
     default_branch: str
+    private: bool
     permissions: _Permissions
 
     def to_domain(self) -> InstallationRepository:
@@ -248,6 +249,7 @@ class _Repository(_GitHubModel):
                 push=self.permissions.push,
                 triage=self.permissions.triage,
             ),
+            private=self.private,
         )
 
 

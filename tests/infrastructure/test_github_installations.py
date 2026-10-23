@@ -58,13 +58,13 @@ def installation(installation_id: int, suspended_at: str | None = None) -> dict[
     }
 
 
-def repo_json(n: int, *, admin: bool = False, maintain: bool = False, push: bool = False, triage: bool = False) -> dict[str, Any]:
+def repo_json(n: int, *, admin: bool = False, maintain: bool = False, push: bool = False, triage: bool = False, private: bool = False) -> dict[str, Any]:
     return {
         "id": n,
         "node_id": "MDEwOlJlcG9zaXRvcnkxMjk2MjY5",
         "name": f"repo-{n}",
         "full_name": f"octo-org/repo-{n}",
-        "private": True,
+        "private": private,
         "default_branch": "main",
         "permissions": {"admin": admin, "maintain": maintain, "push": push, "triage": triage, "pull": True},
     }
@@ -321,6 +321,12 @@ def test_user_repository_reads_one_repository_with_the_user_token() -> None:
 
     assert found == InstallationRepository("42", "octo-org/repo-42", "main", RepositoryPermissions(admin=False, maintain=True, push=False, triage=False))
     assert seen == ["/repositories/42"]
+
+
+def test_user_repository_reads_whether_the_repository_is_private() -> None:
+    found = make_catalog(lambda request: httpx.Response(200, json=repo_json(42, private=True))).user_repository(TOKEN, "42")
+
+    assert found is not None and found.private
 
 
 @pytest.mark.parametrize("status", [403, 404])

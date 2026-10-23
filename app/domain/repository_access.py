@@ -4,10 +4,11 @@
 пользователь может, если GitHub вернул его в ответе по токену пользователя,
 подключать — с правом admin или maintain (решение 3A из
 larchanka-training/dmc-268-ui-t1#37, change `repositories-via-user-token`).
-Репозиторий только с правом чтения при подключении считается невидимым.
+Публичный репозиторий только с правом чтения при подключении считается невидимым,
+приватный — видимым (change `user-token-private-read`).
 """
 
-from app.domain.entities import RepositoryPermissions
+from app.domain.entities import InstallationRepository, RepositoryPermissions
 
 
 def has_explicit_access(permissions: RepositoryPermissions) -> bool:
@@ -20,6 +21,17 @@ def has_explicit_access(permissions: RepositoryPermissions) -> bool:
     (change `user-token-explicit-access`).
     """
     return permissions.admin or permissions.maintain or permissions.push or permissions.triage
+
+
+def visible_for_connect(repository: InstallationRepository) -> bool:
+    """Виден ли репозиторий пользователю при подключении.
+
+    Приватный GitHub отдаёт только участнику, хотя бы с ролью read: пользователь
+    и так знает, что репозиторий есть, и отказ `403` ему ничего не раскрывает.
+    Публичный — только с явным правом (`has_explicit_access`)
+    (change `user-token-private-read`).
+    """
+    return repository.private or has_explicit_access(repository.permissions)
 
 
 def can_connect(permissions: RepositoryPermissions) -> bool:
