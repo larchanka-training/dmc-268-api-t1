@@ -23,7 +23,9 @@ from app.domain.enums import (
     MergeRequestState,
     PromptRole,
     Provider,
+    ReviewRunStage,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     RulesStatus,
     TriggerSource,
     VerificationOutcome,
@@ -43,6 +45,39 @@ class Repository:
     auto_review_enabled: bool
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryPermissions:
+    """Права пользователя на репозиторий так, как их отдаёт провайдер.
+
+    Только то, что читают решения о подключении (`app/domain/repository_access.py`):
+    `pull` не нужен — его GitHub отдаёт любому на публичный репозиторий.
+    """
+
+    admin: bool
+    maintain: bool
+    push: bool
+    triage: bool
+
+
+@dataclass(frozen=True, slots=True)
+class InstallationRepository:
+    """Репозиторий установки GitHub App, видимый вошедшему пользователю.
+
+    Список таких репозиториев отдаёт GitHub по токену пользователя: это
+    пересечение «доступно приложению» и «доступно пользователю», с правами
+    пользователя на каждый (change `repositories-via-user-token`).
+    `installation_id` не хранится и не нужен. `private` — приватный ли репозиторий:
+    приватный GitHub отдаёт только тому, у кого на нём есть роль
+    (change `user-token-private-read`).
+    """
+
+    provider_id: str
+    full_name: str
+    default_branch: str
+    permissions: RepositoryPermissions
+    private: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +127,39 @@ class ReviewRun:
     # Итог второго прохода модели; пуст, пока анализ не завершён.
     verification: VerificationOutcome | None = None
     verifier_dropped_findings: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewRunListEntry:
+    """Прогон строкой списка: сам прогон, его запрос на изменение, репозиторий и
+    число находок. Собирается одним запросом на пачку, а не чтением на прогон."""
+
+    run: ReviewRun
+    merge_request: MergeRequest
+    repository: Repository
+    findings_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewRunStep:
+    """Один шаг воркера в прогоне: этап, его исход, время и затраты.
+
+    Хранится как `review_run_steps`. Повтор этапа (новая попытка вызова модели)
+    — отдельный шаг того же этапа, поэтому у прогона их может быть несколько.
+    Запросов и ответов модели шаг не хранит.
+    """
+
+    id: UUID
+    review_run_id: UUID
+    stage: ReviewRunStage
+    status: ReviewRunStepStatus
+    started_at: datetime
+    # Пусто, пока шаг идёт.
+    duration_seconds: float | None = None
+    # Пусто у шага, который модель не вызывал.
+    tokens_used: int | None = None
+    # Машиночитаемый код сбоя (`run_steps.error_code`); пуст, если шаг не падал.
+    error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,3 +512,67 @@ class OAuthProfile:
     login: str
     name: str | None
     avatar_url: str | None
+
+
+class Secret:
+    """Строка-секрет: токен пользователя у провайдера.
+
+    `repr` и `str` не раскрывают значение, поэтому секрет не попадает ни в
+    лог, ни в трейсбек с локальными переменными, ни в `repr` записи, которая
+    его держит. Значение — только явным `reveal()`.
+    """
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def reveal(self) -> str:
+        return self._value
+
+    def __repr__(self) -> str:
+        return "Secret('<скрыто>')"
+
+    __str__ = __repr__
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Secret) and other._value == self._value
+
+    def __hash__(self) -> int:
+        return hash(self._value)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderGrant:
+    """Ответ провайдера на обмен `code` или refresh token: токены и сроки в секундах.
+
+    Сроков нет, если у приложения выключено истечение токенов: тогда access
+    token бессрочный и refresh token не выдаётся.
+    """
+
+    access_token: Secret
+    expires_in: int | None
+    refresh_token: Secret | None
+    refresh_token_expires_in: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthLogin:
+    """Итог обмена `code`: профиль и токен пользователя."""
+
+    profile: OAuthProfile
+    grant: ProviderGrant
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderToken:
+    """Токен пользователя у провайдера, привязанный к сессии входа.
+
+    Сроки — абсолютные моменты; `None` — без истечения. В базе лежит только
+    зашифрованным: шифрует адаптер хранения.
+    """
+
+    access_token: Secret
+    access_expires_at: datetime | None
+    refresh_token: Secret | None
+    refresh_expires_at: datetime | None

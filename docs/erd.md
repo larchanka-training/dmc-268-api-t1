@@ -3,7 +3,10 @@
 Источник истины о структуре базы данных. Таблицы создаются миграцией
 `alembic/versions/0001_baseline_schema.py`, пользователи и сессии — ревизией
 `0005_add_users_and_sessions.py`, ссылка замечания на правило и итог
-верификации — `0006_add_rule_ref_and_verification.py`; отдельный тест следит, чтобы таблицы
+верификации — `0006_add_rule_ref_and_verification.py`, шаги прогона —
+`0007_add_review_run_steps.py`, индекс `review_runs (updated_at, id)` под курсор
+общего потока событий — `0008_add_review_runs_updated_at_index.py`, токен пользователя у
+провайдера при сессии — `0009_add_provider_tokens.py`; отдельный тест следит, чтобы таблицы
 на этой диаграмме и модели не расходились.
 
 `ReviewRun` в тикете называется `ReviewJob`. Имя поменяли, потому что «job»
@@ -14,11 +17,13 @@
 erDiagram
     repositories ||--o{ merge_requests : "содержит"
     merge_requests ||--o{ review_runs : "проверяется в"
+    review_runs ||--o{ review_run_steps : "прошёл"
     review_runs ||--o{ context_payloads : "получил на вход"
     review_runs ||--o{ findings : "выдал"
     review_runs ||--o{ published_comments : "опубликовал"
     findings ||--o| published_comments : "стало"
     users ||--o{ sessions : "вошёл в"
+    sessions ||--o| provider_tokens : "токен провайдера"
 
     repositories {
         provider provider "github или gitlab"
@@ -59,6 +64,18 @@ erDiagram
         int rejected_findings "замечания, отброшенные отсевом: строка вне диффа, невалидная ссылка на правило, дубль"
         review_verification verification "итог второго прохода модели: verified, not_required, unavailable; null до конца анализа"
         int verifier_dropped_findings "замечания, отброшенные верификатором"
+        uuid id PK
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    review_run_steps {
+        uuid review_run_id FK
+        review_run_stage stage "fetching_diff, building_context, analysing, verifying, publishing"
+        review_run_step_status status "running, completed, failed"
+        timestamptz started_at
+        float duration_seconds "null, пока шаг идёт"
+        bigint tokens_used "null, если шаг модель не вызывал или расход неизвестен"
+        text error_code "код из каталога ошибок прогона; только у упавшего шага"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
@@ -124,6 +141,13 @@ erDiagram
         timestamptz expires_at "вход + 30 дней"
         uuid id PK
     }
+    provider_tokens {
+        uuid session_id PK "и FK на sessions"
+        bytea access_token_encrypted "AES-256-GCM"
+        timestamptz access_expires_at "null — без истечения"
+        bytea refresh_token_encrypted "null — refresh token нет"
+        timestamptz refresh_expires_at
+    }
 ```
 
 ## Таблицы
@@ -159,6 +183,16 @@ push. Новый прогон сверяется с ним, чтобы поня�
 называется `ReviewJob`; строка живёт дольше своего сообщения в очереди на всё
 время анализа и публикации и владеет их результатами.
 
+**`review_run_steps`**: ход прогона для кабинета — по строке на шаг воркера:
+этап, состояние, начало, длительность, токены и код ошибки. Этапы мельче
+статуса прогона: `building_context` прогона — это шаги `fetching_diff` и
+`building_context`, `analysing` — шаги `analysing` и `verifying`. Повтор этапа
+(новая попытка вызова модели: ответ не по схеме, переход к резервному
+провайдеру) — отдельная строка того же этапа, упавшая попытка остаётся
+`failed` со своим кодом. Запросов и ответов модели здесь нет: шаг — исход, а
+не телеметрия. Упавший верификатор — `failed`-шаг при завершённом прогоне:
+второй проход fail-open.
+
 **`context_payloads`**: ровно то, что было показано модели в рамках прогона, по
 порядку, по строке на чанк, если контекст не влезает в один запрос. Благодаря
 этому прогон воспроизводим: неудачное замечание можно отследить до входных
@@ -182,11 +216,19 @@ push. Новый прогон сверяется с ним, чтобы поня�
 
 **`users`**: пользователь кабинета, одна строка на учётную запись у провайдера
 входа. Логин, имя и аватар перезаписываются при каждом входе. Токен провайдера
-не хранится: после входа он не нужен, ревью работает через GitHub App.
+хранится не здесь, а при сессии (`provider_tokens`): ревью работает через GitHub App,
+токен пользователя нужен только списку и подключению репозиториев.
 
 **`sessions`**: сессия входа. Значения cookie в базе нет, только SHA-256 от
 него, поэтому утечка таблицы не даёт действующих cookie. Срок — 30 дней от
 входа, без продления и без `updated_at`. Выход удаляет строку.
+
+**`provider_tokens`**: токен пользователя GitHub App, полученный при входе, — одна
+строка на сессию. Только шифротекст: AES-256-GCM с ключом `USER_TOKEN_ENCRYPTION_KEY`,
+associated data — id сессии и имя поля, так что шифротекст, перенесённый в другую строку
+или поле, не расшифровывается. Сроки `NULL` — токены без истечения. Строку обновляет
+refresh под блокировкой `SELECT … FOR UPDATE`; удаляется она вместе с сессией. Сессии,
+открытые до ревизии 0009, строки не имеют.
 
 ## Правила, которые обеспечивает схема
 
@@ -201,10 +243,13 @@ push. Новый прогон сверяется с ним, чтобы поня�
 | Чанки контекста сохраняют порядок | `UNIQUE (review_run_id, chunk_index)` |
 | Замечание не может повториться в одном прогоне | `UNIQUE NULLS NOT DISTINCT (review_run_id, file_path, side, old_line, new_line, category)`. Привязка заполняет только номер строки своей стороны, поэтому в ключе есть оба номера, а NULL считаются равными. Без любой из этих двух частей ограничение никогда не сработает на старой стороне, где `new_line` всегда NULL. |
 | Ссылка на правило заполнена целиком или пуста целиком | `ck_findings_rule_ref`: `rule_name`, `rule_check`, `rule_check_text` все `NULL` либо все заполнены и `rule_check >= 1`. Префикс атрибуции строится из всех трёх частей. |
+| Шаг закрыт целиком или идёт | `ck_review_run_steps_duration`: длительности нет ровно у `running`; `ck_review_run_steps_error_code`: код ошибки есть ровно у `failed`. Длительность и токены не отрицательны. |
 | Счётчик верификатора не отрицателен | `ck_review_runs_verifier_dropped`: `verifier_dropped_findings >= 0` |
 | Комментарий публикуется один раз за прогон | `UNIQUE NULLS NOT DISTINCT (review_run_id, finding_id)`. Именно правило для NULL распространяет это ограничение на итоговый комментарий прогона, у которого замечания нет. |
 | Учётная запись провайдера — один пользователь | `UNIQUE (provider, provider_user_id)` |
 | Сессия находится по cookie одним запросом | `UNIQUE (token_hash)` |
+| Токен провайдера живёт не дольше сессии | `ON DELETE CASCADE` на `provider_tokens.session_id`: выход, вход поверх сессии, уборка истёкших и удаление пользователя удаляют и токен. Второе исключение из правила ниже, по той же причине. |
+| Срок refresh token без самого токена не хранится | `ck_provider_tokens_refresh_expiry_needs_token`: `refresh_expires_at IS NULL OR refresh_token_encrypted IS NOT NULL` |
 | Удаление пользователя гасит его сессии | `ON DELETE CASCADE` на `sessions.user_id` — единственное исключение из правила ниже: сессия без пользователя ничего не значит. |
 | Удаление строки никогда не удаляет зависимые | `ON DELETE RESTRICT` на каждом внешнем ключе конвейера. Удаление, после которого что-то осталось бы без родителя, отклоняется, так что `provider_comment_id` опубликованного комментария и стоимость прогона не пропадут побочным эффектом. Очистка, когда она появится, удаляет дочерние строки явно. |
 

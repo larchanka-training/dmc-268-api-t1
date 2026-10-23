@@ -9,8 +9,9 @@
       `confidence`.
 - [ ] Error model можно корректно показать пользователю, включая `scm_provider` и `provider_attempt`.
 - [x] Согласован способ обновления статуса: SSE, без polling —
-      `GET /api/v1/reviews/{id}/events` (спека `review-run-events`). Снимок при каждом
-      подключении закрывает пропуски; зависший прогон виден по `last_progress_at`.
+      общий поток `GET /api/v1/events` (спека `review-rest-api`), экран прогона отбирает
+      события своего прогона по id. Снимок REST после подключения закрывает пропуски;
+      зависший прогон виден по `last_progress_at`.
 
 ## Backend
 - [ ] Все endpoints реализуемы, включая `POST /webhooks/{provider}` с проверкой подписи.

@@ -212,9 +212,15 @@ def test_every_error_response_is_problem_json() -> None:
         if set(content) != {PROBLEM_MEDIA_TYPE}:
             problems.append(f"{where}: тип содержимого {sorted(content)}, а нужен только {PROBLEM_MEDIA_TYPE}")
             continue
-        ref = content[PROBLEM_MEDIA_TYPE]["schema"].get("$ref", "")
-        if ref_name(ref) not in problem_schemas:
-            problems.append(f"{where}: схема {ref!r} — не модель ошибки")
+        schema = content[PROBLEM_MEDIA_TYPE]["schema"]
+        # Два кода на один статус (`403` у `POST /repositories`: `Origin` и права) — `oneOf`
+        # моделей ошибки с discriminator по `code`; иначе — ссылка на одну модель.
+        refs = [variant.get("$ref", "") for variant in schema["oneOf"]] if "oneOf" in schema else [schema.get("$ref", "")]
+        if "oneOf" in schema and schema.get("discriminator", {}).get("propertyName") != "code":
+            problems.append(f"{where}: у oneOf нет discriminator по code")
+        for ref in refs:
+            if ref_name(ref) not in problem_schemas:
+                problems.append(f"{where}: схема {ref!r} — не модель ошибки")
     assert not problems, "\n".join(problems)
 
 

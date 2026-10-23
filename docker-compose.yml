@@ -67,12 +67,24 @@ services:
       GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
       GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      # Ключ шифрования токенов пользователя (openssl rand -base64 32): пустой —
+      # вход отказывает, токен открытым не хранится никогда.
+      USER_TOKEN_ENCRYPTION_KEY: ${USER_TOKEN_ENCRYPTION_KEY:-}
+      # Спаны OpenTelemetry по умолчанию никуда не уходят; console — в stdout.
+      OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+      # Стабильные имена атрибутов semconv для SQL и HTTP; то же значение ставит код.
+      OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    # exec: uvicorn заменяет sh и становится PID 1 — иначе SIGTERM от
+    # `docker stop` достаётся sh, который его игнорирует, и через грейс-период
+    # приходит SIGKILL: lifespan не завершается, спаны не выгружаются.
+    # --timeout-graceful-shutdown — по той же причине: открытый поток SSE иначе
+    # держал бы остановку до конца прогона (подробно — в Dockerfile у CMD).
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5"]
 
   worker:
     build: .
@@ -96,12 +108,26 @@ services:
       EUROROUTER_BASE_URL: ${EUROROUTER_BASE_URL:-}
       EUROROUTER_MODEL: ${EUROROUTER_MODEL:-}
       EUROROUTER_API_KEYS: ${EUROROUTER_API_KEYS:-}
+      OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+      OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
     command: ["python", "-m", "app.worker"]
+    # Как в infra: без init воркер — PID 1, а ему ядро не доставляет сигналы с
+    # обработчиком по умолчанию, и второй SIGTERM не остановил бы его сразу.
+    init: true
+    # По SIGTERM воркер дорабатывает сообщение в работе. Худший случай — два
+    # вызова модели (ревью и верификатор) × LLM_TIMEOUT_SECONDS (300) ×
+    # LLM_MAX_ATTEMPTS (2) × два провайдера с LLM_HOSTED_FALLBACK = 2400 с,
+    # плюс минута на GitHub и базу. Без этого через 10 с пришёл бы SIGKILL.
+    # Та же формула — local.worker_stop_seconds в infra/main.tf: меняется там —
+    # меняем и здесь.
+    # consumer_timeout брокера сюда не ограничение: в RabbitMQ 4.3 его
+    # применяют только quorum-очереди, а очередь review — classic.
+    stop_grace_period: 41m
 
   # Локальная модель для прогона на своей машине, только с профилем:
   #   docker compose --profile ollama up -d

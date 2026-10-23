@@ -108,6 +108,27 @@ uv run python scripts/export_openapi.py --check   # то же, что в CI: rc=
 Cookie сессии ставится с `Secure`: вход работает по HTTPS и на `localhost`, по
 голому HTTP на другом хосте — нет.
 
+### Ключ шифрования токенов пользователя
+
+При входе сервис сохраняет токен пользователя GitHub App (user access token, а если у
+App включено истечение токенов — и refresh token) при сессии: по нему GitHub отдаёт
+список репозиториев, доступных пользователю. В базе токен лежит только зашифрованным
+(AES-256-GCM, таблица `provider_tokens`), ключ — настройка `USER_TOKEN_ENCRYPTION_KEY`:
+32 случайных байта в base64.
+
+```bash
+openssl rand -base64 32        # ключ для .env или для секрета стенда
+# стенд: секрет, который deploy.yml передаёт в TF_VAR_user_token_encryption_key
+openssl rand -base64 32 | gh secret set USER_TOKEN_KEY_DMC268_T1 -R larchanka-training/dmc-268-api-t1
+```
+
+Ключ не задан — вход отвечает `/login?error=provider_unavailable` (токен открытым не
+пишется никогда), ключ битый — API не стартует и называет настройку, не печатая
+значение. На стенде без секрета `USER_TOKEN_KEY_DMC268_T1` падает уже `tofu apply`.
+Смена ключа делает сохранённые токены нечитаемыми: ручки репозиториев отвечают `401`,
+сессия закрывается, пользователь входит заново. Сессии, открытые до хранения токенов,
+ведут себя так же.
+
 Тот же стек — PostgreSQL, RabbitMQ и контейнеры API и воркера — описан ещё раз в
 [`infra/`](infra/README.md), для сервера. Два описания одного стека уже дважды
 разъезжались и ломали стенд, поэтому факты, которые обязаны совпадать (миграции
@@ -156,7 +177,7 @@ export TEST_DATABASE_URL="postgresql+psycopg://dmc:dmc@localhost:5432/dmc268_tes
 
 ```bash
 EUROROUTER_API_KEYS=... EUROROUTER_BASE_URL=https://api.eurouter.ai/api/v1 \
-EUROROUTER_MODEL=qwen3-coder-30b-a3b uv run pytest -m live tests/live
+EUROROUTER_MODEL=qwen3-coder-next-80b uv run pytest -m live tests/live
 ```
 
 Сквозной стенд (`tests/e2e/stack.py`) прогоняет подписанный вебхук через API, базу, RabbitMQ и воркер до публикации в GitHub; GitHub подменён на уровне HTTP, модель - за портом.
@@ -196,9 +217,25 @@ uv run alembic heads               # должна быть ровно одна
 
 Вебхуки репозиториев, которых нет в системе, сервис игнорирует: регистрацию
 по вебхуку спека запрещает — её выполняет отдельная операция с авторизацией.
-До появления такой ручки (тикет
-[#41](https://github.com/larchanka-training/dmc-268-api-t1/issues/41))
-репозиторий вносится вручную:
+
+Основной путь — кабинет: экран «Подключить репозиторий» показывает репозитории
+установок GitHub App (`GET /api/v1/repositories/available`) и подключает выбранный
+(`POST /api/v1/repositories`). Список отдаёт сам GitHub по токену пользователя,
+сохранённому при входе (`GET /user/installations` и
+`GET /user/installations/{id}/repositories`): это ровно те репозитории установок, к
+которым у пользователя есть доступ, с его правами на каждый. Подключение — два запроса:
+репозиторий по id токеном пользователя и установка приложения на нём (JWT приложения).
+Подключить можно только с правом admin или maintain; роль read на приватном репозитории —
+`403`. Репозиторий, которого пользователь не видит, публичный только с правом чтения (так
+GitHub отдаёт любой публичный репозиторий) и репозиторий, на
+котором приложение не установлено или установка приостановлена, — один и тот же `404`. Приложение должно быть установлено на репозиторий,
+иначе его нет в списке. Запросы идут из лимита пользователя, а не установки.
+`installation_id` не хранится. Нужен ключ `USER_TOKEN_ENCRYPTION_KEY` (см. «Ключ
+шифрования токенов пользователя»); отдельных разрешений App сверх **Metadata: read**
+список не требует. Если у App включено истечение user access token, сервис сам обновляет
+токен по refresh token.
+
+Для разработки, без кабинета и установленного App, репозиторий можно внести вручную:
 
 ```bash
 psql "$DATABASE_URL" -c "
@@ -244,3 +281,23 @@ Eurorouter (OpenAI-совместимый hosted-провайдер) подкл�
 
 Окно модели (`LLM_CONTEXT_WINDOW_TOKENS`) должно вмещать пакет контекста (`CONTEXT_MAX_TOKENS`), системный промпт и резерв ответа (`LLM_MAX_OUTPUT_TOKENS`): иначе воркер не стартует.
 Все переменные с пояснениями - в [`.env.example`](.env.example).
+
+## Трассировка
+
+API и воркер пишут спаны OpenTelemetry: HTTP-запрос, вызовы GitHub и модели,
+запросы к базе, публикация в очередь и обработка в воркере по этапам — один
+трейс на прогон; его trace id клиент видит в `X-Trace-ID`. По умолчанию спаны
+никуда не уходят. Посмотреть их локально:
+
+```bash
+OTEL_TRACES_EXPORTER=console uv run uvicorn app.main:app --reload
+OTEL_TRACES_EXPORTER=console uv run python -m app.worker
+```
+
+`OTEL_SERVICE_NAME` переопределяет имя сервиса (`dmc-268-api`, `dmc-268-worker`),
+`OTEL_SDK_DISABLED=true` выключает трассировку. Атрибуты спанов SQL и httpx — стабильные
+имена semconv (`db.query.text`, `http.request.method`, `url.full`): без
+`OTEL_SEMCONV_STABILITY_OPT_IN` код ставит `database,http` сам. Экспорт в хранилище
+трейсов — #89.
+Это телеметрия для команды: данные прогона для кабинета — длительность, токены,
+шаги — берутся из базы.

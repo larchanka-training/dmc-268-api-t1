@@ -6,7 +6,8 @@ from uuid import UUID
 from fastapi import FastAPI
 
 from app.api.dependencies import get_unit_of_work_factory
-from app.api.session import SESSION_COOKIE, current_user
+from app.api.session import SESSION_COOKIE, current_session, current_user
+from app.application.use_cases.auth import SignedIn
 from app.domain.entities import User
 from app.domain.enums import Provider
 from app.domain.session import open_session
@@ -25,9 +26,13 @@ SIGNED_IN = User(
 )
 
 
+SIGNED_IN_SESSION_ID = UUID(int=0xA5)
+
+
 def sign_in(app: FastAPI, user: User = SIGNED_IN) -> None:
-    """Подменить проверку сессии: запросы идут от `user`."""
+    """Подменить проверку сессии: запросы идут от `user` из сессии `SIGNED_IN_SESSION_ID`."""
     app.dependency_overrides[current_user] = lambda: user
+    app.dependency_overrides[current_session] = lambda: SignedIn(user=user, session_id=SIGNED_IN_SESSION_ID)
 
 
 SESSION_TOKEN = "signed-in-session"
@@ -39,7 +44,7 @@ def sign_in_with_session(app: FastAPI, uow: FakeUnitOfWork) -> dict[str, str]:
     sign_in(app)
     uow.users.add(SIGNED_IN)
     uow.sessions.add(
-        open_session(UUID(int=0xA5), SIGNED_IN.id, SESSION_TOKEN, datetime.now(UTC))
+        open_session(SIGNED_IN_SESSION_ID, SIGNED_IN.id, SESSION_TOKEN, datetime.now(UTC))
     )
     app.dependency_overrides[get_unit_of_work_factory] = lambda: lambda: uow
     return {SESSION_COOKIE: SESSION_TOKEN}

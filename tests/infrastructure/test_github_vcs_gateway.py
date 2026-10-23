@@ -19,6 +19,7 @@ from app.domain.vcs_errors import VcsFileTooLargeError
 from app.infrastructure.vcs.errors import (
     VcsAuthError,
     VcsError,
+    VcsNotFoundError,
     VcsUnavailableError,
 )
 from app.infrastructure.vcs.github import GitHubVcsGateway
@@ -282,9 +283,11 @@ def test_404_raises_immediately_without_retry(rsa_key_pair: RsaKeyPair) -> None:
         sleeps,
     )
 
-    with pytest.raises(VcsError):
+    with pytest.raises(VcsNotFoundError) as caught:
         gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID)
 
+    # 404 на compare не различает коммит и репозиторий: код - PR_NOT_FOUND.
+    assert caught.value.code == "PR_NOT_FOUND"
     assert len(seen) == 1
     assert sleeps == []
 

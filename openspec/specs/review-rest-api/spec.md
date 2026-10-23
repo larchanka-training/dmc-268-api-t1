@@ -54,6 +54,10 @@
 возвращающий прогон ревью вместе со всеми его находками в одном ответе.
 Запрос к несуществующему прогону SHALL быть отклонён кодом 404.
 
+Ответ SHALL содержать время последнего прогресса прогона
+(`last_progress_at`) и этап сбоя (`failed_stage`); у прогона, который не
+падал, этап сбоя SHALL быть `null`.
+
 #### Scenario: Существующий прогон возвращается с находками
 
 - **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` для
@@ -73,6 +77,19 @@
   `review_run_id`, которого нет в системе
 - **THEN** ответ — 404
 
+#### Scenario: Ответ содержит время последнего прогресса
+
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` для идущего
+  прогона
+- **THEN** ответ содержит `last_progress_at` — время его последнего перехода,
+  а `failed_stage` равен `null`
+
+#### Scenario: Упавший прогон отдаёт этап сбоя
+
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` для прогона,
+  упавшего на этапе `analysing`
+- **THEN** ответ содержит `failed_stage: "analysing"` и причину сбоя
+
 ### Requirement: Находки прогона отдаются в стабильном порядке
 
 `GET /api/v1/reviews/{review_run_id}` SHALL возвращать находки прогона в
@@ -85,7 +102,7 @@
 
 ### Requirement: Ручки чтения требуют сессию
 
-Ручки чтения REST API — репозитории, запросы на изменение, прогоны ревью, их находки и поток статуса прогона — SHALL требовать действительную сессию пользователя и без неё SHALL отвечать `401` с `code = UNAUTHENTICATED`.
+Ручки чтения REST API — репозитории, запросы на изменение, прогоны ревью, их находки и общий поток событий `GET /api/v1/events` — SHALL требовать действительную сессию пользователя и без неё SHALL отвечать `401` с `code = UNAUTHENTICATED`.
 
 #### Scenario: Запрос без сессии
 
@@ -103,7 +120,7 @@
 
 #### Scenario: Несуществующий прогон
 
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` или `GET /api/v1/reviews/{review_run_id}/events` для прогона, которого нет
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}` для прогона, которого нет
 - **THEN** ответ — `404` `application/problem+json` с `code = REVIEW_NOT_FOUND`
 
 #### Scenario: Несуществующий репозиторий
@@ -152,17 +169,28 @@
 
 ### Requirement: Каждый ответ несёт trace id
 
-Сервер SHALL выдавать каждому запросу собственный trace id — 32 строчных hex-символа в формате trace-id W3C Trace Context, не все нули — и отдавать его заголовком `X-Trace-ID` на любом ответе, включая поток SSE. Входящие `X-Trace-ID`, `X-Request-ID` и `traceparent` SHALL NOT приниматься. В теле ошибки `trace_id` SHALL совпадать с этим заголовком.
+Сервер SHALL выдавать каждому запросу собственный trace id — trace id серверного спана запроса, 32 строчных hex-символа (trace-id W3C Trace Context), не все нули — и отдавать его заголовком `X-Trace-ID` на любом ответе, включая поток SSE. Входящие `X-Trace-ID`, `X-Request-ID` и `traceparent` SHALL NOT приниматься: HTTP-запрос начинает новый трейс. В теле ошибки `trace_id` SHALL совпадать с этим заголовком.
 
 #### Scenario: Идентификатор в ошибке
 
 - **WHEN** запрос получает ответ с ошибкой
 - **THEN** `trace_id` в теле равен заголовку `X-Trace-ID`
 
+#### Scenario: Идентификатор — trace id спана запроса
+
+- **WHEN** запрос получает ответ `404` или `500`
+- **THEN** `X-Trace-ID` и `trace_id` в теле равны trace id серверного спана этого запроса, в том числе у `500`, который отдаётся снаружи всех middleware
+
+#### Scenario: Трассировка выключена
+
+- **WHEN** трассировка выключена (`OTEL_SDK_DISABLED=true`), и спана у запроса нет
+- **THEN** `X-Trace-ID` — случайный trace id того же формата, у двух запросов разный
+
 #### Scenario: Клиент прислал свой идентификатор
 
 - **WHEN** запрос пришёл с заголовками `X-Trace-ID`, `X-Request-ID` или `traceparent`
 - **THEN** в ответе один заголовок `X-Trace-ID`, и его значение — новый trace id сервера, а не присланный
+- **AND** у серверного спана запроса нет родителя
 
 #### Scenario: Успешный ответ
 
@@ -171,8 +199,8 @@
 
 #### Scenario: Поток статуса прогона
 
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/events` с сессией для существующего прогона
-- **THEN** ответ — `text/event-stream` с заголовком `X-Trace-ID`
+- **WHEN** вызывается `GET /api/v1/events` с сессией
+- **THEN** ответ — `text/event-stream` с заголовком `X-Trace-ID`, равным trace id серверного спана запроса
 
 ### Requirement: Сбой сервера оставляет строку лога с trace id
 
@@ -219,12 +247,12 @@
 
 ### Requirement: Время в ответах — UTC с Z
 
-Каждое поле времени в JSON-ответах API и в данных событий потока статуса SHALL отдаваться в UTC в форме `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`. В схеме OpenAPI такое поле SHALL быть `format: date-time` с `pattern` этой формы.
+Каждое поле времени в JSON-ответах API и в данных событий общего потока SHALL отдаваться в UTC в форме `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`. В схеме OpenAPI такое поле SHALL быть `format: date-time` с `pattern` этой формы.
 
 #### Scenario: Время прогона
 
 - **WHEN** прогон записан со временем `2026-10-11T13:00:00+03:00`
-- **THEN** в ответе и в событии `status` поле времени — `2026-10-11T10:00:00Z`
+- **THEN** в ответе и в данных события `run.*` поле времени — `2026-10-11T10:00:00Z`
 
 ### Requirement: Offset списков в пределах bigint
 
@@ -278,49 +306,6 @@
 - **WHEN** запрошен прогон без опубликованных комментариев
 - **THEN** `published_comments` — пустой список
 
-### Requirement: Подключение репозитория описано заглушками
-
-`GET /api/v1/repositories/available` и `POST /api/v1/repositories` SHALL быть описаны в схеме с полными моделями запроса и ответа и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока подключение не реализовано. Сессию, а для `POST` также `Origin` и тело, они SHALL проверять так же, как реализованные ручки.
-
-#### Scenario: Список доступных репозиториев
-
-- **WHEN** вызывается `GET /api/v1/repositories/available` с сессией
-- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
-
-#### Scenario: Подключение репозитория
-
-- **WHEN** вызывается `POST /api/v1/repositories` с сессией, своим `Origin` и телом `{"provider": "github", "provider_id": "123456789"}`
-- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
-
-#### Scenario: Подключение без Origin
-
-- **WHEN** вызывается `POST /api/v1/repositories` без `Origin`
-- **THEN** ответ — `403` с `code = ORIGIN_FORBIDDEN`
-
-#### Scenario: Подключение с пустым идентификатором
-
-- **WHEN** вызывается `POST /api/v1/repositories` с сессией, своим `Origin` и пустым `provider_id`
-- **THEN** ответ — `422` с `{"where": "body.provider_id", "reason": "длина строки должна быть не меньше 1"}`
-
-### Requirement: Дифф и шаги прогона описаны заглушками
-
-`GET /api/v1/reviews/{review_run_id}/diff` и `GET /api/v1/reviews/{review_run_id}/steps` SHALL быть описаны в схеме с полными моделями ответа и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализованы. Сессию и формат id прогона они SHALL проверять так же, как реализованные ручки.
-
-#### Scenario: Дифф прогона
-
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/diff` с сессией
-- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
-
-#### Scenario: Шаги прогона
-
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/steps` с сессией
-- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
-
-#### Scenario: Без сессии
-
-- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/diff` без сессии
-- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
-
 ### Requirement: Находка отдаёт ссылку на правило, прогон - итог верификации
 
 `GET /api/v1/reviews/{review_run_id}` SHALL отдавать у каждой находки поле `rule`: объект с именем правила (`name`), номером пункта (`check`) и текстом пункта (`check_text`) либо `null` для находки по стандартным критериям.
@@ -340,3 +325,563 @@
 
 - **WHEN** запрошен завершённый прогон, верификатор которого был недоступен
 - **THEN** `verification` равен `unavailable`, а `verifier_dropped_findings` - 0
+
+### Requirement: Дифф прогона описан заглушкой
+
+`GET /api/v1/reviews/{review_run_id}/diff` SHALL быть описан в схеме с полной моделью ответа и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализован. Сессию и формат id прогона он SHALL проверять так же, как реализованные ручки.
+
+#### Scenario: Дифф прогона
+
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/diff` с сессией
+- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
+
+#### Scenario: Дифф без сессии
+
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/diff` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+### Requirement: Шаги прогона отдаются по порядку начала
+
+`GET /api/v1/reviews/{review_run_id}/steps` SHALL отдавать шаги воркера в прогоне (`ReviewRunStepListResponse`) по порядку начала, при равном начале — по id. Каждый шаг SHALL содержать этап, статус, начало, длительность (`null`, пока шаг идёт), токены (`null`, если шаг модель не вызывал) и код ошибки (`null`, если шаг не падал) и SHALL NOT содержать запросов и ответов модели. Повтор этапа SHALL отдаваться отдельным шагом того же этапа. Ручка SHALL требовать сессию.
+
+#### Scenario: Шаги прогона по порядку
+
+- **WHEN** у прогона записаны шаги, и вызывается `GET /api/v1/reviews/{review_run_id}/steps` с сессией
+- **THEN** ответ — `200`, `items` — шаги этого прогона по времени начала, упавшая попытка этапа и её повтор — два шага
+
+#### Scenario: Прогон без шагов
+
+- **WHEN** прогон существует, но воркер ещё не начал ни одного шага
+- **THEN** ответ — `200` с пустым `items`
+
+#### Scenario: Несуществующий прогон
+
+- **WHEN** прогона с таким id нет
+- **THEN** ответ — `404` `application/problem+json` с `code = REVIEW_NOT_FOUND`
+
+#### Scenario: Шаги без сессии
+
+- **WHEN** вызывается `GET /api/v1/reviews/{review_run_id}/steps` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+#### Scenario: Брошенный шаг без токенов
+
+- **WHEN** прогон упал, а его шаг закрыт как брошенный (`error_code = REVIEW_RUN_STALE`)
+- **THEN** у шага `status = failed` и `tokens_used = null`: сколько токенов он израсходовал, неизвестно
+
+### Requirement: Список репозиториев, доступных для подключения
+
+`GET /api/v1/repositories/available` SHALL требовать сессию и SHALL отдавать репозитории установок, которые GitHub отдаёт по токену пользователя сессии (`/user/installations…`), с `already_connected`. Не отданное GitHub SHALL NOT попадать в ответ. Приостановленная установка и установка с `403` (не лимит) или `404` SHALL пропускаться. Страниц SHALL быть не больше 50. Сбой GitHub, `403` лимита и неожиданное тело SHALL давать `502 SCM_UNAVAILABLE`.
+
+#### Scenario: Список с отметкой подключённых
+
+- **WHEN** по токену пользователя GitHub отдаёт репозитории `octo-org/api` и `octo-org/web`, `octo-org/api` уже зарегистрирован, и вызывается `GET /api/v1/repositories/available` с сессией
+- **THEN** ответ — `200` с обоими репозиториями, у `octo-org/api` `already_connected = true`, у `octo-org/web` — `false`
+
+#### Scenario: Репозиторий только с правом чтения показывается
+
+- **WHEN** GitHub отдаёт `octo-org/web` с `permissions.admin = false` и `permissions.maintain = false`
+- **THEN** `octo-org/web` есть в ответе
+
+#### Scenario: Репозиторий без доступа не показывается
+
+- **WHEN** `octo-org/api` есть в установке приложения, но у вошедшего пользователя нет к нему доступа, и GitHub не отдаёт его по токену пользователя
+- **THEN** `octo-org/api` в ответе нет, ответ — `200`
+
+#### Scenario: Чужой приватный репозиторий не показывается
+
+- **WHEN** `octo-org/secret` приватный, в установке приложения, а вошедший пользователь к нему доступа не имеет
+- **THEN** `octo-org/secret` в ответе нет: сервис показывает только то, что GitHub отдал по токену пользователя, и сам доступ не вычисляет
+
+#### Scenario: Публичный репозиторий без явного права не показывается
+
+- **WHEN** `octo-org/public` публичный, в установке приложения, а у вошедшего пользователя на нём нет роли (читать его может любой), и GitHub не отдаёт его по `/user/installations…`
+- **THEN** `octo-org/public` в ответе нет, ответ — `200`: публичность репозитория видимости не даёт
+
+#### Scenario: Приостановленная установка
+
+- **WHEN** одна из установок пользователя приостановлена (`suspended_at` не `null`)
+- **THEN** её репозитории не запрашиваются, ответ — `200` с репозиториями остальных установок
+
+#### Scenario: Установка закрыта для токена
+
+- **WHEN** GitHub отвечает `403` без признаков лимита на репозитории одной установки (например, организация требует SAML SSO)
+- **THEN** установка пропускается, ответ — `200` с репозиториями остальных установок
+
+#### Scenario: Лимит GitHub
+
+- **WHEN** GitHub отвечает `403` с `x-ratelimit-remaining: 0`, с `retry-after` или с «rate limit» в `message` тела
+- **THEN** ответ — `502` с `code = SCM_UNAVAILABLE`
+
+#### Scenario: Ответ, который не кончается
+
+- **WHEN** GitHub отдаёт полные страницы дольше 50 страниц
+- **THEN** запрашивается не больше 50 страниц, список усечён
+
+#### Scenario: Доступа нет ни к одному репозиторию
+
+- **WHEN** GitHub не отдаёт пользователю ни одного репозитория установок
+- **THEN** ответ — `200` с пустым `items`
+
+#### Scenario: Список без сессии
+
+- **WHEN** вызывается `GET /api/v1/repositories/available` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+#### Scenario: GitHub недоступен при получении списка
+
+- **WHEN** GitHub не ответил, ответил `429`, `5xx` или другой ошибкой, кроме `401`, или вернул тело без нужных полей, в том числе `null` в них
+- **THEN** ответ — `502` с `code = SCM_UNAVAILABLE`, сессия не закрывается
+
+### Requirement: Подключение репозитория
+
+`POST /api/v1/repositories` SHALL требовать сессию и `Origin` сервиса и SHALL регистрировать репозиторий, найденный двумя запросами к GitHub (по id токеном пользователя, затем установка приложения), без обхода списка: `auto_review_enabled = true`, `full_name` и `default_branch` — из ответа GitHub, ответ — `201`. `installation_id` SHALL NOT храниться. Сбой GitHub SHALL давать `502 SCM_UNAVAILABLE` без записи.
+
+#### Scenario: Подключение администратором
+
+- **WHEN** вызывается `POST /api/v1/repositories` с сессией пользователя, у которого на репозиторий `permissions.admin = true`, своим `Origin` и телом `{"provider": "github", "provider_id": "123456789"}`
+- **THEN** ответ — `201` с репозиторием, `auto_review_enabled = true`
+- **AND** репозиторий записан в `repositories`
+
+#### Scenario: Два запроса к GitHub
+
+- **WHEN** подключается репозиторий, видимый пользователю, с установленным приложением
+- **THEN** к GitHub уходят ровно два запроса: репозиторий по id токеном пользователя и установка приложения на нём
+
+### Requirement: Отказы подключения репозитория
+
+Подключать репозиторий SHALL только пользователь с `permissions.admin` или `permissions.maintain`. Порядок: не `github`, не виден пользователю или публичный только с `pull`, приложение не установлено или приостановлено — `404 REPOSITORY_NOT_IN_INSTALLATION` (установка — после доступа); нет admin и maintain — `403 REPOSITORY_MANAGE_REQUIRED`; уже зарегистрирован — `409 REPOSITORY_ALREADY_CONNECTED`. Все `404` SHALL быть одинаковы; без прав SHALL NOT быть видно, подключён ли репозиторий.
+
+#### Scenario: Подключение с ролью maintain
+
+- **WHEN** у вошедшего пользователя на репозиторий `permissions.maintain = true` и `permissions.admin = false`
+- **THEN** ответ — `201`, репозиторий записан
+
+#### Scenario: Подключение без прав admin
+
+- **WHEN** GitHub отдаёт репозиторий пользователю с `permissions.push = true` или `permissions.triage = true`, но с `permissions.admin = false` и `permissions.maintain = false`
+- **THEN** ответ — `403` с `code = REPOSITORY_MANAGE_REQUIRED`, записи нет
+
+#### Scenario: Репозиторий только с правом чтения
+
+- **WHEN** GitHub отдаёт публичный (`private = false`) репозиторий по id с `permissions.push`, `triage`, `maintain` и `admin` равными `false` — так он отдаёт любому чужой публичный репозиторий
+- **THEN** ответ — `404` с `code = REPOSITORY_NOT_IN_INSTALLATION`, тело совпадает с ответом на отсутствующий репозиторий, кроме `trace_id`, установка приложения не запрашивается, и ответ не зависит от того, установлено ли туда приложение
+
+#### Scenario: Приватный репозиторий только с правом чтения
+
+- **WHEN** GitHub отдаёт приватный (`private = true`) репозиторий по id с `permissions.push`, `triage`, `maintain` и `admin` равными `false` — у пользователя роль read, а приложение на репозитории установлено
+- **THEN** ответ — `403` с `code = REPOSITORY_MANAGE_REQUIRED`, записи нет: приватный репозиторий GitHub отдаёт только участнику, и отказ ему ничего не раскрывает
+
+#### Scenario: Приватный репозиторий только с правом чтения без приложения
+
+- **WHEN** у пользователя роль read на приватном репозитории, а приложение на нём не установлено или установка приостановлена
+- **THEN** ответ — `404` с `code = REPOSITORY_NOT_IN_INSTALLATION`
+
+#### Scenario: Подключение уже подключённого без прав
+
+- **WHEN** репозиторий уже зарегистрирован, а у вошедшего пользователя нет ни admin, ни maintain на него
+- **THEN** ответ — `403` с `code = REPOSITORY_MANAGE_REQUIRED`, а не `409`
+
+#### Scenario: Повторное подключение
+
+- **WHEN** репозиторий уже зарегистрирован, и подключает пользователь с admin или maintain
+- **THEN** ответ — `409` с `code = REPOSITORY_ALREADY_CONNECTED`
+
+#### Scenario: Репозиторий не из установки
+
+- **WHEN** `provider_id` нет среди репозиториев установок приложения
+- **THEN** ответ — `404` с `code = REPOSITORY_NOT_IN_INSTALLATION`
+
+#### Scenario: Невидимый репозиторий неотличим от отсутствующего
+
+- **WHEN** репозиторий есть в установке, но GitHub не отдаёт его по токену пользователя
+- **THEN** ответ — `404` с `code = REPOSITORY_NOT_IN_INSTALLATION`, тело совпадает с ответом на отсутствующий репозиторий, кроме `trace_id`
+
+#### Scenario: Приложение не установлено или установка приостановлена
+
+- **WHEN** пользователь видит репозиторий, но приложение на нём не установлено или установка приостановлена
+- **THEN** ответ — `404` с `code = REPOSITORY_NOT_IN_INSTALLATION`, тело совпадает с ответом на невидимый репозиторий, кроме `trace_id`
+
+#### Scenario: Установка не проверяется для чужого репозитория
+
+- **WHEN** пользователь не видит репозиторий
+- **THEN** установка приложения на нём не запрашивается, ответ — `404`
+
+#### Scenario: GitHub недоступен при подключении
+
+- **WHEN** GitHub не ответил или ответил ошибкой, кроме `401`
+- **THEN** ответ — `502` с `code = SCM_UNAVAILABLE`, записи нет
+
+#### Scenario: Подключение без Origin
+
+- **WHEN** вызывается `POST /api/v1/repositories` без `Origin`
+- **THEN** ответ — `403` с `code = ORIGIN_FORBIDDEN`
+
+#### Scenario: Подключение с пустым идентификатором
+
+- **WHEN** вызывается `POST /api/v1/repositories` с сессией, своим `Origin` и пустым `provider_id`
+- **THEN** ответ — `422` с `{"where": "body.provider_id", "reason": "длина строки должна быть не меньше 1"}`
+
+### Requirement: Список прогонов описан заглушкой
+
+`GET /api/v1/reviews` SHALL быть описан в схеме с полной моделью ответа и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализован; сессию SHALL требовать. Ответ SHALL содержать `items` — строки `ReviewRunListItem` с `MergeRequestSummary`, числом находок и обязательным `last_progress_at` — и `total` — число прогонов под фильтрами без учёта `limit` и `offset`.
+
+#### Scenario: Список прогонов
+
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией
+- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
+
+#### Scenario: Список без сессии
+
+- **WHEN** вызывается `GET /api/v1/reviews` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+#### Scenario: Контракт списка для фронтенда
+
+- **WHEN** фронтенд читает `docs/openapi/openapi.json`
+- **THEN** в `ReviewRunListResponse` есть обязательные `items` и `total`
+
+#### Scenario: Время последнего перехода в строке списка
+
+- **WHEN** фронтенд читает `ReviewRunListItem` в `docs/openapi/openapi.json`
+- **THEN** `last_progress_at` — обязательное поле, время в UTC, как у `ReviewRunResponse`
+
+### Requirement: Параметры списка прогонов проверяются раньше 501
+
+`GET /api/v1/reviews` SHALL проверять параметры фильтров и пагинации раньше ответа `501`. `status` и `repository_id` SHALL принимать несколько значений, параметр повторяется; `repository_id` — не больше 50. У `q` и `author` пустая строка SHALL означать «без фильтра». `created_from` и `created_to` SHALL принимать только строку ISO 8601 с зоной, любой. `created_from` позже `created_to` SHALL отклоняться кодом `422` вместе с остальными ошибками параметров.
+
+#### Scenario: Обратный диапазон дат
+
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией и `created_from` позже `created_to`
+- **THEN** ответ — `422` с `code = VALIDATION_ERROR` и ошибкой в `query.created_to`
+
+#### Scenario: Время без зоны или не ISO 8601
+
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией и `created_from` без зоны или `created_to` в виде unix-времени
+- **THEN** ответ — `422` с `code = VALIDATION_ERROR` и причиной «ожидается время с зоной» или «ожидается время в ISO 8601»
+
+#### Scenario: Статус не из списка
+
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией и значением `status` вне `ReviewRunStatus`
+- **THEN** ответ — `422` с `code = VALIDATION_ERROR`
+
+#### Scenario: Все фильтры сразу
+
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией и допустимыми `status` (несколько значений), `active`, `repository_id` (несколько значений), `created_from`, `created_to`, `limit`, `offset`, пустыми `q` и `author` и временем с зоной `+03:00`
+- **THEN** ответ — `501` с `code = NOT_IMPLEMENTED`
+
+#### Scenario: Без сессии параметры не проверяются
+
+- **WHEN** вызывается `GET /api/v1/reviews` без сессии и с неверными параметрами
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+#### Scenario: Неверный id репозитория среди нескольких
+
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией и `repository_id` дважды, второй раз не UUID
+- **THEN** ответ — `422` с `code = VALIDATION_ERROR` и ошибкой в `query.repository_id.1`
+
+#### Scenario: Больше 50 репозиториев
+
+- **WHEN** вызывается `GET /api/v1/reviews` с сессией и 51 значением `repository_id`
+- **THEN** ответ — `422` с причиной «элементов должно быть не больше 50» в `query.repository_id`
+
+### Requirement: Настройки репозитория описаны заглушкой
+
+`GET` и `PUT /api/v1/repositories/{repository_id}/settings` SHALL быть описаны в схеме с полными моделями и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализованы. Ответ обеих — `RepositorySettingsResponse` с обязательными `auto_review_enabled`, `branch_filter` и `min_severity` из `FindingSeverity`. Обе SHALL требовать сессию, `PUT` — ещё `Origin` сервиса.
+
+#### Scenario: Чтение настроек
+
+- **WHEN** вызывается `GET /api/v1/repositories/{repository_id}/settings` с сессией и UUID в пути
+- **THEN** ответ — `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
+
+#### Scenario: Запись настроек
+
+- **WHEN** вызывается `PUT /api/v1/repositories/{repository_id}/settings` с сессией, своим `Origin` и допустимым телом, в том числе с пустым `branch_filter`
+- **THEN** ответ — `501` с `code = NOT_IMPLEMENTED`
+
+#### Scenario: Без сессии
+
+- **WHEN** вызывается `GET` или `PUT` настроек без сессии (у `PUT` — со своим `Origin`)
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+#### Scenario: Запись без Origin
+
+- **WHEN** вызывается `PUT` настроек без `Origin` или с чужим `Origin`, с сессией или без
+- **THEN** ответ — `403` с `code = ORIGIN_FORBIDDEN`, тело не разбирается
+
+#### Scenario: Значения по умолчанию в контракте
+
+- **WHEN** фронтенд читает описание `GET` настроек в `docs/openapi/openapi.json`
+- **THEN** там указано: у репозитория без сохранённых настроек `auto_review_enabled = true`, `branch_filter = []` (все ветки), `min_severity = critical`
+
+#### Scenario: Отказ по роли описан
+
+- **WHEN** фронтенд читает `PUT` настроек в `docs/openapi/openapi.json`
+- **THEN** ответ `403` допускает `ORIGIN_FORBIDDEN` и `REPOSITORY_MANAGE_REQUIRED`, а `auto_review_enabled` описан как та же колонка, что в `RepositoryResponse`
+
+### Requirement: Тело записи настроек проверяется раньше 501
+
+`PUT /api/v1/repositories/{repository_id}/settings` SHALL принимать `RepositorySettingsUpdate` — полный набор настроек: все три поля обязательны, лишние поля запрещены. Паттерн в `branch_filter` SHALL быть непустым после обрезки пробелов и не длиннее 200 символов, без повторов, паттернов SHALL быть не больше 50. Id репозитория и тело SHALL проверяться раньше ответа `501`.
+
+#### Scenario: Неверный id
+
+- **WHEN** вызывается `PUT` настроек с сессией, своим `Origin` и не-UUID в пути
+- **THEN** ответ — `422` с `code = VALIDATION_ERROR` и ошибкой в `path.repository_id`
+
+#### Scenario: Неизвестная важность
+
+- **WHEN** в теле `min_severity` вне `FindingSeverity`
+- **THEN** ответ — `422` с ошибкой в `body.min_severity`
+
+#### Scenario: Лишнее или пропущенное поле
+
+- **WHEN** в теле есть поле вне модели или нет одного из трёх полей
+- **THEN** ответ — `422` с `code = VALIDATION_ERROR`
+
+#### Scenario: Пустой или длинный паттерн
+
+- **WHEN** в `branch_filter` есть пустая строка или строка длиннее 200 символов
+- **THEN** ответ — `422` с ошибкой в `body.branch_filter.<индекс>`
+
+#### Scenario: Слишком много паттернов
+
+- **WHEN** в `branch_filter` 51 паттерн
+- **THEN** ответ — `422` с ошибкой в `body.branch_filter`
+
+#### Scenario: Без сессии тело не проверяется
+
+- **WHEN** вызывается `PUT` настроек со своим `Origin`, без сессии и с неверным телом
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+#### Scenario: Паттерн из пробелов
+
+- **WHEN** в `branch_filter` есть паттерн `"   "`
+- **THEN** ответ — `422` с причиной «длина строки должна быть не меньше 1» в `body.branch_filter.<индекс>`
+
+#### Scenario: Повтор паттерна
+
+- **WHEN** в `branch_filter` есть `main` и ` main ` (совпадают после обрезки пробелов)
+- **THEN** ответ — `422` с причиной «паттерны веток повторяются» в `body.branch_filter`
+
+### Requirement: Статус правил репозитория описан заглушкой
+
+`GET /api/v1/repositories/{repository_id}/rules` SHALL быть описан в схеме с ответом `RulesStatusResponse` — объединением по `status` со значениями `RulesStatus` — и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализован. Ручка SHALL требовать сессию и проверять id репозитория раньше `501`.
+
+#### Scenario: Статус правил
+
+- **WHEN** вызывается `GET /api/v1/repositories/{repository_id}/rules` с сессией и UUID в пути
+- **THEN** ответ — `501` с `code = NOT_IMPLEMENTED`
+
+#### Scenario: Без сессии или с неверным id
+
+- **WHEN** вызывается ручка без сессии или с сессией и не-UUID в пути
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED` или `422` с ошибкой в `path.repository_id`
+
+#### Scenario: Варианты статуса в контракте
+
+- **WHEN** фронтенд читает `RulesStatusResponse` в `docs/openapi/openapi.json`
+- **THEN** у схемы дискриминатор `status` и четыре варианта: `loaded` (`branch`, `path`, `rules` из `RepoRule` с `name`, `patterns`, `excludes`, `checks`, `rejected` из `RejectedRule` с `name`, `reason`, `fetched_at` в UTC с `Z`), `absent`, `too_large`, `unavailable` (`branch`, `path`)
+
+### Requirement: Один репозиторий по id
+
+`GET /api/v1/repositories/{repository_id}` SHALL требовать сессию и SHALL отдавать зарегистрированный репозиторий в той же форме `RepositoryResponse`, что строка `GET /api/v1/repositories`. Репозитория нет — `404` с `code = REPOSITORY_NOT_FOUND`; id не UUID — `422`.
+
+#### Scenario: Репозиторий по id
+
+- **WHEN** репозиторий зарегистрирован, и вызывается `GET /api/v1/repositories/{repository_id}` с сессией
+- **THEN** ответ — `200`, тело совпадает со строкой этого репозитория в `GET /api/v1/repositories`
+
+#### Scenario: Репозиторий за пределами первой страницы списка
+
+- **WHEN** зарегистрировано больше репозиториев, чем помещается на страницу списка, и запрашивается последний по id
+- **THEN** ответ — `200` с этим репозиторием
+
+#### Scenario: Нет такого репозитория
+
+- **WHEN** репозитория с таким id нет
+- **THEN** ответ — `404` `application/problem+json` с `code = REPOSITORY_NOT_FOUND`
+
+#### Scenario: id не UUID
+
+- **WHEN** вызывается `GET /api/v1/repositories/repo-1` с сессией
+- **THEN** ответ — `422` с ошибкой в `path.repository_id`
+
+#### Scenario: Без сессии
+
+- **WHEN** вызывается `GET /api/v1/repositories/{repository_id}` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+
+### Requirement: Типы и видимость событий общего потока описаны
+
+Имя события `GET /api/v1/events` SHALL быть `<ресурс>.<действие>` в поле `event:`, данные — модель своего типа, перечисленная в `x-sse-events`. Клиент SHALL игнорировать незнакомые типы: новые добавляются без правки клиентов. Пользователь SHALL получать только видимые ему события; видимость задаёт правило типа события. Фильтров у потока нет.
+
+#### Scenario: Сегодняшние типы
+
+- **WHEN** фронтенд читает ответ потока и `components/schemas` в `docs/openapi/openapi.json`
+- **THEN** в `x-sse-events` есть `run.created`, `run.status_changed` и `run.finished` со ссылкой на `ReviewRunListItem` и `ping` с пустым объектом, а `StreamEventType` перечисляет эти четыре имени
+
+#### Scenario: Итоговый статус
+
+- **WHEN** фронтенд читает описание потока
+- **THEN** в нём сказано, что при переходе прогона в итоговый статус приходит только `run.finished`
+
+#### Scenario: Видимость прогонов
+
+- **WHEN** пользователь подключается к потоку
+- **THEN** набор видимых репозиториев считается один раз тем же расчётом, что ответ `GET /repositories/available`, и до переподключения не пересчитывается; события `run.*` по прогонам остальных репозиториев не приходят
+
+#### Scenario: Сбой провайдера при подключении
+
+- **WHEN** GitHub не ответил или ответил ошибкой, пока считается набор видимых репозиториев
+- **THEN** ответ — `502` с `code = SCM_UNAVAILABLE`, поток не открывается
+
+#### Scenario: Незнакомый тип
+
+- **WHEN** фронтенд читает описание потока
+- **THEN** в нём сказано, что клиент игнорирует незнакомые типы событий
+
+#### Scenario: Прогоны публичного репозитория без явного права
+
+- **WHEN** у пользователя нет роли на публичном репозитории `octo-org/public`, к которому подключено приложение, и по `octo-org/public` идёт прогон
+- **THEN** события `run.*` этого прогона пользователю не приходят: `octo-org/public` нет в ответе `GET /repositories/available`
+
+### Requirement: Порядок версий строки в общем потоке событий описан
+
+Описание `GET /api/v1/events` SHALL задавать правило для клиента: upsert строки прогона по `id`; побеждает больший `updated_at`, при равном — версия, пришедшая позже. Источник событий SHALL быть описан: опрос базы раз в секунду; переход на PostgreSQL NOTIFY контракт не меняет. Истории нет: при подключении и после переподключения клиент перезапрашивает снимок REST.
+
+#### Scenario: Правило в контракте
+
+- **WHEN** фронтенд читает описание `GET /api/v1/events` в `docs/openapi/openapi.json`
+- **THEN** в нём есть правило выбора версии по `updated_at`, источник событий — опрос раз в секунду, позже NOTIFY без изменения контракта, и перезапрос снимка `GET /reviews/{review_run_id}` или `GET /reviews` после события `open`
+
+### Requirement: Истёкший токен пользователя обновляется
+
+Ручки, обращающиеся к GitHub по токену пользователя (`GET /repositories/available`, `POST /repositories`, подключение к `GET /events`), SHALL обменивать истёкший access token по refresh token и сохранять новую пару. Сбой обмена или ожидание чужого дольше 15 секунд SHALL давать `502 SCM_UNAVAILABLE` без закрытия сессии, если до истечения access token меньше минуты; иначе запрос идёт прежним токеном. Два параллельных запроса одной сессии SHALL обменивать refresh token не больше одного раза.
+
+#### Scenario: Истёкший токен обновляется
+
+- **WHEN** access token сессии истёк, refresh token действует, и вызывается `GET /api/v1/repositories/available`
+- **THEN** токен обменивается по refresh token, новая пара сохраняется, ответ — `200`
+
+#### Scenario: Токен без истечения
+
+- **WHEN** GitHub выдал при входе токен без `expires_in`
+- **THEN** токен используется без обмена, сколько бы времени ни прошло
+
+#### Scenario: GitHub недоступен при обмене
+
+- **WHEN** access token истёк, а обмен refresh token не удался из-за сети, `5xx` или ошибки настройки приложения
+- **THEN** ответ — `502` с `code = SCM_UNAVAILABLE`, сессия и токен остаются
+
+#### Scenario: Сбой обмена при ещё действующем токене
+
+- **WHEN** до истечения access token меньше 5 минут, но больше минуты, и обмен не удался из-за сбоя GitHub или чужая блокировка не отпущена за 15 секунд
+- **THEN** запрос выполняется прежним access token, сессия и токен остаются
+
+#### Scenario: Два запроса одной сессии с истёкшим токеном
+
+- **WHEN** два запроса одной сессии одновременно видят истёкший access token
+- **THEN** refresh token обменивается один раз, оба запроса используют новый токен
+
+#### Scenario: Обмен при подключении к общему потоку
+
+- **WHEN** access token сессии истёк, refresh token действует, и клиент подключается к `GET /api/v1/events`
+- **THEN** токен обменивается до начала потока, видимые репозитории считаются новым токеном, поток открывается; если GitHub при обмене недоступен — `502` с `code = SCM_UNAVAILABLE`, поток не открывается, сессия остаётся
+
+### Requirement: Непригодный токен пользователя закрывает сессию
+
+Если у сессии нет токена пользователя, он не расшифровывается, refresh token истёк или отвергнут GitHub, или GitHub ответил `401` на токен, который не сменился и не обновился, ручки репозиториев и подключение к `GET /api/v1/events` SHALL удалять сессию вместе с токеном и отвечать `401 UNAUTHENTICATED` с удалением cookie `session`.
+
+#### Scenario: Отвергнутый refresh token
+
+- **WHEN** GitHub отвечает на обмен `bad_refresh_token`
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`, cookie `session` удаляется, следующий запрос с ней получает `401`
+
+#### Scenario: Отозванный токен
+
+- **WHEN** GitHub отвечает `401` на запрос с токеном пользователя
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`, сессия закрыта
+
+#### Scenario: Отказ на токен, заменённый параллельным обменом
+
+- **WHEN** GitHub отвечает `401` на access token, а параллельный запрос той же сессии уже обменял refresh token
+- **THEN** запрос повторяется один раз с новым токеном, сессия не закрывается
+
+#### Scenario: Отказ на токен, истёкший посреди обхода
+
+- **WHEN** GitHub отвечает `401` на access token, который не сменился, а refresh token действует
+- **THEN** токен обменивается по refresh token, запрос повторяется один раз, сессия не закрывается
+
+#### Scenario: Сессия, открытая до хранения токенов
+
+- **WHEN** у сессии нет сохранённого токена
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`, сессия закрыта, пользователь входит заново
+
+#### Scenario: Подключение к общему потоку с непригодным токеном
+
+- **WHEN** клиент подключается к `GET /api/v1/events`, а токен сессии отозван, не обновляется или его нет
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED` до начала потока, сессия закрыта, cookie `session` удаляется
+
+### Requirement: Общий поток событий реализован
+
+`GET /api/v1/events` SHALL требовать сессию и отдавать `text/event-stream`, начиная со строки `retry: 3000`. Событие SHALL быть строкой `event: <тип>` и строкой `data:` с JSON в одну строку. Событие прогона SHALL приходить не позже чем через пару секунд после записи прогона, `ping` с `data: {}` — в тишине не реже раза в 15 секунд. Истории поток SHALL не отдавать. Сессия SHALL перепроверяться каждые 5 секунд; без неё поток SHALL закрываться.
+
+#### Scenario: Смена статуса доходит сразу
+
+- **WHEN** поток открыт, а воркер записал прогону видимого репозитория новый статус
+- **THEN** клиент получает событие на ближайшем опросе, раз в секунду, пока поток открыт
+
+#### Scenario: Новый прогон
+
+- **WHEN** после подключения создан прогон видимого репозитория и это его первое событие в соединении
+- **THEN** событие — `run.created` с данными `ReviewRunListItem`
+
+#### Scenario: Изменение без итогового статуса
+
+- **WHEN** прогон, уже показанный или созданный до подключения, изменился, а статус не итоговый — в том числе изменился только прогресс
+- **THEN** событие — `run.status_changed` с последней версией строки
+
+#### Scenario: Итоговый статус
+
+- **WHEN** прогон оказался в статусе `completed`, `failed` или `cancelled`, даже если это его первое событие
+- **THEN** событие — только `run.finished`
+
+#### Scenario: Истории нет
+
+- **WHEN** клиент подключается, а прогоны менялись до подключения
+- **THEN** событий по этим версиям нет, клиент берёт их снимком REST после `open`
+
+#### Scenario: Равный updated_at
+
+- **WHEN** два прогона записаны с одним `updated_at`, второй закоммичен после того, как поток увидел первый
+- **THEN** приходят события обоих, при любом порядке их id
+
+#### Scenario: Запоздавшая запись
+
+- **WHEN** запись прогона закоммичена позже соседней, а её `updated_at` меньше уже увиденного, но не больше чем на 5 секунд
+- **THEN** событие по ней приходит
+
+#### Scenario: Тишина
+
+- **WHEN** 15 секунд нет событий
+- **THEN** приходит `event: ping` с `data: {}`
+
+#### Scenario: Сессия истекла
+
+- **WHEN** сессия закончилась, пока поток открыт
+- **THEN** поток закрывается без события не позже чем через 5 секунд и один опрос
+
+#### Scenario: Без сессии
+
+- **WHEN** вызывается `GET /api/v1/events` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`, поток не открывается
+
+#### Scenario: Контракт ответов
+
+- **WHEN** фронтенд читает `GET /api/v1/events` в `docs/openapi/openapi.json`
+- **THEN** у операции нет параметров, есть ответы `200` `text/event-stream`, `401` и `502`, ответа `501` нет; пути `/api/v1/reviews/events` нет, а `GET /api/v1/reviews/events` отвечает `422` проверки id прогона
+
+#### Scenario: Трасса потока
+
+- **WHEN** поток открыт часами, а клиент затем закрывает соединение
+- **THEN** опрос базы не пишет спанов SQL, а спан запроса закрывается без статуса ERROR

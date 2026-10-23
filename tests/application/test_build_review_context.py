@@ -7,7 +7,10 @@ from uuid import UUID
 import pytest
 
 from app.application.context_assembly import AssembledContext, ContextLimits
-from app.application.use_cases.build_review_context import build_review_context
+from app.application.use_cases.build_review_context import (
+    build_review_context,
+    fetch_review_diff,
+)
 from app.domain.entities import Definition, FileOutline, ReviewJob
 from app.domain.enums import DefinitionKind, Language
 from app.domain.vcs_errors import VcsError
@@ -54,6 +57,7 @@ def _file_diff(path: str) -> str:
 def _build(vcs: FakeVcs, extractor: FakeExtractor | None = None, limits: ContextLimits = LIMITS) -> AssembledContext:
     return build_review_context(
         JOB,
+        fetch_review_diff(JOB, vcs),
         vcs=vcs,
         extractor=extractor or FakeExtractor(outlines={SOURCE: OUTLINE}),
         cache=FakeCache(),

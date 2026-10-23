@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -189,3 +190,40 @@ def test_complete_answer_marked_as_cut_by_the_provider_is_accepted() -> None:
 
     assert isinstance(response.content, ReviewOutput)
     assert response.tokens_used == 1_024
+
+
+def _listening() -> tuple[LlmRequest[ReviewOutput], list[tuple[LlmError, int]]]:
+    heard: list[tuple[LlmError, int]] = []
+    request = replace(REQUEST, on_retry=lambda error, tokens: heard.append((error, tokens)))
+    return request, heard
+
+
+def test_each_retry_is_reported_with_the_tokens_spent_so_far() -> None:
+    request, heard = _listening()
+    send = _Scripted(WITHOUT_SEVERITY, WITHOUT_SEVERITY, VALID)
+
+    complete_structured(send, request, max_attempts=3)
+
+    assert [(type(error), tokens) for error, tokens in heard] == [
+        (LlmOutputError, 100),
+        (LlmOutputError, 200),
+    ]
+    assert "findings.0.severity: missing" in str(heard[0][0])
+
+
+def test_the_last_failed_attempt_is_raised_not_reported_as_a_retry() -> None:
+    request, heard = _listening()
+    send = _Scripted(WITHOUT_SEVERITY, WITHOUT_SEVERITY)
+
+    with pytest.raises(LlmOutputError):
+        complete_structured(send, request, max_attempts=2)
+
+    assert [tokens for _, tokens in heard] == [100]
+
+
+def test_a_valid_first_answer_reports_no_retry() -> None:
+    request, heard = _listening()
+
+    complete_structured(_Scripted(VALID), request, max_attempts=2)
+
+    assert heard == []

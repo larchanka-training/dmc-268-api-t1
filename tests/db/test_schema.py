@@ -20,11 +20,13 @@ TABLES = [
     "repositories",
     "merge_requests",
     "review_runs",
+    "review_run_steps",
     "context_payloads",
     "findings",
     "published_comments",
     "users",
     "sessions",
+    "provider_tokens",
 ]
 
 
@@ -45,7 +47,9 @@ def test_timestamps_carry_a_time_zone(table: str) -> None:
 
 @pytest.mark.parametrize("table", TABLES)
 def test_primary_key_is_a_native_uuid_without_a_database_default(table: str) -> None:
-    line = next(line for line in ddl(table).splitlines() if line.strip().startswith("id "))
+    # У `provider_tokens` ключ — `session_id`: токен принадлежит сессии.
+    [key] = Base.metadata.tables[table].primary_key.columns
+    line = next(line for line in ddl(table).splitlines() if line.strip().startswith(f"{key.name} "))
     assert "UUID" in line
     assert "DEFAULT" not in line
 
@@ -63,6 +67,13 @@ def test_one_active_run_per_commit_is_a_partial_unique_index() -> None:
         assert terminal.value in statement
 
 
+def test_steps_are_indexed_in_the_order_list_for_run_reads_them() -> None:
+    indexes = Base.metadata.tables["review_run_steps"].indexes
+    assert {(i.name, tuple(c.name for c in i.columns)) for i in indexes} == {
+        ("ix_review_run_steps_run_order", ("review_run_id", "started_at", "id")),
+    }
+
+
 def test_enum_columns_are_native_postgres_types() -> None:
     statement = ddl("findings")
     assert "finding_category" in statement
@@ -77,6 +88,7 @@ def test_children_restrict_deletion_of_their_parent() -> None:
     for table in (
         "merge_requests",
         "review_runs",
+        "review_run_steps",
         "context_payloads",
         "findings",
         "published_comments",
@@ -84,6 +96,12 @@ def test_children_restrict_deletion_of_their_parent() -> None:
         statement = ddl(table)
         assert "ON DELETE RESTRICT" in statement
         assert "CASCADE" not in statement
+
+
+def test_step_stage_and_status_are_native_enums() -> None:
+    statement = ddl("review_run_steps")
+    assert "stage review_run_stage NOT NULL" in statement
+    assert "status review_run_step_status NOT NULL" in statement
 
 
 def test_merge_request_state_is_a_native_enum() -> None:
@@ -124,6 +142,15 @@ def test_a_session_is_found_by_a_unique_token_hash() -> None:
     statement = ddl("sessions")
     assert "token_hash BYTEA NOT NULL" in statement
     assert "CONSTRAINT uq_sessions_token_hash UNIQUE (token_hash)" in statement
+
+
+def test_deleting_a_session_deletes_its_provider_token() -> None:
+    assert "REFERENCES sessions (id) ON DELETE CASCADE" in ddl("provider_tokens")
+
+
+def test_provider_tokens_hold_only_ciphertext_columns() -> None:
+    columns = Base.metadata.tables["provider_tokens"].columns
+    assert {c.name for c in columns if "token" in c.name} == {"access_token_encrypted", "refresh_token_encrypted"}
 
 
 def test_deleting_a_user_deletes_their_sessions() -> None:

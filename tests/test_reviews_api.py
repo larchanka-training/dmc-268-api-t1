@@ -1,12 +1,13 @@
-"""Контракт `GET /api/v1/reviews/{id}`. Без БД."""
+"""Контракт `GET /api/v1/reviews/{id}` и `/steps`. Без БД."""
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_unit_of_work
 from app.api.factory import create_app
+from app.api.reviews import review_run_list_item
 from app.config import Settings
 from app.domain.entities import (
     DiffAnchor,
@@ -15,6 +16,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunListEntry,
     RuleRef,
 )
 from app.domain.enums import (
@@ -24,11 +26,13 @@ from app.domain.enums import (
     FindingSeverity,
     MergeRequestState,
     Provider,
+    ReviewRunStage,
     ReviewRunStatus,
     TriggerSource,
     VerificationOutcome,
 )
 from app.domain.ids import new_id
+from app.domain.run_steps import finish_step, start_step
 
 from .fakes.auth import sign_in
 from .fakes.unit_of_work import FakeUnitOfWork
@@ -345,3 +349,104 @@ def test_a_run_that_published_nothing_has_no_comments() -> None:
     body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
 
     assert body["published_comments"] == []
+
+
+def test_steps_come_in_start_order_with_their_outcome() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+
+    def step(stage: ReviewRunStage, seconds: int):
+        return start_step(run.id, stage, started_at=NOW + timedelta(seconds=seconds), step_id=new_id())
+
+    analysing_retry = step(ReviewRunStage.ANALYSING, 30)
+    for added in (
+        analysing_retry,
+        finish_step(step(ReviewRunStage.FETCHING_DIFF, 0), duration_seconds=1.25, tokens_used=None),
+        finish_step(
+            step(ReviewRunStage.ANALYSING, 10), duration_seconds=20.0, tokens_used=40, error_code="LLM_TIMEOUT"
+        ),
+    ):
+        uow.review_run_steps.add(added)
+    # Шаг другого прогона в ответ не попадает.
+    uow.review_run_steps.add(
+        start_step(_add_run(uow).id, ReviewRunStage.PUBLISHING, started_at=NOW, step_id=new_id())
+    )
+
+    response = _client(uow).get(f"/api/v1/reviews/{run.id}/steps")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "stage": "fetching_diff",
+                "status": "completed",
+                "started_at": "2026-09-29T00:00:00Z",
+                "duration_seconds": 1.25,
+                "tokens_used": None,
+                "error_code": None,
+            },
+            {
+                "stage": "analysing",
+                "status": "failed",
+                "started_at": "2026-09-29T00:00:10Z",
+                "duration_seconds": 20.0,
+                "tokens_used": 40,
+                "error_code": "LLM_TIMEOUT",
+            },
+            {
+                "stage": "analysing",
+                "status": "running",
+                "started_at": "2026-09-29T00:00:30Z",
+                "duration_seconds": None,
+                "tokens_used": None,
+                "error_code": None,
+            },
+        ]
+    }
+
+
+def test_a_run_without_steps_has_an_empty_list() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, status=ReviewRunStatus.QUEUED)
+
+    response = _client(uow).get(f"/api/v1/reviews/{run.id}/steps")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
+def test_steps_of_an_unknown_run_are_404() -> None:
+    run_id = new_id()
+
+    response = _client(FakeUnitOfWork()).get(f"/api/v1/reviews/{run_id}/steps")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "REVIEW_NOT_FOUND"
+    assert response.json()["instance"] == f"/api/v1/reviews/{run_id}/steps"
+
+
+def test_old_events_path_is_a_run_id_now() -> None:
+    """Поток переехал на `/events`: `/reviews/events` — прогон с неверным id, `422`, а не поток."""
+    response = _client(FakeUnitOfWork()).get("/api/v1/reviews/events")
+
+    assert response.status_code == 422
+    assert response.json()["errors"] == [{"where": "path.review_run_id", "reason": "ожидается UUID"}]
+
+
+def test_list_item_is_built_from_the_run_its_merge_request_and_findings() -> None:
+    """Строка списка для потока событий: прогон, запрос на изменение со ссылкой и число находок из записи пачки."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    merge_request = uow.merge_requests.get(run.merge_request_id)
+    assert merge_request is not None
+    repository = uow.repositories.get(merge_request.repository_id)
+    assert repository is not None
+
+    item = review_run_list_item(ReviewRunListEntry(run, merge_request, repository, findings_count=2))
+
+    assert item.id == run.id
+    assert item.last_progress_at == NOW
+    assert item.findings_count == 2
+    assert item.merge_request.url == "https://github.com/octo-org/api/pull/42"
+    assert item.merge_request.repository.full_name == "octo-org/api"

@@ -99,18 +99,22 @@ compile-time зависимости от слоя приложения.
 | `RepositoryRepo` | `SqlAlchemyRepositoryRepo` | репозитории на ревью |
 | `MergeRequestRepo` | `SqlAlchemyMergeRequestRepo` | change request'ы |
 | `ReviewRunRepo` | `SqlAlchemyReviewRunRepo` | прогоны ревью и их жизненный цикл |
+| `ReviewRunStepRepo` | `SqlAlchemyReviewRunStepRepo` | шаги прогона («ход прогона»): начало и исход каждого этапа, повтор — отдельным шагом |
 | `ContextPayloadRepo` | `SqlAlchemyContextPayloadRepo` | что было показано модели |
 | `FindingRepo` | `SqlAlchemyFindingRepo` | замечания с привязкой к диффу |
 | `PublishedCommentRepo` | `SqlAlchemyPublishedCommentRepo` | опубликованные комментарии |
 | `UserRepo` | `SqlAlchemyUserRepo` | пользователи кабинета по учётной записи у провайдера |
 | `SessionRepo` | `SqlAlchemySessionRepo` | сессии входа по хэшу cookie |
+| `ProviderTokenRepo` | `SqlAlchemyProviderTokenRepo` | токен пользователя у провайдера при сессии; шифрует AES-256-GCM при записи и расшифровывает при чтении (`app/infrastructure/db/token_cipher.py`), `get_for_update` — блокировка строки на время refresh, ожидание чужой — не дольше 15 секунд (`ProviderTokenBusy`). Без ключа — `ProviderTokenUnavailable` |
 | `UnitOfWork` | `SqlAlchemyUnitOfWork` | граница транзакции |
+| `StageTracer` | `OtelStageTracer`; без адаптера — `NO_STAGE_TRACING` | спан трассировки на каждый шаг прогона: `StepRecorder` открывает его вместе с шагом и закрывает с его исходом. Порт — ради границы слоя: слой приложения не знает OpenTelemetry. Телеметрия, а не данные: шаги для API — из `review_run_steps` (раздел «Наблюдаемость») |
 | `VcsGateway` | `GitHubVcsGateway` | дифф, метаданные PR и содержимое файла на коммите (`fetch_file`, contents API; 404 — `None`) через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и exponential backoff внутри адаптера. Для `fetch_file` App нужно разрешение **Contents: read** |
+| `InstallationCatalog` | `GitHubInstallationCatalog` | репозитории установок GitHub App, видимые пользователю, — по его токену (user access token): `GET /user/installations`, затем `GET /user/installations/{id}/repositories`, постранично по 100. GitHub сам отдаёт пересечение «доступно приложению» ∩ «доступно пользователю» с `permissions` на каждом репозитории; подключать можно с admin или maintain (`app/domain/repository_access.py`). Приостановленные установки, `404` и `403` (не лимит, например SAML SSO) на установке пропускаются; `403` лимита (`x-ratelimit-remaining: 0`, `retry-after`) — `VcsUnavailableError`; пагинация до `total_count`, не больше 50 страниц; `401` — `ProviderTokenRejected` (сессия закрывается), прочие сбои и неожиданное тело — `VcsError` (`502`). Токен — через `httpx.Auth` (`BearerAuth`), таймаут `httpx.Timeout(10, connect=5)`. Тела ответов разбирают приватные строгие модели pydantic адаптера (лишние поля игнорируются), ошибка разбора — `VcsError` без значений полей. Подключение список не обходит: `user_repository` — `GET /repositories/{id}` токеном пользователя, `app_installed` — `GET /repos/{owner}/{repo}/installation` с JWT приложения (свой `GitHubAppAuth`, только JWT); не виден (в том числе публичный только с `pull`, как у любого — `visible_for_connect`; приватный с ролью read виден и получает `403`), не установлено, приостановлено — один `404`. `installation_id` не хранится. Свой HTTP-клиент |
 | `CacheStore` | `InMemoryCacheStore` | best-effort key/value с TTL в памяти процесса воркера, один экземпляр на composition root; промах не ошибка. Первый потребитель — правила `.review/rules.md` по ключу «репозиторий, base_sha». Redis — со второй репликой |
 | `DefinitionExtractor` | `TreeSitterDefinitionExtractor` | контур файла (определения с диапазонами строк, импорты) для AST-окружения изменённых строк; грамматики Python, TypeScript/TSX, JavaScript, Go. Какие определения показать модели, решает домен (`select_scopes`); tree-sitter запрещён во внутренних слоях контрактом import-linter |
-| `OAuthProvider` | `GitHubOAuthProvider` | вход через OAuth самого GitHub App: адрес авторизации и обмен `code` на профиль (`GET /user`); токен пользователя не выходит из адаптера, любой сбой — `OAuthProviderUnavailable`. Контейнер выдаёт провайдера по `{provider}` из пути, неизвестный — `404` |
-| `JobQueue` | `RabbitMQJobQueue` | задача ревью в RabbitMQ, один метод `enqueue`; тело — только доменные данные по §4.2 System Design, приоритет — свойство AMQP; очередь `review_jobs` с `x-max-priority` и DLX/DLQ-топологией, переиспользуемое соединение с publisher confirms внутри адаптера |
-| `LlmGateway` | `FallbackLlmGateway` над `OllamaGateway` и `OpenAiCompatibleGateway` (Eurorouter); `StubLlmGateway` при `LLM_BACKEND=stub` | `complete(LlmRequest) -> LlmResponse`: получить от модели ответ по Pydantic-модели из запроса. На входе - уже собранные сообщения (`app/domain/prompt.py`), модель ответа (`app/application/llm_schema.py`) и предел длины ответа; на выходе - её проверенный экземпляр, фактически ответившая модель и число токенов. `OllamaGateway` - локальная модель через нативную `/api/chat` (`format` по схеме, окно `num_ctx` передаётся явно, `prompt_eval_count` больше окна за вычетом резерва - сбой: модель могла обрезать запрос); `OpenAiCompatibleGateway` - `/chat/completions` с `json_schema` и ротацией ключей на `401`/`403`/`429`. Проверка ответа по модели и повторы - общий `complete_structured`: повтор дописывает одно сообщение с путями и видами нарушений после исходных, не меняя их и не возвращая модели её отвергнутый ответ; ответ, оборванный пределом длины, повторяется с подсказкой о пределе и просьбой ответить короче (полный ответ с такой пометкой принимается: модель могла дописать пробелы после объекта). Сбой несёт токены, израсходованные к нему (`LlmError.tokens_used`). `FallbackLlmGateway` вызывает провайдеров по порядку: локальная модель первая, Eurorouter - вторым и только при `LLM_HOSTED_FALLBACK=true`; токены сбойных провайдеров прибавляются к ответу или к последнему сбою. Подключение к провайдеру ограничено 10 секундами независимо от таймаута ответа. Сборка промпта, проверка окна модели и отсев замечаний - не дело адаптера. Сбой транспорта - `LlmError`, ответ, так и не прошедший модель, - `LlmOutputError`. |
+| `OAuthProvider` | `GitHubOAuthProvider` | вход через OAuth самого GitHub App: адрес авторизации, обмен `code` на профиль (`GET /user`) и токен пользователя (`OAuthLogin`), обмен refresh token (`refresh`, `grant_type=refresh_token`), отзыв токена при выходе (`revoke`, `DELETE /applications/{client_id}/token`, best-effort фоновой задачей). Токены — `Secret`, `repr` их не раскрывает. `bad_refresh_token` — `ProviderTokenRejected`, любой другой сбой — `OAuthProviderUnavailable`. Контейнер выдаёт провайдера по `{provider}` из пути, неизвестный — `404` |
+| `JobQueue` | `RabbitMQJobQueue` | задача ревью в RabbitMQ, один метод `enqueue`; тело — только доменные данные по §4.2 System Design, приоритет и контекст трассировки (`traceparent`) — свойства AMQP; очередь `review_jobs` с `x-max-priority` и DLX/DLQ-топологией, переиспользуемое соединение с publisher confirms внутри адаптера |
+| `LlmGateway` | `FallbackLlmGateway` над `OllamaGateway` и `OpenAiCompatibleGateway` (Eurorouter); `StubLlmGateway` при `LLM_BACKEND=stub` | `complete(LlmRequest) -> LlmResponse`: получить от модели ответ по Pydantic-модели из запроса. На входе - уже собранные сообщения (`app/domain/prompt.py`), модель ответа (`app/application/llm_schema.py`) и предел длины ответа; на выходе - её проверенный экземпляр, фактически ответившая модель и число токенов. `OllamaGateway` - локальная модель через нативную `/api/chat` (`format` по схеме, окно `num_ctx` передаётся явно, `prompt_eval_count` больше окна за вычетом резерва - сбой: модель могла обрезать запрос); `OpenAiCompatibleGateway` - `/chat/completions` с `json_schema` и ротацией ключей на `401`/`403`/`429`. Проверка ответа по модели и повторы - общий `complete_structured`: повтор дописывает одно сообщение с путями и видами нарушений после исходных, не меняя их и не возвращая модели её отвергнутый ответ; ответ, оборванный пределом длины, повторяется с подсказкой о пределе и просьбой ответить короче (полный ответ с такой пометкой принимается: модель могла дописать пробелы после объекта). Сбой несёт токены, израсходованные к нему (`LlmError.tokens_used`), и код из каталога ошибок прогона (`LlmError.code`). О каждом повторе внутри вызова (ответ не по схеме, переход к следующему провайдеру) адаптер сообщает слушателю `LlmRequest.on_retry` с токенами от начала вызова - прогон пишет попытку отдельным шагом. `FallbackLlmGateway` вызывает провайдеров по порядку: локальная модель первая, Eurorouter - вторым и только при `LLM_HOSTED_FALLBACK=true`; токены сбойных провайдеров прибавляются к ответу или к последнему сбою. Подключение к провайдеру ограничено 10 секундами независимо от таймаута ответа. Сборка промпта, проверка окна модели и отсев замечаний - не дело адаптера. Сбой транспорта - `LlmError`, ответ, так и не прошедший модель, - `LlmOutputError`. |
 
 `app/infrastructure/container.py` единственное место, где порт связывается с
 адаптером. Тест проверяет, что у каждого объявленного порта есть адаптер и что
@@ -136,6 +140,15 @@ compile-time зависимости от слоя приложения.
 Открыты без сессии: `/webhooks/*` (подпись), `/auth/{provider}/login`,
 `/auth/{provider}/callback` и `/health`. `POST /auth/logout` сессии не требует,
 только `Origin`: выход идемпотентен и всегда отвечает `204`.
+
+Ручки репозиториев (`/repositories/available`, `POST /repositories`) берут ещё и токен
+пользователя у провайдера, сохранённый при сессии (`call_with_user_token`,
+`app/application/use_cases/user_token.py`): истёкший — обмен по refresh token под
+блокировкой строки токена (сбой обмена при ещё действующем токене — прежний токен),
+`401` на токен, заменённый параллельным обменом, — один повтор с новым, непригодный (нет, не
+расшифровывается, отвергнут GitHub) — сессия закрывается и `401 UNAUTHENTICATED` с удалением
+cookie. Выход отзывает токен у GitHub после ответа. Обоснование — change
+`repositories-via-user-token`.
 
 Истёкшие сессии стирает воркер в том же периодическом проходе, что выметает
 зависшие прогоны (`purge_expired_sessions`, раз в минуту). Индекса по
@@ -174,6 +187,12 @@ ack/nack и dead-letter настоящие. Обработчик сообщен�
 проводит прогон через `queued → building_context → analysing → publishing →
 completed`/`failed`: контекст собирает `build_review_context` (дифф,
 AST-окружение, правила владельца), анализ — `LlmGateway` (пока заглушка).
+Начало и исход каждого этапа (`fetching_diff`, `building_context`,
+`analysing`, `verifying`, `publishing`) пишет в `review_run_steps`
+`StepRecorder` (`app/application/review_run_steps.py`); их отдаёт
+`GET /api/v1/reviews/{id}/steps`. Тот же `StepRecorder` открывает на каждый
+шаг спан трассировки, а спан обработки сообщения продолжает трейс запроса
+вебхука из заголовка AMQP (раздел «Наблюдаемость»).
 
 У них общие домен, репозитории и база данных, а общаются они через очередь, а
 не по HTTP. Это модульный монолит, а не набор сервисов.
@@ -276,26 +295,82 @@ def upgrade() -> None:
 (`LLM_TIMEOUT_SECONDS` × `LLM_MAX_ATTEMPTS` × провайдеры) короче
 `STALE_RUN_TIMEOUT_SECONDS`, - воркер при старте, до подключения к брокеру.
 Настройки `github_app_id`, `github_app_private_key`, `github_webhook_secret`,
-`rabbitmq_url`, `github_app_client_id`, `github_app_client_secret` и `public_origin`
-опциональны с пустым дефолтом: приложение без GitHub-реквизитов поднимается
+`rabbitmq_url`, `github_app_client_id`, `github_app_client_secret`, `public_origin` и
+`user_token_encryption_key` опциональны с пустым дефолтом: приложение без GitHub-реквизитов поднимается
 и отвечает на запросы, не касающиеся вебхуков, а пустая настройка громко
-падает при первом использовании. Новые настройки появляются вместе с кодом,
+падает при первом использовании (пустой ключ токенов — отказ входа; битый —
+падение старта, без значения в сообщении). Новые настройки появляются вместе с кодом,
 который их использует.
 
 ## Наблюдаемость
 
-Стоимость прогона хранится в колонке, а не в стеке метрик. `review_runs`
-хранит в строке `model`, `tokens_used`, `duration_seconds` и `failure_reason`.
+Здесь два разных источника для двух разных читателей, и они не смешиваются.
 
-Вопросы, которые будут задавать этому сервису: почему ревью заняло четыре
-минуты, во что обошлась прошлая неделя, какие прогоны падают и где. На все три
-отвечает SQL по таблице, которая нужна в любом случае, и ответы остаются
-привязаны к тому прогону, который человек смотрит.
+**Данные продукта — из базы.** Всё, что видит пользователь кабинета, —
+длительность, токены и модель прогона, шаги «хода прогона», будущие usage и
+биллинг — хранится в колонках и таблицах и отдаётся через REST. `review_runs`
+хранит в строке `model`, `tokens_used`, `duration_seconds` и `failure_reason`,
+шаги — `review_run_steps`. Вопросы «почему ревью заняло четыре минуты», «во что
+обошлась прошлая неделя», «какие прогоны падают и где» решает SQL по таблицам,
+которые нужны в любом случае, и ответ остаётся привязан к прогону, который
+человек смотрит.
 
-Prometheus, Grafana и распределённая трассировка нужны, чтобы восстановить
-запрос, прошедший через множество сервисов. У двух процессов с общей базой
-такой проблемы нет. Если это изменится, следующим шагом будут структурированные
-логи с id прогона.
+**Телеметрия — для команды.** Трассировка OpenTelemetry отвечает на
+эксплуатационные вопросы: где тормозит, что падает, что происходило между
+вебхуком и публикацией. Пользователю она не показывается: спаны сэмплируются,
+хранятся ограниченно и не разделены по аккаунтам. Спаны этапов повторяют шаги
+прогона, но источником шагов для API не становятся; ни один ответ API не
+строится из телеметрии, это проверяет `tests/api/test_tracing.py`.
+
+Трассировка нужна, хотя процессов два: запрос вебхука и работа воркера по нему
+разделены очередью, и без общего trace id их связывает только `review_run_id`.
+Как она устроена (`app/infrastructure/telemetry.py`, спека `observability`):
+
+- **Провайдер.** SDK-провайдер ставят `create_app` и `run_worker`. HTTP-сервер
+  трассирует встроенная телеметрия FastAPI — снаружи всех middleware, поэтому
+  `X-Trace-ID` и `trace_id` в problem+json, в том числе у `500`, — trace id
+  спана запроса. httpx (GitHub, модель) — `opentelemetry-instrumentation-httpx`,
+  запросы к базе — `EngineTracer` из `opentelemetry-instrumentation-sqlalchemy`
+  на движке контейнера. Класс внутренний: пакеты contrib держит верхняя граница
+  серии в `pyproject.toml`, а несовместимый `EngineTracer` выключает спаны SQL с
+  предупреждением и не мешает старту.
+- **Через очередь.** Контекст — заголовок AMQP `traceparent` (W3C), тело
+  сообщения не меняется. Публикацию и приём делает адаптер очереди
+  (`_publish`, `consuming_span`), а не автоинструментирование pika: для
+  генератора `consume()` оно закрывает спан приёма сразу и держит его контекст
+  текущим на простое цикла.
+- **Доверие.** Глобальный пропагатор пуст: входящий `traceparent` от HTTP-клиента
+  не продолжает трейс (каждый запрос начинает новый), и httpx не отдаёт наш
+  контекст GitHub и провайдерам модели. Заголовкам своей очереди доверяем —
+  писать в неё может только API.
+- **Трейс клиента — ссылкой.** Валидный `traceparent` запроса (кабинет шлёт его
+  из браузера) серверный спан получает не родителем, а span link с атрибутом
+  `link.source = "client"`: в Tempo от трейса API виден переход к спану браузера.
+  Ссылку ставит `link_client_trace` из `TraceIdMiddleware`, где спан запроса уже
+  текущий: у встроенной телеметрии FastAPI нет ни параметра `links`, ни хука на
+  создание спана, а `span.add_link` SDK поддерживает с 1.45. Разбирает
+  `TraceContextTextMapPropagator`, и только `traceparent` — `tracestate` и baggage
+  ему не передаются; невалидный заголовок — без ссылки и без ошибки. Почему не
+  родитель: trace id показывается людям (`X-Trace-ID`, problem+json, логи) и
+  должен быть нашим; флаг `sampled` клиента управлял бы записью трейсов (`00` —
+  ничего, `01` — всё при частичном сэмплировании), а ссылки сэмплер
+  `parentbased_*` не видит — она добавляется после его решения; один `trace_id`
+  в тысяче запросов склеил бы их в гигантский трейс; браузер, не выгрузивший свои
+  спаны, оставил бы серверный трейс без корня. CORS не нужен: кабинет ходит в API
+  с того же origin.
+- **Этапы.** Спан `review.<этап>` с атрибутом `review_run_id` открывается и
+  закрывается в тех же точках, что шаг `StepRecorder`; повтор этапа — отдельный
+  спан. Слой приложения о OpenTelemetry не знает: шаги зовут порт
+  `StageTracer`, адаптер — `OtelStageTracer`; `opentelemetry` в запрещённых
+  вендорах внутренних слоёв (`lint-imports`).
+- **Экспорт** не настроен: по умолчанию спаны никуда не уходят и ошибок экспорта
+  в логе нет. `OTEL_TRACES_EXPORTER=console` печатает их в stdout для отладки.
+  Хранилище трейсов, OTLP, структурированные логи с trace id и метрики — задача
+  #89; автонастройка экспортёров FastAPI и его OTel-лог исключений выключены
+  явно (`telemetry={"auto_configure": False, "logs": False}` в `create_app`).
+- **Атрибуты** SQL и httpx — стабильные имена semconv:
+  `OTEL_SEMCONV_STABILITY_OPT_IN=database,http` по умолчанию ставит код до первого
+  инструментирования (пакеты читают переменную один раз на процесс).
 
 ## Расширение
 
@@ -379,9 +454,15 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 
 **Сессия пользователя.** Значение cookie `session` равносильно паролю. В базе —
 только SHA-256 от него, cookie `HttpOnly; Secure; SameSite=Lax`, выход удаляет
-сессию сразу. Токен пользователя GitHub после входа не хранится. Access-лог uvicorn
+сессию сразу. Токен пользователя GitHub (user access token и refresh token) хранится
+при сессии только зашифрованным — AES-256-GCM, ключ `USER_TOKEN_ENCRYPTION_KEY` вне
+базы, associated data привязывает шифротекст к строке; в логи, ответы и `repr` он не
+попадает (`Secret`), удаляется вместе с сессией. Утечка базы без ключа токенов не даёт;
+утечка ключа и базы вместе даёт токены живых сессий с правами пользователя в пределах
+разрешений приложения. Access-лог uvicorn
 пишет путь с query, а в query callback'а лежат `code` и `state`, поэтому
-`app/api/log_redaction.py` вырезает query на путях `/api/v1/auth/`. CSRF держат
+`app/api/log_redaction.py` вырезает query на путях `/api/v1/auth/`; в серверном спане
+запроса тот же query скрывает `QueryRedaction` из `app/infrastructure/telemetry.py`. CSRF держат
 `SameSite=Lax` и проверка `Origin`. Обоснование — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
 
 **Область действия учётных данных.** Для публикации комментариев нужен доступ
