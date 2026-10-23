@@ -35,12 +35,16 @@
 
 ## 3. Из аудита #92 — SSE и очередь
 
-- [ ] 3.1 Процессор `SpanSuppression` (дроп SQL-спанов по contextvar-флагу в parent-context) и
-  включение флага в цикле опроса `review_run_events`. Тест: «десять минут» просмотра (прокрутка
-  цикла с чтениями) не добавляют SQL-спанов в трейс, спан потока один
-- [ ] 3.2 Нормализация статуса серверного спана SSE при отключении клиента
-  (`ClientDisconnect`/`CancelledError`) — без ERROR. Тест: отключение до терминального статуса
-  закрывает спан без ошибки
+- [ ] 3.1 Подавление SQL-спанов опроса в цикле общего потока `GET /api/v1/events` — ручка
+  `stream_events` в `app/api/events.py`, цикл опроса — `run_feed_events` (бывший
+  `review_run_events`). Механизм — существующий contextvar-флаг `untraced`
+  (`UntracedUnitOfWork` зависимостью `untraced_uow_factory`), второго процессора не заводить.
+  Тест: «десять минут» просмотра (прокрутка цикла с чтениями) не добавляют SQL-спанов в трейс,
+  спан потока один
+- [ ] 3.2 Статус серверного спана общего потока `GET /api/v1/events` (`stream_events`) при
+  отключении клиента (`ClientDisconnect`/`CancelledError`) — без ERROR: уход клиента штатно
+  закрывает ответ (`_EventStream` в `app/api/events.py`). Тест: отключение до терминального
+  статуса закрывает спан без ошибки
 - [ ] 3.3 `consuming_span(..., redelivered: bool)`: атрибут
   `messaging.rabbitmq.message.redelivered` из `basic.deliver`. Тест: повторная доставка
   (unack + redeliver на настоящем брокере) даёт спан с `redelivered=true`, первая — `false`

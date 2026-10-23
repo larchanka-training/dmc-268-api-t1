@@ -36,7 +36,7 @@
   HTTP-метрики даёт встроенная телеметрия FastAPI. Ручные — только бизнес-сигналы для алертов:
   прогоны по статусам, длительность этапов, токены и стоимость LLM. Очередь — плагин
   `rabbitmq_prometheus`, Postgres — свой экспортёр.
-- **Из аудита #92:** SSE-поток `GET /reviews/{id}/events` не раздувает трейс (сегодня десять минут
+- **Из аудита #92:** SSE-поток `GET /events` не раздувает трейс (сегодня десять минут
   просмотра — сотни SQL-спанов-детей в одном трейсе) и штатное отключение клиента не закрывает спан
   с ERROR; на спане обработки сообщения появляется признак повторной доставки
   (`messaging.rabbitmq.message.redelivered`).
@@ -65,7 +65,7 @@ _Нет: всё изменение достраивает существующу
 
 - **Код:** новый модуль настройки логов в `app/infrastructure/`; `app/infrastructure/telemetry.py`
   (список экспортёров, OTLP, resource, подавление SQL-спанов SSE); `app/api/errors.py`
-  (`exc_info`); `app/api/review_events.py` (отключение клиента); `app/infrastructure/queue/rabbitmq.py`
+  (`exc_info`); `app/api/events.py` (отключение клиента); `app/infrastructure/queue/rabbitmq.py`
   (redelivered); `alembic/env.py` (спан миграций); входы API и воркера (вызов `configure_logging()`).
 - **Инфраструктура:** `docker-compose.yml` (пять контейнеров наблюдаемости, тот же профиль,
   что на проде), `infra/` (Terraform: те же контейнеры на стенде), конфиги коллектора, Loki,
