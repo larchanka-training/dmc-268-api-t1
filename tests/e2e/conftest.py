@@ -9,6 +9,8 @@ import pytest
 def _no_unexpected_github_requests(request: pytest.FixtureRequest) -> Iterator[None]:
     """Неожиданный запрос фейк отвечает `404` и записывает: best-effort шаги
     (check run, GraphQL) такой `404` переживают, и регрессия маршрута прошла бы молча."""
+    # Стенд берём до `yield`: тогда pytest разбирает его после этой проверки.
+    stack = request.getfixturevalue("stack") if "stack" in request.fixturenames else None
     yield
-    if "stack" in request.fixturenames:
-        assert request.getfixturevalue("stack").github.unexpected == []
+    if stack is not None:
+        assert stack.github.unexpected == []
