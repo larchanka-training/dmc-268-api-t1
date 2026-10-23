@@ -1,4 +1,4 @@
-"""Прогон ревью: чтение вместе с находками и ручной запуск (пока заглушка).
+"""Прогон ревью: список, чтение вместе с находками и ручной запуск (пока заглушка).
 
 Один связный ответ, не два эндпоинта: прогон без находок бессмысленно
 смотреть отдельно от них (design.md change'а add-review-rest-api).
@@ -7,6 +7,7 @@
 `app/api/schemas.py`.
 """
 
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime
 from http import HTTPStatus
@@ -17,17 +18,24 @@ from fastapi import APIRouter, Depends, Path, Query
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from pydantic_core import PydanticCustomError
 
-from app.api.dependencies import get_unit_of_work
+from app.api.dependencies import (
+    get_installation_catalog,
+    get_token_provider,
+    get_unit_of_work,
+    get_unit_of_work_factory,
+)
 from app.api.errors import (
     ERRORS_403_ORIGIN,
     ERRORS_404_REVIEW,
     ERRORS_409_REVIEW_ACTIVE,
     ERRORS_422,
     ERRORS_501_NOT_IMPLEMENTED,
+    ERRORS_502_SCM_REVIEWS,
     ApiError,
 )
-from app.api.pagination import DEFAULT_LIMIT, Limit, Offset
+from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
+from app.api.repositories import available_repositories
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
     FailedStage,
@@ -38,8 +46,10 @@ from app.api.schemas import (
     UtcDatetime,
     UtcDatetimeParam,
 )
-from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
-from app.application.ports import UnitOfWork
+from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES, current_session
+from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
+from app.application.run_feed_events import visible_repository_ids
+from app.application.use_cases.auth import SignedIn
 from app.domain.entities import MergeRequest, Repository, ReviewRun, ReviewRunListEntry
 from app.domain.enums import (
     CommentKind,
@@ -52,6 +62,7 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.provider_links import merge_request_url
+from app.domain.run_list import run_list_filter
 
 # Задачи на реализацию ручного запуска пока нет — ссылка появится в описании операции.
 _CREATE_REVIEW_DESCRIPTION = (
@@ -82,10 +93,8 @@ VISIBILITY_RULE = (
     "правило, что у GET /repositories/available."
 )
 _LIST_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #103). Требует сессию; параметры запроса проверяются до ответа 501. Когда ручка "
-    "заработает: снимок списка прогонов ревью, сначала новые — по created_at по убыванию, при равном "
-    "created_at — по id по убыванию. "
+    "Требует сессию; параметры запроса проверяются раньше обращения к GitHub. Снимок списка прогонов "
+    "ревью, сначала новые — по created_at по убыванию, при равном created_at — по id по убыванию. "
     + VISIBILITY_RULE
     + " Фильтры складываются через «и»: status — один или несколько статусов (параметр повторяется); "
     "active=true — только активные (queued, building_context, analysing, publishing), active=false — "
@@ -342,10 +351,31 @@ def create_review(body: CreateReviewRequest) -> ReviewJob:
     summary="Список прогонов ревью",
     response_description="Страница прогонов и общее число подходящих под фильтры.",
     description=_LIST_DESCRIPTION,
-    responses={**ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+    responses={**ERRORS_422, **ERRORS_502_SCM_REVIEWS},
 )
-def list_reviews(query: Annotated[ReviewRunListQuery, Query()]) -> ReviewRunListResponse:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Список прогонов ревью ещё не реализован.")
+def list_reviews(
+    query: Annotated[ReviewRunListQuery, Query()],
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> ReviewRunListResponse:
+    # Видимые репозитории — вызовом, а не зависимостью: зависимость FastAPI выполняется
+    # и тогда, когда параметры запроса не прошли проверку, а 422 не должен стоить запроса в GitHub.
+    available = available_repositories(signed_in, catalog, oauth, uow_factory)
+    run_filter = run_list_filter(
+        visible=visible_repository_ids(uow_factory(), available),
+        repository_ids=query.repository_id,
+        statuses=query.status,
+        active=query.active,
+        author=query.author,
+        q=query.q,
+        created_from=query.created_from,
+        created_to=query.created_to,
+    )
+    with uow_factory() as uow:
+        page = uow.review_runs.list_page(run_filter, page_size(query.limit), query.offset)
+    return ReviewRunListResponse(items=[review_run_list_item(entry) for entry in page.entries], total=page.total)
 
 
 @router.get(

@@ -110,6 +110,11 @@ ERRORS_502_SCM_EVENTS = _doc(
     ScmUnavailableProblem,
     "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя; поток не открыт.",
 )
+ERRORS_502_SCM_REVIEWS = _doc(
+    HTTPStatus.BAD_GATEWAY,
+    ScmUnavailableProblem,
+    "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",
+)
 ERRORS_404_NOT_IN_INSTALLATION = _doc(
     HTTPStatus.NOT_FOUND,
     RepositoryNotInInstallationProblem,

@@ -318,17 +318,12 @@ def test_review_run_parts_check_session_and_id_first(client: TestClient, part: s
     assert_problem(_signed_in_client().get(path), 422, "VALIDATION_ERROR", path)
 
 
-def test_planned_review_list_answers_not_implemented() -> None:
-    """Список прогонов описан в схеме, а отвечает `501`."""
-    assert_problem(_signed_in_client().get("/api/v1/reviews"), 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
-
-
 @pytest.mark.parametrize("path", ["/api/v1/reviews", "/api/v1/events"])
-def test_planned_review_list_and_stream_check_session_first(client: TestClient, path: str) -> None:
+def test_review_list_and_stream_check_session_first(client: TestClient, path: str) -> None:
     assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
 
 
-def test_planned_review_list_checks_session_before_query(client: TestClient) -> None:
+def test_review_list_checks_session_before_query(client: TestClient) -> None:
     """Без сессии неверные параметры не разбираются: `401`, а не `422`."""
     response = client.get("/api/v1/reviews", params={"status": "unknown", "limit": "0"})
     assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/reviews")
@@ -352,28 +347,10 @@ def test_planned_review_list_checks_session_before_query(client: TestClient) -> 
         ),
     ],
 )
-def test_planned_review_list_checks_query_first(params: dict[str, Any], error: dict[str, str]) -> None:
-    """Заглушка списка проверяет параметры раньше, чем ответить `501`."""
+def test_review_list_checks_query(params: dict[str, Any], error: dict[str, str]) -> None:
     response = _signed_in_client().get("/api/v1/reviews", params=params)
     problem = assert_problem(response, 422, "VALIDATION_ERROR", "/api/v1/reviews")
     assert problem["errors"] == [error]
-
-
-def test_planned_review_list_accepts_every_filter() -> None:
-    """Все фильтры вместе, пустые `q` и `author`, время с любой зоной проходят проверку: дальше — `501`."""
-    params = {
-        "status": ["queued", "analysing"],
-        "active": "true",
-        "repository_id": [RUN_ID, str(UUID(int=7))],
-        "author": "",
-        "q": "",
-        "created_from": "2026-10-11T03:00:00+03:00",
-        "created_to": "2026-10-11T00:00:00Z",
-        "limit": "20",
-        "offset": "40",
-    }
-    response = _signed_in_client().get("/api/v1/reviews", params=params)
-    assert_problem(response, 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
 
 
 def test_review_list_is_in_the_exported_contract() -> None:
