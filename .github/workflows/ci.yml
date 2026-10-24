@@ -22,9 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
-          version: "0.12.21"
+          version: "0.13.5"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - run: uv run python -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
@@ -36,9 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
-          version: "0.12.21"
+          version: "0.13.5"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - run: uv run ruff check .
@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: opentofu/setup-opentofu@v2
         with:
-          tofu_version: 1.12.6
+          tofu_version: 1.13.2
       - run: tofu fmt -check -recursive infra/
       - run: cd infra && tofu init -backend=false && tofu validate
 
@@ -104,7 +104,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       rabbitmq:
-        image: rabbitmq:4.3-alpine
+        image: rabbitmq:4.4-alpine
         ports:
           - 5672:5672
         options: >-
@@ -124,9 +124,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
-          version: "0.12.21"
+          version: "0.13.5"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - name: pytest (пропуск теста — провал)

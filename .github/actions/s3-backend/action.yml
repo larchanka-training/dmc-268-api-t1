@@ -133,6 +133,11 @@ runs:
         storage="$(printf '%s\n' "$out" | sed -n 's/^S3=//p' | tail -1)"
         echo "storage=${storage:-не сообщено}" >> "$GITHUB_OUTPUT"
 
+        image_note="$(printf '%s\n' "$out" | sed -n 's/^S3_IMAGE=//p' | tail -1)"
+        case "$image_note" in
+          "не "*) echo "::warning::образ хранилища: $image_note" ;;
+        esac
+
         case "$storage" in
           "создан"|"уже запущен"|"был остановлен, запущен") ;;
           *) echo "::error::хранилище не поднялось (код $rc)"; exit 1 ;;

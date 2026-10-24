@@ -59,6 +59,11 @@ target-version = "py314"
 # tests/fixtures — исходники для парсера AST: их имена нарочно не определены.
 exclude = [".venv", "venv", ".git", "tests/fixtures"]
 
+[tool.ruff.lint]
+# ruff 0.17 убрал правила о наивном `datetime` из набора по умолчанию, а время
+# в коде — только UTC с часовым поясом: возвращаем их явно.
+extend-select = ["DTZ"]
+
 # `Depends(...)` as a FastAPI parameter default is the framework's own
 # dependency-injection idiom (see .agents/templates/backend/endpoint.md),
 # not the mutable-default-argument bug B008 exists to catch.
@@ -67,6 +72,8 @@ extend-immutable-calls = ["fastapi.Depends"]
 
 [tool.mypy]
 python_version = "3.14"
+# Параллельная проверка: с 2.4 не experimental, на холодном кэше вдвое быстрее.
+num_workers = "auto"
 strict = true
 plugins = ["pydantic.mypy"]
 exclude = ["^\\.venv/", "^venv/", "^tests/fixtures/"]

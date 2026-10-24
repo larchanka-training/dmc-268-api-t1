@@ -135,10 +135,10 @@ jobs:
 
       - uses: opentofu/setup-opentofu@v2
         with:
-          tofu_version: 1.12.6
+          tofu_version: 1.13.2
 
-      # Хранилище состояния и туннель к нему. Тот же composite action, что и у
-      # tfstate-backend.yml: снесённый контейнер чинится этим же деплоем.
+      # Хранилище состояния и туннель к нему: снесённый контейнер чинится этим
+      # же деплоем, новый тег образа выкатывается на прежнем томе.
       - uses: ./.github/actions/s3-backend
         with:
           ssh_key: ${{ secrets.VPS_DMC268_KEY_T1 }}
@@ -149,7 +149,7 @@ jobs:
           container: dmc268-s3
           volume: dmc268-s3-data
           port: "9000"
-          image: rustfs/rustfs:1.0.0
+          image: rustfs/rustfs:1.0.3
           cred_user_var: RUSTFS_ACCESS_KEY
           cred_pass_var: RUSTFS_SECRET_KEY
           bucket: dmc268-tfstate
