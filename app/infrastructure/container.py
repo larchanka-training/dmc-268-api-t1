@@ -187,7 +187,14 @@ def build_container(settings: Settings) -> Container:
     # (`record_exception`, статус спана).
     return Container(
         engine=create_engine(
-            settings.database_url, future=True, pool_pre_ping=True, hide_parameters=True
+            settings.database_url,
+            future=True,
+            pool_pre_ping=True,
+            hide_parameters=True,
+            # Пул — явно из настроек, а не умолчанием диалекта: предел,
+            # который публикует `instrument_pool`, обязан совпадать с фактом.
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
         ),
         settings=settings,
         _token_cipher=_token_cipher(settings),

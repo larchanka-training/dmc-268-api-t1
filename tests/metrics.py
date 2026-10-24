@@ -48,3 +48,31 @@ def metric_delta(
         return value_after - value_before, None
     assert sum_before is not None
     return value_after - value_before, sum_after - sum_before
+
+
+def metric_histogram(
+    reader: InMemoryMetricReader, name: str, **attributes: str
+) -> tuple[float, tuple[float, ...], tuple[int, ...]]:
+    """Ряд гистограммы: (наблюдений, границы бакетов, счётчики бакетов).
+
+    Границы нужны тестам бакетов (View с явными границами), счётчики —
+    проверки «значение попало в свой бакет». Ряда нет — (0, (), ()).
+    """
+    data = reader.get_metrics_data()
+    if data is None:
+        return 0.0, (), ()
+    wanted = tuple(sorted(attributes.items()))
+    for resource_metrics in data.resource_metrics or ():
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                if metric.name != name:
+                    continue
+                points = metric.data.data_points if metric.data is not None else ()
+                for point in points:
+                    if not isinstance(point, HistogramDataPoint):
+                        continue
+                    if tuple(sorted((point.attributes or {}).items())) != wanted:
+                        continue
+                    counts = tuple(int(count) for count in point.bucket_counts)
+                    return float(point.count), point.explicit_bounds, counts
+    return 0.0, (), ()

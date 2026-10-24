@@ -104,6 +104,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # контейнере — его собирает и воркер, которому ключ не передаётся.
         _log.warning("USER_TOKEN_ENCRYPTION_KEY не задан: вход отказывает, токены не хранятся")
     telemetry.instrument_engine(app.state.container.engine)
+    telemetry.instrument_pool(
+        app.state.container.engine, settings.db_pool_size, settings.db_max_overflow
+    )
 
     from app.api import errors, log_redaction
     from app.api.auth import router as auth_router

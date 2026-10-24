@@ -15,8 +15,11 @@
 - спаны этапов прогона — `OtelStageTracer`, адаптер порта, который зовёт `StepRecorder`;
 - спан периодического прохода воркера — `sweep_span`;
 - спан прогона миграций — `migrate_span`, его открывает `alembic/env.py`;
-- бизнес-метрики для алертов: исходы прогонов (`record_run_finished`), длительность
-  этапов (пишет `OtelStageTracer`), токены модели (`record_llm_tokens`).
+- бизнес-метрики для алертов: исходы прогонов (`record_run_finished` — пишет
+  адаптер `OtelRunOutcomeRecorder` через порт `RunOutcomeRecorder`),
+  длительность этапов (пишет `OtelStageTracer`) и вызовов модели (пишет
+  `MeteredLlmGateway`), токены модели (`record_llm_tokens`);
+- метрики пула соединений — снимками состояния (`instrument_pool`).
 
 Экспорт включается окружением, без правки кода: `OTEL_TRACES_EXPORTER` — список
 значений через запятую; `console` печатает законченные спаны в stdout, `otlp`
@@ -73,6 +76,11 @@ from opentelemetry.sdk.metrics.export import (
     MetricExporter,
     PeriodicExportingMetricReader,
 )
+from opentelemetry.sdk.metrics.view import (
+    DropAggregation,
+    ExplicitBucketHistogramAggregation,
+    View,
+)
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import Span, SpanLimits, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import (
@@ -84,6 +92,7 @@ from opentelemetry.sdk.trace.sampling import ALWAYS_ON, ParentBased, Sampler
 from opentelemetry.trace import Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from sqlalchemy import Engine
+from sqlalchemy.pool import QueuePool
 
 from app.domain.enums import ReviewRunStage
 
@@ -98,6 +107,42 @@ MIGRATE_SERVICE = "dmc-268-migrate"
 # Имя атрибута — как у поля в API и в логах: по нему трейс ищется от прогона.
 REVIEW_RUN_ID = "review_run_id"
 
+# Метрики пула соединений — снимками состояния, а не событиями: событийный
+# счётчик contrib (`db.client.connections.usage`) пропускает события внутри
+# `untraced()` (опрос `/events` живёт в подавлении инструментирования) и
+# дрейфует без шанса выправиться. Имена атрибутов — semconv пула соединений.
+CONNECTION_POOL = "app"
+_POOL_NAME_ATTRIBUTE = "db.client.connection.pool.name"
+_CONNECTION_COUNT = "db.client.connection.count"
+_CONNECTION_MAX = "db.client.connection.max"
+_STATE_ATTRIBUTE = "db.client.connection.state"
+
+# Бакеты гистограмм длительности, секунды: этапы прогона и вызовы модели
+# длятся от десятых доли до минут — на дефолтных миллисекундных бакетах
+# почти всё попадало в один бакет, и `histogram_quantile` бесполезен.
+DURATION_BUCKET_BOUNDARIES = (0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300)
+
+# Вид провайдера: конфигурация агрегации по именам приборов. `View` и
+# агрегации публичны в установленной SDK (`opentelemetry.sdk.metrics.view`);
+# advisory из спецификации (явные границы бакетов) в Python SDK задаётся
+# именно агрегацией `ExplicitBucketHistogramAggregation`.
+_VIEWS = (
+    # Событийный счётчик contrib всё ещё создаётся в `instrument_engine` и
+    # получает события (передать None в EngineTracer нельзя — его листенеры
+    # зовут `.add`), но не экспортируется: соединения считает снимок пула
+    # (`instrument_pool`).
+    View(instrument_name="db.client.connections.usage", aggregation=DropAggregation()),
+    *(
+        View(
+            instrument_name=name,
+            aggregation=ExplicitBucketHistogramAggregation(
+                boundaries=DURATION_BUCKET_BOUNDARIES
+            ),
+        )
+        for name in ("review_stage_duration", "review_llm_call_duration")
+    ),
+)
+
 _tracer = trace.get_tracer(__name__)
 
 # Метры бизнес-сигналов — из того же глобального провайдера, что и трейсы:
@@ -105,18 +150,23 @@ _tracer = trace.get_tracer(__name__)
 _meter = metrics.get_meter(__name__)
 
 # Бизнес-метрики — ручные сигналы для алертов (change `add-observability-stack`):
-# исходы прогонов, длительность этапов, расход токенов модели. Метки — только
-# перечисления (`status`, `stage`, `task`, `model`); данные продукта — шаги и
-# токены прогона — остаются в базе, из телеметрии ответы не строятся.
+# исходы прогонов, длительность этапов и вызовов модели, расход токенов.
+# Метки — только перечисления (`status`, `stage`, `task`, `model`); данные
+# продукта — шаги и токены прогона — остаются в базе, из телеметрии ответы
+# не строятся. Бакеты гистограммам задаёт `_VIEWS`.
 _review_runs_total = _meter.create_counter(
     "review_runs_total",
     unit="{run}",
-    # Обработки сообщений, а не уникальные прогоны: повторная доставка уже
-    # терминального прогона пишется повторно.
-    description="Обработки задач прогона по терминальному статусу.",
+    # Прогоны, доведённые до терминального статуса тем, кто этот переход
+    # сделал (пайплайн или выметатель), — не обработки сообщений: повторная
+    # доставка терминального прогона и сообщение без прогона не пишутся.
+    description="Прогоны по терминальному статусу.",
 )
 _review_stage_duration = _meter.create_histogram(
     "review_stage_duration", unit="s", description="Длительность этапов прогона."
+)
+_review_llm_call_duration = _meter.create_histogram(
+    "review_llm_call_duration", unit="s", description="Длительность вызовов модели."
 )
 _review_llm_tokens = _meter.create_counter(
     "review_llm_tokens", unit="{token}", description="Токены модели по задачам прогона."
@@ -255,11 +305,6 @@ def configure_telemetry(service_name: str) -> None:
         _meter_installed = meter_provider
 
 
-def configure_tracing(service_name: str) -> None:
-    """Прежнее имя `configure_telemetry` — оставлено вызовом, чтобы точки вызова не ломались."""
-    configure_telemetry(service_name)
-
-
 def shutdown_tracing() -> None:
     """Выгрузить накопленные спаны и метрики, закрыть провайдеры `configure_telemetry`.
 
@@ -340,7 +385,8 @@ def build_meter_provider(service_name: str) -> MeterProvider:
     `none` и пустое значение — экспорт выключен: ридеров нет, метрики никуда
     не уходят и ошибок в логе нет. Гейт обязателен: SDK по умолчанию сам
     ставит `otlp` и без него стучался бы в localhost:4318. Resource — тот же,
-    что у трейсов (`_service_resource`).
+    что у трейсов (`_service_resource`); агрегации отдельных приборов задаёт
+    `_VIEWS` (дроп старого счётчика contrib, бакеты гистограмм длительности).
     """
     readers = []
     for name in parse_exporters(os.environ.get("OTEL_METRICS_EXPORTER", "")):
@@ -356,7 +402,9 @@ def build_meter_provider(service_name: str) -> MeterProvider:
             )
             continue
         readers.append(PeriodicExportingMetricReader(factory()))
-    return MeterProvider(resource=_service_resource(service_name), metric_readers=readers)
+    return MeterProvider(
+        resource=_service_resource(service_name), metric_readers=readers, views=_VIEWS
+    )
 
 
 def _sampler() -> Sampler | None:
@@ -397,7 +445,15 @@ def instrument_engine(engine: Engine) -> None:
     2.1 молча ничего не делает, а с пропуском проверки ещё и подменяет
     `create_async_engine`, которому нужен `greenlet`. События движка
     (`before_cursor_execute` и т. п.) в 2.1 те же — спаны запросов проверяет сквозной
-    тест трейса. Счётчик соединений — no-op: метрик в сервисе нет.
+    тест трейса.
+
+    Счётчик соединений у contrib (`db.client.connections.usage`) — событийный:
+    события checkin/checkout внутри `untraced()` (подавление инструментирования,
+    живёт на опросе `/events`) им пропускаются, и счётчик дрейфует. Поэтому он
+    здесь только создаётся (передать None в `EngineTracer` нельзя — его
+    листенеры зовут `.add`), но гасится View-агрегацией в `build_meter_provider`;
+    соединения считает снимок пула — `instrument_pool` — и receiver `postgresql`
+    коллектора со стороны базы.
 
     `EngineTracer` — внутренний класс пакета, без обещаний совместимости: пакет держит
     верхняя граница в `pyproject.toml`, а если класс всё же переехал или сменил
@@ -416,7 +472,7 @@ def instrument_engine(engine: Engine) -> None:
         from opentelemetry.instrumentation.sqlalchemy.engine import EngineTracer
 
         tracer = trace.get_tracer("opentelemetry.instrumentation.sqlalchemy")
-        connections = metrics.get_meter(__name__).create_up_down_counter(
+        connections = _meter.create_up_down_counter(
             "db.client.connections.usage", unit="connections"
         )
         # Именем, а не позицией: если параметры сдвинутся, вызов упадёт `TypeError`, а
@@ -426,6 +482,46 @@ def instrument_engine(engine: Engine) -> None:
         logger.warning(
             "спаны запросов к базе выключены: EngineTracer несовместим", exc_info=True
         )
+
+
+def instrument_pool(engine: Engine, pool_size: int, max_overflow: int) -> None:
+    """Метрики пула соединений — снимками состояния, а не событиями.
+
+    `db.client.connection.count` — observable up/down counter: колбэк снимает
+    фактические `checkedout`/`checkedin` пула на момент сбора, поэтому
+    соединение, выданное внутри `untraced()`, не может увести снимок в минус,
+    как это было бы у событийного счётчика contrib. Предел пула —
+    `db.client.connection.max` = `pool_size + max_overflow`; аргументы те же,
+    что заданы `create_engine` в composition root, — иначе метрика разошлась
+    бы с фактической конфигурацией. Не-`QueuePool` (например, `StaticPool`
+    тестов) — тихий выход: у него нет ни `checkedout`, ни смысла в снимке.
+    """
+    pool = engine.pool
+    if not isinstance(pool, QueuePool):
+        return
+    labels = {_POOL_NAME_ATTRIBUTE: CONNECTION_POOL}
+
+    def _snapshot(_options: metrics.CallbackOptions) -> Iterator[metrics.Observation]:
+        yield metrics.Observation(
+            pool.checkedout(), {**labels, _STATE_ATTRIBUTE: "used"}
+        )
+        yield metrics.Observation(pool.checkedin(), {**labels, _STATE_ATTRIBUTE: "idle"})
+
+    def _limit(_options: metrics.CallbackOptions) -> Iterator[metrics.Observation]:
+        yield metrics.Observation(pool_size + max_overflow, labels)
+
+    _meter.create_observable_up_down_counter(
+        _CONNECTION_COUNT,
+        callbacks=[_snapshot],
+        unit="{connection}",
+        description="Соединения с базой по состоянию снимка пула.",
+    )
+    _meter.create_observable_gauge(
+        _CONNECTION_MAX,
+        callbacks=[_limit],
+        unit="{connection}",
+        description="Предел пула соединений: pool_size + max_overflow.",
+    )
 
 
 # Атрибуты серверного спана FastAPI (semconv HTTP).
@@ -530,10 +626,26 @@ def record_current_exception(exc: BaseException) -> None:
 def record_run_finished(status: str) -> None:
     """Отметить терминальный исход прогона в счётчике `review_runs_total`.
 
-    Бизнес-сигнал для алертов по исходам: пишет тот, кто довёл прогон до
-    терминального статуса, — обработчик воркера (`build_review_handler`).
+    Бизнес-сигнал для алертов по исходам. Пишет тот, кто перевёл прогон в
+    терминальный статус, — пайплайн (`run_review`) или выметатель
+    (`sweep_stale_runs`), — поэтому счётчик считает прогоны, а не обработки
+    сообщений: прикладной слой зовёт его через порт `RunOutcomeRecorder`,
+    здесь — адаптер `OtelRunOutcomeRecorder`.
     """
     _review_runs_total.add(1, {"status": status})
+
+
+def record_llm_call_duration(task: str, model: str, duration_seconds: float) -> None:
+    """Записать длительность логического вызова модели в `review_llm_call_duration`.
+
+    Latency видит `MeteredLlmGateway`: приложение зовёт `complete` один раз на
+    логический вызов, схемные повторы и фоллбэк происходят внутри шлюза и
+    свёрнуты в длительность этой точки — отдельно попытки видны слушателю
+    `on_retry` и в токенах ответа (`record_llm_tokens`; аудит #89). Бакеты в
+    секундах задаёт View (`_VIEWS`): на дефолтных миллисекундных
+    `histogram_quantile` бесполезен.
+    """
+    _review_llm_call_duration.record(duration_seconds, {"task": task, "model": model})
 
 
 def record_llm_tokens(task: str, model: str, tokens: int) -> None:
@@ -619,3 +731,16 @@ class OtelStageTracer:
         )
         token = otel_context.attach(trace.set_span_in_context(span))
         return _OtelStageSpan(span, token, stage)
+
+
+class OtelRunOutcomeRecorder:
+    """Адаптер `RunOutcomeRecorder`: исход прогона — в счётчик `review_runs_total`.
+
+    Передаётся composition root-ом (`run_worker`) в пайплайн и выметатель:
+    запись делает тот, кто перевёл прогон в терминальный статус, поэтому
+    повторная доставка терминального прогона и сообщение без прогона счётчик
+    не трогают.
+    """
+
+    def run_finished(self, status: str) -> None:
+        record_run_finished(status)
