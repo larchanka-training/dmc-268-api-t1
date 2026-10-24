@@ -7,6 +7,7 @@ from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
 from app.worker.factory import (
     WorkerConfigError,
     check_model_deadline,
+    check_sweep_thresholds,
     load_checked_prompt_texts,
     run_worker,
 )
@@ -81,4 +82,24 @@ def test_model_call_longer_than_the_stale_run_threshold_stops_the_worker() -> No
 
     # Брокер недоступен: проверка срабатывает раньше подключения.
     with pytest.raises(WorkerConfigError, match="2400"):
+        run_worker(settings)
+
+
+def test_default_sweep_thresholds_pass_the_startup_check() -> None:
+    check_sweep_thresholds(_settings())
+
+
+@pytest.mark.parametrize("queued", [1800, 600])
+def test_queued_threshold_not_above_the_stale_one_stops_the_worker(queued: int) -> None:
+    settings = _settings(
+        llm_backend="stub", stale_run_timeout_seconds=1800, queued_run_timeout_seconds=queued
+    )
+
+    with pytest.raises(
+        WorkerConfigError, match=rf"{queued} с \(QUEUED_RUN_TIMEOUT_SECONDS\).* 1800 с"
+    ):
+        check_sweep_thresholds(settings)
+
+    # Брокер недоступен: проверка срабатывает раньше подключения.
+    with pytest.raises(WorkerConfigError, match="QUEUED_RUN_TIMEOUT_SECONDS"):
         run_worker(settings)

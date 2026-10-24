@@ -312,10 +312,25 @@ def check_model_deadline(settings: Settings) -> None:
         )
 
 
+def check_sweep_thresholds(settings: Settings) -> None:
+    """Порог ждущего в очереди прогона больше порога зависшего (change `queued-run-timeout`).
+
+    Иначе прогон, ещё не взятый воркером, выметался бы раньше зависшего в
+    работе, а его сообщение воркер потом молча пропустил бы.
+    """
+    queued, stale = settings.queued_run_timeout_seconds, settings.stale_run_timeout_seconds
+    if queued <= stale:
+        raise WorkerConfigError(
+            f"порог ждущего в очереди прогона {queued} с (QUEUED_RUN_TIMEOUT_SECONDS)"
+            f" не больше порога зависшего прогона {stale} с (STALE_RUN_TIMEOUT_SECONDS)"
+        )
+
+
 def build_maintenance(
     uow_factory: Callable[[], UnitOfWork],
     *,
     stale_limit: timedelta,
+    queued_limit: timedelta,
     now: Callable[[], datetime],
 ) -> Callable[[], None]:
     """Периодический проход: зависшие прогоны и истёкшие сессии.
@@ -326,7 +341,9 @@ def build_maintenance(
 
     def maintenance() -> None:
         try:
-            swept = sweep_stale_runs(uow_factory(), now=now(), limit=stale_limit)
+            swept = sweep_stale_runs(
+                uow_factory(), now=now(), limit=stale_limit, queued_limit=queued_limit
+            )
             if swept:
                 logger.warning("зависших прогонов переведено в failed: %d", swept)
         except Exception as exc:
@@ -351,6 +368,7 @@ def run_worker(settings: Settings) -> None:
     if settings.llm_backend is None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
     check_model_deadline(settings)
+    check_sweep_thresholds(settings)
     configure_tracing(WORKER_SERVICE)
     container = build_container(settings)
     instrument_engine(container.engine)
@@ -360,6 +378,7 @@ def run_worker(settings: Settings) -> None:
     sweep = build_maintenance(
         container.unit_of_work,
         stale_limit=timedelta(seconds=settings.stale_run_timeout_seconds),
+        queued_limit=timedelta(seconds=settings.queued_run_timeout_seconds),
         now=lambda: datetime.now(UTC),
     )
     handler = build_review_handler(

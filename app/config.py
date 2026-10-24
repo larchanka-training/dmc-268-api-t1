@@ -49,6 +49,14 @@ class Settings(BaseSettings):
         gt=0,
         description="How long a non-terminal review run may go without progress before the worker fails it.",
     )
+    # Прогресс `queued` — время создания: порог больше любого разумного хвоста
+    # очереди, иначе ждущий прогон выметается и ревью теряется молча. Больше
+    # stale_run_timeout_seconds — проверяет воркер при старте (change queued-run-timeout).
+    queued_run_timeout_seconds: int = Field(
+        default=21_600,
+        gt=0,
+        description="Сколько прогон может ждать в queued, прежде чем воркер переведёт его в failed",
+    )
     # Пустые по умолчанию, а не обязательные: composition root строит
     # VCS-шлюз лениво, и приложение без GitHub-реквизитов продолжает отвечать
     # на запросы, не касающиеся вебхуков. Пустой ключ громко аукнется при
