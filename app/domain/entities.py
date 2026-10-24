@@ -191,6 +191,11 @@ class DiffAnchor:
     old_line: int | None = None
     new_line: int | None = None
 
+    @property
+    def line(self) -> int | None:
+        """Номер строки на стороне привязки; `None`, если он не заполнен."""
+        return self.new_line if self.side is DiffSide.NEW else self.old_line
+
 
 @dataclass(frozen=True, slots=True)
 class LlmRuleRef:

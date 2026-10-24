@@ -52,6 +52,8 @@ dev = [
     # Корпус eval правил (tests/eval/rules/corpus.py) читает кейсы из YAML.
     "pyyaml>=6.0.3",
     "types-pyyaml>=6.0.12.20260906",
+    # Транспорт TestClient Starlette: с httpx он предупреждает об устаревании.
+    "httpx2>=2.16.0",
 ]
 
 [tool.ruff]

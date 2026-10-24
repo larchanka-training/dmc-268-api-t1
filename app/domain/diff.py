@@ -18,10 +18,8 @@ def validate_anchor(anchor: DiffAnchor, hunks: Iterable[Hunk]) -> Result[DiffAnc
     if not for_file:
         return Result.failure(f"{anchor.file_path} is not in the diff")
 
-    if anchor.side is DiffSide.NEW:
-        line, touched = anchor.new_line, "changed_new_lines"
-    else:
-        line, touched = anchor.old_line, "changed_old_lines"
+    line = anchor.line
+    touched = "changed_new_lines" if anchor.side is DiffSide.NEW else "changed_old_lines"
 
     if line is None:
         return Result.failure(f"anchor on the {anchor.side} side carries no line number")

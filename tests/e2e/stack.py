@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-import httpx
+import httpx2
 import pika
 from fastapi import FastAPI
 from pydantic import SecretStr
@@ -266,8 +266,8 @@ class Stack:
 
 
 def deliver(
-    client: httpx.Client, pull: PullRequest, *, delivery: str = "", action: str = "opened"
-) -> httpx.Response:
+    client: httpx2.Client, pull: PullRequest, *, delivery: str = "", action: str = "opened"
+) -> httpx2.Response:
     """Подписанная доставка вебхука `pull_request` по HTTP."""
     body = webhook_body(pull, action)
     headers = webhook_headers(body, delivery or f"delivery-{pull.number}-{pull.head_sha[:7]}")

@@ -484,7 +484,8 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
         release.clear()
 
     app, cookies = _app(world, Ticks({}))
-    app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(every_step(held_sleep))
+    held = FakeRunChanges(every_step(held_sleep))
+    app.dependency_overrides[get_run_changes] = lambda: held
     cookie = "; ".join(f"{name}={value}" for name, value in cookies.items())
     scope: dict[str, Any] = {
         "type": "http",
@@ -532,6 +533,8 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
     assert server.context is not None
     assert dict(start["headers"])[b"x-trace-id"].decode() == format_trace_id(server.context.trace_id)
     assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
+    # Клиент ушёл — подписка на изменения прогонов закрыта, слушатель не течёт.
+    assert [s.closed for s in held.subscriptions] == [True]
 
 
 def test_the_untraced_factory_is_wired_to_the_container() -> None:
