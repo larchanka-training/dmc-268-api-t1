@@ -564,10 +564,13 @@ def test_a_client_leaving_before_the_terminal_status_closes_the_span_without_err
     gone = asyncio.Event()
     # Поток вошёл в первое ожидание сигнала: первое чтение прошло, дальше — тишина ленты.
     waiting = asyncio.Event()
+    # Ожидание сигнала не прекращается само: уход клиента отменяет генератор прямо
+    # в нём, поэтому `release` никто не ставит.
+    release = asyncio.Event()
 
     async def held_wait(timeout: float) -> bool:
         waiting.set()
-        await gone.wait()
+        await release.wait()
         return False
 
     app, cookies = _app(world, Ticks({}))
