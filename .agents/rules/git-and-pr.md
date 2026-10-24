@@ -7,7 +7,8 @@
 
 Ветка отводится от `develop` и мёржится в `develop`. Префиксы: `feat/…`, `fix/…`,
 `deps-update-YYYY-MM-DD`. Имя ветки — подсказка ревью-агенту, когда заголовок пул-реквеста
-невнятен.
+невнятен. В ветке `deps-update-…` обновляются и SHA-пины actions (`pinact run --update`);
+комментарий `# vX.Y.Z` остаётся на той же строке, что и SHA.
 
 Коммиты — conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`.
 
