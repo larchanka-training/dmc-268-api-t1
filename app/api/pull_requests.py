@@ -14,9 +14,9 @@ from fastapi import APIRouter, Depends, Path
 from pydantic import BaseModel, Field
 
 from app.api.dependencies import (
-    get_installation_catalog,
     get_token_provider,
     get_unit_of_work_factory,
+    get_visibility_catalog,
 )
 from app.api.errors import ERRORS_404_REPOSITORY, ERRORS_422, ERRORS_502_SCM_VISIBILITY
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
@@ -70,7 +70,7 @@ def list_pull_requests(
     limit: Limit = DEFAULT_LIMIT,
     offset: Offset = 0,
     signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> MergeRequestListResponse:

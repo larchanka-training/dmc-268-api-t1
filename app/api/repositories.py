@@ -19,6 +19,7 @@ from app.api.dependencies import (
     get_installation_catalog,
     get_token_provider,
     get_unit_of_work_factory,
+    get_visibility_catalog,
 )
 from app.api.errors import (
     ERRORS_403_ORIGIN_OR_MANAGE,
@@ -221,7 +222,7 @@ def available_repositories(
 
 def user_repositories(
     signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> list[InstallationRepository]:
@@ -351,7 +352,7 @@ def list_repositories(
     limit: Limit = DEFAULT_LIMIT,
     offset: Offset = 0,
     signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositoryListResponse:
@@ -508,7 +509,7 @@ class RulesStatusResponse(
 def get_repository(
     repository_id: RepositoryIdPath,
     signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositoryResponse:

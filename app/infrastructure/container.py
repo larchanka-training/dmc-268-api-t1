@@ -32,6 +32,7 @@ from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
 )
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
+from app.infrastructure.vcs.cached_installations import CachedInstallationCatalog
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from app.infrastructure.vcs.github_installations import GitHubInstallationCatalog
@@ -118,6 +119,16 @@ class Container:
     def installation_catalog(self) -> InstallationCatalog:
         """Репозитории установок GitHub App, видимые пользователю по его токену."""
         return self._installation_catalog
+
+    def visibility_catalog(self, catalog: InstallationCatalog) -> InstallationCatalog:
+        """`catalog` с кэшем списка видимых репозиториев — для видимости прогонов и репозиториев.
+
+        Каталог — аргументом, а не свой: тесты подменяют каталог зависимостью API,
+        и кэш должен лечь поверх подменённого.
+        """
+        return CachedInstallationCatalog(
+            catalog, self._cache_store, self.settings.visible_repositories_cache_ttl_seconds
+        )
 
     def oauth_provider(self, name: str) -> OAuthProvider | None:
         """Провайдер входа по имени из пути; неизвестное имя — `None`."""

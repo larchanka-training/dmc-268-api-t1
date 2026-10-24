@@ -40,6 +40,17 @@ def get_installation_catalog(container: Container = Depends(get_container)) -> I
     return container.installation_catalog()
 
 
+def get_visibility_catalog(
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    container: Container = Depends(get_container),
+) -> InstallationCatalog:
+    """Каталог с кэшем видимых репозиториев: видимость прогонов и репозиториев (#126).
+
+    Страница подключения и само подключение берут `get_installation_catalog` — без кэша.
+    """
+    return container.visibility_catalog(catalog)
+
+
 def get_token_provider(container: Container = Depends(get_container)) -> OAuthProvider:
     """Провайдер, выдавший токен сессии, — обновляет и отзывает его: сессии кабинета — только GitHub."""
     provider = container.oauth_provider(Provider.GITHUB.value)
