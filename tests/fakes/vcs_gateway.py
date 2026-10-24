@@ -35,10 +35,18 @@ class RecordingVcsGateway:
     pr_title: str = "feat: изменение"
     pr_description: str = ""
     commit_messages: tuple[str, ...] = ()
+    # Сбой сверки тредов: `fetch_review_threads_resolved_state` бросает это исключение.
+    threads_error: Exception | None = None
+    # Сбои после публикации ревью: дифф между коммитами, ответ и закрытие треда по корню.
+    diff_error: Exception | None = None
+    reply_errors: dict[str, Exception] = field(default_factory=dict)
+    resolve_errors: dict[str, Exception] = field(default_factory=dict)
 
     def fetch_diff(
         self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
     ) -> str:
+        if self.diff_error is not None:
+            raise self.diff_error
         if len(self.diff.encode("utf-8")) > max_bytes:
             raise VcsFileTooLargeError(f"дифф: больше {max_bytes} байт")
         return self.diff
@@ -100,6 +108,8 @@ class RecordingVcsGateway:
         provider_comment_id: str,
         body: str,
     ) -> str:
+        if provider_comment_id in self.reply_errors:
+            raise self.reply_errors[provider_comment_id]
         self.replies.append((provider_comment_id, body))
         return f"reply-to-{provider_comment_id}"
 
@@ -110,6 +120,8 @@ class RecordingVcsGateway:
         installation_id: int,
         provider_comment_ids: frozenset[str],
     ) -> dict[str, bool]:
+        if self.threads_error is not None:
+            raise self.threads_error
         return {cid: False for cid in provider_comment_ids}
 
     def resolve_review_thread_for_comment(
@@ -119,6 +131,8 @@ class RecordingVcsGateway:
         installation_id: int,
         provider_comment_id: str,
     ) -> None:
+        if provider_comment_id in self.resolve_errors:
+            raise self.resolve_errors[provider_comment_id]
         self.resolved.append(provider_comment_id)
 
     def set_merge_gate_check(
