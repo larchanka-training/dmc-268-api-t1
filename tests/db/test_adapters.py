@@ -345,6 +345,27 @@ def test_a_payload_body_is_a_copy_not_a_handle_on_the_row(uow) -> None:
         assert work.context_payloads.find_by_digest("d1").body == {"text": "x"}
 
 
+def test_a_payload_body_mutated_before_commit_is_stored_as_added(uow) -> None:
+    """Мутация исходной сущности после `add` не меняет сохранённое."""
+    with uow as work:
+        _, _, run = seeded(work)
+    payload = replace(
+        a_context_payload(run.id, chunk_index=0, digest="d2"),
+        body={"text": "x", "files": [{"path": "a.py"}]},
+    )
+    with uow as work:
+        work.context_payloads.add(payload)
+        payload.body["text"] = "mutated"
+        payload.body["files"][0]["path"] = "mutated.py"
+        work.commit()
+
+    with uow as work:
+        assert work.context_payloads.find_by_digest("d2").body == {
+            "text": "x",
+            "files": [{"path": "a.py"}],
+        }
+
+
 def test_a_failed_run_keeps_the_stage_it_failed_in(uow) -> None:
     with uow as work:
         repo = a_repository()

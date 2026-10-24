@@ -4,6 +4,7 @@ import datetime as dt
 from uuid import UUID
 
 import pytest
+from sqlalchemy import event, text
 
 from app.domain.entities import DiffAnchor, Finding, MergeRequest, Repository, ReviewRun
 from app.domain.enums import (
@@ -194,3 +195,38 @@ def test_empty_visibility_or_statuses_answer_without_query(uow, world) -> None:
         assert uow.review_runs.list_page(RunListFilter(repository_ids=frozenset()), 50, 0).total == 0
         empty = RunListFilter(repository_ids=frozenset({seen.id}), statuses=frozenset())
         assert uow.review_runs.list_page(empty, 50, 0).entries == []
+
+
+def test_total_and_page_are_read_in_one_snapshot(uow, world, clean_db) -> None:
+    """Прогон, закоммиченный между подсчётом и страницей, не попадает ни в total, ни в страницу.
+
+    В READ COMMITTED второй запрос увидел бы его, и страница оказалась бы больше total.
+    """
+    seen, _, cache, *_ = world
+    _store(uow, _run(cache, 0))
+    late = _run(cache, 10)
+    fired: list[bool] = []
+
+    def commit_late_run(conn, cursor, statement, parameters, context, executemany) -> None:
+        if fired or "count(" not in statement.lower():
+            return
+        fired.append(True)
+        _store(SqlAlchemyUnitOfWork(clean_db), late)
+
+    event.listen(clean_db, "after_cursor_execute", commit_late_run)
+    try:
+        page = _page(uow, {seen.id})
+    finally:
+        event.remove(clean_db, "after_cursor_execute", commit_late_run)
+
+    assert fired
+    assert page.total == 1
+    assert len(page.entries) == 1
+    assert _page(uow, {seen.id}).total == 2
+
+
+def test_snapshot_isolation_does_not_leak_to_the_next_unit_of_work(uow, world) -> None:
+    seen, *_ = world
+    _page(uow, {seen.id})
+    with uow:
+        assert uow.session.scalar(text("SHOW transaction_isolation")) == "read committed"

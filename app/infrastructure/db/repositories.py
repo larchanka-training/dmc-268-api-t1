@@ -5,6 +5,7 @@
 чистой функцией — это единственные места, где появляется правило. Они отмечены.
 """
 
+import copy
 import datetime as dt
 from collections.abc import Collection
 from typing import Any
@@ -283,7 +284,8 @@ class SqlAlchemyReviewRunRepo:
         return self._entries(picked, ReviewRunRow.updated_at, ReviewRunRow.id)
 
     def list_page(self, run_filter: RunListFilter, limit: int, offset: int) -> RunListPage:
-        """Два запроса: `COUNT` под фильтрами и страница строками списка, как у `list_changed`.
+        """Два запроса в одной транзакции REPEATABLE READ: `COUNT` под фильтрами и страница строками
+        списка, как у `list_changed`.
 
         Порядок страницы — по индексу `(created_at, id)`. Подстрока `q` ищется `ILIKE` без
         индекса, по прогонам видимых репозиториев; `%` и `_` из ввода экранируются
@@ -296,6 +298,10 @@ class SqlAlchemyReviewRunRepo:
             .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
             .where(*_run_list_conditions(run_filter))
         )
+        # COUNT и страница - один снимок: в READ COMMITTED прогон, закоммиченный между ними,
+        # попал бы на страницу, но не в total. Уровень ставится до первого запроса транзакции;
+        # SQLAlchemy возвращает соединению прежний уровень при возврате в пул.
+        self._session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         total = self._session.scalar(select(func.count()).select_from(matching.subquery()))
         newest_first = (ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
         page = matching.order_by(*newest_first).limit(limit).offset(offset).cte("page")
@@ -491,7 +497,8 @@ class SqlAlchemyContextPayloadRepo:
                 file_paths=list(payload.file_paths),
                 token_count=payload.token_count,
                 content_sha256=payload.content_sha256,
-                body=payload.body,
+                # Копия, а не ссылка: строка не должна делить словарь с сущностью.
+                body=copy.deepcopy(payload.body),
             )
         )
 

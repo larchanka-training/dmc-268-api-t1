@@ -332,6 +332,13 @@ class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             name="uq_published_comments_finding",
             postgresql_nulls_not_distinct=True,
         ),
+        # Дубль id комментария у провайдера - ошибка, а не вторая запись. С kind: у сводки
+        # id ревью GitHub, у inline и ответа - id комментария к строке, счётчики у них разные
+        # и могут совпасть. Колонки NOT NULL, NULLS NOT DISTINCT не нужен. provider_comment_id
+        # первым - индекс обслуживает и поиск комментария по id (вебхуки о тредах и фидбеке).
+        UniqueConstraint(
+            "provider_comment_id", "kind", name="uq_published_comments_provider_comment_id"
+        ),
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
