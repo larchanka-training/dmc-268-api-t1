@@ -1,13 +1,25 @@
 """Проверки старта воркера, которые не требуют брокера: промпты и окно модели."""
 
+import contextlib
+import io
+import json
+import logging
+import sys
+import threading
+from collections.abc import Iterator
+
 import pytest
 
 from app.config import Settings
+from app.infrastructure.logging import JsonFormatter
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
+from app.infrastructure.telemetry import WORKER_SERVICE
+from app.worker import factory
 from app.worker.factory import (
     WorkerConfigError,
     check_model_deadline,
     check_sweep_thresholds,
+    install_excepthooks,
     load_checked_prompt_texts,
     run_worker,
 )
@@ -20,6 +32,28 @@ def _settings(**overrides: object) -> Settings:
         github_webhook_secret="test-secret",
         **overrides,  # type: ignore[arg-type]
     )
+
+
+@pytest.fixture(autouse=True)
+def _restore_excepthooks() -> Iterator[None]:
+    """`run_worker` ставит глобальные excepthook'и — тест возвращает прежние."""
+    sys_hook, thread_hook = sys.excepthook, threading.excepthook
+    yield
+    sys.excepthook = sys_hook
+    threading.excepthook = thread_hook
+
+
+@contextlib.contextmanager
+def _json_log(worker_log: logging.Logger) -> Iterator[io.StringIO]:
+    """Записи логгера воркера через производственный JSON-форматтер, в память."""
+    out = io.StringIO()
+    handler = logging.StreamHandler(out)
+    handler.setFormatter(JsonFormatter("dmc-268-worker"))
+    worker_log.addHandler(handler)
+    try:
+        yield out
+    finally:
+        worker_log.removeHandler(handler)
 
 
 def test_default_configuration_fits_the_window_and_loads_the_real_prompts() -> None:
@@ -45,6 +79,52 @@ def test_worker_without_a_chosen_model_backend_does_not_start() -> None:
     # проверка срабатывает раньше подключения.
     with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
         run_worker(_settings())
+
+
+def test_run_worker_configures_logging_before_reading_its_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Логи настраиваются первой строкой `run_worker`, до проверок конфигурации:
+    `WorkerConfigError` уходит из процесса JSON-записью, которую читает
+    коллектор, а не текстом, который он дропает."""
+    calls: list[str] = []
+    monkeypatch.setattr(factory, "configure_logging", calls.append)
+
+    with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
+        run_worker(_settings())
+
+    assert calls == [WORKER_SERVICE]
+
+
+def test_unhandled_exceptions_of_both_hooks_go_through_the_logger() -> None:
+    """Необработанное исключение — JSON-запись со стектрейсом через логгер
+    (`exc_info`), а не дефолтный текстовый дамп интерпретатора: не-JSON
+    строку коллектор дропает, и падение воркера осталось бы без диагноза."""
+    worker_log = logging.getLogger("app.worker.factory")
+    install_excepthooks()
+
+    with _json_log(worker_log) as out:
+        try:
+            raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
+        except WorkerConfigError:
+            # Как интерпретатор на выходе исключения из `main()` точки входа.
+            sys.excepthook(*sys.exc_info())
+        try:
+            raise RuntimeError("сбой фонового потока")
+        except RuntimeError as error:
+            threading.excepthook(
+                threading.ExceptHookArgs(
+                    (type(error), error, error.__traceback__, threading.current_thread())
+                )
+            )
+
+    main_record, thread_record = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert main_record["severity"] == "ERROR"
+    assert main_record["exception.type"] == "WorkerConfigError"
+    assert "WorkerConfigError: LLM_BACKEND не задан" in main_record["exception.stacktrace"]
+    assert thread_record["severity"] == "ERROR"
+    assert thread_record["exception.type"] == "RuntimeError"
+    assert "RuntimeError: сбой фонового потока" in thread_record["exception.stacktrace"]
 
 
 def test_empty_model_backend_from_compose_does_not_start_the_worker() -> None:

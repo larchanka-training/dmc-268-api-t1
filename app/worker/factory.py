@@ -11,12 +11,14 @@ Ack/nack-решение — чистая `should_ack`, здесь только �
 import contextlib
 import logging
 import signal
+import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import FrameType
+from types import FrameType, TracebackType
 from typing import Protocol
 
 import pika
@@ -298,6 +300,57 @@ class WorkerConfigError(RuntimeError):
     """Конфигурация, с которой воркер заведомо не сможет работать."""
 
 
+def _log_unhandled_exception(
+    message: str,
+    exc_type: type[BaseException],
+    exc_value: BaseException | None,
+    exc_traceback: TracebackType | None,
+) -> None:
+    """Необработанное исключение — одна JSON-запись со стектрейсом.
+
+    Интерпретатор передаёт в хук готовый экземпляр исключения; типы хука
+    допускают `None` — тогда в записи остаётся имя типа в тексте.
+    """
+    if exc_value is None:
+        logger.error("%s: %s", message, exc_type.__qualname__)
+        return
+    logger.error(message, exc_info=(exc_type, exc_value, exc_traceback))
+
+
+def _main_thread_excepthook(
+    exc_type: type[BaseException],
+    exc_value: BaseException | None,
+    exc_traceback: TracebackType | None,
+) -> None:
+    """Необработанное исключение главного потока — JSON-запись со стектрейсом."""
+    _log_unhandled_exception("необработанное исключение", exc_type, exc_value, exc_traceback)
+
+
+def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
+    """Необработанное исключение стороннего потока — та же JSON-запись."""
+    thread_name = args.thread.name if args.thread is not None else "без объекта потока"
+    _log_unhandled_exception(
+        "необработанное исключение в потоке " + thread_name,
+        args.exc_type,
+        args.exc_value,
+        args.exc_traceback,
+    )
+
+
+def install_excepthooks() -> None:
+    """Необработанное исключение любого потока пишет логгер, не интерпретатор.
+
+    Дефолтные хуки печатают текстовый дамп в stderr — не-JSON строку дропает
+    коллектор, и падение воркера не оставило бы следа в Loki. Воркер
+    однопроцессный, точка входа тонкая (`app/worker/__main__.py` →
+    `run_worker`), поэтому хуки ставятся здесь, сразу после настройки логов:
+    и `WorkerConfigError`, поднятая `run_worker`, уходит JSON-записью с
+    `exception.type` и стектрейсом.
+    """
+    sys.excepthook = _main_thread_excepthook
+    threading.excepthook = _threading_excepthook
+
+
 def load_checked_prompt_texts(settings: Settings, root: Path) -> PromptTexts:
     """Тексты промптов и проверка, что полный пакет с ними помещается в окно модели.
 
@@ -455,6 +508,12 @@ def build_maintenance(
 
 def run_worker(settings: Settings) -> None:
     """Собрать зависимости и запустить воркер бесконечно. Вызывается из `__main__.py`."""
+    # Первыми строками, до чтения конфигурации: непригодная конфигурация
+    # поднимает WorkerConfigError — исключение должно уходить из процесса
+    # JSON-записью (логи настроены, excepthook пишёт через логгер), а не
+    # текстовым дампом дефолтного обработчика, который коллектор дропает.
+    configure_logging(WORKER_SERVICE)
+    install_excepthooks()
     # До подключения к брокеру: с непригодной конфигурацией воркер не поднимается.
     # Заглушка модели выбирается только явно - иначе прогоны молча выходили бы
     # пустыми (change `add-llm-gateway`, требование «Выбор заглушки явный»).
@@ -462,7 +521,6 @@ def run_worker(settings: Settings) -> None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
     check_model_deadline(settings)
     check_sweep_thresholds(settings)
-    configure_logging(WORKER_SERVICE)
     configure_telemetry(WORKER_SERVICE)
     container = build_container(settings)
     instrument_engine(container.engine)

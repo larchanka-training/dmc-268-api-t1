@@ -422,7 +422,9 @@ def upgrade() -> None:
   кладёт стектрейс и `exception.type` (qualname класса) в ту же запись,
   дубль uvicorn «Exception in ASGI
   application» отсекается: на `500` в логе ровно одна запись, и её `trace_id`
-  равен `X-Trace-ID` ответа. Дальше запись
+  равен `X-Trace-ID` ответа. Необработанное исключение воркера — вплоть до
+  `WorkerConfigError` старта — пишут excepthook'и той же JSON-записью:
+  дефолтный текстовый дамп интерпретатора коллектор дропает. Дальше запись
   уносит `file_log` коллектора — он
   дочитывает stdout контейнеров, шлёт распарсенный JSON в Loki, и в Grafana от
   записи лога к трейсу ведёт переход по `trace_id` (derived field по structured
