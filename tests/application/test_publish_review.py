@@ -908,3 +908,98 @@ def test_without_host_thread_state_every_finding_is_published(
     assert draft.line == 10
     (check,) = vcs.checks
     assert check.conclusion == "failure"
+
+
+CRITICAL_FINDING_ID = UUID(int=90)
+
+
+def _run_with_critical_finding(uow: FakeUnitOfWork) -> ReviewRun:
+    """Первый прогон PR: базы тредов нет, у прогона одна находка `critical`."""
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    uow.findings.add(
+        Finding(
+            id=CRITICAL_FINDING_ID,
+            review_run_id=RUN_ID,
+            anchor=DiffAnchor(file_path="app/x.py", side=DiffSide.NEW, new_line=10),
+            category=FindingCategory.SECURITY,
+            severity=FindingSeverity.CRITICAL,
+            message="SQL-инъекция",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    return run
+
+
+def _seed_merge_request(uow: FakeUnitOfWork) -> None:
+    uow.merge_requests.add(
+        MergeRequest(
+            id=MR_ID,
+            repository_id=UUID(int=9),
+            number=7,
+            title="t",
+            description="",
+            author="a",
+            source_branch="feat",
+            target_branch="develop",
+            head_sha=JOB.head_sha,
+            state=MergeRequestState.OPEN,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+
+def _publish_first_run(uow: FakeUnitOfWork, run: ReviewRun, vcs: RecordingVcsGateway) -> None:
+    publish_review(
+        JOB,
+        run,
+        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        uow=uow,
+        vcs=vcs,
+        now=NOW,
+        new_id=_ids(),
+        diff_max_bytes=DIFF_LIMIT,
+    )
+
+
+def test_the_review_carries_the_marker_of_its_run() -> None:
+    """По маркеру адаптер находит своё ревью, если ответ на POST потерялся (#185)."""
+    uow = FakeUnitOfWork()
+    vcs = RecordingVcsGateway()
+
+    _publish_first_run(uow, _run_with_critical_finding(uow), vcs)
+
+    assert vcs.review_run_ids == [RUN_ID]
+
+
+def test_lost_inline_ids_keep_the_summary_and_block_the_merge() -> None:
+    """#185: id inline не получены - сводка записана, gate видит `critical` без треда в базе."""
+    uow = FakeUnitOfWork()
+    vcs = RecordingVcsGateway(inline_ids_lost=True)
+
+    _publish_first_run(uow, _run_with_critical_finding(uow), vcs)
+
+    assert [(c.kind, c.provider_comment_id) for c in uow.published_comments.list_for_run(RUN_ID)] == [
+        (CommentKind.SUMMARY, "summary-1")
+    ]
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+
+
+def test_merge_gate_failure_after_publishing_does_not_fail_the_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#185: check run не выставился - ревью уже на GitHub, повтор дал бы второе; warning в лог."""
+    uow = FakeUnitOfWork()
+    error = VcsTransientError("GitHub API отвечал 429/5xx 3 попытки подряд на POST /check-runs")
+    vcs = RecordingVcsGateway(check_error=error)
+
+    with caplog.at_level(logging.WARNING, logger="app.application.publish_review"):
+        _publish_first_run(uow, _run_with_critical_finding(uow), vcs)
+
+    assert len(vcs.publications) == 1
+    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert str(RUN_ID) in record.getMessage()
+    assert record.exc_info is not None and record.exc_info[1] is error

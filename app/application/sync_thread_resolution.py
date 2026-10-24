@@ -107,7 +107,11 @@ def refresh_merge_gate_for_merge_request(
         vcs=vcs,
         now=now,
     )
-    still_open = collect_open_findings(uow, merge_request_id)
+    with uow:
+        head_run = uow.review_runs.find_reviewed(merge_request_id, head_sha)
+    still_open = collect_open_findings(
+        uow, merge_request_id, head_run_id=head_run.id if head_run is not None else None
+    )
     vcs.set_merge_gate_check(
         repo_full_name,
         head_sha,

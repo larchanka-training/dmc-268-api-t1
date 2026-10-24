@@ -52,6 +52,27 @@ _GITHUB_API = "https://api.github.com"
 # таймаут на каждую фазу httpx, подключение — короче. Refresh держит
 # блокировку строки токена, и худший случай — сумма фаз, а не 10 секунд.
 _GITHUB_USER_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+
+@dataclass(frozen=True, slots=True)
+class VcsClientLimits:
+    """Таймаут HTTP-клиента VCS-шлюза и бюджет ожидания лимита GitHub на один запрос."""
+
+    timeout: httpx.Timeout
+    rate_limit_budget_seconds: float
+
+
+# API отвечает на вебхук, а GitHub ждёт ответа доставки 10 секунд: таймаут -
+# прежнее умолчание httpx, лимит не пережидается. Отказ уходит 5xx, доставку
+# переотправит воркер (#149) с паузой не меньше пяти минут.
+API_VCS_LIMITS = VcsClientLimits(timeout=httpx.Timeout(5.0), rate_limit_budget_seconds=0.0)
+# Воркер: дифф и список комментариев крупного PR, создание ревью с пачкой
+# inline дольше 5 секунд. Минута ожидания лимита на запрос - пауза GitHub без
+# заголовков; запросов публикации - единицы, и прогон не подходит к
+# STALE_RUN_TIMEOUT_SECONDS (по умолчанию 30 минут) без прогресса.
+WORKER_VCS_LIMITS = VcsClientLimits(
+    timeout=httpx.Timeout(30.0, connect=5.0), rate_limit_budget_seconds=60.0
+)
 # Callback входа: путь роутера `/auth`, зарегистрированный в настройках GitHub App.
 _OAUTH_CALLBACK_PATH = "/api/v1/auth/{provider}/callback"
 
@@ -75,6 +96,8 @@ class Container:
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
     _vcs_gateway: VcsGateway | None
+    # Таймаут и ожидание лимита VCS-шлюза: у API и воркера свои.
+    _vcs_limits: VcsClientLimits
     # Репозитории, видимые пользователю, — запросы с его токеном; App-реквизиты
     # и кэш installation tokens ему не нужны. Конструирование — без сети.
     _installation_catalog: InstallationCatalog
@@ -117,15 +140,25 @@ class Container:
         """Собрать VCS-шлюз при первом обращении; конструирование — без сети."""
         gateway = self._vcs_gateway
         if gateway is None:
-            client = httpx.Client(base_url=_GITHUB_API)
-            auth = GitHubAppAuth(
-                self.settings.github_app_id,
-                self.settings.github_app_private_key.get_secret_value(),
-                client,
-            )
-            gateway = GitHubVcsGateway(auth, client)
+            gateway = self._build_vcs_gateway(self._vcs_limits)
             object.__setattr__(self, "_vcs_gateway", gateway)
         return gateway
+
+    def redelivery_vcs_gateway(self) -> VcsGateway:
+        """VCS-шлюз прохода повтора доставок (#149): лимит GitHub не пережидается.
+
+        Отказ лимита завершает проход (`webhook-intake`), а ожидание общего шлюза
+        воркера держало бы consume-цикл дольше бюджета прохода. Свой клиент и
+        `GitHubAppAuth`; собирается воркером один раз, конструирование — без сети.
+        """
+        return self._build_vcs_gateway(API_VCS_LIMITS)
+
+    def _build_vcs_gateway(self, limits: VcsClientLimits) -> GitHubVcsGateway:
+        client = httpx.Client(base_url=_GITHUB_API, timeout=limits.timeout)
+        auth = GitHubAppAuth(
+            self.settings.github_app_id, self.settings.github_app_private_key.get_secret_value(), client
+        )
+        return GitHubVcsGateway(auth, client, rate_limit_budget_seconds=limits.rate_limit_budget_seconds)
 
     def webhook_deliveries(self) -> WebhookDeliveries:
         """Доставки вебхука GitHub App — для повтора упавших (#149).
@@ -177,7 +210,7 @@ class Container:
         return extractor
 
 
-def build_container(settings: Settings) -> Container:
+def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS_LIMITS) -> Container:
     # pool_pre_ping: соединение, умершее в простое (перезапуск сервера, idle
     # timeout, NAT сбросил поток), обнаруживается при выдаче из пула и
     # заменяется, а не всплывает OperationalError на следующем запросе.
@@ -192,6 +225,7 @@ def build_container(settings: Settings) -> Container:
         _token_cipher=_token_cipher(settings),
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
+        _vcs_limits=vcs_limits,
         _installation_catalog=_build_installation_catalog(settings),
         _oauth_providers={
             "github": GitHubOAuthProvider(

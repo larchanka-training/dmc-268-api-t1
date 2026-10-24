@@ -40,7 +40,7 @@ from app.config import Settings
 from app.domain.ids import new_id
 from app.domain.prompt import PromptTexts, check_window_config
 from app.domain.webhook_redelivery import RedeliveryPolicy
-from app.infrastructure.container import build_container
+from app.infrastructure.container import WORKER_VCS_LIMITS, build_container
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
     QUEUE_NAME,
@@ -439,7 +439,7 @@ def run_worker(settings: Settings) -> None:
     check_model_deadline(settings)
     check_sweep_thresholds(settings)
     configure_tracing(WORKER_SERVICE)
-    container = build_container(settings)
+    container = build_container(settings, vcs_limits=WORKER_VCS_LIMITS)
     instrument_engine(container.engine)
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
     # Собрать адаптер модели сразу: порядок провайдеров уходит в лог при старте.
@@ -452,7 +452,7 @@ def run_worker(settings: Settings) -> None:
         redeliver=build_redelivery(
             settings,
             container.webhook_deliveries,
-            container.vcs_gateway,
+            container.redelivery_vcs_gateway,
             now=lambda: datetime.now(UTC),
         ),
         redelivery_interval=timedelta(seconds=settings.webhook_redelivery_interval_seconds),

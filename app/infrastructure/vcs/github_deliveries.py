@@ -102,7 +102,7 @@ class GitHubWebhookDeliveries:
         status = response.status_code
         if status == 401:
             raise VcsAuthError(f"GitHub API отверг JWT приложения на {method} {path}")
-        if status == 429 or status >= 500 or (status == 403 and is_rate_limited(response)):
+        if status >= 500 or is_rate_limited(response):
             raise VcsUnavailableError(f"GitHub API: HTTP {status} на {method} {path}")
         if response.is_error:
             raise VcsError(f"GitHub API: HTTP {status} на {method} {path}")
