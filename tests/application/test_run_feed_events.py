@@ -26,6 +26,7 @@ from app.domain.enums import ReviewRunStatus as S
 from app.domain.run_events import PING_AFTER_SECONDS, PingEvent
 from app.domain.run_feed import (
     BATCH_LIMIT,
+    RECHECK,
     RunEventType,
     RunFeedEvent,
     RunFeedState,
@@ -304,3 +305,15 @@ def test_catching_up_reads_without_the_recheck_window() -> None:
     _, catch_up = script.recheck_from
     # Без этого правила окно начиналось бы на `RECHECK` (5 с) ниже курсора.
     assert catch_up == script.cursors[1]
+
+
+def test_a_signal_during_catch_up_reads_with_the_full_window() -> None:
+    """Сигнал, пришедший во время дочитывания, — полное окно: им может быть запоздавший
+    коммит с `updated_at` ниже курсора, и без окна он не придёт никогда."""
+    changed = _entries(BATCH_LIMIT + 50, 1)
+    script = Script(changed[:BATCH_LIMIT], changed[BATCH_LIMIT:], changes_at=(1.0, 1.2))
+    script.read_cost = 0.5
+
+    _collect(script, limit=BATCH_LIMIT + 50)
+
+    assert script.recheck_from[1] == script.cursors[1] - RECHECK
