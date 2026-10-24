@@ -36,6 +36,7 @@ from app.domain.entities import ContextPayload, Finding, Repository, ReviewRun
 from app.domain.enums import Provider
 from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.container import Container
+from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
@@ -152,6 +153,7 @@ class Stack:
             _installation_catalog=FakeInstallationCatalog([]),
             _oauth_providers={},
             _cache_store=InMemoryCacheStore(),
+            _run_changes=PostgresRunChanges(listen_conninfo(self.settings.database_url)),
             _llm_gateway=llm,
             _definition_extractor=TreeSitterDefinitionExtractor(),
         )

@@ -51,6 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            await app.state.container.aclose()
             telemetry.shutdown_tracing()
 
     # Схема — из роутов и моделей (`app/api/openapi.py`); ответ `default` с каталогом

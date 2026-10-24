@@ -16,6 +16,7 @@ from app.application.ports.repositories import (
     SessionRepo,
     UserRepo,
 )
+from app.application.ports.run_changes import RunChanges
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 
@@ -34,6 +35,7 @@ __all__ = [
     "RepositoryRepo",
     "ReviewRunRepo",
     "ReviewRunStepRepo",
+    "RunChanges",
     "SessionRepo",
     "UnitOfWork",
     "UserRepo",

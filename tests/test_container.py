@@ -53,6 +53,7 @@ PORT_TO_ADAPTER: dict[str, Adapter] = {
     "RepositoryRepo": Adapter("db/repositories.py", "SqlAlchemyRepositoryRepo"),
     "ReviewRunRepo": Adapter("db/repositories.py", "SqlAlchemyReviewRunRepo"),
     "ReviewRunStepRepo": Adapter("db/repositories.py", "SqlAlchemyReviewRunStepRepo"),
+    "RunChanges": Adapter("db/run_changes.py", "PostgresRunChanges"),
     "SessionRepo": Adapter("db/repositories.py", "SqlAlchemySessionRepo"),
     "UnitOfWork": Adapter("db/unit_of_work.py", "SqlAlchemyUnitOfWork"),
     "UserRepo": Adapter("db/repositories.py", "SqlAlchemyUserRepo"),

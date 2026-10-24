@@ -4,14 +4,13 @@
 конкретный адаптер.
 """
 
-import asyncio
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Callable, Iterator
 from typing import Annotated, cast
 
 from fastapi import Depends, Path, Request
 
-from app.application.ports import UnitOfWork
+from app.application.ports import RunChanges, UnitOfWork
 from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
@@ -100,9 +99,9 @@ def get_oauth_provider(
     return container.oauth_provider(provider)
 
 
-def get_sleep() -> Callable[[float], Awaitable[None]]:
-    """Ожидание между проверками статуса; тесты подменяют его мгновенным."""
-    return asyncio.sleep
+def get_run_changes(container: Container = Depends(get_container)) -> RunChanges:
+    """Сигнал изменений прогонов для потока событий; тесты подменяют его своим."""
+    return container.run_changes()
 
 
 def get_clock() -> Callable[[], float]:

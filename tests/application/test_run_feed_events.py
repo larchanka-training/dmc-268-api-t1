@@ -1,12 +1,12 @@
-"""Цикл общего потока событий — поддельные чтение, ожидание и часы, без базы и настоящего сна."""
+"""Цикл общего потока событий — поддельные сигналы изменений, чтение и часы, без базы и настоящего ожидания."""
 
 import asyncio
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from uuid import UUID
 
+from app.application.ports.run_changes import RunChangesLost
 from app.application.run_feed_events import (
-    POLL_SECONDS,
     SESSION_CHECK_SECONDS,
     FeedItem,
     run_feed_events,
@@ -71,10 +71,16 @@ def _entry(status: S, seconds: float) -> ReviewRunListEntry:
 
 
 class Script:
-    """Пачки, которые вернут следующие опросы; дальше — пусто. Часы идут ожиданием."""
+    """Пачки, которые вернут следующие чтения; дальше — пусто. Сигналы — по расписанию.
 
-    def __init__(self, *batches: list[ReviewRunListEntry]) -> None:
+    Часы идут ожиданием: сигнал в момент `t` будит ожидание, если `t` наступает до
+    его таймаута; иначе ожидание длится весь таймаут и возвращает `False`.
+    """
+
+    def __init__(self, *batches: list[ReviewRunListEntry], changes_at: tuple[float, ...] = ()) -> None:
         self._batches = list(batches)
+        self._changes_at = sorted(changes_at)
+        self.lost_at: float | None = None
         self.reads = 0
         self.now = 0.0
         self.session_checks = 0
@@ -88,8 +94,20 @@ class Script:
         self.now += self.read_cost
         return self._batches.pop(0) if self._batches else []
 
-    async def sleep(self, seconds: float) -> None:
-        self.now += seconds
+    async def wait_change(self, timeout: float) -> bool:
+        deadline = self.now + timeout
+        next_change = self._changes_at[0] if self._changes_at else None
+        if self.lost_at is not None and self.lost_at <= deadline and (next_change is None or self.lost_at < next_change):
+            self.now = max(self.now, self.lost_at)
+            raise RunChangesLost
+        if self._changes_at and self._changes_at[0] <= deadline:
+            self.now = max(self.now, self._changes_at.pop(0))
+            # Сигналы, накопившиеся к этому моменту, — один `True`.
+            while self._changes_at and self._changes_at[0] <= self.now:
+                self._changes_at.pop(0)
+            return True
+        self.now = deadline
+        return False
 
     def clock(self) -> float:
         return self.now
@@ -106,7 +124,7 @@ def _collect(script: Script, *, limit: int) -> list[FeedItem]:
         async for item in run_feed_events(
             open_feed(CONNECTED),
             script.read,
-            sleep=script.sleep,
+            wait_change=script.wait_change,
             session_alive=script.session_alive,
             clock=script.clock,
         ):
@@ -118,10 +136,10 @@ def _collect(script: Script, *, limit: int) -> list[FeedItem]:
     return asyncio.run(run())
 
 
-def test_each_poll_reads_one_batch_and_turns_it_into_events() -> None:
+def test_each_change_signal_reads_one_batch_and_turns_it_into_events() -> None:
     analysing = _entry(S.ANALYSING, 1)
     completed = _entry(S.COMPLETED, 2)
-    script = Script([analysing], [completed])
+    script = Script([analysing], [completed], changes_at=(1.0, 2.5))
 
     items = _collect(script, limit=2)
 
@@ -130,7 +148,26 @@ def test_each_poll_reads_one_batch_and_turns_it_into_events() -> None:
         RunFeedEvent(RunEventType.FINISHED, completed),
     ]
     assert script.reads == 2
-    assert script.now == 2 * POLL_SECONDS
+    assert script.now == 2.5
+
+
+def test_silence_does_not_read_the_database() -> None:
+    """Без сигналов база не читается: минута тишины — ноль чтений, только ping."""
+    script = Script()
+
+    items = _collect(script, limit=4)
+
+    assert items == [PingEvent()] * 4
+    assert script.reads == 0
+    assert script.now == 4 * PING_AFTER_SECONDS
+
+
+def test_a_burst_of_changes_is_one_read() -> None:
+    script = Script([_entry(S.ANALYSING, 1)], changes_at=(1.0, 1.0, 1.0))
+
+    _collect(script, limit=2)
+
+    assert script.reads == 1
 
 
 def test_silence_gets_a_ping_within_fifteen_seconds() -> None:
@@ -143,13 +180,13 @@ def test_silence_gets_a_ping_within_fifteen_seconds() -> None:
 
 
 def test_an_event_resets_the_ping_timer() -> None:
-    script = Script(*([[]] * 9), [_entry(S.ANALYSING, 1)])
+    script = Script([_entry(S.ANALYSING, 1)], changes_at=(10.0,))
 
     items = _collect(script, limit=2)
 
     assert isinstance(items[0], RunFeedEvent)
     assert items[1] == PingEvent()
-    assert script.now - 10 * POLL_SECONDS >= PING_AFTER_SECONDS
+    assert script.now == 10.0 + PING_AFTER_SECONDS
 
 
 def test_an_expired_session_ends_the_stream_without_an_event() -> None:
@@ -163,27 +200,43 @@ def test_an_expired_session_ends_the_stream_without_an_event() -> None:
     assert script.now == SESSION_CHECK_SECONDS
 
 
-def test_the_poll_and_session_intervals_are_the_promised_ones() -> None:
-    # Спека: событие не позже двух секунд после записи, сессия — раз в 5 секунд.
-    assert POLL_SECONDS == 1.0
+def test_the_session_is_rechecked_every_five_seconds_even_in_silence() -> None:
+    """Спека `user-auth`: выход закрывает поток не позже чем через 5 секунд — и без сигналов."""
+    script = Script()
+    script.session_checks_alive = 3
+
+    _collect(script, limit=10)
+
     assert SESSION_CHECK_SECONDS == 5.0
+    assert script.check_times == [5.0, 10.0, 15.0, 20.0]
 
 
 def test_the_session_is_rechecked_by_the_clock_even_when_reads_are_slow() -> None:
-    script = Script()
+    script = Script(changes_at=tuple(float(t) for t in range(1, 40)))
     script.read_cost = 2.0
     script.session_checks_alive = 3
 
     items = _collect(script, limit=10)
 
-    # Круг «ожидание 1 с + чтение 2 с»: время чтения копится в интервале, поэтому
-    # проверки идут по часам, а не через пять ожиданий (это было бы 15 с). Проверка
-    # делается после ожидания и запаздывает не больше чем на один круг.
+    # Круг «сигнал + чтение 2 с»: время чтения копится в интервале, поэтому
+    # проверки идут по часам, а не по числу сигналов. Проверка делается после
+    # ожидания и запаздывает не больше чем на одно чтение.
     assert script.session_checks == 4
     gaps = [b - a for a, b in pairwise([0.0, *script.check_times])]
-    limit = SESSION_CHECK_SECONDS + POLL_SECONDS + script.read_cost
+    limit = SESSION_CHECK_SECONDS + script.read_cost
     assert all(SESSION_CHECK_SECONDS <= gap <= limit for gap in gaps), gaps
     assert all(item == PingEvent() for item in items)
+
+
+def test_a_lost_source_ends_the_stream() -> None:
+    """Источник изменений оборвался — поток кончается: клиент переподключится и возьмёт снимок."""
+    script = Script([_entry(S.ANALYSING, 1)], changes_at=(1.0,))
+    script.lost_at = 3.0
+
+    items = _collect(script, limit=10)
+
+    assert len(items) == 1
+    assert script.now == 3.0
 
 
 def test_visible_repository_ids_are_the_registered_ones_among_available() -> None:
