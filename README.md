@@ -35,6 +35,19 @@ ln -s AGENTS.md CLAUDE.md                 # Claude Code читает CLAUDE.md
 Симлинк, а не копия: копия разойдётся с оригиналом на первой же правке. Antigravity исключение —
 он читает `.agents/skills` сам.
 
+Актуальную документацию библиотек агент берёт из [context7](https://context7.com) — MCP-сервера,
+который отдаёт документацию нужной версии. Подключение тоже личное, конфиг MCP не коммитится:
+
+```bash
+claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp   # Claude Code
+npx ctx7 setup --cursor                    # или --claude, --opencode
+```
+
+Для остальных инструментов — [инструкция context7](https://context7.com/docs/resources/all-clients).
+Ключ API необязателен, с ним выше лимиты. Правило, когда сверяться с документацией, — в
+[`.agents/rules/backend.md`](.agents/rules/backend.md), «Документация библиотек и проверка на
+практике».
+
 Системные промпты ревью-агента, которого мы разрабатываем, —
 [`prompts/review/README.md`](prompts/review/README.md).
 
