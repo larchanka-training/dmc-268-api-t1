@@ -26,6 +26,7 @@ import re
 from collections.abc import Iterable
 from pathlib import PurePosixPath
 
+from app.domain.diff_parser import split_lines
 from app.domain.entities import RejectedRule, RepoRule
 
 RULES_PATH = ".review/rules.md"
@@ -74,7 +75,7 @@ def parse_rules_markdown(text: str) -> tuple[tuple[RepoRule, ...], tuple[Rejecte
     current: _Draft | None = None
     in_fence = False
 
-    for line in text.splitlines():
+    for line in split_lines(text):
         if _FENCE.match(line):
             in_fence = not in_fence
             continue
