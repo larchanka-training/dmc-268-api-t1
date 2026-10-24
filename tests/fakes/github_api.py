@@ -123,6 +123,8 @@ class FakeGitHub:
     reviews: list[Review] = field(default_factory=list)
     check_runs: list[CheckRun] = field(default_factory=list)
     resolved_threads: set[str] = field(default_factory=set)
+    # Статус, которым отвечает каждый запрос GraphQL: сбой GitHub после публикации ревью.
+    graphql_status: int | None = None
     # Метод и путь с query каждого запроса к API, кроме выдачи токена.
     requests: list[tuple[str, str]] = field(default_factory=list)
     unexpected: list[tuple[str, str]] = field(default_factory=list)
@@ -354,6 +356,8 @@ class FakeGitHub:
 
     def _graphql(self, request: httpx.Request) -> httpx.Response:
         """Треды ревью: каждый inline-комментарий открывает свой тред, как в GitHub."""
+        if self.graphql_status is not None:
+            return httpx.Response(self.graphql_status, json={"message": "Bad Gateway"})
         payload = json.loads(request.content)
         query: str = payload["query"]
         variables: dict[str, Any] = payload.get("variables") or {}

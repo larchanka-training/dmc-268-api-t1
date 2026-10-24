@@ -1,5 +1,6 @@
 """Публикация результатов прогона на GitHub: комментарии, треды, check run."""
 
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -40,7 +41,9 @@ from app.domain.review_comment import (
     format_summary_comment,
     format_thread_reply,
 )
-from app.domain.vcs_errors import VcsFileTooLargeError
+from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
+
+logger = logging.getLogger(__name__)
 
 
 def _default_summary(findings: tuple[Finding, ...]) -> LlmReviewSummary:
@@ -211,15 +214,29 @@ def publish_review(
         diff_max_bytes=diff_max_bytes,
     )
 
-    sync_open_threads_from_host(
-        run.merge_request_id,
-        repo_full_name=job.repository_full_name,
-        pr_number=job.pull_request_number,
-        installation_id=job.installation_id,
-        uow=uow,
-        vcs=vcs,
-        now=now,
-    )
+    # Ревью уже в PR: сверка - best-effort, её сбой не роняет прогон (повтор
+    # после `failed` опубликовал бы второе ревью) и не отменяет gate. Gate -
+    # после сверки, чтобы видеть свежие треды; упала она - gate по базе, треды
+    # досинхронизирует следующий прогон или вебхук закрытия треда. Ошибки кода
+    # (не `VcsError`) не гасятся.
+    try:
+        sync_open_threads_from_host(
+            run.merge_request_id,
+            repo_full_name=job.repository_full_name,
+            pr_number=job.pull_request_number,
+            installation_id=job.installation_id,
+            uow=uow,
+            vcs=vcs,
+            now=now,
+        )
+    except VcsError:
+        logger.warning(
+            "прогон %s: сверка тредов %s#%s с GitHub не удалась, merge gate - по базе",
+            run.id,
+            job.repository_full_name,
+            job.pull_request_number,
+            exc_info=True,
+        )
 
     still_open = collect_open_findings(uow, run.merge_request_id)
     vcs.set_merge_gate_check(
@@ -257,6 +274,9 @@ def _publish_thread_follow_ups(
         by_key[key] = open_thread
 
     moment = now
+    # Модель может вернуть два follow-up на одно место: второй ответ в тот же тред
+    # упал бы на `uq_published_comments_finding` уже после ответа на GitHub.
+    answered: set[str] = set()
     for item in follow_ups:
         follow_up_line = item.anchor.line
         if follow_up_line is None:
@@ -266,35 +286,48 @@ def _publish_thread_follow_ups(
         )
         if matched is None:
             continue
+        root_id = matched.root_provider_comment_id
+        if root_id in answered:
+            continue
         with uow:
             prev_run = uow.review_runs.get(matched.finding.review_run_id)
         prev_head = prev_run.head_sha if prev_run is not None else job.head_sha
         if prev_head not in incremental_hunks_cache:
-            incremental_hunks_cache[prev_head] = _hunks_between_commits(
-                vcs, job, prev_head, job.head_sha, max_bytes=diff_max_bytes
-            )
+            try:
+                incremental_hunks_cache[prev_head] = _hunks_between_commits(
+                    vcs, job, prev_head, job.head_sha, max_bytes=diff_max_bytes
+                )
+            except VcsError:
+                # Как при превышении лимита: изменение строки якоря не подтверждено.
+                logger.warning(
+                    "прогон %s: дифф %s..%s для треда %s не получен, критичный тред не закрывается",
+                    run.id,
+                    prev_head,
+                    job.head_sha,
+                    root_id,
+                    exc_info=True,
+                )
+                incremental_hunks_cache[prev_head] = ()
         incremental_hunks = incremental_hunks_cache[prev_head]
         body = format_thread_reply(item.status, item.reply, severity=matched.finding.severity)
-        reply_id = vcs.reply_to_review_comment(
-            job.repository_full_name,
-            job.pull_request_number,
-            job.installation_id,
-            matched.root_provider_comment_id,
-            body,
-        )
-        resolve = item.resolve_thread and _may_resolve_thread(
-            item.status,
-            matched.finding.severity,
-            matched.finding.anchor,
-            incremental_hunks,
-        )
-        if resolve:
-            vcs.resolve_review_thread_for_comment(
+        # Ответы - после публикации ревью: сбой хостинга на одном треде пишется в
+        # лог и не мешает следующим, сверке и gate.
+        try:
+            reply_id = vcs.reply_to_review_comment(
                 job.repository_full_name,
                 job.pull_request_number,
                 job.installation_id,
-                matched.root_provider_comment_id,
+                root_id,
+                body,
             )
+        except VcsError:
+            logger.warning(
+                "прогон %s: ответ в тред %s не опубликован", run.id, root_id, exc_info=True
+            )
+            continue
+        answered.add(root_id)
+        # Ответ записывается до закрытия треда: сбой закрытия не теряет запись,
+        # и следующий прогон не ответит повторно.
         with uow:
             uow.published_comments.add(
                 PublishedComment(
@@ -306,13 +339,34 @@ def _publish_thread_follow_ups(
                     published_at=moment,
                     created_at=moment,
                     updated_at=moment,
-                    in_reply_to_provider_comment_id=matched.root_provider_comment_id,
+                    in_reply_to_provider_comment_id=root_id,
                 )
             )
-            if resolve:
-                root = uow.published_comments.get(matched.root_published_comment_id)
-                if root is not None:
-                    uow.published_comments.update(
-                        replace(root, thread_resolved=True, updated_at=moment)
-                    )
+            uow.commit()
+        resolve = item.resolve_thread and _may_resolve_thread(
+            item.status,
+            matched.finding.severity,
+            matched.finding.anchor,
+            incremental_hunks,
+        )
+        if not resolve:
+            continue
+        try:
+            vcs.resolve_review_thread_for_comment(
+                job.repository_full_name,
+                job.pull_request_number,
+                job.installation_id,
+                root_id,
+            )
+        except VcsError:
+            logger.warning(
+                "прогон %s: тред %s не закрыт на GitHub после ответа", run.id, root_id, exc_info=True
+            )
+            continue
+        with uow:
+            root = uow.published_comments.get(matched.root_published_comment_id)
+            if root is not None:
+                uow.published_comments.update(
+                    replace(root, thread_resolved=True, updated_at=moment)
+                )
             uow.commit()
