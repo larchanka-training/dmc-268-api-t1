@@ -372,6 +372,25 @@ def test_a_finding_cannot_be_published_twice_in_one_run(session) -> None:
         session.flush()
 
 
+def test_a_provider_comment_id_cannot_be_recorded_twice(session) -> None:
+    """Дубль id комментария у провайдера — ошибка, даже для разных замечаний и прогонов."""
+    mr = make_mr(session, make_repo(session))
+    first, second = make_run(session, mr), make_run(session, mr, head="def456")
+    add_summary(session, first, provider_comment_id="c-dup")
+    add_summary(session, second, provider_comment_id="c-dup")
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_a_summary_and_a_line_comment_may_share_a_provider_id(session) -> None:
+    """У сводки id ревью, у комментария к строке - свой счётчик GitHub: совпадение не ошибка."""
+    mr = make_mr(session, make_repo(session))
+    first, second = make_run(session, mr), make_run(session, mr, head="def456")
+    add_summary(session, first, provider_comment_id="c-same")
+    add_summary(session, second, provider_comment_id="c-same", kind=CommentKind.THREAD_REPLY)
+    session.flush()
+
+
 def test_generated_ids_sort_in_creation_order(session) -> None:
     ids = [new_id() for _ in range(20)]
     assert ids == sorted(ids, key=str)
@@ -404,13 +423,13 @@ def test_the_same_line_number_on_each_side_is_kept(session) -> None:
     assert session.query(FindingRow).count() == 2
 
 
-def add_summary(session, run, *, provider_comment_id):
+def add_summary(session, run, *, provider_comment_id, kind=CommentKind.SUMMARY):
     row = PublishedCommentRow(
         id=new_id(),
         review_run_id=run.id,
         finding_id=None,
         provider_comment_id=provider_comment_id,
-        kind=CommentKind.SUMMARY,
+        kind=kind,
         published_at=NOW,
     )
     session.add(row)

@@ -113,7 +113,7 @@ erDiagram
     published_comments {
         uuid review_run_id FK
         uuid finding_id FK "null у итогового комментария"
-        text provider_comment_id "id на хостинге, нужен для правки или удаления комментария"
+        text provider_comment_id UK "id на хостинге, нужен для правки или удаления комментария"
         comment_kind kind "summary, inline, thread_reply"
         bool thread_resolved "тред на хостинге закрыт (в т.ч. вручную)"
         text in_reply_to_provider_comment_id "корневой комментарий треда для ответа"
@@ -246,6 +246,7 @@ refresh под блокировкой `SELECT … FOR UPDATE`; удаляетс�
 | Шаг закрыт целиком или идёт | `ck_review_run_steps_duration`: длительности нет ровно у `running`; `ck_review_run_steps_error_code`: код ошибки есть ровно у `failed`. Длительность и токены не отрицательны. |
 | Счётчик верификатора не отрицателен | `ck_review_runs_verifier_dropped`: `verifier_dropped_findings >= 0` |
 | Комментарий публикуется один раз за прогон | `UNIQUE NULLS NOT DISTINCT (review_run_id, finding_id)`. Именно правило для NULL распространяет это ограничение на итоговый комментарий прогона, у которого замечания нет. |
+| Id комментария у провайдера не повторяется внутри вида | `UNIQUE (provider_comment_id, kind)`: у сводки это id ревью, у `inline` и `thread_reply` — id комментария к строке, счётчики у GitHub разные и могут совпасть. Колонки `NOT NULL`, поэтому правило для NULL не нужно. Ограничение даёт и индекс для поиска комментария по id. |
 | Учётная запись провайдера — один пользователь | `UNIQUE (provider, provider_user_id)` |
 | Сессия находится по cookie одним запросом | `UNIQUE (token_hash)` |
 | Токен провайдера живёт не дольше сессии | `ON DELETE CASCADE` на `provider_tokens.session_id`: выход, вход поверх сессии, уборка истёкших и удаление пользователя удаляют и токен. Второе исключение из правила ниже, по той же причине. |
