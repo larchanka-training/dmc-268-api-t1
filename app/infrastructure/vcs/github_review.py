@@ -8,6 +8,7 @@ from app.application.ports.vcs_review import (
     MergeGateCheck,
     PublishedInlineComment,
     PullRequestReviewPublication,
+    ReviewThreadState,
 )
 from app.domain.enums import DiffSide
 from app.infrastructure.vcs.errors import VcsError
@@ -27,6 +28,19 @@ def _raw_comment_line(raw: dict[str, Any]) -> int | None:
         return int(line)
     except (TypeError, ValueError):
         return None
+
+
+def _thread_current_line(thread: dict[str, Any]) -> int | None:
+    """Строка треда в текущем диффе PR; у устаревшего треда её нет.
+
+    У outdated-треда GitHub отдаёт `line: null` и `isOutdated: true` (проверено
+    на живом PR); `originalLine` - строка на коммите комментария, к нынешнему
+    коду она не относится и здесь не берётся.
+    """
+    if thread.get("isOutdated") is not False:
+        return None
+    line = thread.get("line")
+    return line if isinstance(line, int) else None
 
 
 def _map_fetched_inline_comments(
@@ -133,27 +147,28 @@ class GitHubReviewClient:
         )
         return str(response["id"])
 
-    def fetch_review_threads_resolved_state(
+    def fetch_review_threads_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
         provider_comment_ids: frozenset[str],
-    ) -> dict[str, bool]:
+    ) -> dict[str, ReviewThreadState]:
         if not provider_comment_ids:
             return {}
         owner, name = repo_full_name.split("/", 1)
         targets = {int(cid) for cid in provider_comment_ids}
         threads = self._load_review_threads(owner, name, pr_number, installation_id)
-        result: dict[str, bool] = {}
+        result: dict[str, ReviewThreadState] = {}
         for thread in threads:
             is_resolved = thread.get("isResolved")
             if not isinstance(is_resolved, bool):
                 continue
+            state = ReviewThreadState(resolved=is_resolved, line=_thread_current_line(thread))
             for node in thread.get("comments", {}).get("nodes", []):
                 database_id = node.get("databaseId")
                 if database_id in targets:
-                    result[str(database_id)] = is_resolved
+                    result[str(database_id)] = state
         return result
 
     def resolve_review_thread_for_comment(
@@ -220,6 +235,8 @@ class GitHubReviewClient:
                 nodes {
                   id
                   isResolved
+                  isOutdated
+                  line
                   comments(first: 50) {
                     nodes { databaseId }
                   }

@@ -596,3 +596,23 @@ def test_a_step_stage_outside_the_enum_is_refused(session) -> None:
             ),
             {"id": new_id(), "run": run.id},
         )
+
+
+def test_a_finding_cannot_be_covered_by_itself(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    finding = add_finding(session, run)
+    session.flush()
+    finding.covered_by_finding_id = finding.id
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_deleting_a_finding_that_covers_a_repeat_is_refused(session) -> None:
+    mr = make_mr(session, make_repo(session))
+    first, second = make_run(session, mr), make_run(session, mr, head="def456")
+    original = add_finding(session, first)
+    session.flush()
+    repeat = add_finding(session, second)
+    repeat.covered_by_finding_id = original.id
+    session.flush()
+    delete_is_refused(session, original)

@@ -20,6 +20,7 @@ from app.application.ports.vcs_review import (
     InlineCommentDraft,
     MergeGateCheck,
     PullRequestReviewPublication,
+    ReviewThreadState,
 )
 from app.domain.entities import PRMetadata
 
@@ -98,14 +99,18 @@ class VcsGateway(Protocol):
         """Ответ в существующий review comment; возвращает id нового комментария."""
         ...
 
-    def fetch_review_threads_resolved_state(
+    def fetch_review_threads_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
         provider_comment_ids: frozenset[str],
-    ) -> dict[str, bool]:
-        """Для каждого id корневого комментария — `isResolved` треда на хостинге."""
+    ) -> dict[str, ReviewThreadState]:
+        """Состояние треда на хостинге по id его корневого комментария.
+
+        Все треды PR - одним запросом с пагинацией. Комментария, которого
+        хостинг не нашёл (удалён), в ответе нет.
+        """
         ...
 
     def resolve_review_thread_for_comment(

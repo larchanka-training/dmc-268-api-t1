@@ -170,6 +170,13 @@ class FindingResponse(BaseModel):
     rule: RuleRefResponse | None = Field(
         description="Пункт правила владельца, по которому выпущена находка; null - находка по стандартным критериям."
     )
+    covered_by_finding_id: UUID | None = Field(
+        description=(
+            "Находка прошлого прогона того же запроса на изменение, чей тред бота уже говорит об этой "
+            "проблеме: своего комментария у находки нет, повтор не публиковался. null - находка "
+            "опубликована своим комментарием или прогон её ещё не публиковал."
+        )
+    )
 
 
 class RepositorySummary(RepositoryBase):
