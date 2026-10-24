@@ -10,6 +10,7 @@
 
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from dataclasses import replace
 from uuid import UUID
 
 from app.application.ports import UnitOfWork
@@ -17,7 +18,13 @@ from app.application.ports.run_changes import RunChangesLost
 from app.domain.entities import InstallationRepository, ReviewRunListEntry
 from app.domain.enums import Provider
 from app.domain.run_events import PING_AFTER_SECONDS, PingEvent
-from app.domain.run_feed import RunFeedEvent, RunFeedState, advance_feed
+from app.domain.run_feed import (
+    BATCH_LIMIT,
+    FeedCursor,
+    RunFeedEvent,
+    RunFeedState,
+    advance_feed,
+)
 
 # Спека `user-auth`: сессия перепроверяется каждые 5 секунд по монотонным часам,
 # поэтому поток закрывается не позже чем через 5 секунд после выхода.
@@ -59,18 +66,29 @@ async def run_feed_events(
     """
     last_session_check = clock()
     last_sent = clock()
+    more = False
     while True:
         due = min(last_session_check + SESSION_CHECK_SECONDS, last_sent + PING_AFTER_SECONDS)
         try:
-            changed = await wait_change(max(due - clock(), 0.0))
+            # Прошлое чтение упёрлось в `BATCH_LIMIT` — остаток читается сразу:
+            # один сигнал на всю пачку, второго может не быть (массовый `stale_sweep`).
+            signalled = await wait_change(0.0 if more else max(due - clock(), 0.0))
         except RunChangesLost:
             return
         if clock() - last_session_check >= SESSION_CHECK_SECONDS:
             last_session_check = clock()
             if not await session_alive():
                 return
+        changed, catching_up, more = signalled or more, more and not signalled, False
         if changed:
-            state, events = advance_feed(state, await read_batch(state))
+            # Дочитывание без нового сигнала — без окна перепроверки: запоздавший коммит
+            # пришлёт свой NOTIFY, а окно с одним `updated_at` на всю пачку (`stale_sweep`)
+            # перечитывалось бы целиком на каждом круге.
+            read_state = replace(state, floor=state.cursor.updated_at) if catching_up else state
+            batch = await read_batch(read_state)
+            # Лимит — у строк за курсором; окно перепроверки под ним в счёт не идёт.
+            more = sum(FeedCursor(e.run.updated_at, e.run.id) > state.cursor for e in batch) >= BATCH_LIMIT
+            state, events = advance_feed(state, batch)
             for event in events:
                 yield event
             if events:

@@ -1,6 +1,7 @@
 """Цикл общего потока событий — поддельные сигналы изменений, чтение и часы, без базы и настоящего ожидания."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from uuid import UUID
@@ -23,7 +24,14 @@ from app.domain.entities import (
 from app.domain.enums import MergeRequestState, Provider, TriggerSource
 from app.domain.enums import ReviewRunStatus as S
 from app.domain.run_events import PING_AFTER_SECONDS, PingEvent
-from app.domain.run_feed import RunEventType, RunFeedEvent, RunFeedState, open_feed
+from app.domain.run_feed import (
+    BATCH_LIMIT,
+    RECHECK,
+    RunEventType,
+    RunFeedEvent,
+    RunFeedState,
+    open_feed,
+)
 
 from ..fakes.unit_of_work import FakeUnitOfWork
 
@@ -82,6 +90,8 @@ class Script:
         self._changes_at = sorted(changes_at)
         self.lost_at: float | None = None
         self.reads = 0
+        self.recheck_from: list[datetime] = []
+        self.cursors: list[datetime] = []
         self.now = 0.0
         self.session_checks = 0
         self.session_checks_alive: int | None = None
@@ -91,6 +101,8 @@ class Script:
 
     async def read(self, state: RunFeedState) -> list[ReviewRunListEntry]:
         self.reads += 1
+        self.recheck_from.append(state.recheck_from)
+        self.cursors.append(state.cursor.updated_at)
         self.now += self.read_cost
         return self._batches.pop(0) if self._batches else []
 
@@ -250,3 +262,58 @@ def test_visible_repository_ids_are_the_registered_ones_among_available() -> Non
 
     assert visible_repository_ids(uow, available) == frozenset({REPOSITORY.id})
     assert visible_repository_ids(uow, []) == frozenset()
+
+
+def _entries(count: int, seconds: float) -> list[ReviewRunListEntry]:
+    """`count` разных прогонов, изменённых в момент `seconds`."""
+    base = _entry(S.FAILED, seconds)
+    return [replace(base, run=replace(base.run, id=UUID(int=1000 + n))) for n in range(count)]
+
+
+def test_more_changes_than_one_batch_all_arrive_after_one_signal() -> None:
+    """Один коммит меняет больше `BATCH_LIMIT` прогонов (массовый `stale_sweep`) — сигнал один,
+    а остаток дочитывается сразу, без ожидания следующего изменения."""
+    changed = _entries(BATCH_LIMIT + 50, 1)
+    script = Script(changed[:BATCH_LIMIT], changed[BATCH_LIMIT:], changes_at=(1.0,))
+
+    items = _collect(script, limit=BATCH_LIMIT + 50)
+
+    assert len(items) == BATCH_LIMIT + 50
+    assert script.reads == 2
+    assert script.now == 1.0
+
+
+def test_a_full_recheck_window_does_not_spin_the_loop() -> None:
+    """Под лимит идут только строки за курсором: окно перепроверки из старых версий
+    не заставляет перечитывать пачку снова и снова без ожидания."""
+    fresh = _entries(BATCH_LIMIT, 1)
+    script = Script(fresh, fresh, changes_at=(1.0,))
+
+    _collect(script, limit=BATCH_LIMIT + 1)
+
+    assert script.reads == 2
+
+
+def test_catching_up_reads_without_the_recheck_window() -> None:
+    """Дочитывание без сигнала — без окна перепроверки: иначе пачка с одним `updated_at`
+    (массовый `stale_sweep`) перечитывалась бы целиком на каждом круге."""
+    changed = _entries(BATCH_LIMIT + 50, 1)
+    script = Script(changed[:BATCH_LIMIT], changed[BATCH_LIMIT:], changes_at=(1.0,))
+
+    _collect(script, limit=BATCH_LIMIT + 50)
+
+    _, catch_up = script.recheck_from
+    # Без этого правила окно начиналось бы на `RECHECK` (5 с) ниже курсора.
+    assert catch_up == script.cursors[1]
+
+
+def test_a_signal_during_catch_up_reads_with_the_full_window() -> None:
+    """Сигнал, пришедший во время дочитывания, — полное окно: им может быть запоздавший
+    коммит с `updated_at` ниже курсора, и без окна он не придёт никогда."""
+    changed = _entries(BATCH_LIMIT + 50, 1)
+    script = Script(changed[:BATCH_LIMIT], changed[BATCH_LIMIT:], changes_at=(1.0, 1.2))
+    script.read_cost = 0.5
+
+    _collect(script, limit=BATCH_LIMIT + 50)
+
+    assert script.recheck_from[1] == script.cursors[1] - RECHECK
