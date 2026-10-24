@@ -40,7 +40,7 @@ from app.infrastructure.vcs.errors import (
 )
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from app.infrastructure.vcs.github_installations import is_rate_limited
-from app.infrastructure.vcs.github_review import GitHubReviewClient, RetryBudget
+from app.infrastructure.vcs.github_review import GitHubReviewClient
 
 _DIFF_ACCEPT = "application/vnd.github.v3.diff"
 _JSON_ACCEPT = "application/vnd.github+json"
@@ -243,14 +243,23 @@ class GitHubVcsGateway:
         payload: dict[str, Any],
         *,
         repeatable: bool = True,
+        already_done: Callable[[], dict[str, Any] | None] | None = None,
     ) -> dict[str, Any]:
         """POST с JSON-ответом-объектом.
 
-        `repeatable=False` - запрос без идемпотентности (ревью, ответ в тред):
-        на обрыв, 5xx и лимит адаптер его не повторяет, а бросает
-        `VcsUnconfirmedError` - повтор опубликовал бы второй раз.
+        `repeatable=False` - запрос без идемпотентности (ревью, ответ в тред).
+        С `already_done` - проверкой, выполнен ли он уже, - повторяется после
+        паузы, только если проверка вернула `None`; её результат - ответ
+        запроса. Без проверки - `VcsUnconfirmedError` на первом же сбое.
         """
-        response = self._request("POST", url, installation_id, json=payload, repeatable=repeatable)
+        response = self._request(
+            "POST",
+            url,
+            installation_id,
+            json=payload,
+            repeatable=repeatable,
+            already_done=None if already_done is None else _as_response(already_done),
+        )
         try:
             data: dict[str, Any] = response.json()
         except ValueError as error:
@@ -318,6 +327,7 @@ class GitHubVcsGateway:
         max_bytes: int | None = None,
         repeatable: bool = True,
         graphql: bool = False,
+        already_done: Callable[[], httpx.Response | None] | None = None,
     ) -> httpx.Response:
         """Один цикл повторов на все запросы к API.
 
@@ -330,68 +340,70 @@ class GitHubVcsGateway:
         - 5xx - экспоненциальный backoff;
         - прочие ошибки - сразу ошибка адаптера (404 на GET - `VcsNotFoundError`).
 
-        Обрыв сети не повторяется. Неповторяемый запрос (`repeatable=False`) на
-        обрыв, 5xx и лимит бросает `VcsUnconfirmedError`.
+        Обрыв сети повторяемого запроса не повторяется. Неповторяемый запрос
+        (`repeatable=False`) на обрыв, 5xx и лимит без `already_done` бросает
+        `VcsUnconfirmedError`; с ним - после паузы спрашивает `already_done()`:
+        ответ - результат запроса, `None` - запрос уходит снова. Попытки или
+        бюджет кончились - последняя проверка и `VcsUnavailableError`.
         """
         where = f"{method} {url}"
         token = self._auth.installation_token(installation_id)
         token_refreshed = False
-        retries = RetryBudget()
+        attempt = 0
+        rate_limit_hits = 0
+        waited = 0.0
         while True:
+            limited: httpx.Response | None = None
             try:
                 response = self._send(method, url, token, accept, json, max_bytes)
             except httpx.RequestError as error:
-                failure = VcsUnavailableError if repeatable else VcsUnconfirmedError
-                raise failure(f"GitHub API недоступен на {where}: {error}") from error
-            status = response.status_code
-            if status == 401:
-                if token_refreshed:
-                    raise VcsAuthError(f"GitHub API отклонил токен на {where}")
-                self._auth.invalidate(installation_id)
-                token = self._auth.installation_token(installation_id)
-                token_refreshed = True
-                continue
-            limited = _rate_limited(response, graphql=graphql)
-            if not response.is_error and not limited:
-                return response
-            if not limited and status < 500:
-                if status == 404 and method == "GET":
-                    raise VcsNotFoundError(f"GitHub API: HTTP 404 на {where}")
-                raise VcsError(f"GitHub API: HTTP {status} на {where}")
-            if not repeatable:
-                raise VcsUnconfirmedError(
-                    f"GitHub API: HTTP {status} на {where}; запрос без идемпотентности не повторяется",
-                    rate_limited=response if limited else None,
-                )
-            self.wait_before_retry(retries, response if limited else None, where)
-
-    def wait_before_retry(
-        self, retries: RetryBudget, rate_limited: httpx.Response | None, where: str
-    ) -> None:
-        """Пауза перед следующей попыткой или `VcsUnavailableError`, если ждать нельзя.
-
-        Попытки кончились - сбой. Отказ лимита (`rate_limited` - его ответ) -
-        пауза по заголовкам GitHub, сумма пауз на запрос не больше бюджета;
-        прочий сбой - экспоненциальный backoff. Общая для цикла `_request` и
-        для публикации ревью, которая между попытками ищет своё ревью.
-        """
-        retries.attempt += 1
-        if retries.attempt >= self._max_attempts:
-            raise VcsUnavailableError(
-                f"GitHub API отвечал 429/5xx {self._max_attempts} попытки подряд на {where}"
-            )
-        if rate_limited is not None:
-            retries.rate_limit_hits += 1
-            pause = _rate_limit_wait(rate_limited, self._clock(), retries.rate_limit_hits)
-            if retries.waited + pause > self._rate_limit_budget_seconds:
-                raise VcsUnavailableError(
+                if repeatable:
+                    raise VcsUnavailableError(f"GitHub API недоступен на {where}: {error}") from error
+                if already_done is None:
+                    raise VcsUnconfirmedError(f"GitHub API недоступен на {where}: {error}") from error
+            else:
+                status = response.status_code
+                if status == 401:
+                    if token_refreshed:
+                        raise VcsAuthError(f"GitHub API отклонил токен на {where}")
+                    self._auth.invalidate(installation_id)
+                    token = self._auth.installation_token(installation_id)
+                    token_refreshed = True
+                    continue
+                limited = response if is_rate_limited(response, graphql=graphql) else None
+                if not response.is_error and limited is None:
+                    return response
+                if limited is None and status < 500:
+                    if status == 404 and method == "GET":
+                        raise VcsNotFoundError(f"GitHub API: HTTP 404 на {where}")
+                    raise VcsError(f"GitHub API: HTTP {status} на {where}")
+                if not repeatable and already_done is None:
+                    raise VcsUnconfirmedError(
+                        f"GitHub API: HTTP {status} на {where}; запрос без идемпотентности не повторяется"
+                    )
+            attempt += 1
+            pause = self._backoff_base_seconds * 2 ** (attempt - 1)
+            if limited is not None:
+                rate_limit_hits += 1
+                pause = _rate_limit_wait(limited, self._clock(), rate_limit_hits)
+            failure = None
+            if attempt >= self._max_attempts:
+                failure = f"GitHub API отвечал 429/5xx {self._max_attempts} попытки подряд на {where}"
+            elif limited is not None and waited + pause > self._rate_limit_budget_seconds:
+                failure = (
                     f"лимит GitHub API на {where}: ждать {pause:g} с,"
                     f" бюджет ожидания {self._rate_limit_budget_seconds:g} с"
                 )
-            retries.waited += pause
-        else:
-            pause = self._backoff_base_seconds * 2 ** (retries.attempt - 1)
-        self._sleep(pause)
+            if failure is not None:
+                done = already_done() if already_done is not None else None
+                if done is not None:
+                    return done
+                raise VcsUnavailableError(failure)
+            if limited is not None:
+                waited += pause
+            self._sleep(pause)
+            if already_done is not None and (done := already_done()) is not None:
+                return done
 
     def _send(
         self,
@@ -422,32 +434,16 @@ class GitHubVcsGateway:
             )
 
 
-def _rate_limited(response: httpx.Response, *, graphql: bool) -> bool:
-    """Отказ лимита GitHub: 429, 403 лимита, у GraphQL - ошибка лимита при 200.
+def _as_response(
+    already_done: Callable[[], dict[str, Any] | None],
+) -> Callable[[], httpx.Response | None]:
+    """Проверка «уже выполнен» с телом-объектом - в форме ответа для цикла `_request`."""
 
-    GraphQL отдаёт превышение лимита статусом 200 (первичный) или 200/403
-    (вторичный) с сообщением в `errors` («Rate limits and query limits for
-    the GraphQL API»); тип ошибки - `RATE_LIMITED`.
-    """
-    status = response.status_code
-    if status == 429:
-        return True
-    if status == 403:
-        return is_rate_limited(response)
-    if not graphql or status != 200:
-        return False
-    try:
-        body = response.json()
-    except ValueError:
-        return False
-    errors = body.get("errors") if isinstance(body, dict) else None
-    if not isinstance(errors, list):
-        return False
-    return any(
-        isinstance(item, dict)
-        and (item.get("type") == "RATE_LIMITED" or "rate limit" in str(item.get("message", "")).lower())
-        for item in errors
-    )
+    def check() -> httpx.Response | None:
+        data = already_done()
+        return None if data is None else httpx.Response(200, json=data)
+
+    return check
 
 
 def _rate_limit_wait(response: httpx.Response, now: float, hits: int) -> float:

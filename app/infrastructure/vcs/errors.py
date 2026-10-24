@@ -8,8 +8,6 @@
 
 from typing import ClassVar
 
-import httpx
-
 from app.domain.vcs_errors import VcsError, VcsTransientError
 
 __all__ = [
@@ -32,13 +30,7 @@ class VcsUnconfirmedError(VcsUnavailableError):
     Обрыв, таймаут, 5xx или отказ лимита: ответа нет, а записал ли GitHub
     результат - неизвестно. Идемпотентности у этих запросов нет, поэтому
     адаптер их не повторяет; проверить результат - дело вызывающего.
-    `rate_limited` - ответ GitHub с отказом лимита (по его заголовкам считается
-    пауза перед следующей попыткой), `None` - обрыв, таймаут или 5xx.
     """
-
-    def __init__(self, message: str, *, rate_limited: httpx.Response | None = None) -> None:
-        super().__init__(message)
-        self.rate_limited = rate_limited
 
 
 class VcsAuthError(VcsError):

@@ -1,7 +1,6 @@
 """Публикация ревью и check run через GitHub REST и GraphQL."""
 
 import logging
-from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -16,20 +15,9 @@ from app.application.ports.vcs_review import (
 from app.domain.enums import DiffSide
 from app.infrastructure.vcs.errors import (
     VcsError,
-    VcsUnavailableError,
-    VcsUnconfirmedError,
 )
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class RetryBudget:
-    """Сколько попыток и ожидания лимита уже потрачено на один запрос."""
-
-    attempt: int = 0
-    rate_limit_hits: int = 0
-    waited: float = 0.0
 
 
 def review_run_marker(review_run_id: UUID) -> str:
@@ -144,7 +132,20 @@ class GitHubReviewClient:
         if comments_payload:
             payload["comments"] = comments_payload
         reviews_url = f"/repos/{repo_full_name}/pulls/{pr_number}/reviews"
-        review_id = self._create_review(reviews_url, installation_id, payload, marker, review_run_id)
+        response = self._gw._post_json(
+            reviews_url,
+            installation_id,
+            payload,
+            repeatable=False,
+            # Ответа на POST нет - после паузы ищем своё ревью и шлём снова, только если его нет.
+            already_done=lambda: self._review_found_by_marker(
+                reviews_url, installation_id, marker, review_run_id
+            ),
+        )
+        try:
+            review_id = str(response["id"])
+        except (KeyError, TypeError) as error:
+            raise VcsError(f"GitHub API вернул ревью без id на POST {reviews_url}") from error
         published: tuple[PublishedInlineComment | None, ...] = ()
         if inline_comments:
             try:
@@ -165,53 +166,20 @@ class GitHubReviewClient:
             inline_comments=published,
         )
 
-    def _create_review(
-        self,
-        reviews_url: str,
-        installation_id: int,
-        payload: dict[str, Any],
-        marker: str,
-        review_run_id: UUID,
-    ) -> str:
-        """id созданного ревью: `POST` повторяется, только когда ревью с маркером нет.
-
-        Ответа на `POST` нет (обрыв, таймаут, 5xx, отказ лимита) - пауза, как у
-        прочих запросов (лимит - по заголовкам GitHub в пределах бюджета), затем
-        поиск ревью по маркеру. Нашлось - опубликовано; нет - следующий `POST`.
-        Пауза перед поиском заодно даёт GitHub дописать ревью после 502. Попытки
-        или бюджет кончились - последний поиск и `VcsUnavailableError`.
-        """
-        where = f"POST {reviews_url}"
-        retries = RetryBudget()
-        while True:
-            try:
-                response = self._gw._post_json(reviews_url, installation_id, payload, repeatable=False)
-            except VcsUnconfirmedError as error:
-                try:
-                    self._gw.wait_before_retry(retries, error.rate_limited, where)
-                except VcsUnavailableError as exhausted:
-                    found = self._find_review_by_marker(reviews_url, installation_id, marker)
-                    if found is None:
-                        raise VcsUnavailableError(
-                            f"ревью прогона {review_run_id} не опубликовано: {exhausted};"
-                            " среди ревью бота его маркера нет"
-                        ) from error
-                else:
-                    found = self._find_review_by_marker(reviews_url, installation_id, marker)
-                    if found is None:
-                        continue
-                logger.warning(
-                    "прогон %s: ответ на %s потерян, ревью %s найдено по маркеру",
-                    review_run_id,
-                    where,
-                    found,
-                    exc_info=True,
-                )
-                return found
-            try:
-                return str(response["id"])
-            except (KeyError, TypeError) as error:
-                raise VcsError(f"GitHub API вернул ревью без id на {where}") from error
+    def _review_found_by_marker(
+        self, reviews_url: str, installation_id: int, marker: str, review_run_id: UUID
+    ) -> dict[str, Any] | None:
+        """Ответ «создано» для ревью с маркером, если оно уже есть; `None` - нет."""
+        found = self._find_review_by_marker(reviews_url, installation_id, marker)
+        if found is None:
+            return None
+        logger.warning(
+            "прогон %s: ответ на POST %s потерян, ревью %s найдено по маркеру",
+            review_run_id,
+            reviews_url,
+            found,
+        )
+        return {"id": found}
 
     def _find_review_by_marker(
         self, reviews_url: str, installation_id: int, marker: str

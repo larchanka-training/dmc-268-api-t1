@@ -140,16 +140,7 @@ class Container:
         """Собрать VCS-шлюз при первом обращении; конструирование — без сети."""
         gateway = self._vcs_gateway
         if gateway is None:
-            limits = self._vcs_limits
-            client = httpx.Client(base_url=_GITHUB_API, timeout=limits.timeout)
-            auth = GitHubAppAuth(
-                self.settings.github_app_id,
-                self.settings.github_app_private_key.get_secret_value(),
-                client,
-            )
-            gateway = GitHubVcsGateway(
-                auth, client, rate_limit_budget_seconds=limits.rate_limit_budget_seconds
-            )
+            gateway = self._build_vcs_gateway(self._vcs_limits)
             object.__setattr__(self, "_vcs_gateway", gateway)
         return gateway
 
@@ -160,13 +151,14 @@ class Container:
         воркера держало бы consume-цикл дольше бюджета прохода. Свой клиент и
         `GitHubAppAuth`; собирается воркером один раз, конструирование — без сети.
         """
-        client = httpx.Client(base_url=_GITHUB_API, timeout=API_VCS_LIMITS.timeout)
+        return self._build_vcs_gateway(API_VCS_LIMITS)
+
+    def _build_vcs_gateway(self, limits: VcsClientLimits) -> GitHubVcsGateway:
+        client = httpx.Client(base_url=_GITHUB_API, timeout=limits.timeout)
         auth = GitHubAppAuth(
             self.settings.github_app_id, self.settings.github_app_private_key.get_secret_value(), client
         )
-        return GitHubVcsGateway(
-            auth, client, rate_limit_budget_seconds=API_VCS_LIMITS.rate_limit_budget_seconds
-        )
+        return GitHubVcsGateway(auth, client, rate_limit_budget_seconds=limits.rate_limit_budget_seconds)
 
     def webhook_deliveries(self) -> WebhookDeliveries:
         """Доставки вебхука GitHub App — для повтора упавших (#149).
