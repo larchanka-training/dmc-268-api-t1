@@ -31,10 +31,11 @@ jobs:
   # Какой коммит катить. Автоматический запуск — только после зелёного CI
   # по пушу в develop: прогон CI по пул-реквесту из ветки с именем develop
   # тоже попадает под фильтр branches, поэтому событие сверяется отдельно.
-  # Ручной запуск — осознанное действие, CI он не ждёт.
+  # Ручной запуск — осознанное действие, CI он не ждёт, но только с develop:
+  # с другой ветки не собирается и образ, а не только деплой.
   gate:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
