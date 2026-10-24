@@ -1,0 +1,16 @@
+# ВРЕМЕННЫЙ (#146): ставит check run gate-probe от github-actions — проверка источника.
+name: gate-probe
+on:
+  pull_request:
+    branches: [test/gate-base]
+permissions:
+  checks: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        run: gh api -X POST "repos/$REPO/check-runs" -f name=gate-probe -f head_sha="$SHA" -f status=completed -f conclusion=success
