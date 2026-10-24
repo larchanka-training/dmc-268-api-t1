@@ -363,6 +363,27 @@ def test_e2e_02_a_redelivered_webhook_creates_no_second_run_or_review(stack: Sta
     assert len(stack.github.reviews_of(PR)) == 1
 
 
+def test_e2e_02b_a_redelivery_after_the_run_completed_creates_no_second_review(
+    stack: Stack,
+) -> None:
+    """#75: повтор доставки после завершения прогона - один прогон, одно ревью."""
+    pull = _open(stack, base_files={RULES_PATH: RULES_MD})
+    client = TestClient(stack.api())
+
+    first = deliver(client, pull, delivery="redelivered-after-completion")
+    assert first.status_code == 202, first.text
+    stack.work(ScriptedLlmGateway([review_response()]), 1)
+    assert stack.run(first.json()["id"]).status is ReviewRunStatus.COMPLETED
+
+    again = deliver(client, pull, delivery="redelivered-after-completion")
+
+    assert again.status_code == 202, again.text
+    assert again.json()["id"] == first.json()["id"]
+    assert again.json()["status"] == "completed"
+    assert stack.queue_depth() == 0
+    assert len(stack.github.reviews_of(PR)) == 1
+
+
 def test_e2e_05_a_model_failure_fails_the_run_without_publishing_anything(stack: Stack) -> None:
     """E2E-05: модель недоступна - `failed` с причиной, в PR ничего, сообщение в DLQ."""
     pull = _open(stack, base_files={RULES_PATH: RULES_MD})

@@ -8,12 +8,12 @@
 
 from typing import ClassVar
 
-from app.domain.vcs_errors import VcsError
+from app.domain.vcs_errors import VcsError, VcsTransientError
 
 __all__ = ["VcsAuthError", "VcsError", "VcsNotFoundError", "VcsUnavailableError"]
 
 
-class VcsUnavailableError(VcsError):
+class VcsUnavailableError(VcsTransientError):
     """GitHub недоступен: обрыв сети (транспортный сбой httpx) или
     повторяемые сбои (429/5xx) исчерпали попытки адаптера."""
 

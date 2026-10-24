@@ -225,20 +225,53 @@ def test_duplicate_delivery_returns_existing_run_and_enqueues_nothing() -> None:
     assert len(queue.jobs) == 1
 
 
-def test_terminal_run_on_same_commit_does_not_block_new_one() -> None:
-    """Завершённый прогон неактивен: `find_active` его пропускает.
+@pytest.mark.parametrize("status", [ReviewRunStatus.COMPLETED, ReviewRunStatus.CANCELLED])
+def test_redelivery_after_a_finished_run_is_a_duplicate(status: ReviewRunStatus) -> None:
+    """#75: повтор после завершения не даёт второго прогона и второго ревью.
 
-    Фейк фильтрует так же, как `SqlAlchemyReviewRunRepo.find_active`, поэтому
+    GitHub переотправляет доставку с тем же `X-GitHub-Delivery`, а запуск
+    ревью — только opened и synchronize: тот же коммит ещё раз — повтор.
+    """
+    _, uow, _, queue = run_case()
+    (finished,) = uow.review_runs.added
+    (original_mr,) = uow.merge_requests.added
+    object.__setattr__(finished, "status", status)
+
+    outcome, uow, _, queue = run_case(uow=uow, queue=queue)
+    assert outcome.kind == "duplicate"
+    assert outcome.run is finished
+    assert outcome.merge_request is original_mr
+    assert uow.merge_requests.updated == []
+    assert len(uow.review_runs.added) == 1
+    assert len(queue.jobs) == 1
+
+
+def test_failed_run_on_same_commit_does_not_block_new_one() -> None:
+    """`failed` дублем не делает: повтор после сбоя должен дать ревью.
+
+    Фейк фильтрует так же, как `SqlAlchemyReviewRunRepo.find_reviewed`, поэтому
     выдёргивание фильтра из продакшн-запроса красит этот тест.
     """
     _, uow, _, queue = run_case()
     (finished,) = uow.review_runs.added
-    object.__setattr__(finished, "status", ReviewRunStatus.COMPLETED)
+    object.__setattr__(finished, "status", ReviewRunStatus.FAILED)
 
     outcome, uow, _, queue = run_case(uow=uow, queue=queue)
     assert outcome.kind == "success"
     assert len(uow.review_runs.added) == 2
     assert len(queue.jobs) == 2
+
+
+def test_finished_run_of_another_trigger_does_not_make_a_duplicate() -> None:
+    """Дублем делает только прогон по вебхуку: явное повторное ревью — не доставка."""
+    _, uow, _, queue = run_case()
+    (finished,) = uow.review_runs.added
+    object.__setattr__(finished, "status", ReviewRunStatus.COMPLETED)
+    object.__setattr__(finished, "trigger", TriggerSource.MANUAL)
+
+    outcome, uow, _, queue = run_case(uow=uow, queue=queue)
+    assert outcome.kind == "success"
+    assert len(uow.review_runs.added) == 2
 
 
 def test_lost_race_returns_conflict_with_survivor_run(monkeypatch) -> None:

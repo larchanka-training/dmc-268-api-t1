@@ -43,7 +43,13 @@ from app.domain.entities import (
     User,
 )
 from app.domain.entities import Session as UserSession
-from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
+from app.domain.enums import (
+    REVIEWED_STATUSES,
+    TERMINAL_STATUSES,
+    CommentKind,
+    Provider,
+    TriggerSource,
+)
 from app.domain.lifecycle import next_status
 from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
 from app.domain.run_feed import FeedCursor
@@ -221,6 +227,22 @@ class SqlAlchemyReviewRunRepo:
                 ReviewRunRow.status.not_in(TERMINAL_STATUSES),
             )
             .order_by(ReviewRunRow.created_at)
+        ).first()
+        return m.review_run_to_domain(row) if row else None
+
+    def find_reviewed(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        # Прогонов на один merge_request — единицы: индекс по merge_request_id
+        # сужает выборку, частичный уникальный индекс терминальные строки не видит.
+        row = self._session.scalars(
+            select(ReviewRunRow)
+            .where(
+                ReviewRunRow.merge_request_id == merge_request_id,
+                ReviewRunRow.head_sha == head_sha,
+                ReviewRunRow.trigger == TriggerSource.WEBHOOK,
+                ReviewRunRow.status.in_(REVIEWED_STATUSES),
+            )
+            .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+            .limit(1)
         ).first()
         return m.review_run_to_domain(row) if row else None
 
