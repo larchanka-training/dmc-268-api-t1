@@ -7,15 +7,18 @@
 
 Кэшируется только ответ `list_repositories` — что пользователь видит на GitHub.
 Подключён ли репозиторий, вызывающий по-прежнему читает из базы, поэтому
-подключение кэш не сбрасывает: новый репозиторий виден сразу. Цена кэша —
-отзыв доступа на GitHub виден с задержкой до TTL.
+подключение само кэш не трогает. Но ответ GitHub меняется, когда пользователь
+ставит приложение на новый репозиторий: страница подключения
+(`GET /repositories/available`) всегда спрашивает GitHub и пишет свежий ответ в
+кэш (`read=False`). Подключить можно только оттуда, поэтому к моменту
+подключения кэш уже знает о новом репозитории. Цена кэша — отзыв доступа на
+GitHub виден с задержкой до TTL.
 
 Ключ — sha256 токена: тот же пользователь с тем же токеном. Обновлённый токен
 или выход — другой ключ, старая запись недостижима и уходит по TTL; сам токен в
 кэше не хранится. Сбои GitHub не кэшируются. Сбой хранилища — промах, а не
-ошибка (`CacheStore`). Подключение (`user_repository`, `app_installed`) и
-`GET /repositories/available` идут мимо кэша: на странице подключения только что
-поставленное приложение должно быть видно сразу.
+ошибка (`CacheStore`). Проверки подключения (`user_repository`, `app_installed`)
+идут мимо кэша.
 
 Хранилище — `CacheStore` процесса API: процесс один, кэш в нём корректен. Со
 второй репликой у каждой будет свой кэш — запросов к GitHub больше, но ответы
@@ -43,14 +46,18 @@ def visible_repositories_key(access_token: Secret) -> str:
 
 
 class CachedInstallationCatalog:
-    def __init__(self, catalog: InstallationCatalog, cache: CacheStore, ttl_seconds: int) -> None:
+    def __init__(
+        self, catalog: InstallationCatalog, cache: CacheStore, ttl_seconds: int, *, read: bool = True
+    ) -> None:
         self._catalog = catalog
         self._cache = cache
         self._ttl_seconds = ttl_seconds
+        # `False` — всегда к GitHub, ответ — в кэш: страница подключения.
+        self._read_cache = read
 
     def list_repositories(self, access_token: Secret) -> list[InstallationRepository]:
         key = visible_repositories_key(access_token)
-        cached = self._read(key)
+        cached = self._read(key) if self._read_cache else None
         if cached is not None:
             return cached
         repositories = self._catalog.list_repositories(access_token)

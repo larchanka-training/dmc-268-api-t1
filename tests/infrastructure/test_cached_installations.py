@@ -108,3 +108,20 @@ def test_connecting_goes_past_the_cache() -> None:
     cached.app_installed("octo-org/api")
 
     assert catalog.calls == ["user_repository", "user_repository", "app_installed"]
+
+
+def test_a_refreshing_catalog_always_asks_github_and_feeds_the_cache() -> None:
+    """Страница подключения: всегда к GitHub, свежий ответ — читающим из кэша."""
+    stale = FakeInstallationCatalog([])
+    fresh = FakeInstallationCatalog([PRIVATE])
+    cache = InMemoryCacheStore()
+    reading = CachedInstallationCatalog(stale, cache, TTL)
+    refreshing = CachedInstallationCatalog(fresh, cache, TTL, read=False)
+
+    assert reading.list_repositories(TOKEN) == []
+    assert refreshing.list_repositories(TOKEN) == [PRIVATE]
+    assert refreshing.list_repositories(TOKEN) == [PRIVATE]
+
+    assert fresh.calls == ["list_repositories", "list_repositories"]
+    assert reading.list_repositories(TOKEN) == [PRIVATE]
+    assert stale.calls == ["list_repositories"]

@@ -120,14 +120,15 @@ class Container:
         """Репозитории установок GitHub App, видимые пользователю по его токену."""
         return self._installation_catalog
 
-    def visibility_catalog(self, catalog: InstallationCatalog) -> InstallationCatalog:
+    def visibility_catalog(self, catalog: InstallationCatalog, *, read: bool = True) -> InstallationCatalog:
         """`catalog` с кэшем списка видимых репозиториев — для видимости прогонов и репозиториев.
 
+        `read=False` — всегда к GitHub, свежий ответ в кэш: страница подключения.
         Каталог — аргументом, а не свой: тесты подменяют каталог зависимостью API,
         и кэш должен лечь поверх подменённого.
         """
         return CachedInstallationCatalog(
-            catalog, self._cache_store, self.settings.visible_repositories_cache_ttl_seconds
+            catalog, self._cache_store, self.settings.visible_repositories_cache_ttl_seconds, read=read
         )
 
     def oauth_provider(self, name: str) -> OAuthProvider | None:

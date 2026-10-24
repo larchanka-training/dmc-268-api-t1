@@ -617,3 +617,21 @@ def test_the_connect_page_always_asks_github() -> None:
     client.get("/api/v1/repositories/available")
 
     assert _github_listings(catalog) == 3
+
+
+def test_a_repository_installed_within_the_ttl_is_listed_once_connected() -> None:
+    """Приложение поставили на новый репозиторий, пока кэш жив: страница подключения
+    пишет свежий ответ GitHub в кэш, и подключённый репозиторий виден сразу везде."""
+    catalog = FakeInstallationCatalog([])
+    client = _client(FakeUnitOfWork(), catalog)
+    assert client.get("/api/v1/repositories").json()["items"] == []
+
+    catalog._repositories.append(API)  # приложение поставили на GitHub
+    available = client.get("/api/v1/repositories/available").json()["items"]
+    connected = _connect(client)
+
+    assert [item["full_name"] for item in available] == [API.full_name]
+    assert connected.status_code == 201
+    listed = client.get("/api/v1/repositories").json()["items"]
+    assert [item["full_name"] for item in listed] == [API.full_name]
+    assert client.get(f"/api/v1/repositories/{connected.json()['id']}").status_code == 200
