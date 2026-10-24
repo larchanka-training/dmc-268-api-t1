@@ -264,7 +264,13 @@ def _fail_unenqueued(
             work.review_runs.update(failed)
             work.commit()
     except Exception:
-        logger.exception("не удалось перевести прогон %s в failed после сбоя очереди", run_id)
+        # Идентификатор — атрибутом записи, не текстом (правило «Логи»):
+        # контекста сообщения воркера на пути вебхука нет, поэтому его несёт
+        # extra; имя — то же, что у атрибута спанов.
+        logger.exception(
+            "не удалось перевести прогон в failed после сбоя очереди",
+            extra={"review_run_id": str(run_id)},
+        )
 
 
 def _find_survivor(
