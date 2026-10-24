@@ -337,7 +337,8 @@ def foreign_filter_keeps(
 
 
 def _file_log_operators() -> list[dict[str, Any]]:
-    return load_config()["receivers"]["file_log"]["operators"]
+    operators: list[dict[str, Any]] = load_config()["receivers"]["file_log"]["operators"]
+    return operators
 
 
 def _path_parts(entry: dict[str, Any], path: str) -> tuple[dict[str, Any], str]:

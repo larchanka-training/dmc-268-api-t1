@@ -49,7 +49,7 @@ def _role_is_monitor_member(engine) -> bool:
     """Членство в pg_monitor по pg_auth_members, а не по pg_has_role: явная
     таблица членства не зависит от текущего пользователя соединения."""
     with engine.connect() as conn:
-        count = conn.execute(
+        count: int = conn.execute(
             text(
                 "SELECT count(*) FROM pg_auth_members m"
                 " JOIN pg_roles granted ON granted.oid = m.roleid"
@@ -63,7 +63,7 @@ def _role_is_monitor_member(engine) -> bool:
 
 def _extension_exists(engine) -> bool:
     with engine.connect() as conn:
-        count = conn.execute(
+        count: int = conn.execute(
             text("SELECT count(*) FROM pg_extension WHERE extname = :name"),
             {"name": EXTENSION},
         ).scalar_one()

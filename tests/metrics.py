@@ -74,5 +74,5 @@ def metric_histogram(
                     if tuple(sorted((point.attributes or {}).items())) != wanted:
                         continue
                     counts = tuple(int(count) for count in point.bucket_counts)
-                    return float(point.count), point.explicit_bounds, counts
+                    return float(point.count), tuple(point.explicit_bounds), counts
     return 0.0, (), ()
