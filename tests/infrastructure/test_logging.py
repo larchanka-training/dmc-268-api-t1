@@ -141,6 +141,7 @@ def test_record_to_fields_follows_the_otel_log_record_model() -> None:
         "timestamp": "2025-11-11T10:00:00.500000Z",
         "severity": "ERROR",
         "message": "этап анализ завершён",
+        "logger": "app.selftest",
         "service.name": "dmc-268-api",
     }
 
@@ -172,6 +173,16 @@ def test_a_record_outside_a_span_is_kept_without_the_trace_fields(
     [fields] = selftest.fields()
     assert fields["message"] == "вне спана"
     assert {"trace_id", "span_id", "trace_flags"}.isdisjoint(fields)
+
+
+def test_the_record_carries_its_logger_name(selftest: JsonLog) -> None:
+    """Поле `logger` — имя логгера записи: в Loki отличимы `uvicorn.access`
+    от `app.worker.factory` (имя stdlib кладёт в `record.name`, в JSON оно
+    раньше не попадало)."""
+    SELFTEST_LOGGER.warning("источник записи")
+
+    [fields] = selftest.fields()
+    assert fields["logger"] == "observability.selftest"
 
 
 # --- 1.1.1: контекст прогона — атрибутом записи, не вклейкой ------------------------
@@ -226,6 +237,43 @@ def test_exc_info_becomes_the_stacktrace_of_the_same_record(selftest: JsonLog) -
     [fields] = selftest.fields()
     assert fields["severity"] == "ERROR"
     assert "ValueError: сбой этапа" in fields["exception.stacktrace"]
+
+
+def test_exc_info_leaves_the_exception_type_of_the_record(selftest: JsonLog) -> None:
+    """`exception.type` — qualname класса исключения: редакция коллектора
+    гасит `exception.message`, `exception.stacktrace` и тело записи, а
+    диагноз остаётся (в трейсах тип сохраняется по той же спеке — паритет)."""
+
+    class StageError(ValueError):
+        """Локальный класс: qualname ≠ name, проверяется именно qualname."""
+
+    try:
+        raise StageError("сбой этапа")
+    except StageError as error:
+        SELFTEST_LOGGER.error("упало", exc_info=error)
+
+    [fields] = selftest.fields()
+    assert fields["exception.type"].endswith("StageError")
+
+
+def test_extra_cannot_override_the_service_fields(selftest: JsonLog) -> None:
+    """`extra` не перетирает служебные поля: подделка `severity` не меняет
+    уровень записи, `timestamp`/`service.name`/`logger` остаются нашими."""
+    SELFTEST_LOGGER.error(
+        "упало",
+        extra={
+            "severity": "INFO",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "service.name": "чужой-сервис",
+            "logger": "fake",
+        },
+    )
+
+    [fields] = selftest.fields()
+    assert fields["severity"] == "ERROR"
+    assert fields["service.name"] == "dmc-268-test"
+    assert fields["logger"] == "observability.selftest"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z", fields["timestamp"])
 
 
 # --- 1.2: дубль uvicorn и направление uvicorn.* на JSON-хендлер -------------------

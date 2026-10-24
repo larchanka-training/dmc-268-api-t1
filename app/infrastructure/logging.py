@@ -6,12 +6,15 @@
 чтобы весь stdout контейнера был JSON.
 
 Формат — плоский JSON по модели OTel LogRecord: `timestamp` (RFC 3339, UTC),
-`severity`, `message`, `trace_id`/`span_id`/`trace_flags` (lowercase hex, как
-в W3C Trace Context), `service.name`, атрибуты из `extra` — на верхнем
-уровне. Плоский, а не вложенный: запись читается в Loki без разворачивания и
-разбирается `json_parser` коллектора (`trace: {}`, `severity` — имена по
-умолчанию). Стектрейс записи с `exc_info` — атрибутом `exception.stacktrace`
-(semconv исключений), не вклейкой в текст.
+`severity`, `message`, `logger` (имя логгера), `trace_id`/`span_id`/`trace_flags`
+(lowercase hex, как в W3C Trace Context), `service.name`, атрибуты из `extra` —
+на верхнем уровне. Плоский, а не вложенный: запись читается в Loki без
+разворачивания и разбирается `json_parser` коллектора (`trace: {}`, `severity`
+— имена по умолчанию). Стектрейс записи с `exc_info` — атрибутом
+`exception.stacktrace`, тип исключения — `exception.type` (semconv исключений),
+не вклейкой в текст: редакция коллектора гасит тело такой записи, и тип
+остаётся её единственным диагнозом. Служебные поля (`severity`, `timestamp`,
+`service.name`, `logger`) `extra` перетереть не может.
 
 Бизнес-контекст (например `review_run_id`) прикладной код передаёт через
 `extra={...}` или через `review_run_id_scope` — контекст, который фильтр
@@ -27,7 +30,7 @@
 TODO: OTel Logs SDK в Python ещё не Stable (`opentelemetry.sdk._logs` — статус
 Development, а `LoggingHandler` оттуда устарел с 1.40.0). Когда станет
 Stable — перейти на `LoggingHandler` из `opentelemetry-instrumentation-logging`
-(пакет уже в зависимостях) и убрать сбор логов из stdout.
+и убрать сбор логов из stdout.
 """
 
 import contextvars
@@ -47,11 +50,13 @@ from opentelemetry import trace
 TIMESTAMP = "timestamp"
 SEVERITY = "severity"
 MESSAGE = "message"
+LOGGER = "logger"
 TRACE_ID = "trace_id"
 SPAN_ID = "span_id"
 TRACE_FLAGS = "trace_flags"
 SERVICE_NAME = "service.name"
 STACKTRACE = "exception.stacktrace"
+EXCEPTION_TYPE = "exception.type"
 
 # Имя атрибута бизнес-контекста — то же, что у атрибута спанов (`REVIEW_RUN_ID`
 # в `app/infrastructure/telemetry.py`): одна сущность — одно имя везде (правило
@@ -144,6 +149,25 @@ UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 HTTP_CLIENT_LOGGERS = ("httpx", "httpcore")
 
 
+# Поля, которые собирает сам форматтер: `extra` перетереть их не может —
+# подделка `severity` не меняет уровень записи, `timestamp`, `service.name`,
+# `logger`, `exception.*` и trace-поля остаются своими.
+_FILTER_OWNED = frozenset(
+    {
+        TIMESTAMP,
+        SEVERITY,
+        MESSAGE,
+        LOGGER,
+        SERVICE_NAME,
+        STACKTRACE,
+        EXCEPTION_TYPE,
+        TRACE_ID,
+        SPAN_ID,
+        TRACE_FLAGS,
+    }
+)
+
+
 def _rfc3339(seconds: float) -> str:
     """Unix-время → RFC 3339 с зоной UTC: `2026-10-22T12:00:00.500000Z`."""
     return datetime.fromtimestamp(seconds, tz=UTC).isoformat().replace("+00:00", "Z")
@@ -158,18 +182,33 @@ def _stacktrace(record: logging.LogRecord) -> str | None:
     return None
 
 
+def _exception_type(record: logging.LogRecord) -> str | None:
+    """Тип исключения записи — qualname класса из `exc_info`.
+
+    Редакция коллектора гасит `exception.message`, `exception.stacktrace` и
+    тело записи, несущей исключение, — `exception.type` остаётся её
+    единственным диагнозом (в трейсах тип сохраняется по той же спеке).
+    """
+    exc_type = record.exc_info[0] if record.exc_info else None
+    if exc_type is None:
+        return None
+    return exc_type.__qualname__
+
+
 def record_to_fields(record: logging.LogRecord, service_name: str) -> dict[str, Any]:
     """Поля JSON-записи по модели OTel LogRecord. Чистая функция над записью.
 
     `trace_id`/`span_id`/`trace_flags` появляются, только если их положил
     `TraceContextFilter`; вне спана полей нет, запись не теряется. Атрибуты
     из `extra` идут на верхний уровень как есть — фильтр и форматтер не знают
-    их имён. `service.name` — ресурс процесса, поэтому приходит аргументом.
+    их имён, но служебные поля записи перетереть не дают. `service.name` —
+    ресурс процесса, поэтому приходит аргументом.
     """
     fields: dict[str, Any] = {
         TIMESTAMP: _rfc3339(record.created),
         SEVERITY: record.levelname,
         MESSAGE: record.getMessage(),
+        LOGGER: record.name,
         SERVICE_NAME: service_name,
     }
     for name in (TRACE_ID, SPAN_ID, TRACE_FLAGS):
@@ -179,8 +218,11 @@ def record_to_fields(record: logging.LogRecord, service_name: str) -> dict[str, 
     stacktrace = _stacktrace(record)
     if stacktrace is not None:
         fields[STACKTRACE] = stacktrace
+    exception_type = _exception_type(record)
+    if exception_type is not None:
+        fields[EXCEPTION_TYPE] = exception_type
     for name, value in record.__dict__.items():
-        if name not in _RESERVED and name not in (TRACE_ID, SPAN_ID, TRACE_FLAGS):
+        if name not in _RESERVED and name not in _FILTER_OWNED:
             fields[name] = value
     return fields
 

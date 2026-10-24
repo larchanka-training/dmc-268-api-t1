@@ -415,18 +415,21 @@ def upgrade() -> None:
   для алертов, не для отчётов.
 - **Логи** — JSON в stdout. `configure_logging(service_name)` ставит один
   JSON-хендлер: поля по модели данных OTel — `timestamp`, `severity`,
-  `message`, `service.name`, атрибуты из `extra` верхним уровнем; trace-поля
+  `message`, `logger`, `service.name`, атрибуты из `extra` верхним уровнем
+  (служебные поля `extra` перетереть не может); trace-поля
   (`trace_id`/`span_id`/`trace_flags`) добавляет `TraceContextFilter` из
   текущего спана, запись вне спана пишется без них и не теряется. `exc_info`
-  кладёт стектрейс в ту же запись, дубль uvicorn «Exception in ASGI
+  кладёт стектрейс и `exception.type` (qualname класса) в ту же запись,
+  дубль uvicorn «Exception in ASGI
   application» отсекается: на `500` в логе ровно одна запись, и её `trace_id`
-  равен `X-Trace-ID` ответа. Дальше запись уносит `file_log` коллектора — он
+  равен `X-Trace-ID` ответа. Дальше запись
+  уносит `file_log` коллектора — он
   дочитывает stdout контейнеров, шлёт распарсенный JSON в Loki, и в Grafana от
   записи лога к трейсу ведёт переход по `trace_id` (derived field по structured
   metadata). По пути коллектор пускает в Loki только логи наших сервисов
   (записи без нашего `service.name` дропаются) и редактирует записи с
   исключениями: стектрейс, текст и тело такой записи заменяются маркером
-  `<скрыто>`.
+  `<скрыто>`, `exception.type` остаётся диагнозом.
 - **Стек** — семь контейнеров (коллектор, Loki, Tempo, Prometheus, Grafana,
   node_exporter за сервер и cAdvisor за контейнеры) с
   одними конфигами локально и на стенде: конфиги лежат в

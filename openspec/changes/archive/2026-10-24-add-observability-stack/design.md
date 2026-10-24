@@ -41,10 +41,13 @@ SQL-спаны и ERROR на отключение клиента, чувстви
 — `fileConfig` остаётся с `disable_existing_loggers=False` и наш хендлер не глушит.
 
 - **Формат — плоский JSON по модели OTel LogRecord**: `timestamp` (RFC 3339, UTC), `severity`
-  (уровень), `message` (тело), `trace_id` / `span_id` / `trace_flags` (lowercase hex, из текущего
-  спана), `service.name`, остальные поля из `extra` — атрибутами на верхнем уровне (`review_run_id`).
-  Плоский, а не вложенный: так запись читается в Loki без разворачивания, а имена полей совпадают с
-  теми, что ждёт `json_parser` коллектора (блоки `trace: {}` и `severity` — имена по умолчанию).
+  (уровень), `message` (тело), `logger` (имя логгера), `trace_id` / `span_id` / `trace_flags`
+  (lowercase hex, из текущего спана), `service.name`, остальные поля из `extra` — атрибутами на
+  верхнем уровне (`review_run_id`). Плоский, а не вложенный: так запись читается в Loki без
+  разворачивания, а имена полей совпадают с теми, что ждёт `json_parser` коллектора (блоки
+  `trace: {}` и `severity` — имена по умолчанию). Запись с `exc_info` несёт
+  `exception.stacktrace` и `exception.type` (qualname класса), служебные поля `extra` перетереть
+  не может.
 - **`TraceContextFilter`** берёт `trace_id`/`span_id`/`trace_flags` из
   `trace.get_current_span()` и переносит в record; вне спана поля просто отсутствуют. Бизнес-контекст
   код передаёт `extra={"review_run_id": …}` — фильтр и форматтер не знают его имён.
@@ -56,7 +59,7 @@ SQL-спаны и ERROR на отключение клиента, чувстви
   её `trace_id` = `X-Trace-ID` (проверено экспериментом в #89); текущая версия без `exc_info`
   удаляется, `telemetry={"logs": False}` остаётся.
 - В `configure_logging()` — TODO: при Stable OTel Logs перейти на `LoggingHandler` из
-  `opentelemetry-instrumentation-logging` (пакет уже в зависимостях) и убрать сбор stdout.
+  `opentelemetry-instrumentation-logging` и убрать сбор stdout.
 
 Альтернатива — structlog или свой фасад над логгерами — отклонена: мост OTel цепляется к stdlib
 `logging`, а обёртки нарушают правило «`logging.getLogger(__name__)` без посредников».
@@ -205,6 +208,13 @@ httpx, — отдельный span-процессор дублировал бы 
 - **Health-check — вне трейсинга.** Опция `exclude` встроенной телеметрии FastAPI исключает
   `/health` целиком: спана нет, `X-Trace-ID` ответа — случайное значение без трейса.
 - **Метрики базы — receiver `postgresql`** вместо postgres-exporter (см. решение 3).
+- **Имя логгера, тип исключения и защита служебных полей записи.** Формат дополнен полем
+  `logger` (`record.name`): без него в Loki не отличить `uvicorn.access` от
+  `app.worker.factory`. Запись с `exc_info` несёт `exception.type` — qualname класса: редакция
+  коллектора гасит `exception.message`, `exception.stacktrace` и тело записи, и тип остаётся её
+  единственным диагнозом (в трейсах тип сохраняется — паритет). Служебные поля (`severity`,
+  `timestamp`, `service.name`, `logger`) `extra` перетереть не может: `extra={"severity":
+  "INFO"}` не превращает ошибку в Info, подделка `timestamp`/`service.name` игнорируется.
 
 ## Risks / Trade-offs
 
