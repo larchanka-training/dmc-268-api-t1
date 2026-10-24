@@ -34,7 +34,7 @@ from typing import Any
 
 from app.domain.context_budget import estimate_tokens
 from app.domain.entities import Finding, PromptMessage
-from app.domain.enums import DiffSide, Language, PromptRole, RulesStatus
+from app.domain.enums import Language, PromptRole, RulesStatus
 from app.domain.result import Result
 from app.domain.untrusted import fence, sanitize
 
@@ -246,13 +246,12 @@ def _candidates_message(candidates: Sequence[Finding]) -> str:
     parts = ["## Замечания первого прохода"]
     for candidate_id, finding in zip(candidate_ids(len(candidates)), candidates, strict=True):
         anchor = finding.anchor
-        line = anchor.new_line if anchor.side is DiffSide.NEW else anchor.old_line
         # Путь в находке сырой - по нему публикуется комментарий; модель видит
         # его так же, как в пакете: литерал JSON маркеры не обезвреживает.
         metadata = {
             "filePath": sanitize(anchor.file_path),
             "side": anchor.side.value,
-            "line": line,
+            "line": anchor.line,
             "category": finding.category.value,
             "severity": finding.severity.value,
             "rule": (

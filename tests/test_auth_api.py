@@ -339,7 +339,7 @@ def test_neither_the_session_cookie_nor_the_code_reaches_the_app_logs(stand, cap
     responses.append(client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN}))
 
     # Запросы пишет сам тестовый клиент — это не логи приложения.
-    app_logs = "\n".join(r.getMessage() for r in caplog.records if r.name != "httpx")
+    app_logs = "\n".join(r.getMessage() for r in caplog.records if r.name not in ("httpx", "httpx2"))
     assert "code-secret-1" not in app_logs
     assert token not in app_logs
     assert "set-cookie" not in app_logs.lower()

@@ -380,7 +380,7 @@ def _verify(
 
 
 def _where(finding: Finding) -> str:
-    return f"{finding.anchor.file_path}:{finding.anchor.new_line or finding.anchor.old_line}"
+    return f"{finding.anchor.file_path}:{finding.anchor.line}"
 
 
 def _record_progress(uow: UnitOfWork, run: ReviewRun, now: datetime) -> ReviewRun:

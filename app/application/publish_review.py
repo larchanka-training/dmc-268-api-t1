@@ -58,11 +58,10 @@ def _default_summary(findings: tuple[Finding, ...]) -> LlmReviewSummary:
 
 
 def _line_for_anchor(finding: Finding) -> int:
-    if finding.anchor.side is DiffSide.NEW:
-        assert finding.anchor.new_line is not None
-        return finding.anchor.new_line
-    assert finding.anchor.old_line is not None
-    return finding.anchor.old_line
+    # Сохранённое замечание прошло `validate_anchor`: строка на его стороне есть.
+    line = finding.anchor.line
+    assert line is not None
+    return line
 
 
 def _hunks_between_commits(
@@ -259,9 +258,7 @@ def _publish_thread_follow_ups(
 
     moment = now
     for item in follow_ups:
-        follow_up_line = (
-            item.anchor.new_line if item.anchor.side is DiffSide.NEW else item.anchor.old_line
-        )
+        follow_up_line = item.anchor.line
         if follow_up_line is None:
             continue
         matched = by_key.get(

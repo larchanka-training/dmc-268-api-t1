@@ -17,10 +17,6 @@ def _github_side(side: DiffSide) -> str:
     return "RIGHT" if side is DiffSide.NEW else "LEFT"
 
 
-def _line_for_side(draft: InlineCommentDraft) -> int:
-    return draft.line
-
-
 def _raw_comment_line(raw: dict[str, Any]) -> int | None:
     line = raw.get("line")
     if line is None:
@@ -41,7 +37,7 @@ def _map_fetched_inline_comments(
     used_provider_ids: set[str] = set()
     for draft in drafts:
         want_side = _github_side(draft.side)
-        want_line = _line_for_side(draft)
+        want_line = draft.line
         match = next(
             (
                 raw
@@ -89,7 +85,7 @@ class GitHubReviewClient:
             {
                 "path": item.file_path,
                 "body": item.body,
-                "line": _line_for_side(item),
+                "line": item.line,
                 "side": _github_side(item.side),
             }
             for item in inline_comments

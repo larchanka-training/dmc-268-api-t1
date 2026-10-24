@@ -160,12 +160,12 @@ Tech Lead не должен ждать полной реализации сер�
 ```text
 docs/
 ├── pipeline/
-│   ├── PIPELINE_SPEC.md
-│   ├── review-job.schema.json
-│   ├── finding.schema.json
-│   └── error.schema.json
-└── api/
-    └── openapi.yaml
+│   └── PIPELINE_SPEC.md
+└── openapi/
+    ├── openapi.json
+    ├── finding.schema.json
+    ├── llm_review_output.schema.json
+    └── llm_verification_output.schema.json
 ```
 
 Создать PR:

@@ -44,6 +44,9 @@ jobs:
         with:
           version: "0.13.5"
           python-version: "3.14"
+      # --frozen ставит из uv.lock не глядя в pyproject.toml: зависимость, добавленная
+      # без `uv lock`, иначе прошла бы CI мимо lock-файла.
+      - run: uv lock --check
       - run: uv sync --all-extras --frozen
       - run: uv run ruff check .
       # Правило слоёв из BACKEND_ARCHITECTURE.md. Отдельным шагом: общий шаг

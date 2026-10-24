@@ -19,7 +19,7 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import Client, Response
+from httpx2 import Client, Response
 from sqlalchemy import Engine
 
 from app.api.factory import create_app

@@ -1,8 +1,7 @@
 """Текст комментариев, публикуемых на хостинг (шапка severity/category и ответы в тред)."""
 
-from app.domain.entities import DiffAnchor, Finding
+from app.domain.entities import Finding
 from app.domain.enums import (
-    DiffSide,
     FindingCategory,
     FindingSeverity,
     ThreadFollowUpStatus,
@@ -83,15 +82,3 @@ def format_thread_reply(
             "по аргументации — при согласии закройте обсуждение вручную.*"
         )
     return body
-
-
-def anchor_matches_llm(
-    anchor: DiffAnchor,
-    *,
-    file_path: str,
-    side: DiffSide,
-    line: int,
-) -> bool:
-    """Сопоставить якорь сохранённого замечания с полями thread follow-up от LLM."""
-    line_on_side = anchor.new_line if side is DiffSide.NEW else anchor.old_line
-    return anchor.file_path == file_path and anchor.side is side and line_on_side == line

@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -111,14 +111,14 @@ def _client(
     return client
 
 
-def _connect(client: TestClient, provider_id: str = "101", provider: str = "github") -> httpx.Response:
-    response: httpx.Response = client.post(
+def _connect(client: TestClient, provider_id: str = "101", provider: str = "github") -> httpx2.Response:
+    response: httpx2.Response = client.post(
         "/api/v1/repositories", json={"provider": provider, "provider_id": provider_id}, headers={"Origin": ORIGIN}
     )
     return response
 
 
-def _session_cookie_cleared(response: httpx.Response) -> bool:
+def _session_cookie_cleared(response: httpx2.Response) -> bool:
     return any(
         header.startswith(f"{SESSION_COOKIE}=") and "Max-Age=0" in header
         for header in response.headers.get_list("set-cookie")

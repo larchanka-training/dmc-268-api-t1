@@ -62,11 +62,6 @@ class FakeRepositoryRepo:
             None,
         )
 
-    def list_all(self, limit: int, offset: int) -> list[Repository]:
-        # Порядок как у SQL-адаптера: `(created_at, id)`.
-        ordered = sorted(self._by_id.values(), key=lambda r: (r.created_at, r.id))
-        return ordered[offset : offset + limit]
-
     def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
         wanted = set(provider_ids)
         return sorted(
