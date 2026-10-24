@@ -7,6 +7,7 @@ from app.application.ports.vcs_review import (
     MergeGateCheck,
     PublishedInlineComment,
     PullRequestReviewPublication,
+    ReviewThreadState,
 )
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
@@ -35,7 +36,11 @@ class RecordingVcsGateway:
     pr_title: str = "feat: изменение"
     pr_description: str = ""
     commit_messages: tuple[str, ...] = ()
-    # Сбой сверки тредов: `fetch_review_threads_resolved_state` бросает это исключение.
+    # Треды на хостинге по корневому комментарию; не заданный - открыт и устарел
+    # (`line=None`): с находками прогона он не совпадает.
+    thread_states: dict[str, ReviewThreadState] = field(default_factory=dict)
+    thread_state_requests: list[frozenset[str]] = field(default_factory=list)
+    # Сбой сверки тредов: `fetch_review_threads_state` бросает это исключение.
     threads_error: Exception | None = None
     # Сбои после публикации ревью: дифф между коммитами, ответ и закрытие треда по корню.
     diff_error: Exception | None = None
@@ -113,16 +118,20 @@ class RecordingVcsGateway:
         self.replies.append((provider_comment_id, body))
         return f"reply-to-{provider_comment_id}"
 
-    def fetch_review_threads_resolved_state(
+    def fetch_review_threads_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
         provider_comment_ids: frozenset[str],
-    ) -> dict[str, bool]:
+    ) -> dict[str, ReviewThreadState]:
+        self.thread_state_requests.append(provider_comment_ids)
         if self.threads_error is not None:
             raise self.threads_error
-        return {cid: False for cid in provider_comment_ids}
+        return {
+            cid: self.thread_states.get(cid, ReviewThreadState(resolved=False, line=None))
+            for cid in provider_comment_ids
+        }
 
     def resolve_review_thread_for_comment(
         self,

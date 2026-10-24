@@ -15,6 +15,7 @@ from uuid import UUID
 
 from app.application.ports.unit_of_work import UnitOfWork
 from app.domain.entities import (
+    BotThread,
     ContextPayload,
     Finding,
     MergeRequest,
@@ -349,6 +350,13 @@ class FakeFindingRepo:
     def add(self, finding: Finding) -> None:
         self._items.append(finding)
 
+    def mark_covered(self, finding_id: UUID, covered_by_finding_id: UUID) -> None:
+        for index, item in enumerate(self._items):
+            if item.id == finding_id:
+                self._items[index] = replace(item, covered_by_finding_id=covered_by_finding_id)
+                return
+        raise LookupError(f"finding {finding_id} is not stored")
+
 
 class FakePublishedCommentRepo:
     def __init__(self, review_runs: FakeReviewRunRepo) -> None:
@@ -374,6 +382,17 @@ class FakePublishedCommentRepo:
     def list_open_threads_for_merge_request(
         self, merge_request_id: UUID
     ) -> list[OpenReviewThread]:
+        return [
+            OpenReviewThread(
+                finding=t.finding,
+                root_provider_comment_id=t.root_provider_comment_id,
+                root_published_comment_id=t.root_published_comment_id,
+            )
+            for t in self.list_threads_for_merge_request(merge_request_id)
+            if not t.resolved
+        ]
+
+    def list_threads_for_merge_request(self, merge_request_id: UUID) -> list[BotThread]:
         if self._findings is None:
             return []
         runs = {
@@ -381,9 +400,9 @@ class FakePublishedCommentRepo:
             for r in self._review_runs.runs
             if r.merge_request_id == merge_request_id
         }
-        threads: list[OpenReviewThread] = []
-        for comment in self._items:
-            if comment.kind is not CommentKind.INLINE or comment.thread_resolved:
+        threads: list[BotThread] = []
+        for comment in sorted(self._items, key=lambda c: (c.published_at, c.id)):
+            if comment.kind is not CommentKind.INLINE:
                 continue
             run = runs.get(comment.review_run_id)
             if run is None or comment.finding_id is None:
@@ -395,10 +414,12 @@ class FakePublishedCommentRepo:
             if finding is None:
                 continue
             threads.append(
-                OpenReviewThread(
+                BotThread(
                     finding=finding,
                     root_provider_comment_id=comment.provider_comment_id,
                     root_published_comment_id=comment.id,
+                    resolved=comment.thread_resolved,
+                    resolved_by_bot=comment.thread_resolved_by_bot,
                 )
             )
         return threads

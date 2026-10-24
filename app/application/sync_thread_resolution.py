@@ -1,6 +1,6 @@
 """Сверка `thread_resolved` с состоянием треда на GitHub."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -12,6 +12,7 @@ from app.application.merge_gate_publish import (
 )
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
+from app.application.ports.vcs_review import ReviewThreadState
 from app.domain.enums import CommentKind, Provider
 from app.domain.webhook import THREAD_ACTIONS
 
@@ -45,20 +46,45 @@ def sync_open_threads_from_host(
     if not open_threads:
         return
     root_ids = frozenset(t.root_provider_comment_id for t in open_threads)
-    resolved_map = vcs.fetch_review_threads_resolved_state(
+    states = vcs.fetch_review_threads_state(
         repo_full_name, pr_number, installation_id, root_ids
     )
-    for thread in open_threads:
-        if resolved_map.get(thread.root_provider_comment_id) is not True:
+    record_threads_resolved_on_host(
+        ((t.root_provider_comment_id, t.root_published_comment_id) for t in open_threads),
+        states,
+        uow=uow,
+        now=now,
+    )
+
+
+def record_threads_resolved_on_host(
+    roots: Iterable[tuple[str, UUID]],
+    states: Mapping[str, ReviewThreadState],
+    *,
+    uow: UnitOfWork,
+    now: datetime,
+) -> frozenset[str]:
+    """Записать закрытие тредов, открытых в базе и закрытых на хостинге.
+
+    `roots` - пары (id корня у провайдера, id записи корня). Закрыл не бот:
+    свои закрытия бот записывает сам, сразу после них. Возвращает id корней,
+    которые записаны закрытыми.
+    """
+    marked: set[str] = set()
+    for provider_comment_id, published_comment_id in roots:
+        state = states.get(provider_comment_id)
+        if state is None or not state.resolved:
             continue
         with uow:
-            root = uow.published_comments.get(thread.root_published_comment_id)
+            root = uow.published_comments.get(published_comment_id)
             if root is None or root.thread_resolved:
                 continue
             uow.published_comments.update(
-                replace(root, thread_resolved=True, updated_at=now)
+                replace(root, thread_resolved=True, thread_resolved_by_bot=False, updated_at=now)
             )
             uow.commit()
+        marked.add(provider_comment_id)
+    return frozenset(marked)
 
 
 def refresh_merge_gate_for_merge_request(
@@ -119,8 +145,15 @@ def apply_review_thread_webhook(
         if published.thread_resolved == resolved:
             return True
         moment = now()
+        # Бот записывает своё закрытие сам; если вебхук о нём пришёл раньше,
+        # запись бота перекроет эту. Открытый заново тред снова ничей.
         uow.published_comments.update(
-            replace(published, thread_resolved=resolved, updated_at=moment)
+            replace(
+                published,
+                thread_resolved=resolved,
+                thread_resolved_by_bot=False,
+                updated_at=moment,
+            )
         )
         uow.commit()
     return True

@@ -1,6 +1,7 @@
 """Контракт `GET /api/v1/reviews/{id}`, `/steps` и `/diff`: данные и видимость прогона. Без БД и сети."""
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -265,6 +266,28 @@ def test_a_standard_finding_reports_no_rule() -> None:
     body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
 
     assert body["findings"][0]["rule"] is None
+
+
+def test_a_finding_covered_by_an_earlier_thread_reports_that_finding() -> None:
+    """#148: повтор замечания не публиковался - находка ссылается на находку треда."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    earlier = new_id()
+    uow.findings.add(replace(_finding(run, None), covered_by_finding_id=earlier))
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["findings"][0]["covered_by_finding_id"] == str(earlier)
+
+
+def test_a_published_finding_is_covered_by_nothing() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    uow.findings.add(_finding(run, None))
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["findings"][0]["covered_by_finding_id"] is None
 
 
 def test_a_run_reports_its_verification_outcome() -> None:

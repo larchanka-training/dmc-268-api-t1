@@ -23,6 +23,7 @@ from app.application.ports.vcs_review import (
     InlineCommentDraft,
     MergeGateCheck,
     PullRequestReviewPublication,
+    ReviewThreadState,
 )
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
@@ -157,14 +158,14 @@ class GitHubVcsGateway:
             repo_full_name, pr_number, installation_id, provider_comment_id, body
         )
 
-    def fetch_review_threads_resolved_state(
+    def fetch_review_threads_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
         provider_comment_ids: frozenset[str],
-    ) -> dict[str, bool]:
-        return self._review.fetch_review_threads_resolved_state(
+    ) -> dict[str, ReviewThreadState]:
+        return self._review.fetch_review_threads_state(
             repo_full_name, pr_number, installation_id, provider_comment_ids
         )
 

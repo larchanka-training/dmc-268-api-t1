@@ -133,6 +133,7 @@ def finding_to_domain(row: FindingRow) -> Finding:
         suggestion=row.suggestion,
         confidence=row.confidence,
         rule=_rule_ref(row),
+        covered_by_finding_id=row.covered_by_finding_id,
     )
 
 
@@ -154,6 +155,7 @@ def published_comment_to_domain(row: PublishedCommentRow) -> PublishedComment:
         updated_at=row.updated_at,
         finding_id=row.finding_id,
         thread_resolved=row.thread_resolved,
+        thread_resolved_by_bot=row.thread_resolved_by_bot,
         in_reply_to_provider_comment_id=row.in_reply_to_provider_comment_id,
         feedback_positive=row.feedback_positive,
         feedback_negative=row.feedback_negative,

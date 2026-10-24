@@ -12,6 +12,7 @@ from typing import Protocol
 from uuid import UUID
 
 from app.domain.entities import (
+    BotThread,
     ContextPayload,
     Finding,
     MergeRequest,
@@ -128,6 +129,10 @@ class FindingRepo(Protocol):
 
     def add(self, finding: Finding) -> None: ...
 
+    def mark_covered(self, finding_id: UUID, covered_by_finding_id: UUID) -> None:
+        """Связать находку с находкой, чей тред бота уже о той же проблеме."""
+        ...
+
 
 class PublishedCommentRepo(Protocol):
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]: ...
@@ -135,6 +140,10 @@ class PublishedCommentRepo(Protocol):
     def list_open_threads_for_merge_request(
         self, merge_request_id: UUID
     ) -> list[OpenReviewThread]: ...
+
+    def list_threads_for_merge_request(self, merge_request_id: UUID) -> list[BotThread]:
+        """Все inline-треды бота на PR, открытые и закрытые, в порядке публикации."""
+        ...
 
     def get(self, published_comment_id: UUID) -> PublishedComment | None: ...
 
