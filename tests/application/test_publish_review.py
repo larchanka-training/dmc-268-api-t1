@@ -551,6 +551,23 @@ def test_failed_reply_does_not_stop_the_next_follow_up_or_the_merge_gate(
     assert "root-inline" in record.getMessage()
 
 
+def test_two_follow_ups_for_one_thread_publish_one_reply() -> None:
+    """Модель вернула два follow-up на одно место: второй ответ в тот же тред не уходит.
+
+    Иначе его запись упала бы на `uq_published_comments_finding` уже после ответа на GitHub.
+    """
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow)
+    vcs = RecordingVcsGateway(diff=FIXED_LINE_10_DIFF)
+
+    _publish_follow_ups(uow, vcs, FIRST_FOLLOW_UP, FIRST_FOLLOW_UP)
+
+    assert [root for root, _ in vcs.replies] == ["root-inline"]
+    assert _replies_in_db(uow) == ["root-inline"]
+    (check,) = vcs.checks
+    assert check.conclusion == "success"
+
+
 def test_failed_resolve_keeps_the_reply_record_and_leaves_the_thread_open() -> None:
     """#76: закрытие треда упало после ответа - ответ в базе, тред открыт, gate выставлен."""
     uow = FakeUnitOfWork()

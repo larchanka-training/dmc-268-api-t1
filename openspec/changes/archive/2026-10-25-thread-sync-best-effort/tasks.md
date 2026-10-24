@@ -9,3 +9,4 @@
 
 - [x] 2.1 Красные тесты `publish_review`: ответ в первый тред упал — второй опубликован, gate выставлен, warning с id прогона и корнем; закрытие упало после ответа — ответ в базе, `thread_resolved` не выставлен, gate выставлен; `VcsError` на инкрементальном диффе — ответ есть, тред не закрыт; программная ошибка пробрасывается (`tests/application/test_publish_review.py`, фейк `RecordingVcsGateway.diff_error`, `reply_errors`, `resolve_errors`)
 - [x] 2.2 `_publish_thread_follow_ups`: `VcsError` на диффе, ответе и закрытии — warning и следующий тред; запись ответа до закрытия, `thread_resolved` — отдельной транзакцией
+- [x] 2.3 Второй follow-up на уже отвеченный в этом прогоне тред пропускается: его запись упала бы на `uq_published_comments_finding` после ответа на GitHub (тест `test_two_follow_ups_for_one_thread_publish_one_reply`)

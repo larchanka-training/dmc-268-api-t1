@@ -274,6 +274,9 @@ def _publish_thread_follow_ups(
         by_key[key] = open_thread
 
     moment = now
+    # Модель может вернуть два follow-up на одно место: второй ответ в тот же тред
+    # упал бы на `uq_published_comments_finding` уже после ответа на GitHub.
+    answered: set[str] = set()
     for item in follow_ups:
         follow_up_line = item.anchor.line
         if follow_up_line is None:
@@ -284,6 +287,8 @@ def _publish_thread_follow_ups(
         if matched is None:
             continue
         root_id = matched.root_provider_comment_id
+        if root_id in answered:
+            continue
         with uow:
             prev_run = uow.review_runs.get(matched.finding.review_run_id)
         prev_head = prev_run.head_sha if prev_run is not None else job.head_sha
@@ -320,6 +325,7 @@ def _publish_thread_follow_ups(
                 "прогон %s: ответ в тред %s не опубликован", run.id, root_id, exc_info=True
             )
             continue
+        answered.add(root_id)
         # Ответ записывается до закрытия треда: сбой закрытия не теряет запись,
         # и следующий прогон не ответит повторно.
         with uow:
