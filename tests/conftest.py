@@ -11,6 +11,8 @@
 """
 
 import os
+import sys
+import threading
 from collections.abc import Iterator
 
 import pytest
@@ -144,6 +146,20 @@ def _forget_spans() -> Iterator[None]:
     """Спаны теста не копятся в памяти до конца сессии: экспортёр общий на все тесты."""
     yield
     SPAN_EXPORTER.clear()
+
+
+@pytest.fixture(autouse=True)
+def _restore_excepthooks() -> Iterator[None]:
+    """`run_worker` ставит глобальные excepthook'и — тест возвращает прежние.
+
+    `run_worker` вызывается не только тестами старта воркера, но и тестами
+    цикла и телеметрии, поэтому фикстура общая на все тесты: без неё хуки
+    утекали бы на всю pytest-сессию.
+    """
+    sys_hook, thread_hook = sys.excepthook, threading.excepthook
+    yield
+    sys.excepthook = sys_hook
+    threading.excepthook = thread_hook
 
 
 @pytest.fixture(scope="session")

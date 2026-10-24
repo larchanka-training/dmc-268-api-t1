@@ -34,15 +34,6 @@ def _settings(**overrides: object) -> Settings:
     )
 
 
-@pytest.fixture(autouse=True)
-def _restore_excepthooks() -> Iterator[None]:
-    """`run_worker` ставит глобальные excepthook'и — тест возвращает прежние."""
-    sys_hook, thread_hook = sys.excepthook, threading.excepthook
-    yield
-    sys.excepthook = sys_hook
-    threading.excepthook = thread_hook
-
-
 @contextlib.contextmanager
 def _json_log(worker_log: logging.Logger) -> Iterator[io.StringIO]:
     """Записи логгера воркера через производственный JSON-форматтер, в память."""
