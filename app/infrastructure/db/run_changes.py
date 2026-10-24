@@ -55,10 +55,13 @@ class _Subscription:
         self._changed.set()
 
     async def wait(self, timeout: float) -> bool:
-        try:
-            await asyncio.wait_for(self._changed.wait(), timeout)
-        except TimeoutError:
-            return False
+        # `wait_for` с нулевым таймаутом отменяет ожидание до первого шага — уже
+        # пришедший сигнал (и обрыв) без этой проверки при `timeout=0` не виден.
+        if not self._changed.is_set():
+            try:
+                await asyncio.wait_for(self._changed.wait(), timeout)
+            except TimeoutError:
+                return False
         if self._lost:
             raise RunChangesLost
         self._changed.clear()

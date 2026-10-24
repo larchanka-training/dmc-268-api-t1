@@ -17,6 +17,9 @@ from app.infrastructure.db.run_changes import (
     PostgresRunChanges,
     listen_conninfo,
 )
+from app.infrastructure.db.run_changes import (
+    _Subscription as Subscription,
+)
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 
 from ..conftest import TEST_DATABASE_URL, requires_db
@@ -184,3 +187,21 @@ def test_an_abandoned_subscription_does_not_pile_up(clean_db) -> None:
             await changes.close()
 
     assert asyncio.run(scenario()) == 0
+
+
+def test_a_zero_timeout_still_sees_a_signal_and_a_loss() -> None:
+    """Дочитывание пачки ждёт с нулевым таймаутом: пришедший сигнал и обрыв должны быть видны и тогда."""
+    changes = _listener()
+
+    async def scenario() -> tuple[bool, bool, bool]:
+        signalled, quiet, lost = Subscription(changes), Subscription(changes), Subscription(changes)
+        signalled.signal()
+        lost.lose()
+        try:
+            await lost.wait(0.0)
+            saw_loss = False
+        except RunChangesLost:
+            saw_loss = True
+        return await signalled.wait(0.0), await quiet.wait(0.0), saw_loss
+
+    assert asyncio.run(scenario()) == (True, False, True)

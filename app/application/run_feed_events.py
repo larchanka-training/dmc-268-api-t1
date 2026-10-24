@@ -10,6 +10,7 @@
 
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from dataclasses import replace
 from uuid import UUID
 
 from app.application.ports import UnitOfWork
@@ -71,16 +72,20 @@ async def run_feed_events(
         try:
             # Прошлое чтение упёрлось в `BATCH_LIMIT` — остаток читается сразу:
             # один сигнал на всю пачку, второго может не быть (массовый `stale_sweep`).
-            changed = await wait_change(0.0 if more else max(due - clock(), 0.0)) or more
+            signalled = await wait_change(0.0 if more else max(due - clock(), 0.0))
         except RunChangesLost:
             return
         if clock() - last_session_check >= SESSION_CHECK_SECONDS:
             last_session_check = clock()
             if not await session_alive():
                 return
-        more = False
+        changed, catching_up, more = signalled or more, more and not signalled, False
         if changed:
-            batch = await read_batch(state)
+            # Дочитывание без нового сигнала — без окна перепроверки: запоздавший коммит
+            # пришлёт свой NOTIFY, а окно с одним `updated_at` на всю пачку (`stale_sweep`)
+            # перечитывалось бы целиком на каждом круге.
+            read_state = replace(state, floor=state.cursor.updated_at) if catching_up else state
+            batch = await read_batch(read_state)
             # Лимит — у строк за курсором; окно перепроверки под ним в счёт не идёт.
             more = sum(FeedCursor(e.run.updated_at, e.run.id) > state.cursor for e in batch) >= BATCH_LIMIT
             state, events = advance_feed(state, batch)

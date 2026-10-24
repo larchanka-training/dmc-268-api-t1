@@ -89,6 +89,8 @@ class Script:
         self._changes_at = sorted(changes_at)
         self.lost_at: float | None = None
         self.reads = 0
+        self.recheck_from: list[datetime] = []
+        self.cursors: list[datetime] = []
         self.now = 0.0
         self.session_checks = 0
         self.session_checks_alive: int | None = None
@@ -98,6 +100,8 @@ class Script:
 
     async def read(self, state: RunFeedState) -> list[ReviewRunListEntry]:
         self.reads += 1
+        self.recheck_from.append(state.recheck_from)
+        self.cursors.append(state.cursor.updated_at)
         self.now += self.read_cost
         return self._batches.pop(0) if self._batches else []
 
@@ -287,3 +291,16 @@ def test_a_full_recheck_window_does_not_spin_the_loop() -> None:
     _collect(script, limit=BATCH_LIMIT + 1)
 
     assert script.reads == 2
+
+
+def test_catching_up_reads_without_the_recheck_window() -> None:
+    """Дочитывание без сигнала — без окна перепроверки: иначе пачка с одним `updated_at`
+    (массовый `stale_sweep`) перечитывалась бы целиком на каждом круге."""
+    changed = _entries(BATCH_LIMIT + 50, 1)
+    script = Script(changed[:BATCH_LIMIT], changed[BATCH_LIMIT:], changes_at=(1.0,))
+
+    _collect(script, limit=BATCH_LIMIT + 50)
+
+    _, catch_up = script.recheck_from
+    # Без этого правила окно начиналось бы на `RECHECK` (5 с) ниже курсора.
+    assert catch_up == script.cursors[1]
