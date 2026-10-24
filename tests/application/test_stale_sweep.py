@@ -82,7 +82,7 @@ def test_each_swept_run_is_counted_as_failed_once() -> None:
     uow.review_runs.add(_run(4, ReviewRunStatus.COMPLETED, timedelta(hours=5)))
     recorder = RecordingRunOutcome()
 
-    swept = sweep_stale_runs(uow, now=NOW, limit=LIMIT, run_outcome=recorder)
+    swept = sweep_stale_runs(uow, now=NOW, limit=LIMIT, queued_limit=QUEUED_LIMIT, run_outcome=recorder)
 
     assert swept == 2
     assert recorder.statuses == ["failed", "failed"]

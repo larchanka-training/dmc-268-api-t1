@@ -445,7 +445,7 @@ def test_a_github_failure_leaves_no_diff_or_token_in_the_log(
     auth = GitHubAppAuth(APP_ID, rsa_key_pair.private_pem, client)
     gateway = GitHubVcsGateway(auth, client, sleep=sleeps.append)
 
-    diff = fetch_review_diff(JOB, gateway)
+    diff = fetch_review_diff(JOB, gateway, max_bytes=LIMITS.diff_max_bytes)
     assert DIFF_SECRET in diff  # секретный код действительно пришёл
 
     build_review_context(
