@@ -132,6 +132,7 @@ class GitHubReviewClient:
         if comments_payload:
             payload["comments"] = comments_payload
         reviews_url = f"/repos/{repo_full_name}/pulls/{pr_number}/reviews"
+        self._learn_bot_login()
         response = self._gw._post_json(
             reviews_url,
             installation_id,
@@ -165,6 +166,15 @@ class GitHubReviewClient:
             summary_provider_comment_id=review_id,
             inline_comments=published,
         )
+
+    def _learn_bot_login(self) -> None:
+        """Логин бота - до `POST`, best-effort: он нужен поиску по маркеру, а поиск
+        идёт, когда GitHub уже сбоит, и `GET /app` тогда упал бы вместе с ним.
+        Логин кэшируется на процесс; не получили сейчас - поиск спросит ещё раз."""
+        try:
+            self._gw.bot_login()
+        except VcsError:
+            logger.warning("логин бота GitHub App не получен до публикации ревью", exc_info=True)
 
     def _review_found_by_marker(
         self, reviews_url: str, installation_id: int, marker: str, review_run_id: UUID

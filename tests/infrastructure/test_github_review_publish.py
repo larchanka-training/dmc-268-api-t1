@@ -181,6 +181,9 @@ class _GitHub:
         self.reviews: list[dict[str, Any]] = []
         self.seen: list[tuple[str, str]] = []
         self.comments_status = 200
+        # Статус `GET /app` до первого и после первого `POST …/reviews`.
+        self.app_status_before_post = 200
+        self.app_status_after_post = 200
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -188,6 +191,9 @@ class _GitHub:
             return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
         self.seen.append((request.method, path))
         if path == "/app":
+            status = self.app_status_after_post if self.posts() else self.app_status_before_post
+            if status != 200:
+                return httpx.Response(status, json={"message": "Bad Gateway"})
             return httpx.Response(200, json={"id": 1, "slug": "dmc-268-review"})
         if request.method == "POST" and path == "/repos/o/r/pulls/7/reviews":
             return self.create(request)
@@ -240,6 +246,33 @@ def test_502_on_create_review_is_not_repeated_and_the_review_is_found_by_marker(
     assert github.posts() == 1
     assert publication.summary_provider_comment_id == "9001"
     assert publication.inline_comments[0].provider_comment_id == "42"
+
+
+def test_bot_login_is_known_before_the_post_so_a_later_outage_does_not_hide_the_review(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """POST ответил 502, и `GET /app` после него тоже 502: логин бота взят до POST, ревью найдено."""
+    github = _GitHub(lambda request: httpx.Response(502, json={"message": "Bad Gateway"}))
+    github.reviews = [{"id": 9001, "body": f"сводка\n\n{MARKER}", "user": BOT}]
+    github.app_status_after_post = 502
+
+    publication = _publish(make_gateway(rsa_key_pair, github.handler))
+
+    assert github.posts() == 1
+    assert publication.summary_provider_comment_id == "9001"
+
+
+def test_failed_bot_login_before_the_post_does_not_stop_the_publication(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """Логин бота заранее - best-effort: `GET /app` упал, ревью всё равно публикуется."""
+    github = _GitHub(lambda request: httpx.Response(200, json={"id": 9001}))
+    github.app_status_before_post = 502
+
+    publication = _publish(make_gateway(rsa_key_pair, github.handler))
+
+    assert github.posts() == 1
+    assert publication.summary_provider_comment_id == "9001"
 
 
 def test_timeout_on_create_review_looks_the_review_up_instead_of_repeating(

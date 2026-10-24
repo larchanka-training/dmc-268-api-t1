@@ -258,7 +258,10 @@ class GitHubVcsGateway:
             installation_id,
             json=payload,
             repeatable=repeatable,
-            already_done=None if already_done is None else _as_response(already_done),
+            # Цикл `_request` возвращает ответ - найденное тело оборачивается в него.
+            already_done=None
+            if already_done is None
+            else lambda: None if (found := already_done()) is None else httpx.Response(200, json=found),
         )
         try:
             data: dict[str, Any] = response.json()
@@ -432,18 +435,6 @@ class GitHubVcsGateway:
             return httpx.Response(
                 response.status_code, headers=kept, content=content, request=response.request
             )
-
-
-def _as_response(
-    already_done: Callable[[], dict[str, Any] | None],
-) -> Callable[[], httpx.Response | None]:
-    """Проверка «уже выполнен» с телом-объектом - в форме ответа для цикла `_request`."""
-
-    def check() -> httpx.Response | None:
-        data = already_done()
-        return None if data is None else httpx.Response(200, json=data)
-
-    return check
 
 
 def _rate_limit_wait(response: httpx.Response, now: float, hits: int) -> float:
