@@ -156,6 +156,11 @@ jobs:
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - name: pytest (пропуск теста — провал)
+        env:
+          # Тест алярма брокера (tests/queue/test_broker_blocked.py) включает его
+          # через `docker exec … rabbitmqctl` в service-контейнере. Контекст `job`
+          # доступен только в env шага, не job'а.
+          TEST_RABBITMQ_CONTAINER: ${{ job.services.rabbitmq.id }}
         run: |
           set -o pipefail
           # Живые тесты против EUrouter (маркер live) - платные: `addopts` в
