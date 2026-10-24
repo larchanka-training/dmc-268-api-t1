@@ -169,6 +169,9 @@ TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest   # вместе с а
 Тесты, которым нужен PostgreSQL, помечены `integration` и пропускаются, если
 `TEST_DATABASE_URL` не задан; сквозным (`tests/e2e/`), обвязке eval и малому
 нагрузочному прогону нужен ещё и RabbitMQ в `TEST_RABBITMQ_URL`.
+Тест алярма брокера (`tests/queue/test_broker_blocked.py`) включает алярм памяти
+через `docker exec` в контейнере RabbitMQ: имя или идентификатор контейнера —
+в `TEST_RABBITMQ_CONTAINER`, без него тест пропускается.
 
 Эта переменная намеренно не `DATABASE_URL`, и никакого отката на неё нет.
 Подготовка тестовой базы удаляет её схему, так что если направить тесты на базу,
