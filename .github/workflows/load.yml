@@ -62,7 +62,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
         env:
           POSTGRES_USER: dmc268
           POSTGRES_PASSWORD: dmc268
@@ -75,7 +75,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       rabbitmq:
-        image: rabbitmq:4.4-alpine
+        image: rabbitmq:4.4-alpine@sha256:5b70d54d53d0ce9558b84ad93cb237d06fa2e8c57115fa0ff7223b9eaffa44ed
         ports:
           - 5672:5672
         options: >-
@@ -99,9 +99,11 @@ jobs:
       LOAD_MAX_END_TO_END_P95_SECONDS: ${{ inputs.max_end_to_end_p95_seconds }}
       LOAD_REPORT_DIR: load-report
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.5"
           python-version: "3.14"
@@ -114,7 +116,7 @@ jobs:
             echo "::error::нагрузочный прогон пропущен: нет сервисов PostgreSQL или RabbitMQ"
             exit 1
           fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: load-report
