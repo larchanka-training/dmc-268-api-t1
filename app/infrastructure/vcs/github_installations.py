@@ -106,8 +106,9 @@ class GitHubInstallationCatalog:
     def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
         """`GET /repositories/{id}` токеном пользователя («Get a repository»): `404` или
         `403` не из-за лимита — пользователь репозитория не видит."""
-        if not provider_id.isdigit():
+        if not (provider_id.isascii() and provider_id.isdigit()):
             # Id репозитория GitHub — число; иное не отправляем в путь запроса.
+            # `isdigit()` один пропустил бы и не-ASCII цифры (`²`, `١٢٣`).
             return None
         url = f"/repositories/{provider_id}"
         try:

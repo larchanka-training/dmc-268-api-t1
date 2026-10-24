@@ -196,6 +196,24 @@ def test_reconnecting_with_rights_is_a_conflict() -> None:
     assert _connect(FakeInstallationCatalog([API]), uow) is ConnectRefusal.ALREADY_CONNECTED
 
 
+def test_the_id_from_githubs_answer_is_recorded() -> None:
+    # GitHub отдаёт на `/repositories/0101` тот же репозиторий, что на `/repositories/101`.
+    uow = _signed_in()
+
+    outcome = _connect(FakeInstallationCatalog([API]), uow, "0101")
+
+    assert isinstance(outcome, Repository)
+    assert outcome.provider_id == "101"
+    assert uow.repositories.get(NEW_ID) == outcome
+
+
+def test_a_connected_repository_under_another_spelling_of_its_id_is_a_conflict() -> None:
+    uow = _signed_in()
+    uow.repositories.add(_registered("101"))
+
+    assert _connect(FakeInstallationCatalog([API]), uow, "0101") is ConnectRefusal.ALREADY_CONNECTED
+
+
 def test_a_parallel_connect_that_won_is_a_conflict() -> None:
     uow = _signed_in()
     original_add = uow.repositories.add

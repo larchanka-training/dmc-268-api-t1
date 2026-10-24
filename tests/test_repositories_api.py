@@ -541,6 +541,17 @@ def test_connecting_a_gitlab_repository_is_404() -> None:
     assert response.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
 
 
+@pytest.mark.parametrize("provider_id", ["0101", "+101", "١٠١", "²"])
+def test_a_non_canonical_id_is_422_without_asking_github(provider_id: str) -> None:
+    catalog = FakeInstallationCatalog([API])
+
+    response = _connect(_client(FakeUnitOfWork(), catalog), provider_id)
+
+    assert response.status_code == 422
+    assert response.json()["errors"] == [{"where": "body.provider_id", "reason": "недопустимое значение"}]
+    assert catalog.calls == []
+
+
 def test_connecting_twice_is_409() -> None:
     uow = FakeUnitOfWork()
     uow.repositories.add(_repository(101))
