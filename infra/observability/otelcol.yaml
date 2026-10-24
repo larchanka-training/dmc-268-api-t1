@@ -1,9 +1,10 @@
 # Коллектор телеметрии — один конфиг для локального стека (docker compose,
 # профиль observability) и стенда (infra/main.tf): различия окружений — только
-# переменные запуска (пути лог-файлов) и сетевые алиасы, совпадающие в обоих
-# окружениях. Образ зафиксирован тегом в docker-compose.yml и main.tf: у
-# приёмника file_log операторы stanza вне гарантий стабильности (beta), при
-# обновлении образа читаются breaking changes.
+# переменные запуска (пути лог-файлов, реквизиты receiver postgresql) и сетевые
+# алиасы, совпадающие в обоих окружениях. Образ зафиксирован дайджестом в
+# docker-compose.yml и main.tf (тег в комментарии рядом): у приёмника file_log
+# операторы stanza вне гарантий стабильности (beta), при обновлении образа
+# читаются breaking changes.
 
 receivers:
   # Приём OTLP от сервисов приложения: трейсы и метрики SDK при
@@ -33,7 +34,8 @@ receivers:
           parse_from: attributes.time
           layout_type: gotime
           layout: "2006-01-02T15:04:05.999999999Z07:00"
-      # Внутренний JSON записи становится телом: он же — строка в Loki.
+      # Внутренний JSON записи становится телом — его разбирает следующий
+      # parser; окончательное тело запись получает ниже (message-to-body).
       - type: move
         from: attributes.log
         to: body
@@ -54,6 +56,41 @@ receivers:
             parse_from: attributes.trace_flags
         severity:
           parse_from: attributes.severity
+      # Тело записи — текст сообщения: поля записи уже лежат в атрибутах, и
+      # строка-JSON в теле хранила бы весь текст в Loki дважды. move удаляет
+      # источник: отдельный оператор remove для attributes.message здесь был
+      # бы мёртвым — он гарантированно промахивался бы и с on_error: send
+      # писал «field does not exist» в лог коллектора на каждой записи.
+      - type: move
+        id: message-to-body
+        from: attributes.message
+        to: body
+      # color_message — ANSI-дубль сообщения uvicorn — удаляется не здесь, а
+      # стейтментом delete_key в transform/redact-logs: у оператора remove
+      # этой версии stanza нет тихого пропуска отсутствующего поля (значения
+      # continue нет — «all processing errors will be logged»), и каждая
+      # запись без color_message давала бы ошибку в лог коллектора.
+
+  # Метрики базы (решение #89): снимает сам коллектор receiver-ом postgresql —
+  # без отдельного контейнера экспортёра, в общий конвейер метрик. Роль
+  # только-чтение dmc268_monitor с привилегией pg_monitor создаёт миграция
+  # 0011; её реквизиты приходят переменными окружения — они различаются между
+  # локальным стеком и стендом, литералом в общем конфиге им не место.
+  # Endpoint — строго host:port, имя базы передаётся отдельно (databases):
+  # суффикс /dbname endpoint этого receiver не принимает. Тяжёлые запросы —
+  # из pg_stat_statements: shared_preload_libraries задаёт сама база (command
+  # у контейнера postgres), расширение создаёт та же миграция 0011.
+  postgresql:
+    username: ${env:POSTGRESQL_USERNAME}
+    password: ${env:POSTGRESQL_PASSWORD}
+    endpoint: ${env:POSTGRESQL_ENDPOINT}
+    databases: ["${env:POSTGRESQL_DATABASE}"]
+    # База в нашей docker-сети и локально, и на стенде: TLS между коллектором
+    # и Postgres не поднимается ни в одном окружении — без этого receiver
+    # падает с «SSL is not enabled on the server».
+    tls:
+      insecure: true
+    collection_interval: 15s
 
 processors:
   # Потолок памяти коллектора; в infra контейнеру задан лимит с запасом
@@ -70,6 +107,43 @@ processors:
   groupbyattrs/service:
     keys:
       - service.name
+
+  # Фильтр чужих контейнеров. Коллектор работает под root и читает
+  # *-json.log всех контейнеров хоста — иначе лог-файлы Docker не прочитать
+  # (root оставлен намеренно), поэтому чужие JSON-логи отсекаются здесь:
+  # в Loki идут записи только трёх наших сервисов. У записей file_log
+  # service.name — атрибут записи (до groupbyattrs/service), у OTLP-логов —
+  # ресурс: условие покрывает оба случая, а имя, которого нет нигде,
+  # не совпадает ни с одним равенством — тоже дроп. Условие log_record —
+  # правило дропа: запись с несовпавшим условием уходит в Loki.
+  filter/foreign-services:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'not (attributes["service.name"] == "dmc-268-api" or attributes["service.name"] == "dmc-268-worker" or attributes["service.name"] == "dmc-268-migrate" or resource.attributes["service.name"] == "dmc-268-api" or resource.attributes["service.name"] == "dmc-268-worker" or resource.attributes["service.name"] == "dmc-268-migrate")'
+
+  # Редакция логов — тот же второй рубеж после SDK, что transform/redact для
+  # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
+  # исключения несут значения ключей базы и текст ответа провайдера модели —
+  # те же поля semconv, что у событий exception в трейсах. Тело гасится у
+  # записей, несущих исключение: текст исключения мог попасть в сообщение
+  # библиотечного логгера, а правило событий exception в трейсах действует
+  # по тому же принципу — по наличию исключения, не по его типу.
+  transform/redact-logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["exception.stacktrace"], "<скрыто>") where attributes["exception.stacktrace"] != nil
+          - set(attributes["exception.message"], "<скрыто>") where attributes["exception.message"] != nil
+          # Тело записи — текст сообщения (оператор message-to-body выше).
+          - set(body, "<скрыто>") where attributes["exception.stacktrace"] != nil
+          # ANSI-дубль сообщения uvicorn удаляется целиком; message уже в теле
+          # (оператор message-to-body). delete_key молча пропускает отсутствие
+          # ключа — по документации OTTL это no-op для несуществующего, поэтому
+          # записи без color_message не дают ни ошибок, ни шума (remove из
+          # stanza так не умеет — см. комментарий у message-to-body).
+          - delete_key(attributes, "color_message")
 
   # Редакция чувствительных данных — второй рубеж после SDK (первый — фильтры
   # app/api/log_redaction.py и статус по имени типа в
@@ -123,8 +197,14 @@ exporters:
   otlphttp/loki:
     endpoint: http://loki:3100/otlp
   # Метрики — exporter-порт коллектора: Prometheus скрейпит его (job collector).
+  # resource_to_telemetry_conversion переносит атрибуты ресурса (service.name)
+  # в лейблы рядов: без неё job у всех рядов — "collector" (имя скрейп-джобы),
+  # а имя сервиса прячется в exported_job — ряды сервисов не различить ни в
+  # запросах, ни в алертах.
   prometheus:
     endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
 
 extensions:
   # Смещения file_log между рестартами: без них после перезапуска коллектора
@@ -143,10 +223,10 @@ service:
       processors: [memory_limiter, transform/redact, batch]
       exporters: [otlphttp/tempo]
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, postgresql]
       processors: [memory_limiter, batch]
       exporters: [prometheus]
     logs:
       receivers: [otlp, file_log]
-      processors: [memory_limiter, groupbyattrs/service, batch]
+      processors: [memory_limiter, filter/foreign-services, transform/redact-logs, groupbyattrs/service, batch]
       exporters: [otlphttp/loki]

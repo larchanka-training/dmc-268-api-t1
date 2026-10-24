@@ -203,26 +203,31 @@ variable "deployment_environment_name" {
   }
 }
 
-# Пять контейнеров стека на VPS — риск из design.md change'а
+# Семь контейнеров стека на VPS — риск из design.md change'а
 # add-observability-stack; потолки памяти без свопа (как у postgres/api выше),
 # прод-размеры поднимаются этой переменной.
 variable "observability_memory_mb" {
   type = object({
-    collector         = number
-    loki              = number
-    tempo             = number
-    prometheus        = number
-    grafana           = number
-    postgres_exporter = number
+    collector  = number
+    loki       = number
+    tempo      = number
+    prometheus = number
+    grafana    = number
+    # node_exporter — статический сборщик с фиксированным набором collectors:
+    # десятков мегабайт хватает. cAdvisor держит статистику по каждому
+    # контейнеру хоста — потолок с запасом на десятки контейнеров.
+    node_exporter = number
+    cadvisor      = number
   })
   description = "Потолки памяти контейнеров стека наблюдаемости, МБ, без свопа."
   default = {
-    collector         = 384
-    loki              = 768
-    tempo             = 768
-    prometheus        = 768
-    grafana           = 512
-    postgres_exporter = 128
+    collector     = 384
+    loki          = 768
+    tempo         = 768
+    prometheus    = 768
+    grafana       = 512
+    node_exporter = 64
+    cadvisor      = 256
   }
 }
 
@@ -237,6 +242,16 @@ variable "grafana_port" {
 variable "grafana_admin_password" {
   type        = string
   description = "Пароль админа Grafana (GF_SECURITY_ADMIN_PASSWORD). Не коммитить."
+  sensitive   = true
+}
+
+# Без значения по умолчанию: пароль роли мониторинга задаётся на стенде явно
+# (секрет PG_MONITOR_PASSWORD_DMC268_T1). Роль dmc268_monitor создаёт миграция
+# 0011 (POSTGRES_MONITOR_PASSWORD), под ней коллектор снимает метрики базы
+# (POSTGRESQL_PASSWORD его env).
+variable "postgres_monitor_password" {
+  type        = string
+  description = "Пароль роли мониторинга базы dmc268_monitor (pg_monitor). Не коммитить."
   sensitive   = true
 }
 
