@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from app.domain.code_context import select_scopes
 from app.domain.entities import Definition, FileOutline
 from app.domain.enums import DefinitionKind, Language
 from app.infrastructure.parsing.tree_sitter_extractor import (
@@ -110,3 +111,129 @@ def test_long_signature_is_clipped(extractor: TreeSitterDefinitionExtractor) -> 
     (definition,) = extractor.extract(f"def f({params}) -> None:\n    pass\n", Language.PYTHON).definitions
     assert len(definition.signature) == 300
     assert definition.signature.endswith("…")
+
+
+# Декораторы TypeScript: у метода они — соседи в теле класса, у
+# `@Component(…) export class` — соседи в `export_statement`, а не дети узла.
+DECORATED_TS = """\
+@Component({
+  selector: "app-root",
+})
+export class AppComponent {
+  @Input() @Output()
+  title = "app";
+
+  @HostListener("window:resize", [
+    "$event",
+  ])
+  // Пересчёт раскладки.
+  @Throttle(100)
+  onResize(event: UIEvent): void {
+    this.layout();
+  }
+
+  @Debounce(300) save = async (): Promise<void> => {};
+
+  layout(): void {}
+}
+"""
+
+
+def test_typescript_decorators_are_part_of_definition(
+    extractor: TreeSitterDefinitionExtractor,
+) -> None:
+    outline = extractor.extract(DECORATED_TS, Language.TYPESCRIPT)
+    assert outline.definitions == (
+        Definition(CLASS, "AppComponent", "class AppComponent", 1, 20),
+        # Диапазон — от первого декоратора; сигнатура — без декораторов.
+        Definition(
+            METHOD, "onResize", "onResize(event: UIEvent): void", 8, 15, "AppComponent"
+        ),
+        Definition(
+            METHOD, "save", "save = async (): Promise<void> =>", 17, 17, "AppComponent"
+        ),
+        Definition(METHOD, "layout", "layout(): void", 19, 19, "AppComponent"),
+    )
+
+
+GENERIC_GO = """\
+package p
+
+func Map[T any, U comparable](xs []T, f func(T) U) []U {
+\treturn nil
+}
+
+func Keys[
+\tK comparable,
+\tV interface{ ~int | ~string },
+](m map[K]V) []K {
+\treturn nil
+}
+
+type Set[T interface{ ~int | ~string }] struct {
+\titems map[T]struct{}
+}
+
+type Ordered[T interface{ ~int }] interface {
+\tLess(other T) bool
+}
+
+func (s *Set[T]) Add(v T) {
+\ts.items[v] = struct{}{}
+}
+"""
+
+
+def test_go_generic_signatures_keep_type_parameters(
+    extractor: TreeSitterDefinitionExtractor,
+) -> None:
+    outline = extractor.extract(GENERIC_GO, Language.GO)
+    assert outline.definitions == (
+        Definition(
+            FUNCTION,
+            "Map",
+            "func Map[T any, U comparable](xs []T, f func(T) U) []U",
+            3,
+            5,
+        ),
+        Definition(
+            FUNCTION,
+            "Keys",
+            "func Keys[K comparable, V interface{ ~int | ~string },](m map[K]V) []K",
+            7,
+            12,
+        ),
+        # Ограничение с `{` не обрывает параметры типа.
+        Definition(
+            CLASS, "Set", "type Set[T interface{ ~int | ~string }] struct", 14, 16
+        ),
+        Definition(
+            INTERFACE, "Ordered", "type Ordered[T interface{ ~int }] interface", 18, 20
+        ),
+        Definition(METHOD, "Add", "func (s *Set[T]) Add(v T)", 22, 24, "Set"),
+    )
+
+
+# Слияние объявлений TS: тип и функция-компаньон с одним именем.
+COMPANION_TS = """\
+export interface Money {
+  amount: number;
+}
+
+export function Money(amount: number): Money {
+  const round = (x: number): number => Math.round(x);
+  return { amount: round(amount) };
+}
+"""
+
+
+def test_nested_function_does_not_pull_in_type_by_parent_name(
+    extractor: TreeSitterDefinitionExtractor,
+) -> None:
+    outline = extractor.extract(COMPANION_TS, Language.TYPESCRIPT)
+    scopes = select_scopes(outline, frozenset({6}))
+    # `round` — функция внутри функции `Money`, а не метод типа `Money`.
+    assert [(d.kind, d.name) for d in scopes] == [
+        (FUNCTION, "Money"),
+        (FUNCTION, "round"),
+    ]

@@ -62,8 +62,8 @@ def select_scopes(outline: FileOutline, touched: frozenset[int]) -> tuple[Defini
 
     Класс охватывает свои методы по диапазону строк, поэтому изменение в
     методе Python/TS даёт и метод, и его класс. Метод Go объявлен вне
-    структуры — её тип добавляется по имени родителя (ресивера). Результат —
-    в порядке файла.
+    структуры — её тип добавляется по имени родителя (ресивера); только для
+    метода, не для вложенных функций и классов. Результат — в порядке файла.
     """
     lines = sorted(touched)
 
@@ -74,7 +74,9 @@ def select_scopes(outline: FileOutline, touched: frozenset[int]) -> tuple[Defini
 
     ordered = sorted(outline.definitions, key=lambda d: (d.line, -d.end_line))
     selected = {d for d in ordered if covers(d)}
-    parents = {d.parent for d in selected if d.parent is not None}
+    # По имени — только тип метода: у вложенной функции или класса `parent` —
+    # охватывающее определение, и тип с тем же именем к изменению не относится.
+    parents = {d.parent for d in selected if d.kind is DefinitionKind.METHOD and d.parent}
     return tuple(
         d
         for d in ordered
