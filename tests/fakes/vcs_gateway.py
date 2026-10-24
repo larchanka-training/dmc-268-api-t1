@@ -10,6 +10,7 @@ from app.application.ports.vcs_review import (
 )
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
+from app.domain.vcs_errors import VcsFileTooLargeError
 
 # Как у `FakeVcs`: первая строка `app/main.py` в диффе для сборки контекста.
 _PIPELINE_DIFF = (
@@ -36,8 +37,10 @@ class RecordingVcsGateway:
     commit_messages: tuple[str, ...] = ()
 
     def fetch_diff(
-        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
+        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
     ) -> str:
+        if len(self.diff.encode("utf-8")) > max_bytes:
+            raise VcsFileTooLargeError(f"дифф: больше {max_bytes} байт")
         return self.diff
 
     def fetch_pr_metadata(

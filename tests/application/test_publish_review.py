@@ -33,6 +33,7 @@ MR_ID = UUID(int=3)
 RUN_ID = UUID(int=2)
 FINDING_ID = UUID(int=50)
 ROOT_COMMENT_ID = UUID(int=51)
+DIFF_LIMIT = 5_242_880
 
 
 JOB = ReviewJob(
@@ -128,6 +129,7 @@ def test_merge_gate_fails_while_critical_thread_open() -> None:
         vcs=vcs,
         now=NOW,
         new_id=lambda: UUID(int=300),
+        diff_max_bytes=DIFF_LIMIT,
     )
 
     assert vcs.checks[-1].conclusion == "failure"
@@ -169,13 +171,60 @@ def test_thread_follow_up_fixed_resolves_on_host() -> None:
         "-критично\n"
         "+исправлено\n"
     )
-    publish_review(JOB, run, result, uow=uow, vcs=vcs, now=NOW, new_id=lambda: UUID(int=301))
+    publish_review(
+        JOB, run, result, uow=uow, vcs=vcs, now=NOW, new_id=lambda: UUID(int=301), diff_max_bytes=DIFF_LIMIT
+    )
 
     assert vcs.resolved == ["root-inline"]
     root = uow.published_comments.get(ROOT_COMMENT_ID)
     assert root is not None
     assert root.thread_resolved is True
     assert vcs.checks[-1].conclusion == "success"
+
+
+def test_critical_fixed_not_resolved_when_incremental_diff_is_over_the_limit() -> None:
+    """Инкрементальный дифф больше лимита не роняет публикацию: изменение строки
+    якоря не подтверждено, тред критичного замечания остаётся открытым."""
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow)
+    run = ReviewRun(
+        id=RUN_ID,
+        merge_request_id=MR_ID,
+        head_sha=JOB.head_sha,
+        status=ReviewRunStatus.PUBLISHING,
+        trigger=TriggerSource.WEBHOOK,
+        last_progress_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    uow.review_runs.add(run)
+    vcs = RecordingVcsGateway()
+    # Этот же дифф в пределах лимита закрыл бы тред (`test_thread_follow_up_fixed_resolves_on_host`).
+    vcs.diff = (
+        "diff --git a/app/x.py b/app/x.py\n"
+        "--- a/app/x.py\n+++ b/app/x.py\n"
+        "@@ -10,1 +10,1 @@\n"
+        "-критично\n"
+        "+исправлено\n"
+    )
+    follow_up = LlmThreadFollowUp(
+        anchor=DiffAnchor(file_path="app/x.py", side=DiffSide.NEW, new_line=10),
+        category=FindingCategory.CORRECTNESS,
+        status=ThreadFollowUpStatus.FIXED,
+        reply="теперь ок",
+        resolve_thread=True,
+    )
+    result = LlmReviewResult(model="m", tokens_used=0, findings=(), thread_follow_ups=(follow_up,))
+
+    publish_review(
+        JOB, run, result, uow=uow, vcs=vcs, now=NOW, new_id=lambda: UUID(int=304), diff_max_bytes=10
+    )
+
+    assert vcs.resolved == []
+    assert [body for _, body in vcs.replies] != []
+    root = uow.published_comments.get(ROOT_COMMENT_ID)
+    assert root is not None
+    assert root.thread_resolved is False
 
 
 def test_critical_fixed_not_resolved_while_anchor_still_in_diff() -> None:
@@ -214,7 +263,9 @@ def test_critical_fixed_not_resolved_while_anchor_still_in_diff() -> None:
         thread_follow_ups=(follow_up,),
     )
 
-    publish_review(JOB, run, result, uow=uow, vcs=vcs, now=NOW, new_id=lambda: UUID(int=302))
+    publish_review(
+        JOB, run, result, uow=uow, vcs=vcs, now=NOW, new_id=lambda: UUID(int=302), diff_max_bytes=DIFF_LIMIT
+    )
 
     assert vcs.resolved == []
     root = uow.published_comments.get(ROOT_COMMENT_ID)
@@ -261,7 +312,9 @@ def test_critical_fixed_not_resolved_when_line_inserted_above_anchor() -> None:
         thread_follow_ups=(follow_up,),
     )
 
-    publish_review(JOB, run, result, uow=uow, vcs=vcs, now=NOW, new_id=lambda: UUID(int=303))
+    publish_review(
+        JOB, run, result, uow=uow, vcs=vcs, now=NOW, new_id=lambda: UUID(int=303), diff_max_bytes=DIFF_LIMIT
+    )
 
     assert vcs.resolved == []
     root = uow.published_comments.get(ROOT_COMMENT_ID)
@@ -306,6 +359,7 @@ def test_inline_comment_is_attributed_from_the_stored_rule_reference() -> None:
         vcs=vcs,
         now=NOW,
         new_id=lambda: UUID(int=301),
+        diff_max_bytes=DIFF_LIMIT,
     )
 
     ((_, (inline,)),) = vcs.publications

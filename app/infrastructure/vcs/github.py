@@ -74,12 +74,13 @@ class GitHubVcsGateway:
         self._review = GitHubReviewClient(self)
 
     def fetch_diff(
-        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
+        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
     ) -> str:
         response = self._get(
             f"/repos/{repo_full_name}/compare/{base_sha}...{head_sha}",
             installation_id,
             _DIFF_ACCEPT,
+            max_bytes=max_bytes,
         )
         return response.text
 

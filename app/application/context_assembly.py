@@ -75,6 +75,8 @@ class ContextLimits:
     ast_max_files: int
     ast_max_file_bytes: int
     pr_context_max_tokens: int
+    # Потолок unified diff прогона в байтах: больший не дочитывается, прогон - `failed`.
+    diff_max_bytes: int
 
 
 @dataclass(frozen=True, slots=True)

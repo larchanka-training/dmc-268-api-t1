@@ -148,6 +148,13 @@ class Settings(BaseSettings):
             "отзыв доступа на GitHub виден с этой задержкой"
         ),
     )
+    # Потолок диффа прогона: тело читается потоком и обрывается на лимите,
+    # больший дифф не ревьюится — прогон `failed` с `DIFF_TOO_LARGE` (#144).
+    diff_max_bytes: int = Field(
+        default=5_242_880,
+        gt=0,
+        description="Больший unified diff PR не дочитывается и не ревьюится",
+    )
     ast_max_files: int = Field(
         default=20,
         gt=0,

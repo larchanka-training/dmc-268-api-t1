@@ -28,13 +28,18 @@ CHECK_RUN_NAME = "dmc-268-ai-review"
 
 class VcsGateway(Protocol):
     def fetch_diff(
-        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
+        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
     ) -> str:
         """Unified diff пары коммитов base...head как есть, строкой.
 
         Пара SHA берётся из сообщения задачи, а не актуальный head `/pulls/{n}`:
         между доставкой вебхука и обработкой мог прийти `synchronize` — воркер
         обязан ревьюить тот коммит, для которого создан прогон.
+
+        Размер диффа задаёт автор PR, поэтому лимит `max_bytes` соблюдается во
+        время загрузки: тело больше лимита не дочитывается —
+        `VcsFileTooLargeError`. Достаёт дифф только воркер; приём вебхука его не
+        запрашивает.
         """
         ...
 
