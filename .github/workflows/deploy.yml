@@ -121,6 +121,10 @@ jobs:
     # Но не раньше, чем воркер доработает сообщение: при пересоздании apply ждёт
     # его до destroy_grace_seconds — до 41 мин (local.worker_stop_seconds в
     # infra/main.tf); job, убитый посреди apply, оставил бы блокировку висеть.
+    # После apply — до 5 мин на шаг «реплика получает поток» (первая сборка
+    # реплики копирует базу целиком). Худший случай ≈ 41 + init и apply +
+    # минута /health + 1,5 мин воркера + 5 ≈ 50 мин: запас в 60 есть, но
+    # растёт грейс воркера или ожидание реплики — пересчитать здесь.
     timeout-minutes: 60
     # packages: read обязателен — образ тянется из приватного пакета, и его
     # забирает docker-провайдер тем же GITHUB_TOKEN. Без него реестр отвечает
@@ -197,6 +201,7 @@ jobs:
           TF_VAR_api_image: ${{ needs.image.outputs.image }}
           TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
           TF_VAR_rabbitmq_password: ${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}
+          TF_VAR_postgres_replication_password: ${{ secrets.PG_REPLICATION_PASSWORD_DMC268_T1 }}
           TF_VAR_github_webhook_secret: ${{ secrets.WEBHOOK_SECRET_DMC268_T1 }}
           TF_VAR_github_app_id: ${{ vars.APP_ID_DMC268_T1 }}
           TF_VAR_github_app_private_key: ${{ secrets.APP_PRIVATE_KEY_DMC268_T1 }}
@@ -215,14 +220,14 @@ jobs:
           # Наружу не смотрит ничего из этого стека: снаружи API доступен через
           # `/api/` на публичном входе интерфейса, который ходит к нему по
           # внутренней docker-сети. Порт остаётся на петле — от неё зависят
-          # туннельная проверка живости и отладка.
+          # туннельная проверка живости и отладка. База и брокер портов на
+          # хосте не публикуют вовсе: они только во внутренней сети стека.
           export TF_VAR_docker_host="ssh://${SSH_USER}@${HOST}"
           export TF_VAR_service_host="$HOST"
           # Интерфейс отдаётся по HTTPS на тот же адрес (public_tls в dmc-268-ui-t1),
           # и API приходят его запросы: с этим origin сверяется Origin.
           export TF_VAR_public_origin="https://$HOST"
           export TF_VAR_bind_ip="127.0.0.1"
-          export TF_VAR_internal_bind_ip="127.0.0.1"
 
           tofu init -input=false -no-color
 
@@ -341,6 +346,51 @@ jobs:
 
           echo "::error::воркер не проработал ${hold} с без рестартов за полторы минуты"
           ssh -o BatchMode=yes "$SSH_USER@$HOST" "docker logs --tail 50 dmc268-worker 2>&1" || true
+          exit 1
+
+      # Реплика, которая запущена, но не получает поток, внешне неотличима от
+      # рабочей: контейнер жив, на запросы отвечает. Поэтому проверяем со
+      # стороны основного сервера — слот активен, и держит его именно реплика
+      # (application_name dmc268_replica), а не pg_basebackup первой сборки,
+      # у которого свой walsender в том же состоянии streaming.
+      # Первая сборка на пустом томе копирует базу целиком, отсюда пять минут.
+      # Пользователь и база — из окружения контейнера, запрос — через stdin:
+      # так в командной строке нет ни кавычек запроса, ни захардкоженных имён.
+      - name: Проверить, что реплика получает поток
+        env:
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -uo pipefail
+          query="select r.state from pg_stat_replication r join pg_replication_slots s on s.active_pid = r.pid where s.slot_name = 'dmc268_replica' and r.application_name = 'dmc268_replica'"
+          remote="docker exec -i dmc268-postgres sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -XtA'"
+          # Реплика, потерявшая поток между деплоями (например, слот потерян по
+          # max_slot_wal_keep_size), — unhealthy, но Docker такие контейнеры не
+          # перезапускает. Перезапуск даёт entrypoint пересобрать её; на другом
+          # кластере основного сервера она остановится, ничего не стерев.
+          health="$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" \
+            "docker inspect -f '{{.State.Health.Status}}' dmc268-postgres-replica" 2>/dev/null)"
+          if [ "$health" = "unhealthy" ]; then
+            echo "::warning::реплика unhealthy до проверки — перезапускаю"
+            ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" "docker restart dmc268-postgres-replica" >/dev/null
+          fi
+
+          state=""
+          deadline=$(( $(date +%s) + 300 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            state="$(printf '%s\n' "$query" \
+              | ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" "$remote" 2>/dev/null \
+              | tr -d '[:space:]')"
+            if [ "$state" = "streaming" ]; then
+              echo "реплика получает поток"
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "::error::реплика не перешла в streaming за пять минут (состояние: '${state:-нет соединения}')"
+          ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" \
+            "docker logs --tail 50 dmc268-postgres-replica 2>&1; echo '--- настройка репликации ---'; docker logs --tail 30 dmc268-replication-setup 2>&1" || true
           exit 1
 
       - name: Записать результат в summary

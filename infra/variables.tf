@@ -17,20 +17,6 @@ variable "bind_ip" {
   }
 }
 
-variable "internal_bind_ip" {
-  type        = string
-  description = "Interface to publish PostgreSQL and RabbitMQ on the host (keep 127.0.0.1 unless you need local tools only)."
-  default     = "127.0.0.1"
-
-  # Спека backend-delivery: порты PostgreSQL и RabbitMQ не выходят за пределы
-  # сервера. Гарантирует это только петля; ловим ошибку на plan, пока на сервере
-  # ничего не изменилось.
-  validation {
-    condition     = can(regex("^127\\.", var.internal_bind_ip)) || var.internal_bind_ip == "::1"
-    error_message = "internal_bind_ip должен быть адресом петли (127.0.0.0/8 или ::1): иначе порты PostgreSQL и RabbitMQ окажутся доступны снаружи."
-  }
-}
-
 variable "service_host" {
   type        = string
   description = "Hostname or IP clients use in connection URLs (must be reachable, not 0.0.0.0)."
@@ -61,10 +47,35 @@ variable "postgres_db" {
   default     = "dmc268"
 }
 
-variable "postgres_port" {
+variable "postgres_replication_password" {
+  type        = string
+  description = "Пароль роли replicator, под которой реплика забирает поток с основного сервера. Не коммитить."
+  sensitive   = true
+
+  # Пустой пароль сделал бы роль без входа, и реплика молча не собралась бы:
+  # ловим на plan, пока на сервере ничего не изменилось.
+  validation {
+    condition     = length(var.postgres_replication_password) >= 16
+    error_message = "postgres_replication_password обязателен и не короче 16 символов."
+  }
+}
+
+variable "postgres_max_slot_wal_keep_size" {
+  type        = string
+  description = "Сколько WAL основной сервер держит для отставшей реплики (max_slot_wal_keep_size). Потолок защищает диск от упавшей реплики."
+  default     = "2GB"
+}
+
+variable "postgres_replica_memory" {
   type        = number
-  description = "Host port for PostgreSQL."
-  default     = 5432
+  description = "Потолок памяти реплики, МБ."
+  default     = 512
+}
+
+variable "backup_keep_days" {
+  type        = number
+  description = "Сколько дней хранить резервные копии базы."
+  default     = 7
 }
 
 variable "rabbitmq_user" {
@@ -77,12 +88,6 @@ variable "rabbitmq_password" {
   type        = string
   description = "RabbitMQ password. Do not commit real values."
   sensitive   = true
-}
-
-variable "rabbitmq_port" {
-  type        = number
-  description = "Host port for AMQP."
-  default     = 5672
 }
 
 variable "github_app_id" {
@@ -112,7 +117,7 @@ variable "llm_backend" {
 
 variable "ollama_base_url" {
   type        = string
-  description = "Адрес Ollama в сети стека (OLLAMA_BASE_URL)."
+  description = "Адрес Ollama (OLLAMA_BASE_URL). Контейнер Ollama подключается к сети dmc268-backend — воркер ходит к нему оттуда; к dmc268-egress — только если Ollama сама скачивает модели."
   default     = "http://dmc268-ollama:11434"
 }
 
