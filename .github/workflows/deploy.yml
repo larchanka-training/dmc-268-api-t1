@@ -154,6 +154,28 @@ jobs:
           cred_pass_var: RUSTFS_SECRET_KEY
           bucket: dmc268-tfstate
 
+      # Доходят ли вебхуки GitHub до стенда — по логам контейнеров, которые
+      # сейчас заменит выкат: у новых контейнеров логи пустые, поэтому шаг стоит
+      # до применения. Только числа: лог Actions видят все, кто читает
+      # репозиторий, — строк запросов и текстов ошибок здесь нет. Нет доставок —
+      # смотреть GitHub App, `401` — секрет вебхука, `202` при пустом стенде —
+      # воркер. Диагностика, а не выкат: неудача шаг не роняет.
+      # Подключение готовит шаг s3-backend выше.
+      - name: Доставки вебхука и сбои воркера с прошлого выката
+        continue-on-error: true
+        env:
+          SSH_USER: ${{ secrets.VPS_DMC268_U }}
+          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+        run: |
+          set -uo pipefail
+          ssh -o BatchMode=yes "$SSH_USER@$HOST" sh -s <<'EOF'
+          echo "Доставки POST /api/v1/webhooks/github по кодам ответа (пусто — доставок не было):"
+          docker logs dmc268-api 2>&1 | grep -F 'POST /api/v1/webhooks/github' \
+            | grep -oE '" [0-9]{3}' | tr -d '" ' | sort | uniq -c
+          echo "Строк воркера с ERROR или Traceback: $(docker logs dmc268-worker 2>&1 | grep -cE 'ERROR|Traceback')"
+          echo "Контейнеры живут с: $(docker inspect -f '{{.Name}} {{.State.StartedAt}}' dmc268-api dmc268-worker 2>/dev/null | tr '\n' ' ')"
+          EOF
+
       - name: Применить конфигурацию
         id: apply
         working-directory: infra
