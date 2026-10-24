@@ -276,6 +276,51 @@ App нужно разрешение **Contents: read**. Без него прог
 лимиты сборки контекста (`CONTEXT_MAX_TOKENS`, `RULES_MAX_BYTES`,
 `AST_MAX_FILES`, …) — в [`app/config.py`](app/config.py).
 
+## Merge gate
+
+После публикации ревью бот ставит на `head_sha` check run `dmc-268-ai-review`: `failure`,
+пока открыт тред с замечанием `critical`, иначе `success`. Когда тред закрывают, бот
+пересчитывает проверку сразу, нового пуша не нужно. Для этого App нужно разрешение
+**Checks: write** и подписка на событие `pull_request_review_thread`. Мердж блокирует только обязательная проверка, и делать её
+обязательной надо **с источником — нашим App**. Проверку «по имени» закрывает любой check run
+с тем же именем, например из workflow автора PR с `checks: write`, и любой commit status от
+того, у кого есть право записи. С источником GitHub не даст смёржить, если статус выставил
+кто-то другой.
+
+В интерфейсе: Settings → Rules → Rulesets → New branch ruleset → Require status checks
+to pass → Add checks → `dmc-268-ai-review`, источник — наш App вместо «Any source». App
+появляется в списке источников, только когда он недавно ставил check run в этом
+репозитории: сначала прогоните ревью на любом PR. Через API источник задаёт
+`integration_id` — id App (переменная репозитория `APP_ID_DMC268_T1`, у нас `5262828`):
+
+```bash
+gh api -X POST repos/<owner>/<repo>/rulesets --input - <<'EOF'
+{
+  "name": "Merge gate ревью-бота",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+  "rules": [{
+    "type": "required_status_checks",
+    "parameters": {
+      "strict_required_status_checks_policy": false,
+      "required_status_checks": [
+        {"context": "dmc-268-ai-review", "integration_id": 5262828}
+      ]
+    }
+  }]
+}
+EOF
+```
+
+Обязательную проверку проходят `success`, `neutral` и `skipped`, блокируют `failure` и
+`action_required`. Наш бот ставит только `success` и `failure`.
+
+Проверено на практике (2026-10-24, временный ruleset в этом репозитории): `success` с тем же
+именем от пользователя проверку с источником не закрывает, `success` от нужного App —
+закрывает. Но `failure` с тем же именем от любого, у кого есть право записи, мердж
+блокирует: обойти gate так нельзя, придержать — можно.
+
 ## Модель
 
 Воркер обращается к модели через адаптер, который выбирает `LLM_BACKEND`; без этой переменной воркер не стартует.
