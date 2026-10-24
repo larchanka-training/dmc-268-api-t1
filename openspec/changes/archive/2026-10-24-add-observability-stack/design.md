@@ -82,7 +82,8 @@ SQL-спаны и ERROR на отключение клиента, чувстви
 
 ### 3. Метрики: SDK `MeterProvider` рядом с трейсами
 
-`configure_tracing` (получит имя `configure_telemetry`, прежнее останется вызовом) ставит глобальный
+`configure_telemetry` (бывший `configure_tracing`; прежнее имя при ревью PR #130 удалено — вызовы
+обновлены) ставит глобальный
 `MeterProvider`; экспорт гейтит `OTEL_METRICS_EXPORTER` — тот же список через запятую, что у
 `OTEL_TRACES_EXPORTER`: `none` по умолчанию, поддержаны `otlp` и `console`, мусорное значение — одно
 предупреждение при старте. Без гейта SDK сам ставит `otlp` и стучался бы в localhost:4318, поэтому
@@ -97,16 +98,22 @@ SQL-спаны и ERROR на отключение клиента, чувстви
 `lint-imports` уже стоит): длительность и исходы этапов — адаптер рядом с `OtelStageTracer`
 (счётчик `review_runs_total{status}`, гистограмма `review_stage_duration{stage}`); токены и
 стоимость — адаптер LLM-шлюза, где usage уже есть; страж «данные продукта — из базы» не меняется.
-RabbitMQ — плагин `rabbitmq_prometheus` (порт 15692), Postgres — контейнер
-`prometheus-community/postgres-exporter`: оба настраиваются в compose и `infra/`, кода не касаются.
+RabbitMQ — плагин `rabbitmq_prometheus` (порт 15692). Метрики базы снимает сам коллектор
+receiver-ом `postgresql` — отдельного контейнера postgres-exporter нет (возврат к решению #89,
+закреплено ревью PR #130): один конвейер метрик без лишнего контейнера, у коллектора роль
+только-чтение `dmc268_monitor` с привилегией `pg_monitor` (создаёт миграция 0011), тяжёлые запросы
+— из `pg_stat_statements`. Экономия памяти тут не главный аргумент — главный один конвейер и
+минимальные права на базу.
 
 ### 4. Коллектор: конфиг в репозитории, один на локальный стек и стенд
 
 Каталог `infra/observability/` с конфигами: `otelcol.yaml` (receivers: `otlp` grpc/http, `file_log`
-с `json_parser` и блоками `trace: {}`, `severity`; processors: `memory_limiter`, `batch`,
-`transform` для редакции; exporters: Loki, Tempo — `otlphttp`, Prometheus — exporter-порт),
-`loki.yaml`, `tempo.yaml`, `prometheus.yml`, provisioning Grafana (datasources с переходом лог ↔
-трейс по `trace_id`). Образы фиксируются тегами; `otel/opentelemetry-collector-contrib` — beta для
+с `json_parser` и блоками `trace: {}`, `severity`, `postgresql`; processors: `memory_limiter`,
+`batch`, `filter` чужих сервисов, `transform` для редакции трейсов и логов; exporters: Loki, Tempo
+— `otlphttp`, Prometheus — exporter-порт), `loki.yaml`, `tempo.yaml`, `prometheus.yml`,
+provisioning Grafana (datasources с переходом лог ↔ трейс по `trace_id`, дашборд «Обзор dmc-268»
+с панелями по бизнес-сигналам из решения 3 и по node_exporter/cAdvisor). Образы фиксируются
+дайджестами манифест-листов (`имя@sha256:…`); `otel/opentelemetry-collector-contrib` — beta для
 `file_log`, поэтому при обновлении образа читаются breaking changes.
 
 - **Редакция (второй рубеж после SDK)** — OTTL-правила `transform`: `url.query`/`url.full` httpx-спанов,
@@ -117,8 +124,9 @@ RabbitMQ — плагин `rabbitmq_prometheus` (порт 15692), Postgres — �
 - **Логи из stdout**: `file_log` читает лог-файлы контейнеров API, воркера и `migrate` (docker
   logging driver `json-file`); различия путей между хостом локального стека и стенда — переменные
   запуска коллектора, не разные конфиги.
-- **Compose**: пять сервисов под профилем `observability` (поднял — получил стек локально; без
-  профиля — стек не мешает тем, кто его не просил), `infra/` — те же конфиги через
+- **Compose**: семь сервисов под профилем `observability` — коллектор, Loki, Tempo, Prometheus,
+  Grafana, node_exporter (сервер: CPU, память, диски) и cAdvisor (контейнеры) — поднял, получил
+  стек локально; без профиля стек не мешает тем, кто его не просил. `infra/` — те же конфиги через
   `docker_container` в существующей сети. Grafana локально — без логина, на стенде — учётка из
   переменных (остаётся DevOps).
 
@@ -151,6 +159,53 @@ httpx, — отдельный span-процессор дублировал бы 
   `instrument_engine( engine)` — SQL-миграции детьми, `shutdown_tracing()` в конце. Без
   `OTEL_TRACES_EXPORTER` поведение миграций не меняется.
 
+### 7. Правки ревью PR #130
+
+Решения, изменившиеся или уточнившиеся при ревью; всё остальное выше — как было задумано.
+
+- **Логи httpx/httpcore — на WARNING.** Root-логгер на INFO сливал URL исходящих запросов
+  (имя приватного репозитория, пути файлов); в `configure_logging` логгеры `httpx` и `httpcore`
+  переводятся на WARNING.
+- **Редакция логов в коллекторе.** `transform/redact-logs` (`log_statements`): атрибуты
+  `exception.stacktrace`/`exception.message` записи — маркером, тело записи, несущей исключение,
+  — целиком; тело записи — текст `message` (оператор `move`), `color_message` uvicorn удаляется
+  `delete_key` (тихо пропускает отсутствие ключа).
+- **Фильтр логов по `service.name`.** Коллектор читает `*-json.log` всех контейнеров хоста и
+  остаётся под root — иначе лог-файлы Docker не прочитать; чужие JSON-логи отсекает
+  `filter/foreign-services` по `service.name` ∈ {dmc-268-api, dmc-268-worker, dmc-268-migrate}
+  (у OTLP-логов имя в ресурсе — условие покрывает оба случая).
+- **Переход лог → трейс — по structured metadata.** `trace_id` уже лежит в structured metadata
+  Loki (блок `trace: {}` в `json_parser`), derived field берёт его лейблом (`matcherType: label`):
+  старый регэксп по телу не совпадал из-за пробела после двоеточия в `json.dumps`.
+- **Счётчик соединений — снимок пула.** Событийный счётчик contrib (`db.client.connections.usage`)
+  пропускает события внутри `untraced()` и дрейфует; вместо него `instrument_pool` снимает
+  `checkedout`/`checkedin` observable-колбэками (`db.client.connection.count` + gauge
+  `db.client.connection.max`), а contrib-счётчик гасится `View(DropAggregation)` — передать
+  `None` в `EngineTracer` нельзя, его листенеры зовут `.add`.
+- **Счётчик прогонов — на терминальном переходе.** Порт `RunOutcomeRecorder` (Protocol + noop
+  в `app/application/ports`) получают `run_review` и `sweep_stale_runs`; запись делает тот, кто
+  перевёл прогон в терминальный статус, — повторная доставка терминального прогона и сообщение
+  без прогона счётчик не трогают. Из `build_review_handler` запись убрана.
+- **`review_run_id` в логах — через ContextVar.** Фильтр хендлера берёт идентификатор из
+  контекста (`review_run_context` в `logging.py`), контекст ставит `handle()` воркера вокруг
+  `run_review`; из текстов сообщений идентификатор убран, sweep-путь несёт его `extra`.
+- **Бакеты гистограмм — через View.** `review_stage_duration` и `review_llm_call_duration`
+  (новая — latency каждого логического вызова модели, пишет `MeteredLlmGateway`) получают
+  `ExplicitBucketHistogramAggregation` [0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300] с:
+  на дефолтных миллисекундных бакетах `histogram_quantile` бесполезен.
+- **`resource_to_telemetry_conversion` у exporter prometheus.** Без неё `service.name` прячется
+  в `exported_job` и все ряды выглядят как `job="collector"`; с ней лейбл `job` = `service.name` —
+  ряды и алерты различают сервисы.
+- **Дашборд из репозитория.** Provider + JSON «Обзор dmc-268» в provisioning Grafana: RPS/5xx,
+  p50/p95 HTTP и вызова модели, очередь `review_jobs`, прогоны по статусам, этапы, соединения
+  приложения и базы, CPU/RAM/диски сервера и контейнеров; лейбл панелей — `job` = `service.name`.
+- **Query access-лога скрыт на всех путях.** `AccessQueryRedaction` (бывший
+  `AuthQueryRedaction`) режет query в access-логе без условия по префиксу: поисковые и фильтровые
+  query кабинета в логе не нужны нигде; в спанах скрытие остаётся на путях входа (`/api/v1/auth/`).
+- **Health-check — вне трейсинга.** Опция `exclude` встроенной телеметрии FastAPI исключает
+  `/health` целиком: спана нет, `X-Trace-ID` ответа — случайное значение без трейса.
+- **Метрики базы — receiver `postgresql`** вместо postgres-exporter (см. решение 3).
+
 ## Risks / Trade-offs
 
 - [EngineTracer — внутренний класс пакета] → уже принят в #92; риск не растёт: правки не касаются
@@ -161,7 +216,7 @@ httpx, — отдельный span-процессор дублировал бы 
 - [Редакция в коллекторе остаётся без unit-теста в Python] → тест конфига на примерах из аудита
   (#89): примеры спанов прогоняются через правила `transform` (OTTL применим в тесте) плюс валидация
   конфига самим коллектором при поднятии стека.
-- [Пять контейнеров стека на стенде — ресурсы VPS] → лимиты памяти в конфигах вынесены в
+- [Семь контейнеров стека на стенде — ресурсы VPS] → лимиты памяти в конфигах вынесены в
   переменные; прод-размеры — DevOps.
 - [Очередь `BatchSpanProcessor` (2048) при всплеске] → подавление SQL-спанов SSE убирает главный
   генератор; tail sampling — отдельное изменение, если объём вырастет.
@@ -178,8 +233,11 @@ httpx, — отдельный span-процессор дублировал бы 
 
 ## Open Questions
 
-- Точная версия тега образов стека (collector, Loki, Tempo, Prometheus, Grafana) — фиксируется при
-  реализации по актуальным релизам; на подход не влияет.
-- Место счётчика терминальных статусов прогона — решён: адаптер воркера (`build_review_handler`),
-  только он видит оба терминальных исхода — возврат пайплайна (`completed`) и его сбой (`failed`);
-  LLM-шлюз не видит ни одного: прогон может упасть без вызова модели.
+- CI-валидация конфигов стека (коллектор, Loki, Tempo) — вынесена в issue
+  [#140](https://github.com/larchanka-training/dmc-268-api-t1/issues/140): локально конфиг
+  коллектора валидирует тест под маркером `docker`, в CI он не гоняется, битый OTTL-стейтмент
+  доезжает до стенда.
+- Решено при реализации: версии образов зафиксированы дайджестами манифест-листов
+  (`имя@sha256:…`) в compose и `main.tf`; место счётчика терминальных статусов — терминальный
+  переход через порт `RunOutcomeRecorder` (см. решение 7), а не адаптер в
+  `build_review_handler`.

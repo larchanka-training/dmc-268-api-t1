@@ -404,10 +404,13 @@ def upgrade() -> None:
 - **Метрики** — тот же SDK с отдельным гейтом: `configure_telemetry` собирает
   `MeterProvider` с периодическим экспортом, включая его `OTEL_METRICS_EXPORTER`
   — тот же список, `none` по умолчанию. HTTP-метрики даёт встроенная телеметрия
-  FastAPI, ручки `/metrics` нет — Prometheus собирает их через коллектор.
-  Ручные — только сигналы алертов: `review_runs_total{status}` и
-  `review_stage_duration{stage}`; токены LLM — в адаптере шлюза, где известен
-  usage (`review_llm_tokens`); стоимость — отдельное изменение (#119).
+  FastAPI, ручки `/metrics` нет — Prometheus собирает их через коллектор, а
+  `resource_to_telemetry_conversion` делает лейбл `job` равным `service.name`.
+  Ручные — только сигналы алертов: прогоны по статусам (`review_runs_total{status}`),
+  длительность этапов и вызова модели (`review_stage_duration{stage}`,
+  `review_llm_call_duration`), токены LLM — в адаптере шлюза, где известен
+  usage (`review_llm_tokens`), пул соединений — снимками состояния
+  (`db.client.connection.*`); стоимость — отдельное изменение (#119).
   «Во что обошёлся прогон» остаётся SQL по колонкам `review_runs`: метрики —
   для алертов, не для отчётов.
 - **Логи** — JSON в stdout. `configure_logging(service_name)` ставит один
@@ -418,15 +421,22 @@ def upgrade() -> None:
   кладёт стектрейс в ту же запись, дубль uvicorn «Exception in ASGI
   application» отсекается: на `500` в логе ровно одна запись, и её `trace_id`
   равен `X-Trace-ID` ответа. Дальше запись уносит `file_log` коллектора — он
-  дочитывает stdout контейнеров и шлёт распарсенный JSON в Loki, в Grafana от
-  записи лога к трейсу ведёт переход по `trace_id`.
-- **Стек** — пять контейнеров (коллектор, Loki, Tempo, Prometheus, Grafana) с
+  дочитывает stdout контейнеров, шлёт распарсенный JSON в Loki, и в Grafana от
+  записи лога к трейсу ведёт переход по `trace_id` (derived field по structured
+  metadata). По пути коллектор пускает в Loki только логи наших сервисов
+  (записи без нашего `service.name` дропаются) и редактирует записи с
+  исключениями: стектрейс, текст и тело такой записи заменяются маркером
+  `<скрыто>`.
+- **Стек** — семь контейнеров (коллектор, Loki, Tempo, Prometheus, Grafana,
+  node_exporter за сервер и cAdvisor за контейнеры) с
   одними конфигами локально и на стенде: конфиги лежат в
   `infra/observability/`, локально их монтирует профиль `observability` в
-  compose, на стенде те же файлы собирает `infra/` (Terraform). На входе
-  трейсов коллектор редактирует чувствительные данные — query URL, значения
-  `db.*`, тексты и стектрейсы исключений заменяются маркером `<скрыто>`,
-  атрибут остаётся; проверка — `tests/infrastructure/test_collector_redaction.py`.
+  compose, на стенде те же файлы собирает `infra/` (Terraform). Метрики базы
+  снимает сам коллектор receiver-ом `postgresql` — отдельного экспортёра нет,
+  роль только-чтение `dmc268_monitor` с `pg_monitor` создаёт миграция 0011.
+  На входе трейсов и логов коллектор редактирует чувствительные данные — query
+  URL, значения `db.*`, тексты и стектрейсы исключений заменяются маркером
+  `<скрыто>`, атрибут остаётся; проверка — `tests/infrastructure/test_collector_redaction.py`.
   Разворачивание стенда — по готовности DevOps; для включения экспорта сервису
   нужен только `OTEL_EXPORTER_OTLP_ENDPOINT`, код при этом не меняется.
 - **Атрибуты** SQL и httpx — стабильные имена semconv:
@@ -521,9 +531,9 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 попадает (`Secret`), удаляется вместе с сессией. Утечка базы без ключа токенов не даёт;
 утечка ключа и базы вместе даёт токены живых сессий с правами пользователя в пределах
 разрешений приложения. Access-лог uvicorn
-пишет путь с query, а в query callback'а лежат `code` и `state`, поэтому
-`app/api/log_redaction.py` вырезает query на путях `/api/v1/auth/`; в серверном спане
-запроса тот же query скрывает `QueryRedaction` из `app/infrastructure/telemetry.py`. CSRF держат
+пишет путь с query, а там бывают `code` и `state` callback'а входа и поисковые query
+кабинета, поэтому `app/api/log_redaction.py` вырезает query на любом пути; в серверном спане
+запроса query путей входа скрывает `QueryRedaction` из `app/infrastructure/telemetry.py`. CSRF держат
 `SameSite=Lax` и проверка `Origin`. Обоснование — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
 
 **Область действия учётных данных.** Для публикации комментариев нужен доступ

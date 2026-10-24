@@ -51,7 +51,8 @@
 
 ## 4. Метрики — OTel SDK в Prometheus
 
-- [x] 4.1 `configure_telemetry` (переименование `configure_tracing`, точки вызова те же):
+- [x] 4.1 `configure_telemetry` (переименование `configure_tracing`, точки вызова те же; прежнее
+  имя при ревью PR #130 удалено — вызовы обновлены):
   глобальный `MeterProvider` с `PeriodicExportingMetricReader(OTLPMetricExporter())`; экспорт
   гейтит `OTEL_METRICS_EXPORTER` — тот же список через запятую, что у трейсов (`none` по
   умолчанию, `otlp` и `console`, мусор — одно предупреждение). Тест: запросы в API дают
@@ -72,9 +73,10 @@
 ## 6. Коллектор и стек — одинаково локально и на проде
 
 - [x] 6.1 Каталог `infra/observability/`: `otelcol.yaml` (приём OTLP, `file_log` с `json_parser`
-  `trace: {}` `severity`, `memory_limiter`, `batch`, `transform`), конфиги Loki, Tempo, Prometheus,
-  provisioning Grafana; версии образов зафиксированы. Проверка: `docker compose --profile
-  observability up` поднимает пять контейнеров, коллектор стартует без ошибок конфига
+  `trace: {}` `severity`, `postgresql`, `memory_limiter`, `batch`, `filter` чужих сервисов,
+  `transform`), конфиги Loki, Tempo, Prometheus,
+  provisioning Grafana; версии образов зафиксированы дайджестами. Проверка: `docker compose
+  --profile observability up` поднимает семь контейнеров, коллектор стартует без ошибок конфига
 - [x] 6.2 OTTL-правила редакции: `url.query`/`url.full` httpx, значения `db.*` и description
   статуса SQL-спанов, message и stacktrace события `exception` на спанах обработки — маркер
   `<скрыто>`, атрибут остаётся. Тест на примерах из аудита #89 (DETAIL psycopg с ключами, текст
@@ -86,8 +88,9 @@
   c `service.version` и `deployment.environment.name=local`), плагин `rabbitmq_prometheus` у
   локального RabbitMQ. Проверка: локальный прогон ревью виден в Grafana целиком — лог, трейс,
   метрики
-- [x] 6.5 `infra/` (Terraform): ресурсы пяти контейнеров стека в существующей сети с теми же
-  конфигами из `infra/observability/`, `postgres-exporter`, переменные стека (ресурсы, хранение,
+- [x] 6.5 `infra/` (Terraform): ресурсы семи контейнеров стека в существующей сети с теми же
+  конфигами из `infra/observability/`, метрики базы — receiver `postgresql` коллектора вместо
+  postgres-exporter, node_exporter и cAdvisor, переменные стека (ресурсы, хранение,
   доступ Grafana); `service.version` — sha образа в выводах сборки. Проверка: `tofu plan` без
   изменений вне стека; применение на стенд — по готовности DevOps
 

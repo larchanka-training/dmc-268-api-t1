@@ -144,7 +144,7 @@ forbidden-контракте import-linter, layout обменов задаёт `
 | Изменяющий запрос без `Origin` или с чужим | `403 ORIGIN_FORBIDDEN`, сессия цела |
 | Вебхук без сессии и `Origin` | проверка подписи, а не сессии |
 | Значение cookie | в базе только SHA-256, самого значения нет |
-| Логи | ни `code`, ни значения cookie, ни `Set-Cookie`; access-лог без query на `/api/v1/auth/` |
+| Логи | ни `code`, ни значения cookie, ни `Set-Cookie`; access-лог без query на любом пути |
 | Поток SSE после выхода | закрыт не позже чем через 5 с и один круг опроса (≈1 с) без события, повторное подключение — `401` |
 
 ### 3.3 Контрактные [целевое]
@@ -204,7 +204,7 @@ p95 длительности на MR ≈300 строк и деградация �
 | Проверка | Где |
 |---|---|
 | Поля JSON-лога по модели OTel: `timestamp`, `severity`, `message`, `service.name`, атрибуты из `extra` верхним уровнем; запись внутри спана несёт его `trace_id`/`span_id` и `review_run_id` из `extra`, вне спана — без trace-полей и не теряется; дубль uvicorn отсечён, остальные записи проходят | `tests/infrastructure/test_logging.py` |
-| Запретный список в логах: нет тел запросов к модели, кода из диффа, токенов доступа, query путей входа — на примерах вызова модели, ответа GitHub и callback входа | `tests/infrastructure/test_logging.py` |
+| Запретный список в логах: нет тел запросов к модели, кода из диффа, токенов доступа, query любого пути (access-лог скрыт и на `/reviews`, и на входе), URL httpx — на примерах вызова модели, ответа GitHub и callback входа | `tests/infrastructure/test_logging.py` |
 | `500` под настоящим uvicorn: stdout — только JSON, ровно одна запись со стектрейсом, её `trace_id` равен `X-Trace-ID` ответа | `tests/api/test_internal_error_logging.py` |
 | SSE-трейс: «десять минут» просмотра добавляют ноль SQL-спанов, спан потока один; отключение клиента до терминального статуса закрывает спан без ошибки | `tests/test_events_api.py` |
 | Признак повторной доставки — всегда булев атрибут `messaging.rabbitmq.message.redelivered`, попытки различимы при любом значении | `tests/infrastructure/test_telemetry.py` |
