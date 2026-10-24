@@ -14,7 +14,9 @@
 (semconv исключений), не вклейкой в текст.
 
 Бизнес-контекст (например `review_run_id`) прикладной код передаёт через
-`extra={...}` — теми же именами, что у атрибутов спанов; сам код знает только
+`extra={...}` или через `review_run_id_scope` — контекст, который фильтр
+хендлера кладёт в записи сам (обработчик воркера ставит его на всё
+сообщение). Имена — те же, что у атрибутов спанов; сам код знает только
 `logging.getLogger(__name__)`, никаких обёрток.
 
 Дубль uvicorn «Exception in ASGI application» (сервер пишет его после ответа
@@ -28,11 +30,14 @@ Stable — перейти на `LoggingHandler` из `opentelemetry-instrumentat
 (пакет уже в зависимостях) и убрать сбор логов из stdout.
 """
 
+import contextvars
 import json
 import logging
 import sys
 import traceback
 import typing
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -47,6 +52,52 @@ SPAN_ID = "span_id"
 TRACE_FLAGS = "trace_flags"
 SERVICE_NAME = "service.name"
 STACKTRACE = "exception.stacktrace"
+
+# Имя атрибута бизнес-контекста — то же, что у атрибута спанов (`REVIEW_RUN_ID`
+# в `app/infrastructure/telemetry.py`): одна сущность — одно имя везде (правило
+# «Трассировка»). Константа локальная, а не импорт: настройке логов связь с
+# телеметрией импортом не нужна — имя фиксирует правило спеки.
+REVIEW_RUN_ID = "review_run_id"
+
+# Контекст обрабатываемого сообщения: ставит обработчик воркера
+# (`review_run_id_scope`), читает фильтр хендлера в момент записи — у записи
+# того потока и задачи, где её написали.
+_review_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "review_run_id", default=None
+)
+
+
+@contextmanager
+def review_run_id_scope(review_run_id: str | None) -> Iterator[None]:
+    """Задать `review_run_id` записям лога внутри блока.
+
+    Контекст протягивается вглубь вызовов без правки их сигнатур: всё, что
+    пайплайн пишет во время обработки сообщения, уходит с атрибутом прогона и
+    ищется в Loki по полю, а не по тексту. Выход из блока возвращает прежний
+    контекст (токен `ContextVar`), поэтому вложенность и повторный вход
+    безопасны.
+    """
+    token = _review_run_id.set(review_run_id)
+    try:
+        yield
+    finally:
+        _review_run_id.reset(token)
+
+
+class ReviewRunIdFilter(logging.Filter):
+    """Кладёт `review_run_id` из контекста в запись; вне контекста поля нет.
+
+    Стоит на хендлере рядом с `TraceContextFilter`: бизнес-контекст — атрибут
+    записи теми же именами, что у атрибутов спанов, не строка в тексте
+    сообщения (правило «Логи»). Запись вне контекста уходит без поля и не
+    теряется.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        value = _review_run_id.get()
+        if value is not None:
+            setattr(record, REVIEW_RUN_ID, value)
+        return True
 
 # Запись uvicorn о необработанном исключении; завершающий перевод строки —
 # часть сообщения (uvicorn пишет «Exception in ASGI application\n»).
@@ -84,6 +135,13 @@ _RESERVED = frozenset(
 
 # Логгеры uvicorn и его сообщение о исключении в ASGI-приложении.
 UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+# Логгеры HTTP-клиентов: на INFO httpx пишет «HTTP Request: <метод> <URL>»
+# о каждом исходящем запросе — имя приватного репозитория, пути файлов и
+# токены в query уходили бы в лог открытым текстом (замечание ревью
+# PR #130); httpcore на DEBUG пишет хосты и пути соединений. WARNING
+# оставляет клиентам записи о настоящих сбоях.
+HTTP_CLIENT_LOGGERS = ("httpx", "httpcore")
 
 
 def _rfc3339(seconds: float) -> str:
@@ -147,7 +205,7 @@ class TraceContextFilter(logging.Filter):
 class UvicornDuplicateFilter(logging.Filter):
     """Отсекает дубль uvicorn «Exception in ASGI application».
 
-    Тот же приём, что `AuthQueryRedaction` (`app/api/log_redaction.py`):
+    Тот же приём, что `AccessQueryRedaction` (`app/api/log_redaction.py`):
     фильтр на логгере uvicorn. Наш обработчик `500` уже записал исключение со
     стектрейсом и `trace_id` (`_internal_error_handler` в `app/api/errors.py`);
     запись uvicorn выходит после закрытия спана запроса и без `trace_id`.
@@ -188,6 +246,7 @@ _handler: logging.StreamHandler[typing.TextIO] | None = None
 def configure_logging(service_name: str) -> None:
     """Поставить на root единственный JSON-хендлер в stdout; uvicorn — туда же.
 
+    Логгеры HTTP-клиентов (`HTTP_CLIENT_LOGGERS`) переводятся на WARNING.
     Точки вызова — там же, где настраивается трассировка: фабрика приложения
     (`create_app`, до первого запроса), `run_worker` воркера и `alembic/env.py`
     (до `fileConfig`; он снимает все root-хендлеры, поэтому вызов повторяется
@@ -198,11 +257,15 @@ def configure_logging(service_name: str) -> None:
     if _handler is None:
         _handler = logging.StreamHandler(sys.stdout)
         _handler.addFilter(TraceContextFilter())
+        _handler.addFilter(ReviewRunIdFilter())
     _handler.setFormatter(JsonFormatter(service_name))
     if _handler not in root.handlers:
         root.addHandler(_handler)
     # INFO — рабочие события (ход прогона, access-лог uvicorn); DEBUG не включаем.
     root.setLevel(logging.INFO)
+    # setLevel идемпотентен: повторный вызов configure_logging не меняет уровень.
+    for name in HTTP_CLIENT_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
     for name in UVICORN_LOGGERS:
         # Свои хендлеры uvicorn (plain-текст) снимаем: записи уходят
         # propagate-ом на root, в stdout — только JSON.
