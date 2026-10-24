@@ -6,7 +6,6 @@
 """
 
 import contextlib
-import contextlib
 import logging
 from collections.abc import AsyncIterator, MutableMapping
 from typing import Any
