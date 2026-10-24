@@ -366,3 +366,16 @@ def test_github_unavailable_on_refresh_is_502_and_keeps_the_session() -> None:
     assert response.status_code == 502
     assert response.json()["code"] == "SCM_UNAVAILABLE"
     assert len(world.uow.sessions.stored) == 1
+
+
+def test_a_repeated_list_within_the_ttl_does_not_ask_github() -> None:
+    """Кабинет перезапрашивает список на события потока: в пределах TTL — без GitHub (#126)."""
+    world = World()
+    catalog = FakeInstallationCatalog([API, WEB])
+    client = _client(world, catalog)
+
+    first = client.get(PATH)
+    second = client.get(PATH, params={"status": "completed"})
+
+    assert first.status_code == second.status_code == 200
+    assert catalog.calls.count("list_repositories") == 1

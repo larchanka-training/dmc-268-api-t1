@@ -132,6 +132,14 @@ class Settings(BaseSettings):
         gt=0,
         description="Сколько живёт в CacheStore результат загрузки правил",
     )
+    visible_repositories_cache_ttl_seconds: int = Field(
+        default=30,
+        gt=0,
+        description=(
+            "Сколько живёт в CacheStore список репозиториев, видимых пользователю на GitHub; "
+            "отзыв доступа на GitHub виден с этой задержкой"
+        ),
+    )
     ast_max_files: int = Field(
         default=20,
         gt=0,

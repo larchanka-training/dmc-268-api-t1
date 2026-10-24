@@ -19,10 +19,10 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
-    get_installation_catalog,
     get_token_provider,
     get_unit_of_work,
     get_unit_of_work_factory,
+    get_visibility_catalog,
 )
 from app.api.errors import (
     ERRORS_403_ORIGIN,
@@ -344,7 +344,7 @@ class ReviewRunListQuery(BaseModel):
 def visible_run(
     review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
     signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> ReviewRun:
@@ -398,7 +398,7 @@ def create_review(body: CreateReviewRequest) -> ReviewJob:
 def list_reviews(
     query: Annotated[ReviewRunListQuery, Query()],
     signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> ReviewRunListResponse:

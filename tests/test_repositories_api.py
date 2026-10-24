@@ -575,3 +575,63 @@ def test_connecting_requires_a_session() -> None:
 
     assert response.status_code == 401
     assert response.json()["code"] == "UNAUTHENTICATED"
+
+
+# --- кэш видимых репозиториев (#126) ---------------------------------------------
+
+
+def _github_listings(catalog: FakeInstallationCatalog) -> int:
+    return catalog.calls.count("list_repositories")
+
+
+def test_a_repeated_list_within_the_ttl_does_not_ask_github() -> None:
+    catalog = FakeInstallationCatalog([API])
+    client = _client(FakeUnitOfWork(), catalog)
+
+    client.get("/api/v1/repositories")
+    client.get("/api/v1/repositories")
+
+    assert _github_listings(catalog) == 1
+
+
+def test_a_connected_repository_is_listed_at_once_without_waiting_for_the_ttl() -> None:
+    """Кэшируется только ответ GitHub, подключённые читаются из базы: подключённый виден сразу."""
+    catalog = FakeInstallationCatalog([API])
+    client = _client(FakeUnitOfWork(), catalog)
+    assert client.get("/api/v1/repositories").json()["items"] == []
+
+    assert _connect(client).status_code == 201
+    listed = client.get("/api/v1/repositories").json()["items"]
+
+    assert [item["full_name"] for item in listed] == [API.full_name]
+    assert _github_listings(catalog) == 1
+
+
+def test_the_connect_page_always_asks_github() -> None:
+    """Страница подключения мимо кэша: только что поставленное приложение видно сразу."""
+    catalog = FakeInstallationCatalog([API])
+    client = _client(FakeUnitOfWork(), catalog)
+
+    client.get("/api/v1/repositories")
+    client.get("/api/v1/repositories/available")
+    client.get("/api/v1/repositories/available")
+
+    assert _github_listings(catalog) == 3
+
+
+def test_a_repository_installed_within_the_ttl_is_listed_once_connected() -> None:
+    """Приложение поставили на новый репозиторий, пока кэш жив: страница подключения
+    пишет свежий ответ GitHub в кэш, и подключённый репозиторий виден сразу везде."""
+    catalog = FakeInstallationCatalog([])
+    client = _client(FakeUnitOfWork(), catalog)
+    assert client.get("/api/v1/repositories").json()["items"] == []
+
+    catalog._repositories.append(API)  # приложение поставили на GitHub
+    available = client.get("/api/v1/repositories/available").json()["items"]
+    connected = _connect(client)
+
+    assert [item["full_name"] for item in available] == [API.full_name]
+    assert connected.status_code == 201
+    listed = client.get("/api/v1/repositories").json()["items"]
+    assert [item["full_name"] for item in listed] == [API.full_name]
+    assert client.get(f"/api/v1/repositories/{connected.json()['id']}").status_code == 200

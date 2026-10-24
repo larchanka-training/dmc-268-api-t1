@@ -113,6 +113,7 @@ def test_context_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatc
         "rules_max_tokens",
         "rules_max_bytes",
         "rules_cache_ttl_seconds",
+        "visible_repositories_cache_ttl_seconds",
         "ast_max_files",
         "ast_max_file_bytes",
         "llm_context_window_tokens",

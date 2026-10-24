@@ -17,8 +17,10 @@ from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
     get_installation_catalog,
+    get_refreshing_catalog,
     get_token_provider,
     get_unit_of_work_factory,
+    get_visibility_catalog,
 )
 from app.api.errors import (
     ERRORS_403_ORIGIN_OR_MANAGE,
@@ -208,7 +210,7 @@ def _as_user[T](signed_in: SignedIn, oauth: OAuthProvider, call: Callable[[conne
 
 def available_repositories(
     signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    catalog: InstallationCatalog = Depends(get_refreshing_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> list[connecting.AvailableRepository]:
@@ -221,14 +223,15 @@ def available_repositories(
 
 def user_repositories(
     signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> list[InstallationRepository]:
-    """Те же репозитории без отметки подключённых — видимость прогонов в GET /reviews и GET /events.
+    """Те же репозитории без отметки подключённых — видимость прогонов и репозиториев.
 
-    Запрос к GitHub тот же, что у GET /repositories/available: правило видимости одно —
-    поменяется здесь, поменяется у всех.
+    Список тот же, что у GET /repositories/available, но из кэша в пределах TTL;
+    страница подключения пишет туда свежий. Правило видимости одно — поменяется
+    здесь, поменяется у всех.
     """
     now = datetime.now(UTC)
     return _as_user(signed_in, oauth, lambda user: connecting.list_user_repositories(catalog, uow_factory(), user, now))
@@ -351,7 +354,7 @@ def list_repositories(
     limit: Limit = DEFAULT_LIMIT,
     offset: Offset = 0,
     signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositoryListResponse:
@@ -508,7 +511,7 @@ class RulesStatusResponse(
 def get_repository(
     repository_id: RepositoryIdPath,
     signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositoryResponse:

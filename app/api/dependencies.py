@@ -40,6 +40,30 @@ def get_installation_catalog(container: Container = Depends(get_container)) -> I
     return container.installation_catalog()
 
 
+def get_visibility_catalog(
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    container: Container = Depends(get_container),
+) -> InstallationCatalog:
+    """Каталог с кэшем видимых репозиториев: видимость прогонов и репозиториев (#126).
+
+    Подключение берёт `get_installation_catalog` — без кэша, страница подключения —
+    `get_refreshing_catalog`.
+    """
+    return container.visibility_catalog(catalog)
+
+
+def get_refreshing_catalog(
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    container: Container = Depends(get_container),
+) -> InstallationCatalog:
+    """Каталог страницы подключения: всегда к GitHub, свежий ответ — в кэш видимости.
+
+    После установки приложения на GitHub новый репозиторий виден и на странице, и —
+    когда его подключат — в списке, прогонах и потоке, без ожидания TTL.
+    """
+    return container.visibility_catalog(catalog, read=False)
+
+
 def get_token_provider(container: Container = Depends(get_container)) -> OAuthProvider:
     """Провайдер, выдавший токен сессии, — обновляет и отзывает его: сессии кабинета — только GitHub."""
     provider = container.oauth_provider(Provider.GITHUB.value)
