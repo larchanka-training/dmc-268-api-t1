@@ -484,3 +484,75 @@ def test_unquoted_paths_with_trailing_tab_are_unchanged() -> None:
     diff = "diff --git a/with space.py b/with space.py\n--- a/with space.py\t\n+++ b/with space.py\t\n@@ -1 +1 @@\n-a\n+b\n"
     (parsed,) = parse_diff(diff)
     assert (parsed.file_path, parsed.old_path) == ("with space.py", None)
+
+
+# Git и GitHub делят дифф на строки только по `\n`. Остальные разделители
+# `str.splitlines()` — часть содержимого строки кода: они не сдвигают номера
+# строк и не превращают хвост строки в заголовок файла или hunk'а.
+FOREIGN_LINE_SEPARATORS = ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ", "\r"]
+
+
+def _one_file_diff(*body: str) -> str:
+    header = "diff --git a/app/x.py b/app/x.py\n--- a/app/x.py\n+++ b/app/x.py\n"
+    return header + "\n".join(body) + "\n"
+
+
+@pytest.mark.parametrize("separator", FOREIGN_LINE_SEPARATORS, ids=repr)
+def test_foreign_separator_inside_line_keeps_line_numbers(separator: str) -> None:
+    raw = _one_file_diff("@@ -1,2 +1,3 @@", " keep", f"+b{separator}c", "+d", " keep")
+
+    [parsed] = parse_diff(raw)
+
+    [hunk] = parsed.hunks
+    assert hunk.changed_new_lines == frozenset({2, 3})
+    assert hunk.text == f"@@ -1,2 +1,3 @@\n keep\n+b{separator}c\n+d\n keep"
+
+
+@pytest.mark.parametrize("separator", FOREIGN_LINE_SEPARATORS, ids=repr)
+def test_file_header_after_foreign_separator_is_not_a_file(separator: str) -> None:
+    raw = _one_file_diff("@@ -0,0 +1,2 @@", f"+y{separator}diff --git a/evil.py b/evil.py", "+z")
+
+    files = parse_diff(raw)
+
+    assert [f.file_path for f in files] == ["app/x.py"]
+    assert files[0].hunks[0].changed_new_lines == frozenset({1, 2})
+
+
+@pytest.mark.parametrize("separator", FOREIGN_LINE_SEPARATORS, ids=repr)
+def test_hunk_header_after_foreign_separator_is_not_a_hunk(separator: str) -> None:
+    raw = _one_file_diff("@@ -0,0 +1,2 @@", f"+z{separator}@@ -100 +100 @@", "+w")
+
+    [parsed] = parse_diff(raw)
+
+    [hunk] = parsed.hunks
+    assert (hunk.new_start, hunk.changed_new_lines) == (1, frozenset({1, 2}))
+
+
+def test_crlf_diff_parses_as_before() -> None:
+    # Ожидаемое снято с парсера до перехода на деление по `\n`: `\r` перед
+    # `\n` в строку не попадает — ни в заголовках, ни в теле hunk'а.
+    raw = (
+        "diff --git a/w.py b/w.py\r\n--- a/w.py\r\n+++ b/w.py\r\n"
+        "@@ -1,3 +1,3 @@\r\n keep\r\n-old\r\n+new\r\n keep\r\n"
+    )
+
+    assert parse_diff(raw) == [
+        ParsedFile(
+            file_path="w.py",
+            old_path=None,
+            is_binary=False,
+            is_deleted=False,
+            hunks=(
+                Hunk(
+                    file_path="w.py",
+                    old_start=1,
+                    old_count=3,
+                    new_start=1,
+                    new_count=3,
+                    changed_new_lines=frozenset({2}),
+                    changed_old_lines=frozenset({2}),
+                    text="@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep",
+                ),
+            ),
+        )
+    ]

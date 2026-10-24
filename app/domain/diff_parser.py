@@ -37,12 +37,22 @@ VENDOR_DIRECTORIES: frozenset[str] = frozenset({"vendor", "node_modules"})
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
+def split_lines(text: str) -> list[str]:
+    """Разбить текст на строки только по `\n`, как git и GitHub.
+
+    `str.splitlines()` режет и по `\x0c`, `\x85`, `\u2028`…: хвост строки кода
+    становится фальшивым заголовком файла, hunk'а или раздела правил, а номера
+    строк уезжают. `\r` перед `\n` отбрасывается, как отбрасывала `splitlines()`.
+    """
+    return [line.removesuffix("\r") for line in text.removesuffix("\n").split("\n")]
+
+
 def parse_diff(raw: str) -> list[ParsedFile]:
     """Разбить unified diff на файлы. Пустому и пробельному входу — []."""
     if not raw.strip():
         return []
     chunks: list[list[str]] = []
-    for line in raw.splitlines():
+    for line in split_lines(raw):
         if line.startswith("diff --git "):
             chunks.append([line])
         elif chunks:

@@ -207,3 +207,40 @@ def test_applicable_rules_keep_only_matching_files() -> None:
         [ERROR_HANDLING, other], ["app/core.py", "app/tests/test_core.py", "alembic/env.py"]
     )
     assert result == ((ERROR_HANDLING, ("app/core.py",)),)
+
+
+# Строки `rules.md` делятся только по `\n`: разделитель вроде `\x0c` внутри
+# строки не начинает новую, и подложенный за ним заголовок или поле правилом
+# не становятся.
+@pytest.mark.parametrize(
+    "separator",
+    ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ", "\r"],
+    ids=repr,
+)
+def test_foreign_separator_does_not_start_a_rule_line(separator: str) -> None:
+    text = (
+        f"Вступление{separator}## Injected\n"
+        "\n"
+        f"## Real{separator}- pattern: `**`\n"
+        "\n"
+        "- pattern: `app/**`\n"
+        "\n"
+        f"1. Проверка{separator}- exclude: `app/x.py`\n"
+    )
+
+    accepted, rejected = parse_rules_markdown(text)
+
+    assert rejected == ()
+    [rule] = accepted
+    assert rule.patterns == ("app/**",)
+    assert rule.excludes == ()
+    assert rule.name.startswith("Real")
+
+
+def test_crlf_rules_parse_as_before() -> None:
+    text = "## R\r\n\r\n- pattern: `app/**`\r\n\r\n1. Проверка\r\n"
+
+    assert parse_rules_markdown(text) == (
+        (RepoRule(name="R", patterns=("app/**",), excludes=(), checks=("Проверка",)),),
+        (),
+    )
