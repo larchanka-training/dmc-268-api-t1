@@ -40,12 +40,13 @@ def test_the_pass_purges_expired_sessions() -> None:
     uow.sessions.add(_session(1, NOW - timedelta(days=1)))
     uow.sessions.add(_session(2, NOW + timedelta(days=1)))
 
-    build_maintenance(lambda: uow, stale_limit=timedelta(minutes=30), now=lambda: NOW)()
+    build_maintenance(lambda: uow, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
 
     assert [s.id for s in uow.sessions.stored] == [UUID(int=2)]
 
 
 LIMIT = timedelta(minutes=30)
+QUEUED_LIMIT = timedelta(hours=6)
 
 
 def test_the_pass_sweeps_stale_runs() -> None:
@@ -64,7 +65,7 @@ def test_the_pass_sweeps_stale_runs() -> None:
         )
     )
 
-    build_maintenance(lambda: uow, stale_limit=LIMIT, now=lambda: NOW)()
+    build_maintenance(lambda: uow, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
 
     run = uow.review_runs.get(UUID(int=1))
     assert run is not None and run.status is ReviewRunStatus.FAILED
@@ -87,7 +88,7 @@ def test_a_failing_step_is_logged_and_does_not_stop_the_other(caplog, monkeypatc
             raise RuntimeError("база недоступна")
         return uow
 
-    build_maintenance(uow_factory, stale_limit=LIMIT, now=lambda: NOW)()
+    build_maintenance(uow_factory, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
 
     assert calls == 2
     assert uow.sessions.stored == []
@@ -109,7 +110,9 @@ def test_a_failing_step_marks_the_pass_span_as_an_error(
         return uow
 
     with sweep_span():
-        build_maintenance(uow_factory, stale_limit=LIMIT, now=lambda: NOW)()
+        build_maintenance(
+            uow_factory, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW
+        )()
 
     # Второй шаг выполнен, хотя спан уже отмечен ошибкой первого.
     assert uow.sessions.stored == []
@@ -146,7 +149,10 @@ def test_the_queries_of_the_pass_are_children_of_its_span(
     engine = create_engine(clean_db.url)
     instrument_engine(engine)
     sweep = build_maintenance(
-        lambda: SqlAlchemyUnitOfWork(engine), stale_limit=LIMIT, now=lambda: NOW
+        lambda: SqlAlchemyUnitOfWork(engine),
+        stale_limit=LIMIT,
+        queued_limit=QUEUED_LIMIT,
+        now=lambda: NOW,
     )
     try:
         # Один такт простоя: проход и ни одного сообщения.

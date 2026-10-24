@@ -293,7 +293,9 @@ def upgrade() -> None:
 контекста на пределе лимита, системный промпт и резерв ответа помещаются в
 окно `LLM_CONTEXT_WINDOW_TOKENS`, и что вызов модели в худшем случае
 (`LLM_TIMEOUT_SECONDS` × `LLM_MAX_ATTEMPTS` × провайдеры) короче
-`STALE_RUN_TIMEOUT_SECONDS`, - воркер при старте, до подключения к брокеру.
+`STALE_RUN_TIMEOUT_SECONDS`, а порог ждущего в очереди прогона
+`QUEUED_RUN_TIMEOUT_SECONDS` (6 ч) - больше `STALE_RUN_TIMEOUT_SECONDS`, - воркер
+при старте, до подключения к брокеру.
 Настройки `github_app_id`, `github_app_private_key`, `github_webhook_secret`,
 `rabbitmq_url`, `github_app_client_id`, `github_app_client_secret`, `public_origin` и
 `user_token_encryption_key` опциональны с пустым дефолтом: приложение без GitHub-реквизитов поднимается

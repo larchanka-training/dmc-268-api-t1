@@ -606,7 +606,13 @@ def test_a_swept_run_has_no_running_steps_left(uow) -> None:
         work.review_run_steps.add(abandoned)
         work.commit()
 
-    assert sweep_stale_runs(uow, now=NOW + dt.timedelta(hours=1), limit=dt.timedelta(minutes=30)) == 1
+    swept = sweep_stale_runs(
+        uow,
+        now=NOW + dt.timedelta(hours=1),
+        limit=dt.timedelta(minutes=30),
+        queued_limit=dt.timedelta(hours=6),
+    )
+    assert swept == 1
 
     with uow as work:
         assert work.review_runs.get(run.id).status is ReviewRunStatus.FAILED
