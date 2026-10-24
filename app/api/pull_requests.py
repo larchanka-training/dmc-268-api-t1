@@ -6,20 +6,25 @@
 `repository_id`.
 """
 
-from http import HTTPStatus
+from collections.abc import Callable
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path
 from pydantic import BaseModel, Field
 
-from app.api.dependencies import get_unit_of_work
-from app.api.errors import ERRORS_404_REPOSITORY, ERRORS_422, ApiError
+from app.api.dependencies import (
+    get_installation_catalog,
+    get_token_provider,
+    get_unit_of_work_factory,
+)
+from app.api.errors import ERRORS_404_REPOSITORY, ERRORS_422, ERRORS_502_SCM_VISIBILITY
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
-from app.api.problems import ErrorCode
+from app.api.repositories import visible_repository
 from app.api.schemas import MergeRequestBase, UtcDatetime
-from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
-from app.application.ports import UnitOfWork
+from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES, current_session
+from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
+from app.application.use_cases.auth import SignedIn
 
 router = APIRouter(
     prefix="/api/v1/repositories",
@@ -55,20 +60,23 @@ class MergeRequestListResponse(BaseModel):
     response_description="Страница запросов на изменение.",
     description=(
         "Требует сессию. Постранично, по номеру запроса на изменение. Пагинация та же, что у "
-        "списка репозиториев: limit выше 200 приводится к 200. Репозитория нет — 404."
+        "списка репозиториев: limit выше 200 приводится к 200. Репозитория нет или пользователь не "
+        "видит его на GitHub — один и тот же 404."
     ),
-    responses={**ERRORS_404_REPOSITORY, **ERRORS_422},
+    responses={**ERRORS_404_REPOSITORY, **ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
 def list_pull_requests(
     repository_id: Annotated[UUID, Path(description="Идентификатор репозитория в сервисе.")],
     limit: Limit = DEFAULT_LIMIT,
     offset: Offset = 0,
-    uow: UnitOfWork = Depends(get_unit_of_work),
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> MergeRequestListResponse:
-    if uow.repositories.get(repository_id) is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REPOSITORY_NOT_FOUND, "Репозитория с таким id нет.")
-
-    merge_requests = uow.merge_requests.list_for_repository(repository_id, page_size(limit), offset)
+    visible_repository(repository_id, signed_in, catalog, oauth, uow_factory)
+    with uow_factory() as uow:
+        merge_requests = uow.merge_requests.list_for_repository(repository_id, page_size(limit), offset)
     return MergeRequestListResponse(
         items=[MergeRequestResponse.model_validate(mr, from_attributes=True) for mr in merge_requests]
     )

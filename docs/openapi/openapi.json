@@ -700,7 +700,7 @@
           "repositories"
         ],
         "summary": "Список зарегистрированных репозиториев",
-        "description": "Требует сессию. Постранично, по времени регистрации, затем по id. limit выше 200 не отклоняется, а приводится к 200. Общего числа записей в ответе нет: конец списка — страница короче limit.",
+        "description": "Требует сессию. Только репозитории, которые пользователь видит на GitHub по своему токену, — то же правило, что у GET /reviews и GET /events. Постранично, по времени регистрации, затем по id. limit выше 200 не отклоняется, а приводится к 200. Общего числа записей в ответе нет: конец списка — страница короче limit.",
         "operationId": "listRepositories",
         "security": [
           {
@@ -796,6 +796,21 @@
                 "$ref": "#/components/headers/X-Trace-ID"
               }
             }
+          },
+          "502": {
+            "description": "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmUnavailableProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
           }
         }
       }
@@ -806,7 +821,7 @@
           "repositories"
         ],
         "summary": "Зарегистрированный репозиторий",
-        "description": "Требует сессию. Один зарегистрированный репозиторий по id — та же форма, что строка GET /repositories. 404 REPOSITORY_NOT_FOUND, если репозитория нет.",
+        "description": "Требует сессию. Один зарегистрированный репозиторий по id — та же форма, что строка GET /repositories. 404 REPOSITORY_NOT_FOUND, если репозитория нет или пользователь не видит его на GitHub — ответ один и тот же.",
         "operationId": "getRepository",
         "security": [
           {
@@ -894,6 +909,21 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "502": {
+            "description": "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmUnavailableProblem"
                 }
               }
             },
@@ -1313,7 +1343,7 @@
           "pull-requests"
         ],
         "summary": "Список запросов на изменение репозитория",
-        "description": "Требует сессию. Постранично, по номеру запроса на изменение. Пагинация та же, что у списка репозиториев: limit выше 200 приводится к 200. Репозитория нет — 404.",
+        "description": "Требует сессию. Постранично, по номеру запроса на изменение. Пагинация та же, что у списка репозиториев: limit выше 200 приводится к 200. Репозитория нет или пользователь не видит его на GitHub — один и тот же 404.",
         "operationId": "listPullRequests",
         "security": [
           {
@@ -1428,6 +1458,21 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "502": {
+            "description": "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmUnavailableProblem"
                 }
               }
             },

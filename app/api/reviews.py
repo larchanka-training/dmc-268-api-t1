@@ -30,12 +30,12 @@ from app.api.errors import (
     ERRORS_409_REVIEW_ACTIVE,
     ERRORS_422,
     ERRORS_501_NOT_IMPLEMENTED,
-    ERRORS_502_SCM_REVIEWS,
+    ERRORS_502_SCM_VISIBILITY,
     ApiError,
 )
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
-from app.api.repositories import user_repositories
+from app.api.repositories import is_visible, user_repositories, visible_provider_ids
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
     FailedStage,
@@ -354,12 +354,11 @@ def visible_run(
     спрашиваем до чтения прогона и при любом id: иначе `502`, `401` или задержка ответа
     выдали бы, что такой id есть.
     """
-    visible = {r.provider_id for r in user_repositories(signed_in, catalog, oauth, uow_factory)}
+    provider_ids = visible_provider_ids(signed_in, catalog, oauth, uow_factory)
     with uow_factory() as uow:
         run = uow.review_runs.get(review_run_id)
         repository = None if run is None else _repository_of(uow, run)
-    # Кабинет видит репозитории только через GitHub: прогон репозитория другого провайдера не виден никому.
-    if run is None or repository is None or repository.provider is not Provider.GITHUB or repository.provider_id not in visible:
+    if run is None or repository is None or not is_visible(repository, provider_ids):
         raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
     return run
 
@@ -394,7 +393,7 @@ def create_review(body: CreateReviewRequest) -> ReviewJob:
     summary="Список прогонов ревью",
     response_description="Страница прогонов и общее число подходящих под фильтры.",
     description=_LIST_DESCRIPTION,
-    responses={**ERRORS_422, **ERRORS_502_SCM_REVIEWS},
+    responses={**ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
 def list_reviews(
     query: Annotated[ReviewRunListQuery, Query()],
@@ -432,7 +431,7 @@ def list_reviews(
         "Опубликованные комментарии — по времени публикации, затем по id; пока прогон ничего не опубликовал — "
         "пустой published_comments."
     ),
-    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_502_SCM_REVIEWS},
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
 def get_review(
     run: ReviewRun = Depends(visible_run),
@@ -546,7 +545,7 @@ class ReviewRunStepListResponse(BaseModel):
     summary="Дифф прогона",
     response_description="Изменённые файлы с ханками.",
     description=_DIFF_DESCRIPTION,
-    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED, **ERRORS_502_SCM_REVIEWS},
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED, **ERRORS_502_SCM_VISIBILITY},
 )
 def get_review_diff(run: ReviewRun = Depends(visible_run)) -> ReviewDiffResponse:
     raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Дифф прогона ещё не реализован.")
@@ -558,7 +557,7 @@ def get_review_diff(run: ReviewRun = Depends(visible_run)) -> ReviewDiffResponse
     summary="Шаги прогона",
     response_description="Шаги воркера по порядку.",
     description=_STEPS_DESCRIPTION,
-    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_502_SCM_REVIEWS},
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
 def get_review_steps(
     run: ReviewRun = Depends(visible_run),
