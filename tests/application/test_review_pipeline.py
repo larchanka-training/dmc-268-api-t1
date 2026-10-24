@@ -49,6 +49,7 @@ from ..fakes.llm_gateway import (
     review_response,
     verification_response,
 )
+from ..fakes.run_outcome import RecordingRunOutcome
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
 from ..fakes.webhooks import FakeVcs
@@ -184,6 +185,72 @@ def test_context_is_built_from_the_real_diff() -> None:
     assert payload.file_paths == (CHANGED_FILE,)
     assert payload.body["schema"] == "context-payload/v1"
     assert "+new" in payload.body["diff"][0]["hunk"]
+
+
+# --- счётчик исходов: терминальный переход, а не обработка сообщения -----------------
+
+
+def test_a_completed_run_is_counted_once() -> None:
+    """Доведённый до терминального статуса прогон — ровно одна запись `completed`."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    recorder = RecordingRunOutcome()
+
+    _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
+
+    assert recorder.statuses == ["completed"]
+
+
+def test_a_failed_run_is_counted_once() -> None:
+    """Упавший прогон — ровно одна запись `failed`, даже при повторных коммитах."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    recorder = RecordingRunOutcome()
+
+    with pytest.raises(LlmTimeoutError):
+        _run(
+            uow,
+            ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=1)]),
+            run_outcome=recorder,
+        )
+
+    assert recorder.statuses == ["failed"]
+    assert uow.review_runs.get(JOB.review_run_id).status is ReviewRunStatus.FAILED  # type: ignore[union-attr]
+
+
+def test_a_failed_translation_is_not_counted() -> None:
+    """Сбой записи перевода в failed — записи в счётчике нет: прогон ещё не терминален."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    uow.commit_error = RuntimeError("база недоступна")
+    recorder = RecordingRunOutcome()
+
+    with pytest.raises(RuntimeError, match="база недоступна"):
+        _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
+
+    assert recorder.statuses == []
+
+
+def test_a_redelivered_terminal_run_is_not_counted() -> None:
+    """Повторная доставка терминального прогона возвращается молча — счётчик не растёт."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, status=ReviewRunStatus.COMPLETED)
+    recorder = RecordingRunOutcome()
+
+    _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
+
+    assert recorder.statuses == []
+
+
+def test_a_message_without_a_run_is_not_counted() -> None:
+    """Прогона нет (`LookupError`) — считать нечего: это не исход прогона."""
+    uow = FakeUnitOfWork()
+    recorder = RecordingRunOutcome()
+
+    with pytest.raises(LookupError):
+        _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
+
+    assert recorder.statuses == []
 
 
 def test_diff_failure_marks_the_run_failed_and_reraises() -> None:

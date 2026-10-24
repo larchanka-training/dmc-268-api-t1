@@ -11,9 +11,12 @@ import io
 import json
 import logging
 import re
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from uuid import UUID
 
@@ -33,10 +36,12 @@ from app.domain.llm_errors import LlmError
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 from app.infrastructure.logging import (
     JsonFormatter,
+    ReviewRunIdFilter,
     TraceContextFilter,
     UvicornDuplicateFilter,
     configure_logging,
     record_to_fields,
+    review_run_id_scope,
 )
 from app.infrastructure.queue.rabbitmq import to_wire_message
 from app.infrastructure.vcs.github import GitHubVcsGateway
@@ -78,9 +83,11 @@ class JsonLog:
 
 
 def _json_handler(out: io.StringIO) -> logging.Handler:
+    """Та же связка, что ставит `configure_logging`: JSON + оба фильтра."""
     handler = logging.StreamHandler(out)
     handler.setFormatter(JsonFormatter("dmc-268-test"))
     handler.addFilter(TraceContextFilter())
+    handler.addFilter(ReviewRunIdFilter())
     return handler
 
 
@@ -167,6 +174,47 @@ def test_a_record_outside_a_span_is_kept_without_the_trace_fields(
     assert {"trace_id", "span_id", "trace_flags"}.isdisjoint(fields)
 
 
+# --- 1.1.1: контекст прогона — атрибутом записи, не вклейкой ------------------------
+
+
+def test_the_run_id_scope_becomes_the_record_attribute(selftest: JsonLog) -> None:
+    """Внутри `review_run_id_scope` запись несёт `review_run_id` — без extra и без
+    вклейки в текст: контекст ставит фильтр хендлера, как в обработке сообщения."""
+    with review_run_id_scope(str(JOB.review_run_id)):
+        SELFTEST_LOGGER.warning("этап прогона завершился")
+
+    [fields] = selftest.fields()
+    assert fields["review_run_id"] == str(JOB.review_run_id)
+    assert fields["message"] == "этап прогона завершился"
+    assert str(JOB.review_run_id) not in fields["message"]
+
+
+def test_outside_the_scope_the_record_has_no_run_id_attribute(
+    selftest: JsonLog,
+) -> None:
+    """Вне контекста поля нет, запись не теряется; после выхода контекст не течёт."""
+    with review_run_id_scope(str(JOB.review_run_id)):
+        pass
+
+    SELFTEST_LOGGER.warning("вне обработки сообщения")
+
+    [fields] = selftest.fields()
+    assert fields["message"] == "вне обработки сообщения"
+    assert "review_run_id" not in fields
+
+
+def test_a_nested_scope_is_restored_by_the_outer_one(selftest: JsonLog) -> None:
+    """Вложенный контекст: выход из внутреннего возвращает внешний, а не стирает его."""
+    with review_run_id_scope("внешний-прогон"):
+        with review_run_id_scope("внутренний-прогон"):
+            SELFTEST_LOGGER.warning("внутри")
+        SELFTEST_LOGGER.warning("после внутреннего")
+
+    inner, outer = selftest.fields()
+    assert inner["review_run_id"] == "внутренний-прогон"
+    assert outer["review_run_id"] == "внешний-прогон"
+
+
 def test_exc_info_becomes_the_stacktrace_of_the_same_record(selftest: JsonLog) -> None:
     try:
         raise ValueError("сбой этапа")
@@ -232,6 +280,67 @@ def test_uvicorn_error_records_arrive_as_json_except_the_duplicate() -> None:
 
     [fields] = log.fields()
     assert fields["message"] == "Application startup complete."
+
+
+# --- 1.3: httpx/httpcore — молчание на INFO, URL запроса не в логе ----------------
+
+
+class _OkHandler(BaseHTTPRequestHandler):
+    """Локальный HTTP-сервер: 200 на любой GET, свой access-лог не пишет."""
+
+    def do_GET(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.end_headers()
+        self.wfile.write(b"ok\n")
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass  # собственный access-лог сервера в тесте не нужен
+
+
+def test_configure_logging_puts_httpx_and_httpcore_on_warning() -> None:
+    """httpx на INFO пишет «HTTP Request: <метод> <URL>» о каждом исходящем
+    запросе: имя приватного репозитория, пути файлов и токены query уходили
+    бы в лог целиком; WARNING оставляет клиентам только настоящие сбои."""
+    configure_logging("dmc-268-api")
+
+    for name in ("httpx", "httpcore"):
+        assert logging.getLogger(name).level == logging.WARNING
+
+
+def test_an_outgoing_httpx_request_url_stays_out_of_the_log(root_log: JsonLog) -> None:
+    """Настоящий запрос httpx (не мок): URL — ни в одной записи root.
+
+    Строка «HTTP Request: …» пишется только после ответа, поэтому запрос
+    идёт к поднятому в тесте локальному серверу: без перевода логгера на
+    WARNING URL с путём и токеном query попадал в лог открытым текстом.
+    Недоступный адрес проверяется там же — попытка соединения URL не пишет.
+    """
+    configure_logging("dmc-268-api")
+
+    server = HTTPServer(("127.0.0.1", 0), _OkHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = (
+            f"http://127.0.0.1:{server.server_address[1]}"
+            "/private-repo/contents/app/main.py?token=ghs_url-token"
+        )
+        # trust_env=False: прокси из окружения изменил бы адрес назначения.
+        with httpx.Client(timeout=2, trust_env=False) as client:
+            assert client.get(url).status_code == HTTPStatus.OK
+            # Недоступный локальный адрес: попытка соединения URL не пишет.
+            with pytest.raises(httpx.ConnectError):
+                client.get("http://127.0.0.1:1/private-repo?token=ghs_url-token")
+            # Клиенты не заглушены целиком: WARNING и выше в лог попадают.
+            logging.getLogger("httpx").warning("сбой исходящего запроса")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    text = root_log.text()
+    assert "HTTP Request:" not in text
+    assert "/private-repo" not in text
+    assert "ghs_url-token" not in text
+    assert "сбой исходящего запроса" in text
 
 
 # --- 1.4: запретный список — секреты не попадают в запись -------------------------
@@ -369,9 +478,26 @@ def test_a_github_failure_leaves_no_diff_or_token_in_the_log(
     assert DIFF_SECRET not in text
 
 
+def test_a_failing_task_log_carries_the_run_id_as_an_attribute(
+    root_log: JsonLog,
+) -> None:
+    """Настоящий обработчик воркера: упавшая задача пишет `job.id` в тексте, а
+    `review_run_id` — атрибутом из контекста (фильтр хендлера), не вклейкой."""
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+    handler = build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, LLM_LIMITS, TEXTS)
+
+    with pytest.raises(LookupError):
+        handler(body)
+
+    [fields] = [f for f in root_log.fields() if f["severity"] == "ERROR"]
+    assert fields["review_run_id"] == str(JOB.review_run_id)
+    assert str(JOB.id) in fields["message"]
+    assert str(JOB.review_run_id) not in fields["message"]
+
+
 def test_the_auth_callback_query_stays_out_of_the_access_log() -> None:
-    """Access-лог uvicorn на путях входа: `code` и `state` скрыты ещё фильтром
-    `AuthQueryRedaction` — до JSON-форматтера."""
+    """Access-лог uvicorn: query скрыт фильтром `AccessQueryRedaction` до
+    JSON-форматтера — на путях входа в нём `code` и `state`."""
     log_redaction.install()
     uvicorn = logging.getLogger("uvicorn.access")
 
@@ -390,3 +516,24 @@ def test_the_auth_callback_query_stays_out_of_the_access_log() -> None:
     assert "code-secret-1" not in fields["message"]
     assert "state-secret-1" not in fields["message"]
     assert "/api/v1/auth/github/callback?<скрыто>" in fields["message"]
+
+
+def test_the_query_is_redacted_on_any_path_of_the_access_log() -> None:
+    """Access-лог uvicorn: query скрыт на любом пути, не только на входе —
+    поисковой query `GET /reviews?q=…` кабинета в логе тоже нет."""
+    log_redaction.install()
+    uvicorn = logging.getLogger("uvicorn.access")
+
+    with json_log(uvicorn) as log:
+        uvicorn.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:50000",
+            "GET",
+            "/api/v1/reviews?q=поиск-по-замечаниям-пользователя",
+            "1.1",
+            200,
+        )
+
+    [fields] = log.fields()
+    assert "поиск-по-замечаниям" not in fields["message"]
+    assert "/api/v1/reviews?<скрыто>" in fields["message"]

@@ -30,6 +30,20 @@ class Settings(BaseSettings):
     database_url: str = Field(
         description="PostgreSQL DSN, e.g. postgresql+psycopg://user:pass@host/db",
     )
+    # Размер пула соединений SQLAlchemy (QueuePool) у API и воркера. Задан
+    # явно, а не умолчанием диалекта: `instrument_pool` публикует предел пула
+    # (`db.client.connection.max`) как pool_size + max_overflow, и метрика
+    # обязана совпадать с фактической конфигурацией движка.
+    db_pool_size: int = Field(
+        default=5,
+        gt=0,
+        description="Размер пула соединений с базой у API и воркера",
+    )
+    db_max_overflow: int = Field(
+        default=10,
+        ge=0,
+        description="Допустимые сверх пула соединения (overflow) у API и воркера",
+    )
     rabbitmq_url: str = Field(
         description="RabbitMQ AMQP DSN, e.g. amqp://user:pass@host//",
     )

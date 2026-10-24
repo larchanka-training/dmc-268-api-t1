@@ -43,6 +43,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.pool import StaticPool
 
 from app.api.factory import create_app
 from app.config import Settings
@@ -62,7 +63,7 @@ from app.worker import factory as worker_factory
 from ..application.test_review_pipeline import _run, _seed_run
 from ..fakes.llm_gateway import ScriptedLlmGateway
 from ..fakes.unit_of_work import FakeUnitOfWork
-from ..metrics import metric_delta, metric_snapshot
+from ..metrics import metric_delta, metric_histogram, metric_snapshot
 
 RUN_ID = UUID(int=2)
 JOB = ReviewJob(
@@ -796,11 +797,14 @@ def test_the_installed_engine_tracer_still_produces_sql_spans(
 
 
 def test_a_failed_query_does_not_put_its_parameters_into_the_process_span(
-    spans: InMemorySpanExporter,
+    spans: InMemorySpanExporter, tmp_path: Any
 ) -> None:
     # Параметр запроса — код из диффа; ошибка запроса выходит из обработки сообщения.
+    # Файловый sqlite: у контейнера пул задан явно (`pool_size`/`max_overflow`),
+    # а sqlite в памяти берёт SingletonThreadPool, который их не принимает.
     secret = "def leaked_from_diff(): ..."
-    engine = build_container(SETTINGS.model_copy(update={"database_url": "sqlite://"})).engine
+    url = f"sqlite:///{tmp_path / 'query.db'}"
+    engine = build_container(SETTINGS.model_copy(update={"database_url": url})).engine
     with (
         engine.connect() as connection,
         pytest.raises(OperationalError),
@@ -814,6 +818,217 @@ def test_a_failed_query_does_not_put_its_parameters_into_the_process_span(
         str(value) for event in process.events for value in (event.attributes or {}).values()
     ]
     assert not [value for value in recorded if secret in value]
+
+
+# --- метрики пула соединений ---------------------------------------------------------
+
+CONNECTION_COUNT = "db.client.connection.count"
+CONNECTION_MAX = "db.client.connection.max"
+POOL_ATTRIBUTE = "db.client.connection.pool.name"
+STATE_ATTRIBUTE = "db.client.connection.state"
+
+
+def _pool_snapshot(reader: InMemoryMetricReader, state: str) -> float:
+    """Наблюдение снимка пула по состоянию (`used`/`idle`)."""
+    key = (
+        CONNECTION_COUNT,
+        tuple(sorted({POOL_ATTRIBUTE: "app", STATE_ATTRIBUTE: state}.items())),
+    )
+    return metric_snapshot(reader)[key][0]
+
+
+def _pool_limit(reader: InMemoryMetricReader) -> float:
+    """Наблюдение предела пула."""
+    return metric_snapshot(reader)[(CONNECTION_MAX, ((POOL_ATTRIBUTE, "app"),))][0]
+
+
+def _exported_metric_names(reader: InMemoryMetricReader) -> set[str]:
+    data = reader.get_metrics_data()
+    if data is None:
+        return set()
+    return {
+        metric.name
+        for resource_metrics in data.resource_metrics or ()
+        for scope_metrics in resource_metrics.scope_metrics
+        for metric in scope_metrics.metrics
+    }
+
+
+@pytest.fixture
+def views_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Any, InMemoryMetricReader]:
+    """Провайдер метрик с нашими View и ридером в память.
+
+    Глобальный провайдер сессии (tests/conftest.py) стоит без View, а
+    конфигурация агрегации — Drop старого счётчика и бакеты гистограмм —
+    живёт в `build_meter_provider`: проверять её можно только на собранном
+    здесь провайдере, как это делает `configure_telemetry` в проде.
+    """
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(telemetry, "PeriodicExportingMetricReader", lambda exporter: reader)
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "otlp")
+    return telemetry.build_meter_provider("dmc-268-api"), reader
+
+
+@pytest.fixture
+def pool_reader(
+    views_provider: tuple[Any, InMemoryMetricReader], monkeypatch: pytest.MonkeyPatch
+) -> InMemoryMetricReader:
+    """Тот же провайдер, с метрами телеметрии (`_meter`), переведёнными на него."""
+    provider, reader = views_provider
+    monkeypatch.setattr(telemetry, "_meter", provider.get_meter("telemetry-test"))
+    return reader
+
+
+def test_the_pool_snapshot_matches_the_real_pool(
+    pool_reader: InMemoryMetricReader, tmp_path: Any
+) -> None:
+    """used/idle — фактическое состояние пула, max — pool_size + max_overflow."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'pool.db'}", pool_size=2, max_overflow=3)
+    telemetry.instrument_pool(engine, 2, 3)
+
+    with engine.connect(), engine.connect():
+        assert _pool_snapshot(pool_reader, "used") == 2
+        assert _pool_snapshot(pool_reader, "idle") == 0
+    # Соединения вернулись в пул — снимок это видит, хотя событий никто не звал.
+    assert _pool_snapshot(pool_reader, "used") == 0
+    assert _pool_snapshot(pool_reader, "idle") == 2
+    assert _pool_limit(pool_reader) == 5
+
+
+def test_pool_instruments_are_counted_in_connections(
+    pool_reader: InMemoryMetricReader, tmp_path: Any
+) -> None:
+    """Unit `{connection}` — у обоих приборов пула."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'unit.db'}", pool_size=1, max_overflow=1)
+    telemetry.instrument_pool(engine, 1, 1)
+
+    data = pool_reader.get_metrics_data()
+    assert data is not None
+    units = {
+        metric.name: metric.unit
+        for resource_metrics in data.resource_metrics or ()
+        for scope_metrics in resource_metrics.scope_metrics
+        for metric in scope_metrics.metrics
+    }
+    assert units[CONNECTION_COUNT] == "{connection}"
+    assert units[CONNECTION_MAX] == "{connection}"
+
+
+def test_a_non_queuepool_engine_gets_no_pool_metrics(
+    pool_reader: InMemoryMetricReader,
+) -> None:
+    """Не-`QueuePool` (как `StaticPool` тестов) — тихий выход: приборов нет."""
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+
+    telemetry.instrument_pool(engine, 5, 10)
+
+    assert _exported_metric_names(pool_reader).isdisjoint({CONNECTION_COUNT, CONNECTION_MAX})
+
+
+def test_a_connection_used_inside_untraced_does_not_drift_the_snapshot(
+    pool_reader: InMemoryMetricReader, tmp_path: Any
+) -> None:
+    """Снимок — состояние пула, а не события: `untraced()` его не ломает.
+
+    Событийный счётчик contrib пропустил бы checkin внутри подавления и
+    остался бы с «использованным» соединением, которого нет; снимок в минус
+    не уходит в принципе — он читает `checkedout`/`checkedin` на момент сбора.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'untraced.db'}", pool_size=1, max_overflow=1)
+    telemetry.instrument_pool(engine, 1, 1)
+
+    with telemetry.untraced(), engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+        assert _pool_snapshot(pool_reader, "used") == 1
+        assert _pool_snapshot(pool_reader, "idle") == 0
+
+    assert _pool_snapshot(pool_reader, "used") == 0
+    assert _pool_snapshot(pool_reader, "idle") == 1
+
+
+def test_the_deprecated_event_counter_is_not_exported_and_sql_spans_live(
+    pool_reader: InMemoryMetricReader, tmp_path: Any, spans: InMemorySpanExporter
+) -> None:
+    """Старый счётчик contrib создаётся, но гасится View-агрегацией; спаны SQL живы."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'drop.db'}")
+    telemetry.instrument_engine(engine)
+    telemetry.instrument_pool(engine, 5, 10)
+
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+
+    names = _exported_metric_names(pool_reader)
+    assert "db.client.connections.usage" not in names
+    assert {CONNECTION_COUNT, CONNECTION_MAX} <= names
+    assert [s for s in spans.get_finished_spans() if s.kind is SpanKind.CLIENT], (
+        "после переноса счётчика в снимок пула спаны SQL пропали"
+    )
+
+
+def test_the_container_engine_pool_is_sized_from_the_settings(
+    views_provider: tuple[Any, InMemoryMetricReader],
+    pool_reader: InMemoryMetricReader,
+) -> None:
+    """Пул создаётся с явными настройками; дефолты 5/10 — прежнее поведение."""
+    container = build_container(SETTINGS)
+    assert container.engine.pool.size() == 5
+
+    tuned = build_container(
+        SETTINGS.model_copy(update={"db_pool_size": 2, "db_max_overflow": 1})
+    )
+    assert tuned.engine.pool.size() == 2
+    # Предел, который публикует `instrument_pool`, совпадает с фактической
+    # конфигурацией движка: метрика обязана не расходиться с пулом.
+    telemetry.instrument_pool(tuned.engine, 2, 1)
+    assert _pool_limit(pool_reader) == 3
+
+
+# --- бакеты гистограмм длительности --------------------------------------------------
+
+# Бакеты задаёт View в `build_meter_provider`: этапы прогона и вызовы модели
+# длятся от десятых доли до минут, дефолтные миллисекундные бакеты бесполезны.
+DURATION_BUCKETS = (
+    0.1,
+    0.25,
+    0.5,
+    1,
+    2.5,
+    5,
+    10,
+    30,
+    60,
+    120,
+    300,
+)
+
+
+def test_duration_histograms_get_explicit_second_buckets(
+    views_provider: tuple[Any, InMemoryMetricReader],
+) -> None:
+    """Обе гистограммы длительности — с явными бакетами в секундах.
+
+    0.4 с обязан попасть в бакет (0.25, 0.5]: на дефолтных бакетах (до
+    10–50 мс) почти вся длительность прогона лежала в первом бакете, и
+    `histogram_quantile` по такой гистограмме не считается.
+    """
+    provider, reader = views_provider
+    meter = provider.get_meter("buckets-test")
+    stage = meter.create_histogram("review_stage_duration", unit="s")
+    stage.record(0.4, {"stage": "analysing"})
+    call = meter.create_histogram("review_llm_call_duration", unit="s")
+    call.record(0.4, {"task": "review", "model": "m"})
+
+    for name, attributes in (
+        ("review_stage_duration", {"stage": "analysing"}),
+        ("review_llm_call_duration", {"task": "review", "model": "m"}),
+    ):
+        count, bounds, buckets = metric_histogram(reader, name, **attributes)
+        assert count == 1
+        assert bounds == DURATION_BUCKETS
+        # 0.4 с — третий бакет (0.25, 0.5]; в остальных пусто.
+        assert buckets == tuple(1 if index == 2 else 0 for index in range(len(bounds) + 1))
 
 
 # --- остановка процесса --------------------------------------------------------------

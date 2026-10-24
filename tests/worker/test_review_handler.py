@@ -1,5 +1,6 @@
 """Обработчик воркера: разбор сообщения очереди + `run_review`. Без БД и брокера."""
 
+import io
 import json
 import logging
 from datetime import UTC, datetime
@@ -18,9 +19,16 @@ from app.domain.enums import (
     TriggerSource,
     VerificationOutcome,
 )
+from app.domain.llm_errors import LlmTimeoutError
 from app.domain.prompt import PromptTexts
 from app.infrastructure.llm.stub import StubLlmGateway
+from app.infrastructure.logging import (
+    JsonFormatter,
+    ReviewRunIdFilter,
+    TraceContextFilter,
+)
 from app.infrastructure.queue.rabbitmq import to_wire_message
+from app.infrastructure.telemetry import OtelRunOutcomeRecorder
 from app.worker.factory import build_review_handler
 
 from ..fakes.context import FakeCache, FakeExtractor
@@ -70,8 +78,8 @@ class _Deps:
         return FakeCache()
 
 
-def _seeded_uow() -> FakeUnitOfWork:
-    """База с открытым PR и прогоном задачи в `queued`."""
+def _seeded_uow(status: ReviewRunStatus = ReviewRunStatus.QUEUED) -> FakeUnitOfWork:
+    """База с открытым PR и прогоном задачи в `status`."""
     now = datetime(2026, 9, 29, tzinfo=UTC)
     uow = FakeUnitOfWork()
     mr_id = UUID(int=3)
@@ -96,7 +104,7 @@ def _seeded_uow() -> FakeUnitOfWork:
             id=JOB.review_run_id,
             merge_request_id=mr_id,
             head_sha=JOB.head_sha,
-            status=ReviewRunStatus.QUEUED,
+            status=status,
             trigger=TriggerSource.WEBHOOK,
             last_progress_at=now,
             created_at=now,
@@ -131,31 +139,112 @@ def test_handler_passes_the_output_limit_to_the_model() -> None:
 
 
 def test_handler_logs_both_ids_when_the_run_fails(caplog: pytest.LogCaptureFixture) -> None:
-    # Прогона нет — обработка падает; в логе должны быть и задача, и прогон.
+    """Лог упавшей задачи: `job.id` — в тексте, `review_run_id` — атрибут записи.
+
+    Прогона нет — обработка падает; идентификатор прогона приносят и контекст
+    логов, и спан обработки, поэтому в тексте ему делать нечего (спека «Логи»).
+    Хендлер здесь — производственная связка `configure_logging` (JSON + оба
+    фильтра) со своим потоком: порядок фильтров детерминирован тестом, а не
+    порядком хендлеров root из прошлых тестов.
+    """
     body = json.dumps(to_wire_message(JOB)).encode("utf-8")
     handler = build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, LLM_LIMITS, TEXTS)
+    out = io.StringIO()
+    record_handler = logging.StreamHandler(out)
+    record_handler.setFormatter(JsonFormatter("dmc-268-test"))
+    record_handler.addFilter(TraceContextFilter())
+    record_handler.addFilter(ReviewRunIdFilter())
+    worker_logger = logging.getLogger("app.worker.factory")
+    worker_logger.addHandler(record_handler)
 
     with caplog.at_level(logging.ERROR), pytest.raises(LookupError):
         handler(body)
 
+    worker_logger.removeHandler(record_handler)
+    # Атрибут и текст — на одной записи производственного JSON-хендлера.
+    [fields] = [json.loads(line) for line in out.getvalue().splitlines() if line]
+    assert fields["review_run_id"] == str(JOB.review_run_id)
+    assert str(JOB.id) in fields["message"]
+    assert str(JOB.review_run_id) not in fields["message"]
+    # Та же запись уходит дальше по root без потерь.
     [record] = caplog.records
-    assert str(JOB.id) in record.getMessage()
-    assert str(JOB.review_run_id) in record.getMessage()
+    assert record.levelno == logging.ERROR
+    assert str(JOB.review_run_id) not in record.getMessage()
 
 
-def test_a_failed_run_grows_the_run_counter_by_status(
+def test_a_message_without_a_run_is_not_counted_as_failed(
     metric_reader: InMemoryMetricReader,
 ) -> None:
-    """Упавший прогон растит `review_runs_total{status="failed"}` — сигнал для алертов.
+    """Сообщение без прогона (`LookupError`) — не исход прогона: счётчик не растёт.
 
-    Счётчик считает исходы обработки: пайплайн переводит прогон в `failed` сам
-    и пробрасывает сбой в обработчик.
+    Считает не обработчик, а пайплайн на фактическом терминальном переходе:
+    прогона нет — считать нечего.
     """
     before = metric_snapshot(metric_reader)
     body = json.dumps(to_wire_message(JOB)).encode("utf-8")
 
     with pytest.raises(LookupError):
-        build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, LLM_LIMITS, TEXTS)(body)
+        build_review_handler(
+            _Deps(FakeUnitOfWork()),
+            LIMITS,
+            LLM_LIMITS,
+            TEXTS,
+            run_outcome=OtelRunOutcomeRecorder(),
+        )(body)
+
+    failed, _ = metric_delta(metric_reader, before, "review_runs_total", status="failed")
+    assert failed == 0
+    completed, _ = metric_delta(
+        metric_reader, before, "review_runs_total", status="completed"
+    )
+    assert completed == 0
+
+
+def test_a_redelivered_terminal_run_is_not_counted(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Повторная доставка терминального прогона возвращается молча — счётчик не растёт."""
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+    before = metric_snapshot(metric_reader)
+
+    build_review_handler(
+        _Deps(_seeded_uow(ReviewRunStatus.COMPLETED)),
+        LIMITS,
+        LLM_LIMITS,
+        TEXTS,
+        run_outcome=OtelRunOutcomeRecorder(),
+    )(body)
+
+    failed, _ = metric_delta(metric_reader, before, "review_runs_total", status="failed")
+    assert failed == 0
+    completed, _ = metric_delta(
+        metric_reader, before, "review_runs_total", status="completed"
+    )
+    assert completed == 0
+
+
+def test_a_failed_run_grows_the_run_counter_by_status(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Упавший прогон растит `review_runs_total{status="failed"}` ровно один раз.
+
+    Счётчик пишет пайплайн на переходе в failed (`_mark_failed`), а не
+    обработчик на каждый сбой обработки.
+    """
+    before = metric_snapshot(metric_reader)
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+
+    with pytest.raises(LlmTimeoutError):
+        build_review_handler(
+            _Deps(
+                _seeded_uow(),
+                ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=1)]),
+            ),
+            LIMITS,
+            LLM_LIMITS,
+            TEXTS,
+            run_outcome=OtelRunOutcomeRecorder(),
+        )(body)
 
     failed, _ = metric_delta(metric_reader, before, "review_runs_total", status="failed")
     assert failed == 1
@@ -172,7 +261,13 @@ def test_a_completed_run_grows_the_run_counter_by_status(
     before = metric_snapshot(metric_reader)
     body = json.dumps(to_wire_message(JOB)).encode("utf-8")
 
-    build_review_handler(_Deps(_seeded_uow()), LIMITS, LLM_LIMITS, TEXTS)(body)
+    build_review_handler(
+        _Deps(_seeded_uow()),
+        LIMITS,
+        LLM_LIMITS,
+        TEXTS,
+        run_outcome=OtelRunOutcomeRecorder(),
+    )(body)
 
     completed, _ = metric_delta(
         metric_reader, before, "review_runs_total", status="completed"
