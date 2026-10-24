@@ -110,7 +110,7 @@ ERRORS_502_SCM_EVENTS = _doc(
     ScmUnavailableProblem,
     "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя; поток не открыт.",
 )
-ERRORS_502_SCM_REVIEWS = _doc(
+ERRORS_502_SCM_VISIBILITY = _doc(
     HTTPStatus.BAD_GATEWAY,
     ScmUnavailableProblem,
     "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",

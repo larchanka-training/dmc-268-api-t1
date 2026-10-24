@@ -6,7 +6,7 @@
 
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -75,6 +75,13 @@ WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", defaul
 WRITER = InstallationRepository(provider_id="303", full_name="octo-org/docs", default_branch="main", permissions=WRITE)
 
 
+def _seen(*repositories: Repository) -> FakeInstallationCatalog:
+    """GitHub отдаёт пользователю эти зарегистрированные репозитории — они видны в кабинете."""
+    return FakeInstallationCatalog(
+        [InstallationRepository(r.provider_id, r.full_name, r.default_branch, READ) for r in repositories]
+    )
+
+
 def _client(
     uow: FakeUnitOfWork,
     catalog: FakeInstallationCatalog | None = None,
@@ -120,9 +127,10 @@ def _session_cookie_cleared(response: httpx.Response) -> bool:
 
 def test_returns_registered_repositories() -> None:
     uow = FakeUnitOfWork()
-    uow.repositories.add(_repository(1))
-    uow.repositories.add(_repository(2))
-    client = _client(uow)
+    first, second = _repository(1), _repository(2)
+    uow.repositories.add(first)
+    uow.repositories.add(second)
+    client = _client(uow, _seen(first, second))
 
     response = client.get("/api/v1/repositories")
 
@@ -136,7 +144,7 @@ def test_one_repository_by_id_has_the_shape_of_a_list_row() -> None:
     uow = FakeUnitOfWork()
     repository = _repository(1)
     uow.repositories.add(repository)
-    client = _client(uow)
+    client = _client(uow, _seen(repository))
 
     one = client.get(f"/api/v1/repositories/{repository.id}")
     row = client.get("/api/v1/repositories").json()["items"][0]
@@ -153,7 +161,7 @@ def test_a_repository_beyond_the_first_page_is_found_by_id() -> None:
     last = _repository(MAX_LIMIT)
     uow.repositories.add(last)
 
-    response = _client(uow).get(f"/api/v1/repositories/{last.id}")
+    response = _client(uow, _seen(last)).get(f"/api/v1/repositories/{last.id}")
 
     assert response.status_code == 200
     assert response.json()["full_name"] == f"owner/repo-{MAX_LIMIT}"
@@ -185,14 +193,95 @@ def test_one_repository_requires_a_session() -> None:
 
 def test_limit_above_the_ceiling_is_capped_not_rejected() -> None:
     uow = FakeUnitOfWork()
-    for n in range(MAX_LIMIT + 5):
-        uow.repositories.add(_repository(n))
-    client = _client(uow)
+    repositories = [_repository(n) for n in range(MAX_LIMIT + 5)]
+    for repository in repositories:
+        uow.repositories.add(repository)
+    client = _client(uow, _seen(*repositories))
 
     response = client.get("/api/v1/repositories", params={"limit": 10_000})
 
     assert response.status_code == 200
     assert len(response.json()["items"]) == MAX_LIMIT
+
+
+# --- видимость: то же правило, что у прогонов, списка прогонов и потока (#129) -----------
+
+
+def test_the_list_holds_only_repositories_seen_on_github() -> None:
+    """Зарегистрированный репозиторий, которого GitHub пользователю не отдаёт, в списке не виден."""
+    uow = FakeUnitOfWork()
+    seen, hidden = _repository(1), _repository(2)
+    gitlab = replace(_repository(3), provider=Provider.GITLAB, provider_id=seen.provider_id)
+    for repository in (seen, hidden, gitlab):
+        uow.repositories.add(repository)
+
+    response = _client(uow, _seen(seen)).get("/api/v1/repositories")
+
+    assert [item["id"] for item in response.json()["items"]] == [str(seen.id)]
+
+
+def test_the_visible_list_is_paged_in_registration_order() -> None:
+    uow = FakeUnitOfWork()
+    repositories = [replace(_repository(n), created_at=NOW + timedelta(minutes=n)) for n in range(5)]
+    for repository in reversed(repositories):
+        uow.repositories.add(repository)
+    client = _client(uow, _seen(*repositories))
+
+    page = client.get("/api/v1/repositories", params={"limit": 2, "offset": 2}).json()["items"]
+
+    assert [item["id"] for item in page] == [str(r.id) for r in repositories[2:4]]
+
+
+def test_a_repository_hidden_on_github_is_404_like_a_missing_one() -> None:
+    uow = FakeUnitOfWork()
+    hidden = _repository(1)
+    uow.repositories.add(hidden)
+    client = _client(uow, FakeInstallationCatalog([WEB]))
+
+    response = client.get(f"/api/v1/repositories/{hidden.id}")
+    missing = client.get(f"/api/v1/repositories/{new_id()}")
+
+    assert response.status_code == missing.status_code == 404
+    assert response.json()["code"] == "REPOSITORY_NOT_FOUND"
+    assert response.json()["detail"] == missing.json()["detail"]
+
+
+def test_a_repository_outside_github_is_visible_to_nobody() -> None:
+    uow = FakeUnitOfWork()
+    gitlab = replace(_repository(1), provider=Provider.GITLAB)
+    uow.repositories.add(gitlab)
+
+    response = _client(uow, _seen(_repository(1))).get(f"/api/v1/repositories/{gitlab.id}")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/api/v1/repositories", f"/api/v1/repositories/{new_id()}"])
+def test_github_failure_on_registered_repositories_is_502(path: str) -> None:
+    response = _client(FakeUnitOfWork(), FakeInstallationCatalog(error=VcsError("GitHub API: HTTP 503"))).get(path)
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("path", ["/api/v1/repositories", f"/api/v1/repositories/{new_id()}"])
+def test_a_revoked_token_on_registered_repositories_closes_the_session(path: str) -> None:
+    uow = FakeUnitOfWork()
+
+    response = _client(uow, FakeInstallationCatalog(error=ProviderTokenRejected("401"))).get(path)
+
+    assert response.status_code == 401
+    assert _session_cookie_cleared(response)
+    assert uow.sessions.stored == []
+
+
+def test_an_invalid_limit_does_not_ask_github() -> None:
+    catalog = _seen(_repository(1))
+
+    response = _client(FakeUnitOfWork(), catalog).get("/api/v1/repositories", params={"limit": 0})
+
+    assert response.status_code == 422
+    assert catalog.calls == []
 
 
 def test_a_non_integer_limit_is_a_validation_error_without_the_input() -> None:
