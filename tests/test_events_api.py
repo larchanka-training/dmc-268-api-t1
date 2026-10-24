@@ -25,11 +25,12 @@ from starlette.types import Message
 from app.api.dependencies import (
     get_clock,
     get_installation_catalog,
-    get_sleep,
+    get_run_changes,
     get_token_provider,
     get_untraced_unit_of_work_factory,
 )
 from app.api.factory import create_app
+from app.application.ports.run_changes import RunChangesLost
 from app.config import Settings
 from app.domain.entities import (
     DiffAnchor,
@@ -57,6 +58,7 @@ from app.domain.vcs_errors import VcsError
 from .fakes.auth import SIGNED_IN_SESSION_ID, sign_in_with_session
 from .fakes.installation_catalog import FakeInstallationCatalog
 from .fakes.oauth import EXPIRING_GRANT, FakeOAuthProvider, rejecting
+from .fakes.run_changes import FakeRunChanges, every_step
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -175,7 +177,7 @@ def _app(
     app.dependency_overrides[get_untraced_unit_of_work_factory] = lambda: lambda: world.uow
     app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog([VISIBLE])
     app.dependency_overrides[get_token_provider] = lambda: oauth or FakeOAuthProvider()
-    app.dependency_overrides[get_sleep] = lambda: ticks.sleep
+    app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(every_step(ticks.sleep))
     app.dependency_overrides[get_clock] = lambda: ticks.clock
     return app, cookies
 
@@ -482,7 +484,7 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
         release.clear()
 
     app, cookies = _app(world, Ticks({}))
-    app.dependency_overrides[get_sleep] = lambda: held_sleep
+    app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(every_step(held_sleep))
     cookie = "; ".join(f"{name}={value}" for name, value in cookies.items())
     scope: dict[str, Any] = {
         "type": "http",
@@ -574,3 +576,58 @@ def test_uvicorn_declares_the_asgi_spec_version_the_stream_test_relies_on() -> N
         thread.join(10)
 
     assert seen["spec_version"] == ASGI_SPEC_VERSION
+
+
+# --- источник событий — сигнал NOTIFY, а не опрос (#124) -----------------------
+
+
+def test_without_change_signals_the_stream_reads_nothing_after_connecting() -> None:
+    """Изменение без сигнала не приходит: поток читает базу только по сигналу, а не раз в секунду."""
+    world = World()
+    run = _run(world.visible_mr, S.QUEUED, FUTURE, created_at=FUTURE)
+    ticks = Ticks({1: lambda: world.put(run), 5: world.end_session})
+
+    async def silent(timeout: float) -> bool:
+        await ticks.sleep(min(timeout, 1.0))
+        return False
+
+    app, cookies = _app(world, ticks)
+    app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(silent)
+
+    text = TestClient(app, cookies=cookies).get(PATH).text
+
+    assert _events(text) == []
+
+
+def test_an_unavailable_source_gives_a_stream_of_only_retry() -> None:
+    """Слушатель не подключился к базе — поток из одной строки `retry`: EventSource переподключится."""
+    world = World()
+    app, cookies = _app(world, Ticks({}))
+    app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(every_step(Ticks({}).sleep), available=False)
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    assert response.status_code == 200
+    assert response.text == "retry: 3000\n\n"
+
+
+def test_a_lost_source_closes_the_stream_and_the_subscription() -> None:
+    """Обрыв LISTEN — поток закрывается: изменения за время обрыва могли потеряться."""
+    world = World()
+    ticks = Ticks({})
+
+    async def lost_on_third(timeout: float) -> bool:
+        await ticks.sleep(min(timeout, 1.0))
+        if ticks.tick >= 3:
+            raise RunChangesLost
+        return True
+
+    changes = FakeRunChanges(lost_on_third)
+    app, cookies = _app(world, ticks)
+    app.dependency_overrides[get_run_changes] = lambda: changes
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    assert response.text == "retry: 3000\n\n"
+    assert ticks.tick == 3
+    assert [s.closed for s in changes.subscriptions] == [True]

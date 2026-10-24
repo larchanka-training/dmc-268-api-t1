@@ -61,6 +61,7 @@ from app.infrastructure.db.models import (
     SessionRow,
     UserRow,
 )
+from app.infrastructure.db.run_changes import REVIEW_RUNS_CHANNEL
 from app.infrastructure.db.token_cipher import TokenCipher
 
 
@@ -359,6 +360,7 @@ class SqlAlchemyReviewRunRepo:
                 verifier_dropped_findings=run.verifier_dropped_findings,
             )
         )
+        self._notify(run)
 
     def update(self, run: ReviewRun) -> None:
         """Записать прогресс прогона, отклонив статус, запрещённый машиной состояний.
@@ -391,6 +393,18 @@ class SqlAlchemyReviewRunRepo:
         row.rejected_findings = run.rejected_findings
         row.verification = run.verification
         row.verifier_dropped_findings = run.verifier_dropped_findings
+        self._notify(run)
+
+    def _notify(self, run: ReviewRun) -> None:
+        """Уведомить поток событий: `pg_notify` в той же транзакции уходит только при коммите.
+
+        Через соединение сессии, а не `Session.execute`: тот запустил бы autoflush и
+        поменял момент, когда пишутся строки вызывающего, — порядок вставок остаётся прежним.
+        """
+        self._session.connection().execute(
+            text("SELECT pg_notify(:channel, :run_id)"),
+            {"channel": REVIEW_RUNS_CHANNEL, "run_id": str(run.id)},
+        )
 
 
 class SqlAlchemyReviewRunStepRepo:

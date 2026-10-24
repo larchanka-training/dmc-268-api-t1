@@ -13,7 +13,12 @@ from dataclasses import dataclass
 import httpx
 from sqlalchemy import Engine, create_engine
 
-from app.application.ports import CacheStore, DefinitionExtractor, UnitOfWork
+from app.application.ports import (
+    CacheStore,
+    DefinitionExtractor,
+    RunChanges,
+    UnitOfWork,
+)
 from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
@@ -21,6 +26,7 @@ from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.vcs_gateway import VcsGateway
 from app.config import Settings
 from app.infrastructure.cache.memory import InMemoryCacheStore
+from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
 from app.infrastructure.db.token_cipher import TokenCipher
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork, UntracedUnitOfWork
 from app.infrastructure.llm.fallback import FallbackLlmGateway
@@ -76,6 +82,9 @@ class Container:
     # In-process кэш живёт, пока жив процесс, — только если он один на
     # контейнер: фабрика на каждый вызов теряла бы всё между прогонами.
     _cache_store: CacheStore
+    # Слушатель изменений прогонов для потока событий API: соединение `LISTEN`
+    # открывается при первой подписке, воркеру оно не нужно.
+    _run_changes: PostgresRunChanges
     # Ленивый, как VCS-шлюз: процессу API параметры модели не нужны, а
     # HTTP-клиенты провайдеров создаются один раз на процесс.
     _llm_gateway: LlmGateway | None
@@ -138,6 +147,13 @@ class Container:
     def cache_store(self) -> CacheStore:
         return self._cache_store
 
+    def run_changes(self) -> RunChanges:
+        return self._run_changes
+
+    async def aclose(self) -> None:
+        """Закрыть то, что живёт в event loop процесса: слушатель изменений прогонов."""
+        await self._run_changes.close()
+
     def definition_extractor(self) -> DefinitionExtractor:
         extractor = self._definition_extractor
         if extractor is None:
@@ -171,6 +187,7 @@ def build_container(settings: Settings) -> Container:
             ),
         },
         _cache_store=InMemoryCacheStore(),
+        _run_changes=PostgresRunChanges(listen_conninfo(settings.database_url)),
         _llm_gateway=None,
         _definition_extractor=None,
     )

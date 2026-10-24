@@ -13,7 +13,7 @@ from app.api.dependencies import (
     get_clock,
     get_installation_catalog,
     get_oauth_provider,
-    get_sleep,
+    get_run_changes,
     get_token_provider,
     get_unit_of_work_factory,
     get_untraced_unit_of_work_factory,
@@ -27,6 +27,7 @@ from app.infrastructure.oauth.github import GitHubOAuthProvider
 
 from .fakes.installation_catalog import FakeInstallationCatalog
 from .fakes.oauth import FakeOAuthProvider
+from .fakes.run_changes import FakeRunChanges, every_step
 from .fakes.unit_of_work import FakeUnitOfWork
 
 ORIGIN = "https://review.example"
@@ -413,7 +414,7 @@ def test_logout_closes_an_open_event_stream_and_reconnecting_is_401(stand) -> No
 
     stand.app.dependency_overrides[get_untraced_unit_of_work_factory] = lambda: lambda: stand.uow
     stand.app.dependency_overrides[get_installation_catalog] = lambda: FakeInstallationCatalog()
-    stand.app.dependency_overrides[get_sleep] = lambda: sleep_then_logout
+    stand.app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(every_step(sleep_then_logout))
     stand.app.dependency_overrides[get_clock] = lambda: lambda: now[0]
 
     response = client.get("/api/v1/events")
