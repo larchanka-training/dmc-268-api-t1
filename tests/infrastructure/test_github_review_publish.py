@@ -6,7 +6,11 @@ from typing import Any
 
 import httpx
 
-from app.application.ports.vcs_review import InlineCommentDraft, MergeGateCheck
+from app.application.ports.vcs_review import (
+    InlineCommentDraft,
+    MergeGateCheck,
+    ReviewThreadState,
+)
 from app.domain.enums import DiffSide
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
@@ -113,3 +117,53 @@ def test_set_merge_gate_check_posts_check_run(rsa_key_pair: RsaKeyPair) -> None:
 
     assert payloads[0]["conclusion"] == "failure"
     assert payloads[0]["name"] == "dmc-268-ai-review"
+
+
+def test_thread_state_carries_the_current_line_and_none_for_an_outdated_thread(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """Форма ответа - как у живого PR: у outdated-треда `line: null`, `originalLine` - старая строка."""
+    queries: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        payload = json.loads(request.content.decode())
+        queries.append(payload["query"])
+        nodes = [
+            {
+                "id": "T_1",
+                "isResolved": False,
+                "isOutdated": False,
+                "line": 104,
+                "comments": {"nodes": [{"databaseId": 11}]},
+            },
+            {
+                "id": "T_2",
+                "isResolved": True,
+                "isOutdated": True,
+                "line": None,
+                "comments": {"nodes": [{"databaseId": 22}]},
+            },
+            {
+                "id": "T_3",
+                "isResolved": False,
+                "isOutdated": False,
+                "line": 5,
+                "comments": {"nodes": [{"databaseId": 33}]},
+            },
+        ]
+        threads = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}
+        return httpx.Response(
+            200, json={"data": {"repository": {"pullRequest": {"reviewThreads": threads}}}}
+        )
+
+    gateway = make_gateway(rsa_key_pair, handler)
+    states = gateway.fetch_review_threads_state("o/r", 7, INSTALLATION_ID, frozenset({"11", "22"}))
+
+    assert states == {
+        "11": ReviewThreadState(resolved=False, line=104),
+        "22": ReviewThreadState(resolved=True, line=None),
+    }
+    (query,) = queries
+    assert "isOutdated" in query and "line" in query

@@ -114,7 +114,8 @@
 В PR при этом было ревью, но не было статуса, а повторное ревью опубликовало бы второе.
 Воспроизведено на стенде подменой ответа GraphQL на 502.
 Исправлено в change `thread-sync-best-effort`: сверка тредов после публикации - best-effort, её сбой VCS пишется в лог, прогон завершается `completed`, check run выставляется по данным в базе.
-Сценарий на стенде - `test_graphql_outage_after_publishing_completes_the_run_with_the_merge_gate`.
+С change `skip-findings-with-open-thread` сверка идёт до публикации, один раз на прогон, и только когда у PR уже есть треды бота; при её сбое находки публикуются без сверки с тредами.
+Сценарий на стенде - `test_graphql_outage_on_a_rerun_publishes_the_finding_and_the_gate_from_the_database` (`tests/e2e/test_thread_dedup_e2e.py`).
 
 ### 5.4 Одно нарушение публикуется дважды с разными категориями - исправлено
 

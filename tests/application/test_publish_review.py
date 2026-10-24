@@ -3,12 +3,14 @@
 import itertools
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
 
 from app.application.ports.llm_gateway import LlmReviewResult, LlmThreadFollowUp
+from app.application.ports.vcs_review import InlineCommentDraft, ReviewThreadState
 from app.application.publish_review import publish_review
 from app.domain.entities import (
     DiffAnchor,
@@ -609,3 +611,300 @@ def test_programming_error_in_a_follow_up_is_not_swallowed() -> None:
 
     with pytest.raises(AttributeError):
         _publish_follow_ups(uow, vcs, FIRST_FOLLOW_UP)
+
+
+# --- #148: повторный прогон не дублирует замечание с тредом бота ---------------
+
+NEW_FINDING_ID = UUID(int=80)
+
+
+def _seed_prior_thread(
+    uow: FakeUnitOfWork,
+    *,
+    severity: FindingSeverity,
+    resolved: bool = False,
+    resolved_by_bot: bool = False,
+) -> None:
+    """Тред бота с прошлого прогона на `app/x.py:10` (correctness) нужной серьёзности."""
+    _seed_previous_critical_thread(uow)
+    (finding,) = uow.findings.list_for_run(UUID(int=4))
+    uow.findings.restore(
+        [replace(f, severity=severity) if f.id == finding.id else f for f in uow.findings.snapshot()]
+    )
+    root = uow.published_comments.get(ROOT_COMMENT_ID)
+    assert root is not None
+    uow.published_comments.update(
+        replace(root, thread_resolved=resolved, thread_resolved_by_bot=resolved_by_bot)
+    )
+
+
+def _current_finding(
+    uow: FakeUnitOfWork, *, severity: FindingSeverity, line: int = 10
+) -> None:
+    uow.findings.add(
+        Finding(
+            id=NEW_FINDING_ID,
+            review_run_id=RUN_ID,
+            anchor=DiffAnchor(file_path="app/x.py", side=DiffSide.NEW, new_line=line),
+            category=FindingCategory.CORRECTNESS,
+            severity=severity,
+            message="та же проблема",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+
+def _on_host(*, line: int | None, resolved: bool = False) -> RecordingVcsGateway:
+    return RecordingVcsGateway(
+        thread_states={"root-inline": ReviewThreadState(resolved=resolved, line=line)}
+    )
+
+
+def _publish(
+    uow: FakeUnitOfWork, vcs: RecordingVcsGateway, *follow_ups: LlmThreadFollowUp
+) -> None:
+    _publish_follow_ups(uow, vcs, *follow_ups)
+
+
+def _inline_drafts(vcs: RecordingVcsGateway) -> tuple[InlineCommentDraft, ...]:
+    ((_, drafts),) = vcs.publications
+    return drafts
+
+
+def _stored_new_finding(uow: FakeUnitOfWork) -> Finding:
+    (finding,) = [f for f in uow.findings.list_for_run(RUN_ID) if f.id == NEW_FINDING_ID]
+    return finding
+
+
+def test_rerun_with_the_same_finding_publishes_no_new_inline_comment() -> None:
+    """#148: открытый тред на той же строке - замечание не повторяется, находка связана с тредом."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.CRITICAL)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = _on_host(line=10)
+
+    _publish(uow, vcs)
+
+    assert _inline_drafts(vcs) == ()
+    assert _stored_new_finding(uow).covered_by_finding_id == FINDING_ID
+    inline = [c for c in uow.published_comments.list_for_run(RUN_ID) if c.kind is CommentKind.INLINE]
+    assert inline == []
+    # Подавленная находка gate не ломает: критичный тред открыт - мердж заблокирован.
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+
+
+def test_lower_severity_finding_is_covered_by_the_open_thread() -> None:
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.HIGH)
+    _current_finding(uow, severity=FindingSeverity.MEDIUM)
+    vcs = _on_host(line=10)
+
+    _publish(uow, vcs)
+
+    assert _inline_drafts(vcs) == ()
+    assert _stored_new_finding(uow).covered_by_finding_id == FINDING_ID
+
+
+def test_finding_that_became_critical_is_published_next_to_the_open_thread() -> None:
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.HIGH)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = _on_host(line=10)
+
+    _publish(uow, vcs)
+
+    (draft,) = _inline_drafts(vcs)
+    assert (draft.file_path, draft.line) == ("app/x.py", 10)
+    assert _stored_new_finding(uow).covered_by_finding_id is None
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+
+
+def test_outdated_thread_does_not_suppress_the_finding() -> None:
+    """GitHub отдаёт `line: null` у устаревшего треда: к нынешней строке он не привязан."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.CRITICAL)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = _on_host(line=None)
+
+    _publish(uow, vcs)
+
+    (draft,) = _inline_drafts(vcs)
+    assert (draft.file_path, draft.line) == ("app/x.py", 10)
+
+
+def test_thread_is_matched_by_its_current_line_on_the_host() -> None:
+    """Над строкой добавили две строки: тред с 10-й переехал на 12-ю, туда же и находка."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.CRITICAL)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL, line=12)
+    vcs = _on_host(line=12)
+
+    _publish(uow, vcs)
+
+    assert _inline_drafts(vcs) == ()
+    assert _stored_new_finding(uow).covered_by_finding_id == FINDING_ID
+
+
+def test_stored_line_alone_does_not_match_a_moved_thread() -> None:
+    """Тред уехал на 12-ю: находка на 10-й - другое место, публикуется."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.CRITICAL)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL, line=10)
+    vcs = _on_host(line=12)
+
+    _publish(uow, vcs)
+
+    (draft,) = _inline_drafts(vcs)
+    assert draft.line == 10
+
+
+def test_thread_resolved_by_a_human_suppresses_the_finding() -> None:
+    """#169, п. 3а: тред закрыл человек - замечание повторно не публикуется."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.CRITICAL, resolved=True)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = _on_host(line=10, resolved=True)
+
+    _publish(uow, vcs)
+
+    assert _inline_drafts(vcs) == ()
+    assert _stored_new_finding(uow).covered_by_finding_id == FINDING_ID
+    (check,) = vcs.checks
+    assert check.conclusion == "success"
+
+
+def test_thread_resolved_on_the_host_without_a_webhook_counts_as_resolved_by_a_human() -> None:
+    """В базе тред открыт, на GitHub его закрыл человек: сверка до публикации это видит."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.HIGH)
+    _current_finding(uow, severity=FindingSeverity.HIGH)
+    vcs = _on_host(line=10, resolved=True)
+
+    _publish(uow, vcs)
+
+    assert _inline_drafts(vcs) == ()
+    root = uow.published_comments.get(ROOT_COMMENT_ID)
+    assert root is not None
+    assert (root.thread_resolved, root.thread_resolved_by_bot) == (True, False)
+
+
+def test_critical_finding_escalated_past_a_human_resolved_thread_is_published() -> None:
+    """#169, п. 3а: исключение - критичное замечание, ставшее серьёзнее, публикуется в любом случае."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.HIGH, resolved=True)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = _on_host(line=10, resolved=True)
+
+    _publish(uow, vcs)
+
+    (draft,) = _inline_drafts(vcs)
+    assert draft.line == 10
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+
+
+def test_non_critical_escalation_past_a_human_resolved_thread_is_not_published() -> None:
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.LOW, resolved=True)
+    _current_finding(uow, severity=FindingSeverity.HIGH)
+    vcs = _on_host(line=10, resolved=True)
+
+    _publish(uow, vcs)
+
+    assert _inline_drafts(vcs) == ()
+
+
+def test_finding_returns_after_the_bot_resolved_its_thread_as_fixed() -> None:
+    """Тред закрыл сам бот как исправленный, а проблема вернулась - замечание публикуется снова."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(
+        uow, severity=FindingSeverity.CRITICAL, resolved=True, resolved_by_bot=True
+    )
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = _on_host(line=10, resolved=True)
+
+    _publish(uow, vcs)
+
+    (draft,) = _inline_drafts(vcs)
+    assert draft.line == 10
+    assert _stored_new_finding(uow).covered_by_finding_id is None
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+
+
+def test_bot_marks_the_thread_it_resolves() -> None:
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow)
+    vcs = RecordingVcsGateway(diff=FIXED_LINE_10_DIFF)
+
+    _publish(uow, vcs, FIRST_FOLLOW_UP)
+
+    assert vcs.resolved == ["root-inline"]
+    root = uow.published_comments.get(ROOT_COMMENT_ID)
+    assert root is not None
+    assert (root.thread_resolved, root.thread_resolved_by_bot) == (True, True)
+
+
+def test_covered_thread_is_not_resolved_by_a_follow_up_of_the_same_run() -> None:
+    """Модель сказала «исправлено», но та же находка есть в этом прогоне: тред остаётся
+    открытым, иначе подавленная находка сняла бы блокировку мерджа."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.CRITICAL)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = _on_host(line=10)
+    vcs.diff = FIXED_LINE_10_DIFF
+
+    _publish(uow, vcs, FIRST_FOLLOW_UP)
+
+    assert _inline_drafts(vcs) == ()
+    assert [root for root, _ in vcs.replies] == ["root-inline"]
+    assert vcs.resolved == []
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+
+
+def test_escalated_finding_gets_a_new_inline_and_no_reply_in_the_old_thread() -> None:
+    """Одна проблема - один комментарий: новый inline вместо ответа в старый тред."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.HIGH)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = _on_host(line=10)
+    vcs.diff = FIXED_LINE_10_DIFF
+
+    _publish(uow, vcs, FIRST_FOLLOW_UP)
+
+    (draft,) = _inline_drafts(vcs)
+    assert draft.line == 10
+    assert vcs.replies == []
+
+
+def test_host_thread_state_is_fetched_once_per_run() -> None:
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.CRITICAL)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = _on_host(line=10)
+
+    _publish(uow, vcs)
+
+    assert vcs.thread_state_requests == [frozenset({"root-inline"})]
+
+
+def test_without_host_thread_state_every_finding_is_published(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Сверка не удалась: текущая строка треда неизвестна - лучше повтор, чем потерянное замечание."""
+    uow = FakeUnitOfWork()
+    _seed_prior_thread(uow, severity=FindingSeverity.CRITICAL)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = RecordingVcsGateway(threads_error=VcsTransientError("HTTP 502 на /graphql"))
+
+    with caplog.at_level(logging.WARNING, logger="app.application.publish_review"):
+        _publish(uow, vcs)
+
+    (draft,) = _inline_drafts(vcs)
+    assert draft.line == 10
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"

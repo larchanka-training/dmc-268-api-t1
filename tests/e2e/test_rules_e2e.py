@@ -399,37 +399,3 @@ def test_e2e_05_a_model_failure_fails_the_run_without_publishing_anything(stack:
     assert stack.github.check_runs == []
     assert stack.queue_depth(DLQ_NAME) == 1
 
-
-def test_graphql_outage_after_publishing_completes_the_run_with_the_merge_gate(
-    stack: Stack,
-) -> None:
-    """#76, отчёт §5.3: ревью опубликовано, GraphQL отвечает 502 - прогон `completed`, gate по базе."""
-    pull = _open(stack, base_files={RULES_PATH: RULES_MD})
-    stack.github.graphql_status = 502
-    llm = ScriptedLlmGateway(
-        [
-            review_response(
-                finding_json(
-                    CODE_PATH,
-                    RAISE_LINE,
-                    "Отказ бросается исключением.",
-                    category="correctness",
-                    severity="critical",
-                )
-            ),
-            verification_response(("F1", "keep")),
-        ]
-    )
-
-    run_id = _deliver(stack, pull)
-    stack.work(llm, 1)
-
-    # Сверка тредов дошла до GraphQL и исчерпала попытки адаптера.
-    assert stack.github.requests.count(("POST", "/graphql")) == 3
-    run = stack.run(run_id)
-    assert run.status is ReviewRunStatus.COMPLETED
-    (review,) = stack.github.reviews_of(PR)
-    assert len(review.comments) == 1
-    (check,) = stack.github.check_runs
-    assert (check.head_sha, check.conclusion) == (HEAD, "failure")
-    assert stack.queue_depth(DLQ_NAME) == 0

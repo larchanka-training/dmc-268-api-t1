@@ -16,6 +16,7 @@ from app.application.ports.vcs_review import (
     InlineCommentDraft,
     MergeGateCheck,
     PullRequestReviewPublication,
+    ReviewThreadState,
 )
 from app.domain.entities import PRMetadata, Repository, ReviewJob
 from app.domain.enums import MergeRequestState, Provider
@@ -167,17 +168,17 @@ class FakeVcs:
             raise self.error
         return "fake-reply-id"
 
-    def fetch_review_threads_resolved_state(
+    def fetch_review_threads_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
         provider_comment_ids: frozenset[str],
-    ) -> dict[str, bool]:
+    ) -> dict[str, ReviewThreadState]:
         self.calls.append(("thread_state", provider_comment_ids))
         if self.error is not None:
             raise self.error
-        return {cid: False for cid in provider_comment_ids}
+        return {cid: ReviewThreadState(resolved=False, line=None) for cid in provider_comment_ids}
 
     def resolve_review_thread_for_comment(
         self,

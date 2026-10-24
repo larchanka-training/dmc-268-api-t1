@@ -7,7 +7,7 @@
 
 import copy
 import datetime as dt
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from typing import Any
 from uuid import UUID
 
@@ -15,6 +15,7 @@ from psycopg.errors import LockNotAvailable
 from sqlalchemy import (
     CTE,
     ColumnElement,
+    Row,
     delete,
     func,
     literal,
@@ -30,6 +31,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from app.domain.entities import (
+    BotThread,
     ContextPayload,
     Finding,
     MergeRequest,
@@ -534,8 +536,15 @@ class SqlAlchemyFindingRepo:
                 rule_name=finding.rule.name if finding.rule else None,
                 rule_check=finding.rule.check if finding.rule else None,
                 rule_check_text=finding.rule.check_text if finding.rule else None,
+                covered_by_finding_id=finding.covered_by_finding_id,
             )
         )
+
+    def mark_covered(self, finding_id: UUID, covered_by_finding_id: UUID) -> None:
+        row = self._session.get(FindingRow, finding_id)
+        if row is None:
+            raise LookupError(f"finding {finding_id} is not stored")
+        row.covered_by_finding_id = covered_by_finding_id
 
 
 class SqlAlchemyPublishedCommentRepo:
@@ -554,6 +563,33 @@ class SqlAlchemyPublishedCommentRepo:
     def list_open_threads_for_merge_request(
         self, merge_request_id: UUID
     ) -> list[OpenReviewThread]:
+        return [
+            OpenReviewThread(
+                finding=m.finding_to_domain(finding_row),
+                root_provider_comment_id=comment_row.provider_comment_id,
+                root_published_comment_id=comment_row.id,
+            )
+            for comment_row, finding_row in self._inline_threads(
+                merge_request_id, PublishedCommentRow.thread_resolved.is_(False)
+            )
+        ]
+
+    def list_threads_for_merge_request(self, merge_request_id: UUID) -> list[BotThread]:
+        return [
+            BotThread(
+                finding=m.finding_to_domain(finding_row),
+                root_provider_comment_id=comment_row.provider_comment_id,
+                root_published_comment_id=comment_row.id,
+                resolved=comment_row.thread_resolved,
+                resolved_by_bot=comment_row.thread_resolved_by_bot,
+            )
+            for comment_row, finding_row in self._inline_threads(merge_request_id)
+        ]
+
+    def _inline_threads(
+        self, merge_request_id: UUID, *conditions: ColumnElement[bool]
+    ) -> Sequence[Row[PublishedCommentRow, FindingRow]]:
+        """Корневые inline-комментарии бота на PR с их находками, в порядке публикации."""
         stmt = (
             select(PublishedCommentRow, FindingRow)
             .join(ReviewRunRow, PublishedCommentRow.review_run_id == ReviewRunRow.id)
@@ -561,19 +597,11 @@ class SqlAlchemyPublishedCommentRepo:
             .where(
                 ReviewRunRow.merge_request_id == merge_request_id,
                 PublishedCommentRow.kind == CommentKind.INLINE,
-                PublishedCommentRow.thread_resolved.is_(False),
+                *conditions,
             )
             .order_by(PublishedCommentRow.published_at, PublishedCommentRow.id)
         )
-        rows = self._session.execute(stmt).all()
-        return [
-            OpenReviewThread(
-                finding=m.finding_to_domain(finding_row),
-                root_provider_comment_id=comment_row.provider_comment_id,
-                root_published_comment_id=comment_row.id,
-            )
-            for comment_row, finding_row in rows
-        ]
+        return self._session.execute(stmt).all()
 
     def get(self, published_comment_id: UUID) -> PublishedComment | None:
         row = self._session.get(PublishedCommentRow, published_comment_id)
@@ -597,6 +625,7 @@ class SqlAlchemyPublishedCommentRepo:
                 kind=comment.kind,
                 published_at=comment.published_at,
                 thread_resolved=comment.thread_resolved,
+                thread_resolved_by_bot=comment.thread_resolved_by_bot,
                 in_reply_to_provider_comment_id=comment.in_reply_to_provider_comment_id,
                 feedback_positive=comment.feedback_positive,
                 feedback_negative=comment.feedback_negative,
@@ -608,6 +637,7 @@ class SqlAlchemyPublishedCommentRepo:
         if row is None:
             raise LookupError(f"published comment {comment.id} is not stored")
         row.thread_resolved = comment.thread_resolved
+        row.thread_resolved_by_bot = comment.thread_resolved_by_bot
         row.in_reply_to_provider_comment_id = comment.in_reply_to_provider_comment_id
         row.feedback_positive = comment.feedback_positive
         row.feedback_negative = comment.feedback_negative

@@ -33,3 +33,13 @@ class MergeGateCheck:
     conclusion: str
     title: str
     summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewThreadState:
+    """Тред ревью на хостинге сейчас, по корневому комментарию."""
+
+    resolved: bool
+    # Строка, на которой тред стоит в текущем диффе PR; `None` - тред устарел
+    # (outdated): его строку изменили, и к нынешнему коду он не привязан.
+    line: int | None

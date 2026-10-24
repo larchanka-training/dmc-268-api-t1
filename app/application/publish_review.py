@@ -18,13 +18,13 @@ from app.application.ports.llm_gateway import (
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import InlineCommentDraft
-from app.application.sync_thread_resolution import sync_open_threads_from_host
+from app.application.sync_thread_resolution import record_threads_resolved_on_host
 from app.domain.diff_parser import parse_diff
 from app.domain.entities import (
+    BotThread,
     DiffAnchor,
     Finding,
     Hunk,
-    OpenReviewThread,
     PublishedComment,
     ReviewJob,
     ReviewRun,
@@ -41,6 +41,7 @@ from app.domain.review_comment import (
     format_summary_comment,
     format_thread_reply,
 )
+from app.domain.thread_coverage import thread_coverage
 from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 
 logger = logging.getLogger(__name__)
@@ -135,15 +136,27 @@ def publish_review(
 ) -> None:
     """Опубликовать находки, ответы в треды и merge gate для одного прогона.
 
-    `diff_max_bytes` ограничивает инкрементальный дифф, которым подтверждается
-    изменение строки якоря критичного замечания.
+    Находка, о которой уже говорит тред бота с прошлого прогона, своего
+    комментария не получает (`thread_coverage`), а связывается с находкой
+    треда. `diff_max_bytes` ограничивает инкрементальный дифф, которым
+    подтверждается изменение строки якоря критичного замечания.
     """
     with uow:
         findings = tuple(uow.findings.list_for_run(run.id))
-        open_threads = tuple(uow.published_comments.list_open_threads_for_merge_request(run.merge_request_id))
+        threads = tuple(uow.published_comments.list_threads_for_merge_request(run.merge_request_id))
         merge_request = uow.merge_requests.get(run.merge_request_id)
     if merge_request is None:
         raise LookupError(f"merge request {run.merge_request_id} not found")
+
+    threads, current_lines = _sync_threads_with_host(job, run, threads, uow=uow, vcs=vcs, now=now)
+    covered: dict[UUID, BotThread] = {}
+    superseded: set[str] = set()
+    for finding in findings:
+        coverage = thread_coverage(finding, threads, current_lines)
+        if coverage.covered_by is not None:
+            covered[finding.id] = coverage.covered_by
+        superseded.update(t.root_provider_comment_id for t in coverage.superseded)
+    to_publish = tuple(f for f in findings if f.id not in covered)
 
     summary = result.summary or _default_summary(findings)
     summary_body = format_summary_comment(summary.problem, summary.positives, summary.effort)
@@ -155,7 +168,7 @@ def publish_review(
             line=_line_for_anchor(finding),
             body=format_inline_finding_comment(finding),
         )
-        for finding in findings
+        for finding in to_publish
     )
 
     publication = vcs.publish_pull_request_review(
@@ -183,7 +196,7 @@ def publish_review(
                 )
             )
         for finding, published_item in zip(
-            findings, publication.inline_comments, strict=True
+            to_publish, publication.inline_comments, strict=True
         ):
             if published_item is None:
                 continue
@@ -200,13 +213,22 @@ def publish_review(
                     updated_at=moment,
                 )
             )
+        for finding_id, thread in covered.items():
+            uow.findings.mark_covered(finding_id, thread.finding.id)
         uow.commit()
 
     _publish_thread_follow_ups(
         job,
         run,
         result.thread_follow_ups,
-        open_threads=open_threads,
+        open_threads=tuple(t for t in threads if not t.resolved),
+        # Ответ в тред, вместо которого опубликован новый inline, повторил бы
+        # замечание дважды; тред, который покрывает находку этого прогона,
+        # не закрывается: проблема на месте.
+        skip_roots=frozenset(superseded),
+        keep_open_roots=frozenset(
+            t.root_provider_comment_id for t in covered.values() if not t.resolved
+        ),
         uow=uow,
         vcs=vcs,
         now=now,
@@ -214,30 +236,8 @@ def publish_review(
         diff_max_bytes=diff_max_bytes,
     )
 
-    # Ревью уже в PR: сверка - best-effort, её сбой не роняет прогон (повтор
-    # после `failed` опубликовал бы второе ревью) и не отменяет gate. Gate -
-    # после сверки, чтобы видеть свежие треды; упала она - gate по базе, треды
-    # досинхронизирует следующий прогон или вебхук закрытия треда. Ошибки кода
-    # (не `VcsError`) не гасятся.
-    try:
-        sync_open_threads_from_host(
-            run.merge_request_id,
-            repo_full_name=job.repository_full_name,
-            pr_number=job.pull_request_number,
-            installation_id=job.installation_id,
-            uow=uow,
-            vcs=vcs,
-            now=now,
-        )
-    except VcsError:
-        logger.warning(
-            "прогон %s: сверка тредов %s#%s с GitHub не удалась, merge gate - по базе",
-            run.id,
-            job.repository_full_name,
-            job.pull_request_number,
-            exc_info=True,
-        )
-
+    # Треды сверены с GitHub до публикации, свои закрытия бот записал сам:
+    # gate - по базе.
     still_open = collect_open_findings(uow, run.merge_request_id)
     vcs.set_merge_gate_check(
         job.repository_full_name,
@@ -247,12 +247,66 @@ def publish_review(
     )
 
 
+def _sync_threads_with_host(
+    job: ReviewJob,
+    run: ReviewRun,
+    threads: tuple[BotThread, ...],
+    *,
+    uow: UnitOfWork,
+    vcs: VcsGateway,
+    now: datetime,
+) -> tuple[tuple[BotThread, ...], dict[str, int | None]]:
+    """Сверить треды бота с GitHub одним запросом: закрытие и текущая строка.
+
+    Тред, закрытый на хостинге не ботом, записывается закрытым человеком.
+    Сверка - best-effort: сбой хостинга пишется в лог и не роняет прогон
+    (повтор после `failed` опубликовал бы второе ревью). Без ответа хостинга
+    строки тредов неизвестны, ни одна находка не считается покрытой, а gate
+    считается по базе. Ошибки кода (не `VcsError`) не гасятся.
+    """
+    # Тред, закрытый ботом, ничего не покрывает: его состояние не нужно.
+    asked = tuple(t for t in threads if not t.resolved_by_bot)
+    if not asked:
+        return threads, {}
+    try:
+        states = vcs.fetch_review_threads_state(
+            job.repository_full_name,
+            job.pull_request_number,
+            job.installation_id,
+            frozenset(t.root_provider_comment_id for t in asked),
+        )
+    except VcsError:
+        logger.warning(
+            "прогон %s: сверка тредов %s#%s с GitHub не удалась, merge gate - по базе",
+            run.id,
+            job.repository_full_name,
+            job.pull_request_number,
+            exc_info=True,
+        )
+        return threads, {}
+    marked = record_threads_resolved_on_host(
+        ((t.root_provider_comment_id, t.root_published_comment_id) for t in asked if not t.resolved),
+        states,
+        uow=uow,
+        now=now,
+    )
+    synced = tuple(
+        replace(t, resolved=True, resolved_by_bot=False)
+        if t.root_provider_comment_id in marked
+        else t
+        for t in threads
+    )
+    return synced, {root: state.line for root, state in states.items()}
+
+
 def _publish_thread_follow_ups(
     job: ReviewJob,
     run: ReviewRun,
     follow_ups: tuple[LlmThreadFollowUp, ...],
     *,
-    open_threads: tuple[OpenReviewThread, ...],
+    open_threads: tuple[BotThread, ...],
+    skip_roots: frozenset[str],
+    keep_open_roots: frozenset[str],
     uow: UnitOfWork,
     vcs: VcsGateway,
     now: datetime,
@@ -262,7 +316,7 @@ def _publish_thread_follow_ups(
     if not follow_ups:
         return
     incremental_hunks_cache: dict[str, tuple[Hunk, ...]] = {}
-    by_key: dict[tuple[str, DiffSide, int, FindingCategory], OpenReviewThread] = {}
+    by_key: dict[tuple[str, DiffSide, int, FindingCategory], BotThread] = {}
     for open_thread in open_threads:
         anchor_line = _line_for_anchor(open_thread.finding)
         key = (
@@ -287,7 +341,7 @@ def _publish_thread_follow_ups(
         if matched is None:
             continue
         root_id = matched.root_provider_comment_id
-        if root_id in answered:
+        if root_id in answered or root_id in skip_roots:
             continue
         with uow:
             prev_run = uow.review_runs.get(matched.finding.review_run_id)
@@ -343,7 +397,7 @@ def _publish_thread_follow_ups(
                 )
             )
             uow.commit()
-        resolve = item.resolve_thread and _may_resolve_thread(
+        resolve = root_id not in keep_open_roots and item.resolve_thread and _may_resolve_thread(
             item.status,
             matched.finding.severity,
             matched.finding.anchor,
@@ -367,6 +421,6 @@ def _publish_thread_follow_ups(
             root = uow.published_comments.get(matched.root_published_comment_id)
             if root is not None:
                 uow.published_comments.update(
-                    replace(root, thread_resolved=True, updated_at=moment)
+                    replace(root, thread_resolved=True, thread_resolved_by_bot=True, updated_at=moment)
                 )
             uow.commit()
