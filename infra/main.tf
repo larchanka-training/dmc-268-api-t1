@@ -35,16 +35,19 @@ locals {
     "OTEL_RESOURCE_ATTRIBUTES=service.version=${local.service_version},deployment.environment.name=${var.deployment_environment_name}",
   ]
 
-  # Образы стека наблюдаемости — те же теги, что в docker-compose.yml: конфиги
-  # в observability/ общие, версии обновляются в обоих местах вместе (у
-  # file_log коллектора операторы stanza — beta, обновление с чтением breaking
-  # changes).
-  otelcol_image           = "otel/opentelemetry-collector-contrib:0.158.0"
-  loki_image              = "grafana/loki:3.7.9"
-  tempo_image             = "grafana/tempo:3.1.1"
-  prometheus_image        = "prom/prometheus:v3.15.1"
-  grafana_image           = "grafana/grafana:13.2.4"
-  postgres_exporter_image = "prometheuscommunity/postgres-exporter:v0.20.1"
+  # Образы стека наблюдаемости — те же версии, что в docker-compose.yml:
+  # конфиги в observability/ общие. Зафиксированы дайджестом манифест-листа
+  # (multi-arch, разрешён `docker buildx imagetools inspect <имя:тег>`) —
+  # одинаково в обоих местах; тег в комментарии рядом, обновление образа —
+  # осознанная замена дайджеста в обоих файлах с чтением breaking changes
+  # (у file_log коллектора операторы stanza — beta).
+  otelcol_image       = "otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5"
+  loki_image          = "grafana/loki@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28"
+  tempo_image         = "grafana/tempo@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044"
+  prometheus_image    = "prom/prometheus@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2"
+  grafana_image       = "grafana/grafana@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f"
+  node_exporter_image = "quay.io/prometheus/node-exporter@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a"
+  cadvisor_image      = "gcr.io/cadvisor/cadvisor@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435"
 
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
   # consumer_timeout RabbitMQ его не ограничивает: в 4.4 таймаут подтверждения
@@ -101,6 +104,13 @@ resource "docker_container" "postgres" {
   name    = "dmc268-postgres"
   image   = docker_image.postgres.image_id
   restart = "unless-stopped"
+
+  # Тяжёлые запросы снимает receiver postgresql коллектора через
+  # pg_stat_statements (решение #89): библиотека должна быть загружена при
+  # старте сервера, расширение и роль мониторинга создаёт миграция 0011.
+  # ENTRYPOINT образа (docker-entrypoint.sh) остаётся — переопределяется
+  # только CMD. Та же команда — у сервиса postgres в docker-compose.yml.
+  command = ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
 
   # Только запрет повышения привилегий: entrypoint образа стартует от root,
   # делает chown каталога данных и сам переходит на пользователя postgres.
@@ -218,7 +228,13 @@ resource "docker_container" "migrate" {
     name = docker_network.dmc268.name
   }
 
-  env = concat(local.app_env, local.telemetry_env)
+  env = concat(local.app_env, local.telemetry_env, [
+    # Пароль роли мониторинга dmc268_monitor: миграция 0011 создаёт роль с
+    # ним, коллектор подключается под ней (receiver postgresql). Один источник
+    # с env коллектора (POSTGRESQL_PASSWORD ниже) — иначе роль и подключение
+    # разъедутся.
+    "POSTGRES_MONITOR_PASSWORD=${var.postgres_monitor_password}",
+  ])
 
   # depends_on у docker-провайдера задаёт только порядок создания, но не ждёт
   # готовности. Прежняя версия ждала открытия TCP-порта — этого мало:
@@ -378,8 +394,10 @@ resource "docker_container" "worker" {
 }
 
 # Стек наблюдаемости (change add-observability-stack): коллектор, Loki, Tempo,
-# Prometheus, Grafana и postgres-exporter — те же конфиги из observability/,
-# что и в локальном compose. Конфиги заливаются в контейнеры при создании
+# Prometheus, Grafana, node-exporter и cAdvisor — те же конфиги из
+# observability/, что и в локальном compose. Метрики базы снимает receiver
+# postgresql самого коллектора (решение #89) — отдельного экспортёра нет.
+# Конфиги заливаются в контейнеры при создании
 # (upload), поэтому на сервере не нужен чекаут репозитория: tofu читает файлы
 # из рабочей копии и передаёт через Docker API. Правка конфига пересоздаёт
 # контейнер следующим apply. Алиасы сети повторяют имена сервисов compose —
@@ -412,8 +430,13 @@ resource "docker_image" "grafana" {
   keep_locally = true
 }
 
-resource "docker_image" "postgres_exporter" {
-  name         = local.postgres_exporter_image
+resource "docker_image" "node_exporter" {
+  name         = local.node_exporter_image
+  keep_locally = true
+}
+
+resource "docker_image" "cadvisor" {
+  name         = local.cadvisor_image
   keep_locally = true
 }
 
@@ -474,6 +497,13 @@ resource "docker_container" "otelcol" {
     # Все *-json.log контейнеров; не-JSON строки (логи самих контейнеров
     # стека) коллектор отбрасывает — см. on_error: drop в конфиге.
     "OTELCOL_LOG_FILES=/var/lib/docker/containers/*/*-json.log",
+    # Реквизиты роли мониторинга базы (receiver postgresql в otelcol.yaml):
+    # роль создаёт миграция 0011 с тем же паролем (docker_container.migrate),
+    # имя совпадает с переменной POSTGRES_MONITOR_PASSWORD настроек.
+    "POSTGRESQL_USERNAME=dmc268_monitor",
+    "POSTGRESQL_PASSWORD=${var.postgres_monitor_password}",
+    "POSTGRESQL_ENDPOINT=dmc268-postgres:5432",
+    "POSTGRESQL_DATABASE=${var.postgres_db}",
   ]
 
   networks_advanced {
@@ -568,6 +598,10 @@ resource "docker_container" "prometheus" {
     "--config.file=/etc/prometheus/prometheus.yml",
     # Хранение метрик — 30 дней (как retention логов Loki).
     "--storage.tsdb.retention.time=30d",
+    # Потолок по размеру, а не только по времени: всплеск кардинальности
+    # не должен забить диск раньше срока хранения. Свободное место видно
+    # алертам (#100) по node_filesystem_avail_bytes от node-exporter.
+    "--storage.tsdb.retention.size=8GB",
   ]
 
   volumes {
@@ -600,6 +634,18 @@ resource "docker_container" "grafana" {
     file    = "/etc/grafana/provisioning/datasources/datasources.yaml"
   }
 
+  # Провижининг дашборда: файл-провайдер и сам дашборд, как у datasources.
+  # Каталог сканируется Grafana на *.json, yaml провайдера там же игнорируется.
+  upload {
+    content = file("${path.module}/observability/grafana/provisioning/dashboards/dashboards.yaml")
+    file    = "/etc/grafana/provisioning/dashboards/dashboards.yaml"
+  }
+
+  upload {
+    content = file("${path.module}/observability/grafana/provisioning/dashboards/dmc268-overview.json")
+    file    = "/etc/grafana/provisioning/dashboards/dmc268-overview.json"
+  }
+
   env = [
     "GF_SECURITY_ADMIN_PASSWORD=${var.grafana_admin_password}",
     "GF_AUTH_ANONYMOUS_ENABLED=false",
@@ -629,30 +675,94 @@ resource "docker_container" "grafana" {
   ]
 }
 
-# Экспортёр метрик PostgreSQL (design, решение 3): кода не касается, скреится
-# Prometheus-ом (job postgres).
-resource "docker_container" "postgres_exporter" {
-  name    = "dmc268-postgres-exporter"
-  image   = docker_image.postgres_exporter.image_id
+# Метрики сервера (алерты #100): CPU, память, диск, файловые системы хоста.
+# Каноничный запуск образа: корень хоста только для чтения (--path.rootfs),
+# /proc и /sys — источники статистики ядра. Имя контейнера с префиксом
+# dmc268-, алиас сети — как имя сервиса compose.
+resource "docker_container" "node_exporter" {
+  name    = "dmc268-node-exporter"
+  image   = docker_image.node_exporter.image_id
   restart = "unless-stopped"
 
-  memory      = var.observability_memory_mb.postgres_exporter
-  memory_swap = var.observability_memory_mb.postgres_exporter
+  memory      = var.observability_memory_mb.node_exporter
+  memory_swap = var.observability_memory_mb.node_exporter
   log_driver  = "json-file"
   log_opts    = local.log_opts
 
   security_opts = ["no-new-privileges:true"]
 
-  env = [
-    "DATA_SOURCE_URI=dmc268-postgres:5432/${var.postgres_db}?sslmode=disable",
-    "DATA_SOURCE_USER=${var.postgres_user}",
-    "DATA_SOURCE_PASS=${var.postgres_password}",
+  command = [
+    "--path.rootfs=/rootfs",
+    "--path.procfs=/host/proc",
+    "--path.sysfs=/host/sys",
   ]
+
+  volumes {
+    host_path      = "/"
+    container_path = "/rootfs"
+    read_only      = true
+  }
+
+  volumes {
+    host_path      = "/proc"
+    container_path = "/host/proc"
+    read_only      = true
+  }
+
+  volumes {
+    host_path      = "/sys"
+    container_path = "/host/sys"
+    read_only      = true
+  }
 
   networks_advanced {
     name    = docker_network.dmc268.name
-    aliases = ["postgres-exporter"]
+    aliases = ["node-exporter"]
+  }
+}
+
+# Метрики контейнеров: CPU и память каждого, включая сам стек наблюдаемости.
+# Маунты — каноничные из документации cAdvisor (только чтение); без
+# --privileged и /dev/kmsg недоступны OOM- и perf-коллекторы, CPU, память
+# и сеть остаются.
+resource "docker_container" "cadvisor" {
+  name    = "dmc268-cadvisor"
+  image   = docker_image.cadvisor.image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.cadvisor
+  memory_swap = var.observability_memory_mb.cadvisor
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  security_opts = ["no-new-privileges:true"]
+
+  volumes {
+    host_path      = "/"
+    container_path = "/rootfs"
+    read_only      = true
   }
 
-  depends_on = [docker_container.postgres]
+  volumes {
+    host_path      = "/var/run"
+    container_path = "/var/run"
+    read_only      = true
+  }
+
+  volumes {
+    host_path      = "/sys"
+    container_path = "/sys"
+    read_only      = true
+  }
+
+  volumes {
+    host_path      = "/var/lib/docker"
+    container_path = "/var/lib/docker"
+    read_only      = true
+  }
+
+  networks_advanced {
+    name    = docker_network.dmc268.name
+    aliases = ["cadvisor"]
+  }
 }

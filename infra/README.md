@@ -52,6 +52,8 @@ Eurorouter подключается только фоллбэком после �
 | --- | --- |
 | `api_image` | тег собранного образа |
 | `postgres_password`, `rabbitmq_password` | секреты `PG_PASSWORD_DMC268_T1`, `RABBITMQ_PASSWORD_DMC268_T1` |
+| `grafana_admin_password` | секрет `GRAFANA_ADMIN_PASSWORD_DMC268_T1` — пароль админа Grafana (`GF_SECURITY_ADMIN_PASSWORD` контейнера `dmc268-grafana`). Значения по умолчанию у переменной нет: без секрета `apply` падает на её чтении. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 | gh secret set GRAFANA_ADMIN_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` — или своим паролем; локальному стеку он не нужен, Grafana там без логина |
+| `postgres_monitor_password` | секрет `PG_MONITOR_PASSWORD_DMC268_T1` — пароль роли `dmc268_monitor` (`pg_monitor`), которую создаёт миграция 0011 и под которой коллектор снимает метрики базы (`POSTGRESQL_PASSWORD` его env). Значения по умолчанию у переменной нет: без секрета `apply` падает на её чтении. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 | gh secret set PG_MONITOR_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` |
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `user_token_encryption_key` | секрет `USER_TOKEN_KEY_DMC268_T1` — 32 байта в base64 (`openssl rand -base64 32`). Без него или с битым значением `apply` падает на проверке переменной: стенд не стартует без шифрования токенов пользователя. Генерация и установка — `README.md`, «Ключ шифрования токенов пользователя» |
 | `registry_username`, `registry_password` | `github.actor` и `GITHUB_TOKEN`, живут один прогон |
@@ -73,13 +75,16 @@ Eurorouter подключается только фоллбэком после �
 
 ## Стек наблюдаемости
 
-Рядом с API на стенде стоит стек телеметрии: OTel Collector (`dmc268-otelcol`), Loki (логи),
-Tempo (трейсы), Prometheus (метрики), Grafana (интерфейс, `grafana_port` на `internal_bind_ip`)
-и `postgres-exporter`. Конфиги лежат в `observability/` и **те же самые** используются локальным
+Рядом с API на стенде стоит стек телеметрии из семи контейнеров: OTel Collector (`dmc268-otelcol`),
+Loki (логи), Tempo (трейсы), Prometheus (метрики), Grafana (интерфейс, `grafana_port` на
+`internal_bind_ip`), `node-exporter` (сервер: CPU, память, диски) и `cAdvisor` (контейнеры).
+Метрики базы снимает сам коллектор — receiver `postgresql` (решение #89), отдельного экспортёра
+Postgres нет. Конфиги лежат в `observability/` и **те же самые** используются локальным
 docker compose (профиль `observability`): различия окружений — только переменные и лимиты, не
-конфиги. Версии образов зафиксированы и обновляются в обоих местах вместе (в
-`main.tf` и в `docker-compose.yml`); у приёмника `file_log` коллектора операторы stanza — beta,
-обновление образа — с чтением breaking changes.
+конфиги. Образы стека зафиксированы дайджестами (`имя@sha256:…`, дайджест манифест-листа) в
+`main.tf` и в `docker-compose.yml` — одинаково; тег в комментарии рядом, обновление образа —
+осознанная замена дайджеста в обоих файлах (у приёмника `file_log` коллектора операторы
+stanza — beta, обновление с чтением breaking changes).
 
 Конфиги заливаются в контейнеры при создании (`upload` в `docker_container`): tofu читает их из
 рабочей копии и передаёт через Docker API, поэтому на сервере не нужен чекаут репозитория. Правка
@@ -95,11 +100,26 @@ docker compose (профиль `observability`): различия окружен
 (только чтение, от root) и раскладывает по хранилищам; чувствительные данные он редактирует до
 отправки — правила в `observability/otelcol.yaml`, тест `tests/infrastructure/test_collector_redaction.py`.
 
-Переменные стека: `observability_memory_mb` (потолки памяти без свопа), `grafana_port`,
-`grafana_admin_password` (секрет; локально Grafana без логина, на стенде — по учётке),
-`deployment_environment_name`. RabbitMQ отдаёт метрики встроенным плагином
-`rabbitmq_prometheus` (порт 15692 в сети), PostgreSQL — контейнер `dmc268-postgres-exporter`;
-оба скреятся `prometheus.yml`. Применение стека на стенд — задача DevOps (#108).
+Переменные стека: `observability_memory_mb` (потолки памяти без свопа, семь контейнеров),
+`grafana_port`, `grafana_admin_password` (секрет; локально Grafana без логина, на стенде — по
+учётке), `postgres_monitor_password` (секрет, см. таблицу выше), `deployment_environment_name`.
+Метрики базы коллектор снимает receiver-ом `postgresql`: роль только-чтение `dmc268_monitor` с
+`pg_monitor` и расширение `pg_stat_statements` (тяжёлые запросы) создаёт миграция 0011,
+`shared_preload_libraries` включает контейнер Postgres. RabbitMQ отдаёт метрики встроенным
+плагином `rabbitmq_prometheus` (порт 15692 в сети, per-object эндпоинт — метрики очередей с
+лейблом `queue`); сервер — `node-exporter` (9100), контейнеры — `cAdvisor` (8080); все скреятся
+`prometheus.yml`. Дашборд «Обзор dmc-268» провиженится из репозитория
+(`observability/grafana/provisioning/dashboards/`). Диски ограничены: у Prometheus —
+`--storage.tsdb.retention.size=8GB` рядом с потолком по времени, у Loki OSS размерного retention
+нет (только `retention_period`) — заполнение диска закрывают алерты #100 по
+`node_filesystem_avail_bytes`. Применение стека на стенд — задача DevOps (#108).
+
+Память стека без нагрузки — по замерам ревью PR #130 (Grafana ~350 МБ, Tempo ~200 МБ, Loki
+~90 МБ, коллектор ~85 МБ) и локальному прогону Docker Desktop (2026-10-24: node-exporter
+~13 МБ, cAdvisor ~45 МБ, коллектор ~65 МБ, Prometheus сразу после старта ~170 МБ и растёт
+по мере накопления). Потолки памяти задаются переменной `observability_memory_mb` с запасом
+против этих цифр: фактическое потребление — это ориентир при её пересмотре, а не гарантия
+(под нагрузкой Loki и Tempo растут).
 
 ## Хранилище состояния
 

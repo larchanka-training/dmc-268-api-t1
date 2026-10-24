@@ -3,10 +3,20 @@ services:
     # Postgres with built-in pgvector: the repository profile (RAG) stores its
     # vectors in the same database; migration 0003 creates the extension.
     image: pgvector/pgvector:pg18
-    # Имя контейнера совпадает со стендом (infra/main.tf): одинаковые имена
-    # хостов в конфигах стека наблюдаемости — postgres-exporter ходит по
-    # dmc268-postgres и локально, и на стенде.
-    container_name: dmc268-postgres
+    # Тяжёлые запросы снимает receiver postgresql коллектора через
+    # pg_stat_statements (решение #89): библиотека должна быть загружена при
+    # старте сервера, расширение и роль мониторинга создаёт миграция 0011.
+    # Та же команда — у контейнера postgres в infra/main.tf.
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+    # Алиас сети совпадает с именем контейнера на стенде (infra/main.tf):
+    # одинаковые хосты в конфигах стека наблюдаемости — коллектор ходит по
+    # dmc268-postgres и локально, и на стенде. Само имя контейнера не
+    # фиксируется: fixed container_name сталкивался бы с infra на общем хосте
+    # (второй compose-проект не смог бы создать контейнер с тем же именем).
+    networks:
+      default:
+        aliases:
+          - dmc268-postgres
     environment:
       POSTGRES_USER: dmc268
       POSTGRES_PASSWORD: dmc268
@@ -41,9 +51,13 @@ services:
 
   rabbitmq:
     image: rabbitmq:4.4-alpine
-    # Имя контейнера совпадает со стендом: prometheus.yml скреет
-    # dmc268-rabbitmq в обоих окружениях.
-    container_name: dmc268-rabbitmq
+    # Алиас сети совпадает с именем контейнера на стенде (infra/main.tf):
+    # prometheus.yml скреит dmc268-rabbitmq в обоих окружениях. Имя контейнера
+    # не фиксируется — см. комментарий у postgres.
+    networks:
+      default:
+        aliases:
+          - dmc268-rabbitmq
     ports:
       - "5672:5672"
       # Метрики rabbitmq_prometheus (плагин включён в самом образе) —
@@ -99,6 +113,11 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local}
       # Стабильные имена атрибутов semconv для SQL и HTTP; то же значение ставит код.
       OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
+      # Пароль роли мониторинга dmc268_monitor: api гоняет миграции, роль
+      # создаёт ревизия 0011. Локальный дефолт пари́т реквизитам postgres
+      # выше (как и POSTGRES_PASSWORD, допустим только локально); на стенде
+      # переменную задаёт infra из секрета.
+      POSTGRES_MONITOR_PASSWORD: ${POSTGRES_MONITOR_PASSWORD:-dmc268_monitor}
     # Драйвер логов json-file с той же ротацией, что в infra/main.tf
     # (local.log_opts): Docker Desktop по умолчанию пишет драйвером local
     # (файлы local-logs/ в бинарном формате), а коллектор собирает именно
@@ -194,18 +213,22 @@ services:
 
   # Стек наблюдаемости — те же конфиги из infra/observability/, что и на
   # стенде (спека observability: различия окружений — переменные, не конфиги).
-  # Пять сервисов: коллектор, Loki (логи), Tempo (трейсы), Prometheus
-  # (метрики), Grafana (интерфейс), плюс postgres-exporter. Без профиля ничего
-  # из этого не поднимается. Экспорт включают переменные api/worker —
+  # Семь сервисов: коллектор (трейсы, логи, метрики приложения и базы), Loki
+  # (логи), Tempo (трейсы), Prometheus (метрики), Grafana (интерфейс),
+  # node-exporter (сервер) и cAdvisor (контейнеры). Без профиля ничего из
+  # этого не поднимается. Экспорт включают переменные api/worker —
   # см. комментарий у OTEL_TRACES_EXPORTER.
   #
-  # Имена сервисов/контейнеров совпадают с алиасами сети в infra/main.tf,
+  # Имена сервисов и алиасы сети совпадают с алиасами в infra/main.tf,
   # поэтому одни и те же конфиги резолвят хосты в обоих окружениях.
-  # Образы зафиксированы тегами (не latest): у file_log коллектора операторы
-  # stanza — beta, обновление образа — отдельная задача с чтением breaking
-  # changes.
+  # Образы зафиксированы дайджестами (имя@sha256:…) — это дайджест
+  # манифест-листа (multi-arch), разрешённый docker buildx imagetools
+  # inspect; тег в комментарии рядом. Одинаковый дайджест и в main.tf:
+  # обновление образа — осознанная замена дайджеста в обоих местах с чтением
+  # breaking changes (у file_log коллектора операторы stanza — beta).
   collector:
-    image: otel/opentelemetry-collector-contrib:0.158.0
+    # otel/opentelemetry-collector-contrib:0.158.0
+    image: otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
     profiles: ["observability"]
     # От root: лог-файлы Docker на стенде читает только root (как promtail),
     # и он же создаёт каталог file_storage в томе. Образ по умолчанию — 10001.
@@ -220,12 +243,19 @@ services:
       # Все *-json.log контейнеров; не-JSON строки (логи самих контейнеров
       # стека) коллектор отбрасывает — см. on_error: drop в конфиге.
       OTELCOL_LOG_FILES: /var/lib/docker/containers/*/*-json.log
+      # Реквизиты роли мониторинга базы (receiver postgresql в otelcol.yaml):
+      # локальные, как у api выше; на стенде — переменные infra из секрета.
+      POSTGRESQL_USERNAME: dmc268_monitor
+      POSTGRESQL_PASSWORD: dmc268_monitor
+      POSTGRESQL_ENDPOINT: dmc268-postgres:5432
+      POSTGRESQL_DATABASE: dmc268
     depends_on:
       - loki
       - tempo
 
   loki:
-    image: grafana/loki:3.7.9
+    # grafana/loki:3.7.9
+    image: grafana/loki@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
     profiles: ["observability"]
     command: ["-config.file=/etc/loki/config.yaml"]
     volumes:
@@ -233,7 +263,8 @@ services:
       - loki_data:/loki
 
   tempo:
-    image: grafana/tempo:3.1.1
+    # grafana/tempo:3.1.1
+    image: grafana/tempo@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044
     profiles: ["observability"]
     command: ["-config.file=/etc/tempo/config.yaml"]
     volumes:
@@ -241,18 +272,24 @@ services:
       - tempo_data:/var/tempo
 
   prometheus:
-    image: prom/prometheus:v3.15.1
+    # prom/prometheus:v3.15.1
+    image: prom/prometheus@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
     profiles: ["observability"]
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       # Хранение метрик — 30 дней (как retention логов Loki).
       - --storage.tsdb.retention.time=30d
+      # Потолок по размеру, а не только по времени: всплеск кардинальности
+      # не должен забить диск раньше срока хранения. Свободное место видно
+      # алертам (#100) по node_filesystem_avail_bytes от node-exporter.
+      - --storage.tsdb.retention.size=8GB
     volumes:
       - ./infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
 
   grafana:
-    image: grafana/grafana:13.2.4
+    # grafana/grafana:13.2.4
+    image: grafana/grafana@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     profiles: ["observability"]
     ports:
       # Единственная точка стека, нужная человеку: http://127.0.0.1:3000.
@@ -268,19 +305,37 @@ services:
       - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
 
-  # Экспортёр метрик PostgreSQL (design, решение 3): кода не касается,
-  # скреится Prometheus-ом (job postgres).
-  postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:v0.20.1
+  # Метрики сервера: CPU, память, диск, файловые системы хоста (алерты #100 —
+  # свободное место). Каноничный запуск образа: корень хоста только для чтения
+  # (--path.rootfs=/rootfs), /proc и /sys — источники статистики ядра.
+  # На Docker Desktop «сервер» — это виртуальная машина: метрики хоста
+  # ограничены ею, это ожидаемо.
+  node-exporter:
+    # quay.io/prometheus/node-exporter:v1.9.1
+    image: quay.io/prometheus/node-exporter@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a
     profiles: ["observability"]
-    environment:
-      # Реквизиты локальные, как у api/worker выше; на стенде — переменные infra.
-      DATA_SOURCE_URI: dmc268-postgres:5432/dmc268?sslmode=disable
-      DATA_SOURCE_USER: dmc268
-      DATA_SOURCE_PASS: dmc268
-    depends_on:
-      postgres:
-        condition: service_healthy
+    command:
+      - --path.rootfs=/rootfs
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+    volumes:
+      - /:/rootfs:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+
+  # Метрики контейнеров: CPU и память каждого, включая сам стек. Маунты —
+  # каноничные из документации cAdvisor (только чтение); без --privileged и
+  # /dev/kmsg недоступны OOM- и perf-коллекторы, CPU/память/сеть остаются.
+  # На Docker Desktop контейнеры живут в ВМ — метрики хоста там не видны.
+  cadvisor:
+    # gcr.io/cadvisor/cadvisor:v0.52.1
+    image: gcr.io/cadvisor/cadvisor@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435
+    profiles: ["observability"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
 
 volumes:
   postgres_data:
@@ -299,5 +354,9 @@ volumes:
     name: dmc268-tempo-data
   prometheus_data:
     name: dmc268-prometheus-data
+  # Единственный том стека без фиксированного name: префикс compose-проекта
+  # отделяет его от тома стенда (dmc268-grafana-data) на общем хосте — два
+  # проекта с одним именем тома не поднимаются вместе. Внутри — только
+  # локальное состояние Grafana (дашборды, собранные в UI): данные разработчиков
+  # он не хранит, потери при пересоздании проекта не страшны.
   grafana_data:
-    name: dmc268-grafana-data

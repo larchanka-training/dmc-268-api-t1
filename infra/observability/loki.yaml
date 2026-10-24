@@ -38,5 +38,9 @@ limits_config:
   # Структурированные метаданные: trace_id из OTLP-логов хранится и фильтруется
   # — работает переход трейс → лог в Grafana.
   allow_structured_metadata: true
-  # Хранение логов — 30 дней.
+  # Хранение логов — 30 дней. У Loki OSS retention только по времени: лимита
+  # по размеру нет (в отличие от Prometheus, у которого стоит
+  # --storage.tsdb.retention.size). Заполнение диска закрывает мониторинг
+  # файловой системы — алерты #100 по node_filesystem_avail_bytes
+  # от node-exporter.
   retention_period: 720h
