@@ -1,4 +1,4 @@
-"""Ревизия 0011 откатывается начисто и накатывается снова: роль dmc268_monitor.
+"""Ревизия 0013 откатывается начисто и накатывается снова: роль dmc268_monitor.
 
 Роль и расширение нужны метрикам базы (receiver postgresql коллектора,
 решение #89): роль только для входа с привилегией pg_monitor и
@@ -96,7 +96,7 @@ def test_the_monitor_role_revision_downgrades_and_upgrades_cleanly(migrated) -> 
     # иначе upgrade в тесте упал бы на «role already exists».
     _drop_role(migrated)
     try:
-        command.downgrade(config, "0010")
+        command.downgrade(config, "0012")
         assert not _role_exists(migrated)
         assert not _extension_exists(migrated)
     finally:

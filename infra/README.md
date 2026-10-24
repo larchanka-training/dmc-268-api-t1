@@ -53,7 +53,7 @@ Eurorouter подключается только фоллбэком после �
 | `api_image` | тег собранного образа |
 | `postgres_password`, `rabbitmq_password` | секреты `PG_PASSWORD_DMC268_T1`, `RABBITMQ_PASSWORD_DMC268_T1` |
 | `grafana_admin_password` | секрет `GRAFANA_ADMIN_PASSWORD_DMC268_T1` — пароль админа Grafana (`GF_SECURITY_ADMIN_PASSWORD` контейнера `dmc268-grafana`). Значения по умолчанию у переменной нет: без секрета `apply` падает на её чтении. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 | gh secret set GRAFANA_ADMIN_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` — или своим паролем; локальному стеку он не нужен, Grafana там без логина |
-| `postgres_monitor_password` | секрет `PG_MONITOR_PASSWORD_DMC268_T1` — пароль роли `dmc268_monitor` (`pg_monitor`), которую создаёт миграция 0011 и под которой коллектор снимает метрики базы (`POSTGRESQL_PASSWORD` его env). Значения по умолчанию у переменной нет: без секрета `apply` падает на её чтении. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 | gh secret set PG_MONITOR_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` |
+| `postgres_monitor_password` | секрет `PG_MONITOR_PASSWORD_DMC268_T1` — пароль роли `dmc268_monitor` (`pg_monitor`), которую создаёт миграция 0013 и под которой коллектор снимает метрики базы (`POSTGRESQL_PASSWORD` его env). Значения по умолчанию у переменной нет: без секрета `apply` падает на её чтении. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 | gh secret set PG_MONITOR_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` |
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `user_token_encryption_key` | секрет `USER_TOKEN_KEY_DMC268_T1` — 32 байта в base64 (`openssl rand -base64 32`). Без него или с битым значением `apply` падает на проверке переменной: стенд не стартует без шифрования токенов пользователя. Генерация и установка — `README.md`, «Ключ шифрования токенов пользователя» |
 | `registry_username`, `registry_password` | `github.actor` и `GITHUB_TOKEN`, живут один прогон |
@@ -104,7 +104,7 @@ stanza — beta, обновление с чтением breaking changes).
 `grafana_port`, `grafana_admin_password` (секрет; локально Grafana без логина, на стенде — по
 учётке), `postgres_monitor_password` (секрет, см. таблицу выше), `deployment_environment_name`.
 Метрики базы коллектор снимает receiver-ом `postgresql`: роль только-чтение `dmc268_monitor` с
-`pg_monitor` и расширение `pg_stat_statements` (тяжёлые запросы) создаёт миграция 0011,
+`pg_monitor` и расширение `pg_stat_statements` (тяжёлые запросы) создаёт миграция 0013,
 `shared_preload_libraries` включает контейнер Postgres. RabbitMQ отдаёт метрики встроенным
 плагином `rabbitmq_prometheus` (порт 15692 в сети, per-object эндпоинт — метрики очередей с
 лейблом `queue`); сервер — `node-exporter` (9100), контейнеры — `cAdvisor` (8080); все скреятся

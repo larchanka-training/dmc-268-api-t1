@@ -247,7 +247,7 @@ variable "grafana_admin_password" {
 
 # Без значения по умолчанию: пароль роли мониторинга задаётся на стенде явно
 # (секрет PG_MONITOR_PASSWORD_DMC268_T1). Роль dmc268_monitor создаёт миграция
-# 0011 (POSTGRES_MONITOR_PASSWORD), под ней коллектор снимает метрики базы
+# 0013 (POSTGRES_MONITOR_PASSWORD), под ней коллектор снимает метрики базы
 # (POSTGRESQL_PASSWORD его env).
 variable "postgres_monitor_password" {
   type        = string

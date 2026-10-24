@@ -821,7 +821,7 @@ def test_the_postgresql_receiver_sits_in_the_metrics_pipeline_only() -> None:
 def test_the_postgresql_receiver_takes_connection_from_the_environment() -> None:
     """Реквизиты роли мониторинга — из окружения, литералов в конфиге нет.
 
-    Роль dmc268_monitor создаёт миграция 0011; пароль приходит из той же
+    Роль dmc268_monitor создаёт миграция 0013; пароль приходит из той же
     переменной, что питает миграцию (локальный compose и infra различаются),
     поэтому в общем конфиге ему место только как ${env:...}. Endpoint —
     строго host:port, имя базы — отдельно (databases): суффикс /dbname

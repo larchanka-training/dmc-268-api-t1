@@ -5,7 +5,7 @@ services:
     image: pgvector/pgvector:pg18
     # Тяжёлые запросы снимает receiver postgresql коллектора через
     # pg_stat_statements (решение #89): библиотека должна быть загружена при
-    # старте сервера, расширение и роль мониторинга создаёт миграция 0011.
+    # старте сервера, расширение и роль мониторинга создаёт миграция 0013.
     # Та же команда — у контейнера postgres в infra/main.tf.
     command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
     # Алиас сети совпадает с именем контейнера на стенде (infra/main.tf):
@@ -114,7 +114,7 @@ services:
       # Стабильные имена атрибутов semconv для SQL и HTTP; то же значение ставит код.
       OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
       # Пароль роли мониторинга dmc268_monitor: api гоняет миграции, роль
-      # создаёт ревизия 0011. Локальный дефолт пари́т реквизитам postgres
+      # создаёт ревизия 0013. Локальный дефолт пари́т реквизитам postgres
       # выше (как и POSTGRES_PASSWORD, допустим только локально); на стенде
       # переменную задаёт infra из секрета.
       POSTGRES_MONITOR_PASSWORD: ${POSTGRES_MONITOR_PASSWORD:-dmc268_monitor}

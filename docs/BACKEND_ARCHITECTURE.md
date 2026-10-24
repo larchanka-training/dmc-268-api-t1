@@ -433,7 +433,7 @@ def upgrade() -> None:
   `infra/observability/`, локально их монтирует профиль `observability` в
   compose, на стенде те же файлы собирает `infra/` (Terraform). Метрики базы
   снимает сам коллектор receiver-ом `postgresql` — отдельного экспортёра нет,
-  роль только-чтение `dmc268_monitor` с `pg_monitor` создаёт миграция 0011.
+  роль только-чтение `dmc268_monitor` с `pg_monitor` создаёт миграция 0013.
   На входе трейсов и логов коллектор редактирует чувствительные данные — query
   URL, значения `db.*`, тексты и стектрейсы исключений заменяются маркером
   `<скрыто>`, атрибут остаётся; проверка — `tests/infrastructure/test_collector_redaction.py`.

@@ -107,7 +107,7 @@ resource "docker_container" "postgres" {
 
   # Тяжёлые запросы снимает receiver postgresql коллектора через
   # pg_stat_statements (решение #89): библиотека должна быть загружена при
-  # старте сервера, расширение и роль мониторинга создаёт миграция 0011.
+  # старте сервера, расширение и роль мониторинга создаёт миграция 0013.
   # ENTRYPOINT образа (docker-entrypoint.sh) остаётся — переопределяется
   # только CMD. Та же команда — у сервиса postgres в docker-compose.yml.
   command = ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
@@ -229,7 +229,7 @@ resource "docker_container" "migrate" {
   }
 
   env = concat(local.app_env, local.telemetry_env, [
-    # Пароль роли мониторинга dmc268_monitor: миграция 0011 создаёт роль с
+    # Пароль роли мониторинга dmc268_monitor: миграция 0013 создаёт роль с
     # ним, коллектор подключается под ней (receiver postgresql). Один источник
     # с env коллектора (POSTGRESQL_PASSWORD ниже) — иначе роль и подключение
     # разъедутся.
@@ -498,7 +498,7 @@ resource "docker_container" "otelcol" {
     # стека) коллектор отбрасывает — см. on_error: drop в конфиге.
     "OTELCOL_LOG_FILES=/var/lib/docker/containers/*/*-json.log",
     # Реквизиты роли мониторинга базы (receiver postgresql в otelcol.yaml):
-    # роль создаёт миграция 0011 с тем же паролем (docker_container.migrate),
+    # роль создаёт миграция 0013 с тем же паролем (docker_container.migrate),
     # имя совпадает с переменной POSTGRES_MONITOR_PASSWORD настроек.
     "POSTGRESQL_USERNAME=dmc268_monitor",
     "POSTGRESQL_PASSWORD=${var.postgres_monitor_password}",

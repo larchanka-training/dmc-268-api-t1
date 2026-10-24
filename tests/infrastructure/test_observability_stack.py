@@ -189,7 +189,7 @@ def test_prometheus_is_capped_by_size(file: Path) -> None:
 @pytest.mark.parametrize("file", [COMPOSE_FILE, MAIN_TF])
 def test_postgres_preloads_pg_stat_statements(file: Path) -> None:
     """pg_stat_statements загружается сервером в обоих окружениях: тяжёлые
-    запросы снимает receiver postgresql (расширение создаёт миграция 0011)."""
+    запросы снимает receiver postgresql (расширение создаёт миграция 0013)."""
     assert "shared_preload_libraries=pg_stat_statements" in file.read_text(encoding="utf-8")
 
 
