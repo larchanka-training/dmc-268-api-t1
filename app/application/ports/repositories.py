@@ -69,6 +69,10 @@ class ReviewRunRepo(Protocol):
 
     def find_active(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None: ...
 
+    def find_reviewed(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        """Самый поздний прогон по вебхуку на этот коммит в `REVIEWED_STATUSES`."""
+        ...
+
     def list_unfinished(self) -> list[ReviewRun]: ...
 
     def list_changed(

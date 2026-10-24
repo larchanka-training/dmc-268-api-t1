@@ -12,13 +12,16 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanKind, StatusCode
 from sqlalchemy import create_engine
 
+from app.config import Settings
 from app.domain.entities import ReviewRun, Session
 from app.domain.enums import ReviewRunStatus, TriggerSource
+from app.domain.webhook_redelivery import REDELIVERY_WINDOW, WebhookDelivery
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.telemetry import instrument_engine, sweep_span
-from app.worker.factory import build_maintenance
+from app.worker.factory import build_maintenance, build_redelivery
 
 from ..conftest import requires_db
+from ..fakes import FakeVcs, webhook_payload
 from ..fakes.unit_of_work import FakeUnitOfWork
 from .test_worker_loop import FakeChannel, _worker
 
@@ -171,3 +174,180 @@ def test_the_queries_of_the_pass_are_children_of_its_span(
     assert pass_context is not None
     pass_id = pass_context.span_id
     assert all(s.parent is not None and s.parent.span_id == pass_id for s in database)
+
+
+# --- повтор упавших доставок вебхука (#149) ---------------------------------
+
+
+def test_the_redelivery_step_runs_on_its_own_interval() -> None:
+    clock = {"now": NOW}
+    calls: list[datetime] = []
+
+    def redeliver() -> int:
+        calls.append(clock["now"])
+        return 0
+
+    maintenance = build_maintenance(
+        FakeUnitOfWork,
+        stale_limit=LIMIT,
+        queued_limit=QUEUED_LIMIT,
+        now=lambda: clock["now"],
+        redeliver=redeliver,
+        redelivery_interval=timedelta(minutes=5),
+    )
+    for minute in range(11):
+        clock["now"] = NOW + timedelta(minutes=minute)
+        maintenance()
+
+    assert calls == [NOW, NOW + timedelta(minutes=5), NOW + timedelta(minutes=10)]
+
+
+def test_a_failing_redelivery_does_not_stop_the_other_steps(
+    caplog, monkeypatch, spans: InMemorySpanExporter
+) -> None:
+    caplog.set_level(logging.ERROR)
+    monkeypatch.setattr(logging.getLogger("app.worker.factory"), "disabled", False)
+    uow = FakeUnitOfWork()
+    uow.sessions.add(_session(1, NOW - timedelta(days=1)))
+
+    def redeliver() -> int:
+        raise RuntimeError("HTTP 429")
+
+    with sweep_span():
+        build_maintenance(
+            lambda: uow,
+            stale_limit=LIMIT,
+            queued_limit=QUEUED_LIMIT,
+            now=lambda: NOW,
+            redeliver=redeliver,
+            redelivery_interval=timedelta(minutes=5),
+        )()
+
+    assert uow.sessions.stored == []
+    assert "повтор упавших доставок вебхука завершился ошибкой" in caplog.text
+    (pass_span,) = [s for s in spans.get_finished_spans() if s.name == "review.sweep"]
+    assert pass_span.status.status_code is StatusCode.ERROR
+
+
+def _settings(**overrides: object) -> Settings:
+    return Settings(
+        database_url="postgresql+psycopg://test:test@localhost/test",
+        rabbitmq_url="amqp://guest:guest@localhost//",
+        github_webhook_secret="test-secret",
+        **overrides,  # type: ignore[arg-type]
+    )
+
+
+class _Deliveries:
+    def __init__(self, event: str = "pull_request", action: str = "synchronize") -> None:
+        self.since: list[datetime] = []
+        self.event = event
+        self.action = action
+
+    def list_recent(self, since: datetime) -> list[WebhookDelivery]:
+        self.since.append(since)
+        return [
+            WebhookDelivery(
+                id=7,
+                guid="g",
+                delivered_at=NOW - timedelta(hours=1),
+                redelivery=False,
+                status="Invalid HTTP Response: 502",
+                status_code=502,
+                event=self.event,
+                action=self.action,
+            )
+        ]
+
+    def delivery_payload(self, delivery_id: int) -> dict[str, object] | None:
+        raise AssertionError("тест не читает payload")
+
+    def redeliver(self, delivery_id: int) -> None:
+        raise AssertionError("тест не переотправляет")
+
+
+def _no_vcs() -> FakeVcs:
+    raise AssertionError("шлюз VCS без реквизитов не собирается")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"github_app_id": "42"},
+        {"github_app_private_key": "pem"},
+        {"github_app_id": "42", "github_app_private_key": "pem", "webhook_redelivery_enabled": False},
+    ],
+)
+def test_without_app_credentials_or_when_disabled_redelivery_is_off(
+    overrides: dict[str, object], caplog, monkeypatch
+) -> None:
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(logging.getLogger("app.worker.factory"), "disabled", False)
+
+    def unused() -> _Deliveries:
+        raise AssertionError("адаптер без реквизитов не собирается")
+
+    assert build_redelivery(_settings(**overrides), unused, _no_vcs, now=lambda: NOW) is None
+    (record,) = [r for r in caplog.records if "повтор упавших доставок" in r.getMessage()]
+    assert record.levelno == logging.INFO
+
+
+def test_redelivery_uses_the_policy_from_settings(monkeypatch) -> None:
+    hooks = _Deliveries()
+    settings = _settings(
+        github_app_id="42",
+        github_app_private_key="pem",
+        webhook_redelivery_max_attempts=2,
+        webhook_redelivery_backoff_seconds=7200,
+        webhook_redelivery_max_per_pass=3,
+    )
+
+    redeliver = build_redelivery(settings, lambda: hooks, FakeVcs, now=lambda: NOW)
+
+    assert redeliver is not None
+    # Пауза 2 часа, последняя попытка час назад — переотправлять рано.
+    assert redeliver() == 0
+    assert hooks.since == [NOW - REDELIVERY_WINDOW]
+
+
+def test_redelivery_stops_on_the_pass_budget_from_settings() -> None:
+    """Монотонные часы подменены: каждый вызов на 10 с позже, бюджет — 5 с."""
+    hooks = _Deliveries(event="pull_request_review_thread", action="resolved")
+    ticks = iter(float(10 * n) for n in range(10))
+    settings = _settings(
+        github_app_id="42",
+        github_app_private_key="pem",
+        webhook_redelivery_pass_budget_seconds=5,
+    )
+
+    redeliver = build_redelivery(
+        settings, lambda: hooks, FakeVcs, now=lambda: NOW, monotonic=lambda: next(ticks)
+    )
+
+    assert redeliver is not None
+    # Доставка к переотправке готова, но бюджет истёк до неё: `redeliver` фейка не вызван.
+    assert redeliver() == 0
+
+
+def test_stale_guids_are_remembered_between_passes() -> None:
+    """Память устаревших `guid` живёт в замыкании шага: второй проход их не запрашивает."""
+
+    class StaleDeliveries(_Deliveries):
+        def __init__(self) -> None:
+            super().__init__(event="pull_request", action="synchronize")
+            self.payloads_read = 0
+
+        def delivery_payload(self, delivery_id: int) -> dict[str, object] | None:
+            self.payloads_read += 1
+            return webhook_payload("synchronize")
+
+    hooks = StaleDeliveries()
+    vcs = FakeVcs()  # голова PR — коммит `opened`, доставка `synchronize` устарела
+    settings = _settings(github_app_id="42", github_app_private_key="pem")
+    redeliver = build_redelivery(settings, lambda: hooks, lambda: vcs, now=lambda: NOW)
+
+    assert redeliver is not None
+    assert (redeliver(), redeliver()) == (0, 0)
+    assert hooks.payloads_read == 1
+    assert len(vcs.calls) == 1

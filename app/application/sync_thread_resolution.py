@@ -13,6 +13,7 @@ from app.application.merge_gate_publish import (
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.domain.enums import CommentKind, Provider
+from app.domain.webhook import THREAD_ACTIONS
 
 
 def _thread_comment_provider_ids(thread: Mapping[str, Any]) -> tuple[str, ...]:
@@ -97,7 +98,7 @@ def apply_review_thread_webhook(
 ) -> bool:
     """Вебхук `pull_request_review_thread`: resolved / unresolved."""
     action = payload.get("action")
-    if action not in ("resolved", "unresolved"):
+    if action not in THREAD_ACTIONS:
         return False
     thread = payload.get("thread")
     if not isinstance(thread, dict):

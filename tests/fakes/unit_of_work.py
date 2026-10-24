@@ -28,7 +28,13 @@ from app.domain.entities import (
     Session,
     User,
 )
-from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
+from app.domain.enums import (
+    REVIEWED_STATUSES,
+    TERMINAL_STATUSES,
+    CommentKind,
+    Provider,
+    TriggerSource,
+)
 from app.domain.lifecycle import next_status
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
@@ -191,6 +197,17 @@ class FakeReviewRunRepo:
             ),
             None,
         )
+
+    def find_reviewed(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        reviewed = [
+            r
+            for r in self._by_id.values()
+            if r.merge_request_id == merge_request_id
+            and r.head_sha == head_sha
+            and r.trigger is TriggerSource.WEBHOOK
+            and r.status in REVIEWED_STATUSES
+        ]
+        return max(reviewed, key=lambda r: (r.created_at, r.id), default=None)
 
     def list_unfinished(self) -> list[ReviewRun]:
         return [r for r in self._by_id.values() if r.status not in TERMINAL_STATUSES]

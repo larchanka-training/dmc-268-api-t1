@@ -24,6 +24,7 @@ from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.vcs_gateway import VcsGateway
+from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.config import Settings
 from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
@@ -41,6 +42,7 @@ from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
 from app.infrastructure.vcs.cached_installations import CachedInstallationCatalog
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
+from app.infrastructure.vcs.github_deliveries import GitHubWebhookDeliveries
 from app.infrastructure.vcs.github_installations import GitHubInstallationCatalog
 
 logger = logging.getLogger(__name__)
@@ -124,6 +126,19 @@ class Container:
             gateway = GitHubVcsGateway(auth, client)
             object.__setattr__(self, "_vcs_gateway", gateway)
         return gateway
+
+    def webhook_deliveries(self) -> WebhookDeliveries:
+        """Доставки вебхука GitHub App — для повтора упавших (#149).
+
+        Свой клиент и свой `GitHubAppAuth`: нужен только JWT приложения, кэш
+        installation tokens шлюза ни к чему. Собирается воркером один раз;
+        конструирование — без сети.
+        """
+        client = httpx.Client(base_url=_GITHUB_API, timeout=_GITHUB_USER_TIMEOUT)
+        auth = GitHubAppAuth(
+            self.settings.github_app_id, self.settings.github_app_private_key.get_secret_value(), client
+        )
+        return GitHubWebhookDeliveries(client, auth)
 
     def installation_catalog(self) -> InstallationCatalog:
         """Репозитории установок GitHub App, видимые пользователю по его токену."""

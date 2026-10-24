@@ -228,6 +228,41 @@ class Settings(BaseSettings):
         description="Таймаут одного HTTP-запроса к модели, секунды",
     )
 
+    # Повтор упавших доставок вебхука (#149): GitHub сам их не повторяет. Без
+    # GITHUB_APP_ID и ключа повтор выключен, даже если флаг включён.
+    webhook_redelivery_enabled: bool = Field(
+        default=True,
+        description="Переотправлять ли упавшие доставки вебхука GitHub App из воркера",
+    )
+    webhook_redelivery_interval_seconds: int = Field(
+        default=300,
+        gt=0,
+        description="Как часто воркер проверяет упавшие доставки вебхука, секунды",
+    )
+    # 5 попыток с паузой 5, 10, 20, 40 и 80 минут переживают простой около 2,5 часов.
+    webhook_redelivery_max_attempts: int = Field(
+        default=5,
+        gt=0,
+        description="Сколько раз переотправлять одну доставку вебхука",
+    )
+    webhook_redelivery_backoff_seconds: int = Field(
+        default=300,
+        gt=0,
+        description="Пауза перед первой переотправкой, секунды; дальше вдвое больше с каждой",
+    )
+    webhook_redelivery_max_per_pass: int = Field(
+        default=10,
+        gt=0,
+        description="Сколько доставок вебхука переотправлять за один проход воркера",
+    )
+    # Проход идёт внутри consume-цикла воркера: на кандидата до трёх запросов к
+    # GitHub (payload доставки, голова PR, переотправка), бюджет держит цикл живым.
+    webhook_redelivery_pass_budget_seconds: float = Field(
+        default=30,
+        gt=0,
+        description="Сколько секунд может идти один проход повтора доставок вебхука; остальное — в следующий",
+    )
+
     @field_validator("llm_backend", mode="before")
     @classmethod
     def _empty_backend_is_unset(cls, value: object) -> object:
@@ -263,6 +298,11 @@ class Settings(BaseSettings):
             return 0.0
         providers = 2 if self.llm_hosted_fallback else 1
         return self.llm_timeout_seconds * self.llm_max_attempts * providers
+
+    @property
+    def github_app_configured(self) -> bool:
+        """Заданы ли идентификатор и приватный ключ GitHub App: без них JWT не подписать."""
+        return bool(self.github_app_id and self.github_app_private_key.get_secret_value())
 
     @property
     def eurorouter_keys(self) -> tuple[SecretStr, ...]:

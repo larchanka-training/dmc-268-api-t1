@@ -175,7 +175,7 @@ class GitHubInstallationCatalog:
             raise VcsAuthError(f"GitHub API отверг JWT приложения на GET {url}")
         if status == 401:
             raise ProviderTokenRejected(f"GitHub API отверг токен пользователя на GET {url}")
-        if status == 429 or status >= 500 or (status == 403 and _rate_limited(response)):
+        if status == 429 or status >= 500 or (status == 403 and is_rate_limited(response)):
             raise VcsUnavailableError(f"GitHub API: HTTP {status} на GET {url}")
         if status in (403, 404):
             raise _Inaccessible(status)
@@ -192,7 +192,7 @@ class GitHubInstallationCatalog:
             raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}: {problems}") from None
 
 
-def _rate_limited(response: httpx.Response) -> bool:
+def is_rate_limited(response: httpx.Response) -> bool:
     """`403` из-за лимита GitHub, а не из-за доступа («Rate limits for the REST API»).
 
     Первичный лимит — `x-ratelimit-remaining: 0`; вторичный — `retry-after`

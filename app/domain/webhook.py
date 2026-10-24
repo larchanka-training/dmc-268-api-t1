@@ -12,7 +12,9 @@ from typing import Any
 
 from app.domain.entities import WebhookEvent
 
-_TRIGGERING_ACTIONS: frozenset[str] = frozenset({"opened", "synchronize"})
+TRIGGERING_ACTIONS: frozenset[str] = frozenset({"opened", "synchronize"})
+# Действия `pull_request_review_thread`, которые сверяют закрытие треда.
+THREAD_ACTIONS: frozenset[str] = frozenset({"resolved", "unresolved"})
 
 
 def extract_github_event(payload: dict[str, Any]) -> WebhookEvent | None:
@@ -22,7 +24,7 @@ def extract_github_event(payload: dict[str, Any]) -> WebhookEvent | None:
     устаревшим, поэтому всегда берётся из свежих метаданных PR.
     """
     try:
-        if payload["action"] not in _TRIGGERING_ACTIONS:
+        if payload["action"] not in TRIGGERING_ACTIONS:
             return None
         pull_request = payload["pull_request"]
         head = pull_request["head"]
