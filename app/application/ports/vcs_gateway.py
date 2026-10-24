@@ -15,6 +15,7 @@
 """
 
 from typing import Protocol
+from uuid import UUID
 
 from app.application.ports.vcs_review import (
     InlineCommentDraft,
@@ -84,8 +85,16 @@ class VcsGateway(Protocol):
         installation_id: int,
         summary_body: str,
         inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
     ) -> PullRequestReviewPublication:
-        """Один review на прогон: сводка и пакет инлайн-комментариев."""
+        """Один review на прогон: сводка и пакет инлайн-комментариев.
+
+        Без дублей: ответ на создание не пришёл - адаптер ищет ревью прогона
+        `review_run_id` на хостинге и создаёт заново, только если его нет;
+        попытки кончились - `VcsError`. id сводки возвращается, как только ревью создано; id
+        inline-комментария, который хостинг не отдал, - `None`.
+        """
         ...
 
     def reply_to_review_comment(
@@ -96,7 +105,10 @@ class VcsGateway(Protocol):
         provider_comment_id: str,
         body: str,
     ) -> str:
-        """Ответ в существующий review comment; возвращает id нового комментария."""
+        """Ответ в существующий review comment; возвращает id нового комментария.
+
+        Без повтора: сбой, после которого неизвестно, ушёл ли ответ, - `VcsError`.
+        """
         ...
 
     def fetch_review_threads_state(

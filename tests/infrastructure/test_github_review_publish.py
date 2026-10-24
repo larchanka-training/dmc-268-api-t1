@@ -3,8 +3,10 @@
 import json
 from collections.abc import Callable
 from typing import Any
+from uuid import UUID
 
 import httpx
+import pytest
 
 from app.application.ports.vcs_review import (
     InlineCommentDraft,
@@ -12,6 +14,7 @@ from app.application.ports.vcs_review import (
     ReviewThreadState,
 )
 from app.domain.enums import DiffSide
+from app.infrastructure.vcs.errors import VcsError, VcsUnavailableError
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from tests.infrastructure.conftest import RsaKeyPair
@@ -19,6 +22,10 @@ from tests.infrastructure.conftest import RsaKeyPair
 APP_ID = "123456"
 INSTALLATION_ID = 1
 FAR_FUTURE = "2099-01-01T00:00:00Z"
+RUN_ID = UUID("0b6c1f5e-7d1a-4c1e-9a3e-5f0f6b1c2d3e")
+MARKER = f"<!-- dmc-268-review-run:{RUN_ID} -->"
+BOT = {"login": "dmc-268-review[bot]", "type": "Bot"}
+DRAFT = InlineCommentDraft(file_path="a.py", side=DiffSide.NEW, line=3, body="замечание")
 
 
 def make_gateway(rsa_key_pair: RsaKeyPair, handler: Callable[[httpx.Request], httpx.Response]):
@@ -66,11 +73,8 @@ def test_publish_pull_request_review_fetches_inline_ids(rsa_key_pair: RsaKeyPair
         "c" * 40,
         INSTALLATION_ID,
         "сводка",
-        (
-            InlineCommentDraft(
-                file_path="a.py", side=DiffSide.NEW, line=3, body="замечание"
-            ),
-        ),
+        (DRAFT,),
+        review_run_id=RUN_ID,
     )
 
     assert publication.summary_provider_comment_id == "9001"
@@ -167,3 +171,216 @@ def test_thread_state_carries_the_current_line_and_none_for_an_outdated_thread(
     }
     (query,) = queries
     assert "isOutdated" in query and "line" in query
+
+
+class _GitHub:
+    """Ответы GitHub на публикацию ревью; `create` - что отвечает `POST …/reviews`."""
+
+    def __init__(self, create: Callable[[httpx.Request], httpx.Response]) -> None:
+        self.create = create
+        self.reviews: list[dict[str, Any]] = []
+        self.seen: list[tuple[str, str]] = []
+        self.comments_status = 200
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        self.seen.append((request.method, path))
+        if path == "/app":
+            return httpx.Response(200, json={"id": 1, "slug": "dmc-268-review"})
+        if request.method == "POST" and path == "/repos/o/r/pulls/7/reviews":
+            return self.create(request)
+        if request.method == "GET" and path == "/repos/o/r/pulls/7/reviews":
+            return httpx.Response(200, json=self.reviews)
+        if request.method == "GET" and path.endswith("/comments"):
+            if self.comments_status != 200:
+                return httpx.Response(self.comments_status, json={"message": "Bad Gateway"})
+            return httpx.Response(200, json=[{"id": 42, "path": "a.py", "line": 3, "side": "RIGHT"}])
+        return httpx.Response(404)
+
+    def posts(self) -> int:
+        return self.seen.count(("POST", "/repos/o/r/pulls/7/reviews"))
+
+
+def _publish(gateway: GitHubVcsGateway) -> Any:
+    return gateway.publish_pull_request_review(
+        "o/r", 7, "c" * 40, INSTALLATION_ID, "сводка", (DRAFT,), review_run_id=RUN_ID
+    )
+
+
+def test_review_body_carries_the_hidden_run_marker(rsa_key_pair: RsaKeyPair) -> None:
+    bodies: list[str] = []
+
+    def create(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content)["body"])
+        return httpx.Response(200, json={"id": 9001, "body": bodies[-1]})
+
+    github = _GitHub(create)
+    _publish(make_gateway(rsa_key_pair, github.handler))
+
+    (body,) = bodies
+    assert body.startswith("сводка")
+    assert body.endswith(MARKER)
+
+
+def test_502_on_create_review_is_not_repeated_and_the_review_is_found_by_marker(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """#185: GitHub создал ревью, клиент получил 502 - второго POST нет, ревью - по маркеру от бота."""
+    github = _GitHub(lambda request: httpx.Response(502, json={"message": "Bad Gateway"}))
+    github.reviews = [
+        {"id": 1, "body": f"копия {MARKER}", "user": {"login": "mallory", "type": "User"}},
+        {"id": 2, "body": MARKER, "user": {"login": "other-app[bot]", "type": "Bot"}},
+        {"id": 9001, "body": f"сводка\n\n{MARKER}", "user": BOT},
+    ]
+
+    publication = _publish(make_gateway(rsa_key_pair, github.handler))
+
+    assert github.posts() == 1
+    assert publication.summary_provider_comment_id == "9001"
+    assert publication.inline_comments[0].provider_comment_id == "42"
+
+
+def test_timeout_on_create_review_looks_the_review_up_instead_of_repeating(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    def create(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    github = _GitHub(create)
+    github.reviews = [{"id": 9001, "body": f"сводка\n\n{MARKER}", "user": BOT}]
+
+    publication = _publish(make_gateway(rsa_key_pair, github.handler))
+
+    assert github.posts() == 1
+    assert publication.summary_provider_comment_id == "9001"
+
+
+def _sleeping_gateway(
+    rsa_key_pair: RsaKeyPair, handler: Callable[[httpx.Request], httpx.Response], sleeps: list[float]
+) -> GitHubVcsGateway:
+    client = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    auth = GitHubAppAuth(APP_ID, rsa_key_pair.private_pem, client)
+    return GitHubVcsGateway(auth, client, sleep=sleeps.append, clock=lambda: 1_800_000_000.0)
+
+
+def test_rate_limited_create_review_is_posted_again_after_the_pause_and_a_lookup(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """#185: отказ лимита - пауза по `Retry-After`, ревью по маркеру нет, второй POST создаёт ревью."""
+    responses = [
+        httpx.Response(429, headers={"Retry-After": "7"}, json={"message": "secondary rate limit"}),
+        httpx.Response(200, json={"id": 9001, "body": "x"}),
+    ]
+    github = _GitHub(lambda request: responses.pop(0))
+    sleeps: list[float] = []
+
+    publication = _publish(_sleeping_gateway(rsa_key_pair, github.handler, sleeps))
+
+    assert github.posts() == 2
+    assert sleeps == [7.0]
+    # Поиск - между паузой и повтором.
+    lookup = github.seen.index(("GET", "/repos/o/r/pulls/7/reviews"))
+    assert github.seen.index(("POST", "/repos/o/r/pulls/7/reviews")) < lookup
+    assert publication.summary_provider_comment_id == "9001"
+
+
+def test_review_written_behind_a_502_is_found_after_the_pause_without_a_second_post(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    github = _GitHub(lambda request: httpx.Response(502, json={"message": "Bad Gateway"}))
+    github.reviews = [{"id": 9001, "body": f"сводка\n\n{MARKER}", "user": BOT}]
+    sleeps: list[float] = []
+
+    publication = _publish(_sleeping_gateway(rsa_key_pair, github.handler, sleeps))
+
+    assert github.posts() == 1
+    assert sleeps == [0.5]
+    assert publication.summary_provider_comment_id == "9001"
+
+
+@pytest.mark.parametrize("status", [502, 429])
+def test_create_review_gives_up_after_max_attempts_without_our_review(
+    rsa_key_pair: RsaKeyPair, status: int
+) -> None:
+    """Ревью с маркером нет ни после одной попытки: POST ровно `max_attempts` раз, затем сбой.
+    Ревью человека с тем же маркером своим не считается."""
+    github = _GitHub(lambda request: httpx.Response(status, headers={"Retry-After": "1"}, json={"message": "err"}))
+    github.reviews = [{"id": 1, "body": MARKER, "user": {"login": "mallory", "type": "User"}}]
+
+    with pytest.raises(VcsUnavailableError):
+        _publish(_sleeping_gateway(rsa_key_pair, github.handler, []))
+    assert github.posts() == 3
+
+
+def test_lost_inline_comment_list_keeps_the_review_id(rsa_key_pair: RsaKeyPair) -> None:
+    """#185: `GET …/reviews/{id}/comments` упал - ревью опубликовано, id сводки есть, inline - неизвестны."""
+    github = _GitHub(lambda request: httpx.Response(200, json={"id": 9001, "body": "x"}))
+    github.comments_status = 502
+
+    publication = _publish(make_gateway(rsa_key_pair, github.handler))
+
+    assert publication.summary_provider_comment_id == "9001"
+    assert publication.inline_comments == (None,)
+
+
+def test_reply_is_not_repeated_on_502(rsa_key_pair: RsaKeyPair) -> None:
+    posts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        posts.append(request.url.path)
+        return httpx.Response(502, json={"message": "Bad Gateway"})
+
+    with pytest.raises(VcsError):
+        make_gateway(rsa_key_pair, handler).reply_to_review_comment("o/r", 7, INSTALLATION_ID, "99", "ответ")
+    assert len(posts) == 1
+
+
+def test_check_run_is_repeated_on_502(rsa_key_pair: RsaKeyPair) -> None:
+    """Check run с тем же именем на тот же коммит заменяет прежний: повтор безвреден."""
+    posts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        posts.append(request.url.path)
+        if len(posts) == 1:
+            return httpx.Response(502, json={"message": "Bad Gateway"})
+        return httpx.Response(201, json={"id": 1})
+
+    make_gateway(rsa_key_pair, handler).set_merge_gate_check(
+        "o/r", "c" * 40, INSTALLATION_ID, MergeGateCheck(conclusion="success", title="t", summary="s")
+    )
+    assert len(posts) == 2
+
+
+def test_graphql_rate_limited_with_http_200_is_retried(rsa_key_pair: RsaKeyPair) -> None:
+    """#185: GraphQL отдаёт превышение лимита со статусом 200 и `errors[].type = RATE_LIMITED`."""
+    sleeps: list[float] = []
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(1_800_000_000 + 9)},
+                json={"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]},
+            )
+        threads = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}
+        return httpx.Response(
+            200, json={"data": {"repository": {"pullRequest": {"reviewThreads": threads}}}}
+        )
+
+    client = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    auth = GitHubAppAuth(APP_ID, rsa_key_pair.private_pem, client)
+    gateway = GitHubVcsGateway(auth, client, sleep=sleeps.append, clock=lambda: 1_800_000_000.0)
+
+    assert gateway.fetch_review_threads_state("o/r", 7, INSTALLATION_ID, frozenset({"11"})) == {}
+    assert len(calls) == 2
+    assert sleeps == [10.0]

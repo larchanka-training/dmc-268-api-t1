@@ -33,6 +33,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 API_URL = "https://api.github.com"
 APP_ID = "424242"
+# Slug приложения: GitHub отдаёт его в `GET /app`, а ревью App подписывает
+# пользователем `<slug>[bot]` с `type: Bot`.
+APP_SLUG = "dmc-268-review"
+BOT_LOGIN = f"{APP_SLUG}[bot]"
 
 
 def app_private_key() -> str:
@@ -96,6 +100,20 @@ class Review:
     body: str
     event: str
     comments: tuple[InlineComment, ...]
+    user_login: str = BOT_LOGIN
+    user_type: str = "Bot"
+
+
+@dataclass(frozen=True)
+class CreateReviewFailure:
+    """Отказ на `POST …/reviews`. `stored=True` - GitHub ревью записал, а до
+    клиента дошёл отказ (502 между прокси и бэкендом); `False` - отказ до записи
+    (лимит)."""
+
+    status: int
+    stored: bool
+    headers: dict[str, str] = field(default_factory=dict)
+    message: str = "Bad Gateway"
 
 
 @dataclass(frozen=True)
@@ -128,6 +146,10 @@ class FakeGitHub:
     outdated_threads: set[str] = field(default_factory=set)
     # Статус, которым отвечает каждый запрос GraphQL: сбой GitHub после публикации ревью.
     graphql_status: int | None = None
+    # Отказы `POST …/reviews` по очереди, по одному на запрос; кончились - успех.
+    create_review_failures: list[CreateReviewFailure] = field(default_factory=list)
+    # Статус каждого `GET …/reviews/{id}/comments`: комментарии на месте, а список не отдаётся.
+    review_comments_status: int | None = None
     # Метод и путь с query каждого запроса к API, кроме выдачи токена.
     requests: list[tuple[str, str]] = field(default_factory=list)
     unexpected: list[tuple[str, str]] = field(default_factory=list)
@@ -173,6 +195,22 @@ class FakeGitHub:
             self.pulls[number] = pull
         return pull
 
+    def add_foreign_review(self, number: int, body: str, *, login: str, user_type: str) -> Review:
+        """Ревью не от нашего App: человек или чужой бот, тело - любое."""
+        review = Review(
+            id=next(self._ids),
+            pr_number=number,
+            commit_id=self.pulls[number].head_sha,
+            body=body,
+            event="COMMENT",
+            comments=(),
+            user_login=login,
+            user_type=user_type,
+        )
+        with self._lock:
+            self.reviews.append(review)
+        return review
+
     def reviews_of(self, number: int) -> list[Review]:
         with self._lock:
             return [r for r in self.reviews if r.pr_number == number]
@@ -191,6 +229,12 @@ class FakeGitHub:
             m := re.fullmatch(r"/app/installations/(\d+)/access_tokens", path)
         ) and method == "POST":
             return self._issue_token(request, int(m.group(1)))
+        if path == "/app" and method == "GET":
+            with self._lock:
+                self.requests.append((method, path))
+            if not self._app_jwt_valid(request):
+                return httpx.Response(401, json={"message": "A JSON web token could not be decoded"})
+            return httpx.Response(200, json={"id": int(self.app_id), "slug": APP_SLUG})
         target = path + (f"?{request.url.query.decode()}" if request.url.query else "")
         with self._lock:
             self.requests.append((method, target))
@@ -203,6 +247,7 @@ class FakeGitHub:
             ("GET", rf"{repo}/compare/([0-9a-f]+)\.\.\.([0-9a-f]+)", self._compare),
             ("GET", rf"{repo}/contents/(.+)", self._contents),
             ("POST", rf"{repo}/pulls/(\d+)/reviews", self._create_review),
+            ("GET", rf"{repo}/pulls/(\d+)/reviews", self._list_reviews),
             ("GET", rf"{repo}/pulls/(\d+)/reviews/(\d+)/comments", self._review_comments),
             ("POST", rf"{repo}/check-runs", self._create_check_run),
             ("POST", r"/graphql", self._graphql),
@@ -217,9 +262,8 @@ class FakeGitHub:
 
     # --- маршруты --------------------------------------------------------
 
-    def _issue_token(self, request: httpx.Request, installation_id: int) -> httpx.Response:
-        if installation_id != self.installation_id:
-            return httpx.Response(404, json={"message": "Not Found"})
+    def _app_jwt_valid(self, request: httpx.Request) -> bool:
+        """JWT приложения подписан его ключом и выдан на его App ID."""
         bearer = request.headers.get("Authorization", "").removeprefix("Bearer ")
         public_key = serialization.load_pem_private_key(
             self.private_key.encode("ascii"), password=None
@@ -227,9 +271,14 @@ class FakeGitHub:
         try:
             claims = jwt.decode(bearer, public_key, algorithms=["RS256"])  # type: ignore[arg-type]
         except jwt.PyJWTError:
+            return False
+        return str(claims.get("iss")) == self.app_id
+
+    def _issue_token(self, request: httpx.Request, installation_id: int) -> httpx.Response:
+        if installation_id != self.installation_id:
+            return httpx.Response(404, json={"message": "Not Found"})
+        if not self._app_jwt_valid(request):
             return httpx.Response(401, json={"message": "A JSON web token could not be decoded"})
-        if str(claims.get("iss")) != self.app_id:
-            return httpx.Response(401, json={"message": "Integration not found"})
         with self._lock:
             self.tokens_issued += 1
             token = f"ghs_fake_{self.tokens_issued}"
@@ -322,13 +371,39 @@ class FakeGitHub:
             comments=tuple(comments),
         )
         with self._lock:
-            self.reviews.append(review)
+            failure = self.create_review_failures.pop(0) if self.create_review_failures else None
+            if failure is None or failure.stored:
+                self.reviews.append(review)
+        if failure is not None:
+            return httpx.Response(
+                failure.status, headers=failure.headers, json={"message": failure.message}
+            )
         return httpx.Response(200, json={"id": review.id, "body": review.body})
+
+    def _list_reviews(self, request: httpx.Request, number: str) -> httpx.Response:
+        """Ревью PR в хронологическом порядке, страницами, как в REST GitHub."""
+        per_page = int(request.url.params.get("per_page", "30"))
+        page = int(request.url.params.get("page", "1"))
+        with self._lock:
+            reviews = [r for r in self.reviews if r.pr_number == int(number)]
+        chunk = reviews[(page - 1) * per_page : page * per_page]
+        items = [
+            {
+                "id": r.id,
+                "body": r.body,
+                "commit_id": r.commit_id,
+                "user": {"login": r.user_login, "type": r.user_type},
+            }
+            for r in chunk
+        ]
+        return httpx.Response(200, json=items)
 
     def _review_comments(
         self, request: httpx.Request, number: str, review_id: str
     ) -> httpx.Response:
         page = int(request.url.params.get("page", "1"))
+        if self.review_comments_status is not None:
+            return httpx.Response(self.review_comments_status, json={"message": "Bad Gateway"})
         with self._lock:
             review = next((r for r in self.reviews if r.id == int(review_id)), None)
         if review is None:
