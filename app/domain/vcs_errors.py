@@ -21,8 +21,20 @@ class VcsError(RuntimeError):
 
 
 class VcsFileTooLargeError(VcsError):
-    """Файл больше лимита вызывающего: адаптер оборвал загрузку, не дочитав.
+    """Файл или дифф больше лимита вызывающего: адаптер оборвал загрузку, не дочитав.
 
     Не сбой VCS, а исход лимита — вызывающий ловит его раньше `VcsError`
-    (правила — статус `too_large`, AST — пропуск файла).
+    (правила — статус `too_large`, AST — пропуск файла, дифф прогона —
+    `DiffTooLargeError`, инкрементальный дифф тредов — изменение не подтверждено).
     """
+
+
+class DiffTooLargeError(VcsFileTooLargeError):
+    """Дифф прогона больше `diff_max_bytes`: ревью не выполняется.
+
+    Код свой, а не `SCM_UNAVAILABLE`: VCS ответила исправно, и повтор не
+    поможет — как `PROMPT_TOO_LARGE` у модели. Прогон уходит в `failed`, шаг
+    `fetching_diff` — с этим кодом.
+    """
+
+    code: ClassVar[str] = "DIFF_TOO_LARGE"

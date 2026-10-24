@@ -224,6 +224,7 @@ def context_limits(settings: Settings) -> ContextLimits:
         ast_max_files=settings.ast_max_files,
         ast_max_file_bytes=settings.ast_max_file_bytes,
         pr_context_max_tokens=settings.pr_context_max_tokens,
+        diff_max_bytes=settings.diff_max_bytes,
     )
 
 

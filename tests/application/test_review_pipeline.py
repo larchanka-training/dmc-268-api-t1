@@ -38,7 +38,7 @@ from app.domain.llm_errors import (
 )
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import start_step
-from app.domain.vcs_errors import VcsError
+from app.domain.vcs_errors import DiffTooLargeError, VcsError
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.vcs.errors import VcsNotFoundError
 
@@ -55,7 +55,7 @@ from ..fakes.webhooks import FakeVcs
 
 # Дифф фейкового VCS меняет первую строку `app/main.py`.
 CHANGED_FILE = "app/main.py"
-LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000)
+LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
 LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
 TEXTS = PromptTexts(review_system="ревью", verifier_system="верификация")
 
@@ -772,6 +772,30 @@ def test_a_diff_failure_fails_the_fetching_step_with_its_code() -> None:
     ]
     (step,) = uow.review_run_steps.list_for_run(JOB.review_run_id)
     assert step.duration_seconds == 0.5
+
+
+def test_a_diff_over_the_limit_fails_the_run_without_a_review() -> None:
+    """Дифф больше лимита — прогон `failed` с понятной причиной, шаг
+    `fetching_diff` с `DIFF_TOO_LARGE`; модель не вызывается, на PR ничего."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway([])
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, gateway, vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    assert run.status == ReviewRunStatus.FAILED
+    assert run.failure_reason == "дифф PR больше лимита 1000 байт: ревью не выполняется"
+    assert _steps(uow) == [
+        (ReviewRunStage.FETCHING_DIFF, ReviewRunStepStatus.FAILED, None, "DIFF_TOO_LARGE"),
+    ]
+    assert gateway.requests == []
+    assert vcs.publications == []
+    assert vcs.checks == []
+    assert uow.context_payloads.list_for_run(JOB.review_run_id) == []
 
 
 def test_a_missing_diff_fails_the_fetching_step_as_pr_not_found() -> None:

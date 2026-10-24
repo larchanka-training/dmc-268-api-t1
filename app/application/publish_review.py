@@ -40,6 +40,7 @@ from app.domain.review_comment import (
     format_summary_comment,
     format_thread_reply,
 )
+from app.domain.vcs_errors import VcsFileTooLargeError
 
 
 def _default_summary(findings: tuple[Finding, ...]) -> LlmReviewSummary:
@@ -69,12 +70,23 @@ def _hunks_between_commits(
     job: ReviewJob,
     base_sha: str,
     head_sha: str,
+    *,
+    max_bytes: int,
 ) -> tuple[Hunk, ...]:
+    """Hunk'и между прошлым и текущим head; дифф больше лимита - пусто.
+
+    Пустой результат значит «изменение строки якоря не подтверждено»: тред
+    критичного замечания не закрывается автоматически, а уже готовое ревью
+    из-за лимита не падает.
+    """
     if base_sha == head_sha:
         return ()
-    diff_text = vcs.fetch_diff(
-        job.repository_full_name, base_sha, head_sha, job.installation_id
-    )
+    try:
+        diff_text = vcs.fetch_diff(
+            job.repository_full_name, base_sha, head_sha, job.installation_id, max_bytes=max_bytes
+        )
+    except VcsFileTooLargeError:
+        return ()
     return tuple(hunk for parsed in parse_diff(diff_text) for hunk in parsed.hunks)
 
 
@@ -117,8 +129,13 @@ def publish_review(
     vcs: VcsGateway,
     now: datetime,
     new_id: Callable[[], UUID],
+    diff_max_bytes: int,
 ) -> None:
-    """Опубликовать находки, ответы в треды и merge gate для одного прогона."""
+    """Опубликовать находки, ответы в треды и merge gate для одного прогона.
+
+    `diff_max_bytes` ограничивает инкрементальный дифф, которым подтверждается
+    изменение строки якоря критичного замечания.
+    """
     with uow:
         findings = tuple(uow.findings.list_for_run(run.id))
         open_threads = tuple(uow.published_comments.list_open_threads_for_merge_request(run.merge_request_id))
@@ -192,6 +209,7 @@ def publish_review(
         vcs=vcs,
         now=now,
         new_id=new_id,
+        diff_max_bytes=diff_max_bytes,
     )
 
     sync_open_threads_from_host(
@@ -223,6 +241,7 @@ def _publish_thread_follow_ups(
     vcs: VcsGateway,
     now: datetime,
     new_id: Callable[[], UUID],
+    diff_max_bytes: int,
 ) -> None:
     if not follow_ups:
         return
@@ -255,7 +274,7 @@ def _publish_thread_follow_ups(
         prev_head = prev_run.head_sha if prev_run is not None else job.head_sha
         if prev_head not in incremental_hunks_cache:
             incremental_hunks_cache[prev_head] = _hunks_between_commits(
-                vcs, job, prev_head, job.head_sha
+                vcs, job, prev_head, job.head_sha, max_bytes=diff_max_bytes
             )
         incremental_hunks = incremental_hunks_cache[prev_head]
         body = format_thread_reply(item.status, item.reply, severity=matched.finding.severity)

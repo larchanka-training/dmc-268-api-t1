@@ -33,10 +33,8 @@ from ..fakes import (
     webhook_payload,
 )
 
-EXPECTED_VCS_CALLS = [
-    ("metadata", REPO_FULL_NAME, 6, INSTALLATION_ID),
-    ("diff", REPO_FULL_NAME, pr_metadata().base_sha, pr_metadata().head_sha, INSTALLATION_ID),
-]
+# Приём берёт только метаданные: дифф достаёт воркер с лимитом размера.
+EXPECTED_VCS_CALLS = [("metadata", REPO_FULL_NAME, 6, INSTALLATION_ID)]
 
 
 def run_case(
@@ -191,12 +189,20 @@ def test_unregistered_repository_is_ignored_without_records() -> None:
     assert queue.jobs == []
 
 
+def test_intake_does_not_fetch_the_diff() -> None:
+    """Дифф любого размера не трогает ответ на доставку: его достаёт воркер."""
+    outcome, _, vcs, queue = run_case()
+
+    assert outcome.kind == "success"
+    assert [call for call in vcs.calls if call[0] == "diff"] == []
+    assert len(queue.jobs) == 1
+
+
 def test_vcs_error_yields_failure_and_creates_nothing() -> None:
     outcome, uow, vcs, queue = run_case(vcs_error=VcsError("GitHub API: HTTP 502"))
     assert outcome.kind == "failure"
-    # Метаданные запросили — и на ошибке VCS обработка прекратилась: дифф за
-    # ними не запрашивается.
-    assert vcs.calls == [EXPECTED_VCS_CALLS[0]]
+    # Метаданные запросили — и на ошибке VCS обработка прекратилась.
+    assert vcs.calls == EXPECTED_VCS_CALLS
     assert uow.merge_requests.added == []
     assert uow.review_runs.added == []
     assert queue.jobs == []
@@ -288,7 +294,8 @@ def test_race_with_a_different_commit_retries_the_write() -> None:
 def test_broker_failure_fails_the_run_and_next_delivery_starts_a_new_one() -> None:
     """Сбой брокера после коммита компенсируется сразу, как `_fail_unenqueued`
     в #36: прогон переводится в failed, ошибка идёт дальше — вебхук отвечает
-    5xx и хостинг повторит доставку. Оставленный queued блокировал бы коммит
+    5xx. GitHub упавшую доставку сам не повторяет — её переотправляют вручную
+    или задача #149. Оставленный queued блокировал бы коммит
     от ревью навсегда: повторная доставка до sweep получала бы duplicate и
     задачу больше не ставила."""
 

@@ -111,7 +111,7 @@ def test_fetch_diff_returns_recorded_body_verbatim(rsa_key_pair: RsaKeyPair) -> 
     base_sha, head_sha = "b" * 40, "a" * 40
     assert (
         gateway.fetch_diff(
-            "larchanka-training/dmc-268-api-t1", base_sha, head_sha, INSTALLATION_ID
+            "larchanka-training/dmc-268-api-t1", base_sha, head_sha, INSTALLATION_ID, max_bytes=LIMIT
         )
         == DIFF
     )
@@ -125,6 +125,46 @@ def test_fetch_diff_returns_recorded_body_verbatim(rsa_key_pair: RsaKeyPair) -> 
     assert get.headers["Accept"] == "application/vnd.github.v3.diff"
     assert get.headers["Authorization"] == "Bearer ghs_test"
     assert sleeps == []
+
+
+def test_fetch_diff_declared_length_over_limit_is_refused(rsa_key_pair: RsaKeyPair) -> None:
+    """Дифф с объявленной длиной больше лимита — отказ без чтения тела, без повторов."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(
+        rsa_key_pair,
+        responding([200], httpx.Response(200, content=b"+" * (LIMIT + 1)), seen),
+        sleeps,
+    )
+
+    with pytest.raises(VcsFileTooLargeError):
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+    assert len(seen) == 1
+    assert sleeps == []
+
+
+def test_fetch_diff_stream_without_length_is_cut_at_limit(rsa_key_pair: RsaKeyPair) -> None:
+    """Дифф без `Content-Length` читается потоком и не дочитывается дальше лимита."""
+    produced: list[int] = []
+
+    def chunks() -> Iterator[bytes]:
+        for _ in range(100):
+            produced.append(1)
+            yield b"+" * 100
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        return httpx.Response(200, content=chunks())
+
+    gateway = make_gateway(rsa_key_pair, handler, [])
+
+    with pytest.raises(VcsFileTooLargeError):
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+    # Оборвано на 11-м куске из 100: остальное не читалось.
+    assert len(produced) == 11
 
 
 def test_fetch_pr_metadata_maps_fields_one_to_one(rsa_key_pair: RsaKeyPair) -> None:
@@ -232,7 +272,7 @@ def test_5xx_is_retried_with_growing_pauses(rsa_key_pair: RsaKeyPair) -> None:
         sleeps,
     )
 
-    assert gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID) == DIFF
+    assert gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT) == DIFF
     assert len(seen) == 3
     assert sleeps == [0.5, 1.0]
 
@@ -251,7 +291,7 @@ def test_429_is_retried(rsa_key_pair: RsaKeyPair) -> None:
         sleeps,
     )
 
-    assert gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID) == DIFF
+    assert gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT) == DIFF
     assert len(seen) == 2
     assert sleeps == [0.5]
 
@@ -267,7 +307,7 @@ def test_exhausted_retries_raise_vcs_unavailable(rsa_key_pair: RsaKeyPair) -> No
     )
 
     with pytest.raises(VcsUnavailableError):
-        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID)
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
 
     assert len(seen) == 3
     assert sleeps == [0.5, 1.0]
@@ -284,7 +324,7 @@ def test_404_raises_immediately_without_retry(rsa_key_pair: RsaKeyPair) -> None:
     )
 
     with pytest.raises(VcsNotFoundError) as caught:
-        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID)
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
 
     # 404 на compare не различает коммит и репозиторий: код - PR_NOT_FOUND.
     assert caught.value.code == "PR_NOT_FOUND"
@@ -323,7 +363,7 @@ def test_transport_failure_of_diff_raises_vcs_unavailable(
     gateway = make_gateway(rsa_key_pair, failing_transport(connect_fails, seen), sleeps)
 
     with pytest.raises(VcsUnavailableError):
-        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID)
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
 
     assert len(seen) == 1
     assert sleeps == []
@@ -418,7 +458,7 @@ def test_401_invalidates_cached_token_and_retries_once(
     sleeps: list[float] = []
     gateway = make_gateway(rsa_key_pair, revoked_token_handler(seen), sleeps)
 
-    assert gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID) == DIFF
+    assert gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT) == DIFF
 
     pr_requests = [r for r in seen if not r.url.path.startswith("/app/installations/")]
     token_requests = [r for r in seen if r.url.path.startswith("/app/installations/")]
@@ -445,7 +485,7 @@ def test_second_401_after_refresh_raises_vcs_auth_error(
     gateway = make_gateway(rsa_key_pair, handler, sleeps)
 
     with pytest.raises(VcsAuthError):
-        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID)
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
 
     pr_requests = [r for r in seen if not r.url.path.startswith("/app/installations/")]
     assert len(pr_requests) == 2

@@ -273,7 +273,7 @@ psql "$DATABASE_URL" -c "
 App нужно разрешение **Contents: read**. Без него прогон не падает: правила
 уходят в дефолтный фоллбэк (`rules.status = unavailable`), AST пропускается.
 Формат правил — [`prompts/review/custom-rules.md`](prompts/review/custom-rules.md),
-лимиты сборки контекста (`CONTEXT_MAX_TOKENS`, `RULES_MAX_BYTES`,
+лимиты сборки контекста (`CONTEXT_MAX_TOKENS`, `DIFF_MAX_BYTES`, `RULES_MAX_BYTES`,
 `AST_MAX_FILES`, …) — в [`app/config.py`](app/config.py).
 
 ## Merge gate

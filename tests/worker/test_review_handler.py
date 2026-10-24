@@ -27,7 +27,7 @@ from ..fakes.llm_gateway import ScriptedLlmGateway, review_response
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
 
-LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000)
+LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
 LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
 TEXTS = PromptTexts(review_system="ревью", verifier_system="верификация")
 

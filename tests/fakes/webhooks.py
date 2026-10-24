@@ -97,11 +97,13 @@ class FakeVcs:
     calls: list[tuple[Any, ...]] = field(default_factory=list)
 
     def fetch_diff(
-        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
+        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
     ) -> str:
         self.calls.append(("diff", repo_full_name, base_sha, head_sha, installation_id))
         if self.error is not None:
             raise self.error
+        if len(self.diff.encode("utf-8")) > max_bytes:
+            raise VcsFileTooLargeError(f"дифф: больше {max_bytes} байт")
         return self.diff
 
     def fetch_pr_metadata(

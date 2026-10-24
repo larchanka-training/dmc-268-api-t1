@@ -95,7 +95,7 @@ def test_repeated_delivery_against_real_db_creates_one_run(flow: Flow) -> None:
     assert count == 1
 
     # Повторная доставка — 202 с проекцией найденного прогона, а не ошибка:
-    # не-2xx хостинг считает неудачной доставкой и повторяет её.
+    # не-2xx GitHub записал бы неудавшейся доставкой.
     (enqueued,) = flow.queue.jobs
     assert second.json()["id"] == str(enqueued.review_run_id)
     assert first.json() == second.json()
