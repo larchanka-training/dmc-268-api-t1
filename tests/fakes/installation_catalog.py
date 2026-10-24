@@ -26,7 +26,10 @@ class FakeInstallationCatalog:
 
     def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
         self._record("user_repository", access_token)
-        return next((r for r in self._repositories if r.provider_id == provider_id), None)
+        # GitHub разбирает id как число: `/repositories/0101` — тот же репозиторий, что `/101`.
+        if not (provider_id.isascii() and provider_id.isdigit()):
+            return None
+        return next((r for r in self._repositories if r.provider_id == str(int(provider_id))), None)
 
     def app_installed(self, full_name: str) -> bool:
         self.calls.append("app_installed")

@@ -185,10 +185,12 @@ class ConnectRepositoryRequest(StrictRequest):
 
     # strict у модели не пропустил бы enum строкой; для enum-поля — точечно, как в CreateReviewRequest.
     provider: Provider = Field(strict=False, description="Хостинг репозитория.", examples=["github"])
+    # Канонический id: GitHub отдаёт на `/repositories/0101` тот же репозиторий, что на `/101`.
     provider_id: str = Field(
         min_length=1,
         max_length=255,
-        description="Идентификатор репозитория у провайдера (из списка доступных).",
+        pattern=r"^[1-9][0-9]*$",
+        description="Идентификатор репозитория у провайдера (из списка доступных): число без ведущих нулей.",
         examples=["123456789"],
     )
 

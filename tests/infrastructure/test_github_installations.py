@@ -334,11 +334,13 @@ def test_a_repository_the_user_cannot_see_is_none(status: int) -> None:
     assert make_catalog(lambda request: httpx.Response(status, json={"message": "Not Found"})).user_repository(TOKEN, "42") is None
 
 
-def test_a_non_numeric_id_is_none_without_asking_github() -> None:
+@pytest.mark.parametrize("provider_id", ["../user", "²", "١٢٣"])
+def test_a_non_numeric_id_is_none_without_asking_github(provider_id: str) -> None:
+    # `str.isdigit()` принимает и не-ASCII цифры: в путь они не идут.
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("запроса быть не должно")
 
-    assert make_catalog(handler).user_repository(TOKEN, "../user") is None
+    assert make_catalog(handler).user_repository(TOKEN, provider_id) is None
 
 
 @pytest.mark.parametrize(
