@@ -72,9 +72,9 @@ jobs:
       # любой запрос (#93, #95).
       - run: echo "EUROROUTER_MODEL=$(cat .github/eurorouter-model)" >> "$GITHUB_ENV"
       # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
-          version: "0.12.21"
+          version: "0.13.5"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - name: pytest -m live (пропуск теста - провал)

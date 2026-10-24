@@ -1,6 +1,6 @@
-# Стек сервера (API на Python 3.14, PostgreSQL 18, RabbitMQ 4.3)
+# Стек сервера (API на Python 3.14, PostgreSQL 18, RabbitMQ 4.4)
 
-Нужны **Docker Engine** на целевом хосте и OpenTofu >= 1.12 (в CI ставится 1.12.6). Образ API не собирается здесь: он публикуется в ghcr из CI и забирается по тегу (`api_image`).
+Нужны **Docker Engine** на целевом хосте и OpenTofu >= 1.13 (в CI ставится 1.13.2). Образ API не собирается здесь: он публикуется в ghcr из CI и забирается по тегу (`api_image`).
 
 ## Локальный или удалённый Docker
 

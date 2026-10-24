@@ -75,7 +75,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       rabbitmq:
-        image: rabbitmq:4.3-alpine
+        image: rabbitmq:4.4-alpine
         ports:
           - 5672:5672
         options: >-
@@ -101,9 +101,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
-          version: "0.12.21"
+          version: "0.13.5"
           python-version: "3.14"
       - run: uv sync --all-extras --frozen
       - name: pytest -m load (пропуск теста - провал)

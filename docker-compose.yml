@@ -36,7 +36,7 @@ services:
       retries: 10
 
   rabbitmq:
-    image: rabbitmq:4.3-alpine
+    image: rabbitmq:4.4-alpine
     ports:
       - "5672:5672"
     healthcheck:
@@ -125,7 +125,7 @@ services:
     # плюс минута на GitHub и базу. Без этого через 10 с пришёл бы SIGKILL.
     # Та же формула — local.worker_stop_seconds в infra/main.tf: меняется там —
     # меняем и здесь.
-    # consumer_timeout брокера сюда не ограничение: в RabbitMQ 4.3 его
+    # consumer_timeout брокера сюда не ограничение: в RabbitMQ 4.4 его
     # применяют только quorum-очереди, а очередь review — classic.
     stop_grace_period: 41m
 
@@ -136,7 +136,7 @@ services:
   # публикуется: воркер ходит к ней по сети compose. На стенде Ollama
   # разворачивает отдельная задача.
   ollama:
-    image: ollama/ollama:0.12.6
+    image: ollama/ollama:0.40.10
     profiles: ["ollama"]
     volumes:
       - ollama_models:/root/.ollama

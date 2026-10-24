@@ -17,7 +17,7 @@ locals {
   ]
 
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
-  # consumer_timeout RabbitMQ его не ограничивает: в 4.3 таймаут подтверждения
+  # consumer_timeout RabbitMQ его не ограничивает: в 4.4 таймаут подтверждения
   # есть только у quorum-очередей, а очередь review — classic.
   # Деплой ждёт остановку воркера в `tofu apply`: timeout-minutes job deploy в
   # .github/workflows/deploy.yml обязан быть больше максимума (2460 с) с запасом.
@@ -36,12 +36,15 @@ resource "docker_volume" "postgres" {
   name = "dmc268-postgres-pgvector-data"
 }
 
-# Имя с версией: при переходе с 3.13 на 4.3 том заведён заново, потому что
-# прыжок через минорные версии ломает классические очереди с данными.
+# Имя с версией: при переходе с 3.13 на 4.3 и с 4.3 на 4.4 том заведён
+# заново. Первый раз — потому что прыжок через минорные версии ломает
+# классические очереди с данными, второй — потому что 4.4 пишет хранилище
+# сообщений classic-очередей в новом формате, и откатить узел на 4.3 уже
+# нельзя; данных, которые стоило бы переносить, в брокере не было.
 # Следующее обновление, когда в брокере будут данные, — по шагам через каждую
-# минорную версию на этом же томе.
+# минорную версию на этом же томе, после `rabbitmqctl enable_feature_flag all`.
 resource "docker_volume" "rabbitmq" {
-  name = "dmc268-rabbitmq-v4-data"
+  name = "dmc268-rabbitmq-v44-data"
 }
 
 resource "docker_image" "postgres" {
@@ -52,7 +55,7 @@ resource "docker_image" "postgres" {
 }
 
 resource "docker_image" "rabbitmq" {
-  name         = "rabbitmq:4.3-alpine"
+  name         = "rabbitmq:4.4-alpine"
   keep_locally = true
 }
 
