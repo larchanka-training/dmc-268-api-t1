@@ -43,7 +43,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import QueuePool, StaticPool
 
 from app.api.factory import create_app
 from app.config import Settings
@@ -973,12 +973,16 @@ def test_the_container_engine_pool_is_sized_from_the_settings(
 ) -> None:
     """Пул создаётся с явными настройками; дефолты 5/10 — прежнее поведение."""
     container = build_container(SETTINGS)
-    assert container.engine.pool.size() == 5
+    pool = container.engine.pool
+    assert isinstance(pool, QueuePool)
+    assert pool.size() == 5
 
     tuned = build_container(
         SETTINGS.model_copy(update={"db_pool_size": 2, "db_max_overflow": 1})
     )
-    assert tuned.engine.pool.size() == 2
+    tuned_pool = tuned.engine.pool
+    assert isinstance(tuned_pool, QueuePool)
+    assert tuned_pool.size() == 2
     # Предел, который публикует `instrument_pool`, совпадает с фактической
     # конфигурацией движка: метрика обязана не расходиться с пулом.
     telemetry.instrument_pool(tuned.engine, 2, 1)
