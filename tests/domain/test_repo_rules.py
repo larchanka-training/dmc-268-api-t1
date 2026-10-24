@@ -244,3 +244,140 @@ def test_crlf_rules_parse_as_before() -> None:
         (RepoRule(name="R", patterns=("app/**",), excludes=(), checks=("Проверка",)),),
         (),
     )
+
+
+# Ограда кода по CommonMark: закрывает тот же символ, не короче открывающей,
+# без текста после; отступ любой — пример кода бывает внутри пункта списка.
+RULE_AFTER_FENCE = "\n## Real\n\n- pattern: app/**\n\n1. Проверка\n"
+FENCED_EXAMPLE = "## Example\n\n- pattern: x/**\n\n1. Пример\n"
+
+
+@pytest.mark.parametrize(
+    ("opening", "not_closing"),
+    [
+        ("```", "~~~"),
+        ("~~~", "```"),
+        ("````", "```"),
+        ("~~~~", "~~~"),
+        ("```", "``` текст"),
+    ],
+)
+def test_fence_is_not_closed_by_foreign_short_or_annotated_line(
+    opening: str, not_closing: str
+) -> None:
+    text = f"{opening}\n{FENCED_EXAMPLE}{not_closing}\n{FENCED_EXAMPLE}{opening}\n{RULE_AFTER_FENCE}"
+    accepted, rejected = parse_rules_markdown(text)
+    assert [r.name for r in accepted] == ["Real"]
+    assert rejected == ()
+
+
+def test_longer_closing_fence_closes_the_block() -> None:
+    text = f"```\n{FENCED_EXAMPLE}`````\n{RULE_AFTER_FENCE}"
+    accepted, rejected = parse_rules_markdown(text)
+    assert [r.name for r in accepted] == ["Real"]
+    assert rejected == ()
+
+
+def test_closing_fence_may_be_indented_and_followed_by_spaces() -> None:
+    text = f"```\n{FENCED_EXAMPLE}   ```  \n{RULE_AFTER_FENCE}"
+    accepted, _ = parse_rules_markdown(text)
+    assert [r.name for r in accepted] == ["Real"]
+
+
+def test_code_example_inside_a_list_item_is_not_a_check() -> None:
+    """У пункта `10.` пример кода сдвинут на четыре пробела — это всё ещё блок кода."""
+    text = (
+        "## Без print\n\n- pattern: **/*.py\n\n"
+        "10. Не так:\n    ```python\n    1. print(x)\n    ```\n11. Логгер.\n"
+    )
+    (rule,), rejected = parse_rules_markdown(text)
+    assert rule.checks == ("Не так:", "Логгер.")
+    assert rejected == ()
+
+
+def test_backtick_fence_with_backtick_in_info_is_not_a_fence() -> None:
+    text = f"``` a`b\n{RULE_AFTER_FENCE}"
+    accepted, rejected = parse_rules_markdown(text)
+    assert [r.name for r in accepted] == ["Real"]
+    assert rejected == ()
+
+
+def test_unclosed_fence_rejects_rules_it_swallows() -> None:
+    text = f"```\n{FENCED_EXAMPLE}{RULE_AFTER_FENCE}"
+    accepted, rejected = parse_rules_markdown(text)
+    assert accepted == ()
+    assert rejected == (
+        RejectedRule(name="Example", reason="незакрытый блок кода"),
+        RejectedRule(name="Real", reason="незакрытый блок кода"),
+    )
+
+
+def test_unclosed_fence_keeps_rules_before_it() -> None:
+    text = FULL_RULE + "\n```\n" + RULE_AFTER_FENCE
+    accepted, rejected = parse_rules_markdown(text)
+    assert accepted == (ERROR_HANDLING,)
+    assert rejected == (RejectedRule(name="Real", reason="незакрытый блок кода"),)
+
+
+# Хвостовые `#` — закрывающая последовательность, только если перед ними пробел.
+@pytest.mark.parametrize(
+    ("heading", "name"),
+    [
+        ("## C#", "C#"),
+        ("## F# ##", "F#"),
+        ("## Name ##", "Name"),
+        ("## Name   ###   ", "Name"),
+        ("## C# ##", "C#"),
+        ("## Name#", "Name#"),
+    ],
+)
+def test_heading_strips_closing_sequence_only_after_a_space(heading: str, name: str) -> None:
+    text = f"{heading}\n\n- pattern: a/**\n\n1. Проверка\n"
+    ((rule,), _) = parse_rules_markdown(text)
+    assert rule.name == name
+
+
+# Glob как в .gitignore.
+@pytest.mark.parametrize(
+    ("pattern", "path", "expected"),
+    [
+        ("*.py", "x.py", True),
+        ("*.py", "app/x.py", True),
+        ("*.py", "app/a/x.py", True),
+        ("*.py", "x.ts", False),
+        ("app/", "app/a/b.py", True),
+        ("app/", "app/x.py", True),
+        ("app/", "apps/x.py", False),
+        ("app/", "lib/app/x.py", True),
+        ("lib/app/", "app/x.py", False),
+        ("lib/app/", "lib/app/x.py", True),
+        ("/app/*.py", "app/x.py", True),
+        ("/app/*.py", "app/a/x.py", False),
+        ("/app/*.py", "lib/app/x.py", False),
+        ("app/*.py", "app/x.py", True),
+        ("app/*.py", "lib/app/x.py", False),
+        ("**/x", "x", True),
+        ("**/x", "a/b/x", True),
+        ("a/**/b", "a/b", True),
+        ("a/**/b", "a/c/d/b", True),
+        ("a/**/b", "z/a/b", False),
+        ("setup.py", "app/setup.py", True),
+        ("app/**/*.py", "app/core.py", True),
+        # Шаблон без завершающего `/` — и файл, и содержимое каталога, как в `.gitignore`.
+        ("app/api", "app/api/x.py", True),
+        ("app/api", "app/api", True),
+        ("app/api", "app/apix/x.py", False),
+        ("docs", "docs/a.md", True),
+        ("docs", "lib/docs/a.md", True),
+        ("app/", "app", False),
+    ],
+)
+def test_pattern_follows_gitignore_semantics(pattern: str, path: str, expected: bool) -> None:
+    rule = RepoRule(name="R", patterns=(pattern,), excludes=(), checks=("c",))
+    assert rule_applies_to(rule, path) is expected
+
+
+def test_exclude_follows_gitignore_semantics_too() -> None:
+    rule = RepoRule(name="R", patterns=("app/",), excludes=("test_*.py",), checks=("c",))
+    assert rule_applies_to(rule, "app/core.py")
+    assert not rule_applies_to(rule, "app/sub/test_core.py")
