@@ -1,6 +1,7 @@
 """Цикл общего потока событий — поддельные сигналы изменений, чтение и часы, без базы и настоящего ожидания."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from uuid import UUID
@@ -23,7 +24,13 @@ from app.domain.entities import (
 from app.domain.enums import MergeRequestState, Provider, TriggerSource
 from app.domain.enums import ReviewRunStatus as S
 from app.domain.run_events import PING_AFTER_SECONDS, PingEvent
-from app.domain.run_feed import RunEventType, RunFeedEvent, RunFeedState, open_feed
+from app.domain.run_feed import (
+    BATCH_LIMIT,
+    RunEventType,
+    RunFeedEvent,
+    RunFeedState,
+    open_feed,
+)
 
 from ..fakes.unit_of_work import FakeUnitOfWork
 
@@ -250,3 +257,33 @@ def test_visible_repository_ids_are_the_registered_ones_among_available() -> Non
 
     assert visible_repository_ids(uow, available) == frozenset({REPOSITORY.id})
     assert visible_repository_ids(uow, []) == frozenset()
+
+
+def _entries(count: int, seconds: float) -> list[ReviewRunListEntry]:
+    """`count` разных прогонов, изменённых в момент `seconds`."""
+    base = _entry(S.FAILED, seconds)
+    return [replace(base, run=replace(base.run, id=UUID(int=1000 + n))) for n in range(count)]
+
+
+def test_more_changes_than_one_batch_all_arrive_after_one_signal() -> None:
+    """Один коммит меняет больше `BATCH_LIMIT` прогонов (массовый `stale_sweep`) — сигнал один,
+    а остаток дочитывается сразу, без ожидания следующего изменения."""
+    changed = _entries(BATCH_LIMIT + 50, 1)
+    script = Script(changed[:BATCH_LIMIT], changed[BATCH_LIMIT:], changes_at=(1.0,))
+
+    items = _collect(script, limit=BATCH_LIMIT + 50)
+
+    assert len(items) == BATCH_LIMIT + 50
+    assert script.reads == 2
+    assert script.now == 1.0
+
+
+def test_a_full_recheck_window_does_not_spin_the_loop() -> None:
+    """Под лимит идут только строки за курсором: окно перепроверки из старых версий
+    не заставляет перечитывать пачку снова и снова без ожидания."""
+    fresh = _entries(BATCH_LIMIT, 1)
+    script = Script(fresh, fresh, changes_at=(1.0,))
+
+    _collect(script, limit=BATCH_LIMIT + 1)
+
+    assert script.reads == 2

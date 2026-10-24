@@ -18,6 +18,7 @@
 import asyncio
 import contextlib
 import logging
+import weakref
 
 import psycopg
 from psycopg.conninfo import make_conninfo
@@ -84,11 +85,16 @@ class PostgresRunChanges:
             keepalives_idle=30,
             keepalives_interval=10,
             keepalives_count=3,
+            # Пульс уходит в мёртвое соединение — keepalive молчит, пока есть
+            # неподтверждённые данные, а ретрансляции идут ~15 минут; предел — минута.
+            tcp_user_timeout=60_000,
         )
         self._connect_timeout = connect_timeout
         self._reconnect_delay = reconnect_delay
         self._heartbeat = heartbeat
-        self._subscribers: set[_Subscription] = set()
+        # Слабые ссылки: подписка, брошенная без `close()` (тело ответа так и не
+        # начало итерироваться), уходит вместе с генератором, а не копится до обрыва.
+        self._subscribers: weakref.WeakSet[_Subscription] = weakref.WeakSet()
         self._listening = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 

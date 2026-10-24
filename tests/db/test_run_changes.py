@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime as dt
+import gc
 from dataclasses import replace
 
 import pytest
@@ -168,3 +169,18 @@ def test_an_unreachable_database_refuses_the_subscription() -> None:
     with pytest.raises(RunChangesLost):
         asyncio.run(scenario())
 
+
+
+def test_an_abandoned_subscription_does_not_pile_up(clean_db) -> None:
+    """Подписка, брошенная без `close()`, уходит вместе со ссылкой на неё, а не копится до обрыва LISTEN."""
+
+    async def scenario() -> int:
+        changes = _listener()
+        try:
+            await changes.subscribe()  # ссылку никто не держит — как генератор, который не начал итерироваться
+            gc.collect()
+            return len(changes._subscribers)
+        finally:
+            await changes.close()
+
+    assert asyncio.run(scenario()) == 0
