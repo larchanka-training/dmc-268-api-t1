@@ -146,34 +146,24 @@ def test_guard_stops_a_plan_that_destroys_a_volume(tmp_path: Path) -> None:
     assert not (root / "infra" / "tfplan").exists()
 
 
-def test_guard_ignores_volumes_it_does_not_protect() -> None:
+def test_guard_stops_a_volume_deleted_under_any_address() -> None:
+    """Ресурс тома переименовали без `moved` — и адрес, и имя тома новые: план уничтожает
+    старый том по адресу и имени, которых в конфигурации уже нет. Сторож ловит любой том."""
     plan = {"resource_changes": [
-        {"address": "docker_volume.scratch", "type": "docker_volume", "change": {"actions": ["delete"]}},
-        {"address": "docker_volume.postgres", "type": "docker_volume", "change": {"actions": ["no-op"]}},
+        {"address": "docker_volume.mq_v44", "type": "docker_volume",
+         "change": {"actions": ["delete"], "before": {"name": "dmc268-rabbitmq-v44-data"}}},
+        {"address": "docker_volume.mq_v45", "type": "docker_volume", "change": {"actions": ["create"]}},
+        {"address": "module.x.docker_volume.pg", "type": "docker_volume", "change": {"actions": ["delete", "create"]}},
     ]}
-    assert deploy_report.protected_deletes(plan) == []
-    assert deploy_report.plan_changes(plan) == {"docker_volume": {"destroy": 1}}
+    assert deploy_report.protected_deletes(plan) == ["docker_volume.mq_v44", "module.x.docker_volume.pg"]
 
 
-def test_guard_stops_a_protected_volume_deleted_under_another_address() -> None:
-    """Ресурс тома переименовали без `moved`, а PROTECTED поправили под новый адрес:
-    план уничтожает том по старому адресу, которого в списке нет, — ловит имя тома."""
+def test_guard_allows_what_does_not_destroy_a_volume() -> None:
+    """Снятие тома с учёта (`removed`, `destroy = false`) — `forget`; удаление контейнера — не том."""
     plan = {"resource_changes": [
-        {"address": "docker_volume.pg_old", "type": "docker_volume",
-         "change": {"actions": ["delete"], "before": {"name": "dmc268-postgres-pgvector-data"}}},
-        {"address": "docker_volume.mq_old", "type": "docker_volume",
-         "change": {"actions": ["delete", "create"], "before": {"name": "dmc268-rabbitmq-v44-data"}}},
-    ]}
-    assert deploy_report.protected_deletes(plan) == ["docker_volume.pg_old", "docker_volume.mq_old"]
-
-
-def test_guard_allows_deleting_an_unprotected_volume_by_name() -> None:
-    plan = {"resource_changes": [
-        {"address": "docker_volume.scratch", "type": "docker_volume",
-         "change": {"actions": ["delete"], "before": {"name": "dmc268-scratch"}}},
-        # Имя защищённого тома у ресурса другого типа — не том.
-        {"address": "docker_container.postgres", "type": "docker_container",
-         "change": {"actions": ["delete"], "before": {"name": "dmc268-postgres-pgvector-data"}}},
+        {"address": "docker_volume.postgres", "type": "docker_volume", "change": {"actions": ["forget"]}},
+        {"address": "docker_volume.rabbitmq", "type": "docker_volume", "change": {"actions": ["no-op"]}},
+        {"address": "docker_container.postgres", "type": "docker_container", "change": {"actions": ["delete"]}},
     ]}
     assert deploy_report.protected_deletes(plan) == []
 
@@ -188,22 +178,11 @@ def volume_blocks() -> dict[str, str]:
     }
 
 
-def test_guard_protects_every_volume_the_stack_declares() -> None:
-    """Новый том или переименованный ресурс тома без правки сторожа — дыра в защите."""
-    declared = volume_blocks()
-    assert declared, "ресурсы docker_volume не найдены в infra/*.tf"
-    assert set(declared) == set(deploy_report.PROTECTED)
-    for address, body in declared.items():
-        name = re.search(r'^\s*name\s*=\s*"([^"]+)"', body, re.MULTILINE)
-        assert name, f"у {address} нет name в infra/*.tf"
-        assert deploy_report.PROTECTED[address] == name.group(1), f"имя тома {address} в PROTECTED не то, что в infra/*.tf"
-
-
-def test_every_protected_volume_prevents_destroy() -> None:
+def test_every_volume_prevents_destroy() -> None:
     """Сторож в plan.sh не видит targeted apply шага «Поднять базу и брокер»: том там держит prevent_destroy."""
     blocks = volume_blocks()
-    for address in deploy_report.PROTECTED:
-        assert address in blocks, f"{address} из PROTECTED не найден в infra/*.tf"
+    assert blocks, "ресурсы docker_volume не найдены в infra/*.tf"
+    for address in blocks:
         assert re.search(
             r"^\s*lifecycle\s*\{[^}]*^\s*prevent_destroy\s*=\s*true\s*$", blocks[address], re.MULTILINE
         ), f"у {address} нет lifecycle {{ prevent_destroy = true }}"

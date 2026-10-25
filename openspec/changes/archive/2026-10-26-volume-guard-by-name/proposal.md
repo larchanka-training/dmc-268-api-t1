@@ -6,12 +6,10 @@
 
 ## What Changes
 
-- `PROTECTED` — адрес ресурса → имя тома в Docker: `dmc268-postgres-pgvector-data` и `dmc268-rabbitmq-v44-data` из `infra/*.tf`.
-- Сторож отклоняет `delete` (и замену — `delete`, `create`) у любого `docker_volume`, у которого `change.before.name` — имя защищённого тома, по какому бы адресу он ни шёл. Проверка по адресу остаётся.
-- Тест сверяет имена в `PROTECTED` с `name` ресурсов `docker_volume` в `infra/*.tf`.
-- `infra/README.md`, «Тома данных деплой не уничтожает»: сторож узнаёт том и по имени.
-
-Во фронте (`dmc-268-ui-t1`, `scripts/deploy-report.mjs`) то же для тома ACME уже сделано.
+- Сторож отклоняет `delete` (и замену — `delete`, `create`) у любого `docker_volume`, по какому бы адресу он ни шёл. Список `PROTECTED` удалён: проверка по имени тома (как во фронте, `scripts/deploy-report.mjs`) тоже обходится — переименовать ресурс и дать тому новое имя, поправив список. Все тома стека — с данными; незащищённых томов нет.
+- Смена тома — `removed { lifecycle { destroy = false } }`: план выходит `forget`, сторож его пропускает.
+- Тест проверяет `prevent_destroy` у каждого `docker_volume` в `infra/*.tf`, а не по списку.
+- `infra/README.md`, «Тома данных деплой не уничтожает».
 
 ## Capabilities
 

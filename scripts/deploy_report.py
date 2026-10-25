@@ -41,15 +41,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Тома с данными: адрес ресурса → имя тома в Docker. Их уничтожение — потеря
-# базы или очередей; замена тома — тоже уничтожение (delete, create). Имя ловит
-# то, что адрес пропустит: ресурс переименовали без `moved`, а PROTECTED
-# поправили под новый адрес — план уничтожает том по старому адресу, и
-# prevent_destroy там уже нет.
-PROTECTED = {
-    "docker_volume.postgres": "dmc268-postgres-pgvector-data",
-    "docker_volume.rabbitmq": "dmc268-rabbitmq-v44-data",
-}
+# Все тома стека — с данными (база, очереди): их уничтожение — потеря данных,
+# замена тома — тоже уничтожение (delete, create). Сторож отклоняет delete у
+# любого docker_volume, а не по списку адресов или имён: ресурс, переименованный
+# без `moved` (и с новым именем тома), уничтожается по старому адресу, которого
+# в списке уже нет, и prevent_destroy там тоже нет. Сменить том — `removed`
+# с `destroy = false`: план выйдет `forget`, а не `delete` (infra/README.md).
+VOLUME = "docker_volume"
 
 # Действия плана (`resource_changes[].change.actions` у OpenTofu 1.13.2) —
 # в колонки, как в строке `Plan:` у tofu, но замена отдельно, а не в add и
@@ -115,16 +113,11 @@ def plan_changes(plan: dict[str, Any]) -> dict[str, dict[str, int]]:
 
 
 def protected_deletes(plan: dict[str, Any]) -> list[str]:
-    """Защищённые тома, которые план уничтожает или заменяет: по адресу или по имени тома."""
-    names = set(PROTECTED.values())
+    """Тома, которые план уничтожает или заменяет, — по какому бы адресу они ни шли."""
     return [
         rc["address"]
         for rc in plan.get("resource_changes", [])
-        if "delete" in rc["change"]["actions"]
-        and (
-            rc["address"] in PROTECTED
-            or (rc["type"] == "docker_volume" and (rc["change"].get("before") or {}).get("name") in names)
-        )
+        if rc["type"] == VOLUME and "delete" in rc["change"]["actions"]
     ]
 
 
@@ -530,7 +523,7 @@ def plan_section(report_dir: Path) -> list[str]:
                 + ", ".join(f"`{a}`" for a in plan["protected_deletes"])
                 + " (`dmc268.deploy.plan.protected_deletes`)."]
     else:
-        out += ["", "Тома данных (`" + "`, `".join(PROTECTED) + "`) план не уничтожает."]
+        out += ["", "Тома данных план не уничтожает."]
     return out
 
 
