@@ -28,13 +28,15 @@ locals {
   # OTLP меньше окна graceful shutdown API (5 с), чтобы выгрузка спанов при
   # остановке успевала даже при недоступном коллекторе (замечание из #89).
   # Python SDK читает таймаут в СЕКУНДАХ, вопреки спеке OTel (мс).
-  telemetry_env = [
+  # Стек выключен — список пуст: SDK без OTEL_*_EXPORTER ничего не отправляет
+  # и в лог ошибок не пишет, а concat в env api/воркера/миграций не ломается.
+  telemetry_env = var.observability_enabled ? [
     "OTEL_TRACES_EXPORTER=otlp",
     "OTEL_METRICS_EXPORTER=otlp",
     "OTEL_LOGS_EXPORTER=otlp",
     "OTEL_EXPORTER_OTLP_ENDPOINT=http://dmc268-otelcol:4318",
     "OTEL_EXPORTER_OTLP_TIMEOUT=4",
-  ]
+  ] : []
 
   # Общая часть OTEL_RESOURCE_ATTRIBUTES; service.instance.id каждый контейнер
   # дописывает своим стабильным именем (см. env ниже): случайный UUID на
@@ -54,6 +56,9 @@ locals {
   grafana_image       = "grafana/grafana@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f"
   node_exporter_image = "quay.io/prometheus/node-exporter@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a"
   cadvisor_image      = "gcr.io/cadvisor/cadvisor@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435"
+  # socket-proxy: доступ cAdvisor к Docker API без docker.sock (контейнеры и
+  # информация о сервере; минимум прав — см. env у контейнера ниже).
+  docker_socket_proxy_image = "tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e"
 
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
   # consumer_timeout RabbitMQ его не ограничивает: в 4.4 таймаут подтверждения
@@ -111,12 +116,15 @@ resource "docker_container" "postgres" {
   image   = docker_image.postgres.image_id
   restart = "unless-stopped"
 
-  # Тяжёлые запросы снимает receiver postgresql коллектора через
-  # pg_stat_statements (решение #89): библиотека должна быть загружена при
-  # старте сервера, расширение и роль мониторинга создаёт миграция 0013.
-  # ENTRYPOINT образа (docker-entrypoint.sh) остаётся — переопределяется
-  # только CMD. Та же команда — у сервиса postgres в docker-compose.yml.
-  command = ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+  # Библиотека pg_stat_statements нужна ручной диагностике медленных запросов
+  # (расширение создаёт миграция 0013); загружаем её только вместе со стеком
+  # наблюдаемости, при observability_enabled = false command = nil возвращает
+  # образу его собственный CMD. receiver postgresql коллектора в расширении не
+  # нуждается — метрики базы он снимает обычными вьюхами статистики. Смена
+  # command пересоздаёт контейнер базы (том сохраняется) — она происходит
+  # только в паре с переключателем стека. Локальный compose preload держит
+  # всегда (накладные расходы ничтожны, переключателя в compose нет).
+  command = var.observability_enabled ? ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"] : null
 
   # Только запрет повышения привилегий: entrypoint образа стартует от root,
   # делает chown каталога данных и сам переходит на пользователя postgres.
@@ -249,9 +257,44 @@ resource "docker_container" "migrate" {
   # между этим давало бы редкие падения деплоя без причины. Повторяем саму
   # миграцию: успех означает и готовность базы, и применённую схему. Настоящая
   # ошибка в миграции тоже переживёт все попытки и уйдёт ненулевым кодом.
+  # После миграций — перегенерация пароля роли мониторинга dmc268_monitor
+  # (создаёт миграция 0013): ALTER ROLE идемпотентен, пароль сводится с env
+  # коллектора (POSTGRESQL_PASSWORD) на каждом деплое, а старый пароль из
+  # прошлого секрета перестаёт действовать. Пароль — параметром запроса
+  # psycopg, не литералом команды: литерал осел бы в /proc и docker logs.
+  # track_utility выключается той же транзакцией (SET LOCAL живёт до COMMIT):
+  # иначе ALTER ROLE ... PASSWORD лёг бы в pg_stat_statements открытым текстом.
+  # Тот же шаг перегенерации — у сервиса api в docker-compose.yml.
   command = [
     "sh", "-c",
-    "for i in $(seq 1 30); do alembic upgrade head && exit 0; sleep 2; done; exit 1",
+    <<-EOT
+    ok=0
+    for i in $(seq 1 30); do
+      if alembic upgrade head; then ok=1; break; fi
+      sleep 2
+    done
+    [ "$ok" = 1 ] || exit 1
+    python - <<'PY' || exit 1
+    import os
+
+    import psycopg
+
+    # DATABASE_URL настроек — под схемой SQLAlchemy (postgresql+psycopg://);
+    # psycopg ждёт стандартную схему postgresql://. Привязка значений — на
+    # клиенте (ClientCursor): серверная не проходит по грамматике ALTER ROLE
+    # (PASSWORD принимает только литерал, не $1), а литерал руками собирать
+    # нельзя — psycopg экранирует сам.
+    dsn = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
+    with psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor) as conn:
+        with conn.transaction():
+            conn.execute("SET LOCAL pg_stat_statements.track_utility = off")
+            # Имя роли зашито — то же, что в миграции 0013 и env коллектора.
+            conn.execute(
+                "ALTER ROLE dmc268_monitor PASSWORD %s",
+                (os.environ["POSTGRES_MONITOR_PASSWORD"],),
+            )
+    PY
+    EOT
   ]
 
   lifecycle {
@@ -403,8 +446,8 @@ resource "docker_container" "worker" {
 }
 
 # Стек наблюдаемости (change add-observability-stack): коллектор, Loki, Tempo,
-# Prometheus, Grafana, node-exporter и cAdvisor — те же конфиги из
-# observability/, что и в локальном compose. Метрики базы снимает receiver
+# Prometheus, Grafana, node-exporter, cAdvisor и socket-proxy — те же конфиги
+# из observability/, что и в локальном compose. Метрики базы снимает receiver
 # postgresql самого коллектора (решение #89) — отдельного экспортёра нет.
 # Конфиги заливаются в контейнеры при создании
 # (upload), поэтому на сервере не нужен чекаут репозитория: tofu читает файлы
@@ -413,61 +456,91 @@ resource "docker_container" "worker" {
 # одни и те же адреса работают в обоих окружениях (prometheus.yml, grafana
 # datasources, endpoint коллектора). Наружу из стека не смотрит ничего:
 # Grafana публикуется на internal_bind_ip и открывается SSH-туннелем.
+# Стек поднимается только при observability_enabled: count = 1 : 0 у каждого
+# его ресурса — образа, тома, сети и контейнера; выключение списка телеметрии
+# см. local.telemetry_env.
 
 resource "docker_image" "otelcol" {
+  count        = var.observability_enabled ? 1 : 0
   name         = local.otelcol_image
   keep_locally = true
 }
 
 resource "docker_image" "loki" {
+  count        = var.observability_enabled ? 1 : 0
   name         = local.loki_image
   keep_locally = true
 }
 
 resource "docker_image" "tempo" {
+  count        = var.observability_enabled ? 1 : 0
   name         = local.tempo_image
   keep_locally = true
 }
 
 resource "docker_image" "prometheus" {
+  count        = var.observability_enabled ? 1 : 0
   name         = local.prometheus_image
   keep_locally = true
 }
 
 resource "docker_image" "grafana" {
+  count        = var.observability_enabled ? 1 : 0
   name         = local.grafana_image
   keep_locally = true
 }
 
 resource "docker_image" "node_exporter" {
+  count        = var.observability_enabled ? 1 : 0
   name         = local.node_exporter_image
   keep_locally = true
 }
 
 resource "docker_image" "cadvisor" {
+  count        = var.observability_enabled ? 1 : 0
   name         = local.cadvisor_image
   keep_locally = true
 }
 
+resource "docker_image" "docker_socket_proxy" {
+  count        = var.observability_enabled ? 1 : 0
+  name         = local.docker_socket_proxy_image
+  keep_locally = true
+}
+
 resource "docker_volume" "loki" {
-  name = "dmc268-loki-data"
+  count = var.observability_enabled ? 1 : 0
+  name  = "dmc268-loki-data"
 }
 
 resource "docker_volume" "tempo" {
-  name = "dmc268-tempo-data"
+  count = var.observability_enabled ? 1 : 0
+  name  = "dmc268-tempo-data"
 }
 
 resource "docker_volume" "prometheus" {
-  name = "dmc268-prometheus-data"
+  count = var.observability_enabled ? 1 : 0
+  name  = "dmc268-prometheus-data"
 }
 
 resource "docker_volume" "grafana" {
-  name = "dmc268-grafana-data"
+  count = var.observability_enabled ? 1 : 0
+  name  = "dmc268-grafana-data"
+}
+
+# Отдельная сеть для Docker API через socket-proxy: в ней только proxy и
+# cAdvisor — остальным контейнерам стека и приложения доступ к демону Docker
+# не нужен. cAdvisor — единственный, кто ходит и в эту сеть (к proxy), и в
+# dmc268 (оттуда его скреит Prometheus).
+resource "docker_network" "observability_docker_proxy" {
+  count = var.observability_enabled ? 1 : 0
+  name  = "dmc268-docker-proxy"
 }
 
 resource "docker_container" "otelcol" {
+  count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-otelcol"
-  image   = docker_image.otelcol.image_id
+  image   = docker_image.otelcol[0].image_id
   restart = "unless-stopped"
 
   memory      = var.observability_memory_mb.collector
@@ -514,8 +587,9 @@ resource "docker_container" "otelcol" {
 }
 
 resource "docker_container" "loki" {
+  count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-loki"
-  image   = docker_image.loki.image_id
+  image   = docker_image.loki[0].image_id
   restart = "unless-stopped"
 
   memory      = var.observability_memory_mb.loki
@@ -533,7 +607,7 @@ resource "docker_container" "loki" {
   command = ["-config.file=/etc/loki/config.yaml"]
 
   volumes {
-    volume_name    = docker_volume.loki.name
+    volume_name    = docker_volume.loki[0].name
     container_path = "/loki"
   }
 
@@ -544,8 +618,9 @@ resource "docker_container" "loki" {
 }
 
 resource "docker_container" "tempo" {
+  count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-tempo"
-  image   = docker_image.tempo.image_id
+  image   = docker_image.tempo[0].image_id
   restart = "unless-stopped"
 
   memory      = var.observability_memory_mb.tempo
@@ -563,7 +638,7 @@ resource "docker_container" "tempo" {
   command = ["-config.file=/etc/tempo/config.yaml"]
 
   volumes {
-    volume_name    = docker_volume.tempo.name
+    volume_name    = docker_volume.tempo[0].name
     container_path = "/var/tempo"
   }
 
@@ -574,8 +649,9 @@ resource "docker_container" "tempo" {
 }
 
 resource "docker_container" "prometheus" {
+  count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-prometheus"
-  image   = docker_image.prometheus.image_id
+  image   = docker_image.prometheus[0].image_id
   restart = "unless-stopped"
 
   memory      = var.observability_memory_mb.prometheus
@@ -601,7 +677,7 @@ resource "docker_container" "prometheus" {
   ]
 
   volumes {
-    volume_name    = docker_volume.prometheus.name
+    volume_name    = docker_volume.prometheus[0].name
     container_path = "/prometheus"
   }
 
@@ -614,8 +690,9 @@ resource "docker_container" "prometheus" {
 # Доступ к Grafana — по учётке: анонимный вход выключен, пароль админа из
 # переменной (локальный compose, наоборот, поднимает Grafana без логина).
 resource "docker_container" "grafana" {
+  count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-grafana"
-  image   = docker_image.grafana.image_id
+  image   = docker_image.grafana[0].image_id
   restart = "unless-stopped"
 
   memory      = var.observability_memory_mb.grafana
@@ -646,10 +723,15 @@ resource "docker_container" "grafana" {
     "GF_SECURITY_ADMIN_PASSWORD=${var.grafana_admin_password}",
     "GF_AUTH_ANONYMOUS_ENABLED=false",
     "GF_USERS_ALLOW_SIGN_UP=false",
+    # Телеметрия вендора off: статистика использования и проверка обновлений
+    # не должны уходить с сервера наружу. То же в compose и у Loki/Tempo в их
+    # конфигах (loki.yaml, tempo.yaml).
+    "GF_ANALYTICS_REPORTING_ENABLED=false",
+    "GF_ANALYTICS_CHECK_FOR_UPDATES=false",
   ]
 
   volumes {
-    volume_name    = docker_volume.grafana.name
+    volume_name    = docker_volume.grafana[0].name
     container_path = "/var/lib/grafana"
   }
 
@@ -676,8 +758,9 @@ resource "docker_container" "grafana" {
 # /proc и /sys — источники статистики ядра. Имя контейнера с префиксом
 # dmc268-, алиас сети — как имя сервиса compose.
 resource "docker_container" "node_exporter" {
+  count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-node-exporter"
-  image   = docker_image.node_exporter.image_id
+  image   = docker_image.node_exporter[0].image_id
   restart = "unless-stopped"
 
   memory      = var.observability_memory_mb.node_exporter
@@ -718,12 +801,19 @@ resource "docker_container" "node_exporter" {
 }
 
 # Метрики контейнеров: CPU и память каждого, включая сам стек наблюдаемости.
-# Маунты — каноничные из документации cAdvisor (только чтение); без
-# --privileged и /dev/kmsg недоступны OOM- и perf-коллекторы, CPU, память
-# и сеть остаются.
+# К Docker API cAdvisor ходит только через socket-proxy (флаг -docker —
+# проверено по --help образа v0.52.1; ENV у образа флаги не читает): маунтов
+# docker.sock и /var/lib/docker больше нет. Маунты / и /sys — каноничные из
+# документации cAdvisor (только чтение): без них не видно cgroup-иерархии, по
+# которой находятся контейнеры, — проверено запуском. Без --privileged и
+# /dev/kmsg недоступны OOM- и perf-коллекторы, CPU, память, диски и сеть
+# остаются. Новые контейнеры cAdvisor находит сам, без подписки на события
+# Docker: опрашивает cgroup-иерархию и запрашивает у proxy inspect новых
+# (проверено запуском нового контейнера рядом).
 resource "docker_container" "cadvisor" {
+  count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-cadvisor"
-  image   = docker_image.cadvisor.image_id
+  image   = docker_image.cadvisor[0].image_id
   restart = "unless-stopped"
 
   memory      = var.observability_memory_mb.cadvisor
@@ -733,15 +823,16 @@ resource "docker_container" "cadvisor" {
 
   security_opts = ["no-new-privileges:true"]
 
+  command = [
+    # Имя dockerproxy резолвится в отдельной сети socket-proxy (алиас у
+    # docker_container.docker_socket_proxy) — так же контейнер зовут и в
+    # docker-compose.yml.
+    "--docker=tcp://dockerproxy:2375",
+  ]
+
   volumes {
     host_path      = "/"
     container_path = "/rootfs"
-    read_only      = true
-  }
-
-  volumes {
-    host_path      = "/var/run"
-    container_path = "/var/run"
     read_only      = true
   }
 
@@ -751,14 +842,53 @@ resource "docker_container" "cadvisor" {
     read_only      = true
   }
 
+  networks_advanced {
+    name    = docker_network.dmc268.name
+    aliases = ["cadvisor"]
+  }
+
+  networks_advanced {
+    name = docker_network.observability_docker_proxy[0].name
+  }
+
+  depends_on = [docker_container.docker_socket_proxy]
+}
+
+# Прокси над Docker API (/var/run/docker.sock) с доступом по белому списку
+# эндпоинтов: cAdvisor — единственный клиент, docker.sock контейнерам больше
+# не монтируется. Права — минимальный работающий набор (проверено запуском
+# cAdvisor через proxy): CONTAINERS=1 — список, inspect и статистика
+# контейнеров; INFO=1 — /info и /version, без них cAdvisor падает на проверке
+# Docker-фабрики («403 Forbidden» на /v1.45/info) и не отдаёт метрики
+# контейнеров вовсе. События Docker (/events) не нужны: новые контейнеры
+# находятся опросом cgroup-иерархии. Сеть — отдельная, только proxy и cAdvisor.
+resource "docker_container" "docker_socket_proxy" {
+  count   = var.observability_enabled ? 1 : 0
+  name    = "dmc268-docker-proxy"
+  image   = docker_image.docker_socket_proxy[0].image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.docker_proxy
+  memory_swap = var.observability_memory_mb.docker_proxy
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  # Как у postgres: entrypoint образа сам управляет привилегиями haproxy.
+  security_opts = ["no-new-privileges:true"]
+
+  env = [
+    "CONTAINERS=1",
+    "INFO=1",
+  ]
+
   volumes {
-    host_path      = "/var/lib/docker"
-    container_path = "/var/lib/docker"
+    host_path      = "/var/run/docker.sock"
+    container_path = "/var/run/docker.sock"
     read_only      = true
   }
 
   networks_advanced {
-    name    = docker_network.dmc268.name
-    aliases = ["cadvisor"]
+    name    = docker_network.observability_docker_proxy[0].name
+    aliases = ["dockerproxy"]
   }
 }

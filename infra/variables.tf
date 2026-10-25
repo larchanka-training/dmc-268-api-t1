@@ -203,9 +203,20 @@ variable "deployment_environment_name" {
   }
 }
 
-# Семь контейнеров стека на VPS — риск из design.md change'а
-# add-observability-stack; потолки памяти без свопа (как у postgres/api выше),
-# прод-размеры поднимаются этой переменной.
+# Стек наблюдаемости поднимается только по флагу: локальному apply без него
+# хватает памяти, а секреты (пароль админа Grafana, пароль роли мониторинга
+# базы) нужны только вместе со стеком — см. валидации у их переменных.
+# Деплой стенда включает его (deploy.yml, TF_VAR_observability_enabled).
+variable "observability_enabled" {
+  type        = bool
+  description = "Поднимать стек наблюдаемости: коллектор, Loki, Tempo, Prometheus, Grafana, node-exporter, cAdvisor и socket-proxy."
+  default     = false
+}
+
+# Восемь контейнеров стека на VPS — риск из design.md change'а
+# add-observability-stack (восьмой, socket-proxy, добавлен позже остальных);
+# потолки памяти без свопа (как у postgres/api выше), прод-размеры поднимаются
+# этой переменной.
 variable "observability_memory_mb" {
   type = object({
     collector  = number
@@ -216,8 +227,10 @@ variable "observability_memory_mb" {
     # node_exporter — статический сборщик с фиксированным набором collectors:
     # десятков мегабайт хватает. cAdvisor держит статистику по каждому
     # контейнеру хоста — потолок с запасом на десятки контейнеров.
+    # socket-proxy — haproxy над демоном Docker: несколько соединений cAdvisor.
     node_exporter = number
     cadvisor      = number
+    docker_proxy  = number
   })
   description = "Потолки памяти контейнеров стека наблюдаемости, МБ, без свопа."
   default = {
@@ -228,6 +241,7 @@ variable "observability_memory_mb" {
     grafana       = 512
     node_exporter = 64
     cadvisor      = 256
+    docker_proxy  = 64
   }
 }
 
@@ -237,22 +251,40 @@ variable "grafana_port" {
   default     = 3000
 }
 
-# Без значения по умолчанию: локально Grafana без логина, на стенде — по
-# учётке; без пароля apply падает на чтении переменной.
+# Пустой по умолчанию: локальный apply без стека не требует секрета. При
+# observability_enabled = true валидация роняет apply — на стенде анонимный
+# вход выключен, без учётки Grafana не открыть.
 variable "grafana_admin_password" {
   type        = string
   description = "Пароль админа Grafana (GF_SECURITY_ADMIN_PASSWORD). Не коммитить."
+  default     = ""
   sensitive   = true
+
+  validation {
+    condition     = !var.observability_enabled || length(var.grafana_admin_password) > 0
+    error_message = "grafana_admin_password обязателен при observability_enabled = true: анонимный вход в Grafana на стенде выключен (секрет GRAFANA_ADMIN_PASSWORD_DMC268_T1)."
+  }
 }
 
-# Без значения по умолчанию: пароль роли мониторинга задаётся на стенде явно
-# (секрет PG_MONITOR_PASSWORD_DMC268_T1). Роль dmc268_monitor создаёт миграция
-# 0013 (POSTGRES_MONITOR_PASSWORD), под ней коллектор снимает метрики базы
-# (POSTGRESQL_PASSWORD его env).
+# Дефолт — локальные реквизиты compose и дефолт миграции 0013: локальный apply
+# поднимается без секрета. Допустим он только при выключенном стеке — при
+# observability_enabled = true валидация роняет apply: роль dmc268_monitor
+# становится входом в базу, открытым в docker-сети.
 variable "postgres_monitor_password" {
   type        = string
   description = "Пароль роли мониторинга базы dmc268_monitor (pg_monitor). Не коммитить."
+  default     = "dmc268_monitor"
   sensitive   = true
+
+  validation {
+    condition     = length(var.postgres_monitor_password) > 0
+    error_message = "postgres_monitor_password не должен быть пустым: миграция 0013 задаёт его роли dmc268_monitor, под ней коллектор снимает метрики базы."
+  }
+
+  validation {
+    condition     = !var.observability_enabled || var.postgres_monitor_password != "dmc268_monitor"
+    error_message = "Дефолт dmc268_monitor допустим только при observability_enabled = false: задайте настоящий пароль (секрет PG_MONITOR_PASSWORD_DMC268_T1)."
+  }
 }
 
 variable "registry_username" {

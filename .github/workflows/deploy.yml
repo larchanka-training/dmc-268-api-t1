@@ -207,12 +207,18 @@ jobs:
           TF_VAR_api_image: ${{ needs.image.outputs.image }}
           TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
           TF_VAR_rabbitmq_password: ${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}
-          # Пароль админа Grafana: у переменной infra нет значения по умолчанию,
-          # без секрета apply падает на её чтении и стенд не поднимается.
+          # Стек наблюдаемости на стенде поднимается всегда (до
+          # observability_enabled он был безусловным): флаг выключает его
+          # только для локальных apply без секретов.
+          TF_VAR_observability_enabled: "true"
+          # Пароль админа Grafana: у переменной infra пустой дефолт, а
+          # валидация при observability_enabled = true требует непустого —
+          # без секрета apply падает на проверке и стенд не поднимается.
           TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD_DMC268_T1 }}
           # Пароль роли мониторинга базы dmc268_monitor: её создаёт миграция,
-          # под ней коллектор снимает метрики Postgres. У переменной infra
-          # значения по умолчанию нет — без секрета apply падает.
+          # под ней коллектор снимает метрики Postgres. Дефолт переменной —
+          # локальный (как у compose), валидация при observability_enabled =
+          # true требует настоящего пароля — без секрета apply падает.
           TF_VAR_postgres_monitor_password: ${{ secrets.PG_MONITOR_PASSWORD_DMC268_T1 }}
           TF_VAR_github_webhook_secret: ${{ secrets.WEBHOOK_SECRET_DMC268_T1 }}
           TF_VAR_github_app_id: ${{ vars.APP_ID_DMC268_T1 }}

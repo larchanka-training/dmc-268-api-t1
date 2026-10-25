@@ -4,8 +4,9 @@
 бы только на деплое. Тесты держат структуру: образы стека зафиксированы
 дайджестами одинаково в обоих местах, отдельного экспортёра Postgres больше
 нет (метрики базы снимает receiver postgresql коллектора, решение #89),
-сервер и контейнеры видны (node-exporter, cAdvisor), у Prometheus есть
-потолок по размеру, имена compose не сталкиваются с infra на общем хосте.
+сервер и контейнеры видны (node-exporter, cAdvisor — последний без
+docker.sock, через socket-proxy), у Prometheus есть потолок по размеру,
+имена compose не сталкиваются с infra на общем хосте.
 Валидацию конфига самим коллектором делает класс
 TestCollectorConfigValidation в test_collector_redaction.py.
 """
@@ -22,7 +23,10 @@ REPO = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO / "docker-compose.yml"
 MAIN_TF = REPO / "infra" / "main.tf"
 VARIABLES_TF = REPO / "infra" / "variables.tf"
-PROMETHEUS_CONFIG = REPO / "infra" / "observability" / "prometheus.yml"
+OBSERVABILITY_DIR = REPO / "infra" / "observability"
+PROMETHEUS_CONFIG = OBSERVABILITY_DIR / "prometheus.yml"
+LOKI_CONFIG = OBSERVABILITY_DIR / "loki.yaml"
+TEMPO_CONFIG = OBSERVABILITY_DIR / "tempo.yaml"
 README = REPO / "infra" / "README.md"
 DASHBOARDS_DIR = REPO / "infra" / "observability" / "grafana" / "provisioning" / "dashboards"
 PROVIDER_CONFIG = DASHBOARDS_DIR / "dashboards.yaml"
@@ -38,6 +42,7 @@ STACK_SERVICES = {
     "grafana": "grafana_image",
     "node-exporter": "node_exporter_image",
     "cadvisor": "cadvisor_image",
+    "dockerproxy": "docker_socket_proxy_image",
 }
 
 # имя@sha256:… — дайджест манифест-листа (multi-arch), а не платформенный.
@@ -51,6 +56,11 @@ def load_compose() -> dict[str, Any]:
 
 def load_prometheus() -> dict[str, Any]:
     config: dict[str, Any] = yaml.safe_load(PROMETHEUS_CONFIG.read_text(encoding="utf-8"))
+    return config
+
+
+def load_loki() -> dict[str, Any]:
+    config: dict[str, Any] = yaml.safe_load(LOKI_CONFIG.read_text(encoding="utf-8"))
     return config
 
 
@@ -88,20 +98,21 @@ def test_prometheus_has_no_postgres_job() -> None:
 # --- node-exporter и cAdvisor в обоих окружениях ------------------------------------
 
 
-@pytest.mark.parametrize("service", ["node-exporter", "cadvisor"])
+@pytest.mark.parametrize("service", ["node-exporter", "cadvisor", "dockerproxy"])
 def test_host_and_container_exporters_in_compose(service: str) -> None:
-    """Сервер и контейнеры видны: сервисы в профиле observability, без портов наружу."""
+    """Сервер, контейнеры и прокси Docker API — в профиле observability, без портов наружу."""
     service_config = load_compose()["services"][service]
     assert "observability" in service_config["profiles"]
 
 
-@pytest.mark.parametrize("container", ["node_exporter", "cadvisor"])
+@pytest.mark.parametrize("container", ["node_exporter", "cadvisor", "docker_socket_proxy"])
 def test_host_and_container_exporters_in_infra(container: str) -> None:
     """То же в infra: контейнер, образ из locals и потолок памяти из переменной."""
     text = MAIN_TF.read_text(encoding="utf-8")
     assert f'resource "docker_image" "{container}"' in text
     assert f'resource "docker_container" "{container}"' in text
-    assert f"var.observability_memory_mb.{container}" in text
+    memory_variable = container.replace("docker_socket_proxy", "docker_proxy")
+    assert f"var.observability_memory_mb.{memory_variable}" in text
 
 
 def test_prometheus_scrapes_new_exporters_by_service_hosts() -> None:
@@ -143,7 +154,7 @@ def _infra_digests() -> dict[str, str]:
 
 
 def test_stack_images_are_pinned_by_digest_in_both_places() -> None:
-    """Все семь образов стека — имя@sha256:…, одинаковые в compose и main.tf.
+    """Все восемь образов стека — имя@sha256:…, одинаковые в compose и main.tf.
 
     Тег плавает, дайджест манифест-листа нет: рассинхрон между окружениями —
     ошибка, поэтому сравниваются именно дайджесты, а не полные ссылки.
@@ -186,11 +197,109 @@ def test_prometheus_is_capped_by_size(file: Path) -> None:
     assert "--storage.tsdb.retention.size=8GB" in file.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("file", [COMPOSE_FILE, MAIN_TF])
-def test_postgres_preloads_pg_stat_statements(file: Path) -> None:
-    """pg_stat_statements загружается сервером в обоих окружениях: тяжёлые
-    запросы снимает receiver postgresql (расширение создаёт миграция 0013)."""
-    assert "shared_preload_libraries=pg_stat_statements" in file.read_text(encoding="utf-8")
+def test_compose_preloads_pg_stat_statements_always() -> None:
+    """Локальный стек держит preload pg_stat_statements всегда: расширение —
+    для ручной диагностики медленных запросов (создаёт миграция 0013),
+    накладные расходы preload ничтожны, переключателя в compose нет."""
+    services = load_compose()["services"]
+    assert services["postgres"]["command"] == [
+        "postgres", "-c", "shared_preload_libraries=pg_stat_statements",
+    ]
+
+
+def test_infra_preloads_pg_stat_statements_only_with_the_stack() -> None:
+    """На стенде preload включается вместе со стеком наблюдаемости
+    (observability_enabled), при выключенном стеке command откатывается
+    образу (nil)."""
+    block = _tf_container_block("postgres")
+    assert (
+        'command = var.observability_enabled ? ["postgres", "-c", '
+        '"shared_preload_libraries=pg_stat_statements"] : null' in block
+    )
+
+
+# --- cAdvisor ходит к Docker только через socket-proxy -------------------------------
+
+
+@pytest.mark.parametrize("path", ["/var/run/docker.sock", "/var/run", "/var/lib/docker"])
+def test_cadvisor_mounts_no_docker_paths_in_compose(path: str) -> None:
+    """Маунтов Docker у cAdvisor больше нет ни в compose: Docker API — только
+    через socket-proxy; статистика контейнеров не требует ни socket'а, ни
+    каталога данных демона."""
+    mounts = [mount.split(":")[0] for mount in load_compose()["services"]["cadvisor"]["volumes"]]
+    assert path not in mounts
+
+
+def test_socket_proxy_grants_only_what_cadvisor_needs() -> None:
+    """Минимальный работающий набор прав proxy: CONTAINERS=1 — список, inspect
+    и статистика контейнеров; INFO=1 — /info и /version, без них cAdvisor
+    падает на проверке Docker-фабрики («403 Forbidden» на /v1.45/info;
+    проверено запуском). События Docker (/events) не выданы: новые контейнеры
+    cAdvisor находит опросом cgroup-иерархии (проверено запуском)."""
+    proxy = load_compose()["services"]["dockerproxy"]["environment"]
+    assert proxy == {"CONTAINERS": "1", "INFO": "1"}
+
+
+def test_cadvisor_reaches_docker_through_the_proxy_in_compose() -> None:
+    """cAdvisor идёт к Docker по TCP-адресу proxy в отдельной сети; socket
+    смонтирован только у proxy."""
+    services = load_compose()["services"]
+    assert services["cadvisor"]["command"] == ["--docker=tcp://dockerproxy:2375"]
+    assert set(services["cadvisor"]["networks"]) == {"default", "docker_proxy"}
+    assert services["dockerproxy"]["networks"] == {
+        "docker_proxy": {"aliases": ["dockerproxy"]},
+    }
+    assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["dockerproxy"]["volumes"]
+
+
+def test_cadvisor_reaches_docker_through_the_proxy_in_infra() -> None:
+    """То же в main.tf: у cAdvisor флаг -docker и две сети (dmc268 для
+    Prometheus и отдельная для proxy), у proxy — socket и только эта сеть."""
+    cadvisor = _tf_container_block("cadvisor")
+    proxy = _tf_container_block("docker_socket_proxy")
+    assert '"--docker=tcp://dockerproxy:2375"' in cadvisor
+    assert "/var/run/docker.sock" not in cadvisor
+    assert "/var/lib/docker" not in cadvisor
+    assert "docker_network.dmc268" in cadvisor
+    assert "docker_network.observability_docker_proxy" in cadvisor
+    assert "/var/run/docker.sock" in proxy
+    assert "docker_network.dmc268" not in proxy
+    assert "docker_network.observability_docker_proxy" in proxy
+
+
+# --- приём и телеметрия вендора -------------------------------------------------------
+
+
+def test_collector_job_keeps_service_name_labels() -> None:
+    """honor_labels у скрейп-джобы коллектора: exporter-порт отдаёт лейбл
+    job = service.name, и без honor_labels Prometheus затер бы его именем
+    джобы — панели дашборда, фильтрующие по job, остались бы пустыми."""
+    job = {j["job_name"]: j for j in load_prometheus()["scrape_configs"]}["collector"]
+    assert job["honor_labels"] is True
+
+
+def test_loki_caps_ingestion() -> None:
+    """Потолки приёма Loki: сбои SDK не должны забить Loki и диск; превышение
+    Loki отвергает с 429, а не копит долг."""
+    limits = load_loki()["limits_config"]
+    assert limits["ingestion_rate_mb"] == 1
+    assert limits["ingestion_burst_size_mb"] == 2
+    assert limits["per_stream_rate_limit"] == "512KB"
+
+
+def test_vendor_telemetry_is_off() -> None:
+    """Аналитика вендоров выключена в обоих окружениях: Loki не отправляет
+    статистику использования (analytics.reporting_enabled), Tempo — свой
+    usage_report, Grafana — GF_ANALYTICS_* в compose и main.tf."""
+    assert load_loki()["analytics"] == {"reporting_enabled": False}
+    tempo = yaml.safe_load(TEMPO_CONFIG.read_text(encoding="utf-8"))
+    assert tempo["usage_report"]["reporting_enabled"] is False
+    grafana_compose = load_compose()["services"]["grafana"]["environment"]
+    assert grafana_compose["GF_ANALYTICS_REPORTING_ENABLED"] == "false"
+    assert grafana_compose["GF_ANALYTICS_CHECK_FOR_UPDATES"] == "false"
+    main_tf = MAIN_TF.read_text(encoding="utf-8")
+    assert '"GF_ANALYTICS_REPORTING_ENABLED=false"' in main_tf
+    assert '"GF_ANALYTICS_CHECK_FOR_UPDATES=false"' in main_tf
 
 
 @pytest.mark.parametrize(

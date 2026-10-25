@@ -332,8 +332,8 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "sum by (db_namespace) (postgresql_backends)",
-          "legendFormat": "{{db_namespace}}",
+          "expr": "sum by (postgresql_database_name) (postgresql_backends)",
+          "legendFormat": "{{postgresql_database_name}}",
           "range": true,
           "refId": "A"
         },

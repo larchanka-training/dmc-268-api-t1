@@ -3,9 +3,13 @@ services:
     # Postgres with built-in pgvector: the repository profile (RAG) stores its
     # vectors in the same database; migration 0003 creates the extension.
     image: pgvector/pgvector:pg18
-    # Тяжёлые запросы снимает receiver postgresql коллектора через
-    # pg_stat_statements (решение #89): библиотека должна быть загружена при
-    # старте сервера, расширение и роль мониторинга создаёт миграция 0013.
+    # pg_stat_statements — для ручной диагностики медленных запросов:
+    # библиотека должна быть загружена при старте сервера, расширение и роль
+    # мониторинга создаёт миграция 0013. Receiver postgresql коллектора её не
+    # читает (метрики базы он снимает обычными вьюхами статистики), но
+    # накладные расходы preload ничтожны, поэтому локально preload держим
+    # всегда — без переключателя. На стенде та же библиотека включается
+    # вместе со стеком наблюдаемости (observability_enabled в infra/main.tf).
     # Та же команда — у контейнера postgres в infra/main.tf.
     command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
     # Алиас сети совпадает с именем контейнера на стенде (infra/main.tf):
@@ -150,7 +154,39 @@ services:
     # приходит SIGKILL: lifespan не завершается, спаны не выгружаются.
     # --timeout-graceful-shutdown — по той же причине: открытый поток SSE иначе
     # держал бы остановку до конца прогона (подробно — в Dockerfile у CMD).
-    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5"]
+    # Между миграциями и uvicorn — перегенерация пароля роли мониторинга
+    # dmc268_monitor (создаёт миграция 0013): ALTER ROLE идемпотентен, пароль
+    # сводится с POSTGRES_MONITOR_PASSWORD на каждом старте. Пароль —
+    # параметром запроса psycopg (не литералом команды: тот светится в /proc и
+    # docker logs), track_utility выключен той же транзакцией — иначе
+    # ALTER ROLE ... PASSWORD лёг бы в pg_stat_statements открытым текстом.
+    # Тот же шаг — у контейнера миграций в infra/main.tf.
+    command:
+      - sh
+      - -c
+      - |
+        alembic upgrade head || exit 1
+        python - <<'PY' || exit 1
+        import os
+
+        import psycopg
+
+        # DATABASE_URL настроек — под схемой SQLAlchemy (postgresql+psycopg://);
+        # psycopg ждёт стандартную схему postgresql://. Привязка значений — на
+        # клиенте (ClientCursor): серверная не проходит по грамматике ALTER ROLE
+        # (PASSWORD принимает только литерал, не $1), а литерал руками собирать
+        # нельзя — psycopg экранирует сам.
+        dsn = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
+        with psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor) as conn:
+            with conn.transaction():
+                conn.execute("SET LOCAL pg_stat_statements.track_utility = off")
+                # Имя роли зашито — то же, что в миграции 0013 и env коллектора.
+                conn.execute(
+                    "ALTER ROLE dmc268_monitor PASSWORD %s",
+                    (os.environ["POSTGRES_MONITOR_PASSWORD"],),
+                )
+        PY
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5
 
   worker:
     build: .
@@ -225,10 +261,11 @@ services:
 
   # Стек наблюдаемости — те же конфиги из infra/observability/, что и на
   # стенде (спека observability: различия окружений — переменные, не конфиги).
-  # Семь сервисов: коллектор (трейсы, логи, метрики приложения и базы), Loki
+  # Восемь сервисов: коллектор (трейсы, логи, метрики приложения и базы), Loki
   # (логи), Tempo (трейсы), Prometheus (метрики), Grafana (интерфейс),
-  # node-exporter (сервер) и cAdvisor (контейнеры). Без профиля ничего из
-  # этого не поднимается. Экспорт включают переменные api/worker —
+  # node-exporter (сервер), cAdvisor (контейнеры, через socket-proxy) и сам
+  # socket-proxy (доступ cAdvisor к Docker API без docker.sock). Без профиля
+  # ничего из этого не поднимается. Экспорт включают переменные api/worker —
   # см. комментарий у OTEL_TRACES_EXPORTER.
   #
   # Имена сервисов и алиасы сети совпадают с алиасами в infra/main.tf,
@@ -311,6 +348,11 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
       GF_AUTH_BASIC_ENABLED: "false"
+      # Телеметрия вендора off: статистика использования и проверка обновлений
+      # не должны уходить с машины наружу. То же в main.tf и у Loki/Tempo в
+      # их конфигах (loki.yaml, tempo.yaml).
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
     volumes:
       - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
@@ -333,19 +375,54 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
 
-  # Метрики контейнеров: CPU и память каждого, включая сам стек. Маунты —
-  # каноничные из документации cAdvisor (только чтение); без --privileged и
-  # /dev/kmsg недоступны OOM- и perf-коллекторы, CPU/память/сеть остаются.
-  # На Docker Desktop контейнеры живут в ВМ — метрики хоста там не видны.
+  # Прокси над Docker API (/var/run/docker.sock) с доступом по белому списку
+  # эндпоинтов: cAdvisor — единственный клиент, docker.sock контейнерам больше
+  # не монтируется. Права — минимальный работающий набор (проверено запуском
+  # cAdvisor через proxy): CONTAINERS=1 — список, inspect и статистика
+  # контейнеров; INFO=1 — /info и /version, без них cAdvisor падает на проверке
+  # Docker-фабрики («403 Forbidden» на /v1.45/info) и не отдаёт метрики
+  # контейнеров вовсе. События Docker (/events) не нужны: новые контейнеры
+  # находятся опросом cgroup-иерархии. Сеть — отдельная (docker_proxy), в ней
+  # только proxy и cAdvisor.
+  dockerproxy:
+    # tecnativa/docker-socket-proxy:v0.4.1
+    image: tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e
+    profiles: ["observability"]
+    environment:
+      CONTAINERS: "1"
+      INFO: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      docker_proxy:
+        aliases:
+          - dockerproxy
+
+  # Метрики контейнеров: CPU и память каждого, включая сам стек. К Docker API
+  # ходит только через socket-proxy (флаг -docker — проверено по --help образа
+  # v0.52.1; ENV у образа флаги не читает): маунтов docker.sock и
+  # /var/lib/docker больше нет. Маунты / и /sys — каноничные из документации
+  # cAdvisor (только чтение): без них не видно cgroup-иерархии, по которой
+  # находятся контейнеры, — проверено запуском. Без --privileged и /dev/kmsg
+  # недоступны OOM- и perf-коллекторы, CPU, память, диски и сеть остаются.
+  # Новые контейнеры cAdvisor находит сам, без подписки на события Docker:
+  # опрашивает cgroup-иерархию и запрашивает у proxy inspect новых (проверено
+  # запуском нового контейнера рядом). На Docker Desktop контейнеры живут в
+  # ВМ — метрики хоста там не видны.
   cadvisor:
     # gcr.io/cadvisor/cadvisor:v0.52.1
     image: gcr.io/cadvisor/cadvisor@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435
     profiles: ["observability"]
+    command:
+      - --docker=tcp://dockerproxy:2375
     volumes:
       - /:/rootfs:ro
-      - /var/run:/var/run:ro
       - /sys:/sys:ro
-      - /var/lib/docker:/var/lib/docker:ro
+    networks:
+      default:
+        aliases:
+          - cadvisor
+      docker_proxy:
 
 volumes:
   postgres_data:
@@ -368,3 +445,9 @@ volumes:
   # локальное состояние Grafana (дашборды, собранные в UI): данные разработчиков
   # он не хранит, потери при пересоздании проекта не страшны.
   grafana_data:
+
+# Сеть для доступа к Docker API через socket-proxy: в ней только dockerproxy
+# и cAdvisor (см. их сервисы выше). Имя не фиксируется, как и default-сеть:
+# префикс compose-проекта отделяет её от сети стенда.
+networks:
+  docker_proxy:

@@ -22,9 +22,11 @@ receivers:
   # 0013; её реквизиты приходят переменными окружения — они различаются между
   # локальным стеком и стендом, литералом в общем конфиге им не место.
   # Endpoint — строго host:port, имя базы передаётся отдельно (databases):
-  # суффикс /dbname endpoint этого receiver не принимает. Тяжёлые запросы —
-  # из pg_stat_statements: shared_preload_libraries задаёт сама база (command
-  # у контейнера postgres), расширение создаёт та же миграция 0013.
+  # суффикс /dbname endpoint этого receiver не принимает. Расширение
+  # pg_stat_statements receiver не читает: медленные запросы им не собираются,
+  # расширение остаётся только для ручной диагностики (shared_preload_libraries
+  # включает контейнер базы — docker-compose.yml и infra/main.tf, расширение
+  # создаёт та же миграция 0013).
   postgresql:
     username: ${env:POSTGRESQL_USERNAME}
     password: ${env:POSTGRESQL_PASSWORD}
