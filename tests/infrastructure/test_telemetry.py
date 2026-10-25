@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import types
+import warnings
 from collections.abc import Iterator
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,7 +20,11 @@ import httpx
 import pika
 import pytest
 from fastapi.testclient import TestClient
+from opentelemetry import _logs as otel_logs
 from opentelemetry import trace
+from opentelemetry._logs import SeverityNumber
+from opentelemetry._logs import _internal as logs_internal
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation._semconv import (
@@ -27,6 +32,12 @@ from opentelemetry.instrumentation._semconv import (
 )
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import engine as sqlalchemy_engine
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import (
+    BatchLogRecordProcessor,
+    ConsoleLogRecordExporter,
+    InMemoryLogRecordExporter,
+)
 from opentelemetry.sdk.metrics.export import (
     ConsoleMetricExporter,
     Histogram,
@@ -647,6 +658,222 @@ def test_the_metric_resource_names_the_version_and_the_environment(
     assert attributes["service.name"] == "dmc-268-api"
     assert attributes["service.version"] == "abc123def"
     assert attributes["deployment.environment.name"] == "local"
+
+
+# --- экспорт логов -------------------------------------------------------------------
+
+
+@pytest.fixture
+def logs_gate() -> Iterator[None]:
+    """Гейт логов возвращён в исходное состояние после теста.
+
+    `set_logger_provider` ставит глобального провайдера один раз на процесс
+    (одноразовый `Once` внутри `opentelemetry._logs`), поэтому тест, включивший
+    провайдер, обязан вернуть и провайдера, и хендлер на root — иначе логи
+    остальных тестов пошли бы в его экспортёр, а гейт `none` перестал бы быть
+    проверяемым. Провайдер закрывается до сброса: батч-процессор держит поток.
+    Глобалы возвращаются присваиванием, а не `monkeypatch`-ом: тот вернул бы
+    свои значения на undo — после teardown, то есть следующему тесту.
+    """
+    yield
+    if telemetry._logger_installed is not None:
+        telemetry._logger_installed.shutdown()
+    telemetry._logger_installed = None
+    if telemetry._log_handler is not None:
+        logging.getLogger().removeHandler(telemetry._log_handler)
+    telemetry._log_handler = None
+    logs_internal._LOGGER_PROVIDER = None
+    logs_internal._LOGGER_PROVIDER_SET_ONCE._done = False
+
+
+def test_logs_without_configuration_go_nowhere(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Без `OTEL_LOGS_EXPORTER` процессоров нет: логи идут только в stdout-JSON."""
+    monkeypatch.delenv("OTEL_LOGS_EXPORTER", raising=False)
+
+    provider = telemetry.build_logger_provider("dmc-268-api")
+
+    assert provider._multi_log_record_processor._log_record_processors == ()
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+def test_a_log_processor_is_added_per_supported_exporter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`console,otlp` — по процессору на экспортёр: печать в stdout и OTLP/HTTP."""
+    monkeypatch.setenv("OTEL_LOGS_EXPORTER", "console,otlp")
+
+    provider = telemetry.build_logger_provider("dmc-268-api")
+
+    processors = provider._multi_log_record_processor._log_record_processors
+    exporters = [
+        type(processor._batch_processor._exporter)
+        for processor in processors
+        if isinstance(processor, BatchLogRecordProcessor)
+    ]
+    assert exporters == [ConsoleLogRecordExporter, OTLPLogExporter]
+
+
+def test_an_unsupported_logs_exporter_warns_once_and_exports_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Мусорное значение выключает только свой экспортёр и предупреждает один раз."""
+    monkeypatch.setenv("OTEL_LOGS_EXPORTER", "zipkin")
+    monkeypatch.setattr(
+        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
+    )
+
+    provider = telemetry.build_logger_provider("dmc-268-api")
+
+    [record] = caplog.records
+    assert record.levelname == "WARNING"
+    assert "zipkin" in record.getMessage()
+    assert provider._multi_log_record_processor._log_record_processors == ()
+
+
+def test_the_log_resource_names_the_version_and_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resource логов — тот же, что у трейсов: имя из кода, версия и среда — из окружения."""
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.setenv(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "service.version=abc123def,deployment.environment.name=local",
+    )
+    monkeypatch.setenv("OTEL_LOGS_EXPORTER", "otlp")
+    exporter = InMemoryLogRecordExporter()
+    monkeypatch.setattr(telemetry, "OTLPLogExporter", lambda: exporter)
+
+    provider = telemetry.build_logger_provider("dmc-268-api")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        handler = LoggingHandler(logger_provider=provider)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    level = root.level
+    root.setLevel(logging.INFO)
+    try:
+        root.info("resource-check")
+    finally:
+        root.setLevel(level)
+        root.removeHandler(handler)
+    provider.force_flush()
+
+    (record,) = exporter.get_finished_logs()
+    attributes = dict(record.resource.attributes)
+    assert attributes["service.name"] == "dmc-268-api"
+    assert attributes["service.version"] == "abc123def"
+    assert attributes["deployment.environment.name"] == "local"
+
+
+def test_the_otlp_log_exporter_timeout_is_in_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`OTEL_EXPORTER_OTLP_TIMEOUT=4` — таймаут экспортёра логов ровно 4 секунды.
+
+    Спека OTel определяет эту переменную в миллисекундах (4000 = 4 с), но Python
+    SDK читает её в секундах: `_resolve_timeout` возвращает `float(raw)` без
+    пересчёта, и значение идёт в `time.time() + timeout` и в таймаут транспорта.
+    Поэтому compose и `infra/main.tf` ставят 4, а не 4000: при секундной
+    семантике 4000 — это 66 минут зависания одной попытки экспорта. Ассерт —
+    на фактический атрибут клиента экспортёра: если SDK перейдёт на
+    миллисекунды спеки, тест упадёт вместе со значением в конфигах — править
+    синхронно.
+    """
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "4")
+    monkeypatch.setenv("OTEL_LOGS_EXPORTER", "otlp")
+
+    provider = telemetry.build_logger_provider("dmc-268-api")
+    (processor,) = provider._multi_log_record_processor._log_record_processors
+    assert isinstance(processor, BatchLogRecordProcessor)
+    exporter = processor._batch_processor._exporter
+    assert isinstance(exporter, OTLPLogExporter)
+
+    assert exporter._client._timeout == 4.0
+
+
+def test_the_logs_gate_default_installs_nothing(
+    monkeypatch: pytest.MonkeyPatch, logs_gate: None
+) -> None:
+    """Дефолт `OTEL_LOGS_EXPORTER` (`none`): ни провайдера, ни хендлера на root.
+
+    Провайдер остаётся прокси — установку без экспортёров нельзя было бы
+    отозвать, а stdout-JSON и так полный сигнал (docker logs, отладка).
+    """
+    monkeypatch.delenv("OTEL_LOGS_EXPORTER", raising=False)
+
+    telemetry.configure_telemetry(telemetry.API_SERVICE)
+
+    assert not isinstance(otel_logs.get_logger_provider(), LoggerProvider)
+    assert not any(
+        isinstance(handler, LoggingHandler) for handler in logging.getLogger().handlers
+    )
+
+
+def test_the_otlp_gate_installs_the_provider_and_the_handler_once(
+    monkeypatch: pytest.MonkeyPatch, logs_gate: None
+) -> None:
+    """`OTEL_LOGS_EXPORTER=otlp`: провайдер и хендлер ставятся; повторный
+    `configure_telemetry` не плодит ни того, ни другого."""
+    monkeypatch.setenv("OTEL_LOGS_EXPORTER", "otlp")
+    exporter = InMemoryLogRecordExporter()
+    monkeypatch.setattr(telemetry, "OTLPLogExporter", lambda: exporter)
+
+    telemetry.configure_telemetry(telemetry.API_SERVICE)
+    provider = otel_logs.get_logger_provider()
+
+    telemetry.configure_telemetry(telemetry.WORKER_SERVICE)
+
+    assert isinstance(provider, LoggerProvider)
+    assert otel_logs.get_logger_provider() is provider
+    assert dict(provider.resource.attributes)["service.name"] == telemetry.API_SERVICE
+    handlers = [
+        handler for handler in logging.getLogger().handlers if isinstance(handler, LoggingHandler)
+    ]
+    assert len(handlers) == 1
+
+
+def test_the_otlp_log_handler_delivers_body_severity_and_exception_attributes(
+    monkeypatch: pytest.MonkeyPatch, logs_gate: None
+) -> None:
+    """Запись Python logging уходит по OTLP: body — сообщение, уровень — severity,
+    при `exc_info` — атрибуты `exception.*`.
+
+    Именно `exception.message`, `exception.stacktrace` и тело гасит редакция
+    коллектора (`redact_logs`), `exception.type` остаётся диагнозом записи —
+    тот же паритет, что у stdout-JSON (`configure_logging`)."""
+    monkeypatch.setenv("OTEL_LOGS_EXPORTER", "otlp")
+    exporter = InMemoryLogRecordExporter()
+    monkeypatch.setattr(telemetry, "OTLPLogExporter", lambda: exporter)
+    telemetry.configure_telemetry(telemetry.API_SERVICE)
+    root = logging.getLogger()
+    level = root.level
+    root.setLevel(logging.INFO)
+    try:
+        root.info("привет %s", "мир")
+        try:
+            raise ValueError("сбой этапа")
+        except ValueError as error:
+            root.error("упало", exc_info=error)
+    finally:
+        root.setLevel(level)
+    provider = otel_logs.get_logger_provider()
+    assert isinstance(provider, LoggerProvider)
+    provider.force_flush()
+
+    info, failed = (data.log_record for data in exporter.get_finished_logs())
+    assert info.body == "привет мир"
+    assert info.severity_number is SeverityNumber.INFO
+    assert info.severity_text == "INFO"
+    assert failed.body == "упало"
+    assert failed.severity_number is SeverityNumber.ERROR
+    attributes = dict(failed.attributes or {})
+    assert attributes["exception.type"] == "ValueError"
+    assert attributes["exception.message"] == "сбой этапа"
+    stacktrace = attributes["exception.stacktrace"]
+    assert isinstance(stacktrace, str)
+    assert "ValueError: сбой этапа" in stacktrace
 
 
 # --- бизнес-метрики -----------------------------------------------------------------

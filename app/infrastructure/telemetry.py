@@ -9,6 +9,9 @@
 - SDK-провайдеры трейсов и метрик в API и воркере (`configure_telemetry`). Провайдер
   трейсов нужен, даже когда спаны никуда не уходят: без него у спанов нет настоящего
   trace id, а `X-Trace-ID` — это trace id спана запроса;
+- OTLP-экспорт логов — второй транспорт рядом с stdout-JSON (`configure_logging`):
+  записи Python logging уходят в коллектор по OTLP из SDK (LoggerProvider +
+  BatchLogRecordProcessor + хендлер на root);
 - HTTP-сервер — встроенная телеметрия FastAPI (она берёт глобальные провайдеры сама,
   отдельный пакет инструментирования не нужен); httpx (вызовы GitHub и модели) и
   SQLAlchemy — пакеты `opentelemetry-instrumentation-*`;
@@ -29,6 +32,15 @@
 свой экспортёр и предупреждает при старте. Метрики гейтит так же
 `OTEL_METRICS_EXPORTER`: по умолчанию (`none`) они собираются, но никуда не
 уходят — SDK без гейта сам ставит `otlp` и стучался бы в localhost:4318.
+Логи гейтит `OTEL_LOGS_EXPORTER` теми же значениями, но дефолт (`none`)
+выключает весь сигнал целиком: ни провайдера, ни хендлера на root — записи
+идут только в stdout-JSON. При `otlp` на root ставится хендлер из Python
+logging в OTLP: тело записи — сообщение, уровень — severity, `exc_info` —
+атрибуты `exception.*` (их гасит редакция коллектора, см. `configure_logging`).
+Endpoint и таймаут экспортёры всех трёх сигналов читают из
+`OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_TIMEOUT` сами; таймаут в
+Python SDK — в секундах, вопреки спецификации OTel (миллисекунды): проверено
+по установленному пакету (тест `test_telemetry.py`).
 Автонастройка экспортёров FastAPI и его OTel-лог исключений выключены явно
 (`create_app`, `telemetry=`).
 
@@ -49,15 +61,18 @@ import contextlib
 import logging
 import os
 import time
+import warnings
 from collections.abc import Callable, Iterator
 from contextvars import Token
 from typing import Any
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
+from opentelemetry import _logs as otel_logs
 from opentelemetry import context as otel_context
 from opentelemetry import metrics, propagate, trace
 from opentelemetry.context import Context
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
@@ -69,6 +84,12 @@ from opentelemetry.propagators.textmap import (
     TextMapPropagator,
     default_getter,
     default_setter,
+)
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import (
+    BatchLogRecordProcessor,
+    ConsoleLogRecordExporter,
+    LogRecordExporter,
 )
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
@@ -183,6 +204,7 @@ SEMCONV_STABILITY_OPT_IN = "database,http"
 # `shutdown_tracing`. Чужие провайдеры (тест со своим экспортёром) не закрываем.
 _installed: TracerProvider | None = None
 _meter_installed: MeterProvider | None = None
+_logger_installed: LoggerProvider | None = None
 
 # Дефолт лимита длины значений атрибутов спана: без него `url.full` с длинными
 # путями и тексты ошибок раздували бы спан и трафик экспорта.
@@ -201,6 +223,15 @@ _EXPORTER_FACTORIES: dict[str, Callable[[], SpanExporter]] = {
 _METRIC_EXPORTER_FACTORIES: dict[str, Callable[[], MetricExporter]] = {
     "console": lambda: ConsoleMetricExporter(),
     "otlp": lambda: OTLPMetricExporter(),
+}
+
+# Значение `OTEL_LOGS_EXPORTER` → фабрика экспортёра логов; тот же список
+# через запятую. Экспортёр логов живёт в приватном модуле `_log_exporter`:
+# публичного пути к нему пакет не даёт (модуль стабилен, имя — нет; тест
+# `otlp_exporter_installed` подменяет его тем же именем).
+_LOG_EXPORTER_FACTORIES: dict[str, Callable[[], LogRecordExporter]] = {
+    "console": lambda: ConsoleLogRecordExporter(),
+    "otlp": lambda: OTLPLogExporter(),
 }
 
 
@@ -282,13 +313,16 @@ def link_client_trace(traceparent: str | None) -> None:
 
 
 def configure_telemetry(service_name: str) -> None:
-    """Поставить пустой пропагатор, SDK-провайдеры трейсов и метрик, инструментирование.
+    """Поставить пустой пропагатор, SDK-провайдеры трейсов, метрик и логов, инструментирование.
 
     Провайдеры глобальные и ставятся один раз на процесс; если провайдер уже стоит
     (второй вызов или тест со своим `InMemorySpanExporter`/`InMemoryMetricReader`),
     его не трогаем. `OTEL_SERVICE_NAME` переопределяет `service_name`.
+
+    Логи ставятся только при включённом экспорте (`OTEL_LOGS_EXPORTER`): без него
+    провайдер не нужен вовсе, и root остаётся с одним stdout-JSON-хендлером.
     """
-    global _installed, _meter_installed
+    global _installed, _meter_installed, _logger_installed
     # Пропагатор ставится всегда, и поверх `OTEL_PROPAGATORS`: доверие к входящим
     # заголовкам — правило сервиса, а не настройка окружения.
     propagate.set_global_textmap(_NoPropagation())
@@ -302,20 +336,29 @@ def configure_telemetry(service_name: str) -> None:
         meter_provider = build_meter_provider(service_name)
         metrics.set_meter_provider(meter_provider)
         _meter_installed = meter_provider
+    if not isinstance(otel_logs.get_logger_provider(), LoggerProvider) and (
+        _logs_export_requested()
+    ):
+        logger_provider = build_logger_provider(service_name)
+        otel_logs.set_logger_provider(logger_provider)
+        _logger_installed = logger_provider
+        _install_log_handler(logger_provider)
 
 
 def shutdown_tracing() -> None:
-    """Выгрузить накопленные спаны и метрики, закрыть провайдеры `configure_telemetry`.
+    """Выгрузить накопленные спаны, метрики и логи, закрыть провайдеры `configure_telemetry`.
 
     Зовётся при остановке: в lifespan API и при выходе воркера. `atexit` SDK закрыл бы
     провайдеры и сам, но только при обычном выходе интерпретатора — смерть от SIGTERM
-    с обработчиком по умолчанию его не вызывает, и спаны батч-процессора и метрики
-    периодического ридера пропадают.
+    с обработчиком по умолчанию его не вызывает, и спаны батч-процессора, метрики
+    периодического ридера и логи батч-процессора пропадают.
     """
     if _installed is not None:
         _installed.shutdown()
     if _meter_installed is not None:
         _meter_installed.shutdown()
+    if _logger_installed is not None:
+        _logger_installed.shutdown()
 
 
 def parse_exporters(value: str) -> list[str]:
@@ -404,6 +447,76 @@ def build_meter_provider(service_name: str) -> MeterProvider:
     return MeterProvider(
         resource=_service_resource(service_name), metric_readers=readers, views=_VIEWS
     )
+
+
+def _logs_export_requested() -> bool:
+    """Экспорт логов запрошен: в `OTEL_LOGS_EXPORTER` есть значение кроме `none`.
+
+    Дефолт (`none` и пустая строка) выключает сигнал целиком: глобальный провайдер
+    остаётся прокси, root — без OTel-хендлера, записи идут только в stdout-JSON.
+    Гейт проверяется до постройки провайдера, потому что `set_logger_provider`
+    ставится один раз на процесс: отозвать установку провайдера без экспортёров
+    обратно уже нельзя.
+    """
+    return any(
+        name != "none"
+        for name in parse_exporters(os.environ.get("OTEL_LOGS_EXPORTER", ""))
+    )
+
+
+def build_logger_provider(service_name: str) -> LoggerProvider:
+    """SDK-провайдер логов с экспортом из `OTEL_LOGS_EXPORTER` — как у трейсов.
+
+    Процессор ставится на каждый поддержанный экспортёр; неподдержанное значение
+    выключает только свой экспортёр и получает одно предупреждение при старте.
+    `none` и пустое значение — экспорт выключен, без предупреждений. Resource —
+    тот же, что у трейсов и метрик (`_service_resource`): `service.name` из кода,
+    `service.version` и `deployment.environment.name` — из окружения. Лимиты
+    атрибутов записей (`OTEL_LOG_RECORD_ATTRIBUTE_COUNT_LIMIT` и прочие) не
+    трогаем — дефолты SDK.
+    """
+    provider = LoggerProvider(resource=_service_resource(service_name))
+    for name in parse_exporters(os.environ.get("OTEL_LOGS_EXPORTER", "")):
+        if name == "none":
+            continue  # явное «без экспорта» по спецификации OTel
+        factory = _LOG_EXPORTER_FACTORIES.get(name)
+        if factory is None:
+            logger.warning(
+                "OTEL_LOGS_EXPORTER=%s не поддержан: логи этому экспортёру не"
+                " уходят (поддержаны %s)",
+                name,
+                ", ".join(sorted(_LOG_EXPORTER_FACTORIES)),
+            )
+            continue
+        provider.add_log_record_processor(BatchLogRecordProcessor(factory()))
+    return provider
+
+
+# Хендлер Python logging → OTLP — один на процесс и держится ссылкой: повторный
+# `configure_telemetry` не плодит записи на root (тот же приём, что у
+# stdout-хендлера в `configure_logging`).
+_log_handler: LoggingHandler | None = None
+
+
+def _install_log_handler(provider: LoggerProvider) -> None:
+    """Поставить на root хендлер, который переводит записи Python logging в OTLP.
+
+    Уровень хендлера — NOTSET, как у stdout-хендлера в `configure_logging`:
+    порог задаёт уровень root (INFO там же). Провайдер передаётся явно, а не
+    через глобальный, — хендлер ставится сразу после `set_logger_provider`.
+
+    `LoggingHandler` SDK-пакета логов помечен устаревшим в пользу хендлера из
+    `opentelemetry-instrumentation-logging`; депрекейшн глушится на месте —
+    решение о переходе отложено вместе с TODO в `app/infrastructure/logging.py`.
+    """
+    global _log_handler
+    if _log_handler is None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            _log_handler = LoggingHandler(logger_provider=provider)
+    root = logging.getLogger()
+    if _log_handler not in root.handlers:
+        root.addHandler(_log_handler)
 
 
 def _sampler() -> Sampler | None:
