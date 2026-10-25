@@ -43,9 +43,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     Явно переданные `settings` — это то, как тесты обходятся без настоящего
     окружения; без них настройки читаются из окружения и падают громко, если
-    обязательной не хватает, — но уже после настройки логов и телеметрии:
-    `ValidationError` pydantic выходит JSON-записью, которую читает Loki, а не
-    текстом в stderr до настройки логов (замечание ревью PR #130).
+    обязательной не хватает, — но уже после настройки логов, телеметрии и
+    excepthook'ов: `ValidationError` pydantic выходит JSON-записью, которую
+    читает Loki, — при выходе из процесса её пишет excepthook, а не дефолтный
+    текстовый дамп в stderr, который коллектор дропает (замечание ревью
+    PR #130).
     """
     from pydantic.alias_generators import to_camel
 
@@ -53,7 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.api.errors import ERRORS_DEFAULT
     from app.infrastructure import telemetry
     from app.infrastructure.container import build_container
-    from app.infrastructure.logging import configure_logging
+    from app.infrastructure.logging import configure_logging, install_excepthooks
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -93,8 +95,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(telemetry.API_SERVICE)
     # До контейнера: провайдеры трейсов и метрик нужны телеметрии FastAPI с первого запроса.
     telemetry.configure_telemetry(telemetry.API_SERVICE)
-    # Окружение читается после логов и телеметрии, не раньше (замечание ревью
-    # PR #130): падение на кривом окружении выходит JSON-записью в Loki.
+    # Хук — за логами и до чтения окружения (замечание ревью PR #130): он
+    # общий для API и воркера (`app.infrastructure.logging`), и `ValidationError`
+    # pydantic из кривого окружения выходит из процесса JSON-записью с
+    # `exception.type`, а не текстом в stderr, который коллектор дропает.
+    install_excepthooks()
+    # Окружение читается после логов, телеметрии и excepthook'ов, не раньше
+    # (замечание ревью PR #130): падение на кривом окружении выходит
+    # JSON-записью в Loki.
     # Между началом функции и этим местом настройки не нужны: приложение и
     # OpenAPI-схема строятся без них. Явно переданные настройки (тесты)
     # читаются как читались — из аргумента.

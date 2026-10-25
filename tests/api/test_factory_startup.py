@@ -6,7 +6,12 @@
 почему упал контейнер API — в Loki не видно.
 """
 
+import contextlib
+import io
+import json
 import logging
+import sys
+from collections.abc import Iterator
 
 import pytest
 from pydantic import ValidationError
@@ -20,6 +25,19 @@ REQUIRED_ENV = {
     "DATABASE_URL": "postgresql+psycopg://test:test@localhost/test",
     "RABBITMQ_URL": "amqp://guest:guest@localhost//",
 }
+
+
+@contextlib.contextmanager
+def _json_log(log: logging.Logger) -> Iterator[io.StringIO]:
+    """Записи логгера через производственный JSON-форматтер, в память."""
+    out = io.StringIO()
+    handler = logging.StreamHandler(out)
+    handler.setFormatter(JsonFormatter("dmc-268-api"))
+    log.addHandler(handler)
+    try:
+        yield out
+    finally:
+        log.removeHandler(handler)
 
 
 def test_create_app_reads_the_environment_after_logs_and_telemetry(
@@ -63,3 +81,33 @@ def test_a_broken_environment_fails_with_the_json_handler_on_the_root_logger(
         "JSON-хендлер не на root-логгере в момент падения чтения окружения: "
         "настройки читаются раньше, чем настроены логи"
     )
+
+
+def test_a_validation_error_from_the_environment_leaves_a_json_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ValidationError` из чтения окружения доходит до Loki JSON-записью:
+    excepthook ставится раньше `load_settings` (замечание ревью PR #130),
+    поэтому падение `uvicorn app.main:app` на кривом окружении оставляет запись
+    с `exception.type` и стектрейсом, а не текст в stderr, который коллектор
+    дропает."""
+    original_hook = sys.excepthook
+    # Запись хука идёт через логгер модуля, где хук теперь живёт.
+    hook_log = logging.getLogger("app.infrastructure.logging")
+    try:
+        with _json_log(hook_log) as out:
+            monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "")  # pydantic отклоняет: min_length=1
+            for name, value in REQUIRED_ENV.items():
+                monkeypatch.setenv(name, value)
+            try:
+                create_app()
+            except ValidationError:
+                # Как интерпретатор на выходе исключения из точки входа.
+                sys.excepthook(*sys.exc_info())
+    finally:
+        sys.excepthook = original_hook
+
+    [record] = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert record["severity"] == "ERROR"
+    assert record["exception.type"] == "ValidationError"
+    assert "github_webhook_secret" in record["exception.stacktrace"]

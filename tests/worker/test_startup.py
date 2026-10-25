@@ -12,14 +12,13 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.infrastructure.logging import JsonFormatter
+from app.infrastructure.logging import JsonFormatter, install_excepthooks
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
 from app.worker import factory
 from app.worker.factory import (
     WorkerConfigError,
     check_model_deadline,
     check_sweep_thresholds,
-    install_excepthooks,
     load_checked_prompt_texts,
     run_worker,
 )
@@ -147,9 +146,9 @@ def test_a_validation_error_from_the_loader_leaves_a_json_record() -> None:
     PR #130), поэтому падение `python -m app.worker` на кривом окружении
     оставляет в логе стектрейс, а не текст в stderr, который коллектор
     дропает."""
-    worker_log = logging.getLogger("app.worker.factory")
+    hook_log = logging.getLogger("app.infrastructure.logging")
 
-    with _json_log(worker_log) as out:
+    with _json_log(hook_log) as out:
         try:
             run_worker(_broken_loader)
         except ValidationError:
@@ -166,10 +165,10 @@ def test_unhandled_exceptions_of_both_hooks_go_through_the_logger() -> None:
     """Необработанное исключение — JSON-запись со стектрейсом через логгер
     (`exc_info`), а не дефолтный текстовый дамп интерпретатора: не-JSON
     строку коллектор дропает, и падение воркера осталось бы без диагноза."""
-    worker_log = logging.getLogger("app.worker.factory")
+    hook_log = logging.getLogger("app.infrastructure.logging")
     install_excepthooks()
 
-    with _json_log(worker_log) as out:
+    with _json_log(hook_log) as out:
         try:
             raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
         except WorkerConfigError:

@@ -27,6 +27,11 @@
 ошибку с `trace_id` и стектрейсом) отсекается `UvicornDuplicateFilter` на
 логгере `uvicorn.error`.
 
+Необработанные исключения процесса — тоже записи этого лога: `install_excepthooks`
+ставит `sys.excepthook` и `threading.excepthook`, пишущие через логгер этого
+модуля. Хук ставит любой вход — `create_app` API и `run_worker` воркера, —
+сразу после настройки логов, поэтому падение процесса доходит до Loki.
+
 TODO: OTel Logs SDK в Python ещё не Stable (`opentelemetry.sdk._logs` — статус
 Development, а `LoggingHandler` оттуда устарел с 1.40.0). Когда станет
 Stable — перейти на `LoggingHandler` из `opentelemetry-instrumentation-logging`
@@ -37,14 +42,20 @@ import contextvars
 import json
 import logging
 import sys
+import threading
 import traceback
 import typing
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from types import TracebackType
 from typing import Any
 
 from opentelemetry import trace
+
+# Логгер модуля: через него пишут excepthook'и (`install_excepthooks`) —
+# необработанное исключение любого потока выходит JSON-записью отсюда.
+logger = logging.getLogger(__name__)
 
 # Имена полей — как в модели OTel LogRecord и у блоков `json_parser` коллектора.
 TIMESTAMP = "timestamp"
@@ -288,3 +299,54 @@ def configure_logging(service_name: str) -> None:
         uvicorn.handlers.clear()
         uvicorn.propagate = True
     logging.getLogger("uvicorn.error").addFilter(UVICORN_DUPLICATE_FILTER)
+
+
+def _log_unhandled_exception(
+    message: str,
+    exc_type: type[BaseException],
+    exc_value: BaseException | None,
+    exc_traceback: TracebackType | None,
+) -> None:
+    """Необработанное исключение — одна JSON-запись со стектрейсом.
+
+    Интерпретатор передаёт в хук готовый экземпляр исключения; типы хука
+    допускают `None` — тогда в записи остаётся имя типа в тексте.
+    """
+    if exc_value is None:
+        logger.error("%s: %s", message, exc_type.__qualname__)
+        return
+    logger.error(message, exc_info=(exc_type, exc_value, exc_traceback))
+
+
+def _main_thread_excepthook(
+    exc_type: type[BaseException],
+    exc_value: BaseException | None,
+    exc_traceback: TracebackType | None,
+) -> None:
+    """Необработанное исключение главного потока — JSON-запись со стектрейсом."""
+    _log_unhandled_exception("необработанное исключение", exc_type, exc_value, exc_traceback)
+
+
+def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
+    """Необработанное исключение стороннего потока — та же JSON-запись."""
+    thread_name = args.thread.name if args.thread is not None else "без объекта потока"
+    _log_unhandled_exception(
+        "необработанное исключение в потоке " + thread_name,
+        args.exc_type,
+        args.exc_value,
+        args.exc_traceback,
+    )
+
+
+def install_excepthooks() -> None:
+    """Необработанное исключение любого потока пишет логгер, не интерпретатор.
+
+    Дефолтные хуки печатают текстовый дамп в stderr — не-JSON строку дропает
+    коллектор, и падение процесса не оставило бы следа в Loki. Хук ставит
+    любой вход — `create_app` API и `run_worker` воркера, — сразу после
+    настройки логов: ошибка старта (`ValidationError` pydantic из кривого
+    окружения) выходит из процесса JSON-записью с `exception.type` и
+    стектрейсом, и crash-loop виден в Loki (замечание ревью PR #130).
+    """
+    sys.excepthook = _main_thread_excepthook
+    threading.excepthook = _threading_excepthook
