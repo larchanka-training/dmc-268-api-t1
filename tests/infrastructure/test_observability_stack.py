@@ -162,6 +162,34 @@ def test_stack_images_are_pinned_by_digest_in_both_places() -> None:
     assert _compose_digests() == _infra_digests()
 
 
+def test_stack_published_ports_match_between_compose_and_infra() -> None:
+    """Публикуемые порты стека одинаковы в compose и main.tf.
+
+    Единственный публикуемый порт стека — Grafana (3000 на internal_bind_ip):
+    остальной трафик внутренний, его публикует только человек, который правит
+    оба файла. Рассинхрон порта молчалив так же, как рассинхрон дайджестов
+    (замечание ревью PR #130), поэтому сверяются и внутренний порт, и дефолт
+    внешней переменной.
+    """
+    assert load_compose()["services"]["grafana"]["ports"] == ["127.0.0.1:3000:3000"]
+
+    match = re.search(
+        r"ports \{\s*internal = (\d+)\s*external = var\.(\w+)\s*ip",
+        _tf_container_block("grafana"),
+    )
+    assert match is not None, "у grafana в main.tf нет блока ports"
+    internal, external_var = int(match.group(1)), match.group(2)
+    assert internal == 3000
+
+    default = re.search(
+        rf'variable "{external_var}" \{{.*?default\s*=\s*(\d+)',
+        MAIN_TF.parent.joinpath("variables.tf").read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    assert default is not None, f"у переменной {external_var} нет дефолта"
+    assert int(default.group(1)) == 3000
+
+
 # --- имена: алиасы вместо container_name, том grafana_data без name -----------------
 
 

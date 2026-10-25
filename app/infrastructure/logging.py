@@ -108,35 +108,24 @@ class ReviewRunIdFilter(logging.Filter):
 # часть сообщения (uvicorn пишет «Exception in ASGI application\n»).
 UVICORN_DUPLICATE_MESSAGE = "Exception in ASGI application"
 
-# Атрибуты, которые stdlib кладёт в LogRecord сам: всё остальное в
-# `record.__dict__` — из `extra` вызывающего кода.
-_RESERVED = frozenset(
-    {
-        "args",
-        "asctime",
-        "created",
-        "exc_info",
-        "exc_text",
-        "filename",
-        "funcName",
-        "levelname",
-        "levelno",
-        "lineno",
-        "msecs",
-        "message",
-        "module",
-        "msg",
-        "name",
-        "pathname",
-        "process",
-        "processName",
-        "relativeCreated",
-        "stack_info",
-        "taskName",
-        "thread",
-        "threadName",
-    }
-)
+# Атрибуты, которые stdlib кладёт в LogRecord сам, строятся из пустой записи:
+# новый атрибут LogRecord из будущей версии Python (как `taskName` в 3.12)
+# попадает сюда автоматически, а не уходит в JSON как «extra» (замечание
+# ревью PR #130). `message` и `asctime` stdlib ставит позже, при форматировании.
+# Остальное в списке — имена полей JSON, которые собирает сам форматтер:
+# `extra` перетереть их не может — подделка `severity` не меняет уровень
+# записи, `timestamp`, `service.name`, `logger`, `exception.*` остаются своими.
+_RESERVED = frozenset(logging.makeLogRecord({}).__dict__) | {
+    "message",
+    "asctime",
+    TIMESTAMP,
+    SEVERITY,
+    MESSAGE,
+    LOGGER,
+    SERVICE_NAME,
+    STACKTRACE,
+    EXCEPTION_TYPE,
+}
 
 # Логгеры uvicorn и его сообщение о исключении в ASGI-приложении.
 UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
@@ -147,25 +136,6 @@ UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 # PR #130); httpcore на DEBUG пишет хосты и пути соединений. WARNING
 # оставляет клиентам записи о настоящих сбоях.
 HTTP_CLIENT_LOGGERS = ("httpx", "httpcore")
-
-
-# Поля, которые собирает сам форматтер: `extra` перетереть их не может —
-# подделка `severity` не меняет уровень записи, `timestamp`, `service.name`,
-# `logger`, `exception.*` и trace-поля остаются своими.
-_FILTER_OWNED = frozenset(
-    {
-        TIMESTAMP,
-        SEVERITY,
-        MESSAGE,
-        LOGGER,
-        SERVICE_NAME,
-        STACKTRACE,
-        EXCEPTION_TYPE,
-        TRACE_ID,
-        SPAN_ID,
-        TRACE_FLAGS,
-    }
-)
 
 
 def _rfc3339(seconds: float) -> str:
@@ -201,8 +171,11 @@ def record_to_fields(record: logging.LogRecord, service_name: str) -> dict[str, 
     `trace_id`/`span_id`/`trace_flags` появляются, только если их положил
     `TraceContextFilter`; вне спана полей нет, запись не теряется. Атрибуты
     из `extra` идут на верхний уровень как есть — фильтр и форматтер не знают
-    их имён, но служебные поля записи перетереть не дают. `service.name` —
-    ресурс процесса, поэтому приходит аргументом.
+    их имён, а служебные поля записи перетереть не дают (`_RESERVED`).
+    Коллизия `extra` с trace-полем решается в пользу настоящего контекста:
+    фильтры выполняются после помещения `extra` в запись и перезаписывают
+    её значение; вне спана значение из `extra` доходит до JSON, а не пропадает
+    молча. `service.name` — ресурс процесса, поэтому приходит аргументом.
     """
     fields: dict[str, Any] = {
         TIMESTAMP: _rfc3339(record.created),
@@ -222,7 +195,7 @@ def record_to_fields(record: logging.LogRecord, service_name: str) -> dict[str, 
     if exception_type is not None:
         fields[EXCEPTION_TYPE] = exception_type
     for name, value in record.__dict__.items():
-        if name not in _RESERVED and name not in _FILTER_OWNED:
+        if name not in _RESERVED:
             fields[name] = value
     return fields
 

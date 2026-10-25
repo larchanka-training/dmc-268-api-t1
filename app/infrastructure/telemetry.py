@@ -62,7 +62,7 @@ import logging
 import os
 import time
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextvars import Token
 from typing import Any
 from uuid import UUID
@@ -235,27 +235,6 @@ _LOG_EXPORTER_FACTORIES: dict[str, Callable[[], LogRecordExporter]] = {
 }
 
 
-def _attribute_value_length_limit() -> int:
-    """Лимит длины значений атрибутов: `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` или дефолт.
-
-    Нецелое или отрицательное значение не роняет старт приложения — предупреждение
-    и дефолт, как у неподдержанного экспортёра.
-    """
-    raw = os.environ.get("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "").strip()
-    try:
-        limit = int(raw) if raw else DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT
-        if limit >= 0:
-            return limit
-    except ValueError:
-        pass
-    logger.warning(
-        "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=%s не целое неотрицательное число — лимит %d",
-        raw,
-        DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT,
-    )
-    return DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT
-
-
 class _NoPropagation(TextMapPropagator):
     """Пропагатор, который ничего не берёт из заголовков и ничего в них не кладёт.
 
@@ -365,14 +344,38 @@ def parse_exporters(value: str) -> list[str]:
     """Разобрать `OTEL_TRACES_EXPORTER`: значения через запятую, без повторов.
 
     Разбор по спецификации OTel: каждое значение `strip().lower()`; функция чистая и
-    валидацию поддержанности не делает — мусор остаётся в списке, а предупреждение
-    про него пишет `build_tracer_provider`. Пустое значение — пустой список.
+    валидацию поддержанности не делает — мусор остаётся в списке, предупреждение
+    про него пишет `_exporters`. Пустое значение — пустой список.
     """
     exporters: list[str] = []
     for item in value.split(","):
         name = item.strip().lower()
         if name and name not in exporters:
             exporters.append(name)
+    return exporters
+
+
+def _exporters(env_var: str, factories: Mapping[str, Callable[[], Any]]) -> list[Any]:
+    """Экспортёры сигнала из `OTEL_*_EXPORTER` — по фабрикам своего сигнала.
+
+    `none` — явное «без экспорта» по спецификации OTel; пустое значение —
+    пустой список; неподдержанное значение выключает только свой экспортёр
+    и получает одно предупреждение при старте.
+    """
+    exporters: list[Any] = []
+    for name in parse_exporters(os.environ.get(env_var, "")):
+        if name == "none":
+            continue
+        factory = factories.get(name)
+        if factory is None:
+            logger.warning(
+                "%s=%s не поддержан: записи этому экспортёру не уходят (поддержаны %s)",
+                env_var,
+                name,
+                ", ".join(sorted(factories)),
+            )
+            continue
+        exporters.append(factory())
     return exporters
 
 
@@ -395,27 +398,22 @@ def build_tracer_provider(service_name: str) -> TracerProvider:
     Процессор ставится на каждый поддержанный экспортёр; неподдержанное значение
     выключает только свой экспортёр и получает одно предупреждение при старте.
     `none` и пустое значение — экспорт выключен, без предупреждений. Сэмплирование
-    решает `_sampler`, лимит длины значений атрибутов —
-    `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` с дефолтом в коде.
+    решает `_sampler`; лимит длины значений атрибутов без переменной — дефолт
+    в коде, с переменной значение валидирует SDK: мусор поднимает `ValueError`
+    при старте, осознанно — неверный конфиг телеметрии громче молчаливого
+    дефолта (замечание ревью PR #130).
     """
     provider = TracerProvider(
         sampler=_sampler(),
         resource=_service_resource(service_name),
-        span_limits=SpanLimits(max_attribute_length=_attribute_value_length_limit()),
+        span_limits=SpanLimits(
+            max_attribute_length=None
+            if "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT" in os.environ
+            else DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT
+        ),
     )
-    for name in parse_exporters(os.environ.get("OTEL_TRACES_EXPORTER", "")):
-        if name == "none":
-            continue  # явное «без экспорта» по спецификации OTel
-        factory = _EXPORTER_FACTORIES.get(name)
-        if factory is None:
-            logger.warning(
-                "OTEL_TRACES_EXPORTER=%s не поддержан: спаны этому экспортёру не"
-                " уходят (поддержаны %s)",
-                name,
-                ", ".join(sorted(_EXPORTER_FACTORIES)),
-            )
-            continue
-        provider.add_span_processor(BatchSpanProcessor(factory()))
+    for exporter in _exporters("OTEL_TRACES_EXPORTER", _EXPORTER_FACTORIES):
+        provider.add_span_processor(BatchSpanProcessor(exporter))
     return provider
 
 
@@ -430,20 +428,10 @@ def build_meter_provider(service_name: str) -> MeterProvider:
     что у трейсов (`_service_resource`); агрегации отдельных приборов задаёт
     `_VIEWS` (дроп старого счётчика contrib, бакеты гистограмм длительности).
     """
-    readers = []
-    for name in parse_exporters(os.environ.get("OTEL_METRICS_EXPORTER", "")):
-        if name == "none":
-            continue  # явное «без экспорта» по спецификации OTel
-        factory = _METRIC_EXPORTER_FACTORIES.get(name)
-        if factory is None:
-            logger.warning(
-                "OTEL_METRICS_EXPORTER=%s не поддержан: метрики этому экспортёру"
-                " не уходят (поддержаны %s)",
-                name,
-                ", ".join(sorted(_METRIC_EXPORTER_FACTORIES)),
-            )
-            continue
-        readers.append(PeriodicExportingMetricReader(factory()))
+    readers = [
+        PeriodicExportingMetricReader(exporter)
+        for exporter in _exporters("OTEL_METRICS_EXPORTER", _METRIC_EXPORTER_FACTORIES)
+    ]
     return MeterProvider(
         resource=_service_resource(service_name), metric_readers=readers, views=_VIEWS
     )
@@ -476,19 +464,8 @@ def build_logger_provider(service_name: str) -> LoggerProvider:
     трогаем — дефолты SDK.
     """
     provider = LoggerProvider(resource=_service_resource(service_name))
-    for name in parse_exporters(os.environ.get("OTEL_LOGS_EXPORTER", "")):
-        if name == "none":
-            continue  # явное «без экспорта» по спецификации OTel
-        factory = _LOG_EXPORTER_FACTORIES.get(name)
-        if factory is None:
-            logger.warning(
-                "OTEL_LOGS_EXPORTER=%s не поддержан: логи этому экспортёру не"
-                " уходят (поддержаны %s)",
-                name,
-                ", ".join(sorted(_LOG_EXPORTER_FACTORIES)),
-            )
-            continue
-        provider.add_log_record_processor(BatchLogRecordProcessor(factory()))
+    for exporter in _exporters("OTEL_LOGS_EXPORTER", _LOG_EXPORTER_FACTORIES):
+        provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
     return provider
 
 

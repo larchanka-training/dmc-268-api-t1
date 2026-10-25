@@ -175,6 +175,45 @@ def test_a_record_outside_a_span_is_kept_without_the_trace_fields(
     assert {"trace_id", "span_id", "trace_flags"}.isdisjoint(fields)
 
 
+def test_outside_a_span_an_extra_trace_field_reaches_the_json(
+    selftest: JsonLog,
+) -> None:
+    """Вне спана коллизия extra с trace-полем не теряется молча: фильтр поле
+    не ставит, и значение из extra доходит до JSON (замечание ревью PR #130)."""
+    SELFTEST_LOGGER.warning("вне спана", extra={"trace_id": "из-extra"})
+
+    [fields] = selftest.fields()
+    assert fields["trace_id"] == "из-extra"
+
+
+def test_inside_a_span_the_real_context_wins_over_extra(
+    selftest: JsonLog, spans: InMemorySpanExporter
+) -> None:
+    """Фильтры выполняются после помещения extra в запись и перезаписывают
+    коллизию настоящим контекстом: подделать trace_id через extra нельзя."""
+    with trace.get_tracer(__name__).start_as_current_span("review.analysing"):
+        SELFTEST_LOGGER.info("этап идёт", extra={"trace_id": "подделка"})
+
+    [fields] = selftest.fields()
+    context = spans.get_finished_spans()[0].get_span_context()
+    assert context is not None
+    assert fields["trace_id"] == trace.format_trace_id(context.trace_id)
+    assert fields["trace_id"] != "подделка"
+
+
+def test_the_run_id_attribute_lives_on_the_record_for_the_otlp_transport() -> None:
+    """`review_run_id` — атрибут записи: его читает не только JSON-форматтер,
+    но и OTLP-экспортёр SDK (`LoggingHandler` кладёт `vars(record)` в атрибуты
+    лога), поэтому оба транспорта несут одни поля (решение #89)."""
+    record = SELFTEST_LOGGER.makeRecord(
+        SELFTEST_LOGGER.name, logging.WARNING, __file__, 1, "этап прогона", (), None
+    )
+    with review_run_id_scope(str(JOB.review_run_id)):
+        ReviewRunIdFilter().filter(record)
+
+    assert record.__dict__["review_run_id"] == str(JOB.review_run_id)
+
+
 def test_the_record_carries_its_logger_name(selftest: JsonLog) -> None:
     """Поле `logger` — имя логгера записи: в Loki отличимы `uvicorn.access`
     от `app.worker.factory` (имя stdlib кладёт в `record.name`, в JSON оно

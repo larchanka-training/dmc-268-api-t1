@@ -534,24 +534,18 @@ def test_attribute_values_are_truncated_to_the_default_limit(
     assert value == "x" * 4096
 
 
-def test_a_negative_attribute_length_limit_does_not_stop_the_start(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("raw", ["-5", "abc"])
+def test_a_broken_attribute_length_limit_stops_the_start(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
 ) -> None:
-    """Отрицательный лимит не роняет старт: предупреждение и дефолт, как у мусора."""
-    monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "-5")
-    monkeypatch.setattr(
-        logging.getLogger("app.infrastructure.telemetry"), "disabled", False
-    )
+    """Мусор в переменной поднимает ValueError при старте — валидность значения
+    на стороне SDK, неверный конфиг телеметрии громче молчаливого дефолта
+    (замечание ревью PR #130)."""
+    monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", raw)
 
-    value = _span_with_long_attribute(build_tracer_provider("dmc-268-api"))
-
-    [warning] = [
-        r
-        for r in caplog.records
-        if r.levelname == "WARNING" and "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT" in r.getMessage()
-    ]
-    assert "-5" in warning.getMessage()
-    assert value == "x" * 4096
+    with pytest.raises(ValueError, match="OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT"):
+        build_tracer_provider("dmc-268-api")
 
 
 def test_the_span_resource_names_the_version_and_the_environment(
