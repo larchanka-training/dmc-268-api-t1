@@ -41,12 +41,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Все тома стека — с данными (база, очереди): их уничтожение — потеря данных,
-# замена тома — тоже уничтожение (delete, create). Сторож отклоняет delete у
-# любого docker_volume, а не по списку адресов или имён: ресурс, переименованный
-# без `moved` (и с новым именем тома), уничтожается по старому адресу, которого
-# в списке уже нет, и prevent_destroy там тоже нет. Сменить том — `removed`
-# с `destroy = false`: план выйдет `forget`, а не `delete` (infra/README.md).
+# Все тома стека — с данными (база, реплика, бэкапы, очереди): их уничтожение —
+# потеря данных, замена тома — тоже уничтожение (delete, create). Сторож
+# отклоняет delete у любого docker_volume, а не по списку адресов или имён:
+# ресурс, переименованный без `moved` (и с новым именем тома), уничтожается по
+# старому адресу, которого в списке уже нет, и prevent_destroy там тоже нет.
+# Сменить том — `removed` с `destroy = false`: план выйдет `forget`, а не
+# `delete` (infra/README.md).
 VOLUME = "docker_volume"
 
 # Действия плана (`resource_changes[].change.actions` у OpenTofu 1.13.2) —
@@ -78,6 +79,7 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("api_logs", "Логи API после упавшего apply", ("api_logs",)),
     ("check_api", "Проверить, что API жив (через туннель)", ("check_api",)),
     ("check_worker", "Проверить, что воркер работает", ("check_worker",)),
+    ("check_replica", "Проверить, что реплика получает поток", ("check_replica",)),
     ("prune", "Убрать устаревшие образы", ("prune",)),
 )
 # Засечка шага summary закрывает последний шаг и весь job.

@@ -8,12 +8,13 @@ mock_provider "docker" {}
 # Минимальный набор, с которым конфигурация проходит plan. Пароли со
 # спецсимволами — чтобы проверка адресов ловила пропущенный urlencode.
 variables {
-  api_image                 = "ghcr.io/larchanka-training/dmc-268-api-t1:0123abc@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
-  postgres_password         = "p@ss/w:rd"
-  rabbitmq_password         = "r@bbit#1"
-  github_webhook_secret     = "webhook-secret"
-  user_token_encryption_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-  llm_backend               = "stub"
+  api_image                     = "ghcr.io/larchanka-training/dmc-268-api-t1:0123abc@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+  postgres_password             = "p@ss/w:rd"
+  rabbitmq_password             = "r@bbit#1"
+  postgres_replication_password = "repl:ication@pass-16"
+  github_webhook_secret         = "webhook-secret"
+  user_token_encryption_key     = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  llm_backend                   = "stub"
 }
 
 run "app_containers_get_connection_settings" {
@@ -83,32 +84,105 @@ run "secrets_reach_only_their_containers" {
 run "only_api_published_and_only_on_loopback" {
   command = plan
 
+  # Сети по назначению (спека backend-delivery, «Сети стека разделены по
+  # назначению»): база, реплика и брокер — только в сети данных, API — во входе
+  # и в данных, воркер — в данных и в исходящей. tests/test_infra_isolation.py
+  # сверяет то же по тексту; здесь — по плану.
   assert {
     condition = alltrue([
-      for c in [docker_container.postgres, docker_container.rabbitmq, docker_container.api, docker_container.worker] :
-      [for n in c.networks_advanced : n.name] == [docker_network.dmc268.name]
+      for c in [
+        docker_container.postgres, docker_container.rabbitmq,
+        docker_container.replication_setup, docker_container.postgres_replica, docker_container.postgres_backup,
+      ] :
+      toset([for n in c.networks_advanced : n.name]) == toset([docker_network.backend.name])
     ])
-    error_message = "Все контейнеры стека — в одной сети dmc268: по ней приложение находит базу и брокер по имени."
-  }
-
-  assert {
-    condition     = length(docker_container.worker.ports) == 0
-    error_message = "worker не публикует портов."
+    error_message = "База, реплика, брокер, настройка роли и бэкап — только в сети данных dmc268-backend."
   }
 
   assert {
     condition = (
-      docker_container.api.ports[0].ip == var.bind_ip
-      && docker_container.postgres.ports[0].ip == var.internal_bind_ip
-      && docker_container.rabbitmq.ports[0].ip == var.internal_bind_ip
+      toset([for n in docker_container.api.networks_advanced : n.name]) == toset([docker_network.dmc268.name, docker_network.backend.name])
+      && toset([for n in docker_container.worker.networks_advanced : n.name]) == toset([docker_network.backend.name, docker_network.egress.name])
     )
-    error_message = "API публикуется на bind_ip, PostgreSQL и RabbitMQ — на internal_bind_ip."
+    error_message = "API — во входе dmc268 и в данных; воркер — в данных и в исходящей dmc268-egress, не во входе."
+  }
+
+  assert {
+    condition     = docker_network.backend.internal == true && docker_network.dmc268.name == "dmc268"
+    error_message = "Сеть данных — internal (без выхода наружу); сеть входа сохраняет имя dmc268 — по нему подключается интерфейс."
+  }
+
+  assert {
+    condition = alltrue([
+      for c in [
+        docker_container.postgres, docker_container.rabbitmq, docker_container.worker,
+        docker_container.replication_setup, docker_container.postgres_replica, docker_container.postgres_backup,
+      ] :
+      length(c.ports) == 0
+    ])
+    error_message = "Портов на хосте нет ни у кого, кроме API: база и брокер — только во внутренней сети."
+  }
+
+  assert {
+    condition     = docker_container.api.ports[0].ip == var.bind_ip
+    error_message = "API публикуется на bind_ip."
   }
 
   # Проверка живости ходит на тот порт, который слушает API внутри контейнера.
   assert {
     condition     = strcontains(docker_container.api.healthcheck[0].test[1], "127.0.0.1:${docker_container.api.ports[0].internal}/health")
     error_message = "healthcheck API должен опрашивать /health на внутреннем порту API."
+  }
+}
+
+run "databases_stop_gracefully" {
+  command = plan
+
+  # Без destroy_grace_seconds пересоздание — SIGKILL: база поднимается с
+  # восстановлением после аварии, брокер теряет несброшенное.
+  assert {
+    condition = alltrue([
+      for c in [docker_container.postgres, docker_container.rabbitmq, docker_container.postgres_replica] :
+      c.stop_timeout == 60 && c.destroy_grace_seconds == 60
+    ])
+    error_message = "postgres, rabbitmq и реплика останавливаются через SIGTERM: stop_timeout и destroy_grace_seconds по 60 с."
+  }
+}
+
+run "replica_and_backup_find_their_servers" {
+  command = plan
+
+  assert {
+    condition = (
+      contains(docker_container.postgres_replica.env, "PRIMARY_HOST=${docker_container.postgres.name}")
+      && contains(docker_container.postgres_backup.env, "PRIMARY_HOST=${docker_container.postgres.name}")
+      && contains(docker_container.postgres_backup.env, "REPLICA_HOST=${docker_container.postgres_replica.name}")
+      && contains(docker_container.replication_setup.env, "PGHOST=${docker_container.postgres.name}")
+    )
+    error_message = "Реплика, бэкап и настройка роли находят серверы по именам контейнеров в сети данных."
+  }
+
+  assert {
+    condition     = contains(docker_container.postgres.command, "max_slot_wal_keep_size=2GB") && contains(docker_container.postgres.command, "hba_file=/etc/postgresql/pg_hba.conf")
+    error_message = "Основной сервер ограничивает WAL под слот реплики и читает pg_hba.conf вне каталога данных."
+  }
+}
+
+run "replication_password_stays_out_of_commands" {
+  command = plan
+
+  # Аргументы видны в `ps` на хосте: пароль реплики — только в окружении.
+  assert {
+    condition = alltrue([
+      for c in [docker_container.replication_setup, docker_container.postgres_replica, docker_container.postgres_backup, docker_container.postgres] :
+      length([for a in coalesce(c.command, []) : a if strcontains(a, var.postgres_replication_password)]) == 0
+    ])
+    error_message = "Пароль роли replicator не должен попадать в аргументы контейнеров."
+  }
+
+  assert {
+    condition     = contains(docker_container.postgres_replica.env, "REPLICATION_PASSWORD=${var.postgres_replication_password}")
+    error_message = "Реплика получает пароль окружением и сама пишет из него passfile."
   }
 }
 
@@ -247,11 +321,10 @@ run "public_bind_addresses_rejected" {
   command = plan
 
   variables {
-    bind_ip          = "0.0.0.0"
-    internal_bind_ip = "10.0.0.5"
+    bind_ip = "0.0.0.0"
   }
 
-  expect_failures = [var.bind_ip, var.internal_bind_ip]
+  expect_failures = [var.bind_ip]
 }
 
 # Незаданный секрет в CI приходит в TF_VAR_* пустой строкой.
@@ -259,12 +332,13 @@ run "empty_secrets_rejected" {
   command = plan
 
   variables {
-    github_webhook_secret = ""
-    postgres_password     = ""
-    rabbitmq_password     = ""
+    github_webhook_secret         = ""
+    postgres_password             = ""
+    rabbitmq_password             = ""
+    postgres_replication_password = ""
   }
 
-  expect_failures = [var.github_webhook_secret, var.postgres_password, var.rabbitmq_password]
+  expect_failures = [var.github_webhook_secret, var.postgres_password, var.rabbitmq_password, var.postgres_replication_password]
 }
 
 run "ollama_without_model_rejected" {

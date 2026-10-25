@@ -23,8 +23,10 @@ resource "docker_image" "postgres" {
   # Взят под RAG-профиль репозитория (#27); тот закрыт без мёржа, и расширение
   # `vector` сейчас не создаёт ни одна миграция. Образ остаётся: возврат на
   # postgres:18-alpine — снова смена библиотеки C и новый том (backend-delivery).
-  # Тег плавающий: digest в name пересоздаёт контейнер при каждом обновлении
-  # образа, а без destroy_grace_seconds пересоздание — это SIGKILL (#150, #102).
+  # Тег плавающий: digest в name пересоздавал бы контейнер при каждом
+  # обновлении образа (#150). Теперь пересоздание идёт через SIGTERM
+  # (destroy_grace_seconds у контейнера), и digest можно закрепить отдельной
+  # задачей.
   name         = "pgvector/pgvector:pg18"
   keep_locally = true
 }
@@ -33,6 +35,15 @@ resource "docker_container" "postgres" {
   name    = "dmc268-postgres"
   image   = docker_image.postgres.image_id
   restart = "unless-stopped"
+
+  # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
+  # принудительно (SIGKILL): база поднимается с «not properly shut down» и
+  # восстановлением, брокер теряет то, что не успел сбросить на диск. С ним —
+  # SIGTERM и ожидание штатной остановки; stop_timeout — то же для docker stop.
+  # 60 с хватает с запасом: контрольная точка при остановке на нашем объёме —
+  # секунды.
+  stop_timeout          = 60
+  destroy_grace_seconds = 60
 
   # Только запрет повышения привилегий: entrypoint образа стартует от root,
   # делает chown каталога данных и сам переходит на пользователя postgres.
@@ -44,7 +55,7 @@ resource "docker_container" "postgres" {
   log_opts      = local.log_opts
 
   networks_advanced {
-    name = docker_network.dmc268.name
+    name = docker_network.backend.name
   }
 
   env = [
@@ -53,10 +64,21 @@ resource "docker_container" "postgres" {
     "POSTGRES_DB=${var.postgres_db}",
   ]
 
-  ports {
-    internal = 5432
-    external = var.postgres_port
-    ip       = var.internal_bind_ip
+  # wal_level=replica и max_wal_senders у PostgreSQL 18 уже такие, какие нужны
+  # реплике; задаём только то, чего нет по умолчанию. max_slot_wal_keep_size —
+  # потолок WAL, который удержит слот реплики: без него упавшая реплика копила
+  # бы WAL на основном сервере, пока не кончится диск. Перешагнувшая потолок
+  # реплика теряет слот; при следующем старте она заметит это сама и
+  # пересоберётся (infra/postgres/replica-entrypoint.sh).
+  command = [
+    "postgres",
+    "-c", "hba_file=/etc/postgresql/pg_hba.conf",
+    "-c", "max_slot_wal_keep_size=${var.postgres_max_slot_wal_keep_size}",
+  ]
+
+  upload {
+    file    = "/etc/postgresql/pg_hba.conf"
+    content = file("${path.module}/postgres/pg_hba.conf")
   }
 
   volumes {
