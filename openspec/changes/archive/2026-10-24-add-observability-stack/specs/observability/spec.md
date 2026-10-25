@@ -291,8 +291,9 @@ stacktrace события `exception`; в логах — атрибуты `excep
 
 ### Requirement: Стек наблюдаемости одинаков локально и на проде
 
-Наблюдаемость SHALL работать в стеке из семи контейнеров из официальных образов с зафиксированными
-версиями: OTel Collector, Loki, Tempo, Prometheus, Grafana, node_exporter и cAdvisor. Конфигурации
+Наблюдаемость SHALL работать в стеке из восьми контейнеров из официальных образов с зафиксированными
+версиями: OTel Collector, Loki, Tempo, Prometheus, Grafana, node_exporter, cAdvisor и socket-proxy.
+Конфигурации
 SHALL быть одними и теми же локально и на стенде: различаться SHALL только ресурсы, хранение и
 доступ — через переменные и оверрайды, не через разные конфиги. По `trace_id` из записи лога SHALL
 открываться трейс в Grafana — переход лог ↔ трейс работает в обе стороны.
@@ -300,13 +301,20 @@ SHALL быть одними и теми же локально и на стенд
 #### Scenario: Локальный стек поднимается теми же конфигами
 
 - **WHEN** разработчик поднимает локальный стек с профилем наблюдаемости
-- **THEN** коллектор, Loki, Tempo, Prometheus, Grafana, node_exporter и cAdvisor подняты теми же
+- **THEN** коллектор, Loki, Tempo, Prometheus, Grafana, node_exporter, cAdvisor и socket-proxy
+  подняты теми же
   конфигами, что на стенде, и логи с трейсами локального прогона видны в Grafana
 
 #### Scenario: Из лога в трейс
 
 - **WHEN** в Grafana открыта запись лога с `trace_id`
 - **THEN** по этому `trace_id` открывается трейс прогона в Tempo
+
+#### Scenario: Стек выключен флагом
+
+- **WHEN** стенд разворачивается при `observability_enabled = false`
+- **THEN** контейнеров стека нет, сервисы работают без экспорта телеметрии, и в логе ошибок
+  экспорта нет
 
 ### Requirement: Метрики сервиса — в Prometheus
 
@@ -338,8 +346,9 @@ SHALL быть одними и теми же локально и на стенд
 
 - **WHEN** Prometheus скрейпит стек
 - **THEN** очередь отдаёт метрики плагином `rabbitmq_prometheus`, база — receiver `postgresql`
-  коллектора (роль только-чтение `dmc268_monitor` с `pg_monitor`, тяжёлые запросы — из
-  `pg_stat_statements`), сервер и контейнеры — node_exporter и cAdvisor
+  коллектора (роль только-чтение `dmc268_monitor` с `pg_monitor`; собирать медленные запросы из
+  `pg_stat_statements` не требуется — расширение остаётся для ручной диагностики), сервер и
+  контейнеры — node_exporter и cAdvisor
 
 #### Scenario: Ручки /metrics нет
 

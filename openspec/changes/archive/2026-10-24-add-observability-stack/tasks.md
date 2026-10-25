@@ -77,7 +77,8 @@
   `postgresql`, `memory_limiter`, `batch`, редакция `transform/redact` и `transform/redact-logs`,
   `groupbyattrs/service`), конфиги Loki, Tempo, Prometheus,
   provisioning Grafana; версии образов зафиксированы дайджестами. Проверка: `docker compose
-  --profile observability up` поднимает семь контейнеров, коллектор стартует без ошибок конфига
+  --profile observability up` поднимает восемь контейнеров (включая socket-proxy), коллектор
+  стартует без ошибок конфига
 - [x] 6.2 OTTL-правила редакции: `url.query`/`url.full` httpx, значения `db.*` и description
   статуса SQL-спанов, message и stacktrace события `exception` на спанах обработки — маркер
   `<скрыто>`, атрибут остаётся. Тест на примерах из аудита #89 (DETAIL psycopg с ключами, текст
@@ -89,7 +90,8 @@
   c `service.version` и `deployment.environment.name=local`), плагин `rabbitmq_prometheus` у
   локального RabbitMQ. Проверка: локальный прогон ревью виден в Grafana целиком — лог, трейс,
   метрики
-- [x] 6.5 `infra/` (Terraform): ресурсы семи контейнеров стека в существующей сети с теми же
+- [x] 6.5 `infra/` (Terraform): ресурсы восьми контейнеров стека (включая socket-proxy) в
+  существующей сети с теми же
   конфигами из `infra/observability/`, метрики базы — receiver `postgresql` коллектора вместо
   postgres-exporter, node_exporter и cAdvisor, переменные стека (ресурсы, хранение,
   доступ Grafana); `service.version` — sha образа в выводах сборки. Проверка: `tofu plan` без
