@@ -52,9 +52,12 @@ jobs:
           RUN_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
-          # Прогоны CI по develop не отменяют друг друга и могут закончиться
-          # не по порядку: без этой сверки поздно завершившийся CI старого
-          # коммита откатил бы стенд назад. Новый коммит катит свой прогон.
+          # Прогоны CI по пушам в develop стоят в одной очереди (concurrency
+          # в ci.yml, `queue: max`) и идут по одному, но порядок очереди GitHub
+          # не гарантирует, а ручной запуск катит вершину develop мимо CI:
+          # прогон CI старого коммита, завершившийся после него, откатил бы
+          # стенд назад. Сверка с вершиной это закрывает; новый коммит катит
+          # свой прогон.
           if [ "$GITHUB_EVENT_NAME" = workflow_run ]; then
             tip="$(gh api "repos/${GITHUB_REPOSITORY}/commits/develop" --jq .sha)"
             if [ "$tip" != "$RUN_SHA" ]; then
@@ -133,6 +136,24 @@ jobs:
           fi
           docker manifest inspect "${IMAGE}@${DIGEST}" > /dev/null
           echo "образ доступен по digest ${DIGEST}"
+
+      # trivy в ci.yml смотрит образ, собранный в CI, а на стенд уезжает этот:
+      # он собран заново, и базовый python:3.14-slim между сборками мог
+      # смениться. Поэтому сканируется опубликованный digest — ровно то, что
+      # заберёт tofu, — с теми же порогами, что в CI. Образ в приватном ghcr:
+      # trivy берёт креды из ~/.docker/config.json, который записал
+      # docker/login-action выше (keychain go-containerregistry в
+      # pkg/remote/remote.go trivy). TRIVY_IMAGE_SRC=remote — сразу из реестра:
+      # в локальном docker этого образа нет, buildx его не загружал.
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_IMAGE_SRC: remote
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
 
   deploy:
     needs: [gate, image]

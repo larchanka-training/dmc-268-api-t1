@@ -181,6 +181,14 @@ TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest   # вместе с а
 через `docker exec` в контейнере RabbitMQ: имя или идентификатор контейнера —
 в `TEST_RABBITMQ_CONTAINER`, без него тест пропускается.
 
+В CI пропуск — провал: шаг pytest идёт с `PYTEST_FAIL_ON_SKIP=1`, и плагин
+`tests/strict_skips.py` (подключён в `addopts`) завершает прогон с кодом 1, если хоть один тест
+пропущен, и перечисляет пропущенные. Локально так же — той же переменной:
+
+```bash
+PYTEST_FAIL_ON_SKIP=1 TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... TEST_RABBITMQ_CONTAINER=... uv run pytest
+```
+
 Эта переменная намеренно не `DATABASE_URL`, и никакого отката на неё нет.
 Подготовка тестовой базы удаляет её схему, так что если направить тесты на базу,
 с которой работает сервис, она окажется пустой. Выделите тестам отдельную:
