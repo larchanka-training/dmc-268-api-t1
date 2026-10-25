@@ -4,12 +4,13 @@
 
 ## What Changes
 
-- `infra/tests/hardening.tftest.hcl` (mock-провайдер, `plan`): защита postgres, rabbitmq, migrate, api и worker ровно в том виде, как она описана в конфигурации. Сторонние сервисы проверяются отдельно: у них только запрет повышения привилегий, без `read_only` и сброса capabilities.
+- `infra/tests/hardening.tftest.hcl` (mock-провайдер, `plan`): защита postgres, rabbitmq, migrate, api и worker ровно в том виде, как она описана в конфигурации. Сторонние сервисы проверяются по нижней планке — запрет повышения привилегий; отсутствие `read_only` и сброса capabilities не закрепляется, усилить защиту можно.
 - `tests/infra_text.py`: `read_infra_text()` склеивает `infra/*.tf` в порядке сортировки; `tests/test_stack_descriptions.py` читает конфигурацию через неё.
 
-Поведение сервиса и конфигурация стенда не меняются.
+Поведение сервиса и конфигурация стенда не меняются. Требование «Контейнеры стека работают с минимальными привилегиями» дополнено воркером: его защита в конфигурации уже такая же, как у API и миграций, а спека его не называла.
 
 ## Impact
 
 - Тесты: `infra/tests/hardening.tftest.hcl`, `tests/infra_text.py`, `tests/test_stack_descriptions.py`.
+- Спека: `backend-delivery`, MODIFIED «Контейнеры стека работают с минимальными привилегиями».
 - Задача: #191.
