@@ -95,6 +95,31 @@ jobs:
           version: "0.13.5"
       - run: uvx zizmor@1.31.1 --offline --persona pedantic --min-severity high .github/
 
+  # Dockerfile и собранный образ. hadolint — по правилам Dockerfile; trivy — по
+  # образу целиком (пакеты ОС и зависимости из uv.lock). Падаем на HIGH и
+  # CRITICAL, у которых есть исправление: --ignore-unfixed (ignore-unfixed в
+  # action) не даёт красному CI из-за CVE, которую нечем закрыть, — такие
+  # видны в отчёте trivy, но решения от нас не ждут. Образ собирается как в
+  # деплое (context .), но не публикуется.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+      - run: docker build -t dmc268-api:ci .
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: dmc268-api:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
   terraform:
     needs: syntax
     runs-on: ubuntu-latest
