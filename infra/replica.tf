@@ -15,8 +15,8 @@ resource "docker_volume" "postgres_backups" {
   name = "dmc268-postgres-backups"
 }
 
-# Роль replicator для реплики. Одноразовый контейнер по образцу migrate:
-# init-скрипты образа на уже заведённом томе не выполняются, поэтому роль
+# Роль replicator для реплики. Одноразовый контейнер: отрабатывает и
+# завершается, а постусловие роняет apply на ненулевом коде. init-скрипты образа на уже заведённом томе не выполняются, поэтому роль
 # заводится здесь, идемпотентно. Запускается не на каждом деплое, а когда
 # сменились пароль или SQL либо пересоздана основная база — её контейнер или
 # том (см. replace_triggered_by). Слот заводит сама реплика.
@@ -58,7 +58,8 @@ resource "docker_container" "replication_setup" {
     "SETUP_SQL=${file("${path.module}/postgres/replication-setup.sql")}",
   ]
 
-  # Как у migrate: depends_on не ждёт готовности базы, поэтому повторяем.
+  # depends_on не ждёт готовности базы (`wait` у postgres срабатывает только
+  # при его создании), поэтому повторяем.
   command = [
     "sh", "-c",
     "for i in $(seq 1 30); do printf '%s\\n' \"$SETUP_SQL\" | psql -f - && exit 0; sleep 2; done; exit 1",

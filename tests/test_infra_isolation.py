@@ -11,6 +11,7 @@
 """
 
 import re
+from pathlib import Path
 
 from tests.infra_text import read_infra_text
 
@@ -27,7 +28,6 @@ EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
     "postgres_replica": frozenset({"backend"}),
     "postgres_backup": frozenset({"backend"}),
     "rabbitmq": frozenset({"backend"}),
-    "migrate": frozenset({"backend"}),
     "replication_setup": frozenset({"backend"}),
     "api": frozenset({"dmc268", "backend"}),
     "worker": frozenset({"backend", "egress"}),
@@ -142,3 +142,31 @@ def test_every_container_is_in_exactly_its_networks() -> None:
         assert networks == expected, (
             f"{name}: сети {sorted(networks or ())}, ожидались {sorted(expected)}"
         )
+
+
+MIGRATE_SCRIPT = Path(".github/scripts/deploy/migrate.sh")
+
+
+def migrate_network(script: str) -> str | None:
+    """Сеть `docker run` миграций в шаге деплоя."""
+    match = re.search(r"^\s*--network[ =](\S+)", script, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def test_migrate_network_extractor() -> None:
+    assert (
+        migrate_network("docker run --rm \\\n  --network dmc268-backend \\\n")
+        == "dmc268-backend"
+    )
+    assert migrate_network("docker run --rm image") is None
+
+
+def test_migrations_run_in_the_data_network() -> None:
+    """Миграции — шаг деплоя, не контейнер стека: их сеть Terraform не видит.
+
+    База только в `dmc268-backend`; в другой сети миграции её не найдут, и деплой
+    упадёт уже на сервере.
+    """
+    assert migrate_network(MIGRATE_SCRIPT.read_text()) == "dmc268-backend", (
+        f"{MIGRATE_SCRIPT}: миграции должны идти в сети данных dmc268-backend"
+    )

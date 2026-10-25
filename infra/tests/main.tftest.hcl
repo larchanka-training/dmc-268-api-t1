@@ -24,26 +24,36 @@ run "app_containers_get_connection_settings" {
   # без правки адреса оставило бы приложение без базы и брокера.
   assert {
     condition = alltrue([
-      for c in [docker_container.migrate, docker_container.api, docker_container.worker] :
-      contains(c.env, "DATABASE_URL=postgresql+psycopg://dmc268:p%40ss%2Fw%3Ard@${docker_container.postgres.name}:5432/dmc268")
+      for env in [docker_container.api.env, docker_container.worker.env, split("\n", output.migrate_env)] :
+      contains(env, "DATABASE_URL=postgresql+psycopg://dmc268:p%40ss%2Fw%3Ard@${docker_container.postgres.name}:5432/dmc268")
     ])
-    error_message = "migrate, api и worker должны получать DATABASE_URL с закодированным паролем и именем контейнера postgres."
+    error_message = "api, worker и миграции должны получать DATABASE_URL с закодированным паролем и именем контейнера postgres."
   }
 
   assert {
     condition = alltrue([
-      for c in [docker_container.migrate, docker_container.api, docker_container.worker] :
-      contains(c.env, "RABBITMQ_URL=amqp://dmc268:r%40bbit%231@${docker_container.rabbitmq.name}:5672/%2F")
+      for env in [docker_container.api.env, docker_container.worker.env, split("\n", output.migrate_env)] :
+      contains(env, "RABBITMQ_URL=amqp://dmc268:r%40bbit%231@${docker_container.rabbitmq.name}:5672/%2F")
     ])
-    error_message = "migrate, api и worker должны получать RABBITMQ_URL с закодированным паролем и vhost %2F."
+    error_message = "api, worker и миграции должны получать RABBITMQ_URL с закодированным паролем и vhost %2F."
   }
 
   assert {
     condition = alltrue([
-      for c in [docker_container.migrate, docker_container.api, docker_container.worker] :
-      contains(c.env, "GITHUB_WEBHOOK_SECRET=webhook-secret")
+      for env in [docker_container.api.env, docker_container.worker.env, split("\n", output.migrate_env)] :
+      contains(env, "GITHUB_WEBHOOK_SECRET=webhook-secret")
     ])
     error_message = "Без GITHUB_WEBHOOK_SECRET общие настройки приложения не загрузятся."
+  }
+
+  # Окружение миграций — то же описание, что у контейнеров приложения, а не
+  # копия: каждая строка migrate_env есть и у api, и у worker.
+  assert {
+    condition = alltrue([
+      for line in split("\n", output.migrate_env) :
+      contains(docker_container.api.env, line) && contains(docker_container.worker.env, line)
+    ])
+    error_message = "migrate_env должен состоять из строк local.app_env, общих у api и worker."
   }
 }
 
@@ -53,12 +63,12 @@ run "secrets_reach_only_their_containers" {
   # Ключ шифрования токенов и client secret нужны только входу в API.
   assert {
     condition = alltrue([
-      for c in [docker_container.migrate, docker_container.worker] : length([
-        for e in c.env : e
+      for env in [docker_container.worker.env, split("\n", output.migrate_env)] : length([
+        for e in env : e
         if startswith(e, "USER_TOKEN_ENCRYPTION_KEY=") || startswith(e, "GITHUB_APP_CLIENT_SECRET=")
       ]) == 0
     ])
-    error_message = "USER_TOKEN_ENCRYPTION_KEY и GITHUB_APP_CLIENT_SECRET не должны попадать в migrate и worker."
+    error_message = "USER_TOKEN_ENCRYPTION_KEY и GITHUB_APP_CLIENT_SECRET не должны попадать в миграции и worker."
   }
 
   assert {
@@ -81,12 +91,12 @@ run "only_api_published_and_only_on_loopback" {
   assert {
     condition = alltrue([
       for c in [
-        docker_container.postgres, docker_container.rabbitmq, docker_container.migrate,
+        docker_container.postgres, docker_container.rabbitmq,
         docker_container.replication_setup, docker_container.postgres_replica, docker_container.postgres_backup,
       ] :
       toset([for n in c.networks_advanced : n.name]) == toset([docker_network.backend.name])
     ])
-    error_message = "База, реплика, брокер, migrate, настройка роли и бэкап — только в сети данных dmc268-backend."
+    error_message = "База, реплика, брокер, настройка роли и бэкап — только в сети данных dmc268-backend."
   }
 
   assert {
@@ -105,7 +115,7 @@ run "only_api_published_and_only_on_loopback" {
   assert {
     condition = alltrue([
       for c in [
-        docker_container.postgres, docker_container.rabbitmq, docker_container.migrate, docker_container.worker,
+        docker_container.postgres, docker_container.rabbitmq, docker_container.worker,
         docker_container.replication_setup, docker_container.postgres_replica, docker_container.postgres_backup,
       ] :
       length(c.ports) == 0
@@ -213,31 +223,51 @@ run "app_containers_run_the_api_image" {
   # apply на mock-провайдере: image_id известен только после создания образа.
   command = apply
 
+  # Разные image_id у двух ресурсов образа, чтобы контейнер, взявший чужой
+  # ресурс, не сошёлся случайно.
+  override_resource {
+    target = docker_image.api
+    values = { image_id = "sha256:api" }
+  }
+
+  override_resource {
+    target = docker_image.worker
+    values = { image_id = "sha256:worker" }
+  }
+
+  # У воркера свой ресурс образа с той же ссылкой: замена общего ресурса ждала
+  # бы уничтожения всех его контейнеров, то есть и дренажа воркера, — API
+  # стоял бы всё это время.
   assert {
-    condition = alltrue([
-      for c in [docker_container.migrate, docker_container.api, docker_container.worker] :
-      c.image == docker_image.api.image_id
-    ])
-    error_message = "migrate, api и worker запускаются из одного образа API."
+    condition = (
+      docker_container.api.image == docker_image.api.image_id
+      && docker_container.worker.image == docker_image.worker.image_id
+    )
+    error_message = "api запускается из docker_image.api, worker — из своего docker_image.worker."
   }
 
   assert {
-    condition     = docker_image.api.name == var.api_image
-    error_message = "Образ API забирается ровно по переданной ссылке, с digest."
+    condition     = docker_image.api.name == var.api_image && docker_image.worker.name == var.api_image
+    error_message = "Оба ресурса образа забирают ровно переданную ссылку на образ API, с digest: образ у API и воркера один."
+  }
+
+  # Без keep_locally удаление одного ресурса при замене удаляло бы образ из-под
+  # второго.
+  assert {
+    condition     = docker_image.api.keep_locally && docker_image.worker.keep_locally
+    error_message = "Образ API делят два ресурса: оба обязаны оставлять его на сервере (keep_locally)."
   }
 }
 
-run "failed_migration_stops_deploy" {
+# Миграции идут сразу после `apply -target` базы: apply обязан вернуться,
+# когда база уже отвечает.
+run "database_ready_before_migrations" {
   command = plan
 
-  override_resource {
-    target = docker_container.migrate
-    values = {
-      exit_code = 1
-    }
+  assert {
+    condition     = docker_container.postgres.wait == true && length(docker_container.postgres.healthcheck) == 1
+    error_message = "У postgres нужны wait = true и healthcheck: без них миграции стартуют против базы, которая ещё не принимает соединения."
   }
-
-  expect_failures = [docker_container.migrate]
 }
 
 run "public_bind_addresses_rejected" {

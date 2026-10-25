@@ -1,4 +1,4 @@
-# Общие значения стека: ротация логов, окружение контейнеров из образа
+# Общие значения стека: ротация логов, окружение процессов из образа
 # приложения и грейс-период остановки воркера.
 
 locals {
@@ -10,12 +10,19 @@ locals {
   }
 
   # Окружение, без которого не загрузятся общие настройки (`load_settings`):
-  # его получают все три контейнера из образа приложения — migrate, api и
-  # worker. Одно описание вместо трёх копий, чтобы они не разъезжались.
+  # его получают оба контейнера из образа приложения — api и worker — и
+  # миграции шага деплоя (выход migrate_env). Одно описание вместо трёх копий,
+  # чтобы они не разъезжались.
+  #
+  # Хосты — ссылки на контейнеры, а не строки: так migrate_env зависит от базы
+  # и брокера, и `tofu apply -target` для них перед миграциями обновляет выход
+  # в состоянии. Выход, не зависящий от целевых ресурсов, targeted apply не
+  # записывает (проверено на OpenTofu 1.13.2), и миграции получили бы
+  # окружение прошлого выката — или никакого на первом.
   app_env = [
-    "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
+    "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@${docker_container.postgres.name}:5432/${var.postgres_db}",
     # %2F — закодированный дефолтный vhost "/": pika разбирает буквальный "//" как пустой vhost.
-    "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@dmc268-rabbitmq:5672/%2F",
+    "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@${docker_container.rabbitmq.name}:5672/%2F",
     "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
   ]
 
