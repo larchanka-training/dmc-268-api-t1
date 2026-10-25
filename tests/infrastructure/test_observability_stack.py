@@ -162,6 +162,37 @@ def test_stack_images_are_pinned_by_digest_in_both_places() -> None:
     assert _compose_digests() == _infra_digests()
 
 
+# --- service_version: тег из ссылки на образ ----------------------------------
+
+
+def _service_version(image: str) -> str:
+    """Прогнать locals `service_version` из main.tf: те же regex в том же
+    порядке `try`, что и в конфиге."""
+    text = MAIN_TF.read_text(encoding="utf-8")
+    patterns = re.findall(r'regex\("([^"]+)", var\.api_image\)', text)
+    assert patterns, "в main.tf нет regex для service_version"
+    for pattern in patterns:
+        match = re.search(pattern, image)
+        if match is not None:
+            return match["tag"]
+    return "unknown"
+
+
+@pytest.mark.parametrize(
+    ("image", "version"),
+    [
+        ("localhost:5000/dmc268-api:sha-abc123", "sha-abc123"),
+        ("dmc268-api:sha-abc123@sha256:" + "0" * 64, "sha-abc123"),
+        ("ghcr.io/larchanka/dmc268-api:sha-def456@sha256:" + "a" * 64, "sha-def456"),
+    ],
+)
+def test_service_version_extracts_the_tag_before_the_digest(image: str, version: str) -> None:
+    """Тег — между последним двоеточием и концом или «@дайджестом»: формат
+    образа с дайджестом (после #204) не должен отдавать hex вместо тега
+    (замечание ревью PR #130)."""
+    assert _service_version(image) == version
+
+
 def test_stack_published_ports_match_between_compose_and_infra() -> None:
     """Публикуемые порты стека одинаковы в compose и main.tf.
 
@@ -249,13 +280,31 @@ def test_infra_preloads_pg_stat_statements_only_with_the_stack() -> None:
 # --- cAdvisor ходит к Docker только через socket-proxy -------------------------------
 
 
-@pytest.mark.parametrize("path", ["/var/run/docker.sock", "/var/run", "/var/lib/docker"])
-def test_cadvisor_mounts_no_docker_paths_in_compose(path: str) -> None:
-    """Маунтов Docker у cAdvisor больше нет ни в compose: Docker API — только
-    через socket-proxy; статистика контейнеров не требует ни socket'а, ни
-    каталога данных демона."""
+@pytest.mark.parametrize("path", ["/", "/var/run/docker.sock", "/var/run", "/var/lib/docker"])
+def test_cadvisor_mounts_no_host_root_or_docker_paths_in_compose(path: str) -> None:
+    """Маунтов Docker и корня хоста у cAdvisor нет в compose: Docker API —
+    только через socket-proxy; рекурсивный /rootfs открывал бы unix-сокет
+    через /rootfs/run/docker.sock (root на хосте) и Env всех контейнеров
+    (замечание ревью PR #130, high). Хостовые файловые метрики —
+    node-exporter."""
     mounts = [mount.split(":")[0] for mount in load_compose()["services"]["cadvisor"]["volumes"]]
     assert path not in mounts
+
+
+def test_cadvisor_is_not_root_and_is_hardened_in_both_places() -> None:
+    """cAdvisor — не root (nobody) и в жёсткой упаковке api: чтение /sys
+    и cgroup v2 работает и от nobody (проверено запуском образа)."""
+    compose_cadvisor = load_compose()["services"]["cadvisor"]
+    assert compose_cadvisor["user"] == "65534"
+    assert compose_cadvisor["read_only"] is True
+    assert compose_cadvisor["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in compose_cadvisor["security_opt"]
+
+    cadvisor = _tf_container_block("cadvisor")
+    assert re.search(r'user\s*=\s*"65534"', cadvisor)
+    assert re.search(r"read_only\s*=\s*true", cadvisor)
+    assert re.search(r'capabilities\s*\{\s*drop\s*=\s*\["ALL"\]\s*\}', cadvisor)
+    assert 'container_path = "/rootfs"' not in cadvisor
 
 
 def test_socket_proxy_grants_only_what_cadvisor_needs() -> None:
@@ -270,10 +319,10 @@ def test_socket_proxy_grants_only_what_cadvisor_needs() -> None:
 
 def test_cadvisor_reaches_docker_through_the_proxy_in_compose() -> None:
     """cAdvisor идёт к Docker по TCP-адресу proxy в отдельной сети; socket
-    смонтирован только у proxy."""
+    смонтирован только у proxy. Из сетей приложения cAdvisor исключён."""
     services = load_compose()["services"]
     assert services["cadvisor"]["command"] == ["--docker=tcp://dockerproxy:2375"]
-    assert set(services["cadvisor"]["networks"]) == {"default", "docker_proxy"}
+    assert set(services["cadvisor"]["networks"]) == {"observability", "docker_proxy"}
     assert services["dockerproxy"]["networks"] == {
         "docker_proxy": {"aliases": ["dockerproxy"]},
     }
@@ -281,18 +330,81 @@ def test_cadvisor_reaches_docker_through_the_proxy_in_compose() -> None:
 
 
 def test_cadvisor_reaches_docker_through_the_proxy_in_infra() -> None:
-    """То же в main.tf: у cAdvisor флаг -docker и две сети (dmc268 для
-    Prometheus и отдельная для proxy), у proxy — socket и только эта сеть."""
+    """То же в main.tf: у cAdvisor флаг -docker и две сети стека (observability
+    для Prometheus и отдельная для proxy), сети приложения и proxy-socket —
+    только у своих."""
     cadvisor = _tf_container_block("cadvisor")
     proxy = _tf_container_block("docker_socket_proxy")
     assert '"--docker=tcp://dockerproxy:2375"' in cadvisor
     assert "/var/run/docker.sock" not in cadvisor
     assert "/var/lib/docker" not in cadvisor
-    assert "docker_network.dmc268" in cadvisor
+    assert 'container_path = "/rootfs"' not in cadvisor
+    assert 'host_path      = "/"' not in cadvisor
+    assert "docker_network.dmc268" not in cadvisor
+    assert "docker_network.observability" in cadvisor
     assert "docker_network.observability_docker_proxy" in cadvisor
     assert "/var/run/docker.sock" in proxy
     assert "docker_network.dmc268" not in proxy
     assert "docker_network.observability_docker_proxy" in proxy
+
+
+# --- сети: стек отдельно от приложения -------------------------------------------------
+
+
+def test_stack_networks_split_the_stack_from_the_app_in_compose() -> None:
+    """Сеть стека отдельна от default: из контейнеров интерфейса (в default)
+    не видно Loki, Prometheus, Tempo и OTLP коллектора (замечание ревью
+    PR #130). Коллектор и Prometheus двуподветочны (приём/скрейп rabbitmq),
+    остальной стек — только в сети стека; docker_proxy — internal."""
+    networks = load_compose()["networks"]
+    assert "observability" in networks
+    assert networks["docker_proxy"]["internal"] is True
+    assert not (networks["observability"] or {}).get("internal")
+
+    services = load_compose()["services"]
+    assert set(services["collector"]["networks"]) == {"default", "observability"}
+    assert set(services["prometheus"]["networks"]) == {"default", "observability"}
+    for service in ("loki", "tempo", "grafana", "node-exporter"):
+        assert set(services[service]["networks"]) == {"observability"}, service
+
+
+def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
+    """То же в main.tf: у loki/tempo/grafana/node-exporter/cadvisor сети
+    dmc268 нет; collector и prometheus — в обеих; docker_proxy — internal."""
+    text = MAIN_TF.read_text(encoding="utf-8")
+    assert re.search(
+        r'resource "docker_network" "observability_docker_proxy" \{[^}]*internal\s*=\s*true', text
+    )
+    for name in ("loki", "tempo", "grafana", "node_exporter", "cadvisor"):
+        block = _tf_container_block(name)
+        assert "docker_network.dmc268" not in block, name
+        assert "docker_network.observability[" in block, name
+    for name in ("otelcol", "prometheus"):
+        block = _tf_container_block(name)
+        assert "docker_network.dmc268.name" in block, name
+        assert "docker_network.observability[0].name" in block, name
+
+
+# --- пароль роли мониторинга не теряется при переносе миграций ------------------------
+
+
+def test_the_monitor_role_password_step_travels_with_the_migrations() -> None:
+    """Шаг перегенерации пароля роли (ALTER ROLE при выключенном
+    track_utility) и сам пароль едут вместе с миграциями в ОБОИХ окружениях:
+    если при переносе миграций (например, на #200) шаг потерять, ревизия 0013
+    создаст роль с дефолтным паролем и коллектор не войдёт (замечание ревью
+    PR #130)."""
+    compose_api = load_compose()["services"]["api"]
+    assert "POSTGRES_MONITOR_PASSWORD" in compose_api["environment"]
+    command = " ".join(compose_api["command"])
+    assert "alembic upgrade head" in command
+    assert "ALTER ROLE" in command
+    assert "track_utility" in command
+
+    migrate = _tf_container_block("migrate")
+    assert "POSTGRES_MONITOR_PASSWORD=${var.postgres_monitor_password}" in migrate
+    assert "ALTER ROLE" in migrate
+    assert "track_utility" in migrate
 
 
 # --- приём и телеметрия вендора -------------------------------------------------------

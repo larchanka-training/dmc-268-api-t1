@@ -513,6 +513,11 @@ def run_worker(settings: Settings) -> None:
     # JSON-записью (логи настроены, excepthook пишёт через логгер), а не
     # текстовым дампом дефолтного обработчика, который коллектор дропает.
     configure_logging(WORKER_SERVICE)
+    # Телеметрия — сразу за логами и до проверок конфигурации: OTLP-хендлер
+    # должен стоять, когда WorkerConfigError пишется, иначе ошибка старта
+    # воркера до Loki не доходит (замечание ревью PR #130). Провайдер собирается
+    # из env, настройки сервиса ему не нужны.
+    configure_telemetry(WORKER_SERVICE)
     install_excepthooks()
     # До подключения к брокеру: с непригодной конфигурацией воркер не поднимается.
     # Заглушка модели выбирается только явно - иначе прогоны молча выходили бы
@@ -521,7 +526,6 @@ def run_worker(settings: Settings) -> None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
     check_model_deadline(settings)
     check_sweep_thresholds(settings)
-    configure_telemetry(WORKER_SERVICE)
     container = build_container(settings)
     instrument_engine(container.engine)
     instrument_pool(container.engine, settings.db_pool_size, settings.db_max_overflow)

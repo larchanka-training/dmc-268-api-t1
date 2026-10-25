@@ -57,8 +57,24 @@ processors:
     keys:
       - service.name
 
-  # Редакция логов — тот же второй рубеж после SDK, что transform/redact для
-  # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
+  # Вольные атрибуты ресурса — вон из лейблов Prometheus: ресурсная конверсия
+  # экспортёра переносит в лейблы ВСЕ атрибуты ресурса, и service_version
+  # (меняется каждым деплоем) с telemetry_sdk_* давали бы новый полный набор
+  # серий на каждый деплой — тот же эффект, что был у случайного
+  # service.instance.id (замечание ревью PR #130). service.name и
+  # service.instance.id стабильны и остаются; версию сервиса смотрят в env
+  # деплоя, а не в метриках. Редакция трейсов и логов не трогается.
+  transform/trim-metrics-resource:
+    error_mode: ignore
+    metric_statements:
+      - context: resource
+        statements:
+          - delete_key(attributes, "service.version")
+          - delete_key(attributes, "telemetry.sdk.version")
+          - delete_key(attributes, "telemetry.sdk.name")
+          - delete_key(attributes, "telemetry.sdk.language")
+
+  # Редакция логов — тот же второй рубеж после SDK, что transform/redact для  # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
   # исключения несут значения ключей базы и текст ответа провайдера модели —
   # те же поля semconv, что у событий exception в трейсах. Тело гасится у
   # записей, несущих исключение: текст исключения мог попасть в сообщение
@@ -154,7 +170,7 @@ service:
       exporters: [otlphttp/tempo]
     metrics:
       receivers: [otlp, postgresql]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, transform/trim-metrics-resource, batch]
       exporters: [prometheus]
     logs:
       receivers: [otlp]

@@ -170,11 +170,11 @@ def test_each_provider_call_lands_in_the_duration_histogram_with_its_outcome(
 
     failed, _ = metric_delta(
         metric_reader, before, "review_llm_call_duration",
-        task="review", model="Ollama", outcome="error",
+        task="review", provider="Ollama", outcome="error",
     )
     answered, _ = metric_delta(
         metric_reader, before, "review_llm_call_duration",
-        task="review", model="mistral", outcome="ok",
+        task="review", provider="Eurorouter", model="mistral", outcome="ok",
     )
     assert failed == 1
     assert answered == 1
@@ -202,7 +202,7 @@ def test_the_histogram_records_the_measured_duration(
 
     calls, total = metric_delta(
         metric_reader, before, "review_llm_call_duration",
-        task="review", model="mistral", outcome="ok",
+        task="review", provider="Ollama", model="mistral", outcome="ok",
     )
     assert calls == 1
     assert total == pytest.approx(1.5)
@@ -221,10 +221,10 @@ def test_calls_failing_everywhere_still_reach_the_histogram(
     with pytest.raises(LlmOutputError):
         gateway.complete(REQUEST)
 
-    for model in ("Ollama", "Eurorouter"):
+    for provider in ("Ollama", "Eurorouter"):
         calls, _ = metric_delta(
             metric_reader, before, "review_llm_call_duration",
-            task="review", model=model, outcome="error",
+            task="review", provider=provider, outcome="error",
         )
         assert calls == 1
 

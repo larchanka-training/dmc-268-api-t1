@@ -13,7 +13,6 @@ import pytest
 from app.config import Settings
 from app.infrastructure.logging import JsonFormatter
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
-from app.infrastructure.telemetry import WORKER_SERVICE
 from app.worker import factory
 from app.worker.factory import (
     WorkerConfigError,
@@ -79,12 +78,30 @@ def test_run_worker_configures_logging_before_reading_its_configuration(
     `WorkerConfigError` уходит из процесса JSON-записью, которую читает
     коллектор, а не текстом, который он дропает."""
     calls: list[str] = []
-    monkeypatch.setattr(factory, "configure_logging", calls.append)
+    monkeypatch.setattr(factory, "configure_logging", lambda service: calls.append("logging"))
+    monkeypatch.setattr(factory, "install_excepthooks", lambda: calls.append("hooks"))
 
     with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
         run_worker(_settings())
 
-    assert calls == [WORKER_SERVICE]
+    assert calls == ["logging", "hooks"]
+
+
+def test_run_worker_configures_telemetry_before_the_config_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Телеметрия — сразу за логами, до проверок конфигурации: OTLP-хендлер
+    уже стоит, когда пишется `WorkerConfigError`, иначе ошибка старта воркера
+    до Loki не доходит (замечание ревью PR #130)."""
+    calls: list[str] = []
+    monkeypatch.setattr(factory, "configure_logging", lambda service: calls.append("logging"))
+    monkeypatch.setattr(factory, "configure_telemetry", lambda service: calls.append("telemetry"))
+    monkeypatch.setattr(factory, "install_excepthooks", lambda: calls.append("hooks"))
+
+    with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
+        run_worker(_settings())
+
+    assert calls == ["logging", "telemetry", "hooks"]
 
 
 def test_unhandled_exceptions_of_both_hooks_go_through_the_logger() -> None:

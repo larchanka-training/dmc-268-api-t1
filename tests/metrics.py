@@ -40,14 +40,18 @@ def metric_snapshot(reader: InMemoryMetricReader) -> Snapshot:
 def metric_delta(
     reader: InMemoryMetricReader, before: Snapshot, name: str, **attributes: str
 ) -> tuple[float, float | None]:
-    """Приращение ряда (имя, метки) между срезами после действия в тесте."""
+    """Приращение ряда (имя, метки) между срезами после действия в тесте.
+
+    Ряд, которого не было в срезе `before` (темпоральность читателя — дельта:
+    после каждого сбора значения обнуляются), считается с нуля — и по счёту,
+    и по сумме.
+    """
     key = (name, tuple(sorted(attributes.items())))
-    value_before, sum_before = before.get(key, (0.0, None))
-    value_after, sum_after = metric_snapshot(reader).get(key, (0.0, None))
-    if sum_after is None:
-        return value_after - value_before, None
-    assert sum_before is not None
-    return value_after - value_before, sum_after - sum_before
+    count_before, sum_before = before.get(key, (0.0, 0.0))
+    count_after, sum_after = metric_snapshot(reader).get(key, (0.0, 0.0))
+    if sum_after is None or sum_before is None:
+        return count_after - count_before, None
+    return count_after - count_before, sum_after - sum_before
 
 
 def metric_histogram(

@@ -725,21 +725,24 @@ def record_run_finished(status: str) -> None:
 
 
 def record_llm_call_duration(
-    task: str, model: str, duration_seconds: float, *, outcome: str
+    task: str, provider: str, duration_seconds: float, *, outcome: str, model: str | None = None
 ) -> None:
     """Записать длительность одного фактического вызова провайдера модели.
 
     Пишет `FallbackLlmGateway` на каждый вызов провайдера, включая упавшие и
-    таймауты: `outcome` — `ok` (ответ получен, `model` — модель ответа) или
-    `error` (сбой, `model` — имя провайдера). Гистограмма показывает время
-    каждого вызова модели (аудит #89), фоллбэк виден двумя записями, а не
-    одной суммой под моделью ответившего последним. Бакеты в секундах задаёт
-    View (`_VIEWS`): на дефолтных миллисекундных `histogram_quantile`
-    бесполезен.
+    таймауты. `provider` — имя провайдера всегда: доля ошибок считается по
+    нему, а не по модели. `model` — модель ответа только у `ok` (её задаёт
+    сам провайдер, у сбоя модели нет — иначе один провайдер разъезжался бы
+    на две серии `model` и ошибки по модели не считались). `outcome` —
+    `ok`/`error`. Гистограмма показывает время каждого вызова модели
+    (аудит #89), фоллбэк виден двумя записями, а не одной суммой под моделью
+    ответившего последним. Бакеты в секундах задаёт View (`_VIEWS`): на
+    дефолтных миллисекундных `histogram_quantile` бесполезен.
     """
-    _review_llm_call_duration.record(
-        duration_seconds, {"task": task, "model": model, "outcome": outcome}
-    )
+    labels: dict[str, str] = {"task": task, "provider": provider, "outcome": outcome}
+    if model is not None:
+        labels["model"] = model
+    _review_llm_call_duration.record(duration_seconds, labels)
 
 
 def error_status(exc: BaseException) -> Status:

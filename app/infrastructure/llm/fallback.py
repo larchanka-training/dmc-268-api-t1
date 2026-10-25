@@ -71,9 +71,10 @@ class FallbackLlmGateway:
             else:
                 record_llm_call_duration(
                     request.task.value,
-                    response.model,
+                    name,
                     self._clock() - started,
                     outcome="ok",
+                    model=response.model,
                 )
                 return _plus(response, spent)
         (last_name, _) = self._providers[-1]
@@ -87,7 +88,11 @@ class FallbackLlmGateway:
             error.tokens_used += spent
             raise
         record_llm_call_duration(
-            request.task.value, response.model, self._clock() - started, outcome="ok"
+            request.task.value,
+            last_name,
+            self._clock() - started,
+            outcome="ok",
+            model=response.model,
         )
         return _plus(response, spent)
 

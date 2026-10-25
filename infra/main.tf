@@ -18,10 +18,15 @@ locals {
 
   # Версия сервиса для телеметрии — тег образа API: deploy.yml публикует образ
   # с тегом по sha коммита, а git внутрь образа не попадает, поэтому версия
-  # приходит окружением (OTEL_RESOURCE_ATTRIBUTES). Тег — после последнего
-  # двоеточия и без слэшей: реестр с портом (localhost:5000/repo:sha) не
-  # ломают разбор.
-  service_version = try(regex(":(?P<tag>[^/:]+)$", var.api_image)["tag"], "unknown")
+  # приходит окружением (OTEL_RESOURCE_ATTRIBUTES). Тег — между последним
+  # двоеточием и концом или «@дайджестом»: реестр с портом
+  # (localhost:5000/repo:sha) и формат с дайджестом (repo:tag@sha256:hex —
+  # после #204) не ломают разбор (замечание ревью PR #130).
+  service_version = try(
+    regex(":(?P<tag>[^/:@]+)@", var.api_image)["tag"],
+    regex(":(?P<tag>[^/:@]+)$", var.api_image)["tag"],
+    "unknown",
+  )
 
   # Экспорт телеметрии сервисами приложения (change add-observability-stack):
   # коллектор в той же сети, логи и трейсы с метриками идут по OTLP. Таймаут
@@ -535,6 +540,22 @@ resource "docker_volume" "grafana" {
 resource "docker_network" "observability_docker_proxy" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-docker-proxy"
+  # Без выхода наружу: proxy и cAdvisor в интернет не ходят.
+  internal = true
+}
+
+# Сеть стека наблюдаемости — отдельно от сети приложения (dmc268), к которой
+# подключается интерфейс (dmc-268-ui-t1): без этого из контейнеров UI доступны
+# Loki без аутентификации, Prometheus, Tempo и приёмник OTLP (замечание ревью
+# PR #130). internal: контейнерам стека наружу идти не нужно. В dmc268 из
+# стека остаются только prometheus (скрейпит rabbitmq) и коллектор (принимает
+# OTLP и скрейпит postgres/rabbitmq).
+resource "docker_network" "observability" {
+  count = var.observability_enabled ? 1 : 0
+  name  = "dmc268-observability"
+  # Без internal: публикуемый порт Grafana на internal-сети не работает
+  # (проверено), а изоляция от интерфейса достигается самим членством в
+  # сети — dmc268 у стека нет, кроме коллектора и Prometheus.
 }
 
 resource "docker_container" "otelcol" {
@@ -580,6 +601,11 @@ resource "docker_container" "otelcol" {
     aliases = ["collector"]
   }
 
+  # Экспортёры (Loki, Tempo) и скрейп Prometheus — в сети стека.
+  networks_advanced {
+    name = docker_network.observability[0].name
+  }
+
   depends_on = [
     docker_container.loki,
     docker_container.tempo,
@@ -612,7 +638,7 @@ resource "docker_container" "loki" {
   }
 
   networks_advanced {
-    name    = docker_network.dmc268.name
+    name    = docker_network.observability[0].name
     aliases = ["loki"]
   }
 }
@@ -643,7 +669,7 @@ resource "docker_container" "tempo" {
   }
 
   networks_advanced {
-    name    = docker_network.dmc268.name
+    name    = docker_network.observability[0].name
     aliases = ["tempo"]
   }
 }
@@ -684,6 +710,11 @@ resource "docker_container" "prometheus" {
   networks_advanced {
     name    = docker_network.dmc268.name
     aliases = ["prometheus"]
+  }
+
+  # Цели в сети стека: collector, node-exporter, cadvisor.
+  networks_advanced {
+    name = docker_network.observability[0].name
   }
 }
 
@@ -742,7 +773,7 @@ resource "docker_container" "grafana" {
   }
 
   networks_advanced {
-    name    = docker_network.dmc268.name
+    name    = docker_network.observability[0].name
     aliases = ["grafana"]
   }
 
@@ -795,7 +826,7 @@ resource "docker_container" "node_exporter" {
   }
 
   networks_advanced {
-    name    = docker_network.dmc268.name
+    name    = docker_network.observability[0].name
     aliases = ["node-exporter"]
   }
 }
@@ -821,7 +852,19 @@ resource "docker_container" "cadvisor" {
   log_driver  = "json-file"
   log_opts    = local.log_opts
 
+  # Без root, без маунта «/» и без capabilities: рекурсивный /rootfs открывал
+  # бы unix-сокет Docker (/rootfs/run/docker.sock — полный Docker API, то есть
+  # root на хосте) и Env всех контейнеров — socket-proxy это не оправдывает
+  # (замечание ревью PR #130, high). Метрики контейнеров — через dockerproxy,
+  # хостовые файловые — node-exporter; cgroup v2 в /sys читается nobody.
+  user          = "65534"
+  read_only     = true
+  tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=64m" }
   security_opts = ["no-new-privileges:true"]
+
+  capabilities {
+    drop = ["ALL"]
+  }
 
   command = [
     # Имя dockerproxy резолвится в отдельной сети socket-proxy (алиас у
@@ -831,19 +874,13 @@ resource "docker_container" "cadvisor" {
   ]
 
   volumes {
-    host_path      = "/"
-    container_path = "/rootfs"
-    read_only      = true
-  }
-
-  volumes {
     host_path      = "/sys"
     container_path = "/sys"
     read_only      = true
   }
 
   networks_advanced {
-    name    = docker_network.dmc268.name
+    name    = docker_network.observability[0].name
     aliases = ["cadvisor"]
   }
 

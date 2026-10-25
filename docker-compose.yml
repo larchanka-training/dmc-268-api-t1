@@ -279,6 +279,11 @@ services:
     # otel/opentelemetry-collector-contrib:0.158.0
     image: otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
     profiles: ["observability"]
+    networks:
+      default:
+        aliases:
+          - collector
+      observability:
     # Логи приложения приходят по OTLP из SDK (OTEL_LOGS_EXPORTER у api и
     # worker): файлы Docker коллектор не читает, и root ему не нужен.
     volumes:
@@ -304,6 +309,10 @@ services:
     # grafana/loki:3.7.9
     image: grafana/loki@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
     profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - loki
     command: ["-config.file=/etc/loki/config.yaml"]
     volumes:
       - ./infra/observability/loki.yaml:/etc/loki/config.yaml:ro
@@ -313,6 +322,10 @@ services:
     # grafana/tempo:3.1.1
     image: grafana/tempo@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044
     profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - tempo
     command: ["-config.file=/etc/tempo/config.yaml"]
     volumes:
       - ./infra/observability/tempo.yaml:/etc/tempo/config.yaml:ro
@@ -322,6 +335,11 @@ services:
     # prom/prometheus:v3.15.1
     image: prom/prometheus@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
     profiles: ["observability"]
+    networks:
+      default:
+      observability:
+        aliases:
+          - prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       # Хранение метрик — 30 дней (как retention логов Loki).
@@ -338,6 +356,10 @@ services:
     # grafana/grafana:13.2.4
     image: grafana/grafana@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - grafana
     ports:
       # Единственная точка стека, нужная человеку: http://127.0.0.1:3000.
       - "127.0.0.1:3000:3000"
@@ -366,6 +388,10 @@ services:
     # quay.io/prometheus/node-exporter:v1.9.1
     image: quay.io/prometheus/node-exporter@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a
     profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - node-exporter
     command:
       - --path.rootfs=/rootfs
       - --path.procfs=/host/proc
@@ -413,13 +439,22 @@ services:
     # gcr.io/cadvisor/cadvisor:v0.52.1
     image: gcr.io/cadvisor/cadvisor@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435
     profiles: ["observability"]
+    # Без root и без маунта «/» — как в infra (см. комментарий там): /rootfs
+    # открывал бы unix-сокет Docker и Env всех контейнеров.
+    user: "65534"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     command:
       - --docker=tcp://dockerproxy:2375
     volumes:
-      - /:/rootfs:ro
       - /sys:/sys:ro
     networks:
-      default:
+      observability:
         aliases:
           - cadvisor
       docker_proxy:
@@ -446,8 +481,19 @@ volumes:
   # он не хранит, потери при пересоздании проекта не страшны.
   grafana_data:
 
-# Сеть для доступа к Docker API через socket-proxy: в ней только dockerproxy
-# и cAdvisor (см. их сервисы выше). Имя не фиксируется, как и default-сеть:
-# префикс compose-проекта отделяет её от сети стенда.
+# Сети стека наблюдаемости. docker_proxy — для доступа к Docker API через
+# socket-proxy: в ней только dockerproxy и cAdvisor, internal — наружу в
+# интернет им идти не нужно (публиковать там нечего). observability — весь
+# стек, отдельно от default-сети приложения: из контейнеров интерфейса
+# (подключаются к default) не должны быть доступны Loki без аутентификации,
+# Prometheus, Tempo и приёмник OTLP (замечание ревью PR #130); internal не
+# ставим — публикуемый порт Grafana на internal-сети не работает (проверено),
+# изоляция достигается членством в сети. Коллектор двуподветочен: OTLP и
+# скрейп postgres/rabbitmq — в default, экспортёры и цели Prometheus — в
+# observability; Prometheus — тоже в обеих (скрейп rabbitmq). Имена не
+# фиксируются, как и default: префикс compose-проекта отделяет их от сетей
+# стенда.
 networks:
   docker_proxy:
+    internal: true
+  observability:

@@ -413,9 +413,9 @@ def upgrade() -> None:
   `resource_to_telemetry_conversion` делает лейбл `job` равным `service.name`.
   Ручные — только сигналы алертов: прогоны по статусам (`review_runs_total{status}`),
   длительность этапов (`review_stage_duration{stage}`) и каждого фактического вызова
-  провайдера (`review_llm_call_duration{outcome}` — в `FallbackLlmGateway`; `ok` —
-  с моделью ответа, `error` — с именем провайдера, в гистограмму попадают упавшие
-  вызовы и таймауты), пул соединений — снимками состояния (`db.client.connection.*`);
+  провайдера (`review_llm_call_duration{outcome}` — в `FallbackLlmGateway`; метка
+  `provider` стоит всегда, `model` — модель ответа только у `ok`, в гистограмму попадают
+  упавшие вызовы и таймауты), пул соединений — снимками состояния (`db.client.connection.*`);
   стоимость — отдельное изменение (#119).
   «Во что обошёлся прогон» остаётся SQL по колонкам `review_runs`: метрики —
   для алертов, не для отчётов.
