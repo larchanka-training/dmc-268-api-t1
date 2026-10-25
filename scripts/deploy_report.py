@@ -43,7 +43,12 @@ from typing import Any
 
 # Тома с данными: их уничтожение — потеря базы или очередей. Замена тома —
 # тоже уничтожение (delete, create).
-PROTECTED = ("docker_volume.postgres", "docker_volume.rabbitmq")
+PROTECTED = (
+    "docker_volume.postgres",
+    "docker_volume.rabbitmq",
+    "docker_volume.postgres_replica",
+    "docker_volume.postgres_backups",
+)
 
 # Действия плана (`resource_changes[].change.actions` у OpenTofu 1.13.2) —
 # в колонки, как в строке `Plan:` у tofu, но замена отдельно, а не в add и
@@ -74,6 +79,7 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("api_logs", "Логи API после упавшего apply", ("api_logs",)),
     ("check_api", "Проверить, что API жив (через туннель)", ("check_api",)),
     ("check_worker", "Проверить, что воркер работает", ("check_worker",)),
+    ("check_replica", "Проверить, что реплика получает поток", ("check_replica",)),
     ("prune", "Убрать устаревшие образы", ("prune",)),
 )
 # Засечка шага summary закрывает последний шаг и весь job.

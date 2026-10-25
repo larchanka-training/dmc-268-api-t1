@@ -54,10 +54,12 @@ docker pull --quiet "$API_IMAGE"
 # Ограничения — как у api и worker в infra/app.tf (сверяет
 # tests/test_stack_descriptions.py). Имя — чтобы второй запуск поверх
 # зависшего первого упал на конфликте имён, а не мигрировал параллельно.
+# Сеть — данных (dmc268-backend): база только в ней, и выхода наружу у
+# миграций нет (сверяет tests/test_infra_isolation.py).
 # Логи alembic идут в stderr: 2>&1, чтобы попасть и в лог шага, и в файл;
 # упавшую миграцию pipefail не прячет за tee.
 docker run --rm --name dmc268-migrations \
-  --network dmc268 \
+  --network dmc268-backend \
   --env-file "$env_file" \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
