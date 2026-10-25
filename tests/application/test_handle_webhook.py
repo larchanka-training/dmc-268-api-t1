@@ -33,10 +33,8 @@ from ..fakes import (
     webhook_payload,
 )
 
-EXPECTED_VCS_CALLS = [
-    ("metadata", REPO_FULL_NAME, 6, INSTALLATION_ID),
-    ("diff", REPO_FULL_NAME, pr_metadata().base_sha, pr_metadata().head_sha, INSTALLATION_ID),
-]
+# Приём берёт только метаданные: дифф достаёт воркер с лимитом размера.
+EXPECTED_VCS_CALLS = [("metadata", REPO_FULL_NAME, 6, INSTALLATION_ID)]
 
 
 def run_case(
@@ -191,12 +189,20 @@ def test_unregistered_repository_is_ignored_without_records() -> None:
     assert queue.jobs == []
 
 
+def test_intake_does_not_fetch_the_diff() -> None:
+    """Дифф любого размера не трогает ответ на доставку: его достаёт воркер."""
+    outcome, _, vcs, queue = run_case()
+
+    assert outcome.kind == "success"
+    assert [call for call in vcs.calls if call[0] == "diff"] == []
+    assert len(queue.jobs) == 1
+
+
 def test_vcs_error_yields_failure_and_creates_nothing() -> None:
     outcome, uow, vcs, queue = run_case(vcs_error=VcsError("GitHub API: HTTP 502"))
     assert outcome.kind == "failure"
-    # Метаданные запросили — и на ошибке VCS обработка прекратилась: дифф за
-    # ними не запрашивается.
-    assert vcs.calls == [EXPECTED_VCS_CALLS[0]]
+    # Метаданные запросили — и на ошибке VCS обработка прекратилась.
+    assert vcs.calls == EXPECTED_VCS_CALLS
     assert uow.merge_requests.added == []
     assert uow.review_runs.added == []
     assert queue.jobs == []
@@ -219,20 +225,53 @@ def test_duplicate_delivery_returns_existing_run_and_enqueues_nothing() -> None:
     assert len(queue.jobs) == 1
 
 
-def test_terminal_run_on_same_commit_does_not_block_new_one() -> None:
-    """Завершённый прогон неактивен: `find_active` его пропускает.
+@pytest.mark.parametrize("status", [ReviewRunStatus.COMPLETED, ReviewRunStatus.CANCELLED])
+def test_redelivery_after_a_finished_run_is_a_duplicate(status: ReviewRunStatus) -> None:
+    """#75: повтор после завершения не даёт второго прогона и второго ревью.
 
-    Фейк фильтрует так же, как `SqlAlchemyReviewRunRepo.find_active`, поэтому
+    GitHub переотправляет доставку с тем же `X-GitHub-Delivery`, а запуск
+    ревью — только opened и synchronize: тот же коммит ещё раз — повтор.
+    """
+    _, uow, _, queue = run_case()
+    (finished,) = uow.review_runs.added
+    (original_mr,) = uow.merge_requests.added
+    object.__setattr__(finished, "status", status)
+
+    outcome, uow, _, queue = run_case(uow=uow, queue=queue)
+    assert outcome.kind == "duplicate"
+    assert outcome.run is finished
+    assert outcome.merge_request is original_mr
+    assert uow.merge_requests.updated == []
+    assert len(uow.review_runs.added) == 1
+    assert len(queue.jobs) == 1
+
+
+def test_failed_run_on_same_commit_does_not_block_new_one() -> None:
+    """`failed` дублем не делает: повтор после сбоя должен дать ревью.
+
+    Фейк фильтрует так же, как `SqlAlchemyReviewRunRepo.find_reviewed`, поэтому
     выдёргивание фильтра из продакшн-запроса красит этот тест.
     """
     _, uow, _, queue = run_case()
     (finished,) = uow.review_runs.added
-    object.__setattr__(finished, "status", ReviewRunStatus.COMPLETED)
+    object.__setattr__(finished, "status", ReviewRunStatus.FAILED)
 
     outcome, uow, _, queue = run_case(uow=uow, queue=queue)
     assert outcome.kind == "success"
     assert len(uow.review_runs.added) == 2
     assert len(queue.jobs) == 2
+
+
+def test_finished_run_of_another_trigger_does_not_make_a_duplicate() -> None:
+    """Дублем делает только прогон по вебхуку: явное повторное ревью — не доставка."""
+    _, uow, _, queue = run_case()
+    (finished,) = uow.review_runs.added
+    object.__setattr__(finished, "status", ReviewRunStatus.COMPLETED)
+    object.__setattr__(finished, "trigger", TriggerSource.MANUAL)
+
+    outcome, uow, _, queue = run_case(uow=uow, queue=queue)
+    assert outcome.kind == "success"
+    assert len(uow.review_runs.added) == 2
 
 
 def test_lost_race_returns_conflict_with_survivor_run(monkeypatch) -> None:
@@ -288,7 +327,8 @@ def test_race_with_a_different_commit_retries_the_write() -> None:
 def test_broker_failure_fails_the_run_and_next_delivery_starts_a_new_one() -> None:
     """Сбой брокера после коммита компенсируется сразу, как `_fail_unenqueued`
     в #36: прогон переводится в failed, ошибка идёт дальше — вебхук отвечает
-    5xx и хостинг повторит доставку. Оставленный queued блокировал бы коммит
+    5xx. GitHub упавшую доставку сам не повторяет — её переотправляют вручную
+    или задача #149. Оставленный queued блокировал бы коммит
     от ревью навсегда: повторная доставка до sweep получала бы duplicate и
     задачу больше не ставила."""
 

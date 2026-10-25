@@ -13,7 +13,7 @@ from app.api.dependencies import (
     get_clock,
     get_installation_catalog,
     get_oauth_provider,
-    get_sleep,
+    get_run_changes,
     get_token_provider,
     get_unit_of_work_factory,
     get_untraced_unit_of_work_factory,
@@ -27,6 +27,7 @@ from app.infrastructure.oauth.github import GitHubOAuthProvider
 
 from .fakes.installation_catalog import FakeInstallationCatalog
 from .fakes.oauth import FakeOAuthProvider
+from .fakes.run_changes import FakeRunChanges, every_step
 from .fakes.unit_of_work import FakeUnitOfWork
 
 ORIGIN = "https://review.example"
@@ -242,6 +243,20 @@ def test_an_expired_session_is_401_and_deleted(stand) -> None:
     assert stand.uow.sessions.stored == []
 
 
+@pytest.mark.parametrize("path", ["/api/v1/auth/me", "/api/v1/repositories"])
+def test_a_session_without_a_provider_token_is_401_and_deleted_everywhere(stand, path) -> None:
+    """Раньше `/auth/me` отвечал такой сессии 200, а поток `/events` — 401 (#120)."""
+    client = stand.client()
+    sign_in(client)
+    stand.uow.provider_tokens.restore({})
+
+    response = client.get(path)
+
+    assert response.status_code == 401
+    assert "Max-Age=0" in set_cookies(response)["session"]
+    assert stand.uow.sessions.stored == []
+
+
 def test_logout_ends_the_session_in_every_tab(stand) -> None:
     tab_1 = stand.client()
     sign_in(tab_1)
@@ -324,7 +339,7 @@ def test_neither_the_session_cookie_nor_the_code_reaches_the_app_logs(stand, cap
     responses.append(client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN}))
 
     # Запросы пишет сам тестовый клиент — это не логи приложения.
-    app_logs = "\n".join(r.getMessage() for r in caplog.records if r.name != "httpx")
+    app_logs = "\n".join(r.getMessage() for r in caplog.records if r.name not in ("httpx", "httpx2"))
     assert "code-secret-1" not in app_logs
     assert token not in app_logs
     assert "set-cookie" not in app_logs.lower()
@@ -399,7 +414,7 @@ def test_logout_closes_an_open_event_stream_and_reconnecting_is_401(stand) -> No
 
     stand.app.dependency_overrides[get_untraced_unit_of_work_factory] = lambda: lambda: stand.uow
     stand.app.dependency_overrides[get_installation_catalog] = lambda: FakeInstallationCatalog()
-    stand.app.dependency_overrides[get_sleep] = lambda: sleep_then_logout
+    stand.app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(every_step(sleep_then_logout))
     stand.app.dependency_overrides[get_clock] = lambda: lambda: now[0]
 
     response = client.get("/api/v1/events")

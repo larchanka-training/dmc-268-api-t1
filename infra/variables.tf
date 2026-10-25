@@ -1,12 +1,14 @@
+# --- Docker и публикация портов ---
+
 variable "docker_host" {
   type        = string
-  description = "Docker daemon URI. Use unix:///var/run/docker.sock locally or ssh://user@server for a remote host."
+  description = "URI демона Docker: локально unix:///var/run/docker.sock, для удалённого хоста ssh://user@server."
   default     = "unix:///var/run/docker.sock"
 }
 
 variable "bind_ip" {
   type        = string
-  description = "Interface to publish the API port on. Not used as a client hostname."
+  description = "Интерфейс, на котором публикуется порт API. Как имя хоста для клиентов не используется."
   default     = "127.0.0.1"
 
   # Спека backend-delivery: порт API не выходит за пределы сервера. Гарантирует
@@ -17,46 +19,52 @@ variable "bind_ip" {
   }
 }
 
-variable "service_host" {
-  type        = string
-  description = "Hostname or IP clients use in connection URLs (must be reachable, not 0.0.0.0)."
-  default     = "127.0.0.1"
-}
-
 variable "api_port" {
   type        = number
-  description = "Host port for the FastAPI HTTP server."
+  description = "Порт хоста для HTTP-сервера FastAPI."
   default     = 8000
 }
 
+# --- PostgreSQL ---
+
 variable "postgres_user" {
   type        = string
-  description = "PostgreSQL user name."
+  description = "Пользователь PostgreSQL."
   default     = "dmc268"
 }
 
+# Незаданный секрет репозитория приходит в TF_VAR_* пустой строкой. Без
+# проверки apply пересоздал бы базу и брокер с пустым паролем, а упал бы
+# только минутой позже, на миграциях, — уже со сломанным стендом.
 variable "postgres_password" {
   type        = string
-  description = "PostgreSQL password. Do not commit real values."
+  description = "Пароль PostgreSQL. Реальные значения не коммитить."
   sensitive   = true
+
+  validation {
+    condition     = var.postgres_password != ""
+    error_message = "postgres_password пуст: секрет PG_PASSWORD_DMC268_T1 не задан."
+  }
 }
 
 variable "postgres_db" {
   type        = string
-  description = "PostgreSQL database name."
+  description = "Имя базы PostgreSQL."
   default     = "dmc268"
 }
 
+# --- Реплика и резервные копии PostgreSQL ---
+
+# Пароль роли replicator. Пустой или короткий — роль без входа, и реплика не
+# соберётся; ловим на plan, пока на сервере ничего не изменилось.
 variable "postgres_replication_password" {
   type        = string
-  description = "Пароль роли replicator, под которой реплика забирает поток с основного сервера. Не коммитить."
+  description = "Пароль роли replicator, под которой реплика забирает поток с основного сервера. Реальные значения не коммитить."
   sensitive   = true
 
-  # Пустой пароль сделал бы роль без входа, и реплика молча не собралась бы:
-  # ловим на plan, пока на сервере ничего не изменилось.
   validation {
     condition     = length(var.postgres_replication_password) >= 16
-    error_message = "postgres_replication_password обязателен и не короче 16 символов."
+    error_message = "postgres_replication_password пуст или короче 16 символов: секрет PG_REPLICATION_PASSWORD_DMC268_T1 не задан."
   }
 }
 
@@ -74,80 +82,40 @@ variable "postgres_replica_memory" {
 
 variable "backup_keep_days" {
   type        = number
-  description = "Сколько дней хранить резервные копии базы."
+  description = "Сколько суток хранить резервные копии базы."
   default     = 7
 }
 
+# --- RabbitMQ ---
+
 variable "rabbitmq_user" {
   type        = string
-  description = "RabbitMQ user name."
+  description = "Пользователь RabbitMQ."
   default     = "dmc268"
 }
 
 variable "rabbitmq_password" {
   type        = string
-  description = "RabbitMQ password. Do not commit real values."
+  description = "Пароль RabbitMQ. Реальные значения не коммитить."
   sensitive   = true
+
+  validation {
+    condition     = var.rabbitmq_password != ""
+    error_message = "rabbitmq_password пуст: секрет RABBITMQ_PASSWORD_DMC268_T1 не задан."
+  }
 }
+
+# --- GitHub App, вход пользователей и вебхуки ---
 
 variable "github_app_id" {
   type        = string
-  description = "GitHub App id (GITHUB_APP_ID for the API and worker containers)."
+  description = "ID GitHub App (GITHUB_APP_ID для контейнеров API и воркера)."
   default     = ""
 }
 
 variable "github_app_private_key" {
   type        = string
-  description = "GitHub App private key in PEM (GITHUB_APP_PRIVATE_KEY). Do not commit real values."
-  default     = ""
-  sensitive   = true
-}
-
-# Без значения по умолчанию: заглушка выбирается только явно, иначе стенд
-# молча публиковал бы пустые ревью (спека llm-gateway, «Выбор заглушки явный»).
-variable "llm_backend" {
-  type        = string
-  description = "Адаптер модели воркера (LLM_BACKEND): stub - без похода к модели, ollama - локальная модель."
-
-  validation {
-    condition     = contains(["stub", "ollama"], var.llm_backend)
-    error_message = "llm_backend - stub или ollama."
-  }
-}
-
-variable "ollama_base_url" {
-  type        = string
-  description = "Адрес Ollama (OLLAMA_BASE_URL). Контейнер Ollama подключается к сети dmc268-backend — воркер ходит к нему оттуда; к dmc268-egress — только если Ollama сама скачивает модели."
-  default     = "http://dmc268-ollama:11434"
-}
-
-variable "ollama_model" {
-  type        = string
-  description = "Модель Ollama (OLLAMA_MODEL); обязательна при llm_backend = ollama."
-  default     = ""
-}
-
-variable "llm_hosted_fallback" {
-  type        = bool
-  description = "Подключить Eurorouter фоллбэком после локальной модели (LLM_HOSTED_FALLBACK). Включение отправляет код проверяемых репозиториев hosted-провайдеру."
-  default     = false
-}
-
-variable "eurorouter_base_url" {
-  type        = string
-  description = "Адрес OpenAI-совместимого API Eurorouter (EUROROUTER_BASE_URL)."
-  default     = ""
-}
-
-variable "eurorouter_model" {
-  type        = string
-  description = "Модель Eurorouter (EUROROUTER_MODEL)."
-  default     = ""
-}
-
-variable "eurorouter_api_keys" {
-  type        = string
-  description = "Ключи Eurorouter через запятую (EUROROUTER_API_KEYS). Не коммитить."
+  description = "Закрытый ключ GitHub App в PEM (GITHUB_APP_PRIVATE_KEY). Реальные значения не коммитить."
   default     = ""
   sensitive   = true
 }
@@ -188,11 +156,98 @@ variable "github_webhook_secret" {
   type        = string
   description = "Общий секрет, которым GitHub подписывает доставки вебхуков (X-Hub-Signature-256). Не коммитить."
   sensitive   = true
+
+  # Пустой секрет — HMAC с ключом, который знает каждый. Приложение такой не
+  # примет и не стартует; ловим раньше, на plan.
+  validation {
+    condition     = var.github_webhook_secret != ""
+    error_message = "github_webhook_secret пуст: секрет WEBHOOK_SECRET_DMC268_T1 не задан."
+  }
 }
 
+# --- Модель ---
+
+# Без значения по умолчанию: заглушка выбирается только явно, иначе стенд
+# молча публиковал бы пустые ревью (спека llm-gateway, «Выбор заглушки явный»).
+variable "llm_backend" {
+  type        = string
+  description = "Адаптер модели воркера (LLM_BACKEND): stub - без похода к модели, ollama - локальная модель."
+
+  validation {
+    condition     = contains(["stub", "ollama"], var.llm_backend)
+    error_message = "llm_backend - stub или ollama."
+  }
+}
+
+variable "ollama_base_url" {
+  type        = string
+  description = "Адрес Ollama (OLLAMA_BASE_URL). Контейнер Ollama подключается к сети dmc268-backend — воркер ходит к нему оттуда; к dmc268-egress — только если Ollama сама скачивает модели."
+  default     = "http://dmc268-ollama:11434"
+}
+
+# Та же проверка есть в настройках приложения (app/config.py), но там она
+# срабатывает только на старте воркера — после того как apply пересоздал
+# контейнеры. Здесь — на plan, пока на сервере ничего не изменилось.
+variable "ollama_model" {
+  type        = string
+  description = "Модель Ollama (OLLAMA_MODEL); обязательна при llm_backend = ollama."
+  default     = ""
+
+  validation {
+    condition     = var.llm_backend != "ollama" || var.ollama_model != ""
+    error_message = "llm_backend = ollama требует ollama_model."
+  }
+}
+
+# Зеркало проверки в app/config.py — по той же причине, что у ollama_model.
+variable "llm_hosted_fallback" {
+  type        = bool
+  description = "Подключить Eurorouter фоллбэком после локальной модели (LLM_HOSTED_FALLBACK). Включение отправляет код проверяемых репозиториев hosted-провайдеру."
+  default     = false
+
+  validation {
+    condition = !var.llm_hosted_fallback || (
+      var.llm_backend == "ollama"
+      && var.eurorouter_base_url != ""
+      && var.eurorouter_model != ""
+      && var.eurorouter_api_keys != ""
+    )
+    error_message = "llm_hosted_fallback = true требует llm_backend = ollama и непустых eurorouter_base_url, eurorouter_model, eurorouter_api_keys."
+  }
+}
+
+variable "eurorouter_base_url" {
+  type        = string
+  description = "Адрес OpenAI-совместимого API Eurorouter (EUROROUTER_BASE_URL)."
+  default     = ""
+}
+
+variable "eurorouter_model" {
+  type        = string
+  description = "Модель Eurorouter (EUROROUTER_MODEL)."
+  default     = ""
+}
+
+variable "eurorouter_api_keys" {
+  type        = string
+  description = "Ключи Eurorouter через запятую (EUROROUTER_API_KEYS). Не коммитить."
+  default     = ""
+  sensitive   = true
+}
+
+# --- Образ API и реестр ---
+
+# Digest обязателен: тег перезаписывается, а digest называет ровно тот образ,
+# который собрал и проверил этот прогон деплоя. Тег оставлен для читаемости
+# (`docker ps` показывает commit sha).
 variable "api_image" {
   type        = string
-  description = "Полная ссылка на образ API в реестре, с тегом по commit sha."
+  description = "Ссылка на образ API в реестре с digest: <репозиторий>:<commit sha>@sha256:<digest>."
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.api_image))
+    error_message = "api_image должен заканчиваться на @sha256:<64 hex>: образ забирается по digest, а не по тегу."
+  }
 }
 
 variable "registry_username" {

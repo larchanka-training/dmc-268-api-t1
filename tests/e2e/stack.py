@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-import httpx
+import httpx2
 import pika
 from fastapi import FastAPI
 from pydantic import SecretStr
@@ -32,10 +32,17 @@ from sqlalchemy import Engine
 from app.api.factory import create_app
 from app.application.ports.llm_gateway import LlmGateway
 from app.config import Settings
-from app.domain.entities import ContextPayload, Finding, Repository, ReviewRun
+from app.domain.entities import (
+    ContextPayload,
+    Finding,
+    PublishedComment,
+    Repository,
+    ReviewRun,
+)
 from app.domain.enums import Provider
 from app.infrastructure.cache.memory import InMemoryCacheStore
-from app.infrastructure.container import Container
+from app.infrastructure.container import WORKER_VCS_LIMITS, Container
+from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
@@ -149,9 +156,11 @@ class Stack:
             _token_cipher=None,
             _job_queue=RabbitMQJobQueue(self.rabbitmq_url),
             _vcs_gateway=GitHubVcsGateway(auth, client, sleep=lambda _: None),
+            _vcs_limits=WORKER_VCS_LIMITS,
             _installation_catalog=FakeInstallationCatalog([]),
             _oauth_providers={},
             _cache_store=InMemoryCacheStore(),
+            _run_changes=PostgresRunChanges(listen_conninfo(self.settings.database_url)),
             _llm_gateway=llm,
             _definition_extractor=TreeSitterDefinitionExtractor(),
         )
@@ -253,6 +262,10 @@ class Stack:
         with SqlAlchemyUnitOfWork(self.engine) as work:
             return len(work.review_runs.list_unfinished())
 
+    def published(self, run_id: str | UUID) -> list[PublishedComment]:
+        with SqlAlchemyUnitOfWork(self.engine) as work:
+            return work.published_comments.list_for_run(UUID(str(run_id)))
+
     def findings(self, run_id: str | UUID) -> list[Finding]:
         with SqlAlchemyUnitOfWork(self.engine) as work:
             return work.findings.list_for_run(UUID(str(run_id)))
@@ -264,8 +277,8 @@ class Stack:
 
 
 def deliver(
-    client: httpx.Client, pull: PullRequest, *, delivery: str = "", action: str = "opened"
-) -> httpx.Response:
+    client: httpx2.Client, pull: PullRequest, *, delivery: str = "", action: str = "opened"
+) -> httpx2.Response:
     """Подписанная доставка вебхука `pull_request` по HTTP."""
     body = webhook_body(pull, action)
     headers = webhook_headers(body, delivery or f"delivery-{pull.number}-{pull.head_sha[:7]}")

@@ -13,14 +13,21 @@ from dataclasses import dataclass
 import httpx
 from sqlalchemy import Engine, create_engine
 
-from app.application.ports import CacheStore, DefinitionExtractor, UnitOfWork
+from app.application.ports import (
+    CacheStore,
+    DefinitionExtractor,
+    RunChanges,
+    UnitOfWork,
+)
 from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.vcs_gateway import VcsGateway
+from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.config import Settings
 from app.infrastructure.cache.memory import InMemoryCacheStore
+from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
 from app.infrastructure.db.token_cipher import TokenCipher
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork, UntracedUnitOfWork
 from app.infrastructure.llm.fallback import FallbackLlmGateway
@@ -32,8 +39,10 @@ from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
 )
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
+from app.infrastructure.vcs.cached_installations import CachedInstallationCatalog
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
+from app.infrastructure.vcs.github_deliveries import GitHubWebhookDeliveries
 from app.infrastructure.vcs.github_installations import GitHubInstallationCatalog
 
 logger = logging.getLogger(__name__)
@@ -43,6 +52,27 @@ _GITHUB_API = "https://api.github.com"
 # таймаут на каждую фазу httpx, подключение — короче. Refresh держит
 # блокировку строки токена, и худший случай — сумма фаз, а не 10 секунд.
 _GITHUB_USER_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+
+@dataclass(frozen=True, slots=True)
+class VcsClientLimits:
+    """Таймаут HTTP-клиента VCS-шлюза и бюджет ожидания лимита GitHub на один запрос."""
+
+    timeout: httpx.Timeout
+    rate_limit_budget_seconds: float
+
+
+# API отвечает на вебхук, а GitHub ждёт ответа доставки 10 секунд: таймаут -
+# прежнее умолчание httpx, лимит не пережидается. Отказ уходит 5xx, доставку
+# переотправит воркер (#149) с паузой не меньше пяти минут.
+API_VCS_LIMITS = VcsClientLimits(timeout=httpx.Timeout(5.0), rate_limit_budget_seconds=0.0)
+# Воркер: дифф и список комментариев крупного PR, создание ревью с пачкой
+# inline дольше 5 секунд. Минута ожидания лимита на запрос - пауза GitHub без
+# заголовков; запросов публикации - единицы, и прогон не подходит к
+# STALE_RUN_TIMEOUT_SECONDS (по умолчанию 30 минут) без прогресса.
+WORKER_VCS_LIMITS = VcsClientLimits(
+    timeout=httpx.Timeout(30.0, connect=5.0), rate_limit_budget_seconds=60.0
+)
 # Callback входа: путь роутера `/auth`, зарегистрированный в настройках GitHub App.
 _OAUTH_CALLBACK_PATH = "/api/v1/auth/{provider}/callback"
 
@@ -66,6 +96,8 @@ class Container:
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
     _vcs_gateway: VcsGateway | None
+    # Таймаут и ожидание лимита VCS-шлюза: у API и воркера свои.
+    _vcs_limits: VcsClientLimits
     # Репозитории, видимые пользователю, — запросы с его токеном; App-реквизиты
     # и кэш installation tokens ему не нужны. Конструирование — без сети.
     _installation_catalog: InstallationCatalog
@@ -75,6 +107,9 @@ class Container:
     # In-process кэш живёт, пока жив процесс, — только если он один на
     # контейнер: фабрика на каждый вызов теряла бы всё между прогонами.
     _cache_store: CacheStore
+    # Слушатель изменений прогонов для потока событий API: соединение `LISTEN`
+    # открывается при первой подписке, воркеру оно не нужно.
+    _run_changes: PostgresRunChanges
     # Ленивый, как VCS-шлюз: процессу API параметры модели не нужны, а
     # HTTP-клиенты провайдеров создаются один раз на процесс.
     _llm_gateway: LlmGateway | None
@@ -105,19 +140,53 @@ class Container:
         """Собрать VCS-шлюз при первом обращении; конструирование — без сети."""
         gateway = self._vcs_gateway
         if gateway is None:
-            client = httpx.Client(base_url=_GITHUB_API)
-            auth = GitHubAppAuth(
-                self.settings.github_app_id,
-                self.settings.github_app_private_key.get_secret_value(),
-                client,
-            )
-            gateway = GitHubVcsGateway(auth, client)
+            gateway = self._build_vcs_gateway(self._vcs_limits)
             object.__setattr__(self, "_vcs_gateway", gateway)
         return gateway
+
+    def redelivery_vcs_gateway(self) -> VcsGateway:
+        """VCS-шлюз прохода повтора доставок (#149): лимит GitHub не пережидается.
+
+        Отказ лимита завершает проход (`webhook-intake`), а ожидание общего шлюза
+        воркера держало бы consume-цикл дольше бюджета прохода. Свой клиент и
+        `GitHubAppAuth`; собирается воркером один раз, конструирование — без сети.
+        """
+        return self._build_vcs_gateway(API_VCS_LIMITS)
+
+    def _build_vcs_gateway(self, limits: VcsClientLimits) -> GitHubVcsGateway:
+        client = httpx.Client(base_url=_GITHUB_API, timeout=limits.timeout)
+        auth = GitHubAppAuth(
+            self.settings.github_app_id, self.settings.github_app_private_key.get_secret_value(), client
+        )
+        return GitHubVcsGateway(auth, client, rate_limit_budget_seconds=limits.rate_limit_budget_seconds)
+
+    def webhook_deliveries(self) -> WebhookDeliveries:
+        """Доставки вебхука GitHub App — для повтора упавших (#149).
+
+        Свой клиент и свой `GitHubAppAuth`: нужен только JWT приложения, кэш
+        installation tokens шлюза ни к чему. Собирается воркером один раз;
+        конструирование — без сети.
+        """
+        client = httpx.Client(base_url=_GITHUB_API, timeout=_GITHUB_USER_TIMEOUT)
+        auth = GitHubAppAuth(
+            self.settings.github_app_id, self.settings.github_app_private_key.get_secret_value(), client
+        )
+        return GitHubWebhookDeliveries(client, auth)
 
     def installation_catalog(self) -> InstallationCatalog:
         """Репозитории установок GitHub App, видимые пользователю по его токену."""
         return self._installation_catalog
+
+    def visibility_catalog(self, catalog: InstallationCatalog, *, read: bool = True) -> InstallationCatalog:
+        """`catalog` с кэшем списка видимых репозиториев — для видимости прогонов и репозиториев.
+
+        `read=False` — всегда к GitHub, свежий ответ в кэш: страница подключения.
+        Каталог — аргументом, а не свой: тесты подменяют каталог зависимостью API,
+        и кэш должен лечь поверх подменённого.
+        """
+        return CachedInstallationCatalog(
+            catalog, self._cache_store, self.settings.visible_repositories_cache_ttl_seconds, read=read
+        )
 
     def oauth_provider(self, name: str) -> OAuthProvider | None:
         """Провайдер входа по имени из пути; неизвестное имя — `None`."""
@@ -125,6 +194,13 @@ class Container:
 
     def cache_store(self) -> CacheStore:
         return self._cache_store
+
+    def run_changes(self) -> RunChanges:
+        return self._run_changes
+
+    async def aclose(self) -> None:
+        """Закрыть то, что живёт в event loop процесса: слушатель изменений прогонов."""
+        await self._run_changes.close()
 
     def definition_extractor(self) -> DefinitionExtractor:
         extractor = self._definition_extractor
@@ -134,7 +210,7 @@ class Container:
         return extractor
 
 
-def build_container(settings: Settings) -> Container:
+def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS_LIMITS) -> Container:
     # pool_pre_ping: соединение, умершее в простое (перезапуск сервера, idle
     # timeout, NAT сбросил поток), обнаруживается при выдаче из пула и
     # заменяется, а не всплывает OperationalError на следующем запросе.
@@ -149,6 +225,7 @@ def build_container(settings: Settings) -> Container:
         _token_cipher=_token_cipher(settings),
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
+        _vcs_limits=vcs_limits,
         _installation_catalog=_build_installation_catalog(settings),
         _oauth_providers={
             "github": GitHubOAuthProvider(
@@ -159,6 +236,7 @@ def build_container(settings: Settings) -> Container:
             ),
         },
         _cache_store=InMemoryCacheStore(),
+        _run_changes=PostgresRunChanges(listen_conninfo(settings.database_url)),
         _llm_gateway=None,
         _definition_extractor=None,
     )

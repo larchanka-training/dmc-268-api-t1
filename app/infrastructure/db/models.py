@@ -148,6 +148,8 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
         # Курсор общего потока событий: опрос «изменённые после (updated_at, id)»
         # раз в секунду на соединение читает диапазон индекса, а не всю таблицу.
         Index("ix_review_runs_updated_at_id", "updated_at", "id"),
+        # Список прогонов GET /reviews: страница «сначала новые» по (created_at, id).
+        Index("ix_review_runs_created_at_id", "created_at", "id"),
     )
 
     merge_request_id: Mapped[uuid.UUID] = mapped_column(
@@ -289,6 +291,10 @@ class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             " AND rule_check_text IS NOT NULL AND rule_check >= 1)",
             name="ck_findings_rule_ref",
         ),
+        CheckConstraint(
+            "covered_by_finding_id IS NULL OR covered_by_finding_id <> id",
+            name="ck_findings_covered_by_other",
+        ),
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -312,6 +318,11 @@ class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     rule_name: Mapped[str | None] = mapped_column(Text)
     rule_check: Mapped[int | None] = mapped_column(Integer)
     rule_check_text: Mapped[str | None] = mapped_column(Text)
+    # Находка прошлого прогона, чей тред бота уже покрывает эту: своего
+    # комментария у находки тогда нет.
+    covered_by_finding_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("findings.id", ondelete="RESTRICT")
+    )
 
 
 class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
@@ -330,6 +341,13 @@ class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             name="uq_published_comments_finding",
             postgresql_nulls_not_distinct=True,
         ),
+        # Дубль id комментария у провайдера - ошибка, а не вторая запись. С kind: у сводки
+        # id ревью GitHub, у inline и ответа - id комментария к строке, счётчики у них разные
+        # и могут совпасть. Колонки NOT NULL, NULLS NOT DISTINCT не нужен. provider_comment_id
+        # первым - индекс обслуживает и поиск комментария по id (вебхуки о тредах и фидбеке).
+        UniqueConstraint(
+            "provider_comment_id", "kind", name="uq_published_comments_provider_comment_id"
+        ),
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -342,6 +360,8 @@ class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     kind: Mapped[CommentKind] = mapped_column(_enum(CommentKind, "comment_kind"), nullable=False)
     published_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     thread_resolved: Mapped[bool] = mapped_column(default=False, server_default="false")
+    # Тред закрыл бот; закрытый не ботом - закрыт человеком.
+    thread_resolved_by_bot: Mapped[bool] = mapped_column(default=False, server_default="false")
     in_reply_to_provider_comment_id: Mapped[str | None] = mapped_column(String(255))
     feedback_positive: Mapped[int] = mapped_column(default=0, server_default="0")
     feedback_negative: Mapped[int] = mapped_column(default=0, server_default="0")

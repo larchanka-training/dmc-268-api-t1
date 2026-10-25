@@ -18,6 +18,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, format_span_id, format_trace_id
 
+from app.api import trace_id as trace_id_module
 from app.api.dependencies import get_unit_of_work_factory
 from app.api.factory import create_app
 from app.config import Settings
@@ -83,6 +84,24 @@ def test_a_successful_response_carries_the_trace_id_of_its_span(
 
     assert response.status_code == 200
     assert response.headers["X-Trace-ID"] == _trace_id(_server_span(spans))
+
+
+def test_a_failure_to_parse_traceparent_still_gives_a_problem_with_the_trace_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`trace_id` в состоянии запроса раньше разбора заголовка: обработчику `500` он нужен."""
+
+    def broken(traceparent: str | None) -> None:
+        raise RuntimeError("разбор traceparent упал")
+
+    monkeypatch.setattr(trace_id_module, "link_client_trace", broken)
+
+    response = TestClient(_app(), raise_server_exceptions=False).get(
+        "/health", headers={"traceparent": FOREIGN_TRACEPARENT}
+    )
+
+    assert response.status_code == 500
+    assert re.fullmatch(r"[0-9a-f]{32}", response.json()["trace_id"])
 
 
 def test_a_valid_traceparent_becomes_a_link_not_the_parent(

@@ -15,6 +15,7 @@ from uuid import UUID
 
 from app.application.ports.unit_of_work import UnitOfWork
 from app.domain.entities import (
+    BotThread,
     ContextPayload,
     Finding,
     MergeRequest,
@@ -28,9 +29,16 @@ from app.domain.entities import (
     Session,
     User,
 )
-from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
+from app.domain.enums import (
+    REVIEWED_STATUSES,
+    TERMINAL_STATUSES,
+    CommentKind,
+    Provider,
+    TriggerSource,
+)
 from app.domain.lifecycle import next_status
 from app.domain.run_feed import FeedCursor
+from app.domain.run_list import RunListFilter, RunListPage
 
 
 class FakeRepositoryRepo:
@@ -60,11 +68,6 @@ class FakeRepositoryRepo:
             ),
             None,
         )
-
-    def list_all(self, limit: int, offset: int) -> list[Repository]:
-        # Порядок как у SQL-адаптера: `(created_at, id)`.
-        ordered = sorted(self._by_id.values(), key=lambda r: (r.created_at, r.id))
-        return ordered[offset : offset + limit]
 
     def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
         wanted = set(provider_ids)
@@ -142,6 +145,24 @@ class FakeMergeRequestRepo:
         self._by_id[merge_request.id] = merge_request
 
 
+def _matches(entry: ReviewRunListEntry, run_filter: RunListFilter) -> bool:
+    run, merge_request = entry.run, entry.merge_request
+    if merge_request.repository_id not in run_filter.repository_ids:
+        return False
+    if run_filter.statuses is not None and run.status not in run_filter.statuses:
+        return False
+    if run_filter.author is not None and merge_request.author != run_filter.author:
+        return False
+    if run_filter.text is not None:
+        needle = run_filter.text.lower()
+        haystack = (merge_request.title, merge_request.author, merge_request.source_branch)
+        if not any(needle in value.lower() for value in haystack) and merge_request.number != run_filter.number:
+            return False
+    if run_filter.created_from is not None and run.created_at < run_filter.created_from:
+        return False
+    return run_filter.created_to is None or run.created_at < run_filter.created_to
+
+
 class FakeReviewRunRepo:
     def __init__(self) -> None:
         self._by_id: dict[UUID, ReviewRun] = {}
@@ -177,6 +198,17 @@ class FakeReviewRunRepo:
             ),
             None,
         )
+
+    def find_reviewed(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        reviewed = [
+            r
+            for r in self._by_id.values()
+            if r.merge_request_id == merge_request_id
+            and r.head_sha == head_sha
+            and r.trigger is TriggerSource.WEBHOOK
+            and r.status in REVIEWED_STATUSES
+        ]
+        return max(reviewed, key=lambda r: (r.created_at, r.id), default=None)
 
     def list_unfinished(self) -> list[ReviewRun]:
         return [r for r in self._by_id.values() if r.status not in TERMINAL_STATUSES]
@@ -217,6 +249,22 @@ class FakeReviewRunRepo:
             if e.run.updated_at > recheck_from and FeedCursor(e.run.updated_at, e.run.id) <= after
         ]
         return sorted(fresh + late, key=lambda e: (e.run.updated_at, e.run.id))
+
+    def list_page(self, run_filter: RunListFilter, limit: int, offset: int) -> RunListPage:
+        # Как SQL-адаптер: ILIKE — подстрока через lower(), не casefold(); номер — точное совпадение.
+        entries = [entry for entry in self._entries() if _matches(entry, run_filter)]
+        entries.sort(key=lambda e: (e.run.created_at, e.run.id), reverse=True)
+        return RunListPage(entries=entries[offset : offset + limit], total=len(entries))
+
+    def _entries(self) -> list[ReviewRunListEntry]:
+        entries: list[ReviewRunListEntry] = []
+        for run in self._by_id.values():
+            merge_request = self._merge_requests.get(run.merge_request_id)
+            assert merge_request is not None
+            repository = self._repositories.get(merge_request.repository_id)
+            assert repository is not None
+            entries.append(ReviewRunListEntry(run, merge_request, repository, len(self._findings.list_for_run(run.id))))
+        return entries
 
     def add(self, run: ReviewRun) -> None:
         self.added.append(run)
@@ -302,6 +350,13 @@ class FakeFindingRepo:
     def add(self, finding: Finding) -> None:
         self._items.append(finding)
 
+    def mark_covered(self, finding_id: UUID, covered_by_finding_id: UUID) -> None:
+        for index, item in enumerate(self._items):
+            if item.id == finding_id:
+                self._items[index] = replace(item, covered_by_finding_id=covered_by_finding_id)
+                return
+        raise LookupError(f"finding {finding_id} is not stored")
+
 
 class FakePublishedCommentRepo:
     def __init__(self, review_runs: FakeReviewRunRepo) -> None:
@@ -327,6 +382,17 @@ class FakePublishedCommentRepo:
     def list_open_threads_for_merge_request(
         self, merge_request_id: UUID
     ) -> list[OpenReviewThread]:
+        return [
+            OpenReviewThread(
+                finding=t.finding,
+                root_provider_comment_id=t.root_provider_comment_id,
+                root_published_comment_id=t.root_published_comment_id,
+            )
+            for t in self.list_threads_for_merge_request(merge_request_id)
+            if not t.resolved
+        ]
+
+    def list_threads_for_merge_request(self, merge_request_id: UUID) -> list[BotThread]:
         if self._findings is None:
             return []
         runs = {
@@ -334,9 +400,9 @@ class FakePublishedCommentRepo:
             for r in self._review_runs.runs
             if r.merge_request_id == merge_request_id
         }
-        threads: list[OpenReviewThread] = []
-        for comment in self._items:
-            if comment.kind is not CommentKind.INLINE or comment.thread_resolved:
+        threads: list[BotThread] = []
+        for comment in sorted(self._items, key=lambda c: (c.published_at, c.id)):
+            if comment.kind is not CommentKind.INLINE:
                 continue
             run = runs.get(comment.review_run_id)
             if run is None or comment.finding_id is None:
@@ -348,10 +414,12 @@ class FakePublishedCommentRepo:
             if finding is None:
                 continue
             threads.append(
-                OpenReviewThread(
+                BotThread(
                     finding=finding,
                     root_provider_comment_id=comment.provider_comment_id,
                     root_published_comment_id=comment.id,
+                    resolved=comment.thread_resolved,
+                    resolved_by_bot=comment.thread_resolved_by_bot,
                 )
             )
         return threads
@@ -479,6 +547,9 @@ class FakeProviderTokenRepo:
 
     def get(self, session_id: UUID) -> ProviderToken | None:
         return self.stored.get(session_id)
+
+    def exists(self, session_id: UUID) -> bool:
+        return session_id in self.stored
 
     def get_for_update(self, session_id: UUID) -> ProviderToken | None:
         self.locked.append(session_id)

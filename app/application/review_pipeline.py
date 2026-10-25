@@ -170,7 +170,7 @@ def run_review(
         run = _transition(uow, run, ReviewRunStatus.BUILDING_CONTEXT, now())
 
         steps.start(ReviewRunStage.FETCHING_DIFF)
-        diff = fetch_review_diff(job, vcs_gateway)
+        diff = fetch_review_diff(job, vcs_gateway, max_bytes=context_limits.diff_max_bytes)
         steps.finish()
 
         steps.start(ReviewRunStage.BUILDING_CONTEXT)
@@ -265,6 +265,7 @@ def run_review(
             vcs=vcs_gateway,
             now=now(),
             new_id=new_id,
+            diff_max_bytes=context_limits.diff_max_bytes,
         )
         steps.finish()
 
@@ -379,7 +380,7 @@ def _verify(
 
 
 def _where(finding: Finding) -> str:
-    return f"{finding.anchor.file_path}:{finding.anchor.new_line or finding.anchor.old_line}"
+    return f"{finding.anchor.file_path}:{finding.anchor.line}"
 
 
 def _record_progress(uow: UnitOfWork, run: ReviewRun, now: datetime) -> ReviewRun:

@@ -1,28 +1,15 @@
-# Общая часть двух workflow: ключ, хранилище состояния, туннель, бакет.
+# Подготовка job'а деплоя: хранилище состояния, туннель, бакет.
 #
-# Вынесено в composite action, а не в reusable workflow, по механической
-# причине: туннель живёт внутри job'а и в соседний не передаётся, поэтому
-# «поднять хранилище» и «применить конфигурацию» обязаны быть одним job'ом.
-# Reusable workflow дал бы второй job и туннель пришлось бы открывать заново —
-# то есть скопировать. У этого action два вызывающих: tfstate-backend.yml и
-# deploy.yml.
-# Побочный, но существенный эффект: первый шаг готовит SSH-подключение
-# (~/.ssh/ci_key, known_hosts, config с IdentityFile) для ВСЕГО job'а, а не
-# только для шагов этого action. Шаги вызывающего workflow, которые ходят на
-# сервер, полагаются на это и сломаются, если поставить их раньше.
+# Composite action, а не reusable workflow, по механической причине: туннель
+# живёт внутри job'а и в соседний не передаётся, поэтому «поднять хранилище» и
+# «применить конфигурацию» обязаны быть одним job'ом. Вызывающий один —
+# job deploy в deploy.yml; второй, tfstate-backend.yml, удалён в audit-fixes.
+# SSH-подключение (хост `stand` в ~/.ssh/config) готовит не этот action, а
+# .github/actions/stand-ssh — его шаг должен стоять раньше.
 name: S3 state backend
-description: Поднимает хранилище состояния, открывает туннель, готовит бакет и настраивает SSH для всего job'а.
+description: Поднимает хранилище состояния, открывает туннель и готовит бакет. SSH к стенду готовит stand-ssh.
 
 inputs:
-  ssh_key:
-    description: Приватный ключ CI
-    required: true
-  ssh_user:
-    description: Пользователь на сервере
-    required: true
-  host:
-    description: Адрес сервера
-    required: true
   s3_user:
     description: Логин хранилища
     required: true
@@ -51,60 +38,21 @@ inputs:
     description: Бакет под состояние
     required: true
 
-outputs:
-  storage:
-    description: Что произошло с контейнером хранилища
-    value: ${{ steps.storage.outputs.storage }}
-  bucket:
-    description: Что произошло с бакетом
-    value: ${{ steps.bucket.outputs.bucket }}
-  versioning:
-    description: Состояние версионирования бакета
-    value: ${{ steps.bucket.outputs.versioning }}
-
 runs:
   using: composite
   steps:
-    - name: Подготовить ключ и known_hosts
+    - name: Проверить SSH-подключение
       shell: bash
-      env:
-        CI_KEY: ${{ inputs.ssh_key }}
-        HOST: ${{ inputs.host }}
       run: |
         set -euo pipefail
-        umask 077
-        mkdir -p ~/.ssh
-        chmod 700 ~/.ssh
-        printf '%s\n' "$CI_KEY" > ~/.ssh/ci_key
-        chmod 600 ~/.ssh/ci_key
-        # Ключ хоста закреплён в репозитории и сверен с сервером вне CI.
-        # ssh-keyscan доверял бы любому, кто ответит по этому адресу.
-        pinned="$GITHUB_WORKSPACE/.github/ssh/known_hosts"
-        if ! ssh-keygen -F "$HOST" -f "$pinned" > /dev/null; then
-          echo "::error::ключ хоста $HOST не закреплён в .github/ssh/known_hosts"
+        if ! grep -qx 'Host stand' ~/.ssh/config 2>/dev/null; then
+          echo "::error::нет хоста stand в ~/.ssh/config: шаг .github/actions/stand-ssh должен стоять до s3-backend"
           exit 1
         fi
-        cp "$pinned" ~/.ssh/known_hosts
-
-        # Docker-провайдер Terraform вызывает `ssh` сам и флаг -i не передаёт:
-        # он берёт личности по умолчанию (~/.ssh/id_*), которых на раннере нет,
-        # и упирается в «Permission denied». Поэтому ключ прописывается в
-        # конфиг, а не только передаётся нашими собственными вызовами.
-        cat > ~/.ssh/config <<CFG
-        Host $HOST
-          IdentityFile ~/.ssh/ci_key
-          IdentitiesOnly yes
-          BatchMode yes
-          StrictHostKeyChecking yes
-        CFG
-        chmod 600 ~/.ssh/config
 
     - name: Поднять S3-хранилище
-      id: storage
       shell: bash
       env:
-        SSH_USER: ${{ inputs.ssh_user }}
-        HOST: ${{ inputs.host }}
         S3_USER: ${{ inputs.s3_user }}
         S3_PASSWORD: ${{ inputs.s3_password }}
         S3_CONTAINER: ${{ inputs.container }}
@@ -126,12 +74,15 @@ runs:
         rc=0
         out="$(printf '%s=%s\n%s=%s\n' \
             "$S3_CRED_USER_VAR" "$S3_USER" "$S3_CRED_PASS_VAR" "$S3_PASSWORD" \
-          | ssh -o BatchMode=yes -o ConnectTimeout=15 \
-            "$SSH_USER@$HOST" "$remote" 2>&1)" || rc=$?
+          | ssh -o ConnectTimeout=15 stand "$remote" 2>&1)" || rc=$?
 
         printf '%s\n' "$out"
         storage="$(printf '%s\n' "$out" | sed -n 's/^S3=//p' | tail -1)"
-        echo "storage=${storage:-не сообщено}" >> "$GITHUB_OUTPUT"
+
+        image_note="$(printf '%s\n' "$out" | sed -n 's/^S3_IMAGE=//p' | tail -1)"
+        case "$image_note" in
+          "не "*) echo "::warning::образ хранилища: $image_note" ;;
+        esac
 
         case "$storage" in
           "создан"|"уже запущен"|"был остановлен, запущен") ;;
@@ -141,15 +92,12 @@ runs:
     - name: Открыть туннель к хранилищу
       shell: bash
       env:
-        SSH_USER: ${{ inputs.ssh_user }}
-        HOST: ${{ inputs.host }}
         S3_PORT: ${{ inputs.port }}
       run: |
         set -euo pipefail
         # ExitOnForwardFailure обязателен: без него ssh уходит в фон даже когда
         # проброс не удался, и всё падает позже с невнятной ошибкой.
-        ssh -o BatchMode=yes -o ExitOnForwardFailure=yes \
-          -f -N -L "${S3_PORT}:127.0.0.1:${S3_PORT}" "$SSH_USER@$HOST"
+        ssh -o ExitOnForwardFailure=yes -f -N -L "${S3_PORT}:127.0.0.1:${S3_PORT}" stand
 
         for _ in $(seq 1 20); do
           if (exec 3<>"/dev/tcp/127.0.0.1/${S3_PORT}") 2>/dev/null; then
@@ -162,7 +110,6 @@ runs:
         exit 1
 
     - name: Создать бакет и включить версионирование
-      id: bucket
       shell: bash
       env:
         AWS_ACCESS_KEY_ID: ${{ inputs.s3_user }}
@@ -177,8 +124,8 @@ runs:
         rc=0
         out="$(aws --endpoint-url "$endpoint" s3api create-bucket --bucket "$STATE_BUCKET" 2>&1)" || rc=$?
         case "$rc:$out" in
-          0:*) echo "Бакет: создан"; echo "bucket=создан" >> "$GITHUB_OUTPUT" ;;
-          *BucketAlreadyOwnedByYou*|*BucketAlreadyExists*) echo "Бакет: уже существует"; echo "bucket=уже существует" >> "$GITHUB_OUTPUT" ;;
+          0:*) echo "Бакет: создан" ;;
+          *BucketAlreadyOwnedByYou*|*BucketAlreadyExists*) echo "Бакет: уже существует" ;;
           *) echo "::error::бакет не создан: $out"; exit 1 ;;
         esac
 
@@ -188,7 +135,6 @@ runs:
         status="$(aws --endpoint-url "$endpoint" s3api get-bucket-versioning \
           --bucket "$STATE_BUCKET" --query Status --output text 2>/dev/null || echo 'не определён')"
         echo "Версионирование: $status"
-        echo "versioning=$status" >> "$GITHUB_OUTPUT"
         if [ "$status" != "Enabled" ]; then
           echo "::error::версионирование не включилось: $status"
           exit 1

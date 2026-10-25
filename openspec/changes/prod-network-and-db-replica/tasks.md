@@ -28,6 +28,10 @@
 - [x] 3.9 У `pg_basebackup` своё `application_name` (`dmc268_basebackup`), в conninfo — `connect_timeout=5`; растущая пауза между попытками сборки
 - [x] 3.10 Деплой перезапускает unhealthy-реплику перед проверкой потока; README — пересборка требует места под две копии, unhealthy-реплика значит копии с основного сервера
 
+- [x] 3.11 `develop` с раскладкой `infra/` по файлам доменов (#196) и скриптами деплоя (#197): изменения перенесены в `network.tf`, `postgres.tf`, `rabbitmq.tf`, `app.tf`, новый `replica.tf`; проверка реплики — `.github/scripts/deploy/check-replica.sh`; `test_infra_isolation` читает `infra/*.tf`
+- [x] 3.12 `postgres`, реплика и `rabbitmq`: `stop_timeout` и `destroy_grace_seconds` по 60 с
+- [x] 3.13 `infra/tests/*.tftest.hcl`: раскладка сетей по плану, нет портов у базы и брокера, грейс 60 с, пароль реплики не в аргументах, новые контейнеры — в проверках привилегий, памяти и логов; пустой пароль реплики отклоняется
+
 ## 4. Приёмка
 
 - [x] 4.1 Секрет `PG_REPLICATION_PASSWORD_DMC268_T1` заведён в настройках репозитория
@@ -56,3 +60,5 @@
 - другой кластер: том основной базы заменён (`-replace` тома и контейнера), реплика не пересоздана; после её рестарта — «основной сервер — другой кластер … каталог данных НЕ стираю», выход с кодом 1, каталог реплики (589 МБ) на месте, `.partial` нет; ручная пересборка из README (удалить том, apply) даёт `streaming`;
 - имя `pg_basebackup`: при `--dbname="… application_name=dmc268_replica application_name=dmc268_basebackup"` оба walsender'а копии видны как `dmc268_basebackup` (`backup`), `dmc268_replica` — только настоящая реплика;
 - зависший основной сервер (`docker pause`): рестарт реплики — «основной сервер не ответил — каталог данных не трогаю», через 6 с принимает соединения на чтение; после `unpause` поток восстанавливается сам.
+
+Перенос на раскладку `infra/` по файлам (3.11–3.13) проверен локально на OpenTofu 1.13.2: `tofu fmt -check`, `validate`, `tofu test` — 19 passed; apply части с базой на Docker — реплика в `streaming`, у `postgres` и `rabbitmq` только сеть `dmc268-backend` и нет портов. `-replace` контейнеров `postgres`, реплики и `rabbitmq` при 200 тыс. строк: новый `postgres` пишет «database system was shut down» (без «not properly shut down» и восстановления после аварии), реплика — «shut down in recovery» и продолжает поток без пересборки, данные на месте.

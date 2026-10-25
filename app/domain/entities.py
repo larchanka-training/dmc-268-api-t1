@@ -191,6 +191,11 @@ class DiffAnchor:
     old_line: int | None = None
     new_line: int | None = None
 
+    @property
+    def line(self) -> int | None:
+        """Номер строки на стороне привязки; `None`, если он не заполнен."""
+        return self.new_line if self.side is DiffSide.NEW else self.old_line
+
 
 @dataclass(frozen=True, slots=True)
 class LlmRuleRef:
@@ -248,6 +253,10 @@ class Finding:
     confidence: float | None = None
     # Пусто - замечание по стандартным критериям ревью.
     rule: RuleRef | None = None
+    # Находка с прошлого прогона, чей тред бота уже говорит об этой проблеме:
+    # заполнено - своего комментария у находки нет. Пусто - находка
+    # опубликована или ещё не публиковалась.
+    covered_by_finding_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +272,9 @@ class PublishedComment:
     updated_at: datetime
     finding_id: UUID | None = None
     thread_resolved: bool = False
+    # Тред закрыл сам бот (ответ «исправлено»/«неактуально»). Закрытый не ботом
+    # считается закрытым человеком: такое замечание повторно не публикуется.
+    thread_resolved_by_bot: bool = False
     in_reply_to_provider_comment_id: str | None = None
     feedback_positive: int = 0
     feedback_negative: int = 0
@@ -275,6 +287,17 @@ class OpenReviewThread:
     finding: Finding
     root_provider_comment_id: str
     root_published_comment_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class BotThread:
+    """Инлайн-тред бота на PR с прошлого прогона - открытый или закрытый."""
+
+    finding: Finding
+    root_provider_comment_id: str
+    root_published_comment_id: UUID
+    resolved: bool
+    resolved_by_bot: bool
 
 
 @dataclass(frozen=True, slots=True)

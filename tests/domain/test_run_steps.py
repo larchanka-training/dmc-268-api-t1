@@ -21,7 +21,7 @@ from app.domain.run_steps import (
     finish_step,
     start_step,
 )
-from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
+from app.domain.vcs_errors import DiffTooLargeError, VcsError, VcsFileTooLargeError
 
 NOW = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
 RUN_ID, STEP_ID = UUID(int=1), UUID(int=2)
@@ -93,9 +93,10 @@ def test_a_negative_duration_is_clamped_to_zero() -> None:
         (PromptTooLargeError("больше окна"), "PROMPT_TOO_LARGE"),
         (VcsError("GitHub недоступен"), "SCM_UNAVAILABLE"),
         (VcsFileTooLargeError("слишком большой"), "SCM_UNAVAILABLE"),
+        (DiffTooLargeError("дифф больше лимита"), "DIFF_TOO_LARGE"),
         (RuntimeError("ошибка программы"), INTERNAL_ERROR),
     ],
-    ids=["llm", "timeout", "rate-limited", "output", "too-large", "vcs", "vcs-subclass", "other"],
+    ids=["llm", "timeout", "rate-limited", "output", "too-large", "vcs", "vcs-subclass", "diff-too-large", "other"],
 )
 def test_the_error_code_comes_from_the_failure_class(
     error: Exception, code: str

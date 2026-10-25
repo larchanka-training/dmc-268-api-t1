@@ -15,11 +15,13 @@
 """
 
 from typing import Protocol
+from uuid import UUID
 
 from app.application.ports.vcs_review import (
     InlineCommentDraft,
     MergeGateCheck,
     PullRequestReviewPublication,
+    ReviewThreadState,
 )
 from app.domain.entities import PRMetadata
 
@@ -28,13 +30,18 @@ CHECK_RUN_NAME = "dmc-268-ai-review"
 
 class VcsGateway(Protocol):
     def fetch_diff(
-        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
+        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
     ) -> str:
         """Unified diff пары коммитов base...head как есть, строкой.
 
         Пара SHA берётся из сообщения задачи, а не актуальный head `/pulls/{n}`:
         между доставкой вебхука и обработкой мог прийти `synchronize` — воркер
         обязан ревьюить тот коммит, для которого создан прогон.
+
+        Размер диффа задаёт автор PR, поэтому лимит `max_bytes` соблюдается во
+        время загрузки: тело больше лимита не дочитывается —
+        `VcsFileTooLargeError`. Достаёт дифф только воркер; приём вебхука его не
+        запрашивает.
         """
         ...
 
@@ -78,8 +85,16 @@ class VcsGateway(Protocol):
         installation_id: int,
         summary_body: str,
         inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
     ) -> PullRequestReviewPublication:
-        """Один review на прогон: сводка и пакет инлайн-комментариев."""
+        """Один review на прогон: сводка и пакет инлайн-комментариев.
+
+        Без дублей: ответ на создание не пришёл - адаптер ищет ревью прогона
+        `review_run_id` на хостинге и создаёт заново, только если его нет;
+        попытки кончились - `VcsError`. id сводки возвращается, как только ревью создано; id
+        inline-комментария, который хостинг не отдал, - `None`.
+        """
         ...
 
     def reply_to_review_comment(
@@ -90,17 +105,24 @@ class VcsGateway(Protocol):
         provider_comment_id: str,
         body: str,
     ) -> str:
-        """Ответ в существующий review comment; возвращает id нового комментария."""
+        """Ответ в существующий review comment; возвращает id нового комментария.
+
+        Без повтора: сбой, после которого неизвестно, ушёл ли ответ, - `VcsError`.
+        """
         ...
 
-    def fetch_review_threads_resolved_state(
+    def fetch_review_threads_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
         provider_comment_ids: frozenset[str],
-    ) -> dict[str, bool]:
-        """Для каждого id корневого комментария — `isResolved` треда на хостинге."""
+    ) -> dict[str, ReviewThreadState]:
+        """Состояние треда на хостинге по id его корневого комментария.
+
+        Все треды PR - одним запросом с пагинацией. Комментария, которого
+        хостинг не нашёл (удалён), в ответе нет.
+        """
         ...
 
     def resolve_review_thread_for_comment(

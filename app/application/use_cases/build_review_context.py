@@ -3,9 +3,10 @@
 `fetch_review_diff` → `parse_diff` → контекст PR (заголовок, описание,
 сообщения коммитов) → правила целевой ветки → содержимое изменённых файлов
 на `head_sha` и их контуры → чистая `assemble_context`. Получение диффа —
-отдельная функция: у прогона это отдельный шаг (`fetching_diff`). Сбой
-получения диффа пробрасывается: без диффа ревьюить нечего, прогон уходит в
-`failed` и DLQ.
+отдельная функция: у прогона это отдельный шаг (`fetching_diff`), и дифф
+достаётся здесь впервые — приём вебхука его не запрашивает. Сбой получения
+диффа и дифф больше `diff_max_bytes` пробрасываются: без диффа ревьюить
+нечего, прогон уходит в `failed` и DLQ.
 Контекст PR, правила и AST — best-effort: сбой на них деградирует пакет
 (причина — в `omitted` и `rules.status`), но не прогон.
 """
@@ -30,16 +31,29 @@ from app.application.repo_config_loader import load_repo_rules
 from app.domain.code_context import language_for_path
 from app.domain.diff_parser import filter_diff_files, parse_diff
 from app.domain.entities import ParsedFile, ReviewJob
-from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
+from app.domain.vcs_errors import DiffTooLargeError, VcsError, VcsFileTooLargeError
 
 logger = logging.getLogger(__name__)
 
 
-def fetch_review_diff(job: ReviewJob, vcs: VcsGateway) -> str:
-    """Unified diff запроса на изменение между `base_sha` и `head_sha` задачи."""
-    return vcs.fetch_diff(
-        job.repository_full_name, job.base_sha, job.head_sha, job.installation_id
-    )
+def fetch_review_diff(job: ReviewJob, vcs: VcsGateway, *, max_bytes: int) -> str:
+    """Unified diff запроса на изменение между `base_sha` и `head_sha` задачи.
+
+    Дифф больше `max_bytes` не дочитывается и не ревьюится по частям:
+    `DiffTooLargeError`, прогон уходит в `failed` с понятной причиной.
+    """
+    try:
+        return vcs.fetch_diff(
+            job.repository_full_name,
+            job.base_sha,
+            job.head_sha,
+            job.installation_id,
+            max_bytes=max_bytes,
+        )
+    except VcsFileTooLargeError as error:
+        raise DiffTooLargeError(
+            f"дифф PR больше лимита {max_bytes} байт: ревью не выполняется"
+        ) from error
 
 
 def build_review_context(

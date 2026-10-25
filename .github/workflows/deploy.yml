@@ -5,8 +5,10 @@ name: Deploy
 
 # Деплой ждёт CI: workflow_run срабатывает, когда CI завершился. Работает
 # только из ветки по умолчанию — у нас это develop.
+# zizmor считает workflow_run опасным триггером: риск принят — gate катит только
+# прогон CI по push и выкатывает проверенный head_sha, а не код из события.
 on:
-  workflow_run:
+  workflow_run:  # zizmor: ignore[dangerous-triggers]
     workflows: [CI]
     types: [completed]
     branches: [develop]
@@ -29,10 +31,11 @@ jobs:
   # Какой коммит катить. Автоматический запуск — только после зелёного CI
   # по пушу в develop: прогон CI по пул-реквесту из ветки с именем develop
   # тоже попадает под фильтр branches, поэтому событие сверяется отдельно.
-  # Ручной запуск — осознанное действие, CI он не ждёт.
+  # Ручной запуск — осознанное действие, CI он не ждёт, но только с develop:
+  # с другой ветки не собирается и образ, а не только деплой.
   gate:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
@@ -49,9 +52,12 @@ jobs:
           RUN_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
-          # Прогоны CI по develop не отменяют друг друга и могут закончиться
-          # не по порядку: без этой сверки поздно завершившийся CI старого
-          # коммита откатил бы стенд назад. Новый коммит катит свой прогон.
+          # Прогоны CI по пушам в develop стоят в одной очереди (concurrency
+          # в ci.yml, `queue: max`) и идут по одному, но порядок очереди GitHub
+          # не гарантирует, а ручной запуск катит вершину develop мимо CI:
+          # прогон CI старого коммита, завершившийся после него, откатил бы
+          # стенд назад. Сверка с вершиной это закрывает; новый коммит катит
+          # свой прогон.
           if [ "$GITHUB_EVENT_NAME" = workflow_run ]; then
             tip="$(gh api "repos/${GITHUB_REPOSITORY}/commits/develop" --jq .sha)"
             if [ "$tip" != "$RUN_SHA" ]; then
@@ -69,11 +75,15 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # Наружу — ссылка с digest: тег перезаписывается, digest называет ровно
+    # собранный здесь образ, и tofu забирает его (проверка api_image в
+    # infra/variables.tf).
     outputs:
-      image: ${{ steps.meta.outputs.image }}
+      image: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.gate.outputs.sha }}
 
       - name: Посчитать имя образа
@@ -84,34 +94,66 @@ jobs:
           set -euo pipefail
           # Тег по commit sha, а не по хешу исходников: так видно, какой именно
           # коммит сейчас на стенде.
-          image="$(printf '%s' "$IMAGE_NAME" | tr 'A-Z' 'a-z'):${SHA}"
+          image="$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]'):${SHA}"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "$image"
 
       # Без этого шага buildx работает на docker-драйвере, а тот не умеет
       # экспортировать кеш: `cache-to: type=gha` падает с «Cache export is not
       # supported for the docker driver».
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Без provenance-аттестации: в ней данные прогона, и повторная сборка
+          # того же коммита давала бы новый digest — tofu пересоздавал бы migrate,
+          # api и worker с дренажом воркера. Аттестацию никто не читает.
+          provenance: false
 
       - name: Убедиться, что образ забирается обратно
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          docker manifest inspect "${{ steps.meta.outputs.image }}" > /dev/null
-          echo "образ доступен по тегу"
+          # Пустой digest дал бы ссылку, которую отвергнет проверка api_image,
+          # но уже в job'е деплоя; ловим здесь.
+          if [ -z "$DIGEST" ]; then
+            echo "::error::сборка не вернула digest"
+            exit 1
+          fi
+          docker manifest inspect "${IMAGE}@${DIGEST}" > /dev/null
+          echo "образ доступен по digest ${DIGEST}"
+
+      # trivy в ci.yml смотрит образ, собранный в CI, а на стенд уезжает этот:
+      # он собран заново, и базовый python:3.14-slim между сборками мог
+      # смениться. Поэтому сканируется опубликованный digest — ровно то, что
+      # заберёт tofu, — с теми же порогами, что в CI. Образ в приватном ghcr:
+      # trivy берёт креды из ~/.docker/config.json, который записал
+      # docker/login-action выше (keychain go-containerregistry в
+      # pkg/remote/remote.go trivy). TRIVY_IMAGE_SRC=remote — сразу из реестра:
+      # в локальном docker этого образа нет, buildx его не загружал.
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_IMAGE_SRC: remote
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
 
   deploy:
     needs: [gate, image]
@@ -120,43 +162,60 @@ jobs:
     # apply держит блокировку состояния, поэтому лучше упасть раньше шести часов.
     # Но не раньше, чем воркер доработает сообщение: при пересоздании apply ждёт
     # его до destroy_grace_seconds — до 41 мин (local.worker_stop_seconds в
-    # infra/main.tf); job, убитый посреди apply, оставил бы блокировку висеть.
-    # После apply — до 5 мин на шаг «реплика получает поток» (первая сборка
-    # реплики копирует базу целиком). Худший случай ≈ 41 + init и apply +
-    # минута /health + 1,5 мин воркера + 5 ≈ 50 мин: запас в 60 есть, но
-    # растёт грейс воркера или ожидание реплики — пересчитать здесь.
+    # infra/locals.tf); job, убитый посреди apply, оставил бы блокировку висеть.
+    # После apply — до 5 мин на проверку реплики (первая сборка копирует базу
+    # целиком, check-replica.sh). Худший случай ≈ 41 + init и apply + минута
+    # /health + 1,5 мин воркера + 5 ≈ 50 мин: запас в 60 есть, но растёт грейс
+    # воркера или ожидание реплики — пересчитать здесь.
     timeout-minutes: 60
+    # Environment `stand` пускает только develop: ручной запуск с другой ветки
+    # отклоняется до первого шага. Секреты при этом остаются в репозитории.
+    environment: stand
     # packages: read обязателен — образ тянется из приватного пакета, и его
     # забирает docker-провайдер тем же GITHUB_TOKEN. Без него реестр отвечает
     # «denied», а не чем-нибудь понятным.
     permissions:
       contents: read
       packages: read
+    # Адрес стенда: публичный origin интерфейса и адрес в summary. На сервер
+    # шаги ходят через хост `stand` из ~/.ssh/config (stand-ssh).
+    env:
+      HOST: ${{ vars.VPS_DMC268_IP_T1 }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.gate.outputs.sha }}
 
-      - uses: opentofu/setup-opentofu@v2
-        with:
-          tofu_version: 1.12.6
-
-      # Хранилище состояния и туннель к нему. Тот же composite action, что и у
-      # tfstate-backend.yml: снесённый контейнер чинится этим же деплоем.
-      - uses: ./.github/actions/s3-backend
+      # Ключ, known_hosts и хост `stand` в ~/.ssh/config для всех шагов ниже.
+      - uses: ./.github/actions/stand-ssh
         with:
           ssh_key: ${{ secrets.VPS_DMC268_KEY_T1 }}
           ssh_user: ${{ secrets.VPS_DMC268_U }}
           host: ${{ vars.VPS_DMC268_IP_T1 }}
+
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: 1.13.2
+
+      # Хранилище состояния и туннель к нему: снесённый контейнер чинится этим
+      # же деплоем, новый тег образа выкатывается на прежнем томе.
+      - uses: ./.github/actions/s3-backend
+        with:
           s3_user: ${{ secrets.S3_USER_DMC268_T1 }}
           s3_password: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
           container: dmc268-s3
           volume: dmc268-s3-data
           port: "9000"
-          image: rustfs/rustfs:1.0.0
+          image: rustfs/rustfs:1.0.3
           cred_user_var: RUSTFS_ACCESS_KEY
           cred_pass_var: RUSTFS_SECRET_KEY
           bucket: dmc268-tfstate
+
+      # До применения: считает логи контейнеров, которые выкат сейчас заменит.
+      - name: Доставки вебхука и сбои воркера с прошлого выката
+        continue-on-error: true
+        run: .github/scripts/deploy/diagnostics.sh
 
       - name: Применить конфигурацию
         id: apply
@@ -165,11 +224,23 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
           AWS_DEFAULT_REGION: us-east-1
-          SSH_USER: ${{ secrets.VPS_DMC268_U }}
-          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+          # Docker-провайдер зовёт системный ssh, и тот берёт пользователя,
+          # адрес и ключ из ~/.ssh/config.
+          TF_VAR_docker_host: ssh://stand
+          # Наружу не смотрит ничего из этого стека: снаружи API доступен через
+          # `/api/` на публичном входе интерфейса, который ходит к нему по
+          # внутренней docker-сети. Порт остаётся на петле — от неё зависят
+          # туннельная проверка живости и отладка. База и брокер портов на
+          # хосте не публикуют вовсе: они только во внутренней сети стека.
+          TF_VAR_bind_ip: 127.0.0.1
+          # Интерфейс отдаётся по HTTPS на тот же адрес (public_tls в dmc-268-ui-t1),
+          # и API приходят его запросы: с этим origin сверяется Origin.
+          TF_VAR_public_origin: https://${{ vars.VPS_DMC268_IP_T1 }}
           TF_VAR_api_image: ${{ needs.image.outputs.image }}
           TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
           TF_VAR_rabbitmq_password: ${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}
+          # Пароль роли replicator. Нет секрета — пустая строка, и проверка
+          # переменной роняет plan, ничего не меняя на сервере.
           TF_VAR_postgres_replication_password: ${{ secrets.PG_REPLICATION_PASSWORD_DMC268_T1 }}
           TF_VAR_github_webhook_secret: ${{ secrets.WEBHOOK_SECRET_DMC268_T1 }}
           TF_VAR_github_app_id: ${{ vars.APP_ID_DMC268_T1 }}
@@ -186,35 +257,24 @@ jobs:
           TF_VAR_llm_backend: stub
         run: |
           set -euo pipefail
-          # Наружу не смотрит ничего из этого стека: снаружи API доступен через
-          # `/api/` на публичном входе интерфейса, который ходит к нему по
-          # внутренней docker-сети. Порт остаётся на петле — от неё зависят
-          # туннельная проверка живости и отладка. База и брокер портов на
-          # хосте не публикуют вовсе: они только во внутренней сети стека.
-          export TF_VAR_docker_host="ssh://${SSH_USER}@${HOST}"
-          export TF_VAR_service_host="$HOST"
-          # Интерфейс отдаётся по HTTPS на тот же адрес (public_tls в dmc-268-ui-t1),
-          # и API приходят его запросы: с этим origin сверяется Origin.
-          export TF_VAR_public_origin="https://$HOST"
-          export TF_VAR_bind_ip="127.0.0.1"
-
           tofu init -input=false -no-color
 
           # Упавшие миграции оставляют свой контейнер с ненулевым кодом, а
-          # Terraform не пересоздаёт ресурс, конфигурация которого не
+          # OpenTofu не пересоздаёт ресурс, конфигурация которого не
           # изменилась, — и постусловие падает на том же старом коде. Новый
           # коммит расшивает это сам (меняется тег образа), а повторный прогон
           # того же коммита залипал бы. Форсируем замену ровно в этом случае:
           # здоровый путь остаётся идемпотентным.
-          # Подключение готовит шаг s3-backend выше.
           # Фильтр по цифрам обязателен: для несуществующего контейнера
           # `docker inspect` печатает пустую строку в stdout и лишь затем
           # отдаёт ненулевой код. Без фильтра в переменную попадали обе строки,
           # и замена форсировалась всякий раз, когда контейнера нет.
           replace=""
-          previous="$(ssh -o BatchMode=yes "$SSH_USER@$HOST" \
+          previous="$(ssh stand \
             "docker inspect -f '{{.State.ExitCode}}' dmc268-migrate 2>/dev/null || true" \
-            | grep -E '^[0-9]+$' | tail -1)"
+            | grep -E '^[0-9]+$' | tail -1 || true)"
+          # `|| true`: нет контейнера — grep ничего не находит и под pipefail
+          # уронил бы шаг на чистом сервере, мимо ветки «заменять нечего».
           case "$previous" in
             "") echo "контейнера миграций нет — заменять нечего" ;;
             0) echo "прошлые миграции прошли успешно" ;;
@@ -224,152 +284,44 @@ jobs:
 
           # shellcheck disable=SC2086  # пустая строка не должна стать аргументом
           tofu apply -input=false -no-color -auto-approve $replace
-          echo "api_url=$(tofu output -raw api_url)" >> "$GITHUB_OUTPUT"
+
+      - name: Проверить, что API жив (через туннель)
+        run: .github/scripts/deploy/check-api.sh
+
+      - name: Проверить, что воркер работает
+        run: .github/scripts/deploy/check-worker.sh
+
+      - name: Проверить, что реплика получает поток
+        run: .github/scripts/deploy/check-replica.sh
 
       # Уборка — гигиена, а не часть выката: неудача здесь означает мусор на
-      # диске, а не сломанный стенд, поэтому шаг не роняет прогон. Порог в
-      # неделю оставляет предыдущие теги на месте для отката.
+      # диске, а не сломанный стенд, поэтому шаг не роняет прогон. Стоит после
+      # проверок: упавший выкат диск не трогает. Порог в неделю оставляет
+      # предыдущие теги на месте для отката.
       #
       # Масштаб скромный: слои у тегов общие, и удаление двух образов API
       # освободило 99 КБ. По-настоящему место занимает смена зависимостей —
       # тогда на диск ложится новый набор слоёв, и убрать его больше некому.
-      # Подключение (ключ, known_hosts, ~/.ssh/config) готовит шаг s3-backend
-      # выше. Переставить этот шаг перед ним — получить «Permission denied».
       - name: Убрать устаревшие образы
+        # После любого успешного apply, как раньше: упавшие проверки стенда
+        # не повод оставлять старые образы на диске.
+        if: ${{ !cancelled() && steps.apply.outcome == 'success' }}
         continue-on-error: true
-        env:
-          SSH_USER: ${{ secrets.VPS_DMC268_U }}
-          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
-        run: |
-          set -uo pipefail
-          ssh -o BatchMode=yes "$SSH_USER@$HOST" \
-            "docker image prune -af --filter until=168h" 2>&1 | tail -5
+        # Явный bash включает pipefail: сбой ssh не прячется за `tail`.
+        shell: bash
+        run: ssh stand "docker image prune -af --filter until=168h" 2>&1 | tail -5
 
-      # Подключение готовит шаг s3-backend выше — см. комментарий к уборке.
-      - name: Проверить, что API жив (через туннель)
-        env:
-          SSH_USER: ${{ secrets.VPS_DMC268_U }}
-          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
-        run: |
-          set -uo pipefail
-          # Через туннель, а не по публичному адресу: так «сервис мёртв» не
-          # путается с «порт закрыт снаружи». Публичную доступность проверяет
-          # следующий шаг.
-          ssh -o BatchMode=yes -o ExitOnForwardFailure=yes \
-            -f -N -L 18000:127.0.0.1:8000 "$SSH_USER@$HOST"
-
-          for _ in $(seq 1 30); do
-            if curl -fsS --max-time 3 http://127.0.0.1:18000/health >/dev/null 2>&1; then
-              echo "/health отвечает"
-              exit 0
-            fi
-            sleep 2
-          done
-
-          echo "::error::/health не ответил за минуту"
-          ssh -o BatchMode=yes "$SSH_USER@$HOST" \
-            "docker logs --tail 50 dmc268-api 2>&1; echo '--- миграции ---'; docker logs --tail 30 dmc268-migrate 2>&1" || true
-          exit 1
-
-      # HTTP у воркера нет, поэтому живость — это состояние контейнера.
-      # «Запущен» мало: при падении Docker перезапускает его, и в момент
-      # проверки он снова запущен. Живым считаем контейнер, который 30 секунд
-      # подряд запущен и ни разу не перезапустился; опрос каждые 5 секунд
-      # видит и быстрый рестарт — по выросшему счётчику. Окно длиннее
-      # жизни процесса ловит любую петлю падений с периодом до 30 секунд:
-      # после падения процесса, прожившего больше 10 секунд, Docker сбрасывает
-      # задержку и поднимает его сразу, и короткое окно такую петлю пропускало.
-      # Рестарты в начале, пока брокер не готов (depends_on его не ждёт),
-      # окно не засчитывает и начинает заново; на всё — до 90 секунд.
-      - name: Проверить, что воркер работает
-        env:
-          SSH_USER: ${{ secrets.VPS_DMC268_U }}
-          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
-        run: |
-          set -uo pipefail
-          state() {
-            ssh -o BatchMode=yes "$SSH_USER@$HOST" \
-              "docker inspect -f '{{.State.Running}} {{.RestartCount}}' dmc268-worker 2>/dev/null" \
-              | grep -E '^(true|false) [0-9]+$' | tail -1
-          }
-
-          hold=30
-          started="$(date +%s)"
-          last=""
-          stable_since="$started"
-          while [ $(( $(date +%s) - started )) -lt 90 ]; do
-            now="$(date +%s)"
-            current="$(state)"
-            if [ -n "$current" ] && [ "${current%% *}" = "true" ] && [ "$current" = "$last" ]; then
-              if [ $(( now - stable_since )) -ge "$hold" ]; then
-                echo "воркер работает ${hold} с без рестартов, рестартов всего: ${current##* }"
-                exit 0
-              fi
-            else
-              [ -n "$last" ] && echo "воркер ещё не устоялся: было '${last}', стало '${current}'"
-              last="$current"
-              stable_since="$now"
-            fi
-            sleep 5
-          done
-
-          echo "::error::воркер не проработал ${hold} с без рестартов за полторы минуты"
-          ssh -o BatchMode=yes "$SSH_USER@$HOST" "docker logs --tail 50 dmc268-worker 2>&1" || true
-          exit 1
-
-      # Реплика, которая запущена, но не получает поток, внешне неотличима от
-      # рабочей: контейнер жив, на запросы отвечает. Поэтому проверяем со
-      # стороны основного сервера — слот активен, и держит его именно реплика
-      # (application_name dmc268_replica), а не pg_basebackup первой сборки,
-      # у которого свой walsender в том же состоянии streaming.
-      # Первая сборка на пустом томе копирует базу целиком, отсюда пять минут.
-      # Пользователь и база — из окружения контейнера, запрос — через stdin:
-      # так в командной строке нет ни кавычек запроса, ни захардкоженных имён.
-      - name: Проверить, что реплика получает поток
-        env:
-          SSH_USER: ${{ secrets.VPS_DMC268_U }}
-          HOST: ${{ vars.VPS_DMC268_IP_T1 }}
-        run: |
-          set -uo pipefail
-          query="select r.state from pg_stat_replication r join pg_replication_slots s on s.active_pid = r.pid where s.slot_name = 'dmc268_replica' and r.application_name = 'dmc268_replica'"
-          remote="docker exec -i dmc268-postgres sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -XtA'"
-          # Реплика, потерявшая поток между деплоями (например, слот потерян по
-          # max_slot_wal_keep_size), — unhealthy, но Docker такие контейнеры не
-          # перезапускает. Перезапуск даёт entrypoint пересобрать её; на другом
-          # кластере основного сервера она остановится, ничего не стерев.
-          health="$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" \
-            "docker inspect -f '{{.State.Health.Status}}' dmc268-postgres-replica" 2>/dev/null)"
-          if [ "$health" = "unhealthy" ]; then
-            echo "::warning::реплика unhealthy до проверки — перезапускаю"
-            ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" "docker restart dmc268-postgres-replica" >/dev/null
-          fi
-
-          state=""
-          deadline=$(( $(date +%s) + 300 ))
-          while [ "$(date +%s)" -lt "$deadline" ]; do
-            state="$(printf '%s\n' "$query" \
-              | ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" "$remote" 2>/dev/null \
-              | tr -d '[:space:]')"
-            if [ "$state" = "streaming" ]; then
-              echo "реплика получает поток"
-              exit 0
-            fi
-            sleep 5
-          done
-
-          echo "::error::реплика не перешла в streaming за пять минут (состояние: '${state:-нет соединения}')"
-          ssh -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$HOST" \
-            "docker logs --tail 50 dmc268-postgres-replica 2>&1; echo '--- настройка репликации ---'; docker logs --tail 30 dmc268-replication-setup 2>&1" || true
-          exit 1
-
+      # Публичный адрес API — вход интерфейса: порт 8000 снаружи закрыт.
       - name: Записать результат в summary
         if: always()
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}
         run: |
           {
             echo "## Деплой"
             echo
             echo "| | |"
             echo "| --- | --- |"
-            echo "| Образ | \`${{ needs.image.outputs.image }}\` |"
-            echo "| Адрес | ${{ steps.apply.outputs.api_url || 'не получен' }} |"
+            echo "| Образ | \`${IMAGE}\` |"
+            echo "| Адрес | https://${HOST}/api/v1/ |"
           } >> "$GITHUB_STEP_SUMMARY"

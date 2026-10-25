@@ -12,6 +12,7 @@ from typing import Protocol
 from uuid import UUID
 
 from app.domain.entities import (
+    BotThread,
     ContextPayload,
     Finding,
     MergeRequest,
@@ -27,14 +28,13 @@ from app.domain.entities import (
 )
 from app.domain.enums import Provider
 from app.domain.run_feed import FeedCursor
+from app.domain.run_list import RunListFilter, RunListPage
 
 
 class RepositoryRepo(Protocol):
     def get(self, repository_id: UUID) -> Repository | None: ...
 
     def find_by_provider(self, provider: Provider, provider_id: str) -> Repository | None: ...
-
-    def list_all(self, limit: int, offset: int) -> list[Repository]: ...
 
     def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
         """Зарегистрированные репозитории провайдера из списка его id; незарегистрированных нет."""
@@ -70,6 +70,10 @@ class ReviewRunRepo(Protocol):
 
     def find_active(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None: ...
 
+    def find_reviewed(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        """Самый поздний прогон по вебхуку на этот коммит в `REVIEWED_STATUSES`."""
+        ...
+
     def list_unfinished(self) -> list[ReviewRun]: ...
 
     def list_changed(
@@ -85,6 +89,15 @@ class ReviewRunRepo(Protocol):
         окна перепроверки — `updated_at` позже `recheck_from`, но не новее `after` (окно
         ограничено временем, а не числом строк). Порядок — по `(updated_at, id)`. Пустой
         `repository_ids` — пустой ответ.
+        """
+        ...
+
+    def list_page(self, run_filter: RunListFilter, limit: int, offset: int) -> RunListPage:
+        """Страница прогонов под фильтром — строками списка — и их общее число.
+
+        Порядок — `created_at` по убыванию, при равном — `id` по убыванию. Число
+        запросов к базе не зависит от размера страницы. Пустой `repository_ids` или
+        пустой набор статусов — пустая страница и `total = 0`.
         """
         ...
 
@@ -116,6 +129,10 @@ class FindingRepo(Protocol):
 
     def add(self, finding: Finding) -> None: ...
 
+    def mark_covered(self, finding_id: UUID, covered_by_finding_id: UUID) -> None:
+        """Связать находку с находкой, чей тред бота уже о той же проблеме."""
+        ...
+
 
 class PublishedCommentRepo(Protocol):
     def list_for_run(self, review_run_id: UUID) -> list[PublishedComment]: ...
@@ -123,6 +140,10 @@ class PublishedCommentRepo(Protocol):
     def list_open_threads_for_merge_request(
         self, merge_request_id: UUID
     ) -> list[OpenReviewThread]: ...
+
+    def list_threads_for_merge_request(self, merge_request_id: UUID) -> list[BotThread]:
+        """Все inline-треды бота на PR, открытые и закрытые, в порядке публикации."""
+        ...
 
     def get(self, published_comment_id: UUID) -> PublishedComment | None: ...
 
@@ -175,6 +196,11 @@ class ProviderTokenRepo(Protocol):
     """
 
     def get(self, session_id: UUID) -> ProviderToken | None: ...
+
+    def exists(self, session_id: UUID) -> bool:
+        """Есть ли у сессии токен — без расшифровки и без ключа: проверка сессии на
+        каждом запросе (`authenticate`) не должна зависеть от шифрования."""
+        ...
 
     def get_for_update(self, session_id: UUID) -> ProviderToken | None:
         """Прочитать и держать запись до конца транзакции: refresh одной сессии —

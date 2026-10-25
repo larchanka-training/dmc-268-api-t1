@@ -106,8 +106,9 @@ class GitHubInstallationCatalog:
     def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
         """`GET /repositories/{id}` токеном пользователя («Get a repository»): `404` или
         `403` не из-за лимита — пользователь репозитория не видит."""
-        if not provider_id.isdigit():
+        if not (provider_id.isascii() and provider_id.isdigit()):
             # Id репозитория GitHub — число; иное не отправляем в путь запроса.
+            # `isdigit()` один пропустил бы и не-ASCII цифры (`²`, `١٢٣`).
             return None
         url = f"/repositories/{provider_id}"
         try:
@@ -174,7 +175,7 @@ class GitHubInstallationCatalog:
             raise VcsAuthError(f"GitHub API отверг JWT приложения на GET {url}")
         if status == 401:
             raise ProviderTokenRejected(f"GitHub API отверг токен пользователя на GET {url}")
-        if status == 429 or status >= 500 or (status == 403 and _rate_limited(response)):
+        if status >= 500 or is_rate_limited(response):
             raise VcsUnavailableError(f"GitHub API: HTTP {status} на GET {url}")
         if status in (403, 404):
             raise _Inaccessible(status)
@@ -191,19 +192,40 @@ class GitHubInstallationCatalog:
             raise VcsError(f"GitHub API вернул неожиданное тело на GET {url}: {problems}") from None
 
 
-def _rate_limited(response: httpx.Response) -> bool:
-    """`403` из-за лимита GitHub, а не из-за доступа («Rate limits for the REST API»).
+def is_rate_limited(response: httpx.Response, *, graphql: bool = False) -> bool:
+    """Отказ лимита GitHub, а не доступа: 429, 403 лимита, у GraphQL - ошибка лимита при 200.
 
-    Первичный лимит — `x-ratelimit-remaining: 0`; вторичный — `retry-after`
-    или, бывает, только «rate limit» в `message` тела.
+    `403` лимита («Rate limits for the REST API»): первичный -
+    `x-ratelimit-remaining: 0`, вторичный - `retry-after` или, бывает, только
+    «rate limit» в `message` тела. GraphQL отдаёт превышение статусом 200
+    (первичный) или 200/403 (вторичный) с сообщением в `errors` («Rate limits
+    and query limits for the GraphQL API»); тип ошибки - `RATE_LIMITED`.
     """
-    if response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers:
+    status = response.status_code
+    if status == 429:
         return True
-    try:
-        message = _ErrorBody.model_validate_json(response.content).message
-    except ValidationError:
+    if status == 403:
+        if response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers:
+            return True
+        try:
+            message = _ErrorBody.model_validate_json(response.content).message
+        except ValidationError:
+            return False
+        return message is not None and "rate limit" in message.lower()
+    if not graphql or status != 200:
         return False
-    return message is not None and "rate limit" in message.lower()
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if not isinstance(errors, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and (item.get("type") == "RATE_LIMITED" or "rate limit" in str(item.get("message", "")).lower())
+        for item in errors
+    )
 
 
 class _GitHubModel(BaseModel):

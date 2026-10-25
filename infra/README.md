@@ -1,6 +1,29 @@
-# Стек сервера (API на Python 3.14, PostgreSQL 18, RabbitMQ 4.3)
+# Стек сервера (API на Python 3.14, PostgreSQL 18, RabbitMQ 4.4)
 
-Нужны **Docker Engine** на целевом хосте и OpenTofu >= 1.12 (в CI ставится 1.12.6). Образ API не собирается здесь: он публикуется в ghcr из CI и забирается по тегу (`api_image`).
+Нужны **Docker Engine** на целевом хосте и OpenTofu >= 1.13 (в CI ставится 1.13.2). Образ API не собирается здесь: он публикуется в ghcr из CI и забирается по digest (`api_image` — `<репозиторий>:<commit sha>@sha256:<digest>`; ссылка без digest не проходит проверку переменной).
+
+## Раскладка файлов
+
+Конфигурация разложена по доменам; OpenTofu читает все `*.tf` каталога как один модуль, так что адреса ресурсов от файла не зависят.
+
+| Файл | Что внутри |
+| --- | --- |
+| `versions.tf` | версия OpenTofu, провайдер `kreuzwerker/docker` и его настройки (хост Docker, вход в ghcr) |
+| `backend.tf` | хранилище состояния (S3 на сервере) |
+| `locals.tf` | общие значения: ротация логов, окружение контейнеров приложения, грейс-период воркера |
+| `network.tf` | три сети: вход `dmc268` (общая со стеком `dmc-268-ui-t1`), данные `dmc268-backend`, исходящая `dmc268-egress` |
+| `postgres.tf` | образ, том и контейнер PostgreSQL |
+| `rabbitmq.tf` | образ, том и контейнер RabbitMQ |
+| `app.tf` | образ API и контейнеры `migrate`, `api`, `worker` |
+| `replica.tf` | роль репликации, горячая реплика и резервные копии PostgreSQL |
+| `postgres/` | то, что загружается в контейнеры PostgreSQL: `pg_hba.conf`, SQL роли, entrypoint реплики, скрипт копий |
+| `variables.tf` | входные переменные, по секциям тех же доменов |
+| `outputs.tf` | выходы |
+| `tests/*.tftest.hcl` | `tofu test` с mock-провайдером |
+
+## Почему OpenTofu, а не Terraform
+
+Terraform с версии 1.6 распространяется под Business Source License (BUSL) — она не open source, и условия дополнительного разрешения HashiCorp на использование размыты. OpenTofu — форк последней открытой версии под Mozilla Public License 2.0, проект Linux Foundation. Провайдеры у него те же, что у Terraform (своих OpenTofu не пишет), а берутся из собственного реестра `registry.opentofu.org`: `kreuzwerker/docker` работает без изменений. Сверх Terraform OpenTofu умеет шифровать состояние и план на диске и в бэкенде (с 1.7); у нас шифрование пока не включено — состояние лежит в хранилище на петле сервера, доступном только через SSH-туннель.
 
 ## Локальный или удалённый Docker
 
@@ -9,7 +32,7 @@
 - Локальный демон: `docker_host = "unix:///var/run/docker.sock"` (у Docker Desktop на macOS часто `unix:///Users/<вы>/.docker/run/docker.sock`).
 - Удалённый сервер: `docker_host = "ssh://user@server"` (нужны SSH-доступ и Docker на удалённом хосте).
 
-API публикуется на `bind_ip`, в деплое это `127.0.0.1`. Другого значения конфигурация не примет: переменная проверяется на адрес петли (`127.0.0.0/8` или `::1`), и ошибка всплывает на `plan`. В URL для клиентов используется `service_host`, его нельзя ставить в `0.0.0.0`. PostgreSQL, реплика и RabbitMQ портов на хосте не публикуют вовсе — см. «Сети».
+API публикуется на `bind_ip`, в деплое это `127.0.0.1`. Другого значения конфигурация не примет: переменная проверяется на адрес петли (`127.0.0.0/8` или `::1`), и ошибка всплывает на `plan`. PostgreSQL, реплика и RabbitMQ портов на хосте не публикуют вовсе — см. «Сети».
 
 ## Сети
 
@@ -21,7 +44,7 @@ API публикуется на `bind_ip`, в деплое это `127.0.0.1`. �
 | `dmc268-backend` (`internal`) | `postgres`, `postgres-replica`, `postgres-backup`, `rabbitmq`, `migrate`, `replication-setup`, `api`, `worker` | данные. У сети нет шлюза: из неё не выйти в интернет, а интерфейса в ней нет |
 | `dmc268-egress` | `worker` | исходящие запросы воркера к GitHub API и провайдеру модели |
 
-API — единственный, кто стоит и во входе, и в данных. С `internal`-сети Docker не публикует порты, поэтому у базы и брокера портов на хосте нет: для отладки — `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268` и `docker exec dmc268-rabbitmq rabbitmq-diagnostics status`. Изоляцию по описанию проверяет `tests/test_infra_isolation.py`.
+API — единственный, кто стоит и во входе, и в данных. С `internal`-сети Docker не публикует порты, поэтому у базы и брокера портов на хосте нет: для отладки — `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268` и `docker exec dmc268-rabbitmq rabbitmq-diagnostics status`. Изоляцию проверяют `tests/test_infra_isolation.py` (по тексту `infra/*.tf`) и `infra/tests/main.tftest.hcl` (по плану).
 
 ## Реплика и резервные копии
 
@@ -34,7 +57,7 @@ API — единственный, кто стоит и во входе, и в д
 - **Другой кластер основного сервера** (его том заведён заново, например потерян) реплика **не стирает**: в ней может быть последняя копия данных, а новый основной сервер — пустым. Контейнер завершается с ошибкой «основной сервер — другой кластер», деплой падает на проверке потока. Дальше решает человек: если данные реплики нужны — поднять из них основной сервер (или снять `pg_dump` с остановленной реплики); если нет — пересобрать реплику, удалив её том: `docker rm -f dmc268-postgres-replica && docker volume rm dmc268-postgres-replica-data`, затем деплой. Решение принимается только по ответу основного сервера: пока он недоступен, реплика ничего не трогает.
 - **Потолок WAL.** Слот держит WAL для отставшей реплики, но не больше `postgres_max_slot_wal_keep_size` (2 ГБ): иначе упавшая реплика заполнила бы диск основного сервера. Реплика, перешагнувшая потолок, теряет поток и становится `unhealthy`. Docker unhealthy-контейнеры не перезапускает, поэтому это делает деплой: перед проверкой потока он перезапускает unhealthy-реплику, и она пересобирается. Между деплоями — вручную: `docker restart dmc268-postgres-replica`.
 - **Здоровье реплики** — это поток: healthcheck смотрит `pg_stat_wal_receiver.status = streaming`. Отставшая реплика отвечает на запросы, но `unhealthy`.
-- **Деплой** проверяет со стороны основного сервера, что слот держит именно реплика (`application_name = dmc268_replica`, а не `pg_basebackup` первой сборки) и поток в состоянии `streaming`.
+- **Деплой** (`.github/scripts/deploy/check-replica.sh`) проверяет со стороны основного сервера, что слот держит именно реплика (`application_name = dmc268_replica`, а у `pg_basebackup` первой сборки — `dmc268_basebackup`) и поток в состоянии `streaming`; unhealthy-реплику перед этим перезапускает.
 - **Доступ к базе** (`postgres/pg_hba.conf`, вне каталога данных) — только из подсети самого сервера (`samenet`), то есть из `dmc268-backend`.
 
 Реплика на том же сервере: она спасает от сбоя процесса или тома основной базы, но не от падения самого сервера.
@@ -57,6 +80,7 @@ docker run --rm --network dmc268-backend -v dmc268-postgres-backups:/backups:ro 
 - `postgres` и `rabbitmq` — только `no-new-privileges`: их entrypoint стартует от root, чтобы подготовить каталог данных, и сам переходит на служебного пользователя.
 - У каждого контейнера потолок памяти без свопа (`postgres` 1 ГБ, `postgres-replica`, `rabbitmq`, `api` и `worker` по 512 МБ, `migrate` и `postgres-backup` по 256 МБ, `replication-setup` 64 МБ) и ротация логов: три файла по 10 МБ. Вместе — около 3,6 ГБ, без учёта интерфейса и хранилища состояния.
 - `replication-setup` и `postgres-backup` — как `migrate`: файловая система только для чтения, без capabilities. `postgres-replica` — как `postgres`: только `no-new-privileges`.
+- `postgres`, `postgres-replica` и `rabbitmq` при пересоздании и `docker stop` останавливаются штатно: `stop_timeout` и `destroy_grace_seconds` по 60 с. Без `destroy_grace_seconds` провайдер удаляет контейнер через SIGKILL, и база поднимается с восстановлением после аварии.
 
 Смена любого из этих атрибутов пересоздаёт контейнер. Данные PostgreSQL и RabbitMQ лежат в томах и замену переживают.
 
@@ -91,13 +115,13 @@ Eurorouter подключается только фоллбэком после �
 
 | Переменная | Откуда |
 | --- | --- |
-| `api_image` | тег собранного образа |
+| `api_image` | тег и digest собранного образа (`outputs.digest` у `docker/build-push-action`) |
 | `postgres_password`, `rabbitmq_password` | секреты `PG_PASSWORD_DMC268_T1`, `RABBITMQ_PASSWORD_DMC268_T1` |
 | `postgres_replication_password` | секрет `PG_REPLICATION_PASSWORD_DMC268_T1`, не короче 16 символов |
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `user_token_encryption_key` | секрет `USER_TOKEN_KEY_DMC268_T1` — 32 байта в base64 (`openssl rand -base64 32`). Без него или с битым значением `apply` падает на проверке переменной: стенд не стартует без шифрования токенов пользователя. Генерация и установка — `README.md`, «Ключ шифрования токенов пользователя» |
 | `registry_username`, `registry_password` | `github.actor` и `GITHUB_TOKEN`, живут один прогон |
-| `docker_host`, `service_host` | собираются из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
+| `docker_host` | `ssh://stand`: хост `stand` в `~/.ssh/config` собирает `.github/actions/stand-ssh` из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
 | `bind_ip` | `127.0.0.1`: API снаружи не публикуется, к нему ходит интерфейс изнутри docker-сети |
 | `llm_backend` | `stub` прямо в `deploy.yml`: модели на стенде пока нет |
 
@@ -115,7 +139,7 @@ Eurorouter подключается только фоллбэком после �
 
 ## Хранилище состояния
 
-Состояние Terraform лежит не рядом с конфигурацией, а в S3-совместимом хранилище (RustFS) на том же сервере (`backend.tf`). Так оно переживает прогон раннера GitHub Actions, который исчезает вместе со своим диском.
+Состояние OpenTofu лежит не рядом с конфигурацией, а в S3-совместимом хранилище (RustFS) на том же сервере (`backend.tf`). Так оно переживает прогон раннера GitHub Actions, который исчезает вместе со своим диском.
 
 Хранилище слушает только `127.0.0.1`, поэтому `tofu` любой командой, которой нужно состояние, работает через SSH-туннель:
 
@@ -131,7 +155,7 @@ ssh -i <ключ> -o ExitOnForwardFailure=yes -f -N -L 9000:127.0.0.1:9000 <user
 cd infra && tofu force-unlock <ID из ошибки>
 ```
 
-Сам контейнер хранилища **не входит в этот стек**: его поднимает composite action `.github/actions/s3-backend` первым job'ом деплоя, а не Terraform, иначе `apply` мог бы снести хранилище собственного состояния. Практическое следствие: `tofu destroy` его не удалит, и полная зачистка сервера состоит из двух шагов — `tofu destroy`, а затем `docker rm -f dmc268-s3` и `docker volume rm dmc268-s3-data` вручную.
+Сам контейнер хранилища **не входит в этот стек**: его поднимает composite action `.github/actions/s3-backend` шагом job'а деплоя перед `tofu apply`, а не OpenTofu, иначе `apply` мог бы снести хранилище собственного состояния. Практическое следствие: `tofu destroy` его не удалит, и полная зачистка сервера состоит из двух шагов — `tofu destroy`, а затем `docker rm -f dmc268-s3` и `docker volume rm dmc268-s3-data` вручную.
 
 ## Развёртывание и удаление
 
@@ -147,14 +171,14 @@ cd infra && tofu init && tofu plan
 
 Ключ и учётные данные лежат в секретах GitHub и наружу не отдаются, так что у большинства их не будет — и это нормально: чтобы разрабатывать, разворачивать стенд не нужно, достаточно `docker compose up` из корня репозитория.
 
-Проверить конфигурацию без доступа к состоянию можно всегда:
+Проверить конфигурацию без доступа к состоянию можно всегда — то же делает job `opentofu` в `ci.yml`:
 
 ```bash
-cd infra && tofu fmt -check && tofu init -backend=false && tofu validate
+cd infra && tofu fmt -check -recursive && tofu init -backend=false && tofu validate && tofu test
 ```
 
-`tofu destroy` удалит стек, но **не** контейнер хранилища состояния — он не входит в этот стек намеренно. Полная зачистка описана ниже, в разделе про хранилище.
+`tofu test` гоняет `tests/*.tftest.hcl` с `mock_provider "docker"`: ни Docker, ни сервер не нужны. Тесты проверяют адреса базы и брокера в окружении контейнеров, какие секреты получает какой контейнер, сеть и порты, грейс-период воркера, остановку на упавших миграциях и проверки переменных. Проверки отклоняют на `plan`, пока сервер не тронут: пустые `github_webhook_secret`, `postgres_password`, `rabbitmq_password`, пустой или короткий `postgres_replication_password` (незаданный секрет CI приходит пустой строкой), `llm_backend = "ollama"` без `ollama_model`, `llm_hosted_fallback` без `ollama` и всех `eurorouter_*`, `api_image` без digest.
 
-Выход: `api_url`. URL базы и брокера наружу не отдаются: портов на хосте у них нет.
+`tofu destroy` удалит стек, но **не** контейнер хранилища состояния — он не входит в этот стек намеренно. Полная зачистка описана выше, в разделе «Хранилище состояния».
 
 Этот стек только для API. UI деплоится отдельно из `dmc-268-ui-t1/infra/`.

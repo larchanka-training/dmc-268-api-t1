@@ -5,7 +5,7 @@
 `app/api/pagination.py`. Правила подключения — `app/application/use_cases/connect_repository.py`.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Annotated, Literal
@@ -17,9 +17,10 @@ from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
     get_installation_catalog,
+    get_refreshing_catalog,
     get_token_provider,
-    get_unit_of_work,
     get_unit_of_work_factory,
+    get_visibility_catalog,
 )
 from app.api.errors import (
     ERRORS_403_ORIGIN_OR_MANAGE,
@@ -29,6 +30,7 @@ from app.api.errors import (
     ERRORS_422,
     ERRORS_501_NOT_IMPLEMENTED,
     ERRORS_502_SCM_REPOSITORIES,
+    ERRORS_502_SCM_VISIBILITY,
     ApiError,
 )
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
@@ -46,6 +48,7 @@ from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
 from app.application.use_cases import connect_repository as connecting
 from app.application.use_cases.auth import SignedIn
 from app.application.use_cases.user_token import SessionClosed
+from app.domain.entities import InstallationRepository, Repository
 from app.domain.enums import FindingSeverity, Provider, RulesStatus
 from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
@@ -182,34 +185,97 @@ class ConnectRepositoryRequest(StrictRequest):
 
     # strict у модели не пропустил бы enum строкой; для enum-поля — точечно, как в CreateReviewRequest.
     provider: Provider = Field(strict=False, description="Хостинг репозитория.", examples=["github"])
+    # Канонический id: GitHub отдаёт на `/repositories/0101` тот же репозиторий, что на `/101`.
     provider_id: str = Field(
         min_length=1,
         max_length=255,
-        description="Идентификатор репозитория у провайдера (из списка доступных).",
+        pattern=r"^[1-9][0-9]*$",
+        description="Идентификатор репозитория у провайдера (из списка доступных): число без ведущих нулей.",
         examples=["123456789"],
     )
 
 
-def available_repositories(
-    signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
-    oauth: OAuthProvider = Depends(get_token_provider),
-    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
-) -> list[connecting.AvailableRepository]:
-    """Репозитории, видимые пользователю у провайдера по его токену, или ошибка.
+def _as_user[T](signed_in: SignedIn, oauth: OAuthProvider, call: Callable[[connecting.UserContext], T]) -> T:
+    """Вызов провайдера токеном пользователя с переводом сбоев в ответы API.
 
     Токен непригоден — сессия закрыта, `401 UNAUTHENTICATED`; GitHub недоступен —
-    `502 SCM_UNAVAILABLE`. Зависимость, а не код ручки: тот же список задаёт
-    видимость прогонов в потоке GET /events (`app/api/events.py`). Правило одно —
-    поменяется здесь, поменяется у обоих.
+    `502 SCM_UNAVAILABLE`.
     """
     user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
     try:
-        return connecting.list_available_repositories(catalog, uow_factory(), user, datetime.now(UTC))
+        return call(user)
     except SessionClosed:
         raise Unauthenticated(had_cookie=True) from None
     except (VcsError, OAuthProviderUnavailable) as error:
         raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
+
+
+def available_repositories(
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_refreshing_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> list[connecting.AvailableRepository]:
+    """Репозитории, видимые пользователю у провайдера по его токену, с отметкой подключённых."""
+    now = datetime.now(UTC)
+    return _as_user(
+        signed_in, oauth, lambda user: connecting.list_available_repositories(catalog, uow_factory(), user, now)
+    )
+
+
+def user_repositories(
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> list[InstallationRepository]:
+    """Те же репозитории без отметки подключённых — видимость прогонов и репозиториев.
+
+    Список тот же, что у GET /repositories/available, но из кэша в пределах TTL;
+    страница подключения пишет туда свежий. Правило видимости одно — поменяется
+    здесь, поменяется у всех.
+    """
+    now = datetime.now(UTC)
+    return _as_user(signed_in, oauth, lambda user: connecting.list_user_repositories(catalog, uow_factory(), user, now))
+
+
+def visible_provider_ids(
+    signed_in: SignedIn,
+    catalog: InstallationCatalog,
+    oauth: OAuthProvider,
+    uow_factory: Callable[[], UnitOfWork],
+) -> set[str]:
+    """`provider_id` репозиториев, которые пользователь видит на GitHub по своему токену."""
+    return {r.provider_id for r in user_repositories(signed_in, catalog, oauth, uow_factory)}
+
+
+def is_visible(repository: Repository, provider_ids: Collection[str]) -> bool:
+    """Правило видимости кабинета: репозиторий виден, если GitHub отдаёт его пользователю.
+
+    Кабинет видит репозитории только через GitHub: репозиторий другого провайдера не виден никому.
+    """
+    return repository.provider is Provider.GITHUB and repository.provider_id in provider_ids
+
+
+def visible_repository(
+    repository_id: UUID,
+    signed_in: SignedIn,
+    catalog: InstallationCatalog,
+    oauth: OAuthProvider,
+    uow_factory: Callable[[], UnitOfWork],
+) -> Repository:
+    """Репозиторий, если он виден пользователю; невидимый отвечает тем же `404`, что несуществующий.
+
+    GitHub спрашиваем до чтения базы и при любом id, как у прогона: иначе `502`, `401` или
+    время ответа выдали бы, что такой id есть. Вызывается из тела ручки, а не зависимостью:
+    зависимость выполнилась бы и при `422` других параметров — запрос к GitHub впустую.
+    """
+    provider_ids = visible_provider_ids(signed_in, catalog, oauth, uow_factory)
+    with uow_factory() as uow:
+        repository = uow.repositories.get(repository_id)
+    if repository is None or not is_visible(repository, provider_ids):
+        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REPOSITORY_NOT_FOUND, "Репозитория с таким id нет.")
+    return repository
 
 
 @router.get(
@@ -279,21 +345,29 @@ def connect_repository(
     summary="Список зарегистрированных репозиториев",
     response_description="Страница репозиториев.",
     description=(
-        "Требует сессию. Постранично, по времени регистрации, затем по id. limit выше 200 не "
-        "отклоняется, а приводится к 200. Общего числа записей в ответе нет: конец списка — "
-        "страница короче limit."
+        "Требует сессию. Только репозитории, которые пользователь видит на GitHub по своему "
+        "токену, — то же правило, что у GET /reviews и GET /events. Постранично, по времени "
+        "регистрации, затем по id. limit выше 200 не отклоняется, а приводится к 200. Общего числа "
+        "записей в ответе нет: конец списка — страница короче limit."
     ),
-    responses=ERRORS_422,
+    responses={**ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
 def list_repositories(
     limit: Limit = DEFAULT_LIMIT,
     offset: Offset = 0,
-    uow: UnitOfWork = Depends(get_unit_of_work),
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositoryListResponse:
-    repositories = uow.repositories.list_all(page_size(limit), offset)
-    return RepositoryListResponse(
-        items=[RepositoryResponse.model_validate(r, from_attributes=True) for r in repositories]
-    )
+    # GitHub — в теле, а не зависимостью: при 422 limit или offset запроса к нему нет.
+    provider_ids = visible_provider_ids(signed_in, catalog, oauth, uow_factory)
+    with uow_factory() as uow:
+        visible = uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)
+    # Видимых не больше, чем отдаёт GitHub пользователю: страница — срез в памяти.
+    ordered = sorted(visible, key=lambda r: (r.created_at, r.id))
+    page = ordered[offset : offset + page_size(limit)]
+    return RepositoryListResponse(items=[RepositoryResponse.model_validate(r, from_attributes=True) for r in page])
 
 
 # Ограничения фильтра веток в настройках.
@@ -431,16 +505,19 @@ class RulesStatusResponse(
     response_description="Репозиторий.",
     description=(
         "Требует сессию. Один зарегистрированный репозиторий по id — та же форма, что строка "
-        "GET /repositories. 404 REPOSITORY_NOT_FOUND, если репозитория нет."
+        "GET /repositories. 404 REPOSITORY_NOT_FOUND, если репозитория нет или пользователь не "
+        "видит его на GitHub — ответ один и тот же."
     ),
-    responses={**ERRORS_404_REPOSITORY, **ERRORS_422},
+    responses={**ERRORS_404_REPOSITORY, **ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
 def get_repository(
-    repository_id: RepositoryIdPath, uow: UnitOfWork = Depends(get_unit_of_work)
+    repository_id: RepositoryIdPath,
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositoryResponse:
-    repository = uow.repositories.get(repository_id)
-    if repository is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REPOSITORY_NOT_FOUND, "Репозитория с таким id нет.")
+    repository = visible_repository(repository_id, signed_in, catalog, oauth, uow_factory)
     return RepositoryResponse.model_validate(repository, from_attributes=True)
 
 

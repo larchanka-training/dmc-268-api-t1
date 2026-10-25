@@ -27,11 +27,15 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pika import spec
-from pika.exceptions import AMQPConnectionError, ChannelWrongStateError
+from pika.exceptions import (
+    AMQPConnectionError,
+    ChannelWrongStateError,
+    ConnectionBlockedTimeout,
+)
 from pika.exchange_type import ExchangeType
 
 from app.domain.entities import ReviewJob
-from app.infrastructure.telemetry import REVIEW_RUN_ID, record_current_exception
+from app.infrastructure.telemetry import REVIEW_RUN_ID, error_status_span
 
 QUEUE_NAME = "review_jobs"
 DLX_NAME = "review_jobs.dlx"
@@ -42,6 +46,14 @@ MAX_PRIORITY = 9
 # реализованы") — фиксированный дефолт до тех пор, см. design.md
 # change'а add-rabbitmq-job-queue.
 DEFAULT_PRIORITY = 5
+
+# При алярме памяти или диска брокер перестаёт читать сокет издателя, и
+# подтверждение публикации не приходит, пока алярм не снят. Оба таймаута держат
+# худший `enqueue` (ожидание lock'а + блокировка) под 10-секундным лимитом
+# доставки вебхука GitHub: отказ → прогон в failed → 5xx. Сам GitHub упавшую
+# доставку не повторяет — её переотправляет задача #149.
+BLOCKED_CONNECTION_TIMEOUT_SECONDS = 3
+LOCK_TIMEOUT_SECONDS = 3
 
 # Явный пропагатор, а не глобальный: глобальный пуст, чтобы не доверять
 # `traceparent` HTTP-клиентов (`app/infrastructure/telemetry.py`).
@@ -128,8 +140,8 @@ def consuming_span(
     Нет заголовка `traceparent` (сообщение старше трассировки, его переложили руками)
     или он битый — спан начинает новый трейс, обработка идёт как обычно. Исключение
     обработки выходит наружу через контекст-менеджер: спан записывает его событием
-    `exception` и закрывается со статусом ошибки. `KeyboardInterrupt` и `SystemExit` —
-    тоже: их отмечаем сами, `start_as_current_span` видит только `Exception`.
+    `exception` и закрывается со статусом ошибки, в описании — только тип
+    (`error_status_span`). `KeyboardInterrupt` и `SystemExit` — тоже.
     """
     headers = (properties.headers if properties is not None else None) or {}
     # pika отдаёт строковый заголовок `str`, а не декодируемый в UTF-8 — `bytes`.
@@ -138,7 +150,8 @@ def consuming_span(
         for key, value in headers.items()
         if isinstance(value, str | bytes)
     }
-    with _tracer.start_as_current_span(
+    with error_status_span(
+        _tracer,
         f"process {QUEUE_NAME}",
         context=_PROPAGATOR.extract(carrier),
         kind=SpanKind.CONSUMER,
@@ -149,13 +162,11 @@ def consuming_span(
             "messaging.rabbitmq.message.delivery_tag": delivery_tag,
         },
     ):
-        try:
-            yield
-        except Exception:
-            raise
-        except BaseException as exc:
-            record_current_exception(exc)
-            raise
+        yield
+
+
+class PublisherBlockedError(RuntimeError):
+    """Брокер блокирует издателей (алярм памяти или диска): задача не поставлена."""
 
 
 class RabbitMQJobQueue:
@@ -186,7 +197,11 @@ class RabbitMQJobQueue:
             or self._channel is None
             or self._channel.is_closed
         ):
-            self._connection = pika.BlockingConnection(pika.URLParameters(self._url))
+            parameters = pika.URLParameters(self._url)
+            # Заблокированное брокером дольше таймаута соединение pika рвёт и
+            # поднимает `ConnectionBlockedTimeout`; без таймаута ждёт вечно.
+            parameters.blocked_connection_timeout = BLOCKED_CONNECTION_TIMEOUT_SECONDS
+            self._connection = pika.BlockingConnection(parameters)
             self._channel = self._connection.channel()
             declare_topology(self._channel)
             # Publisher confirms: без них `basic_publish` на `BlockingConnection`
@@ -211,6 +226,19 @@ class RabbitMQJobQueue:
         self._channel = None
 
     def _publish(self, job: ReviewJob, headers: dict[str, str]) -> None:
+        try:
+            self._basic_publish(job, headers)
+        except ConnectionBlockedTimeout as exc:
+            # Блокировка — не обрыв: повтор на новом соединении упрётся в тот же
+            # алярм. `PublisherBlockedError` не `AMQPConnectionError`, поэтому
+            # повтор в `enqueue` её не ловит. Соединение pika уже порвал.
+            self._drop_connection()
+            raise PublisherBlockedError(
+                f"брокер блокирует издателей дольше {BLOCKED_CONNECTION_TIMEOUT_SECONDS} с "
+                "(алярм памяти или диска)"
+            ) from exc
+
+    def _basic_publish(self, job: ReviewJob, headers: dict[str, str]) -> None:
         self._channel_ready().basic_publish(
             exchange="",
             routing_key=QUEUE_NAME,
@@ -234,7 +262,21 @@ class RabbitMQJobQueue:
         # Спан — одна публикация с точки зрения вызывающего, вместе с повтором:
         # обрыв, который пережил повтор, не ошибка, и ERROR спан получает, только
         # если упала и вторая попытка.
-        with self._lock, _tracer.start_as_current_span(
+        # Lock — с таймаутом: пока одна постановка ждёт заблокированного брокера,
+        # остальные не должны копиться за ней и съедать threadpool. Соединение
+        # при этом не трогаем — им владеет другой поток.
+        if not self._lock.acquire(timeout=LOCK_TIMEOUT_SECONDS):
+            raise PublisherBlockedError(
+                f"брокер блокирует издателей: соединение занято другой постановкой "
+                f"дольше {LOCK_TIMEOUT_SECONDS} с"
+            )
+        try:
+            self._publish_with_retry(job)
+        finally:
+            self._lock.release()
+
+    def _publish_with_retry(self, job: ReviewJob) -> None:
+        with _tracer.start_as_current_span(
             f"publish {QUEUE_NAME}",
             kind=SpanKind.PRODUCER,
             attributes={

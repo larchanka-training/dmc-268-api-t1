@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: dmc268
       POSTGRES_DB: dmc268
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       # postgres:18's image stores data under a major-version subdirectory of
       # this path; mounting at .../data (the pre-18 convention) makes the
@@ -25,10 +25,13 @@ services:
   # cache) per docs/BACKEND_ARCHITECTURE.md's "no Redis now, Redis-ready by
   # construction". Adding a client, a port, or an adapter belongs to the
   # ticket that introduces that first caller, not this one.
+  # Ни один сервис compose его не использует, поэтому по умолчанию не
+  # поднимается: `docker compose --profile redis up -d redis`.
   redis:
     image: redis:8-alpine
+    profiles: ["redis"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -36,19 +39,34 @@ services:
       retries: 10
 
   rabbitmq:
-    image: rabbitmq:4.3-alpine
+    image: rabbitmq:4.4-alpine
     ports:
-      - "5672:5672"
+      - "127.0.0.1:5672:5672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+  # Одноразовая миграция схемы: API и воркер стартуют только после её успешного
+  # завершения, поэтому миграция идёт один раз, а не при каждом старте API.
+  migrate:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
+      # Settings требует все три обязательные настройки, даже когда нужна одна база.
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      GITHUB_WEBHOOK_SECRET: local-dev-secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
       # %2F — закодированный дефолтный vhost "/"; pika разбирает буквальный
@@ -79,12 +97,13 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    # exec: uvicorn заменяет sh и становится PID 1 — иначе SIGTERM от
-    # `docker stop` достаётся sh, который его игнорирует, и через грейс-период
-    # приходит SIGKILL: lifespan не завершается, спаны не выгружаются.
+      migrate:
+        condition: service_completed_successfully
+    # Без sh: uvicorn — PID 1 и получает SIGTERM от `docker stop` сам, иначе
+    # через грейс-период пришёл бы SIGKILL, и спаны не выгрузились.
     # --timeout-graceful-shutdown — по той же причине: открытый поток SSE иначе
     # держал бы остановку до конца прогона (подробно — в Dockerfile у CMD).
-    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]
 
   worker:
     build: .
@@ -115,6 +134,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: ["python", "-m", "app.worker"]
     # Как в infra: без init воркер — PID 1, а ему ядро не доставляет сигналы с
     # обработчиком по умолчанию, и второй SIGTERM не остановил бы его сразу.
@@ -123,9 +144,9 @@ services:
     # вызова модели (ревью и верификатор) × LLM_TIMEOUT_SECONDS (300) ×
     # LLM_MAX_ATTEMPTS (2) × два провайдера с LLM_HOSTED_FALLBACK = 2400 с,
     # плюс минута на GitHub и базу. Без этого через 10 с пришёл бы SIGKILL.
-    # Та же формула — local.worker_stop_seconds в infra/main.tf: меняется там —
+    # Та же формула — local.worker_stop_seconds в infra/locals.tf: меняется там —
     # меняем и здесь.
-    # consumer_timeout брокера сюда не ограничение: в RabbitMQ 4.3 его
+    # consumer_timeout брокера сюда не ограничение: в RabbitMQ 4.4 его
     # применяют только quorum-очереди, а очередь review — classic.
     stop_grace_period: 41m
 
@@ -136,7 +157,7 @@ services:
   # публикуется: воркер ходит к ней по сети compose. На стенде Ollama
   # разворачивает отдельная задача.
   ollama:
-    image: ollama/ollama:0.12.6
+    image: ollama/ollama:0.40.10
     profiles: ["ollama"]
     volumes:
       - ollama_models:/root/.ollama

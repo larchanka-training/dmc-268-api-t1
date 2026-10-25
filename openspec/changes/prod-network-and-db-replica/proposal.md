@@ -6,6 +6,7 @@
 
 - **BREAKING (для отладки):** PostgreSQL и RabbitMQ больше не публикуют порты на петле сервера. Туннель к `5432`/`5672` перестаёт работать; доступ — `docker exec`. Переменные `internal_bind_ip`, `postgres_port`, `rabbitmq_port` и выходы `postgres_url`, `rabbitmq_url` удалены: они описывали несуществующие теперь порты.
 - Три docker-сети вместо одной: `dmc268` — публичный вход (интерфейс и API), `dmc268-backend` (`internal`, без шлюза) — данные, `dmc268-egress` — исходящие запросы воркера. API — единственный в обеих сетях входа и данных.
+- `postgres`, реплика и `rabbitmq` останавливаются штатно: `stop_timeout` и `destroy_grace_seconds` по 60 с — первый деплой пересоздаёт их, и без этого провайдер убивал бы базу SIGKILL.
 - Горячая реплика `dmc268-postgres-replica`: потоковая физическая репликация по слоту `dmc268_replica`. Роль `replicator` и слот заводит одноразовый контейнер `dmc268-replication-setup` идемпотентно на каждом деплое. WAL под слот ограничен `max_slot_wal_keep_size`.
 - `pg_hba.conf` вне каталога данных: подключения и репликация только из подсети сервера (`samenet`).
 - Резервные копии: `dmc268-postgres-backup` снимает `pg_dump -Fc` с реплики раз в сутки в том `dmc268-postgres-backups`, хранит `backup_keep_days` дней; `unhealthy`, если свежей копии нет дольше 26 часов.
@@ -22,8 +23,8 @@
 
 ## Impact
 
-- `infra/main.tf`, `infra/variables.tf`, `infra/outputs.tf`, `infra/terraform.tfvars.example`, `infra/README.md`, новый каталог `infra/postgres/`.
-- `.github/workflows/deploy.yml`.
+- `infra/network.tf`, `infra/postgres.tf`, `infra/rabbitmq.tf`, `infra/app.tf`, новый `infra/replica.tf` и каталог `infra/postgres/`, `infra/variables.tf`, `infra/terraform.tfvars.example`, `infra/README.md`, `infra/tests/*.tftest.hcl`.
+- `.github/workflows/deploy.yml`, новый `.github/scripts/deploy/check-replica.sh`.
 - Настройки репозитория: секрет `PG_REPLICATION_PASSWORD_DMC268_T1` заводится **до мёржа** — без него `tofu plan` останавливает деплой, ничего не меняя на сервере.
 - Память на сервере: +832 МБ лимитов (реплика 512, бэкап 256, настройка 64 на время деплоя). Диск: полная копия базы на томе реплики, до 2 ГБ WAL под слот, копии за 7 дней.
 - Первый деплой пересоздаёт `postgres`, `rabbitmq`, `api`, `worker` (смена сетей): простой около минуты. Тома не трогаются, данные сохраняются.

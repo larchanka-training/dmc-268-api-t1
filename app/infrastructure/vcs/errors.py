@@ -8,14 +8,29 @@
 
 from typing import ClassVar
 
-from app.domain.vcs_errors import VcsError
+from app.domain.vcs_errors import VcsError, VcsTransientError
 
-__all__ = ["VcsAuthError", "VcsError", "VcsNotFoundError", "VcsUnavailableError"]
+__all__ = [
+    "VcsAuthError",
+    "VcsError",
+    "VcsNotFoundError",
+    "VcsUnavailableError",
+    "VcsUnconfirmedError",
+]
 
 
-class VcsUnavailableError(VcsError):
+class VcsUnavailableError(VcsTransientError):
     """GitHub недоступен: обрыв сети (транспортный сбой httpx) или
     повторяемые сбои (429/5xx) исчерпали попытки адаптера."""
+
+
+class VcsUnconfirmedError(VcsUnavailableError):
+    """Неповторяемый запрос (создание ревью, ответ в тред) мог выполниться.
+
+    Обрыв, таймаут, 5xx или отказ лимита: ответа нет, а записал ли GitHub
+    результат - неизвестно. Идемпотентности у этих запросов нет, поэтому
+    адаптер их не повторяет; проверить результат - дело вызывающего.
+    """
 
 
 class VcsAuthError(VcsError):

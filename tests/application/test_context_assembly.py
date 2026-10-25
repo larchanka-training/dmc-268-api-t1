@@ -52,6 +52,7 @@ LIMITS = ContextLimits(
     ast_max_files=20,
     ast_max_file_bytes=262_144,
     pr_context_max_tokens=1_000,
+    diff_max_bytes=5_242_880,
 )
 
 DIFF = """\
@@ -194,7 +195,7 @@ def test_same_inputs_give_the_same_digest() -> None:
 
 @pytest.mark.parametrize("max_tokens", [1_024, 2_000, 5_000, 32_000])
 def test_huge_diff_never_exceeds_the_limit(max_tokens: int) -> None:
-    limits = ContextLimits(max_tokens, 200, 32_768, 60, 20, 262_144, 1_000)
+    limits = ContextLimits(max_tokens, 200, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
     payload = _assemble(diff=_big_diff(files=400), limits=limits).payload
     assert payload.token_count <= max_tokens
     assert estimate_tokens(serialize(payload.body)) <= max_tokens
@@ -205,7 +206,7 @@ def test_huge_diff_never_exceeds_the_limit(max_tokens: int) -> None:
 
 
 def test_omitted_count_reports_entries_that_did_not_fit_the_list() -> None:
-    limits = ContextLimits(1_024, 100, 32_768, 60, 20, 262_144, 1_000)
+    limits = ContextLimits(1_024, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
     body = _assemble(diff=_big_diff(files=2_000, lines_per_hunk=2), limits=limits).payload.body
     assert body["omitted_count"] > len(body["omitted"])
 
@@ -219,7 +220,7 @@ def test_diff_displaces_ast_when_budget_is_short() -> None:
         ),
         imports=tuple(f"import module_{i}" for i in range(500)),
     )
-    limits = ContextLimits(2_000, 100, 32_768, 60, 20, 262_144, 1_000)
+    limits = ContextLimits(2_000, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
     payload = _assemble(
         diff=_big_diff(files=1, lines_per_hunk=40),
         rules=RepoRules(status=RulesStatus.ABSENT),
@@ -236,7 +237,7 @@ def test_diff_displaces_ast_when_budget_is_short() -> None:
 
 def test_rules_do_not_spend_more_than_their_share() -> None:
     many_checks = RepoRule("Huge", ("app/**",), ("x/**",), tuple(f"проверка {i}" * 20 for i in range(50)))
-    limits = ContextLimits(32_000, 100, 32_768, 60, 20, 262_144, 1_000)
+    limits = ContextLimits(32_000, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
     body = _assemble(rules=RepoRules(RulesStatus.LOADED, (many_checks,)), limits=limits).payload.body
     assert body["rules"]["items"] == []
     assert {"path": ".review/rules.md", "part": "rule", "reason": "budget", "name": "Huge"} in body["omitted"]
@@ -244,7 +245,7 @@ def test_rules_do_not_spend_more_than_their_share() -> None:
 
 
 def test_rule_for_files_whose_diff_was_dropped_is_not_shown() -> None:
-    limits = ContextLimits(1_024, 200, 32_768, 60, 20, 262_144, 1_000)
+    limits = ContextLimits(1_024, 200, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
     docs_rule = RepoRule("Docs", ("app/f399.py",), ("x/**",), ("c",))
     body = _assemble(
         diff=_big_diff(files=400), rules=RepoRules(RulesStatus.LOADED, (docs_rule,)), limits=limits
@@ -261,7 +262,7 @@ def test_shown_rules_are_exactly_the_rules_in_the_package() -> None:
 
 def test_rule_evicted_by_the_budget_is_not_shown() -> None:
     many_checks = RepoRule("Huge", ("app/**",), ("x/**",), tuple(f"проверка {i}" * 20 for i in range(50)))
-    limits = ContextLimits(32_000, 100, 32_768, 60, 20, 262_144, 1_000)
+    limits = ContextLimits(32_000, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
     assembled = _assemble(rules=RepoRules(RulesStatus.LOADED, (many_checks,)), limits=limits)
     assert assembled.rules == ()
 
@@ -363,8 +364,8 @@ def test_empty_diff_gives_empty_but_valid_payload() -> None:
 
 def test_unused_rules_share_goes_to_the_diff() -> None:
     """Без правил доля под них не отнимается у диффа."""
-    small_share = ContextLimits(2_000, 50, 32_768, 60, 20, 262_144, 1_000)
-    large_share = ContextLimits(2_000, 1_500, 32_768, 60, 20, 262_144, 1_000)
+    small_share = ContextLimits(2_000, 50, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+    large_share = ContextLimits(2_000, 1_500, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
     absent = RepoRules(status=RulesStatus.ABSENT)
     diff = _big_diff(files=200)
     shown_small = _assemble(diff=diff, rules=absent, asts=(), limits=small_share).hunks
@@ -375,7 +376,7 @@ def test_unused_rules_share_goes_to_the_diff() -> None:
 def test_rules_share_is_reserved_only_for_what_rules_need() -> None:
     """Правило на один файл не резервирует всю долю."""
     tiny = RepoRule("Tiny", ("app/f0.py",), ("x/**",), ("c",))
-    limits = ContextLimits(2_000, 1_500, 32_768, 60, 20, 262_144, 1_000)
+    limits = ContextLimits(2_000, 1_500, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
     diff = _big_diff(files=200)
     with_rule = _assemble(diff=diff, rules=RepoRules(RulesStatus.LOADED, (tiny,)), asts=(), limits=limits)
     without = _assemble(diff=diff, rules=RepoRules(RulesStatus.ABSENT), asts=(), limits=limits)
@@ -449,7 +450,7 @@ def test_description_that_fits_is_not_marked_as_cut() -> None:
 
 
 def test_commits_over_the_share_are_each_reported() -> None:
-    limits = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 300)
+    limits = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 300, diff_max_bytes=5_242_880)
     commits = tuple(f"коммит {n}: " + "x" * 400 for n in range(5, 0, -1))
     body = _assemble(limits=limits, pr_context=PrContext("t", "", commits)).payload.body
     shown = [item for item in body["pull_request_context"] if item["part"] == "commit"]
@@ -460,7 +461,7 @@ def test_commits_over_the_share_are_each_reported() -> None:
 
 
 def test_package_with_pr_context_never_exceeds_the_limit() -> None:
-    limits = ContextLimits(1_024, 100, 32_768, 60, 20, 262_144, 200)
+    limits = ContextLimits(1_024, 100, 32_768, 60, 20, 262_144, 200, diff_max_bytes=5_242_880)
     context = PrContext("t" * 500, "d" * 2_000, tuple("c" * 300 for _ in range(10)))
     payload = _assemble(diff=_big_diff(30), limits=limits, pr_context=context).payload
     assert payload.token_count <= 1_024

@@ -4,14 +4,13 @@
 конкретный адаптер.
 """
 
-import asyncio
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Callable, Iterator
 from typing import Annotated, cast
 
 from fastapi import Depends, Path, Request
 
-from app.application.ports import UnitOfWork
+from app.application.ports import RunChanges, UnitOfWork
 from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
@@ -38,6 +37,30 @@ def get_job_queue(container: Container = Depends(get_container)) -> JobQueue:
 
 def get_installation_catalog(container: Container = Depends(get_container)) -> InstallationCatalog:
     return container.installation_catalog()
+
+
+def get_visibility_catalog(
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    container: Container = Depends(get_container),
+) -> InstallationCatalog:
+    """Каталог с кэшем видимых репозиториев: видимость прогонов и репозиториев (#126).
+
+    Подключение берёт `get_installation_catalog` — без кэша, страница подключения —
+    `get_refreshing_catalog`.
+    """
+    return container.visibility_catalog(catalog)
+
+
+def get_refreshing_catalog(
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    container: Container = Depends(get_container),
+) -> InstallationCatalog:
+    """Каталог страницы подключения: всегда к GitHub, свежий ответ — в кэш видимости.
+
+    После установки приложения на GitHub новый репозиторий виден и на странице, и —
+    когда его подключат — в списке, прогонах и потоке, без ожидания TTL.
+    """
+    return container.visibility_catalog(catalog, read=False)
 
 
 def get_token_provider(container: Container = Depends(get_container)) -> OAuthProvider:
@@ -76,9 +99,9 @@ def get_oauth_provider(
     return container.oauth_provider(provider)
 
 
-def get_sleep() -> Callable[[float], Awaitable[None]]:
-    """Ожидание между проверками статуса; тесты подменяют его мгновенным."""
-    return asyncio.sleep
+def get_run_changes(container: Container = Depends(get_container)) -> RunChanges:
+    """Сигнал изменений прогонов для потока событий; тесты подменяют его своим."""
+    return container.run_changes()
 
 
 def get_clock() -> Callable[[], float]:

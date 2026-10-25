@@ -43,6 +43,8 @@ _METHODS = frozenset({"method_definition", "abstract_method_signature", "method_
 # Поле класса или переменная, значение которых — функция: `handle = () => {}`.
 _FUNCTION_HOLDERS = frozenset({"public_field_definition", "field_definition", "variable_declarator"})
 _FUNCTION_VALUES = frozenset({"arrow_function", "function_expression", "function"})
+# Узлы, которые могут стоять между декораторами и определением.
+_DECORATOR_RUN = frozenset({"decorator", "comment"})
 _IMPORTS = frozenset({"import_statement", "import_from_statement", "future_import_statement"})
 
 _MAX_SIGNATURE_CHARS = 300
@@ -131,17 +133,41 @@ def _definition(
         # Деструктуризация `const {a, b} = …` — не определение с именем.
         return None
     end = body.start_byte if body is not None else node.end_byte
-    signature = _signature(data[node.start_byte : end])
-    # Декораторы — часть определения: их правка затрагивает функцию.
-    span = node.parent if node.parent is not None and node.parent.type == "decorated_definition" else node
+    signature = _signature(data[_signature_start(node) : end])
     return Definition(
         kind=kind,
         name=_text(data, name_node),
         signature=signature,
-        line=span.start_point.row + 1,
-        end_line=span.end_point.row + 1,
+        line=_first_line(node),
+        end_line=node.end_point.row + 1,
         parent=parent,
     )
+
+
+def _first_line(node: tree_sitter.Node) -> int:
+    """Первая строка определения вместе с декораторами.
+
+    Декораторы — часть определения: их правка затрагивает его. Где они
+    лежат, зависит от грамматики: дети узла (JS, поле класса TS), соседи
+    перед ним в `decorated_definition` (Python), в теле класса (метод TS) и
+    в `export_statement` (`@Component(…) export class`). Соседей собираем
+    назад до первого узла, который не декоратор и не комментарий.
+    """
+    start = node
+    sibling = node.prev_named_sibling
+    while sibling is not None and sibling.type in _DECORATOR_RUN:
+        if sibling.type == "decorator":
+            start = sibling
+        sibling = sibling.prev_named_sibling
+    return start.start_point.row + 1
+
+
+def _signature_start(node: tree_sitter.Node) -> int:
+    """Начало заголовка без декораторов-детей узла (JS, поле класса TS)."""
+    for child in node.children:
+        if child.type not in _DECORATOR_RUN:
+            return child.start_byte
+    return node.start_byte
 
 
 def _go_type(data: bytes, node: tree_sitter.Node) -> Definition | None:
@@ -151,16 +177,18 @@ def _go_type(data: bytes, node: tree_sitter.Node) -> Definition | None:
     if type_node is None or name_node is None:
         return None
     if type_node.type == "struct_type":
-        kind = DefinitionKind.CLASS
+        kind, keyword = DefinitionKind.CLASS, b"struct"
     elif type_node.type == "interface_type":
-        kind = DefinitionKind.INTERFACE
+        kind, keyword = DefinitionKind.INTERFACE, b"interface"
     else:
         return None
-    head = _text(data, node).split("{", 1)[0]
+    # Заголовок — до узла типа, а не до первой `{`: в параметрах типа
+    # бывает ограничение `[T interface{ ~int }]`.
+    head = data[node.start_byte : type_node.start_byte]
     return Definition(
         kind=kind,
         name=_text(data, name_node),
-        signature=_signature(("type " + head).encode("utf-8")),
+        signature=_signature(b"type " + head + keyword),
         line=node.start_point.row + 1,
         end_line=node.end_point.row + 1,
     )

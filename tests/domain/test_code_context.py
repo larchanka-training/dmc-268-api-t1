@@ -65,6 +65,16 @@ def test_go_method_pulls_in_its_receiver_type() -> None:
     assert select_scopes(outline, frozenset({8})) == (repo, save)
 
 
+@pytest.mark.parametrize("kind", [DefinitionKind.FUNCTION, DefinitionKind.CLASS, DefinitionKind.INTERFACE])
+def test_only_method_pulls_in_type_by_parent_name(kind: DefinitionKind) -> None:
+    """У вложенной функции или класса `parent` — охватывающее определение, не тип."""
+    money = Definition(DefinitionKind.INTERFACE, "Money", "interface Money", 1, 3)
+    outer = Definition(DefinitionKind.FUNCTION, "Money", "function Money(): Money", 5, 9)
+    inner = Definition(kind, "round", "round", 6, 7, "Money")
+    outline = FileOutline(definitions=(money, outer, inner))
+    assert select_scopes(outline, frozenset({6})) == (outer, inner)
+
+
 def test_added_lines_are_touched() -> None:
     hunk = Hunk("a.py", 1, 3, 1, 4, changed_new_lines=frozenset({2, 3}))
     assert touched_lines([hunk]) == frozenset({2, 3})

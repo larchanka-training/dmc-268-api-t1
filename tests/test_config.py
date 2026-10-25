@@ -71,6 +71,25 @@ def test_stale_timeout_must_be_positive() -> None:
         )
 
 
+def test_queued_timeout_defaults_to_six_hours() -> None:
+    assert make_settings().queued_run_timeout_seconds == 21_600
+
+
+def test_queued_timeout_is_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("QUEUED_RUN_TIMEOUT_SECONDS", "43200")
+    assert make_settings().queued_run_timeout_seconds == 43_200
+
+
+def test_queued_timeout_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url=DATABASE_URL,
+            rabbitmq_url=RABBITMQ_URL,
+            github_webhook_secret="s",
+            queued_run_timeout_seconds=0,
+        )
+
+
 def test_the_client_secret_is_readable_and_the_origin_has_no_trailing_slash() -> None:
     settings = make_settings()
     assert settings.github_app_client_secret.get_secret_value() == CLIENT_SECRET
@@ -113,6 +132,8 @@ def test_context_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatc
         "rules_max_tokens",
         "rules_max_bytes",
         "rules_cache_ttl_seconds",
+        "diff_max_bytes",
+        "visible_repositories_cache_ttl_seconds",
         "ast_max_files",
         "ast_max_file_bytes",
         "llm_context_window_tokens",

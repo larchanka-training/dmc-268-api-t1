@@ -1,9 +1,8 @@
 """Порт транспорта к LLM.
 
 Отдельно от `app/application/ports/repositories.py` — не порт хранения, порт
-внешней модели. Держится вне `ports.__all__` по той же причине, что и
-`JobQueue`: гвардрейл в `tests/test_container.py` заточен под SQLAlchemy-
-адаптеры портов хранения.
+внешней модели. Входит в `ports.__all__`, адаптер сверяет
+`tests/test_container.py`.
 
 Порт получает готовый запрос: сообщения собирает чистая функция
 (`app/domain/prompt.py`), форму ответа задаёт Pydantic-модель

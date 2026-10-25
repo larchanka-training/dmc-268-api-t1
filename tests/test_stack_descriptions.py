@@ -1,6 +1,6 @@
 """Два описания одного стека — сверены по тем фактам, что обязаны совпадать.
 
-`docker-compose.yml` описывает локальный стек, `infra/main.tf` — серверный.
+`docker-compose.yml` описывает локальный стек, `infra/*.tf` — серверный.
 Оба обязательны и законно различаются: compose собирает образ и поднимает
 Redis, infra забирает готовый тег и поднимает RabbitMQ. Сверять их целиком
 бессмысленно.
@@ -20,10 +20,11 @@ Redis, infra забирает готовый тег и поднимает Rabbit
 import re
 from pathlib import Path
 
+from tests.infra_text import read_infra_text
+
 NOT_FOUND = "не найдено"
 
 COMPOSE = Path("docker-compose.yml")
-INFRA = Path("infra/main.tf")
 DOCKERFILE = Path("Dockerfile")
 
 
@@ -69,8 +70,18 @@ def infra_postgres_volume_path(text: str) -> str:
 
 
 def compose_applies_migrations(text: str) -> bool:
-    """Compose применяет миграции командой сервиса api."""
-    return "alembic upgrade head" in text
+    """Compose применяет миграции отдельным сервисом, от которого зависят api и воркер.
+
+    Одного сервиса мало: без `service_completed_successfully` API стартовал бы
+    параллельно с миграциями (или против непромигрированной базы).
+    """
+    migrate = re.search(r"^  migrate:\n(.*?)(?=^  \S)", text, re.MULTILINE | re.DOTALL)
+    if not migrate or not re.search(r'"alembic",\s*"upgrade",\s*"head"', migrate.group(1)):
+        return False
+    waits = re.findall(
+        r"migrate:\s*\n\s*condition:\s*service_completed_successfully", text
+    )
+    return len(waits) >= 2
 
 
 def infra_applies_migrations(text: str) -> bool:
@@ -156,7 +167,12 @@ def test_extractors_find_facts_that_are_present() -> None:
         )
         == "/var/lib/postgresql"
     )
-    assert compose_applies_migrations("command: alembic upgrade head && uvicorn")
+    assert compose_applies_migrations(
+        '  migrate:\n    command: ["alembic", "upgrade", "head"]\n  api:\n'
+        "    depends_on:\n      migrate:\n        condition: service_completed_successfully\n"
+        "  worker:\n    depends_on:\n      migrate:\n"
+        "        condition: service_completed_successfully\n"
+    )
     assert infra_applies_migrations(
         'resource "docker_container" "migrate" {}\n'
         "depends_on = [docker_container.migrate]"
@@ -192,6 +208,8 @@ def test_extractors_report_absence_instead_of_a_blank() -> None:
     assert compose_postgres_volume_path("ничего похожего") == NOT_FOUND
     assert infra_postgres_volume_path("ничего похожего") == NOT_FOUND
     assert not compose_applies_migrations("ничего похожего")
+    # Миграции в команде API, как было раньше, больше не считаются.
+    assert not compose_applies_migrations("command: alembic upgrade head && uvicorn")
     assert not infra_applies_migrations('resource "docker_container" "migrate" {}')
     assert compose_worker_model_env("ничего похожего") == frozenset()
     assert infra_worker_model_env("ничего похожего") == frozenset()
@@ -201,9 +219,9 @@ def test_extractors_report_absence_instead_of_a_blank() -> None:
 
 def test_both_descriptions_use_the_same_postgres_image() -> None:
     compose = compose_postgres_image(COMPOSE.read_text())
-    infra = infra_postgres_image(INFRA.read_text())
+    infra = infra_postgres_image(read_infra_text())
     assert compose != NOT_FOUND, "образ PostgreSQL не найден в docker-compose.yml"
-    assert infra != NOT_FOUND, "образ PostgreSQL не найден в infra/main.tf"
+    assert infra != NOT_FOUND, "образ PostgreSQL не найден в конфигурации infra/*.tf"
     assert compose == infra, (
         f"образ PostgreSQL разошёлся: compose {compose}, infra {infra}"
     )
@@ -212,9 +230,9 @@ def test_both_descriptions_use_the_same_postgres_image() -> None:
 def test_both_descriptions_mount_the_postgres_volume_the_same_way() -> None:
     """Расхождение здесь однажды уложило postgres:18 в рестарт-луп."""
     compose = compose_postgres_volume_path(COMPOSE.read_text())
-    infra = infra_postgres_volume_path(INFRA.read_text())
+    infra = infra_postgres_volume_path(read_infra_text())
     assert compose != NOT_FOUND, "точка монтирования не найдена в docker-compose.yml"
-    assert infra != NOT_FOUND, "точка монтирования не найдена в infra/main.tf"
+    assert infra != NOT_FOUND, "точка монтирования не найдена в конфигурации infra/*.tf"
     assert compose == infra, (
         f"точка монтирования тома PostgreSQL разошлась: "
         f"compose {compose}, infra {infra}"
@@ -227,16 +245,16 @@ def test_both_descriptions_apply_migrations_before_serving() -> None:
         COMPOSE.read_text()
     ), "docker-compose.yml не применяет миграции"
     assert infra_applies_migrations(
-        INFRA.read_text()
-    ), "infra/main.tf не применяет миграции до старта API"
+        read_infra_text()
+    ), "infra/*.tf не применяет миграции до старта API"
 
 
 def test_both_descriptions_give_the_worker_the_same_model_settings() -> None:
     """Без `LLM_BACKEND` воркер не стартует: описание без неё роняет деплой."""
     compose = compose_worker_model_env(COMPOSE.read_text())
-    infra = infra_worker_model_env(INFRA.read_text())
+    infra = infra_worker_model_env(read_infra_text())
     assert "LLM_BACKEND" in compose, "docker-compose.yml не передаёт воркеру LLM_BACKEND"
-    assert "LLM_BACKEND" in infra, "infra/main.tf не передаёт воркеру LLM_BACKEND"
+    assert "LLM_BACKEND" in infra, "infra/*.tf не передаёт воркеру LLM_BACKEND"
     assert compose == infra, (
         f"переменные модели воркера разошлись: только в compose {sorted(compose - infra)}, "
         f"только в infra {sorted(infra - compose)}"
@@ -248,8 +266,8 @@ def test_the_api_stops_within_the_grace_period_despite_open_sse_streams() -> Non
 
     Тогда lifespan не завершается и батч спанов теряется (спека `observability`).
     """
-    grace = infra_api_destroy_grace(INFRA.read_text())
-    assert grace is not None, "destroy_grace_seconds контейнера API не найден в infra/main.tf"
+    grace = infra_api_destroy_grace(read_infra_text())
+    assert grace is not None, "destroy_grace_seconds контейнера API не найден в конфигурации infra/*.tf"
     for path in (DOCKERFILE, COMPOSE):
         timeout = uvicorn_graceful_timeout(path.read_text())
         assert timeout is not None, f"{path}: uvicorn без --timeout-graceful-shutdown"

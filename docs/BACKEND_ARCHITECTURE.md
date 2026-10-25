@@ -108,9 +108,9 @@ compile-time зависимости от слоя приложения.
 | `ProviderTokenRepo` | `SqlAlchemyProviderTokenRepo` | токен пользователя у провайдера при сессии; шифрует AES-256-GCM при записи и расшифровывает при чтении (`app/infrastructure/db/token_cipher.py`), `get_for_update` — блокировка строки на время refresh, ожидание чужой — не дольше 15 секунд (`ProviderTokenBusy`). Без ключа — `ProviderTokenUnavailable` |
 | `UnitOfWork` | `SqlAlchemyUnitOfWork` | граница транзакции |
 | `StageTracer` | `OtelStageTracer`; без адаптера — `NO_STAGE_TRACING` | спан трассировки на каждый шаг прогона: `StepRecorder` открывает его вместе с шагом и закрывает с его исходом. Порт — ради границы слоя: слой приложения не знает OpenTelemetry. Телеметрия, а не данные: шаги для API — из `review_run_steps` (раздел «Наблюдаемость») |
-| `VcsGateway` | `GitHubVcsGateway` | дифф, метаданные PR и содержимое файла на коммите (`fetch_file`, contents API; 404 — `None`) через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и exponential backoff внутри адаптера. Для `fetch_file` App нужно разрешение **Contents: read** |
-| `InstallationCatalog` | `GitHubInstallationCatalog` | репозитории установок GitHub App, видимые пользователю, — по его токену (user access token): `GET /user/installations`, затем `GET /user/installations/{id}/repositories`, постранично по 100. GitHub сам отдаёт пересечение «доступно приложению» ∩ «доступно пользователю» с `permissions` на каждом репозитории; подключать можно с admin или maintain (`app/domain/repository_access.py`). Приостановленные установки, `404` и `403` (не лимит, например SAML SSO) на установке пропускаются; `403` лимита (`x-ratelimit-remaining: 0`, `retry-after`) — `VcsUnavailableError`; пагинация до `total_count`, не больше 50 страниц; `401` — `ProviderTokenRejected` (сессия закрывается), прочие сбои и неожиданное тело — `VcsError` (`502`). Токен — через `httpx.Auth` (`BearerAuth`), таймаут `httpx.Timeout(10, connect=5)`. Тела ответов разбирают приватные строгие модели pydantic адаптера (лишние поля игнорируются), ошибка разбора — `VcsError` без значений полей. Подключение список не обходит: `user_repository` — `GET /repositories/{id}` токеном пользователя, `app_installed` — `GET /repos/{owner}/{repo}/installation` с JWT приложения (свой `GitHubAppAuth`, только JWT); не виден (в том числе публичный только с `pull`, как у любого — `visible_for_connect`; приватный с ролью read виден и получает `403`), не установлено, приостановлено — один `404`. `installation_id` не хранится. Свой HTTP-клиент |
-| `CacheStore` | `InMemoryCacheStore` | best-effort key/value с TTL в памяти процесса воркера, один экземпляр на composition root; промах не ошибка. Первый потребитель — правила `.review/rules.md` по ключу «репозиторий, base_sha». Redis — со второй репликой |
+| `VcsGateway` | `GitHubVcsGateway` | дифф (с лимитом `max_bytes`, только в воркере), метаданные PR и содержимое файла на коммите (`fetch_file`, contents API; 404 — `None`) через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и повторы внутри адаптера — один цикл `_request`: 5xx — exponential backoff, отказ лимита (429, 403 лимита, GraphQL `RATE_LIMITED` при 200) — пауза по `retry-after` / `x-ratelimit-reset` / минута в пределах бюджета (`VcsClientLimits`: API — таймаут 5 с и без ожидания лимита, воркер — 30 с и 60 с). Ответ в тред не повторяется (`VcsUnconfirmedError`); ревью несёт скрытый маркер `<!-- dmc-268-review-run:<id> -->`, и после потерянного ответа на `POST …/reviews` — пауза, поиск по маркеру среди ревью бота `<slug>[bot]` (slug — `GET /app`), новый `POST` только если ревью не нашлось. Для `fetch_file` App нужно разрешение **Contents: read** |
+| `InstallationCatalog` | `GitHubInstallationCatalog` | репозитории установок GitHub App, видимые пользователю, — по его токену (user access token): `GET /user/installations`, затем `GET /user/installations/{id}/repositories`, постранично по 100. GitHub сам отдаёт пересечение «доступно приложению» ∩ «доступно пользователю» с `permissions` на каждом репозитории; подключать можно с admin или maintain (`app/domain/repository_access.py`). Приостановленные установки, `404` и `403` (не лимит, например SAML SSO) на установке пропускаются; `403` лимита (`x-ratelimit-remaining: 0`, `retry-after`) — `VcsUnavailableError`; пагинация до `total_count`, не больше 50 страниц; `401` — `ProviderTokenRejected` (сессия закрывается), прочие сбои и неожиданное тело — `VcsError` (`502`). Токен — через `httpx.Auth` (`BearerAuth`), таймаут `httpx.Timeout(10, connect=5)`. Тела ответов разбирают приватные строгие модели pydantic адаптера (лишние поля игнорируются), ошибка разбора — `VcsError` без значений полей. Подключение список не обходит: `user_repository` — `GET /repositories/{id}` токеном пользователя, `app_installed` — `GET /repos/{owner}/{repo}/installation` с JWT приложения (свой `GitHubAppAuth`, только JWT); не виден (в том числе публичный только с `pull`, как у любого — `visible_for_connect`; приватный с ролью read виден и получает `403`), не установлено, приостановлено — один `404`. `installation_id` не хранится. Свой HTTP-клиент. Ручки видимости (`GET /reviews`, `GET /events`, прогон, зарегистрированные репозитории) берут его через `CachedInstallationCatalog`: `list_repositories` из `CacheStore` в пределах TTL; страница подключения всегда спрашивает GitHub и пишет свежий ответ в кэш, проверки подключения — без кэша |
+| `CacheStore` | `InMemoryCacheStore` | best-effort key/value с TTL в памяти процесса, один экземпляр на composition root; промах не ошибка. Потребители: правила `.review/rules.md` в воркере по ключу «репозиторий, base_sha»; список репозиториев, видимых пользователю на GitHub, в API (`CachedInstallationCatalog`, ключ — sha256 токена, TTL `VISIBLE_REPOSITORIES_CACHE_TTL_SECONDS`, 30 с). Кэш процесса корректен и при нескольких репликах — кэшируется только ответ GitHub, подключённые читаются из базы, — Redis нужен, когда понадобится общий кэш или общее состояние (change `visible-repositories-cache`) |
 | `DefinitionExtractor` | `TreeSitterDefinitionExtractor` | контур файла (определения с диапазонами строк, импорты) для AST-окружения изменённых строк; грамматики Python, TypeScript/TSX, JavaScript, Go. Какие определения показать модели, решает домен (`select_scopes`); tree-sitter запрещён во внутренних слоях контрактом import-linter |
 | `OAuthProvider` | `GitHubOAuthProvider` | вход через OAuth самого GitHub App: адрес авторизации, обмен `code` на профиль (`GET /user`) и токен пользователя (`OAuthLogin`), обмен refresh token (`refresh`, `grant_type=refresh_token`), отзыв токена при выходе (`revoke`, `DELETE /applications/{client_id}/token`, best-effort фоновой задачей). Токены — `Secret`, `repr` их не раскрывает. `bad_refresh_token` — `ProviderTokenRejected`, любой другой сбой — `OAuthProviderUnavailable`. Контейнер выдаёт провайдера по `{provider}` из пути, неизвестный — `404` |
 | `JobQueue` | `RabbitMQJobQueue` | задача ревью в RabbitMQ, один метод `enqueue`; тело — только доменные данные по §4.2 System Design, приоритет и контекст трассировки (`traceparent`) — свойства AMQP; очередь `review_jobs` с `x-max-priority` и DLX/DLQ-топологией, переиспользуемое соединение с publisher confirms внутри адаптера |
@@ -153,6 +153,18 @@ cookie. Выход отзывает токен у GitHub после ответа
 Истёкшие сессии стирает воркер в том же периодическом проходе, что выметает
 зависшие прогоны (`purge_expired_sessions`, раз в минуту). Индекса по
 `expires_at` нет: таблица мала, а проход не лежит на пути запроса.
+
+Тот же проход, но не чаще `WEBHOOK_REDELIVERY_INTERVAL_SECONDS`, переотправляет
+упавшие доставки вебхука (#149): GitHub сам их не повторяет. Порт
+`WebhookDeliveries` (адаптер `GitHubWebhookDeliveries`, JWT приложения) отдаёт
+попытки за трое суток, чистая `select_redeliveries` выбирает группы `guid` без
+успешной попытки — только события приёма, не больше `max_attempts` переотправок
+с паузой, растущей вдвое, — и запросы идут по одному, в пределах бюджета
+времени прохода. Доставку `pull_request`, чей коммит уже не голова PR
+(`fetch_pr_metadata`), проход не переотправляет: повтор откатил бы head
+merge_request на старый коммит. Состояния нет: попытки
+считаются по самому списку. Дубль переотправки (два воркера) безвреден: приём
+отвечает существующим прогоном, в том числе завершённым не-`failed` (#75).
 
 ### Спроектированы, но не реализованы
 
@@ -293,13 +305,17 @@ def upgrade() -> None:
 контекста на пределе лимита, системный промпт и резерв ответа помещаются в
 окно `LLM_CONTEXT_WINDOW_TOKENS`, и что вызов модели в худшем случае
 (`LLM_TIMEOUT_SECONDS` × `LLM_MAX_ATTEMPTS` × провайдеры) короче
-`STALE_RUN_TIMEOUT_SECONDS`, - воркер при старте, до подключения к брокеру.
+`STALE_RUN_TIMEOUT_SECONDS`, а порог ждущего в очереди прогона
+`QUEUED_RUN_TIMEOUT_SECONDS` (6 ч) - больше `STALE_RUN_TIMEOUT_SECONDS`, - воркер
+при старте, до подключения к брокеру.
 Настройки `github_app_id`, `github_app_private_key`, `github_webhook_secret`,
 `rabbitmq_url`, `github_app_client_id`, `github_app_client_secret`, `public_origin` и
 `user_token_encryption_key` опциональны с пустым дефолтом: приложение без GitHub-реквизитов поднимается
 и отвечает на запросы, не касающиеся вебхуков, а пустая настройка громко
 падает при первом использовании (пустой ключ токенов — отказ входа; битый —
-падение старта, без значения в сообщении). Новые настройки появляются вместе с кодом,
+падение старта, без значения в сообщении). Исключение — повтор упавших доставок
+вебхука в проходе воркера (`WEBHOOK_REDELIVERY_*`, #149): без `GITHUB_APP_ID` или
+ключа шаг не собирается, и об этом одна строка INFO при старте. Новые настройки появляются вместе с кодом,
 который их использует.
 
 ## Наблюдаемость
@@ -488,8 +504,10 @@ Pull request может содержать `# IGNORE ALL PREVIOUS INSTRUCTIONS` 
 (`llm_context_window_tokens`) той же оценкой до отправки, и не помещающийся
 запрос не уходит ни одному провайдеру (`PromptTooLargeError`). Конфигурация, в
 которой пакет на пределе лимита заведомо не помещается в окно, не даёт воркеру
-стартовать. Довыборка файлов для AST ограничена
-`ast_max_files` и `ast_max_file_bytes`, правила — `rules_max_bytes`; лимит
+стартовать. Дифф прогона ограничен `diff_max_bytes` (больший — прогон `failed`
+с `DIFF_TOO_LARGE`, ревью нет; приём вебхука дифф не запрашивает вовсе),
+довыборка файлов для AST — `ast_max_files` и `ast_max_file_bytes`, правила —
+`rules_max_bytes`; лимит
 размера соблюдается во время загрузки (адаптер читает тело потоком и обрывает
 его), поэтому большой файл или сжатая «бомба» в память не попадают. Лимита на
 длительность прогона пока нет.

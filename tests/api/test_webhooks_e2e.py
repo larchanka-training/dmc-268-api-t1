@@ -19,7 +19,7 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import Client, Response
+from httpx2 import Client, Response
 from sqlalchemy import Engine
 
 from app.api.factory import create_app
@@ -182,15 +182,12 @@ def test_opened_creates_records_and_publishes_section_4_2_message(flow: Flow) ->
     assert enqueued.installation_id == INSTALLATION_ID
 
 
-def test_vcs_is_called_for_metadata_then_diff(flow: Flow) -> None:
-    """Метаданные до диффа: base_sha берётся из них, дифф — той же пары SHA,
-    что уйдёт в сообщение. Сбой любого из них даёт 502 до создания записей."""
+def test_intake_fetches_only_the_metadata(flow: Flow) -> None:
+    """Приём берёт у VCS только метаданные: из них base_sha задачи, их сбой —
+    502 до создания записей. Дифф достаёт воркер по паре SHA из сообщения."""
     post_webhook(flow.client, "opened")
 
-    assert flow.vcs.calls == [
-        ("metadata", REPO_FULL_NAME, PR_NUMBER, INSTALLATION_ID),
-        ("diff", REPO_FULL_NAME, BASE_SHA, HEAD_SHA, INSTALLATION_ID),
-    ]
+    assert flow.vcs.calls == [("metadata", REPO_FULL_NAME, PR_NUMBER, INSTALLATION_ID)]
 
 
 @pytest.mark.parametrize("signature", [None, "sha256=" + "0" * 64])

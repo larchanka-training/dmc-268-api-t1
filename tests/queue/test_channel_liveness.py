@@ -1,5 +1,6 @@
 """Адаптер очереди перепроверяет канал, а не только соединение. Без брокера."""
 
+import threading
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -117,3 +118,76 @@ def test_a_second_connection_failure_is_not_swallowed(monkeypatch) -> None:
 
     with pytest.raises(pika.exceptions.StreamLostError):
         RabbitMQJobQueue("amqp://x").enqueue(JOB)
+
+
+def test_enqueue_gives_up_when_another_publish_holds_the_connection(monkeypatch) -> None:
+    publishing = threading.Event()
+    release = threading.Event()
+    connections: list[Any] = []
+
+    class StuckChannel(FakeChannel):
+        def basic_publish(self, **kwargs: Any) -> None:
+            publishing.set()
+            release.wait(5)  # подтверждение не приходит: брокер блокирует издателей
+
+    class FakeConnection:
+        is_closed = False
+
+        def channel(self) -> FakeChannel:
+            return StuckChannel()
+
+    def connect(params: Any) -> FakeConnection:
+        connection = FakeConnection()
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(pika, "BlockingConnection", connect)
+    monkeypatch.setattr(rabbitmq, "declare_topology", lambda channel: None)
+    monkeypatch.setattr(pika, "URLParameters", lambda url: SimpleNamespace())
+    monkeypatch.setattr(rabbitmq, "LOCK_TIMEOUT_SECONDS", 0.1)
+    queue = RabbitMQJobQueue("amqp://x")
+    stuck = threading.Thread(target=queue.enqueue, args=(JOB,))
+    stuck.start()
+    try:
+        assert publishing.wait(5)
+        with pytest.raises(rabbitmq.PublisherBlockedError, match="блокирует издателей"):
+            queue.enqueue(JOB)
+        assert len(connections) == 1  # чужое соединение не тронуто
+    finally:
+        release.set()
+        stuck.join(5)
+
+
+def test_a_blocked_connection_is_dropped_and_not_retried(monkeypatch) -> None:
+    connections: list[Any] = []
+
+    class BlockedChannel(FakeChannel):
+        def basic_publish(self, **kwargs: Any) -> None:
+            raise pika.exceptions.ConnectionBlockedTimeout("Blocked connection timeout expired.")
+
+    class FakeConnection:
+        is_closed = False
+
+        def __init__(self) -> None:
+            self.closed_by_us = False
+
+        def channel(self) -> FakeChannel:
+            return BlockedChannel()
+
+        def close(self) -> None:
+            self.closed_by_us = True
+
+    def connect(params: Any) -> FakeConnection:
+        connection = FakeConnection()
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(pika, "BlockingConnection", connect)
+    monkeypatch.setattr(rabbitmq, "declare_topology", lambda channel: None)
+    monkeypatch.setattr(pika, "URLParameters", lambda url: SimpleNamespace())
+
+    with pytest.raises(rabbitmq.PublisherBlockedError, match="блокирует издателей"):
+        RabbitMQJobQueue("amqp://x").enqueue(JOB)
+
+    assert len(connections) == 1
+    assert connections[0].closed_by_us

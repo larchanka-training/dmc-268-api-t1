@@ -54,16 +54,22 @@ def list_available_repositories(
     catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, now: datetime
 ) -> list[AvailableRepository]:
     """Репозитории установок, видимые пользователю, с отметкой, зарегистрирован ли каждый."""
-    repositories = call_with_user_token(uow, user.oauth, user.session_id, now, catalog.list_repositories)
+    repositories = list_user_repositories(catalog, uow, user, now)
     with uow:
-        return [
-            AvailableRepository(
-                repository,
-                already_connected=uow.repositories.find_by_provider(Provider.GITHUB, repository.provider_id)
-                is not None,
-            )
-            for repository in repositories
-        ]
+        provider_ids = [repository.provider_id for repository in repositories]
+        connected = {r.provider_id for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
+    return [AvailableRepository(r, already_connected=r.provider_id in connected) for r in repositories]
+
+
+def list_user_repositories(
+    catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, now: datetime
+) -> list[InstallationRepository]:
+    """Репозитории установок, видимые пользователю у провайдера, — ответ GitHub без чтения своей базы.
+
+    Видимость прогонов (GET /reviews, GET /events) сопоставляет их с подключёнными
+    сама, одним запросом, — отметка `already_connected` ей не нужна.
+    """
+    return call_with_user_token(uow, user.oauth, user.session_id, now, catalog.list_repositories)
 
 
 def connect_repository(
@@ -100,10 +106,12 @@ def connect_repository(
         return ConnectRefusal.NOT_IN_INSTALLATION
     if not can_connect(found.permissions):
         return ConnectRefusal.MANAGE_REQUIRED
+    # Id — из ответа GitHub, а не из запроса: GitHub разбирает id как число, и
+    # запись `0101` не совпала бы с `str(id)` вебхуков и списков (change `canonical-repository-id`).
     repository = Repository(
         id=repository_id,
         provider=provider,
-        provider_id=provider_id,
+        provider_id=found.provider_id,
         full_name=found.full_name,
         default_branch=found.default_branch,
         auto_review_enabled=True,
@@ -111,7 +119,7 @@ def connect_repository(
         updated_at=now,
     )
     with uow:
-        if uow.repositories.find_by_provider(provider, provider_id) is not None:
+        if uow.repositories.find_by_provider(provider, repository.provider_id) is not None:
             return ConnectRefusal.ALREADY_CONNECTED
         # Параллельное подключение могло успеть между проверкой и вставкой.
         if not uow.repositories.add(repository):

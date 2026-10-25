@@ -1,4 +1,4 @@
-"""Изоляция серверного стека — по описанию `infra/main.tf`.
+"""Изоляция серверного стека — по описанию `infra/*.tf`.
 
 Спека `backend-delivery`: база, реплика и брокер живут во внутренней сети без
 выхода наружу и не публикуют портов на хосте; интерфейс до них не дотягивается.
@@ -11,9 +11,9 @@
 """
 
 import re
-from pathlib import Path
 
-INFRA = Path("infra/main.tf")
+from tests.infra_text import read_infra_text
+
 NOT_A_NETWORK_REFERENCE = "<не ссылка на docker_network>"
 
 # Контейнеры с данными: никаких портов на хосте.
@@ -107,17 +107,17 @@ def test_extractors_report_absence_instead_of_a_blank() -> None:
 
 
 def test_data_network_has_no_way_out() -> None:
-    assert network_is_internal(INFRA.read_text(), "backend") is True, (
+    assert network_is_internal(read_infra_text(), "backend") is True, (
         "сеть данных dmc268-backend должна быть internal: без этого база и брокер "
         "получают выход в интернет"
     )
 
 
 def test_data_containers_publish_no_host_ports() -> None:
-    text = INFRA.read_text()
+    text = read_infra_text()
     for name in DATA_CONTAINERS:
         publishes = container_publishes_ports(text, name)
-        assert publishes is not None, f"контейнер {name} не найден в infra/main.tf"
+        assert publishes is not None, f"контейнер {name} не найден в infra/*.tf"
         assert not publishes, f"{name} публикует порт на хосте"
 
 
@@ -127,15 +127,15 @@ def test_every_container_is_in_exactly_its_networks() -> None:
     В том числе: в сети входа `dmc268`, к которой подключается интерфейс, из
     нашего стека только API, а воркер ходит наружу через `egress`.
     """
-    text = INFRA.read_text()
+    text = read_infra_text()
     containers = set(
         re.findall(r"^resource\s+\"docker_container\"\s+\"(\w+)\"", text, re.MULTILINE)
     )
-    assert containers, "контейнеры не найдены в infra/main.tf"
+    assert containers, "контейнеры не найдены в infra/*.tf"
     assert containers == set(EXPECTED_NETWORKS), (
-        f"контейнеры в infra/main.tf и в EXPECTED_NETWORKS разошлись: "
+        f"контейнеры в infra/*.tf и в EXPECTED_NETWORKS разошлись: "
         f"нет в тесте {sorted(containers - set(EXPECTED_NETWORKS))}, "
-        f"нет в main.tf {sorted(set(EXPECTED_NETWORKS) - containers)}"
+        f"нет в infra/*.tf {sorted(set(EXPECTED_NETWORKS) - containers)}"
     )
     for name, expected in EXPECTED_NETWORKS.items():
         networks = container_networks(text, name)

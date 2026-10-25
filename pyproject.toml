@@ -52,12 +52,19 @@ dev = [
     # Корпус eval правил (tests/eval/rules/corpus.py) читает кейсы из YAML.
     "pyyaml>=6.0.3",
     "types-pyyaml>=6.0.12.20260906",
+    # Транспорт TestClient Starlette: с httpx он предупреждает об устаревании.
+    "httpx2>=2.16.0",
 ]
 
 [tool.ruff]
 target-version = "py314"
 # tests/fixtures — исходники для парсера AST: их имена нарочно не определены.
 exclude = [".venv", "venv", ".git", "tests/fixtures"]
+
+[tool.ruff.lint]
+# ruff 0.17 убрал правила о наивном `datetime` из набора по умолчанию, а время
+# в коде — только UTC с часовым поясом: возвращаем их явно.
+extend-select = ["DTZ"]
 
 # `Depends(...)` as a FastAPI parameter default is the framework's own
 # dependency-injection idiom (see .agents/templates/backend/endpoint.md),
@@ -67,6 +74,8 @@ extend-immutable-calls = ["fastapi.Depends"]
 
 [tool.mypy]
 python_version = "3.14"
+# Параллельная проверка: с 2.4 не experimental, на холодном кэше вдвое быстрее.
+num_workers = "auto"
 strict = true
 plugins = ["pydantic.mypy"]
 exclude = ["^\\.venv/", "^venv/", "^tests/fixtures/"]
@@ -87,7 +96,9 @@ testpaths = ["tests"]
 # `llm-live.yml`), иначе `uv run pytest` без ключей всегда давал бы пропуски.
 # Так же eval на живой модели (`eval.yml`) и полный нагрузочный прогон
 # (`load.yml`): долгие, и их результат - отчёт, а не зелёная галочка.
-addopts = ["-m", "not live and not eval and not load"]
+# `-p tests.strict_skips` - «пропущенный тест = упавший» при PYTEST_FAIL_ON_SKIP=1
+# (так в CI; локально - той же переменной), см. tests/strict_skips.py.
+addopts = ["-m", "not live and not eval and not load", "-p", "tests.strict_skips"]
 markers = [
     "integration: needs a live PostgreSQL; skipped when TEST_DATABASE_URL is unset",
     "live: paid call to the real EUrouter; skipped when EUROROUTER_API_KEYS is unset",

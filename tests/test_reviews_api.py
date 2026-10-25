@@ -1,20 +1,29 @@
-"""Контракт `GET /api/v1/reviews/{id}` и `/steps`. Без БД."""
+"""Контракт `GET /api/v1/reviews/{id}`, `/steps` и `/diff`: данные и видимость прогона. Без БД и сети."""
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_unit_of_work
+from app.api.dependencies import (
+    get_installation_catalog,
+    get_token_provider,
+    get_unit_of_work,
+)
 from app.api.factory import create_app
 from app.api.reviews import review_run_list_item
 from app.config import Settings
 from app.domain.entities import (
     DiffAnchor,
     Finding,
+    InstallationRepository,
     MergeRequest,
     PublishedComment,
     Repository,
+    RepositoryPermissions,
     ReviewRun,
     ReviewRunListEntry,
     RuleRef,
@@ -32,9 +41,13 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.ids import new_id
+from app.domain.provider_token import ProviderTokenRejected
 from app.domain.run_steps import finish_step, start_step
+from app.domain.vcs_errors import VcsError
 
-from .fakes.auth import sign_in
+from .fakes.auth import sign_in_with_session
+from .fakes.installation_catalog import FakeInstallationCatalog
+from .fakes.oauth import FakeOAuthProvider
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -45,16 +58,22 @@ SETTINGS = Settings(
 
 NOW = datetime(2026, 9, 29, tzinfo=UTC)
 
+READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
+# GitHub по токену пользователя отдаёт репозиторий прогонов тестов (`provider_id` 123) — прогон виден.
+VISIBLE = InstallationRepository("123", "octo-org/api", "main", READ)
 
-def _client(uow: FakeUnitOfWork) -> TestClient:
+
+def _client(uow: FakeUnitOfWork, catalog: FakeInstallationCatalog | None = None) -> TestClient:
     app = create_app(SETTINGS)
-    sign_in(app)
+    cookies = sign_in_with_session(app, uow)
 
     def override_uow() -> Iterator[FakeUnitOfWork]:
         yield uow
 
     app.dependency_overrides[get_unit_of_work] = override_uow
-    return TestClient(app)
+    app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog([VISIBLE])
+    app.dependency_overrides[get_token_provider] = lambda: FakeOAuthProvider()
+    return TestClient(app, cookies=cookies)
 
 
 def _merge_request(uow: FakeUnitOfWork, provider: Provider = Provider.GITHUB) -> MergeRequest:
@@ -249,6 +268,28 @@ def test_a_standard_finding_reports_no_rule() -> None:
     assert body["findings"][0]["rule"] is None
 
 
+def test_a_finding_covered_by_an_earlier_thread_reports_that_finding() -> None:
+    """#148: повтор замечания не публиковался - находка ссылается на находку треда."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    earlier = new_id()
+    uow.findings.add(replace(_finding(run, None), covered_by_finding_id=earlier))
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["findings"][0]["covered_by_finding_id"] == str(earlier)
+
+
+def test_a_published_finding_is_covered_by_nothing() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    uow.findings.add(_finding(run, None))
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["findings"][0]["covered_by_finding_id"] is None
+
+
 def test_a_run_reports_its_verification_outcome() -> None:
     uow = FakeUnitOfWork()
     run = _add_run(uow, verification=VerificationOutcome.UNAVAILABLE)
@@ -305,13 +346,14 @@ def test_a_run_carries_a_summary_of_its_merge_request() -> None:
 
 def test_a_merge_request_outside_github_has_no_url() -> None:
     uow = FakeUnitOfWork()
-    run = _run(merge_request_id=_merge_request(uow, Provider.GITLAB).id)
-    uow.review_runs.add(run)
+    merge_request = _merge_request(uow, Provider.GITLAB)
+    repository = uow.repositories.get(merge_request.repository_id)
+    assert repository is not None
 
-    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+    item = review_run_list_item(ReviewRunListEntry(_run(merge_request_id=merge_request.id), merge_request, repository, 0))
 
-    assert body["merge_request"]["url"] is None
-    assert body["merge_request"]["repository"]["provider"] == "gitlab"
+    assert item.merge_request.url is None
+    assert item.merge_request.repository.provider == "gitlab"
 
 
 def test_published_comments_come_in_publication_order() -> None:
@@ -450,3 +492,110 @@ def test_list_item_is_built_from_the_run_its_merge_request_and_findings() -> Non
     assert item.findings_count == 2
     assert item.merge_request.url == "https://github.com/octo-org/api/pull/42"
     assert item.merge_request.repository.full_name == "octo-org/api"
+
+
+# --- видимость прогона: то же правило, что у списка и потока (#127) ---------------
+
+RUN_PATHS = ("", "/steps", "/diff")
+
+
+@pytest.mark.parametrize("suffix", RUN_PATHS)
+def test_a_run_of_a_repository_hidden_on_github_is_404_like_a_missing_one(suffix: str) -> None:
+    """Чужой прогон отвечает тем же `404`, что несуществующий: ответ не подтверждает, что id есть."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    hidden = _client(uow, FakeInstallationCatalog([InstallationRepository("999", "octo-org/other", "main", READ)]))
+
+    response = hidden.get(f"/api/v1/reviews/{run.id}{suffix}")
+    missing = hidden.get(f"/api/v1/reviews/{new_id()}{suffix}")
+
+    assert response.status_code == missing.status_code == 404
+    assert response.json()["code"] == "REVIEW_NOT_FOUND"
+    assert _without_instance(response) == _without_instance(missing)
+    assert _headers(response) == _headers(missing)
+
+
+def _without_instance(response: Any) -> dict[str, Any]:
+    """Тело ответа без `instance` и `trace_id`: путь с id и трасса у двух ответов разные по определению."""
+    return {key: value for key, value in response.json().items() if key not in {"instance", "trace_id"}}
+
+
+def _headers(response: Any) -> dict[str, str]:
+    """Заголовки ответа без тех, что различаются у любых двух запросов."""
+    return {key: value for key, value in response.headers.items() if key.lower() not in {"x-trace-id", "content-length"}}
+
+
+@pytest.mark.parametrize("suffix", RUN_PATHS)
+def test_a_run_outside_github_is_visible_to_nobody(suffix: str) -> None:
+    """Кабинет видит репозитории только через GitHub: id у другого провайдера может совпасть, но прогон не виден."""
+    uow = FakeUnitOfWork()
+    run = _run(merge_request_id=_merge_request(uow, Provider.GITLAB).id)
+    uow.review_runs.add(run)
+
+    assert _client(uow).get(f"/api/v1/reviews/{run.id}{suffix}").status_code == 404
+
+
+@pytest.mark.parametrize("suffix", RUN_PATHS)
+def test_a_missing_run_asks_github_like_an_existing_one(suffix: str) -> None:
+    """GitHub спрашиваем и для несуществующего id: иначе сбой GitHub или задержка выдали бы, что id есть."""
+    catalog = FakeInstallationCatalog([VISIBLE])
+
+    response = _client(FakeUnitOfWork(), catalog).get(f"/api/v1/reviews/{new_id()}{suffix}")
+
+    assert response.status_code == 404
+    assert catalog.calls != []
+
+
+@pytest.mark.parametrize("suffix", RUN_PATHS)
+def test_github_failure_hides_whether_the_run_exists(suffix: str) -> None:
+    """GitHub лёг — `502` и для существующего прогона, и для несуществующего."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    client = _client(uow, FakeInstallationCatalog(error=VcsError("GitHub недоступен")))
+
+    existing = client.get(f"/api/v1/reviews/{run.id}{suffix}")
+    missing = client.get(f"/api/v1/reviews/{new_id()}{suffix}")
+
+    assert existing.status_code == missing.status_code == 502
+    assert _without_instance(existing) == _without_instance(missing)
+
+
+@pytest.mark.parametrize("suffix", RUN_PATHS)
+def test_a_token_revoked_at_github_closes_the_session(suffix: str) -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+
+    response = _client(uow, FakeInstallationCatalog(error=ProviderTokenRejected("401"))).get(
+        f"/api/v1/reviews/{run.id}{suffix}"
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"
+    assert any(
+        header.startswith("session=") and "Max-Age=0" in header for header in response.headers.get_list("set-cookie")
+    )
+    assert uow.sessions.stored == []
+
+
+@pytest.mark.parametrize("suffix", RUN_PATHS)
+def test_github_failure_on_a_run_is_502(suffix: str) -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+
+    response = _client(uow, FakeInstallationCatalog(error=VcsError("GitHub недоступен"))).get(
+        f"/api/v1/reviews/{run.id}{suffix}"
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+
+
+def test_diff_of_a_visible_run_answers_not_implemented() -> None:
+    """Дифф прогона описан в схеме, а отвечает `501` — после проверки видимости прогона."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+
+    response = _client(uow).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 501
+    assert response.json()["code"] == "NOT_IMPLEMENTED"

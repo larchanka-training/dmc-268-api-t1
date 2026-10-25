@@ -59,9 +59,26 @@ def _iso_8601_only(value: object) -> object:
     return value
 
 
+def _param_to_utc(moment: datetime) -> datetime:
+    # На краю календаря сдвиг зоны выводит дату за год 1 или 9999: `OverflowError` — не
+    # `ValueError`, pydantic его не ловит, и вышел бы 500.
+    try:
+        return moment.astimezone(UTC)
+    except OverflowError:
+        raise PydanticCustomError("datetime_out_of_range", "время вне допустимого диапазона") from None
+
+
 # Время во входных параметрах: строка ISO 8601 с любой зоной, приводится к UTC. В схеме —
 # `date-time` без `pattern` ответа: на вход годится и `+03:00`, `Z` обязателен только в ответах.
-UtcDatetimeParam = Annotated[AwareDatetime, BeforeValidator(_iso_8601_only), AfterValidator(_to_utc)]
+UtcDatetimeParam = Annotated[AwareDatetime, BeforeValidator(_iso_8601_only), AfterValidator(_param_to_utc)]
+
+
+def without_nul(value: str) -> str:
+    # PostgreSQL не хранит и не сравнивает NUL в тексте: psycopg отказал бы уже в базе, ответом 500.
+    if "\x00" in value:
+        raise PydanticCustomError("string_nul", "строка не должна содержать символ NUL")
+    return value
+
 
 # Этап, на котором прогон может упасть, — те же значения, что `FAILURE_STAGES` домена
 # (равенство множеств проверяет тест).
@@ -105,6 +122,7 @@ ReviewErrorCode = Literal[
     "LLM_UNAVAILABLE",
     "LLM_INVALID_OUTPUT",
     "PROMPT_TOO_LARGE",
+    "DIFF_TOO_LARGE",
     "REVIEW_RUN_STALE",
     "INTERNAL_ERROR",
 ]

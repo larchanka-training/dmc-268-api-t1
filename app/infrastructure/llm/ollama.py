@@ -66,7 +66,8 @@ class OllamaGateway:
             data = response.json()
             text: str = data["message"]["content"]
             model: str = data["model"]
-            # Полностью закэшированный запрос Ollama не считает и поле опускает.
+            # С Ollama 0.33.3 поле - весь вход вместе с закэшированной частью;
+            # `.get` - на случай, если сервер старше и поле опустил.
             prompt_tokens: int = data.get("prompt_eval_count", 0)
             output_tokens: int = data["eval_count"]
             # `length` - ответ оборван по `num_predict`.

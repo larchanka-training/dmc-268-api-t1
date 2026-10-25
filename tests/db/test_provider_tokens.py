@@ -61,6 +61,16 @@ def test_a_token_round_trips_and_the_table_holds_only_ciphertext(clean_db) -> No
     assert b"ghr_refresh-value" not in dump
 
 
+def test_exists_tells_a_session_with_a_token_from_one_without_and_needs_no_key(clean_db) -> None:
+    with_token = _signed_in(clean_db, token_from_grant(GRANT, NOW))
+    without = _signed_in(clean_db)
+
+    # Без ключа: проверка сессии не расшифровывает токен.
+    with _uow(clean_db, key=None) as work:
+        assert work.provider_tokens.exists(with_token)
+        assert not work.provider_tokens.exists(without)
+
+
 def test_a_token_without_expiry_round_trips(clean_db) -> None:
     forever = ProviderToken(Secret("ghu_forever"), None, None, None)
     session_id = _signed_in(clean_db, forever)

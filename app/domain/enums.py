@@ -189,3 +189,8 @@ TERMINAL_STATUSES: frozenset[ReviewRunStatus] = frozenset(
         ReviewRunStatus.CANCELLED,
     }
 )
+
+# Терминальные статусы, после которых коммит считается отревьюенным: повтор
+# доставки вебхука на него — дубль (#75, #149). `failed` сюда не входит —
+# повтор после сбоя должен дать ревью.
+REVIEWED_STATUSES: frozenset[ReviewRunStatus] = TERMINAL_STATUSES - {ReviewRunStatus.FAILED}

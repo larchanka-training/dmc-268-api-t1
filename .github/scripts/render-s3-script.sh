@@ -35,9 +35,26 @@ ENV_FILE="\$(mktemp)"
 trap 'rm -f "\$ENV_FILE"' EXIT
 cat > "\$ENV_FILE"
 
+# Образ из описания деплоя должен доехать и до уже созданного контейнера:
+# иначе новый тег в deploy.yml на сервер не попадёт никогда. Контейнер
+# пересоздаётся на том же томе, состояние в нём переживает docker rm.
+# Останавливаем штатно, а не rm -f: SIGKILL посреди записи state не нужен.
+# Сначала скачиваем: недоступный реестр не должен оставить стенд без
+# хранилища — тогда остаёмся на прежнем образе и говорим об этом.
+CURRENT="\$(docker inspect -f '{{.Config.Image}}' "\$NAME" 2>/dev/null || true)"
+if [ -n "\$CURRENT" ] && [ "\$CURRENT" != "\$IMAGE" ]; then
+    if ! ERR="\$(docker pull -q "\$IMAGE" 2>&1 >/dev/null)"; then
+        echo "S3_IMAGE=не скачался \$IMAGE, остаётся \$CURRENT: \$(printf '%s' "\$ERR" | tr '\n' ' ')"
+    elif ERR="\$({ docker stop "\$NAME" && docker rm "\$NAME"; } 2>&1 >/dev/null)"; then
+        echo "S3_IMAGE=обновлён: \$CURRENT -> \$IMAGE"
+    else
+        echo "S3_IMAGE=не удалось убрать старый контейнер, остаётся \$CURRENT: \$(printf '%s' "\$ERR" | tr '\n' ' ')"
+    fi
+fi
+
 # Три состояния вместо двух: контейнера нет, есть но остановлен, работает.
 # Остановленный надо поднять, а не пересоздавать — в томе лежит состояние
-# Terraform, и терять его из-за перезагрузки сервера было бы обидно.
+# OpenTofu, и терять его из-за перезагрузки сервера было бы обидно.
 STATE="\$(docker inspect -f '{{.State.Running}}' "\$NAME" 2>/dev/null || echo missing)"
 
 case "\$STATE" in

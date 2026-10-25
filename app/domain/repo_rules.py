@@ -26,18 +26,45 @@ import re
 from collections.abc import Iterable
 from pathlib import PurePosixPath
 
+from app.domain.diff_parser import split_lines
 from app.domain.entities import RejectedRule, RepoRule
 
 RULES_PATH = ".review/rules.md"
 
-_RULE_HEADING = re.compile(r"^##(?!#)\s+(?P<name>.+?)\s*#*\s*$")
+# Закрывающие `#` — часть заголовка только после пробела (CommonMark): `## C#` — правило `C#`.
+_RULE_HEADING = re.compile(r"^##(?!#)\s+(?P<name>.+?)(?:\s+#+)?\s*$")
 _ANY_HEADING = re.compile(r"^#{1,6}\s")
 _FIELD = re.compile(
     r"^\s*(?:[-*+]\s+)?(?P<key>pattern|exclude)\s*:\s*(?P<value>.+?)\s*$",
     re.IGNORECASE,
 )
 _CHECK = re.compile(r"^\s*\d+[.)]\s+(?P<text>.+?)\s*$")
-_FENCE = re.compile(r"^\s*(```|~~~)")
+# Ограда кода по CommonMark: в info-строке обратной ограды нет обратных кавычек;
+# закрывает тот же символ, не короче открывающей, и после неё только пробелы.
+# Отступ любой, а не до трёх пробелов: списки парсер не разбирает, а пример кода
+# в пункте `10.` сдвинут на четыре.
+_FENCE_OPEN = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+_FENCE_CLOSE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})[ \t]*$")
+UNCLOSED_FENCE_REASON = "незакрытый блок кода"
+
+
+def _opening_fence(line: str) -> str | None:
+    """Ограда, которой line открывает блок кода, или None, если не открывает."""
+    match = _FENCE_OPEN.match(line)
+    if match is None:
+        return None
+    fence = match.group("fence")
+    if fence[0] == "`" and "`" in match.group("info"):
+        return None
+    return fence
+
+
+def _closes_fence(line: str, fence: str) -> bool:
+    match = _FENCE_CLOSE.match(line)
+    if match is None:
+        return False
+    closing = match.group("fence")
+    return closing[0] == fence[0] and len(closing) >= len(fence)
 
 
 class _Draft:
@@ -72,13 +99,19 @@ def parse_rules_markdown(text: str) -> tuple[tuple[RepoRule, ...], tuple[Rejecte
     """Разобрать `rules.md` на принятые и отклонённые правила, в порядке файла."""
     drafts: list[_Draft] = []
     current: _Draft | None = None
-    in_fence = False
+    fence: str | None = None
+    swallowed: list[str] = []
 
-    for line in text.splitlines():
-        if _FENCE.match(line):
-            in_fence = not in_fence
+    for line in split_lines(text):
+        if fence is not None:
+            if _closes_fence(line, fence):
+                fence = None
+                swallowed = []
+            else:
+                swallowed.append(line)
             continue
-        if in_fence:
+        if (opening := _opening_fence(line)) is not None:
+            fence = opening
             continue
         if (heading := _RULE_HEADING.match(line)) is not None:
             current = _Draft(heading.group("name"))
@@ -113,15 +146,42 @@ def parse_rules_markdown(text: str) -> tuple[tuple[RepoRule, ...], tuple[Rejecte
         else:
             taken.add(result.name)
             accepted.append(result)
+    if fence is not None:
+        # Незакрытый блок молча съел бы остаток файла: правила в нём не видны
+        # ни как принятые, ни как отклонённые, и автор не узнает почему.
+        rejected.extend(
+            RejectedRule(name=heading.group("name"), reason=UNCLOSED_FENCE_REASON)
+            for line in swallowed
+            if (heading := _RULE_HEADING.match(line)) is not None
+        )
     return tuple(accepted), tuple(rejected)
 
 
 def rule_applies_to(rule: RepoRule, path: str) -> bool:
     """Файл подходит под паттерн правила и не подпадает под исключение."""
     candidate = PurePosixPath(path)
-    return any(candidate.full_match(p) for p in rule.patterns) and not any(
-        candidate.full_match(e) for e in rule.excludes
+    return any(_glob_matches(candidate, p) for p in rule.patterns) and not any(
+        _glob_matches(candidate, e) for e in rule.excludes
     )
+
+
+def _glob_matches(path: PurePosixPath, pattern: str) -> bool:
+    """Glob с семантикой `.gitignore`.
+
+    Шаблон без `/` (кроме завершающего) — имя на любой глубине: `*.py` = `**/*.py`.
+    Завершающий `/` — только каталог со всем содержимым: `app/` = `**/app/**`. Шаблон без
+    завершающего `/` совпадает и с файлом, и с содержимым каталога: `app/api` = `app/api/**`.
+    `/` в начале или середине привязывает шаблон к корню репозитория.
+    """
+    body = pattern.strip("/")
+    if not body:
+        return False
+    anchored = pattern.startswith("/") or "/" in body
+    if not anchored:
+        body = "**/" + body
+    if pattern.endswith("/"):
+        return path.full_match(body + "/**")
+    return path.full_match(body) or path.full_match(body + "/**")
 
 
 def applicable_rules(

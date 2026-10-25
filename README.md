@@ -35,6 +35,19 @@ ln -s AGENTS.md CLAUDE.md                 # Claude Code читает CLAUDE.md
 Симлинк, а не копия: копия разойдётся с оригиналом на первой же правке. Antigravity исключение —
 он читает `.agents/skills` сам.
 
+Актуальную документацию библиотек агент берёт из [context7](https://context7.com) — MCP-сервера,
+который отдаёт документацию нужной версии. Подключение тоже личное, конфиг MCP не коммитится:
+
+```bash
+claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp   # Claude Code
+npx ctx7 setup --cursor                    # или --claude, --opencode
+```
+
+Для остальных инструментов — [инструкция context7](https://context7.com/docs/resources/all-clients).
+Ключ API необязателен, с ним выше лимиты. Правило, когда сверяться с документацией, — в
+[`.agents/rules/backend.md`](.agents/rules/backend.md), «Документация библиотек и проверка на
+практике».
+
 Системные промпты ревью-агента, которого мы разрабатываем, —
 [`prompts/review/README.md`](prompts/review/README.md).
 
@@ -60,14 +73,22 @@ uv run pre-commit install   # перед каждым коммитом гоня�
 docker compose up
 ```
 
-Поднимает API вместе с PostgreSQL и Redis, дожидается, пока PostgreSQL отчитается
-о готовности, применяет миграции и отдаёт API на `localhost:8000`. `GET /health`
-отвечает `{"status": "ok"}`. Данные PostgreSQL остаются в именованном томе и
-переживают `docker compose down` / `up`; чтобы стереть их, добавьте `-v` к `down`.
+Поднимает API и воркер вместе с PostgreSQL и RabbitMQ. Сначала PostgreSQL
+отчитывается о готовности, затем одноразовый сервис `migrate` применяет миграции
+(`alembic upgrade head`) и завершается с кодом 0; API и воркер стартуют только
+после этого, поэтому миграции идут один раз, а не при каждом старте API. Порты
+(`8000`, `5432`, `5672`, `6379`) опубликованы только на `127.0.0.1`: с других
+машин стек недоступен. API отдаётся на `localhost:8000`, `GET /health` отвечает
+`{"status": "ok"}`. Данные PostgreSQL остаются в именованном томе и переживают
+`docker compose down` / `up`; чтобы стереть их, добавьте `-v` к `down`.
 
-Redis поднимается только как локальная инфраструктура — из API в него пока никто
-не ходит. Он понадобится первой же задаче, которой нужны идемпотентность,
-rate limiting или кэш (см. `docs/BACKEND_ARCHITECTURE.md`, «Добавление Redis»).
+Воркеру нужен `LLM_BACKEND` (см. раздел о модели ниже): без него он не стартует.
+
+Redis — локальная инфраструктура без потребителей: из API и воркера в него никто
+не ходит, поэтому по умолчанию он не поднимается. Нужен — включите профиль:
+`docker compose --profile redis up -d redis`. Он понадобится первой же задаче,
+которой нужны идемпотентность, rate limiting или кэш (см.
+`docs/BACKEND_ARCHITECTURE.md`, «Добавление Redis»).
 
 ### Путь без лишних зависимостей: свой PostgreSQL
 
@@ -156,6 +177,17 @@ TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest   # вместе с а
 Тесты, которым нужен PostgreSQL, помечены `integration` и пропускаются, если
 `TEST_DATABASE_URL` не задан; сквозным (`tests/e2e/`), обвязке eval и малому
 нагрузочному прогону нужен ещё и RabbitMQ в `TEST_RABBITMQ_URL`.
+Тест алярма брокера (`tests/queue/test_broker_blocked.py`) включает алярм памяти
+через `docker exec` в контейнере RabbitMQ: имя или идентификатор контейнера —
+в `TEST_RABBITMQ_CONTAINER`, без него тест пропускается.
+
+В CI пропуск — провал: шаг pytest идёт с `PYTEST_FAIL_ON_SKIP=1`, и плагин
+`tests/strict_skips.py` (подключён в `addopts`) завершает прогон с кодом 1, если хоть один тест
+пропущен, и перечисляет пропущенные. Локально так же — той же переменной:
+
+```bash
+PYTEST_FAIL_ON_SKIP=1 TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... TEST_RABBITMQ_CONTAINER=... uv run pytest
+```
 
 Эта переменная намеренно не `DATABASE_URL`, и никакого отката на неё нет.
 Подготовка тестовой базы удаляет её схему, так что если направить тесты на базу,
@@ -257,8 +289,53 @@ psql "$DATABASE_URL" -c "
 App нужно разрешение **Contents: read**. Без него прогон не падает: правила
 уходят в дефолтный фоллбэк (`rules.status = unavailable`), AST пропускается.
 Формат правил — [`prompts/review/custom-rules.md`](prompts/review/custom-rules.md),
-лимиты сборки контекста (`CONTEXT_MAX_TOKENS`, `RULES_MAX_BYTES`,
+лимиты сборки контекста (`CONTEXT_MAX_TOKENS`, `DIFF_MAX_BYTES`, `RULES_MAX_BYTES`,
 `AST_MAX_FILES`, …) — в [`app/config.py`](app/config.py).
+
+## Merge gate
+
+После публикации ревью бот ставит на `head_sha` check run `dmc-268-ai-review`: `failure`,
+пока открыт тред с замечанием `critical`, иначе `success`. Когда тред закрывают, бот
+пересчитывает проверку сразу, нового пуша не нужно. Для этого App нужно разрешение
+**Checks: write** и подписка на событие `pull_request_review_thread`. Мердж блокирует только обязательная проверка, и делать её
+обязательной надо **с источником — нашим App**. Проверку «по имени» закрывает любой check run
+с тем же именем, например из workflow автора PR с `checks: write`, и любой commit status от
+того, у кого есть право записи. С источником GitHub не даст смёржить, если статус выставил
+кто-то другой.
+
+В интерфейсе: Settings → Rules → Rulesets → New branch ruleset → Require status checks
+to pass → Add checks → `dmc-268-ai-review`, источник — наш App вместо «Any source». App
+появляется в списке источников, только когда он недавно ставил check run в этом
+репозитории: сначала прогоните ревью на любом PR. Через API источник задаёт
+`integration_id` — id App (переменная репозитория `APP_ID_DMC268_T1`, у нас `5262828`):
+
+```bash
+gh api -X POST repos/<owner>/<repo>/rulesets --input - <<'EOF'
+{
+  "name": "Merge gate ревью-бота",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+  "rules": [{
+    "type": "required_status_checks",
+    "parameters": {
+      "strict_required_status_checks_policy": false,
+      "required_status_checks": [
+        {"context": "dmc-268-ai-review", "integration_id": 5262828}
+      ]
+    }
+  }]
+}
+EOF
+```
+
+Обязательную проверку проходят `success`, `neutral` и `skipped`, блокируют `failure` и
+`action_required`. Наш бот ставит только `success` и `failure`.
+
+Проверено на практике (2026-10-24, временный ruleset в этом репозитории): `success` с тем же
+именем от пользователя проверку с источником не закрывает, `success` от нужного App —
+закрывает. Но `failure` с тем же именем от любого, у кого есть право записи, мердж
+блокирует: обойти gate так нельзя, придержать — можно.
 
 ## Модель
 

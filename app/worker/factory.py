@@ -31,13 +31,16 @@ from app.application.ports import (
     VcsGateway,
 )
 from app.application.ports.llm_gateway import LlmGateway
+from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.application.review_pipeline import run_review
 from app.application.session_purge import purge_expired_sessions
 from app.application.stale_sweep import sweep_stale_runs
+from app.application.webhook_redelivery import redeliver_failed_webhooks
 from app.config import Settings
 from app.domain.ids import new_id
 from app.domain.prompt import PromptTexts, check_window_config
-from app.infrastructure.container import build_container
+from app.domain.webhook_redelivery import RedeliveryPolicy
+from app.infrastructure.container import WORKER_VCS_LIMITS, build_container
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
     QUEUE_NAME,
@@ -224,6 +227,7 @@ def context_limits(settings: Settings) -> ContextLimits:
         ast_max_files=settings.ast_max_files,
         ast_max_file_bytes=settings.ast_max_file_bytes,
         pr_context_max_tokens=settings.pr_context_max_tokens,
+        diff_max_bytes=settings.diff_max_bytes,
     )
 
 
@@ -312,21 +316,90 @@ def check_model_deadline(settings: Settings) -> None:
         )
 
 
+def check_sweep_thresholds(settings: Settings) -> None:
+    """Порог ждущего в очереди прогона больше порога зависшего (change `queued-run-timeout`).
+
+    Иначе прогон, ещё не взятый воркером, выметался бы раньше зависшего в
+    работе, а его сообщение воркер потом молча пропустил бы.
+    """
+    queued, stale = settings.queued_run_timeout_seconds, settings.stale_run_timeout_seconds
+    if queued <= stale:
+        raise WorkerConfigError(
+            f"порог ждущего в очереди прогона {queued} с (QUEUED_RUN_TIMEOUT_SECONDS)"
+            f" не больше порога зависшего прогона {stale} с (STALE_RUN_TIMEOUT_SECONDS)"
+        )
+
+
+def build_redelivery(
+    settings: Settings,
+    deliveries: Callable[[], WebhookDeliveries],
+    vcs: Callable[[], VcsGateway],
+    *,
+    now: Callable[[], datetime],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> Callable[[], int] | None:
+    """Шаг повтора упавших доставок вебхука (#149) или `None`, если он выключен.
+
+    Без идентификатора или ключа GitHub App JWT не подписать — шаг не собирается,
+    и об этом одна строка INFO при старте, а не ошибка на каждом проходе.
+    """
+    if not settings.webhook_redelivery_enabled:
+        logger.info("повтор упавших доставок вебхука выключен: WEBHOOK_REDELIVERY_ENABLED=false")
+        return None
+    if not settings.github_app_configured:
+        logger.info(
+            "повтор упавших доставок вебхука выключен: не заданы GITHUB_APP_ID или GITHUB_APP_PRIVATE_KEY"
+        )
+        return None
+    hooks, gateway = deliveries(), vcs()
+    policy = RedeliveryPolicy(
+        max_attempts=settings.webhook_redelivery_max_attempts,
+        backoff=timedelta(seconds=settings.webhook_redelivery_backoff_seconds),
+        limit=settings.webhook_redelivery_max_per_pass,
+    )
+
+    # `guid` устаревших доставок — в памяти процесса: после рестарта воркер
+    # проверит их по разу заново, это дешевле таблицы.
+    known_stale: set[str] = set()
+
+    def redeliver() -> int:
+        return redeliver_failed_webhooks(
+            hooks,
+            gateway,
+            now=now(),
+            policy=policy,
+            monotonic=monotonic,
+            budget_seconds=settings.webhook_redelivery_pass_budget_seconds,
+            known_stale=known_stale,
+        )
+
+    return redeliver
+
+
 def build_maintenance(
     uow_factory: Callable[[], UnitOfWork],
     *,
     stale_limit: timedelta,
+    queued_limit: timedelta,
     now: Callable[[], datetime],
+    redeliver: Callable[[], int] | None = None,
+    redelivery_interval: timedelta = timedelta(seconds=300),
 ) -> Callable[[], None]:
-    """Периодический проход: зависшие прогоны и истёкшие сессии.
+    """Периодический проход: зависшие прогоны, истёкшие сессии, повтор доставок.
 
     Шаги независимы: сбой одного логируется, отмечается ошибкой на текущем спане
-    (`review.sweep`) и не мешает другому.
+    (`review.sweep`) и не мешает другому. Повтор доставок ходит в GitHub, поэтому
+    идёт реже прохода — не чаще `redelivery_interval`; время его попытки
+    запоминается и при сбое, чтобы отказ лимита не повторялся каждую минуту.
     """
+    last_redelivery: datetime | None = None
 
     def maintenance() -> None:
+        nonlocal last_redelivery
         try:
-            swept = sweep_stale_runs(uow_factory(), now=now(), limit=stale_limit)
+            swept = sweep_stale_runs(
+                uow_factory(), now=now(), limit=stale_limit, queued_limit=queued_limit
+            )
             if swept:
                 logger.warning("зависших прогонов переведено в failed: %d", swept)
         except Exception as exc:
@@ -339,6 +412,19 @@ def build_maintenance(
         except Exception as exc:
             record_current_exception(exc)
             logger.exception("удаление истёкших сессий завершилось ошибкой")
+        moment = now()
+        if redeliver is None or (
+            last_redelivery is not None and moment - last_redelivery < redelivery_interval
+        ):
+            return
+        last_redelivery = moment
+        try:
+            redelivered = redeliver()
+            if redelivered:
+                logger.info("упавших доставок вебхука переотправлено: %d", redelivered)
+        except Exception as exc:
+            record_current_exception(exc)
+            logger.exception("повтор упавших доставок вебхука завершился ошибкой")
 
     return maintenance
 
@@ -351,8 +437,9 @@ def run_worker(settings: Settings) -> None:
     if settings.llm_backend is None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
     check_model_deadline(settings)
+    check_sweep_thresholds(settings)
     configure_tracing(WORKER_SERVICE)
-    container = build_container(settings)
+    container = build_container(settings, vcs_limits=WORKER_VCS_LIMITS)
     instrument_engine(container.engine)
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
     # Собрать адаптер модели сразу: порядок провайдеров уходит в лог при старте.
@@ -360,7 +447,15 @@ def run_worker(settings: Settings) -> None:
     sweep = build_maintenance(
         container.unit_of_work,
         stale_limit=timedelta(seconds=settings.stale_run_timeout_seconds),
+        queued_limit=timedelta(seconds=settings.queued_run_timeout_seconds),
         now=lambda: datetime.now(UTC),
+        redeliver=build_redelivery(
+            settings,
+            container.webhook_deliveries,
+            container.redelivery_vcs_gateway,
+            now=lambda: datetime.now(UTC),
+        ),
+        redelivery_interval=timedelta(seconds=settings.webhook_redelivery_interval_seconds),
     )
     handler = build_review_handler(
         container, context_limits(settings), llm_limits(settings), prompt_texts

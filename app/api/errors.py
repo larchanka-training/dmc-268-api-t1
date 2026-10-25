@@ -110,6 +110,11 @@ ERRORS_502_SCM_EVENTS = _doc(
     ScmUnavailableProblem,
     "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя; поток не открыт.",
 )
+ERRORS_502_SCM_VISIBILITY = _doc(
+    HTTPStatus.BAD_GATEWAY,
+    ScmUnavailableProblem,
+    "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",
+)
 ERRORS_404_NOT_IN_INSTALLATION = _doc(
     HTTPStatus.NOT_FOUND,
     RepositoryNotInInstallationProblem,
@@ -231,6 +236,9 @@ _REASONS = {
     "timezone_aware": "ожидается время с зоной",
     # Свой тип `PydanticCustomError`: время во входе — только строка ISO 8601 (`UtcDatetimeParam`).
     "datetime_not_iso": "ожидается время в ISO 8601",
+    # Свои типы `PydanticCustomError` входных параметров (`app/api/schemas.py`).
+    "datetime_out_of_range": "время вне допустимого диапазона",
+    "string_nul": "строка не должна содержать символ NUL",
 }
 _DEFAULT_REASON = "недопустимое значение"
 # Ошибки, у которых последний элемент `loc` — не поле схемы: имя лишнего поля (ввод клиента,

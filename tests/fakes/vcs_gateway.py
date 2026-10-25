@@ -1,15 +1,18 @@
 """Записывающий `VcsGateway` для тестов публикации."""
 
 from dataclasses import dataclass, field
+from uuid import UUID
 
 from app.application.ports.vcs_review import (
     InlineCommentDraft,
     MergeGateCheck,
     PublishedInlineComment,
     PullRequestReviewPublication,
+    ReviewThreadState,
 )
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
+from app.domain.vcs_errors import VcsFileTooLargeError
 
 # Как у `FakeVcs`: первая строка `app/main.py` в диффе для сборки контекста.
 _PIPELINE_DIFF = (
@@ -34,10 +37,30 @@ class RecordingVcsGateway:
     pr_title: str = "feat: изменение"
     pr_description: str = ""
     commit_messages: tuple[str, ...] = ()
+    # Треды на хостинге по корневому комментарию; не заданный - открыт и устарел
+    # (`line=None`): с находками прогона он не совпадает.
+    thread_states: dict[str, ReviewThreadState] = field(default_factory=dict)
+    thread_state_requests: list[frozenset[str]] = field(default_factory=list)
+    # Сбой сверки тредов: `fetch_review_threads_state` бросает это исключение.
+    threads_error: Exception | None = None
+    # Сбои после публикации ревью: дифф между коммитами, ответ и закрытие треда по корню.
+    diff_error: Exception | None = None
+    reply_errors: dict[str, Exception] = field(default_factory=dict)
+    resolve_errors: dict[str, Exception] = field(default_factory=dict)
+    # Ревью опубликовано, а id inline-комментариев не получены (`GET …/comments` упал).
+    inline_ids_lost: bool = False
+    # Сбой самого check run merge gate.
+    check_error: Exception | None = None
+    # Прогоны, чьим маркером помечено каждое опубликованное ревью.
+    review_run_ids: list[UUID] = field(default_factory=list)
 
     def fetch_diff(
-        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
+        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
     ) -> str:
+        if self.diff_error is not None:
+            raise self.diff_error
+        if len(self.diff.encode("utf-8")) > max_bytes:
+            raise VcsFileTooLargeError(f"дифф: больше {max_bytes} байт")
         return self.diff
 
     def fetch_pr_metadata(
@@ -73,8 +96,16 @@ class RecordingVcsGateway:
         installation_id: int,
         summary_body: str,
         inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
     ) -> PullRequestReviewPublication:
         self.publications.append((summary_body, inline_comments))
+        self.review_run_ids.append(review_run_id)
+        if self.inline_ids_lost:
+            return PullRequestReviewPublication(
+                summary_provider_comment_id="summary-1",
+                inline_comments=tuple(None for _ in inline_comments),
+            )
         published = tuple(
             PublishedInlineComment(
                 file_path=item.file_path,
@@ -97,17 +128,25 @@ class RecordingVcsGateway:
         provider_comment_id: str,
         body: str,
     ) -> str:
+        if provider_comment_id in self.reply_errors:
+            raise self.reply_errors[provider_comment_id]
         self.replies.append((provider_comment_id, body))
         return f"reply-to-{provider_comment_id}"
 
-    def fetch_review_threads_resolved_state(
+    def fetch_review_threads_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
         provider_comment_ids: frozenset[str],
-    ) -> dict[str, bool]:
-        return {cid: False for cid in provider_comment_ids}
+    ) -> dict[str, ReviewThreadState]:
+        self.thread_state_requests.append(provider_comment_ids)
+        if self.threads_error is not None:
+            raise self.threads_error
+        return {
+            cid: self.thread_states.get(cid, ReviewThreadState(resolved=False, line=None))
+            for cid in provider_comment_ids
+        }
 
     def resolve_review_thread_for_comment(
         self,
@@ -116,6 +155,8 @@ class RecordingVcsGateway:
         installation_id: int,
         provider_comment_id: str,
     ) -> None:
+        if provider_comment_id in self.resolve_errors:
+            raise self.resolve_errors[provider_comment_id]
         self.resolved.append(provider_comment_id)
 
     def set_merge_gate_check(
@@ -125,4 +166,6 @@ class RecordingVcsGateway:
         installation_id: int,
         check: MergeGateCheck,
     ) -> None:
+        if self.check_error is not None:
+            raise self.check_error
         self.checks.append(check)

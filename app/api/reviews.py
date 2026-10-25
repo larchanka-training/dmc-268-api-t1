@@ -1,4 +1,4 @@
-"""Прогон ревью: чтение вместе с находками и ручной запуск (пока заглушка).
+"""Прогон ревью: список, чтение вместе с находками и ручной запуск (пока заглушка).
 
 Один связный ответ, не два эндпоинта: прогон без находок бессмысленно
 смотреть отдельно от них (design.md change'а add-review-rest-api).
@@ -7,6 +7,7 @@
 `app/api/schemas.py`.
 """
 
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime
 from http import HTTPStatus
@@ -17,17 +18,24 @@ from fastapi import APIRouter, Depends, Path, Query
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from pydantic_core import PydanticCustomError
 
-from app.api.dependencies import get_unit_of_work
+from app.api.dependencies import (
+    get_token_provider,
+    get_unit_of_work,
+    get_unit_of_work_factory,
+    get_visibility_catalog,
+)
 from app.api.errors import (
     ERRORS_403_ORIGIN,
     ERRORS_404_REVIEW,
     ERRORS_409_REVIEW_ACTIVE,
     ERRORS_422,
     ERRORS_501_NOT_IMPLEMENTED,
+    ERRORS_502_SCM_VISIBILITY,
     ApiError,
 )
-from app.api.pagination import DEFAULT_LIMIT, Limit, Offset
+from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
+from app.api.repositories import is_visible, user_repositories, visible_provider_ids
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
     FailedStage,
@@ -37,9 +45,12 @@ from app.api.schemas import (
     StrictRequest,
     UtcDatetime,
     UtcDatetimeParam,
+    without_nul,
 )
-from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES
-from app.application.ports import UnitOfWork
+from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES, current_session
+from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
+from app.application.run_feed_events import visible_repository_ids
+from app.application.use_cases.auth import SignedIn
 from app.domain.entities import MergeRequest, Repository, ReviewRun, ReviewRunListEntry
 from app.domain.enums import (
     CommentKind,
@@ -52,6 +63,7 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.provider_links import merge_request_url
+from app.domain.run_list import run_list_filter
 
 # Задачи на реализацию ручного запуска пока нет — ссылка появится в описании операции.
 _CREATE_REVIEW_DESCRIPTION = (
@@ -65,27 +77,27 @@ _CREATE_REVIEW_DESCRIPTION = (
 # Решения 2 и 4 в dmc-268-ui-t1#37; реализация — отдельными задачами, ссылка появится здесь.
 _DIFF_DESCRIPTION = (
     "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #82). Когда ручка заработает: полный дифф запроса на изменение у провайдера между base_sha "
-    "и head_sha прогона; 404 REVIEW_NOT_FOUND, если прогона нет. Требует сессию."
+    "(задача #82). Требует сессию; прогон проверяется до ответа 501 — 404 REVIEW_NOT_FOUND, если его нет "
+    "или он не виден пользователю. Когда ручка заработает: полный дифф запроса на изменение у провайдера "
+    "между base_sha и head_sha прогона."
 )
 _STEPS_DESCRIPTION = (
     "Требует сессию. Шаги воркера по порядку начала (при равном начале — по id): этап, статус, начало, "
     "длительность, токены, код ошибки; без запросов и ответов модели. Повтор этапа (новая попытка вызова "
     "модели) — отдельный шаг того же этапа. Прогон, у которого шагов ещё нет, — 200 с пустым items; "
-    "404 REVIEW_NOT_FOUND, если прогона нет."
+    "404 REVIEW_NOT_FOUND, если прогона нет или он не виден пользователю."
 )
 
-# Видимость прогонов — решение А в dmc-268-ui-t1#43: одно правило на список и поток GET /events.
+# Видимость прогонов — решение А в dmc-268-ui-t1#43: одно правило на список, поток GET /events и
+# ручки одного прогона (#127).
 VISIBILITY_RULE = (
     "Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub "
     "(любая роль; публичный репозиторий, на котором у пользователя роли нет, не виден), — то же "
     "правило, что у GET /repositories/available."
 )
 _LIST_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #103). Требует сессию; параметры запроса проверяются до ответа 501. Когда ручка "
-    "заработает: снимок списка прогонов ревью, сначала новые — по created_at по убыванию, при равном "
-    "created_at — по id по убыванию. "
+    "Требует сессию; параметры запроса проверяются раньше обращения к GitHub. Снимок списка прогонов "
+    "ревью, сначала новые — по created_at по убыванию, при равном created_at — по id по убыванию. "
     + VISIBILITY_RULE
     + " Фильтры складываются через «и»: status — один или несколько статусов (параметр повторяется); "
     "active=true — только активные (queued, building_context, analysing, publishing), active=false — "
@@ -157,6 +169,13 @@ class FindingResponse(BaseModel):
     )
     rule: RuleRefResponse | None = Field(
         description="Пункт правила владельца, по которому выпущена находка; null - находка по стандартным критериям."
+    )
+    covered_by_finding_id: UUID | None = Field(
+        description=(
+            "Находка прошлого прогона того же запроса на изменение, чей тред бота уже говорит об этой "
+            "проблеме: своего комментария у находки нет, повтор не публиковался. null - находка "
+            "опубликована своим комментарием или прогон её ещё не публиковал."
+        )
     )
 
 
@@ -313,6 +332,12 @@ class ReviewRunListQuery(BaseModel):
     limit: Limit = DEFAULT_LIMIT
     offset: Offset = 0
 
+    @field_validator("author", "q")
+    @classmethod
+    def _text_fits_postgres(cls, value: str | None) -> str | None:
+        """Текст фильтра уходит в SQL параметром: NUL отказал бы в базе ответом 500."""
+        return None if value is None else without_nul(value)
+
     @field_validator("created_to")
     @classmethod
     def _range_is_not_reversed(cls, created_to: datetime | None, info: ValidationInfo) -> datetime | None:
@@ -321,6 +346,39 @@ class ReviewRunListQuery(BaseModel):
         if created_to is not None and created_from is not None and created_from > created_to:
             raise PydanticCustomError("range_reversed", "created_from позже created_to")
         return created_to
+
+
+def visible_run(
+    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> ReviewRun:
+    """Прогон, если он виден пользователю, — по тому же правилу, что список и поток.
+
+    Невидимый прогон отвечает так же, как несуществующий, `404 REVIEW_NOT_FOUND`. GitHub
+    спрашиваем до чтения прогона и при любом id: иначе `502`, `401` или задержка ответа
+    выдали бы, что такой id есть.
+    """
+    provider_ids = visible_provider_ids(signed_in, catalog, oauth, uow_factory)
+    with uow_factory() as uow:
+        run = uow.review_runs.get(review_run_id)
+        repository = None if run is None else _repository_of(uow, run)
+    if run is None or repository is None or not is_visible(repository, provider_ids):
+        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
+    return run
+
+
+def _repository_of(uow: UnitOfWork, run: ReviewRun) -> Repository:
+    """Репозиторий прогона через его запрос на изменение; внешние ключи с RESTRICT — их отсутствие — 500."""
+    merge_request = uow.merge_requests.get(run.merge_request_id)
+    if merge_request is None:
+        raise RuntimeError(f"У прогона {run.id} нет запроса на изменение {run.merge_request_id}.")
+    repository = uow.repositories.get(merge_request.repository_id)
+    if repository is None:
+        raise RuntimeError(f"У запроса на изменение {merge_request.id} нет репозитория {merge_request.repository_id}.")
+    return repository
 
 
 @router.post(
@@ -342,10 +400,31 @@ def create_review(body: CreateReviewRequest) -> ReviewJob:
     summary="Список прогонов ревью",
     response_description="Страница прогонов и общее число подходящих под фильтры.",
     description=_LIST_DESCRIPTION,
-    responses={**ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+    responses={**ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
-def list_reviews(query: Annotated[ReviewRunListQuery, Query()]) -> ReviewRunListResponse:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Список прогонов ревью ещё не реализован.")
+def list_reviews(
+    query: Annotated[ReviewRunListQuery, Query()],
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> ReviewRunListResponse:
+    # Видимые репозитории — вызовом, а не зависимостью: зависимость FastAPI выполняется
+    # и тогда, когда параметры запроса не прошли проверку, а 422 не должен стоить запроса в GitHub.
+    repositories = user_repositories(signed_in, catalog, oauth, uow_factory)
+    run_filter = run_list_filter(
+        visible=visible_repository_ids(uow_factory(), repositories),
+        repository_ids=query.repository_id,
+        statuses=query.status,
+        active=query.active,
+        author=query.author,
+        q=query.q,
+        created_from=query.created_from,
+        created_to=query.created_to,
+    )
+    with uow_factory() as uow:
+        page = uow.review_runs.list_page(run_filter, page_size(query.limit), query.offset)
+    return ReviewRunListResponse(items=[review_run_list_item(entry) for entry in page.entries], total=page.total)
 
 
 @router.get(
@@ -354,22 +433,19 @@ def list_reviews(query: Annotated[ReviewRunListQuery, Query()]) -> ReviewRunList
     summary="Прогон ревью вместе с находками",
     response_description="Прогон, его запрос на изменение, находки и опубликованные комментарии.",
     description=(
-        "Требует сессию. Находки — в стабильном порядке: по времени создания, затем по id. Прогон без находок — "
-        "200 с пустым findings. Опубликованные комментарии — по времени публикации, затем по id; пока прогон "
-        "ничего не опубликовал — пустой published_comments."
+        "Требует сессию. 404 REVIEW_NOT_FOUND, если прогона нет или он не виден пользователю. Находки — в "
+        "стабильном порядке: по времени создания, затем по id. Прогон без находок — 200 с пустым findings. "
+        "Опубликованные комментарии — по времени публикации, затем по id; пока прогон ничего не опубликовал — "
+        "пустой published_comments."
     ),
-    responses={**ERRORS_404_REVIEW, **ERRORS_422},
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
 def get_review(
-    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
+    run: ReviewRun = Depends(visible_run),
     uow: UnitOfWork = Depends(get_unit_of_work),
 ) -> ReviewRunResponse:
-    run = uow.review_runs.get(review_run_id)
-    if run is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
-
-    findings = uow.findings.list_for_run(review_run_id)
-    comments = uow.published_comments.list_for_run(review_run_id)
+    findings = uow.findings.list_for_run(run.id)
+    comments = uow.published_comments.list_for_run(run.id)
     return ReviewRunResponse.model_validate(
         {
             **asdict(run),
@@ -476,11 +552,9 @@ class ReviewRunStepListResponse(BaseModel):
     summary="Дифф прогона",
     response_description="Изменённые файлы с ханками.",
     description=_DIFF_DESCRIPTION,
-    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED, **ERRORS_502_SCM_VISIBILITY},
 )
-def get_review_diff(
-    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
-) -> ReviewDiffResponse:
+def get_review_diff(run: ReviewRun = Depends(visible_run)) -> ReviewDiffResponse:
     raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Дифф прогона ещё не реализован.")
 
 
@@ -490,13 +564,11 @@ def get_review_diff(
     summary="Шаги прогона",
     response_description="Шаги воркера по порядку.",
     description=_STEPS_DESCRIPTION,
-    responses={**ERRORS_404_REVIEW, **ERRORS_422},
+    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
 def get_review_steps(
-    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
+    run: ReviewRun = Depends(visible_run),
     uow: UnitOfWork = Depends(get_unit_of_work),
 ) -> ReviewRunStepListResponse:
-    if uow.review_runs.get(review_run_id) is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
-    steps = uow.review_run_steps.list_for_run(review_run_id)
+    steps = uow.review_run_steps.list_for_run(run.id)
     return ReviewRunStepListResponse.model_validate({"items": [asdict(step) for step in steps]})

@@ -345,6 +345,27 @@ def test_a_payload_body_is_a_copy_not_a_handle_on_the_row(uow) -> None:
         assert work.context_payloads.find_by_digest("d1").body == {"text": "x"}
 
 
+def test_a_payload_body_mutated_before_commit_is_stored_as_added(uow) -> None:
+    """Мутация исходной сущности после `add` не меняет сохранённое."""
+    with uow as work:
+        _, _, run = seeded(work)
+    payload = replace(
+        a_context_payload(run.id, chunk_index=0, digest="d2"),
+        body={"text": "x", "files": [{"path": "a.py"}]},
+    )
+    with uow as work:
+        work.context_payloads.add(payload)
+        payload.body["text"] = "mutated"
+        payload.body["files"][0]["path"] = "mutated.py"
+        work.commit()
+
+    with uow as work:
+        assert work.context_payloads.find_by_digest("d2").body == {
+            "text": "x",
+            "files": [{"path": "a.py"}],
+        }
+
+
 def test_a_failed_run_keeps_the_stage_it_failed_in(uow) -> None:
     with uow as work:
         repo = a_repository()
@@ -606,7 +627,13 @@ def test_a_swept_run_has_no_running_steps_left(uow) -> None:
         work.review_run_steps.add(abandoned)
         work.commit()
 
-    assert sweep_stale_runs(uow, now=NOW + dt.timedelta(hours=1), limit=dt.timedelta(minutes=30)) == 1
+    swept = sweep_stale_runs(
+        uow,
+        now=NOW + dt.timedelta(hours=1),
+        limit=dt.timedelta(minutes=30),
+        queued_limit=dt.timedelta(hours=6),
+    )
+    assert swept == 1
 
     with uow as work:
         assert work.review_runs.get(run.id).status is ReviewRunStatus.FAILED
@@ -618,3 +645,68 @@ def test_a_swept_run_has_no_running_steps_left(uow) -> None:
         tokens_used=None,
         error_code="REVIEW_RUN_STALE",
     )
+
+
+def test_bot_threads_of_a_merge_request_keep_resolution_and_coverage(uow) -> None:
+    """#148: треды бота на PR - открытые и закрытые, с отметкой бота; находка связывается с тредом."""
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        first, second = a_run(mr.id), replace(a_run(mr.id), head_sha="def456")
+        work.review_runs.add(first)
+        work.review_runs.add(second)
+        work.commit()
+
+    def finding(run_id, line):
+        return Finding(
+            id=new_id(),
+            review_run_id=run_id,
+            anchor=DiffAnchor("app/main.py", DiffSide.NEW, new_line=line),
+            category=FindingCategory.SECURITY,
+            severity=FindingSeverity.HIGH,
+            message="m",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+    open_finding, bot_closed_finding, repeated = finding(first.id, 1), finding(first.id, 2), finding(second.id, 1)
+
+    def inline(finding_id, provider_comment_id, **flags):
+        return PublishedComment(
+            id=new_id(),
+            review_run_id=first.id,
+            finding_id=finding_id,
+            provider_comment_id=provider_comment_id,
+            kind=CommentKind.INLINE,
+            published_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+            **flags,
+        )
+
+    open_root = inline(open_finding.id, "c1")
+    closed_root = inline(bot_closed_finding.id, "c2", thread_resolved=True, thread_resolved_by_bot=True)
+    with uow as work:
+        for f in (open_finding, bot_closed_finding, repeated):
+            work.findings.add(f)
+        work.published_comments.add(open_root)
+        work.published_comments.add(closed_root)
+        work.commit()
+    with uow as work:
+        work.findings.mark_covered(repeated.id, open_finding.id)
+        work.commit()
+
+    with uow as work:
+        threads = work.published_comments.list_threads_for_merge_request(mr.id)
+        open_threads = work.published_comments.list_open_threads_for_merge_request(mr.id)
+        (stored,) = work.findings.list_for_run(second.id)
+
+    by_root = {t.root_provider_comment_id: (t.finding.id, t.resolved, t.resolved_by_bot) for t in threads}
+    assert by_root == {
+        "c1": (open_finding.id, False, False),
+        "c2": (bot_closed_finding.id, True, True),
+    }
+    assert [t.root_provider_comment_id for t in open_threads] == ["c1"]
+    assert stored.covered_by_finding_id == open_finding.id

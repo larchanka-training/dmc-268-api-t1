@@ -203,6 +203,16 @@ def test_an_expired_session_is_refused_and_deleted() -> None:
     assert uow.sessions.stored == []
 
 
+def test_a_session_without_a_provider_token_is_refused_and_deleted() -> None:
+    """Сессия, открытая до хранения токенов: без токена не работает ни одна ручка с GitHub."""
+    uow = FakeUnitOfWork()
+    login(uow, FakeOAuthProvider())
+    uow.provider_tokens.restore({})
+
+    assert authenticate(uow, "cookie-1", LATER) is None
+    assert uow.sessions.stored == []
+
+
 def test_logout_ends_the_session_for_every_tab_and_is_idempotent() -> None:
     uow = FakeUnitOfWork()
     login(uow, FakeOAuthProvider())

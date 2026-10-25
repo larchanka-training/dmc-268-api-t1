@@ -5,17 +5,33 @@
 чистой функцией — это единственные места, где появляется правило. Они отмечены.
 """
 
+import copy
 import datetime as dt
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
+from typing import Any
 from uuid import UUID
 
 from psycopg.errors import LockNotAvailable
-from sqlalchemy import delete, func, literal, select, text, tuple_, union_all, update
+from sqlalchemy import (
+    CTE,
+    ColumnElement,
+    Row,
+    delete,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+    tuple_,
+    union_all,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from app.domain.entities import (
+    BotThread,
     ContextPayload,
     Finding,
     MergeRequest,
@@ -30,10 +46,17 @@ from app.domain.entities import (
     User,
 )
 from app.domain.entities import Session as UserSession
-from app.domain.enums import TERMINAL_STATUSES, CommentKind, Provider
+from app.domain.enums import (
+    REVIEWED_STATUSES,
+    TERMINAL_STATUSES,
+    CommentKind,
+    Provider,
+    TriggerSource,
+)
 from app.domain.lifecycle import next_status
 from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
 from app.domain.run_feed import FeedCursor
+from app.domain.run_list import RunListFilter, RunListPage
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
@@ -47,6 +70,7 @@ from app.infrastructure.db.models import (
     SessionRow,
     UserRow,
 )
+from app.infrastructure.db.run_changes import REVIEW_RUNS_CHANNEL
 from app.infrastructure.db.token_cipher import TokenCipher
 
 
@@ -66,19 +90,6 @@ class SqlAlchemyRepositoryRepo:
             )
         ).one_or_none()
         return m.repository_to_domain(row) if row else None
-
-    def list_all(self, limit: int, offset: int) -> list[Repository]:
-        # `id` как тай-брейкер: одного `created_at` недостаточно для
-        # стабильного порядка между страницами, если у двух строк совпадает
-        # timestamp — тогда `limit`/`offset` может задвоить или пропустить
-        # строку между вызовами.
-        rows = self._session.scalars(
-            select(RepositoryRow)
-            .order_by(RepositoryRow.created_at, RepositoryRow.id)
-            .limit(limit)
-            .offset(offset)
-        ).all()
-        return [m.repository_to_domain(row) for row in rows]
 
     def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
         if not provider_ids:
@@ -179,6 +190,26 @@ class SqlAlchemyMergeRequestRepo:
         row.state = merge_request.state
 
 
+def _run_list_conditions(run_filter: RunListFilter) -> list[ColumnElement[bool]]:
+    """Условия фильтра списка прогонов; запрос уже соединён с `merge_requests`."""
+    conditions: list[ColumnElement[bool]] = [MergeRequestRow.repository_id.in_(run_filter.repository_ids)]
+    if run_filter.statuses is not None:
+        conditions.append(ReviewRunRow.status.in_(run_filter.statuses))
+    if run_filter.author is not None:
+        conditions.append(MergeRequestRow.author == run_filter.author)
+    if run_filter.text is not None:
+        text_columns = (MergeRequestRow.title, MergeRequestRow.author, MergeRequestRow.source_branch)
+        matches = [column.icontains(run_filter.text, autoescape=True) for column in text_columns]
+        if run_filter.number is not None:
+            matches.append(MergeRequestRow.number == run_filter.number)
+        conditions.append(or_(*matches))
+    if run_filter.created_from is not None:
+        conditions.append(ReviewRunRow.created_at >= run_filter.created_from)
+    if run_filter.created_to is not None:
+        conditions.append(ReviewRunRow.created_at < run_filter.created_to)
+    return conditions
+
+
 class SqlAlchemyReviewRunRepo:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -199,6 +230,22 @@ class SqlAlchemyReviewRunRepo:
                 ReviewRunRow.status.not_in(TERMINAL_STATUSES),
             )
             .order_by(ReviewRunRow.created_at)
+        ).first()
+        return m.review_run_to_domain(row) if row else None
+
+    def find_reviewed(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        # Прогонов на один merge_request — единицы: индекс по merge_request_id
+        # сужает выборку, частичный уникальный индекс терминальные строки не видит.
+        row = self._session.scalars(
+            select(ReviewRunRow)
+            .where(
+                ReviewRunRow.merge_request_id == merge_request_id,
+                ReviewRunRow.head_sha == head_sha,
+                ReviewRunRow.trigger == TriggerSource.WEBHOOK,
+                ReviewRunRow.status.in_(REVIEWED_STATUSES),
+            )
+            .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+            .limit(1)
         ).first()
         return m.review_run_to_domain(row) if row else None
 
@@ -235,9 +282,39 @@ class SqlAlchemyReviewRunRepo:
         )
         fresh = visible.where(key > cursor).limit(limit).subquery("fresh")
         late = visible.where(ReviewRunRow.updated_at > recheck_from, key <= cursor).subquery("late")
-        # CTE, а не подзапрос: на неё ссылаются и выборка, и подсчёт находок, а CTE с
-        # двумя ссылками PostgreSQL вычисляет один раз.
         picked = union_all(select(fresh.c.id), select(late.c.id)).cte("picked")
+        return self._entries(picked, ReviewRunRow.updated_at, ReviewRunRow.id)
+
+    def list_page(self, run_filter: RunListFilter, limit: int, offset: int) -> RunListPage:
+        """Два запроса в одной транзакции REPEATABLE READ: `COUNT` под фильтрами и страница строками
+        списка, как у `list_changed`.
+
+        Порядок страницы — по индексу `(created_at, id)`. Подстрока `q` ищется `ILIKE` без
+        индекса, по прогонам видимых репозиториев; `%` и `_` из ввода экранируются
+        (`autoescape`) и шаблоном не становятся.
+        """
+        if not run_filter.repository_ids or run_filter.statuses == frozenset():
+            return RunListPage(entries=[], total=0)
+        matching = (
+            select(ReviewRunRow.id)
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .where(*_run_list_conditions(run_filter))
+        )
+        # COUNT и страница - один снимок: в READ COMMITTED прогон, закоммиченный между ними,
+        # попал бы на страницу, но не в total. Уровень ставится до первого запроса транзакции;
+        # SQLAlchemy возвращает соединению прежний уровень при возврате в пул.
+        self._session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        total = self._session.scalar(select(func.count()).select_from(matching.subquery()))
+        newest_first = (ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+        page = matching.order_by(*newest_first).limit(limit).offset(offset).cte("page")
+        return RunListPage(entries=self._entries(page, *newest_first), total=total or 0)
+
+    def _entries(self, picked: CTE, *order_by: ColumnElement[Any] | InstrumentedAttribute[Any]) -> list[ReviewRunListEntry]:
+        """Прогоны из `picked` строками списка: запрос на изменение, репозиторий и число находок.
+
+        CTE, а не подзапрос: на неё ссылаются и выборка, и подсчёт находок, а CTE с
+        двумя ссылками PostgreSQL вычисляет один раз.
+        """
         counts = (
             select(FindingRow.review_run_id, func.count().label("findings_count"))
             .where(FindingRow.review_run_id.in_(select(picked.c.id)))
@@ -255,7 +332,7 @@ class SqlAlchemyReviewRunRepo:
             .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
             .join(RepositoryRow, RepositoryRow.id == MergeRequestRow.repository_id)
             .outerjoin(counts, counts.c.review_run_id == ReviewRunRow.id)
-            .order_by(ReviewRunRow.updated_at, ReviewRunRow.id)
+            .order_by(*order_by)
         ).all()
         return [
             ReviewRunListEntry(
@@ -300,6 +377,7 @@ class SqlAlchemyReviewRunRepo:
                 verifier_dropped_findings=run.verifier_dropped_findings,
             )
         )
+        self._notify(run)
 
     def update(self, run: ReviewRun) -> None:
         """Записать прогресс прогона, отклонив статус, запрещённый машиной состояний.
@@ -332,6 +410,18 @@ class SqlAlchemyReviewRunRepo:
         row.rejected_findings = run.rejected_findings
         row.verification = run.verification
         row.verifier_dropped_findings = run.verifier_dropped_findings
+        self._notify(run)
+
+    def _notify(self, run: ReviewRun) -> None:
+        """Уведомить поток событий: `pg_notify` в той же транзакции уходит только при коммите.
+
+        Через соединение сессии, а не `Session.execute`: тот запустил бы autoflush и
+        поменял момент, когда пишутся строки вызывающего, — порядок вставок остаётся прежним.
+        """
+        self._session.connection().execute(
+            text("SELECT pg_notify(:channel, :run_id)"),
+            {"channel": REVIEW_RUNS_CHANNEL, "run_id": str(run.id)},
+        )
 
 
 class SqlAlchemyReviewRunStepRepo:
@@ -409,7 +499,8 @@ class SqlAlchemyContextPayloadRepo:
                 file_paths=list(payload.file_paths),
                 token_count=payload.token_count,
                 content_sha256=payload.content_sha256,
-                body=payload.body,
+                # Копия, а не ссылка: строка не должна делить словарь с сущностью.
+                body=copy.deepcopy(payload.body),
             )
         )
 
@@ -445,8 +536,15 @@ class SqlAlchemyFindingRepo:
                 rule_name=finding.rule.name if finding.rule else None,
                 rule_check=finding.rule.check if finding.rule else None,
                 rule_check_text=finding.rule.check_text if finding.rule else None,
+                covered_by_finding_id=finding.covered_by_finding_id,
             )
         )
+
+    def mark_covered(self, finding_id: UUID, covered_by_finding_id: UUID) -> None:
+        row = self._session.get(FindingRow, finding_id)
+        if row is None:
+            raise LookupError(f"finding {finding_id} is not stored")
+        row.covered_by_finding_id = covered_by_finding_id
 
 
 class SqlAlchemyPublishedCommentRepo:
@@ -465,6 +563,33 @@ class SqlAlchemyPublishedCommentRepo:
     def list_open_threads_for_merge_request(
         self, merge_request_id: UUID
     ) -> list[OpenReviewThread]:
+        return [
+            OpenReviewThread(
+                finding=m.finding_to_domain(finding_row),
+                root_provider_comment_id=comment_row.provider_comment_id,
+                root_published_comment_id=comment_row.id,
+            )
+            for comment_row, finding_row in self._inline_threads(
+                merge_request_id, PublishedCommentRow.thread_resolved.is_(False)
+            )
+        ]
+
+    def list_threads_for_merge_request(self, merge_request_id: UUID) -> list[BotThread]:
+        return [
+            BotThread(
+                finding=m.finding_to_domain(finding_row),
+                root_provider_comment_id=comment_row.provider_comment_id,
+                root_published_comment_id=comment_row.id,
+                resolved=comment_row.thread_resolved,
+                resolved_by_bot=comment_row.thread_resolved_by_bot,
+            )
+            for comment_row, finding_row in self._inline_threads(merge_request_id)
+        ]
+
+    def _inline_threads(
+        self, merge_request_id: UUID, *conditions: ColumnElement[bool]
+    ) -> Sequence[Row[PublishedCommentRow, FindingRow]]:
+        """Корневые inline-комментарии бота на PR с их находками, в порядке публикации."""
         stmt = (
             select(PublishedCommentRow, FindingRow)
             .join(ReviewRunRow, PublishedCommentRow.review_run_id == ReviewRunRow.id)
@@ -472,19 +597,11 @@ class SqlAlchemyPublishedCommentRepo:
             .where(
                 ReviewRunRow.merge_request_id == merge_request_id,
                 PublishedCommentRow.kind == CommentKind.INLINE,
-                PublishedCommentRow.thread_resolved.is_(False),
+                *conditions,
             )
             .order_by(PublishedCommentRow.published_at, PublishedCommentRow.id)
         )
-        rows = self._session.execute(stmt).all()
-        return [
-            OpenReviewThread(
-                finding=m.finding_to_domain(finding_row),
-                root_provider_comment_id=comment_row.provider_comment_id,
-                root_published_comment_id=comment_row.id,
-            )
-            for comment_row, finding_row in rows
-        ]
+        return self._session.execute(stmt).all()
 
     def get(self, published_comment_id: UUID) -> PublishedComment | None:
         row = self._session.get(PublishedCommentRow, published_comment_id)
@@ -508,6 +625,7 @@ class SqlAlchemyPublishedCommentRepo:
                 kind=comment.kind,
                 published_at=comment.published_at,
                 thread_resolved=comment.thread_resolved,
+                thread_resolved_by_bot=comment.thread_resolved_by_bot,
                 in_reply_to_provider_comment_id=comment.in_reply_to_provider_comment_id,
                 feedback_positive=comment.feedback_positive,
                 feedback_negative=comment.feedback_negative,
@@ -519,6 +637,7 @@ class SqlAlchemyPublishedCommentRepo:
         if row is None:
             raise LookupError(f"published comment {comment.id} is not stored")
         row.thread_resolved = comment.thread_resolved
+        row.thread_resolved_by_bot = comment.thread_resolved_by_bot
         row.in_reply_to_provider_comment_id = comment.in_reply_to_provider_comment_id
         row.feedback_positive = comment.feedback_positive
         row.feedback_negative = comment.feedback_negative
@@ -646,6 +765,11 @@ class SqlAlchemyProviderTokenRepo:
     def get(self, session_id: UUID) -> ProviderToken | None:
         row = self._session.get(ProviderTokenRow, session_id)
         return self._to_domain(row) if row else None
+
+    def exists(self, session_id: UUID) -> bool:
+        return self._session.scalar(
+            select(ProviderTokenRow.session_id).where(ProviderTokenRow.session_id == session_id)
+        ) is not None
 
     def get_for_update(self, session_id: UUID) -> ProviderToken | None:
         # Ждём чужой refresh не дольше `_LOCK_TIMEOUT` (только эта транзакция):

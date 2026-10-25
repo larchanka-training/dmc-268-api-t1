@@ -10,12 +10,13 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from app.application.ports.vcs_review import (
     InlineCommentDraft,
     MergeGateCheck,
     PullRequestReviewPublication,
+    ReviewThreadState,
 )
 from app.domain.entities import PRMetadata, Repository, ReviewJob
 from app.domain.enums import MergeRequestState, Provider
@@ -97,11 +98,13 @@ class FakeVcs:
     calls: list[tuple[Any, ...]] = field(default_factory=list)
 
     def fetch_diff(
-        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int
+        self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
     ) -> str:
         self.calls.append(("diff", repo_full_name, base_sha, head_sha, installation_id))
         if self.error is not None:
             raise self.error
+        if len(self.diff.encode("utf-8")) > max_bytes:
+            raise VcsFileTooLargeError(f"дифф: больше {max_bytes} байт")
         return self.diff
 
     def fetch_pr_metadata(
@@ -142,6 +145,8 @@ class FakeVcs:
         installation_id: int,
         summary_body: str,
         inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
     ) -> PullRequestReviewPublication:
         self.calls.append(
             ("publish_review", repo_full_name, pr_number, head_sha, installation_id)
@@ -165,17 +170,17 @@ class FakeVcs:
             raise self.error
         return "fake-reply-id"
 
-    def fetch_review_threads_resolved_state(
+    def fetch_review_threads_state(
         self,
         repo_full_name: str,
         pr_number: int,
         installation_id: int,
         provider_comment_ids: frozenset[str],
-    ) -> dict[str, bool]:
+    ) -> dict[str, ReviewThreadState]:
         self.calls.append(("thread_state", provider_comment_ids))
         if self.error is not None:
             raise self.error
-        return {cid: False for cid in provider_comment_ids}
+        return {cid: ReviewThreadState(resolved=False, line=None) for cid in provider_comment_ids}
 
     def resolve_review_thread_for_comment(
         self,

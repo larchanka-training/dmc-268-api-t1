@@ -6,12 +6,16 @@
 
 import asyncio
 import json
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
+import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -21,11 +25,12 @@ from starlette.types import Message
 from app.api.dependencies import (
     get_clock,
     get_installation_catalog,
-    get_sleep,
+    get_run_changes,
     get_token_provider,
     get_untraced_unit_of_work_factory,
 )
 from app.api.factory import create_app
+from app.application.ports.run_changes import RunChangesLost
 from app.config import Settings
 from app.domain.entities import (
     DiffAnchor,
@@ -53,6 +58,7 @@ from app.domain.vcs_errors import VcsError
 from .fakes.auth import SIGNED_IN_SESSION_ID, sign_in_with_session
 from .fakes.installation_catalog import FakeInstallationCatalog
 from .fakes.oauth import EXPIRING_GRANT, FakeOAuthProvider, rejecting
+from .fakes.run_changes import FakeRunChanges, every_step
 from .fakes.unit_of_work import FakeUnitOfWork
 
 SETTINGS = Settings(
@@ -166,14 +172,12 @@ def _app(
     with_token: bool = True,
 ) -> tuple[FastAPI, dict[str, str]]:
     app = create_app(SETTINGS)
-    cookies = sign_in_with_session(app, world.uow)
     # Токен пользователя, сохранённый при входе: видимость считается им.
-    if with_token:
-        world.uow.provider_tokens.save(SIGNED_IN_SESSION_ID, token_from_grant(EXPIRING_GRANT, datetime.now(UTC)))
+    cookies = sign_in_with_session(app, world.uow, with_token=with_token)
     app.dependency_overrides[get_untraced_unit_of_work_factory] = lambda: lambda: world.uow
     app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog([VISIBLE])
     app.dependency_overrides[get_token_provider] = lambda: oauth or FakeOAuthProvider()
-    app.dependency_overrides[get_sleep] = lambda: ticks.sleep
+    app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(every_step(ticks.sleep))
     app.dependency_overrides[get_clock] = lambda: ticks.clock
     return app, cookies
 
@@ -449,6 +453,11 @@ def test_silence_gets_a_ping_at_least_every_fifteen_seconds() -> None:
 
 # --- поток в реальном времени и телеметрия ---------------------------------------
 
+# Версия спецификации ASGI, которую объявляет uvicorn. Starlette слушает `http.disconnect`
+# только при версии ниже 2.4: выше уход клиента — `ClientDisconnect`, то есть ERROR спана.
+# Тест потока задаёт её сам, а соответствие настоящему uvicorn сверяет тест ниже.
+ASGI_SPEC_VERSION = "2.3"
+
 
 def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_error(
     spans: InMemorySpanExporter,
@@ -475,11 +484,12 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
         release.clear()
 
     app, cookies = _app(world, Ticks({}))
-    app.dependency_overrides[get_sleep] = lambda: held_sleep
+    held = FakeRunChanges(every_step(held_sleep))
+    app.dependency_overrides[get_run_changes] = lambda: held
     cookie = "; ".join(f"{name}={value}" for name, value in cookies.items())
     scope: dict[str, Any] = {
         "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "asgi": {"version": "3.0", "spec_version": ASGI_SPEC_VERSION},
         "http_version": "1.1",
         "method": "GET",
         "scheme": "http",
@@ -523,6 +533,8 @@ def test_events_reach_the_client_as_they_happen_and_a_client_close_is_not_an_err
     assert server.context is not None
     assert dict(start["headers"])[b"x-trace-id"].decode() == format_trace_id(server.context.trace_id)
     assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
+    # Клиент ушёл — подписка на изменения прогонов закрыта, слушатель не течёт.
+    assert [s.closed for s in held.subscriptions] == [True]
 
 
 def test_the_untraced_factory_is_wired_to_the_container() -> None:
@@ -535,3 +547,90 @@ def test_the_untraced_factory_is_wired_to_the_container() -> None:
     factory = get_untraced_unit_of_work_factory(Container())  # type: ignore[arg-type]
 
     assert factory() is uow
+
+
+def test_uvicorn_declares_the_asgi_spec_version_the_stream_test_relies_on() -> None:
+    """Настоящий uvicorn с той же HTTP-реализацией, что в контейнере (`http="auto"`).
+
+    Объявит 2.4 и выше — Starlette перестанет слушать `http.disconnect`, и уход клиента из
+    потока станет ERROR: тест упадёт здесь, а не молча на стенде.
+    """
+    seen: dict[str, str] = {}
+
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        seen["spec_version"] = scope["asgi"].get("spec_version", "2.0")
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=0, lifespan="off", log_level="warning")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            assert time.monotonic() < deadline, "uvicorn не стартовал за 10 с"
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        httpx.get(f"http://127.0.0.1:{port}/")
+    finally:
+        server.should_exit = True
+        thread.join(10)
+
+    assert seen["spec_version"] == ASGI_SPEC_VERSION
+
+
+# --- источник событий — сигнал NOTIFY, а не опрос (#124) -----------------------
+
+
+def test_without_change_signals_the_stream_reads_nothing_after_connecting() -> None:
+    """Изменение без сигнала не приходит: поток читает базу только по сигналу, а не раз в секунду."""
+    world = World()
+    run = _run(world.visible_mr, S.QUEUED, FUTURE, created_at=FUTURE)
+    ticks = Ticks({1: lambda: world.put(run), 5: world.end_session})
+
+    async def silent(timeout: float) -> bool:
+        await ticks.sleep(min(timeout, 1.0))
+        return False
+
+    app, cookies = _app(world, ticks)
+    app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(silent)
+
+    text = TestClient(app, cookies=cookies).get(PATH).text
+
+    assert _events(text) == []
+
+
+def test_an_unavailable_source_gives_a_stream_of_only_retry() -> None:
+    """Слушатель не подключился к базе — поток из одной строки `retry`: EventSource переподключится."""
+    world = World()
+    app, cookies = _app(world, Ticks({}))
+    app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(every_step(Ticks({}).sleep), available=False)
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    assert response.status_code == 200
+    assert response.text == "retry: 3000\n\n"
+
+
+def test_a_lost_source_closes_the_stream_and_the_subscription() -> None:
+    """Обрыв LISTEN — поток закрывается: изменения за время обрыва могли потеряться."""
+    world = World()
+    ticks = Ticks({})
+
+    async def lost_on_third(timeout: float) -> bool:
+        await ticks.sleep(min(timeout, 1.0))
+        if ticks.tick >= 3:
+            raise RunChangesLost
+        return True
+
+    changes = FakeRunChanges(lost_on_third)
+    app, cookies = _app(world, ticks)
+    app.dependency_overrides[get_run_changes] = lambda: changes
+
+    response = TestClient(app, cookies=cookies).get(PATH)
+
+    assert response.text == "retry: 3000\n\n"
+    assert ticks.tick == 3
+    assert [s.closed for s in changes.subscriptions] == [True]

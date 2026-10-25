@@ -4,12 +4,12 @@
 `<ресурс>.<действие>`, данные — модель своего типа (`x-sse-events`); у `run.*` —
 `ReviewRunListItem` из `app/api/reviews.py`.
 
-Роутер переводит: набор видимых репозиториев и первый опрос — до ответа (сбой
-провайдера — `502` до начала потока), события — в текст SSE. Что отправлять,
-решают `advance_feed` и цикл `run_feed_events`.
+Роутер переводит: набор видимых репозиториев, подписка на изменения прогонов и
+первое чтение — до ответа (сбой провайдера — `502` до начала потока), события — в
+текст SSE. Что отправлять, решают `advance_feed` и цикл `run_feed_events`.
 """
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Any, Literal
@@ -22,24 +22,24 @@ from starlette.types import Message, Receive, Scope, Send
 
 from app.api.dependencies import (
     get_clock,
-    get_sleep,
+    get_run_changes,
     get_unit_of_work_factory,
     get_untraced_unit_of_work_factory,
 )
 from app.api.errors import ERRORS_502_SCM_EVENTS
-from app.api.repositories import available_repositories
+from app.api.repositories import user_repositories
 from app.api.reviews import VISIBILITY_RULE, review_run_list_item
 from app.api.schemas import STREAM_HEADERS_DOC
 from app.api.session import SESSION_COOKIE, SESSION_REQUIRED, SESSION_RESPONSES
-from app.application.ports import UnitOfWork
+from app.application.ports import RunChanges, UnitOfWork
+from app.application.ports.run_changes import RunChangesLost
 from app.application.run_feed_events import (
     FeedItem,
     run_feed_events,
     visible_repository_ids,
 )
 from app.application.use_cases.auth import authenticate
-from app.application.use_cases.connect_repository import AvailableRepository
-from app.domain.entities import ReviewRunListEntry
+from app.domain.entities import InstallationRepository, ReviewRunListEntry
 from app.domain.run_events import PingEvent
 from app.domain.run_feed import BATCH_LIMIT, RunFeedState, open_feed, start_feed
 
@@ -66,9 +66,10 @@ _STREAM_DESCRIPTION = (
     "cookie удаляется; GitHub не ответил или ответил ошибкой, в том числе при обновлении токена, — "
     "`502 SCM_UNAVAILABLE`. В обоих случаях поток не открывается. Клиент применяет любое событие прогона одинаково: "
     "upsert по id, из двух версий побеждает та, у которой updated_at больше, при равном — пришедшая "
-    "позже. Источник событий — опрос базы раз в секунду: событие приходит не позже чем через пару "
-    "секунд после записи прогона, несколько изменений прогона между опросами приходят одним событием "
-    "с последней версией. Позже источником станет PostgreSQL NOTIFY, контракт при этом не меняется. "
+    "позже. Источник событий — уведомление PostgreSQL NOTIFY при коммите записи прогона: событие "
+    "приходит не позже чем через пару секунд после записи, несколько изменений прогона подряд могут "
+    "прийти одним событием с последней версией. Если источник событий на сервере оборвался, поток "
+    "закрывается — EventSource переподключится, и клиент перезапросит снимок. "
     "Истории поток не отдаёт: при подключении и после каждого переподключения клиент перезапрашивает "
     "снимок REST (GET /reviews/{review_run_id} или GET /reviews) после события `open` у "
     "EventSource; событие, пришедшее раньше снимка, не потеряется, а более старая версия строки "
@@ -175,16 +176,16 @@ class _EventStream(StreamingResponse):
 )
 async def stream_events(
     request: Request,
-    available: list[AvailableRepository] = Depends(available_repositories),
+    repositories: list[InstallationRepository] = Depends(user_repositories),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
     untraced_uow_factory: Callable[[], UnitOfWork] = Depends(get_untraced_unit_of_work_factory),
-    sleep: Callable[[float], Awaitable[None]] = Depends(get_sleep),
+    run_changes: RunChanges = Depends(get_run_changes),
     clock: Callable[[], float] = Depends(get_clock),
 ) -> StreamingResponse:
     token = request.cookies.get(SESSION_COOKIE)
     connected_at = datetime.now(UTC)
     # Набор видимых — один раз, до потока: сбой провайдера уже стал 502 в зависимости.
-    visible = await run_in_threadpool(visible_repository_ids, uow_factory(), available)
+    visible = await run_in_threadpool(visible_repository_ids, uow_factory(), repositories)
 
     def read_sync(state: RunFeedState) -> list[ReviewRunListEntry]:
         with untraced_uow_factory() as uow:
@@ -199,14 +200,30 @@ async def stream_events(
         signed_in = await run_in_threadpool(authenticate, untraced_uow_factory(), token, datetime.now(UTC))
         return signed_in is not None
 
-    # Первый опрос — до ответа: всё, что он видит, клиент получит снимком REST после `open`,
+    # Подписка — раньше первого чтения: изменение, закоммиченное между ними, придёт
+    # сигналом, а не потеряется. Источник недоступен — поток из одной строки `retry`:
+    # EventSource переподключится через 3 секунды.
+    try:
+        changes = await run_changes.subscribe()
+    except RunChangesLost:
+        return _EventStream(iter([_RETRY]), media_type="text/event-stream", headers=_HEADERS)
+    # Первое чтение — до ответа: всё, что оно видит, клиент получит снимком REST после `open`,
     # а изменения после него — событиями.
     opened = open_feed(connected_at)
-    state = start_feed(opened, await read(opened))
+    try:
+        state = start_feed(opened, await read(opened))
+    except BaseException:
+        changes.close()
+        raise
 
     async def body() -> AsyncIterator[str]:
-        yield _RETRY
-        async for item in run_feed_events(state, read, sleep=sleep, session_alive=session_alive, clock=clock):
-            yield format_feed_event(item)
+        try:
+            yield _RETRY
+            async for item in run_feed_events(
+                state, read, wait_change=changes.wait, session_alive=session_alive, clock=clock
+            ):
+                yield format_feed_event(item)
+        finally:
+            changes.close()
 
     return _EventStream(body(), media_type="text/event-stream", headers=_HEADERS)
