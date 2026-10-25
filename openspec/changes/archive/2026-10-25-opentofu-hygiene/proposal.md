@@ -25,4 +25,4 @@ Job `terraform` в CI проверяет только формат и синта
 - `infra/variables.tf`, `infra/main.tf` (комментарии), `infra/tests/`, `infra/terraform.tfvars.example`, `infra/README.md`.
 - `.github/workflows/ci.yml` (job `opentofu`), `.github/workflows/deploy.yml`, `.github/actions/s3-backend/action.yml`, `.github/scripts/render-s3-script.sh` (комментарии).
 - Обязательная проверка `terraform` в rulesets пропадает из прогонов: без правки ruleset мёрж блокируется.
-- Сборка с provenance-аттестацией даёт новый digest и на повторной сборке того же коммита: перезапуск деплоя пересоздаёт `migrate`, `api` и `worker`.
+- Сборка образа без provenance-аттестации (`provenance: false`): с ней повторная сборка того же коммита давала бы новый digest, и перезапуск деплоя пересоздавал бы `migrate`, `api` и `worker`. Аттестацию никто не читает.

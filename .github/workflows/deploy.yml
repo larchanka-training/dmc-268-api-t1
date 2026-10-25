@@ -114,6 +114,10 @@ jobs:
           tags: ${{ steps.meta.outputs.image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Без provenance-аттестации: в ней данные прогона, и повторная сборка
+          # того же коммита давала бы новый digest — tofu пересоздавал бы migrate,
+          # api и worker с дренажом воркера. Аттестацию никто не читает.
+          provenance: false
 
       - name: Убедиться, что образ забирается обратно
         env:
