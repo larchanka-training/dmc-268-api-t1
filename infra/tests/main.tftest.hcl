@@ -259,6 +259,49 @@ run "app_containers_run_the_api_image" {
   }
 }
 
+# Apply считает API выкаченным, только когда тот healthy: провайдер ждёт
+# healthcheck после создания контейнера (wait) и роняет apply по таймауту.
+run "api_waits_until_healthy" {
+  command = plan
+
+  assert {
+    condition     = docker_container.api.wait == true && docker_container.api.wait_timeout == 90
+    error_message = "У API нужны wait = true и wait_timeout = 90: иначе apply считает готовым любой запущенный контейнер."
+  }
+
+  # Без start_interval первая проверка — через interval (30 с), и wait ждал бы
+  # её даже у здорового API.
+  assert {
+    condition     = docker_container.api.healthcheck[0].start_interval == "2s"
+    error_message = "start_interval healthcheck API — 2s: healthy в первые секунды после старта."
+  }
+
+  # Длительности — в том виде, в каком провайдер читает их обратно из Docker
+  # (time.Duration.String: "2s", "30s", "1m0s"). "1m" или "30000ms" давали бы
+  # вечный diff и пересоздание API на каждом деплое: healthcheck — ForceNew.
+  assert {
+    condition = alltrue([
+      for d in [
+        docker_container.api.healthcheck[0].interval,
+        docker_container.api.healthcheck[0].timeout,
+        docker_container.api.healthcheck[0].start_period,
+        docker_container.api.healthcheck[0].start_interval,
+      ] : can(regex("^(?:[1-5]?[0-9]s|[1-5]?[1-9]m[1-5]?[0-9]s|[1-5]0m[1-5]?[0-9]s|[1-9][0-9]*h[1-5]?[0-9]m[1-5]?[0-9]s)$", d))
+    ])
+    error_message = "Длительности healthcheck API — в формате Go, как их нормализует провайдер: \"2s\", \"30s\", \"1m0s\"."
+  }
+
+  # Правку healthcheck провайдер на месте не применяет: API пересоздаётся от
+  # terraform_data.api_healthcheck, и описание у них обязано быть одним.
+  assert {
+    condition = alltrue([
+      for k in ["test", "interval", "timeout", "retries", "start_period", "start_interval"] :
+      jsonencode(docker_container.api.healthcheck[0][k]) == jsonencode(terraform_data.api_healthcheck.input[k])
+    ])
+    error_message = "healthcheck API и terraform_data.api_healthcheck должны браться из одного local.api_healthcheck."
+  }
+}
+
 # Миграции идут сразу после `apply -target` базы: apply обязан вернуться,
 # когда база уже отвечает.
 run "database_ready_before_migrations" {
