@@ -5,7 +5,7 @@
 переводятся в `PRMetadata` один-в-один, включая перевод состояния PR,
 описанный в самом `MergeRequestState`. Повторы - один цикл `_request`: 5xx -
 экспоненциальный backoff, отказ лимита - пауза по заголовкам GitHub в пределах
-бюджета; запросы без идемпотентности (ревью, ответ в тред) не повторяются.
+бюджета; запросы без идемпотентности (создание ревью) не повторяются.
 Пауза и часы приходят инъекцией (`sleep`, `clock`), чтобы тесты не ждали
 по-настоящему.
 
@@ -159,18 +159,6 @@ class GitHubVcsGateway:
             review_run_id=review_run_id,
         )
 
-    def reply_to_review_comment(
-        self,
-        repo_full_name: str,
-        pr_number: int,
-        installation_id: int,
-        provider_comment_id: str,
-        body: str,
-    ) -> str:
-        return self._review.reply_to_review_comment(
-            repo_full_name, pr_number, installation_id, provider_comment_id, body
-        )
-
     def fetch_review_threads_state(
         self,
         repo_full_name: str,
@@ -180,17 +168,6 @@ class GitHubVcsGateway:
     ) -> dict[str, ReviewThreadState]:
         return self._review.fetch_review_threads_state(
             repo_full_name, pr_number, installation_id, provider_comment_ids
-        )
-
-    def resolve_review_thread_for_comment(
-        self,
-        repo_full_name: str,
-        pr_number: int,
-        installation_id: int,
-        provider_comment_id: str,
-    ) -> None:
-        self._review.resolve_review_thread_for_comment(
-            repo_full_name, pr_number, installation_id, provider_comment_id
         )
 
     def set_merge_gate_check(
@@ -247,7 +224,7 @@ class GitHubVcsGateway:
     ) -> dict[str, Any]:
         """POST с JSON-ответом-объектом.
 
-        `repeatable=False` - запрос без идемпотентности (ревью, ответ в тред).
+        `repeatable=False` - запрос без идемпотентности (создание ревью).
         С `already_done` - проверкой, выполнен ли он уже, - повторяется после
         паузы, только если проверка вернула `None`; её результат - ответ
         запроса. Без проверки - `VcsUnconfirmedError` на первом же сбое.
@@ -274,7 +251,7 @@ class GitHubVcsGateway:
     def _post_graphql(
         self, installation_id: int, query: str, variables: dict[str, Any]
     ) -> dict[str, Any]:
-        # Запросы и `resolveReviewThread` повторяемы: повтор закрытия треда безвреден.
+        # Запросы GraphQL только читают: повтор безвреден.
         response = self._request(
             "POST",
             "/graphql",

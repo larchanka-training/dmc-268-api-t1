@@ -26,8 +26,7 @@ from pydantic import BaseModel
 
 # Находка модели - доменная запись (её разбирает доменный отсев); порт её
 # реэкспортирует, поэтому вызывающие импортируют всё о модели отсюда.
-from app.domain.entities import DiffAnchor, LlmFinding, LlmRuleRef, PromptMessage
-from app.domain.enums import FindingCategory, ThreadFollowUpStatus
+from app.domain.entities import LlmFinding, LlmRuleRef, PromptMessage
 from app.domain.llm_errors import LlmError
 
 __all__ = [
@@ -39,7 +38,6 @@ __all__ = [
     "LlmReviewSummary",
     "LlmRuleRef",
     "LlmTask",
-    "LlmThreadFollowUp",
     "RetryListener",
 ]
 
@@ -93,18 +91,8 @@ class LlmReviewSummary:
 
 
 @dataclass(frozen=True, slots=True)
-class LlmThreadFollowUp:
-    anchor: DiffAnchor
-    category: FindingCategory
-    status: ThreadFollowUpStatus
-    reply: str
-    resolve_thread: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class LlmReviewResult:
     model: str
     tokens_used: int
     findings: tuple[LlmFinding, ...]
     summary: LlmReviewSummary | None = None
-    thread_follow_ups: tuple[LlmThreadFollowUp, ...] = ()

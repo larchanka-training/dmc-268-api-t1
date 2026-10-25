@@ -27,9 +27,6 @@ _RANK: dict[FindingSeverity, int] = {
 class ThreadCoverage:
     # Тред, который уже говорит об этой находке: своего комментария ей не нужно.
     covered_by: BotThread | None
-    # Открытые треды на том же месте с меньшей серьёзностью: находка публикуется
-    # заново, и ответ в эти треды повторил бы её второй раз.
-    superseded: tuple[BotThread, ...] = ()
 
 
 def thread_coverage(
@@ -58,7 +55,7 @@ def thread_coverage(
             finding, thread
         ):
             return ThreadCoverage(covered_by=thread)
-    return ThreadCoverage(covered_by=None, superseded=tuple(open_threads))
+    return ThreadCoverage(covered_by=None)
 
 
 def _escalated_to_critical(finding: Finding, thread: BotThread) -> bool:

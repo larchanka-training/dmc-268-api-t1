@@ -17,14 +17,12 @@ from app.application.ports.llm_gateway import (
     LlmReviewResult,
     LlmReviewSummary,
     LlmRuleRef,
-    LlmThreadFollowUp,
 )
 from app.domain.entities import DiffAnchor, Verdict
 from app.domain.enums import (
     DiffSide,
     FindingCategory,
     FindingSeverity,
-    ThreadFollowUpStatus,
     VerifierVerdict,
 )
 
@@ -64,6 +62,7 @@ VERIFICATION: dict[str, Any] = {
 
 
 def test_valid_review_translates_into_exact_result() -> None:
+    """`threadFollowUps` проходят проверку формы и в результат не попадают (#73)."""
     result = to_review_result(ReviewOutput.model_validate(REVIEW), model="m", tokens_used=7)
 
     assert result == LlmReviewResult(
@@ -81,15 +80,6 @@ def test_valid_review_translates_into_exact_result() -> None:
             ),
         ),
         summary=LlmReviewSummary(problem="Ошибки теряются.", positives=("Тесты есть",), effort="час"),
-        thread_follow_ups=(
-            LlmThreadFollowUp(
-                anchor=DiffAnchor(file_path="app/old.py", side=DiffSide.OLD, old_line=3),
-                category=FindingCategory.SECURITY,
-                status=ThreadFollowUpStatus.FIXED,
-                reply="Исправлено.",
-                resolve_thread=True,
-            ),
-        ),
     )
 
 
@@ -105,7 +95,6 @@ def test_optional_fields_may_be_absent() -> None:
     assert result.findings[0].rule is None
     assert result.findings[0].suggestion is None
     assert result.findings[0].confidence is None
-    assert result.thread_follow_ups == ()
 
 
 def test_integer_confidence_is_a_number() -> None:

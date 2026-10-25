@@ -210,23 +210,6 @@ class GitHubReviewClient:
                 return str(review["id"])
         return None
 
-    def reply_to_review_comment(
-        self,
-        repo_full_name: str,
-        pr_number: int,
-        installation_id: int,
-        provider_comment_id: str,
-        body: str,
-    ) -> str:
-        # Ответ не повторяется: повтор на обрыве или 5xx дал бы второй ответ в тред.
-        response = self._gw._post_json(
-            f"/repos/{repo_full_name}/pulls/{pr_number}/comments/{provider_comment_id}/replies",
-            installation_id,
-            {"body": body},
-            repeatable=False,
-        )
-        return str(response["id"])
-
     def fetch_review_threads_state(
         self,
         repo_full_name: str,
@@ -250,35 +233,6 @@ class GitHubReviewClient:
                 if database_id in targets:
                     result[str(database_id)] = state
         return result
-
-    def resolve_review_thread_for_comment(
-        self,
-        repo_full_name: str,
-        pr_number: int,
-        installation_id: int,
-        provider_comment_id: str,
-    ) -> None:
-        owner, name = repo_full_name.split("/", 1)
-        state = self._thread_for_comment(
-            owner, name, pr_number, installation_id, provider_comment_id
-        )
-        if state is None:
-            raise VcsError(f"тред для комментария {provider_comment_id} не найден")
-        thread_id = state[1]
-        mutation = """
-        mutation($threadId: ID!) {
-          resolveReviewThread(input: {threadId: $threadId}) {
-            thread { isResolved }
-          }
-        }
-        """
-        data = self._gw._post_graphql(
-            installation_id,
-            mutation,
-            {"threadId": thread_id},
-        )
-        if not data.get("resolveReviewThread", {}).get("thread", {}).get("isResolved"):
-            raise VcsError(f"не удалось закрыть тред для комментария {provider_comment_id}")
 
     def set_merge_gate_check(
         self,
@@ -348,24 +302,3 @@ class GitHubReviewClient:
             if not isinstance(next_cursor, str):
                 return threads
             cursor = next_cursor
-
-    def _thread_for_comment(
-        self,
-        owner: str,
-        name: str,
-        pr_number: int,
-        installation_id: int,
-        provider_comment_id: str,
-    ) -> tuple[bool, str] | None:
-        target = int(provider_comment_id)
-        for thread in self._load_review_threads(owner, name, pr_number, installation_id):
-            for node in thread.get("comments", {}).get("nodes", []):
-                if node.get("databaseId") == target:
-                    thread_id = thread["id"]
-                    if not isinstance(thread_id, str):
-                        raise VcsError("GraphQL вернул thread id не-строкой")
-                    is_resolved = thread.get("isResolved")
-                    if not isinstance(is_resolved, bool):
-                        raise VcsError("GraphQL вернул isResolved не bool")
-                    return is_resolved, thread_id
-        return None
