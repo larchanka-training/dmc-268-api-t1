@@ -31,7 +31,7 @@
 # Параметры (env): REPORT_DIR — каталог отчёта деплоя, по умолчанию
 # $RUNNER_TEMP/deploy-report: туда копируется вывод alembic, по строкам
 # `Running upgrade A -> B` summary считает применённые ревизии
-# (scripts/deploy_report.py).
+# (scripts/deploy_report.py), а после сбоя — вывод `alembic current`.
 set -euo pipefail
 umask 077
 
@@ -67,7 +67,9 @@ docker rm -f dmc268-migrations >/dev/null 2>&1 || true
 # Ограничения — как у api и worker в infra/app.tf (сверяет
 # tests/test_stack_descriptions.py).
 # Логи alembic идут в stderr: 2>&1, чтобы попасть и в лог шага, и в файл;
-# упавшую миграцию pipefail не прячет за tee.
+# упавшую миграцию pipefail не прячет за tee. `-e` на время запуска снят:
+# после сбоя нужен ещё вопрос к базе, а код выхода шага — код upgrade.
+set +e
 docker run --rm --name dmc268-migrations \
   --network dmc268 \
   --env-file "$env_file" \
@@ -79,3 +81,28 @@ docker run --rm --name dmc268-migrations \
   --memory 256m \
   --memory-swap 256m \
   "$API_IMAGE" alembic upgrade head 2>&1 | tee "$report_dir/migrate.log"
+status=$?
+set -e
+[ "$status" -eq 0 ] && exit 0
+
+# Что откатилось, по логу не сказать: autocommit_block (0003) фиксирует всё до
+# себя, а при оборванном ssh сирота мог довести миграции до commit, и код
+# выхода тогда потерян (ревью #220). Ревизию базы summary берёт отсюда —
+# `alembic current` тем же образом и окружением; сначала убирается сирота,
+# чтобы он не дописал миграции после ответа. Не ответила база или ssh за
+# 60 с — код в migrate-current.error, и summary пишет «ревизия неизвестна».
+docker rm -f dmc268-migrations >/dev/null 2>&1 || true
+current=0
+timeout 60 docker run --rm \
+  --network dmc268 \
+  --env-file "$env_file" \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --security-opt no-new-privileges:true \
+  --cap-drop ALL \
+  --init \
+  --memory 256m \
+  --memory-swap 256m \
+  "$API_IMAGE" alembic current > "$report_dir/migrate-current.log" || current=$?
+[ "$current" -eq 0 ] || echo "$current" > "$report_dir/migrate-current.error"
+exit "$status"

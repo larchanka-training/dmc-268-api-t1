@@ -15,8 +15,8 @@ on:
   # Ручной запуск — с develop (gate). allow_stateful_replace — осознанный обход
   # сторожа замены контейнеров базы и брокера (scripts/deploy_report.py,
   # STATEFUL): правка их env, command, памяти или образа иначе деплоем не
-  # выкатывается. `gh workflow run deploy.yml -f allow_stateful_replace=true`.
-  # Тома защищены всегда.
+  # выкатывается. `gh workflow run deploy.yml -f allow_stateful_replace=true`;
+  # повтор с флагом — новым dispatch, не Re-run. Тома защищены всегда.
   workflow_dispatch:
     inputs:
       allow_stateful_replace:
@@ -264,11 +264,14 @@ jobs:
       - name: Поднять базу и брокер
         id: infra
         env: &tofu-env
-          # Обход сторожа базы и брокера — только из ручного запуска: у
-          # workflow_run выражение даёт `false`, и push-деплой его не откроет.
-          # Сторож (infra.sh и plan.sh) верит только буквальному `true`.
-          ALLOW_STATEFUL_REPLACE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_stateful_replace }}
-          DEPLOY_ACTOR: ${{ github.actor }}
+          # Обход сторожа базы и брокера — только из ручного запуска и только
+          # первой попытки: у workflow_run выражение даёт `false`, и push-деплой
+          # его не откроет, а Re-run повторяет inputs старого запуска — повтор с
+          # флагом делают новым dispatch. Сторож (infra.sh и plan.sh) верит
+          # только буквальному `true`. triggering_actor — кто запустил эту
+          # попытку, а не автор первой.
+          ALLOW_STATEFUL_REPLACE: ${{ github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && inputs.allow_stateful_replace }}
+          DEPLOY_ACTOR: ${{ github.triggering_actor }}
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
           AWS_DEFAULT_REGION: us-east-1

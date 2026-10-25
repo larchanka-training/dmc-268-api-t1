@@ -33,6 +33,7 @@ import yaml
 
 from scripts import deploy_report
 from tests.infra_text import read_infra_text
+from tests.test_stack_descriptions import missing_migration_restrictions
 
 FIXTURES = Path("tests/fixtures/deploy")
 SCRIPTS = Path(".github/scripts/deploy")
@@ -52,13 +53,18 @@ case "$args" in
 esac
 """
 
-# Подложный docker для migrate.sh: вызовы — в журнал, `run` печатает вывод
-# alembic из MIGRATE_LOG и выходит с MIGRATE_EXIT, `rm` контейнера, которого
-# нет, — код 1, как у настоящего.
+# Подложный docker для migrate.sh: вызовы — в журнал. `run … alembic
+# upgrade head` печатает вывод alembic из MIGRATE_LOG и выходит с
+# MIGRATE_EXIT, `run … alembic current` печатает CURRENT (с CURRENT_FAIL —
+# код 255, как при оборванном ssh), `rm` контейнера, которого нет, — код 1.
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "docker $*" >> "$CALLS"
 case "$1" in
-  run) cat "${MIGRATE_LOG:-/dev/null}"; exit "${MIGRATE_EXIT:-0}" ;;
+  run)
+    case "$*" in
+      *"alembic current"*) [ -z "${CURRENT_FAIL:-}" ] || exit 255; printf '%s\\n' "${CURRENT:-}" ;;
+      *) cat "${MIGRATE_LOG:-/dev/null}"; exit "${MIGRATE_EXIT:-0}" ;;
+    esac ;;
   rm) exit 1 ;;
 esac
 """
@@ -275,9 +281,13 @@ def test_override_reaches_the_guard_only_from_a_manual_run() -> None:
         step = next(s for s in deploy_steps() if s.get("id") == step_id)
         env = step["env"]
         assert isinstance(env, dict)
+        # Re-run прогона повторяет его inputs: флаг — только у первой попытки,
+        # повтор с флагом — новым dispatch (ревью #220).
         assert env["ALLOW_STATEFUL_REPLACE"] == (
-            "${{ github.event_name == 'workflow_dispatch' && inputs.allow_stateful_replace }}"
+            "${{ github.event_name == 'workflow_dispatch' && github.run_attempt == 1"
+            " && inputs.allow_stateful_replace }}"
         ), step_id
+        assert env["DEPLOY_ACTOR"] == "${{ github.triggering_actor }}", step_id
         assert "${{" not in str(step["run"]), step_id
 
 
@@ -325,6 +335,27 @@ def test_guard_protects_every_volume_the_stack_declares() -> None:
     declared = volume_blocks()
     assert declared, "ресурсы docker_volume не найдены в infra/*.tf"
     assert set(declared) == set(deploy_report.PROTECTED)
+
+
+def test_every_container_on_a_data_volume_is_guarded() -> None:
+    """Ревью #220: контейнер на томе данных вне STATEFUL сторож пересоздал бы молча.
+
+    Тома — все `docker_volume` из infra/*.tf, а не PROTECTED: так тест не зависит
+    от того, как сторож томов перечисляет защищённые (#219).
+    """
+    text = read_infra_text()
+    volumes = set(re.findall(r'^resource\s+"docker_volume"\s+"(\w+)"', text, re.MULTILINE))
+    assert volumes, "ресурсы docker_volume не найдены в infra/*.tf"
+    containers = re.findall(r'^resource\s+"docker_container"\s+"(\w+)"\s*\{\n(.*?)^\}', text, re.MULTILINE | re.DOTALL)
+    on_volumes = {
+        f"docker_container.{name}"
+        for name, body in containers
+        if set(re.findall(r"volume_name\s*=\s*docker_volume\.(\w+)\.", body)) & volumes
+    }
+    assert on_volumes, "контейнеры на томах данных не найдены"
+    assert on_volumes <= set(deploy_report.STATEFUL), on_volumes - set(deploy_report.STATEFUL)
+    targets = set(re.findall(r"-target=(\S+)", (SCRIPTS / "infra.sh").read_text()))
+    assert on_volumes <= targets, on_volumes - targets
 
 
 def test_every_protected_volume_prevents_destroy() -> None:
@@ -531,42 +562,85 @@ FAILED_MIGRATION_LOG = (
 )
 
 
-def test_failed_migrations_applied_nothing() -> None:
-    """Сценарий #213: alembic идёт одной транзакцией, упавшая 0014 откатывает и 0013."""
-    assert deploy_report.migrations(FAILED_MIGRATION_LOG, "failure") == {
-        "applied": 0, "from": "0012_b", "failed": "0014_d",
+def test_failed_migrations_take_the_database_revision_from_alembic_current() -> None:
+    """Сценарий #213: что откатилось, говорит база, а не лог — `alembic current` после сбоя."""
+    # Одна транзакция: упавшая 0014 откатила и 0013, база на 0012.
+    assert deploy_report.migrations(FAILED_MIGRATION_LOG, "failure", "0012_b") == {
+        "applied": 0, "from": "0012_b", "failed": "0014_d", "current": "0012_b",
     }
-    # Упало до первой ревизии — например, lock_timeout на чтении alembic_version.
-    assert deploy_report.migrations("INFO  Will assume transactional DDL.\nLockNotAvailable\n", "failure") == {
-        "applied": 0,
+    # autocommit_block зафиксировал 0013 до падения 0014.
+    assert deploy_report.migrations(FAILED_MIGRATION_LOG, "failure", "0013_c")["applied"] == 1
+    # Commit прошёл, код выхода потерян: база уже на 0014.
+    assert deploy_report.migrations(FAILED_MIGRATION_LOG, "failure", "0014_d")["applied"] == 2
+    # Ревизию базы узнать не удалось — и число применённых неизвестно.
+    assert deploy_report.migrations(FAILED_MIGRATION_LOG, "failure", None) == {
+        "applied": None, "from": "0012_b", "failed": "0014_d", "current": None,
     }
 
 
-def test_summary_of_failed_migrations_does_not_claim_revisions(tmp_path: Path) -> None:
+def test_alembic_current_output_is_parsed() -> None:
+    assert deploy_report.current_revision("0012 (head)\n") == "0012"
+    assert deploy_report.current_revision("0013_c\n") == "0013_c"
+    # Пустая база: alembic current ничего не печатает.
+    assert deploy_report.current_revision("\n") == ""
+
+
+def failed_migrate_summary(tmp_path: Path, *, log: str = FAILED_MIGRATION_LOG, current: str | None) -> str:
     report = tmp_path / "report"
     report.mkdir()
-    (report / "migrate.log").write_text(FAILED_MIGRATION_LOG)
+    (report / "migrate.log").write_text(log)
+    if current is None:
+        (report / "migrate-current.log").write_text("")
+        (report / "migrate-current.error").write_text("255\n")
+    else:
+        (report / "migrate-current.log").write_text(current + "\n")
     results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
+    return summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results)
 
-    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results)
+
+def test_summary_of_rolled_back_migrations(tmp_path: Path) -> None:
+    text = failed_migrate_summary(tmp_path, current="0012_b (head)")
 
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 0 |" in text
     assert "| Упала на ревизии | `dmc268.deploy.migrations.revision.failed` | `0014_d` |" in text
-    assert "| Ревизия базы | `dmc268.deploy.migrations.revision.from` | `0012_b` |" in text
+    assert "| Ревизия базы | `dmc268.deploy.migrations.revision.current` | `0012_b` |" in text
     assert "миграции откатены" in text
     assert "dmc268.deploy.migrations.revision.to" not in text
 
 
-def test_summary_of_migrations_that_failed_before_alembic(tmp_path: Path) -> None:
-    report = tmp_path / "report"
-    report.mkdir()
-    (report / "migrate.log").write_text("docker: Error response from daemon: Conflict.\n")
-    results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
+def test_summary_of_failed_migrations_when_the_database_did_not_answer(tmp_path: Path) -> None:
+    """Сценарий ревью #220: ssh оборвался — сирота мог довести миграции до commit, «откатено» не пишем."""
+    text = failed_migrate_summary(tmp_path, current=None)
 
-    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results)
+    assert "упала на `0014_d`, ревизия базы неизвестна — проверьте `alembic current`" in text
+    assert "откатены" not in text
+    assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | неизвестно |" in text
+    assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 0 |" not in text
+
+
+def test_summary_of_failed_migrations_that_committed_part(tmp_path: Path) -> None:
+    text = failed_migrate_summary(tmp_path, current="0013_c")
+
+    assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 1 |" in text
+    assert "откатены" not in text
+    assert "`0013_c`" in text
+
+
+def test_summary_of_migrations_that_failed_before_the_first_revision(tmp_path: Path) -> None:
+    text = failed_migrate_summary(tmp_path, log="docker: Error response from daemon: Conflict.\n", current="0012_b")
 
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 0 |" in text
     assert "до первой ревизии" in text
+
+
+def test_summary_of_a_migrate_step_that_failed_before_alembic(tmp_path: Path) -> None:
+    """Сценарий ревью #220: `tofu output` или pull образа упали — лога alembic нет, но шаг шёл."""
+    results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
+
+    text = summary(tmp_path, tmp_path / "empty", JOB_STATUS="failure", STEP_RESULTS=results)
+
+    assert "Шаг миграций упал до alembic (`tofu output` или pull образа): схема не менялась." in text
+    assert "Шаг миграций не запускался." not in text
 
 
 def test_summary_of_cancelled_migrations_claims_nothing(tmp_path: Path) -> None:
@@ -597,6 +671,56 @@ def test_migrate_removes_a_container_left_by_a_killed_run(tmp_path: Path) -> Non
     run = next(i for i, c in enumerate(calls) if c.startswith("docker run "))
     assert "docker rm -f dmc268-migrations" in calls[:run], calls
     assert (report / "migrate.log").exists()
+
+
+def test_migrate_asks_the_database_revision_after_a_failure(tmp_path: Path) -> None:
+    (tmp_path / "alembic.log").write_text(FAILED_MIGRATION_LOG)
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"), MIGRATE_EXIT="1", CURRENT="0012_b (head)",
+    )
+
+    assert result.returncode == 1
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert [c for c in calls if c.startswith("docker run ") and "alembic current" in c], calls
+    # Под timeout: при оборванном ssh вопрос к базе не держит шаг.
+    assert any(c.startswith("timeout 60 docker run ") and "alembic current" in c for c in calls), calls
+    assert (report / "migrate-current.log").read_text().strip() == "0012_b (head)"
+    assert not (report / "migrate-current.error").exists()
+
+
+def test_migrate_records_that_the_database_revision_is_unknown(tmp_path: Path) -> None:
+    (tmp_path / "alembic.log").write_text(FAILED_MIGRATION_LOG)
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"), MIGRATE_EXIT="1", CURRENT_FAIL="1",
+    )
+
+    assert result.returncode == 1
+    assert (report / "migrate-current.error").read_text().strip() == "255"
+
+
+def test_migrate_does_not_ask_after_a_success(tmp_path: Path) -> None:
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"),
+    )
+
+    assert result.returncode == 0
+    assert "alembic current" not in (tmp_path / "calls").read_text()
+    assert not (report / "migrate-current.log").exists()
+
+
+def test_every_migrations_container_is_restricted() -> None:
+    """И `alembic current` после сбоя идёт с теми же ограничениями, что upgrade."""
+    script = (SCRIPTS / "migrate.sh").read_text()
+    runs = re.findall(r"^\s*(?:timeout \d+ )?docker run --rm\b(?:[^\n]*\\\n)*[^\n]*$", script, re.MULTILINE)
+    assert len(runs) == 2, runs
+    for run in runs:
+        assert not missing_migration_restrictions(run.strip().removeprefix("timeout 60 ")), run
 
 
 def test_migrate_keeps_the_alembic_exit_code(tmp_path: Path) -> None:

@@ -25,3 +25,12 @@
 ## 4. Проверки
 
 - [x] 4.1 ruff, lint-imports, mypy, pytest с `PYTEST_FAIL_ON_SKIP=1` и живыми PostgreSQL и RabbitMQ, `openspec validate --all --strict`, `tofu fmt`/`validate`/`test`, shellcheck 0.9.0, zizmor
+
+## 5. Правки ревью #220
+
+- [x] 5.1 `migrate.sh`: после упавшего upgrade — `docker rm -f` сироты и `alembic current` тем же образом и env-файлом под `timeout 60`, вывод в `migrate-current.log`, сбой — `migrate-current.error`; `deploy_report.py`: `current_revision`, `migrations(log, outcome, current)` — число применённых по ревизии базы, «ревизия неизвестна» без «откатено»
+- [x] 5.2 `deploy.yml`: флаг — только у первой попытки (`github.run_attempt == 1`), `DEPLOY_ACTOR` — `github.triggering_actor`
+- [x] 5.3 Тест: каждый `docker_container` на `docker_volume` из `infra/*.tf` — в `STATEFUL` и в `-target` `infra.sh`
+- [x] 5.4 Нет `migrate.log` при упавшем шаге — «упал до alembic», а не «не запускался»
+- [x] 5.5 Тест `SHOW lock_timeout`/`statement_timeout` в сессии миграций на живом PostgreSQL
+- [x] 5.6 Правила `.agents/rules/backend.md` («Деплой», «Миграции») и строка в `AGENTS.md`

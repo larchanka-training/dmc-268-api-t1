@@ -23,8 +23,9 @@ infra` — targeted-план шага «Поднять базу и брокер�
 - `api-old-id`, `api-events.jsonl`, `api-new.json` — контейнер API до apply,
   события Docker во время apply и состояние нового контейнера (`apply.sh`);
   `<файл>.error` рядом — сервер не ответил (код ssh или timeout);
-- `migrate.log` — вывод `alembic upgrade head` (`migrate.sh`); исход шага
-  миграций — из `STEP_RESULTS`;
+- `migrate.log` — вывод `alembic upgrade head` (`migrate.sh`), после сбоя —
+  `migrate-current.log` с выводом `alembic current` (`.error` рядом — база не
+  ответила); исход шага миграций — из `STEP_RESULTS`;
 - `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`).
 
 Нет файла — нет и раздела, а не падение: summary пишется и после упавшего шага.
@@ -305,22 +306,36 @@ def api_downtime(old_id: str, events: list[dict[str, Any]], new: dict[str, Any] 
 UPGRADE = re.compile(r"Running upgrade (\S*) -> ([^\s,]+)")
 
 
-def migrations(log: str, outcome: str = "success") -> dict[str, Any]:
-    """Применённые ревизии из вывода `alembic upgrade head` и исхода шага.
+def current_revision(text: str) -> str:
+    """Ревизия из вывода `alembic current`: `0012 (head)` → `0012`; пусто — пустая база."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.split()[0]
+    return ""
 
-    Строка `Running upgrade A -> B` пишется до ревизии B, а не после неё.
-    Упал шаг — последняя начатая ревизия и есть упавшая, а применено ноль:
-    `alembic/env.py` гонит весь upgrade одной транзакцией, и ошибка откатывает
-    и ревизии до упавшей (#213). Исключение — ревизия с `autocommit_block`:
-    всё до неё фиксируется; такие ревизии редки, и summary их не различает.
+
+def migrations(log: str, outcome: str = "success", current: str | None = None) -> dict[str, Any]:
+    """Применённые ревизии из вывода `alembic upgrade head`, исхода шага и ревизии базы.
+
+    Строка `Running upgrade A -> B` пишется до ревизии B, а не после неё:
+    при упавшем шаге последняя начатая и есть упавшая. Сколько из начатых
+    зафиксировано, лог не говорит. Обычно ноль — upgrade идёт одной
+    транзакцией (`alembic/env.py`), — но `autocommit_block` фиксирует всё до
+    себя, а потерянный код выхода (оборванный ssh) скрывает и полный успех.
+    Поэтому при сбое число берётся по `current` — ревизии базы из `alembic
+    current` после сбоя (ревью #220); None — её узнать не удалось, и число
+    тоже неизвестно (`applied` — None).
     """
     steps = UPGRADE.findall(log)
+    if outcome != "failure":
+        if not steps:
+            return {"applied": 0}
+        return {"applied": len(steps), "from": steps[0][0] or "пустая база", "to": steps[-1][1]}
     if not steps:
-        return {"applied": 0}
-    base = steps[0][0] or "пустая база"
-    if outcome == "failure":
-        return {"applied": 0, "from": base, "failed": steps[-1][1]}
-    return {"applied": len(steps), "from": base, "to": steps[-1][1]}
+        return {"applied": 0, "current": current}
+    chain = [steps[0][0], *(to for _, to in steps)]
+    applied = chain.index(current) if current in chain else None
+    return {"applied": applied, "from": steps[0][0] or "пустая база", "failed": steps[-1][1], "current": current}
 
 
 # --- диск -----------------------------------------------------------------
@@ -596,27 +611,48 @@ def plan_section(report_dir: Path) -> list[str]:
 def migrations_section(report_dir: Path, marks: dict[str, float], outcome: str) -> list[str]:
     out = ["### Миграции", ""]
     if not (report_dir / "migrate.log").exists():
+        if outcome == "failure":
+            # migrate.log появляется с запуском alembic; до него — tofu output и pull.
+            return [*out, "Шаг миграций упал до alembic (`tofu output` или pull образа): схема не менялась."]
         return [*out, "Шаг миграций не запускался."]
     if outcome == "cancelled":
         # Отмена убивает docker CLI на раннере, а не контейнер на сервере:
         # миграции могли и дойти до конца, и откатиться (trap в migrate.sh).
         return [*out, ("Шаг миграций прерван: применились ли ревизии, по логу не сказать. "
                 "Ревизию базы покажет `alembic current` или следующий деплой.")]
-    m = migrations(read(report_dir / "migrate.log"), outcome)
+    # Ответ `alembic current` после сбоя (migrate.sh); нет файла или рядом
+    # `.error` — база не ответила, ревизия неизвестна.
+    answered = (report_dir / "migrate-current.log").exists() and not (report_dir / "migrate-current.error").exists()
+    current = current_revision(read(report_dir / "migrate-current.log")) if outcome == "failure" and answered else None
+    m = migrations(read(report_dir / "migrate.log"), outcome, current)
+    applied = "неизвестно" if m["applied"] is None else m["applied"]
     out += ["| | Ключ | Значение |", "| --- | --- | --- |",
-            f"| Применено ревизий | `dmc268.deploy.migrations.applied` | {m['applied']} |"]
+            f"| Применено ревизий | `dmc268.deploy.migrations.applied` | {applied} |"]
     if "failed" in m:
-        out += [f"| Упала на ревизии | `dmc268.deploy.migrations.revision.failed` | `{m['failed']}` |",
-                f"| Ревизия базы | `dmc268.deploy.migrations.revision.from` | `{m['from']}` |"]
+        out.append(f"| Упала на ревизии | `dmc268.deploy.migrations.revision.failed` | `{m['failed']}` |")
     elif m["applied"]:
         out += [f"| Ревизия до | `dmc268.deploy.migrations.revision.from` | `{m['from']}` |",
                 f"| Ревизия после | `dmc268.deploy.migrations.revision.to` | `{m['to']}` |"]
+    if outcome == "failure":
+        base = "неизвестна" if m["current"] is None else f"`{m['current'] or 'пустая база'}`"
+        out.append(f"| Ревизия базы | `dmc268.deploy.migrations.revision.current` | {base} |")
     out.append(f"| Время шага, с | | {seconds(durations(marks).get('migrate'))} |")
-    if "failed" in m:
-        out += ["", "> [!CAUTION]", (f"> Шаг миграций упал на ревизии `{m['failed']}`: миграции откатены, "
-                f"применено 0 — upgrade идёт одной транзакцией (`alembic/env.py`), база осталась на `{m['from']}`.")]
-    elif outcome == "failure":
-        out += ["", "> [!CAUTION]", "> Шаг миграций упал до первой ревизии: схема не менялась. Причина — в логе шага."]
+    if outcome != "failure":
+        return out
+    out += ["", "> [!CAUTION]"]
+    if "failed" not in m:
+        out.append("> Шаг миграций упал до первой ревизии: схема не менялась. Причина — в логе шага.")
+    elif m["current"] is None:
+        out.append(f"> Миграция упала на `{m['failed']}`, ревизия базы неизвестна — проверьте `alembic current`.")
+    elif m["applied"] == 0:
+        out.append(f"> Шаг миграций упал на ревизии `{m['failed']}`: миграции откатены, применено 0 — "
+                   f"база на `{m['current'] or 'пустая база'}` (`alembic current` после сбоя).")
+    elif m["applied"] is None:
+        out.append(f"> Шаг миграций упал на `{m['failed']}`, а база на `{m['current']}` — ревизии вне этого "
+                   "запуска; проверьте `alembic history`.")
+    else:
+        out.append(f"> Шаг миграций упал на `{m['failed']}`, но база на `{m['current']}`: зафиксировано "
+                   f"{m['applied']} — `autocommit_block` или commit с потерянным кодом выхода.")
     return out
 
 

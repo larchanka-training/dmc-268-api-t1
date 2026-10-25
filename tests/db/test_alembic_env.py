@@ -12,8 +12,8 @@ import time
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import text
-from sqlalchemy.engine import make_url
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import OperationalError
 
 from alembic import command
@@ -119,3 +119,31 @@ def test_a_migration_waiting_for_a_lock_gives_up_after_lock_timeout(migrated) ->
     # 55P03 lock_not_available — сработал именно lock_timeout, а не statement_timeout (57014).
     assert getattr(caught.value.orig, "sqlstate", None) == "55P03"
     assert 4 < waited < 15, waited
+
+
+@pytest.mark.integration
+@requires_db
+def test_the_migrations_session_carries_both_timeouts(migrated) -> None:
+    """Ревью #220: `SHOW` в той самой сессии, которую настраивает env.py.
+
+    Сессию видно только изнутри: alembic открывает своё соединение и закрывает
+    его (NullPool). Слушатель на чтении `alembic_version` — уже после `SET` —
+    спрашивает настройки в том же соединении.
+    """
+    assert TEST_DATABASE_URL is not None
+    seen: dict[str, str] = {}
+
+    def show(conn, cursor, statement, parameters, context, executemany) -> None:
+        if "alembic_version" in statement and not seen:
+            seen["lock_timeout"] = cursor.connection.execute("SHOW lock_timeout").fetchone()[0]
+            seen["statement_timeout"] = cursor.connection.execute("SHOW statement_timeout").fetchone()[0]
+
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL.replace("%", "%%"))
+    event.listen(Engine, "after_cursor_execute", show)
+    try:
+        command.upgrade(config, "head")
+    finally:
+        event.remove(Engine, "after_cursor_execute", show)
+
+    assert seen == {"lock_timeout": "5s", "statement_timeout": "2min"}
