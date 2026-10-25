@@ -2,14 +2,14 @@
 
 `recover-state.sh` срабатывает раз в долгое время и именно тогда, когда всё
 уже сломано, — узнавать о его поломке деплоем нельзя. Поэтому он гоняется
-настоящим bash с подложными `tofu`, `aws`, `curl` и `timeout`, а вход —
+настоящим bash с подложными `tofu`, `aws`, `timeout` и туннелем, а вход —
 настоящий: `tests/fixtures/deploy/errored-tfstate.json` (`errored.tfstate`; `*.tfstate` в .gitignore) и `tflock.json` — то, что
 OpenTofu 1.13.2 оставил на docker:29-dind, когда RustFS 1.0.3 остановили
 посреди apply (serial и lineage — из прогона, ресурсы убраны: скрипт их не читает). `Who` блокировки
 тест подставляет свой: скрипт снимает только блокировку этого раннера.
 
-Сторож туннеля и `check-tip.sh` — тоже настоящим bash с подложными `curl`,
-`pkill` и `gh`.
+Туннель, его сторож и `check-tip.sh` — тоже настоящим bash с подложными `curl`,
+`ssh`, `pkill` и `gh`.
 """
 
 import json
@@ -47,11 +47,6 @@ echo "An error occurred (NoSuchKey) when calling the GetObject operation: The sp
 exit 255
 """
 
-FAKE_CURL = """#!/usr/bin/env bash
-echo "curl $*" >> "$CALLS"
-exit "${CURL_EXIT:-0}"
-"""
-
 # coreutils timeout на macOS нет: подложный пишет вызов и запускает команду.
 FAKE_TIMEOUT = """#!/usr/bin/env bash
 echo "timeout $1" >> "$CALLS"
@@ -60,7 +55,7 @@ exec "$@"
 """
 
 FAKE_TUNNEL = """#!/usr/bin/env bash
-echo "tunnel $*" >> "$CALLS"
+echo "tunnel $* wait=${S3_TUNNEL_WAIT:-}" >> "$CALLS"
 exit "${TUNNEL_EXIT:-0}"
 """
 
@@ -100,7 +95,7 @@ def recover(
         (root / "infra" / ".terraform" / "terraform.tfstate").write_text(json.dumps(backend))
     if errored:
         (root / "infra" / "errored.tfstate").write_text((FIXTURES / "errored-tfstate.json").read_text())
-    bin_dir = write_bin(tmp_path, tofu=FAKE_TOFU, aws=FAKE_AWS, curl=FAKE_CURL, timeout=FAKE_TIMEOUT)
+    bin_dir = write_bin(tmp_path, tofu=FAKE_TOFU, aws=FAKE_AWS, timeout=FAKE_TIMEOUT)
     tunnel = write_bin(tmp_path, tunnel=FAKE_TUNNEL) / "tunnel"
     report = tmp_path / "report"
     result = subprocess.run(
@@ -150,7 +145,7 @@ def test_recovery_reopens_the_tunnel_and_reads_the_lock_next_to_the_state(tmp_pa
     recover(tmp_path, LOCK_JSON=str(own_lock(tmp_path)))
 
     log = calls(tmp_path)
-    assert log[0] == "tunnel 9000"
+    assert log[0] == "tunnel 9000 wait=0"
     get = next(c for c in log if c.startswith("aws "))
     assert "--endpoint-url http://127.0.0.1:9000 s3api get-object" in get
     assert "--bucket dmc268-tfstate --key api/terraform.tfstate.tflock" in get
@@ -213,12 +208,11 @@ def test_recovery_keeps_the_lock_when_the_push_is_refused(tmp_path: Path) -> Non
     assert (root / "infra" / "errored.tfstate").exists()
 
 
-def test_recovery_gives_up_when_the_storage_does_not_answer(tmp_path: Path) -> None:
-    result, pairs, _ = recover(tmp_path, CURL_EXIT="7")
+def test_recovery_waits_for_a_hung_storage_longer_than_a_plain_tunnel(tmp_path: Path) -> None:
+    """Ответа хранилища ждёт туннель (#211) — сколько велит RECOVER_WAIT, по умолчанию 120 с."""
+    recover(tmp_path, RECOVER_WAIT="120", LOCK_JSON=str(own_lock(tmp_path)))
 
-    assert result.returncode == 1
-    assert tofu_calls(tmp_path) == []
-    assert pairs["reason"] == "хранилище не ответило за 0 с"
+    assert calls(tmp_path)[0] == "tunnel 9000 wait=120"
 
 
 def test_recovery_does_not_guess_on_a_storage_error(tmp_path: Path) -> None:
@@ -233,7 +227,8 @@ def test_recovery_reports_a_failed_tunnel(tmp_path: Path) -> None:
     result, pairs, _ = recover(tmp_path, TUNNEL_EXIT="1")
 
     assert result.returncode == 1
-    assert pairs["reason"] == "туннель к хранилищу не открылся"
+    assert tofu_calls(tmp_path) == []
+    assert pairs["reason"] == "туннель не открылся или хранилище не ответило за 0 с"
 
 
 def test_recovery_before_init_has_nothing_to_restore(tmp_path: Path) -> None:
@@ -330,6 +325,58 @@ def test_watchdog_and_reopening_find_the_tunnel_they_open() -> None:
 
 def test_storage_tunnel_tolerates_a_longer_outage_than_the_master() -> None:
     assert "-o ServerAliveCountMax=12" in tunnel_command()
+
+
+# Подложный curl туннеля: коды ответа по очереди из CODES, последний — дальше.
+FAKE_PROBE = """#!/usr/bin/env bash
+echo "curl $*" >> "$CALLS"
+n=$(cat "$COUNT" 2>/dev/null || echo 0)
+echo $((n + 1)) > "$COUNT"
+read -ra codes <<< "$CODES"
+i=$(( n < ${#codes[@]} ? n : ${#codes[@]} - 1 ))
+printf '%s' "${codes[$i]}"
+"""
+RECORD = """#!/usr/bin/env bash
+echo "$(basename "$0") $*" >> "$CALLS"
+"""
+
+
+def open_tunnel(tmp_path: Path, codes: str, wait: str = "30") -> subprocess.CompletedProcess[str]:
+    bin_dir = write_bin(tmp_path, curl=FAKE_PROBE, ssh=RECORD, pkill=RECORD, nohup=RECORD, sleep=RECORD)
+    return subprocess.run(
+        # Порт, который на машине разработчика никто не слушает: проверка, что
+        # прежний туннель закрылся, идёт по настоящему /dev/tcp.
+        ["bash", str(SCRIPTS / "s3-tunnel.sh"), "59997"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "CALLS": str(tmp_path / "calls"),
+            "COUNT": str(tmp_path / "count"),
+            "CODES": codes,
+            "S3_TUNNEL_WAIT": wait,
+            "REPORT_DIR": str(tmp_path / "report"),
+        },
+    )
+
+
+def test_tunnel_waits_for_the_storage_to_answer(tmp_path: Path) -> None:
+    """Порт на петле открыт сразу — его слушает ssh; готовность — первый ответ HTTP хранилища (#211)."""
+    result = open_tunnel(tmp_path, "000 000 403")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "хранилище отвечает (HTTP 403)" in result.stdout
+    assert (tmp_path / "count").read_text().strip() == "3"
+
+
+def test_tunnel_fails_when_the_storage_never_answers(tmp_path: Path) -> None:
+    """ssh поднял проброс, а хранилище молчит: шаг падает здесь, а не потом на `tofu init`."""
+    result = open_tunnel(tmp_path, "000", wait="0")
+
+    assert result.returncode == 1
+    assert "::error::туннель поднялся, но хранилище за ним не ответило за 0 с" in result.stdout
+    assert not any(c.startswith("nohup ") for c in calls(tmp_path))
 
 
 # --- сверка вершины -------------------------------------------------------------

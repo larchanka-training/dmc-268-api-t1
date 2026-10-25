@@ -26,10 +26,12 @@
 # Нужен хост `stand` в ~/.ssh/config (.github/actions/stand-ssh). Аргумент —
 # порт хранилища, он же локальный конец туннеля. Параметры (env): REPORT_DIR —
 # каталог отчёта деплоя (по умолчанию $RUNNER_TEMP/deploy-report), туда пишет
-# сторож.
+# сторож; S3_TUNNEL_WAIT — сколько секунд ждать ответа хранилища (30;
+# recover-state.sh ждёт дольше — хранилище могло зависнуть).
 set -euo pipefail
 
 port="${1:?нужен порт хранилища}"
+wait_for="${S3_TUNNEL_WAIT:-30}"
 here="$(cd "$(dirname "$0")" && pwd)"
 report_dir="${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/deploy-report}"
 mkdir -p "$report_dir"
@@ -47,15 +49,22 @@ done
 # построчно.
 ssh -o ControlPath=none -o ServerAliveCountMax=12 -o ExitOnForwardFailure=yes -f -N -L "$forward" stand
 
-for _ in $(seq 1 20); do
-  if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
-    echo "туннель открыт, порт ${port} отвечает"
+# Ждём ответа хранилища, а не открытого порта: порт на петле слушает сам ssh,
+# и он открыт, даже когда хранилище на сервере лежит, — ошибка всплыла бы
+# позже, на `tofu init`, без подсказки (#211). Любой код HTTP, даже 403, —
+# хранилище живо; 000 — ответа нет. Так же — state-tunnel во фронте.
+started="$(date +%s)"
+while true; do
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${port}/" || true)"
+  if [ -n "$code" ] && [ "$code" != "000" ]; then
+    echo "туннель открыт, хранилище отвечает (HTTP ${code})"
     # Сторож живёт до конца job'а; вывод — в файл: лог шага закрывается
     # вместе с шагом.
     nohup bash "$here/s3-watchdog.sh" "$port" >> "$report_dir/s3-watchdog.log" 2>&1 < /dev/null &
     exit 0
   fi
-  sleep 0.5
+  [ $(( $(date +%s) - started )) -lt "$wait_for" ] || break
+  sleep 1
 done
-echo "::error::туннель поднялся, но порт ${port} не отвечает"
+echo "::error::туннель поднялся, но хранилище за ним не ответило за ${wait_for} с: проверьте контейнер dmc268-s3 на сервере"
 exit 1

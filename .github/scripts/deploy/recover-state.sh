@@ -74,16 +74,11 @@ if [ -z "$backend" ]; then
 fi
 read -r bucket key endpoint port <<< "$backend"
 
-"${S3_TUNNEL:-$here/../s3-tunnel.sh}" "$port" || fail "туннель к хранилищу не открылся"
-
+# Туннель сам ждёт ответа хранилища — здесь дольше, чем при обычном открытии:
+# хранилище могло зависнуть, а не упасть.
 wait_for="${RECOVER_WAIT:-120}"
-started="$(date +%s)"
-until curl -s -o /dev/null --max-time 10 "$endpoint/"; do
-  if [ $(( $(date +%s) - started )) -ge "$wait_for" ]; then
-    fail "хранилище не ответило за ${wait_for} с"
-  fi
-  sleep 5
-done
+S3_TUNNEL_WAIT="$wait_for" "${S3_TUNNEL:-$here/../s3-tunnel.sh}" "$port" \
+  || fail "туннель не открылся или хранилище не ответило за ${wait_for} с"
 
 # Блокировка: объект есть — его JSON, нет — пусто. Ошибка, кроме «нет
 # объекта», — хранилище не отвечает как надо, гадать нельзя.
