@@ -110,8 +110,8 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Длительность вызова модели, p50/p95 (по модели)",
-      "description": "Латентность логических вызовов модели (review_llm_call_duration, воркер): бакеты в секундах задаёт View в telemetry.py, схемные повторы и фоллбэк свёрнуты в один вызов.",
+      "title": "Длительность вызова модели, p50/p95 (по провайдеру)",
+      "description": "Латентность каждого фактического вызова провайдера модели (review_llm_call_duration, воркер): FallbackLlmGateway пишет запись на каждый вызов провайдера, включая таймауты и сбои. В квантиль входят только успешные (outcome=\"ok\"), сбои видны отдельной серией по provider. Бакеты в секундах задаёт View в telemetry.py.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "fieldConfig": {
@@ -129,16 +129,16 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by (le, model) (rate(review_llm_call_duration_seconds_bucket{job=\"dmc-268-worker\"}[$__rate_interval])))",
-          "legendFormat": "p50 {{model}}",
+          "expr": "histogram_quantile(0.50, sum by (le, provider) (rate(review_llm_call_duration_seconds_bucket{job=\"dmc-268-worker\", outcome=\"ok\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{provider}}",
           "range": true,
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(review_llm_call_duration_seconds_bucket{job=\"dmc-268-worker\"}[$__rate_interval])))",
-          "legendFormat": "p95 {{model}}",
+          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(review_llm_call_duration_seconds_bucket{job=\"dmc-268-worker\", outcome=\"ok\"}[$__rate_interval])))",
+          "legendFormat": "p95 {{provider}}",
           "range": true,
           "refId": "B"
         }
