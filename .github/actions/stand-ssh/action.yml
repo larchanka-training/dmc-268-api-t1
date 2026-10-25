@@ -48,6 +48,16 @@ runs:
         # он берёт личности по умолчанию (~/.ssh/id_*), которых на раннере нет,
         # и упирается в «Permission denied». Поэтому ключ прописывается в
         # конфиг, а не передаётся каждым вызовом.
+        #
+        # ControlMaster: первый `ssh stand` поднимает фоновое соединение, и все
+        # следующие вызовы — `ssh stand …` шагов и каждый запрос Docker через
+        # ssh://stand — идут по нему, без нового рукопожатия. Замер с RTT 80 мс:
+        # `docker -H ssh://stand version` 1,25 с без него, 0,4 с с ним (#203).
+        # ControlPath короткий: путь unix-сокета ограничен ~104 байтами, а %C —
+        # хеш из 40 символов. ControlPersist 10m — соединение живёт 10 минут
+        # после последнего вызова. Туннели (`ssh -f -N -L`) идут мимо него, с
+        # `-o ControlPath=none`: через master ExitOnForwardFailure не
+        # срабатывает, а проброс умирает вместе с master по ControlPersist.
         cat > ~/.ssh/config <<CFG
         Host stand
           HostName $HOST
@@ -56,5 +66,8 @@ runs:
           IdentitiesOnly yes
           BatchMode yes
           StrictHostKeyChecking yes
+          ControlMaster auto
+          ControlPath ~/.ssh/cm-%C
+          ControlPersist 10m
         CFG
         chmod 600 ~/.ssh/config

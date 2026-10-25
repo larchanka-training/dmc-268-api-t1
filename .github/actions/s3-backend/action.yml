@@ -97,7 +97,11 @@ runs:
         set -euo pipefail
         # ExitOnForwardFailure обязателен: без него ssh уходит в фон даже когда
         # проброс не удался, и всё падает позже с невнятной ошибкой.
-        ssh -o ExitOnForwardFailure=yes -f -N -L "${S3_PORT}:127.0.0.1:${S3_PORT}" stand
+        # ControlPath=none — своё соединение, мимо ControlMaster из stand-ssh:
+        # через master проброс открывал бы master, ExitOnForwardFailure не
+        # срабатывал бы, а туннель к состоянию закрылся бы через ControlPersist
+        # простоя посреди деплоя.
+        ssh -o ControlPath=none -o ExitOnForwardFailure=yes -f -N -L "${S3_PORT}:127.0.0.1:${S3_PORT}" stand
 
         for _ in $(seq 1 20); do
           if (exec 3<>"/dev/tcp/127.0.0.1/${S3_PORT}") 2>/dev/null; then

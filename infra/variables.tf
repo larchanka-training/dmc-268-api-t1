@@ -228,11 +228,12 @@ variable "eurorouter_api_keys" {
   sensitive   = true
 }
 
-# --- Образ API и реестр ---
+# --- Образ API ---
 
 # Digest обязателен: тег перезаписывается, а digest называет ровно тот образ,
 # который собрал и проверил этот прогон деплоя. Тег оставлен для читаемости
-# (`docker ps` показывает commit sha).
+# лога и summary деплоя (commit sha); контейнеры ссылаются на образ без тега —
+# local.api_image_ref в app.tf.
 variable "api_image" {
   type        = string
   description = "Ссылка на образ API в реестре с digest: <репозиторий>:<commit sha>@sha256:<digest>."
@@ -241,17 +242,4 @@ variable "api_image" {
     condition     = can(regex("@sha256:[0-9a-f]{64}$", var.api_image))
     error_message = "api_image должен заканчиваться на @sha256:<64 hex>: образ забирается по digest, а не по тегу."
   }
-}
-
-variable "registry_username" {
-  type        = string
-  description = "Пользователь реестра образов. В CI — github.actor."
-  default     = ""
-}
-
-variable "registry_password" {
-  type        = string
-  description = "Токен реестра образов. В CI — GITHUB_TOKEN, живёт один прогон."
-  default     = ""
-  sensitive   = true
 }
