@@ -1,12 +1,14 @@
+# --- Docker и публикация портов ---
+
 variable "docker_host" {
   type        = string
-  description = "Docker daemon URI. Use unix:///var/run/docker.sock locally or ssh://user@server for a remote host."
+  description = "URI демона Docker: локально unix:///var/run/docker.sock, для удалённого хоста ssh://user@server."
   default     = "unix:///var/run/docker.sock"
 }
 
 variable "bind_ip" {
   type        = string
-  description = "Interface to publish the API port on. Not used as a client hostname."
+  description = "Интерфейс, на котором публикуется порт API. Как имя хоста для клиентов не используется."
   default     = "127.0.0.1"
 
   # Спека backend-delivery: порт API не выходит за пределы сервера. Гарантирует
@@ -19,7 +21,7 @@ variable "bind_ip" {
 
 variable "internal_bind_ip" {
   type        = string
-  description = "Interface to publish PostgreSQL and RabbitMQ on the host (keep 127.0.0.1 unless you need local tools only)."
+  description = "Интерфейс хоста, на котором публикуются PostgreSQL и RabbitMQ (оставляйте 127.0.0.1: снаружи к ним ходить не нужно, только локальным инструментам)."
   default     = "127.0.0.1"
 
   # Спека backend-delivery: порты PostgreSQL и RabbitMQ не выходят за пределы
@@ -39,13 +41,15 @@ variable "service_host" {
 
 variable "api_port" {
   type        = number
-  description = "Host port for the FastAPI HTTP server."
+  description = "Порт хоста для HTTP-сервера FastAPI."
   default     = 8000
 }
 
+# --- PostgreSQL ---
+
 variable "postgres_user" {
   type        = string
-  description = "PostgreSQL user name."
+  description = "Пользователь PostgreSQL."
   default     = "dmc268"
 }
 
@@ -54,7 +58,7 @@ variable "postgres_user" {
 # только минутой позже, на миграциях, — уже со сломанным стендом.
 variable "postgres_password" {
   type        = string
-  description = "PostgreSQL password. Do not commit real values."
+  description = "Пароль PostgreSQL. Реальные значения не коммитить."
   sensitive   = true
 
   validation {
@@ -65,25 +69,27 @@ variable "postgres_password" {
 
 variable "postgres_db" {
   type        = string
-  description = "PostgreSQL database name."
+  description = "Имя базы PostgreSQL."
   default     = "dmc268"
 }
 
 variable "postgres_port" {
   type        = number
-  description = "Host port for PostgreSQL."
+  description = "Порт хоста для PostgreSQL."
   default     = 5432
 }
 
+# --- RabbitMQ ---
+
 variable "rabbitmq_user" {
   type        = string
-  description = "RabbitMQ user name."
+  description = "Пользователь RabbitMQ."
   default     = "dmc268"
 }
 
 variable "rabbitmq_password" {
   type        = string
-  description = "RabbitMQ password. Do not commit real values."
+  description = "Пароль RabbitMQ. Реальные значения не коммитить."
   sensitive   = true
 
   validation {
@@ -94,22 +100,71 @@ variable "rabbitmq_password" {
 
 variable "rabbitmq_port" {
   type        = number
-  description = "Host port for AMQP."
+  description = "Порт хоста для AMQP."
   default     = 5672
 }
 
+# --- GitHub App, вход пользователей и вебхуки ---
+
 variable "github_app_id" {
   type        = string
-  description = "GitHub App id (GITHUB_APP_ID for the API and worker containers)."
+  description = "ID GitHub App (GITHUB_APP_ID для контейнеров API и воркера)."
   default     = ""
 }
 
 variable "github_app_private_key" {
   type        = string
-  description = "GitHub App private key in PEM (GITHUB_APP_PRIVATE_KEY). Do not commit real values."
+  description = "Закрытый ключ GitHub App в PEM (GITHUB_APP_PRIVATE_KEY). Реальные значения не коммитить."
   default     = ""
   sensitive   = true
 }
+
+variable "github_app_client_id" {
+  type        = string
+  description = "Client ID GitHub App для входа пользователей (GITHUB_APP_CLIENT_ID). Пустой — вход не работает."
+  default     = ""
+}
+
+variable "github_app_client_secret" {
+  type        = string
+  description = "Client secret GitHub App для входа пользователей (GITHUB_APP_CLIENT_SECRET). Не коммитить."
+  default     = ""
+  sensitive   = true
+}
+
+# Без значения по умолчанию и с проверкой формата: стенд без ключа не
+# поднимется молча с неработающим входом — apply упадёт здесь же.
+variable "user_token_encryption_key" {
+  type        = string
+  description = "Ключ шифрования токенов пользователя GitHub (USER_TOKEN_ENCRYPTION_KEY): 32 байта в base64, openssl rand -base64 32. Не коммитить."
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.user_token_encryption_key))
+    error_message = "user_token_encryption_key - 32 байта в base64 (44 символа, openssl rand -base64 32); секрет USER_TOKEN_KEY_DMC268_T1 не задан или битый."
+  }
+}
+
+variable "public_origin" {
+  type        = string
+  description = "Публичный origin интерфейса без завершающего / (PUBLIC_ORIGIN): сверка Origin и callback входа. Пустой — изменяющие запросы с сессией получают 403."
+  default     = ""
+}
+
+variable "github_webhook_secret" {
+  type        = string
+  description = "Общий секрет, которым GitHub подписывает доставки вебхуков (X-Hub-Signature-256). Не коммитить."
+  sensitive   = true
+
+  # Пустой секрет — HMAC с ключом, который знает каждый. Приложение такой не
+  # примет и не стартует; ловим раньше, на plan.
+  validation {
+    condition     = var.github_webhook_secret != ""
+    error_message = "github_webhook_secret пуст: секрет WEBHOOK_SECRET_DMC268_T1 не задан."
+  }
+}
+
+# --- Модель ---
 
 # Без значения по умолчанию: заглушка выбирается только явно, иначе стенд
 # молча публиковал бы пустые ревью (спека llm-gateway, «Выбор заглушки явный»).
@@ -179,50 +234,7 @@ variable "eurorouter_api_keys" {
   sensitive   = true
 }
 
-variable "github_app_client_id" {
-  type        = string
-  description = "Client ID GitHub App для входа пользователей (GITHUB_APP_CLIENT_ID). Пустой — вход не работает."
-  default     = ""
-}
-
-variable "github_app_client_secret" {
-  type        = string
-  description = "Client secret GitHub App для входа пользователей (GITHUB_APP_CLIENT_SECRET). Не коммитить."
-  default     = ""
-  sensitive   = true
-}
-
-# Без значения по умолчанию и с проверкой формата: стенд без ключа не
-# поднимется молча с неработающим входом — apply упадёт здесь же.
-variable "user_token_encryption_key" {
-  type        = string
-  description = "Ключ шифрования токенов пользователя GitHub (USER_TOKEN_ENCRYPTION_KEY): 32 байта в base64, openssl rand -base64 32. Не коммитить."
-  sensitive   = true
-
-  validation {
-    condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.user_token_encryption_key))
-    error_message = "user_token_encryption_key - 32 байта в base64 (44 символа, openssl rand -base64 32); секрет USER_TOKEN_KEY_DMC268_T1 не задан или битый."
-  }
-}
-
-variable "public_origin" {
-  type        = string
-  description = "Публичный origin интерфейса без завершающего / (PUBLIC_ORIGIN): сверка Origin и callback входа. Пустой — изменяющие запросы с сессией получают 403."
-  default     = ""
-}
-
-variable "github_webhook_secret" {
-  type        = string
-  description = "Общий секрет, которым GitHub подписывает доставки вебхуков (X-Hub-Signature-256). Не коммитить."
-  sensitive   = true
-
-  # Пустой секрет — HMAC с ключом, который знает каждый. Приложение такой не
-  # примет и не стартует; ловим раньше, на plan.
-  validation {
-    condition     = var.github_webhook_secret != ""
-    error_message = "github_webhook_secret пуст: секрет WEBHOOK_SECRET_DMC268_T1 не задан."
-  }
-}
+# --- Образ API и реестр ---
 
 # Digest обязателен: тег перезаписывается, а digest называет ровно тот образ,
 # который собрал и проверил этот прогон деплоя. Тег оставлен для читаемости
