@@ -1,5 +1,6 @@
-# Приложение: образ API из реестра и три контейнера из него — migrate, api и
-# worker.
+# Приложение: образ API из реестра и два контейнера из него — api и worker.
+# Миграции сюда не входят: их применяет шаг деплоя до `tofu apply`
+# (.github/scripts/deploy/migrate.sh) с окружением из выхода migrate_env.
 
 resource "docker_image" "api" {
   # Образ собирается и публикуется в CI, здесь он только забирается — по
@@ -10,57 +11,27 @@ resource "docker_image" "api" {
   keep_locally = true
 }
 
-resource "docker_container" "migrate" {
-  name  = "dmc268-migrate"
-  image = docker_image.api.image_id
+# Тот же образ под воркер, отдельным ресурсом. Замена ресурса образа ждёт
+# уничтожения всех контейнеров, которые на него ссылаются: с общим ресурсом
+# новый API не стартовал, пока воркер дорабатывал сообщение (до
+# destroy_grace_seconds). Замер на Docker 29.9.2 с воркером, который дренирует
+# 60 с: простой API при замене образа 64 с с общим ресурсом, 2,5 с — со своим
+# (#159). Порядок уничтожения OpenTofu берёт из состояния, поэтому выигрыш —
+# со второго деплоя после перехода. Два ресурса с одним name провайдеру не мешают:
+# оба только забирают образ, а keep_locally не даёт удалению одного снять
+# образ из-под другого.
+resource "docker_image" "worker" {
+  name         = var.api_image
+  keep_locally = true
+}
 
-  # Одноразовый контейнер: отрабатывает и завершается. `attach` заставляет
-  # OpenTofu дождаться конца, а postcondition — упасть на ненулевом коде.
-  # Без этого упавшая миграция осталась бы незамеченной, и API поднялся бы
-  # против непромигрированной базы.
-  must_run = false
-  attach   = true
-  logs     = true
-
-  # Наш образ: пользователь не root (USER в Dockerfile), приложение ничего не
-  # пишет на диск, поэтому файловая система только для чтения и без capabilities.
-  read_only     = true
-  tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=64m" }
-  security_opts = ["no-new-privileges:true"]
-  init          = true
-  memory        = 256
-  memory_swap   = 256
-  log_driver    = "json-file"
-  log_opts      = local.log_opts
-
-  capabilities {
-    drop = ["ALL"]
-  }
-
-  depends_on = [docker_container.postgres]
-
-  networks_advanced {
-    name = docker_network.dmc268.name
-  }
-
-  env = local.app_env
-
-  # depends_on у docker-провайдера задаёт только порядок создания, но не ждёт
-  # готовности. Прежняя версия ждала открытия TCP-порта — этого мало:
-  # PostgreSQL открывает порт раньше, чем начинает принимать запросы, и окно
-  # между этим давало бы редкие падения деплоя без причины. Повторяем саму
-  # миграцию: успех означает и готовность базы, и применённую схему. Настоящая
-  # ошибка в миграции тоже переживёт все попытки и уйдёт ненулевым кодом.
-  command = [
-    "sh", "-c",
-    "for i in $(seq 1 30); do alembic upgrade head && exit 0; sleep 2; done; exit 1",
-  ]
+# Контейнер миграций жил в стеке до #159. Из состояния он уходит без
+# уничтожения: остановленный контейнер на сервере убирает шаг миграций.
+removed {
+  from = docker_container.migrate
 
   lifecycle {
-    postcondition {
-      condition     = self.exit_code == 0
-      error_message = "Миграции завершились с ненулевым кодом — деплой остановлен до старта API."
-    }
+    destroy = false
   }
 }
 
@@ -76,7 +47,9 @@ resource "docker_container" "api" {
   # потоки SSE uvicorn рвёт через 5 с, остальное время — на lifespan.
   destroy_grace_seconds = 10
 
-  # Те же основания, что у migrate: образ один.
+  # Наш образ: пользователь не root (USER в Dockerfile), приложение ничего не
+  # пишет на диск, поэтому файловая система только для чтения и без capabilities.
+  # Те же ограничения у миграций — флаги docker run в migrate.sh.
   read_only     = true
   tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=64m" }
   security_opts = ["no-new-privileges:true"]
@@ -90,11 +63,10 @@ resource "docker_container" "api" {
     drop = ["ALL"]
   }
 
-  # Миграции — тоже предусловие старта, не только живые postgres и rabbitmq.
+  # Миграции к этому моменту уже применены шагом деплоя.
   depends_on = [
     docker_container.postgres,
     docker_container.rabbitmq,
-    docker_container.migrate,
   ]
 
   networks_advanced {
@@ -135,12 +107,12 @@ resource "docker_container" "api" {
   }
 }
 
-# Воркер: тот же образ, что у API, другая команда. Портов нет: с остальным
+# Воркер: тот же образ, что у API (свой ресурс docker_image.worker), другая команда. Портов нет: с остальным
 # стеком он говорит только через очередь и базу (`backend-delivery`), наружу —
 # исходящими запросами к GitHub API за диффом, правилами и файлами.
 resource "docker_container" "worker" {
   name    = "dmc268-worker"
-  image   = docker_image.api.image_id
+  image   = docker_image.worker.image_id
   restart = "unless-stopped"
   command = ["python", "-m", "app.worker"]
 
@@ -152,7 +124,7 @@ resource "docker_container" "worker" {
   stop_timeout          = local.worker_stop_seconds
   destroy_grace_seconds = local.worker_stop_seconds
 
-  # Те же основания, что у migrate: образ один.
+  # Те же основания, что у api: образ один.
   read_only     = true
   tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=64m" }
   security_opts = ["no-new-privileges:true"]
@@ -166,13 +138,12 @@ resource "docker_container" "worker" {
     drop = ["ALL"]
   }
 
-  # Как у API: воркер пишет в ту же схему, поэтому стартует только после
-  # миграций. Готовности брокера depends_on не ждёт; если воркер поднялся
+  # Как у API: воркер пишет в ту же схему, а миграции уже применены шагом
+  # деплоя. Готовности брокера depends_on не ждёт; если воркер поднялся
   # раньше, он упадёт на подключении и рестарт поднимет его снова.
   depends_on = [
     docker_container.postgres,
     docker_container.rabbitmq,
-    docker_container.migrate,
   ]
 
   networks_advanced {

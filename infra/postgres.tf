@@ -57,6 +57,12 @@ resource "docker_container" "postgres" {
     container_path = "/var/lib/postgresql"
   }
 
+  # Миграции идут сразу после `tofu apply -target` базы (deploy.yml): на
+  # чистом сервере apply возвращается, только когда healthcheck зелёный, и
+  # миграциям не нужен цикл повторов. На живом стенде wait ничего не стоит:
+  # провайдер ждёт только что созданный контейнер.
+  wait = true
+
   healthcheck {
     test     = ["CMD-SHELL", "pg_isready -U ${var.postgres_user} -d ${var.postgres_db}"]
     interval = "10s"

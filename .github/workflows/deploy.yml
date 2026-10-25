@@ -118,8 +118,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # Без provenance-аттестации: в ней данные прогона, и повторная сборка
-          # того же коммита давала бы новый digest — tofu пересоздавал бы migrate,
-          # api и worker с дренажом воркера. Аттестацию никто не читает.
+          # того же коммита давала бы новый digest — tofu пересоздавал бы api и
+          # worker с дренажом воркера. Аттестацию никто не читает.
           provenance: false
 
       - name: Убедиться, что образ забирается обратно
@@ -213,10 +213,26 @@ jobs:
         continue-on-error: true
         run: .github/scripts/deploy/diagnostics.sh
 
-      - name: Применить конфигурацию
-        id: apply
+      # docker CLI раннера ходит к демону стенда (DOCKER_HOST=ssh://stand) и
+      # отдаёт ему учётные данные реестра вместе с запросом pull: образ лежит
+      # в приватном пакете. Хватает packages: read у GITHUB_TOKEN этого job'а.
+      # Сам вход идёт через docker раннера, не стенда: на сервере токен не
+      # остаётся.
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # База и брокер — до миграций: на чистом сервере их ещё нет. На живом
+      # стенде это `No changes` за несколько секунд; предупреждение OpenTofu о
+      # -target здесь ожидаемое. postgres с `wait = true` (infra/postgres.tf):
+      # apply возвращается, когда база отвечает. Заодно обновляется выход
+      # migrate_env в состоянии — он зависит от этих контейнеров
+      # (infra/locals.tf). Переменные — те же, что у полного apply (якорь).
+      - name: Поднять базу и брокер
         working-directory: infra
-        env:
+        env: &tofu-env
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
           AWS_DEFAULT_REGION: us-east-1
@@ -251,32 +267,27 @@ jobs:
         run: |
           set -euo pipefail
           tofu init -input=false -no-color
+          tofu apply -input=false -no-color -auto-approve \
+            -target=docker_network.dmc268 \
+            -target=docker_container.postgres \
+            -target=docker_container.rabbitmq
 
-          # Упавшие миграции оставляют свой контейнер с ненулевым кодом, а
-          # OpenTofu не пересоздаёт ресурс, конфигурация которого не
-          # изменилась, — и постусловие падает на том же старом коде. Новый
-          # коммит расшивает это сам (меняется тег образа), а повторный прогон
-          # того же коммита залипал бы. Форсируем замену ровно в этом случае:
-          # здоровый путь остаётся идемпотентным.
-          # Фильтр по цифрам обязателен: для несуществующего контейнера
-          # `docker inspect` печатает пустую строку в stdout и лишь затем
-          # отдаёт ненулевой код. Без фильтра в переменную попадали обе строки,
-          # и замена форсировалась всякий раз, когда контейнера нет.
-          replace=""
-          previous="$(ssh stand \
-            "docker inspect -f '{{.State.ExitCode}}' dmc268-migrate 2>/dev/null || true" \
-            | grep -E '^[0-9]+$' | tail -1 || true)"
-          # `|| true`: нет контейнера — grep ничего не находит и под pipefail
-          # уронил бы шаг на чистом сервере, мимо ветки «заменять нечего».
-          case "$previous" in
-            "") echo "контейнера миграций нет — заменять нечего" ;;
-            0) echo "прошлые миграции прошли успешно" ;;
-            *) echo "прошлые миграции завершились с кодом $previous — пересоздаём контейнер"
-               replace="-replace=docker_container.migrate" ;;
-          esac
+      # Миграции до выката нового кода: упали — полный apply не запускается,
+      # на стенде остаётся прежняя версия API и воркера.
+      - name: Применить миграции
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
+          AWS_DEFAULT_REGION: us-east-1
+          API_IMAGE: ${{ needs.image.outputs.image }}
+          DOCKER_HOST: ssh://stand
+        run: .github/scripts/deploy/migrate.sh
 
-          # shellcheck disable=SC2086  # пустая строка не должна стать аргументом
-          tofu apply -input=false -no-color -auto-approve $replace
+      - name: Применить конфигурацию
+        id: apply
+        working-directory: infra
+        env: *tofu-env
+        run: tofu apply -input=false -no-color -auto-approve
 
       - name: Проверить, что API жив (через туннель)
         run: .github/scripts/deploy/check-api.sh
