@@ -18,7 +18,7 @@
 - бизнес-метрики для алертов: исходы прогонов (`record_run_finished` — пишет
   адаптер `OtelRunOutcomeRecorder` через порт `RunOutcomeRecorder`),
   длительность этапов (пишет `OtelStageTracer`) и вызовов модели (пишет
-  `MeteredLlmGateway`), токены модели (`record_llm_tokens`);
+  `FallbackLlmGateway` — на каждый фактический вызов провайдера, с исходом);
 - метрики пула соединений — снимками состояния (`instrument_pool`).
 
 Экспорт включается окружением, без правки кода: `OTEL_TRACES_EXPORTER` — список
@@ -150,9 +150,9 @@ _tracer = trace.get_tracer(__name__)
 _meter = metrics.get_meter(__name__)
 
 # Бизнес-метрики — ручные сигналы для алертов (change `add-observability-stack`):
-# исходы прогонов, длительность этапов и вызовов модели, расход токенов.
-# Метки — только перечисления (`status`, `stage`, `task`, `model`); данные
-# продукта — шаги и токены прогона — остаются в базе, из телеметрии ответы
+# исходы прогонов, длительность этапов и вызовов модели. Метки — только
+# перечисления (`status`, `stage`, `task`, `model`) и исход вызова (`outcome`);
+# данные продукта — шаги и токены прогона — остаются в базе, из телеметрии ответы
 # не строятся. Бакеты гистограммам задаёт `_VIEWS`.
 _review_runs_total = _meter.create_counter(
     "review_runs_total",
@@ -166,10 +166,9 @@ _review_stage_duration = _meter.create_histogram(
     "review_stage_duration", unit="s", description="Длительность этапов прогона."
 )
 _review_llm_call_duration = _meter.create_histogram(
-    "review_llm_call_duration", unit="s", description="Длительность вызовов модели."
-)
-_review_llm_tokens = _meter.create_counter(
-    "review_llm_tokens", unit="{token}", description="Токены модели по задачам прогона."
+    "review_llm_call_duration",
+    unit="s",
+    description="Длительность вызовов провайдеров модели.",
 )
 
 # Стабильные имена атрибутов semconv у пакетов contrib: `db.query.text` вместо
@@ -635,27 +634,22 @@ def record_run_finished(status: str) -> None:
     _review_runs_total.add(1, {"status": status})
 
 
-def record_llm_call_duration(task: str, model: str, duration_seconds: float) -> None:
-    """Записать длительность логического вызова модели в `review_llm_call_duration`.
+def record_llm_call_duration(
+    task: str, model: str, duration_seconds: float, *, outcome: str
+) -> None:
+    """Записать длительность одного фактического вызова провайдера модели.
 
-    Latency видит `MeteredLlmGateway`: приложение зовёт `complete` один раз на
-    логический вызов, схемные повторы и фоллбэк происходят внутри шлюза и
-    свёрнуты в длительность этой точки — отдельно попытки видны слушателю
-    `on_retry` и в токенах ответа (`record_llm_tokens`; аудит #89). Бакеты в
-    секундах задаёт View (`_VIEWS`): на дефолтных миллисекундных
-    `histogram_quantile` бесполезен.
+    Пишет `FallbackLlmGateway` на каждый вызов провайдера, включая упавшие и
+    таймауты: `outcome` — `ok` (ответ получен, `model` — модель ответа) или
+    `error` (сбой, `model` — имя провайдера). Гистограмма показывает время
+    каждого вызова модели (аудит #89), фоллбэк виден двумя записями, а не
+    одной суммой под моделью ответившего последним. Бакеты в секундах задаёт
+    View (`_VIEWS`): на дефолтных миллисекундных `histogram_quantile`
+    бесполезен.
     """
-    _review_llm_call_duration.record(duration_seconds, {"task": task, "model": model})
-
-
-def record_llm_tokens(task: str, model: str, tokens: int) -> None:
-    """Записать расход токенов модели в счётчик `review_llm_tokens`.
-
-    Бизнес-сигнал для алерта бюджета; по модели и задаче прогона (ревью,
-    верификация). Стоимость деньгами токен не выражается — её считает
-    отдельное изменение (#119), как и разбивку по типам токенов.
-    """
-    _review_llm_tokens.add(tokens, {"task": task, "model": model})
+    _review_llm_call_duration.record(
+        duration_seconds, {"task": task, "model": model, "outcome": outcome}
+    )
 
 
 def error_status(exc: BaseException) -> Status:

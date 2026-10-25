@@ -23,6 +23,7 @@ from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.oauth_provider import OAuthProvider
+from app.application.ports.run_outcome import RunOutcomeRecorder
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.config import Settings
@@ -31,7 +32,6 @@ from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninf
 from app.infrastructure.db.token_cipher import TokenCipher
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork, UntracedUnitOfWork
 from app.infrastructure.llm.fallback import FallbackLlmGateway
-from app.infrastructure.llm.metered import MeteredLlmGateway
 from app.infrastructure.llm.ollama import OllamaGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 from app.infrastructure.llm.stub import StubLlmGateway
@@ -40,6 +40,7 @@ from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
 )
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
+from app.infrastructure.telemetry import OtelRunOutcomeRecorder
 from app.infrastructure.vcs.cached_installations import CachedInstallationCatalog
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
@@ -166,6 +167,14 @@ class Container:
     def run_changes(self) -> RunChanges:
         return self._run_changes
 
+    def run_outcome(self) -> RunOutcomeRecorder:
+        """Счётчик терминальных исходов прогонов — адаптер телеметрии.
+
+        Роуты телеметрию не импортируют (гард-тест и спека `observability`):
+        порт на адаптер связывает composition root.
+        """
+        return OtelRunOutcomeRecorder()
+
     async def aclose(self) -> None:
         """Закрыть то, что живёт в event loop процесса: слушатель изменений прогонов."""
         await self._run_changes.close()
@@ -254,7 +263,7 @@ def _build_llm_gateway(settings: Settings) -> LlmGateway:
         raise RuntimeError("LLM_BACKEND не задан: выберите stub или ollama")
     if settings.llm_backend == "stub":
         logger.info("модель: заглушка без похода к модели")
-        return MeteredLlmGateway(StubLlmGateway())
+        return StubLlmGateway()
     timeout = llm_http_timeout(settings)
     providers: list[tuple[str, LlmGateway]] = [
         (
@@ -270,7 +279,7 @@ def _build_llm_gateway(settings: Settings) -> LlmGateway:
     local = f"модель: Ollama ({settings.ollama_model})"
     if not settings.llm_hosted_fallback:
         logger.info("%s; hosted-фоллбэк выключен", local)
-        return MeteredLlmGateway(FallbackLlmGateway(providers))
+        return FallbackLlmGateway(providers)
     providers.append(
         (
             "Eurorouter",
@@ -288,4 +297,4 @@ def _build_llm_gateway(settings: Settings) -> LlmGateway:
         local,
         settings.eurorouter_model,
     )
-    return MeteredLlmGateway(FallbackLlmGateway(providers))
+    return FallbackLlmGateway(providers)
