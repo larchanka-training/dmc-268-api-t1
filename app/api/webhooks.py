@@ -178,6 +178,10 @@ async def receive_webhook(
         container.job_queue(),
         now=lambda: datetime.now(UTC),
         new_id=new_id,
+        # Компенсация «не поставили в очередь» — терминальный переход прогона:
+        # счётчик ведёт адаптер телеметрии (как у пайплайна и выметателя), его
+        # выдаёт контейнер — роуты телеметрию не импортируют.
+        run_outcome=container.run_outcome(),
     )
     if outcome.kind == "failure":
         raise _scm_unavailable()
