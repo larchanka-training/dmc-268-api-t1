@@ -81,7 +81,8 @@ ERRORS_DEFAULT = _doc(
 ERRORS_413_BODY = _doc(
     HTTPStatus.CONTENT_TOO_LARGE,
     RequestBodyTooLargeProblem,
-    "Тело больше `REQUEST_BODY_MAX_BYTES` (по умолчанию 25 МиБ): по `Content-Length` отказ без чтения "
+    "Тело больше лимита (вебхук — `WEBHOOK_BODY_MAX_BYTES`, 25 МиБ; остальные — `REQUEST_BODY_MAX_BYTES`, "
+    "1 МиБ): по `Content-Length` отказ без чтения "
     "тела, поток без него обрывается на лимите. Ни разбора тела, ни сессии, ни подписи до отказа нет; "
     "соединение закрывается.",
 )

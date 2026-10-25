@@ -148,14 +148,19 @@ class Settings(BaseSettings):
             "отзыв доступа на GitHub виден с этой задержкой"
         ),
     )
-    # Потолок тела HTTP-запроса API (#72): проверяется до разбора тела, сессии и подписи
-    # вебхука. Умолчание — 25 МиБ, не меньше потолка доставки GitHub («Payloads are capped
-    # at 25 MB», docs.github.com, Webhook events and payloads): законная доставка не
-    # отклоняется, а тело без аутентификации не занимает память сверх этого.
+    # Потолки тела HTTP-запроса API (#72): проверяются до разбора тела, сессии и подписи
+    # вебхука. Ручкам с JSON-телом хватает 1 МиБ. Приёму вебхука — 25 МиБ, не меньше потолка
+    # доставки GitHub («Payloads are capped at 25 MB», docs.github.com, Webhook events and
+    # payloads). Общий 25 МиБ на все ручки отдал бы 512 МБ памяти API двадцати запросам.
     request_body_max_bytes: int = Field(
+        default=1_048_576,
+        gt=0,
+        description="Большее тело запроса API, кроме вебхука, отклоняется 413 REQUEST_BODY_TOO_LARGE",
+    )
+    webhook_body_max_bytes: int = Field(
         default=26_214_400,
         gt=0,
-        description="Большее тело запроса API отклоняется 413 REQUEST_BODY_TOO_LARGE до чтения целиком",
+        description="Большее тело доставки вебхука отклоняется 413 REQUEST_BODY_TOO_LARGE до чтения целиком",
     )
     # Потолок диффа прогона: тело читается потоком и обрывается на лимите,
     # больший дифф не ревьюится — прогон `failed` с `DIFF_TOO_LARGE` (#144).

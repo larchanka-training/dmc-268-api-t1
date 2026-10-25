@@ -1,4 +1,8 @@
-"""Лимит тела запроса: тело больше `REQUEST_BODY_MAX_BYTES` не читается целиком (#72).
+"""Лимит тела запроса: тело больше лимита не читается целиком (#72).
+
+Лимита два: `WEBHOOK_BODY_MAX_BYTES` (25 МиБ, потолок доставки GitHub) — для путей приёма
+вебхука, `REQUEST_BODY_MAX_BYTES` (1 МиБ) — для остальных. Путь выбирается по префиксу до
+роутинга: путь, который только начинается как вебхук, роутер всё равно не найдёт.
 
 Приём вебхука открыт без сессии и читает сырое тело до проверки подписи — без лимита
 любой мог бы занять память процесса многогигабайтным телом. Ручки с JSON-телом читают
@@ -32,20 +36,25 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.api.errors import problem_response
 from app.api.problems import ErrorCode
 
+# Приём вебхука (`app/api/webhooks.py`): только ему нужен лимит доставки GitHub.
+WEBHOOK_PREFIX = "/api/v1/webhooks/"
+
 
 class RequestBodyLimitMiddleware:
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, max_bytes: int, webhook_max_bytes: int) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.webhook_max_bytes = webhook_max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        limit = self.webhook_max_bytes if scope["path"].startswith(WEBHOOK_PREFIX) else self.max_bytes
         headers = Headers(scope=scope)
         declared = _declared_length(headers)
-        if declared is not None and declared > self.max_bytes:
-            await self._reject(scope, receive, send)
+        if declared is not None and declared > limit:
+            await _reject(scope, receive, send, limit)
             return
         if not declared and "transfer-encoding" not in headers:
             # Ни длины, ни chunked: по HTTP/1.1 (RFC 9112, 6.3) тела у запроса нет. GET и
@@ -62,8 +71,8 @@ class RequestBodyLimitMiddleware:
                 break
             body = message.get("body", b"")
             size += len(body)
-            if size > self.max_bytes:
-                await self._reject(scope, receive, send)
+            if size > limit:
+                await _reject(scope, receive, send, limit)
                 return
             chunks.append(body)
             if not message.get("more_body", False):
@@ -79,15 +88,17 @@ class RequestBodyLimitMiddleware:
 
         await self.app(scope, replay, send)
 
-    async def _reject(self, scope: Scope, receive: Receive, send: Send) -> None:
-        response = problem_response(
-            Request(scope),
-            HTTPStatus.CONTENT_TOO_LARGE,
-            ErrorCode.REQUEST_BODY_TOO_LARGE,
-            f"Тело запроса больше лимита {self.max_bytes} байт.",
-            headers={"Connection": "close"},
-        )
-        await response(scope, receive, send)
+
+
+async def _reject(scope: Scope, receive: Receive, send: Send, limit: int) -> None:
+    response = problem_response(
+        Request(scope),
+        HTTPStatus.CONTENT_TOO_LARGE,
+        ErrorCode.REQUEST_BODY_TOO_LARGE,
+        f"Тело запроса больше лимита {limit} байт.",
+        headers={"Connection": "close"},
+    )
+    await response(scope, receive, send)
 
 
 def _declared_length(headers: Headers) -> int | None:

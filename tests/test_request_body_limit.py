@@ -3,8 +3,8 @@
 Объявленная длина проверяется до чтения тела, поток без `Content-Length` считается по
 байтам и обрывается на лимите. Ответ — `413 REQUEST_BODY_TOO_LARGE` в формате Problem
 Details с `trace_id`. Отказ по длине и по потоку проверяется на уровне ASGI: тест видит,
-сколько тела приложение попросило у сервера. Лимит — значение по умолчанию: тест держит
-и то, что умолчание не пропускает тело больше максимума доставки GitHub.
+сколько тела приложение попросило у сервера. Лимиты — значения по умолчанию: тест держит
+и то, что вебхук принимает максимум доставки GitHub, а остальные ручки — только 1 МиБ.
 """
 
 import asyncio
@@ -31,8 +31,10 @@ SETTINGS = Settings(
     github_webhook_secret=SECRET,
     public_origin=ORIGIN,
 )
-# Умолчание: 25 МиБ — не меньше потолка доставки GitHub («Payloads are capped at 25 MB»).
+# Умолчания: вебхук — 25 МиБ, не меньше потолка доставки GitHub («Payloads are capped at
+# 25 MB»); остальные ручки — 1 МиБ.
 LIMIT = 25 * 1024 * 1024
+BODY_LIMIT = 1024 * 1024
 CHUNK = 1024 * 1024
 WEBHOOK = "/api/v1/webhooks/github"
 
@@ -193,7 +195,7 @@ def test_wrong_signature_within_the_limit_is_still_unauthorized(app: FastAPI) ->
 
 def test_body_route_rejects_an_oversize_stream_before_the_session(app: FastAPI) -> None:
     """`POST /reviews` без сессии: тело больше лимита — 413, а не 401 после чтения целиком."""
-    wire = Wire(stream(LIMIT + 10 * CHUNK))
+    wire = Wire(stream(BODY_LIMIT + 10 * CHUNK))
 
     call(
         app,
@@ -203,7 +205,37 @@ def test_body_route_rejects_an_oversize_stream_before_the_session(app: FastAPI) 
     )
 
     assert_too_large(wire)
-    assert wire.received == LIMIT + CHUNK
+    assert wire.received == BODY_LIMIT + CHUNK
+
+
+def test_webhook_limit_does_not_apply_to_other_routes(app: FastAPI) -> None:
+    """Тело, которое вебхук принимает, ручке с JSON-телом не достаётся: у неё свой 1 МиБ.
+
+    Иначе 25 МиБ на каждую ручку — и двадцать запросов без сессии занимают всю память API.
+    """
+    size = BODY_LIMIT + 1
+    headers = {"content-length": str(size), "content-type": "application/json", "origin": ORIGIN}
+    route = Wire(stream(size))
+
+    call(app, route, headers, path="/api/v1/reviews")
+
+    assert_too_large(route)
+    assert route.received == 0
+    assert str(BODY_LIMIT) in route.body["detail"]
+
+    body = b"x" * size
+    webhook = Wire(stream(size))
+    call(app, webhook, {"content-length": str(size), "x-hub-signature-256": sign(body), "x-github-event": "pull_request"})
+    assert webhook.status == 202
+
+
+def test_webhook_limit_is_chosen_by_path_prefix_only(app: FastAPI) -> None:
+    """Путь, похожий на вебхук, но без его префикса, получает общий лимит."""
+    wire = Wire(stream(BODY_LIMIT + 1))
+
+    call(app, wire, {"content-length": str(BODY_LIMIT + 1), "origin": ORIGIN}, path="/api/v1/webhooks")
+
+    assert_too_large(wire)
 
 
 def test_oversize_body_is_a_problem_with_trace_id_over_http(app: FastAPI) -> None:
@@ -215,8 +247,9 @@ def test_oversize_body_is_a_problem_with_trace_id_over_http(app: FastAPI) -> Non
     assert str(LIMIT) in body["detail"]
 
 
-def test_default_limit_is_not_below_the_github_delivery_cap() -> None:
-    assert SETTINGS.request_body_max_bytes == LIMIT >= 25_000_000
+def test_default_limits() -> None:
+    assert SETTINGS.webhook_body_max_bytes == LIMIT >= 25_000_000
+    assert SETTINGS.request_body_max_bytes == BODY_LIMIT
 
 
 def test_limit_is_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -224,7 +257,9 @@ def test_limit_is_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("RABBITMQ_URL", SETTINGS.rabbitmq_url)
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", SECRET)
     monkeypatch.setenv("REQUEST_BODY_MAX_BYTES", "1024")
-    assert load_settings().request_body_max_bytes == 1024
+    monkeypatch.setenv("WEBHOOK_BODY_MAX_BYTES", "2048")
+    settings = load_settings()
+    assert (settings.request_body_max_bytes, settings.webhook_body_max_bytes) == (1024, 2048)
 
 
 def test_every_operation_with_a_body_declares_413() -> None:

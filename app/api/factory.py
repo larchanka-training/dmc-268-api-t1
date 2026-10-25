@@ -104,7 +104,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Последний добавленный — внешний: trace id ставится раньше, чем Origin или лимит тела
     # могут отказать; чужой Origin отказывает, не читая тела, а тело читается с лимитом до
     # роутинга, сессии и подписи вебхука.
-    app.add_middleware(RequestBodyLimitMiddleware, max_bytes=settings.request_body_max_bytes)
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_bytes=settings.request_body_max_bytes,
+        webhook_max_bytes=settings.webhook_body_max_bytes,
+    )
     app.add_middleware(OriginMiddleware, public_origin=settings.public_origin)
     app.add_middleware(TraceIdMiddleware)
 

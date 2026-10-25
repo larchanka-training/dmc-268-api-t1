@@ -134,6 +134,7 @@ def test_context_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatc
         "rules_cache_ttl_seconds",
         "diff_max_bytes",
         "request_body_max_bytes",
+        "webhook_body_max_bytes",
         "visible_repositories_cache_ttl_seconds",
         "ast_max_files",
         "ast_max_file_bytes",

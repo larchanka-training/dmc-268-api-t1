@@ -5,7 +5,7 @@
 ## 2. Правка
 
 - [x] 2.1 Код `REQUEST_BODY_TOO_LARGE`, модель `RequestBodyTooLargeProblem` в `AnyProblem` (`app/api/problems.py`), `ERRORS_413_BODY` (`app/api/errors.py`)
-- [x] 2.2 Настройка `request_body_max_bytes`, 25 МиБ (`app/config.py`, тест `tests/test_config.py`, `.env.example`)
+- [x] 2.2 Настройки `webhook_body_max_bytes` (25 МиБ) и `request_body_max_bytes` (1 МиБ), тест, что лимит вебхука не действует на другие ручки (`app/config.py`, тест `tests/test_config.py`, `.env.example`)
 - [x] 2.3 Адаптер HTTP `RequestBodyLimitMiddleware` (`app/api/body_limit.py`), подключён в `app/api/factory.py` внутри `TraceIdMiddleware` и `OriginMiddleware`
 - [x] 2.4 `413` в `responses` у приёма вебхука, `POST /reviews`, `POST /repositories`, `PUT /repositories/{id}/settings`; тест контракта — у каждой операции с телом
 - [x] 2.5 `uv run python scripts/export_openapi.py`

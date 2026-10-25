@@ -347,7 +347,10 @@ class NotImplementedProblem(Problem):
 
 
 class RequestBodyTooLargeProblem(Problem):
-    """`413 REQUEST_BODY_TOO_LARGE`: тело запроса больше лимита `REQUEST_BODY_MAX_BYTES`.
+    """`413 REQUEST_BODY_TOO_LARGE`: тело запроса больше лимита.
+
+    Лимит: `WEBHOOK_BODY_MAX_BYTES` (25 МиБ) у приёма вебхука, `REQUEST_BODY_MAX_BYTES`
+    (1 МиБ) у остальных ручек; `detail` называет сработавший.
 
     Отказ — до разбора тела, сессии и подписи вебхука: по `Content-Length` тело не читается
     вовсе, поток без него обрывается на лимите. Соединение после ответа закрывается.
