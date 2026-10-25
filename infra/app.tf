@@ -1,69 +1,5 @@
-locals {
-  # Ротация логов: без неё json-file растёт, пока не кончится диск сервера.
-  # Три файла по 10 МБ на контейнер хватает, чтобы разобрать падение после деплоя.
-  log_opts = {
-    "max-size" = "10m"
-    "max-file" = "3"
-  }
-
-  # Окружение, без которого не загрузятся общие настройки (`load_settings`):
-  # его получают все три контейнера из образа приложения — migrate, api и
-  # worker. Одно описание вместо трёх копий, чтобы они не разъезжались.
-  app_env = [
-    "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@dmc268-postgres:5432/${var.postgres_db}",
-    # %2F — закодированный дефолтный vhost "/": pika разбирает буквальный "//" как пустой vhost.
-    "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@dmc268-rabbitmq:5672/%2F",
-    "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
-  ]
-
-  # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
-  # consumer_timeout RabbitMQ его не ограничивает: в 4.4 таймаут подтверждения
-  # есть только у quorum-очередей, а очередь review — classic.
-  # Деплой ждёт остановку воркера в `tofu apply`: timeout-minutes job deploy в
-  # .github/workflows/deploy.yml обязан быть больше максимума (2460 с) с запасом.
-  # Та же формула — у stop_grace_period воркера в docker-compose.yml.
-  worker_stop_seconds = 2 * 300 * 2 * (var.llm_hosted_fallback ? 2 : 1) + 60
-}
-
-resource "docker_network" "dmc268" {
-  name = "dmc268"
-}
-
-# Имя со сборкой образа: при переходе с postgres:18-alpine (musl) на
-# pgvector/pgvector:pg18 (glibc) том заведён заново — библиотеки сортируют
-# строки по-разному, и текстовые индексы старого тома были бы неконсистентны.
-resource "docker_volume" "postgres" {
-  name = "dmc268-postgres-pgvector-data"
-}
-
-# Имя с версией: при переходе с 3.13 на 4.3 и с 4.3 на 4.4 том заведён
-# заново. Первый раз — потому что прыжок через минорные версии ломает
-# классические очереди с данными, второй — потому что 4.4 пишет хранилище
-# сообщений classic-очередей в новом формате, и откатить узел на 4.3 уже
-# нельзя; данных, которые стоило бы переносить, в брокере не было.
-# Следующее обновление, когда в брокере будут данные, — по шагам через каждую
-# минорную версию на этом же томе, после `rabbitmqctl enable_feature_flag all`.
-resource "docker_volume" "rabbitmq" {
-  name = "dmc268-rabbitmq-v44-data"
-}
-
-resource "docker_image" "postgres" {
-  # Образ проекта pgvector поверх официального postgres:18 (Debian, glibc).
-  # Взят под RAG-профиль репозитория (#27); тот закрыт без мёржа, и расширение
-  # `vector` сейчас не создаёт ни одна миграция. Образ остаётся: возврат на
-  # postgres:18-alpine — снова смена библиотеки C и новый том (backend-delivery).
-  # Тег плавающий: digest в name пересоздаёт контейнер при каждом обновлении
-  # образа, а без destroy_grace_seconds пересоздание — это SIGKILL (#150, #102).
-  name         = "pgvector/pgvector:pg18"
-  keep_locally = true
-}
-
-resource "docker_image" "rabbitmq" {
-  # Тег плавающий по той же причине, что у postgres: digest — после
-  # destroy_grace_seconds у брокера (#150, #102).
-  name         = "rabbitmq:4.4-alpine"
-  keep_locally = true
-}
+# Приложение: образ API из реестра и три контейнера из него — migrate, api и
+# worker.
 
 resource "docker_image" "api" {
   # Образ собирается и публикуется в CI, здесь он только забирается — по
@@ -74,94 +10,6 @@ resource "docker_image" "api" {
   keep_locally = true
 }
 
-resource "docker_container" "postgres" {
-  name    = "dmc268-postgres"
-  image   = docker_image.postgres.image_id
-  restart = "unless-stopped"
-
-  # Только запрет повышения привилегий: entrypoint образа стартует от root,
-  # делает chown каталога данных и сам переходит на пользователя postgres.
-  # Сброс capabilities или user здесь ломают этот старт.
-  security_opts = ["no-new-privileges:true"]
-  memory        = 1024
-  memory_swap   = 1024
-  log_driver    = "json-file"
-  log_opts      = local.log_opts
-
-  networks_advanced {
-    name = docker_network.dmc268.name
-  }
-
-  env = [
-    "POSTGRES_USER=${var.postgres_user}",
-    "POSTGRES_PASSWORD=${var.postgres_password}",
-    "POSTGRES_DB=${var.postgres_db}",
-  ]
-
-  ports {
-    internal = 5432
-    external = var.postgres_port
-    ip       = var.internal_bind_ip
-  }
-
-  volumes {
-    volume_name = docker_volume.postgres.name
-    # Не .../data: postgres:18 держит данные в подкаталоге с номером мажорной
-    # версии, и монтирование по до-18-й конвенции заставляет entrypoint
-    # отказаться стартовать. В docker-compose.yml это уже учтено — здесь
-    # расхождение осталось и обнаружилось первым же деплоем.
-    container_path = "/var/lib/postgresql"
-  }
-
-  healthcheck {
-    test     = ["CMD-SHELL", "pg_isready -U ${var.postgres_user} -d ${var.postgres_db}"]
-    interval = "10s"
-    timeout  = "5s"
-    retries  = 5
-  }
-}
-
-resource "docker_container" "rabbitmq" {
-  name    = "dmc268-rabbitmq"
-  image   = docker_image.rabbitmq.image_id
-  restart = "unless-stopped"
-
-  # Как у postgres: entrypoint сам переходит на пользователя rabbitmq. Порог
-  # памяти брокер считает от лимита cgroup, так что memory он учтёт сам.
-  security_opts = ["no-new-privileges:true"]
-  memory        = 512
-  memory_swap   = 512
-  log_driver    = "json-file"
-  log_opts      = local.log_opts
-
-  networks_advanced {
-    name = docker_network.dmc268.name
-  }
-
-  env = [
-    "RABBITMQ_DEFAULT_USER=${var.rabbitmq_user}",
-    "RABBITMQ_DEFAULT_PASS=${var.rabbitmq_password}",
-  ]
-
-  ports {
-    internal = 5672
-    external = var.rabbitmq_port
-    ip       = var.internal_bind_ip
-  }
-
-  volumes {
-    volume_name    = docker_volume.rabbitmq.name
-    container_path = "/var/lib/rabbitmq"
-  }
-
-  healthcheck {
-    test     = ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-    interval = "10s"
-    timeout  = "5s"
-    retries  = 5
-  }
-}
-
 resource "docker_container" "migrate" {
   name  = "dmc268-migrate"
   image = docker_image.api.image_id
@@ -169,7 +17,7 @@ resource "docker_container" "migrate" {
   # Одноразовый контейнер: отрабатывает и завершается. `attach` заставляет
   # OpenTofu дождаться конца, а postcondition — упасть на ненулевом коде.
   # Без этого упавшая миграция осталась бы незамеченной, и API поднялся бы
-  # против непромигрированной базы (ровно то, что делал прежний main.tf).
+  # против непромигрированной базы.
   must_run = false
   attach   = true
   logs     = true
