@@ -177,26 +177,44 @@ jobs:
     # шаги ходят через хост `stand` из ~/.ssh/config (stand-ssh).
     env:
       HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+    # Шаги с id — для summary: исход каждого берёт шаг summary, а каждый шаг с
+    # `run` первой строкой ставит засечку (.github/scripts/deploy/mark.sh) —
+    # по ним считается длительность. Так время шагов видно без `actions: read`
+    # у токена: API прогона job'у не нужен.
     steps:
+      # Засечка до checkout — скрипта ещё нет, поэтому строкой здесь, в том же
+      # формате, что у mark.sh. От неё считается подготовка и весь job.
+      - name: Засечь начало деплоя
+        id: start
+        run: mkdir -p "$RUNNER_TEMP/deploy-report" && echo "start $(date +%s.%N)" >> "$RUNNER_TEMP/deploy-report/marks"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
           persist-credentials: false
           ref: ${{ needs.gate.outputs.sha }}
 
       # Ключ, known_hosts и хост `stand` в ~/.ssh/config для всех шагов ниже.
       - uses: ./.github/actions/stand-ssh
+        id: ssh
         with:
           ssh_key: ${{ secrets.VPS_DMC268_KEY_T1 }}
           ssh_user: ${{ secrets.VPS_DMC268_U }}
           host: ${{ vars.VPS_DMC268_IP_T1 }}
 
+      # Без обёртки: она копирует stdout каждого вызова tofu в выходы шага, а
+      # это `output -raw migrate_env` и `show -json` плана — пароли открытым
+      # текстом. Коды возврата без неё те же.
       - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        id: tofu
         with:
           tofu_version: 1.13.2
+          tofu_wrapper: false
 
       # Хранилище состояния и туннель к нему: снесённый контейнер чинится этим
       # же деплоем, новый тег образа выкатывается на прежнем томе.
       - uses: ./.github/actions/s3-backend
+        id: s3
         with:
           s3_user: ${{ secrets.S3_USER_DMC268_T1 }}
           s3_password: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
@@ -208,11 +226,6 @@ jobs:
           cred_pass_var: RUSTFS_SECRET_KEY
           bucket: dmc268-tfstate
 
-      # До применения: считает логи контейнеров, которые выкат сейчас заменит.
-      - name: Доставки вебхука и сбои воркера с прошлого выката
-        continue-on-error: true
-        run: .github/scripts/deploy/diagnostics.sh
-
       # docker CLI раннера ходит к демону стенда (DOCKER_HOST=ssh://stand) и
       # отдаёт ему учётные данные реестра вместе с запросом pull: образ лежит
       # в приватном пакете. Хватает packages: read у GITHUB_TOKEN этого job'а.
@@ -220,10 +233,19 @@ jobs:
       # остаётся. Скачивает образ только migrate.sh: контейнеры api и worker
       # tofu создаёт из уже скачанного (infra/app.tf).
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        id: login
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # До применения: считает логи контейнеров, которые выкат сейчас заменит.
+      - name: Доставки вебхука и сбои воркера с прошлого выката
+        id: diagnostics
+        continue-on-error: true
+        run: |
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/diagnostics.sh
 
       # База и брокер — до миграций: на чистом сервере их ещё нет. На живом
       # стенде это `No changes` за несколько секунд; предупреждение OpenTofu о
@@ -232,6 +254,7 @@ jobs:
       # migrate_env в состоянии — он зависит от этих контейнеров
       # (infra/locals.tf). Переменные — те же, что у полного apply (якорь).
       - name: Поднять базу и брокер
+        id: infra
         working-directory: infra
         env: &tofu-env
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
@@ -264,6 +287,7 @@ jobs:
           # Модели на стенде пока нет: заглушка выбрана явно, ревью пустые.
           TF_VAR_llm_backend: stub
         run: |
+          ../.github/scripts/deploy/mark.sh
           set -euo pipefail
           tofu init -input=false -no-color
           tofu apply -input=false -no-color -auto-approve \
@@ -271,37 +295,65 @@ jobs:
             -target=docker_container.postgres \
             -target=docker_container.rabbitmq
 
+      # План полного выката — в файл, сразу после targeted apply: план видит
+      # его результат, а миграции состояние не трогают (`tofu output` только
+      # читает), так что `apply tfplan` после них не устаревает. Тома защищает
+      # prevent_destroy (infra/postgres.tf) — и здесь, и в targeted apply выше;
+      # сторож в plan.sh дублирует его для summary. Упал план — миграции не
+      # идут. Переменные — те же (якорь).
+      - name: Спланировать и проверить план
+        id: plan
+        env: *tofu-env
+        run: |
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/plan.sh
+
       # Миграции до выката нового кода: упали — полный apply не запускается,
       # на стенде остаётся прежняя версия API и воркера. Заодно скачивается
       # образ, из которого полный apply создаст api и worker.
       - name: Применить миграции
+        id: migrate
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
           AWS_DEFAULT_REGION: us-east-1
           API_IMAGE: ${{ needs.image.outputs.image }}
           DOCKER_HOST: ssh://stand
-        run: .github/scripts/deploy/migrate.sh
+        run: |
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/migrate.sh
 
-      # Apply ждёт, пока новый API станет healthy (wait у docker_container.api),
-      # и падает через 90 с, если этого не случилось.
+      # Применяется ровно проверенный план. Apply ждёт, пока новый API станет
+      # healthy (wait у docker_container.api), и падает через 90 с, если этого
+      # не случилось. Заодно apply.sh собирает события контейнера API для
+      # разбивки простоя в summary и удаляет файл плана.
       - name: Применить конфигурацию
         id: apply
-        working-directory: infra
         env: *tofu-env
-        run: tofu apply -input=false -no-color -auto-approve
+        run: |
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/apply.sh
 
       # От провайдера в логе только «container failed to be in healthy state»,
       # а проверки ниже после упавшего apply не идут: причину показывает этот шаг.
       - name: Логи API после упавшего apply
+        id: api_logs
         if: failure() && steps.apply.outcome == 'failure'
-        run: ssh stand "docker logs --tail 50 dmc268-api 2>&1; docker inspect -f '{{json .State.Health}}' dmc268-api" || true
+        run: |
+          .github/scripts/deploy/mark.sh
+          ssh stand "docker logs --tail 50 dmc268-api 2>&1; docker inspect -f '{{json .State.Health}}' dmc268-api" || true
 
       - name: Проверить, что API жив (через туннель)
-        run: .github/scripts/deploy/check-api.sh
+        id: check_api
+        run: |
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/check-api.sh
 
       - name: Проверить, что воркер работает
-        run: .github/scripts/deploy/check-worker.sh
+        id: check_worker
+        run: |
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/check-worker.sh
 
       # Уборка — гигиена, а не часть выката: неудача здесь означает мусор на
       # диске, а не сломанный стенд, поэтому шаг не роняет прогон. Стоит после
@@ -312,25 +364,47 @@ jobs:
       # освободило 99 КБ. По-настоящему место занимает смена зависимостей —
       # тогда на диск ложится новый набор слоёв, и убрать его больше некому.
       - name: Убрать устаревшие образы
+        id: prune
         # После любого успешного apply, как раньше: упавшие проверки стенда
         # не повод оставлять старые образы на диске.
         if: ${{ !cancelled() && steps.apply.outcome == 'success' }}
         continue-on-error: true
         # Явный bash включает pipefail: сбой ssh не прячется за `tail`.
         shell: bash
-        run: ssh stand "docker image prune -af --filter until=168h" 2>&1 | tail -5
+        run: |
+          .github/scripts/deploy/mark.sh
+          ssh stand "docker image prune -af --filter until=168h" 2>&1 | tail -5
 
-      # Публичный адрес API — вход интерфейса: порт 8000 снаружи закрыт.
+      # Исход, шаг падения, простой API, план, миграции, диск и длительность
+      # шагов (summary.sh). Исходы шагов — списком, а не toJSON(steps): тот
+      # несёт и выходы шагов, а env шага печатается в лог. Строка на каждый
+      # шаг с id (сверяет tests/test_deploy_report.py).
       - name: Записать результат в summary
+        id: summary
         if: always()
+        # ssh внутри — под `timeout 30` (summary.sh); это — потолок шага на
+        # случай, если повиснет что-то ещё: job ждал бы до своих 60 минут.
+        timeout-minutes: 3
         env:
           IMAGE: ${{ needs.image.outputs.image }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          JOB_STATUS: ${{ job.status }}
+          STEP_RESULTS: |
+            start ${{ steps.start.outcome }} ${{ steps.start.conclusion }}
+            checkout ${{ steps.checkout.outcome }} ${{ steps.checkout.conclusion }}
+            ssh ${{ steps.ssh.outcome }} ${{ steps.ssh.conclusion }}
+            tofu ${{ steps.tofu.outcome }} ${{ steps.tofu.conclusion }}
+            s3 ${{ steps.s3.outcome }} ${{ steps.s3.conclusion }}
+            login ${{ steps.login.outcome }} ${{ steps.login.conclusion }}
+            diagnostics ${{ steps.diagnostics.outcome }} ${{ steps.diagnostics.conclusion }}
+            infra ${{ steps.infra.outcome }} ${{ steps.infra.conclusion }}
+            plan ${{ steps.plan.outcome }} ${{ steps.plan.conclusion }}
+            migrate ${{ steps.migrate.outcome }} ${{ steps.migrate.conclusion }}
+            apply ${{ steps.apply.outcome }} ${{ steps.apply.conclusion }}
+            api_logs ${{ steps.api_logs.outcome }} ${{ steps.api_logs.conclusion }}
+            check_api ${{ steps.check_api.outcome }} ${{ steps.check_api.conclusion }}
+            check_worker ${{ steps.check_worker.outcome }} ${{ steps.check_worker.conclusion }}
+            prune ${{ steps.prune.outcome }} ${{ steps.prune.conclusion }}
         run: |
-          {
-            echo "## Деплой"
-            echo
-            echo "| | |"
-            echo "| --- | --- |"
-            echo "| Образ | \`${IMAGE}\` |"
-            echo "| Адрес | https://${HOST}/api/v1/ |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/summary.sh
