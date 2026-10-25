@@ -1,7 +1,9 @@
 # Защита контейнеров стенда (спека backend-delivery, «Контейнеры стека работают
 # с минимальными привилегиями»): правка одного контейнера не должна тихо
 # снимать защиту. Без Docker: mock-провайдер, только plan. Запуск:
-# `cd infra && tofu init -backend=false && tofu test`.
+# `cd infra && tofu init -backend=false && tofu test`. Миграции идут шагом
+# деплоя, не контейнером стека: их ограничения — флаги `docker run` в
+# .github/scripts/deploy/migrate.sh, их сверяет tests/test_stack_descriptions.py.
 
 mock_provider "docker" {}
 
@@ -34,42 +36,42 @@ run "app_containers_run_with_minimal_privileges" {
 
   assert {
     condition = alltrue([
-      for c in [docker_container.migrate, docker_container.api, docker_container.worker] :
+      for c in [docker_container.api, docker_container.worker] :
       c.read_only == true
     ])
-    error_message = "migrate, api и worker должны работать с файловой системой только для чтения."
+    error_message = "api и worker должны работать с файловой системой только для чтения."
   }
 
   assert {
     condition = alltrue([
-      for c in [docker_container.migrate, docker_container.api, docker_container.worker] :
+      for c in [docker_container.api, docker_container.worker] :
       jsonencode(c.tmpfs) == jsonencode({ "/tmp" = "rw,noexec,nosuid,size=64m" })
     ])
-    error_message = "migrate, api и worker пишут только в /tmp: tmpfs rw,noexec,nosuid,size=64m."
+    error_message = "api и worker пишут только в /tmp: tmpfs rw,noexec,nosuid,size=64m."
   }
 
   assert {
     condition = alltrue([
-      for c in [docker_container.migrate, docker_container.api, docker_container.worker] :
+      for c in [docker_container.api, docker_container.worker] :
       length(c.capabilities) == 1 && toset(one(c.capabilities).drop) == toset(["ALL"]) && length(coalesce(one(c.capabilities).add, toset([]))) == 0
     ])
-    error_message = "migrate, api и worker должны сбрасывать все Linux capabilities (drop = [\"ALL\"]) и ничего не добавлять."
+    error_message = "api и worker должны сбрасывать все Linux capabilities (drop = [\"ALL\"]) и ничего не добавлять."
   }
 
   assert {
     condition = alltrue([
-      for c in [docker_container.migrate, docker_container.api, docker_container.worker] :
+      for c in [docker_container.api, docker_container.worker] :
       toset(c.security_opts) == toset(["no-new-privileges:true"])
     ])
-    error_message = "migrate, api и worker должны запрещать повышение привилегий: security_opts = [\"no-new-privileges:true\"]."
+    error_message = "api и worker должны запрещать повышение привилегий: security_opts = [\"no-new-privileges:true\"]."
   }
 
   assert {
     condition = alltrue([
-      for c in [docker_container.migrate, docker_container.api, docker_container.worker] :
+      for c in [docker_container.api, docker_container.worker] :
       c.init == true
     ])
-    error_message = "migrate, api и worker должны запускаться с init: без него некому подбирать зомби-процессы и передавать сигналы."
+    error_message = "api и worker должны запускаться с init: без него некому подбирать зомби-процессы и передавать сигналы."
   }
 }
 
@@ -79,7 +81,7 @@ run "every_container_has_memory_ceiling_and_log_rotation" {
   assert {
     condition = alltrue([
       for c in [
-        docker_container.postgres, docker_container.rabbitmq, docker_container.migrate,
+        docker_container.postgres, docker_container.rabbitmq,
         docker_container.api, docker_container.worker,
       ] :
       c.memory > 0 && c.memory == c.memory_swap
@@ -90,7 +92,7 @@ run "every_container_has_memory_ceiling_and_log_rotation" {
   assert {
     condition = alltrue([
       for c in [
-        docker_container.postgres, docker_container.rabbitmq, docker_container.migrate,
+        docker_container.postgres, docker_container.rabbitmq,
         docker_container.api, docker_container.worker,
       ] :
       c.log_driver == "json-file" && jsonencode(c.log_opts) == jsonencode({ "max-size" = "10m", "max-file" = "3" })
