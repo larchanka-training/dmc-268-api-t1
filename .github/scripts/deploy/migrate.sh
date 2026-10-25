@@ -63,10 +63,13 @@ docker pull --quiet "$API_IMAGE"
 # docker logs. track_utility выключается той же транзакцией (SET LOCAL живёт
 # до COMMIT): иначе ALTER ROLE ... PASSWORD лёг бы в pg_stat_statements
 # открытым текстом. Тот же шаг — у сервиса migrate в docker-compose.yml.
+#
+# Сеть — данных (dmc268-backend): база только в ней, и выхода наружу у
+# миграций нет (сверяет tests/test_infra_isolation.py).
 # Логи идут в stderr: 2>&1, чтобы попасть и в лог шага, и в файл отчёта;
 # упавшую миграцию pipefail не прячет за tee.
 docker run --rm --name dmc268-migrations \
-  --network dmc268 \
+  --network dmc268-backend \
   --env-file "$env_file" \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \

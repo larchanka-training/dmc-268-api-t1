@@ -16,6 +16,8 @@
 api_image         = "ghcr.io/larchanka-training/dmc-268-api-t1:CHANGE_ME_TAG@sha256:CHANGE_ME_64_HEX"
 postgres_password = "CHANGE_ME_POSTGRES"
 rabbitmq_password = "CHANGE_ME_RABBITMQ"
+# Пароль роли replicator горячей реплики; не короче 16 символов.
+postgres_replication_password = "CHANGE_ME_REPLICATION_PASSWORD"
 # Секрет подписи вебхуков GitHub App; пустой не пройдёт проверку.
 github_webhook_secret = "CHANGE_ME_WEBHOOK"
 # Ключ шифрования токенов пользователя: `openssl rand -base64 32`.
@@ -26,15 +28,18 @@ llm_backend = "stub"
 
 # --- остальное имеет значения по умолчанию ---
 
-docker_host      = "unix:///var/run/docker.sock"
-bind_ip          = "127.0.0.1"
-internal_bind_ip = "127.0.0.1"
-api_port         = 8000
-postgres_user    = "dmc268"
-postgres_db      = "dmc268"
-postgres_port    = 5432
-rabbitmq_user    = "dmc268"
-rabbitmq_port    = 5672
+docker_host   = "unix:///var/run/docker.sock"
+bind_ip       = "127.0.0.1"
+api_port      = 8000
+postgres_user = "dmc268"
+postgres_db   = "dmc268"
+rabbitmq_user = "dmc268"
+
+# База и брокер портов на хосте не публикуют: они только во внутренней сети
+# стека. Доступ для отладки — `docker exec -it dmc268-postgres psql -U dmc268`.
+postgres_max_slot_wal_keep_size = "2GB"
+postgres_replica_memory         = 512
+backup_keep_days                = 7
 
 # --- модель воркера ---
 # Eurorouter включается только фоллбэком после локальной модели:

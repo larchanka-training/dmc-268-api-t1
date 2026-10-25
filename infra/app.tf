@@ -87,8 +87,16 @@ resource "docker_container" "api" {
     docker_container.rabbitmq,
   ]
 
+  # API — единственный, кто стоит в обеих сетях: запросы приходят из сети
+  # входа, база и брокер — в сети данных. Сеть входа не internal: через неё
+  # же API ходит в GitHub (OAuth, метаданные PR), и на ней опубликован порт
+  # для проверки живости через туннель.
   networks_advanced {
     name = docker_network.dmc268.name
+  }
+
+  networks_advanced {
+    name = docker_network.backend.name
   }
 
   # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера,
@@ -206,7 +214,11 @@ resource "docker_container" "worker" {
   ]
 
   networks_advanced {
-    name = docker_network.dmc268.name
+    name = docker_network.backend.name
+  }
+
+  networks_advanced {
+    name = docker_network.egress.name
   }
 
   # Секрет вебхука воркеру не нужен, но без него не загрузятся общие

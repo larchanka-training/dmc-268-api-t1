@@ -41,13 +41,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Тома с данными: их уничтожение — потеря базы, очередей или телеметрии.
-# Замена тома — тоже уничтожение (delete, create). Тома стека наблюдаемости —
-# инстансы с [0] (count = 1:0 за флагом): сравнение адресов точное, без [0]
-# сторож бы их не увидел (замечание ревью PR #130).
+# Тома с данными: их уничтожение — потеря базы, очередей, реплики или
+# телеметрии. Замена тома — тоже уничтожение (delete, create). Тома стека
+# наблюдаемости — инстансы с [0] (count = 1:0 за флагом): сравнение адресов
+# точное, без [0] сторож бы их не увидел (замечание ревью PR #130).
 PROTECTED = (
     "docker_volume.postgres",
     "docker_volume.rabbitmq",
+    "docker_volume.postgres_replica",
+    "docker_volume.postgres_backups",
     "docker_volume.loki[0]",
     "docker_volume.tempo[0]",
     "docker_volume.prometheus[0]",
@@ -83,6 +85,7 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("api_logs", "Логи API после упавшего apply", ("api_logs",)),
     ("check_api", "Проверить, что API жив (через туннель)", ("check_api",)),
     ("check_worker", "Проверить, что воркер работает", ("check_worker",)),
+    ("check_replica", "Проверить, что реплика получает поток", ("check_replica",)),
     ("prune", "Убрать устаревшие образы", ("prune",)),
 )
 # Засечка шага summary закрывает последний шаг и весь job.

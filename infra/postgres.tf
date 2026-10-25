@@ -23,9 +23,10 @@ resource "docker_image" "postgres" {
   # Взят под RAG-профиль репозитория (#27); тот закрыт без мёржа, и расширение
   # `vector` сейчас не создаёт ни одна миграция. Образ остаётся: возврат на
   # postgres:18-alpine — снова смена библиотеки C и новый том (backend-delivery).
-  # Тег плавающий: digest в name пересоздаёт контейнер при каждом обновлении
-  # образа; остановку при пересоздании обслуживает destroy_grace_seconds
-  # контейнера ниже (#150, #102).
+  # Тег плавающий: digest в name пересоздавал бы контейнер при каждом
+  # обновлении образа (#150). Теперь пересоздание идёт через SIGTERM:
+  # остановку при пересоздании обслуживает destroy_grace_seconds контейнера
+  # ниже (#102), и digest можно закрепить отдельной задачей.
   name         = "pgvector/pgvector:pg18"
   keep_locally = true
 }
@@ -37,19 +38,34 @@ resource "docker_container" "postgres" {
 
   # Библиотека pg_stat_statements нужна ручной диагностике медленных запросов
   # (расширение создаёт миграция 0013); загружаем её только вместе со стеком
-  # наблюдаемости, при observability_enabled = false command = null возвращает
-  # образу его собственный CMD. receiver postgresql коллектора в расширении не
-  # нуждается — метрики базы он снимает обычными вьюхами статистики. Смена
-  # command пересоздаёт контейнер базы (том сохраняется) — она происходит
-  # только в паре с переключателем стека. Локальный compose preload держит
-  # всегда (накладные расходы ничтожны, переключателя в compose нет).
-  command = var.observability_enabled ? ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"] : null
+  # наблюдаемости — накладные расходы держать не просили. Receiver postgresql
+  # коллектора в расширении не нуждается — метрики базы он снимает обычными
+  # вьюхами статистики. Смена command пересоздаёт контейнер базы (том
+  # сохраняется): это происходит и при переключателе стека, и при смене
+  # digest образа. Локальный compose preload держит всегда (накладные расходы
+  # ничтожны, переключателя в compose нет).
+  #
+  # wal_level=replica и max_wal_senders у PostgreSQL 18 уже такие, какие нужны
+  # реплике; задаём только то, чего нет по умолчанию. max_slot_wal_keep_size —
+  # потолок WAL, который удержит слот реплики: без него упавшая реплика копила
+  # бы WAL на основном сервере, пока не кончится диск. Перешагнувшая потолок
+  # реплика теряет слот; при следующем старте она заметит это сама и
+  # пересоберётся (infra/postgres/replica-entrypoint.sh).
+  command = concat([
+    "postgres",
+    "-c", "hba_file=/etc/postgresql/pg_hba.conf",
+    "-c", "max_slot_wal_keep_size=${var.postgres_max_slot_wal_keep_size}",
+    ], var.observability_enabled ? [
+    "-c", "shared_preload_libraries=pg_stat_statements",
+  ] : [])
 
-  # Окно остановки: смена command (переключатель observability_enabled) и новый
-  # digest образа пересоздают контейнер базы, и без окна провайдер делает
-  # SIGKILL под пишущей базой (замечание ревью PR #130, high). stop_timeout —
-  # окно docker stop, destroy_grace_seconds — то же при пересоздании
-  # провайдером; 60 с — запас postgres на чекпоинт и чистую остановку.
+  # Окно остановки: смена command (переключатель observability_enabled или
+  # новый digest образа) пересоздаёт контейнер базы, и без окна провайдер
+  # делает SIGKILL под пишущей базой (замечание ревью PR #130, high): база
+  # поднимается с «not properly shut down» и восстановлением, брокер теряет
+  # то, что не успел сбросить на диск. stop_timeout — окно docker stop,
+  # destroy_grace_seconds — то же при пересоздании провайдером; 60 с — запас
+  # postgres на чекпоинт и чистую остановку.
   stop_timeout          = 60
   destroy_grace_seconds = 60
 
@@ -63,7 +79,7 @@ resource "docker_container" "postgres" {
   log_opts      = local.log_opts
 
   networks_advanced {
-    name = docker_network.dmc268.name
+    name = docker_network.backend.name
   }
 
   env = [
@@ -72,10 +88,9 @@ resource "docker_container" "postgres" {
     "POSTGRES_DB=${var.postgres_db}",
   ]
 
-  ports {
-    internal = 5432
-    external = var.postgres_port
-    ip       = var.internal_bind_ip
+  upload {
+    file    = "/etc/postgresql/pg_hba.conf"
+    content = file("${path.module}/postgres/pg_hba.conf")
   }
 
   volumes {

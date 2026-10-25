@@ -218,7 +218,7 @@ def test_service_version_extracts_the_tag_before_the_digest(image: str, version:
 def test_stack_published_ports_match_between_compose_and_infra() -> None:
     """Публикуемые порты стека одинаковы в compose и infra.
 
-    Единственный публикуемый порт стека — Grafana (3000 на internal_bind_ip):
+    Единственный публикуемый порт стека — Grafana (3000 на bind_ip):
     остальной трафик внутренний, его публикует только человек, который правит
     оба файла. Рассинхрон порта молчалив так же, как рассинхрон дайджестов
     (замечание ревью PR #130), поэтому сверяются и внутренний порт, и дефолт
@@ -295,13 +295,14 @@ def test_compose_preloads_pg_stat_statements_always() -> None:
 
 def test_infra_preloads_pg_stat_statements_only_with_the_stack() -> None:
     """На стенде preload включается вместе со стеком наблюдаемости
-    (observability_enabled), при выключенном стеке command откатывается
-    образу (nil)."""
+    (observability_enabled): флаг живёт в условной ветке command, при
+    выключенном стеке команда без него. Безусловная часть command
+    (#102) — hba_file и потолок WAL слота реплики."""
     block = _tf_container_block("postgres")
-    assert (
-        'command = var.observability_enabled ? ["postgres", "-c", '
-        '"shared_preload_libraries=pg_stat_statements"] : null' in block
-    )
+    assert "command = concat([" in block
+    assert '"-c", "hba_file=/etc/postgresql/pg_hba.conf",' in block
+    assert 'var.observability_enabled ? [' in block
+    assert '"-c", "shared_preload_libraries=pg_stat_statements",' in block
 
 
 # --- cAdvisor ходит к Docker только через socket-proxy -------------------------------
@@ -428,7 +429,8 @@ def test_stack_networks_split_the_stack_from_the_app_in_compose() -> None:
 
 def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
     """То же в infra: у loki/tempo/grafana/node-exporter/cadvisor сети
-    dmc268 нет; collector и prometheus — в обеих; docker_proxy — internal."""
+    dmc268 нет; collector и prometheus — в данных (backend: postgres-
+    receiver, скрейп rabbitmq) и сети стека; docker_proxy — internal."""
     text = OBSERVABILITY_TF.read_text(encoding="utf-8")
     assert re.search(
         r'resource "docker_network" "observability_docker_proxy" \{[^}]*internal\s*=\s*true', text
@@ -439,7 +441,7 @@ def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
         assert "docker_network.observability[" in block, name
     for name in ("otelcol", "prometheus"):
         block = _tf_container_block(name)
-        assert "docker_network.dmc268.name" in block, name
+        assert "docker_network.backend.name" in block, name
         assert "docker_network.observability[0].name" in block, name
 
 

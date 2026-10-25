@@ -8,7 +8,7 @@
 # контейнер следующим apply. Алиасы сети повторяют имена сервисов compose —
 # одни и те же адреса работают в обоих окружениях (prometheus.yml, grafana
 # datasources, endpoint коллектора). Наружу из стека не смотрит ничего:
-# Grafana публикуется на internal_bind_ip и открывается SSH-туннелем.
+# Grafana публикуется на bind_ip и открывается SSH-туннелем.
 # Стек поднимается только при observability_enabled: count = 1 : 0 у каждого
 # его ресурса — образа, тома, сети и контейнера; выключение списка телеметрии
 # см. local.telemetry_env.
@@ -105,7 +105,7 @@ resource "docker_volume" "grafana" {
 # Отдельная сеть для Docker API через socket-proxy: в ней только proxy и
 # cAdvisor — остальным контейнерам стека и приложения доступ к демону Docker
 # не нужен. cAdvisor — единственный, кто ходит и в эту сеть (к proxy), и в
-# dmc268 (оттуда его скреит Prometheus).
+# observability (оттуда его скреит Prometheus).
 resource "docker_network" "observability_docker_proxy" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-docker-proxy"
@@ -113,18 +113,20 @@ resource "docker_network" "observability_docker_proxy" {
   internal = true
 }
 
-# Сеть стека наблюдаемости — отдельно от сети приложения (dmc268), к которой
-# подключается интерфейс (dmc-268-ui-t1): без этого из контейнеров UI доступны
-# Loki без аутентификации, Prometheus, Tempo и приёмник OTLP (замечание ревью
-# PR #130). internal: контейнерам стека наружу идти не нужно. В dmc268 из
-# стека остаются только prometheus (скрейпит rabbitmq) и коллектор (принимает
-# OTLP и скрейпит postgres/rabbitmq).
+# Сеть стека наблюдаемости — отдельно от обеих сетей приложения: входа
+# (dmc268, там интерфейс dmc-268-ui-t1) и данных (backend): без этого из
+# контейнеров UI доступны Loki без аутентификации, Prometheus, Tempo и
+# приёмник OTLP (замечание ревью PR #130). Не internal: публикуемый порт
+# Grafana на internal-сети не работает (проверено), а изоляция от интерфейса
+# достигается самим членством в сетях — dmc268 у стека нет вовсе. В backend
+# из стека ходят только prometheus (скрейпит rabbitmq) и коллектор (принимает
+# OTLP api и воркера, скрейпит postgres и rabbitmq).
 resource "docker_network" "observability" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-observability"
   # Без internal: публикуемый порт Grafana на internal-сети не работает
   # (проверено), а изоляция от интерфейса достигается самим членством в
-  # сети — dmc268 у стека нет, кроме коллектора и Prometheus.
+  # сетях — dmc268 у стека нет вовсе.
 }
 
 resource "docker_container" "otelcol" {
@@ -165,14 +167,16 @@ resource "docker_container" "otelcol" {
     "POSTGRESQL_DATABASE=${var.postgres_db}",
   ]
 
+  # Приёмник OTLP (api и воркер) и цели receiver-ов — в сети данных.
   networks_advanced {
-    name    = docker_network.dmc268.name
-    aliases = ["collector"]
+    name = docker_network.backend.name
   }
 
-  # Экспортёры (Loki, Tempo) и скрейп Prometheus — в сети стека.
+  # Экспортёры (Loki, Tempo) и скрейп Prometheus — в сети стека; алиас —
+  # там же: collector:8889 скреит Prometheus.
   networks_advanced {
-    name = docker_network.observability[0].name
+    name    = docker_network.observability[0].name
+    aliases = ["collector"]
   }
 
   depends_on = [
@@ -276,14 +280,15 @@ resource "docker_container" "prometheus" {
     container_path = "/prometheus"
   }
 
+  # Скрейп rabbitmq — в сети данных; сеть стека — для целей collector,
+  # node-exporter, cadvisor и datasources Grafana, алиас — там же.
   networks_advanced {
-    name    = docker_network.dmc268.name
-    aliases = ["prometheus"]
+    name = docker_network.backend.name
   }
 
-  # Цели в сети стека: collector, node-exporter, cadvisor.
   networks_advanced {
-    name = docker_network.observability[0].name
+    name    = docker_network.observability[0].name
+    aliases = ["prometheus"]
   }
 }
 
@@ -338,7 +343,7 @@ resource "docker_container" "grafana" {
   ports {
     internal = 3000
     external = var.grafana_port
-    ip       = var.internal_bind_ip
+    ip       = var.bind_ip
   }
 
   networks_advanced {

@@ -19,20 +19,6 @@ variable "bind_ip" {
   }
 }
 
-variable "internal_bind_ip" {
-  type        = string
-  description = "Интерфейс хоста, на котором публикуются PostgreSQL и RabbitMQ (оставляйте 127.0.0.1: снаружи к ним ходить не нужно, только локальным инструментам)."
-  default     = "127.0.0.1"
-
-  # Спека backend-delivery: порты PostgreSQL и RabbitMQ не выходят за пределы
-  # сервера. Гарантирует это только петля; ловим ошибку на plan, пока на сервере
-  # ничего не изменилось.
-  validation {
-    condition     = can(regex("^127\\.", var.internal_bind_ip)) || var.internal_bind_ip == "::1"
-    error_message = "internal_bind_ip должен быть адресом петли (127.0.0.0/8 или ::1): иначе порты PostgreSQL и RabbitMQ окажутся доступны снаружи."
-  }
-}
-
 variable "api_port" {
   type        = number
   description = "Порт хоста для HTTP-сервера FastAPI."
@@ -67,10 +53,37 @@ variable "postgres_db" {
   default     = "dmc268"
 }
 
-variable "postgres_port" {
+# --- Реплика и резервные копии PostgreSQL ---
+
+# Пароль роли replicator. Пустой или короткий — роль без входа, и реплика не
+# соберётся; ловим на plan, пока на сервере ничего не изменилось.
+variable "postgres_replication_password" {
+  type        = string
+  description = "Пароль роли replicator, под которой реплика забирает поток с основного сервера. Реальные значения не коммитить."
+  sensitive   = true
+
+  validation {
+    condition     = length(var.postgres_replication_password) >= 16
+    error_message = "postgres_replication_password пуст или короче 16 символов: секрет PG_REPLICATION_PASSWORD_DMC268_T1 не задан."
+  }
+}
+
+variable "postgres_max_slot_wal_keep_size" {
+  type        = string
+  description = "Сколько WAL основной сервер держит для отставшей реплики (max_slot_wal_keep_size). Потолок защищает диск от упавшей реплики."
+  default     = "2GB"
+}
+
+variable "postgres_replica_memory" {
   type        = number
-  description = "Порт хоста для PostgreSQL."
-  default     = 5432
+  description = "Потолок памяти реплики, МБ."
+  default     = 512
+}
+
+variable "backup_keep_days" {
+  type        = number
+  description = "Сколько суток хранить резервные копии базы."
+  default     = 7
 }
 
 # --- RabbitMQ ---
@@ -90,12 +103,6 @@ variable "rabbitmq_password" {
     condition     = var.rabbitmq_password != ""
     error_message = "rabbitmq_password пуст: секрет RABBITMQ_PASSWORD_DMC268_T1 не задан."
   }
-}
-
-variable "rabbitmq_port" {
-  type        = number
-  description = "Порт хоста для AMQP."
-  default     = 5672
 }
 
 # --- GitHub App, вход пользователей и вебхуки ---
@@ -229,7 +236,7 @@ variable "observability_memory_mb" {
 
 variable "grafana_port" {
   type        = number
-  description = "Порт Grafana на internal_bind_ip: наружу не публикуется, в UI заходят через SSH-туннель."
+  description = "Порт Grafana на bind_ip: наружу не публикуется, в UI заходят через SSH-туннель."
   default     = 3000
 }
 
@@ -271,7 +278,7 @@ variable "postgres_monitor_password" {
 
 variable "ollama_base_url" {
   type        = string
-  description = "Адрес Ollama в сети стека (OLLAMA_BASE_URL)."
+  description = "Адрес Ollama (OLLAMA_BASE_URL). Контейнер Ollama подключается к сети dmc268-backend — воркер ходит к нему оттуда; к dmc268-egress — только если Ollama сама скачивает модели."
   default     = "http://dmc268-ollama:11434"
 }
 
