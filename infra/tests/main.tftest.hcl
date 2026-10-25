@@ -219,43 +219,46 @@ run "worker_grace_covers_hosted_fallback" {
   }
 }
 
-run "app_containers_run_the_api_image" {
-  # apply на mock-провайдере: image_id известен только после создания образа.
-  command = apply
+# Контейнеры ссылаются на образ по digest без тега: атрибут image провайдер
+# сравнивает строкой, и тег commit sha в ссылке пересоздавал бы api и worker
+# на каждом коммите даже при том же digest (#203).
+run "app_containers_run_the_api_image_by_digest" {
+  command = plan
 
-  # Разные image_id у двух ресурсов образа, чтобы контейнер, взявший чужой
-  # ресурс, не сошёлся случайно.
-  override_resource {
-    target = docker_image.api
-    values = { image_id = "sha256:api" }
-  }
-
-  override_resource {
-    target = docker_image.worker
-    values = { image_id = "sha256:worker" }
-  }
-
-  # У воркера свой ресурс образа с той же ссылкой: замена общего ресурса ждала
-  # бы уничтожения всех его контейнеров, то есть и дренажа воркера, — API
-  # стоял бы всё это время.
   assert {
-    condition = (
-      docker_container.api.image == docker_image.api.image_id
-      && docker_container.worker.image == docker_image.worker.image_id
-    )
-    error_message = "api запускается из docker_image.api, worker — из своего docker_image.worker."
+    condition = alltrue([
+      for c in [docker_container.api, docker_container.worker] :
+      c.image == "ghcr.io/larchanka-training/dmc-268-api-t1@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+    ])
+    error_message = "api и worker запускаются из образа api_image по digest, без тега: <репозиторий>@sha256:<digest>."
+  }
+}
+
+# Ссылка без тега проходит как есть.
+run "api_image_without_tag_runs_as_is" {
+  command = plan
+
+  variables {
+    api_image = "ghcr.io/larchanka-training/dmc-268-api-t1@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
   }
 
   assert {
-    condition     = docker_image.api.name == var.api_image && docker_image.worker.name == var.api_image
-    error_message = "Оба ресурса образа забирают ровно переданную ссылку на образ API, с digest: образ у API и воркера один."
+    condition     = docker_container.api.image == var.api_image && docker_container.worker.image == var.api_image
+    error_message = "Ссылка <репозиторий>@sha256:<digest> доходит до контейнеров без изменений."
+  }
+}
+
+# Двоеточие порта реестра — не тег: срезается только тег после последнего «/».
+run "registry_port_is_not_a_tag" {
+  command = plan
+
+  variables {
+    api_image = "localhost:5000/dmc-268-api-t1:0123abc@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
   }
 
-  # Без keep_locally удаление одного ресурса при замене удаляло бы образ из-под
-  # второго.
   assert {
-    condition     = docker_image.api.keep_locally && docker_image.worker.keep_locally
-    error_message = "Образ API делят два ресурса: оба обязаны оставлять его на сервере (keep_locally)."
+    condition     = docker_container.api.image == "localhost:5000/dmc-268-api-t1@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
+    error_message = "Из localhost:5000/<образ>:<тег>@sha256:<digest> срезается только тег, порт реестра остаётся."
   }
 }
 
@@ -270,10 +273,11 @@ run "api_waits_until_healthy" {
   }
 
   # Без start_interval первая проверка — через interval (30 с), и wait ждал бы
-  # её даже у здорового API.
+  # её даже у здорового API. Раз в секунду — healthy через секунду после
+  # старта приложения, а не через две (#203).
   assert {
-    condition     = docker_container.api.healthcheck[0].start_interval == "2s"
-    error_message = "start_interval healthcheck API — 2s: healthy в первые секунды после старта."
+    condition     = docker_container.api.healthcheck[0].start_interval == "1s"
+    error_message = "start_interval healthcheck API — 1s: healthy в первую секунду после старта приложения."
   }
 
   # Длительности — в том виде, в каком провайдер читает их обратно из Docker

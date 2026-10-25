@@ -1,28 +1,40 @@
-# Приложение: образ API из реестра и два контейнера из него — api и worker.
+# Приложение: контейнеры api и worker из образа API в реестре.
 # Миграции сюда не входят: их применяет шаг деплоя до `tofu apply`
 # (.github/scripts/deploy/migrate.sh) с окружением из выхода migrate_env.
 
-resource "docker_image" "api" {
-  # Образ собирается и публикуется в CI, здесь он только забирается — по
-  # digest, который вернула сборка (`api_image` без него не пройдёт проверку).
-  # Раньше он собирался прямо отсюда по хешу исходников; при удалённом
-  # docker_host такая сборка ушла бы на сервер — без контекста и без кеша.
-  name         = var.api_image
-  keep_locally = true
+# Образ собирается и публикуется в CI, контейнеры ссылаются на него по digest
+# (`api_image` без него не пройдёт проверку). Ресурса docker_image у образа
+# API нет: его замена на каждом коммите шла уже после остановки старого API и
+# добавляла к простою pull (6 с в деплое #202). Скачивает образ migrate.sh по
+# той же ссылке до полного apply, и провайдер создаёт контейнер из готового
+# образа: сам он тянет образ, только если того нет на сервере (README.md,
+# «Деплой»).
+#
+# В ссылке контейнера только digest, без тега: атрибут image сравнивается
+# строкой, и новый тег при том же digest пересоздавал бы api и worker (в CI тег
+# — commit sha, новый на каждом коммите). Тег остаётся в api_image для лога и
+# summary деплоя.
+locals {
+  api_image_ref = join("@", regex("^(.+?)(?::[\\w][\\w.-]{0,127})?@(sha256:[0-9a-f]{64})$", var.api_image))
 }
 
-# Тот же образ под воркер, отдельным ресурсом. Замена ресурса образа ждёт
-# уничтожения всех контейнеров, которые на него ссылаются: с общим ресурсом
-# новый API не стартовал, пока воркер дорабатывал сообщение (до
-# destroy_grace_seconds). Замер на Docker 29.9.2 с воркером, который дренирует
-# 60 с: простой API при замене образа 64 с с общим ресурсом, 2,5 с — со своим
-# (#159). Порядок уничтожения OpenTofu берёт из состояния, поэтому выигрыш —
-# со второго деплоя после перехода. Два ресурса с одним name провайдеру не мешают:
-# оба только забирают образ, а keep_locally не даёт удалению одного снять
-# образ из-под другого.
-resource "docker_image" "worker" {
-  name         = var.api_image
-  keep_locally = true
+# Ресурсы образа API жили в стеке до #203. Из состояния они уходят без
+# уничтожения: keep_locally у них и так не снимал образ с сервера, а старые
+# образы убирает шаг чистки деплоя.
+removed {
+  from = docker_image.api
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = docker_image.worker
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 # Контейнер миграций жил в стеке до #159. Из состояния он уходит без
@@ -37,7 +49,7 @@ removed {
 
 resource "docker_container" "api" {
   name    = "dmc268-api"
-  image   = docker_image.api.image_id
+  image   = local.api_image_ref
   restart = "unless-stopped"
 
   # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
@@ -146,7 +158,7 @@ locals {
     timeout        = "5s"
     retries        = 3
     start_period   = "10s"
-    start_interval = "2s"
+    start_interval = "1s"
   }
 }
 
@@ -154,12 +166,12 @@ resource "terraform_data" "api_healthcheck" {
   input = local.api_healthcheck
 }
 
-# Воркер: тот же образ, что у API (свой ресурс docker_image.worker), другая команда. Портов нет: с остальным
+# Воркер: тот же образ, что у API, другая команда. Портов нет: с остальным
 # стеком он говорит только через очередь и базу (`backend-delivery`), наружу —
 # исходящими запросами к GitHub API за диффом, правилами и файлами.
 resource "docker_container" "worker" {
   name    = "dmc268-worker"
-  image   = docker_image.worker.image_id
+  image   = local.api_image_ref
   restart = "unless-stopped"
   command = ["python", "-m", "app.worker"]
 

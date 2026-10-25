@@ -17,7 +17,9 @@
 set -euo pipefail
 
 # ExitOnForwardFailure: без него ssh уходит в фон и при неудавшемся пробросе.
-ssh -o ExitOnForwardFailure=yes -f -N -L 18000:127.0.0.1:8000 stand
+# ControlPath=none — мимо ControlMaster: через master ExitOnForwardFailure не
+# срабатывает (.github/actions/stand-ssh).
+ssh -o ControlPath=none -o ExitOnForwardFailure=yes -f -N -L 18000:127.0.0.1:8000 stand
 
 for _ in $(seq 1 10); do
   if curl -fsS --max-time 3 http://127.0.0.1:18000/health >/dev/null 2>&1; then
