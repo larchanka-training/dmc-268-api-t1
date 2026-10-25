@@ -42,18 +42,19 @@ from pathlib import Path
 from typing import Any
 
 # Тома с данными: их уничтожение — потеря базы, очередей, реплики или
-# телеметрии. Замена тома — тоже уничтожение (delete, create). Тома стека
-# наблюдаемости — инстансы с [0] (count = 1:0 за флагом): сравнение адресов
-# точное, без [0] сторож бы их не увидел (замечание ревью PR #130).
+# телеметрии. Замена тома — тоже уничтожение (delete, create). Адреса без
+# [0]: тома стека наблюдаемости создаются без count (иначе откат флага
+# observability_enabled падал бы на prevent_destroy — замечание ревью
+# PR #130), а сравнение адресов точное.
 PROTECTED = (
     "docker_volume.postgres",
     "docker_volume.rabbitmq",
     "docker_volume.postgres_replica",
     "docker_volume.postgres_backups",
-    "docker_volume.loki[0]",
-    "docker_volume.tempo[0]",
-    "docker_volume.prometheus[0]",
-    "docker_volume.grafana[0]",
+    "docker_volume.loki",
+    "docker_volume.tempo",
+    "docker_volume.prometheus",
+    "docker_volume.grafana",
 )
 
 # Действия плана (`resource_changes[].change.actions` у OpenTofu 1.13.2) —

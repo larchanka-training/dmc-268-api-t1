@@ -8,10 +8,13 @@
 # контейнер следующим apply. Алиасы сети повторяют имена сервисов compose —
 # одни и те же адреса работают в обоих окружениях (prometheus.yml, grafana
 # datasources, endpoint коллектора). Наружу из стека не смотрит ничего:
-# Grafana публикуется на bind_ip и открывается SSH-туннелем.
-# Стек поднимается только при observability_enabled: count = 1 : 0 у каждого
-# его ресурса — образа, тома, сети и контейнера; выключение списка телеметрии
-# см. local.telemetry_env.
+# сеть стека internal, а публикуемый порт Grafana живёт в отдельной
+# не-internal сети dmc268-grafana и открывается SSH-туннелем.
+# Стек поднимается только при observability_enabled: count = 1 : 0 у образа,
+# сети и контейнера; выключение списка телеметрии см. local.telemetry_env.
+# Томам с данными count за флагом не нужен: они создаются всегда, поэтому
+# откат флагом не строит план, который их уничтожает (и не падает на
+# prevent_destroy), — данные телеметрии переживают выключение флага.
 
 resource "docker_image" "otelcol" {
   count        = var.observability_enabled ? 1 : 0
@@ -62,41 +65,41 @@ resource "docker_image" "docker_socket_proxy" {
 }
 
 resource "docker_volume" "loki" {
-  count = var.observability_enabled ? 1 : 0
-  name  = "dmc268-loki-data"
+  name = "dmc268-loki-data"
 
   # Логи за 30 дней — данные, а не кэш: план, который уничтожает или
   # заменяет том, OpenTofu отклоняет (infra/postgres.tf, «prevent_destroy»).
+  # count за флагом у томов нет: с ним откат observability_enabled строил бы
+  # план уничтожения тома поверх включённого стенда и падал бы на
+  # prevent_destroy («Resource instance cannot be destroyed»), а выключение
+  # флага должно снимать только контейнеры (замечание ревью PR #130).
   lifecycle {
     prevent_destroy = true
   }
 }
 
 resource "docker_volume" "tempo" {
-  count = var.observability_enabled ? 1 : 0
-  name  = "dmc268-tempo-data"
+  name = "dmc268-tempo-data"
 
-  # prevent_destroy — как у тома Loki выше.
+  # prevent_destroy и отсутствие count — как у тома Loki выше.
   lifecycle {
     prevent_destroy = true
   }
 }
 
 resource "docker_volume" "prometheus" {
-  count = var.observability_enabled ? 1 : 0
-  name  = "dmc268-prometheus-data"
+  name = "dmc268-prometheus-data"
 
-  # prevent_destroy — как у тома Loki выше.
+  # prevent_destroy и отсутствие count — как у тома Loki выше.
   lifecycle {
     prevent_destroy = true
   }
 }
 
 resource "docker_volume" "grafana" {
-  count = var.observability_enabled ? 1 : 0
-  name  = "dmc268-grafana-data"
+  name = "dmc268-grafana-data"
 
-  # prevent_destroy — как у тома Loki выше.
+  # prevent_destroy и отсутствие count — как у тома Loki выше.
   lifecycle {
     prevent_destroy = true
   }
@@ -116,17 +119,28 @@ resource "docker_network" "observability_docker_proxy" {
 # Сеть стека наблюдаемости — отдельно от обеих сетей приложения: входа
 # (dmc268, там интерфейс dmc-268-ui-t1) и данных (backend): без этого из
 # контейнеров UI доступны Loki без аутентификации, Prometheus, Tempo и
-# приёмник OTLP (замечание ревью PR #130). Не internal: публикуемый порт
-# Grafana на internal-сети не работает (проверено), а изоляция от интерфейса
-# достигается самим членством в сетях — dmc268 у стека нет вовсе. В backend
-# из стека ходят только prometheus (скрейпит rabbitmq) и коллектор (принимает
-# OTLP api и воркера, скрейпит postgres и rabbitmq).
+# приёмник OTLP (замечание ревью PR #130). Internal, как и сеть данных:
+# наружу из стека не ходит никто, а изоляция от интерфейса достигается самим
+# членством в сетях — dmc268 у стека нет вовсе. В backend из стека ходят
+# только prometheus (скрейпит rabbitmq) и коллектор (принимает OTLP api и
+# воркера, скрейпит postgres и rabbitmq).
 resource "docker_network" "observability" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-observability"
-  # Без internal: публикуемый порт Grafana на internal-сети не работает
-  # (проверено), а изоляция от интерфейса достигается самим членством в
-  # сетях — dmc268 у стека нет вовсе.
+  # Изолирована от интернета целиком; публикуемый порт Grafana живёт в
+  # отдельной сети dmc268-grafana ниже: порты на internal-сети Docker не
+  # публикует (проверено).
+  internal = true
+}
+
+# Сеть публикации порта Grafana — единственное её назначение: порты на
+# internal-сети Docker не публикует, поэтому Grafana стоит и в отдельной
+# не-internal сети, и в internal-сети стека. Наружу порт открыт только на
+# bind_ip (петля) и через SSH-туннель; в dmc268, сети интерфейса, Grafana не
+# подключена.
+resource "docker_network" "grafana" {
+  count = var.observability_enabled ? 1 : 0
+  name  = "dmc268-grafana"
 }
 
 resource "docker_container" "otelcol" {
@@ -206,7 +220,7 @@ resource "docker_container" "loki" {
   command = ["-config.file=/etc/loki/config.yaml"]
 
   volumes {
-    volume_name    = docker_volume.loki[0].name
+    volume_name    = docker_volume.loki.name
     container_path = "/loki"
   }
 
@@ -237,7 +251,7 @@ resource "docker_container" "tempo" {
   command = ["-config.file=/etc/tempo/config.yaml"]
 
   volumes {
-    volume_name    = docker_volume.tempo[0].name
+    volume_name    = docker_volume.tempo.name
     container_path = "/var/tempo"
   }
 
@@ -276,7 +290,7 @@ resource "docker_container" "prometheus" {
   ]
 
   volumes {
-    volume_name    = docker_volume.prometheus[0].name
+    volume_name    = docker_volume.prometheus.name
     container_path = "/prometheus"
   }
 
@@ -336,7 +350,7 @@ resource "docker_container" "grafana" {
   ]
 
   volumes {
-    volume_name    = docker_volume.grafana[0].name
+    volume_name    = docker_volume.grafana.name
     container_path = "/var/lib/grafana"
   }
 
@@ -346,9 +360,18 @@ resource "docker_container" "grafana" {
     ip       = var.bind_ip
   }
 
+  # Сеть стека — для datasources (loki, tempo, prometheus); алиас зеркалит
+  # имя сервиса compose, по нему никто в стеке не ходит — оставлен для
+  # симметрии с остальным стеком.
   networks_advanced {
     name    = docker_network.observability[0].name
     aliases = ["grafana"]
+  }
+
+  # Публикуемый порт — в отдельной не-internal сети: порты на internal-сети
+  # Docker не публикует.
+  networks_advanced {
+    name = docker_network.grafana[0].name
   }
 
   depends_on = [

@@ -32,12 +32,14 @@ EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
     "api": frozenset({"dmc268", "backend"}),
     "worker": frozenset({"backend", "egress"}),
     # Стек наблюдаемости: цели receiver-ов и OTLP — в сети данных, остальное
-    # — в своей сети. В dmc268 (там UI) из стека не ходит никто.
+    # — в своей сети. В dmc268 (там UI) из стека не ходит никто. Grafana —
+    # ещё и в отдельной сети dmc268-grafana: порты на internal-сети Docker не
+    # публикует, поэтому порт Grafana живёт в не-internal сети.
     "otelcol": frozenset({"backend", "observability"}),
     "loki": frozenset({"observability"}),
     "tempo": frozenset({"observability"}),
     "prometheus": frozenset({"backend", "observability"}),
-    "grafana": frozenset({"observability"}),
+    "grafana": frozenset({"observability", "grafana"}),
     "node_exporter": frozenset({"observability"}),
     "cadvisor": frozenset({"observability", "observability_docker_proxy"}),
     "docker_socket_proxy": frozenset({"observability_docker_proxy"}),
@@ -126,6 +128,23 @@ def test_data_network_has_no_way_out() -> None:
     assert network_is_internal(read_infra_text(), "backend") is True, (
         "сеть данных dmc268-backend должна быть internal: без этого база и брокер "
         "получают выход в интернет"
+    )
+
+
+def test_observability_network_has_no_way_out() -> None:
+    """Сеть стека наблюдаемости internal, как и сеть данных: наружу из стека
+    не ходит никто. Сеть публикации порта Grafana dmc268-grafana — не
+    internal (порты на internal-сети Docker не публикует): проверяем именно
+    отсутствие internal = true — его постановка сломала бы публикацию порта.
+    """
+    text = read_infra_text()
+    assert network_is_internal(text, "observability") is True, (
+        "сеть стека dmc268-observability должна быть internal: без этого стек "
+        "получает выход в интернет"
+    )
+    assert network_is_internal(text, "grafana") is False, (
+        "сеть dmc268-grafana не должна быть internal: её единственное назначение — "
+        "публикуемый порт Grafana, а порты на internal-сети Docker не публикует"
     )
 
 

@@ -158,8 +158,10 @@ def test_guard_ignores_volumes_it_does_not_protect() -> None:
 def volume_blocks() -> dict[str, str]:
     """Ресурсы docker_volume из infra/*.tf: адрес → тело блока.
 
-    Адрес — как в плане tofu: у ресурса с `count` (тома стека наблюдаемости,
-    `count = 1:0` за флагом) это `тип.имя[0]`, без count — просто `тип.имя`.
+    Адрес — как в плане tofu: у ресурса с `count` это `тип.имя[0]`, без
+    count — просто `тип.имя`. Томов с count нет ни у данных приложения, ни у
+    стека наблюдаемости: тома создаются всегда, чтобы откат флага
+    observability_enabled не строил план их уничтожения.
     """
     blocks: dict[str, str] = {}
     for name, body in re.findall(

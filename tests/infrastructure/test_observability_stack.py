@@ -430,15 +430,32 @@ def test_stack_networks_split_the_stack_from_the_app_in_compose() -> None:
 def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
     """То же в infra: у loki/tempo/grafana/node-exporter/cadvisor сети
     dmc268 нет; collector и prometheus — в данных (backend: postgres-
-    receiver, скрейп rabbitmq) и сети стека; docker_proxy — internal."""
+    receiver, скрейп rabbitmq) и сети стека; сеть стека internal, а порт
+    Grafana публикуется через отдельную не-internal сеть dmc268-grafana:
+    порты на internal-сети Docker не публикует (замечание ревью PR #130);
+    docker_proxy — internal."""
     text = OBSERVABILITY_TF.read_text(encoding="utf-8")
+    assert re.search(
+        r'resource "docker_network" "observability" \{[^}]*internal\s*=\s*true', text
+    )
     assert re.search(
         r'resource "docker_network" "observability_docker_proxy" \{[^}]*internal\s*=\s*true', text
     )
-    for name in ("loki", "tempo", "grafana", "node_exporter", "cadvisor"):
+    # Сеть порта Grafana — ровно без internal: её постановка сломала бы
+    # публикацию порта.
+    grafana_network = re.search(
+        r'resource "docker_network" "grafana" \{(.*?)^\}', text, re.DOTALL | re.MULTILINE
+    )
+    assert grafana_network is not None, "нет docker_network.grafana в observability.tf"
+    assert not re.search(r"^\s*internal\s*=", grafana_network.group(1), re.MULTILINE)
+    for name in ("loki", "tempo", "node_exporter", "cadvisor"):
         block = _tf_container_block(name)
         assert "docker_network.dmc268" not in block, name
         assert "docker_network.observability[" in block, name
+    grafana = _tf_container_block("grafana")
+    assert "docker_network.dmc268" not in grafana
+    assert "docker_network.observability[" in grafana
+    assert "docker_network.grafana[0].name" in grafana
     for name in ("otelcol", "prometheus"):
         block = _tf_container_block(name)
         assert "docker_network.backend.name" in block, name

@@ -96,3 +96,48 @@ run "observability_stack_without_secrets_rejected" {
 
   expect_failures = [var.grafana_admin_password, var.postgres_monitor_password]
 }
+
+# Сети и порт стека по плану (то же сверяет tests/test_infra_isolation.py по
+# тексту): collector и prometheus — в данных и в стеке, grafana — в стеке и
+# в сети публикации порта; сеть стека internal, сеть порта Grafana — нет;
+# порт Grafana публикуется на bind_ip.
+run "stack_networks_and_grafana_port_follow_their_purpose" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+  }
+
+  assert {
+    condition = alltrue([
+      for c in [docker_container.otelcol[0], docker_container.prometheus[0]] :
+      toset([for n in c.networks_advanced : n.name]) == toset([
+        docker_network.backend.name, docker_network.observability[0].name,
+      ])
+    ])
+    error_message = "Коллектор и Prometheus должны стоять ровно в двух сетях: данных (receiver postgres, скрейп rabbitmq и приём OTLP) и стека (экспортёры, скрейп collector/node-exporter/cadvisor)."
+  }
+
+  assert {
+    condition = toset([for n in docker_container.grafana[0].networks_advanced : n.name]) == toset([
+      docker_network.observability[0].name, docker_network.grafana[0].name,
+    ])
+    error_message = "Grafana должна стоять в сети стека (datasources loki/tempo/prometheus) и в отдельной сети dmc268-grafana, где публикуется её порт."
+  }
+
+  assert {
+    condition     = docker_network.observability[0].internal == true && docker_network.grafana[0].internal != true
+    error_message = "Сеть стека — internal (наружу из стека не ходит никто), сеть dmc268-grafana — не internal: порты на internal-сети Docker не публикует."
+  }
+
+  assert {
+    condition = (
+      docker_container.grafana[0].ports[0].ip == var.bind_ip
+      && docker_container.grafana[0].ports[0].external == var.grafana_port
+      && docker_container.grafana[0].ports[0].internal == 3000
+    )
+    error_message = "Grafana публикует ровно один порт: 3000 из контейнера на grafana_port и bind_ip (петля; снаружи — SSH-туннель)."
+  }
+}
