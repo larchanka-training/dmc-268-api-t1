@@ -6,7 +6,7 @@
 работа идёт или ждёт приёмки после мерджа — проверку проходит, но попадает в
 список открытых в summary прогона, чтобы висящие change были видны.
 
-    npx @fission-ai/openspec@1.14.2 list --json | python3 scripts/check_openspec_archived.py
+    npx @fission-ai/openspec@1.15.0 list --json | python3 scripts/check_openspec_archived.py
 """
 
 import json

@@ -65,12 +65,12 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
-      - run: npx --yes @fission-ai/openspec@1.14.2 validate --all --strict
+      - run: npx --yes @fission-ai/openspec@1.15.0 validate --all --strict
       # Change со всеми закрытыми задачами архивируется в том же PR — иначе его
       # дельты не доходят до openspec/specs/. Открытые change — в summary.
       # Явный `shell: bash` включает pipefail: сбой openspec не маскируется
       # ошибкой разбора JSON в скрипте.
-      - run: npx --yes @fission-ai/openspec@1.14.2 list --json | python3 scripts/check_openspec_archived.py
+      - run: npx --yes @fission-ai/openspec@1.15.0 list --json | python3 scripts/check_openspec_archived.py
         shell: bash
 
   # Статический аудит workflow и их скриптов: неприбитые actions и образы,
