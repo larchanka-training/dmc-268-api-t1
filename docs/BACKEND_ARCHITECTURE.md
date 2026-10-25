@@ -397,8 +397,13 @@ def upgrade() -> None:
   `none`: спаны никуда не уходят и ошибок экспорта в логе нет. `console`
   печатает их в stdout для отладки, `otlp` шлёт OTLP/HTTP в коллектор
   (`OTEL_EXPORTER_OTLP_ENDPOINT`). Ресурс дополняют `OTEL_RESOURCE_ATTRIBUTES` —
-  `service.version` (в инфре — sha образа) и `deployment.environment.name`;
-  лимит длины атрибутов — `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`. Автонастройка
+  `service.version` (в инфре — sha образа), `deployment.environment.name` и стабильный
+  `service.instance.id` по сервису (`dmc268-api`, `dmc268-worker`, `dmc268-migrate`): случайный
+  UUID на процесс растил бы в Prometheus серии `exported_instance`. Таймаут OTLP —
+  `OTEL_EXPORTER_OTLP_TIMEOUT=4`, в секундах: Python SDK читает переменную в секундах, вопреки
+  спецификации OTel с её миллисекундами (4000 означало бы 66 минут), значение меньше окна
+  graceful shutdown (5 с). Лимит длины атрибутов — `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`.
+  Автонастройка
   экспортёров FastAPI и его OTel-лог исключений выключены явно
   (`telemetry={"auto_configure": False, "logs": False}` в `create_app`).
 - **Метрики** — тот же SDK с отдельным гейтом: `configure_telemetry` собирает
@@ -414,8 +419,8 @@ def upgrade() -> None:
   стоимость — отдельное изменение (#119).
   «Во что обошёлся прогон» остаётся SQL по колонкам `review_runs`: метрики —
   для алертов, не для отчётов.
-- **Логи** — JSON в stdout. `configure_logging(service_name)` ставит один
-  JSON-хендлер: поля по модели данных OTel — `timestamp`, `severity`,
+- **Логи** — два транспорта из одной точки настройки. `configure_logging(service_name)`
+  ставит JSON-хендлер в stdout: поля по модели данных OTel — `timestamp`, `severity`,
   `message`, `logger`, `service.name`, атрибуты из `extra` верхним уровнем
   (служебные поля `extra` перетереть не может); trace-поля
   (`trace_id`/`span_id`/`trace_flags`) добавляет `TraceContextFilter` из
@@ -424,14 +429,18 @@ def upgrade() -> None:
   дубль uvicorn «Exception in ASGI application» отсекается: на `500` в логе
   ровно одна запись, и её `trace_id` равен `X-Trace-ID` ответа. Необработанное
   исключение воркера — вплоть до `WorkerConfigError` старта — пишут excepthook'и
-  той же JSON-записью: дефолтный текстовый дамп интерпретатора коллектор
-  дропает. Дальше запись уносит `file_log` коллектора — он дочитывает stdout
-  контейнеров, шлёт распарсенный JSON в Loki, и в Grafana от записи лога к
-  трейсу ведёт переход по `trace_id` (derived field по structured metadata).
-  По пути коллектор пускает в Loki только логи наших сервисов
-  (записи без нашего `service.name` дропаются) и редактирует записи с
-  исключениями: стектрейс, текст и тело такой записи заменяются маркером
-  `<скрыто>`, `exception.type` остаётся диагнозом.
+  той же JSON-записью: текстовый дамп интерпретатора уходит в stderr и до
+  хранилища логов не доходит. stdout остаётся для `docker logs` и локальной
+  отладки; в Loki записи уходят вторым транспортом — по OTLP из SDK при
+  `OTEL_LOGS_EXPORTER=otlp` (дефолт `none` — только stdout): `configure_telemetry`
+  ставит `LoggerProvider` с `BatchLogRecordProcessor` и хендлер на root, resource
+  общий с трейсами, тело записи — текст сообщения, `exc_info` — атрибуты
+  `exception.*`. Коллектор принимает логи только по OTLP — каталог Docker не
+  читает, логов postgres и rabbitmq в Loki нет. От записи лога к трейсу в
+  Grafana ведёт переход по `trace_id` (derived field по structured metadata
+  OTLP-лога). На пути коллектор редактирует записи с исключениями: стектрейс,
+  текст и тело такой записи заменяются маркером `<скрыто>`, `exception.type`
+  остаётся диагнозом.
 - **Стек** — семь контейнеров (коллектор, Loki, Tempo, Prometheus, Grafana,
   node_exporter за сервер и cAdvisor за контейнеры) с
   одними конфигами локально и на стенде: конфиги лежат в

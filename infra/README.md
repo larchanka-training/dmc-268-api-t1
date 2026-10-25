@@ -83,8 +83,7 @@ Postgres нет. Конфиги лежат в `observability/` и **те же с
 docker compose (профиль `observability`): различия окружений — только переменные и лимиты, не
 конфиги. Образы стека зафиксированы дайджестами (`имя@sha256:…`, дайджест манифест-листа) в
 `main.tf` и в `docker-compose.yml` — одинаково; тег в комментарии рядом, обновление образа —
-осознанная замена дайджеста в обоих файлах (у приёмника `file_log` коллектора операторы
-stanza — beta, обновление с чтением breaking changes).
+осознанная замена дайджеста в обоих файлах, с чтением breaking changes.
 
 Конфиги заливаются в контейнеры при создании (`upload` в `docker_container`): tofu читает их из
 рабочей копии и передаёт через Docker API, поэтому на сервере не нужен чекаут репозитория. Правка
@@ -97,11 +96,15 @@ read_only: конфиг приходит read-only маунтом. Локаль�
 OTEL_LOGS_EXPORTER=otlp docker compose --profile observability up -d` (Grafana —
 http://127.0.0.1:3000 без логина).
 
-Экспорт телеметрии API, воркера и миграций включён окружением (`local.telemetry_env`):
-`service.version` берётся из тега `api_image` (это sha коммита сборки), окружение задаёт
-`deployment_environment_name` — `production`, потому что стенд и есть прод (#97), то же значение
-шлёт кабинет (#108). Коллектор читает `json-file`-логи контейнеров из `/var/lib/docker/containers`
-(только чтение, от root) и раскладывает по хранилищам; чувствительные данные он редактирует до
+Экспорт телеметрии API, воркера и миграций включён окружением (`local.telemetry_env`): трейсы,
+метрики и логи уходят коллектору по OTLP. `service.version` берётся из тега `api_image` (это sha
+коммита сборки), окружение задаёт `deployment_environment_name` — `production`, потому что стенд
+и есть прод (#97), то же значение шлёт кабинет (#108); `service.instance.id` у каждого сервиса
+своё и стабильное (`dmc268-api`, `dmc268-worker`, `dmc268-migrate`) — вместо случайного UUID на
+процесс, который растил бы в Prometheus серии `exported_instance`. Таймаут OTLP — 4 секунды
+(`OTEL_EXPORTER_OTLP_TIMEOUT`): Python SDK читает переменную в секундах, вопреки спецификации
+OTel с её миллисекундами. Логи коллектор получает только по OTLP от сервисов — каталог Docker
+не читает, логов postgres и rabbitmq в Loki нет; чувствительные данные он редактирует до
 отправки — правила в `observability/otelcol.yaml`, тест `tests/infrastructure/test_collector_redaction.py`.
 
 Переменные стека: `observability_memory_mb` (потолки памяти без свопа, семь контейнеров),

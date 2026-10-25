@@ -15,9 +15,10 @@
   `configure_logging()`: JSON-форматтер по модели данных OTel (`trace_id`, `span_id`,
   `trace_flags` на верхнем уровне, lowercase hex, уровень → severity, `service.name` → resource) и
   `Filter`, берущий trace-контекст из текущего спана и бизнес-контекст (`review_run_id`) из
-  `contextvars`. Контекст — только через `extra`/`Filter`, не вклейкой в текст. Нативный OTel Logs
-  SDK в Python ещё не Stable — сейчас стабильный путь через stdout, в `configure_logging()`
-  остаётся TODO на переход.
+  `contextvars`. Контекст — только через `extra`/`Filter`, не вклейкой в текст. В Loki записи
+  уходят вторым транспортом — по OTLP из SDK при `OTEL_LOGS_EXPORTER=otlp` (дефолт `none` —
+  только stdout); переход на хендлер из `opentelemetry-instrumentation-logging` — TODO
+  в `configure_logging()`.
 - **Одна запись со стектрейсом на `500`.** `_internal_error_handler` пишет `logger.error(...,
   exc_info=error)` с `trace_id`, методом и путём без query; дубль uvicorn («Exception in ASGI
   application») отсекается фильтром. Проверено экспериментом (issue #89): наша запись пишется
@@ -27,8 +28,8 @@
   Сэмплирование 100% (`parentbased_always_on`), health-check вне трейсинга,
   `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` задан.
 - **Коллектор и стек — одинаковые конфиги локально и на проде.** OTel Collector
-  (`otel/opentelemetry-collector-contrib`, версия зафиксирована): приём OTLP, сбор логов из stdout
-  (`file_log`), `memory_limiter`, `batch`, редакция чувствительных данных (`url.query`, `url.full`,
+  (`otel/opentelemetry-collector-contrib`, версия зафиксирована): приём OTLP (трейсы, метрики,
+  логи), `memory_limiter`, `batch`, редакция чувствительных данных (`url.query`, `url.full`,
   `db.*`, описание статуса SQL-спанов, события `exception`). Хранилища: Loki — логи, Tempo —
   трейсы, Prometheus — метрики, Grafana — интерфейс с переходом лог ↔ трейс по `trace_id`.
   Локально — те же пять контейнеров в compose, на проде — в `infra/`.
@@ -70,7 +71,7 @@ _Нет: всё изменение достраивает существующу
 - **Инфраструктура:** `docker-compose.yml` (пять контейнеров наблюдаемости, тот же профиль,
   что на проде), `infra/` (Terraform: те же контейнеры на стенде), конфиги коллектора, Loki,
   Tempo, Prometheus, Grafana в репозитории.
-- **Зависимости:** `opentelemetry-exporter-otlp-proto-http` (трейсы и метрики OTLP/HTTP);
+- **Зависимости:** `opentelemetry-exporter-otlp-proto-http` (трейсы, метрики и логи OTLP/HTTP);
   версии образов стека фиксируются.
 - **Не меняется:** контракт API (`docs/openapi/openapi.json` не трогаем), схема базы (миграций
   нет), ответы и поведение прогона.

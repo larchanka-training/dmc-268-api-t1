@@ -189,8 +189,10 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 
 ### Логи
 
-Один путь: stdlib `logging` → JSON в stdout → `file_log` коллектора → Loki.
-Чек-лист ревью логирующего кода:
+Два транспорта из одной точки настройки: stdlib `logging` → JSON в stdout —
+всегда, для docker logs и локальной отладки; OTLP-экспорт из SDK при
+`OTEL_LOGS_EXPORTER=otlp` (дефолт `none`) — путь в Loki через коллектор,
+принимающий логи только по OTLP. Чек-лист ревью логирующего кода:
 
 - **Только stdlib**: `logging.getLogger(__name__)`. Посредников (loguru,
   structlog, свои обёртки) не заводим — мимо них выпадают `extra`, `Filter` и
@@ -210,10 +212,12 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 - **Стектрейс — через `exc_info`**: одна запись с полем стектрейса, а не
   вторая запись с `traceback.format_exc()` в сообщении. Эталон — `500` под
   настоящим uvicorn (`tests/api/test_internal_error_logging.py`).
-- **Нативный OTel Logs SDK** в Python — статус Development, логи через него не
-  отправляем; когда станет Stable, `LoggingHandler` — только из
-  `opentelemetry-instrumentation-logging`: версия в `opentelemetry.sdk._logs`
-  устарела с 1.40.0 и будет удалена.
+- **OTLP-экспорт — из SDK**: при `OTEL_LOGS_EXPORTER=otlp` `configure_telemetry`
+  ставит на root хендлер `opentelemetry.sdk._logs` — в коллектор уходят тело
+  записи (текст сообщения), severity и `exception.*`; ресурс общий с трейсами,
+  `service.name` в нём. Хендлер из `opentelemetry.sdk._logs` помечен устаревшим:
+  переход на `LoggingHandler` из `opentelemetry-instrumentation-logging` — TODO
+  в `configure_logging`, сбор stdout при этом не убирается.
 
 ## Тесты
 

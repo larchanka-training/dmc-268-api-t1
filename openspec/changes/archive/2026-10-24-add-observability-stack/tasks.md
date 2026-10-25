@@ -73,9 +73,9 @@
 
 ## 6. Коллектор и стек — одинаково локально и на проде
 
-- [x] 6.1 Каталог `infra/observability/`: `otelcol.yaml` (приём OTLP, `file_log` с `json_parser`
-  `trace: {}` `severity`, `postgresql`, `memory_limiter`, `batch`, `filter` чужих сервисов,
-  `transform`), конфиги Loki, Tempo, Prometheus,
+- [x] 6.1 Каталог `infra/observability/`: `otelcol.yaml` (приём OTLP — трейсы, метрики, логи,
+  `postgresql`, `memory_limiter`, `batch`, редакция `transform/redact` и `transform/redact-logs`,
+  `groupbyattrs/service`), конфиги Loki, Tempo, Prometheus,
   provisioning Grafana; версии образов зафиксированы дайджестами. Проверка: `docker compose
   --profile observability up` поднимает семь контейнеров, коллектор стартует без ошибок конфига
 - [x] 6.2 OTTL-правила редакции: `url.query`/`url.full` httpx, значения `db.*` и description
