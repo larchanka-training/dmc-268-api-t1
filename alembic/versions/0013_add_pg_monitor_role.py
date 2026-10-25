@@ -42,8 +42,9 @@ def upgrade() -> None:
     # (POSTGRESQL_PASSWORD): иначе роль и подключение разъедутся. Кавычки в
     # литерале SQL удваиваются: пароль задаёт человек.
     password = _monitor_password().replace("'", "''")
-    # bind-параметры в utility-выражениях PostgreSQL не поддерживаются,
-    # поэтому пароль попадает в литерал, а не в плейсхолдер.
+    # bind-параметры в utility-выражениях PostgreSQL не поддерживаются
+    # (грамматика PASSWORD принимает только литерал, не $1), поэтому пароль
+    # попадает в литерал, а не в плейсхолдер.
     # Роль кластерная — её видно всем базам инстанции: на второй базе того
     # же кластера (тестовая, вторая схема) роль уже создана первой. Создаём
     # при отсутствии (в DO-блоке — только зашитое имя, без пароля), пароль
@@ -55,15 +56,26 @@ def upgrade() -> None:
         f" THEN CREATE ROLE {_MONITOR_ROLE}; END IF;"
         f" END $$"
     )
+    # track_utility выключается до ALTER ROLE в той же транзакции (SET LOCAL
+    # живёт до конца транзакции, ревизию alembic выполняет в одной): иначе
+    # пароль осел бы в pg_stat_statements открытым текстом — утилитные
+    # выражения этот трекер пишет как есть, не заменяя константы
+    # плейсхолдерами (проверено на PostgreSQL 18). Возврат вручную не нужен:
+    # SET LOCAL умирает на COMMIT. Если библиотека не загружена (shared_preload
+    # выключен), SET LOCAL спокойно создаёт placeholder-параметр и ничего
+    # не ломает. Тот же приём — у перегенерации пароля на деплое
+    # (infra/main.tf, docker-compose.yml).
+    op.execute("SET LOCAL pg_stat_statements.track_utility = off")
     op.execute(f"ALTER ROLE {_MONITOR_ROLE} WITH LOGIN PASSWORD '{password}'")
     # pg_monitor — предопределённая роль со статистическими вьюхами
     # (pg_stat_activity, pg_stat_database, pg_stat_statements): других
     # привилегий роли мониторинга не нужно, данные она не читает. Повторный
     # GRANT уже выданного членства — notice, не ошибка.
     op.execute(f"GRANT pg_monitor TO {_MONITOR_ROLE}")
-    # Тяжёлые запросы снимает receiver postgresql (событие db.server.top_query
-    # и метрика postgresql.query.execution.time): библиотека уже загружена
-    # через shared_preload_libraries — её включает контейнер базы
+    # Расширение остаётся для ручной диагностики медленных запросов: receiver
+    # postgresql коллектора его не читает (метрики базы он снимает обычными
+    # вьюхами статистики). Библиотека уже загружена через
+    # shared_preload_libraries — её включает контейнер базы
     # (docker-compose.yml и infra/main.tf), здесь создаётся расширение.
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
 

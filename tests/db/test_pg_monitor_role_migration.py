@@ -9,6 +9,7 @@ pg_stat_statements. Отличие от табличных ревизий: ро�
 """
 
 import os
+import uuid
 
 import pytest
 from alembic.config import Config
@@ -75,12 +76,15 @@ def _drop_role(engine) -> None:
         conn.execute(text(f"DROP ROLE IF EXISTS {ROLE}"))
 
 
-def _role_accepts_the_default_password() -> bool:
+def _role_accepts_password(password: str) -> bool:
     assert TEST_DATABASE_URL is not None
-    # Тот же сервер, что у тестовой базы, но под ролью мониторинга: роль
-    # создана миграцией с дефолтным паролем, если вход проходит.
+    # Тот же сервер, что у тестовой базы, но под ролью мониторинга: вход
+    # проходит, если роль создана миграцией с этим паролем. Локальный стек
+    # держит host-авторизацию в trust — там проверка ничего не отвергнет и не
+    # даст ложного срабатывания; отвергнуть она может там, где пароль реально
+    # проверяется (CI-сервис PostgreSQL).
     url = make_url(TEST_DATABASE_URL).set(
-        username=ROLE, password=DEFAULT_ROLE_PASSWORD
+        username=ROLE, password=password
     )
     try:
         with create_engine(url, connect_args={"connect_timeout": 3}).connect() as conn:
@@ -115,4 +119,86 @@ def test_the_monitor_role_revision_downgrades_and_upgrades_cleanly(migrated) -> 
     assert _extension_exists(migrated)
     # Пароль — дефолт миграции, если окружение его не переопределило.
     if not os.environ.get("POSTGRES_MONITOR_PASSWORD"):
-        assert _role_accepts_the_default_password()
+        assert _role_accepts_password(DEFAULT_ROLE_PASSWORD)
+
+
+def _canary_leaks(migrated, fragment_first: str, fragment_last: str) -> int:
+    """Сколько записей pg_stat_statements содержит склеенную канарейку.
+
+    Литерал собирается из частей bind-параметрами: сам запрос проверки не
+    должен попасть в статистику с канарейкой целиком — иначе он находил бы
+    собственную запись.
+    """
+    with migrated.connect() as conn:
+        return int(
+            conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_statements"
+                    " WHERE query LIKE '%' || :first || :last || '%'"
+                ),
+                {"first": fragment_first, "last": fragment_last},
+            ).scalar_one()
+        )
+
+
+def test_the_role_password_never_reaches_pg_stat_statements(migrated) -> None:
+    """Пароль роли из ревизии 0013 не оседает в pg_stat_statements.
+
+    Утилитные выражения трекер пишет как есть — константы не заменяются
+    плейсхолдерами (проверено на PostgreSQL 18), поэтому пароль из литерала
+    ALTER ROLE уехал бы в статистику сервера открытым текстом. Ревизия
+    выключает track_utility до ALTER ROLE в той же транзакции (SET LOCAL).
+    Контрольная половина в конце доказывает, что проверка не пустая: с
+    включённым track_utility тот же ALTER ROLE записывается и находится.
+    """
+    config = _config()
+    # Роли кластерные: снимаем роль и откатываем ревизию, чтобы upgrade
+    # прошёл заново — с паролем-канарейкой из окружения.
+    _drop_role(migrated)
+    command.downgrade(config, "0012")
+    assert not _extension_exists(migrated)
+
+    canary = f"canary-{uuid.uuid4().hex}"
+    previous = os.environ.pop("POSTGRES_MONITOR_PASSWORD", None)
+    os.environ["POSTGRES_MONITOR_PASSWORD"] = canary
+    try:
+        command.upgrade(config, "head")
+    finally:
+        # Остальные тесты сессии ждут окружение без канарейки.
+        if previous is None:
+            os.environ.pop("POSTGRES_MONITOR_PASSWORD", None)
+        else:
+            os.environ["POSTGRES_MONITOR_PASSWORD"] = previous
+
+    assert _extension_exists(migrated)
+    # Роль приняла канарейку: ALTER ROLE прошёл именно с паролем из окружения
+    # (где host-авторизация проверяет пароль по-настоящему).
+    assert _role_accepts_password(canary)
+    # Статистика жива: записи пишутся (этот SELECT уже попал в неё сам).
+    with migrated.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM pg_stat_statements")).scalar_one() > 0
+    # И канарейки в ней нет — track_utility был выключен той же транзакцией.
+    assert _canary_leaks(migrated, "canary-", canary.removeprefix("canary-")) == 0
+
+    # Контроль: тот же ALTER ROLE с включённым track_utility записывается —
+    # значит, отсутствие канарейки выше достигнуто выключением трекера, а не
+    # тем, что статистика перестала писать ALTER ROLE. Канарейка из uuid:
+    # конфликты со старыми записями статистики исключены. Привязка — литералом:
+    # серверная привязка psycopg не проходит по грамматике PASSWORD (как и в
+    # самой ревизии), символы из uuid.hex литерал не ломают.
+    control = f"control-{uuid.uuid4().hex}"
+    with migrated.begin() as conn:
+        conn.execute(text("SET pg_stat_statements.track_utility = on"))
+        conn.execute(text(f"ALTER ROLE {ROLE} PASSWORD '{control}'"))
+        # Соединение вернётся в пул с настройкой по умолчанию.
+        conn.execute(text("RESET pg_stat_statements.track_utility"))
+    assert _canary_leaks(migrated, "control-", control.removeprefix("control-")) == 1
+
+    # Пароль роли возвращаем к дефолту тем же приёмом, что и деплой
+    # (infra/main.tf): track_utility выключен в той же транзакции.
+    with migrated.begin() as conn:
+        conn.execute(text("SET pg_stat_statements.track_utility = off"))
+        conn.execute(
+            text(f"ALTER ROLE {ROLE} PASSWORD '{DEFAULT_ROLE_PASSWORD}'")
+        )
+        conn.execute(text("RESET pg_stat_statements.track_utility"))

@@ -117,19 +117,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
-      postgres:
-        image: postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
-        env:
-          POSTGRES_USER: dmc268
-          POSTGRES_PASSWORD: dmc268
-          POSTGRES_DB: dmc268
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U dmc268 -d dmc268"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
       rabbitmq:
         image: rabbitmq:4.4-alpine@sha256:5b70d54d53d0ce9558b84ad93cb237d06fa2e8c57115fa0ff7223b9eaffa44ed
         ports:
@@ -152,6 +139,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Postgres с pg_stat_statements в preload: канареечный тест пароля роли
+      # (tests/db/test_pg_monitor_role_migration.py) требует загруженного
+      # расширения, а service-контейнеры Actions не позволяют переопределить
+      # CMD образа — поэтому база поднимается шагом docker run.
+      - name: Postgres с pg_stat_statements
+        run: |
+          docker run -d --name ci-postgres \
+            -p 5432:5432 \
+            -e POSTGRES_USER=dmc268 -e POSTGRES_PASSWORD=dmc268 -e POSTGRES_DB=dmc268 \
+            postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5 \
+            -c shared_preload_libraries=pg_stat_statements
+          for _ in $(seq 1 30); do
+            docker exec ci-postgres pg_isready -U dmc268 -d dmc268 -q && break
+            sleep 1
+          done
+          docker exec ci-postgres pg_isready -U dmc268 -d dmc268
       # Точная версия: плавающих мажорных тегов у setup-uv нет.
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
