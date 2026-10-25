@@ -23,3 +23,12 @@
 - [x] 4.2 `tests/test_stack_descriptions.py`: полный apply — шаг `apply.sh` после миграций
 - [x] 4.3 Репетиция на `docker:29-dind`: выкат старый `infra/` → текущий, план с заменой тома (сторож), смена тома через `removed`, повтор без изменений
 - [x] 4.4 shellcheck, zizmor, actionlint, `tofu fmt`/`validate`/`test`, ruff, mypy, pytest, `openspec validate`
+
+## 5. Правки ревью #210
+
+- [x] 5.1 `infra/postgres.tf`, `infra/rabbitmq.tf`: `lifecycle { prevent_destroy = true }` у томов; тест — у каждого адреса из `PROTECTED` есть `prevent_destroy`; README — `tofu destroy` и снятие защиты
+- [x] 5.2 `deploy.yml`: шаг плана — между «Поднять базу и брокер» и «Применить миграции»; `summary.sh` убирает оставшийся файл плана
+- [x] 5.3 `deploy_report.py`: готовность — событие `health_status: healthy`, неуспешные проверки — `exec_die` с `exitCode` ≠ 0, `Health.Log` — запасной путь с пометкой; фикстура `api-new-after-10min.json`
+- [x] 5.4 `stand-ssh`: `ServerAliveInterval 10`, `ServerAliveCountMax 3`; ssh в `apply.sh` и `summary.sh` под `timeout 30`; `timeout-minutes: 3` у шага summary
+- [x] 5.5 `apply.sh`: сбой ssh — `<файл>.error`, summary отличает его от «контейнера нет»
+- [x] 5.6 Репетиция на `docker:29-dind`: targeted apply со сменой имени тома падает до изменений; смена тома через новый ресурс и `removed`; `tofu destroy` падает на томах

@@ -1,0 +1,53 @@
+{
+  "Id": "a49644628f45ec6669ef6a0d5abb50b9c4ddf002d8ade948a77bde275cd79b08",
+  "Created": "2026-10-25T11:40:29.188178262Z",
+  "State": {
+    "Dead": false,
+    "Error": "",
+    "ExitCode": 0,
+    "FinishedAt": "0001-01-01T00:00:00Z",
+    "Health": {
+      "FailingStreak": 0,
+      "Log": [
+        {
+          "End": "2026-10-25T11:48:33.125921014Z",
+          "ExitCode": 0,
+          "Output": "",
+          "Start": "2026-10-25T11:48:32.888193264Z"
+        },
+        {
+          "End": "2026-10-25T11:49:03.125921014Z",
+          "ExitCode": 0,
+          "Output": "",
+          "Start": "2026-10-25T11:49:02.888193264Z"
+        },
+        {
+          "End": "2026-10-25T11:49:33.125921014Z",
+          "ExitCode": 0,
+          "Output": "",
+          "Start": "2026-10-25T11:49:32.888193264Z"
+        },
+        {
+          "End": "2026-10-25T11:50:03.125921014Z",
+          "ExitCode": 0,
+          "Output": "",
+          "Start": "2026-10-25T11:50:02.888193264Z"
+        },
+        {
+          "End": "2026-10-25T11:50:33.125921014Z",
+          "ExitCode": 0,
+          "Output": "",
+          "Start": "2026-10-25T11:50:32.888193264Z"
+        }
+      ],
+      "Status": "healthy"
+    },
+    "OOMKilled": false,
+    "Paused": false,
+    "Pid": 7320,
+    "Restarting": false,
+    "Running": true,
+    "StartedAt": "2026-10-25T11:40:29.22162347Z",
+    "Status": "running"
+  }
+}

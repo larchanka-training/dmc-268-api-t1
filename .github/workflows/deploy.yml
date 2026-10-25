@@ -295,6 +295,19 @@ jobs:
             -target=docker_container.postgres \
             -target=docker_container.rabbitmq
 
+      # План полного выката — в файл, сразу после targeted apply: план видит
+      # его результат, а миграции состояние не трогают (`tofu output` только
+      # читает), так что `apply tfplan` после них не устаревает. Тома защищает
+      # prevent_destroy (infra/postgres.tf) — и здесь, и в targeted apply выше;
+      # сторож в plan.sh дублирует его для summary. Упал план — миграции не
+      # идут. Переменные — те же (якорь).
+      - name: Спланировать и проверить план
+        id: plan
+        env: *tofu-env
+        run: |
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/plan.sh
+
       # Миграции до выката нового кода: упали — полный apply не запускается,
       # на стенде остаётся прежняя версия API и воркера. Заодно скачивается
       # образ, из которого полный apply создаст api и worker.
@@ -309,16 +322,6 @@ jobs:
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/migrate.sh
-
-      # План полного выката — в файл, и до apply его проверяет сторож томов:
-      # план, который уничтожает или заменяет том базы или брокера, роняет шаг,
-      # и apply не запускается (plan.sh). Переменные — те же (якорь).
-      - name: Спланировать и проверить план
-        id: plan
-        env: *tofu-env
-        run: |
-          .github/scripts/deploy/mark.sh
-          .github/scripts/deploy/plan.sh
 
       # Применяется ровно проверенный план. Apply ждёт, пока новый API станет
       # healthy (wait у docker_container.api), и падает через 90 с, если этого
@@ -379,6 +382,9 @@ jobs:
       - name: Записать результат в summary
         id: summary
         if: always()
+        # ssh внутри — под `timeout 30` (summary.sh); это — потолок шага на
+        # случай, если повиснет что-то ещё: job ждал бы до своих 60 минут.
+        timeout-minutes: 3
         env:
           IMAGE: ${{ needs.image.outputs.image }}
           SHA: ${{ needs.gate.outputs.sha }}
@@ -392,8 +398,8 @@ jobs:
             login ${{ steps.login.outcome }} ${{ steps.login.conclusion }}
             diagnostics ${{ steps.diagnostics.outcome }} ${{ steps.diagnostics.conclusion }}
             infra ${{ steps.infra.outcome }} ${{ steps.infra.conclusion }}
-            migrate ${{ steps.migrate.outcome }} ${{ steps.migrate.conclusion }}
             plan ${{ steps.plan.outcome }} ${{ steps.plan.conclusion }}
+            migrate ${{ steps.migrate.outcome }} ${{ steps.migrate.conclusion }}
             apply ${{ steps.apply.outcome }} ${{ steps.apply.conclusion }}
             api_logs ${{ steps.api_logs.outcome }} ${{ steps.api_logs.conclusion }}
             check_api ${{ steps.check_api.outcome }} ${{ steps.check_api.conclusion }}

@@ -19,6 +19,7 @@ ubuntu-latest), как у `check_openspec_archived.py`:
 - `plan.json` — от команды `plan`;
 - `api-old-id`, `api-events.jsonl`, `api-new.json` — контейнер API до apply,
   события Docker во время apply и состояние нового контейнера (`apply.sh`);
+  `<файл>.error` рядом — сервер не ответил (код ssh или timeout);
 - `migrate.log` — вывод `alembic upgrade head` (`migrate.sh`);
 - `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`).
 
@@ -67,8 +68,8 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
      ("start", "checkout", "ssh", "tofu", "s3", "login")),
     ("diagnostics", "Доставки вебхука и сбои воркера с прошлого выката", ("diagnostics",)),
     ("infra", "Поднять базу и брокер", ("infra",)),
-    ("migrate", "Применить миграции", ("migrate",)),
     ("plan", "Спланировать и проверить план", ("plan",)),
+    ("migrate", "Применить миграции", ("migrate",)),
     ("apply", "Применить конфигурацию", ("apply",)),
     ("api_logs", "Логи API после упавшего apply", ("api_logs",)),
     ("check_api", "Проверить, что API жив (через туннель)", ("check_api",)),
@@ -87,6 +88,7 @@ RESULTS = {
 }
 
 # Сколько записей держит State.Health.Log у Docker: старые вытесняются.
+# Журнал — запасной путь для готовности API, основной — события Docker.
 HEALTH_LOG_SIZE = 5
 
 
@@ -163,9 +165,17 @@ def api_downtime(old_id: str, events: list[dict[str, Any]], new: dict[str, Any] 
     Время остановки старого — из событий Docker: контейнер к концу apply уже
     удалён, inspect его не покажет. Начало простоя — SIGTERM (`kill` с
     сигналом 15): по нему uvicorn первым делом закрывает слушающий сокет, и
-    новые соединения старый API уже не принимает.
-    Время нового — из `docker inspect`; готовность — конец первой успешной
-    проверки в `State.Health.Log`. Все отметки — с часов сервера.
+    новые соединения старый API уже не принимает. `Created` и `StartedAt`
+    нового — из `docker inspect`. Готовность — событие `health_status: healthy`
+    нового контейнера, неуспешные проверки до него — `exec_die` с `exitCode` ≠ 0
+    (проверку здоровья Docker запускает как exec, а других exec в API во время
+    apply никто не делает). Все отметки — с часов сервера.
+
+    Нет событий нового контейнера (поток не подключился или оборвался) —
+    запасной путь, `State.Health.Log`. Журнал держит пять последних проверок,
+    после healthy — раз в 30 с: если apply шёл дольше пары минут после healthy,
+    первая успешная из него вытеснена, и готовность выходит позже настоящей.
+    Полный журнал поэтому недостоверен (`healthy_reliable`).
     """
     if new is None:
         return {"status": "missing"}
@@ -174,40 +184,73 @@ def api_downtime(old_id: str, events: list[dict[str, Any]], new: dict[str, Any] 
     if new["Id"] == old_id:
         return {"status": "kept"}
 
-    own = [e for e in events if e.get("Actor", {}).get("ID") == old_id]
+    def of(container: str) -> list[dict[str, Any]]:
+        return [e for e in events if e.get("Actor", {}).get("ID") == container]
 
-    def first(action: str, **attributes: str) -> float | None:
-        for e in own:
-            attrs = e.get("Actor", {}).get("Attributes", {})
-            if e.get("Action") == action and all(attrs.get(k) == v for k, v in attributes.items()):
-                return int(e["timeNano"]) / 1e9
-        return None
+    def at(event: dict[str, Any]) -> float:
+        return int(event["timeNano"]) / 1e9
 
-    term = first("kill", signal="15")
-    died = first("die")
+    def attrs(event: dict[str, Any]) -> dict[str, Any]:
+        attributes: dict[str, Any] = event.get("Actor", {}).get("Attributes", {})
+        return attributes
+
+    def first(own: list[dict[str, Any]], action: str, **attributes: str) -> dict[str, Any] | None:
+        return next(
+            (e for e in own if e.get("Action") == action and all(attrs(e).get(k) == v for k, v in attributes.items())),
+            None,
+        )
+
+    old_events, new_events = of(old_id), of(new["Id"])
+    term, died = first(old_events, "kill", signal="15"), first(old_events, "die")
     created = parse_time(new["Created"])
     started_at = new["State"].get("StartedAt", "")
     started = parse_time(started_at) if not started_at.startswith("0001-") else None
 
-    log = (new["State"].get("Health") or {}).get("Log") or []
-    success = next((i for i, entry in enumerate(log) if entry["ExitCode"] == 0), None)
-    healthy = parse_time(log[success]["End"]) if success is not None else None
+    if new_events:
+        healthy_event = first(new_events, "health_status: healthy")
+        before = new_events[: new_events.index(healthy_event)] if healthy_event else new_events
+        exits = [e for e in before if e.get("Action") == "exec_die"]
+        healthy = at(healthy_event) if healthy_event else None
+        failed = sum(1 for e in exits if attrs(e).get("exitCode") != "0")
+        check = None
+        success = next((e for e in reversed(exits) if attrs(e).get("exitCode") == "0"), None)
+        if healthy_event and success:
+            exec_id = attrs(success).get("execID")
+            begun = next(
+                (e for e in before if str(e.get("Action", "")).startswith("exec_create")
+                 and attrs(e).get("execID") == exec_id),
+                None,
+            )
+            check = round(at(success) - at(begun), 3) if begun else None
+        source, reliable, at_least = "events", True, False
+    else:
+        log = (new["State"].get("Health") or {}).get("Log") or []
+        index = next((i for i, entry in enumerate(log) if entry["ExitCode"] == 0), None)
+        healthy = parse_time(log[index]["End"]) if index is not None else None
+        failed = index if index is not None else len(log)
+        check = round(healthy - parse_time(log[index]["Start"]), 3) if index is not None and healthy else None
+        full = len(log) >= HEALTH_LOG_SIZE
+        # Полный журнал: и успешная проверка могла быть не первой, и неуспешные
+        # до неё могли вытесниться.
+        source, reliable, at_least = "health_log", not full, full
 
     def span(a: float | None, b: float | None) -> float | None:
         return round(b - a, 3) if a is not None and b is not None else None
 
+    term_at = at(term) if term else None
+    died_at = at(died) if died else None
     return {
         "status": "replaced",
-        "stop": span(term, died),
-        "recreate": span(died, created),
+        "stop": span(term_at, died_at),
+        "recreate": span(died_at, created),
         "start": span(created, started),
         "ready": span(started, healthy),
-        "total": span(term, healthy),
-        "failed_checks": success if success is not None else len(log),
-        # Docker держит пять последних записей: в полном журнале более ранние
-        # неуспешные проверки могли вытесниться, и число — нижняя граница.
-        "failed_checks_at_least": len(log) >= HEALTH_LOG_SIZE,
-        "check": span(parse_time(log[success]["Start"]), healthy) if success is not None else None,
+        "total": span(term_at, healthy),
+        "failed_checks": failed,
+        "failed_checks_at_least": at_least,
+        "check": check,
+        "healthy_from": source,
+        "healthy_reliable": reliable,
     }
 
 
@@ -416,6 +459,10 @@ def downtime_section(report_dir: Path) -> list[str]:
     out = ["### Простой API", ""]
     if not (report_dir / "api-old-id").exists():
         return [*out, "Apply не запускался."]
+    for name, what in (("api-old-id", "прежнем"), ("api-new.json", "новом")):
+        if (report_dir / f"{name}.error").exists():
+            code = read(report_dir / f"{name}.error").strip()
+            return [*out, f"Не удалось спросить сервер о {what} контейнере API (ssh или timeout, код {code}): простой не посчитать."]
     new = read_json(report_dir / "api-new.json")
     d = api_downtime(
         read(report_dir / "api-old-id").strip(),
@@ -428,13 +475,14 @@ def downtime_section(report_dir: Path) -> list[str]:
         return [*out, "API создан впервые: прежнего контейнера не было, простой не считается."]
     if d["status"] == "missing":
         return [*out, "Контейнера API после apply нет: простой не посчитать."]
+    ready_mark = "`health_status: healthy`" if d["healthy_from"] == "events" else "`Health.Log[].End`"
     out += [
         "| Этап | Ключ | с |",
         "| --- | --- | ---: |",
         f"| Остановка старого: SIGTERM → выход процесса | `dmc268.deploy.api.downtime.stop` | {seconds(d['stop'])} |",
         f"| Удаление старого и создание нового → `Created` | `dmc268.deploy.api.downtime.recreate` | {seconds(d['recreate'])} |",
         f"| Старт процесса: `Created` → `State.StartedAt` | `dmc268.deploy.api.downtime.start` | {seconds(d['start'])} |",
-        f"| До первой успешной проверки: `StartedAt` → `Health.Log[].End` | `dmc268.deploy.api.downtime.ready` | {seconds(d['ready'])} |",
+        f"| До первой успешной проверки: `StartedAt` → {ready_mark} | `dmc268.deploy.api.downtime.ready` | {seconds(d['ready'])} |",
         f"| **Простой: SIGTERM старому → первая успешная проверка нового** | `dmc268.deploy.api.downtime` | **{seconds(d['total'])}** |",
         "",
     ]
@@ -446,7 +494,13 @@ def downtime_section(report_dir: Path) -> list[str]:
         note += "; успешной проверки не было."
     if d["stop"] is None:
         note += " Событий остановки старого контейнера нет: начало простоя неизвестно."
-    return [*out, note]
+    if d["healthy_from"] == "health_log":
+        note += " Событий нового контейнера в потоке `docker events` нет: готовность — из `State.Health.Log`."
+    out.append(note)
+    if not d["healthy_reliable"]:
+        out += ["", "> [!WARNING]", ("> Готовность и простой недостоверны: журнал проверок полон, первая успешная "
+                "проверка могла из него вытесниться, и простой тогда завышен.")]
+    return out
 
 
 def plan_section(report_dir: Path) -> list[str]:

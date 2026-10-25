@@ -7,7 +7,13 @@
 `resource_changes` вывод `tofu show -json` OpenTofu 1.13.2 на демоне Docker
 29.9.2 (выкат после #204 и план с заменой и удалением томов), `api-*` — то, что
 собрал `apply.sh` при таком выкате: события Docker, id старого контейнера и
-состояние нового.
+состояние нового. `api-new-after-10min.json` — тот же контейнер, но inspect
+через 10 мин после healthy (воркер дорабатывал сообщение): в журнале проверок
+только пять успешных раз в 30 с, первая успешная вытеснена.
+
+Тома защищает и `prevent_destroy` в `infra/*.tf`: `tofu test` его не проверит
+(тест не может переименовать том, а уборка `run` с `command = apply` на нём
+упала бы), поэтому наличие сверяется чтением конфигурации.
 
 Отдельно сверяется раскладка job'а с `scripts/deploy_report.py`: summary
 знает шаги по id, и шаг без id, засечки или строки в `STEP_RESULTS` молча
@@ -42,16 +48,25 @@ esac
 """
 
 # Подложный ssh: отвечает на команды apply.sh и summary.sh из файлов фикстур.
+# SSH_FAIL — подстрока команды, на которой ssh падает, как при обрыве (255).
 FAKE_SSH = """#!/usr/bin/env bash
 while [ $# -gt 0 ]; do case "$1" in -o) shift 2 ;; -*) shift ;; *) break ;; esac; done
 shift
 echo "$*" >> "$CALLS"
+if [ -n "${SSH_FAIL:-}" ] && [[ "$*" == *"$SSH_FAIL"* ]]; then exit 255; fi
 case "$*" in
   *"docker events"*) cat "$FIX/api-events.jsonl"; exec sleep 30 ;;
-  *"docker inspect -f '{{.Id}}'"*) cat "$FIX/api-old-id" ;;
-  *"docker inspect -f"*) cat "$FIX/api-new.json" ;;
+  *"docker inspect -f '{{.Id}}'"*) cat "$FIX/${OLD_ID:-api-old-id}" ;;
+  *"docker inspect -f"*) cat "$FIX/${NEW:-api-new.json}" ;;
   *"docker info"*) printf 'docker_root /var/lib/docker\\n%s\\n' "$DF" ;;
 esac
+"""
+
+# coreutils timeout на macOS нет: подложный пишет вызов и запускает команду.
+FAKE_TIMEOUT = """#!/usr/bin/env bash
+echo "timeout $*" >> "$CALLS"
+shift
+exec "$@"
 """
 
 GNU_DF = """Filesystem     1024-blocks     Used Available Capacity Mounted on
@@ -62,7 +77,7 @@ GNU_DF = """Filesystem     1024-blocks     Used Available Capacity Mounted on
 def fake_bin(tmp_path: Path) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    for name, body in (("tofu", FAKE_TOFU), ("ssh", FAKE_SSH)):
+    for name, body in (("tofu", FAKE_TOFU), ("ssh", FAKE_SSH), ("timeout", FAKE_TIMEOUT)):
         path = bin_dir / name
         path.write_text(body)
         path.chmod(0o755)
@@ -140,11 +155,31 @@ def test_guard_ignores_volumes_it_does_not_protect() -> None:
     assert deploy_report.plan_changes(plan) == {"docker_volume": {"destroy": 1}}
 
 
+def volume_blocks() -> dict[str, str]:
+    """Ресурсы docker_volume из infra/*.tf: адрес → тело блока."""
+    return {
+        f"docker_volume.{name}": body
+        for name, body in re.findall(
+            r'^resource\s+"docker_volume"\s+"(\w+)"\s*\{\n(.*?)^\}', read_infra_text(), re.MULTILINE | re.DOTALL
+        )
+    }
+
+
 def test_guard_protects_every_volume_the_stack_declares() -> None:
     """Новый том или переименованный ресурс тома без правки сторожа — дыра в защите."""
-    declared = set(re.findall(r'resource\s+"docker_volume"\s+"(\w+)"', read_infra_text()))
+    declared = volume_blocks()
     assert declared, "ресурсы docker_volume не найдены в infra/*.tf"
-    assert {f"docker_volume.{name}" for name in declared} == set(deploy_report.PROTECTED)
+    assert set(declared) == set(deploy_report.PROTECTED)
+
+
+def test_every_protected_volume_prevents_destroy() -> None:
+    """Сторож в plan.sh не видит targeted apply шага «Поднять базу и брокер»: том там держит prevent_destroy."""
+    blocks = volume_blocks()
+    for address in deploy_report.PROTECTED:
+        assert address in blocks, f"{address} из PROTECTED не найден в infra/*.tf"
+        assert re.search(
+            r"^\s*lifecycle\s*\{[^}]*^\s*prevent_destroy\s*=\s*true\s*$", blocks[address], re.MULTILINE
+        ), f"у {address} нет lifecycle {{ prevent_destroy = true }}"
 
 
 # --- apply и простой API -----------------------------------------------------
@@ -175,19 +210,61 @@ def test_apply_keeps_the_tofu_exit_code_and_still_collects(tmp_path: Path) -> No
 def test_apply_reads_only_state_of_the_new_container() -> None:
     """В полном `docker inspect` есть окружение с паролями: в файл отчёта его не берём."""
     script = (SCRIPTS / "apply.sh").read_text()
-    inspects = re.findall(r"^\s*ssh stand \"docker inspect[^\n]*", script, re.MULTILINE)
+    inspects = re.findall(r"^\s*ask \S+ \"docker inspect[^\n]*", script, re.MULTILINE)
     assert len(inspects) == 2, inspects
     assert all(" -f " in call for call in inspects), inspects
 
 
-def load_downtime(**changes: object) -> dict[str, object]:
-    new = json.loads((FIXTURES / "api-new.json").read_text())
+def test_apply_asks_the_server_under_a_timeout(tmp_path: Path) -> None:
+    """ConnectTimeout через живой ControlMaster не действует: вопросы серверу — под timeout."""
+    run_script(tmp_path, "plan.sh")
+    run_script(tmp_path, "apply.sh")
+
+    calls = (tmp_path / "calls").read_text()
+    assert calls.count("timeout 30 ssh stand docker inspect") == 2, calls
+
+
+def test_apply_tells_a_failed_ssh_from_a_missing_container(tmp_path: Path) -> None:
+    run_script(tmp_path, "plan.sh")
+    result, report, _ = run_script(tmp_path, "apply.sh", SSH_FAIL="{{.Id}}")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (report / "api-old-id.error").read_text().strip() == "255"
+    text = summary(tmp_path, report, JOB_STATUS="success", STEP_RESULTS=ALL_SUCCESS)
+    assert "Не удалось спросить сервер о прежнем контейнере API (ssh или timeout, код 255)" in text
+    assert "создан впервые" not in text
+
+
+def test_apply_without_the_old_container_is_a_first_deploy(tmp_path: Path) -> None:
+    """Контейнера нет — ssh ответил, а docker inspect пуст: это первый выкат, не сбой."""
+    run_script(tmp_path, "plan.sh")
+    # Нет файла — подложный ssh отвечает пусто с кодом 1, как `docker inspect` без контейнера.
+    result, report, _ = run_script(tmp_path, "apply.sh", OLD_ID="absent")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (report / "api-old-id.error").exists()
+    text = summary(tmp_path, report, JOB_STATUS="success", STEP_RESULTS=ALL_SUCCESS)
+    assert "API создан впервые: прежнего контейнера не было" in text
+
+
+OLD_ID = (FIXTURES / "api-old-id").read_text().strip()
+
+
+def fixture_events() -> list[dict[str, object]]:
+    return deploy_report.read_events((FIXTURES / "api-events.jsonl").read_text())
+
+
+def old_events_only() -> list[dict[str, object]]:
+    """Поток, в котором нет событий нового контейнера: он оборвался после остановки старого."""
+    return [e for e in fixture_events() if e["Actor"]["ID"] == OLD_ID]  # type: ignore[index]
+
+
+def load_downtime(
+    events: list[dict[str, object]] | None = None, new_file: str = "api-new.json", **changes: object
+) -> dict[str, object]:
+    new = json.loads((FIXTURES / new_file).read_text())
     new.update(changes)
-    return deploy_report.api_downtime(
-        (FIXTURES / "api-old-id").read_text().strip(),
-        deploy_report.read_events((FIXTURES / "api-events.jsonl").read_text()),
-        new,
-    )
+    return deploy_report.api_downtime(OLD_ID, fixture_events() if events is None else events, new)
 
 
 def test_downtime_breakdown_from_real_events() -> None:
@@ -205,18 +282,59 @@ def test_downtime_breakdown_from_real_events() -> None:
     }, abs=0.002)
     assert d["failed_checks"] == 2
     assert not d["failed_checks_at_least"]
+    assert d["healthy_from"] == "events" and d["healthy_reliable"]
     parts = (d["stop"], d["recreate"], d["start"], d["ready"])
     assert sum(parts) == pytest.approx(d["total"], abs=0.005)  # type: ignore[arg-type]
 
 
-def test_downtime_when_the_new_api_never_became_healthy() -> None:
-    new = json.loads((FIXTURES / "api-new.json").read_text())
-    failing = [{**entry, "ExitCode": 1} for entry in new["State"]["Health"]["Log"]] * 2
-    d = load_downtime(State={**new["State"], "Health": {"Status": "unhealthy", "Log": failing[:5]}})
+def test_downtime_does_not_grow_when_apply_ends_long_after_healthy() -> None:
+    """Сценарий ревью #210: inspect через 10 мин после healthy, первая успешная из журнала вытеснена.
 
-    assert d["ready"] is None and d["total"] is None
+    По журналу простой вышел бы ≈ 485 с; по событию `health_status: healthy` — настоящие 5,1 с.
+    """
+    d = load_downtime(new_file="api-new-after-10min.json")
+
+    assert d["total"] == pytest.approx(5.13, abs=0.002)
+    assert d["ready"] == pytest.approx(3.904, abs=0.002)
+    assert d["failed_checks"] == 2 and d["healthy_from"] == "events" and d["healthy_reliable"]
+
+
+def test_downtime_from_the_health_log_is_flagged_when_the_log_is_full() -> None:
+    """Без событий нового контейнера — запасной путь по журналу; полный журнал — пометка о недостоверности."""
+    d = load_downtime(old_events_only(), new_file="api-new-after-10min.json")
+
+    assert d["healthy_from"] == "health_log"
+    assert d["total"] > 480  # type: ignore[operator]
+    assert not d["healthy_reliable"] and d["failed_checks_at_least"]
+
+
+def test_downtime_from_a_short_health_log_is_exact() -> None:
+    """Журнал не полон — ничего не вытеснено, и запасной путь даёт то же, что события."""
+    d = load_downtime(old_events_only())
+
+    assert d["healthy_from"] == "health_log" and d["healthy_reliable"]
+    assert d["total"] == pytest.approx(5.13, abs=0.002)
+    assert d["check"] == pytest.approx(0.238, abs=0.002)
+    assert d["failed_checks"] == 2 and not d["failed_checks_at_least"]
+
+
+def test_downtime_when_the_new_api_never_became_healthy() -> None:
+    """Поток видел старт нового и только неуспешные проверки: healthy не было, счёт неуспешных точный."""
+    events = []
+    for e in fixture_events():
+        if e["Actor"]["ID"] == OLD_ID:  # type: ignore[index]
+            events.append(e)
+        elif e["Action"] != "health_status: healthy":
+            attributes = {**e["Actor"]["Attributes"]}  # type: ignore[index]
+            if e["Action"] == "exec_die":
+                attributes["exitCode"] = "1"
+            events.append({**e, "Actor": {**e["Actor"], "Attributes": attributes}})  # type: ignore[dict-item]
+    d = load_downtime(events)
+
+    assert d["ready"] is None and d["total"] is None and d["check"] is None
     assert d["stop"] == pytest.approx(1.14, abs=0.002)
-    assert d["failed_checks"] == 5 and d["failed_checks_at_least"]
+    assert d["failed_checks"] == 3 and not d["failed_checks_at_least"]
+    assert d["healthy_from"] == "events"
 
 
 def test_downtime_when_the_api_was_not_recreated() -> None:
@@ -291,8 +409,13 @@ ALL_SUCCESS = "\n".join(f"{i} success success" for _, _, ids in deploy_report.ST
 
 def summary(tmp_path: Path, report: Path, **env: str) -> str:
     out = tmp_path / "summary.md"
+    root = tmp_path / "repo"
+    (root / "infra").mkdir(parents=True, exist_ok=True)
+    (root / "scripts").mkdir(exist_ok=True)
+    (root / "scripts" / "deploy_report.py").write_text(Path("scripts/deploy_report.py").read_text())
     result = subprocess.run(
         ["bash", str((SCRIPTS / "summary.sh").resolve())],
+        cwd=root,
         capture_output=True,
         text=True,
         check=False,
@@ -321,6 +444,8 @@ def test_summary_of_a_successful_deploy(tmp_path: Path) -> None:
 
     assert text.startswith("## Деплой: успешно\n")
     assert "| **Простой: SIGTERM старому → первая успешная проверка нового** | `dmc268.deploy.api.downtime` | **5.1** |" in text
+    assert "`StartedAt` → `health_status: healthy`" in text
+    assert "[!WARNING]" not in text
     assert "| `docker_container` |  |  |  | 2 |  |" in text
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 1 |" in text
     assert "| `/` | корень, Docker (`/var/lib/docker`) | 48.2 ГиБ | 38% |" in text
@@ -386,3 +511,31 @@ def test_tofu_runs_without_the_wrapper() -> None:
     """Обёртка setup-opentofu кладёт stdout tofu в выходы шага, а в нём пароли."""
     setup = next(s for s in deploy_steps() if str(s.get("uses", "")).startswith("opentofu/setup-opentofu@"))
     assert setup["with"]["tofu_wrapper"] is False  # type: ignore[index]
+
+
+def test_summary_warns_when_readiness_comes_from_a_full_health_log(tmp_path: Path) -> None:
+    run_script(tmp_path, "plan.sh")
+    _, report, _ = run_script(tmp_path, "apply.sh", NEW="api-new-after-10min.json")
+    events = (report / "api-events.jsonl").read_text().splitlines()
+    (report / "api-events.jsonl").write_text("\n".join(e for e in events if OLD_ID in e) + "\n")
+
+    text = summary(tmp_path, report, JOB_STATUS="success", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "`StartedAt` → `Health.Log[].End`" in text
+    assert "> Готовность и простой недостоверны" in text
+
+
+def test_summary_removes_a_plan_left_by_failed_migrations(tmp_path: Path) -> None:
+    """План строится до миграций: упали они — apply.sh не шёл, файл плана с паролями убирает summary."""
+    _, report, root = run_script(tmp_path, "plan.sh")
+    assert (root / "infra" / "tfplan").exists()
+
+    summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert not (root / "infra" / "tfplan").exists()
+    assert "timeout 30 ssh -o ConnectTimeout=10 stand" in (tmp_path / "calls").read_text()
+
+
+def test_summary_step_has_a_timeout() -> None:
+    summary_step = deploy_steps()[-1]
+    assert summary_step["timeout-minutes"] == 3

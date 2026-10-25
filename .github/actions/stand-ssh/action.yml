@@ -58,6 +58,11 @@ runs:
         # после последнего вызова. Туннели (`ssh -f -N -L`) идут мимо него, с
         # `-o ControlPath=none`: через master ExitOnForwardFailure не
         # срабатывает, а проброс умирает вместе с master по ControlPersist.
+        #
+        # ServerAlive: ConnectTimeout через живой master не действует — клиент
+        # идёт в сокет, а не в TCP. Если TCP мастера пропал без разрыва (сервер
+        # недоступен), вызовы висели бы до таймаута job'а; так master замечает
+        # мёртвое соединение за 30 с (3 запроса раз в 10 с) и закрывается.
         cat > ~/.ssh/config <<CFG
         Host stand
           HostName $HOST
@@ -69,5 +74,7 @@ runs:
           ControlMaster auto
           ControlPath ~/.ssh/cm-%C
           ControlPersist 10m
+          ServerAliveInterval 10
+          ServerAliveCountMax 3
         CFG
         chmod 600 ~/.ssh/config
