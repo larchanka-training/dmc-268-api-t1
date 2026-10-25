@@ -24,6 +24,8 @@ on:
       - "prompts/**"
       - "tests/live/**"
       - ".github/workflows/llm-live.yml"
+      - ".github/actions/python-env/**"
+      - "tests/strict_skips.py"
       - ".github/eurorouter-model"
       - "uv.lock"
   push:
@@ -42,6 +44,8 @@ on:
       - "prompts/**"
       - "tests/live/**"
       - ".github/workflows/llm-live.yml"
+      - ".github/actions/python-env/**"
+      - "tests/strict_skips.py"
       - ".github/eurorouter-model"
       - "uv.lock"
   workflow_dispatch:
@@ -73,17 +77,10 @@ jobs:
       # единственный допустимый правилом провайдер (GreenPT) с 21.10 отвергает
       # любой запрос (#93, #95).
       - run: echo "EUROROUTER_MODEL=$(cat .github/eurorouter-model)" >> "$GITHUB_ENV"
-      # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          version: "0.13.5"
-          python-version: "3.14"
-      - run: uv sync --all-extras --frozen
+      - uses: ./.github/actions/python-env
       - name: pytest -m live (пропуск теста - провал)
-        run: |
-          set -o pipefail
-          uv run pytest -q -rs -m live tests/live | tee pytest.out
-          if grep -qE '[0-9]+ skipped' pytest.out; then
-            echo "::error::живой тест пропущен: нет секрета AI_DMC268_T1 или переменной AI_DMC268_URL в окружении прогона"
-            exit 1
-          fi
+        env:
+          # Пропуск роняет прогон (tests/strict_skips.py): обычно нет секрета
+          # AI_DMC268_T1 или переменной AI_DMC268_URL в окружении прогона.
+          PYTEST_FAIL_ON_SKIP: "1"
+        run: uv run pytest -q -rs -m live tests/live

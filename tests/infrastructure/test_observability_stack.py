@@ -21,7 +21,10 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO / "docker-compose.yml"
-MAIN_TF = REPO / "infra" / "main.tf"
+LOCALS_TF = REPO / "infra" / "locals.tf"
+OBSERVABILITY_TF = REPO / "infra" / "observability.tf"
+OUTPUTS_TF = REPO / "infra" / "outputs.tf"
+MIGRATE_SCRIPT = REPO / ".github" / "scripts" / "deploy" / "migrate.sh"
 VARIABLES_TF = REPO / "infra" / "variables.tf"
 OBSERVABILITY_DIR = REPO / "infra" / "observability"
 PROMETHEUS_CONFIG = OBSERVABILITY_DIR / "prometheus.yml"
@@ -32,7 +35,7 @@ DASHBOARDS_DIR = REPO / "infra" / "observability" / "grafana" / "provisioning" /
 PROVIDER_CONFIG = DASHBOARDS_DIR / "dashboards.yaml"
 DASHBOARD_JSON = DASHBOARDS_DIR / "dmc268-overview.json"
 
-# Сервисы стека наблюдаемости и их переменные-образы в locals main.tf:
+# Сервисы стека наблюдаемости и их переменные-образы в locals.tf:
 # пар «сервис compose → local» обязан совпадать дайджестами в обоих файлах.
 STACK_SERVICES = {
     "collector": "otelcol_image",
@@ -65,11 +68,30 @@ def load_loki() -> dict[str, Any]:
 
 
 def parse_tf_locals() -> dict[str, str]:
-    """Переменные locals main.tf: имя → значение-строка."""
+    """Переменные locals (infra/locals.tf): имя → значение-строка."""
     locals: dict[str, str] = {}
-    for name, value in re.findall(r'^\s*(\w+)\s+=\s+"([^"]*)"', MAIN_TF.read_text(encoding="utf-8"), re.MULTILINE):
+    for name, value in re.findall(r'^\s*(\w+)\s+=\s+"([^"]*)"', LOCALS_TF.read_text(encoding="utf-8"), re.MULTILINE):
         locals[name] = value
     return locals
+
+
+def _tf_container_block(name: str) -> str:
+    """Текст блока docker_container в infra/*.tf по имени ресурса.
+
+    Конфигурация разрезана по доменам (app.tf, postgres.tf, observability.tf),
+    поэтому поиск идёт по всем файлам infra/*.tf. Вложенные блоки сдвинуты
+    отступом, поэтому конец ресурса — первая закрывающая скобка в начале
+    строки после заголовка.
+    """
+    for path in sorted((REPO / "infra").glob("*.tf")):
+        match = re.search(
+            rf'resource "docker_container" "{name}" \{{.*?\n\}}',
+            path.read_text(encoding="utf-8"),
+            re.DOTALL,
+        )
+        if match is not None:
+            return match.group(0)
+    raise AssertionError(f"нет docker_container.{name} в infra/*.tf")
 
 
 # --- postgres-exporter удалён целиком -----------------------------------------------
@@ -79,7 +101,7 @@ def parse_tf_locals() -> dict[str, str]:
     ("path", "needle"),
     [
         (COMPOSE_FILE, "postgres-exporter"),
-        (MAIN_TF, "postgres_exporter"),
+        (OBSERVABILITY_TF, "postgres_exporter"),
         (VARIABLES_TF, "postgres_exporter"),
         (README, "postgres-exporter"),
     ],
@@ -108,7 +130,7 @@ def test_host_and_container_exporters_in_compose(service: str) -> None:
 @pytest.mark.parametrize("container", ["node_exporter", "cadvisor", "docker_socket_proxy"])
 def test_host_and_container_exporters_in_infra(container: str) -> None:
     """То же в infra: контейнер, образ из locals и потолок памяти из переменной."""
-    text = MAIN_TF.read_text(encoding="utf-8")
+    text = OBSERVABILITY_TF.read_text(encoding="utf-8")
     assert f'resource "docker_image" "{container}"' in text
     assert f'resource "docker_container" "{container}"' in text
     memory_variable = container.replace("docker_socket_proxy", "docker_proxy")
@@ -154,7 +176,7 @@ def _infra_digests() -> dict[str, str]:
 
 
 def test_stack_images_are_pinned_by_digest_in_both_places() -> None:
-    """Все восемь образов стека — имя@sha256:…, одинаковые в compose и main.tf.
+    """Все восемь образов стека — имя@sha256:…, одинаковые в compose и infra.
 
     Тег плавает, дайджест манифест-листа нет: рассинхрон между окружениями —
     ошибка, поэтому сравниваются именно дайджесты, а не полные ссылки.
@@ -166,11 +188,11 @@ def test_stack_images_are_pinned_by_digest_in_both_places() -> None:
 
 
 def _service_version(image: str) -> str:
-    """Прогнать locals `service_version` из main.tf: те же regex в том же
+    """Прогнать locals `service_version` из locals.tf: те же regex в том же
     порядке `try`, что и в конфиге."""
-    text = MAIN_TF.read_text(encoding="utf-8")
+    text = LOCALS_TF.read_text(encoding="utf-8")
     patterns = re.findall(r'regex\("([^"]+)", var\.api_image\)', text)
-    assert patterns, "в main.tf нет regex для service_version"
+    assert patterns, "в locals.tf нет regex для service_version"
     for pattern in patterns:
         match = re.search(pattern, image)
         if match is not None:
@@ -194,7 +216,7 @@ def test_service_version_extracts_the_tag_before_the_digest(image: str, version:
 
 
 def test_stack_published_ports_match_between_compose_and_infra() -> None:
-    """Публикуемые порты стека одинаковы в compose и main.tf.
+    """Публикуемые порты стека одинаковы в compose и infra.
 
     Единственный публикуемый порт стека — Grafana (3000 на internal_bind_ip):
     остальной трафик внутренний, его публикует только человек, который правит
@@ -208,13 +230,13 @@ def test_stack_published_ports_match_between_compose_and_infra() -> None:
         r"ports \{\s*internal = (\d+)\s*external = var\.(\w+)\s*ip",
         _tf_container_block("grafana"),
     )
-    assert match is not None, "у grafana в main.tf нет блока ports"
+    assert match is not None, "у grafana в infra/*.tf нет блока ports"
     internal, external_var = int(match.group(1)), match.group(2)
     assert internal == 3000
 
     default = re.search(
         rf'variable "{external_var}" \{{.*?default\s*=\s*(\d+)',
-        MAIN_TF.parent.joinpath("variables.tf").read_text(encoding="utf-8"),
+        VARIABLES_TF.read_text(encoding="utf-8"),
         re.DOTALL,
     )
     assert default is not None, f"у переменной {external_var} нет дефолта"
@@ -249,7 +271,7 @@ def test_grafana_volume_has_no_fixed_name() -> None:
 # --- лимиты и preload: одно и то же в compose и infra -------------------------------
 
 
-@pytest.mark.parametrize("file", [COMPOSE_FILE, MAIN_TF])
+@pytest.mark.parametrize("file", [COMPOSE_FILE, OBSERVABILITY_TF])
 def test_prometheus_is_capped_by_size(file: Path) -> None:
     """Потолок по размеру рядом с потолком по времени: всплеск кардинальности
     не должен забить диск раньше срока хранения."""
@@ -330,7 +352,7 @@ def test_cadvisor_reaches_docker_through_the_proxy_in_compose() -> None:
 
 
 def test_cadvisor_reaches_docker_through_the_proxy_in_infra() -> None:
-    """То же в main.tf: у cAdvisor флаг -docker и две сети стека (observability
+    """То же в infra: у cAdvisor флаг -docker и две сети стека (observability
     для Prometheus и отдельная для proxy), сети приложения и proxy-socket —
     только у своих."""
     cadvisor = _tf_container_block("cadvisor")
@@ -369,9 +391,9 @@ def test_stack_networks_split_the_stack_from_the_app_in_compose() -> None:
 
 
 def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
-    """То же в main.tf: у loki/tempo/grafana/node-exporter/cadvisor сети
+    """То же в infra: у loki/tempo/grafana/node-exporter/cadvisor сети
     dmc268 нет; collector и prometheus — в обеих; docker_proxy — internal."""
-    text = MAIN_TF.read_text(encoding="utf-8")
+    text = OBSERVABILITY_TF.read_text(encoding="utf-8")
     assert re.search(
         r'resource "docker_network" "observability_docker_proxy" \{[^}]*internal\s*=\s*true', text
     )
@@ -391,20 +413,23 @@ def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
 def test_the_monitor_role_password_step_travels_with_the_migrations() -> None:
     """Шаг перегенерации пароля роли (ALTER ROLE при выключенном
     track_utility) и сам пароль едут вместе с миграциями в ОБОИХ окружениях:
-    если при переносе миграций (например, на #200) шаг потерять, ревизия 0013
-    создаст роль с дефолтным паролем и коллектор не войдёт (замечание ревью
-    PR #130)."""
-    compose_api = load_compose()["services"]["api"]
-    assert "POSTGRES_MONITOR_PASSWORD" in compose_api["environment"]
-    command = " ".join(compose_api["command"])
+    если при переносе миграций шаг потерять, ревизия 0013 создаст роль с
+    дефолтным паролем и коллектор не войдёт (замечание ревью PR #130)."""
+    compose_migrate = load_compose()["services"]["migrate"]
+    assert "POSTGRES_MONITOR_PASSWORD" in compose_migrate["environment"]
+    command = " ".join(compose_migrate["command"])
     assert "alembic upgrade head" in command
     assert "ALTER ROLE" in command
     assert "track_utility" in command
 
-    migrate = _tf_container_block("migrate")
-    assert "POSTGRES_MONITOR_PASSWORD=${var.postgres_monitor_password}" in migrate
-    assert "ALTER ROLE" in migrate
-    assert "track_utility" in migrate
+    script = MIGRATE_SCRIPT.read_text(encoding="utf-8")
+    assert 'os.environ["POSTGRES_MONITOR_PASSWORD"]' in script
+    assert "ALTER ROLE" in script
+    assert "track_utility" in script
+
+    # Пароль приезжает в скрипт окружением миграций — выходом migrate_env.
+    outputs = OUTPUTS_TF.read_text(encoding="utf-8")
+    assert "POSTGRES_MONITOR_PASSWORD=${var.postgres_monitor_password}" in outputs
 
 
 # --- приём и телеметрия вендора -------------------------------------------------------
@@ -430,23 +455,23 @@ def test_loki_caps_ingestion() -> None:
 def test_vendor_telemetry_is_off() -> None:
     """Аналитика вендоров выключена в обоих окружениях: Loki не отправляет
     статистику использования (analytics.reporting_enabled), Tempo — свой
-    usage_report, Grafana — GF_ANALYTICS_* в compose и main.tf."""
+    usage_report, Grafana — GF_ANALYTICS_* в compose и infra."""
     assert load_loki()["analytics"] == {"reporting_enabled": False}
     tempo = yaml.safe_load(TEMPO_CONFIG.read_text(encoding="utf-8"))
     assert tempo["usage_report"]["reporting_enabled"] is False
     grafana_compose = load_compose()["services"]["grafana"]["environment"]
     assert grafana_compose["GF_ANALYTICS_REPORTING_ENABLED"] == "false"
     assert grafana_compose["GF_ANALYTICS_CHECK_FOR_UPDATES"] == "false"
-    main_tf = MAIN_TF.read_text(encoding="utf-8")
-    assert '"GF_ANALYTICS_REPORTING_ENABLED=false"' in main_tf
-    assert '"GF_ANALYTICS_CHECK_FOR_UPDATES=false"' in main_tf
+    observability_tf = OBSERVABILITY_TF.read_text(encoding="utf-8")
+    assert '"GF_ANALYTICS_REPORTING_ENABLED=false"' in observability_tf
+    assert '"GF_ANALYTICS_CHECK_FOR_UPDATES=false"' in observability_tf
 
 
 @pytest.mark.parametrize(
     ("path", "variables"),
     [
         (COMPOSE_FILE, ("POSTGRESQL_USERNAME", "POSTGRESQL_PASSWORD", "POSTGRESQL_ENDPOINT", "POSTGRESQL_DATABASE")),
-        (MAIN_TF, ("POSTGRESQL_USERNAME", "POSTGRESQL_PASSWORD", "POSTGRESQL_ENDPOINT", "POSTGRESQL_DATABASE")),
+        (OBSERVABILITY_TF, ("POSTGRESQL_USERNAME", "POSTGRESQL_PASSWORD", "POSTGRESQL_ENDPOINT", "POSTGRESQL_DATABASE")),
     ],
 )
 def test_collector_receives_postgresql_receiver_variables(path: Path, variables: tuple[str, ...]) -> None:
@@ -474,21 +499,6 @@ def _compose_env_defaults(service: str) -> dict[str, str]:
         match = _DEFAULT_ENV.match(value)
         defaults[name] = match.group("default") if match else value
     return defaults
-
-
-def _tf_container_block(name: str) -> str:
-    """Текст блока docker_container в main.tf по имени ресурса.
-
-    Вложенные блоки сдвинуты отступом, поэтому конец ресурса — первая
-    закрывающая скобка в начале строки после заголовка.
-    """
-    match = re.search(
-        rf'resource "docker_container" "{name}" \{{.*?\n\}}',
-        MAIN_TF.read_text(encoding="utf-8"),
-        re.DOTALL,
-    )
-    assert match is not None, f"нет docker_container.{name} в main.tf"
-    return match.group(0)
 
 
 def test_collector_in_compose_takes_only_otlp_and_is_hardened() -> None:
@@ -519,7 +529,7 @@ def test_collector_in_infra_takes_only_otlp_and_is_hardened() -> None:
     пути, apply упал бы на создании контейнера. Локальный коллектор
     read_only: конфиг приходит read-only маунтом."""
     block = _tf_container_block("otelcol")
-    text = MAIN_TF.read_text(encoding="utf-8")
+    text = OBSERVABILITY_TF.read_text(encoding="utf-8")
     assert "/var/lib/docker/containers" not in block
     assert "OTELCOL_LOG_FILES" not in block
     assert not re.search(r'user\s*=\s*"0"', block)
@@ -562,7 +572,7 @@ def test_compose_resource_attributes_pin_a_stable_instance_id(
 def test_infra_telemetry_env_sets_seconds_timeout_and_log_exporter() -> None:
     """telemetry_env: таймаут в секундах (SDK Python читает переменную в
     СЕКУНДАХ, вопреки спеке OTel — мс) и включённый экспортёр логов."""
-    text = MAIN_TF.read_text(encoding="utf-8")
+    text = LOCALS_TF.read_text(encoding="utf-8")
     assert '"OTEL_EXPORTER_OTLP_TIMEOUT=4"' in text
     assert "OTEL_EXPORTER_OTLP_TIMEOUT=4000" not in text
     assert '"OTEL_LOGS_EXPORTER=otlp"' in text
@@ -570,13 +580,15 @@ def test_infra_telemetry_env_sets_seconds_timeout_and_log_exporter() -> None:
 
 @pytest.mark.parametrize(
     ("container", "instance"),
-    [("migrate", "dmc268-migrate"), ("api", "dmc268-api"), ("worker", "dmc268-worker")],
+    [("api", "dmc268-api"), ("worker", "dmc268-worker")],
 )
 def test_infra_resource_attributes_pin_a_stable_instance_id(
     container: str, instance: str
 ) -> None:
     """service.instance.id — стабильное имя контейнера, не UUID (смысл —
-    в тесте compose выше)."""
+    в тесте compose выше). У миграций своего контейнера больше нет:
+    идентификатор dmc268-migrations проверяет тест пароля роли выше
+    (выход migrate_env)."""
     block = _tf_container_block(container)
     match = re.search(
         r"OTEL_RESOURCE_ATTRIBUTES=[^\n]+service\.instance\.id=(?P<instance>[\w-]+)",

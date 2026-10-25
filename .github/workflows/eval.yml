@@ -84,20 +84,13 @@ jobs:
       # сравнимы только при одной модели. Числа в docs/testing/RULES_E2E_REPORT.md
       # сняты на прежней qwen3-coder-30b-a3b (#93, #95).
       - run: echo "EUROROUTER_MODEL=$(cat .github/eurorouter-model)" >> "$GITHUB_ENV"
-      # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          version: "0.13.5"
-          python-version: "3.14"
-      - run: uv sync --all-extras --frozen
+      - uses: ./.github/actions/python-env
       - name: pytest -m eval (пропуск теста - провал)
-        run: |
-          set -o pipefail
-          uv run pytest -q -rs -s -m eval tests/eval | tee pytest.out
-          if grep -qE '[0-9]+ skipped' pytest.out; then
-            echo "::error::eval пропущен: нет секрета AI_DMC268_T1, переменной AI_DMC268_URL или сервисов"
-            exit 1
-          fi
+        env:
+          # Пропуск роняет прогон (tests/strict_skips.py): обычно нет секрета
+          # AI_DMC268_T1, переменной AI_DMC268_URL или сервисов.
+          PYTEST_FAIL_ON_SKIP: "1"
+        run: uv run pytest -q -rs -s -m eval tests/eval
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

@@ -19,6 +19,12 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 Тесты с базой: маркер `integration`, переменная `TEST_DATABASE_URL`, отдельная база — подготовка
 удаляет схему.
 
+Пропущенный тест — провал: в CI шаг pytest идёт с `PYTEST_FAIL_ON_SKIP=1`, и плагин
+`tests/strict_skips.py` (подключён в `addopts`) отдаёт код 1, если в прогоне был хоть один
+пропуск. Без переменной пропуск остаётся пропуском — так задумано для работы без базы. Проверить
+локально, как в CI: `PYTEST_FAIL_ON_SKIP=1 uv run pytest` с `TEST_DATABASE_URL`, `TEST_RABBITMQ_URL`
+и `TEST_RABBITMQ_CONTAINER`.
+
 ## Где что лежит
 
 | Что | Где |
@@ -44,7 +50,8 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 предлагать правку: интеграционный тест, отдельный контейнер того же образа, `tofu plan` на
 локальном Docker. Предположение, которое не проверили, так и называем в задаче и в описании
 пул-реквеста. Примеры того, что запуск опроверг: один вынос миграций из графа OpenTofu не убирает
-простой API (общий `docker_image` ждёт дренажа воркера); RabbitMQ в контейнере не видит лимит
+простой API (общий `docker_image` ждёт дренажа воркера), а `create_before_destroy` у образа —
+тоже (OpenTofu всё равно сначала гасит контейнер); RabbitMQ в контейнере не видит лимит
 памяти cgroup; ранний отказ `RequestBodyLimitMiddleware` уходит `text/plain`, а не Problem Details.
 
 ## Слои

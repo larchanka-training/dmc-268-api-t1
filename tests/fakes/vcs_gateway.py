@@ -1,6 +1,7 @@
 """Записывающий `VcsGateway` для тестов публикации."""
 
 from dataclasses import dataclass, field
+from uuid import UUID
 
 from app.application.ports.vcs_review import (
     InlineCommentDraft,
@@ -46,6 +47,12 @@ class RecordingVcsGateway:
     diff_error: Exception | None = None
     reply_errors: dict[str, Exception] = field(default_factory=dict)
     resolve_errors: dict[str, Exception] = field(default_factory=dict)
+    # Ревью опубликовано, а id inline-комментариев не получены (`GET …/comments` упал).
+    inline_ids_lost: bool = False
+    # Сбой самого check run merge gate.
+    check_error: Exception | None = None
+    # Прогоны, чьим маркером помечено каждое опубликованное ревью.
+    review_run_ids: list[UUID] = field(default_factory=list)
 
     def fetch_diff(
         self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
@@ -89,8 +96,16 @@ class RecordingVcsGateway:
         installation_id: int,
         summary_body: str,
         inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
     ) -> PullRequestReviewPublication:
         self.publications.append((summary_body, inline_comments))
+        self.review_run_ids.append(review_run_id)
+        if self.inline_ids_lost:
+            return PullRequestReviewPublication(
+                summary_provider_comment_id="summary-1",
+                inline_comments=tuple(None for _ in inline_comments),
+            )
         published = tuple(
             PublishedInlineComment(
                 file_path=item.file_path,
@@ -151,4 +166,6 @@ class RecordingVcsGateway:
         installation_id: int,
         check: MergeGateCheck,
     ) -> None:
+        if self.check_error is not None:
+            raise self.check_error
         self.checks.append(check)

@@ -1,6 +1,8 @@
 """Публикация ревью и check run через GitHub REST и GraphQL."""
 
+import logging
 from typing import Any
+from uuid import UUID
 
 from app.application.ports.vcs_gateway import CHECK_RUN_NAME
 from app.application.ports.vcs_review import (
@@ -11,7 +13,17 @@ from app.application.ports.vcs_review import (
     ReviewThreadState,
 )
 from app.domain.enums import DiffSide
-from app.infrastructure.vcs.errors import VcsError
+from app.infrastructure.vcs.errors import (
+    VcsError,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def review_run_marker(review_run_id: UUID) -> str:
+    """Скрытый маркер прогона в теле ревью: HTML-комментарий GitHub не показывает,
+    а `GET …/reviews` отдаёт в `body` как есть."""
+    return f"<!-- dmc-268-review-run:{review_run_id} -->"
 
 
 def _github_side(side: DiffSide) -> str:
@@ -94,7 +106,15 @@ class GitHubReviewClient:
         installation_id: int,
         summary_body: str,
         inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
     ) -> PullRequestReviewPublication:
+        """Одно ревью с маркером прогона в теле; повтор `POST` - только после поиска.
+
+        Список inline-комментариев не получен - ревью всё равно опубликовано:
+        id сводки возвращается, inline - `None` (не сопоставлены).
+        """
+        marker = review_run_marker(review_run_id)
         comments_payload = [
             {
                 "path": item.file_path,
@@ -106,31 +126,89 @@ class GitHubReviewClient:
         ]
         payload: dict[str, Any] = {
             "commit_id": head_sha,
-            "body": summary_body,
+            "body": f"{summary_body}\n\n{marker}",
             "event": "COMMENT",
         }
         if comments_payload:
             payload["comments"] = comments_payload
+        reviews_url = f"/repos/{repo_full_name}/pulls/{pr_number}/reviews"
+        self._learn_bot_login()
         response = self._gw._post_json(
-            f"/repos/{repo_full_name}/pulls/{pr_number}/reviews",
+            reviews_url,
             installation_id,
             payload,
+            repeatable=False,
+            # Ответа на POST нет - после паузы ищем своё ревью и шлём снова, только если его нет.
+            already_done=lambda: self._review_found_by_marker(
+                reviews_url, installation_id, marker, review_run_id
+            ),
         )
-        summary_id = None
-        if response.get("body"):
-            summary_id = str(response["id"])
+        try:
+            review_id = str(response["id"])
+        except (KeyError, TypeError) as error:
+            raise VcsError(f"GitHub API вернул ревью без id на POST {reviews_url}") from error
         published: tuple[PublishedInlineComment | None, ...] = ()
         if inline_comments:
-            review_id = response["id"]
-            raw_comments = self._gw._get_json_list_paginated(
-                f"/repos/{repo_full_name}/pulls/{pr_number}/reviews/{review_id}/comments",
-                installation_id,
-            )
+            try:
+                raw_comments = self._gw._get_json_list_paginated(
+                    f"{reviews_url}/{review_id}/comments", installation_id
+                )
+            except VcsError:
+                logger.warning(
+                    "прогон %s: ревью %s опубликовано, а id inline-комментариев не получены",
+                    review_run_id,
+                    review_id,
+                    exc_info=True,
+                )
+                raw_comments = []
             published = _map_fetched_inline_comments(inline_comments, raw_comments)
         return PullRequestReviewPublication(
-            summary_provider_comment_id=summary_id,
+            summary_provider_comment_id=review_id,
             inline_comments=published,
         )
+
+    def _learn_bot_login(self) -> None:
+        """Логин бота - до `POST`, best-effort: он нужен поиску по маркеру, а поиск
+        идёт, когда GitHub уже сбоит, и `GET /app` тогда упал бы вместе с ним.
+        Логин кэшируется на процесс; не получили сейчас - поиск спросит ещё раз."""
+        try:
+            self._gw.bot_login()
+        except VcsError:
+            logger.warning("логин бота GitHub App не получен до публикации ревью", exc_info=True)
+
+    def _review_found_by_marker(
+        self, reviews_url: str, installation_id: int, marker: str, review_run_id: UUID
+    ) -> dict[str, Any] | None:
+        """Ответ «создано» для ревью с маркером, если оно уже есть; `None` - нет."""
+        found = self._find_review_by_marker(reviews_url, installation_id, marker)
+        if found is None:
+            return None
+        logger.warning(
+            "прогон %s: ответ на POST %s потерян, ревью %s найдено по маркеру",
+            review_run_id,
+            reviews_url,
+            found,
+        )
+        return {"id": found}
+
+    def _find_review_by_marker(
+        self, reviews_url: str, installation_id: int, marker: str
+    ) -> str | None:
+        """id ревью бота App с маркером в теле; ревью человека или чужого бота не в счёт."""
+        bot_login = self._gw.bot_login()
+        for review in self._gw._get_json_list_paginated(reviews_url, installation_id):
+            user = review.get("user")
+            body = review.get("body")
+            if (
+                isinstance(user, dict)
+                and user.get("login") == bot_login
+                and user.get("type") == "Bot"
+                and isinstance(body, str)
+                and marker in body
+                and review.get("id") is not None
+            ):
+                return str(review["id"])
+        return None
 
     def reply_to_review_comment(
         self,
@@ -140,10 +218,12 @@ class GitHubReviewClient:
         provider_comment_id: str,
         body: str,
     ) -> str:
+        # Ответ не повторяется: повтор на обрыве или 5xx дал бы второй ответ в тред.
         response = self._gw._post_json(
             f"/repos/{repo_full_name}/pulls/{pr_number}/comments/{provider_comment_id}/replies",
             installation_id,
             {"body": body},
+            repeatable=False,
         )
         return str(response["id"])
 

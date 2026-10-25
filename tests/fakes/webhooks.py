@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from app.application.ports.vcs_review import (
     InlineCommentDraft,
@@ -145,6 +145,8 @@ class FakeVcs:
         installation_id: int,
         summary_body: str,
         inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
     ) -> PullRequestReviewPublication:
         self.calls.append(
             ("publish_review", repo_full_name, pr_number, head_sha, installation_id)

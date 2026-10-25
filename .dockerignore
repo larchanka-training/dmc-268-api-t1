@@ -1,6 +1,6 @@
 .venv
 venv
-__pycache__
+**/__pycache__
 .pytest_cache
 .ruff_cache
 .terraform
@@ -8,6 +8,16 @@ __pycache__
 .github
 .idea
 infra
-*.pyc
+**/*.pyc
 .env
 .DS_Store
+.mypy_cache
+.agents
+.pre-commit-config.yaml
+# В образ уезжают только app, alembic, prompts и файлы зависимостей (см. COPY в
+# Dockerfile); остальное — лишний вес контекста сборки.
+tests
+docs
+openspec
+scripts
+*.md

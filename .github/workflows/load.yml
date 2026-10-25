@@ -47,6 +47,8 @@ on:
     paths:
       - "tests/load/**"
       - ".github/workflows/load.yml"
+      - ".github/actions/python-env/**"
+      - "tests/strict_skips.py"
 
 # У токена прогона только чтение: workflow ничего не пишет в репозиторий.
 permissions:
@@ -102,20 +104,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          version: "0.13.5"
-          python-version: "3.14"
-      - run: uv sync --all-extras --frozen
+      - uses: ./.github/actions/python-env
       - name: pytest -m load (пропуск теста - провал)
-        run: |
-          set -o pipefail
-          uv run pytest -q -rs -s -m load tests/load | tee pytest.out
-          if grep -qE '[0-9]+ skipped' pytest.out; then
-            echo "::error::нагрузочный прогон пропущен: нет сервисов PostgreSQL или RabbitMQ"
-            exit 1
-          fi
+        env:
+          # Пропуск роняет прогон (tests/strict_skips.py): обычно нет сервисов
+          # PostgreSQL или RabbitMQ.
+          PYTEST_FAIL_ON_SKIP: "1"
+        run: uv run pytest -q -rs -s -m load tests/load
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

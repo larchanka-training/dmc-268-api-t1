@@ -11,43 +11,37 @@ permissions:
 
 # Новый пуш в ветку пул-реквеста отменяет прогон по устаревшему коммиту.
 # Пуши в main и develop не отменяются: там нужен результат по каждому коммиту.
+# Одного cancel-in-progress: false для этого мало: при `queue: single` (по
+# умолчанию) в группе ждёт только один прогон, и следующий пуш отменяет
+# ожидающий — из трёх быстрых пушей средний CI не получил бы. `queue: max`
+# держит в очереди до 100 прогонов, но с `cancel-in-progress: true` вместе
+# запрещён, поэтому оба ключа — выражения от события: у pull_request — отмена
+# и single, у push — очередь без отмены. Прогоны push одной ветки идут по
+# одному, в порядке постановки в очередь; порядок GitHub не гарантирует, и
+# gate в deploy.yml поэтому сверяет вершину develop.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  queue: ${{ github.event_name == 'pull_request' && 'single' || 'max' }}
 
+# Job'ы без `needs`: ни один не потребляет выход другого, а цепочка только
+# удлиняла бы критический путь и прятала второй провал за первым. Синтаксис
+# Python проверяет `ruff check` (ошибка разбора — тоже нарушение), отдельный
+# compileall не нужен. Мимо ruff — только tests/fixtures/: это вход парсера
+# AST, его разбирает tests/infrastructure/test_tree_sitter_extractor.py.
 jobs:
-  syntax:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          version: "0.13.5"
-          python-version: "3.14"
-      - run: uv sync --all-extras --frozen
-      - run: uv run python -m compileall -q -x '(^|/)(\.venv|venv|\.git)/' .
-
   lint:
-    needs: syntax
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          version: "0.13.5"
-          python-version: "3.14"
-      # --frozen ставит из uv.lock не глядя в pyproject.toml: зависимость, добавленная
-      # без `uv lock`, иначе прошла бы CI мимо lock-файла.
+      - uses: ./.github/actions/python-env
+      # Sync в python-env идёт с --frozen — из uv.lock, не глядя в pyproject.toml:
+      # зависимость, добавленная без `uv lock`, иначе прошла бы CI мимо
+      # lock-файла. Порядок неважен: --frozen uv.lock не трогает.
       - run: uv lock --check
-      - run: uv sync --all-extras --frozen
       - run: uv run ruff check .
       # Правило слоёв из BACKEND_ARCHITECTURE.md. Отдельным шагом: общий шаг
       # сообщил бы одну ошибку на две несвязанные проблемы.
@@ -71,18 +65,19 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
-      - run: npx --yes @fission-ai/openspec@1.14.2 validate --all --strict
+      - run: npx --yes @fission-ai/openspec@1.15.0 validate --all --strict
       # Change со всеми закрытыми задачами архивируется в том же PR — иначе его
       # дельты не доходят до openspec/specs/. Открытые change — в summary.
       # Явный `shell: bash` включает pipefail: сбой openspec не маскируется
       # ошибкой разбора JSON в скрипте.
-      - run: npx --yes @fission-ai/openspec@1.14.2 list --json | python3 scripts/check_openspec_archived.py
+      - run: npx --yes @fission-ai/openspec@1.15.0 list --json | python3 scripts/check_openspec_archived.py
         shell: bash
 
-  # Статический аудит workflow: неприбитые actions и образы, `${{ … }}` в `run`,
-  # опасные триггеры. Персона pedantic — ради unpinned-images; падаем только на
-  # high. --offline: онлайн-аудитам нужен токен к API, а результат не должен
-  # зависеть от сети. Версия закреплена: новые проверки приходят с её обновлением.
+  # Статический аудит workflow и их скриптов: неприбитые actions и образы,
+  # `${{ … }}` в `run`, опасные триггеры. Персона pedantic — ради
+  # unpinned-images; падаем только на high. --offline: онлайн-аудитам нужен
+  # токен к API, а результат не должен зависеть от сети. Версия закреплена:
+  # новые проверки приходят с её обновлением.
   zizmor:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -90,13 +85,46 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Только uv, без Python проекта и sync: python-env здесь лишний. Версия uv —
+      # та же, что в .github/actions/python-env.
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.5"
       - run: uvx zizmor@1.31.1 --offline --persona pedantic --min-severity high .github/
+      # Скрипты, которые вызывают workflow и actions (.github/scripts/**). shellcheck
+      # предустановлен на ubuntu-latest (apt-пакет в образе раннера), отдельного
+      # action не нужно. find отдаёт ненулевой код, если shellcheck упал.
+      - run: find .github/scripts -name '*.sh' -exec shellcheck {} +
 
-  terraform:
-    needs: syntax
+  # Dockerfile и собранный образ. hadolint — по правилам Dockerfile; trivy — по
+  # образу целиком (пакеты ОС и зависимости из uv.lock). Падаем на HIGH и
+  # CRITICAL, у которых есть исправление: --ignore-unfixed (ignore-unfixed в
+  # action) не даёт красному CI из-за CVE, которую нечем закрыть, — такие
+  # видны в отчёте trivy, но решения от нас не ждут. Образ собирается как в
+  # деплое (context .), но не публикуется.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+      - run: docker build -t dmc268-api:ci .
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: dmc268-api:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+  # Конфигурация стенда без стенда: формат, валидность и логика infra/*.tf и
+  # проверок переменных (`tofu test`, infra/tests/). Провайдер docker в тестах
+  # подменён mock_provider: ни docker.sock, ни сервера job не трогает.
+  opentofu:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -108,12 +136,11 @@ jobs:
           tofu_version: 1.13.2
       - run: tofu fmt -check -recursive infra/
       - run: cd infra && tofu init -backend=false && tofu validate
+      - run: cd infra && tofu test
 
+  # Не после lint: замечание линтера не делает тесты бессмысленными, а в
+  # цепочке оно прятало бы упавший тест до следующего пуша.
   test:
-    # Не после terraform: `tofu validate` и `pytest` проверяют несвязанное, а в
-    # цепочке загрузка провайдера с registry.opentofu.org решала бы, запустятся
-    # ли тесты вообще.
-    needs: [lint]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -155,24 +182,15 @@ jobs:
             sleep 1
           done
           docker exec ci-postgres pg_isready -U dmc268 -d dmc268
-      # Точная версия: плавающих мажорных тегов у setup-uv нет.
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          version: "0.13.5"
-          python-version: "3.14"
-      - run: uv sync --all-extras --frozen
+      - uses: ./.github/actions/python-env
       - name: pytest (пропуск теста — провал)
         env:
           # Тест алярма брокера (tests/queue/test_broker_blocked.py) включает его
           # через `docker exec … rabbitmqctl` в service-контейнере. Контекст `job`
           # доступен только в env шага, не job'а.
           TEST_RABBITMQ_CONTAINER: ${{ job.services.rabbitmq.id }}
-        run: |
-          set -o pipefail
-          # Живые тесты против EUrouter (маркер live) - платные: `addopts` в
-          # pyproject.toml их не собирает, их гоняет llm-live.yml с ключом.
-          uv run pytest -q -rs | tee pytest.out
-          if grep -qE '[0-9]+ skipped' pytest.out; then
-            echo "::error::тест пропущен, и прогон доказывает меньше, чем кажется; обычно причина в TEST_DATABASE_URL"
-            exit 1
-          fi
+          # Пропуск роняет прогон — плагин tests/strict_skips.py.
+          PYTEST_FAIL_ON_SKIP: "1"
+        # Живые тесты против EUrouter (маркер live) - платные: `addopts` в
+        # pyproject.toml их не собирает, их гоняет llm-live.yml с ключом.
+        run: uv run pytest -q -rs

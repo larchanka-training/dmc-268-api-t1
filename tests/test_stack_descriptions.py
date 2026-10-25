@@ -1,9 +1,10 @@
 """Два описания одного стека — сверены по тем фактам, что обязаны совпадать.
 
-`docker-compose.yml` описывает локальный стек, `infra/main.tf` — серверный.
-Оба обязательны и законно различаются: compose собирает образ и поднимает
-Redis, infra забирает готовый тег и поднимает RabbitMQ. Сверять их целиком
-бессмысленно.
+`docker-compose.yml` описывает локальный стек, `infra/*.tf` вместе с шагами
+`.github/workflows/deploy.yml` — серверный. Оба обязательны и законно
+различаются: compose собирает образ и поднимает Redis, infra забирает готовый
+тег и поднимает RabbitMQ, а миграции на сервере — шаг деплоя, а не контейнер
+стека. Сверять их целиком бессмысленно.
 
 Совпадать обязаны инварианты из спеки `backend-delivery`: миграции применяются
 до приёма трафика, том PostgreSQL монтируется по конвенции используемого
@@ -20,11 +21,14 @@ Redis, infra забирает готовый тег и поднимает Rabbit
 import re
 from pathlib import Path
 
+from tests.infra_text import read_infra_text
+
 NOT_FOUND = "не найдено"
 
 COMPOSE = Path("docker-compose.yml")
-INFRA = Path("infra/main.tf")
 DOCKERFILE = Path("Dockerfile")
+DEPLOY_WORKFLOW = Path(".github/workflows/deploy.yml")
+MIGRATE_SCRIPT = Path(".github/scripts/deploy/migrate.sh")
 
 
 # Образ сверяется целиком, а не по мажорному релизу: `postgres:18-alpine` и
@@ -69,21 +73,76 @@ def infra_postgres_volume_path(text: str) -> str:
 
 
 def compose_applies_migrations(text: str) -> bool:
-    """Compose применяет миграции командой сервиса api."""
-    return "alembic upgrade head" in text
+    """Compose применяет миграции отдельным сервисом, от которого зависят api и воркер.
 
-
-def infra_applies_migrations(text: str) -> bool:
-    """В Terraform миграции — отдельный ресурс, от которого зависит api.
-
-    Одного наличия ресурса мало: без зависимости API стартовал бы параллельно
-    с миграциями, то есть ровно так же, как до появления этого ресурса.
+    Одного сервиса мало: без `service_completed_successfully` API стартовал бы
+    параллельно с миграциями (или против непромигрированной базы). Команда —
+    список exec (`["alembic", "upgrade", "head"]`) или скрипт sh -c, когда
+    после миграций идёт шаг роли мониторинга (PR #130).
     """
-    has_resource = bool(
-        re.search(r"resource\s+\"docker_container\"\s+\"migrate\"", text)
+    migrate = re.search(r"^  migrate:\n(.*?)(?=^  \S)", text, re.MULTILINE | re.DOTALL)
+    if not migrate or not re.search(
+        r"alembic upgrade head|\"alembic\",\s*\"upgrade\",\s*\"head\"", migrate.group(1)
+    ):
+        return False
+    waits = re.findall(
+        r"migrate:\s*\n\s*condition:\s*service_completed_successfully", text
     )
-    api_depends = "docker_container.migrate" in text
-    return has_resource and api_depends
+    return len(waits) >= 2
+
+
+def deploy_migrates_before_apply(workflow: str) -> bool:
+    """На сервере миграции — шаг деплоя, и стоит он раньше полного `tofu apply`.
+
+    Полный apply выкатывает API и воркер; шаг после него пустил бы новый код
+    на непромигрированную базу. `apply -target` для базы и брокера — не он.
+    """
+    step = re.search(
+        r"^[ \t]*(?:- )?run: \.github/scripts/deploy/migrate\.sh[ \t]*$", workflow, re.MULTILINE
+    )
+    # Команда целиком, с продолжениями строки: `-target` бывает на следующей.
+    applies = re.finditer(
+        r"^[ \t]*(?:run: )?tofu apply\b(?:[^\n]*\\\n)*[^\n]*$", workflow, re.MULTILINE
+    )
+    full_apply = next((a for a in applies if "-target" not in a.group(0)), None)
+    return bool(step and full_apply and step.start() < full_apply.start())
+
+
+def script_runs_migrations(script: str) -> bool:
+    """Скрипт применяет `alembic upgrade head` одноразовым контейнером образа выката.
+
+    После миграций может идти шаг роли мониторинга (PR #130): тогда команда
+    контейнера — `sh -c 'alembic upgrade head && …'`, а не голый alembic.
+    """
+    return bool(
+        re.search(
+            r"^\s*docker run --rm\b(?:[^\n]*\\\n)*?[^\n]*\"\$API_IMAGE\"\s+"
+            r"(?:alembic upgrade head\s*$|sh -c ['\"]alembic upgrade head)",
+            script,
+            re.MULTILINE,
+        )
+    )
+
+
+# Ограничения процесса миграций (спека backend-delivery, «Контейнеры стека
+# работают с минимальными привилегиями») — те же, что у api и worker в
+# infra/app.tf, которые сверяет infra/tests/hardening.tftest.hcl.
+MIGRATION_RESTRICTIONS = (
+    "--read-only",
+    "--tmpfs /tmp:rw,noexec,nosuid,size=64m",
+    "--security-opt no-new-privileges:true",
+    "--cap-drop ALL",
+    "--init",
+    "--memory 256m",
+    "--memory-swap 256m",
+)
+
+
+def missing_migration_restrictions(script: str) -> list[str]:
+    """Ограничения, которых нет среди флагов `docker run` скрипта миграций."""
+    run = re.search(r"^\s*docker run --rm\b(?:[^\n]*\\\n)*[^\n]*$", script, re.MULTILINE)
+    flags = run.group(0) if run else ""
+    return [flag for flag in MIGRATION_RESTRICTIONS if not re.search(rf"(?<!\S){re.escape(flag)}(?!\S)", flags)]
 
 
 # Переменные модели воркера (change `add-llm-gateway`): без `LLM_BACKEND` воркер
@@ -156,11 +215,29 @@ def test_extractors_find_facts_that_are_present() -> None:
         )
         == "/var/lib/postgresql"
     )
-    assert compose_applies_migrations("command: alembic upgrade head && uvicorn")
-    assert infra_applies_migrations(
-        'resource "docker_container" "migrate" {}\n'
-        "depends_on = [docker_container.migrate]"
+    assert compose_applies_migrations(
+        '  migrate:\n    command: ["alembic", "upgrade", "head"]\n  api:\n'
+        "    depends_on:\n      migrate:\n        condition: service_completed_successfully\n"
+        "  worker:\n    depends_on:\n      migrate:\n"
+        "        condition: service_completed_successfully\n"
     )
+    assert deploy_migrates_before_apply(
+        "          tofu apply -auto-approve \\\n            -target=docker_container.postgres\n"
+        "      - run: .github/scripts/deploy/migrate.sh\n"
+        "        run: tofu apply -input=false -auto-approve\n"
+    )
+    assert script_runs_migrations(
+        'docker run --rm --name x \\\n  --init \\\n  "$API_IMAGE" alembic upgrade head\n'
+    )
+    assert script_runs_migrations(
+        'docker run --rm --name x \\\n  --init \\\n'
+        '  "$API_IMAGE" sh -c \'alembic upgrade head && python - <<"PY"\n'
+        "print(1)\n"
+        "PY'\n"
+    )
+    assert missing_migration_restrictions(
+        "docker run --rm \\\n  " + " \\\n  ".join(MIGRATION_RESTRICTIONS) + ' \\\n  "$API_IMAGE" x\n'
+    ) == []
     assert compose_worker_model_env(
         "services:\n  worker:\n    environment:\n      # комментарий\n"
         "      LLM_BACKEND: stub\n      DATABASE_URL: x\n  ollama:\n    environment:\n"
@@ -192,7 +269,24 @@ def test_extractors_report_absence_instead_of_a_blank() -> None:
     assert compose_postgres_volume_path("ничего похожего") == NOT_FOUND
     assert infra_postgres_volume_path("ничего похожего") == NOT_FOUND
     assert not compose_applies_migrations("ничего похожего")
-    assert not infra_applies_migrations('resource "docker_container" "migrate" {}')
+    # Миграции в команде API, как было раньше, больше не считаются.
+    assert not compose_applies_migrations("command: alembic upgrade head && uvicorn")
+    # Шаг миграций после полного apply — то же, что без миграций.
+    assert not deploy_migrates_before_apply(
+        "        run: tofu apply -auto-approve\n      - run: .github/scripts/deploy/migrate.sh\n"
+    )
+    # `apply -target` раньше шага не считается полным выкатом, и с -target на
+    # строке продолжения тоже.
+    assert not deploy_migrates_before_apply(
+        "          tofu apply -auto-approve \\\n            -target=docker_container.postgres\n"
+        "      - run: .github/scripts/deploy/migrate.sh\n"
+    )
+    # Закомментированный вызов — не вызов.
+    assert not script_runs_migrations('# docker run --rm "$API_IMAGE" alembic upgrade head\n')
+    # Флаг из соседней команды не засчитывается, `--init` — не `--initx`.
+    assert missing_migration_restrictions(
+        "docker run --rm --initx \"$API_IMAGE\" x\necho --read-only\n"
+    ) == list(MIGRATION_RESTRICTIONS)
     assert compose_worker_model_env("ничего похожего") == frozenset()
     assert infra_worker_model_env("ничего похожего") == frozenset()
     assert uvicorn_graceful_timeout("ничего похожего") is None
@@ -201,9 +295,9 @@ def test_extractors_report_absence_instead_of_a_blank() -> None:
 
 def test_both_descriptions_use_the_same_postgres_image() -> None:
     compose = compose_postgres_image(COMPOSE.read_text())
-    infra = infra_postgres_image(INFRA.read_text())
+    infra = infra_postgres_image(read_infra_text())
     assert compose != NOT_FOUND, "образ PostgreSQL не найден в docker-compose.yml"
-    assert infra != NOT_FOUND, "образ PostgreSQL не найден в infra/main.tf"
+    assert infra != NOT_FOUND, "образ PostgreSQL не найден в конфигурации infra/*.tf"
     assert compose == infra, (
         f"образ PostgreSQL разошёлся: compose {compose}, infra {infra}"
     )
@@ -212,9 +306,9 @@ def test_both_descriptions_use_the_same_postgres_image() -> None:
 def test_both_descriptions_mount_the_postgres_volume_the_same_way() -> None:
     """Расхождение здесь однажды уложило postgres:18 в рестарт-луп."""
     compose = compose_postgres_volume_path(COMPOSE.read_text())
-    infra = infra_postgres_volume_path(INFRA.read_text())
+    infra = infra_postgres_volume_path(read_infra_text())
     assert compose != NOT_FOUND, "точка монтирования не найдена в docker-compose.yml"
-    assert infra != NOT_FOUND, "точка монтирования не найдена в infra/main.tf"
+    assert infra != NOT_FOUND, "точка монтирования не найдена в конфигурации infra/*.tf"
     assert compose == infra, (
         f"точка монтирования тома PostgreSQL разошлась: "
         f"compose {compose}, infra {infra}"
@@ -226,17 +320,26 @@ def test_both_descriptions_apply_migrations_before_serving() -> None:
     assert compose_applies_migrations(
         COMPOSE.read_text()
     ), "docker-compose.yml не применяет миграции"
-    assert infra_applies_migrations(
-        INFRA.read_text()
-    ), "infra/main.tf не применяет миграции до старта API"
+    assert deploy_migrates_before_apply(
+        DEPLOY_WORKFLOW.read_text()
+    ), f"{DEPLOY_WORKFLOW}: нет шага {MIGRATE_SCRIPT} до полного tofu apply"
+    assert script_runs_migrations(
+        MIGRATE_SCRIPT.read_text()
+    ), f"{MIGRATE_SCRIPT}: нет docker run --rm образа выката с alembic upgrade head"
+
+
+def test_migrations_run_with_the_app_container_restrictions() -> None:
+    """Снятая с миграций защита роняет CI, как у api и worker (hardening.tftest.hcl)."""
+    missing = missing_migration_restrictions(MIGRATE_SCRIPT.read_text())
+    assert not missing, f"{MIGRATE_SCRIPT}: у docker run нет {missing}"
 
 
 def test_both_descriptions_give_the_worker_the_same_model_settings() -> None:
     """Без `LLM_BACKEND` воркер не стартует: описание без неё роняет деплой."""
     compose = compose_worker_model_env(COMPOSE.read_text())
-    infra = infra_worker_model_env(INFRA.read_text())
+    infra = infra_worker_model_env(read_infra_text())
     assert "LLM_BACKEND" in compose, "docker-compose.yml не передаёт воркеру LLM_BACKEND"
-    assert "LLM_BACKEND" in infra, "infra/main.tf не передаёт воркеру LLM_BACKEND"
+    assert "LLM_BACKEND" in infra, "infra/*.tf не передаёт воркеру LLM_BACKEND"
     assert compose == infra, (
         f"переменные модели воркера разошлись: только в compose {sorted(compose - infra)}, "
         f"только в infra {sorted(infra - compose)}"
@@ -248,8 +351,8 @@ def test_the_api_stops_within_the_grace_period_despite_open_sse_streams() -> Non
 
     Тогда lifespan не завершается и батч спанов теряется (спека `observability`).
     """
-    grace = infra_api_destroy_grace(INFRA.read_text())
-    assert grace is not None, "destroy_grace_seconds контейнера API не найден в infra/main.tf"
+    grace = infra_api_destroy_grace(read_infra_text())
+    assert grace is not None, "destroy_grace_seconds контейнера API не найден в конфигурации infra/*.tf"
     for path in (DOCKERFILE, COMPOSE):
         timeout = uvicorn_graceful_timeout(path.read_text())
         assert timeout is not None, f"{path}: uvicorn без --timeout-graceful-shutdown"

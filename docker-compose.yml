@@ -26,7 +26,7 @@ services:
       POSTGRES_PASSWORD: dmc268
       POSTGRES_DB: dmc268
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       # postgres:18's image stores data under a major-version subdirectory of
       # this path; mounting at .../data (the pre-18 convention) makes the
@@ -43,10 +43,13 @@ services:
   # cache) per docs/BACKEND_ARCHITECTURE.md's "no Redis now, Redis-ready by
   # construction". Adding a client, a port, or an adapter belongs to the
   # ticket that introduces that first caller, not this one.
+  # Ни один сервис compose его не использует, поэтому по умолчанию не
+  # поднимается: `docker compose --profile redis up -d redis`.
   redis:
     image: redis:8-alpine
+    profiles: ["redis"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -63,7 +66,7 @@ services:
         aliases:
           - dmc268-rabbitmq
     ports:
-      - "5672:5672"
+      - "127.0.0.1:5672:5672"
       # Метрики rabbitmq_prometheus (плагин включён в самом образе) —
       # наружу на петле для локальной проверки; в сети compose его скреит
       # Prometheus.
@@ -74,10 +77,62 @@ services:
       timeout: 5s
       retries: 10
 
+  # Одноразовая миграция схемы: API и воркер стартуют только после её успешного
+  # завершения, поэтому миграция идёт один раз, а не при каждом старте API.
+  migrate:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
+      # Settings требует все три обязательные настройки, даже когда нужна одна база.
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      GITHUB_WEBHOOK_SECRET: local-dev-secret
+      # Пароль роли мониторинга dmc268_monitor: шаг роли едет вместе с
+      # миграциями (замечание ревью PR #130 — «шаг теряется при переносе»),
+      # роль создаёт ревизия 0013. Локальный дефолт пари́т реквизитам postgres
+      # выше (как и POSTGRES_PASSWORD, допустим только локально); на стенде
+      # переменную задаёт infra из секрета.
+      POSTGRES_MONITOR_PASSWORD: ${POSTGRES_MONITOR_PASSWORD:-dmc268_monitor}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Миграции и шаг роли — одним контейнером. ALTER ROLE идемпотентен, пароль
+    # сводится с POSTGRES_MONITOR_PASSWORD на каждом запуске. Пароль —
+    # параметром запроса psycopg (не литералом команды: тот светится в /proc и
+    # docker logs), track_utility выключен той же транзакцией — иначе
+    # ALTER ROLE ... PASSWORD лёг бы в pg_stat_statements открытым текстом.
+    # Тот же шаг — у деплоя (.github/scripts/deploy/migrate.sh) и контейнера
+    # миграций в infra.
+    command:
+      - sh
+      - -c
+      - |
+        alembic upgrade head || exit 1
+        python - <<'PY' || exit 1
+        import os
+
+        import psycopg
+
+        # DATABASE_URL настроек — под схемой SQLAlchemy (postgresql+psycopg://);
+        # psycopg ждёт стандартную схему postgresql://. Привязка значений — на
+        # клиенте (ClientCursor): серверная не проходит по грамматике ALTER ROLE
+        # (PASSWORD принимает только литерал, не $1), а литерал руками собирать
+        # нельзя — psycopg экранирует сам.
+        dsn = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
+        with psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor) as conn:
+            with conn.transaction():
+                conn.execute("SET LOCAL pg_stat_statements.track_utility = off")
+                # Имя роли зашито — то же, что в миграции 0013 и env коллектора.
+                conn.execute(
+                    "ALTER ROLE dmc268_monitor PASSWORD %s",
+                    (os.environ["POSTGRES_MONITOR_PASSWORD"],),
+                )
+        PY
+    restart: "no"
+
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
       # %2F — закодированный дефолтный vhost "/"; pika разбирает буквальный
@@ -125,15 +180,9 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local,service.instance.id=dmc268-api}
       # Стабильные имена атрибутов semconv для SQL и HTTP; то же значение ставит код.
       OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
-      # Пароль роли мониторинга dmc268_monitor: api гоняет миграции, роль
-      # создаёт ревизия 0013. Локальный дефолт пари́т реквизитам postgres
-      # выше (как и POSTGRES_PASSWORD, допустим только локально); на стенде
-      # переменную задаёт infra из секрета.
-      POSTGRES_MONITOR_PASSWORD: ${POSTGRES_MONITOR_PASSWORD:-dmc268_monitor}
-    # Драйвер логов json-file с той же ротацией, что в infra/main.tf
-    # (local.log_opts); без ротации лог растёт, пока не кончится диск.
-    # stdout остаётся для docker logs, в Loki логи идут по OTLP
-    # (OTEL_LOGS_EXPORTER выше).
+    # Драйвер логов json-file с той же ротацией, что в infra (local.log_opts);
+    # без ротации лог растёт, пока не кончится диск. stdout остаётся для
+    # docker logs, в Loki логи идут по OTLP (OTEL_LOGS_EXPORTER выше).
     logging:
       driver: json-file
       options:
@@ -144,49 +193,18 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     # Худший случай остановки: 5 с graceful shutdown (рвутся потоки SSE) +
     # 4 с выгрузки спанов (OTEL_EXPORTER_OTLP_TIMEOUT) с запасом. Без него
     # дефолтные 10 с Docker — впритык, с ним lifespan гарантированно
     # завершается и спаны выгружаются (замечание из #89 про обе половины).
     stop_grace_period: 15s
-    # exec: uvicorn заменяет sh и становится PID 1 — иначе SIGTERM от
-    # `docker stop` достаётся sh, который его игнорирует, и через грейс-период
-    # приходит SIGKILL: lifespan не завершается, спаны не выгружаются.
+    # Без sh: uvicorn — PID 1 и получает SIGTERM от `docker stop` сам, иначе
+    # через грейс-период пришёл бы SIGKILL, и спаны не выгрузились.
     # --timeout-graceful-shutdown — по той же причине: открытый поток SSE иначе
     # держал бы остановку до конца прогона (подробно — в Dockerfile у CMD).
-    # Между миграциями и uvicorn — перегенерация пароля роли мониторинга
-    # dmc268_monitor (создаёт миграция 0013): ALTER ROLE идемпотентен, пароль
-    # сводится с POSTGRES_MONITOR_PASSWORD на каждом старте. Пароль —
-    # параметром запроса psycopg (не литералом команды: тот светится в /proc и
-    # docker logs), track_utility выключен той же транзакцией — иначе
-    # ALTER ROLE ... PASSWORD лёг бы в pg_stat_statements открытым текстом.
-    # Тот же шаг — у контейнера миграций в infra/main.tf.
-    command:
-      - sh
-      - -c
-      - |
-        alembic upgrade head || exit 1
-        python - <<'PY' || exit 1
-        import os
-
-        import psycopg
-
-        # DATABASE_URL настроек — под схемой SQLAlchemy (postgresql+psycopg://);
-        # psycopg ждёт стандартную схему postgresql://. Привязка значений — на
-        # клиенте (ClientCursor): серверная не проходит по грамматике ALTER ROLE
-        # (PASSWORD принимает только литерал, не $1), а литерал руками собирать
-        # нельзя — psycopg экранирует сам.
-        dsn = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
-        with psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor) as conn:
-            with conn.transaction():
-                conn.execute("SET LOCAL pg_stat_statements.track_utility = off")
-                # Имя роли зашито — то же, что в миграции 0013 и env коллектора.
-                conn.execute(
-                    "ALTER ROLE dmc268_monitor PASSWORD %s",
-                    (os.environ["POSTGRES_MONITOR_PASSWORD"],),
-                )
-        PY
-        exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]
 
   worker:
     build: .
@@ -226,6 +244,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: ["python", "-m", "app.worker"]
     # Драйвер логов json-file с той же ротацией, что у api выше и в
     # infra/main.tf.
@@ -241,7 +261,7 @@ services:
     # вызова модели (ревью и верификатор) × LLM_TIMEOUT_SECONDS (300) ×
     # LLM_MAX_ATTEMPTS (2) × два провайдера с LLM_HOSTED_FALLBACK = 2400 с,
     # плюс минута на GitHub и базу. Без этого через 10 с пришёл бы SIGKILL.
-    # Та же формула — local.worker_stop_seconds в infra/main.tf: меняется там —
+    # Та же формула — local.worker_stop_seconds в infra/locals.tf: меняется там —
     # меняем и здесь.
     # consumer_timeout брокера сюда не ограничение: в RabbitMQ 4.4 его
     # применяют только quorum-очереди, а очередь review — classic.

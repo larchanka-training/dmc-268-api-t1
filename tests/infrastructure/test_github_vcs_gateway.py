@@ -277,23 +277,92 @@ def test_5xx_is_retried_with_growing_pauses(rsa_key_pair: RsaKeyPair) -> None:
     assert sleeps == [0.5, 1.0]
 
 
-def test_429_is_retried(rsa_key_pair: RsaKeyPair) -> None:
-    """Rate limit — повторяемая ошибка: одна пауза, затем успех."""
+def _limited(status: int, headers: dict[str, str], seen: list[httpx.Request]) -> Handler:
+    """Первый запрос к PR - отказ лимита с заголовками, следующий - успех."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(status, headers=headers, json={"message": "rate limit"})
+        return httpx.Response(200, json=PR_JSON)
+
+    return handler
+
+
+def _clocked_gateway(
+    rsa_key_pair: RsaKeyPair, handler: Handler, sleeps: list[float], **kwargs: Any
+) -> GitHubVcsGateway:
+    client = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    auth = GitHubAppAuth(APP_ID, rsa_key_pair.private_pem, client)
+    return GitHubVcsGateway(auth, client, sleep=sleeps.append, clock=lambda: 1_800_000_000.0, **kwargs)
+
+
+def test_429_waits_for_retry_after(rsa_key_pair: RsaKeyPair) -> None:
+    """Вторичный лимит: пауза - ровно `Retry-After` секунд, затем повтор (#185)."""
     seen: list[httpx.Request] = []
     sleeps: list[float] = []
-    gateway = make_gateway(
-        rsa_key_pair,
-        responding(
-            [429, 200],
-            httpx.Response(200, text=DIFF, headers={"Content-Type": "text/plain"}),
-            seen,
-        ),
-        sleeps,
+    gateway = _clocked_gateway(rsa_key_pair, _limited(429, {"Retry-After": "7"}, seen), sleeps)
+
+    assert gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID) == EXPECTED_METADATA
+    assert len(seen) == 2
+    assert sleeps == [7.0]
+
+
+def test_exhausted_primary_limit_waits_until_the_reset(rsa_key_pair: RsaKeyPair) -> None:
+    """403 с `x-ratelimit-remaining: 0`: ждём до `x-ratelimit-reset` (эпоха, UTC) и секунду сверху."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(1_800_000_000 + 30)}
+    gateway = _clocked_gateway(rsa_key_pair, _limited(403, headers, seen), sleeps)
+
+    assert gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID) == EXPECTED_METADATA
+    assert sleeps == [31.0]
+
+
+def test_rate_limit_without_headers_waits_a_minute(rsa_key_pair: RsaKeyPair) -> None:
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = _clocked_gateway(rsa_key_pair, _limited(429, {}, seen), sleeps)
+
+    assert gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID) == EXPECTED_METADATA
+    assert sleeps == [60.0]
+
+
+def test_rate_limit_wait_over_the_budget_fails_without_sleeping(rsa_key_pair: RsaKeyPair) -> None:
+    """Ждать дольше бюджета нельзя: воркер не висит до сброса часового лимита."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(1_800_000_000 + 3_000)}
+    gateway = _clocked_gateway(
+        rsa_key_pair, _limited(403, headers, seen), sleeps, rate_limit_budget_seconds=60.0
     )
 
-    assert gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT) == DIFF
-    assert len(seen) == 2
-    assert sleeps == [0.5]
+    with pytest.raises(VcsUnavailableError):
+        gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
+    assert len(seen) == 1
+    assert sleeps == []
+
+
+def test_forbidden_without_rate_limit_signs_is_not_retried(rsa_key_pair: RsaKeyPair) -> None:
+    """403 без признаков лимита - отказ в доступе, а не лимит: повтора нет."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        seen.append(request)
+        return httpx.Response(403, json={"message": "Resource not accessible by integration"})
+
+    gateway = _clocked_gateway(rsa_key_pair, handler, sleeps)
+
+    with pytest.raises(VcsError) as caught:
+        gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
+    assert not isinstance(caught.value, VcsUnavailableError)
+    assert len(seen) == 1
+    assert sleeps == []
 
 
 def test_exhausted_retries_raise_vcs_unavailable(rsa_key_pair: RsaKeyPair) -> None:

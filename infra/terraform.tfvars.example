@@ -7,25 +7,28 @@
 
 # --- обязательные (без них apply не стартует) ---
 
-# Полная ссылка на образ API с тегом. В CI — тег по commit sha из ghcr.
-api_image         = "ghcr.io/larchanka-training/dmc-268-api-t1:CHANGE_ME_TAG"
+# Ссылка на образ API с digest; тег без digest не пройдёт проверку. В CI —
+# тег по commit sha и digest из сборки. Digest опубликованного образа:
+# `docker buildx imagetools inspect <образ>:<тег>`, строка Digest. Перед
+# apply образ скачивают на целевой Docker: `docker pull <api_image>` (для
+# приватного пакета — после `docker login ghcr.io`), провайдер сам его не
+# тянет с учётными данными (README.md, «Деплой»).
+api_image         = "ghcr.io/larchanka-training/dmc-268-api-t1:CHANGE_ME_TAG@sha256:CHANGE_ME_64_HEX"
 postgres_password = "CHANGE_ME_POSTGRES"
 rabbitmq_password = "CHANGE_ME_RABBITMQ"
+# Секрет подписи вебхуков GitHub App; пустой не пройдёт проверку.
+github_webhook_secret = "CHANGE_ME_WEBHOOK"
 # Ключ шифрования токенов пользователя: `openssl rand -base64 32`.
 user_token_encryption_key = "CHANGE_ME_openssl_rand_base64_32_xxxxxxxxx="
-
-# --- учётные данные реестра образов ---
-# В CI — github.actor и GITHUB_TOKEN, живущие один прогон. Локально нужны
-# только если образ лежит в приватном пакете.
-registry_username = ""
-registry_password = ""
+# Адаптер модели воркера, значения по умолчанию нет: stub - без похода к
+# модели, ollama - локальная модель (тогда обязателен ollama_model).
+llm_backend = "stub"
 
 # --- остальное имеет значения по умолчанию ---
 
 docker_host      = "unix:///var/run/docker.sock"
 bind_ip          = "127.0.0.1"
 internal_bind_ip = "127.0.0.1"
-service_host     = "127.0.0.1"
 api_port         = 8000
 postgres_user    = "dmc268"
 postgres_db      = "dmc268"
@@ -34,18 +37,27 @@ rabbitmq_user    = "dmc268"
 rabbitmq_port    = 5672
 
 # --- модель воркера ---
-# stub - без похода к модели. Eurorouter включается только фоллбэком после
-# локальной модели: llm_hosted_fallback = true отправляет код проверяемым
-# репозиториям hosted-провайдеру. Ключи - через запятую, в CI из секрета.
-llm_backend         = "stub"
+# Eurorouter включается только фоллбэком после локальной модели:
+# llm_hosted_fallback = true требует llm_backend = "ollama" и всех eurorouter_*
+# и отправляет код проверяемых репозиториев hosted-провайдеру. Ключи - через
+# запятую, в CI из секрета.
 ollama_model        = ""
 llm_hosted_fallback = false
+
+# --- GitHub App ---
+# Без них apply пройдёт, но VCS-шлюз и вход пользователей не заработают
+# (README.md, «Деплой»).
+# github_app_id            = ""
+# github_app_private_key   = ""
+# github_app_client_id     = ""
+# github_app_client_secret = ""
+# public_origin            = "https://<адрес интерфейса>"
 
 # --- стек наблюдаемости ---
 # По умолчанию выключен (observability_enabled = false): локальному apply
 # хватает памяти и секреты не нужны. При true валидации потребуют настоящий
 # пароль админа Grafana (grafana_admin_password) и пароль роли мониторинга
 # (postgres_monitor_password, не локальный дефолт dmc268_monitor).
-# observability_enabled    = true
-# grafana_admin_password   = "CHANGE_ME_GRAFANA_ADMIN"
+# observability_enabled     = true
+# grafana_admin_password    = "CHANGE_ME_GRAFANA_ADMIN"
 # postgres_monitor_password = "CHANGE_ME_PG_MONITOR"

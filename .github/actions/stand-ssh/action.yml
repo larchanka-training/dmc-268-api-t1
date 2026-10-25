@@ -1,0 +1,73 @@
+# SSH-подключение к стенду для всего job'а: ключ, закреплённый known_hosts и
+# `~/.ssh/config` с хостом `stand`. Дальше шаги job'а, s3-backend и
+# docker-провайдер OpenTofu ходят на сервер как `ssh stand …` и `ssh://stand`
+# — пользователь, адрес, ключ и BatchMode берутся из конфига, а не из флагов
+# каждого вызова. Ставится первым шагом после checkout: known_hosts лежит в
+# репозитории.
+name: Stand SSH
+description: Готовит ключ, known_hosts и ~/.ssh/config с хостом stand для всего job'а.
+
+inputs:
+  ssh_key:
+    description: Приватный ключ CI
+    required: true
+  ssh_user:
+    description: Пользователь на сервере
+    required: true
+  host:
+    description: Адрес сервера
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Подготовить ключ, known_hosts и ~/.ssh/config
+      shell: bash
+      env:
+        CI_KEY: ${{ inputs.ssh_key }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        HOST: ${{ inputs.host }}
+      run: |
+        set -euo pipefail
+        umask 077
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        printf '%s\n' "$CI_KEY" > ~/.ssh/ci_key
+        chmod 600 ~/.ssh/ci_key
+        # Ключ хоста закреплён в репозитории и сверен с сервером вне CI.
+        # ssh-keyscan доверял бы любому, кто ответит по этому адресу.
+        # known_hosts ssh сверяет по HostName, поэтому алиас stand ему не мешает.
+        pinned="$GITHUB_WORKSPACE/.github/ssh/known_hosts"
+        if ! ssh-keygen -F "$HOST" -f "$pinned" > /dev/null; then
+          echo "::error::ключ хоста $HOST не закреплён в .github/ssh/known_hosts"
+          exit 1
+        fi
+        cp "$pinned" ~/.ssh/known_hosts
+
+        # Docker-провайдер OpenTofu вызывает `ssh` сам и флаг -i не передаёт:
+        # он берёт личности по умолчанию (~/.ssh/id_*), которых на раннере нет,
+        # и упирается в «Permission denied». Поэтому ключ прописывается в
+        # конфиг, а не передаётся каждым вызовом.
+        #
+        # ControlMaster: первый `ssh stand` поднимает фоновое соединение, и все
+        # следующие вызовы — `ssh stand …` шагов и каждый запрос Docker через
+        # ssh://stand — идут по нему, без нового рукопожатия. Замер с RTT 80 мс:
+        # `docker -H ssh://stand version` 1,25 с без него, 0,4 с с ним (#203).
+        # ControlPath короткий: путь unix-сокета ограничен ~104 байтами, а %C —
+        # хеш из 40 символов. ControlPersist 10m — соединение живёт 10 минут
+        # после последнего вызова. Туннели (`ssh -f -N -L`) идут мимо него, с
+        # `-o ControlPath=none`: через master ExitOnForwardFailure не
+        # срабатывает, а проброс умирает вместе с master по ControlPersist.
+        cat > ~/.ssh/config <<CFG
+        Host stand
+          HostName $HOST
+          User $SSH_USER
+          IdentityFile ~/.ssh/ci_key
+          IdentitiesOnly yes
+          BatchMode yes
+          StrictHostKeyChecking yes
+          ControlMaster auto
+          ControlPath ~/.ssh/cm-%C
+          ControlPersist 10m
+        CFG
+        chmod 600 ~/.ssh/config

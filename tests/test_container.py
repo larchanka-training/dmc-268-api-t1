@@ -7,13 +7,18 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
 from app.api.dependencies import get_unit_of_work
 from app.application import ports
 from app.config import Settings
-from app.infrastructure.container import build_container, llm_http_timeout
+from app.infrastructure.container import (
+    WORKER_VCS_LIMITS,
+    build_container,
+    llm_http_timeout,
+)
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.stub import StubLlmGateway
 
@@ -271,3 +276,23 @@ def test_the_model_gateway_is_built_once() -> None:
     gateway = container.llm_gateway()
     assert isinstance(gateway, FallbackLlmGateway)
     assert container.llm_gateway() is gateway
+
+
+def test_the_api_vcs_client_keeps_a_short_timeout_and_the_worker_gets_thirty_seconds() -> None:
+    """#185: вебхуку GitHub ждёт ответа 10 с - API не ждёт GitHub дольше 5 с и не пережидает
+    лимит; воркеру на дифф и публикацию крупного PR - 30 с и минута на лимит."""
+    api = build_container(SETTINGS).vcs_gateway()
+    worker = build_container(SETTINGS, vcs_limits=WORKER_VCS_LIMITS).vcs_gateway()
+
+    assert api._client.timeout == httpx.Timeout(5.0)  # type: ignore[attr-defined]
+    assert api._rate_limit_budget_seconds == 0.0  # type: ignore[attr-defined]
+    assert worker._client.timeout == httpx.Timeout(30.0, connect=5.0)  # type: ignore[attr-defined]
+    assert worker._rate_limit_budget_seconds == 60.0  # type: ignore[attr-defined]
+
+
+def test_the_redelivery_pass_gets_a_gateway_that_does_not_wait_out_rate_limits() -> None:
+    """Отказ лимита завершает проход повтора доставок: ждать его в consume-цикле нельзя."""
+    gateway = build_container(SETTINGS, vcs_limits=WORKER_VCS_LIMITS).redelivery_vcs_gateway()
+
+    assert gateway._rate_limit_budget_seconds == 0.0  # type: ignore[attr-defined]
+    assert gateway._client.timeout == httpx.Timeout(5.0)  # type: ignore[attr-defined]

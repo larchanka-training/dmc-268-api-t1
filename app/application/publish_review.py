@@ -178,6 +178,7 @@ def publish_review(
         job.installation_id,
         summary_body,
         inline_drafts,
+        review_run_id=run.id,
     )
 
     moment = now
@@ -237,14 +238,25 @@ def publish_review(
     )
 
     # Треды сверены с GitHub до публикации, свои закрытия бот записал сам:
-    # gate - по базе.
-    still_open = collect_open_findings(uow, run.merge_request_id)
-    vcs.set_merge_gate_check(
-        job.repository_full_name,
-        job.head_sha,
-        job.installation_id,
-        build_merge_gate_check(still_open),
-    )
+    # gate - по базе, с находками этого прогона, чей id inline не получен.
+    still_open = collect_open_findings(uow, run.merge_request_id, head_run_id=run.id)
+    # Best-effort: ревью уже в PR, а `failed` после публикации ведёт к новому
+    # прогону и второму ревью. Без check run обязательная проверка не даёт мерджа
+    # до следующего прогона или вебхука закрытия треда.
+    try:
+        vcs.set_merge_gate_check(
+            job.repository_full_name,
+            job.head_sha,
+            job.installation_id,
+            build_merge_gate_check(still_open),
+        )
+    except VcsError:
+        logger.warning(
+            "прогон %s: ревью опубликовано, а check run merge gate на %s не выставлен",
+            run.id,
+            job.head_sha,
+            exc_info=True,
+        )
 
 
 def _sync_threads_with_host(

@@ -32,10 +32,16 @@ from sqlalchemy import Engine
 from app.api.factory import create_app
 from app.application.ports.llm_gateway import LlmGateway
 from app.config import Settings
-from app.domain.entities import ContextPayload, Finding, Repository, ReviewRun
+from app.domain.entities import (
+    ContextPayload,
+    Finding,
+    PublishedComment,
+    Repository,
+    ReviewRun,
+)
 from app.domain.enums import Provider
 from app.infrastructure.cache.memory import InMemoryCacheStore
-from app.infrastructure.container import Container
+from app.infrastructure.container import WORKER_VCS_LIMITS, Container
 from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.parsing.tree_sitter_extractor import (
@@ -150,6 +156,7 @@ class Stack:
             _token_cipher=None,
             _job_queue=RabbitMQJobQueue(self.rabbitmq_url),
             _vcs_gateway=GitHubVcsGateway(auth, client, sleep=lambda _: None),
+            _vcs_limits=WORKER_VCS_LIMITS,
             _installation_catalog=FakeInstallationCatalog([]),
             _oauth_providers={},
             _cache_store=InMemoryCacheStore(),
@@ -254,6 +261,10 @@ class Stack:
     def unfinished_runs(self) -> int:
         with SqlAlchemyUnitOfWork(self.engine) as work:
             return len(work.review_runs.list_unfinished())
+
+    def published(self, run_id: str | UUID) -> list[PublishedComment]:
+        with SqlAlchemyUnitOfWork(self.engine) as work:
+            return work.published_comments.list_for_run(UUID(str(run_id)))
 
     def findings(self, run_id: str | UUID) -> list[Finding]:
         with SqlAlchemyUnitOfWork(self.engine) as work:
