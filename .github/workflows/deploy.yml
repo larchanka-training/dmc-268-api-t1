@@ -72,8 +72,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # Наружу — ссылка с digest: тег перезаписывается, digest называет ровно
+    # собранный здесь образ, и tofu забирает его (проверка api_image в
+    # infra/variables.tf).
     outputs:
-      image: ${{ steps.meta.outputs.image }}
+      image: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,6 +107,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build
         with:
           context: .
           push: true
@@ -114,10 +118,17 @@ jobs:
       - name: Убедиться, что образ забирается обратно
         env:
           IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          docker manifest inspect "$IMAGE" > /dev/null
-          echo "образ доступен по тегу"
+          # Пустой digest дал бы ссылку, которую отвергнет проверка api_image,
+          # но уже в job'е деплоя; ловим здесь.
+          if [ -z "$DIGEST" ]; then
+            echo "::error::сборка не вернула digest"
+            exit 1
+          fi
+          docker manifest inspect "${IMAGE}@${DIGEST}" > /dev/null
+          echo "образ доступен по digest ${DIGEST}"
 
   deploy:
     needs: [gate, image]
@@ -237,7 +248,7 @@ jobs:
           tofu init -input=false -no-color
 
           # Упавшие миграции оставляют свой контейнер с ненулевым кодом, а
-          # Terraform не пересоздаёт ресурс, конфигурация которого не
+          # OpenTofu не пересоздаёт ресурс, конфигурация которого не
           # изменилась, — и постусловие падает на том же старом коде. Новый
           # коммит расшивает это сам (меняется тег образа), а повторный прогон
           # того же коммита залипал бы. Форсируем замену ровно в этом случае:

@@ -49,10 +49,18 @@ variable "postgres_user" {
   default     = "dmc268"
 }
 
+# Незаданный секрет репозитория приходит в TF_VAR_* пустой строкой. Без
+# проверки apply пересоздал бы базу и брокер с пустым паролем, а упал бы
+# только минутой позже, на миграциях, — уже со сломанным стендом.
 variable "postgres_password" {
   type        = string
   description = "PostgreSQL password. Do not commit real values."
   sensitive   = true
+
+  validation {
+    condition     = var.postgres_password != ""
+    error_message = "postgres_password пуст: секрет PG_PASSWORD_DMC268_T1 не задан."
+  }
 }
 
 variable "postgres_db" {
@@ -77,6 +85,11 @@ variable "rabbitmq_password" {
   type        = string
   description = "RabbitMQ password. Do not commit real values."
   sensitive   = true
+
+  validation {
+    condition     = var.rabbitmq_password != ""
+    error_message = "rabbitmq_password пуст: секрет RABBITMQ_PASSWORD_DMC268_T1 не задан."
+  }
 }
 
 variable "rabbitmq_port" {
@@ -116,16 +129,35 @@ variable "ollama_base_url" {
   default     = "http://dmc268-ollama:11434"
 }
 
+# Та же проверка есть в настройках приложения (app/config.py), но там она
+# срабатывает только на старте воркера — после того как apply пересоздал
+# контейнеры. Здесь — на plan, пока на сервере ничего не изменилось.
 variable "ollama_model" {
   type        = string
   description = "Модель Ollama (OLLAMA_MODEL); обязательна при llm_backend = ollama."
   default     = ""
+
+  validation {
+    condition     = var.llm_backend != "ollama" || var.ollama_model != ""
+    error_message = "llm_backend = ollama требует ollama_model."
+  }
 }
 
+# Зеркало проверки в app/config.py — по той же причине, что у ollama_model.
 variable "llm_hosted_fallback" {
   type        = bool
   description = "Подключить Eurorouter фоллбэком после локальной модели (LLM_HOSTED_FALLBACK). Включение отправляет код проверяемых репозиториев hosted-провайдеру."
   default     = false
+
+  validation {
+    condition = !var.llm_hosted_fallback || (
+      var.llm_backend == "ollama"
+      && var.eurorouter_base_url != ""
+      && var.eurorouter_model != ""
+      && var.eurorouter_api_keys != ""
+    )
+    error_message = "llm_hosted_fallback = true требует llm_backend = ollama и непустых eurorouter_base_url, eurorouter_model, eurorouter_api_keys."
+  }
 }
 
 variable "eurorouter_base_url" {
@@ -183,11 +215,26 @@ variable "github_webhook_secret" {
   type        = string
   description = "Общий секрет, которым GitHub подписывает доставки вебхуков (X-Hub-Signature-256). Не коммитить."
   sensitive   = true
+
+  # Пустой секрет — HMAC с ключом, который знает каждый. Приложение такой не
+  # примет и не стартует; ловим раньше, на plan.
+  validation {
+    condition     = var.github_webhook_secret != ""
+    error_message = "github_webhook_secret пуст: секрет WEBHOOK_SECRET_DMC268_T1 не задан."
+  }
 }
 
+# Digest обязателен: тег перезаписывается, а digest называет ровно тот образ,
+# который собрал и проверил этот прогон деплоя. Тег оставлен для читаемости
+# (`docker ps` показывает commit sha).
 variable "api_image" {
   type        = string
-  description = "Полная ссылка на образ API в реестре, с тегом по commit sha."
+  description = "Ссылка на образ API в реестре с digest: <репозиторий>:<commit sha>@sha256:<digest>."
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.api_image))
+    error_message = "api_image должен заканчиваться на @sha256:<64 hex>: образ забирается по digest, а не по тегу."
+  }
 }
 
 variable "registry_username" {

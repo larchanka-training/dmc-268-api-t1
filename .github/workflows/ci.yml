@@ -120,7 +120,10 @@ jobs:
           exit-code: "1"
           format: table
 
-  terraform:
+  # Конфигурация стенда без стенда: формат, валидность и логика main.tf и
+  # проверок переменных (`tofu test`, infra/tests/). Провайдер docker в тестах
+  # подменён mock_provider: ни docker.sock, ни сервера job не трогает.
+  opentofu:
     needs: syntax
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -133,9 +136,10 @@ jobs:
           tofu_version: 1.13.2
       - run: tofu fmt -check -recursive infra/
       - run: cd infra && tofu init -backend=false && tofu validate
+      - run: cd infra && tofu test
 
   test:
-    # Не после terraform: `tofu validate` и `pytest` проверяют несвязанное, а в
+    # Не после opentofu: `tofu validate` и `pytest` проверяют несвязанное, а в
     # цепочке загрузка провайдера с registry.opentofu.org решала бы, запустятся
     # ли тесты вообще.
     needs: [lint]
