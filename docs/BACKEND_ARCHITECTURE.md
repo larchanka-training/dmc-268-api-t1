@@ -407,10 +407,11 @@ def upgrade() -> None:
   FastAPI, ручки `/metrics` нет — Prometheus собирает их через коллектор, а
   `resource_to_telemetry_conversion` делает лейбл `job` равным `service.name`.
   Ручные — только сигналы алертов: прогоны по статусам (`review_runs_total{status}`),
-  длительность этапов и вызова модели (`review_stage_duration{stage}`,
-  `review_llm_call_duration`), токены LLM — в адаптере шлюза, где известен
-  usage (`review_llm_tokens`), пул соединений — снимками состояния
-  (`db.client.connection.*`); стоимость — отдельное изменение (#119).
+  длительность этапов (`review_stage_duration{stage}`) и каждого фактического вызова
+  провайдера (`review_llm_call_duration{outcome}` — в `FallbackLlmGateway`; `ok` —
+  с моделью ответа, `error` — с именем провайдера, в гистограмму попадают упавшие
+  вызовы и таймауты), пул соединений — снимками состояния (`db.client.connection.*`);
+  стоимость — отдельное изменение (#119).
   «Во что обошёлся прогон» остаётся SQL по колонкам `review_runs`: метрики —
   для алертов, не для отчётов.
 - **Логи** — JSON в stdout. `configure_logging(service_name)` ставит один

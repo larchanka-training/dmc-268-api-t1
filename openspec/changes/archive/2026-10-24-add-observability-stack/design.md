@@ -99,8 +99,10 @@ SQL-спаны и ERROR на отключение клиента, чувстви
 
 Ручные метрики пишут инфраструктурные адаптеры, домен и application про OTel не узнают (запрет в
 `lint-imports` уже стоит): длительность и исходы этапов — адаптер рядом с `OtelStageTracer`
-(счётчик `review_runs_total{status}`, гистограмма `review_stage_duration{stage}`); токены и
-стоимость — адаптер LLM-шлюза, где usage уже есть; страж «данные продукта — из базы» не меняется.
+(счётчик `review_runs_total{status}`, гистограмма `review_stage_duration{stage}`); гистограмма
+`review_llm_call_duration{outcome}` — `FallbackLlmGateway` на каждый фактический вызов
+провайдера (`ok` — с моделью ответа, `error` — с именем провайдера, в гистограмму попадают
+упавшие вызовы и таймауты); страж «данные продукта — из базы» не меняется.
 RabbitMQ — плагин `rabbitmq_prometheus` (порт 15692). Метрики базы снимает сам коллектор
 receiver-ом `postgresql` — отдельного контейнера postgres-exporter нет (возврат к решению #89,
 закреплено ревью PR #130): один конвейер метрик без лишнего контейнера, у коллектора роль
@@ -193,7 +195,8 @@ httpx, — отдельный span-процессор дублировал бы 
   контекста (`review_run_context` в `logging.py`), контекст ставит `handle()` воркера вокруг
   `run_review`; из текстов сообщений идентификатор убран, sweep-путь несёт его `extra`.
 - **Бакеты гистограмм — через View.** `review_stage_duration` и `review_llm_call_duration`
-  (новая — latency каждого логического вызова модели, пишет `MeteredLlmGateway`) получают
+  (пишет `FallbackLlmGateway` на каждый фактический вызов провайдера, с исходом: `ok` — с
+  моделью ответа, `error` — с именем провайдера) получают
   `ExplicitBucketHistogramAggregation` [0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300] с:
   на дефолтных миллисекундных бакетах `histogram_quantile` бесполезен.
 - **`resource_to_telemetry_conversion` у exporter prometheus.** Без неё `service.name` прячется

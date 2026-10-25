@@ -59,9 +59,10 @@
   HTTP-метрики встроенной телеметрии FastAPI; ручки `/metrics` нет,
   `uv run python scripts/export_openapi.py --check` без изменений
 - [x] 4.2 Адаптер бизнес-метрик рядом с `OtelStageTracer`: счётчик `review_runs_total{status}`,
-  гистограмма `review_stage_duration{stage}`; токены и стоимость LLM — в адаптере LLM-шлюза, где
-  известен usage. Тест: упавший прогон вырос в счётчике по статусу, длительность этапа — в
-  гистограмме; домен и application не импортируют OTel (страж `lint-imports`)
+  гистограмма `review_stage_duration{stage}`; гистограмма `review_llm_call_duration{outcome}` —
+  в `FallbackLlmGateway` на каждый фактический вызов провайдера. Тест: упавший прогон вырос в
+  счётчике по статусу, длительность этапа — в гистограмме; домен и application не импортируют
+  OTel (страж `lint-imports`)
 
 ## 5. Миграции — в трейсе деплоя
 
