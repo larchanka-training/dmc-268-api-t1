@@ -73,10 +73,11 @@ jobs:
       - run: npx --yes @fission-ai/openspec@1.14.2 list --json | python3 scripts/check_openspec_archived.py
         shell: bash
 
-  # Статический аудит workflow: неприбитые actions и образы, `${{ … }}` в `run`,
-  # опасные триггеры. Персона pedantic — ради unpinned-images; падаем только на
-  # high. --offline: онлайн-аудитам нужен токен к API, а результат не должен
-  # зависеть от сети. Версия закреплена: новые проверки приходят с её обновлением.
+  # Статический аудит workflow и их скриптов: неприбитые actions и образы,
+  # `${{ … }}` в `run`, опасные триггеры. Персона pedantic — ради
+  # unpinned-images; падаем только на high. --offline: онлайн-аудитам нужен
+  # токен к API, а результат не должен зависеть от сети. Версия закреплена:
+  # новые проверки приходят с её обновлением.
   zizmor:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -90,6 +91,10 @@ jobs:
         with:
           version: "0.13.5"
       - run: uvx zizmor@1.31.1 --offline --persona pedantic --min-severity high .github/
+      # Скрипты, которые вызывают workflow и actions (.github/scripts/**). shellcheck
+      # предустановлен на ubuntu-latest (apt-пакет в образе раннера), отдельного
+      # action не нужно. find отдаёт ненулевой код, если shellcheck упал.
+      - run: find .github/scripts -name '*.sh' -exec shellcheck {} +
 
   # Dockerfile и собранный образ. hadolint — по правилам Dockerfile; trivy — по
   # образу целиком (пакеты ОС и зависимости из uv.lock). Падаем на HIGH и
@@ -116,7 +121,7 @@ jobs:
           exit-code: "1"
           format: table
 
-  # Конфигурация стенда без стенда: формат, валидность и логика main.tf и
+  # Конфигурация стенда без стенда: формат, валидность и логика infra/*.tf и
   # проверок переменных (`tofu test`, infra/tests/). Провайдер docker в тестах
   # подменён mock_provider: ни docker.sock, ни сервера job не трогает.
   opentofu:
