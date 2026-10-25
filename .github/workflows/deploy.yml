@@ -194,9 +194,24 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.gate.outputs.sha }}
 
+      # Перезапуск упавшего деплоя («Re-run failed jobs») берёт sha из gate
+      # первой попытки, а ручной запуск gate не сверяет: коммит, который уже
+      # не вершина develop, не катится (check-tip.sh). Шаги ниже идут только
+      # при deploy=true (`if: *fresh`); summary и шаги после упавших — по
+      # своим условиям. Пропуск — зелёный job с пометкой в summary.
+      - name: Сверить коммит с вершиной develop
+        id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/check-tip.sh
+
       # Ключ, known_hosts и хост `stand` в ~/.ssh/config для всех шагов ниже.
       - uses: ./.github/actions/stand-ssh
         id: ssh
+        if: &fresh steps.tip.outputs.deploy == 'true'
         with:
           ssh_key: ${{ secrets.VPS_DMC268_KEY_T1 }}
           ssh_user: ${{ secrets.VPS_DMC268_U }}
@@ -207,6 +222,7 @@ jobs:
       # текстом. Коды возврата без неё те же.
       - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         id: tofu
+        if: *fresh
         with:
           tofu_version: 1.13.2
           tofu_wrapper: false
@@ -215,6 +231,7 @@ jobs:
       # же деплоем, новый тег образа выкатывается на прежнем томе.
       - uses: ./.github/actions/s3-backend
         id: s3
+        if: *fresh
         with:
           s3_user: ${{ secrets.S3_USER_DMC268_T1 }}
           s3_password: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
@@ -234,6 +251,7 @@ jobs:
       # tofu создаёт из уже скачанного (infra/app.tf).
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         id: login
+        if: *fresh
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -242,6 +260,7 @@ jobs:
       # До применения: считает логи контейнеров, которые выкат сейчас заменит.
       - name: Доставки вебхука и сбои воркера с прошлого выката
         id: diagnostics
+        if: *fresh
         continue-on-error: true
         run: |
           .github/scripts/deploy/mark.sh
@@ -255,6 +274,7 @@ jobs:
       # (infra/locals.tf). Переменные — те же, что у полного apply (якорь).
       - name: Поднять базу и брокер
         id: infra
+        if: *fresh
         working-directory: infra
         env: &tofu-env
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
@@ -290,7 +310,7 @@ jobs:
           ../.github/scripts/deploy/mark.sh
           set -euo pipefail
           tofu init -input=false -no-color
-          tofu apply -input=false -no-color -auto-approve \
+          tofu apply -input=false -no-color -auto-approve -lock-timeout=2m \
             -target=docker_network.dmc268 \
             -target=docker_container.postgres \
             -target=docker_container.rabbitmq
@@ -303,6 +323,7 @@ jobs:
       # идут. Переменные — те же (якорь).
       - name: Спланировать и проверить план
         id: plan
+        if: *fresh
         env: *tofu-env
         run: |
           .github/scripts/deploy/mark.sh
@@ -313,6 +334,7 @@ jobs:
       # образ, из которого полный apply создаст api и worker.
       - name: Применить миграции
         id: migrate
+        if: *fresh
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
@@ -329,10 +351,32 @@ jobs:
       # разбивки простоя в summary и удаляет файл плана.
       - name: Применить конфигурацию
         id: apply
+        if: *fresh
         env: *tofu-env
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/apply.sh
+
+      # Связь с хранилищем пропала посреди шага, который пишет состояние или
+      # держит блокировку: несохранённое состояние осталось в
+      # infra/errored.tfstate раннера, блокировка — в бакете, и следующий
+      # деплой упёрся бы в неё, а после force-unlock — в старое состояние.
+      # recover-state.sh заново открывает туннель, записывает состояние и
+      # снимает свою блокировку; не вышло — `::error::` с инструкцией
+      # (infra/README.md, «Если деплой упал посреди apply»). Ничего не
+      # осталось (упал healthcheck, а не связь) — шаг ничего не меняет.
+      - name: Восстановить состояние OpenTofu
+        id: recover
+        if: >-
+          failure() && (steps.infra.outcome == 'failure' ||
+          steps.plan.outcome == 'failure' || steps.apply.outcome == 'failure')
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/recover-state.sh
 
       # От провайдера в логе только «container failed to be in healthy state»,
       # а проверки ниже после упавшего apply не идут: причину показывает этот шаг.
@@ -345,12 +389,14 @@ jobs:
 
       - name: Проверить, что API жив (через туннель)
         id: check_api
+        if: *fresh
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/check-api.sh
 
       - name: Проверить, что воркер работает
         id: check_worker
+        if: *fresh
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/check-worker.sh
@@ -392,6 +438,7 @@ jobs:
           STEP_RESULTS: |
             start ${{ steps.start.outcome }} ${{ steps.start.conclusion }}
             checkout ${{ steps.checkout.outcome }} ${{ steps.checkout.conclusion }}
+            tip ${{ steps.tip.outcome }} ${{ steps.tip.conclusion }}
             ssh ${{ steps.ssh.outcome }} ${{ steps.ssh.conclusion }}
             tofu ${{ steps.tofu.outcome }} ${{ steps.tofu.conclusion }}
             s3 ${{ steps.s3.outcome }} ${{ steps.s3.conclusion }}
@@ -401,6 +448,7 @@ jobs:
             plan ${{ steps.plan.outcome }} ${{ steps.plan.conclusion }}
             migrate ${{ steps.migrate.outcome }} ${{ steps.migrate.conclusion }}
             apply ${{ steps.apply.outcome }} ${{ steps.apply.conclusion }}
+            recover ${{ steps.recover.outcome }} ${{ steps.recover.conclusion }}
             api_logs ${{ steps.api_logs.outcome }} ${{ steps.api_logs.conclusion }}
             check_api ${{ steps.check_api.outcome }} ${{ steps.check_api.conclusion }}
             check_worker ${{ steps.check_worker.outcome }} ${{ steps.check_worker.conclusion }}
