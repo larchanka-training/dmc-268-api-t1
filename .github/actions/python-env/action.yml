@@ -1,0 +1,24 @@
+# uv и окружение проекта для job'ов, которые запускают Python: lint и test в
+# ci.yml, eval.yml, llm-live.yml, load.yml. Версии uv и Python записаны здесь
+# одни на всех, а не входами: переопределять их некому, и вход вернул бы ту
+# копию версий в каждый workflow, которую action убирает. Checkout остаётся
+# в workflow: action лежит в репозитории и без checkout не находится.
+#
+# Python 3.14 — тот же, что в `.python-version` и `requires-python`. uv для
+# zizmor (ci.yml) ставится отдельно, без Python и sync: держите версию uv там
+# той же.
+name: Python env
+description: Ставит uv и Python и синхронизирует окружение из uv.lock со всеми extras.
+
+runs:
+  using: composite
+  steps:
+    # Точная версия: плавающих мажорных тегов у setup-uv нет.
+    - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      with:
+        version: "0.13.5"
+        python-version: "3.14"
+    # --frozen ставит из uv.lock, не сверяя его с pyproject.toml: свежесть
+    # lock-файла проверяет `uv lock --check` в job'е lint.
+    - run: uv sync --all-extras --frozen
+      shell: bash
