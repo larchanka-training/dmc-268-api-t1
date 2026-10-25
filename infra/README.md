@@ -30,7 +30,7 @@ Terraform с версии 1.6 распространяется под Business S
 - Локальный демон: `docker_host = "unix:///var/run/docker.sock"` (у Docker Desktop на macOS часто `unix:///Users/<вы>/.docker/run/docker.sock`).
 - Удалённый сервер: `docker_host = "ssh://user@server"` (нужны SSH-доступ и Docker на удалённом хосте).
 
-PostgreSQL и RabbitMQ публикуются на `internal_bind_ip`, API — на `bind_ip`; в деплое оба равны `127.0.0.1`. Другого значения конфигурация не примет: обе переменные проверяются на адрес петли (`127.0.0.0/8` или `::1`), и ошибка всплывает на `plan`. В URL для клиентов используется `service_host`, его нельзя ставить в `0.0.0.0`.
+PostgreSQL и RabbitMQ публикуются на `internal_bind_ip`, API — на `bind_ip`; в деплое оба равны `127.0.0.1`. Другого значения конфигурация не примет: обе переменные проверяются на адрес петли (`127.0.0.0/8` или `::1`), и ошибка всплывает на `plan`.
 
 ## Ограничения контейнеров
 
@@ -76,7 +76,7 @@ Eurorouter подключается только фоллбэком после �
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `user_token_encryption_key` | секрет `USER_TOKEN_KEY_DMC268_T1` — 32 байта в base64 (`openssl rand -base64 32`). Без него или с битым значением `apply` падает на проверке переменной: стенд не стартует без шифрования токенов пользователя. Генерация и установка — `README.md`, «Ключ шифрования токенов пользователя» |
 | `registry_username`, `registry_password` | `github.actor` и `GITHUB_TOKEN`, живут один прогон |
-| `docker_host`, `service_host` | собираются из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
+| `docker_host` | `ssh://stand`: хост `stand` в `~/.ssh/config` собирает `.github/actions/stand-ssh` из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
 | `bind_ip` | `127.0.0.1`: API снаружи не публикуется, к нему ходит интерфейс изнутри docker-сети |
 | `llm_backend` | `stub` прямо в `deploy.yml`: модели на стенде пока нет |
 
@@ -135,7 +135,5 @@ cd infra && tofu fmt -check -recursive && tofu init -backend=false && tofu valid
 `tofu test` гоняет `tests/*.tftest.hcl` с `mock_provider "docker"`: ни Docker, ни сервер не нужны. Тесты проверяют адреса базы и брокера в окружении контейнеров, какие секреты получает какой контейнер, сеть и порты, грейс-период воркера, остановку на упавших миграциях и проверки переменных. Проверки отклоняют на `plan`, пока сервер не тронут: пустые `github_webhook_secret`, `postgres_password`, `rabbitmq_password` (незаданный секрет CI приходит пустой строкой), `llm_backend = "ollama"` без `ollama_model`, `llm_hosted_fallback` без `ollama` и всех `eurorouter_*`, `api_image` без digest.
 
 `tofu destroy` удалит стек, но **не** контейнер хранилища состояния — он не входит в этот стек намеренно. Полная зачистка описана выше, в разделе «Хранилище состояния».
-
-Выходы: `api_url`; чувствительные: `postgres_url`, `rabbitmq_url` (пароли в URL кодируются через `urlencode`).
 
 Этот стек только для API. UI деплоится отдельно из `dmc-268-ui-t1/infra/`.

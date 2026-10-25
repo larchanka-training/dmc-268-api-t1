@@ -33,12 +33,6 @@ variable "internal_bind_ip" {
   }
 }
 
-variable "service_host" {
-  type        = string
-  description = "Hostname or IP clients use in connection URLs (must be reachable, not 0.0.0.0)."
-  default     = "127.0.0.1"
-}
-
 variable "api_port" {
   type        = number
   description = "Порт хоста для HTTP-сервера FastAPI."
