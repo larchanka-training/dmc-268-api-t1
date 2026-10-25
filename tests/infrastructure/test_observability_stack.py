@@ -261,11 +261,16 @@ def test_base_services_resolve_by_network_alias(service: str, alias: str) -> Non
     assert alias in service_config["networks"]["default"]["aliases"]
 
 
-def test_grafana_volume_has_no_fixed_name() -> None:
-    """Том grafana_data получает префикс compose-проекта: два проекта с одним
-    фиксированным именем тома на общем хосте не поднимаются вместе."""
-    # grafana_data без отображения yaml разбирает в None — ключей у него нет.
-    assert not (load_compose()["volumes"]["grafana_data"] or {}).get("name")
+def test_stack_data_volumes_have_no_fixed_name() -> None:
+    """Ни у одного тома данных стека нет фиксированного name: том получает
+    префикс проекта compose и не пересекается с томами infra — иначе compose и
+    локальный `tofu apply` с флагом (второй worktree) писали бы в ОДИН том
+    dmc268-*-data двумя процессами в одну TSDB (замечание ревью PR #130)."""
+
+    # Том без отображения yaml разбирает в None — ключей у него нет.
+    volumes = load_compose()["volumes"]
+    for name in ("loki_data", "tempo_data", "prometheus_data", "grafana_data"):
+        assert not (volumes[name] or {}).get("name"), name
 
 
 # --- лимиты и preload: одно и то же в compose и infra -------------------------------
@@ -329,14 +334,45 @@ def test_cadvisor_is_not_root_and_is_hardened_in_both_places() -> None:
     assert 'container_path = "/rootfs"' not in cadvisor
 
 
-def test_socket_proxy_grants_only_what_cadvisor_needs() -> None:
-    """Минимальный работающий набор прав proxy: CONTAINERS=1 — список, inspect
-    и статистика контейнеров; INFO=1 — /info и /version, без них cAdvisor
-    падает на проверке Docker-фабрики («403 Forbidden» на /v1.45/info;
-    проверено запуском). События Docker (/events) не выданы: новые контейнеры
-    cAdvisor находит опросом cgroup-иерархии (проверено запуском)."""
-    proxy = load_compose()["services"]["dockerproxy"]["environment"]
-    assert proxy == {"CONTAINERS": "1", "INFO": "1"}
+SOCKET_PROXY_TEMPLATE = OBSERVABILITY_DIR / "docker-socket-proxy.cfg"
+SOCKET_PROXY_TEMPLATE_PATH = "/usr/local/etc/haproxy/haproxy.cfg.template"
+# Единственный белый список путей proxy (замечание ревью PR #130).
+_SOCKET_PROXY_ALLOW = r"^(/v[\d\.]+)?/(containers/json|containers/[^/]+/json|info|version|_ping)$"
+
+
+def test_socket_proxy_allows_only_the_cadvisor_paths() -> None:
+    """Белый список путей proxy живёт в шаблоне haproxy, а не в env образа.
+
+    CONTAINERS=1 у tecnativa/docker-socket-proxy открывал ЛЮБОЙ GET под
+    /containers — /containers/{id}/archive?path=… (любой файл любого
+    контейнера, включая том Postgres), /export и inspect с полным Env
+    (замечание ревью PR #130). Свой шаблон разрешает только то, что cAdvisor
+    берёт через API; статистику он читает из cgroup, не через API. Шаблон один
+    и тот же в обоих окружениях: compose монтирует файл по пути, который
+    рендерит entrypoint образа, infra заливает его upload-ом по тому же пути.
+    """
+    proxy = load_compose()["services"]["dockerproxy"]
+    assert "CONTAINERS" not in (proxy.get("environment") or {})
+    assert "INFO" not in (proxy.get("environment") or {})
+    assert (
+        f"./infra/observability/docker-socket-proxy.cfg:{SOCKET_PROXY_TEMPLATE_PATH}:ro"
+        in proxy["volumes"]
+    )
+
+    infra_proxy = _tf_container_block("docker_socket_proxy")
+    assert "CONTAINERS=" not in infra_proxy and "INFO=" not in infra_proxy
+    assert 'content = file("${path.module}/observability/docker-socket-proxy.cfg")' in infra_proxy
+    assert f'file    = "{SOCKET_PROXY_TEMPLATE_PATH}"' in infra_proxy
+
+    assert SOCKET_PROXY_TEMPLATE.is_file(), "нет infra/observability/docker-socket-proxy.cfg"
+    template = SOCKET_PROXY_TEMPLATE.read_text(encoding="utf-8")
+    allow_lines = [line.strip() for line in template.splitlines() if "http-request allow" in line]
+    assert allow_lines == [
+        "http-request allow if { path,url_dec -m reg -i " + _SOCKET_PROXY_ALLOW + " }"
+    ]
+    # Всё, что не в списке, — deny: и не-GET, и остальные пути.
+    assert "http-request deny unless METH_GET" in template
+    assert "    http-request deny\n    default_backend dockerbackend" in template
 
 
 def test_cadvisor_reaches_docker_through_the_proxy_in_compose() -> None:
@@ -576,6 +612,23 @@ def test_infra_telemetry_env_sets_seconds_timeout_and_log_exporter() -> None:
     assert '"OTEL_EXPORTER_OTLP_TIMEOUT=4"' in text
     assert "OTEL_EXPORTER_OTLP_TIMEOUT=4000" not in text
     assert '"OTEL_LOGS_EXPORTER=otlp"' in text
+
+
+def test_infra_telemetry_env_caps_batch_queues() -> None:
+    """telemetry_env ставит потолки очередей батч-процессоров спанов (BSP) и
+    логов (BLRP): shutdown_tracing закрывает три провайдера телеметрии
+    последовательно, и с очередью по умолчанию остановка при лежащем
+    коллекторе не влезала в стоп-окно api (замечание ревью PR #130)."""
+    text = LOCALS_TF.read_text(encoding="utf-8")
+    assert '"OTEL_BSP_MAX_QUEUE_SIZE=512"' in text
+    assert '"OTEL_BLRP_MAX_QUEUE_SIZE=512"' in text
+
+
+@pytest.mark.parametrize("service", ["api", "worker", "migrate"])
+def test_compose_caps_batch_queues_by_default(service: str) -> None:
+    """Дефолт потолков очередей в compose — 512, как в telemetry_env infra."""
+    assert _compose_env_defaults(service)["OTEL_BSP_MAX_QUEUE_SIZE"] == "512"
+    assert _compose_env_defaults(service)["OTEL_BLRP_MAX_QUEUE_SIZE"] == "512"
 
 
 @pytest.mark.parametrize(

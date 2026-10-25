@@ -15,6 +15,7 @@
 | `postgres.tf` | образ, том и контейнер PostgreSQL |
 | `rabbitmq.tf` | образ, том и контейнер RabbitMQ |
 | `app.tf` | контейнеры `api`, `worker` из образа API по digest |
+| `observability.tf` | стек наблюдаемости: образы, тома, сети и восемь контейнеров |
 | `variables.tf` | входные переменные, по секциям тех же доменов |
 | `outputs.tf` | выходы: `migrate_env` — окружение миграций для шага деплоя |
 | `tests/*.tftest.hcl` | `tofu test` с mock-провайдером |
@@ -101,7 +102,7 @@ Eurorouter подключается только фоллбэком после �
 | --- | --- |
 | `api_image` | тег и digest собранного образа (`outputs.digest` у `docker/build-push-action`) |
 | `postgres_password`, `rabbitmq_password` | секреты `PG_PASSWORD_DMC268_T1`, `RABBITMQ_PASSWORD_DMC268_T1` |
-| `grafana_admin_password` | секрет `GRAFANA_ADMIN_PASSWORD_DMC268_T1` — пароль админа Grafana (`GF_SECURITY_ADMIN_PASSWORD` контейнера `dmc268-grafana`). Дефолт переменной пустой, и при `observability_enabled = true` валидация требует непустого значения: без секрета `apply` падает на проверке. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 \| gh secret set GRAFANA_ADMIN_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` — или своим паролем; локальному стеку он не нужен, Grafana там без логина |
+| `grafana_admin_password` | секрет `GRAFANA_ADMIN_PASSWORD_DMC268_T1` — пароль админа Grafana (`GF_SECURITY_ADMIN_PASSWORD` контейнера `dmc268-grafana`). Дефолт переменной пустой, и при `observability_enabled = true` валидация требует непустого значения: без секрета `apply` падает на проверке. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 \| gh secret set GRAFANA_ADMIN_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` — или своим паролем; локальному стеку он не нужен, Grafana там без логина. **`GF_SECURITY_ADMIN_PASSWORD` действует только при первом старте Grafana** (создание `grafana.db` в томе): смена секрета пароль уже работающей Grafana **не** меняет — коллектор и алерты от этого не зависят, но вход по старому паролю сохранится. Ротация — на сервере, командой внутри контейнера: `docker exec -it dmc268-grafana grafana cli admin reset-admin-password <новый>` |
 | `postgres_monitor_password` | секрет `PG_MONITOR_PASSWORD_DMC268_T1` — пароль роли `dmc268_monitor` (`pg_monitor`), которую создаёт миграция 0013 и под которой коллектор снимает метрики базы (`POSTGRESQL_PASSWORD` его env). Дефолт переменной — локальный `dmc268_monitor`, а при `observability_enabled = true` валидация требует настоящего пароля: без секрета `apply` падает на проверке. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 \| gh secret set PG_MONITOR_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` |
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `user_token_encryption_key` | секрет `USER_TOKEN_KEY_DMC268_T1` — 32 байта в base64 (`openssl rand -base64 32`). Без него или с битым значением `apply` падает на проверке переменной: стенд не стартует без шифрования токенов пользователя. Генерация и установка — `README.md`, «Ключ шифрования токенов пользователя» |
@@ -128,6 +129,11 @@ Eurorouter подключается только фоллбэком после �
 `grafana_port` на `internal_bind_ip`), `node-exporter` (сервер: CPU, память, диски), `cAdvisor`
 (контейнеры) и socket-proxy (`dmc268-docker-proxy`: Docker API для cAdvisor по белому списку
 эндпоинтов вместо маунта `docker.sock`; отдельная сеть, где кроме proxy и cAdvisor никого).
+Белый список — свой шаблон haproxy (`observability/docker-socket-proxy.cfg`), а не
+env-переменные образа: `CONTAINERS=1` открывал любой GET под `/containers`, вплоть до чтения
+файлов контейнеров через `/archive` (замечание ревью PR #130); в compose шаблон монтируется
+по пути, который рендерит entrypoint образа, на стенде заливается тем же `upload`, что и
+остальные конфиги.
 Метрики базы снимает сам коллектор — receiver `postgresql` (решение #89), отдельного экспортёра
 Postgres нет. Конфиги лежат в `observability/` и **те же самые** используются локальным
 docker compose (профиль `observability`): различия окружений — только переменные и лимиты, не
@@ -227,27 +233,31 @@ Prometheus, Grafana), отдельная сеть socket-proxy (`count = 1 : 0` 
 
 ### Диск
 
-Тома данных (`dmc268-postgres-pgvector-data`, `dmc268-rabbitmq-v44-data`, `dmc268-loki-data`,
-`dmc268-tempo-data`, `dmc268-prometheus-data`, `dmc268-grafana-data`) объёмных лимитов не имеют:
-у `docker_volume` размера нет, растут до конца диска сервера. Заданные сверху потолки:
+Диск на стенде один на всё: тома данных стека и PostgreSQL растут на одной файловой системе,
+и его объём в README пока не зафиксирован — снять факт можно `df -h /` на сервере.
+У `docker_volume` размера нет — потолок задаёт только само приложение, если умеет:
 
 | Что | Потолок | Откуда |
 | --- | --- | --- |
 | метрики Prometheus | ≤ 8 ГБ и не дольше 30 дней | `--storage.tsdb.retention.size=8GB` и `--storage.tsdb.retention.time=30d` (`observability.tf`, compose) |
-| логи Loki | 30 дней (`retention_period: 720h`), лимита по размеру нет | `observability/loki.yaml`; заполнение диска ловят алерты #100 по `node_filesystem_avail_bytes` |
-| трейсы Tempo | 14 дней (`block_retention: 336h`), лимита по размеру нет | `observability/tempo.yaml` |
+| логи Loki | только 30 дней (`retention_period: 720h`), лимита по размеру нет | `observability/loki.yaml` |
+| трейсы Tempo | только 14 дней (`block_retention: 336h`), лимита по размеру нет | `observability/tempo.yaml` |
 | логи контейнеров (json-file) | 30 МБ на контейнер (3 файла × 10 МБ) | `local.log_opts` в `locals.tf`, `logging.options` в compose |
 
-На стенде под ротацию попадает 13 контейнеров этого стека (5 приложения + 8 наблюдаемости) —
-не больше 390 МБ. Оценка 30 дней логов Loki — арифметика от лимитов приёма
-(`ingestion_rate_mb: 1`, `ingestion_burst_size_mb: 2`, `per_stream_rate_limit: 512KB`) и
-допущения о реальном объёме. Пишут в Loki только три сервиса приложения — api, worker и
-одноразовый migrate (логи postgres и rabbitmq туда не попадают: приём только OTLP). При
+Единственный компонент с потолком по размеру — Prometheus (8 ГБ): всплеск кардинальности не
+забьёт диск раньше срока хранения. У Loki и Tempo такого лимита нет: записи старше срока
+хранения удаляются, но суммарный объём под сроком ничем не ограничен. Теоретический потолок
+Loki — скорость приёма 1 МБ/с (`ingestion_rate_mb: 1`) ≈ 86 ГБ в сутки: поток сверх лимита
+Loki отбрасывает с 429 и долг не копит, но всё принятое до отбрасывания пишет на диск.
+Алертов #100 пока нет (задача открыта), поэтому до #100 защиты от переполнения диска нет
+никакой — ни лимита, ни алерта; после #100 заполнение ловят алерты по
+`node_filesystem_avail_bytes` от node-exporter.
+
+Ожидаемые объёмы: под ротацию json-file попадает 13 контейнеров этого стека (5 приложения +
+8 наблюдаемости) — не больше 390 МБ. В Loki пишут только три сервиса приложения — api, worker
+и одноразовый migrate (логи postgres и rabbitmq туда не попадают: приём только OTLP). При
 допущении «запись в секунду на сервис по 1 КБ» — 3 КБ/с ≈ 260 МБ в сутки ≈ 7,8 ГБ за 30 дней
-на все три. Теоретический потолок при непрерывной работе на лимите приёма — 1 МБ/с ≈ 86 ГБ в
-сутки ≈ 2,6 ТБ за 30 дней — недостижим: превышение Loki отвергает с 429, а не копит долг, а
-рост занятого диска останавливает алерт #100 по свободному месту. Ожидаемый объём тома Loki —
-единицы ГБ; индекс TSDB (период 24 ч) и рабочие файлы compactor в оценку не входят.
+на все три; индекс TSDB Loki (период 24 ч) и рабочие файлы compactor в оценку не входят.
 
 ## Хранилище состояния
 

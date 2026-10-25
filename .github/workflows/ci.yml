@@ -138,6 +138,64 @@ jobs:
       - run: cd infra && tofu init -backend=false && tofu validate
       - run: cd infra && tofu test
 
+  # Конфиги стека наблюдаемости (infra/observability/) валидируются самими
+  # образами: опечатка в OTTL-стейтменте или секции конфига роняет эту джобу,
+  # а не стенд при поднятии стека (#140). Docker-тест коллектора в pytest под
+  # маркером и в CI не гоняется, Loki и Tempo конфиг-валидатором не покрыты
+  # вовсе. Tempo здесь не валидируется: флага -verify-config, как у Loki, у
+  # зафиксированной версии образа нет (записано в #140). Без needs — как
+  # остальные: провал валидации не делает бессмысленными параллельные проверки.
+  observability-configs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Единственный источник дайджестов — infra/locals.tf: литералы в workflow
+      # разъезжались бы с ним при обновлении образа. awk печатает вторую
+      # кавыченную часть строки `otelcol_image = "..."`. В $GITHUB_ENV, а не
+      # через ${{ }} в run: выражения в run запрещены (ловит job zizmor).
+      - name: Дайджесты образов из infra/locals.tf
+        run: |
+          {
+            echo "OTELCOL=$(awk -F'"' '/^  otelcol_image/{print $2}' infra/locals.tf)"
+            echo "LOKI=$(awk -F'"' '/^  loki_image/{print $2}' infra/locals.tf)"
+            echo "PROM=$(awk -F'"' '/^  prometheus_image/{print $2}' infra/locals.tf)"
+            echo "TEMPO=$(awk -F'"' '/^  tempo_image/{print $2}' infra/locals.tf)"
+          } >> "$GITHUB_ENV"
+      # Все ${env:...}, что читает otelcol.yaml, — только четыре POSTGRESQL_*:
+      # validate подставляет их в конфиг и выходит, к базе не подключаясь,
+      # поэтому значения фиктивные.
+      - name: Коллектор телеметрии (otelcol validate)
+        run: |
+          docker run --rm \
+            -e POSTGRESQL_USERNAME=dmc268_monitor \
+            -e POSTGRESQL_PASSWORD=validate \
+            -e POSTGRESQL_ENDPOINT=dmc268-postgres:5432 \
+            -e POSTGRESQL_DATABASE=dmc268 \
+            -v "$PWD/infra/observability/otelcol.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+            "$OTELCOL" validate --config=/etc/otelcol-contrib/config.yaml
+      - name: Prometheus (promtool check config)
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            "$PROM" check config /etc/prometheus/prometheus.yml
+      # -verify-config разбирает конфиг и выходит, не стартуя сервер.
+      - name: Loki (-verify-config)
+        run: |
+          docker run --rm \
+            -v "$PWD/infra/observability/loki.yaml:/etc/loki/config.yaml:ro" \
+            "$LOKI" -config.file=/etc/loki/config.yaml -verify-config
+      # У Tempo флага -verify-config нет, но есть собственный -config.verify
+      # («Verify configuration and exit»); форма с =true, голый флаг ждёт
+      # аргумент. Закрывает пробел из #140 без отдельной задачи.
+      - name: Tempo (-config.verify)
+        run: |
+          docker run --rm \
+            -v "$PWD/infra/observability/tempo.yaml:/etc/tempo/config.yaml:ro" \
+            "$TEMPO" -config.file=/etc/tempo/config.yaml -config.verify=true
+
   # Не после lint: замечание линтера не делает тесты бессмысленными, а в
   # цепочке оно прятало бы упавший тест до следующего пуша.
   test:

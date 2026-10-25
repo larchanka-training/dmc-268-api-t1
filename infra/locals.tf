@@ -35,6 +35,15 @@ locals {
     "OTEL_LOGS_EXPORTER=otlp",
     "OTEL_EXPORTER_OTLP_ENDPOINT=http://dmc268-otelcol:4318",
     "OTEL_EXPORTER_OTLP_TIMEOUT=4",
+    # Потолки очередей батч-процессоров спанов (BSP) и логов (BLRP). При
+    # остановке shutdown_tracing закрывает три провайдера телеметрии
+    # последовательно, и у каждого батча свой таймаут 4 с
+    # (OTEL_EXPORTER_OTLP_TIMEOUT выше): с очередью по умолчанию недоставленный
+    # батч досылается все 4 с, и замер ревью PR #130 при лежащем коллекторе
+    # давал 17–18 с — окно stop_timeout = 15 у api рвалось SIGKILL-ом. Очередь
+    # 512 записей — 9,5 с на всё: влезает в стоп-окно с запасом.
+    "OTEL_BSP_MAX_QUEUE_SIZE=512",
+    "OTEL_BLRP_MAX_QUEUE_SIZE=512",
   ] : []
 
   # Общая часть OTEL_RESOURCE_ATTRIBUTES; service.instance.id каждый контейнер
@@ -55,8 +64,9 @@ locals {
   grafana_image       = "grafana/grafana@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f"
   node_exporter_image = "quay.io/prometheus/node-exporter@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a"
   cadvisor_image      = "gcr.io/cadvisor/cadvisor@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435"
-  # socket-proxy: доступ cAdvisor к Docker API без docker.sock (контейнеры и
-  # информация о сервере; минимум прав — см. env у контейнера в observability.tf).
+  # socket-proxy: доступ cAdvisor к Docker API без docker.sock — белый список
+  # путей в своём шаблоне haproxy (observability/docker-socket-proxy.cfg),
+  # минимум прав там же и в комментариях у контейнера в observability.tf.
   docker_socket_proxy_image = "tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e"
 
   # Окружение, без которого не загрузятся общие настройки (`load_settings`):

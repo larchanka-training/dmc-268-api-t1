@@ -985,7 +985,8 @@ def test_an_incompatible_engine_tracer_does_not_stop_the_worker(
 
     monkeypatch.setattr(worker_factory, "build_worker", lambda settings: _Worker())
 
-    worker_factory.run_worker(SETTINGS)
+    # Настройки — загрузчиком: `run_worker` читает их сам после настройки логов.
+    worker_factory.run_worker(lambda: SETTINGS)
 
     assert started == [True]
     [record] = _engine_warnings(caplog)

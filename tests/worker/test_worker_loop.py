@@ -258,14 +258,14 @@ def test_a_stop_signal_stops_the_worker_and_flushes_the_traces(
     monkeypatch.setattr(factory, "build_worker", lambda settings: _Worker())
     monkeypatch.setattr(factory, "shutdown_tracing", lambda: flushed.append(True))
 
-    factory.run_worker(
-        Settings(
-            database_url="postgresql+psycopg://t:t@localhost/t",
-            rabbitmq_url="amqp://guest:guest@localhost//",
-            github_webhook_secret="s",
-            llm_backend="stub",
-        )
+    settings = Settings(
+        database_url="postgresql+psycopg://t:t@localhost/t",
+        rabbitmq_url="amqp://guest:guest@localhost//",
+        github_webhook_secret="s",
+        llm_backend="stub",
     )
+    # Настройки — загрузчиком: `run_worker` читает их сам после настройки логов.
+    factory.run_worker(lambda: settings)
 
     assert seen == {"requested": True, "restored": True}
     assert flushed == [True]  # провайдер трейсов закрыт после выхода цикла

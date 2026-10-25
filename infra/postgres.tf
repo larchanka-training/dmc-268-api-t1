@@ -24,7 +24,8 @@ resource "docker_image" "postgres" {
   # `vector` сейчас не создаёт ни одна миграция. Образ остаётся: возврат на
   # postgres:18-alpine — снова смена библиотеки C и новый том (backend-delivery).
   # Тег плавающий: digest в name пересоздаёт контейнер при каждом обновлении
-  # образа, а без destroy_grace_seconds пересоздание — это SIGKILL (#150, #102).
+  # образа; остановку при пересоздании обслуживает destroy_grace_seconds
+  # контейнера ниже (#150, #102).
   name         = "pgvector/pgvector:pg18"
   keep_locally = true
 }
@@ -43,6 +44,14 @@ resource "docker_container" "postgres" {
   # только в паре с переключателем стека. Локальный compose preload держит
   # всегда (накладные расходы ничтожны, переключателя в compose нет).
   command = var.observability_enabled ? ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"] : null
+
+  # Окно остановки: смена command (переключатель observability_enabled) и новый
+  # digest образа пересоздают контейнер базы, и без окна провайдер делает
+  # SIGKILL под пишущей базой (замечание ревью PR #130, high). stop_timeout —
+  # окно docker stop, destroy_grace_seconds — то же при пересоздании
+  # провайдером; 60 с — запас postgres на чекпоинт и чистую остановку.
+  stop_timeout          = 60
+  destroy_grace_seconds = 60
 
   # Только запрет повышения привилегий: entrypoint образа стартует от root,
   # делает chown каталога данных и сам переходит на пользователя postgres.

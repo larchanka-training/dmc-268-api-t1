@@ -53,10 +53,14 @@ resource "docker_container" "api" {
   restart = "unless-stopped"
 
   # Остановка api: SIGTERM и ожидание. Худший случай — 5 с graceful shutdown
-  # (рвутся потоки SSE) + 4 с выгрузки спанов (OTEL_EXPORTER_OTLP_TIMEOUT,
-  # local.telemetry_env) с запасом: без него дефолтные 10 с Docker — впритык,
-  # и lifespan оборвался бы до выгрузки спанов (замечание из #89 про обе
-  # половины). destroy_grace_seconds — то же окно при пересоздании провайдером;
+  # (рвутся потоки SSE), затем shutdown_tracing закрывает три провайдера
+  # телеметрии последовательно (трейсы, метрики, логи), и у каждого батча свой
+  # таймаут 4 с (OTEL_EXPORTER_OTLP_TIMEOUT в local.telemetry_env) — «5 + 4»
+  # было бы верно только для одного провайдера. Очереди батчей capped 512
+  # (OTEL_BSP/BLRP_MAX_QUEUE_SIZE там же): худший замер при лежащем коллекторе
+  # — 9,5 с вместо 17–18 с с очередью по умолчанию, когда 15 с не хватало и api
+  # получал SIGKILL со спанами (замечание ревью PR #130). Итого 5 + 9,5 ≤ 15 —
+  # запас есть. destroy_grace_seconds — то же окно при пересоздании провайдером;
   # 15 с — как у stop_grace_period api в docker-compose.yml.
   stop_timeout          = 15
   destroy_grace_seconds = 15

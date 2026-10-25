@@ -101,6 +101,10 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://collector:4318}
       # Python SDK читает таймаут в СЕКУНДАХ, вопреки спеке OTel (мс).
       OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-4}
+      # Потолки очередей батч-процессоров — как у api (см. комментарий там):
+      # трейс деплоя должен успеть выгрузиться за время жизни контейнера.
+      OTEL_BSP_MAX_QUEUE_SIZE: ${OTEL_BSP_MAX_QUEUE_SIZE:-512}
+      OTEL_BLRP_MAX_QUEUE_SIZE: ${OTEL_BLRP_MAX_QUEUE_SIZE:-512}
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local,service.instance.id=dmc268-migrate}
       OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
     depends_on:
@@ -182,6 +186,14 @@ services:
       # остановке успевает даже при недоступном коллекторе (замечание из #89).
       # Python SDK читает переменную в СЕКУНДАХ, вопреки спеке OTel (мс).
       OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-4}
+      # Потолки очередей батч-процессоров спанов (BSP) и логов (BLRP):
+      # shutdown_tracing закрывает три провайдера телеметрии последовательно,
+      # у каждого батча свой таймаут 4 с выше, и с очередью по умолчанию
+      # остановка при лежащем коллекторе длилась 17–18 с. Capped 512 — 9,5 с,
+      # влезает в stop_grace_period ниже (замер ревью PR #130; подробно —
+      # local.telemetry_env в infra/locals.tf).
+      OTEL_BSP_MAX_QUEUE_SIZE: ${OTEL_BSP_MAX_QUEUE_SIZE:-512}
+      OTEL_BLRP_MAX_QUEUE_SIZE: ${OTEL_BLRP_MAX_QUEUE_SIZE:-512}
       # service.version — sha собранного образа: git внутрь контейнера не
       # попадает, поэтому переменная с дефолтом (осмысленно —
       # SERVICE_VERSION=$(git rev-parse --short HEAD) в .env).
@@ -206,10 +218,13 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    # Худший случай остановки: 5 с graceful shutdown (рвутся потоки SSE) +
-    # 4 с выгрузки спанов (OTEL_EXPORTER_OTLP_TIMEOUT) с запасом. Без него
-    # дефолтные 10 с Docker — впритык, с ним lifespan гарантированно
-    # завершается и спаны выгружаются (замечание из #89 про обе половины).
+    # Худший случай остановки: 5 с graceful shutdown (рвутся потоки SSE), затем
+    # shutdown_tracing закрывает три провайдера телеметрии последовательно,
+    # по 4 с на батч (OTEL_EXPORTER_OTLP_TIMEOUT выше); очереди capped 512
+    # (OTEL_BSP/BLRP_MAX_QUEUE_SIZE) — худший замер 9,5 с при лежащем
+    # коллекторе (ревью PR #130), итого 5 + 9,5 ≤ 15. Дефолтных 10 с Docker
+    # не хватало: без потолков shutdown_tracing длился 17–18 с (замечание
+    # из #89 про обе половины).
     stop_grace_period: 15s
     # Без sh: uvicorn — PID 1 и получает SIGTERM от `docker stop` сам, иначе
     # через грейс-период пришёл бы SIGKILL, и спаны не выгрузились.
@@ -246,6 +261,10 @@ services:
       # Python SDK читает таймаут в СЕКУНДАХ, вопреки спеке OTel (мс) —
       # подробнее у api.
       OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-4}
+      # Потолки очередей батч-процессоров — как у api: от них зависит, сколько
+      # shutdown_tracing дописывает незакрытых данных при остановке.
+      OTEL_BSP_MAX_QUEUE_SIZE: ${OTEL_BSP_MAX_QUEUE_SIZE:-512}
+      OTEL_BLRP_MAX_QUEUE_SIZE: ${OTEL_BLRP_MAX_QUEUE_SIZE:-512}
       # Тот же resource, что у api; дефолты те же (см. комментарий там), кроме
       # service.instance.id — стабильное имя воркера вместо случайного UUID.
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local,service.instance.id=dmc268-worker}
@@ -432,24 +451,27 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
 
-  # Прокси над Docker API (/var/run/docker.sock) с доступом по белому списку
-  # эндпоинтов: cAdvisor — единственный клиент, docker.sock контейнерам больше
-  # не монтируется. Права — минимальный работающий набор (проверено запуском
-  # cAdvisor через proxy): CONTAINERS=1 — список, inspect и статистика
-  # контейнеров; INFO=1 — /info и /version, без них cAdvisor падает на проверке
-  # Docker-фабрики («403 Forbidden» на /v1.45/info) и не отдаёт метрики
-  # контейнеров вовсе. События Docker (/events) не нужны: новые контейнеры
-  # находятся опросом cgroup-иерархии. Сеть — отдельная (docker_proxy), в ней
-  # только proxy и cAdvisor.
+  # Прокси над Docker API (/var/run/docker.sock): cAdvisor — единственный
+  # клиент, docker.sock контейнерам больше не монтируется. Белый список путей —
+  # не env-переменные образа (CONTAINERS=1 открывал ЛЮБОЙ GET под /containers:
+  # /containers/{id}/archive?path=… — любой файл любого контейнера, включая том
+  # Postgres; замечание ревью PR #130), а свой шаблон haproxy ниже: entrypoint
+  # образа рендерит именно его и стартует haproxy по результату. Разрешены
+  # только пути cAdvisor — /containers/json, inspect контейнера, /info,
+  # /version, /_ping (правила и остаточный риск с Env — в шапке файла);
+  # статистику cAdvisor читает из cgroup, не через API. События Docker
+  # (/events) не нужны: новые контейнеры находятся опросом cgroup-иерархии.
+  # Сеть — отдельная (docker_proxy), в ней только proxy и cAdvisor.
   dockerproxy:
     # tecnativa/docker-socket-proxy:v0.4.1
     image: tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e
     profiles: ["observability"]
-    environment:
-      CONTAINERS: "1"
-      INFO: "1"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Свой узкий шаблон haproxy вместо собранного образом из env: тот же файл,
+      # что заливает upload в infra/observability.tf. :ro — контейнеру запись
+      # шаблона не нужна.
+      - ./infra/observability/docker-socket-proxy.cfg:/usr/local/etc/haproxy/haproxy.cfg.template:ro
     networks:
       docker_proxy:
         aliases:
@@ -498,18 +520,18 @@ volumes:
   # Скачанные модели переживают пересоздание контейнера Ollama.
   ollama_models:
     name: dmc268-ollama-models
-  # Данные стека наблюдаемости переживают пересоздание контейнеров.
+  # Данные стека наблюдаемости переживают пересоздание контейнеров. Имени нет
+  # ни у одного из четырёх: том получает префикс проекта compose
+  # (<проект>_loki_data) и не пересекается с томами стенда (dmc268-*-data от
+  # tofu). С фиксированным именем локальный compose и локальный `tofu apply`
+  # с флагом (второй worktree) писали бы в ОДИН том dmc268-*-data двумя
+  # процессами в одну TSDB (замечание ревью PR #130). Внутри — только
+  # локальные данные: на стенде тома создаёт infra, а Grafana здесь без
+  # логина и хранит лишь собранные в UI дашборды — потеря при пересоздании
+  # проекта не страшна.
   loki_data:
-    name: dmc268-loki-data
   tempo_data:
-    name: dmc268-tempo-data
   prometheus_data:
-    name: dmc268-prometheus-data
-  # Единственный том стека без фиксированного name: префикс compose-проекта
-  # отделяет его от тома стенда (dmc268-grafana-data) на общем хосте — два
-  # проекта с одним именем тома не поднимаются вместе. Внутри — только
-  # локальное состояние Grafana (дашборды, собранные в UI): данные разработчиков
-  # он не хранит, потери при пересоздании проекта не страшны.
   grafana_data:
 
 # Сети стека наблюдаемости. docker_proxy — для доступа к Docker API через

@@ -460,14 +460,18 @@ resource "docker_container" "cadvisor" {
   depends_on = [docker_container.docker_socket_proxy]
 }
 
-# Прокси над Docker API (/var/run/docker.sock) с доступом по белому списку
-# эндпоинтов: cAdvisor — единственный клиент, docker.sock контейнерам больше
-# не монтируется. Права — минимальный работающий набор (проверено запуском
-# cAdvisor через proxy): CONTAINERS=1 — список, inspect и статистика
-# контейнеров; INFO=1 — /info и /version, без них cAdvisor падает на проверке
-# Docker-фабрики («403 Forbidden» на /v1.45/info) и не отдаёт метрики
-# контейнеров вовсе. События Docker (/events) не нужны: новые контейнеры
-# находятся опросом cgroup-иерархии. Сеть — отдельная, только proxy и cAdvisor.
+# Прокси над Docker API (/var/run/docker.sock): cAdvisor — единственный клиент,
+# docker.sock контейнерам больше не монтируется. Белый список путей — не
+# env-переменные образа (CONTAINERS=1 открывал ЛЮБОЙ GET под /containers —
+# /containers/{id}/archive?path=… читал любой файл любого контейнера, включая
+# том Postgres, /export отдавал файловую систему, inspect — полный Env;
+# замечание ревью PR #130), а свой шаблон haproxy: entrypoint образа рендерит
+# файл /usr/local/etc/haproxy/haproxy.cfg.template (sed подставляет адрес
+# прослушивания вместо ${BIND_CONFIG}) и стартует haproxy по результату.
+# Разрешены только пути cAdvisor — /containers/json, inspect контейнера,
+# /info, /version и /_ping; статистику cAdvisor читает из cgroup, не через API.
+# События Docker (/events) не нужны: новые контейнеры находятся опросом
+# cgroup-иерархии. Сеть — отдельная, только proxy и cAdvisor.
 resource "docker_container" "docker_socket_proxy" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-docker-proxy"
@@ -482,10 +486,13 @@ resource "docker_container" "docker_socket_proxy" {
   # Как у postgres: entrypoint образа сам управляет привилегиями haproxy.
   security_opts = ["no-new-privileges:true"]
 
-  env = [
-    "CONTAINERS=1",
-    "INFO=1",
-  ]
+  # Шаблон конфига заливается при создании, до старта: entrypoint успевает
+  # отрендерить его при запуске. Правка содержимого пересоздаёт контейнер
+  # следующим apply — так же, как у коллектора и Grafana выше.
+  upload {
+    content = file("${path.module}/observability/docker-socket-proxy.cfg")
+    file    = "/usr/local/etc/haproxy/haproxy.cfg.template"
+  }
 
   volumes {
     host_path      = "/var/run/docker.sock"

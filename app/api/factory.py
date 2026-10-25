@@ -43,13 +43,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     Явно переданные `settings` — это то, как тесты обходятся без настоящего
     окружения; без них настройки читаются из окружения и падают громко, если
-    обязательной не хватает.
+    обязательной не хватает, — но уже после настройки логов и телеметрии:
+    `ValidationError` pydantic выходит JSON-записью, которую читает Loki, а не
+    текстом в stderr до настройки логов (замечание ревью PR #130).
     """
-    if settings is None:
-        from app.config import load_settings
-
-        settings = load_settings()
-
     from pydantic.alias_generators import to_camel
 
     from app.api import openapi
@@ -91,12 +88,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.api.events import StreamEventType
 
     openapi.install(app, extra_models=[StreamEventType])
-    app.state.settings = settings
     # Логи — до первого запроса и до трассировки: её предупреждения при старте
     # тоже должны выйти JSON-записями.
     configure_logging(telemetry.API_SERVICE)
     # До контейнера: провайдеры трейсов и метрик нужны телеметрии FastAPI с первого запроса.
     telemetry.configure_telemetry(telemetry.API_SERVICE)
+    # Окружение читается после логов и телеметрии, не раньше (замечание ревью
+    # PR #130): падение на кривом окружении выходит JSON-записью в Loki.
+    # Между началом функции и этим местом настройки не нужны: приложение и
+    # OpenAPI-схема строятся без них. Явно переданные настройки (тесты)
+    # читаются как читались — из аргумента.
+    if settings is None:
+        from app.config import load_settings
+
+        settings = load_settings()
+
+    app.state.settings = settings
     app.state.container = build_container(settings)
     if settings.user_token_key is None:
         # Видно в логе старта API: вход на таком стенде будет отказывать. Не в

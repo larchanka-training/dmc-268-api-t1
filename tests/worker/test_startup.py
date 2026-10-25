@@ -6,9 +6,10 @@ import json
 import logging
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.infrastructure.logging import JsonFormatter
@@ -30,6 +31,20 @@ def _settings(**overrides: object) -> Settings:
         rabbitmq_url="amqp://guest:guest@localhost//",
         github_webhook_secret="test-secret",
         **overrides,  # type: ignore[arg-type]
+    )
+
+
+def _loader(settings: Settings) -> Callable[[], Settings]:
+    """Загрузчик настроек, каким его ждёт `run_worker`: готовые настройки под рукой."""
+    return lambda: settings
+
+
+def _broken_loader() -> Settings:
+    """Загрузчик, как в проде: pydantic отклоняет окружение (`ValidationError`)."""
+    return Settings(
+        database_url="postgresql+psycopg://test:test@localhost/test",
+        rabbitmq_url="amqp://guest:guest@localhost//",
+        github_webhook_secret="",
     )
 
 
@@ -68,7 +83,7 @@ def test_worker_without_a_chosen_model_backend_does_not_start() -> None:
     # Брокер по адресу из настроек недоступен: тест проходит, только если
     # проверка срабатывает раньше подключения.
     with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
-        run_worker(_settings())
+        run_worker(_loader(_settings()))
 
 
 def test_run_worker_configures_logging_before_reading_its_configuration(
@@ -82,7 +97,7 @@ def test_run_worker_configures_logging_before_reading_its_configuration(
     monkeypatch.setattr(factory, "install_excepthooks", lambda: calls.append("hooks"))
 
     with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
-        run_worker(_settings())
+        run_worker(_loader(_settings()))
 
     assert calls == ["logging", "hooks"]
 
@@ -99,9 +114,52 @@ def test_run_worker_configures_telemetry_before_the_config_checks(
     monkeypatch.setattr(factory, "install_excepthooks", lambda: calls.append("hooks"))
 
     with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
-        run_worker(_settings())
+        run_worker(_loader(_settings()))
 
     assert calls == ["logging", "telemetry", "hooks"]
+
+
+def test_run_worker_reads_the_environment_after_logs_telemetry_and_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Окружение читается последним из стартовых шагов — после логов,
+    телеметрии и excepthook'ов: иначе `ValidationError` pydantic выходила бы
+    текстом в stderr до настройки логов, и crash-loop воркера был бы невидим
+    в Loki (замечание ревью PR #130)."""
+    calls: list[str] = []
+    monkeypatch.setattr(factory, "configure_logging", lambda service: calls.append("logging"))
+    monkeypatch.setattr(factory, "configure_telemetry", lambda service: calls.append("telemetry"))
+    monkeypatch.setattr(factory, "install_excepthooks", lambda: calls.append("hooks"))
+
+    def loader() -> Settings:
+        calls.append("load")
+        return _settings()
+
+    with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
+        run_worker(loader)
+
+    assert calls == ["logging", "telemetry", "hooks", "load"]
+
+
+def test_a_validation_error_from_the_loader_leaves_a_json_record() -> None:
+    """`ValidationError` pydantic из загрузчика настроек доходит до Loki
+    JSON-записью: excepthook ставится до чтения окружения (замечание ревью
+    PR #130), поэтому падение `python -m app.worker` на кривом окружении
+    оставляет в логе стектрейс, а не текст в stderr, который коллектор
+    дропает."""
+    worker_log = logging.getLogger("app.worker.factory")
+
+    with _json_log(worker_log) as out:
+        try:
+            run_worker(_broken_loader)
+        except ValidationError:
+            # Как интерпретатор на выходе исключения из `main()` точки входа.
+            sys.excepthook(*sys.exc_info())
+
+    [record] = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert record["severity"] == "ERROR"
+    assert record["exception.type"] == "ValidationError"
+    assert "github_webhook_secret" in record["exception.stacktrace"]
 
 
 def test_unhandled_exceptions_of_both_hooks_go_through_the_logger() -> None:
@@ -137,7 +195,7 @@ def test_unhandled_exceptions_of_both_hooks_go_through_the_logger() -> None:
 
 def test_empty_model_backend_from_compose_does_not_start_the_worker() -> None:
     with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
-        run_worker(_settings(llm_backend=""))
+        run_worker(_loader(_settings(llm_backend="")))
 
 
 def test_default_model_timeouts_fit_under_the_stale_run_threshold() -> None:
@@ -170,7 +228,7 @@ def test_model_call_longer_than_the_stale_run_threshold_stops_the_worker() -> No
 
     # Брокер недоступен: проверка срабатывает раньше подключения.
     with pytest.raises(WorkerConfigError, match="2400"):
-        run_worker(settings)
+        run_worker(_loader(settings))
 
 
 def test_default_sweep_thresholds_pass_the_startup_check() -> None:
@@ -190,4 +248,4 @@ def test_queued_threshold_not_above_the_stale_one_stops_the_worker(queued: int) 
 
     # Брокер недоступен: проверка срабатывает раньше подключения.
     with pytest.raises(WorkerConfigError, match="QUEUED_RUN_TIMEOUT_SECONDS"):
-        run_worker(settings)
+        run_worker(_loader(settings))

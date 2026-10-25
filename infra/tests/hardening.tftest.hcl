@@ -29,6 +29,19 @@ run "third_party_containers_forbid_privilege_escalation" {
     ])
     error_message = "postgres и rabbitmq должны запрещать повышение привилегий: security_opts = [\"no-new-privileges:true\"]."
   }
+
+  # Стоп-окно базы: смена command (переключатель observability_enabled) и новый
+  # digest образа пересоздают контейнер, и без окна провайдер делает SIGKILL
+  # под пишущей базой (замечание ревью PR #130). 60 с — запас postgres на
+  # чекпоинт и чистую остановку; stop_timeout — окно docker stop,
+  # destroy_grace_seconds — то же при пересоздании провайдером.
+  assert {
+    condition = (
+      docker_container.postgres.stop_timeout == 60
+      && docker_container.postgres.destroy_grace_seconds == 60
+    )
+    error_message = "postgres должен останавливаться с окном 60 с: stop_timeout = destroy_grace_seconds = 60, иначе пересоздание — SIGKILL под пишущей базой."
+  }
 }
 
 run "app_containers_run_with_minimal_privileges" {
