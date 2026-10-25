@@ -17,6 +17,10 @@
 # Цикла повторов нет: у postgres `wait = true`, и targeted apply возвращается,
 # когда база уже отвечает. Ошибка миграции видна с первой попытки.
 #
+# Ждать миграция не может бесконечно: lock_timeout 5 с и statement_timeout
+# 2 мин ставит сессии alembic/env.py, у шага — timeout-minutes: 10. Упала —
+# транзакция откатывается целиком, база остаётся на прежней ревизии.
+#
 # Нужны:
 #   API_IMAGE    — ссылка на образ с digest (выход job'а image);
 #   DOCKER_HOST  — ssh://stand (хост из ~/.ssh/config, .github/actions/stand-ssh);
@@ -37,7 +41,7 @@ report_dir="${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/deploy-report}"
 mkdir -p "$report_dir"
 
 env_file="$(mktemp)"
-trap 'rm -f "$env_file"' EXIT
+trap 'rm -f "$env_file"; docker rm -f dmc268-migrations >/dev/null 2>&1 || true' EXIT
 tofu -chdir=infra output -raw migrate_env > "$env_file"
 
 # Контейнер migrate из стека до #159: `removed` в infra/app.tf снял его с учёта,
@@ -51,9 +55,17 @@ docker rm -f dmc268-migrate >/dev/null 2>&1 || true
 # создаёт из уже скачанного образа по той же ссылке (infra/app.tf).
 docker pull --quiet "$API_IMAGE"
 
+# Остаток прошлого запуска: раннер, убивший шаг по таймауту, убивает только
+# docker CLI, а контейнер на сервере живёт дальше — и следующий деплой падал
+# на занятом имени (#213). Параллельного запуска быть не может (concurrency
+# `deploy`), поэтому живой контейнер с этим именем — сирота: его удаление
+# рвёт соединение, и PostgreSQL откатывает его транзакцию. Тот же rm — в
+# trap на выходе: прерванный сигналом шаг уберёт контейнер сам, если bash
+# успеет выполнить trap.
+docker rm -f dmc268-migrations >/dev/null 2>&1 || true
+
 # Ограничения — как у api и worker в infra/app.tf (сверяет
-# tests/test_stack_descriptions.py). Имя — чтобы второй запуск поверх
-# зависшего первого упал на конфликте имён, а не мигрировал параллельно.
+# tests/test_stack_descriptions.py).
 # Логи alembic идут в stderr: 2>&1, чтобы попасть и в лог шага, и в файл;
 # упавшую миграцию pipefail не прячет за tee.
 docker run --rm --name dmc268-migrations \

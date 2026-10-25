@@ -4,23 +4,27 @@
 ubuntu-latest), как у `check_openspec_archived.py`:
 
     tofu -chdir=infra show -json tfplan | python3 scripts/deploy_report.py plan
+    tofu -chdir=infra show -json infra.tfplan | python3 scripts/deploy_report.py plan infra
     python3 scripts/deploy_report.py render >> "$GITHUB_STEP_SUMMARY"
 
-`plan` читает план со stdin, пишет счётчики изменений в `plan.json` и падает,
-если план уничтожает том базы или брокера (спека `backend-delivery`,
-«Развёртывание не уничтожает тома данных»). Сам план на диск не пишется: в
-`tofu show -json` значения переменных и атрибутов, пароли тоже, лежат открытым
-текстом.
+`plan` читает план со stdin, пишет счётчики изменений в `plan.json` (`plan
+infra` — targeted-план шага «Поднять базу и брокер», в `plan-infra.json`) и
+падает, если план уничтожает том базы или брокера (спека `backend-delivery`,
+«Развёртывание не уничтожает тома данных») или пересоздаёт либо удаляет их
+контейнер («Развёртывание не пересоздаёт базу и брокер»). Сам план на диск не
+пишется: в `tofu show -json` значения переменных и атрибутов, пароли тоже,
+лежат открытым текстом.
 
 `render` собирает summary из того, что шаги деплоя сложили в каталог отчёта
 (`REPORT_DIR`, по умолчанию `$RUNNER_TEMP/deploy-report`):
 
 - `marks` — засечки начала шагов (`.github/scripts/deploy/mark.sh`);
-- `plan.json` — от команды `plan`;
+- `plan-infra.json`, `plan.json` — от команды `plan`;
 - `api-old-id`, `api-events.jsonl`, `api-new.json` — контейнер API до apply,
   события Docker во время apply и состояние нового контейнера (`apply.sh`);
   `<файл>.error` рядом — сервер не ответил (код ssh или timeout);
-- `migrate.log` — вывод `alembic upgrade head` (`migrate.sh`);
+- `migrate.log` — вывод `alembic upgrade head` (`migrate.sh`); исход шага
+  миграций — из `STEP_RESULTS`;
 - `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`).
 
 Нет файла — нет и раздела, а не падение: summary пишется и после упавшего шага.
@@ -44,6 +48,23 @@ from typing import Any
 # Тома с данными: их уничтожение — потеря базы или очередей. Замена тома —
 # тоже уничтожение (delete, create).
 PROTECTED = ("docker_volume.postgres", "docker_volume.rabbitmq")
+
+# Контейнеры базы и брокера: деплой их не пересоздаёт. Замена гасит базу
+# посреди транзакций старого API и воркера, а повод к ней — смена env, памяти
+# или log_opts — на томе часто и не срабатывает: POSTGRES_PASSWORD postgres
+# читает только при инициализации тома, и после замены миграции падают на
+# пароле (#213). Такая правка — ручным запуском деплоя с
+# `allow_stateful_replace` (`ALLOW_STATEFUL_REPLACE=true` в env, его ставит
+# только workflow_dispatch): тогда замена — предупреждение, а не отказ. Тома
+# (`PROTECTED`) флаг не открывает никогда.
+STATEFUL = ("docker_container.postgres", "docker_container.rabbitmq")
+
+# Планы деплоя: имя у команды `plan` → файл в каталоге отчёта и подпись в
+# summary. Порядок — порядок шагов.
+PLANS = {
+    "infra": ("plan-infra.json", "База и брокер — targeted-план шага «Поднять базу и брокер»"),
+    "full": ("plan.json", "Полный выкат"),
+}
 
 # Действия плана (`resource_changes[].change.actions` у OpenTofu 1.13.2) —
 # в колонки, как в строке `Plan:` у tofu, но замена отдельно, а не в add и
@@ -108,33 +129,58 @@ def plan_changes(plan: dict[str, Any]) -> dict[str, dict[str, int]]:
     return changes
 
 
-def protected_deletes(plan: dict[str, Any]) -> list[str]:
-    """Защищённые ресурсы, которые план уничтожает или заменяет."""
+def deletes(plan: dict[str, Any], addresses: tuple[str, ...]) -> list[str]:
+    """Ресурсы из `addresses`, которые план уничтожает или заменяет."""
     return [
         rc["address"]
         for rc in plan.get("resource_changes", [])
-        if rc["address"] in PROTECTED and "delete" in rc["change"]["actions"]
+        if rc["address"] in addresses and "delete" in rc["change"]["actions"]
     ]
 
 
-def plan_command(report_dir: Path) -> int:
+def protected_deletes(plan: dict[str, Any]) -> list[str]:
+    """Тома данных, которые план уничтожает или заменяет."""
+    return deletes(plan, PROTECTED)
+
+
+def stateful_deletes(plan: dict[str, Any]) -> list[str]:
+    """Контейнеры базы и брокера, которые план пересоздаёт или удаляет."""
+    return deletes(plan, STATEFUL)
+
+
+def plan_command(report_dir: Path, name: str, allowed_by: str | None) -> int:
+    """Сторож плана; `allowed_by` — кто разрешил замену базы и брокера, None — никто."""
     plan = json.load(sys.stdin)
     changes = plan_changes(plan)
-    deleted = protected_deletes(plan)
+    deleted, recreated = protected_deletes(plan), stateful_deletes(plan)
     report_dir.mkdir(parents=True, exist_ok=True)
-    (report_dir / "plan.json").write_text(
-        json.dumps({"changes": changes, "protected_deletes": deleted}, ensure_ascii=False)
-    )
+    (report_dir / PLANS[name][0]).write_text(json.dumps(
+        {"changes": changes, "protected_deletes": deleted, "stateful_deletes": recreated,
+         "stateful_allowed_by": allowed_by},
+        ensure_ascii=False,
+    ))
     print("\n".join(plan_table(changes)) if changes else "План без изменений.")
-    if deleted:
-        for address in deleted:
-            print(
-                f"::error::план уничтожает том данных {address}: apply не запускается. "
-                "Сменить том — новым ресурсом, а прежний снять с учёта блоком "
-                "removed { lifecycle { destroy = false } }; данные останутся на сервере."
-            )
+    for address in deleted:
+        print(
+            f"::error::план уничтожает том данных {address}: apply не запускается. "
+            "Сменить том — новым ресурсом, а прежний снять с учёта блоком "
+            "removed { lifecycle { destroy = false } }; данные останутся на сервере."
+        )
+    if recreated and allowed_by is not None:
+        print(f"::warning::замена разрешена вручную ({allowed_by}): {', '.join(recreated)} — "
+              "контейнер остановится (destroy_grace_seconds) и создастся заново на том же томе.")
+        recreated = []
+    for address in recreated:
+        print(
+            f"::error::план пересоздаёт или удаляет {address}: apply не запускается. "
+            "Деплой не гасит базу и брокер: правка их env, памяти, log_opts или образа — "
+            "ручным запуском `gh workflow run deploy.yml -f allow_stateful_replace=true`, "
+            "ротация пароля — по runbook (#161). "
+            "POSTGRES_PASSWORD на существующем томе замена контейнера не меняет."
+        )
+    if deleted or recreated:
         return 1
-    print("Тома данных план не уничтожает.")
+    print("Тома данных план не уничтожает, базу и брокер не пересоздаёт без разрешения.")
     return 0
 
 
@@ -259,12 +305,22 @@ def api_downtime(old_id: str, events: list[dict[str, Any]], new: dict[str, Any] 
 UPGRADE = re.compile(r"Running upgrade (\S*) -> ([^\s,]+)")
 
 
-def migrations(log: str) -> dict[str, Any]:
-    """Применённые ревизии из вывода `alembic upgrade head`."""
+def migrations(log: str, outcome: str = "success") -> dict[str, Any]:
+    """Применённые ревизии из вывода `alembic upgrade head` и исхода шага.
+
+    Строка `Running upgrade A -> B` пишется до ревизии B, а не после неё.
+    Упал шаг — последняя начатая ревизия и есть упавшая, а применено ноль:
+    `alembic/env.py` гонит весь upgrade одной транзакцией, и ошибка откатывает
+    и ревизии до упавшей (#213). Исключение — ревизия с `autocommit_block`:
+    всё до неё фиксируется; такие ревизии редки, и summary их не различает.
+    """
     steps = UPGRADE.findall(log)
     if not steps:
         return {"applied": 0}
-    return {"applied": len(steps), "from": steps[0][0] or "пустая база", "to": steps[-1][1]}
+    base = steps[0][0] or "пустая база"
+    if outcome == "failure":
+        return {"applied": 0, "from": base, "failed": steps[-1][1]}
+    return {"applied": len(steps), "from": base, "to": steps[-1][1]}
 
 
 # --- диск -----------------------------------------------------------------
@@ -450,7 +506,8 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
         )
 
     out += ["", *downtime_section(report_dir), "", *plan_section(report_dir)]
-    out += ["", *migrations_section(report_dir, marks), "", *disk_section(report_dir)]
+    migrate = steps.get("migrate", {}).get("outcome", "")
+    out += ["", *migrations_section(report_dir, marks, migrate), "", *disk_section(report_dir)]
     out += ["", *steps_section(steps, marks)]
     return "\n".join(out) + "\n"
 
@@ -504,36 +561,62 @@ def downtime_section(report_dir: Path) -> list[str]:
 
 
 def plan_section(report_dir: Path) -> list[str]:
-    out = ["### План OpenTofu", ""]
-    plan = read_json(report_dir / "plan.json")
-    if plan is None:
-        return [*out, "Плана нет: шаг планирования не дошёл до него."]
-    if plan["changes"]:
-        out += plan_table(plan["changes"])
-        out += ["", ("Ключ — `dmc268.deploy.plan.changes`, атрибуты `dmc268.deploy.plan.resource.type` "
-                "(строки) и `dmc268.deploy.plan.action` (колонки). `replace` в `add` и `destroy` не входит.")]
-    else:
-        out.append("План без изменений.")
-    if plan["protected_deletes"]:
-        out += ["", "> [!CAUTION]", "> Сторож томов остановил деплой до apply: план уничтожает "
-                + ", ".join(f"`{a}`" for a in plan["protected_deletes"])
-                + " (`dmc268.deploy.plan.protected_deletes`)."]
-    else:
-        out += ["", "Тома данных (`" + "`, `".join(PROTECTED) + "`) план не уничтожает."]
+    out = ["### План OpenTofu"]
+    for file, title in PLANS.values():
+        out += ["", f"#### {title}", ""]
+        plan = read_json(report_dir / file)
+        if plan is None:
+            out.append("Плана нет: шаг планирования не дошёл до него.")
+            continue
+        if plan["changes"]:
+            out += plan_table(plan["changes"])
+            out += ["", ("Ключ — `dmc268.deploy.plan.changes`, атрибуты `dmc268.deploy.plan.resource.type` "
+                    "(строки) и `dmc268.deploy.plan.action` (колонки). `replace` в `add` и `destroy` не входит.")]
+        else:
+            out.append("План без изменений.")
+        if plan["protected_deletes"]:
+            out += ["", "> [!CAUTION]", "> Сторож томов остановил деплой до apply: план уничтожает "
+                    + ", ".join(f"`{a}`" for a in plan["protected_deletes"])
+                    + " (`dmc268.deploy.plan.protected_deletes`)."]
+        else:
+            out += ["", "Тома данных (`" + "`, `".join(PROTECTED) + "`) план не уничтожает."]
+        stateful = ", ".join(f"`{a}`" for a in plan["stateful_deletes"])
+        if plan["stateful_deletes"] and plan.get("stateful_allowed_by") is not None:
+            out += ["", "> [!WARNING]", (f"> Замена {stateful} разрешена вручную: запуск с `allow_stateful_replace` "
+                    f"({plan['stateful_allowed_by']}). Ключ — `dmc268.deploy.plan.stateful_allowed_by`.")]
+        elif plan["stateful_deletes"]:
+            out += ["", "> [!CAUTION]", (f"> Сторож остановил деплой до apply: план пересоздаёт или удаляет {stateful}"
+                    " (`dmc268.deploy.plan.stateful_deletes`). Разрешить — ручным запуском с "
+                    "`allow_stateful_replace`; ротация пароля — по runbook (#161).")]
+        else:
+            out += ["", "Базу и брокер (`" + "`, `".join(STATEFUL) + "`) план не пересоздаёт."]
     return out
 
 
-def migrations_section(report_dir: Path, marks: dict[str, float]) -> list[str]:
+def migrations_section(report_dir: Path, marks: dict[str, float], outcome: str) -> list[str]:
     out = ["### Миграции", ""]
     if not (report_dir / "migrate.log").exists():
         return [*out, "Шаг миграций не запускался."]
-    m = migrations(read(report_dir / "migrate.log"))
+    if outcome == "cancelled":
+        # Отмена убивает docker CLI на раннере, а не контейнер на сервере:
+        # миграции могли и дойти до конца, и откатиться (trap в migrate.sh).
+        return [*out, ("Шаг миграций прерван: применились ли ревизии, по логу не сказать. "
+                "Ревизию базы покажет `alembic current` или следующий деплой.")]
+    m = migrations(read(report_dir / "migrate.log"), outcome)
     out += ["| | Ключ | Значение |", "| --- | --- | --- |",
             f"| Применено ревизий | `dmc268.deploy.migrations.applied` | {m['applied']} |"]
-    if m["applied"]:
+    if "failed" in m:
+        out += [f"| Упала на ревизии | `dmc268.deploy.migrations.revision.failed` | `{m['failed']}` |",
+                f"| Ревизия базы | `dmc268.deploy.migrations.revision.from` | `{m['from']}` |"]
+    elif m["applied"]:
         out += [f"| Ревизия до | `dmc268.deploy.migrations.revision.from` | `{m['from']}` |",
                 f"| Ревизия после | `dmc268.deploy.migrations.revision.to` | `{m['to']}` |"]
     out.append(f"| Время шага, с | | {seconds(durations(marks).get('migrate'))} |")
+    if "failed" in m:
+        out += ["", "> [!CAUTION]", (f"> Шаг миграций упал на ревизии `{m['failed']}`: миграции откатены, "
+                f"применено 0 — upgrade идёт одной транзакцией (`alembic/env.py`), база осталась на `{m['from']}`.")]
+    elif outcome == "failure":
+        out += ["", "> [!CAUTION]", "> Шаг миграций упал до первой ревизии: схема не менялась. Причина — в логе шага."]
     return out
 
 
@@ -562,12 +645,15 @@ def steps_section(steps: dict[str, dict[str, str]], marks: dict[str, float]) -> 
 
 def main(argv: list[str]) -> int:
     report_dir = Path(os.environ.get("REPORT_DIR") or Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "deploy-report")
-    if argv == ["plan"]:
-        return plan_command(report_dir)
+    if argv in (["plan"], ["plan", "infra"]):
+        # Только буквальное `true`: его даёт выражение в env шага из ручного запуска.
+        allowed = os.environ.get("ALLOW_STATEFUL_REPLACE") == "true"
+        allowed_by = (os.environ.get("DEPLOY_ACTOR") or "кто — неизвестно") if allowed else None
+        return plan_command(report_dir, argv[1] if len(argv) == 2 else "full", allowed_by)
     if argv == ["render"]:
         sys.stdout.write(render(report_dir, dict(os.environ)))
         return 0
-    print("использование: deploy_report.py plan|render", file=sys.stderr)
+    print("использование: deploy_report.py plan [infra]|render", file=sys.stderr)
     return 2
 
 

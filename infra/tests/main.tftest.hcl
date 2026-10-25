@@ -112,6 +112,16 @@ run "only_api_published_and_only_on_loopback" {
   }
 }
 
+run "database_and_broker_stop_gracefully" {
+  command = plan
+
+  # Без destroy_grace_seconds удаление контейнера — SIGKILL (#213).
+  assert {
+    condition     = docker_container.postgres.destroy_grace_seconds == 60 && docker_container.rabbitmq.destroy_grace_seconds == 60
+    error_message = "Базе и брокеру при удалении контейнера — до 60 с на штатную остановку, а не SIGKILL."
+  }
+}
+
 run "worker_grace_covers_one_provider" {
   command = plan
 

@@ -5,7 +5,9 @@
 `apply.sh` гоняются настоящим bash с подложными `tofu` и `ssh`, а вход —
 настоящие данные: `tests/fixtures/deploy/plan-*.json` — урезанный до
 `resource_changes` вывод `tofu show -json` OpenTofu 1.13.2 на демоне Docker
-29.9.2 (выкат после #204 и план с заменой и удалением томов), `api-*` — то, что
+29.9.2 (выкат после #204 и план с заменой и удалением томов; `plan-infra-*` —
+targeted-план шага «Поднять базу и брокер» без изменений и со сменой пароля
+базы, #213), `api-*` — то, что
 собрал `apply.sh` при таком выкате: события Docker, id старого контейнера и
 состояние нового. `api-new-after-10min.json` — тот же контейнер, но inspect
 через 10 мин после healthy (воркер дорабатывал сообщение): в журнале проверок
@@ -36,14 +38,28 @@ FIXTURES = Path("tests/fixtures/deploy")
 SCRIPTS = Path(".github/scripts/deploy")
 DEPLOY_WORKFLOW = Path(".github/workflows/deploy.yml")
 
-# Подложный tofu: `plan -out` создаёт файл плана, `show -json` отдаёт
-# фикстуру, `apply` падает, если велит тест. Вызовы — в журнал.
+# Подложный tofu: `plan -out=<файл>` создаёт файл плана, `show -json`
+# отдаёт фикстуру, `apply <файл>` без файла падает, а с ним — если велит
+# тест. `output -raw` отдаёт окружение миграций. Вызовы — в журнал.
 FAKE_TOFU = """#!/usr/bin/env bash
-echo "$*" >> "$CALLS"
-case "$*" in
-  *" plan "*) touch infra/tfplan ;;
-  *" show -json tfplan") cat "$PLAN_JSON" ;;
-  *" apply "*) [ -e infra/tfplan ] || exit 3; exit "${APPLY_EXIT:-0}" ;;
+args="$*"
+echo "$args" >> "$CALLS"
+case "$args" in
+  *" plan "*) out="${args##*-out=}"; touch "infra/${out%% *}" ;;
+  *" show -json "*) cat "$PLAN_JSON" ;;
+  *" apply "*) [ -e "infra/${args##* }" ] || exit 3; exit "${APPLY_EXIT:-0}" ;;
+  *" output -raw migrate_env") echo "DATABASE_URL=postgresql+psycopg://u:p@dmc268-postgres:5432/d" ;;
+esac
+"""
+
+# Подложный docker для migrate.sh: вызовы — в журнал, `run` печатает вывод
+# alembic из MIGRATE_LOG и выходит с MIGRATE_EXIT, `rm` контейнера, которого
+# нет, — код 1, как у настоящего.
+FAKE_DOCKER = """#!/usr/bin/env bash
+echo "docker $*" >> "$CALLS"
+case "$1" in
+  run) cat "${MIGRATE_LOG:-/dev/null}"; exit "${MIGRATE_EXIT:-0}" ;;
+  rm) exit 1 ;;
 esac
 """
 
@@ -77,7 +93,7 @@ GNU_DF = """Filesystem     1024-blocks     Used Available Capacity Mounted on
 def fake_bin(tmp_path: Path) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    for name, body in (("tofu", FAKE_TOFU), ("ssh", FAKE_SSH), ("timeout", FAKE_TIMEOUT)):
+    for name, body in (("tofu", FAKE_TOFU), ("ssh", FAKE_SSH), ("timeout", FAKE_TIMEOUT), ("docker", FAKE_DOCKER)):
         path = bin_dir / name
         path.write_text(body)
         path.chmod(0o755)
@@ -119,7 +135,7 @@ def test_guard_passes_a_plan_that_keeps_the_volumes(tmp_path: Path) -> None:
     result, report, root = run_script(tmp_path, "plan.sh")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Тома данных план не уничтожает." in result.stdout
+    assert "Тома данных план не уничтожает, базу и брокер не пересоздаёт без разрешения." in result.stdout
     assert json.loads((report / "plan.json").read_text()) == {
         "changes": {
             "docker_container": {"replace": 2},
@@ -127,6 +143,8 @@ def test_guard_passes_a_plan_that_keeps_the_volumes(tmp_path: Path) -> None:
             "terraform_data": {"change": 1},
         },
         "protected_deletes": [],
+        "stateful_deletes": [],
+        "stateful_allowed_by": None,
     }
     # Проверенный план остаётся для apply.sh.
     assert (root / "infra" / "tfplan").exists()
@@ -153,6 +171,143 @@ def test_guard_ignores_volumes_it_does_not_protect() -> None:
     ]}
     assert deploy_report.protected_deletes(plan) == []
     assert deploy_report.plan_changes(plan) == {"docker_volume": {"destroy": 1}}
+
+
+def test_guard_stops_a_full_plan_that_replaces_the_database(tmp_path: Path) -> None:
+    """В плане с заменой тома пересоздаётся и контейнер postgres: это тоже повод остановиться."""
+    result, report, _ = run_script(tmp_path, "plan.sh", plan="plan-delete-volumes.json")
+
+    assert "::error::план пересоздаёт или удаляет docker_container.postgres" in result.stdout
+    assert json.loads((report / "plan.json").read_text())["stateful_deletes"] == ["docker_container.postgres"]
+
+
+# --- база и брокер до миграций (infra.sh) ------------------------------------
+
+
+def test_targeted_plan_with_a_new_database_password_is_rejected(tmp_path: Path) -> None:
+    """Сценарий #213: смена TF_VAR_postgres_password — `postgres must be replaced`.
+
+    Фикстура — настоящий `tofu show -json` targeted-плана шага на docker:29-dind.
+    Раньше targeted apply пересоздавал базу мимо всякой проверки, SIGKILL'ом.
+    """
+    result, report, root = run_script(tmp_path, "infra.sh", plan="plan-infra-replace-postgres.json")
+
+    assert result.returncode != 0
+    assert "::error::план пересоздаёт или удаляет docker_container.postgres" in result.stdout
+    assert "#161" in result.stdout
+    calls = (tmp_path / "calls").read_text()
+    assert "-target=docker_container.postgres" in calls
+    assert " apply " not in calls, calls
+    plan = json.loads((report / "plan-infra.json").read_text())
+    assert plan["stateful_deletes"] == ["docker_container.postgres"]
+    assert plan["changes"] == {"docker_container": {"replace": 1}}
+    # Файла отклонённого плана с паролями не остаётся.
+    assert not list((root / "infra").glob("*tfplan*"))
+
+
+def test_targeted_plan_without_changes_is_applied_as_checked(tmp_path: Path) -> None:
+    result, report, root = run_script(tmp_path, "infra.sh", plan="plan-infra-no-changes.json")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "calls").read_text().splitlines()
+    plan = next(c for c in calls if " plan " in c)
+    assert all(f"-target={t}" in plan for t in (
+        "docker_network.dmc268", "docker_container.postgres", "docker_container.rabbitmq",
+    )), plan
+    out = re.search(r"-out=(\S+)", plan)
+    assert out, plan
+    # Применяется ровно проверенный файл плана, без своих -target.
+    assert calls[-1] == f"-chdir=infra apply -input=false -no-color {out.group(1)}", calls
+    assert json.loads((report / "plan-infra.json").read_text())["changes"] == {}
+    assert not list((root / "infra").glob("*tfplan*"))
+
+
+def test_manual_override_lets_the_database_be_replaced_with_a_warning(tmp_path: Path) -> None:
+    """Ручной запуск с allow_stateful_replace: замена postgres проходит, но громко."""
+    result, report, root = run_script(
+        tmp_path, "infra.sh", plan="plan-infra-replace-postgres.json",
+        ALLOW_STATEFUL_REPLACE="true", DEPLOY_ACTOR="octocat",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "::warning::замена разрешена вручную (octocat): docker_container.postgres" in result.stdout
+    assert "::error::" not in result.stdout
+    assert (tmp_path / "calls").read_text().splitlines()[-1].endswith(" apply -input=false -no-color infra.tfplan")
+    plan = json.loads((report / "plan-infra.json").read_text())
+    assert plan["stateful_deletes"] == ["docker_container.postgres"]
+    assert plan["stateful_allowed_by"] == "octocat"
+    assert not list((root / "infra").glob("*tfplan*"))
+
+    text = summary(tmp_path, report, JOB_STATUS="success", STEP_RESULTS=ALL_SUCCESS)
+    assert "> Замена `docker_container.postgres` разрешена вручную: запуск с `allow_stateful_replace` (octocat)" in text
+    assert "Сторож остановил деплой" not in text
+
+
+def test_manual_override_never_lets_a_volume_go(tmp_path: Path) -> None:
+    """Флаг — про контейнеры; тома с данными он не открывает."""
+    result, _, root = run_script(
+        tmp_path, "plan.sh", plan="plan-delete-volumes.json",
+        ALLOW_STATEFUL_REPLACE="true", DEPLOY_ACTOR="octocat",
+    )
+
+    assert result.returncode != 0
+    assert "::error::план уничтожает том данных docker_volume.postgres" in result.stdout
+    assert "::warning::замена разрешена вручную (octocat): docker_container.postgres" in result.stdout
+    assert not (root / "infra" / "tfplan").exists()
+
+
+def test_only_the_literal_true_opens_the_guard(tmp_path: Path) -> None:
+    """Push-деплой получает `false` из выражения в env — и пустое, и чужое значение сторож не открывают."""
+    for value in ("false", "", "1", "True "):
+        result, _, _ = run_script(
+            tmp_path, "infra.sh", plan="plan-infra-replace-postgres.json", ALLOW_STATEFUL_REPLACE=value,
+        )
+        assert result.returncode != 0, value
+        assert "::error::план пересоздаёт или удаляет docker_container.postgres" in result.stdout
+
+
+def test_override_reaches_the_guard_only_from_a_manual_run() -> None:
+    workflow = yaml.safe_load(DEPLOY_WORKFLOW.read_text())
+    triggers = workflow[True]  # PyYAML читает ключ `on` как True
+    flag = triggers["workflow_dispatch"]["inputs"]["allow_stateful_replace"]
+    assert flag["type"] == "boolean" and flag["default"] is False
+    for step_id in ("infra", "plan"):
+        step = next(s for s in deploy_steps() if s.get("id") == step_id)
+        env = step["env"]
+        assert isinstance(env, dict)
+        assert env["ALLOW_STATEFUL_REPLACE"] == (
+            "${{ github.event_name == 'workflow_dispatch' && inputs.allow_stateful_replace }}"
+        ), step_id
+        assert "${{" not in str(step["run"]), step_id
+
+
+def test_stateful_deletes_cover_replace_and_delete_but_not_update() -> None:
+    def plan(*changes: tuple[str, list[str]]) -> dict[str, object]:
+        return {"resource_changes": [
+            {"address": a, "type": a.split(".")[0], "change": {"actions": actions}} for a, actions in changes
+        ]}
+
+    assert deploy_report.stateful_deletes(plan(
+        ("docker_container.postgres", ["delete", "create"]),
+        ("docker_container.rabbitmq", ["delete"]),
+        ("docker_container.api", ["delete", "create"]),
+    )) == ["docker_container.postgres", "docker_container.rabbitmq"]
+    # destroy_grace_seconds добавляется на месте: такой план проходит.
+    assert deploy_report.stateful_deletes(plan(
+        ("docker_container.postgres", ["update"]),
+        ("docker_container.rabbitmq", ["create"]),
+    )) == []
+
+
+def test_summary_shows_the_rejected_targeted_plan(tmp_path: Path) -> None:
+    _, report, _ = run_script(tmp_path, "infra.sh", plan="plan-infra-replace-postgres.json")
+    results = ALL_SUCCESS.replace("infra success success", "infra failure failure")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results)
+
+    assert "#### База и брокер" in text
+    assert "> Сторож остановил деплой до apply: план пересоздаёт или удаляет `docker_container.postgres`" in text
+    assert "#### Полный выкат" in text
 
 
 def volume_blocks() -> dict[str, str]:
@@ -367,6 +522,95 @@ def test_migrations_from_alembic_output() -> None:
     assert deploy_report.migrations("INFO  Will assume transactional DDL.\n") == {"applied": 0}
 
 
+FAILED_MIGRATION_LOG = (
+    "INFO  [alembic.runtime.migration] Will assume transactional DDL.\n"
+    "INFO  [alembic.runtime.migration] Running upgrade 0012_b -> 0013_c, таблица\n"
+    "INFO  [alembic.runtime.migration] Running upgrade 0013_c -> 0014_d, деление на ноль\n"
+    "Traceback (most recent call last):\n"
+    "sqlalchemy.exc.DataError: (psycopg.errors.DivisionByZero) division by zero\n"
+)
+
+
+def test_failed_migrations_applied_nothing() -> None:
+    """Сценарий #213: alembic идёт одной транзакцией, упавшая 0014 откатывает и 0013."""
+    assert deploy_report.migrations(FAILED_MIGRATION_LOG, "failure") == {
+        "applied": 0, "from": "0012_b", "failed": "0014_d",
+    }
+    # Упало до первой ревизии — например, lock_timeout на чтении alembic_version.
+    assert deploy_report.migrations("INFO  Will assume transactional DDL.\nLockNotAvailable\n", "failure") == {
+        "applied": 0,
+    }
+
+
+def test_summary_of_failed_migrations_does_not_claim_revisions(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "migrate.log").write_text(FAILED_MIGRATION_LOG)
+    results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results)
+
+    assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 0 |" in text
+    assert "| Упала на ревизии | `dmc268.deploy.migrations.revision.failed` | `0014_d` |" in text
+    assert "| Ревизия базы | `dmc268.deploy.migrations.revision.from` | `0012_b` |" in text
+    assert "миграции откатены" in text
+    assert "dmc268.deploy.migrations.revision.to" not in text
+
+
+def test_summary_of_migrations_that_failed_before_alembic(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "migrate.log").write_text("docker: Error response from daemon: Conflict.\n")
+    results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results)
+
+    assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 0 |" in text
+    assert "до первой ревизии" in text
+
+
+def test_summary_of_cancelled_migrations_claims_nothing(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "migrate.log").write_text(FAILED_MIGRATION_LOG)
+    results = ALL_SUCCESS.replace("migrate success success", "migrate cancelled cancelled")
+
+    text = summary(tmp_path, report, JOB_STATUS="cancelled", STEP_RESULTS=results)
+
+    assert "Шаг миграций прерван" in text
+    assert "dmc268.deploy.migrations.applied" not in text
+
+
+# --- миграции: скрипт шага ---------------------------------------------------
+
+
+def test_migrate_removes_a_container_left_by_a_killed_run(tmp_path: Path) -> None:
+    """Сценарий #213: job убит по таймауту — `dmc268-migrations` остаётся, следующий деплой падал на имени."""
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "calls").read_text().splitlines()
+    run = next(i for i, c in enumerate(calls) if c.startswith("docker run "))
+    assert "docker rm -f dmc268-migrations" in calls[:run], calls
+    assert (report / "migrate.log").exists()
+
+
+def test_migrate_keeps_the_alembic_exit_code(tmp_path: Path) -> None:
+    (tmp_path / "alembic.log").write_text(FAILED_MIGRATION_LOG)
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"), MIGRATE_EXIT="1",
+    )
+
+    assert result.returncode == 1
+    assert "0014_d" in (report / "migrate.log").read_text()
+
+
 def test_disk_rows_merge_when_docker_lives_on_the_root() -> None:
     rows = deploy_report.disk(f"docker_root /var/lib/docker\n{GNU_DF}")
     assert rows == [{
@@ -534,6 +778,18 @@ def test_summary_removes_a_plan_left_by_failed_migrations(tmp_path: Path) -> Non
 
     assert not (root / "infra" / "tfplan").exists()
     assert "timeout 30 ssh -o ConnectTimeout=10 stand" in (tmp_path / "calls").read_text()
+
+
+def test_migrate_step_has_a_timeout() -> None:
+    """Зависшая миграция держала бы job до его 60 минут, а блокировки — на горячих таблицах."""
+    migrate = next(s for s in deploy_steps() if s.get("id") == "migrate")
+    assert migrate["timeout-minutes"] == 10
+
+
+def test_infra_step_runs_the_checked_targeted_plan() -> None:
+    infra = next(s for s in deploy_steps() if s.get("id") == "infra")
+    assert str(infra["run"]).strip().splitlines()[-1] == ".github/scripts/deploy/infra.sh"
+    assert "tofu apply" not in str(infra["run"])
 
 
 def test_summary_step_has_a_timeout() -> None:

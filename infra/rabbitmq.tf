@@ -18,8 +18,7 @@ resource "docker_volume" "rabbitmq" {
 }
 
 resource "docker_image" "rabbitmq" {
-  # Тег плавающий по той же причине, что у postgres: digest — после
-  # destroy_grace_seconds у брокера (#150, #102).
+  # Тег плавающий по той же причине, что у postgres (#150, #102).
   name         = "rabbitmq:4.4-alpine"
   keep_locally = true
 }
@@ -28,6 +27,11 @@ resource "docker_container" "rabbitmq" {
   name    = "dmc268-rabbitmq"
   image   = docker_image.rabbitmq.image_id
   restart = "unless-stopped"
+
+  # Как у postgres: без destroy_grace_seconds удаление контейнера — SIGKILL
+  # посреди записи хранилища сообщений; с ним — до 60 с на штатную остановку
+  # узла.
+  destroy_grace_seconds = 60
 
   # Как у postgres: entrypoint сам переходит на пользователя rabbitmq. Порог
   # памяти брокер считает от лимита cgroup, так что memory он учтёт сам.
