@@ -109,7 +109,6 @@ def recover(
             "REPORT_DIR": str(report),
             "CALLS": str(tmp_path / "calls"),
             "S3_TUNNEL": str(tunnel),
-            "RECOVER_WAIT": "0",
             **env,
         },
     )
@@ -145,7 +144,7 @@ def test_recovery_reopens_the_tunnel_and_reads_the_lock_next_to_the_state(tmp_pa
     recover(tmp_path, LOCK_JSON=str(own_lock(tmp_path)))
 
     log = calls(tmp_path)
-    assert log[0] == "tunnel 9000 wait=0"
+    assert log[0] == "tunnel 9000 wait=120"
     get = next(c for c in log if c.startswith("aws "))
     assert "--endpoint-url http://127.0.0.1:9000 s3api get-object" in get
     assert "--bucket dmc268-tfstate --key api/terraform.tfstate.tflock" in get
@@ -210,9 +209,9 @@ def test_recovery_keeps_the_lock_when_the_push_is_refused(tmp_path: Path) -> Non
 
 def test_recovery_waits_for_a_hung_storage_longer_than_a_plain_tunnel(tmp_path: Path) -> None:
     """Ответа хранилища ждёт туннель (#211) — сколько велит RECOVER_WAIT, по умолчанию 120 с."""
-    recover(tmp_path, RECOVER_WAIT="120", LOCK_JSON=str(own_lock(tmp_path)))
+    recover(tmp_path, RECOVER_WAIT="300", LOCK_JSON=str(own_lock(tmp_path)))
 
-    assert calls(tmp_path)[0] == "tunnel 9000 wait=120"
+    assert calls(tmp_path)[0] == "tunnel 9000 wait=300"
 
 
 def test_recovery_does_not_guess_on_a_storage_error(tmp_path: Path) -> None:
@@ -228,7 +227,7 @@ def test_recovery_reports_a_failed_tunnel(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert tofu_calls(tmp_path) == []
-    assert pairs["reason"] == "туннель не открылся или хранилище не ответило за 0 с"
+    assert pairs["reason"] == "туннель не открылся или хранилище не ответило за 120 с"
 
 
 def test_recovery_before_init_has_nothing_to_restore(tmp_path: Path) -> None:
@@ -368,6 +367,22 @@ def test_tunnel_waits_for_the_storage_to_answer(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "хранилище отвечает (HTTP 403)" in result.stdout
     assert (tmp_path / "count").read_text().strip() == "3"
+
+
+def test_tunnel_does_not_take_a_starting_storage_for_ready(tmp_path: Path) -> None:
+    """503 — хранилище ещё поднимается: создание бакета упало бы; ждём настоящего ответа."""
+    result = open_tunnel(tmp_path, "503 502 200")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "count").read_text().strip() == "3"
+
+
+def test_tunnel_probe_waits_as_long_as_the_watchdog() -> None:
+    """Без --max-time зависшее хранилище повесит шаг до таймаута job'а; меньше, чем у сторожа, —
+    медленное, но живое хранилище туннель счёл бы мёртвым, а восстановление сдалось бы."""
+    tunnel = (SCRIPTS / "s3-tunnel.sh").read_text()
+    watchdog = (SCRIPTS / "s3-watchdog.sh").read_text()
+    assert "--max-time 10 " in tunnel and "--max-time 10 " in watchdog
 
 
 def test_tunnel_fails_when_the_storage_never_answers(tmp_path: Path) -> None:
