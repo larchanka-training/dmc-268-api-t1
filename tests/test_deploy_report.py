@@ -155,6 +155,29 @@ def test_guard_ignores_volumes_it_does_not_protect() -> None:
     assert deploy_report.plan_changes(plan) == {"docker_volume": {"destroy": 1}}
 
 
+def test_guard_stops_a_protected_volume_deleted_under_another_address() -> None:
+    """Ресурс тома переименовали без `moved`, а PROTECTED поправили под новый адрес:
+    план уничтожает том по старому адресу, которого в списке нет, — ловит имя тома."""
+    plan = {"resource_changes": [
+        {"address": "docker_volume.pg_old", "type": "docker_volume",
+         "change": {"actions": ["delete"], "before": {"name": "dmc268-postgres-pgvector-data"}}},
+        {"address": "docker_volume.mq_old", "type": "docker_volume",
+         "change": {"actions": ["delete", "create"], "before": {"name": "dmc268-rabbitmq-v44-data"}}},
+    ]}
+    assert deploy_report.protected_deletes(plan) == ["docker_volume.pg_old", "docker_volume.mq_old"]
+
+
+def test_guard_allows_deleting_an_unprotected_volume_by_name() -> None:
+    plan = {"resource_changes": [
+        {"address": "docker_volume.scratch", "type": "docker_volume",
+         "change": {"actions": ["delete"], "before": {"name": "dmc268-scratch"}}},
+        # Имя защищённого тома у ресурса другого типа — не том.
+        {"address": "docker_container.postgres", "type": "docker_container",
+         "change": {"actions": ["delete"], "before": {"name": "dmc268-postgres-pgvector-data"}}},
+    ]}
+    assert deploy_report.protected_deletes(plan) == []
+
+
 def volume_blocks() -> dict[str, str]:
     """Ресурсы docker_volume из infra/*.tf: адрес → тело блока."""
     return {
@@ -170,6 +193,10 @@ def test_guard_protects_every_volume_the_stack_declares() -> None:
     declared = volume_blocks()
     assert declared, "ресурсы docker_volume не найдены в infra/*.tf"
     assert set(declared) == set(deploy_report.PROTECTED)
+    for address, body in declared.items():
+        name = re.search(r'^\s*name\s*=\s*"([^"]+)"', body, re.MULTILINE)
+        assert name, f"у {address} нет name в infra/*.tf"
+        assert deploy_report.PROTECTED[address] == name.group(1), f"имя тома {address} в PROTECTED не то, что в infra/*.tf"
 
 
 def test_every_protected_volume_prevents_destroy() -> None:
