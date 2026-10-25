@@ -13,15 +13,14 @@
 запрещено громким падением.
 Правило вне этого подмножества упадёт на разборе и потребует обновить тест
 вместе с собой; тихое выпадение атрибута из правил ловит проверка полноты
-покрытия. Той же моделью проверяется конвейер логов: операторы file_log
-(тело из `message`, дубль и `color_message` удалены), фильтр чужих
-контейнеров по `service.name` и derived field Loki → Tempo. Валидация
-конфига самим коллектором — класс `TestCollectorConfigValidation` ниже;
-поднятый стек делает ту же проверку на каждом старте — с невалидным
-конфигом коллектор не запускается.
+покрытия. Той же моделью проверяется конвейер логов: логи приходят в
+коллектор по OTLP из SDK (путь через файлы Docker убран), а конвейер —
+[otlp] → редакция → groupbyattrs → batch → Loki; derived field Loki →
+Tempo остаётся. Валидация конфига самим коллектором — класс
+`TestCollectorConfigValidation` ниже; поднятый стек делает ту же проверку
+на каждом старте — с невалидным конфигом коллектор не запускается.
 """
 
-import json
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -75,14 +74,6 @@ _TARGET = re.compile(r'^attributes\["([^"]+)"\]$')
 _PRESENCE = re.compile(r'^attributes\["([^"]+)"\] != nil$')
 # Сравнение строкового геттера статуса с литералом: status.message != "...".
 _SET_STATUS_LITERAL = re.compile(r'^status\.message != "(?P<value>[^"]*)"$')
-
-# Условие дропа фильтра чужих сервисов: условие log_record — само правило
-# дропа («запись остаётся, пока выполнено хоть одно равенство service.name»),
-# поэтому условие отрицания — not (A == "x" or B == "y").
-_DROP_FOREIGN = re.compile(r'^not \((?P<keep>.+)\)$')
-_KEEP_PAIR = re.compile(
-    r'(?P<path>resource\.attributes\["service\.name"\]|attributes\["service\.name"\]) == "(?P<value>[^"]+)"'
-)
 
 
 @dataclass
@@ -293,101 +284,6 @@ def apply_log_rules(rules: list[Rule], entry: LogEntry) -> LogEntry:
     return entry
 
 
-# --- фильтр чужих контейнеров: service.name ---------------------------------------
-
-
-def parse_foreign_filter() -> dict[str, frozenset[str]]:
-    """Разобрать фильтр чужих сервисов: путь атрибута → допустимые имена.
-
-    Условие читается как «not (путь == имя or ...)»: запись остаётся, пока
-    выполнено хоть одно равенство. Другая форма условия или постороннее
-    сравнение — громкое падение: вычислителя для них в тесте нет.
-    """
-    filter_config = load_config()["processors"]["filter/foreign-services"]
-    statements = filter_config["logs"]["log_record"]
-    allowed: dict[str, set[str]] = {}
-    for statement in statements:
-        match = _DROP_FOREIGN.match(statement)
-        if match is None:
-            message = f"условие фильтра вне подмножества теста: {statement}"
-            raise ValueError(message)
-        for pair in _KEEP_PAIR.finditer(match.group("keep")):
-            allowed.setdefault(pair.group("path"), set()).add(pair.group("value"))
-        remainder = _KEEP_PAIR.sub("", match.group("keep"))
-        if remainder.replace("or", " ").strip():
-            message = f"условие фильтра вне подмножества теста: {statement}"
-            raise ValueError(message)
-    return {path: frozenset(values) for path, values in allowed.items()}
-
-
-def foreign_filter_keeps(
-    allowed: dict[str, frozenset[str]], record_name: str | None, resource_name: str | None
-) -> bool:
-    """Пройдёт ли запись фильтр: имя сервиса в атрибутах записи или в ресурсе.
-
-    Равенство с отсутствующим именем по правилам OTTL ложно (string x nil —
-    «not equal»), поэтому `None` в вычислении просто не совпадает ни с чем.
-    """
-    record_values = allowed.get('attributes["service.name"]', frozenset())
-    resource_values = allowed.get('resource.attributes["service.name"]', frozenset())
-    return record_name in record_values or resource_name in resource_values
-
-
-# --- конвейер file_log: операторы stanza ------------------------------------------
-
-
-def _file_log_operators() -> list[dict[str, Any]]:
-    operators: list[dict[str, Any]] = load_config()["receivers"]["file_log"]["operators"]
-    return operators
-
-
-def _path_parts(entry: dict[str, Any], path: str) -> tuple[dict[str, Any], str]:
-    """Контейнер и последний ключ stanza-пути (`attributes.message` → entry, ...)."""
-    if '"' in path:
-        message = f"путь с кавычками вне подмножества модели: {path}"
-        raise ValueError(message)
-    parts = path.split(".")
-    container = entry
-    for part in parts[:-1]:
-        container = container[part]  # нет промежуточного поля — падение громкое
-    return container, parts[-1]
-
-
-def apply_file_log(envelope: str) -> dict[str, Any] | None:
-    """Прогнать конверт Docker через операторы file_log, как их читает stanza.
-
-    Модель покрывает используемые конфигом типы: `json_parser` (тело →
-    атрибуты, `on_error: drop` на не-JSON), `move` и `remove` (на
-    отсутствующем поле remove — no-op, запись не роняется). Порядок
-    операторов — как в конфиге: перестановка `move` до `app-json` падает
-    на KeyError. Разбор `time` конверта и блоков trace/severity на
-    проверяемые поля не влияет и не моделируется.
-    """
-    entry: dict[str, Any] = {"body": envelope, "attributes": {}}
-    for operator in _file_log_operators():
-        kind = operator["type"]
-        if kind == "json_parser":
-            try:
-                parsed = json.loads(entry["body"])
-            except (TypeError, ValueError):
-                if operator.get("on_error") == "drop":
-                    return None
-                raise
-            entry["attributes"].update(parsed)
-        elif kind == "move":
-            source, source_key = _path_parts(entry, operator["from"])
-            target, target_key = _path_parts(entry, operator["to"])
-            target[target_key] = source.pop(source_key)
-        else:
-            # remove в модели нет сознательно: у него нет тихого пропуска
-            # отсутствующего поля (on_error: send пишет ошибку на каждой
-            # записи), поэтому конфиг его не использует — появившийся
-            # оператор падает здесь громко.
-            message = f"оператор вне подмножества модели: {kind}"
-            raise ValueError(message)
-    return entry
-
-
 @pytest.fixture(scope="module")
 def rules() -> list[Rule]:
     return parse_rules()
@@ -565,8 +461,7 @@ def test_spans_without_secrets_are_not_touched(rules: list[Rule]) -> None:
 LOG_REDACTED_TARGETS = ("exception.stacktrace", "exception.message", "body")
 
 # Атрибут, который redact-логи удаляют целиком (delete_key, без редакции
-# значения): ANSI-дубль сообщения uvicorn. message не среди них — он уже
-# переехал в тело оператором message-to-body.
+# значения): ANSI-дубль сообщения uvicorn.
 LOG_DELETED_KEYS = ("color_message",)
 
 
@@ -586,9 +481,9 @@ def test_all_sensitive_log_targets_are_covered(log_rules: list[Rule]) -> None:
 def test_redact_logs_deletes_only_the_color_duplicate(log_rules: list[Rule]) -> None:
     """delete_key удаляет ровно color_message: дубль ANSI uvicorn.
 
-    message удалять нельзя — его значение уже в теле записи; отсутствие
-    ключа delete_key пропускает молча (документация OTTL), поэтому записи
-    без дубля не дают ошибок.
+    Тело записи приходит из SDK — текст сообщения, отдельного атрибута
+    message у OTLP-лога нет; отсутствие ключа delete_key пропускает молча
+    (документация OTTL), поэтому записи без дубля не дают ошибок.
     """
     deleted = {
         rule.target for rule in log_rules if rule.operation == "delete_key"
@@ -660,130 +555,41 @@ def test_the_prometheus_exporter_converts_the_resource_to_labels() -> None:
     assert exporter["resource_to_telemetry_conversion"]["enabled"] is True
 
 
-# --- конвейер логов: фильтр чужих контейнеров и порядок processors ----------------
+# --- конвейер логов: OTLP из SDK и порядок processors ------------------------------
 
 
-def test_the_logs_pipeline_filters_foreign_services_then_redacts() -> None:
-    """Порядок конвейера логов: лимит → фильтр → редакция → сервис → batch.
+def test_the_logs_pipeline_takes_otlp_and_redacts_before_grouping() -> None:
+    """Конвейер логов: [otlp] → лимит → редакция → сервис → batch → Loki.
 
-    Редакция и фильтр — только в logs: трейсы редактирует transform/redact,
-    метрики не трогаются вовсе.
+    Логи приходят по OTLP из SDK; редакция — только в logs: трейсы
+    редактирует transform/redact, метрики не трогаются вовсе.
     """
     pipelines = load_config()["service"]["pipelines"]
+    assert pipelines["logs"]["receivers"] == ["otlp"]
     assert pipelines["logs"]["processors"] == [
         "memory_limiter",
-        "filter/foreign-services",
         "transform/redact-logs",
         "groupbyattrs/service",
         "batch",
     ]
-    for processor in ("filter/foreign-services", "transform/redact-logs"):
+    assert pipelines["logs"]["exporters"] == ["otlphttp/loki"]
+    for processor in ("transform/redact-logs", "groupbyattrs/service"):
         assert processor not in pipelines["traces"]["processors"]
         assert processor not in pipelines["metrics"]["processors"]
 
 
-def test_the_foreign_services_filter_lets_exactly_our_three_through() -> None:
-    """Условие дропа покрывает оба места service.name и ровно три имени.
+def test_the_file_log_path_is_gone() -> None:
+    """Путь через файлы Docker убран целиком: логи приходят по OTLP из SDK.
 
-    У записей file_log имя — атрибут записи (до groupbyattrs/service),
-    у OTLP-логов — ресурс.
+    Ни receiver file_log с его операторами stanza, ни фильтр чужих
+    контейнеров (чужих логов в конвейере больше нет), ни смещения
+    file_storage не должны остаться нигде в конфиге.
     """
-    ours = frozenset({"dmc-268-api", "dmc-268-worker", "dmc-268-migrate"})
-    assert parse_foreign_filter() == {
-        'attributes["service.name"]': ours,
-        'resource.attributes["service.name"]': ours,
-    }
-
-
-def test_foreign_service_records_are_dropped_and_ours_pass() -> None:
-    allowed = parse_foreign_filter()
-    # Наши три имени проходят — и как атрибут записи, и как ресурс.
-    for name in ("dmc-268-api", "dmc-268-worker", "dmc-268-migrate"):
-        assert foreign_filter_keeps(allowed, name, None)
-        assert foreign_filter_keeps(allowed, None, name)
-    # Чужие контейнеры хоста и записи без имени нигде — дроп.
-    assert not foreign_filter_keeps(allowed, "grafana", None)
-    assert not foreign_filter_keeps(allowed, None, "postgres")
-    assert not foreign_filter_keeps(allowed, "dmc-268-api-typo", "tempo")
-    assert not foreign_filter_keeps(allowed, None, None)
-
-
-# --- конвейер file_log: тело из message, дубль чистит redact-logs -----------------
-
-# Запись приложения и конверт Docker вокруг неё — как их пишет json-file драйвер.
-RECORD_TEXT = "упало с секретом SECRET-42"
-RECORD_INNER = json.dumps(
-    {
-        "timestamp": "2026-10-24T10:00:00.000000Z",
-        "severity": "ERROR",
-        "message": RECORD_TEXT,
-        "service.name": "dmc-268-api",
-        "exception.stacktrace": "Traceback (most recent call last):\n ...",
-    },
-    ensure_ascii=False,
-)
-DOCKER_ENVELOPE = json.dumps({"log": RECORD_INNER, "time": "2026-10-24T10:00:00.123456789Z"})
-
-
-def test_file_log_turns_message_into_body_and_keeps_no_duplicate() -> None:
-    """Тело записи — текст сообщения; в Loki текст не хранится дважды."""
-    entry = apply_file_log(DOCKER_ENVELOPE)
-    assert entry is not None
-    assert entry["body"] == RECORD_TEXT
-    attributes = entry["attributes"]
-    assert attributes["service.name"] == "dmc-268-api"
-    assert attributes["severity"] == "ERROR"
-    assert attributes["exception.stacktrace"] == "Traceback (most recent call last):\n ..."
-    # message переехал в тело (move удаляет источник) — в атрибутах его нет.
-    assert "message" not in attributes
-
-
-def test_the_color_duplicate_is_gone_after_the_full_logs_pipeline(
-    log_rules: list[Rule],
-) -> None:
-    """Полный конвейер логов не оставляет ни message, ни его ANSI-дубля.
-
-    color_message удаляется не оператором remove (тот на каждой записи без
-    дубля писал бы ошибку в лог коллектора), а delete_key в
-    transform/redact-logs; здесь проверяется связка file_log → redact-logs.
-    """
-    envelope = json.dumps(
-        {
-            "log": json.dumps(
-                {
-                    "severity": "INFO",
-                    "message": "Started server process",
-                    "service.name": "dmc-268-api",
-                    "color_message": "\x1b[32mStarted server process\x1b[0m",
-                },
-                ensure_ascii=False,
-            ),
-            "time": "2026-10-24T10:00:00.123456789Z",
-        },
-        ensure_ascii=False,
-    )
-
-    parsed = apply_file_log(envelope)
-    assert parsed is not None
-    # До redact-логов дубль ещё атрибут: file_log его не трогает.
-    assert "color_message" in parsed["attributes"]
-
-    entry = apply_log_rules(log_rules, LogEntry(parsed["body"], parsed["attributes"]))
-
-    assert entry.body == "Started server process"
-    # message переехал в тело, color_message удалён — в атрибутах их нет;
-    # time конверта остаётся: stanza его не удаляет.
-    assert entry.attributes == {
-        "time": "2026-10-24T10:00:00.123456789Z",
-        "severity": "INFO",
-        "service.name": "dmc-268-api",
-    }
-
-
-def test_file_log_drops_records_that_are_not_app_json() -> None:
-    """Не-JSON строки (логи самих контейнеров стека) в Loki не идут."""
-    envelope = json.dumps({"log": "plain text line", "time": "2026-10-24T10:00:00Z"})
-    assert apply_file_log(envelope) is None
+    config = load_config()
+    assert "file_log" not in config["receivers"]
+    assert "filter/foreign-services" not in config["processors"]
+    assert "file_storage" not in config["extensions"]
+    assert "file_storage" not in config["service"]["extensions"]
 
 
 # --- переход лог -> трейс: derived field Loki -------------------------------------
@@ -792,8 +598,8 @@ def test_file_log_drops_records_that_are_not_app_json() -> None:
 def test_loki_derived_field_takes_trace_id_from_structured_metadata() -> None:
     """Переход из лога в трейс — по лейблу trace_id, не по регэкспу тела.
 
-    trace_id лежит в structured metadata OTLP-лога (блок trace: {} в
-    json_parser коллектора): регэксп по телу его не находил.
+    trace_id приходит в OTLP-логе от SDK и Loki держит его в structured
+    metadata: регэксп по телу его не находил.
     """
     datasources: dict[str, Any] = yaml.safe_load(DATASOURCES_CONFIG.read_text(encoding="utf-8"))
     loki = next(ds for ds in datasources["datasources"] if ds["type"] == "loki")

@@ -1,75 +1,20 @@
 # Коллектор телеметрии — один конфиг для локального стека (docker compose,
 # профиль observability) и стенда (infra/main.tf): различия окружений — только
-# переменные запуска (пути лог-файлов, реквизиты receiver postgresql) и сетевые
-# алиасы, совпадающие в обоих окружениях. Образ зафиксирован дайджестом в
-# docker-compose.yml и main.tf (тег в комментарии рядом): у приёмника file_log
-# операторы stanza вне гарантий стабильности (beta), при обновлении образа
-# читаются breaking changes.
+# переменные запуска (реквизиты receiver postgresql) и сетевые алиасы,
+# совпадающие в обоих окружениях. Образ зафиксирован дайджестом в
+# docker-compose.yml и main.tf (тег в комментарии рядом): при обновлении
+# образа читаются breaking changes.
 
 receivers:
-  # Приём OTLP от сервисов приложения: трейсы и метрики SDK при
-  # OTEL_TRACES_EXPORTER=otlp / OTEL_METRICS_EXPORTER=otlp.
+  # Приём OTLP от сервисов приложения: трейсы, метрики и логи SDK при
+  # OTEL_TRACES_EXPORTER=otlp / OTEL_METRICS_EXPORTER=otlp /
+  # OTEL_LOGS_EXPORTER=otlp.
   otlp:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
-
-  # Логи сервисов из stdout: драйвер json-file пишет их в конверт
-  # {"log": "...", "time": "..."}, внутри конверта — JSON-запись из
-  # app/infrastructure/logging.py. Пути вынесены в переменную
-  # OTELCOL_LOG_FILES: id контейнеров различаются между окружениями.
-  file_log:
-    include:
-      - ${env:OTELCOL_LOG_FILES}
-    start_at: end
-    storage: file_storage
-    operators:
-      # Конверт Docker: время записи — из него. Docker пишет RFC3339Nano;
-      # layout — go-time шаблон того же формата.
-      - type: json_parser
-        id: docker
-        timestamp:
-          parse_from: attributes.time
-          layout_type: gotime
-          layout: "2006-01-02T15:04:05.999999999Z07:00"
-      # Внутренний JSON записи становится телом — его разбирает следующий
-      # parser; окончательное тело запись получает ниже (message-to-body).
-      - type: move
-        from: attributes.log
-        to: body
-      # Поля записи по модели OTel. Имена полей — те, что stanza ждёт по
-      # умолчанию, и они совпадают с полями record_to_fields:
-      # attributes.trace_id / attributes.span_id / attributes.trace_flags и
-      # attributes.severity. Не-JSON строки (логи самих контейнеров стека)
-      # в Loki не идут.
-      - type: json_parser
-        id: app-json
-        on_error: drop
-        trace:
-          trace_id:
-            parse_from: attributes.trace_id
-          span_id:
-            parse_from: attributes.span_id
-          trace_flags:
-            parse_from: attributes.trace_flags
-        severity:
-          parse_from: attributes.severity
-      # Тело записи — текст сообщения: поля записи уже лежат в атрибутах, и
-      # строка-JSON в теле хранила бы весь текст в Loki дважды. move удаляет
-      # источник: отдельный оператор remove для attributes.message здесь был
-      # бы мёртвым — он гарантированно промахивался бы и с on_error: send
-      # писал «field does not exist» в лог коллектора на каждой записи.
-      - type: move
-        id: message-to-body
-        from: attributes.message
-        to: body
-      # color_message — ANSI-дубль сообщения uvicorn — удаляется не здесь, а
-      # стейтментом delete_key в transform/redact-logs: у оператора remove
-      # этой версии stanza нет тихого пропуска отсутствующего поля (значения
-      # continue нет — «all processing errors will be logged»), и каждая
-      # запись без color_message давала бы ошибку в лог коллектора.
 
   # Метрики базы (решение #89): снимает сам коллектор receiver-ом postgresql —
   # без отдельного контейнера экспортёра, в общий конвейер метрик. Роль
@@ -102,25 +47,13 @@ processors:
   batch:
     timeout: 5s
 
-  # service.name из полей записи — в ресурс OTLP-лога: Loki берёт имя сервиса
-  # из ресурса (label service_name), иначе все записи идут как unknown_service.
+  # service.name в ресурсе OTLP-лога: Loki берёт имя сервиса из ресурса
+  # (label service_name), иначе все записи идут как unknown_service. Имя
+  # приходит в ресурсе от SDK; groupbyattrs оставлен как нормализация на
+  # случай, если имя окажется на уровне записи.
   groupbyattrs/service:
     keys:
       - service.name
-
-  # Фильтр чужих контейнеров. Коллектор работает под root и читает
-  # *-json.log всех контейнеров хоста — иначе лог-файлы Docker не прочитать
-  # (root оставлен намеренно), поэтому чужие JSON-логи отсекаются здесь:
-  # в Loki идут записи только трёх наших сервисов. У записей file_log
-  # service.name — атрибут записи (до groupbyattrs/service), у OTLP-логов —
-  # ресурс: условие покрывает оба случая, а имя, которого нет нигде,
-  # не совпадает ни с одним равенством — тоже дроп. Условие log_record —
-  # правило дропа: запись с несовпавшим условием уходит в Loki.
-  filter/foreign-services:
-    error_mode: ignore
-    logs:
-      log_record:
-        - 'not (attributes["service.name"] == "dmc-268-api" or attributes["service.name"] == "dmc-268-worker" or attributes["service.name"] == "dmc-268-migrate" or resource.attributes["service.name"] == "dmc-268-api" or resource.attributes["service.name"] == "dmc-268-worker" or resource.attributes["service.name"] == "dmc-268-migrate")'
 
   # Редакция логов — тот же второй рубеж после SDK, что transform/redact для
   # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
@@ -136,13 +69,13 @@ processors:
         statements:
           - set(attributes["exception.stacktrace"], "<скрыто>") where attributes["exception.stacktrace"] != nil
           - set(attributes["exception.message"], "<скрыто>") where attributes["exception.message"] != nil
-          # Тело записи — текст сообщения (оператор message-to-body выше).
+          # Тело записи приходит готовым из SDK — текст сообщения; у записей
+          # с исключением оно гасится.
           - set(body, "<скрыто>") where attributes["exception.stacktrace"] != nil
-          # ANSI-дубль сообщения uvicorn удаляется целиком; message уже в теле
-          # (оператор message-to-body). delete_key молча пропускает отсутствие
-          # ключа — по документации OTTL это no-op для несуществующего, поэтому
-          # записи без color_message не дают ни ошибок, ни шума (remove из
-          # stanza так не умеет — см. комментарий у message-to-body).
+          # ANSI-дубль сообщения uvicorn удаляется целиком. delete_key молча
+          # пропускает отсутствие ключа — по документации OTTL это no-op для
+          # несуществующего, поэтому записи без color_message не дают ни
+          # ошибок, ни шума.
           - delete_key(attributes, "color_message")
 
   # Редакция чувствительных данных — второй рубеж после SDK (первый — фильтры
@@ -207,16 +140,11 @@ exporters:
       enabled: true
 
 extensions:
-  # Смещения file_log между рестартами: без них после перезапуска коллектора
-  # старые записи уходили бы в Loki повторно.
-  file_storage:
-    directory: /var/lib/otelcol/storage
-    create_directory: true
   health_check:
     endpoint: 0.0.0.0:13133
 
 service:
-  extensions: [file_storage, health_check]
+  extensions: [health_check]
   pipelines:
     traces:
       receivers: [otlp]
@@ -227,6 +155,6 @@ service:
       processors: [memory_limiter, batch]
       exporters: [prometheus]
     logs:
-      receivers: [otlp, file_log]
-      processors: [memory_limiter, filter/foreign-services, transform/redact-logs, groupbyattrs/service, batch]
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact-logs, groupbyattrs/service, batch]
       exporters: [otlphttp/loki]

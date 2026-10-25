@@ -97,20 +97,28 @@ services:
       USER_TOKEN_ENCRYPTION_KEY: ${USER_TOKEN_ENCRYPTION_KEY:-}
       # Спаны OpenTelemetry по умолчанию никуда не уходят; console — в stdout.
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+      # Логи — тот же переключатель, что у трейсов: none — остаются в stdout
+      # (docker logs), otlp — уходят в коллектор.
+      OTEL_LOGS_EXPORTER: ${OTEL_LOGS_EXPORTER:-none}
       # Метрики — тот же список экспортёров, что у трейсов (4.1).
       OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
       # Экспорт включается окружением, без правки кода. С поднятым стеком
       # (профиль observability ниже) запускают так:
       #   OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp \
+      #   OTEL_LOGS_EXPORTER=otlp \
       #   docker compose --profile observability up -d
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://collector:4318}
       # Таймаут OTLP меньше окна graceful shutdown (5 с): выгрузка спанов при
       # остановке успевает даже при недоступном коллекторе (замечание из #89).
-      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-4000}
+      # Python SDK читает переменную в СЕКУНДАХ, вопреки спеке OTel (мс).
+      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-4}
       # service.version — sha собранного образа: git внутрь контейнера не
       # попадает, поэтому переменная с дефолтом (осмысленно —
       # SERVICE_VERSION=$(git rev-parse --short HEAD) в .env).
-      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local}
+      # service.instance.id — стабильное имя по сервису, а не UUID: случайный
+      # идентификатор на процесс растил бы в Prometheus серии exported_instance
+      # (ресурс коллектор конвертирует в лейблы).
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local,service.instance.id=dmc268-api}
       # Стабильные имена атрибутов semconv для SQL и HTTP; то же значение ставит код.
       OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
       # Пароль роли мониторинга dmc268_monitor: api гоняет миграции, роль
@@ -119,9 +127,9 @@ services:
       # переменную задаёт infra из секрета.
       POSTGRES_MONITOR_PASSWORD: ${POSTGRES_MONITOR_PASSWORD:-dmc268_monitor}
     # Драйвер логов json-file с той же ротацией, что в infra/main.tf
-    # (local.log_opts): Docker Desktop по умолчанию пишет драйвером local
-    # (файлы local-logs/ в бинарном формате), а коллектор собирает именно
-    # json-file (<id>-json.log); без ротации лог растёт, пока не кончится диск.
+    # (local.log_opts); без ротации лог растёт, пока не кончится диск.
+    # stdout остаётся для docker logs, в Loki логи идут по OTLP
+    # (OTEL_LOGS_EXPORTER выше).
     logging:
       driver: json-file
       options:
@@ -167,11 +175,15 @@ services:
       EUROROUTER_MODEL: ${EUROROUTER_MODEL:-}
       EUROROUTER_API_KEYS: ${EUROROUTER_API_KEYS:-}
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+      OTEL_LOGS_EXPORTER: ${OTEL_LOGS_EXPORTER:-none}
       OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://collector:4318}
-      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-4000}
-      # Тот же resource, что у api; дефолты те же (см. комментарий там).
-      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local}
+      # Python SDK читает таймаут в СЕКУНДАХ, вопреки спеке OTel (мс) —
+      # подробнее у api.
+      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-4}
+      # Тот же resource, что у api; дефолты те же (см. комментарий там), кроме
+      # service.instance.id — стабильное имя воркера вместо случайного UUID.
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local,service.instance.id=dmc268-worker}
       OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
     depends_on:
       postgres:
@@ -225,30 +237,28 @@ services:
   # манифест-листа (multi-arch), разрешённый docker buildx imagetools
   # inspect; тег в комментарии рядом. Одинаковый дайджест и в main.tf:
   # обновление образа — осознанная замена дайджеста в обоих местах с чтением
-  # breaking changes (у file_log коллектора операторы stanza — beta).
+  # breaking changes.
   collector:
     # otel/opentelemetry-collector-contrib:0.158.0
     image: otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
     profiles: ["observability"]
-    # От root: лог-файлы Docker на стенде читает только root (как promtail),
-    # и он же создаёт каталог file_storage в томе. Образ по умолчанию — 10001.
-    user: "0"
-    # Логи контейнеров (json-file) — источник file_log, только чтение;
-    # на Docker Desktop /var/lib/docker/containers монтируется изнутри ВМ.
+    # Логи приложения приходят по OTLP из SDK (OTEL_LOGS_EXPORTER у api и
+    # worker): файлы Docker коллектор не читает, и root ему не нужен.
     volumes:
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - ./infra/observability/otelcol.yaml:/etc/otelcol-contrib/config.yaml:ro
-      - collector_data:/var/lib/otelcol
     environment:
-      # Все *-json.log контейнеров; не-JSON строки (логи самих контейнеров
-      # стека) коллектор отбрасывает — см. on_error: drop в конфиге.
-      OTELCOL_LOG_FILES: /var/lib/docker/containers/*/*-json.log
       # Реквизиты роли мониторинга базы (receiver postgresql в otelcol.yaml):
       # локальные, как у api выше; на стенде — переменные infra из секрета.
       POSTGRESQL_USERNAME: dmc268_monitor
       POSTGRESQL_PASSWORD: dmc268_monitor
       POSTGRESQL_ENDPOINT: dmc268-postgres:5432
       POSTGRESQL_DATABASE: dmc268
+    # Как у api: приём OTLP записи на диск не требует, поэтому файловая
+    # система только для чтения, без capabilities, /tmp — tmpfs.
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
     depends_on:
       - loki
       - tempo
@@ -346,8 +356,6 @@ volumes:
   ollama_models:
     name: dmc268-ollama-models
   # Данные стека наблюдаемости переживают пересоздание контейнеров.
-  collector_data:
-    name: dmc268-collector-data
   loki_data:
     name: dmc268-loki-data
   tempo_data:

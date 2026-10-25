@@ -89,9 +89,13 @@ stanza — beta, обновление с чтением breaking changes).
 Конфиги заливаются в контейнеры при создании (`upload` в `docker_container`): tofu читает их из
 рабочей копии и передаёт через Docker API, поэтому на сервере не нужен чекаут репозитория. Правка
 конфига пересоздаёт контейнер следующим `apply`; если провайдер не заметил изменение содержимого,
-контейнер пересоздают явно (`tofu apply -replace=docker_container.otelcol`). Локально тот же
-стек поднимается профилем: `OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp docker compose
---profile observability up -d` (Grafana — http://127.0.0.1:3000 без логина).
+контейнер пересоздают явно (`tofu apply -replace=docker_container.otelcol`). Из-за `upload`
+коллектор стенда живёт без `read_only` (заливка — запись в rootfs, read-only демон отклоняет
+её до всякого пути): вместо неё — `cap_drop ALL` и `no-new-privileges`. Локальный коллектор
+read_only: конфиг приходит read-only маунтом. Локально тот же
+стек поднимается профилем: `OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp
+OTEL_LOGS_EXPORTER=otlp docker compose --profile observability up -d` (Grafana —
+http://127.0.0.1:3000 без логина).
 
 Экспорт телеметрии API, воркера и миграций включён окружением (`local.telemetry_env`):
 `service.version` берётся из тега `api_image` (это sha коммита сборки), окружение задаёт

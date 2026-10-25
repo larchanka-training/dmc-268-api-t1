@@ -24,23 +24,29 @@ locals {
   service_version = try(regex(":(?P<tag>[^/:]+)$", var.api_image)["tag"], "unknown")
 
   # Экспорт телеметрии сервисами приложения (change add-observability-stack):
-  # коллектор в той же сети. Таймаут OTLP меньше окна graceful shutdown API
-  # (5 с), чтобы выгрузка спанов при остановке успевала даже при недоступном
-  # коллекторе (замечание из #89).
+  # коллектор в той же сети, логи и трейсы с метриками идут по OTLP. Таймаут
+  # OTLP меньше окна graceful shutdown API (5 с), чтобы выгрузка спанов при
+  # остановке успевала даже при недоступном коллекторе (замечание из #89).
+  # Python SDK читает таймаут в СЕКУНДАХ, вопреки спеке OTel (мс).
   telemetry_env = [
     "OTEL_TRACES_EXPORTER=otlp",
     "OTEL_METRICS_EXPORTER=otlp",
+    "OTEL_LOGS_EXPORTER=otlp",
     "OTEL_EXPORTER_OTLP_ENDPOINT=http://dmc268-otelcol:4318",
-    "OTEL_EXPORTER_OTLP_TIMEOUT=4000",
-    "OTEL_RESOURCE_ATTRIBUTES=service.version=${local.service_version},deployment.environment.name=${var.deployment_environment_name}",
+    "OTEL_EXPORTER_OTLP_TIMEOUT=4",
   ]
+
+  # Общая часть OTEL_RESOURCE_ATTRIBUTES; service.instance.id каждый контейнер
+  # дописывает своим стабильным именем (см. env ниже): случайный UUID на
+  # процесс растил бы в Prometheus серии exported_instance — ресурс
+  # конвертируется в лейблы рядов.
+  telemetry_resource = "service.version=${local.service_version},deployment.environment.name=${var.deployment_environment_name}"
 
   # Образы стека наблюдаемости — те же версии, что в docker-compose.yml:
   # конфиги в observability/ общие. Зафиксированы дайджестом манифест-листа
   # (multi-arch, разрешён `docker buildx imagetools inspect <имя:тег>`) —
   # одинаково в обоих местах; тег в комментарии рядом, обновление образа —
-  # осознанная замена дайджеста в обоих файлах с чтением breaking changes
-  # (у file_log коллектора операторы stanza — beta).
+  # осознанная замена дайджеста в обоих файлах с чтением breaking changes.
   otelcol_image       = "otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5"
   loki_image          = "grafana/loki@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28"
   tempo_image         = "grafana/tempo@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044"
@@ -229,6 +235,7 @@ resource "docker_container" "migrate" {
   }
 
   env = concat(local.app_env, local.telemetry_env, [
+    "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-migrate",
     # Пароль роли мониторинга dmc268_monitor: миграция 0013 создаёт роль с
     # ним, коллектор подключается под ней (receiver postgresql). Один источник
     # с env коллектора (POSTGRESQL_PASSWORD ниже) — иначе роль и подключение
@@ -298,6 +305,7 @@ resource "docker_container" "api" {
   # OAuth и origin — у входа и проверки сессии, ключ токенов пользователя — у
   # входа и ручек репозиториев.
   env = concat(local.app_env, local.telemetry_env, [
+    "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-api",
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
     "GITHUB_APP_CLIENT_ID=${var.github_app_client_id}",
@@ -381,6 +389,7 @@ resource "docker_container" "worker" {
   # флагом llm_hosted_fallback: тогда код проверяемых репозиториев уходит
   # hosted-провайдеру (docs/BACKEND_ARCHITECTURE.md, модель угроз).
   env = concat(local.app_env, local.telemetry_env, [
+    "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-worker",
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
     "LLM_BACKEND=${var.llm_backend}",
@@ -440,10 +449,6 @@ resource "docker_image" "cadvisor" {
   keep_locally = true
 }
 
-resource "docker_volume" "collector" {
-  name = "dmc268-collector-data"
-}
-
 resource "docker_volume" "loki" {
   name = "dmc268-loki-data"
 }
@@ -460,32 +465,26 @@ resource "docker_volume" "grafana" {
   name = "dmc268-grafana-data"
 }
 
-# Коллектор от root: лог-файлы Docker на сервере читает только root (как
-# promtail), и он же создаёт каталог file_storage в томе. Образ по умолчанию —
-# пользователь 10001.
 resource "docker_container" "otelcol" {
   name    = "dmc268-otelcol"
   image   = docker_image.otelcol.image_id
   restart = "unless-stopped"
-  user    = "0"
 
   memory      = var.observability_memory_mb.collector
   memory_swap = var.observability_memory_mb.collector
   log_driver  = "json-file"
   log_opts    = local.log_opts
 
+  # Капли и запрет новых привилегий — как у api; read_only здесь НЕ ставим:
+  # провайдер заливает конфиг upload-ом (CopyToContainer, как docker cp),
+  # а демон отказывает в записи в read-only rootfs ещё до пути — apply
+  # упал бы на создании контейнера. Локальный коллектор read_only: конфиг
+  # приходит read-only маунтом (docker-compose.yml).
+  tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=64m" }
   security_opts = ["no-new-privileges:true"]
 
-  # Логи контейнеров (json-file) — источник file_log приёмника, только чтение.
-  volumes {
-    host_path      = "/var/lib/docker/containers"
-    container_path = "/var/lib/docker/containers"
-    read_only      = true
-  }
-
-  volumes {
-    volume_name    = docker_volume.collector.name
-    container_path = "/var/lib/otelcol"
+  capabilities {
+    drop = ["ALL"]
   }
 
   upload {
@@ -494,9 +493,6 @@ resource "docker_container" "otelcol" {
   }
 
   env = [
-    # Все *-json.log контейнеров; не-JSON строки (логи самих контейнеров
-    # стека) коллектор отбрасывает — см. on_error: drop в конфиге.
-    "OTELCOL_LOG_FILES=/var/lib/docker/containers/*/*-json.log",
     # Реквизиты роли мониторинга базы (receiver postgresql в otelcol.yaml):
     # роль создаёт миграция 0013 с тем же паролем (docker_container.migrate),
     # имя совпадает с переменной POSTGRES_MONITOR_PASSWORD настроек.
