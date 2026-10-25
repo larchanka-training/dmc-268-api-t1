@@ -48,19 +48,26 @@ resource "docker_volume" "rabbitmq" {
 }
 
 resource "docker_image" "postgres" {
-  # Официальный образ postgres со встроенным pgvector: профиль репозитория
-  # держит векторы в той же базе, расширение создаёт миграция 0003.
+  # Образ проекта pgvector поверх официального postgres:18 (Debian, glibc).
+  # Взят под RAG-профиль репозитория (#27); тот закрыт без мёржа, и расширение
+  # `vector` сейчас не создаёт ни одна миграция. Образ остаётся: возврат на
+  # postgres:18-alpine — снова смена библиотеки C и новый том (backend-delivery).
+  # Тег плавающий: digest в name пересоздаёт контейнер при каждом обновлении
+  # образа, а без destroy_grace_seconds пересоздание — это SIGKILL (#150, #102).
   name         = "pgvector/pgvector:pg18"
   keep_locally = true
 }
 
 resource "docker_image" "rabbitmq" {
+  # Тег плавающий по той же причине, что у postgres: digest — после
+  # destroy_grace_seconds у брокера (#150, #102).
   name         = "rabbitmq:4.4-alpine"
   keep_locally = true
 }
 
 resource "docker_image" "api" {
-  # Образ собирается и публикуется в CI, здесь он только забирается по тегу.
+  # Образ собирается и публикуется в CI, здесь он только забирается — по
+  # digest, который вернула сборка (`api_image` без него не пройдёт проверку).
   # Раньше он собирался прямо отсюда по хешу исходников; при удалённом
   # docker_host такая сборка ушла бы на сервер — без контекста и без кеша.
   name         = var.api_image
@@ -160,7 +167,7 @@ resource "docker_container" "migrate" {
   image = docker_image.api.image_id
 
   # Одноразовый контейнер: отрабатывает и завершается. `attach` заставляет
-  # Terraform дождаться конца, а postcondition — упасть на ненулевом коде.
+  # OpenTofu дождаться конца, а postcondition — упасть на ненулевом коде.
   # Без этого упавшая миграция осталась бы незамеченной, и API поднялся бы
   # против непромигрированной базы (ровно то, что делал прежний main.tf).
   must_run = false
