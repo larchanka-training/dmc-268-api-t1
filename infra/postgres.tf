@@ -3,8 +3,19 @@
 # Имя со сборкой образа: при переходе с postgres:18-alpine (musl) на
 # pgvector/pgvector:pg18 (glibc) том заведён заново — библиотеки сортируют
 # строки по-разному, и текстовые индексы старого тома были бы неконсистентны.
+#
+# prevent_destroy: план, который уничтожает или заменяет том, OpenTofu
+# отклоняет до изменений — и полный apply, и targeted apply шага «Поднять базу
+# и брокер», который тянет том зависимостью контейнера (спека backend-delivery,
+# «Развёртывание не уничтожает тома данных»). Сменить том — новым ресурсом, а
+# прежний снять с учёта блоком removed { lifecycle { destroy = false } }; снести
+# стенд осознанно — снять prevent_destroy (README.md, «Развёртывание и удаление»).
 resource "docker_volume" "postgres" {
   name = "dmc268-postgres-pgvector-data"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "docker_image" "postgres" {

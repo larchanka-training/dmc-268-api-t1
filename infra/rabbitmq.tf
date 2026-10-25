@@ -7,8 +7,14 @@
 # нельзя; данных, которые стоило бы переносить, в брокере не было.
 # Следующее обновление, когда в брокере будут данные, — по шагам через каждую
 # минорную версию на этом же томе, после `rabbitmqctl enable_feature_flag all`.
+#
+# prevent_destroy — как у тома postgres (infra/postgres.tf).
 resource "docker_volume" "rabbitmq" {
   name = "dmc268-rabbitmq-v44-data"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "docker_image" "rabbitmq" {

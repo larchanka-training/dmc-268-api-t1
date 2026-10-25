@@ -1,0 +1,144 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.13.2",
+  "resource_changes": [
+    {
+      "address": "docker_container.api",
+      "mode": "managed",
+      "type": "docker_container",
+      "name": "api",
+      "action_reason": "replace_by_triggers",
+      "change": {
+        "actions": [
+          "delete",
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "docker_container.postgres",
+      "mode": "managed",
+      "type": "docker_container",
+      "name": "postgres",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_container.rabbitmq",
+      "mode": "managed",
+      "type": "docker_container",
+      "name": "rabbitmq",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_container.worker",
+      "mode": "managed",
+      "type": "docker_container",
+      "name": "worker",
+      "action_reason": "replace_because_cannot_update",
+      "change": {
+        "actions": [
+          "delete",
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "docker_image.api",
+      "mode": "managed",
+      "type": "docker_image",
+      "name": "api",
+      "action_reason": "delete_because_no_resource_config",
+      "change": {
+        "actions": [
+          "forget"
+        ]
+      }
+    },
+    {
+      "address": "docker_image.postgres",
+      "mode": "managed",
+      "type": "docker_image",
+      "name": "postgres",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_image.rabbitmq",
+      "mode": "managed",
+      "type": "docker_image",
+      "name": "rabbitmq",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_image.worker",
+      "mode": "managed",
+      "type": "docker_image",
+      "name": "worker",
+      "action_reason": "delete_because_no_resource_config",
+      "change": {
+        "actions": [
+          "forget"
+        ]
+      }
+    },
+    {
+      "address": "docker_network.dmc268",
+      "mode": "managed",
+      "type": "docker_network",
+      "name": "dmc268",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_volume.postgres",
+      "mode": "managed",
+      "type": "docker_volume",
+      "name": "postgres",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_volume.rabbitmq",
+      "mode": "managed",
+      "type": "docker_volume",
+      "name": "rabbitmq",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "terraform_data.api_healthcheck",
+      "mode": "managed",
+      "type": "terraform_data",
+      "name": "api_healthcheck",
+      "change": {
+        "actions": [
+          "update"
+        ]
+      }
+    }
+  ]
+}

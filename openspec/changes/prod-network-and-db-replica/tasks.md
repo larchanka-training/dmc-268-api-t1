@@ -36,6 +36,8 @@
 
 - [x] 3.15 Сеть миграций сверяется с фактической сетью `postgres` из `infra/*.tf`, а не со строкой; бюджет `timeout-minutes` в `deploy.yml` пересчитан после #202 (ожидание healthy API в apply вместо минуты `/health`)
 
+- [x] 3.16 После #210: тома реплики и копий — с `prevent_destroy` и в `PROTECTED` сторожа (`scripts/deploy_report.py`); шаг проверки реплики — `id: check_replica`, засечка `mark.sh`, строка в `STEP_RESULTS` и в `STEPS` summary; README — о защите четырёх томов
+
 ## 4. Приёмка
 
 - [x] 4.1 Секрет `PG_REPLICATION_PASSWORD_DMC268_T1` заведён в настройках репозитория
