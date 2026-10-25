@@ -110,6 +110,6 @@ check .`, `uv run lint-imports`, `uv run pytest`.
       (`VcsGateway`); проверить: дифф документа.
 - [ ] 7.3 Сквозные проверки: `uv run ruff check .`, `uv run lint-imports`,
       `uv run mypy .`, `uv run pytest`, `uv run alembic heads` (одна
-      ревизия), `npx @fission-ai/openspec@1.14.2 validate --all --strict`;
+      ревизия), `npx @fission-ai/openspec@1.15.0 validate --all --strict`;
       синхронизация дельт `definitions-index` и `context-assembly` в
       `openspec/specs/` при архивации change'а.
