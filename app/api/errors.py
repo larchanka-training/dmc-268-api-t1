@@ -48,6 +48,7 @@ from app.api.problems import (
     RepositoryManageRequiredProblem,
     RepositoryNotFoundProblem,
     RepositoryNotInInstallationProblem,
+    RequestBodyTooLargeProblem,
     ReviewAlreadyActiveProblem,
     ReviewNotFoundProblem,
     ScmUnavailableProblem,
@@ -74,7 +75,15 @@ ERRORS_DEFAULT = _doc(
     "default",
     AnyProblem,
     "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят "
-    "`404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+    "`404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и "
+    "`500 INTERNAL_ERROR`.",
+)
+ERRORS_413_BODY = _doc(
+    HTTPStatus.CONTENT_TOO_LARGE,
+    RequestBodyTooLargeProblem,
+    "Тело больше `REQUEST_BODY_MAX_BYTES` (по умолчанию 25 МиБ): по `Content-Length` отказ без чтения "
+    "тела, поток без него обрывается на лимите. Ни разбора тела, ни сессии, ни подписи до отказа нет; "
+    "соединение закрывается.",
 )
 ERRORS_422 = _doc(
     HTTPStatus.UNPROCESSABLE_CONTENT,

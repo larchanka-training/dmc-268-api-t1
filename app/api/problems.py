@@ -38,6 +38,7 @@ class ErrorCode(StrEnum):
     ORIGIN_FORBIDDEN = "ORIGIN_FORBIDDEN"
     ROUTE_NOT_FOUND = "ROUTE_NOT_FOUND"
     METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
+    REQUEST_BODY_TOO_LARGE = "REQUEST_BODY_TOO_LARGE"
     NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
     HTTP_ERROR = "HTTP_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -345,6 +346,24 @@ class NotImplementedProblem(Problem):
     code: Literal[ErrorCode.NOT_IMPLEMENTED] = ErrorCode.NOT_IMPLEMENTED
 
 
+class RequestBodyTooLargeProblem(Problem):
+    """`413 REQUEST_BODY_TOO_LARGE`: тело запроса больше лимита `REQUEST_BODY_MAX_BYTES`.
+
+    Отказ — до разбора тела, сессии и подписи вебхука: по `Content-Length` тело не читается
+    вовсе, поток без него обрывается на лимите. Соединение после ответа закрывается.
+    """
+
+    example = {
+        "detail": "Тело запроса больше лимита 26214400 байт.",
+        "instance": "/api/v1/webhooks/github",
+    }
+
+    type: Literal["urn:dmc-268:problem:request-body-too-large"] = "urn:dmc-268:problem:request-body-too-large"
+    title: Literal["Тело запроса слишком большое"] = "Тело запроса слишком большое"
+    status: Literal[HTTPStatus.CONTENT_TOO_LARGE] = HTTPStatus.CONTENT_TOO_LARGE
+    code: Literal[ErrorCode.REQUEST_BODY_TOO_LARGE] = ErrorCode.REQUEST_BODY_TOO_LARGE
+
+
 class HttpErrorProblem(Problem):
     """`HTTP_ERROR`: прочий отказ фреймворка или зависимости со статусом, у которого нет своего кода.
 
@@ -397,6 +416,7 @@ class AnyProblem(
             | OriginForbiddenProblem
             | RouteNotFoundProblem
             | MethodNotAllowedProblem
+            | RequestBodyTooLargeProblem
             | NotImplementedProblem
             | HttpErrorProblem
             | InternalErrorProblem,
@@ -407,8 +427,9 @@ class AnyProblem(
     """Любая ошибка — по модели на код, выбор по `code`.
 
     Коды, которые возможны на любом запросе: `ROUTE_NOT_FOUND` (такого пути нет),
-    `METHOD_NOT_ALLOWED` (метод не объявлен), `HTTP_ERROR` (прочий отказ фреймворка) и
-    `INTERNAL_ERROR` (сбой сервера). Остальные коды операция объявляет в своих ответах.
+    `METHOD_NOT_ALLOWED` (метод не объявлен), `REQUEST_BODY_TOO_LARGE` (тело больше лимита),
+    `HTTP_ERROR` (прочий отказ фреймворка) и `INTERNAL_ERROR` (сбой сервера). Остальные коды
+    операция объявляет в своих ответах; `413` — ещё и каждая операция с телом.
     """
 
 

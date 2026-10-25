@@ -27,6 +27,7 @@ from app.api.errors import (
     ERRORS_404_NOT_IN_INSTALLATION,
     ERRORS_404_REPOSITORY,
     ERRORS_409_ALREADY_CONNECTED,
+    ERRORS_413_BODY,
     ERRORS_422,
     ERRORS_501_NOT_IMPLEMENTED,
     ERRORS_502_SCM_REPOSITORIES,
@@ -314,6 +315,7 @@ def list_available_repositories(
         **ERRORS_403_ORIGIN_OR_MANAGE,
         **ERRORS_404_NOT_IN_INSTALLATION,
         **ERRORS_409_ALREADY_CONNECTED,
+        **ERRORS_413_BODY,
         **ERRORS_422,
         **ERRORS_502_SCM_REPOSITORIES,
     },
@@ -542,6 +544,7 @@ def get_repository_settings(repository_id: RepositoryIdPath) -> RepositorySettin
     responses={
         **ERRORS_403_ORIGIN_OR_MANAGE,
         **ERRORS_404_REPOSITORY,
+        **ERRORS_413_BODY,
         **ERRORS_422,
         **ERRORS_501_NOT_IMPLEMENTED,
     },

@@ -714,6 +714,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         client.post("/api/v1/auth/logout"),
         client.post("/api/v1/webhooks/github", content=b"{}"),
         client.post("/api/v1/webhooks/gitlab", content=b"{}"),
+        client.post("/api/v1/webhooks/github", headers={"Content-Length": str(SETTINGS.request_body_max_bytes + 1)}),
         client.get("/api/v1/auth/bitbucket/login"),
         _signed_in_client().post("/api/v1/reviews", json={}, headers={"Origin": ORIGIN}),
         _signed_in_client().post(
