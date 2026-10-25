@@ -158,7 +158,7 @@ jobs:
   deploy:
     needs: [gate, image]
     runs-on: ubuntu-latest
-    # С запасом на холодный tofu init и минуту ожидания /health. Зависший
+    # С запасом на холодный tofu init и ожидание healthy API. Зависший
     # apply держит блокировку состояния, поэтому лучше упасть раньше шести часов.
     # Но не раньше, чем воркер доработает сообщение: при пересоздании apply ждёт
     # его до destroy_grace_seconds — до 41 мин (local.worker_stop_seconds в
@@ -283,11 +283,19 @@ jobs:
           DOCKER_HOST: ssh://stand
         run: .github/scripts/deploy/migrate.sh
 
+      # Apply ждёт, пока новый API станет healthy (wait у docker_container.api),
+      # и падает через 90 с, если этого не случилось.
       - name: Применить конфигурацию
         id: apply
         working-directory: infra
         env: *tofu-env
         run: tofu apply -input=false -no-color -auto-approve
+
+      # От провайдера в логе только «container failed to be in healthy state»,
+      # а проверки ниже после упавшего apply не идут: причину показывает этот шаг.
+      - name: Логи API после упавшего apply
+        if: failure() && steps.apply.outcome == 'failure'
+        run: ssh stand "docker logs --tail 50 dmc268-api 2>&1; docker inspect -f '{{json .State.Health}}' dmc268-api" || true
 
       - name: Проверить, что API жив (через туннель)
         run: .github/scripts/deploy/check-api.sh

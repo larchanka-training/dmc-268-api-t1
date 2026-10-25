@@ -92,19 +92,58 @@ resource "docker_container" "api" {
     ip       = var.bind_ip
   }
 
+  # Apply считает API выкаченным, только когда тот healthy: провайдер после
+  # создания контейнера опрашивает его состояние и роняет apply, если healthy
+  # не наступил за wait_timeout. Ждёт он только при создании, поэтому
+  # повторный деплой без замены API не замедляет. Здоровый API становится
+  # healthy за секунды (start_interval ниже); 90 с — запас медленному старту.
+  wait         = true
+  wait_timeout = 90
+
   # /health существует именно для этого. Без healthcheck Docker знает только,
   # что процесс не завершился, и зависший uvicorn остался бы живым в его
-  # представлении до следующего деплоя. curl в образе нет, python есть.
+  # представлении до следующего деплоя. Значения — в local.api_healthcheck.
   healthcheck {
+    test           = local.api_healthcheck.test
+    interval       = local.api_healthcheck.interval
+    timeout        = local.api_healthcheck.timeout
+    retries        = local.api_healthcheck.retries
+    start_period   = local.api_healthcheck.start_period
+    start_interval = local.api_healthcheck.start_interval
+  }
+
+  # Правку healthcheck провайдер 4.6.0 планирует обновлением на месте, но
+  # Docker не меняет healthcheck запущенного контейнера: diff остаётся вечным,
+  # а проверка — старой (проверено на Docker 29.9.2). Поэтому любая правка
+  # healthcheck пересоздаёт API.
+  lifecycle {
+    replace_triggered_by = [terraform_data.api_healthcheck.output]
+  }
+}
+
+# Healthcheck API отдельным значением: от него пересоздаётся контейнер API
+# (replace_triggered_by), потому что на месте провайдер его не меняет.
+#
+# start_interval — частота проверок в start_period: без него первая проверка
+# шла бы через interval, и wait ждал бы 30 с даже здоровый API. Длительности
+# — в формате Go, в котором провайдер читает их обратно ("2s", "30s", "1m0s"):
+# "1m" давал бы вечный diff. curl в образе нет, python есть.
+locals {
+  api_healthcheck = {
     test = [
       "CMD-SHELL",
       "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)\"",
     ]
-    interval     = "30s"
-    timeout      = "5s"
-    retries      = 3
-    start_period = "10s"
+    interval       = "30s"
+    timeout        = "5s"
+    retries        = 3
+    start_period   = "10s"
+    start_interval = "2s"
   }
+}
+
+resource "terraform_data" "api_healthcheck" {
+  input = local.api_healthcheck
 }
 
 # Воркер: тот же образ, что у API (свой ресурс docker_image.worker), другая команда. Портов нет: с остальным
