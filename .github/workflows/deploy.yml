@@ -415,6 +415,7 @@ jobs:
 
       - name: Проверить, что реплика получает поток
         id: check_replica
+        if: *fresh
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/check-replica.sh
