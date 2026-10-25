@@ -41,6 +41,8 @@ tofu -chdir=infra output -raw migrate_env > "$env_file"
 # первом деплое после #159; дальше это no-op.
 docker rm -f dmc268-migrate >/dev/null 2>&1 || true
 
+# Этот pull — единственный для образа API: контейнеры api и worker полный apply
+# создаёт из уже скачанного образа по той же ссылке (infra/app.tf).
 docker pull --quiet "$API_IMAGE"
 
 # Ограничения — как у api и worker в infra/app.tf (сверяет

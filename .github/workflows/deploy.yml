@@ -76,8 +76,8 @@ jobs:
       contents: read
       packages: write
     # Наружу — ссылка с digest: тег перезаписывается, digest называет ровно
-    # собранный здесь образ, и tofu забирает его (проверка api_image в
-    # infra/variables.tf).
+    # собранный здесь образ, и стенд запускает именно его (проверка api_image
+    # в infra/variables.tf).
     outputs:
       image: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
     steps:
@@ -140,7 +140,7 @@ jobs:
       # trivy в ci.yml смотрит образ, собранный в CI, а на стенд уезжает этот:
       # он собран заново, и базовый python:3.14-slim между сборками мог
       # смениться. Поэтому сканируется опубликованный digest — ровно то, что
-      # заберёт tofu, — с теми же порогами, что в CI. Образ в приватном ghcr:
+      # запустит стенд, — с теми же порогами, что в CI. Образ в приватном ghcr:
       # trivy берёт креды из ~/.docker/config.json, который записал
       # docker/login-action выше (keychain go-containerregistry в
       # pkg/remote/remote.go trivy). TRIVY_IMAGE_SRC=remote — сразу из реестра:
@@ -167,9 +167,9 @@ jobs:
     # Environment `stand` пускает только develop: ручной запуск с другой ветки
     # отклоняется до первого шага. Секреты при этом остаются в репозитории.
     environment: stand
-    # packages: read обязателен — образ тянется из приватного пакета, и его
-    # забирает docker-провайдер тем же GITHUB_TOKEN. Без него реестр отвечает
-    # «denied», а не чем-нибудь понятным.
+    # packages: read обязателен — образ тянется из приватного пакета: его
+    # скачивает migrate.sh через docker login тем же GITHUB_TOKEN. Без него
+    # реестр отвечает «denied», а не чем-нибудь понятным.
     permissions:
       contents: read
       packages: read
@@ -217,7 +217,8 @@ jobs:
       # отдаёт ему учётные данные реестра вместе с запросом pull: образ лежит
       # в приватном пакете. Хватает packages: read у GITHUB_TOKEN этого job'а.
       # Сам вход идёт через docker раннера, не стенда: на сервере токен не
-      # остаётся.
+      # остаётся. Скачивает образ только migrate.sh: контейнеры api и worker
+      # tofu создаёт из уже скачанного (infra/app.tf).
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
@@ -260,8 +261,6 @@ jobs:
           # проверка переменной в infra/variables.tf роняет apply: стенд не
           # стартует без шифрования молча.
           TF_VAR_user_token_encryption_key: ${{ secrets.USER_TOKEN_KEY_DMC268_T1 }}
-          TF_VAR_registry_username: ${{ github.actor }}
-          TF_VAR_registry_password: ${{ secrets.GITHUB_TOKEN }}
           # Модели на стенде пока нет: заглушка выбрана явно, ревью пустые.
           TF_VAR_llm_backend: stub
         run: |
@@ -273,7 +272,8 @@ jobs:
             -target=docker_container.rabbitmq
 
       # Миграции до выката нового кода: упали — полный apply не запускается,
-      # на стенде остаётся прежняя версия API и воркера.
+      # на стенде остаётся прежняя версия API и воркера. Заодно скачивается
+      # образ, из которого полный apply создаст api и worker.
       - name: Применить миграции
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}

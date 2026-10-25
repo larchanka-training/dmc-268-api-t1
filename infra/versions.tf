@@ -14,15 +14,10 @@ terraform {
   }
 }
 
+# Учётных данных реестра у провайдера нет: образ API из приватного пакета
+# скачивает migrate.sh до apply (вход в ghcr — на раннере, на сервере токен не
+# остаётся), а образы PostgreSQL и RabbitMQ публичные. Сам провайдер тянет
+# образ контейнера, только если того нет на сервере (README.md, «Деплой»).
 provider "docker" {
   host = var.docker_host
-
-  # Образ API лежит в приватном пакете репозитория. Учётные данные живут один
-  # прогон (GITHUB_TOKEN), поэтому на сервере не нужно ни `docker login`, ни
-  # долгоживущий токен, о ротации которого потом некому помнить.
-  registry_auth {
-    address  = "ghcr.io"
-    username = var.registry_username
-    password = var.registry_password
-  }
 }

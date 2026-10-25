@@ -9,7 +9,10 @@
 
 # Ссылка на образ API с digest; тег без digest не пройдёт проверку. В CI —
 # тег по commit sha и digest из сборки. Digest опубликованного образа:
-# `docker buildx imagetools inspect <образ>:<тег>`, строка Digest.
+# `docker buildx imagetools inspect <образ>:<тег>`, строка Digest. Перед
+# apply образ скачивают на целевой Docker: `docker pull <api_image>` (для
+# приватного пакета — после `docker login ghcr.io`), провайдер сам его не
+# тянет с учётными данными (README.md, «Деплой»).
 api_image         = "ghcr.io/larchanka-training/dmc-268-api-t1:CHANGE_ME_TAG@sha256:CHANGE_ME_64_HEX"
 postgres_password = "CHANGE_ME_POSTGRES"
 rabbitmq_password = "CHANGE_ME_RABBITMQ"
@@ -20,12 +23,6 @@ user_token_encryption_key = "CHANGE_ME_openssl_rand_base64_32_xxxxxxxxx="
 # Адаптер модели воркера, значения по умолчанию нет: stub - без похода к
 # модели, ollama - локальная модель (тогда обязателен ollama_model).
 llm_backend = "stub"
-
-# --- учётные данные реестра образов ---
-# В CI — github.actor и GITHUB_TOKEN, живущие один прогон. Локально нужны
-# только если образ лежит в приватном пакете.
-registry_username = ""
-registry_password = ""
 
 # --- остальное имеет значения по умолчанию ---
 
