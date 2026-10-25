@@ -161,12 +161,36 @@ def test_migrate_network_extractor() -> None:
     assert migrate_network("docker run --rm image") is None
 
 
-def test_migrations_run_in_the_data_network() -> None:
+def network_name(text: str, resource: str) -> str | None:
+    """Имя docker-сети (`name = "…"`) у ресурса `docker_network.<resource>`."""
+    block = resource_block(text, "docker_network", resource)
+    if block is None:
+        return None
+    match = re.search(r'^\s*name\s*=\s*"([^"]+)"', block, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def test_network_name_extractor() -> None:
+    sample = 'resource "docker_network" "backend" {\n  name     = "dmc268-backend"\n  internal = true\n}\n'
+    assert network_name(sample, "backend") == "dmc268-backend"
+    assert network_name(sample, "egress") is None
+
+
+def test_migrations_run_in_the_database_network() -> None:
     """Миграции — шаг деплоя, не контейнер стека: их сеть Terraform не видит.
 
-    База только в `dmc268-backend`; в другой сети миграции её не найдут, и деплой
-    упадёт уже на сервере.
+    Сверяется с фактической сетью postgres из `infra/*.tf`, а не со строкой:
+    переедет база — тест покажет, что миграции остались в старой сети, и деплой
+    не упадёт уже на сервере с `could not translate host name dmc268-postgres`.
     """
-    assert migrate_network(MIGRATE_SCRIPT.read_text()) == "dmc268-backend", (
-        f"{MIGRATE_SCRIPT}: миграции должны идти в сети данных dmc268-backend"
+    text = read_infra_text()
+    postgres_networks = container_networks(text, "postgres")
+    assert postgres_networks, "сети postgres не найдены в infra/*.tf"
+    names = {network_name(text, network) for network in postgres_networks}
+    assert None not in names, (
+        f"не найдены имена сетей {sorted(postgres_networks)} в infra/*.tf"
+    )
+    used = migrate_network(MIGRATE_SCRIPT.read_text())
+    assert used in names, (
+        f"{MIGRATE_SCRIPT}: миграции в сети {used!r}, а база — в {sorted(n for n in names if n)}"
     )

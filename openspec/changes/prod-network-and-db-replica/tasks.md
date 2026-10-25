@@ -34,6 +34,8 @@
 
 - [x] 3.14 После #200 миграции — шаг деплоя `docker run`, а не контейнер стека: `migrate.sh` запускает их в `dmc268-backend` (иначе база недоступна), это сверяет `tests/test_infra_isolation.py`; targeted apply деплоя явно поднимает `docker_network.backend`
 
+- [x] 3.15 Сеть миграций сверяется с фактической сетью `postgres` из `infra/*.tf`, а не со строкой; бюджет `timeout-minutes` в `deploy.yml` пересчитан после #202 (ожидание healthy API в apply вместо минуты `/health`)
+
 ## 4. Приёмка
 
 - [x] 4.1 Секрет `PG_REPLICATION_PASSWORD_DMC268_T1` заведён в настройках репозитория
