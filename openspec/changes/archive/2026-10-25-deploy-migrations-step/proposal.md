@@ -11,7 +11,7 @@
 - Отдельный `docker_image.worker` с той же ссылкой: замена образа API не ждёт дренажа воркера.
 - Чистый сервер: `apply -target` сети, базы и брокера на каждом деплое; у postgres `wait = true`, цикл повторов в миграциях не нужен.
 - Вход в `ghcr.io` на раннере (`docker/login-action`): docker CLI передаёт учётные данные демону стенда при pull.
-- Expand/contract в скилле `alembic-migration` и в `docs/BACKEND_ARCHITECTURE.md`.
+- Совет про expand/contract на будущее — в скилле `alembic-migration` и в `docs/BACKEND_ARCHITECTURE.md`: пока нет пользователей, ломающая миграция допустима и даёт короткий сбой на стенде во время выката.
 
 **Не входит:** `pg_isready -h 127.0.0.1` у postgres (закрывает окно временного сервера инициализации на пустом томе) — смена healthcheck пересоздаёт базу, а без `destroy_grace_seconds` это SIGKILL; вместе с #102.
 
@@ -20,7 +20,6 @@
 ### Modified Capabilities
 
 - `backend-delivery`: миграции — шаг развёртывания до выката нового кода, окружение миграций из того же описания, простой API не зависит от дренажа воркера.
-- `database-migrations`: миграция совместима с работающей версией кода, ломающее изменение — в два деплоя.
 
 ## Impact
 
