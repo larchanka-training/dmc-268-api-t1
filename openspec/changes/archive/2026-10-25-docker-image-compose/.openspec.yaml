@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-10-25
+# Поведение сервиса не меняется: те же команды образа (api, worker, alembic),
+# меняются сборка образа, локальный compose и проверки CI.
+skip_specs: true

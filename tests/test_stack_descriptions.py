@@ -69,8 +69,18 @@ def infra_postgres_volume_path(text: str) -> str:
 
 
 def compose_applies_migrations(text: str) -> bool:
-    """Compose применяет миграции командой сервиса api."""
-    return "alembic upgrade head" in text
+    """Compose применяет миграции отдельным сервисом, от которого зависят api и воркер.
+
+    Одного сервиса мало: без `service_completed_successfully` API стартовал бы
+    параллельно с миграциями (или против непромигрированной базы).
+    """
+    migrate = re.search(r"^  migrate:\n(.*?)(?=^  \S)", text, re.MULTILINE | re.DOTALL)
+    if not migrate or not re.search(r'"alembic",\s*"upgrade",\s*"head"', migrate.group(1)):
+        return False
+    waits = re.findall(
+        r"migrate:\s*\n\s*condition:\s*service_completed_successfully", text
+    )
+    return len(waits) >= 2
 
 
 def infra_applies_migrations(text: str) -> bool:
@@ -156,7 +166,12 @@ def test_extractors_find_facts_that_are_present() -> None:
         )
         == "/var/lib/postgresql"
     )
-    assert compose_applies_migrations("command: alembic upgrade head && uvicorn")
+    assert compose_applies_migrations(
+        '  migrate:\n    command: ["alembic", "upgrade", "head"]\n  api:\n'
+        "    depends_on:\n      migrate:\n        condition: service_completed_successfully\n"
+        "  worker:\n    depends_on:\n      migrate:\n"
+        "        condition: service_completed_successfully\n"
+    )
     assert infra_applies_migrations(
         'resource "docker_container" "migrate" {}\n'
         "depends_on = [docker_container.migrate]"
@@ -192,6 +207,8 @@ def test_extractors_report_absence_instead_of_a_blank() -> None:
     assert compose_postgres_volume_path("ничего похожего") == NOT_FOUND
     assert infra_postgres_volume_path("ничего похожего") == NOT_FOUND
     assert not compose_applies_migrations("ничего похожего")
+    # Миграции в команде API, как было раньше, больше не считаются.
+    assert not compose_applies_migrations("command: alembic upgrade head && uvicorn")
     assert not infra_applies_migrations('resource "docker_container" "migrate" {}')
     assert compose_worker_model_env("ничего похожего") == frozenset()
     assert infra_worker_model_env("ничего похожего") == frozenset()
