@@ -29,6 +29,7 @@ COMPOSE = Path("docker-compose.yml")
 DOCKERFILE = Path("Dockerfile")
 DEPLOY_WORKFLOW = Path(".github/workflows/deploy.yml")
 MIGRATE_SCRIPT = Path(".github/scripts/deploy/migrate.sh")
+APPLY_SCRIPT = Path(".github/scripts/deploy/apply.sh")
 
 
 # Образ сверяется целиком, а не по мажорному релизу: `postgres:18-alpine` и
@@ -91,21 +92,23 @@ def compose_applies_migrations(text: str) -> bool:
     return len(waits) >= 2
 
 
-def deploy_migrates_before_apply(workflow: str) -> bool:
+def deploy_migrates_before_apply(workflow: str, apply_script: str) -> bool:
     """На сервере миграции — шаг деплоя, и стоит он раньше полного `tofu apply`.
 
     Полный apply выкатывает API и воркер; шаг после него пустил бы новый код
-    на непромигрированную базу. `apply -target` для базы и брокера — не он.
+    на непромигрированную базу. Полный apply — шаг со скриптом apply.sh, и в
+    скрипте `tofu apply` без `-target`; `apply -target` для базы и брокера — не он.
     """
-    step = re.search(
-        r"^[ \t]*(?:- )?run: \.github/scripts/deploy/migrate\.sh[ \t]*$", workflow, re.MULTILINE
-    )
+    def call(script: str) -> re.Match[str] | None:
+        return re.search(
+            rf"^[ \t]*(?:- )?(?:run: )?\.github/scripts/deploy/{re.escape(script)}[ \t]*$", workflow, re.MULTILINE
+        )
+
+    migrate, apply = call("migrate.sh"), call("apply.sh")
     # Команда целиком, с продолжениями строки: `-target` бывает на следующей.
-    applies = re.finditer(
-        r"^[ \t]*(?:run: )?tofu apply\b(?:[^\n]*\\\n)*[^\n]*$", workflow, re.MULTILINE
-    )
-    full_apply = next((a for a in applies if "-target" not in a.group(0)), None)
-    return bool(step and full_apply and step.start() < full_apply.start())
+    applies = re.finditer(r"^[ \t]*tofu\b[^\n]*\bapply\b(?:[^\n]*\\\n)*[^\n]*$", apply_script, re.MULTILINE)
+    full_apply = any("-target" not in a.group(0) for a in applies)
+    return bool(migrate and apply and full_apply and migrate.start() < apply.start())
 
 
 def script_runs_migrations(script: str) -> bool:
@@ -116,8 +119,12 @@ def script_runs_migrations(script: str) -> bool:
     """
     return bool(
         re.search(
+            # Голый alembic — с выводом в файл отчёта деплоя или без;
+            # шаг роли мониторинга (PR #130) — команда `sh -c 'alembic
+            # upgrade head && …'`, тоже с tee или без.
             r"^\s*docker run --rm\b(?:[^\n]*\\\n)*?[^\n]*\"\$API_IMAGE\"\s+"
-            r"(?:alembic upgrade head\s*$|sh -c ['\"]alembic upgrade head)",
+            r"(?:alembic upgrade head(?:\s+2>&1\s*\|\s*tee\s\S+)?\s*$"
+            r"|sh -c ['\"]alembic upgrade head)",
             script,
             re.MULTILINE,
         )
@@ -223,8 +230,9 @@ def test_extractors_find_facts_that_are_present() -> None:
     )
     assert deploy_migrates_before_apply(
         "          tofu apply -auto-approve \\\n            -target=docker_container.postgres\n"
-        "      - run: .github/scripts/deploy/migrate.sh\n"
-        "        run: tofu apply -input=false -auto-approve\n"
+        "        run: |\n          .github/scripts/deploy/mark.sh\n          .github/scripts/deploy/migrate.sh\n"
+        "      - run: .github/scripts/deploy/apply.sh\n",
+        "tofu -chdir=infra apply -input=false -no-color tfplan\n",
     )
     assert script_runs_migrations(
         'docker run --rm --name x \\\n  --init \\\n  "$API_IMAGE" alembic upgrade head\n'
@@ -234,6 +242,17 @@ def test_extractors_find_facts_that_are_present() -> None:
         '  "$API_IMAGE" sh -c \'alembic upgrade head && python - <<"PY"\n'
         "print(1)\n"
         "PY'\n"
+    )
+    assert script_runs_migrations(
+        'docker run --rm \\\n  "$API_IMAGE" alembic upgrade head 2>&1 | tee "$dir/migrate.log"\n'
+    )
+    # Тот же шаг роли мониторинга с выводом в файл отчёта: tee стоит за
+    # закрывающей кавычкой sh -c — на другой строке, чем `sh -c 'alembic…`.
+    assert script_runs_migrations(
+        'docker run --rm --name x \\\n  --init \\\n'
+        '  "$API_IMAGE" sh -c \'alembic upgrade head && python - <<"PY"\n'
+        "print(1)\n"
+        'PY\' 2>&1 | tee "$dir/migrate.log"\n'
     )
     assert missing_migration_restrictions(
         "docker run --rm \\\n  " + " \\\n  ".join(MIGRATION_RESTRICTIONS) + ' \\\n  "$API_IMAGE" x\n'
@@ -272,14 +291,20 @@ def test_extractors_report_absence_instead_of_a_blank() -> None:
     # Миграции в команде API, как было раньше, больше не считаются.
     assert not compose_applies_migrations("command: alembic upgrade head && uvicorn")
     # Шаг миграций после полного apply — то же, что без миграций.
+    full = "tofu -chdir=infra apply -input=false tfplan\n"
     assert not deploy_migrates_before_apply(
-        "        run: tofu apply -auto-approve\n      - run: .github/scripts/deploy/migrate.sh\n"
+        "      - run: .github/scripts/deploy/apply.sh\n      - run: .github/scripts/deploy/migrate.sh\n", full
     )
-    # `apply -target` раньше шага не считается полным выкатом, и с -target на
-    # строке продолжения тоже.
+    # Без шага полного apply `apply -target` раньше миграций выкатом не
+    # считается; скрипт, где apply только с -target (и на строке продолжения),
+    # — тоже.
     assert not deploy_migrates_before_apply(
         "          tofu apply -auto-approve \\\n            -target=docker_container.postgres\n"
-        "      - run: .github/scripts/deploy/migrate.sh\n"
+        "      - run: .github/scripts/deploy/migrate.sh\n", full
+    )
+    assert not deploy_migrates_before_apply(
+        "      - run: .github/scripts/deploy/migrate.sh\n      - run: .github/scripts/deploy/apply.sh\n",
+        "tofu -chdir=infra apply \\\n  -target=docker_container.api tfplan\n",
     )
     # Закомментированный вызов — не вызов.
     assert not script_runs_migrations('# docker run --rm "$API_IMAGE" alembic upgrade head\n')
@@ -321,8 +346,8 @@ def test_both_descriptions_apply_migrations_before_serving() -> None:
         COMPOSE.read_text()
     ), "docker-compose.yml не применяет миграции"
     assert deploy_migrates_before_apply(
-        DEPLOY_WORKFLOW.read_text()
-    ), f"{DEPLOY_WORKFLOW}: нет шага {MIGRATE_SCRIPT} до полного tofu apply"
+        DEPLOY_WORKFLOW.read_text(), APPLY_SCRIPT.read_text()
+    ), f"{DEPLOY_WORKFLOW}: нет шага {MIGRATE_SCRIPT} до полного tofu apply ({APPLY_SCRIPT})"
     assert script_runs_migrations(
         MIGRATE_SCRIPT.read_text()
     ), f"{MIGRATE_SCRIPT}: нет docker run --rm образа выката с alembic upgrade head"

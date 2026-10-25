@@ -64,21 +64,42 @@ resource "docker_image" "docker_socket_proxy" {
 resource "docker_volume" "loki" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-loki-data"
+
+  # Логи за 30 дней — данные, а не кэш: план, который уничтожает или
+  # заменяет том, OpenTofu отклоняет (infra/postgres.tf, «prevent_destroy»).
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "docker_volume" "tempo" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-tempo-data"
+
+  # prevent_destroy — как у тома Loki выше.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "docker_volume" "prometheus" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-prometheus-data"
+
+  # prevent_destroy — как у тома Loki выше.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "docker_volume" "grafana" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-grafana-data"
+
+  # prevent_destroy — как у тома Loki выше.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # Отдельная сеть для Docker API через socket-proxy: в ней только proxy и

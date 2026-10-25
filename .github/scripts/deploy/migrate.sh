@@ -24,11 +24,17 @@
 #   удалённому демону вместе с запросом pull — образ лежит в приватном пакете;
 #   инициализированный infra/ и учётные данные хранилища состояния:
 #   `tofu output` читает состояние через туннель (.github/actions/s3-backend).
+# Параметры (env): REPORT_DIR — каталог отчёта деплоя, по умолчанию
+# $RUNNER_TEMP/deploy-report: туда копируется вывод alembic, по строкам
+# `Running upgrade A -> B` summary считает применённые ревизии
+# (scripts/deploy_report.py).
 set -euo pipefail
 umask 077
 
 : "${API_IMAGE:?нужна ссылка на образ API}"
 : "${DOCKER_HOST:?нужен адрес демона Docker на сервере}"
+report_dir="${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/deploy-report}"
+mkdir -p "$report_dir"
 
 env_file="$(mktemp)"
 trap 'rm -f "$env_file"' EXIT
@@ -57,6 +63,8 @@ docker pull --quiet "$API_IMAGE"
 # docker logs. track_utility выключается той же транзакцией (SET LOCAL живёт
 # до COMMIT): иначе ALTER ROLE ... PASSWORD лёг бы в pg_stat_statements
 # открытым текстом. Тот же шаг — у сервиса migrate в docker-compose.yml.
+# Логи идут в stderr: 2>&1, чтобы попасть и в лог шага, и в файл отчёта;
+# упавшую миграцию pipefail не прячет за tee.
 docker run --rm --name dmc268-migrations \
   --network dmc268 \
   --env-file "$env_file" \
@@ -86,4 +94,4 @@ with psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor) as conn:
             "ALTER ROLE dmc268_monitor PASSWORD %s",
             (os.environ["POSTGRES_MONITOR_PASSWORD"],),
         )
-PY'
+PY' 2>&1 | tee "$report_dir/migrate.log"

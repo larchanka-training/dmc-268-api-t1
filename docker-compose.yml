@@ -92,6 +92,17 @@ services:
       # выше (как и POSTGRES_PASSWORD, допустим только локально); на стенде
       # переменную задаёт infra из секрета.
       POSTGRES_MONITOR_PASSWORD: ${POSTGRES_MONITOR_PASSWORD:-dmc268_monitor}
+      # Телеметрия — тот же переключатель, что у api и воркера: с профилем
+      # observability миграции пишут трейс деплоя (спека observability,
+      # «Деплой с миграциями»). service.instance.id — по имени сервиса.
+      OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+      OTEL_LOGS_EXPORTER: ${OTEL_LOGS_EXPORTER:-none}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://collector:4318}
+      # Python SDK читает таймаут в СЕКУНДАХ, вопреки спеке OTel (мс).
+      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-4}
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=${SERVICE_VERSION:-local},deployment.environment.name=local,service.instance.id=dmc268-migrate}
+      OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-database,http}
     depends_on:
       postgres:
         condition: service_healthy
