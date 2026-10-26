@@ -11,14 +11,17 @@ import asyncio
 import hashlib
 import hmac
 import json
+import tracemalloc
 from collections.abc import Iterator, MutableMapping
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.datastructures import Headers
 
 from app.api import webhooks
+from app.api.body_limit import _declared_length
 from app.api.factory import create_app
 from app.config import Settings, load_settings
 
@@ -110,10 +113,10 @@ def call(app: FastAPI, wire: Wire, headers: dict[str, str], path: str = WEBHOOK)
     asyncio.run(app(scope, wire.receive, wire.send))
 
 
-def stream(total: int) -> Iterator[bytes]:
+def stream(total: int, chunk: int = CHUNK) -> Iterator[bytes]:
     sent = 0
     while sent < total:
-        size = min(CHUNK, total - sent)
+        size = min(chunk, total - sent)
         sent += size
         yield b"x" * size
 
@@ -182,6 +185,33 @@ def test_signed_body_of_exactly_the_limit_is_accepted_as_before(app: FastAPI, ch
 
     assert wire.status == 202
     assert wire.body == {"status": "ignored"}
+
+
+def test_handler_holds_one_copy_of_the_body(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пока работает ручка, тело лежит в памяти одной копией: middleware ссылок не держит.
+
+    Память меряется в `verify_hmac`, когда тело уже прочитано: дочитанные куски и склейка в
+    кадре middleware дали бы две-три копии, и параллельных доставок до OOM влезло бы втрое меньше.
+    """
+    body = b"x" * LIMIT
+    signature = sign(body)
+    held: list[int] = []
+
+    def measure(*_: Any) -> bool:
+        held.append(tracemalloc.get_traced_memory()[0])
+        return False
+
+    monkeypatch.setattr(webhooks, "verify_hmac", measure)
+    wire = Wire(stream(LIMIT, chunk=64 * 1024))
+    tracemalloc.start()
+    try:
+        call(app, wire, {"content-length": str(LIMIT), "x-hub-signature-256": signature})
+    finally:
+        tracemalloc.stop()
+
+    assert wire.status == 401
+    (current,) = held
+    assert current <= 1.2 * LIMIT, f"{current / LIMIT:.2f} тела в памяти"
 
 
 def test_wrong_signature_within_the_limit_is_still_unauthorized(app: FastAPI) -> None:
@@ -278,3 +308,10 @@ def test_every_operation_with_a_body_declares_413() -> None:
         assert content["application/problem+json"]["schema"] == {
             "$ref": "#/components/schemas/RequestBodyTooLargeProblem"
         }, name
+
+
+@pytest.mark.parametrize("value", ["²", "1²", "abc", "-1", ""])
+def test_non_ascii_digit_content_length_is_not_a_length(value: str) -> None:
+    """Заголовок декодируется как latin-1: `str.isdigit()` принимает «²», а `int()` на нём падает."""
+    headers = Headers(raw=[(b"content-length", value.encode("latin-1"))])
+    assert _declared_length(headers) is None

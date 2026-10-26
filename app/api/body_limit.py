@@ -6,7 +6,8 @@
 
 Приём вебхука открыт без сессии и читает сырое тело до проверки подписи — без лимита
 любой мог бы занять память процесса многогигабайтным телом. Ручки с JSON-телом читают
-его до проверки сессии. Поэтому лимит стоит до роутинга, разбора тела, сессии и подписи:
+его до проверки сессии. Снаружи тело режет nginx фронта (`client_max_body_size`), здесь —
+второй эшелон для запроса в обход него. Лимит стоит до роутинга, разбора тела, сессии и подписи:
 
 - `Content-Length` больше лимита — `413` сразу, тело у сервера не запрашивается;
 - без `Content-Length` и `Transfer-Encoding` тела по HTTP/1.1 нет — запрос идёт мимо;
@@ -63,22 +64,24 @@ class RequestBodyLimitMiddleware:
             return
         chunks: list[bytes] = []
         size = 0
+        pending: list[Message] = []
         while True:
             message = await receive()
             if message["type"] != "http.request":
                 # Клиент ушёл, не дослав тело: приложение увидит это само, как без лимита.
-                first: Message = message
+                pending.append(message)
                 break
-            body = message.get("body", b"")
-            size += len(body)
+            size += len(message.get("body", b""))
             if size > limit:
                 await _reject(scope, receive, send, limit)
                 return
-            chunks.append(body)
+            chunks.append(message.get("body", b""))
             if not message.get("more_body", False):
-                first = {"type": "http.request", "body": b"".join(chunks), "more_body": False}
+                # Тело — одна копия: склейка уходит в `pending`, куски отпускаются сразу.
+                # Ссылку на тело в кадре держать нельзя — оно жило бы, пока работает ручка.
+                pending.append({"type": "http.request", "body": b"".join(chunks), "more_body": False})
+                chunks.clear()
                 break
-        pending = [first]
 
         async def replay() -> Message:
             # Тело — одним сообщением, дальше — сервер как есть (`http.disconnect` для SSE).
@@ -87,7 +90,6 @@ class RequestBodyLimitMiddleware:
             return await receive()
 
         await self.app(scope, replay, send)
-
 
 
 async def _reject(scope: Scope, receive: Receive, send: Send, limit: int) -> None:
@@ -102,8 +104,13 @@ async def _reject(scope: Scope, receive: Receive, send: Send, limit: int) -> Non
 
 
 def _declared_length(headers: Headers) -> int | None:
-    """`Content-Length` запроса; нечисловой оставляет решение подсчёту байтов."""
+    """`Content-Length` запроса или `None`, если его нет или он не из цифр ASCII.
+
+    `str.isdigit()` без `isascii()` принимает «²» (заголовок декодирован как latin-1), и `int()`
+    на нём упал бы — `500`. Нечисловой `Content-Length` без `Transfer-Encoding` идёт мимо
+    подсчёта, как запрос без тела: такой заголовок отклоняет сервер (h11 — `400`) до приложения.
+    """
     value = headers.get("content-length")
-    if value is None or not value.isdigit():
+    if value is None or not (value.isascii() and value.isdigit()):
         return None
     return int(value)

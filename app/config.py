@@ -152,6 +152,8 @@ class Settings(BaseSettings):
     # вебхука. Ручкам с JSON-телом хватает 1 МиБ. Приёму вебхука — 25 МиБ, не меньше потолка
     # доставки GitHub («Payloads are capped at 25 MB», docs.github.com, Webhook events and
     # payloads). Общий 25 МиБ на все ручки отдал бы 512 МБ памяти API двадцати запросам.
+    # `webhook_body_max_bytes` равен `client_max_body_size 25m` в `location /api/` nginx
+    # фронта (dmc-268-ui-t1, `nginx/site.conf`) — первого эшелона; меняются вместе.
     request_body_max_bytes: int = Field(
         default=1_048_576,
         gt=0,

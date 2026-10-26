@@ -1,8 +1,8 @@
 ## Why
 
-Приём вебхука (`app/api/webhooks.py`) делает `await request.body()` до проверки подписи, ручка открыта без сессии. Ни uvicorn, ни инфраструктура лимита тела не ставят: любой может прислать многогигабайтное тело — с `Content-Length` или потоком chunked без него — и занять память процесса до того, как сервис узнает, подписано ли оно. То же у ручек с JSON-телом (`POST /reviews`, `POST /repositories`, `PUT …/settings`): тело читается до проверки сессии. Задача #72.
+Приём вебхука (`app/api/webhooks.py`) делает `await request.body()` до проверки подписи, ручка открыта без сессии. У uvicorn лимита тела нет. Снаружи тело режет nginx фронта (`client_max_body_size 25m` в `location /api/`, `dmc-268-ui-t1`), но API на него не опирается: запрос в обход nginx — с `Content-Length` или потоком chunked без него — может принести многогигабайтное тело и занять память процесса до того, как сервис узнает, подписано ли оно. Лимит в API — второй эшелон за nginx, а `WEBHOOK_BODY_MAX_BYTES` равен его `client_max_body_size`: менять их вместе. То же у ручек с JSON-телом (`POST /reviews`, `POST /repositories`, `PUT …/settings`): тело читается до проверки сессии. Задача #72.
 
-Встроенный `max_body_size` Starlette 1.9 закрывает поток, но отказ по `Content-Length` отдаёт `413 text/plain` «Content Too Large» и подменяет им уже собранный ответ — мимо Problem Details и без `X-Trace-ID` (проверено, правило в `.agents/rules/backend.md`).
+Встроенный `max_body_size` Starlette 1.9 закрывает поток, но отказ по `Content-Length` отдаёт `413 text/plain` «Content Too Large» и подменяет им уже собранный ответ — мимо Problem Details и без `X-Trace-ID` (проверено запуском).
 
 ## What Changes
 
