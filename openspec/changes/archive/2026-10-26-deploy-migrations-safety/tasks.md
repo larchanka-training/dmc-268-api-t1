@@ -34,3 +34,9 @@
 - [x] 5.4 Нет `migrate.log` при упавшем шаге — «упал до alembic», а не «не запускался»
 - [x] 5.5 Тест `SHOW lock_timeout`/`statement_timeout` в сессии миграций на живом PostgreSQL
 - [x] 5.6 Правила `.agents/rules/backend.md` («Деплой», «Миграции») и строка в `AGENTS.md`
+
+## 6. Слияние с #102 (реплика, бэкапы, сеть данных)
+
+- [x] 6.1 `infra.sh`: `-target=docker_network.backend`; `alembic current` после сбоя — в сети `dmc268-backend`
+- [x] 6.2 Реплика и копии на томах данных — вне `STATEFUL` и вне targeted-шага; тест классифицирует каждый контейнер на `docker_volume`; тест сетей базы и брокера в `-target`
+

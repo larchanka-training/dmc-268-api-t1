@@ -218,7 +218,7 @@ def test_targeted_plan_without_changes_is_applied_as_checked(tmp_path: Path) -> 
     calls = (tmp_path / "calls").read_text().splitlines()
     plan = next(c for c in calls if " plan " in c)
     assert all(f"-target={t}" in plan for t in (
-        "docker_network.dmc268", "docker_container.postgres", "docker_container.rabbitmq",
+        "docker_network.dmc268", "docker_network.backend", "docker_container.postgres", "docker_container.rabbitmq",
     )), plan
     out = re.search(r"-out=(\S+)", plan)
     assert out, plan
@@ -337,11 +337,21 @@ def test_guard_protects_every_volume_the_stack_declares() -> None:
     assert set(declared) == set(deploy_report.PROTECTED)
 
 
-def test_every_container_on_a_data_volume_is_guarded() -> None:
+# Контейнеры на томах данных, которые деплой пересоздаёт без разрешения: API
+# и воркер в них не ходят, данные — в защищённых томах. Реплика
+# останавливается штатно (destroy_grace_seconds в infra/replica.tf), копия,
+# оборванная на полпути, остаётся *.partial и убирается следующим стартом. До
+# миграций они не нужны, поэтому и не в -target у infra.sh.
+REPLACEABLE_ON_VOLUMES = frozenset({"docker_container.postgres_replica", "docker_container.postgres_backup"})
+
+
+def test_every_container_on_a_data_volume_is_classified() -> None:
     """Ревью #220: контейнер на томе данных вне STATEFUL сторож пересоздал бы молча.
 
-    Тома — все `docker_volume` из infra/*.tf, а не PROTECTED: так тест не зависит
-    от того, как сторож томов перечисляет защищённые (#219).
+    Каждый такой контейнер — либо в STATEFUL и в -target у infra.sh, либо в
+    REPLACEABLE_ON_VOLUMES с причиной; новый контейнер на томе без решения
+    роняет тест. Тома — все `docker_volume` из infra/*.tf, а не PROTECTED:
+    так тест не зависит от того, как сторож томов перечисляет защищённые (#219).
     """
     text = read_infra_text()
     volumes = set(re.findall(r'^resource\s+"docker_volume"\s+"(\w+)"', text, re.MULTILINE))
@@ -352,10 +362,25 @@ def test_every_container_on_a_data_volume_is_guarded() -> None:
         for name, body in containers
         if set(re.findall(r"volume_name\s*=\s*docker_volume\.(\w+)\.", body)) & volumes
     }
-    assert on_volumes, "контейнеры на томах данных не найдены"
-    assert on_volumes <= set(deploy_report.STATEFUL), on_volumes - set(deploy_report.STATEFUL)
-    targets = set(re.findall(r"-target=(\S+)", (SCRIPTS / "infra.sh").read_text()))
-    assert on_volumes <= targets, on_volumes - targets
+    stateful = set(deploy_report.STATEFUL)
+    assert not stateful & REPLACEABLE_ON_VOLUMES
+    assert on_volumes == stateful | REPLACEABLE_ON_VOLUMES, on_volumes ^ (stateful | REPLACEABLE_ON_VOLUMES)
+    targets = set(re.findall(r"^\s*-target=(\S+)", (SCRIPTS / "infra.sh").read_text(), re.MULTILINE))
+    assert stateful <= targets, stateful - targets
+    assert not REPLACEABLE_ON_VOLUMES & targets, "реплика и копии до миграций не нужны"
+
+
+def test_targeted_step_brings_up_every_network_of_the_database_and_broker() -> None:
+    """База — только в сети данных (#102): без её -target на чистом сервере план не соберётся."""
+    text = read_infra_text()
+    targets = set(re.findall(r"^\s*-target=(\S+)", (SCRIPTS / "infra.sh").read_text(), re.MULTILINE))
+    for address in deploy_report.STATEFUL:
+        name = address.split(".", 1)[1]
+        body = re.search(rf'^resource\s+"docker_container"\s+"{name}"\s*\{{\n(.*?)^\}}', text, re.MULTILINE | re.DOTALL)
+        assert body, address
+        networks = {f"docker_network.{n}" for n in re.findall(r"name\s*=\s*docker_network\.(\w+)\.name", body.group(1))}
+        assert networks and networks <= targets, (address, networks - targets)
+    assert "docker_network.dmc268" in targets
 
 
 def test_every_protected_volume_prevents_destroy() -> None:
