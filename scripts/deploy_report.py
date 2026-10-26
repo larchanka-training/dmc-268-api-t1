@@ -1,10 +1,11 @@
 """Отчёт деплоя: сторож плана OpenTofu и summary job'а `deploy`.
 
-Две команды, обе — стандартная библиотека, системный `python3` раннера (3.12 на
+Три команды, все — стандартная библиотека, системный `python3` раннера (3.12 на
 ubuntu-latest), как у `check_openspec_archived.py`:
 
     tofu -chdir=infra show -json tfplan | python3 scripts/deploy_report.py plan
     tofu -chdir=infra show -json infra.tfplan | python3 scripts/deploy_report.py plan infra
+    python3 scripts/deploy_report.py migrate-retry
     python3 scripts/deploy_report.py render >> "$GITHUB_STEP_SUMMARY"
 
 `plan` читает план со stdin, пишет счётчики изменений в `plan.json` (`plan
@@ -14,6 +15,10 @@ infra` — targeted-план шага «Поднять базу и брокер�
 контейнер («Развёртывание не пересоздаёт базу и брокер»). Сам план на диск не
 пишется: в `tofu show -json` значения переменных и атрибутов, пароли тоже,
 лежат открытым текстом.
+
+`migrate-retry` — решение `migrate.sh` после упавшего upgrade: код 0, если
+миграция не дождалась блокировки, а база на ревизии, с которой попытка начала
+(`lock_retry`).
 
 `render` собирает summary из того, что шаги деплоя сложили в каталог отчёта
 (`REPORT_DIR`, по умолчанию `$RUNNER_TEMP/deploy-report`):
@@ -25,7 +30,8 @@ infra` — targeted-план шага «Поднять базу и брокер�
   `<файл>.error` рядом — сервер не ответил (код ssh или timeout);
 - `migrate.log` — вывод `alembic upgrade head` (`migrate.sh`), после сбоя —
   `migrate-current.log` с выводом `alembic current` (`.error` рядом — база не
-  ответила); исход шага миграций — из `STEP_RESULTS`;
+  ответила), `migrate-attempts` — номер последней попытки; исход шага
+  миграций — из `STEP_RESULTS`;
 - `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`).
 
 Нет файла — нет и раздела, а не падение: summary пишется и после упавшего шага.
@@ -63,7 +69,15 @@ PROTECTED = (
 # `allow_stateful_replace` (`ALLOW_STATEFUL_REPLACE=true` в env, его ставит
 # только workflow_dispatch): тогда замена — предупреждение, а не отказ. Тома
 # (`PROTECTED`) флаг не открывает никогда.
+#
+# Сверка — и по адресу, и по имени контейнера на хосте (`change.before.name`,
+# `change.after.name`): ресурс, переименованный без `moved` (и с правкой
+# этого списка), уничтожается по старому адресу, которого здесь уже нет, —
+# тот же обход, что #219 закрыл для томов (ревью #220). Имя на хосте
+# уникально. Адреса нужны и сами: их поднимает `-target` в infra.sh, а в
+# урезанных фикстурах плана нет before/after.
 STATEFUL = ("docker_container.postgres", "docker_container.rabbitmq")
+STATEFUL_NAMES = ("dmc268-postgres", "dmc268-rabbitmq")
 
 # Планы деплоя: имя у команды `plan` → файл в каталоге отчёта и подпись в
 # summary. Порядок — порядок шагов.
@@ -151,8 +165,16 @@ def protected_deletes(plan: dict[str, Any]) -> list[str]:
 
 
 def stateful_deletes(plan: dict[str, Any]) -> list[str]:
-    """Контейнеры базы и брокера, которые план пересоздаёт или удаляет."""
-    return deletes(plan, STATEFUL)
+    """Контейнеры базы и брокера, которые план пересоздаёт или удаляет, — по адресу или имени на хосте."""
+    def stateful(rc: dict[str, Any]) -> bool:
+        names = {(rc["change"].get(side) or {}).get("name") for side in ("before", "after")}
+        return rc["address"] in STATEFUL or (rc["type"] == "docker_container" and bool(names & set(STATEFUL_NAMES)))
+
+    return [
+        rc["address"]
+        for rc in plan.get("resource_changes", [])
+        if "delete" in rc["change"]["actions"] and stateful(rc)
+    ]
 
 
 def plan_command(report_dir: Path, name: str, allowed_by: str | None) -> int:
@@ -342,6 +364,35 @@ def migrations(log: str, outcome: str = "success", current: str | None = None) -
     chain = [steps[0][0], *(to for _, to in steps)]
     applied = chain.index(current) if current in chain else None
     return {"applied": applied, "from": steps[0][0] or "пустая база", "failed": steps[-1][1], "current": current}
+
+
+# Миграция не дождалась блокировки (lock_timeout в alembic/env.py):
+# `LockNotAvailable` у psycopg, SQLSTATE 55P03. statement_timeout (57014,
+# `QueryCanceled`) сюда не входит: долгий запрос повтор не ускорит.
+LOCK_NOT_AVAILABLE = re.compile(r"\bLockNotAvailable\b|\b55P03\b")
+
+
+def lock_retry(log: str, current: str | None) -> bool:
+    """Повторить ли упавший upgrade: не дождался блокировки, а база там, откуда попытка начала.
+
+    Тогда транзакция откатилась целиком, и повтор начнёт с той же ревизии
+    (ревью #220). Ревизия базы неизвестна (`current` — None), начатых ревизий
+    в логе нет или база сдвинулась (`autocommit_block`) — не повторять: что
+    делать, решает человек. DDL из `autocommit_block` самой упавшей ревизии
+    мог остаться и при совпадении — повтор выполнит его снова; такой DDL пишут
+    повторяемым (`IF NOT EXISTS`, скилл alembic-migration).
+    """
+    steps = UPGRADE.findall(log)
+    return bool(LOCK_NOT_AVAILABLE.search(log)) and bool(steps) and current is not None and current == steps[0][0]
+
+
+def migrate_retry_command(report_dir: Path) -> int:
+    """0 — повторить upgrade (migrate.sh), 1 — нет."""
+    if (report_dir / "migrate-current.error").exists() or not (report_dir / "migrate-current.log").exists():
+        current = None
+    else:
+        current = current_revision(read(report_dir / "migrate-current.log"))
+    return 0 if lock_retry(read(report_dir / "migrate.log"), current) else 1
 
 
 # --- диск -----------------------------------------------------------------
@@ -642,6 +693,10 @@ def migrations_section(report_dir: Path, marks: dict[str, float], outcome: str) 
     if outcome == "failure":
         base = "неизвестна" if m["current"] is None else f"`{m['current'] or 'пустая база'}`"
         out.append(f"| Ревизия базы | `dmc268.deploy.migrations.revision.current` | {base} |")
+    attempts = read(report_dir / "migrate-attempts").strip()
+    if attempts.isdigit() and int(attempts) > 1:
+        # Повторы после LockNotAvailable (migrate.sh): прежние попытки откатились целиком.
+        out.append(f"| Попыток | `dmc268.deploy.migrations.attempts` | {attempts} |")
     out.append(f"| Время шага, с | | {seconds(durations(marks).get('migrate'))} |")
     if outcome != "failure":
         return out
@@ -651,8 +706,10 @@ def migrations_section(report_dir: Path, marks: dict[str, float], outcome: str) 
     elif m["current"] is None:
         out.append(f"> Миграция упала на `{m['failed']}`, ревизия базы неизвестна — проверьте `alembic current`.")
     elif m["applied"] == 0:
-        out.append(f"> Шаг миграций упал на ревизии `{m['failed']}`: миграции откатены, применено 0 — "
-                   f"база на `{m['current'] or 'пустая база'}` (`alembic current` после сбоя).")
+        out.append(f"> Шаг миграций упал на ревизии `{m['failed']}`: транзакция миграций откатена, применено 0 — "
+                   f"база на `{m['current'] or 'пустая база'}` (`alembic current` после сбоя). Если `{m['failed']}` "
+                   "успела выполнить `autocommit_block` (например, `ADD VALUE`), этот DDL зафиксирован, "
+                   "хотя ревизия базы прежняя.")
     elif m["applied"] is None:
         out.append(f"> Шаг миграций упал на `{m['failed']}`, а база на `{m['current']}` — ревизии вне этого "
                    "запуска; проверьте `alembic history`.")
@@ -692,10 +749,12 @@ def main(argv: list[str]) -> int:
         allowed = os.environ.get("ALLOW_STATEFUL_REPLACE") == "true"
         allowed_by = (os.environ.get("DEPLOY_ACTOR") or "кто — неизвестно") if allowed else None
         return plan_command(report_dir, argv[1] if len(argv) == 2 else "full", allowed_by)
+    if argv == ["migrate-retry"]:
+        return migrate_retry_command(report_dir)
     if argv == ["render"]:
         sys.stdout.write(render(report_dir, dict(os.environ)))
         return 0
-    print("использование: deploy_report.py plan [infra]|render", file=sys.stderr)
+    print("использование: deploy_report.py plan [infra]|migrate-retry|render", file=sys.stderr)
     return 2
 
 

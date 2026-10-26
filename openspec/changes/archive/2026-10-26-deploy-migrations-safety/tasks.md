@@ -40,3 +40,11 @@
 - [x] 6.1 `infra.sh`: `-target=docker_network.backend`; `alembic current` после сбоя — в сети `dmc268-backend`
 - [x] 6.2 Реплика и копии на томах данных — вне `STATEFUL` и вне targeted-шага; тест классифицирует каждый контейнер на `docker_volume`; тест сетей базы и брокера в `-target`
 
+
+## 7. Правки ревью #220 после слияния с #102
+
+- [x] 7.1 `migrate.sh`: общие аргументы `docker run` — массив `migrations_run`, сеть в одном месте; тесты сети (`re.findall` по всем запускам) и ограничений разбирают массив (`tests/shell_text.py`); проверено, что тест падает, если один запуск в сети `dmc268`
+- [x] 7.2 Повтор после `LockNotAvailable`/`55P03`, если `alembic current` равен исходной ревизии: 3 попытки, пауза 15 с, не позже 300 с от старта шага; `deploy_report.py migrate-retry`, строка «Попыток» в summary; тесты
+- [x] 7.3 `stateful_deletes` — и по имени контейнера (`dmc268-postgres`, `dmc268-rabbitmq`); тест на переименование без `moved`, имена сверены с `infra/*.tf`
+- [x] 7.4 Summary при откате: «транзакция миграций откатена» с оговоркой про `autocommit_block`
+- [x] 7.5 `infra.sh`: `-lock-timeout=2m` у plan и apply; `summary.sh` удаляет и `infra/infra.tfplan`

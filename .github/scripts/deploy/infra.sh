@@ -31,11 +31,13 @@ set -euo pipefail
 export REPORT_DIR="${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/deploy-report}"
 trap 'rm -f infra/infra.tfplan' EXIT
 
+# -lock-timeout: чужая короткая блокировка того же ключа (ручной plan) не роняет
+# деплой сразу — он ждёт её до двух минут, как plan.sh и apply.sh (#215).
 tofu -chdir=infra init -input=false -no-color
-tofu -chdir=infra plan -input=false -no-color -out=infra.tfplan \
+tofu -chdir=infra plan -input=false -no-color -lock-timeout=2m -out=infra.tfplan \
   -target=docker_network.dmc268 \
   -target=docker_network.backend \
   -target=docker_container.postgres \
   -target=docker_container.rabbitmq
 tofu -chdir=infra show -json infra.tfplan | python3 scripts/deploy_report.py plan infra
-tofu -chdir=infra apply -input=false -no-color infra.tfplan
+tofu -chdir=infra apply -input=false -no-color -lock-timeout=2m infra.tfplan

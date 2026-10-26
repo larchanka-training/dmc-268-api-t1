@@ -33,6 +33,7 @@ import yaml
 
 from scripts import deploy_report
 from tests.infra_text import read_infra_text
+from tests.shell_text import commands
 from tests.test_stack_descriptions import missing_migration_restrictions
 
 FIXTURES = Path("tests/fixtures/deploy")
@@ -55,15 +56,19 @@ esac
 
 # Подложный docker для migrate.sh: вызовы — в журнал. `run … alembic
 # upgrade head` печатает вывод alembic из MIGRATE_LOG и выходит с
-# MIGRATE_EXIT, `run … alembic current` печатает CURRENT (с CURRENT_FAIL —
-# код 255, как при оборванном ssh), `rm` контейнера, которого нет, — код 1.
+# MIGRATE_EXIT; у N-й попытки — MIGRATE_LOG_N и MIGRATE_EXIT_N, если заданы.
+# `run … alembic current` печатает CURRENT (с CURRENT_FAIL — код 255, как при
+# оборванном ssh), `rm` контейнера, которого нет, — код 1.
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "docker $*" >> "$CALLS"
 case "$1" in
   run)
     case "$*" in
       *"alembic current"*) [ -z "${CURRENT_FAIL:-}" ] || exit 255; printf '%s\\n' "${CURRENT:-}" ;;
-      *) cat "${MIGRATE_LOG:-/dev/null}"; exit "${MIGRATE_EXIT:-0}" ;;
+      *)
+        n=$(( $(cat "$CALLS.upgrades" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$CALLS.upgrades"
+        log="MIGRATE_LOG_$n" code="MIGRATE_EXIT_$n"
+        cat "${!log:-${MIGRATE_LOG:-/dev/null}}"; exit "${!code:-${MIGRATE_EXIT:-0}}" ;;
     esac ;;
   rm) exit 1 ;;
 esac
@@ -223,7 +228,7 @@ def test_targeted_plan_without_changes_is_applied_as_checked(tmp_path: Path) -> 
     out = re.search(r"-out=(\S+)", plan)
     assert out, plan
     # Применяется ровно проверенный файл плана, без своих -target.
-    assert calls[-1] == f"-chdir=infra apply -input=false -no-color {out.group(1)}", calls
+    assert calls[-1] == f"-chdir=infra apply -input=false -no-color -lock-timeout=2m {out.group(1)}", calls
     assert json.loads((report / "plan-infra.json").read_text())["changes"] == {}
     assert not list((root / "infra").glob("*tfplan*"))
 
@@ -238,7 +243,7 @@ def test_manual_override_lets_the_database_be_replaced_with_a_warning(tmp_path: 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "::warning::замена разрешена вручную (octocat): docker_container.postgres" in result.stdout
     assert "::error::" not in result.stdout
-    assert (tmp_path / "calls").read_text().splitlines()[-1].endswith(" apply -input=false -no-color infra.tfplan")
+    assert (tmp_path / "calls").read_text().splitlines()[-1].endswith(" apply -input=false -no-color -lock-timeout=2m infra.tfplan")
     plan = json.loads((report / "plan-infra.json").read_text())
     assert plan["stateful_deletes"] == ["docker_container.postgres"]
     assert plan["stateful_allowed_by"] == "octocat"
@@ -309,6 +314,56 @@ def test_stateful_deletes_cover_replace_and_delete_but_not_update() -> None:
     )) == []
 
 
+def test_stateful_guard_follows_the_container_name_not_the_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ревью #220: ресурс базы переименовали без `moved` и поправили STATEFUL.
+
+    План уничтожает контейнер по старому адресу, которого в списке уже нет, и
+    создаёт по новому — замена базы шла бы мимо сторожа. Имя контейнера на
+    хосте уникально: оно и ловит. Форма `change` — как у `tofu show -json`.
+    """
+    monkeypatch.setattr(deploy_report, "STATEFUL", ("docker_container.db", "docker_container.rabbitmq"))
+    plan = {"resource_changes": [
+        {"address": "docker_container.postgres", "type": "docker_container",
+         "change": {"actions": ["delete"], "before": {"name": "dmc268-postgres"}, "after": None}},
+        {"address": "docker_container.db", "type": "docker_container",
+         "change": {"actions": ["create"], "before": None, "after": {"name": "dmc268-postgres"}}},
+    ]}
+    assert deploy_report.stateful_deletes(plan) == ["docker_container.postgres"]
+    # Имя у заменяемого контейнера сменилось — ловит и новое имя, и адрес.
+    assert deploy_report.stateful_deletes({"resource_changes": [
+        {"address": "docker_container.api", "type": "docker_container",
+         "change": {"actions": ["delete", "create"], "before": {"name": "dmc268-api"},
+                    "after": {"name": "dmc268-rabbitmq"}}},
+        {"address": "docker_container.db", "type": "docker_container",
+         "change": {"actions": ["delete", "create"], "before": {"name": "dmc268-db"}, "after": {"name": "x"}}},
+    ]}) == ["docker_container.api", "docker_container.db"]
+    # Чужой ресурс с тем же атрибутом name — не контейнер.
+    assert deploy_report.stateful_deletes({"resource_changes": [
+        {"address": "docker_volume.x", "type": "docker_volume",
+         "change": {"actions": ["delete"], "before": {"name": "dmc268-postgres"}, "after": None}},
+    ]}) == []
+    # Урезанный план без before/after (фикстуры) — по адресу, как раньше.
+    assert deploy_report.stateful_deletes({"resource_changes": [
+        {"address": "docker_container.db", "type": "docker_container", "change": {"actions": ["delete"]}},
+    ]}) == ["docker_container.db"]
+
+
+def test_stateful_names_are_the_names_of_the_stateful_containers() -> None:
+    """Имена в STATEFUL_NAMES — `name` контейнеров из STATEFUL в infra/*.tf."""
+    text = read_infra_text()
+    names = set()
+    for address in deploy_report.STATEFUL:
+        body = re.search(
+            rf'^resource\s+"docker_container"\s+"{address.split(".", 1)[1]}"\s*\{{\n(.*?)^\}}',
+            text, re.MULTILINE | re.DOTALL,
+        )
+        assert body, address
+        name = re.search(r'^\s*name\s*=\s*"([^"]+)"', body.group(1), re.MULTILINE)
+        assert name, address
+        names.add(name.group(1))
+    assert names == set(deploy_report.STATEFUL_NAMES)
+
+
 def test_summary_shows_the_rejected_targeted_plan(tmp_path: Path) -> None:
     _, report, _ = run_script(tmp_path, "infra.sh", plan="plan-infra-replace-postgres.json")
     results = ALL_SUCCESS.replace("infra success success", "infra failure failure")
@@ -368,6 +423,11 @@ def test_every_container_on_a_data_volume_is_classified() -> None:
     targets = set(re.findall(r"^\s*-target=(\S+)", (SCRIPTS / "infra.sh").read_text(), re.MULTILINE))
     assert stateful <= targets, stateful - targets
     assert not REPLACEABLE_ON_VOLUMES & targets, "реплика и копии до миграций не нужны"
+    # Сторож ловит и по имени контейнера: у заменяемых оно своё.
+    for address in REPLACEABLE_ON_VOLUMES:
+        body = dict(containers)[address.split(".", 1)[1]]
+        name = re.search(r'^\s*name\s*=\s*"([^"]+)"', body, re.MULTILINE)
+        assert name and name.group(1) not in deploy_report.STATEFUL_NAMES, address
 
 
 def test_targeted_step_brings_up_every_network_of_the_database_and_broker() -> None:
@@ -629,7 +689,9 @@ def test_summary_of_rolled_back_migrations(tmp_path: Path) -> None:
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 0 |" in text
     assert "| Упала на ревизии | `dmc268.deploy.migrations.revision.failed` | `0014_d` |" in text
     assert "| Ревизия базы | `dmc268.deploy.migrations.revision.current` | `0012_b` |" in text
-    assert "миграции откатены" in text
+    assert "транзакция миграций откатена" in text
+    # Ревью #220: DDL из autocommit_block упавшей ревизии мог остаться — оговорка в тексте.
+    assert "`autocommit_block`" in text
     assert "dmc268.deploy.migrations.revision.to" not in text
 
 
@@ -638,7 +700,7 @@ def test_summary_of_failed_migrations_when_the_database_did_not_answer(tmp_path:
     text = failed_migrate_summary(tmp_path, current=None)
 
     assert "упала на `0014_d`, ревизия базы неизвестна — проверьте `alembic current`" in text
-    assert "откатены" not in text
+    assert "откат" not in text
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | неизвестно |" in text
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 0 |" not in text
 
@@ -647,7 +709,7 @@ def test_summary_of_failed_migrations_that_committed_part(tmp_path: Path) -> Non
     text = failed_migrate_summary(tmp_path, current="0013_c")
 
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 1 |" in text
-    assert "откатены" not in text
+    assert "откат" not in text
     assert "`0013_c`" in text
 
 
@@ -742,10 +804,22 @@ def test_migrate_does_not_ask_after_a_success(tmp_path: Path) -> None:
 def test_every_migrations_container_is_restricted() -> None:
     """И `alembic current` после сбоя идёт с теми же ограничениями, что upgrade."""
     script = (SCRIPTS / "migrate.sh").read_text()
-    runs = re.findall(r"^\s*(?:timeout \d+ )?docker run --rm\b(?:[^\n]*\\\n)*[^\n]*$", script, re.MULTILINE)
+    runs = re.findall(r"^\s*(?:timeout \d+ )?docker run --rm\b(?:[^\n]*\\\n)*[^\n]*$", commands(script), re.MULTILINE)
     assert len(runs) == 2, runs
     for run in runs:
         assert not missing_migration_restrictions(run.strip().removeprefix("timeout 60 ")), run
+
+
+def test_every_migrations_run_takes_the_shared_arguments() -> None:
+    """Ревью #220: сеть и ограничения — в одном массиве, а не копией у каждого запуска.
+
+    Копия разошлась: после #102 `alembic current` остался в сети `dmc268`.
+    Строка `docker run` в скрипте одна — в массиве; запуски — через него.
+    """
+    script = (SCRIPTS / "migrate.sh").read_text()
+    lines = [line for line in script.splitlines() if not line.lstrip().startswith("#")]
+    assert len([line for line in lines if re.search(r"(?<!\S)docker run\b", line)]) == 1, lines
+    assert len([line for line in lines if '"${migrations_run[@]}"' in line]) == 2, lines
 
 
 def test_migrate_keeps_the_alembic_exit_code(tmp_path: Path) -> None:
@@ -758,6 +832,144 @@ def test_migrate_keeps_the_alembic_exit_code(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "0014_d" in (report / "migrate.log").read_text()
+
+
+# Вывод alembic, когда миграция не дождалась блокировки (lock_timeout 5 с в
+# alembic/env.py): так падает upgrade на живом PostgreSQL за удержанной
+# ACCESS EXCLUSIVE (tests/db/test_alembic_env.py).
+LOCKED_MIGRATION_LOG = (
+    "INFO  [alembic.runtime.migration] Will assume transactional DDL.\n"
+    "INFO  [alembic.runtime.migration] Running upgrade 0012_b -> 0013_c, таблица\n"
+    "INFO  [alembic.runtime.migration] Running upgrade 0013_c -> 0014_d, индекс\n"
+    "Traceback (most recent call last):\n"
+    "sqlalchemy.exc.OperationalError: (psycopg.errors.LockNotAvailable) canceling statement due to lock timeout\n"
+)
+APPLIED_LOG = (
+    "INFO  [alembic.runtime.migration] Running upgrade 0012_b -> 0013_c, таблица\n"
+    "INFO  [alembic.runtime.migration] Running upgrade 0013_c -> 0014_d, индекс\n"
+)
+
+
+def test_lock_timeout_is_retried_only_when_the_whole_transaction_rolled_back() -> None:
+    """Ревью #220: повтор безопасен, только если база на ревизии, с которой попытка начала."""
+    assert deploy_report.lock_retry(LOCKED_MIGRATION_LOG, "0012_b")
+    # SQLSTATE вместо имени класса — тот же сбой.
+    assert deploy_report.lock_retry(LOCKED_MIGRATION_LOG.replace("LockNotAvailable", "55P03"), "0012_b")
+    # Пустая база: попытка начала с пустой ревизии.
+    assert deploy_report.lock_retry(LOCKED_MIGRATION_LOG.replace("0012_b -> ", " -> "), "")
+    # autocommit_block зафиксировал 0013: повтор начнёт уже с другой ревизии — решает человек.
+    assert not deploy_report.lock_retry(LOCKED_MIGRATION_LOG, "0013_c")
+    # Ревизия базы неизвестна — повтора нет.
+    assert not deploy_report.lock_retry(LOCKED_MIGRATION_LOG, None)
+    # Другая ошибка — не блокировка.
+    assert not deploy_report.lock_retry(FAILED_MIGRATION_LOG, "0012_b")
+    # statement_timeout (57014) — не повод повторять: запрос долгий сам по себе.
+    assert not deploy_report.lock_retry(
+        LOCKED_MIGRATION_LOG.replace("LockNotAvailable) canceling statement due to lock timeout",
+                                     "QueryCanceled) canceling statement due to statement timeout"),
+        "0012_b",
+    )
+    # Ни одна ревизия не начата — не с чем сверить базу.
+    assert not deploy_report.lock_retry("sqlalchemy.exc.OperationalError: (psycopg.errors.LockNotAvailable)\n", "")
+
+
+def migrate(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str], Path, list[str]]:
+    """migrate.sh с подложным docker; вернуть результат, каталог отчёта и запуски upgrade."""
+    for name, text in list(env.items()):
+        if name.startswith("MIGRATE_LOG") and not text.startswith("/"):
+            (tmp_path / name).write_text(text)
+            env[name] = str(tmp_path / name)
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand", MIGRATE_RETRY_PAUSE="0",
+        **env,
+    )
+    calls = (tmp_path / "calls").read_text().splitlines()
+    return result, report, [c for c in calls if c.startswith("docker run ") and "alembic upgrade head" in c]
+
+
+def test_migrate_retries_a_lock_timeout_that_rolled_back(tmp_path: Path) -> None:
+    """Автодеплой за длинной транзакцией воркера: вторая попытка проходит, шаг зелёный."""
+    result, report, upgrades = migrate(
+        tmp_path, MIGRATE_LOG_1=LOCKED_MIGRATION_LOG, MIGRATE_EXIT_1="1", MIGRATE_LOG_2=APPLIED_LOG,
+        CURRENT="0012_b",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(upgrades) == 2
+    assert "::warning::миграции не дождались блокировки" in result.stdout
+    assert (report / "migrate-attempts").read_text().strip() == "2"
+    # В отчёте — лог удачной попытки, а не упавшей.
+    assert "LockNotAvailable" not in (report / "migrate.log").read_text()
+
+    results = ALL_SUCCESS
+    text = summary(tmp_path, report, JOB_STATUS="success", STEP_RESULTS=results)
+    assert "| Попыток | `dmc268.deploy.migrations.attempts` | 2 |" in text
+    assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 2 |" in text
+
+
+def test_migrate_gives_up_after_three_attempts(tmp_path: Path) -> None:
+    result, report, upgrades = migrate(tmp_path, MIGRATE_LOG=LOCKED_MIGRATION_LOG, MIGRATE_EXIT="1", CURRENT="0012_b")
+
+    assert result.returncode == 1
+    assert len(upgrades) == 3
+    assert (report / "migrate-attempts").read_text().strip() == "3"
+
+
+def test_migrate_does_not_retry_when_part_was_committed(tmp_path: Path) -> None:
+    result, _, upgrades = migrate(tmp_path, MIGRATE_LOG=LOCKED_MIGRATION_LOG, MIGRATE_EXIT="1", CURRENT="0013_c")
+
+    assert result.returncode == 1
+    assert len(upgrades) == 1
+
+
+def test_migrate_does_not_retry_when_the_database_did_not_answer(tmp_path: Path) -> None:
+    result, report, upgrades = migrate(tmp_path, MIGRATE_LOG=LOCKED_MIGRATION_LOG, MIGRATE_EXIT="1", CURRENT_FAIL="1")
+
+    assert result.returncode == 1
+    assert len(upgrades) == 1
+    assert (report / "migrate-current.error").exists()
+
+
+def test_migrate_does_not_retry_other_failures(tmp_path: Path) -> None:
+    result, _, upgrades = migrate(tmp_path, MIGRATE_LOG=FAILED_MIGRATION_LOG, MIGRATE_EXIT="1", CURRENT="0012_b")
+
+    assert result.returncode == 1
+    assert len(upgrades) == 1
+
+
+def test_migrate_does_not_start_a_retry_past_its_deadline(tmp_path: Path) -> None:
+    """Повтор, начатый у самого потолка шага, раннер убил бы посреди миграции."""
+    result, _, upgrades = migrate(
+        tmp_path, MIGRATE_LOG=LOCKED_MIGRATION_LOG, MIGRATE_EXIT="1", CURRENT="0012_b", MIGRATE_RETRY_DEADLINE="0",
+    )
+
+    assert result.returncode == 1
+    assert len(upgrades) == 1
+
+
+def test_a_stale_unknown_revision_does_not_outlive_a_retry(tmp_path: Path) -> None:
+    """Ответ базы — от последней попытки: `.error` прошлой не остаётся рядом с новым ответом."""
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "migrate-current.error").write_text("255\n")
+    result, report, _ = migrate(tmp_path, MIGRATE_LOG=FAILED_MIGRATION_LOG, MIGRATE_EXIT="1", CURRENT="0012_b")
+
+    assert result.returncode == 1
+    assert not (report / "migrate-current.error").exists()
+    assert (report / "migrate-current.log").read_text().strip() == "0012_b"
+
+
+def test_migrate_retries_fit_the_step_timeout() -> None:
+    """Последний повтор начинается не позже срока, а после него остаётся 5 мин: два
+    запроса по statement_timeout (2 мин) и `alembic current` под `timeout 60`."""
+    script = (SCRIPTS / "migrate.sh").read_text()
+    deadline = re.search(r'MIGRATE_RETRY_DEADLINE:-(\d+)', script)
+    pause = re.search(r'MIGRATE_RETRY_PAUSE:-(\d+)', script)
+    assert deadline and pause, "нет срока или паузы повтора в migrate.sh"
+    migrate_step = next(s for s in deploy_steps() if s.get("id") == "migrate")
+    assert int(deadline.group(1)) + 5 * 60 <= int(migrate_step["timeout-minutes"]) * 60  # type: ignore[call-overload]
+    assert 0 < int(pause.group(1)) < 60
 
 
 def test_disk_rows_merge_when_docker_lives_on_the_root() -> None:
@@ -927,6 +1139,29 @@ def test_summary_removes_a_plan_left_by_failed_migrations(tmp_path: Path) -> Non
 
     assert not (root / "infra" / "tfplan").exists()
     assert "timeout 30 ssh -o ConnectTimeout=10 stand" in (tmp_path / "calls").read_text()
+
+
+def test_summary_removes_a_targeted_plan_left_by_a_killed_step(tmp_path: Path) -> None:
+    """Ревью #220: шаг «Поднять базу и брокер» отменён или убит по таймауту — trap infra.sh
+    не успел, а `infra/infra.tfplan` с паролями остался на раннере."""
+    report = tmp_path / "report"
+    report.mkdir()
+    root = tmp_path / "repo"
+    (root / "infra").mkdir(parents=True)
+    (root / "infra" / "infra.tfplan").write_text("пароли")
+
+    summary(tmp_path, report, JOB_STATUS="cancelled", STEP_RESULTS=ALL_SUCCESS)
+
+    assert not (root / "infra" / "infra.tfplan").exists()
+
+
+def test_targeted_plan_and_apply_wait_for_a_short_foreign_lock() -> None:
+    """Как plan.sh и apply.sh в #215: чужая короткая блокировка не роняет деплой сразу."""
+    script = commands((SCRIPTS / "infra.sh").read_text())
+    for verb in ("plan", "apply"):
+        command = re.search(rf"^tofu -chdir=infra {verb}\b(?:[^\n]*\\\n)*[^\n]*$", script, re.MULTILINE)
+        assert command, verb
+        assert "-lock-timeout=2m" in command.group(0), verb
 
 
 def test_migrate_step_has_a_timeout() -> None:
