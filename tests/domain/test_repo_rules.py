@@ -1,5 +1,8 @@
 """Разбор `.review/rules.md` и отбор правил — на литеральных Markdown-текстах."""
 
+import time
+from pathlib import PurePosixPath
+
 import pytest
 
 from app.domain.entities import RejectedRule, RepoRule
@@ -381,3 +384,68 @@ def test_exclude_follows_gitignore_semantics_too() -> None:
     rule = RepoRule(name="R", patterns=("app/",), excludes=("test_*.py",), checks=("c",))
     assert rule_applies_to(rule, "app/core.py")
     assert not rule_applies_to(rule, "app/sub/test_core.py")
+
+
+# --- #222: glob без экспоненциального перебора ---------------------------------
+
+REDOS_PATTERNS = ("*a" * 24 + "*x", "/".join(["**", "*a*a*a*a*a*a*a*a*a*a*b"] * 6), "?*" * 30 + "z")
+
+
+@pytest.mark.parametrize("pattern", REDOS_PATTERNS)
+def test_pathological_pattern_answers_in_bounded_time(pattern: str) -> None:
+    """ReDoS: `full_match` на таком шаблоне и длинном имени не завершается; матчер - доли секунды."""
+    rule = RepoRule(name="R", patterns=(pattern,), excludes=(), checks=("c",))
+    paths = ["a" * 60, "/".join(["a" * 30] * 12) + "/" + "a" * 40]
+
+    started = time.perf_counter()
+    assert [rule_applies_to(rule, p) for p in paths] == [False, False]
+    assert time.perf_counter() - started < 0.5
+
+
+_DIFF_PATTERNS = (
+    "*.py", "app/**/*.py", "**/tests/**", "app/", "app/api", "/app/*.py", "a?c.py", "[ab]*.py",
+    "[!a]*.py", "docs/**/index.md", "**", "**/*", "a**b.py", "app/**", "*/x.py", "src/*/*.ts",
+    "*test*", "**/a/**/b/**", "[a-c]?/*.md", "app/**/tests/", "x/**/", ".github/**", "*.min.*",
+)
+_DIFF_PATHS = (
+    "app/core.py", "app/api/v1/routes.py", "app/tests/test_x.py", "tests/app/x.py", "abc.py",
+    "a.py", "b1.py", "docs/index.md", "docs/a/b/index.md", "app", "x.py", "ab.py", "aXYb.py",
+    "src/lib/main.ts", "src/main.ts", "lib/test_utils.py", "a/q/b/c", "b1/readme.md",
+    "app/x/tests/y.py", "x/y/z", ".github/workflows/ci.yml", "dist/app.min.js", "z/x.py",
+)
+
+
+def test_matcher_agrees_with_the_gitignore_semantics_of_full_match() -> None:
+    """Дифференциальная сверка с прежней реализацией (`PurePosixPath.full_match`)
+    на обычных шаблонах: замена матчера не меняет, какие файлы под правило попадают."""
+
+    def reference(path: str, pattern: str) -> bool:
+        candidate = PurePosixPath(path)
+        body = pattern.strip("/")
+        if not body:
+            return False
+        if not (pattern.startswith("/") or "/" in body):
+            body = "**/" + body
+        if pattern.endswith("/"):
+            return candidate.full_match(body + "/**")
+        return candidate.full_match(body) or candidate.full_match(body + "/**")
+
+    mismatches = [
+        (pattern, path)
+        for pattern in _DIFF_PATTERNS
+        for path in _DIFF_PATHS
+        if rule_applies_to(RepoRule(name="R", patterns=(pattern,), excludes=(), checks=("c",)), path)
+        is not reference(path, pattern)
+    ]
+    assert mismatches == []
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path"),
+    [("x/**[!a]b", "x/c/b"), ("[!a][!a]a*/**", "b/a./bxa/aa.")],
+)
+def test_wildcards_inside_a_segment_never_cross_a_slash(pattern: str, path: str) -> None:
+    """Как в `.gitignore`: класс `[!…]` и `**` внутри сегмента не совпадают с `/`.
+    `full_match` на этих парах отвечал «да» - отрицательный класс у него съедал `/`."""
+    rule = RepoRule(name="R", patterns=(pattern,), excludes=(), checks=("c",))
+    assert rule_applies_to(rule, path) is False
