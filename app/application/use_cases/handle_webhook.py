@@ -24,7 +24,9 @@
 
 Повторная доставка на тот же коммит не создаёт второй прогон: `find_active`
 находит существующий активный, `find_reviewed` — завершённый не-failed прогон
-по вебхуку (исход `duplicate` в обоих случаях, #75). Таблицы ключей
+по вебхуку (исход `duplicate` в обоих случаях, #75), если его база та же. Смена
+целевой ветки (`edited`, #222) даёт новый прогон, а активный на старой базе
+отменяется. Таблицы ключей
 `X-GitHub-Delivery` нет: повтор после нашего сбоя постановки приходит с тем же
 ключом и был бы отброшен, а так `failed` прогон повтор не блокирует. Гонку параллельных
 доставок страхуют частичные уникальные индексы — отказ любого из них
@@ -142,19 +144,26 @@ def handle_webhook_event(
         )
         if existing_merge_request is not None:
             # Дубль — активный прогон на этот коммит или завершённый не-failed
-            # прогон по вебхуку (#75): GitHub переотправляет доставку с тем же
-            # `X-GitHub-Delivery`, а запуск — только opened и synchronize, так
-            # что тот же коммит ещё раз — повтор, а не новое событие.
+            # прогон по вебхуку (#75) с той же базой: GitHub переотправляет
+            # доставку с тем же `X-GitHub-Delivery`, так что тот же коммит на той
+            # же базе ещё раз — повтор, а не новое событие. Другая база (смена
+            # целевой ветки, #222) — другой дифф: не дубль.
             existing_run = work.review_runs.find_active(
                 existing_merge_request.id, event.head_sha
             ) or work.review_runs.find_reviewed(existing_merge_request.id, event.head_sha)
-            if existing_run is not None:
+            if existing_run is not None and _same_base(existing_run, metadata.base_sha):
                 return WebhookOutcome(
                     kind="duplicate",
                     run=existing_run,
                     merge_request=existing_merge_request,
                     repository=repository,
                 )
+            if existing_run is not None and existing_run.status not in TERMINAL_STATUSES:
+                # Целевую ветку сменили, пока прогон на старой базе идёт (#222):
+                # он выставил бы merge gate на head по диффу, которого в PR уже
+                # нет. Отмена - своим коммитом до вставки нового прогона:
+                # частичный индекс допускает один активный прогон на коммит.
+                _supersede(work, existing_run, now())
 
         merge_request = _upsert_merge_request(
             work, repository.id, existing_merge_request, event, metadata, now(), new_id
@@ -241,6 +250,27 @@ def handle_webhook_event(
         raise
     return WebhookOutcome(
         kind="success", run=run, merge_request=merge_request, repository=repository
+    )
+
+
+def _same_base(run: ReviewRun, base_sha: str) -> bool:
+    """Прогон ревьюил тот же дифф: тот же head (по выборке) и та же база.
+
+    Прогон без записанной базы считается ревью любой: сравнить не с чем, а
+    лишний прогон на каждый повтор доставки хуже."""
+    return run.base_sha is None or run.base_sha == base_sha
+
+
+def _supersede(work: UnitOfWork, run: ReviewRun, now: datetime) -> None:
+    """Отменить прогон на старой базе. Воркер мог успеть его завершить - тогда
+    переход отклонён, и отменять нечего."""
+    cancelled = advance(run, ReviewRunStatus.CANCELLED, now)
+    if not cancelled.ok:
+        return
+    work.review_runs.update(cancelled.unwrap())
+    work.commit()
+    logger.info(
+        "прогон %s отменён: целевая ветка PR сменилась, база %s устарела", run.id, run.base_sha
     )
 
 

@@ -364,8 +364,9 @@ class WebhookEvent:
     устаревшим, поэтому базовый коммит всегда берётся из свежих метаданных
     PR через `fetch_pr_metadata`. Провайдер один — GitHub, но поля уже
     нейтральны к нему. `action` — исходное действие GitHub (`opened`,
-    `synchronize`): только эти два проходят через `extract_github_event`,
-    и оно же переезжает в `ReviewJob.action` без преобразований.
+    `synchronize`, `edited` со сменой целевой ветки): только они проходят через
+    `extract_github_event`, и оно же переезжает в `ReviewJob.action` без
+    преобразований.
     """
 
     action: str

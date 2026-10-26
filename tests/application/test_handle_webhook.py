@@ -378,3 +378,60 @@ def test_diff_is_never_persisted() -> None:
     (job,) = queue.jobs
     for stored in (mr, run, job):
         assert "package-lock.json" not in str(stored)
+
+
+# --- #222: смена целевой ветки -------------------------------------------------
+
+OLD_BASE = "0" * 40
+NEW_BASE = "1" * 40
+
+
+def test_retarget_after_a_completed_review_starts_a_review_of_the_new_diff() -> None:
+    """Обход merge gate: ревью на старой базе не делает дублем доставку с новой базой."""
+    _, uow, _, queue = run_case(vcs_meta=pr_metadata(OLD_BASE))
+    (reviewed,) = uow.review_runs.added
+    object.__setattr__(reviewed, "status", ReviewRunStatus.COMPLETED)
+
+    outcome, uow, _, queue = run_case("edited", vcs_meta=pr_metadata(NEW_BASE), uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert outcome.run is not None and outcome.run.base_sha == NEW_BASE
+    assert [job.base_sha for job in queue.jobs] == [OLD_BASE, NEW_BASE]
+    assert [job.action for job in queue.jobs] == ["opened", "edited"]
+
+
+def test_retarget_during_an_active_review_cancels_it_and_starts_a_new_one() -> None:
+    """Прогон на старой базе ещё идёт: он отменяется, новый ставится в очередь -
+    иначе он выставил бы merge gate по диффу, которого в PR больше нет."""
+    _, uow, _, queue = run_case(vcs_meta=pr_metadata(OLD_BASE))
+    (stale,) = uow.review_runs.added
+
+    outcome, uow, _, queue = run_case("edited", vcs_meta=pr_metadata(NEW_BASE), uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    cancelled = uow.review_runs.get(stale.id)
+    assert cancelled is not None and cancelled.status is ReviewRunStatus.CANCELLED
+    assert outcome.run is not None and outcome.run.status is ReviewRunStatus.QUEUED
+    assert len(queue.jobs) == 2
+
+
+def test_redelivery_on_the_same_base_is_still_a_duplicate() -> None:
+    _, uow, _, queue = run_case("edited", vcs_meta=pr_metadata(NEW_BASE))
+
+    outcome, uow, _, queue = run_case("edited", vcs_meta=pr_metadata(NEW_BASE), uow=uow, queue=queue)
+
+    assert outcome.kind == "duplicate"
+    assert len(queue.jobs) == 1
+
+
+def test_run_without_a_stored_base_counts_for_any_base() -> None:
+    """Прогон, у которого `base_sha` не записан (поле необязательное), базу не
+    сравнивает: сравнить не с чем, а лишний прогон на каждый повтор хуже."""
+    _, uow, _, queue = run_case(vcs_meta=pr_metadata(OLD_BASE))
+    (legacy,) = uow.review_runs.added
+    object.__setattr__(legacy, "base_sha", None)
+    object.__setattr__(legacy, "status", ReviewRunStatus.COMPLETED)
+
+    outcome, *_ = run_case(vcs_meta=pr_metadata(NEW_BASE), uow=uow, queue=queue)
+
+    assert outcome.kind == "duplicate"
