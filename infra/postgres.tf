@@ -23,9 +23,11 @@ resource "docker_image" "postgres" {
   # Взят под RAG-профиль репозитория (#27); тот закрыт без мёржа, и расширение
   # `vector` сейчас не создаёт ни одна миграция. Образ остаётся: возврат на
   # postgres:18-alpine — снова смена библиотеки C и новый том (backend-delivery).
-  # Тег плавающий: digest в name пересоздаёт контейнер при каждом обновлении
-  # образа, а замену базы деплой отклоняет (сторож плана, #213) — обновление
-  # образа шло бы только вручную (#150, #102).
+  # Тег плавающий: digest в name пересоздавал бы контейнер при каждом
+  # обновлении образа (#150), а замену базы деплой без allow_stateful_replace
+  # отклоняет (сторож плана, #213). Теперь пересоздание идёт через SIGTERM
+  # (destroy_grace_seconds у контейнера), и digest можно закрепить отдельной
+  # задачей.
   name         = "pgvector/pgvector:pg18"
   keep_locally = true
 }
@@ -35,18 +37,19 @@ resource "docker_container" "postgres" {
   image   = docker_image.postgres.image_id
   restart = "unless-stopped"
 
+  # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
+  # принудительно (SIGKILL): база поднимается с «not properly shut down» и
+  # восстановлением, брокер теряет то, что не успел сбросить на диск. С ним —
+  # SIGTERM и ожидание штатной остановки; stop_timeout — то же для docker stop.
+  # 60 с хватает с запасом: контрольная точка при остановке на нашем объёме —
+  # секунды. Деплой контейнер пересоздаёт только ручным запуском с
+  # allow_stateful_replace (сторож плана, infra.sh, #213).
+  stop_timeout          = 60
+  destroy_grace_seconds = 60
+
   # Только запрет повышения привилегий: entrypoint образа стартует от root,
   # делает chown каталога данных и сам переходит на пользователя postgres.
   # Сброс capabilities или user здесь ломают этот старт.
-  # Без destroy_grace_seconds провайдер при удалении контейнера шлёт стоп-сигнал
-  # образа (SIGINT, fast shutdown) и сразу SIGKILL: база падает без
-  # контрольной точки и при старте проходит восстановление по WAL. С ним —
-  # ожидание остановки до 60 с: fast shutdown откатывает транзакции и пишет
-  # контрольную точку, на мелких данных стенда это секунды. Деплой контейнер
-  # пересоздаёт только с allow_stateful_replace (infra.sh). Добавление атрибута —
-  # обновление на месте, не замена (проверено на OpenTofu 1.13.2, провайдер 4.6.0).
-  destroy_grace_seconds = 60
-
   security_opts = ["no-new-privileges:true"]
   memory        = 1024
   memory_swap   = 1024
@@ -54,7 +57,7 @@ resource "docker_container" "postgres" {
   log_opts      = local.log_opts
 
   networks_advanced {
-    name = docker_network.dmc268.name
+    name = docker_network.backend.name
   }
 
   env = [
@@ -63,10 +66,21 @@ resource "docker_container" "postgres" {
     "POSTGRES_DB=${var.postgres_db}",
   ]
 
-  ports {
-    internal = 5432
-    external = var.postgres_port
-    ip       = var.internal_bind_ip
+  # wal_level=replica и max_wal_senders у PostgreSQL 18 уже такие, какие нужны
+  # реплике; задаём только то, чего нет по умолчанию. max_slot_wal_keep_size —
+  # потолок WAL, который удержит слот реплики: без него упавшая реплика копила
+  # бы WAL на основном сервере, пока не кончится диск. Перешагнувшая потолок
+  # реплика теряет слот; при следующем старте она заметит это сама и
+  # пересоберётся (infra/postgres/replica-entrypoint.sh).
+  command = [
+    "postgres",
+    "-c", "hba_file=/etc/postgresql/pg_hba.conf",
+    "-c", "max_slot_wal_keep_size=${var.postgres_max_slot_wal_keep_size}",
+  ]
+
+  upload {
+    file    = "/etc/postgresql/pg_hba.conf"
+    content = file("${path.module}/postgres/pg_hba.conf")
   }
 
   volumes {

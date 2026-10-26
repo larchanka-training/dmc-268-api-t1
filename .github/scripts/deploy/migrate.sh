@@ -65,13 +65,15 @@ docker pull --quiet "$API_IMAGE"
 docker rm -f dmc268-migrations >/dev/null 2>&1 || true
 
 # Ограничения — как у api и worker в infra/app.tf (сверяет
-# tests/test_stack_descriptions.py).
+# tests/test_stack_descriptions.py). Сеть — данных (dmc268-backend): база
+# только в ней, и выхода наружу у миграций нет (сверяет
+# tests/test_infra_isolation.py).
 # Логи alembic идут в stderr: 2>&1, чтобы попасть и в лог шага, и в файл;
 # упавшую миграцию pipefail не прячет за tee. `-e` на время запуска снят:
 # после сбоя нужен ещё вопрос к базе, а код выхода шага — код upgrade.
 set +e
 docker run --rm --name dmc268-migrations \
-  --network dmc268 \
+  --network dmc268-backend \
   --env-file "$env_file" \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
@@ -94,7 +96,7 @@ set -e
 docker rm -f dmc268-migrations >/dev/null 2>&1 || true
 current=0
 timeout 60 docker run --rm \
-  --network dmc268 \
+  --network dmc268-backend \
   --env-file "$env_file" \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \

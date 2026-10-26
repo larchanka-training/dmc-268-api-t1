@@ -18,7 +18,7 @@ resource "docker_volume" "rabbitmq" {
 }
 
 resource "docker_image" "rabbitmq" {
-  # Тег плавающий по той же причине, что у postgres (#150, #102).
+  # Тег плавающий по той же причине, что у postgres (#150).
   name         = "rabbitmq:4.4-alpine"
   keep_locally = true
 }
@@ -28,9 +28,13 @@ resource "docker_container" "rabbitmq" {
   image   = docker_image.rabbitmq.image_id
   restart = "unless-stopped"
 
-  # Как у postgres: без destroy_grace_seconds удаление контейнера — SIGKILL
-  # посреди записи хранилища сообщений; с ним — до 60 с на штатную остановку
-  # узла.
+  # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
+  # принудительно (SIGKILL): база поднимается с «not properly shut down» и
+  # восстановлением, брокер теряет то, что не успел сбросить на диск. С ним —
+  # SIGTERM и ожидание штатной остановки; stop_timeout — то же для docker stop.
+  # 60 с хватает с запасом: контрольная точка при остановке на нашем объёме —
+  # секунды.
+  stop_timeout          = 60
   destroy_grace_seconds = 60
 
   # Как у postgres: entrypoint сам переходит на пользователя rabbitmq. Порог
@@ -42,19 +46,13 @@ resource "docker_container" "rabbitmq" {
   log_opts      = local.log_opts
 
   networks_advanced {
-    name = docker_network.dmc268.name
+    name = docker_network.backend.name
   }
 
   env = [
     "RABBITMQ_DEFAULT_USER=${var.rabbitmq_user}",
     "RABBITMQ_DEFAULT_PASS=${var.rabbitmq_password}",
   ]
-
-  ports {
-    internal = 5672
-    external = var.rabbitmq_port
-    ip       = var.internal_bind_ip
-  }
 
   volumes {
     volume_name    = docker_volume.rabbitmq.name
