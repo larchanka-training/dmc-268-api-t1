@@ -96,17 +96,13 @@ def test_thread_elsewhere_now_covers_nothing(current_line: int | None) -> None:
     coverage = thread_coverage(_finding(CRITICAL), (thread,), {"root": current_line})
 
     assert coverage.covered_by is None
-    assert coverage.superseded == ()
 
 
 def test_thread_unknown_to_the_host_covers_nothing() -> None:
     assert thread_coverage(_finding(HIGH), (_thread(HIGH),), {}).covered_by is None
 
 
-def test_escalated_finding_supersedes_the_open_thread() -> None:
-    thread = _thread(HIGH)
-
-    coverage = thread_coverage(_finding(CRITICAL), (thread,), {"root": 10})
+def test_escalated_finding_is_not_covered_by_the_open_thread() -> None:
+    coverage = thread_coverage(_finding(CRITICAL), (_thread(HIGH),), {"root": 10})
 
     assert coverage.covered_by is None
-    assert coverage.superseded == (thread,)

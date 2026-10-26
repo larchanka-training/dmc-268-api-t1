@@ -75,8 +75,9 @@ def test_webhook_reopening_a_thread_drops_the_bot_mark() -> None:
     assert (row.thread_resolved, row.thread_resolved_by_bot) == (True, False)
 
 
-def test_webhook_about_the_bots_own_resolve_keeps_the_bot_mark() -> None:
-    """Вебхук о закрытии ботом приходит после его записи: отметка бота остаётся."""
+def test_repeated_resolve_webhook_keeps_the_bot_mark_of_an_old_record() -> None:
+    """Метка бота у старых записей сохраняется: повторная доставка `resolved`
+    по уже закрытому треду не превращает закрытие ботом в закрытие человеком."""
     uow = FakeUnitOfWork()
     uow.published_comments.add(
         PublishedComment(

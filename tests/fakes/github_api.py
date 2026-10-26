@@ -439,12 +439,6 @@ class FakeGitHub:
         payload = json.loads(request.content)
         query: str = payload["query"]
         variables: dict[str, Any] = payload.get("variables") or {}
-        if "resolveReviewThread" in query:
-            with self._lock:
-                self.resolved_threads.add(variables["threadId"])
-            return httpx.Response(
-                200, json={"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
-            )
         if "reviewThreads" in query:
             with self._lock:
                 comments = [
