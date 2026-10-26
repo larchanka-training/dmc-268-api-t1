@@ -286,10 +286,14 @@ def test_prometheus_is_capped_by_size(file: Path) -> None:
 def test_compose_preloads_pg_stat_statements_always() -> None:
     """Локальный стек держит preload pg_stat_statements всегда: расширение —
     для ручной диагностики медленных запросов (создаёт миграция 0013),
-    накладные расходы preload ничтожны, переключателя в compose нет."""
+    накладные расходы preload ничтожны, переключателя в compose нет.
+    track_utility=off рядом: утилитные выражения (`ALTER ROLE … PASSWORD`)
+    не попадают в pg_stat_statements, который читает роль с pg_monitor."""
     services = load_compose()["services"]
     assert services["postgres"]["command"] == [
-        "postgres", "-c", "shared_preload_libraries=pg_stat_statements",
+        "postgres",
+        "-c", "shared_preload_libraries=pg_stat_statements",
+        "-c", "pg_stat_statements.track_utility=off",
     ]
 
 
@@ -297,12 +301,16 @@ def test_infra_preloads_pg_stat_statements_only_with_the_stack() -> None:
     """На стенде preload включается вместе со стеком наблюдаемости
     (observability_enabled): флаг живёт в условной ветке command, при
     выключенном стеке команда без него. Безусловная часть command
-    (#102) — hba_file и потолок WAL слота реплики."""
+    (#102) — hba_file и потолок WAL слота реплики. track_utility=off
+    в той же ветке: пароль `replicator` из replication-setup.sql и ранбуков
+    не оседает в pg_stat_statements открытым текстом (замечание ревью
+    PR #130, medium)."""
     block = _tf_container_block("postgres")
     assert "command = concat([" in block
     assert '"-c", "hba_file=/etc/postgresql/pg_hba.conf",' in block
     assert 'var.observability_enabled ? [' in block
     assert '"-c", "shared_preload_libraries=pg_stat_statements",' in block
+    assert '"-c", "pg_stat_statements.track_utility=off",' in block
 
 
 # --- cAdvisor ходит к Docker только через socket-proxy -------------------------------

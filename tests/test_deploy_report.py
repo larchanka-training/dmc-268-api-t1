@@ -171,20 +171,17 @@ def test_guard_allows_what_does_not_destroy_a_volume() -> None:
 def volume_blocks() -> dict[str, str]:
     """Ресурсы docker_volume из infra/*.tf: адрес → тело блока.
 
-    Адрес — как в плане tofu: у ресурса с `count` это `тип.имя[0]`, без
-    count — просто `тип.имя`. Томов с count нет ни у данных приложения, ни у
-    стека наблюдаемости: тома создаются всегда, чтобы откат флага
-    observability_enabled не строил план их уничтожения.
+    Адрес — как в плане tofu: просто `тип.имя`, `[0]` не нужен — томов с
+    count нет ни у данных приложения, ни у стека наблюдаемости: тома
+    создаются всегда, чтобы откат флага observability_enabled не строил план
+    их уничтожения.
     """
-    blocks: dict[str, str] = {}
-    for name, body in re.findall(
-        r'^resource\s+"docker_volume"\s+"(\w+)"\s*\{\n(.*?)^\}', read_infra_text(), re.MULTILINE | re.DOTALL
-    ):
-        address = f"docker_volume.{name}"
-        if re.search(r"^\s*count\s*=", body, re.MULTILINE):
-            address += "[0]"
-        blocks[address] = body
-    return blocks
+    return {
+        f"docker_volume.{name}": body
+        for name, body in re.findall(
+            r'^resource\s+"docker_volume"\s+"(\w+)"\s*\{\n(.*?)^\}', read_infra_text(), re.MULTILINE | re.DOTALL
+        )
+    }
 
 
 def test_every_volume_prevents_destroy() -> None:

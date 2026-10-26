@@ -173,7 +173,8 @@ resource "docker_container" "otelcol" {
 
   env = [
     # Реквизиты роли мониторинга базы (receiver postgresql в otelcol.yaml):
-    # роль создаёт миграция 0013 с тем же паролем (docker_container.migrate),
+    # роль создаёт миграция 0013 с тем же паролем (шаг миграций деплоя,
+    # .github/scripts/deploy/migrate.sh),
     # имя совпадает с переменной POSTGRES_MONITOR_PASSWORD настроек.
     "POSTGRESQL_USERNAME=dmc268_monitor",
     "POSTGRESQL_PASSWORD=${var.postgres_monitor_password}",

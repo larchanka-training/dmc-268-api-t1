@@ -10,8 +10,10 @@ services:
     # накладные расходы preload ничтожны, поэтому локально preload держим
     # всегда — без переключателя. На стенде та же библиотека включается
     # вместе со стеком наблюдаемости (observability_enabled в infra/main.tf).
+    # track_utility=off прячет утилитные выражения (`ALTER ROLE … PASSWORD`)
+    # из pg_stat_statements — их читает роль с pg_monitor.
     # Та же команда — у контейнера postgres в infra/main.tf.
-    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track_utility=off"]
     # Алиас сети совпадает с именем контейнера на стенде (infra/main.tf):
     # одинаковые хосты в конфигах стека наблюдаемости — коллектор ходит по
     # dmc268-postgres и локально, и на стенде. Само имя контейнера не

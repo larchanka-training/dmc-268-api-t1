@@ -141,3 +141,40 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
     error_message = "Grafana публикует ровно один порт: 3000 из контейнера на grafana_port и bind_ip (петля; снаружи — SSH-туннель)."
   }
 }
+
+# Команда базы следует за флагом: preload pg_stat_statements — только вместе
+# со стеком, track_utility=off — рядом с preload. Без него утилитные выражения
+# (`ALTER ROLE … PASSWORD` из replication-setup.sql и ранбуков) оседают в
+# pg_stat_statements открытым текстом, а роль с pg_monitor их читает
+# (замечание ревью PR #130, medium).
+run "postgres_command_tracks_the_stack_flag" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+  }
+
+  assert {
+    condition = (
+      contains(docker_container.postgres.command, "shared_preload_libraries=pg_stat_statements")
+      && contains(docker_container.postgres.command, "pg_stat_statements.track_utility=off")
+    )
+    error_message = "С включённым стеком postgres должен нести preload pg_stat_statements и track_utility=off: пароли из ALTER ROLE не попадают в pg_stat_statements."
+  }
+}
+
+run "postgres_command_without_the_stack_has_no_preload" {
+  command = plan
+
+  # observability_enabled по умолчанию false — preload и track_utility в
+  # команде быть не должны: накладные расходы держать не просили.
+  assert {
+    condition = (
+      !contains(docker_container.postgres.command, "shared_preload_libraries=pg_stat_statements")
+      && !contains(docker_container.postgres.command, "pg_stat_statements.track_utility=off")
+    )
+    error_message = "С выключенным стеком команда postgres не должна нести pg_stat_statements ни в каком виде."
+  }
+}

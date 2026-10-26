@@ -45,6 +45,13 @@ resource "docker_container" "postgres" {
   # digest образа. Локальный compose preload держит всегда (накладные расходы
   # ничтожны, переключателя в compose нет).
   #
+  # track_utility=off при preload обязателен: с ним утилитные выражения — в
+  # том числе `ALTER ROLE … PASSWORD '…'` из replication-setup.sql и ранбуков —
+  # не попадают в pg_stat_statements открытым текстом, а роль с pg_monitor
+  # статистику читает (замечание ревью PR #130, medium). По той же причине
+  # `SET LOCAL track_utility = off` стоит в 0013 и migrate.sh — на случай
+  # preload без этого флага (локальный compose).
+  #
   # wal_level=replica и max_wal_senders у PostgreSQL 18 уже такие, какие нужны
   # реплике; задаём только то, чего нет по умолчанию. max_slot_wal_keep_size —
   # потолок WAL, который удержит слот реплики: без него упавшая реплика копила
@@ -57,6 +64,7 @@ resource "docker_container" "postgres" {
     "-c", "max_slot_wal_keep_size=${var.postgres_max_slot_wal_keep_size}",
     ], var.observability_enabled ? [
     "-c", "shared_preload_libraries=pg_stat_statements",
+    "-c", "pg_stat_statements.track_utility=off",
   ] : [])
 
   # Окно остановки: смена command (переключатель observability_enabled или
