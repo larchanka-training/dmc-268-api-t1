@@ -693,3 +693,19 @@ def test_failed_lookup_of_an_orphan_review_does_not_stop_publishing(
     (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert str(ORPHAN_RUN_ID) in record.getMessage()
     assert record.exc_info is not None and record.exc_info[1] is error
+
+
+def test_run_cancelled_while_publishing_sets_no_merge_gate(caplog: pytest.LogCaptureFixture) -> None:
+    """Целевую ветку сменили, пока прогон публиковал (#222): его gate описывал бы
+    дифф, которого в PR уже нет, - check run не выставляется, ревью уже в PR."""
+    uow = FakeUnitOfWork()
+    run = _run_with_critical_finding(uow)
+    uow.review_runs.add(replace(run, status=ReviewRunStatus.CANCELLED))
+    vcs = RecordingVcsGateway()
+
+    with caplog.at_level(logging.INFO, logger="app.application.publish_review"):
+        _publish_first_run(uow, run, vcs)
+
+    assert len(vcs.publications) == 1
+    assert vcs.checks == []
+    assert any(str(RUN_ID) in r.getMessage() for r in caplog.records)

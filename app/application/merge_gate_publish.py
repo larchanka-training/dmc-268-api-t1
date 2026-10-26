@@ -36,3 +36,16 @@ def build_merge_gate_check(open_findings: tuple[Finding, ...]) -> MergeGateCheck
         else "Критичных незакрытых замечаний нет."
     )
     return MergeGateCheck(conclusion=conclusion, title=title, summary=summary)
+
+
+def build_retarget_check() -> MergeGateCheck:
+    """Блокировка head после смены целевой ветки PR, до ревью нового диффа (#222).
+
+    `failure`, а не `in_progress`: если новое ревью упадёт, блокировка остаётся,
+    а прежний `success` по старому диффу не возвращается.
+    """
+    return MergeGateCheck(
+        conclusion="failure",
+        title="Целевая ветка сменилась — идёт повторное ревью",
+        summary="Прежнее ревью проверяло дифф против другой ветки. Мердж заблокирован до ревью нового диффа.",
+    )

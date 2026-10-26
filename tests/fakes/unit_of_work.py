@@ -211,6 +211,14 @@ class FakeReviewRunRepo:
         ]
         return max(reviewed, key=lambda r: (r.created_at, r.id), default=None)
 
+    def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        runs = [
+            r
+            for r in self._by_id.values()
+            if r.merge_request_id == merge_request_id and r.head_sha == head_sha
+        ]
+        return max(runs, key=lambda r: (r.created_at, r.id), default=None)
+
     def list_unfinished(self) -> list[ReviewRun]:
         return [r for r in self._by_id.values() if r.status not in TERMINAL_STATUSES]
 

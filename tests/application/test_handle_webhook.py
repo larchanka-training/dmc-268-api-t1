@@ -43,6 +43,7 @@ def run_case(
     vcs_error: VcsError | None = None,
     vcs_diff: str = DIFF,
     vcs_meta=None,
+    check_error: VcsError | None = None,
     uow: FakeUow | None = None,
     queue: FakeQueue | None = None,
 ) -> tuple[WebhookOutcome, FakeUow, FakeVcs, FakeQueue]:
@@ -55,6 +56,7 @@ def run_case(
         diff=vcs_diff,
         meta=vcs_meta if vcs_meta is not None else pr_metadata(),
         error=vcs_error,
+        check_error=check_error,
     )
     queue = queue if queue is not None else FakeQueue()
     outcome = handle_webhook_event(
@@ -435,3 +437,54 @@ def test_run_without_a_stored_base_counts_for_any_base() -> None:
     outcome, *_ = run_case(vcs_meta=pr_metadata(NEW_BASE), uow=uow, queue=queue)
 
     assert outcome.kind == "duplicate"
+
+
+def test_retarget_blocks_the_merge_gate_before_the_new_review() -> None:
+    """Пока новый дифф не проверен, на head висит блокирующий check, а не прежний
+    `success`; упадёт новое ревью - блокировка останется."""
+    _, uow, _, queue = run_case(vcs_meta=pr_metadata(OLD_BASE))
+    (reviewed,) = uow.review_runs.added
+    object.__setattr__(reviewed, "status", ReviewRunStatus.COMPLETED)
+
+    outcome, uow, vcs, queue = run_case("edited", vcs_meta=pr_metadata(NEW_BASE), uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert outcome.run is not None
+    ((head_sha, check),) = vcs.checks
+    assert head_sha == outcome.run.head_sha
+    assert check.conclusion == "failure"
+
+
+def test_retarget_whose_gate_cannot_be_blocked_writes_nothing() -> None:
+    """GitHub недоступен на блокировке gate: 502 до записей - доставку повторит #149,
+    и прежний `success` не останется с новым прогоном, которому нечего блокировать."""
+    _, uow, _, queue = run_case(vcs_meta=pr_metadata(OLD_BASE))
+    (reviewed,) = uow.review_runs.added
+    object.__setattr__(reviewed, "status", ReviewRunStatus.COMPLETED)
+
+    outcome, uow, _, queue = run_case(
+        "edited", vcs_meta=pr_metadata(NEW_BASE), uow=uow, queue=queue, check_error=VcsError("502")
+    )
+
+    assert outcome.kind == "failure"
+    assert len(uow.review_runs.added) == 1
+    assert len(queue.jobs) == 1
+
+
+def test_first_review_and_redelivery_touch_no_gate() -> None:
+    _, uow, vcs, queue = run_case()
+    assert vcs.checks == []
+    _, uow, vcs, queue = run_case(uow=uow, queue=queue)
+    assert vcs.checks == []
+
+
+def test_retarget_is_not_a_duplicate_of_a_run_without_a_stored_base() -> None:
+    """Fail closed: при смене целевой ветки прогон без базы ревью нового диффа не заменяет."""
+    _, uow, _, queue = run_case(vcs_meta=pr_metadata(OLD_BASE))
+    (legacy,) = uow.review_runs.added
+    object.__setattr__(legacy, "base_sha", None)
+    object.__setattr__(legacy, "status", ReviewRunStatus.COMPLETED)
+
+    outcome, *_ = run_case("edited", vcs_meta=pr_metadata(NEW_BASE), uow=uow, queue=queue)
+
+    assert outcome.kind == "success"

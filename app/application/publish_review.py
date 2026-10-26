@@ -25,7 +25,7 @@ from app.domain.entities import (
     ReviewJob,
     ReviewRun,
 )
-from app.domain.enums import CommentKind
+from app.domain.enums import CommentKind, ReviewRunStatus
 from app.domain.review_comment import (
     format_inline_finding_comment,
     format_summary_comment,
@@ -112,6 +112,13 @@ def publish_review(
             uow.findings.mark_covered(finding_id, thread.finding.id)
         uow.commit()
 
+    with uow:
+        current = uow.review_runs.get(run.id)
+    if current is not None and current.status is ReviewRunStatus.CANCELLED:
+        # Целевую ветку сменили, пока прогон работал (#222): его gate описывал бы
+        # дифф, которого в PR уже нет. Head заблокировал приём, gate выставит новый прогон.
+        logger.info("прогон %s отменён во время публикации: merge gate не выставляется", run.id)
+        return
     # Треды сверены с GitHub до публикации: gate - по базе, с находками этого
     # прогона, чей id inline не получен.
     still_open = collect_open_findings(uow, run.merge_request_id, head_run_id=run.id)

@@ -754,3 +754,30 @@ def test_unpublished_failures_are_runs_that_died_publishing_without_a_comment(uo
         found = work.review_runs.list_unpublished_failures(mr.id)
 
     assert [r.id for r in found] == [earlier_orphan.id, orphan.id]
+
+
+def test_latest_run_on_a_head_is_the_newest_in_any_status(uow) -> None:
+    """#222: за gate head отвечает последний прогон, в том числе упавший."""
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        completed = replace(a_run(mr.id), status=ReviewRunStatus.COMPLETED, created_at=NOW)
+        failed = replace(
+            a_run(mr.id),
+            status=ReviewRunStatus.FAILED,
+            failed_stage=ReviewRunStatus.ANALYSING,
+            created_at=LATER,
+        )
+        other_head = replace(a_run(mr.id), head_sha="other", created_at=LATER + dt.timedelta(minutes=1))
+        for run in (completed, failed, other_head):
+            work.review_runs.add(run)
+        work.commit()
+
+    with uow as work:
+        latest = work.review_runs.find_latest(mr.id, "abc123")
+        nothing = work.review_runs.find_latest(mr.id, "missing")
+
+    assert latest is not None and latest.id == failed.id
+    assert nothing is None

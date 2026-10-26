@@ -52,6 +52,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+from app.application.merge_gate_publish import build_retarget_check
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
@@ -136,6 +137,7 @@ def handle_webhook_event(
     except VcsError:
         return WebhookOutcome(kind="failure")
 
+    existing_run: ReviewRun | None = None
     with uow as work:
         # Дубль проверяется до upsert'а merge_request: на PR один активный
         # прогон, повторная доставка его не трогает.
@@ -151,19 +153,44 @@ def handle_webhook_event(
             existing_run = work.review_runs.find_active(
                 existing_merge_request.id, event.head_sha
             ) or work.review_runs.find_reviewed(existing_merge_request.id, event.head_sha)
-            if existing_run is not None and _same_base(existing_run, metadata.base_sha):
+            if existing_run is not None and _same_base(
+                existing_run, metadata.base_sha, event.action
+            ):
                 return WebhookOutcome(
                     kind="duplicate",
                     run=existing_run,
                     merge_request=existing_merge_request,
                     repository=repository,
                 )
-            if existing_run is not None and existing_run.status not in TERMINAL_STATUSES:
-                # Целевую ветку сменили, пока прогон на старой базе идёт (#222):
-                # он выставил бы merge gate на head по диффу, которого в PR уже
-                # нет. Отмена - своим коммитом до вставки нового прогона:
-                # частичный индекс допускает один активный прогон на коммит.
-                _supersede(work, existing_run, now())
+
+    if existing_run is not None:
+        # Прогон на этот коммит есть, а база другая — целевую ветку сменили
+        # (#222). Check run висит на коммите: до ревью нового диффа на нём
+        # остался бы `success` старого. Блокировка — до записей и между
+        # транзакциями, как метаданные: не удалась — 502 без записей, доставку
+        # повторит проход воркера (#149), а не новый прогон под старым `success`.
+        try:
+            vcs.set_merge_gate_check(
+                event.repo_full_name,
+                event.head_sha,
+                event.installation_id,
+                build_retarget_check(),
+            )
+        except VcsError:
+            logger.warning(
+                "merge gate %s@%s не заблокирован после смены целевой ветки",
+                event.repo_full_name,
+                event.head_sha,
+                exc_info=True,
+            )
+            return WebhookOutcome(kind="failure")
+
+    with uow as work:
+        if existing_run is not None:
+            # Прогон на старой базе ещё идёт — выставил бы gate по диффу, которого
+            # в PR уже нет. Отмена — своим коммитом до вставки нового прогона:
+            # частичный индекс допускает один активный прогон на коммит.
+            _supersede(work, existing_run.id, now())
 
         merge_request = _upsert_merge_request(
             work, repository.id, existing_merge_request, event, metadata, now(), new_id
@@ -253,17 +280,24 @@ def handle_webhook_event(
     )
 
 
-def _same_base(run: ReviewRun, base_sha: str) -> bool:
+def _same_base(run: ReviewRun, base_sha: str, action: str) -> bool:
     """Прогон ревьюил тот же дифф: тот же head (по выборке) и та же база.
 
-    Прогон без записанной базы считается ревью любой: сравнить не с чем, а
-    лишний прогон на каждый повтор доставки хуже."""
-    return run.base_sha is None or run.base_sha == base_sha
+    Прогон без записанной базы на повторе `opened`/`synchronize` считается
+    ревью любой базы: сравнить не с чем, а лишний прогон на каждый повтор
+    хуже. На `edited` (смена целевой ветки) — нет: fail closed, база заведомо
+    менялась."""
+    if run.base_sha is None:
+        return action != "edited"
+    return run.base_sha == base_sha
 
 
-def _supersede(work: UnitOfWork, run: ReviewRun, now: datetime) -> None:
-    """Отменить прогон на старой базе. Воркер мог успеть его завершить - тогда
-    переход отклонён, и отменять нечего."""
+def _supersede(work: UnitOfWork, run_id: UUID, now: datetime) -> None:
+    """Отменить прогон на старой базе, если он ещё идёт. Строка читается заново:
+    воркер мог успеть его завершить - тогда отменять нечего."""
+    run = work.review_runs.get(run_id)
+    if run is None or run.status in TERMINAL_STATUSES:
+        return
     cancelled = advance(run, ReviewRunStatus.CANCELLED, now)
     if not cancelled.ok:
         return

@@ -250,6 +250,18 @@ class SqlAlchemyReviewRunRepo:
         ).first()
         return m.review_run_to_domain(row) if row else None
 
+    def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        row = self._session.scalars(
+            select(ReviewRunRow)
+            .where(
+                ReviewRunRow.merge_request_id == merge_request_id,
+                ReviewRunRow.head_sha == head_sha,
+            )
+            .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+            .limit(1)
+        ).first()
+        return m.review_run_to_domain(row) if row else None
+
     def list_unfinished(self) -> list[ReviewRun]:
         rows = self._session.scalars(
             select(ReviewRunRow).where(ReviewRunRow.status.not_in(TERMINAL_STATUSES))

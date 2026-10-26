@@ -98,6 +98,9 @@ class FakeVcs:
     commits_error: VcsError | None = None
     # Сбой только метаданных PR - дифф при этом достаётся.
     metadata_error: VcsError | None = None
+    # Сбой только check run merge gate; выставленные check run - (head_sha, check).
+    check_error: VcsError | None = None
+    checks: list[tuple[str, MergeGateCheck]] = field(default_factory=list)
     calls: list[tuple[Any, ...]] = field(default_factory=list)
 
     def fetch_diff(
@@ -194,6 +197,9 @@ class FakeVcs:
         self.calls.append(("check", repo_full_name, head_sha, check.conclusion))
         if self.error is not None:
             raise self.error
+        if self.check_error is not None:
+            raise self.check_error
+        self.checks.append((head_sha, check))
 
 
 @dataclass

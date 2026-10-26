@@ -157,3 +157,66 @@ def test_merge_gate_refresh_sees_a_critical_whose_inline_id_was_lost() -> None:
 
     (check,) = vcs.checks
     assert check.conclusion == "failure"
+
+
+# --- #222: пересчёт gate - только по завершённому ревью head ----------------------
+
+MR_ID = UUID(int=3)
+
+
+def _run(run_id: int, status: ReviewRunStatus, *, at: int, base: str = "base1") -> ReviewRun:
+    moment = NOW.replace(minute=at)
+    return ReviewRun(
+        id=UUID(int=run_id),
+        merge_request_id=MR_ID,
+        head_sha="sha1",
+        base_sha=base,
+        status=status,
+        trigger=TriggerSource.WEBHOOK,
+        last_progress_at=moment,
+        created_at=moment,
+        updated_at=moment,
+    )
+
+
+def _refresh(uow: FakeUnitOfWork) -> RecordingVcsGateway:
+    vcs = RecordingVcsGateway()
+    refresh_merge_gate_for_merge_request(
+        MR_ID,
+        repo_full_name="o/r",
+        pr_number=7,
+        head_sha="sha1",
+        installation_id=1,
+        uow=uow,
+        vcs=vcs,
+        now=NOW,
+    )
+    return vcs
+
+
+def test_closing_a_thread_before_the_head_is_reviewed_sets_no_gate() -> None:
+    """Обход: push, ревью нового head ещё идёт, автор закрывает тред - `success` на
+    непроверенный коммит не выставляется."""
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.ANALYSING, at=1))
+
+    assert _refresh(uow).checks == []
+
+
+def test_closing_a_thread_after_the_review_of_a_new_base_failed_sets_no_gate() -> None:
+    """Целевую ветку сменили, ревью нового диффа упало: прогон на старой базе
+    `success` уже не даёт."""
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.COMPLETED, at=1, base="old"))
+    uow.review_runs.add(_run(2, ReviewRunStatus.FAILED, at=2, base="new"))
+
+    assert _refresh(uow).checks == []
+
+
+def test_closing_a_thread_after_a_completed_review_of_the_head_sets_the_gate() -> None:
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.CANCELLED, at=1, base="old"))
+    uow.review_runs.add(_run(2, ReviewRunStatus.COMPLETED, at=2, base="new"))
+
+    (check,) = _refresh(uow).checks
+    assert check.conclusion == "success"
