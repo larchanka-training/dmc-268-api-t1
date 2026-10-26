@@ -44,7 +44,9 @@
 #
 # Несохранённое состояние раннер уносит с собой, поэтому сначала его
 # зашифрованная копия кладётся в каталог отчёта (errored.tfstate.enc,
-# AES-256 с ключом — паролем хранилища); шаг state_artifact в deploy.yml
+# AES-256 с отдельным случайным ключом STATE_BACKUP_KEY — не паролем
+# хранилища: репозиторий публичный, и ключ ничего, кроме копии, не открывает);
+# шаг state_artifact в deploy.yml
 # загружает её артефактом, если восстановление не вышло. Открытым текстом —
 # никогда: в состоянии пароли.
 #
@@ -57,7 +59,7 @@
 # REPORT_DIR — каталог отчёта, по умолчанию $RUNNER_TEMP/deploy-report;
 # RECOVER_WAIT — сколько секунд ждать, пока хранилище ответит (120);
 # INTERRUPTED=true — шаг tofu оборван, а не упал сам;
-# AWS_SECRET_ACCESS_KEY — пароль хранилища, он же ключ копии;
+# STATE_BACKUP_KEY — ключ зашифрованной копии (секрет STATE_BACKUP_KEY_DMC268_T1);
 # S3_TUNNEL — скрипт туннеля, по умолчанию .github/scripts/s3-tunnel.sh (тест
 # подменяет его: настоящий открывает порт и запускает сторожа).
 set -uo pipefail
@@ -82,10 +84,10 @@ fail() {
 # Копия — до всего остального: шаг могут оборвать посреди ожидания хранилища.
 rm -f "$copy"
 if [ -e "$errored" ]; then
-  if [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
-    echo "::warning::нет пароля хранилища: зашифрованную копию $errored не сохранить"
+  if [ -z "${STATE_BACKUP_KEY:-}" ]; then
+    echo "::warning::нет ключа STATE_BACKUP_KEY: зашифрованную копию $errored не сохранить"
   elif ! (umask 077 && openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt \
-      -pass env:AWS_SECRET_ACCESS_KEY -in "$errored" -out "$copy"); then
+      -pass env:STATE_BACKUP_KEY -in "$errored" -out "$copy"); then
     rm -f "$copy"
     echo "::warning::зашифрованная копия $errored не сохранилась"
   fi

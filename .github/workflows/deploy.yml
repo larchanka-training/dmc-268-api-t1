@@ -408,6 +408,9 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
           AWS_DEFAULT_REGION: us-east-1
+          # Ключ зашифрованной копии errored.tfstate (recover-state.sh) —
+          # отдельный и случайный: артефакт публичного репо доступен всем.
+          STATE_BACKUP_KEY: ${{ secrets.STATE_BACKUP_KEY_DMC268_T1 }}
           INTERRUPTED: >-
             ${{ steps.infra.outcome == 'cancelled' || steps.plan.outcome == 'cancelled' ||
             steps.apply.outcome == 'cancelled' }}

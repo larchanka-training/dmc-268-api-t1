@@ -574,7 +574,7 @@ def state_section(report_dir: Path) -> list[str]:
              "Что делать — `infra/README.md`, «Если деплой упал посреди apply».")]
     if (report_dir / "errored.tfstate.enc").exists():
         out.append(f"> Несохранённое состояние (serial {r.get('serial', '?')}) — в артефакте `errored-tfstate` этого "
-                   "прогона, зашифрованное паролем хранилища; артефакт живёт сутки.")
+                   "прогона, зашифрованное ключом `STATE_BACKUP_KEY_DMC268_T1`; артефакт живёт сутки.")
     return out
 
 

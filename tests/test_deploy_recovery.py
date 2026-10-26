@@ -113,7 +113,7 @@ def recover(
     (root / "infra").mkdir(parents=True, exist_ok=True)
     if "PULL" not in env:
         env["PULL"] = str(remote_state(tmp_path, ERRORED["serial"] - 1))
-    env.setdefault("AWS_SECRET_ACCESS_KEY", KEY)
+    env.setdefault("STATE_BACKUP_KEY", KEY)
     if init:
         (root / "infra" / ".terraform").mkdir(exist_ok=True)
         backend = {"backend": {"type": "s3", "config": {
@@ -316,7 +316,7 @@ def test_recovery_keeps_an_encrypted_copy_of_an_unsaved_state(tmp_path: Path) ->
 
 
 def test_recovery_without_a_key_keeps_no_copy(tmp_path: Path) -> None:
-    result, _, _ = recover(tmp_path, LOCK_JSON=str(own_lock(tmp_path)), PUSH_EXIT="1", AWS_SECRET_ACCESS_KEY="")
+    result, _, _ = recover(tmp_path, LOCK_JSON=str(own_lock(tmp_path)), PUSH_EXIT="1", STATE_BACKUP_KEY="")
 
     assert result.returncode == 1
     assert not any("tfstate" in p.name for p in (tmp_path / "report").iterdir())

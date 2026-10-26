@@ -27,7 +27,7 @@
 
 - [x] 5.1 `recover-state.sh`: снимать мёртвую блокировку другого раннера (`runner@…`) и свою после обрыва шага (`INTERRUPTED`); у блокировки apply — `::warning::` и предупреждение в summary
 - [x] 5.2 `deploy.yml`: восстановление и после отмены или таймаута (`!success()`, исход `cancelled`), `timeout-minutes: 10`; `s3-tunnel.sh`: `ConnectTimeout=15`, порт после `pkill` — до 15 с с явной ошибкой
-- [x] 5.3 Зашифрованная копия `errored.tfstate` (`openssl enc`, пароль хранилища) и шаг `state_artifact` с `retention-days: 1`
+- [x] 5.3 Зашифрованная копия `errored.tfstate` (`openssl enc`, отдельный ключ `STATE_BACKUP_KEY_DMC268_T1`) и шаг `state_artifact` с `retention-days: 1`
 - [x] 5.4 Сверка serial и lineage с `tofu state pull` перед записью; текст про serial в скрипте и README
 - [x] 5.5 Явная ошибка, если в адресе хранилища нет порта; тест на неснятую блокировку (`UNLOCK_EXIT=1`)
 - [x] 5.6 `concurrency` группы `deploy` — `queue: max`
