@@ -609,3 +609,87 @@ def test_merge_gate_failure_after_publishing_does_not_fail_the_run(
     (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert str(RUN_ID) in record.getMessage()
     assert record.exc_info is not None and record.exc_info[1] is error
+
+
+# --- #222: ревью упавшего прогона не дублируется следующим --------------------
+
+ORPHAN_RUN_ID = UUID(int=4)
+
+
+def _seed_orphan(uow: FakeUnitOfWork, *, failed_stage: ReviewRunStatus = ReviewRunStatus.PUBLISHING) -> None:
+    """Прошлый прогон упал на публикации, не записав `published_comments`: его
+    находка `critical` на `app/x.py:10` осталась только на GitHub."""
+    _seed_previous_critical_thread(uow)
+    uow.published_comments.restore([])
+    run = uow.review_runs.get(ORPHAN_RUN_ID)
+    assert run is not None
+    # Прогон кладётся сразу упавшим: переход `completed` → `failed` фейк не пропустит.
+    uow.review_runs.add(replace(run, status=ReviewRunStatus.FAILED, failed_stage=failed_stage))
+
+
+def test_review_of_a_run_that_died_while_publishing_covers_the_same_finding() -> None:
+    """Ревью упавшего прогона найдено по маркеру: его комментарии записаны, своё замечание не постится."""
+    uow = FakeUnitOfWork()
+    _seed_orphan(uow)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = RecordingVcsGateway(stored_reviews={ORPHAN_RUN_ID})
+    vcs.thread_states = {"orphan-inline-app/x.py-10": ReviewThreadState(resolved=False, line=10)}
+
+    _publish(uow, vcs)
+
+    assert vcs.found_review_requests == [ORPHAN_RUN_ID]
+    adopted = {(c.kind, c.provider_comment_id) for c in uow.published_comments.list_for_run(ORPHAN_RUN_ID)}
+    assert adopted == {
+        (CommentKind.SUMMARY, "orphan-summary"),
+        (CommentKind.INLINE, "orphan-inline-app/x.py-10"),
+    }
+    assert _inline_drafts(vcs) == ()
+    assert _stored_new_finding(uow).covered_by_finding_id == FINDING_ID
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+
+
+def test_a_run_that_died_before_github_stored_its_review_adopts_nothing() -> None:
+    """На GitHub ревью упавшего нет: записей не появляется, замечание публикуется."""
+    uow = FakeUnitOfWork()
+    _seed_orphan(uow)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = RecordingVcsGateway()
+
+    _publish(uow, vcs)
+
+    assert vcs.found_review_requests == [ORPHAN_RUN_ID]
+    assert uow.published_comments.list_for_run(ORPHAN_RUN_ID) == []
+    assert [(d.file_path, d.line) for d in _inline_drafts(vcs)] == [("app/x.py", 10)]
+
+
+def test_a_run_that_failed_before_publishing_is_not_looked_up() -> None:
+    """Упавший на анализе прогон ревью не постил: GitHub не спрашиваем."""
+    uow = FakeUnitOfWork()
+    _seed_orphan(uow, failed_stage=ReviewRunStatus.ANALYSING)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    vcs = RecordingVcsGateway(stored_reviews={ORPHAN_RUN_ID})
+
+    _publish(uow, vcs)
+
+    assert vcs.found_review_requests == []
+
+
+def test_failed_lookup_of_an_orphan_review_does_not_stop_publishing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Поиск ревью упавшего прогона - best-effort: сбой GitHub в лог, ревью публикуется."""
+    uow = FakeUnitOfWork()
+    _seed_orphan(uow)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    error = VcsTransientError("GitHub API недоступен на GET /reviews")
+    vcs = RecordingVcsGateway(stored_reviews={ORPHAN_RUN_ID}, find_review_error=error)
+
+    with caplog.at_level(logging.WARNING, logger="app.application.publish_review"):
+        _publish(uow, vcs)
+
+    assert len(vcs.publications) == 1
+    assert uow.published_comments.list_for_run(ORPHAN_RUN_ID) == []
+    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert str(ORPHAN_RUN_ID) in record.getMessage()
+    assert record.exc_info is not None and record.exc_info[1] is error

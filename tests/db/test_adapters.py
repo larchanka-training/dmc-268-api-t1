@@ -710,3 +710,47 @@ def test_bot_threads_of_a_merge_request_keep_resolution_and_coverage(uow) -> Non
     }
     assert [t.root_provider_comment_id for t in open_threads] == ["c1"]
     assert stored.covered_by_finding_id == open_finding.id
+
+
+def test_unpublished_failures_are_runs_that_died_publishing_without_a_comment(uow) -> None:
+    """#222: кандидаты на подбор ревью - `failed` на `publishing` без `published_comments`,
+    только своего PR."""
+
+    def failed(mr_id, stage: ReviewRunStatus, at: dt.datetime) -> ReviewRun:
+        return replace(
+            a_run(mr_id), status=ReviewRunStatus.FAILED, failed_stage=stage, created_at=at
+        )
+
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr, other_mr = a_merge_request(repo.id), replace(a_merge_request(repo.id), number=2)
+        work.merge_requests.add(mr)
+        work.merge_requests.add(other_mr)
+        orphan = failed(mr.id, ReviewRunStatus.PUBLISHING, LATER)
+        earlier_orphan = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW)
+        recorded = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW)
+        analysing = failed(mr.id, ReviewRunStatus.ANALYSING, NOW)
+        foreign = failed(other_mr.id, ReviewRunStatus.PUBLISHING, NOW)
+        for run in (orphan, earlier_orphan, recorded, analysing, foreign):
+            work.review_runs.add(run)
+        work.commit()
+    with uow as work:
+        work.published_comments.add(
+            PublishedComment(
+                id=new_id(),
+                review_run_id=recorded.id,
+                finding_id=None,
+                provider_comment_id="9001",
+                kind=CommentKind.SUMMARY,
+                published_at=NOW,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        work.commit()
+
+    with uow as work:
+        found = work.review_runs.list_unpublished_failures(mr.id)
+
+    assert [r.id for r in found] == [earlier_orphan.id, orphan.id]

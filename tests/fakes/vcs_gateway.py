@@ -47,6 +47,11 @@ class RecordingVcsGateway:
     check_error: Exception | None = None
     # Прогоны, чьим маркером помечено каждое опубликованное ревью.
     review_run_ids: list[UUID] = field(default_factory=list)
+    # Прогоны, чьё ревью с маркером уже есть на хостинге (`find_published_review`):
+    # сводка - `orphan-summary`, inline - на каждой строке черновика.
+    stored_reviews: set[UUID] = field(default_factory=set)
+    found_review_requests: list[UUID] = field(default_factory=list)
+    find_review_error: Exception | None = None
 
     def fetch_diff(
         self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
@@ -110,6 +115,33 @@ class RecordingVcsGateway:
         return PullRequestReviewPublication(
             summary_provider_comment_id="summary-1",
             inline_comments=published,
+        )
+
+    def find_published_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
+    ) -> PullRequestReviewPublication | None:
+        self.found_review_requests.append(review_run_id)
+        if self.find_review_error is not None:
+            raise self.find_review_error
+        if review_run_id not in self.stored_reviews:
+            return None
+        return PullRequestReviewPublication(
+            summary_provider_comment_id="orphan-summary",
+            inline_comments=tuple(
+                PublishedInlineComment(
+                    file_path=item.file_path,
+                    side=item.side,
+                    line=item.line,
+                    provider_comment_id=f"orphan-inline-{item.file_path}-{item.line}",
+                )
+                for item in inline_comments
+            ),
         )
 
     def fetch_review_threads_state(

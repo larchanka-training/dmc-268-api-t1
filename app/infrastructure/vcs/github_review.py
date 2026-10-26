@@ -149,8 +149,8 @@ class GitHubReviewClient:
         published: tuple[PublishedInlineComment | None, ...] = ()
         if inline_comments:
             try:
-                raw_comments = self._gw._get_json_list_paginated(
-                    f"{reviews_url}/{review_id}/comments", installation_id
+                published = self._inline_comments_of(
+                    reviews_url, review_id, installation_id, inline_comments
                 )
             except VcsError:
                 logger.warning(
@@ -159,12 +159,52 @@ class GitHubReviewClient:
                     review_id,
                     exc_info=True,
                 )
-                raw_comments = []
-            published = _map_fetched_inline_comments(inline_comments, raw_comments)
+                published = tuple(None for _ in inline_comments)
         return PullRequestReviewPublication(
             summary_provider_comment_id=review_id,
             inline_comments=published,
         )
+
+    def find_published_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
+    ) -> PullRequestReviewPublication | None:
+        """Ревью прогона, которое бот уже опубликовал: поиск по маркеру и его inline.
+
+        В отличие от публикации, сбой чтения inline - `VcsError`: вызывающий
+        записывает найденное и не должен принять потерю id за отсутствие.
+        """
+        reviews_url = f"/repos/{repo_full_name}/pulls/{pr_number}/reviews"
+        review_id = self._find_review_by_marker(
+            reviews_url, installation_id, review_run_marker(review_run_id)
+        )
+        if review_id is None:
+            return None
+        published: tuple[PublishedInlineComment | None, ...] = ()
+        if inline_comments:
+            published = self._inline_comments_of(
+                reviews_url, review_id, installation_id, inline_comments
+            )
+        return PullRequestReviewPublication(
+            summary_provider_comment_id=review_id, inline_comments=published
+        )
+
+    def _inline_comments_of(
+        self,
+        reviews_url: str,
+        review_id: str,
+        installation_id: int,
+        inline_comments: tuple[InlineCommentDraft, ...],
+    ) -> tuple[PublishedInlineComment | None, ...]:
+        raw_comments = self._gw._get_json_list_paginated(
+            f"{reviews_url}/{review_id}/comments", installation_id
+        )
+        return _map_fetched_inline_comments(inline_comments, raw_comments)
 
     def _learn_bot_login(self) -> None:
         """Логин бота - до `POST`, best-effort: он нужен поиску по маркеру, а поиск

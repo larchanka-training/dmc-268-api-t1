@@ -76,6 +76,11 @@ class ReviewRunRepo(Protocol):
 
     def list_unfinished(self) -> list[ReviewRun]: ...
 
+    def list_unpublished_failures(self, merge_request_id: UUID) -> list[ReviewRun]:
+        """Прогоны PR в `failed` с этапом сбоя `publishing` и без единой записи в
+        `published_comments`: их ревью могло остаться на хостинге без следа в базе."""
+        ...
+
     def list_changed(
         self,
         after: FeedCursor,

@@ -51,6 +51,7 @@ from app.domain.enums import (
     TERMINAL_STATUSES,
     CommentKind,
     Provider,
+    ReviewRunStatus,
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
@@ -252,6 +253,22 @@ class SqlAlchemyReviewRunRepo:
     def list_unfinished(self) -> list[ReviewRun]:
         rows = self._session.scalars(
             select(ReviewRunRow).where(ReviewRunRow.status.not_in(TERMINAL_STATUSES))
+        ).all()
+        return [m.review_run_to_domain(row) for row in rows]
+
+    def list_unpublished_failures(self, merge_request_id: UUID) -> list[ReviewRun]:
+        published = select(PublishedCommentRow.id).where(
+            PublishedCommentRow.review_run_id == ReviewRunRow.id
+        )
+        rows = self._session.scalars(
+            select(ReviewRunRow)
+            .where(
+                ReviewRunRow.merge_request_id == merge_request_id,
+                ReviewRunRow.status == ReviewRunStatus.FAILED,
+                ReviewRunRow.failed_stage == ReviewRunStatus.PUBLISHING,
+                ~published.exists(),
+            )
+            .order_by(ReviewRunRow.created_at, ReviewRunRow.id)
         ).all()
         return [m.review_run_to_domain(row) for row in rows]
 

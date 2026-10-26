@@ -34,6 +34,7 @@ from app.domain.enums import (
     TERMINAL_STATUSES,
     CommentKind,
     Provider,
+    ReviewRunStatus,
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
@@ -212,6 +213,22 @@ class FakeReviewRunRepo:
 
     def list_unfinished(self) -> list[ReviewRun]:
         return [r for r in self._by_id.values() if r.status not in TERMINAL_STATUSES]
+
+    def bind_published(self, published_comments: FakePublishedCommentRepo) -> None:
+        self._published = published_comments
+
+    def list_unpublished_failures(self, merge_request_id: UUID) -> list[ReviewRun]:
+        return sorted(
+            (
+                r
+                for r in self._by_id.values()
+                if r.merge_request_id == merge_request_id
+                and r.status is ReviewRunStatus.FAILED
+                and r.failed_stage is ReviewRunStatus.PUBLISHING
+                and not self._published.list_for_run(r.id)
+            ),
+            key=lambda r: (r.created_at, r.id),
+        )
 
     def bind(
         self,
@@ -589,6 +606,7 @@ class FakeUnitOfWork(UnitOfWork):
         self.findings: FakeFindingRepo = self._fakes.findings
         self.published_comments: FakePublishedCommentRepo = self._fakes.published_comments
         self.published_comments.bind_findings(self.findings)
+        self.review_runs.bind_published(self.published_comments)
         self.users: FakeUserRepo = self._fakes.users
         self.sessions: FakeSessionRepo = self._fakes.sessions
         self.provider_tokens: FakeProviderTokenRepo = self._fakes.provider_tokens

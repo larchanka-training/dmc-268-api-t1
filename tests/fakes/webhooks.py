@@ -44,6 +44,9 @@ def webhook_payload(action: str = "opened") -> dict[str, Any]:
     )
     raw: dict[str, Any] = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
     raw["action"] = action
+    if action == "edited":
+        # `edited` в тестах - смена целевой ветки: иное `edited` ревью не запускает.
+        raw["changes"] = {"base": {"ref": {"from": "evil-staging"}, "sha": {"from": "0" * 40}}}
     return raw
 
 
@@ -154,6 +157,20 @@ class FakeVcs:
         if self.error is not None:
             raise self.error
         return PullRequestReviewPublication(summary_provider_comment_id=None, inline_comments=())
+
+    def find_published_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
+    ) -> PullRequestReviewPublication | None:
+        self.calls.append(("find_review", review_run_id))
+        if self.error is not None:
+            raise self.error
+        return None
 
     def fetch_review_threads_state(
         self,

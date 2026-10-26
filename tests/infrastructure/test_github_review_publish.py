@@ -14,6 +14,7 @@ from app.application.ports.vcs_review import (
     ReviewThreadState,
 )
 from app.domain.enums import DiffSide
+from app.domain.vcs_errors import VcsError
 from app.infrastructure.vcs.errors import VcsUnavailableError
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
@@ -384,3 +385,49 @@ def test_graphql_rate_limited_with_http_200_is_retried(rsa_key_pair: RsaKeyPair)
     assert gateway.fetch_review_threads_state("o/r", 7, INSTALLATION_ID, frozenset({"11"})) == {}
     assert len(calls) == 2
     assert sleeps == [10.0]
+
+
+# --- #222: ревью упавшего прогона ------------------------------------------------
+
+UNMATCHED = InlineCommentDraft(file_path="b.py", side=DiffSide.NEW, line=9, body="другое")
+
+
+def _find(gateway: GitHubVcsGateway, *drafts: InlineCommentDraft) -> Any:
+    return gateway.find_published_review("o/r", 7, INSTALLATION_ID, drafts, review_run_id=RUN_ID)
+
+
+def _never_posts(request: httpx.Request) -> httpx.Response:
+    raise AssertionError("поиск ревью не должен ничего создавать")
+
+
+def test_published_review_of_a_run_is_found_by_marker_with_its_inline_ids(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    github = _GitHub(_never_posts)
+    github.reviews = [{"id": 9001, "user": BOT, "body": f"сводка\n\n{MARKER}"}]
+
+    publication = _find(make_gateway(rsa_key_pair, github.handler), DRAFT, UNMATCHED)
+
+    assert publication.summary_provider_comment_id == "9001"
+    assert [c.provider_comment_id if c else None for c in publication.inline_comments] == ["42", None]
+
+
+def test_no_review_with_the_marker_is_none(rsa_key_pair: RsaKeyPair) -> None:
+    """Ревью человека с тем же маркером своим не считается."""
+    github = _GitHub(_never_posts)
+    github.reviews = [{"id": 9001, "user": {"login": "mallory", "type": "User"}, "body": MARKER}]
+
+    assert _find(make_gateway(rsa_key_pair, github.handler), DRAFT) is None
+    assert not any(path.endswith("/comments") for _, path in github.seen)
+
+
+def test_lost_inline_list_of_a_found_review_is_an_error_not_an_empty_match(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """При поиске потеря id inline - сбой: иначе вызывающий записал бы ревью без тредов."""
+    github = _GitHub(_never_posts)
+    github.reviews = [{"id": 9001, "user": BOT, "body": MARKER}]
+    github.comments_status = 404
+
+    with pytest.raises(VcsError):
+        _find(make_gateway(rsa_key_pair, github.handler), DRAFT)
