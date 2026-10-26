@@ -39,3 +39,30 @@
 - Автор, исправивший критичную проблему, теперь всегда закрывает тред сам, а не ждёт бота → чуть больше ручной работы. Это и есть цель: снять блокировку мерджа может только человек.
 - Повторный прогон, который снова находит ту же проблему, по-прежнему не дублирует замечание (`thread_coverage`), а тред, закрытый человеком, по-прежнему его глушит. Ни то, ни другое не зависит от ответа модели о тредах.
 - Инъекция может склонить модель не сообщать о проблеме вовсе или верификатор — отбросить находку. Это не обходит gate по уже открытому треду: тред открыт, пока его не закроет человек. Для новых находок отсев серьёзной находки безопасности верификатором уже ограничен (`test_diff_asking_the_verifier_to_drop_a_security_finding_does_not_suppress_it`).
+- Gate не защищает от автора PR. Закрыть critical-тред может автор PR или любой с правом write: вебхук `pull_request_review_thread` не сверяет `sender`, сверка перед публикацией читает только `isResolved`, без `resolvedBy`. Такое закрытие считается закрытием человеком: gate `success`, и та же находка на следующих прогонах покрыта тредом и не публикуется. Защиту здесь дают обязательное ревью и required check `dmc-268-ai-review` в ruleset целевой ветки, но сейчас их нет: в ruleset `develop` 0 обязательных аппрувов, required status checks не заданы. Пока так, мердж с gate `failure` возможен и без закрытия треда. Как это исправить, решит отдельная задача из двух уровней: ruleset (обязательные аппрувы и required check) и код (закрытие critical-треда автором PR не засчитывается: `sender.login` против автора PR в вебхуке, `resolvedBy { login }` в сверке).
+- Треды, которые бот закрыл до деплоя этой правки, остаются закрытыми: правка не переоткрывает их, а `thread_resolved_by_bot` у них `true`, поэтому находку они не покрывают, но gate по ним `success`, и `_sync_threads_with_host` хост о них не спрашивает. Это ровно те закрытия, которые правка признаёт недоверенными. Миграция не нужна; риск принят. Если владелец решит проверить, нужен разовый аудит открытых PR на стенде, отдельным действием. Запрос только читает, выполняется в базе стенда (`psql "$DATABASE_URL" -f audit.sql` или из `psql` в контейнере базы):
+
+  ```sql
+  -- critical-треды открытых PR, закрытые ботом ответом в тред.
+  -- Наличие thread_reply к корню отличает настоящее закрытие ботом
+  -- от метки, которую миграция 0012 поставила старым закрытым тредам.
+  SELECT r.full_name, mr.number, root.provider_comment_id, f.id AS finding_id
+  FROM published_comments AS root
+  JOIN findings AS f ON f.id = root.finding_id
+  JOIN review_runs AS rr ON rr.id = root.review_run_id
+  JOIN merge_requests AS mr ON mr.id = rr.merge_request_id
+  JOIN repositories AS r ON r.id = mr.repository_id
+  WHERE root.kind = 'inline'
+    AND root.thread_resolved
+    AND root.thread_resolved_by_bot
+    AND f.severity = 'critical'
+    AND mr.state = 'open'
+    AND EXISTS (
+      SELECT 1 FROM published_comments AS reply
+      WHERE reply.kind = 'thread_reply'
+        AND reply.in_reply_to_provider_comment_id = root.provider_comment_id
+    )
+  ORDER BY r.full_name, mr.number;
+  ```
+
+  Найденные треды переоткрываются на GitHub (Unresolve conversation на странице PR): вебхук `unresolved` сбросит метку бота, и gate снова учтёт тред.

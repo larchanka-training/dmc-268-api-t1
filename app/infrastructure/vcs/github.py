@@ -5,7 +5,8 @@
 переводятся в `PRMetadata` один-в-один, включая перевод состояния PR,
 описанный в самом `MergeRequestState`. Повторы - один цикл `_request`: 5xx -
 экспоненциальный backoff, отказ лимита - пауза по заголовкам GitHub в пределах
-бюджета; запросы без идемпотентности (создание ревью) не повторяются.
+бюджета; запрос без идемпотентности (создание ревью) уходит снова, только
+если проверка `already_done` не нашла его результат.
 Пауза и часы приходят инъекцией (`sleep`, `clock`), чтобы тесты не ждали
 по-настоящему.
 
@@ -36,7 +37,6 @@ from app.infrastructure.vcs.errors import (
     VcsError,
     VcsNotFoundError,
     VcsUnavailableError,
-    VcsUnconfirmedError,
 )
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from app.infrastructure.vcs.github_installations import is_rate_limited
@@ -219,22 +219,19 @@ class GitHubVcsGateway:
         installation_id: int,
         payload: dict[str, Any],
         *,
-        repeatable: bool = True,
         already_done: Callable[[], dict[str, Any] | None] | None = None,
     ) -> dict[str, Any]:
         """POST с JSON-ответом-объектом.
 
-        `repeatable=False` - запрос без идемпотентности (создание ревью).
-        С `already_done` - проверкой, выполнен ли он уже, - повторяется после
-        паузы, только если проверка вернула `None`; её результат - ответ
-        запроса. Без проверки - `VcsUnconfirmedError` на первом же сбое.
+        `already_done` - проверка, выполнен ли запрос уже, - у запроса без
+        идемпотентности (создание ревью): он повторяется после паузы, только
+        если проверка вернула `None`; её результат - ответ запроса.
         """
         response = self._request(
             "POST",
             url,
             installation_id,
             json=payload,
-            repeatable=repeatable,
             # Цикл `_request` возвращает ответ - найденное тело оборачивается в него.
             already_done=None
             if already_done is None
@@ -305,7 +302,6 @@ class GitHubVcsGateway:
         accept: str = _JSON_ACCEPT,
         json: dict[str, Any] | None = None,
         max_bytes: int | None = None,
-        repeatable: bool = True,
         graphql: bool = False,
         already_done: Callable[[], httpx.Response | None] | None = None,
     ) -> httpx.Response:
@@ -320,11 +316,10 @@ class GitHubVcsGateway:
         - 5xx - экспоненциальный backoff;
         - прочие ошибки - сразу ошибка адаптера (404 на GET - `VcsNotFoundError`).
 
-        Обрыв сети повторяемого запроса не повторяется. Неповторяемый запрос
-        (`repeatable=False`) на обрыв, 5xx и лимит без `already_done` бросает
-        `VcsUnconfirmedError`; с ним - после паузы спрашивает `already_done()`:
-        ответ - результат запроса, `None` - запрос уходит снова. Попытки или
-        бюджет кончились - последняя проверка и `VcsUnavailableError`.
+        Обрыв сети запроса без `already_done` не повторяется. С `already_done` -
+        запрос без идемпотентности - на обрыв, 5xx и лимит после паузы спрашивает
+        `already_done()`: ответ - результат запроса, `None` - запрос уходит снова.
+        Попытки или бюджет кончились - последняя проверка и `VcsUnavailableError`.
         """
         where = f"{method} {url}"
         token = self._auth.installation_token(installation_id)
@@ -337,10 +332,8 @@ class GitHubVcsGateway:
             try:
                 response = self._send(method, url, token, accept, json, max_bytes)
             except httpx.RequestError as error:
-                if repeatable:
-                    raise VcsUnavailableError(f"GitHub API недоступен на {where}: {error}") from error
                 if already_done is None:
-                    raise VcsUnconfirmedError(f"GitHub API недоступен на {where}: {error}") from error
+                    raise VcsUnavailableError(f"GitHub API недоступен на {where}: {error}") from error
             else:
                 status = response.status_code
                 if status == 401:
@@ -357,10 +350,6 @@ class GitHubVcsGateway:
                     if status == 404 and method == "GET":
                         raise VcsNotFoundError(f"GitHub API: HTTP 404 на {where}")
                     raise VcsError(f"GitHub API: HTTP {status} на {where}")
-                if not repeatable and already_done is None:
-                    raise VcsUnconfirmedError(
-                        f"GitHub API: HTTP {status} на {where}; запрос без идемпотентности не повторяется"
-                    )
             attempt += 1
             pause = self._backoff_base_seconds * 2 ** (attempt - 1)
             if limited is not None:

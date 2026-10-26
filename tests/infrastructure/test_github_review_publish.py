@@ -120,21 +120,18 @@ def test_thread_state_carries_the_current_line_and_none_for_an_outdated_thread(
         queries.append(payload["query"])
         nodes = [
             {
-                "id": "T_1",
                 "isResolved": False,
                 "isOutdated": False,
                 "line": 104,
                 "comments": {"nodes": [{"databaseId": 11}]},
             },
             {
-                "id": "T_2",
                 "isResolved": True,
                 "isOutdated": True,
                 "line": None,
                 "comments": {"nodes": [{"databaseId": 22}]},
             },
             {
-                "id": "T_3",
                 "isResolved": False,
                 "isOutdated": False,
                 "line": 5,

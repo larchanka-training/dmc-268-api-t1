@@ -137,7 +137,6 @@ class GitHubReviewClient:
             reviews_url,
             installation_id,
             payload,
-            repeatable=False,
             # Ответа на POST нет - после паузы ищем своё ревью и шлём снова, только если его нет.
             already_done=lambda: self._review_found_by_marker(
                 reviews_url, installation_id, marker, review_run_id
@@ -267,7 +266,6 @@ class GitHubReviewClient:
               reviewThreads(first: 100, after: $after) {
                 pageInfo { hasNextPage endCursor }
                 nodes {
-                  id
                   isResolved
                   isOutdated
                   line
