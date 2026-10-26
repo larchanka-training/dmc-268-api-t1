@@ -63,4 +63,7 @@ finish() {
 }
 trap finish EXIT
 
-tofu -chdir=infra apply -input=false -no-color tfplan
+# -lock-timeout: чужая короткая блокировка того же ключа (ручной plan) не роняет
+# деплой сразу — он ждёт её до двух минут. Деплой интерфейса держит свой ключ
+# и не мешает; очередь деплоев бэкенда держит concurrency в deploy.yml.
+tofu -chdir=infra apply -input=false -no-color -lock-timeout=2m tfplan
