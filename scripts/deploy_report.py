@@ -589,7 +589,7 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
         return "\n".join(out) + "\n"
 
     out += ["", *downtime_section(report_dir), "", *plan_section(report_dir)]
-    if recovery := state_section(report_dir):
+    if recovery := state_section(report_dir, env.get("ALLOW_STATEFUL_REPLACE") == "true"):
         out += ["", *recovery]
     migrate = steps.get("migrate", {}).get("outcome", "")
     out += ["", *migrations_section(report_dir, marks, migrate), "", *disk_section(report_dir)]
@@ -655,8 +655,13 @@ def read_pairs(text: str) -> dict[str, str]:
     return pairs
 
 
-def state_section(report_dir: Path) -> list[str]:
-    """Восстановление состояния после обрыва; нет файла — шаг не запускался, раздела нет."""
+def state_section(report_dir: Path, overridden: bool = False) -> list[str]:
+    """Восстановление состояния после обрыва; нет файла — шаг не запускался, раздела нет.
+
+    `overridden` — у этой попытки был `allow_stateful_replace`: Re-run его не
+    получит (флаг — только у первой попытки), и доделать выкат замены базы
+    может лишь новый ручной запуск (ревью #220).
+    """
     if not (report_dir / "state-recovery").exists():
         return []
     r = read_pairs(read(report_dir / "state-recovery"))
@@ -666,16 +671,23 @@ def state_section(report_dir: Path) -> list[str]:
         out += [f"Сторож закрыл туннель к хранилищу: {watchdog[-1]}.", ""]
     lock = f"блокировка `{r['lock']}`" if r.get("lock") else "блокировка"
     result = r.get("result", "")
+    rerun = ("Re-run флага `allow_stateful_replace` не получает: доделает выкат новый ручной запуск "
+             "`gh workflow run deploy.yml --ref develop -f allow_stateful_replace=true`." if overridden
+             else "Перезапуск деплоя доделает выкат без ручных действий.")
     if result == "restored":
         return [*out, (f"Состояние восстановлено: несохранённое состояние (`errored.tfstate`, serial {r.get('serial', '?')}) "
-                f"записано в хранилище, {lock} снята. Перезапуск деплоя доделает выкат без ручных действий.")]
+                f"записано в хранилище, {lock} снята. {rerun}")]
     if result == "unlocked":
-        return [*out, f"Состояние было записано, не снялась только {lock}: снята. Перезапуск деплоя доделает выкат без ручных действий."]
+        return [*out, f"Состояние было записано, не снялась только {lock}: снята. {rerun}"]
     if result == "foreign":
         return [*out, (f"{lock[0].upper() + lock[1:]} — не этого запуска (`{r.get('who', '?')}`): восстановление её не трогает, "
                 "несохранённого состояния этот запуск не оставил.")]
     if result == "none":
-        return [*out, "Несохранённого состояния и блокировки этого запуска нет: восстанавливать нечего."]
+        # Шаг шёл, потому что упал infra, plan или apply, — часто не из-за связи
+        # (отказ сторожа в infra.sh, ошибка плана): раздел о том, что
+        # восстанавливать нечего, только уводит от причины. Остаётся пометка
+        # сторожа хранилища, если он сработал.
+        return out[:-1] if watchdog else []
     if result == "released":
         # Блокировку оборванного запуска (другого раннера или этого, убитого
         # отменой) сняли, не зная, записалось ли состояние под ней.

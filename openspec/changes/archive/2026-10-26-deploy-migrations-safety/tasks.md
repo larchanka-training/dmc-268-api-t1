@@ -48,3 +48,4 @@
 - [x] 7.3 `stateful_deletes` — и по имени контейнера (`dmc268-postgres`, `dmc268-rabbitmq`); тест на переименование без `moved`, имена сверены с `infra/*.tf`
 - [x] 7.4 Summary при откате: «транзакция миграций откатена» с оговоркой про `autocommit_block`
 - [x] 7.5 `infra.sh`: `-lock-timeout=2m` у plan и apply; `summary.sh` удаляет и `infra/infra.tfplan`
+- [x] 7.6 После слияния с #215: `-lock-timeout` проверяется у plan и apply `infra.sh`; при `result=none` раздела «Состояние OpenTofu» нет; у запуска с `allow_stateful_replace` подсказка — новый dispatch, а не Re-run (флаг передан и шагу summary)

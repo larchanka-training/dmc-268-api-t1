@@ -1261,6 +1261,56 @@ def test_summary_of_a_released_dead_plan_lock(tmp_path: Path) -> None:
     assert "[!WARNING]" not in text.split("### Состояние OpenTofu", 1)[1].split("###", 1)[0]
 
 
+def test_summary_of_nothing_to_recover_has_no_state_section(tmp_path: Path) -> None:
+    """Ревью #220: отказ сторожа в infra.sh роняет шаг infra, и recover идёт — но восстанавливать нечего.
+
+    Раздел «восстанавливать нечего» рядом с отказом сторожа только сбивает: его нет.
+    """
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text("result=none\n")
+    results = ALL_SUCCESS.replace("infra success success", "infra failure failure")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results)
+
+    assert "### Состояние OpenTofu" not in text
+    assert "восстанавливать нечего" not in text
+
+
+def test_summary_of_nothing_to_recover_keeps_the_watchdog_note(tmp_path: Path) -> None:
+    """Сторож хранилища сработал — это стоит знать, даже если восстанавливать нечего."""
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text("result=none\n")
+    (report / "s3-watchdog.log").write_text("2026-10-25T14:31:00Z хранилище не отвечает 120 с: туннель закрыт\n")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "Сторож закрыл туннель к хранилищу" in text
+
+
+def test_recovery_after_a_manual_override_asks_for_a_new_dispatch(tmp_path: Path) -> None:
+    """Ревью #220: Re-run повторяет inputs, но флаг — только у первой попытки: доделает выкат новый запуск."""
+    for result in ("lock=7313173c\nserial=4\nresult=restored\n", "lock=7313173c\nresult=unlocked\n"):
+        report = tmp_path / result.splitlines()[-1].split("=")[1]
+        report.mkdir()
+        (report / "state-recovery").write_text(result)
+
+        text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS, ALLOW_STATEFUL_REPLACE="true")
+
+        assert "Перезапуск деплоя доделает выкат" not in text, result
+        assert "`gh workflow run deploy.yml --ref develop -f allow_stateful_replace=true`" in text, result
+        assert "Re-run" in text, result
+
+
+def test_summary_knows_whether_this_attempt_had_the_override() -> None:
+    """Флаг в summary — то же выражение, что у сторожа: у Re-run его нет, и подсказка про Re-run верна."""
+    steps = {s.get("id"): s for s in deploy_steps()}
+    infra_env, summary_env = steps["infra"]["env"], steps[deploy_report.SUMMARY_MARK]["env"]
+    assert isinstance(infra_env, dict) and isinstance(summary_env, dict)
+    assert summary_env["ALLOW_STATEFUL_REPLACE"] == infra_env["ALLOW_STATEFUL_REPLACE"]
+
+
 def test_summary_without_recovery_has_no_state_section(tmp_path: Path) -> None:
     text = summary(tmp_path, tmp_path / "empty", JOB_STATUS="success", STEP_RESULTS=ALL_SUCCESS)
     assert "### Состояние OpenTofu" not in text

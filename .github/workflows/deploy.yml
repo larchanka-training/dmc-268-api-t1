@@ -511,6 +511,9 @@ jobs:
         # случай, если повиснет что-то ещё: job ждал бы до своих 60 минут.
         timeout-minutes: 3
         env:
+          # Тот же флаг, что у сторожа: с ним подсказка «перезапустите» неверна —
+          # Re-run его не получит, нужен новый ручной запуск.
+          ALLOW_STATEFUL_REPLACE: ${{ github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && inputs.allow_stateful_replace }}
           IMAGE: ${{ needs.image.outputs.image }}
           SHA: ${{ needs.gate.outputs.sha }}
           JOB_STATUS: ${{ job.status }}
