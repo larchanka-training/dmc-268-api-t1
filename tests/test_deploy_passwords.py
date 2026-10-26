@@ -46,21 +46,20 @@ exec "$@"
 """
 
 # Подложный psql. С `-h` — вход по сети (scram): пароль из PGPASSWORD
-# сверяется с «хранимым». Без `-h` — локальный сокет (trust): SQL из stdin
-# пишется в журнал, а ALTER ROLE ставит пароль из той переменной окружения,
-# которую назвал `\\getenv` (как настоящий psql). PSQL_ALTER_NOOP — ALTER
-# проходит, но пароль не меняется.
+# сверяется с «хранимым». Без `-h` — локальный сокет (trust): stdin пишется в
+# журнал, а `\\password <роль>` и две строки за ним, как у настоящего psql без
+# tty, ставят пароль, если строки совпали. PSQL_ALTER_NOOP — команда проходит,
+# но пароль не меняется.
 FAKE_PSQL = """#!/usr/bin/env bash
 printf 'psql %s\\n' "$*" >> "$CALLS"
 case " $* " in
   *" -h "*) [ "${PGPASSWORD:-}" = "$(cat "$STATE/pg")" ] || { echo "password authentication failed" >&2; exit 2; }; exit 0 ;;
 esac
-sql="$(cat)"
-printf '%s\\n' "$sql" > "$STATE/pg.sql"
-# Переменная psql в PASSWORD :'имя' → переменная окружения из `\\getenv имя ENV`.
-name="$(printf '%s\\n' "$sql" | sed -n "s/^ALTER ROLE .* PASSWORD :'\\([a-z_]*\\)';$/\\1/p")"
-var="$(printf '%s\\n' "$sql" | sed -n "s/^.getenv $name \\([A-Z_]*\\)$/\\1/p")"
-if [ -n "$name" ] && [ -n "$var" ] && [ -z "${PSQL_ALTER_NOOP:-}" ]; then printf '%s' "${!var}" > "$STATE/pg"; fi
+IFS= read -r command; IFS= read -r first; IFS= read -r second
+printf '%s\\n%s\\n%s\\n' "$command" "$first" "$second" > "$STATE/pg.stdin"
+[ "$command" = "\\\\password $POSTGRES_USER" ] || exit 3
+[ "$first" = "$second" ] || exit 3
+[ -n "${PSQL_ALTER_NOOP:-}" ] || printf '%s' "$first" > "$STATE/pg"
 """
 
 # Подложный rabbitmqctl: пароль — первой строкой stdin, как у настоящего.
@@ -81,8 +80,9 @@ esac
 # Без пауз: подложный await_startup отвечает сразу.
 FAKE_SLEEP = "#!/usr/bin/env bash\nexit 0\n"
 
-OLD_PG, NEW_PG = "old-pg-pass", "n3w pg'pa$$:\\word"
-OLD_RABBIT, NEW_RABBIT = "old-rabbit", "n3w r@bbit \"pass\""
+# Пароли — только безопасные в URL символы: другие passwords.sh отклоняет.
+OLD_PG, NEW_PG = "old-pg-pass", "N3w.pg_pa~ss-0"
+OLD_RABBIT, NEW_RABBIT = "old-rabbit", "N3w.r4bbit_pa~ss-1"
 
 
 def run(
@@ -157,17 +157,25 @@ def test_unchanged_passwords_are_left_alone(tmp_path: Path) -> None:
     assert "rabbitmq: пароль пользователя dmc268 совпадает с секретом" in result.stdout
 
 
-def test_alter_role_keeps_the_password_out_of_server_logs(tmp_path: Path) -> None:
-    """Упавший ALTER ROLE PostgreSQL пишет в лог строкой STATEMENT, psql — строкой LINE (проверено на pg18)."""
+def test_only_a_scram_hash_reaches_the_server(tmp_path: Path) -> None:
+    """`\\password` шифрует пароль в psql: на сервер уходит `ALTER USER … PASSWORD 'SCRAM-SHA-256$…'`.
+
+    Открытый пароль в тексте запроса попал бы в лог медленных и выборочных
+    запросов и в `pg_stat_activity.query` — его видит роль `pg_monitor` (#130).
+    """
     result, state = run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    sql = (state / "pg.sql").read_text()
-    assert "\\set VERBOSITY terse" in sql
-    assert "SET log_min_error_statement = panic;" in sql
-    assert "SET log_statement = none;" in sql
-    assert re.search(r"^\\getenv \w+ NEW_PASSWORD$", sql, re.MULTILINE)
-    assert re.search(r"^ALTER ROLE :\"\w+\" PASSWORD :'\w+';$", sql, re.MULTILINE)
+    stdin = (state / "pg.stdin").read_text()
+    assert stdin.splitlines()[0] == "\\password dmc268"
+    psql_calls = [c for c in calls(tmp_path).splitlines() if c.startswith("psql ")]
+    local = [c for c in psql_calls if " -h " not in c]
+    assert local, psql_calls
+    assert all("ON_ERROR_STOP=1" in c for c in local), local
+    script = SCRIPT.read_text()
+    for text in (script, calls(tmp_path), stdin.splitlines()[0]):
+        assert not re.search(r"ALTER\s+(ROLE|USER)", text, re.IGNORECASE)
+        assert not re.search(r"PASSWORD\s+[:']", text)
     # Вход по сети проверяется уже новым паролем — им придут API и миграции.
     assert "-h dmc268-postgres" in calls(tmp_path)
 
@@ -203,14 +211,19 @@ def test_a_broker_that_never_starts_stops_the_deploy(tmp_path: Path) -> None:
     assert (state / "rabbit").read_text() == OLD_RABBIT
 
 
-def test_an_empty_or_multiline_secret_is_rejected_before_the_server(tmp_path: Path) -> None:
-    for name, value in (("PG_PASSWORD", ""), ("RABBITMQ_PASSWORD", "a\nb")):
+def test_a_password_unsafe_in_a_url_is_rejected_before_the_server(tmp_path: Path) -> None:
+    """`urlencode` в tofu кодирует пробел как `+`, а SQLAlchemy и pika читают `+` буквально;
+    `rabbitmqctl` обрезает пробелы по краям stdin. Такой пароль шаг выставил бы, а API не вошёл бы."""
+    for name, value in (
+        ("PG_PASSWORD", ""), ("PG_PASSWORD", "with space"), ("PG_PASSWORD", "a+b"),
+        ("RABBITMQ_PASSWORD", " edge"), ("RABBITMQ_PASSWORD", "a\nb"), ("RABBITMQ_PASSWORD", "p@ss/w:rd"),
+    ):
         (tmp_path / "calls").unlink(missing_ok=True)
         result, _ = run(tmp_path, **{name: value})
 
-        assert result.returncode != 0, name
-        assert f"::error::{name}" in result.stdout
-        assert calls(tmp_path) == "", name
+        assert result.returncode != 0, (name, value)
+        assert f"::error::{name}" in result.stdout, (name, value)
+        assert calls(tmp_path) == "", (name, value)
 
 
 # --- конфигурация и раскладка job'а ------------------------------------------
@@ -243,7 +256,7 @@ def test_a_new_secret_does_not_recreate_the_database_or_the_broker() -> None:
         assert env, name
         keys = set(re.findall(r'^\s*"(\w+)=', env.group(1), re.MULTILINE))
         assert keys == allowed, (name, keys ^ allowed)
-        assert re.search(r"^  lifecycle \{[^}]*^\s*ignore_changes = \[env\]$", body, re.MULTILINE), name
+        assert re.search(r"^  lifecycle \{[^}]*^\s*ignore_changes\s*=\s*\[env\]$", body, re.MULTILINE), name
 
 
 def deploy_steps() -> list[dict[str, object]]:
@@ -254,7 +267,7 @@ def deploy_steps() -> list[dict[str, object]]:
 def test_passwords_are_set_after_the_checked_plan_and_before_migrations() -> None:
     """После плана: отклонённый план пароль не трогает. До миграций: они входят уже новым."""
     ids = [s.get("id") for s in deploy_steps()]
-    assert ids.index("plan") + 1 == ids.index("passwords") == ids.index("migrate") - 1
+    assert ids.index("plan") + 2 == ids.index("pull") + 1 == ids.index("passwords") == ids.index("migrate") - 1
 
     step = next(s for s in deploy_steps() if s.get("id") == "passwords")
     assert str(step["run"]).strip().splitlines()[-1] == f".github/scripts/deploy/{SCRIPT.name}"
@@ -265,3 +278,27 @@ def test_passwords_are_set_after_the_checked_plan_and_before_migrations() -> Non
     assert env["RABBITMQ_PASSWORD"] == "${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}"
     # Брокер на чистом сервере ждём до двух минут; зависший ssh не держит job.
     assert step["timeout-minutes"] == 5
+
+
+def test_the_api_image_is_pulled_before_the_password_window() -> None:
+    """Окно смены — от шага паролей до замены API: pull образа в него не входит."""
+    step = next(s for s in deploy_steps() if s.get("id") == "pull")
+    assert step["env"] == {"API_IMAGE": "${{ needs.image.outputs.image }}", "DOCKER_HOST": "ssh://stand"}
+    assert str(step["run"]).strip().splitlines()[-1] == 'docker pull --quiet "$API_IMAGE"'
+    assert step["timeout-minutes"] == 5
+    migrate = Path(".github/scripts/deploy/migrate.sh").read_text()
+    assert not re.search(r"^\s*docker pull\b", migrate, re.MULTILINE)
+
+
+def test_a_new_user_or_database_stops_the_plan() -> None:
+    """`ignore_changes = [env]` прятал бы и смену пользователя или базы: пароль сменился бы
+    у старой роли, а миграции вошли бы новой. Такую смену plan отклоняет постусловием: при
+    ignore_changes `self.env` — окружение, с которым контейнер создан (проверено на dind)."""
+    for name, keys in (("postgres", ("POSTGRES_USER", "POSTGRES_DB")), ("rabbitmq", ("RABBITMQ_DEFAULT_USER",))):
+        body = container_block(name)
+        post = re.search(r"^    postcondition \{\n(.*?)^    \}", body, re.MULTILINE | re.DOTALL)
+        assert post, name
+        for key in keys:
+            assert re.search(rf'contains\(self\.env, "{key}=\$\{{var\.\w+\}}"\)', post.group(1)), (name, key)
+        assert "PASSWORD" not in post.group(1), "пароль сверять нельзя: его смена — обычный деплой"
+        assert not re.search(r"^\s*replace_triggered_by\s*=", body, re.MULTILINE), "первое создание триггера пересоздало бы базу"

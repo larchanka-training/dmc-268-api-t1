@@ -57,8 +57,21 @@ resource "docker_container" "rabbitmq" {
     "RABBITMQ_DEFAULT_PASS=${var.rabbitmq_password}",
   ]
 
+  # Смена пароля контейнер не трогает, а смену имён (пользователь) ignore_changes
+  # спрятал бы: шаг паролей сменил бы пароль прежней роли, а API и миграции
+  # входили бы новой. Новое имя в заведённом томе и не появится — ни сейчас, ни
+  # после замены контейнера. Поэтому plan падает до изменений на сервере:
+  # self.env при ignore_changes — то, с чем контейнер создан. replace_triggered_by
+  # от terraform_data не годится: первое создание такого ресурса — тоже повод
+  # к замене, и переход на эту конфигурацию пересоздал бы базу (проверено на
+  # dind, #161).
   lifecycle {
     ignore_changes = [env]
+
+    postcondition {
+      condition     = contains(self.env, "RABBITMQ_DEFAULT_USER=${var.rabbitmq_user}")
+      error_message = "rabbitmq_user не совпадают с теми, с которыми заведён контейнер: имена в заведённом томе не меняются. Новое имя — новый том (infra/README.md, «Смена паролей»)."
+    }
   }
 
   volumes {
@@ -73,3 +86,4 @@ resource "docker_container" "rabbitmq" {
     retries  = 5
   }
 }
+

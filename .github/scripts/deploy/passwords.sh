@@ -16,48 +16,49 @@
 # — ничего не меняется. Нет — пароль меняется и вход проверяется снова: не
 # вошёл и теперь — шаг падает, и деплой не идёт дальше.
 #
-# Стоит после проверенного плана и до миграций: они и новый API входят уже
-# новым паролем. Пока полный apply не заменил API, воркер и копии, их открытые
+# Стоит после проверенного плана и pull образа и до миграций: они и новый API
+# входят уже новым паролем, а pull в окно не входит. Пока полный apply не
+# заменил API, воркер и копии, их открытые
 # соединения живут, а новые со старым паролем отклоняются — это окно смены
 # (infra/README.md, «Смена паролей»).
 #
 # Пароль не попадает ни в аргументы (их видно в `ps` на сервере и в логе ssh),
 # ни в вывод: он идёт первой строкой stdin `docker exec -i`, его читает `read`
 # оболочки в контейнере, а дальше — переменная окружения `psql` и stdin
-# `rabbitmqctl`. Упавший ALTER ROLE PostgreSQL записал бы в свой лог строкой
-# STATEMENT, а psql вывел бы строкой LINE — обе с паролем (проверено на
-# pgvector/pgvector:pg18): сессия отключает и то и другое. Тексты, которые
-# уходят в `sh -c`, секретов не содержат.
+# `rabbitmqctl` и `psql` через встроенный `printf`. Открытым текстом на сервер
+# PostgreSQL он не уходит вовсе: `\password` psql без tty читает его из stdin
+# и шлёт только SCRAM-хеш — в лог запросов, в выборку медленных и в
+# `pg_stat_activity.query` (её видит `pg_monitor`, #130) попадает хеш.
+# Тексты, которые уходят в `sh -c`, секретов не содержат.
+#
+# Пароль — только символы, безопасные в URL без кодирования (`openssl rand
+# -hex 24`). Другие ломаются молча: `urlencode` в OpenTofu кодирует пробел как
+# `+`, а SQLAlchemy и pika читают `+` буквально; `rabbitmqctl` обрезает пробелы
+# по краям строки stdin — и при смене, и при проверке входа, так что шаг был
+# бы зелёным, а API не вошёл бы. Такой секрет шаг отклоняет до сервера.
 #
 # Нужны: DOCKER_HOST — ssh://stand (хост из ~/.ssh/config,
 # .github/actions/stand-ssh); PG_PASSWORD и RABBITMQ_PASSWORD — секреты
-# PG_PASSWORD_DMC268_T1 и RABBITMQ_PASSWORD_DMC268_T1, в одну строку.
+# PG_PASSWORD_DMC268_T1 и RABBITMQ_PASSWORD_DMC268_T1.
 set -euo pipefail
 
 : "${DOCKER_HOST:?нужен адрес демона Docker на сервере}"
 
 for name in PG_PASSWORD RABBITMQ_PASSWORD; do
-  value="${!name:-}"
-  if [ -z "$value" ]; then
-    echo "::error::$name пуст: секрет не задан, пароль не меняю"
+  if ! [[ "${!name:-}" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+    echo "::error::$name пуст или с символами вне A-Z a-z 0-9 . _ ~ -: такой пароль не дойдёт до URL подключения как есть. Новый — openssl rand -hex 24; пароли не меняю"
     exit 1
   fi
-  # Пароль — первая строка stdin: перевод строки разрезал бы его.
-  case "$value" in
-    *$'\n'* | *$'\r'*)
-      echo "::error::$name содержит перевод строки: так пароль не передать"
-      exit 1
-      ;;
-  esac
 done
 
 # Скрипт для `sh` контейнера postgres. Роль и база — из его окружения:
 # POSTGRES_USER — роль, которую завёл initdb и под которой входят приложение и
-# миграции. Остаток stdin после пароля — SQL для psql.
+# миграции. `\password` спрашивает пароль дважды; без tty — из stdin.
+# ON_ERROR_STOP — чтобы сбой команды psql стал кодом возврата, а не строкой в
+# выводе; повторный вход ловит и то, что код не покажет.
 # shellcheck disable=SC2016 # переменные раскрывает sh контейнера
 postgres_sh='set -eu
 IFS= read -r NEW_PASSWORD
-export NEW_PASSWORD
 signs_in() {
   PGPASSWORD="$NEW_PASSWORD" psql -X -q -h dmc268-postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
     -tAc "select 1" < /dev/null > /dev/null 2>&1
@@ -66,29 +67,15 @@ if signs_in; then
   echo "postgres: пароль роли $POSTGRES_USER совпадает с секретом"
   exit 0
 fi
-psql -X -q -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+printf "%s %s\n%s\n%s\n" "\\password" "$POSTGRES_USER" "$NEW_PASSWORD" "$NEW_PASSWORD" \
+  | psql -X -q -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" > /dev/null
 if ! signs_in; then
   echo "::error::postgres: роль $POSTGRES_USER не входит новым паролем и после смены"
   exit 1
 fi
 echo "postgres: пароль роли $POSTGRES_USER сменён"'
 
-# \getenv, а не -v: значение в аргументах psql было бы видно в `ps`.
-# track_utility — на случай pg_stat_statements: без него текст ALTER ROLE с
-# паролем лёг бы в статистику запросов; без расширения SET безвреден.
-postgres_sql='\set VERBOSITY terse
-\set SHOW_CONTEXT never
-\getenv role POSTGRES_USER
-\getenv new_password NEW_PASSWORD
-SET log_statement = none;
-SET log_min_error_statement = panic;
-SET pg_stat_statements.track_utility = off;
-ALTER ROLE :"role" PASSWORD :'"'"'new_password'"'"';'
-
-{
-  printf '%s\n' "$PG_PASSWORD"
-  printf '%s\n' "$postgres_sql"
-} | docker exec -i dmc268-postgres sh -c "$postgres_sh"
+printf '%s\n' "$PG_PASSWORD" | docker exec -i dmc268-postgres sh -c "$postgres_sh"
 
 # Скрипт для `sh` контейнера брокера. Пользователь — тот, кого брокер завёл из
 # RABBITMQ_DEFAULT_USER на пустом томе. На чистом сервере брокер только что

@@ -730,12 +730,12 @@ def test_summary_of_migrations_that_failed_before_the_first_revision(tmp_path: P
 
 
 def test_summary_of_a_migrate_step_that_failed_before_alembic(tmp_path: Path) -> None:
-    """Сценарий ревью #220: `tofu output` или pull образа упали — лога alembic нет, но шаг шёл."""
+    """Сценарий ревью #220: `tofu output` упал — лога alembic нет, но шаг шёл (pull — свой шаг с #161)."""
     results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
 
     text = summary(tmp_path, tmp_path / "empty", JOB_STATUS="failure", STEP_RESULTS=results)
 
-    assert "Шаг миграций упал до alembic (`tofu output` или pull образа): схема не менялась." in text
+    assert "Шаг миграций упал до alembic (`tofu output`): схема не менялась." in text
     assert "Шаг миграций не запускался." not in text
 
 

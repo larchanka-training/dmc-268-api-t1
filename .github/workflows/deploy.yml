@@ -248,8 +248,8 @@ jobs:
       # отдаёт ему учётные данные реестра вместе с запросом pull: образ лежит
       # в приватном пакете. Хватает packages: read у GITHUB_TOKEN этого job'а.
       # Сам вход идёт через docker раннера, не стенда: на сервере токен не
-      # остаётся. Скачивает образ только migrate.sh: контейнеры api и worker
-      # tofu создаёт из уже скачанного (infra/app.tf).
+      # остаётся. Скачивает образ только шаг «Скачать образ API»: контейнеры
+      # api и worker tofu создаёт из уже скачанного (infra/app.tf).
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         id: login
         with:
@@ -330,14 +330,28 @@ jobs:
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/plan.sh
 
+      # Единственный pull образа API: миграции запускают его, а полный apply
+      # создаёт из него api и worker (infra/app.tf). Отдельным шагом до смены
+      # паролей: окно смены — от шага паролей до замены API, и pull (холодный —
+      # около минуты) в него не входит (#161). Потолок — 5 мин.
+      - name: Скачать образ API
+        id: pull
+        timeout-minutes: 5
+        env:
+          API_IMAGE: ${{ needs.image.outputs.image }}
+          DOCKER_HOST: ssh://stand
+        run: |
+          .github/scripts/deploy/mark.sh
+          docker pull --quiet "$API_IMAGE"
+
       # Пароли базы и брокера — из текущих секретов (#161): POSTGRES_PASSWORD и
       # RABBITMQ_DEFAULT_PASS действуют только на пустом томе, а контейнеры
       # базы и брокера правку env не видят (ignore_changes в infra/). Секреты не
       # менялись — шаг ничего не меняет. После проверенного плана: отклонённый
-      # план пароль не трогает. До миграций: они и новый API входят уже новым
-      # паролем, а старые API и воркер до полного apply новых соединений не
-      # откроют (окно — infra/README.md, «Смена паролей»). Потолок 5 мин:
-      # брокер на чистом сервере ждём до двух.
+      # план пароль не трогает; после pull — он не входит в окно. До миграций:
+      # они и новый API входят уже новым паролем, а старые API и воркер до
+      # полного apply новых соединений не откроют (окно — infra/README.md,
+      # «Смена паролей»). Потолок 5 мин: брокер на чистом сервере ждём до двух.
       - name: Выставить пароли базы и брокера
         id: passwords
         timeout-minutes: 5
@@ -350,11 +364,11 @@ jobs:
           .github/scripts/deploy/passwords.sh
 
       # Миграции до выката нового кода: упали — полный apply не запускается,
-      # на стенде остаётся прежняя версия API и воркера. Заодно скачивается
-      # образ, из которого полный apply создаст api и worker. Потолок шага —
-      # 10 мин: на запрос у миграций 2 мин statement_timeout, на блокировку —
-      # 5 с lock_timeout (alembic/env.py), остальное — pull образа и повторы
-      # после LockNotAvailable: последний начинается не позже 5 мин от старта
+      # на стенде остаётся прежняя версия API и воркера. Образ уже скачан
+      # шагом «Скачать образ API». Потолок шага — 10 мин: на запрос у миграций
+      # 2 мин statement_timeout, на блокировку — 5 с lock_timeout
+      # (alembic/env.py), остальное — повторы после LockNotAvailable:
+      # последний начинается не позже 5 мин от старта
       # (migrate.sh). Без потолка зависшая миграция держала бы job до его 60 минут.
       - name: Применить миграции
         id: migrate
@@ -451,6 +465,7 @@ jobs:
             diagnostics ${{ steps.diagnostics.outcome }} ${{ steps.diagnostics.conclusion }}
             infra ${{ steps.infra.outcome }} ${{ steps.infra.conclusion }}
             plan ${{ steps.plan.outcome }} ${{ steps.plan.conclusion }}
+            pull ${{ steps.pull.outcome }} ${{ steps.pull.conclusion }}
             passwords ${{ steps.passwords.outcome }} ${{ steps.passwords.conclusion }}
             migrate ${{ steps.migrate.outcome }} ${{ steps.migrate.conclusion }}
             apply ${{ steps.apply.outcome }} ${{ steps.apply.conclusion }}

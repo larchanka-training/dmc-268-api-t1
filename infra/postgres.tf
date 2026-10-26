@@ -73,8 +73,21 @@ resource "docker_container" "postgres" {
     "POSTGRES_DB=${var.postgres_db}",
   ]
 
+  # Смена пароля контейнер не трогает, а смену имён (роль и база) ignore_changes
+  # спрятал бы: шаг паролей сменил бы пароль прежней роли, а API и миграции
+  # входили бы новой. Новое имя в заведённом томе и не появится — ни сейчас, ни
+  # после замены контейнера. Поэтому plan падает до изменений на сервере:
+  # self.env при ignore_changes — то, с чем контейнер создан. replace_triggered_by
+  # от terraform_data не годится: первое создание такого ресурса — тоже повод
+  # к замене, и переход на эту конфигурацию пересоздал бы базу (проверено на
+  # dind, #161).
   lifecycle {
     ignore_changes = [env]
+
+    postcondition {
+      condition     = contains(self.env, "POSTGRES_USER=${var.postgres_user}") && contains(self.env, "POSTGRES_DB=${var.postgres_db}")
+      error_message = "postgres_user и postgres_db не совпадают с теми, с которыми заведён контейнер: имена в заведённом томе не меняются. Новое имя — новый том (infra/README.md, «Смена паролей»)."
+    }
   }
 
   # wal_level=replica и max_wal_senders у PostgreSQL 18 уже такие, какие нужны
@@ -116,3 +129,4 @@ resource "docker_container" "postgres" {
     retries  = 5
   }
 }
+

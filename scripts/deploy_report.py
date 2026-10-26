@@ -111,6 +111,7 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("diagnostics", "Доставки вебхука и сбои воркера с прошлого выката", ("diagnostics",)),
     ("infra", "Поднять базу и брокер", ("infra",)),
     ("plan", "Спланировать и проверить план", ("plan",)),
+    ("pull", "Скачать образ API", ("pull",)),
     ("passwords", "Выставить пароли базы и брокера", ("passwords",)),
     ("migrate", "Применить миграции", ("migrate",)),
     ("apply", "Применить конфигурацию", ("apply",)),
@@ -199,7 +200,7 @@ def plan_command(report_dir: Path, name: str, allowed_by: str | None) -> int:
     for address in recreated:
         print(
             f"::error::план пересоздаёт или удаляет {address}: apply не запускается. "
-            "Деплой не гасит базу и брокер: правка их env, памяти, log_opts или образа — "
+            "Деплой не гасит базу и брокер: правка их command, памяти, log_opts или образа — "
             "ручным запуском `gh workflow run deploy.yml -f allow_stateful_replace=true`. "
             "Пароль базы и брокера замены не требует: его выставляет шаг деплоя "
             "из секрета (infra/README.md, «Смена паролей»)."
@@ -667,8 +668,8 @@ def migrations_section(report_dir: Path, marks: dict[str, float], outcome: str) 
     out = ["### Миграции", ""]
     if not (report_dir / "migrate.log").exists():
         if outcome == "failure":
-            # migrate.log появляется с запуском alembic; до него — tofu output и pull.
-            return [*out, "Шаг миграций упал до alembic (`tofu output` или pull образа): схема не менялась."]
+            # migrate.log появляется с запуском alembic; до него — tofu output.
+            return [*out, "Шаг миграций упал до alembic (`tofu output`): схема не менялась."]
         return [*out, "Шаг миграций не запускался."]
     if outcome == "cancelled":
         # Отмена убивает docker CLI на раннере, а не контейнер на сервере:
