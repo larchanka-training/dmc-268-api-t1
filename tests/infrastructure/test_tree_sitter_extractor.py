@@ -4,6 +4,8 @@
 пересчитаны тем же обходом.
 """
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,7 +17,8 @@ from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
 )
 
-FIXTURES = Path(__file__).parent.parent / "fixtures" / "outline"
+REPO_ROOT = Path(__file__).parent.parent.parent
+FIXTURES = REPO_ROOT / "tests" / "fixtures" / "outline"
 
 CLASS = DefinitionKind.CLASS
 INTERFACE = DefinitionKind.INTERFACE
@@ -237,3 +240,56 @@ def test_nested_function_does_not_pull_in_type_by_parent_name(
         (FUNCTION, "Money"),
         (FUNCTION, "round"),
     ]
+
+
+# Код дочернего процесса: извлечь контур, дважды отсортировать (как `extract`
+# и `select_scopes`) и вывести число определений и все диапазоны строк.
+LARGE_FILE_SCRIPT = """\
+import sys
+from pathlib import Path
+
+from app.domain.code_context import select_scopes
+from app.domain.enums import Language
+from app.infrastructure.parsing.tree_sitter_extractor import TreeSitterDefinitionExtractor
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+outline = TreeSitterDefinitionExtractor().extract(source, Language.PYTHON)
+ordered = sorted(outline.definitions, key=lambda d: (d.line, -d.end_line))
+select_scopes(outline, frozenset({1}))
+select_scopes(outline, frozenset(range(1, source.count("\\n") + 2)))
+print(len(ordered))
+for d in ordered:
+    print(d.line, d.end_line)
+"""
+
+
+def test_large_file_does_not_crash_interpreter() -> None:
+    """Контур файла длиннее 256 строк не роняет процесс (#226).
+
+    В tree-sitter 0.26.0 геттеры `Point.row`/`Point.column` отдают
+    заимствованную ссылку: для строк больше 256 (их int Python не кэширует)
+    число освобождается раньше времени, `Definition.line`/`end_line` указывают
+    на освобождённую память, и следующая сортировка падает с segfault
+    (SIGSEGV: `returncode -11`, в shell — 139).
+    Исправлено в https://github.com/tree-sitter/py-tree-sitter/pull/466.
+
+    Прогон идёт в дочернем процессе: segfault в процессе pytest убил бы весь
+    прогон, а не один тест. Проверка диапазонов ловит испорченные значения,
+    даже когда раскладка памяти не довела до падения.
+    """
+    fixture = FIXTURES / "deploy_report_53b6a28.py"
+    line_count = len(fixture.read_text(encoding="utf-8").splitlines())
+    result = subprocess.run(
+        [sys.executable, "-X", "faulthandler", "-c", LARGE_FILE_SCRIPT, str(fixture)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    count, *ranges = result.stdout.splitlines()
+    assert int(count) == 33
+    for pair in ranges:
+        line, end_line = map(int, pair.split())
+        assert 0 < line <= end_line <= line_count, pair
