@@ -586,6 +586,44 @@ def test_summary_of_a_foreign_lock(tmp_path: Path) -> None:
     assert "Блокировка `1111` — не этого запуска (`dev@laptop`): восстановление её не трогает" in text
 
 
+def test_summary_of_a_failed_recovery_names_the_encrypted_copy(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text("lock=7313173c\nserial=4\nresult=failed\nreason=tofu state push не прошёл\n")
+    (report / "errored.tfstate.enc").write_bytes(b"Salted__")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "> Несохранённое состояние (serial 4) — в артефакте `errored-tfstate` этого прогона" in text
+
+
+def test_summary_of_a_released_dead_apply_lock_warns_about_an_old_state(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text(
+        "lock=1111\nwho=runner@vm-a\noperation=OperationTypeApply\ncreated=2026-10-25T14:20:26Z\nresult=released\n"
+    )
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert ("Снята блокировка `1111` оборвавшегося запуска (`runner@vm-a`, OperationTypeApply, "
+            "2026-10-25T14:20:26Z).") in text
+    assert "> [!WARNING]\n> Состояние в хранилище может быть старше стенда" in text
+
+
+def test_summary_of_a_released_dead_plan_lock(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text(
+        "lock=1111\nwho=runner@vm-a\noperation=OperationTypePlan\ncreated=2026-10-25T14:20:26Z\nresult=released\n"
+    )
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "Снята блокировка `1111` оборвавшегося запуска" in text
+    assert "[!WARNING]" not in text.split("### Состояние OpenTofu", 1)[1].split("###", 1)[0]
+
+
 def test_summary_without_recovery_has_no_state_section(tmp_path: Path) -> None:
     text = summary(tmp_path, tmp_path / "empty", JOB_STATUS="success", STEP_RESULTS=ALL_SUCCESS)
     assert "### Состояние OpenTofu" not in text

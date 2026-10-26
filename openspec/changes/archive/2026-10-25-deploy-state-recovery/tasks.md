@@ -22,3 +22,12 @@
 - [x] 4.2 `tests/test_deploy_report.py`: состав и порядок шагов, summary пропуска и восстановления
 - [x] 4.3 Репетиция на `docker:29-dind`, OpenTofu 1.13.2, RustFS 1.0.3: `docker stop` хранилища посреди apply, `docker pause`, повторный деплой при занятой блокировке
 - [x] 4.4 `infra/README.md`: «Деплой», «Хранилище состояния», «Если деплой упал посреди apply»
+
+## 5. Замечания ревью
+
+- [x] 5.1 `recover-state.sh`: снимать мёртвую блокировку другого раннера (`runner@…`) и свою после обрыва шага (`INTERRUPTED`); у блокировки apply — `::warning::` и предупреждение в summary
+- [x] 5.2 `deploy.yml`: восстановление и после отмены или таймаута (`!success()`, исход `cancelled`), `timeout-minutes: 10`; `s3-tunnel.sh`: `ConnectTimeout=15`, порт после `pkill` — до 15 с с явной ошибкой
+- [x] 5.3 Зашифрованная копия `errored.tfstate` (`openssl enc`, пароль хранилища) и шаг `state_artifact` с `retention-days: 1`
+- [x] 5.4 Сверка serial и lineage с `tofu state pull` перед записью; текст про serial в скрипте и README
+- [x] 5.5 Явная ошибка, если в адресе хранилища нет порта; тест на неснятую блокировку (`UNLOCK_EXIT=1`)
+- [x] 5.6 `concurrency` группы `deploy` — `queue: max`

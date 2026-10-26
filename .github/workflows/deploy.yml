@@ -19,10 +19,17 @@ permissions:
   contents: read
 
 # Второй деплой ждёт первый, а не отменяет его: отменённый `tofu apply`
-# оставляет состояние заблокированным и стенд на полпути.
+# оставляет состояние заблокированным и стенд на полпути. Группа одна на оба
+# триггера, поэтому деплои идут строго по одному — на этом стоит снятие
+# блокировки другого раннера в recover-state.sh: её держал запуск, который уже
+# кончился. `queue: max`, как у push в ci.yml: при `queue: single` в группе
+# ждёт один прогон, и перезапуск старого («Re-run failed jobs») отменил бы
+# ждущий прогон вершины. Устаревшие прогоны из очереди дёшево пропускают gate
+# и check-tip.sh.
 concurrency:
   group: deploy
   cancel-in-progress: false
+  queue: max
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
@@ -374,21 +381,56 @@ jobs:
       # infra/errored.tfstate раннера, блокировка — в бакете, и следующий
       # деплой упёрся бы в неё, а после force-unlock — в старое состояние.
       # recover-state.sh заново открывает туннель, записывает состояние и
-      # снимает свою блокировку; не вышло — `::error::` с инструкцией
-      # (infra/README.md, «Если деплой упал посреди apply»). Ничего не
-      # осталось (упал healthcheck, а не связь) — шаг ничего не меняет.
+      # снимает свою блокировку и мёртвую блокировку прежнего деплоя; не
+      # вышло — `::error::` с инструкцией (infra/README.md, «Если деплой упал
+      # посреди apply»). Ничего не осталось (упал healthcheck, а не связь) —
+      # шаг ничего не меняет.
+      #
+      # Идёт и после отмены или таймаута job'а: у оборванного шага исход
+      # `cancelled`, и `failure()` тогда ложно — отсюда `!success()` и оба
+      # исхода. Убитый tofu `errored.tfstate` не пишет, поэтому INTERRUPTED:
+      # снятая тогда своя блокировка — с предупреждением, что состояние могло
+      # не записаться. Сколько времени GitHub даёт шагам после отмены, не
+      # документировано: не успел — блокировку снимет следующий деплой.
+      #
+      # Потолок шага — сумма ожиданий recover-state.sh: порт до 15 с, ssh до
+      # 15 с, хранилище до 120 с, блокировка, pull, push и unlock до 60, 60,
+      # 120 и 60 с — ≈ 7,7 мин.
       - name: Восстановить состояние OpenTofu
         id: recover
         if: >-
-          failure() && (steps.infra.outcome == 'failure' ||
-          steps.plan.outcome == 'failure' || steps.apply.outcome == 'failure')
+          !success() && (
+          steps.infra.outcome == 'failure' || steps.infra.outcome == 'cancelled' ||
+          steps.plan.outcome == 'failure' || steps.plan.outcome == 'cancelled' ||
+          steps.apply.outcome == 'failure' || steps.apply.outcome == 'cancelled')
+        timeout-minutes: 10
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
           AWS_DEFAULT_REGION: us-east-1
+          INTERRUPTED: >-
+            ${{ steps.infra.outcome == 'cancelled' || steps.plan.outcome == 'cancelled' ||
+            steps.apply.outcome == 'cancelled' }}
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/recover-state.sh
+
+      # Восстановление не вышло, а несохранённое состояние было: раннер унесёт
+      # его с собой. recover-state.sh кладёт его копию, зашифрованную паролем
+      # хранилища (AES-256, PBKDF2), — она и уходит артефактом на сутки.
+      # Открытым текстом состояние не загружается никогда: в нём пароли, а
+      # репозиторий публичный. Расшифровка — infra/README.md, «Если деплой
+      # упал посреди apply».
+      - name: Сохранить зашифрованное несохранённое состояние
+        id: state_artifact
+        if: >-
+          !success() && (steps.recover.outcome == 'failure' || steps.recover.outcome == 'cancelled')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: errored-tfstate
+          path: ${{ runner.temp }}/deploy-report/errored.tfstate.enc
+          retention-days: 1
+          if-no-files-found: ignore
 
       # От провайдера в логе только «container failed to be in healthy state»,
       # а проверки ниже после упавшего apply не идут: причину показывает этот шаг.
@@ -468,6 +510,7 @@ jobs:
             migrate ${{ steps.migrate.outcome }} ${{ steps.migrate.conclusion }}
             apply ${{ steps.apply.outcome }} ${{ steps.apply.conclusion }}
             recover ${{ steps.recover.outcome }} ${{ steps.recover.conclusion }}
+            state_artifact ${{ steps.state_artifact.outcome }} ${{ steps.state_artifact.conclusion }}
             api_logs ${{ steps.api_logs.outcome }} ${{ steps.api_logs.conclusion }}
             check_api ${{ steps.check_api.outcome }} ${{ steps.check_api.conclusion }}
             check_worker ${{ steps.check_worker.outcome }} ${{ steps.check_worker.conclusion }}

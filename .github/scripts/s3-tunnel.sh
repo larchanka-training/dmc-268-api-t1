@@ -40,14 +40,22 @@ mkdir -p "$report_dir"
 forward="${port}:127.0.0.1:${port}"
 pkill -f "^bash .*s3-watchdog\.sh ${port}\$" 2>/dev/null || true
 pkill -f "^ssh .* -L ${forward//./\\.} stand\$" 2>/dev/null || true
-for _ in $(seq 1 20); do
-  (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null || break
+# Старый ssh может умирать не сразу: ждём порт до 15 с. Не освободился —
+# внятная ошибка, а не «Address in use» от нового ssh.
+busy=1
+for _ in $(seq 1 60); do
+  (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null || { busy=""; break; }
   sleep 0.25
 done
+if [ -n "$busy" ]; then
+  echo "::error::порт ${port} занят и через 15 с после закрытия прежнего туннеля: проверьте, кто его слушает (ss -ltnp)"
+  exit 1
+fi
 
 # Одной строкой: tests/test_stand_ssh.py ищет `ssh … -L` без ControlPath=none
-# построчно.
-ssh -o ControlPath=none -o ServerAliveCountMax=12 -o ExitOnForwardFailure=yes -f -N -L "$forward" stand
+# построчно. ConnectTimeout — как у ssh в s3-backend: туннель открывают и
+# тогда, когда связь пропадала, и без него ssh ждал бы системный TCP-таймаут.
+ssh -o ControlPath=none -o ConnectTimeout=15 -o ServerAliveCountMax=12 -o ExitOnForwardFailure=yes -f -N -L "$forward" stand
 
 # Ждём ответа хранилища, а не открытого порта: порт на петле слушает сам ssh,
 # и он открыт, даже когда хранилище на сервере лежит, — ошибка всплыла бы
