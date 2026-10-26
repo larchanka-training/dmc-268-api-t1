@@ -232,8 +232,8 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
   описании пул-реквеста. Повтор — новым запуском, а не Re-run: у повторной попытки флага нет.
 
 Пароль базы, брокера или `replicator` меняется обычным деплоем: новый секрет
-(`openssl rand -hex 24 | gh secret set <СЕКРЕТ>`; символы вне `A-Z a-z 0-9 . _ ~ -` шаг
-отклоняет — они ломаются в URL подключения) и `gh workflow run deploy.yml --ref develop`, без
+(например, `openssl rand -hex 24 | gh secret set <СЕКРЕТ>`; пустой пароль, пробелы, таб, перевод
+строки и не-ASCII шаг отклоняет — они ломаются в URL подключения) и `gh workflow run deploy.yml --ref develop`, без
 флага. Пароль выставляет шаг «Выставить пароли базы и брокера»; проверка и откат —
 [`infra/README.md`](../../infra/README.md), «Смена паролей».
 

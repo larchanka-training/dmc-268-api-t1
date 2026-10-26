@@ -80,9 +80,13 @@ esac
 # Без пауз: подложный await_startup отвечает сразу.
 FAKE_SLEEP = "#!/usr/bin/env bash\nexit 0\n"
 
-# Пароли — только безопасные в URL символы: другие passwords.sh отклоняет.
-OLD_PG, NEW_PG = "old-pg-pass", "N3w.pg_pa~ss-0"
-OLD_RABBIT, NEW_RABBIT = "old-rabbit", "N3w.r4bbit_pa~ss-1"
+# Пароли со всеми классами печатного ASCII: urlencode кодирует их в %XX, и
+# SQLAlchemy и pika декодируют обратно верно (проверено end-to-end на dind).
+OLD_PG, NEW_PG = "old-pg-pass", "x'y\"z\\$"
+OLD_RABBIT, NEW_RABBIT = "old-rabbit", "a+b/c=d"
+
+# Допустимые пароли (0x21–0x7E): последний — `openssl rand -base64 24`.
+ACCEPTED = ("a+b/c=d", "p@ss:w%rd", "x'y\"z\\$", "q1Zr+8m/0KxV3aYw9bT2nC6dE4fH7jLs")
 
 
 def run(
@@ -211,12 +215,13 @@ def test_a_broker_that_never_starts_stops_the_deploy(tmp_path: Path) -> None:
     assert (state / "rabbit").read_text() == OLD_RABBIT
 
 
-def test_a_password_unsafe_in_a_url_is_rejected_before_the_server(tmp_path: Path) -> None:
+def test_a_password_with_whitespace_or_non_ascii_is_rejected_before_the_server(tmp_path: Path) -> None:
     """`urlencode` в tofu кодирует пробел как `+`, а SQLAlchemy и pika читают `+` буквально;
     `rabbitmqctl` обрезает пробелы по краям stdin. Такой пароль шаг выставил бы, а API не вошёл бы."""
     for name, value in (
-        ("PG_PASSWORD", ""), ("PG_PASSWORD", "with space"), ("PG_PASSWORD", "a+b"),
-        ("RABBITMQ_PASSWORD", " edge"), ("RABBITMQ_PASSWORD", "a\nb"), ("RABBITMQ_PASSWORD", "p@ss/w:rd"),
+        ("PG_PASSWORD", ""), ("PG_PASSWORD", "with space"), ("RABBITMQ_PASSWORD", " edge"),
+        ("RABBITMQ_PASSWORD", "edge "), ("PG_PASSWORD", "tab\there"), ("RABBITMQ_PASSWORD", "a\nb"),
+        ("PG_PASSWORD", "pass\u00e9"),
     ):
         (tmp_path / "calls").unlink(missing_ok=True)
         result, _ = run(tmp_path, **{name: value})
@@ -224,6 +229,17 @@ def test_a_password_unsafe_in_a_url_is_rejected_before_the_server(tmp_path: Path
         assert result.returncode != 0, (name, value)
         assert f"::error::{name}" in result.stdout, (name, value)
         assert calls(tmp_path) == "", (name, value)
+
+
+def test_printable_ascii_passwords_reach_both(tmp_path: Path) -> None:
+    """`+`, `/`, `=`, `@`, `:`, `%`, кавычки и `\\` проходят: base64-секреты стенда не ломаются."""
+    for value in ACCEPTED:
+        result, state = run(tmp_path, PG_PASSWORD=value, RABBITMQ_PASSWORD=value)
+
+        assert result.returncode == 0, (value, result.stdout + result.stderr)
+        assert (state / "pg").read_text() == value
+        assert (state / "rabbit").read_text() == value
+        assert value not in calls(tmp_path)
 
 
 # --- конфигурация и раскладка job'а ------------------------------------------
