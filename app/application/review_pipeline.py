@@ -273,7 +273,6 @@ def run_review(
             vcs=vcs_gateway,
             now=now(),
             new_id=new_id,
-            diff_max_bytes=context_limits.diff_max_bytes,
         )
         steps.finish()
 

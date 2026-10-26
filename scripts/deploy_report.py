@@ -21,7 +21,12 @@ ubuntu-latest), как у `check_openspec_archived.py`:
   события Docker во время apply и состояние нового контейнера (`apply.sh`);
   `<файл>.error` рядом — сервер не ответил (код ssh или timeout);
 - `migrate.log` — вывод `alembic upgrade head` (`migrate.sh`);
-- `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`).
+- `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`);
+- `stale-tip` — вершина develop, если коммит прогона уже не она и деплой
+  пропущен (`check-tip.sh`);
+- `state-recovery` — итог восстановления состояния OpenTofu после обрыва
+  (`recover-state.sh`), строки `ключ=значение`; `s3-watchdog.log` — когда
+  сторож закрыл туннель к зависшему хранилищу (`.github/scripts/s3-watchdog.sh`).
 
 Нет файла — нет и раздела, а не падение: summary пишется и после упавшего шага.
 
@@ -41,21 +46,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Тома с данными: их уничтожение — потеря базы, очередей, реплики или
-# телеметрии. Замена тома — тоже уничтожение (delete, create). Адреса без
-# [0]: тома стека наблюдаемости создаются без count (иначе откат флага
-# observability_enabled падал бы на prevent_destroy — замечание ревью
-# PR #130), а сравнение адресов точное.
-PROTECTED = (
-    "docker_volume.postgres",
-    "docker_volume.rabbitmq",
-    "docker_volume.postgres_replica",
-    "docker_volume.postgres_backups",
-    "docker_volume.loki",
-    "docker_volume.tempo",
-    "docker_volume.prometheus",
-    "docker_volume.grafana",
-)
+# Все тома стека — с данными (база, реплика, бэкапы, очереди): их уничтожение —
+# потеря данных, замена тома — тоже уничтожение (delete, create). Сторож
+# отклоняет delete у любого docker_volume, а не по списку адресов или имён:
+# ресурс, переименованный без `moved` (и с новым именем тома), уничтожается по
+# старому адресу, которого в списке уже нет, и prevent_destroy там тоже нет.
+# Сменить том — `removed` с `destroy = false`: план выйдет `forget`, а не
+# `delete` (infra/README.md).
+VOLUME = "docker_volume"
 
 # Действия плана (`resource_changes[].change.actions` у OpenTofu 1.13.2) —
 # в колонки, как в строке `Plan:` у tofu, но замена отдельно, а не в add и
@@ -76,13 +74,15 @@ UNCHANGED = (("no-op",), ("read",))
 # `uses` засечку не ставят, их время входит в предыдущую засечку: так все они
 # собраны в «Подготовку» до первого шага со скриптом.
 STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("start", "Подготовка: checkout, SSH, OpenTofu, хранилище состояния, вход в ghcr",
-     ("start", "checkout", "ssh", "tofu", "s3", "login")),
+    ("start", "Подготовка: checkout", ("start", "checkout")),
+    ("tip", "Сверить коммит с вершиной develop; SSH, OpenTofu, хранилище состояния, вход в ghcr",
+     ("tip", "ssh", "tofu", "s3", "login")),
     ("diagnostics", "Доставки вебхука и сбои воркера с прошлого выката", ("diagnostics",)),
     ("infra", "Поднять базу и брокер", ("infra",)),
     ("plan", "Спланировать и проверить план", ("plan",)),
     ("migrate", "Применить миграции", ("migrate",)),
     ("apply", "Применить конфигурацию", ("apply",)),
+    ("recover", "Восстановить состояние OpenTofu", ("recover", "state_artifact")),
     ("api_logs", "Логи API после упавшего apply", ("api_logs",)),
     ("check_api", "Проверить, что API жив (через туннель)", ("check_api",)),
     ("check_worker", "Проверить, что воркер работает", ("check_worker",)),
@@ -122,11 +122,11 @@ def plan_changes(plan: dict[str, Any]) -> dict[str, dict[str, int]]:
 
 
 def protected_deletes(plan: dict[str, Any]) -> list[str]:
-    """Защищённые ресурсы, которые план уничтожает или заменяет."""
+    """Тома, которые план уничтожает или заменяет, — по какому бы адресу они ни шли."""
     return [
         rc["address"]
         for rc in plan.get("resource_changes", [])
-        if rc["address"] in PROTECTED and "delete" in rc["change"]["actions"]
+        if rc["type"] == VOLUME and "delete" in rc["change"]["actions"]
     ]
 
 
@@ -436,7 +436,11 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
     run_url = f"{env.get('GITHUB_SERVER_URL', '')}/{env.get('GITHUB_REPOSITORY', '')}/actions/runs/{env.get('GITHUB_RUN_ID', '')}"
     name, tag, digest = image_parts(env.get("IMAGE", ""))
 
+    stale_tip = read(report_dir / "stale-tip").strip()
+    skipped = bool(stale_tip) and result == "success"
     headline = {"success": "успешно", "failure": "упал", "cancellation": "отменён"}.get(result, result)
+    if skipped:
+        headline = f"пропущен: вершина develop уже `{stale_tip}`"
     if failed and result != "success":
         headline += f" на шаге «{failed[1]}»"
     out = [f"## Деплой: {headline}", "", "| | Ключ | Значение |", "| --- | --- | --- |"]
@@ -462,7 +466,14 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
             f"| Длительность job'а, с | `dmc268.deploy.duration` | {seconds(marks[SUMMARY_MARK] - marks['start'])} |"
         )
 
+    if skipped:
+        out += ["", (f"Коммит прогона уже не вершина develop (`{stale_tip}`): стенд не трогали, "
+                "новый коммит выкатывает свой прогон."), "", *steps_section(steps, marks)]
+        return "\n".join(out) + "\n"
+
     out += ["", *downtime_section(report_dir), "", *plan_section(report_dir)]
+    if recovery := state_section(report_dir):
+        out += ["", *recovery]
     out += ["", *migrations_section(report_dir, marks), "", *disk_section(report_dir)]
     out += ["", *steps_section(steps, marks)]
     return "\n".join(out) + "\n"
@@ -516,6 +527,57 @@ def downtime_section(report_dir: Path) -> list[str]:
     return out
 
 
+def read_pairs(text: str) -> dict[str, str]:
+    """Строки `ключ=значение`; значение — до конца строки."""
+    pairs = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            pairs[key.strip()] = value.strip()
+    return pairs
+
+
+def state_section(report_dir: Path) -> list[str]:
+    """Восстановление состояния после обрыва; нет файла — шаг не запускался, раздела нет."""
+    if not (report_dir / "state-recovery").exists():
+        return []
+    r = read_pairs(read(report_dir / "state-recovery"))
+    out = ["### Состояние OpenTofu", ""]
+    watchdog = read(report_dir / "s3-watchdog.log").strip().splitlines()
+    if watchdog:
+        out += [f"Сторож закрыл туннель к хранилищу: {watchdog[-1]}.", ""]
+    lock = f"блокировка `{r['lock']}`" if r.get("lock") else "блокировка"
+    result = r.get("result", "")
+    if result == "restored":
+        return [*out, (f"Состояние восстановлено: несохранённое состояние (`errored.tfstate`, serial {r.get('serial', '?')}) "
+                f"записано в хранилище, {lock} снята. Перезапуск деплоя доделает выкат без ручных действий.")]
+    if result == "unlocked":
+        return [*out, f"Состояние было записано, не снялась только {lock}: снята. Перезапуск деплоя доделает выкат без ручных действий."]
+    if result == "foreign":
+        return [*out, (f"{lock[0].upper() + lock[1:]} — не этого запуска (`{r.get('who', '?')}`): восстановление её не трогает, "
+                "несохранённого состояния этот запуск не оставил.")]
+    if result == "none":
+        return [*out, "Несохранённого состояния и блокировки этого запуска нет: восстанавливать нечего."]
+    if result == "released":
+        # Блокировку оборванного запуска (другого раннера или этого, убитого
+        # отменой) сняли, не зная, записалось ли состояние под ней.
+        who = f"`{r['who']}`, " if r.get("who") else ""
+        out.append(f"Снята {lock} оборвавшегося запуска ({who}{r.get('operation', '?')}, {r.get('created', '?')}).")
+        if r.get("operation") == "OperationTypePlan":
+            return [*out[:-1], out[-1] + " План состояние не пишет: оно не пострадало."]
+        return [*out, "", "> [!WARNING]",
+                ("> Состояние в хранилище может быть старше стенда: записалось ли оно под этой блокировкой, "
+                 "неизвестно. Если план перезапуска создаёт контейнеры, которые на сервере уже есть, — "
+                 "`infra/README.md`, «Если деплой упал посреди apply», шаг 4.")]
+    out += ["> [!CAUTION]", f"> Состояние не восстановлено: {r.get('reason', 'шаг оборвался')}.",
+            ("> Пока его не восстановить, следующий деплой упрётся в блокировку или в старое состояние. "
+             "Что делать — `infra/README.md`, «Если деплой упал посреди apply».")]
+    if (report_dir / "errored.tfstate.enc").exists():
+        out.append(f"> Несохранённое состояние (serial {r.get('serial', '?')}) — в артефакте `errored-tfstate` этого "
+                   "прогона, зашифрованное ключом `STATE_BACKUP_KEY_DMC268_T1`; артефакт живёт сутки.")
+    return out
+
+
 def plan_section(report_dir: Path) -> list[str]:
     out = ["### План OpenTofu", ""]
     plan = read_json(report_dir / "plan.json")
@@ -532,7 +594,7 @@ def plan_section(report_dir: Path) -> list[str]:
                 + ", ".join(f"`{a}`" for a in plan["protected_deletes"])
                 + " (`dmc268.deploy.plan.protected_deletes`)."]
     else:
-        out += ["", "Тома данных (`" + "`, `".join(PROTECTED) + "`) план не уничтожает."]
+        out += ["", "Тома данных план не уничтожает."]
     return out
 
 

@@ -38,11 +38,15 @@ def finding_json(
 
 
 def review_response(
-    *findings: dict[str, Any], tokens: int = 0, model: str = "m"
+    *findings: dict[str, Any],
+    tokens: int = 0,
+    model: str = "m",
+    thread_follow_ups: tuple[dict[str, Any], ...] = (),
 ) -> LlmResponse[ReviewOutput]:
-    content = ReviewOutput.model_validate(
-        {"schemaVersion": "1", "findings": list(findings), "summary": SUMMARY}
-    )
+    payload: dict[str, Any] = {"schemaVersion": "1", "findings": list(findings), "summary": SUMMARY}
+    if thread_follow_ups:
+        payload["threadFollowUps"] = list(thread_follow_ups)
+    content = ReviewOutput.model_validate(payload)
     return LlmResponse(model=model, tokens_used=tokens, content=content)
 
 

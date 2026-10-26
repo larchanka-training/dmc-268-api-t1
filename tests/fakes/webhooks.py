@@ -155,21 +155,6 @@ class FakeVcs:
             raise self.error
         return PullRequestReviewPublication(summary_provider_comment_id=None, inline_comments=())
 
-    def reply_to_review_comment(
-        self,
-        repo_full_name: str,
-        pr_number: int,
-        installation_id: int,
-        provider_comment_id: str,
-        body: str,
-    ) -> str:
-        self.calls.append(
-            ("reply", repo_full_name, pr_number, installation_id, provider_comment_id)
-        )
-        if self.error is not None:
-            raise self.error
-        return "fake-reply-id"
-
     def fetch_review_threads_state(
         self,
         repo_full_name: str,
@@ -181,17 +166,6 @@ class FakeVcs:
         if self.error is not None:
             raise self.error
         return {cid: ReviewThreadState(resolved=False, line=None) for cid in provider_comment_ids}
-
-    def resolve_review_thread_for_comment(
-        self,
-        repo_full_name: str,
-        pr_number: int,
-        installation_id: int,
-        provider_comment_id: str,
-    ) -> None:
-        self.calls.append(("resolve", repo_full_name, pr_number, provider_comment_id))
-        if self.error is not None:
-            raise self.error
 
     def set_merge_gate_check(
         self,

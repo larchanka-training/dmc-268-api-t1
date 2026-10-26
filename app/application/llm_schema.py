@@ -26,7 +26,6 @@ from app.application.ports.llm_gateway import (
     LlmReviewResult,
     LlmReviewSummary,
     LlmRuleRef,
-    LlmThreadFollowUp,
 )
 from app.domain.entities import DiffAnchor, Verdict
 from app.domain.enums import (
@@ -83,6 +82,9 @@ class ThreadAnchorOutput(_Output):
     category: FindingCategory
 
 
+# Поле принимается ради формы (лишнее поле - ошибка), но в `LlmReviewResult` не
+# попадает: модель не видит открытых тредов, и её follow-up мог прийти только по
+# подсказке из диффа, который пишет автор PR (#73).
 class ThreadFollowUpOutput(_Output):
     anchor: ThreadAnchorOutput
     status: ThreadFollowUpStatus
@@ -119,7 +121,7 @@ def _anchor(file_path: str, side: DiffSide, line: int) -> DiffAnchor:
 
 
 def to_review_result(output: ReviewOutput, *, model: str, tokens_used: int) -> LlmReviewResult:
-    """Перевести проверенный ответ ревью в структуры приложения."""
+    """Перевести проверенный ответ ревью в структуры приложения; `threadFollowUps` отбрасываются."""
     return LlmReviewResult(
         model=model,
         tokens_used=tokens_used,
@@ -139,16 +141,6 @@ def to_review_result(output: ReviewOutput, *, model: str, tokens_used: int) -> L
             problem=output.summary.problem,
             positives=output.summary.positives,
             effort=output.summary.effort,
-        ),
-        thread_follow_ups=tuple(
-            LlmThreadFollowUp(
-                anchor=_anchor(t.anchor.file_path, t.anchor.side, t.anchor.line),
-                category=t.anchor.category,
-                status=t.status,
-                reply=t.reply,
-                resolve_thread=t.resolve_thread,
-            )
-            for t in output.thread_follow_ups
         ),
     )
 

@@ -34,7 +34,7 @@ class VcsFileTooLargeError(VcsError):
 
     Не сбой VCS, а исход лимита — вызывающий ловит его раньше `VcsError`
     (правила — статус `too_large`, AST — пропуск файла, дифф прогона —
-    `DiffTooLargeError`, инкрементальный дифф тредов — изменение не подтверждено).
+    `DiffTooLargeError`).
     """
 
 
