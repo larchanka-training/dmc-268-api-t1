@@ -1,11 +1,7 @@
-"""Текст комментариев, публикуемых на хостинг (шапка severity/category и ответы в тред)."""
+"""Текст комментариев, публикуемых на хостинг: инлайн-замечание и сводка."""
 
 from app.domain.entities import Finding
-from app.domain.enums import (
-    FindingCategory,
-    FindingSeverity,
-    ThreadFollowUpStatus,
-)
+from app.domain.enums import FindingCategory, FindingSeverity
 
 _SEVERITY_LABEL: dict[FindingSeverity, str] = {
     FindingSeverity.CRITICAL: "🔴 Критично",
@@ -55,30 +51,3 @@ def format_summary_comment(problem: str, positives: tuple[str, ...], effort: str
     lines.append(f"**Объём доработки:** {effort}")
     return "\n".join(lines)
 
-
-def format_thread_reply(
-    status: ThreadFollowUpStatus,
-    reply: str,
-    *,
-    severity: FindingSeverity,
-) -> str:
-    """Ответ бота в существующий тред на повторном прогоне."""
-    if status == ThreadFollowUpStatus.FIXED:
-        prefix = "✅ Исправление подтверждено, обсуждение закрыто"
-    elif status == ThreadFollowUpStatus.STILL_RELEVANT:
-        prefix = "⏳ Замечание ещё актуально"
-    elif status == ThreadFollowUpStatus.ACCEPTED_RISK:
-        prefix = "🤝 Аргументация принята к сведению"
-    else:
-        prefix = "ℹ️ Замечание снято (код изменился)"
-
-    body = f"{prefix}\n\n{reply.strip()}"
-    if status == ThreadFollowUpStatus.ACCEPTED_RISK and severity in (
-        FindingSeverity.CRITICAL,
-        FindingSeverity.HIGH,
-    ):
-        body += (
-            "\n\n*Замечания уровня critical/major автоматически не закрываются "
-            "по аргументации — при согласии закройте обсуждение вручную.*"
-        )
-    return body

@@ -471,7 +471,7 @@ def test_apply_runs_the_saved_plan_and_collects_the_api_containers(tmp_path: Pat
 
     assert result.returncode == 0, result.stdout + result.stderr
     calls = (tmp_path / "calls").read_text()
-    assert "-chdir=infra apply -input=false -no-color tfplan" in calls
+    assert "-chdir=infra apply -input=false -no-color -lock-timeout=2m tfplan" in calls
     assert (report / "api-old-id").read_text() == (FIXTURES / "api-old-id").read_text()
     assert json.loads((report / "api-new.json").read_text())["Id"].startswith("a4964462")
     assert "health_status: healthy" in (report / "api-events.jsonl").read_text()
@@ -1164,15 +1164,6 @@ def test_summary_removes_a_targeted_plan_left_by_a_killed_step(tmp_path: Path) -
     assert not (root / "infra" / "infra.tfplan").exists()
 
 
-def test_targeted_plan_and_apply_wait_for_a_short_foreign_lock() -> None:
-    """Как plan.sh и apply.sh в #215: чужая короткая блокировка не роняет деплой сразу."""
-    script = commands((SCRIPTS / "infra.sh").read_text())
-    for verb in ("plan", "apply"):
-        command = re.search(rf"^tofu -chdir=infra {verb}\b(?:[^\n]*\\\n)*[^\n]*$", script, re.MULTILINE)
-        assert command, verb
-        assert "-lock-timeout=2m" in command.group(0), verb
-
-
 def test_migrate_step_has_a_timeout() -> None:
     """Зависшая миграция держала бы job до его 60 минут, а блокировки — на горячих таблицах."""
     migrate = next(s for s in deploy_steps() if s.get("id") == "migrate")
@@ -1183,6 +1174,149 @@ def test_infra_step_runs_the_checked_targeted_plan() -> None:
     infra = next(s for s in deploy_steps() if s.get("id") == "infra")
     assert str(infra["run"]).strip().splitlines()[-1] == ".github/scripts/deploy/infra.sh"
     assert "tofu apply" not in str(infra["run"])
+
+
+def test_summary_of_a_skipped_stale_commit(tmp_path: Path) -> None:
+    """Перезапуск устаревшего прогона: зелёный job, стенд не тронут, в summary — почему."""
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "stale-tip").write_text("b" * 40 + "\n")
+    results = re.sub(r"^(?!start|checkout|tip)(\w+) success success$", r"\1 skipped skipped", ALL_SUCCESS, flags=re.MULTILINE)
+
+    text = summary(tmp_path, report, JOB_STATUS="success", STEP_RESULTS=results)
+
+    assert text.startswith(f"## Деплой: пропущен: вершина develop уже `{'b' * 40}`\n")
+    assert "стенд не трогали" in text
+    assert "### План OpenTofu" not in text
+    assert "| Применить конфигурацию | `skip` | — |" in text
+
+
+def test_summary_of_a_restored_state(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text("lock=7313173c\nserial=4\nresult=restored\n")
+    (report / "s3-watchdog.log").write_text("2026-10-25T14:31:00Z хранилище не отвечает 120 с: туннель закрыт\n")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "### Состояние OpenTofu" in text
+    assert "Состояние восстановлено: несохранённое состояние (`errored.tfstate`, serial 4)" in text
+    assert "блокировка `7313173c` снята" in text
+    assert "Сторож закрыл туннель к хранилищу: 2026-10-25T14:31:00Z хранилище не отвечает 120 с" in text
+
+
+def test_summary_of_a_failed_recovery_points_to_the_instruction(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text("lock=7313173c\nresult=failed\nreason=хранилище не ответило за 120 с\n")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "> [!CAUTION]\n> Состояние не восстановлено: хранилище не ответило за 120 с." in text
+    assert "«Если деплой упал посреди apply»" in text
+
+
+def test_summary_of_a_foreign_lock(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text("lock=1111\nwho=dev@laptop\nresult=foreign\n")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "Блокировка `1111` — не этого запуска (`dev@laptop`): восстановление её не трогает" in text
+
+
+def test_summary_of_a_failed_recovery_names_the_encrypted_copy(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text("lock=7313173c\nserial=4\nresult=failed\nreason=tofu state push не прошёл\n")
+    (report / "errored.tfstate.enc").write_bytes(b"Salted__")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "> Несохранённое состояние (serial 4) — в артефакте `errored-tfstate` этого прогона" in text
+
+
+def test_summary_of_a_released_dead_apply_lock_warns_about_an_old_state(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text(
+        "lock=1111\nwho=runner@vm-a\noperation=OperationTypeApply\ncreated=2026-10-25T14:20:26Z\nresult=released\n"
+    )
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert ("Снята блокировка `1111` оборвавшегося запуска (`runner@vm-a`, OperationTypeApply, "
+            "2026-10-25T14:20:26Z).") in text
+    assert "> [!WARNING]\n> Состояние в хранилище может быть старше стенда" in text
+
+
+def test_summary_of_a_released_dead_plan_lock(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text(
+        "lock=1111\nwho=runner@vm-a\noperation=OperationTypePlan\ncreated=2026-10-25T14:20:26Z\nresult=released\n"
+    )
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "Снята блокировка `1111` оборвавшегося запуска" in text
+    assert "[!WARNING]" not in text.split("### Состояние OpenTofu", 1)[1].split("###", 1)[0]
+
+
+def test_summary_of_nothing_to_recover_has_no_state_section(tmp_path: Path) -> None:
+    """Ревью #220: отказ сторожа в infra.sh роняет шаг infra, и recover идёт — но восстанавливать нечего.
+
+    Раздел «восстанавливать нечего» рядом с отказом сторожа только сбивает: его нет.
+    """
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text("result=none\n")
+    results = ALL_SUCCESS.replace("infra success success", "infra failure failure")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results)
+
+    assert "### Состояние OpenTofu" not in text
+    assert "восстанавливать нечего" not in text
+
+
+def test_summary_of_nothing_to_recover_keeps_the_watchdog_note(tmp_path: Path) -> None:
+    """Сторож хранилища сработал — это стоит знать, даже если восстанавливать нечего."""
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "state-recovery").write_text("result=none\n")
+    (report / "s3-watchdog.log").write_text("2026-10-25T14:31:00Z хранилище не отвечает 120 с: туннель закрыт\n")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "Сторож закрыл туннель к хранилищу" in text
+
+
+def test_recovery_after_a_manual_override_asks_for_a_new_dispatch(tmp_path: Path) -> None:
+    """Ревью #220: Re-run повторяет inputs, но флаг — только у первой попытки: доделает выкат новый запуск."""
+    for result in ("lock=7313173c\nserial=4\nresult=restored\n", "lock=7313173c\nresult=unlocked\n"):
+        report = tmp_path / result.splitlines()[-1].split("=")[1]
+        report.mkdir()
+        (report / "state-recovery").write_text(result)
+
+        text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=ALL_SUCCESS, ALLOW_STATEFUL_REPLACE="true")
+
+        assert "Перезапуск деплоя доделает выкат" not in text, result
+        assert "`gh workflow run deploy.yml --ref develop -f allow_stateful_replace=true`" in text, result
+        assert "Re-run" in text, result
+
+
+def test_summary_knows_whether_this_attempt_had_the_override() -> None:
+    """Флаг в summary — то же выражение, что у сторожа: у Re-run его нет, и подсказка про Re-run верна."""
+    steps = {s.get("id"): s for s in deploy_steps()}
+    infra_env, summary_env = steps["infra"]["env"], steps[deploy_report.SUMMARY_MARK]["env"]
+    assert isinstance(infra_env, dict) and isinstance(summary_env, dict)
+    assert summary_env["ALLOW_STATEFUL_REPLACE"] == infra_env["ALLOW_STATEFUL_REPLACE"]
+
+
+def test_summary_without_recovery_has_no_state_section(tmp_path: Path) -> None:
+    text = summary(tmp_path, tmp_path / "empty", JOB_STATUS="success", STEP_RESULTS=ALL_SUCCESS)
+    assert "### Состояние OpenTofu" not in text
 
 
 def test_summary_step_has_a_timeout() -> None:

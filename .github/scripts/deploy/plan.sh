@@ -31,5 +31,8 @@ drop_rejected_plan() {
 }
 trap drop_rejected_plan EXIT
 
-tofu -chdir=infra plan -input=false -no-color -out=tfplan
+# -lock-timeout: чужая короткая блокировка того же ключа (ручной plan) не роняет
+# деплой сразу — он ждёт её до двух минут. Деплой интерфейса держит свой ключ
+# и не мешает; очередь деплоев бэкенда держит concurrency в deploy.yml.
+tofu -chdir=infra plan -input=false -no-color -lock-timeout=2m -out=tfplan
 tofu -chdir=infra show -json tfplan | python3 scripts/deploy_report.py plan

@@ -3,13 +3,8 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from app.domain.entities import DiffAnchor, Finding, RuleRef
-from app.domain.enums import (
-    DiffSide,
-    FindingCategory,
-    FindingSeverity,
-    ThreadFollowUpStatus,
-)
-from app.domain.review_comment import format_inline_finding_comment, format_thread_reply
+from app.domain.enums import DiffSide, FindingCategory, FindingSeverity
+from app.domain.review_comment import format_inline_finding_comment
 
 
 def test_inline_comment_has_severity_header() -> None:
@@ -28,16 +23,6 @@ def test_inline_comment_has_severity_header() -> None:
     assert "🟠 Существенно" in text
     assert "Корректность" in text
     assert "описание" in text
-
-
-def test_accepted_risk_on_critical_adds_manual_resolve_hint() -> None:
-    text = format_thread_reply(
-        ThreadFollowUpStatus.ACCEPTED_RISK,
-        "риск приемлем",
-        severity=FindingSeverity.CRITICAL,
-    )
-    assert "🤝" in text
-    assert "вручную" in text
 
 
 _MOMENT = datetime(2026, 10, 16, tzinfo=UTC)

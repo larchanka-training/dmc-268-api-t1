@@ -32,7 +32,12 @@ infra` — targeted-план шага «Поднять базу и брокер�
   `migrate-current.log` с выводом `alembic current` (`.error` рядом — база не
   ответила), `migrate-attempts` — номер последней попытки; исход шага
   миграций — из `STEP_RESULTS`;
-- `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`).
+- `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`);
+- `stale-tip` — вершина develop, если коммит прогона уже не она и деплой
+  пропущен (`check-tip.sh`);
+- `state-recovery` — итог восстановления состояния OpenTofu после обрыва
+  (`recover-state.sh`), строки `ключ=значение`; `s3-watchdog.log` — когда
+  сторож закрыл туннель к зависшему хранилищу (`.github/scripts/s3-watchdog.sh`).
 
 Нет файла — нет и раздела, а не падение: summary пишется и после упавшего шага.
 
@@ -106,8 +111,9 @@ UNCHANGED = (("no-op",), ("read",))
 # `uses` засечку не ставят, их время входит в предыдущую засечку: так все они
 # собраны в «Подготовку» до первого шага со скриптом.
 STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("start", "Подготовка: checkout, SSH, OpenTofu, хранилище состояния, вход в ghcr",
-     ("start", "checkout", "ssh", "tofu", "s3", "login")),
+    ("start", "Подготовка: checkout", ("start", "checkout")),
+    ("tip", "Сверить коммит с вершиной develop; SSH, OpenTofu, хранилище состояния, вход в ghcr",
+     ("tip", "ssh", "tofu", "s3", "login")),
     ("diagnostics", "Доставки вебхука и сбои воркера с прошлого выката", ("diagnostics",)),
     ("infra", "Поднять базу и брокер", ("infra",)),
     ("plan", "Спланировать и проверить план", ("plan",)),
@@ -115,6 +121,7 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("passwords", "Выставить пароли базы и брокера", ("passwords",)),
     ("migrate", "Применить миграции", ("migrate",)),
     ("apply", "Применить конфигурацию", ("apply",)),
+    ("recover", "Восстановить состояние OpenTofu", ("recover", "state_artifact")),
     ("api_logs", "Логи API после упавшего apply", ("api_logs",)),
     ("check_api", "Проверить, что API жив (через туннель)", ("check_api",)),
     ("check_worker", "Проверить, что воркер работает", ("check_worker",)),
@@ -549,7 +556,11 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
     run_url = f"{env.get('GITHUB_SERVER_URL', '')}/{env.get('GITHUB_REPOSITORY', '')}/actions/runs/{env.get('GITHUB_RUN_ID', '')}"
     name, tag, digest = image_parts(env.get("IMAGE", ""))
 
+    stale_tip = read(report_dir / "stale-tip").strip()
+    skipped = bool(stale_tip) and result == "success"
     headline = {"success": "успешно", "failure": "упал", "cancellation": "отменён"}.get(result, result)
+    if skipped:
+        headline = f"пропущен: вершина develop уже `{stale_tip}`"
     if failed and result != "success":
         headline += f" на шаге «{failed[1]}»"
     out = [f"## Деплой: {headline}", "", "| | Ключ | Значение |", "| --- | --- | --- |"]
@@ -575,7 +586,14 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
             f"| Длительность job'а, с | `dmc268.deploy.duration` | {seconds(marks[SUMMARY_MARK] - marks['start'])} |"
         )
 
+    if skipped:
+        out += ["", (f"Коммит прогона уже не вершина develop (`{stale_tip}`): стенд не трогали, "
+                "новый коммит выкатывает свой прогон."), "", *steps_section(steps, marks)]
+        return "\n".join(out) + "\n"
+
     out += ["", *downtime_section(report_dir), "", *plan_section(report_dir)]
+    if recovery := state_section(report_dir, env.get("ALLOW_STATEFUL_REPLACE") == "true"):
+        out += ["", *recovery]
     migrate = steps.get("migrate", {}).get("outcome", "")
     out += ["", *migrations_section(report_dir, marks, migrate), "", *disk_section(report_dir)]
     out += ["", *steps_section(steps, marks)]
@@ -627,6 +645,69 @@ def downtime_section(report_dir: Path) -> list[str]:
     if not d["healthy_reliable"]:
         out += ["", "> [!WARNING]", ("> Готовность и простой недостоверны: журнал проверок полон, первая успешная "
                 "проверка могла из него вытесниться, и простой тогда завышен.")]
+    return out
+
+
+def read_pairs(text: str) -> dict[str, str]:
+    """Строки `ключ=значение`; значение — до конца строки."""
+    pairs = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            pairs[key.strip()] = value.strip()
+    return pairs
+
+
+def state_section(report_dir: Path, overridden: bool = False) -> list[str]:
+    """Восстановление состояния после обрыва; нет файла — шаг не запускался, раздела нет.
+
+    `overridden` — у этой попытки был `allow_stateful_replace`: Re-run его не
+    получит (флаг — только у первой попытки), и доделать выкат замены базы
+    может лишь новый ручной запуск (ревью #220).
+    """
+    if not (report_dir / "state-recovery").exists():
+        return []
+    r = read_pairs(read(report_dir / "state-recovery"))
+    out = ["### Состояние OpenTofu", ""]
+    watchdog = read(report_dir / "s3-watchdog.log").strip().splitlines()
+    if watchdog:
+        out += [f"Сторож закрыл туннель к хранилищу: {watchdog[-1]}.", ""]
+    lock = f"блокировка `{r['lock']}`" if r.get("lock") else "блокировка"
+    result = r.get("result", "")
+    rerun = ("Re-run флага `allow_stateful_replace` не получает: доделает выкат новый ручной запуск "
+             "`gh workflow run deploy.yml --ref develop -f allow_stateful_replace=true`." if overridden
+             else "Перезапуск деплоя доделает выкат без ручных действий.")
+    if result == "restored":
+        return [*out, (f"Состояние восстановлено: несохранённое состояние (`errored.tfstate`, serial {r.get('serial', '?')}) "
+                f"записано в хранилище, {lock} снята. {rerun}")]
+    if result == "unlocked":
+        return [*out, f"Состояние было записано, не снялась только {lock}: снята. {rerun}"]
+    if result == "foreign":
+        return [*out, (f"{lock[0].upper() + lock[1:]} — не этого запуска (`{r.get('who', '?')}`): восстановление её не трогает, "
+                "несохранённого состояния этот запуск не оставил.")]
+    if result == "none":
+        # Шаг шёл, потому что упал infra, plan или apply, — часто не из-за связи
+        # (отказ сторожа в infra.sh, ошибка плана): раздел о том, что
+        # восстанавливать нечего, только уводит от причины. Остаётся пометка
+        # сторожа хранилища, если он сработал.
+        return out[:-1] if watchdog else []
+    if result == "released":
+        # Блокировку оборванного запуска (другого раннера или этого, убитого
+        # отменой) сняли, не зная, записалось ли состояние под ней.
+        who = f"`{r['who']}`, " if r.get("who") else ""
+        out.append(f"Снята {lock} оборвавшегося запуска ({who}{r.get('operation', '?')}, {r.get('created', '?')}).")
+        if r.get("operation") == "OperationTypePlan":
+            return [*out[:-1], out[-1] + " План состояние не пишет: оно не пострадало."]
+        return [*out, "", "> [!WARNING]",
+                ("> Состояние в хранилище может быть старше стенда: записалось ли оно под этой блокировкой, "
+                 "неизвестно. Если план перезапуска создаёт контейнеры, которые на сервере уже есть, — "
+                 "`infra/README.md`, «Если деплой упал посреди apply», шаг 4.")]
+    out += ["> [!CAUTION]", f"> Состояние не восстановлено: {r.get('reason', 'шаг оборвался')}.",
+            ("> Пока его не восстановить, следующий деплой упрётся в блокировку или в старое состояние. "
+             "Что делать — `infra/README.md`, «Если деплой упал посреди apply».")]
+    if (report_dir / "errored.tfstate.enc").exists():
+        out.append(f"> Несохранённое состояние (serial {r.get('serial', '?')}) — в артефакте `errored-tfstate` этого "
+                   "прогона, зашифрованное ключом `STATE_BACKUP_KEY_DMC268_T1`; артефакт живёт сутки.")
     return out
 
 
