@@ -97,20 +97,6 @@ class VcsGateway(Protocol):
         """
         ...
 
-    def reply_to_review_comment(
-        self,
-        repo_full_name: str,
-        pr_number: int,
-        installation_id: int,
-        provider_comment_id: str,
-        body: str,
-    ) -> str:
-        """Ответ в существующий review comment; возвращает id нового комментария.
-
-        Без повтора: сбой, после которого неизвестно, ушёл ли ответ, - `VcsError`.
-        """
-        ...
-
     def fetch_review_threads_state(
         self,
         repo_full_name: str,
@@ -123,16 +109,6 @@ class VcsGateway(Protocol):
         Все треды PR - одним запросом с пагинацией. Комментария, которого
         хостинг не нашёл (удалён), в ответе нет.
         """
-        ...
-
-    def resolve_review_thread_for_comment(
-        self,
-        repo_full_name: str,
-        pr_number: int,
-        installation_id: int,
-        provider_comment_id: str,
-    ) -> None:
-        """Закрыть тред, в котором лежит корневой комментарий."""
         ...
 
     def set_merge_gate_check(

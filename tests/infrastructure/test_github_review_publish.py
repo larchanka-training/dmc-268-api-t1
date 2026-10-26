@@ -14,7 +14,7 @@ from app.application.ports.vcs_review import (
     ReviewThreadState,
 )
 from app.domain.enums import DiffSide
-from app.infrastructure.vcs.errors import VcsError, VcsUnavailableError
+from app.infrastructure.vcs.errors import VcsUnavailableError
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from tests.infrastructure.conftest import RsaKeyPair
@@ -82,22 +82,6 @@ def test_publish_pull_request_review_fetches_inline_ids(rsa_key_pair: RsaKeyPair
     assert any("/pulls/7/reviews/9001/comments" in r.url.path for r in seen)
 
 
-def test_reply_uses_pull_number_in_path(rsa_key_pair: RsaKeyPair) -> None:
-    paths: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.startswith("/app/installations/"):
-            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
-        paths.append(request.url.path)
-        if request.method == "POST" and "/pulls/7/comments/99/replies" in request.url.path:
-            return httpx.Response(200, json={"id": 100})
-        return httpx.Response(404)
-
-    gateway = make_gateway(rsa_key_pair, handler)
-    assert gateway.reply_to_review_comment("o/r", 7, INSTALLATION_ID, "99", "ответ") == "100"
-    assert any("/pulls/7/comments/99/replies" in p for p in paths)
-
-
 def test_set_merge_gate_check_posts_check_run(rsa_key_pair: RsaKeyPair) -> None:
     payloads: list[dict[str, Any]] = []
 
@@ -136,21 +120,18 @@ def test_thread_state_carries_the_current_line_and_none_for_an_outdated_thread(
         queries.append(payload["query"])
         nodes = [
             {
-                "id": "T_1",
                 "isResolved": False,
                 "isOutdated": False,
                 "line": 104,
                 "comments": {"nodes": [{"databaseId": 11}]},
             },
             {
-                "id": "T_2",
                 "isResolved": True,
                 "isOutdated": True,
                 "line": None,
                 "comments": {"nodes": [{"databaseId": 22}]},
             },
             {
-                "id": "T_3",
                 "isResolved": False,
                 "isOutdated": False,
                 "line": 5,
@@ -356,20 +337,6 @@ def test_lost_inline_comment_list_keeps_the_review_id(rsa_key_pair: RsaKeyPair) 
 
     assert publication.summary_provider_comment_id == "9001"
     assert publication.inline_comments == (None,)
-
-
-def test_reply_is_not_repeated_on_502(rsa_key_pair: RsaKeyPair) -> None:
-    posts: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.startswith("/app/installations/"):
-            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
-        posts.append(request.url.path)
-        return httpx.Response(502, json={"message": "Bad Gateway"})
-
-    with pytest.raises(VcsError):
-        make_gateway(rsa_key_pair, handler).reply_to_review_comment("o/r", 7, INSTALLATION_ID, "99", "ответ")
-    assert len(posts) == 1
 
 
 def test_check_run_is_repeated_on_502(rsa_key_pair: RsaKeyPair) -> None:
