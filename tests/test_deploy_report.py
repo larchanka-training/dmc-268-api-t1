@@ -175,13 +175,26 @@ def test_guard_stops_a_plan_that_destroys_a_volume(tmp_path: Path) -> None:
     assert not (root / "infra" / "tfplan").exists()
 
 
-def test_guard_ignores_volumes_it_does_not_protect() -> None:
+def test_guard_stops_a_volume_deleted_under_any_address() -> None:
+    """Ресурс тома переименовали без `moved` — и адрес, и имя тома новые: план уничтожает
+    старый том по адресу и имени, которых в конфигурации уже нет. Сторож ловит любой том."""
     plan = {"resource_changes": [
-        {"address": "docker_volume.scratch", "type": "docker_volume", "change": {"actions": ["delete"]}},
-        {"address": "docker_volume.postgres", "type": "docker_volume", "change": {"actions": ["no-op"]}},
+        {"address": "docker_volume.mq_v44", "type": "docker_volume",
+         "change": {"actions": ["delete"], "before": {"name": "dmc268-rabbitmq-v44-data"}}},
+        {"address": "docker_volume.mq_v45", "type": "docker_volume", "change": {"actions": ["create"]}},
+        {"address": "module.x.docker_volume.pg", "type": "docker_volume", "change": {"actions": ["delete", "create"]}},
+    ]}
+    assert deploy_report.protected_deletes(plan) == ["docker_volume.mq_v44", "module.x.docker_volume.pg"]
+
+
+def test_guard_allows_what_does_not_destroy_a_volume() -> None:
+    """Снятие тома с учёта (`removed`, `destroy = false`) — `forget`; удаление контейнера — не том."""
+    plan = {"resource_changes": [
+        {"address": "docker_volume.postgres", "type": "docker_volume", "change": {"actions": ["forget"]}},
+        {"address": "docker_volume.rabbitmq", "type": "docker_volume", "change": {"actions": ["no-op"]}},
+        {"address": "docker_container.postgres", "type": "docker_container", "change": {"actions": ["delete"]}},
     ]}
     assert deploy_report.protected_deletes(plan) == []
-    assert deploy_report.plan_changes(plan) == {"docker_volume": {"destroy": 1}}
 
 
 def test_guard_stops_a_full_plan_that_replaces_the_database(tmp_path: Path) -> None:
@@ -385,13 +398,6 @@ def volume_blocks() -> dict[str, str]:
     }
 
 
-def test_guard_protects_every_volume_the_stack_declares() -> None:
-    """Новый том или переименованный ресурс тома без правки сторожа — дыра в защите."""
-    declared = volume_blocks()
-    assert declared, "ресурсы docker_volume не найдены в infra/*.tf"
-    assert set(declared) == set(deploy_report.PROTECTED)
-
-
 # Контейнеры на томах данных, которые деплой пересоздаёт без разрешения: API
 # и воркер в них не ходят, данные — в защищённых томах. Реплика
 # останавливается штатно (destroy_grace_seconds в infra/replica.tf), копия,
@@ -405,7 +411,7 @@ def test_every_container_on_a_data_volume_is_classified() -> None:
 
     Каждый такой контейнер — либо в STATEFUL и в -target у infra.sh, либо в
     REPLACEABLE_ON_VOLUMES с причиной; новый контейнер на томе без решения
-    роняет тест. Тома — все `docker_volume` из infra/*.tf, а не PROTECTED:
+    роняет тест. Тома — все `docker_volume` из infra/*.tf, как у сторожа томов:
     так тест не зависит от того, как сторож томов перечисляет защищённые (#219).
     """
     text = read_infra_text()
@@ -443,11 +449,11 @@ def test_targeted_step_brings_up_every_network_of_the_database_and_broker() -> N
     assert "docker_network.dmc268" in targets
 
 
-def test_every_protected_volume_prevents_destroy() -> None:
+def test_every_volume_prevents_destroy() -> None:
     """Сторож в plan.sh не видит targeted apply шага «Поднять базу и брокер»: том там держит prevent_destroy."""
     blocks = volume_blocks()
-    for address in deploy_report.PROTECTED:
-        assert address in blocks, f"{address} из PROTECTED не найден в infra/*.tf"
+    assert blocks, "ресурсы docker_volume не найдены в infra/*.tf"
+    for address in blocks:
         assert re.search(
             r"^\s*lifecycle\s*\{[^}]*^\s*prevent_destroy\s*=\s*true\s*$", blocks[address], re.MULTILINE
         ), f"у {address} нет lifecycle {{ prevent_destroy = true }}"

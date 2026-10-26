@@ -52,14 +52,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Тома с данными: их уничтожение — потеря базы или очередей. Замена тома —
-# тоже уничтожение (delete, create).
-PROTECTED = (
-    "docker_volume.postgres",
-    "docker_volume.rabbitmq",
-    "docker_volume.postgres_replica",
-    "docker_volume.postgres_backups",
-)
+# Все тома стека — с данными (база, реплика, бэкапы, очереди): их уничтожение —
+# потеря данных, замена тома — тоже уничтожение (delete, create). Сторож
+# отклоняет delete у любого docker_volume, а не по списку адресов или имён:
+# ресурс, переименованный без `moved` (и с новым именем тома), уничтожается по
+# старому адресу, которого в списке уже нет, и prevent_destroy там тоже нет.
+# Сменить том — `removed` с `destroy = false`: план выйдет `forget`, а не
+# `delete` (infra/README.md).
+VOLUME = "docker_volume"
 
 # Контейнеры базы и брокера: деплой их не пересоздаёт. Замена гасит базу
 # посреди транзакций старого API и воркера, а повод к ней — смена env, памяти
@@ -68,7 +68,7 @@ PROTECTED = (
 # пароле (#213). Такая правка — ручным запуском деплоя с
 # `allow_stateful_replace` (`ALLOW_STATEFUL_REPLACE=true` в env, его ставит
 # только workflow_dispatch): тогда замена — предупреждение, а не отказ. Тома
-# (`PROTECTED`) флаг не открывает никогда.
+# (любой docker_volume) флаг не открывает никогда.
 #
 # Сверка — и по адресу, и по имени контейнера на хосте (`change.before.name`,
 # `change.after.name`): ресурс, переименованный без `moved` (и с правкой
@@ -150,18 +150,13 @@ def plan_changes(plan: dict[str, Any]) -> dict[str, dict[str, int]]:
     return changes
 
 
-def deletes(plan: dict[str, Any], addresses: tuple[str, ...]) -> list[str]:
-    """Ресурсы из `addresses`, которые план уничтожает или заменяет."""
+def protected_deletes(plan: dict[str, Any]) -> list[str]:
+    """Тома, которые план уничтожает или заменяет, — по какому бы адресу они ни шли."""
     return [
         rc["address"]
         for rc in plan.get("resource_changes", [])
-        if rc["address"] in addresses and "delete" in rc["change"]["actions"]
+        if rc["type"] == VOLUME and "delete" in rc["change"]["actions"]
     ]
-
-
-def protected_deletes(plan: dict[str, Any]) -> list[str]:
-    """Тома данных, которые план уничтожает или заменяет."""
-    return deletes(plan, PROTECTED)
 
 
 def stateful_deletes(plan: dict[str, Any]) -> list[str]:
@@ -651,7 +646,7 @@ def plan_section(report_dir: Path) -> list[str]:
                     + ", ".join(f"`{a}`" for a in plan["protected_deletes"])
                     + " (`dmc268.deploy.plan.protected_deletes`)."]
         else:
-            out += ["", "Тома данных (`" + "`, `".join(PROTECTED) + "`) план не уничтожает."]
+            out += ["", "Тома данных план не уничтожает."]
         stateful = ", ".join(f"`{a}`" for a in plan["stateful_deletes"])
         if plan["stateful_deletes"] and plan.get("stateful_allowed_by") is not None:
             out += ["", "> [!WARNING]", (f"> Замена {stateful} разрешена вручную: запуск с `allow_stateful_replace` "
