@@ -60,11 +60,22 @@ resource "docker_container" "postgres" {
     name = docker_network.backend.name
   }
 
+  # Только переменные инициализации: entrypoint образа читает их, лишь когда
+  # том пуст (initdb), а на заведённом томе — нет. Поэтому их правку контейнер
+  # не видит (ignore_changes ниже): смена PG_PASSWORD_DMC268_T1 иначе
+  # пересоздавала бы базу, а пароль в томе оставался бы прежним. Пароль роли
+  # выставляет шаг деплоя .github/scripts/deploy/passwords.sh (#161). Переменная,
+  # которая действует при каждом старте, сюда не годится — её правка не дошла
+  # бы до контейнера молча (сверяет tests/test_deploy_passwords.py).
   env = [
     "POSTGRES_USER=${var.postgres_user}",
     "POSTGRES_PASSWORD=${var.postgres_password}",
     "POSTGRES_DB=${var.postgres_db}",
   ]
+
+  lifecycle {
+    ignore_changes = [env]
+  }
 
   # wal_level=replica и max_wal_senders у PostgreSQL 18 уже такие, какие нужны
   # реплике; задаём только то, чего нет по умолчанию. max_slot_wal_keep_size —

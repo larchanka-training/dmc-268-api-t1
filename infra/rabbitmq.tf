@@ -49,10 +49,17 @@ resource "docker_container" "rabbitmq" {
     name = docker_network.backend.name
   }
 
+  # Как у postgres: пользователя по умолчанию брокер заводит только на пустом
+  # томе, правку env контейнер не видит, а пароль выставляет шаг деплоя
+  # .github/scripts/deploy/passwords.sh (#161).
   env = [
     "RABBITMQ_DEFAULT_USER=${var.rabbitmq_user}",
     "RABBITMQ_DEFAULT_PASS=${var.rabbitmq_password}",
   ]
+
+  lifecycle {
+    ignore_changes = [env]
+  }
 
   volumes {
     volume_name    = docker_volume.rabbitmq.name

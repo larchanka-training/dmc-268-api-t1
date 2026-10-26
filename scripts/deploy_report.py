@@ -62,10 +62,11 @@ from typing import Any
 VOLUME = "docker_volume"
 
 # Контейнеры базы и брокера: деплой их не пересоздаёт. Замена гасит базу
-# посреди транзакций старого API и воркера, а повод к ней — смена env, памяти
-# или log_opts — на томе часто и не срабатывает: POSTGRES_PASSWORD postgres
-# читает только при инициализации тома, и после замены миграции падают на
-# пароле (#213). Такая правка — ручным запуском деплоя с
+# посреди транзакций старого API и воркера, а повод к ней — правка памяти,
+# command, log_opts или образа. env базы и брокера план не видит
+# (ignore_changes): это переменные инициализации тома, и смена пароля
+# пересоздавала бы базу, не меняя пароль в томе (#213); пароль выставляет шаг
+# деплоя passwords.sh (#161). Такая правка — ручным запуском деплоя с
 # `allow_stateful_replace` (`ALLOW_STATEFUL_REPLACE=true` в env, его ставит
 # только workflow_dispatch): тогда замена — предупреждение, а не отказ. Тома
 # (любой docker_volume) флаг не открывает никогда.
@@ -110,6 +111,7 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("diagnostics", "Доставки вебхука и сбои воркера с прошлого выката", ("diagnostics",)),
     ("infra", "Поднять базу и брокер", ("infra",)),
     ("plan", "Спланировать и проверить план", ("plan",)),
+    ("passwords", "Выставить пароли базы и брокера", ("passwords",)),
     ("migrate", "Применить миграции", ("migrate",)),
     ("apply", "Применить конфигурацию", ("apply",)),
     ("api_logs", "Логи API после упавшего apply", ("api_logs",)),
@@ -198,9 +200,9 @@ def plan_command(report_dir: Path, name: str, allowed_by: str | None) -> int:
         print(
             f"::error::план пересоздаёт или удаляет {address}: apply не запускается. "
             "Деплой не гасит базу и брокер: правка их env, памяти, log_opts или образа — "
-            "ручным запуском `gh workflow run deploy.yml -f allow_stateful_replace=true`, "
-            "ротация пароля — по runbook (#161). "
-            "POSTGRES_PASSWORD на существующем томе замена контейнера не меняет."
+            "ручным запуском `gh workflow run deploy.yml -f allow_stateful_replace=true`. "
+            "Пароль базы и брокера замены не требует: его выставляет шаг деплоя "
+            "из секрета (infra/README.md, «Смена паролей»)."
         )
     if deleted or recreated:
         return 1
@@ -654,7 +656,8 @@ def plan_section(report_dir: Path) -> list[str]:
         elif plan["stateful_deletes"]:
             out += ["", "> [!CAUTION]", (f"> Сторож остановил деплой до apply: план пересоздаёт или удаляет {stateful}"
                     " (`dmc268.deploy.plan.stateful_deletes`). Разрешить — ручным запуском с "
-                    "`allow_stateful_replace`; ротация пароля — по runbook (#161).")]
+                    "`allow_stateful_replace`. Пароль базы и брокера замены не требует: его выставляет шаг "
+                    "«Выставить пароли базы и брокера».")]
         else:
             out += ["", "Базу и брокер (`" + "`, `".join(STATEFUL) + "`) план не пересоздаёт."]
     return out

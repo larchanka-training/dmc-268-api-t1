@@ -213,12 +213,15 @@ def test_targeted_plan_with_a_new_database_password_is_rejected(tmp_path: Path) 
 
     Фикстура — настоящий `tofu show -json` targeted-плана шага на docker:29-dind.
     Раньше targeted apply пересоздавал базу мимо всякой проверки, SIGKILL'ом.
+    С #161 пароль замены не вызывает (`ignore_changes = [env]`), но план с
+    заменой базы по любому поводу сторож отклоняет так же — и подсказывает,
+    что пароль меняется без неё.
     """
     result, report, root = run_script(tmp_path, "infra.sh", plan="plan-infra-replace-postgres.json")
 
     assert result.returncode != 0
     assert "::error::план пересоздаёт или удаляет docker_container.postgres" in result.stdout
-    assert "#161" in result.stdout
+    assert "«Смена паролей»" in result.stdout
     calls = (tmp_path / "calls").read_text()
     assert "-target=docker_container.postgres" in calls
     assert " apply " not in calls, calls

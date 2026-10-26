@@ -330,6 +330,25 @@ jobs:
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/plan.sh
 
+      # Пароли базы и брокера — из текущих секретов (#161): POSTGRES_PASSWORD и
+      # RABBITMQ_DEFAULT_PASS действуют только на пустом томе, а контейнеры
+      # базы и брокера правку env не видят (ignore_changes в infra/). Секреты не
+      # менялись — шаг ничего не меняет. После проверенного плана: отклонённый
+      # план пароль не трогает. До миграций: они и новый API входят уже новым
+      # паролем, а старые API и воркер до полного apply новых соединений не
+      # откроют (окно — infra/README.md, «Смена паролей»). Потолок 5 мин:
+      # брокер на чистом сервере ждём до двух.
+      - name: Выставить пароли базы и брокера
+        id: passwords
+        timeout-minutes: 5
+        env:
+          DOCKER_HOST: ssh://stand
+          PG_PASSWORD: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
+          RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}
+        run: |
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/passwords.sh
+
       # Миграции до выката нового кода: упали — полный apply не запускается,
       # на стенде остаётся прежняя версия API и воркера. Заодно скачивается
       # образ, из которого полный apply создаст api и worker. Потолок шага —
@@ -432,6 +451,7 @@ jobs:
             diagnostics ${{ steps.diagnostics.outcome }} ${{ steps.diagnostics.conclusion }}
             infra ${{ steps.infra.outcome }} ${{ steps.infra.conclusion }}
             plan ${{ steps.plan.outcome }} ${{ steps.plan.conclusion }}
+            passwords ${{ steps.passwords.outcome }} ${{ steps.passwords.conclusion }}
             migrate ${{ steps.migrate.outcome }} ${{ steps.migrate.conclusion }}
             apply ${{ steps.apply.outcome }} ${{ steps.apply.conclusion }}
             api_logs ${{ steps.api_logs.outcome }} ${{ steps.api_logs.conclusion }}
