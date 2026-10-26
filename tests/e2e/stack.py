@@ -38,6 +38,7 @@ from app.domain.entities import (
     PublishedComment,
     Repository,
     ReviewRun,
+    ReviewRunStep,
 )
 from app.domain.enums import Provider
 from app.infrastructure.cache.memory import InMemoryCacheStore
@@ -265,6 +266,10 @@ class Stack:
     def published(self, run_id: str | UUID) -> list[PublishedComment]:
         with SqlAlchemyUnitOfWork(self.engine) as work:
             return work.published_comments.list_for_run(UUID(str(run_id)))
+
+    def steps(self, run_id: str | UUID) -> list[ReviewRunStep]:
+        with SqlAlchemyUnitOfWork(self.engine) as work:
+            return work.review_run_steps.list_for_run(UUID(str(run_id)))
 
     def findings(self, run_id: str | UUID) -> list[Finding]:
         with SqlAlchemyUnitOfWork(self.engine) as work:

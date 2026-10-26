@@ -117,6 +117,20 @@ class CreateReviewFailure:
 
 
 @dataclass(frozen=True)
+class NetworkFault:
+    """Сетевой сбой на запросе `method` к пути по `path` (регулярное выражение,
+    целиком). `stored=False` - обрыв до GitHub: запрос не дошёл; `True` -
+    GitHub запрос выполнил, а ответ до клиента не дошёл (таймаут чтения).
+    `error` - исключение транспорта или `BaseException`, которым тест
+    имитирует смерть процесса посреди запроса."""
+
+    method: str
+    path: str
+    error: BaseException
+    stored: bool = False
+
+
+@dataclass(frozen=True)
 class CheckRun:
     id: int
     name: str
@@ -144,12 +158,17 @@ class FakeGitHub:
     # Треды, чью строку изменил новый push: GitHub отдаёт им `isOutdated: true`
     # и `line: null`. Остальные стоят на строке своего комментария.
     outdated_threads: set[str] = field(default_factory=set)
+    # Треды, которые новый push сдвинул, не меняя их строки: GitHub отдаёт им
+    # текущую строку в новом диффе (`line`), а не строку комментария.
+    moved_threads: dict[str, int] = field(default_factory=dict)
     # Статус, которым отвечает каждый запрос GraphQL: сбой GitHub после публикации ревью.
     graphql_status: int | None = None
     # Отказы `POST …/reviews` по очереди, по одному на запрос; кончились - успех.
     create_review_failures: list[CreateReviewFailure] = field(default_factory=list)
     # Статус каждого `GET …/reviews/{id}/comments`: комментарии на месте, а список не отдаётся.
     review_comments_status: int | None = None
+    # Сетевые сбои по очереди: первый подходящий срабатывает на запросе и уходит из списка.
+    network_faults: list[NetworkFault] = field(default_factory=list)
     # Метод и путь с query каждого запроса к API, кроме выдачи токена.
     requests: list[tuple[str, str]] = field(default_factory=list)
     unexpected: list[tuple[str, str]] = field(default_factory=list)
@@ -252,13 +271,25 @@ class FakeGitHub:
             ("POST", rf"{repo}/check-runs", self._create_check_run),
             ("POST", r"/graphql", self._graphql),
         ]
+        fault = self._take_fault(method, path)
+        if fault is not None and not fault.stored:
+            raise fault.error
         for route_method, pattern, handler in routes:
             if method == route_method and (m := re.fullmatch(pattern, path)):
                 response: httpx.Response = handler(request, *m.groups())
+                if fault is not None:
+                    raise fault.error
                 return response
         with self._lock:
             self.unexpected.append((method, target))
         return httpx.Response(404, json={"message": "Not Found"})
+
+    def _take_fault(self, method: str, path: str) -> NetworkFault | None:
+        with self._lock:
+            for index, fault in enumerate(self.network_faults):
+                if fault.method == method and re.fullmatch(fault.path, path):
+                    return self.network_faults.pop(index)
+        return None
 
     # --- маршруты --------------------------------------------------------
 
@@ -452,7 +483,9 @@ class FakeGitHub:
                         "id": f"T_{c.id}",
                         "isResolved": f"T_{c.id}" in self.resolved_threads,
                         "isOutdated": f"T_{c.id}" in self.outdated_threads,
-                        "line": None if f"T_{c.id}" in self.outdated_threads else c.line,
+                        "line": None
+                        if f"T_{c.id}" in self.outdated_threads
+                        else self.moved_threads.get(f"T_{c.id}", c.line),
                         "comments": {"nodes": [{"databaseId": c.id}]},
                     }
                     for c in comments
