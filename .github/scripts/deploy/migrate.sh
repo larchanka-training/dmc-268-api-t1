@@ -100,7 +100,8 @@ migrations_run=(
 # autocommit_block (0003) фиксирует всё до себя, а при оборванном ssh сирота
 # мог довести миграции до commit, и код выхода тогда потерян (ревью #220).
 # Ревизию summary и решение о повторе берут отсюда — `alembic current` тем же
-# образом и окружением; сначала убирается сирота, чтобы он не дописал
+# образом и окружением (в stdout перед ревизией — JSON-строки логов,
+# current_revision в scripts/deploy_report.py их пропускает); сначала убирается сирота, чтобы он не дописал
 # миграции после ответа. Не ответила база или ssh за 60 с — код в
 # migrate-current.error, и summary пишет «ревизия неизвестна». Файлы прошлой
 # попытки убираются: ответ — всегда о последней.
@@ -112,8 +113,9 @@ ask_current() {
   [ "$code" -eq 0 ] || echo "$code" > "$report_dir/migrate-current.error"
 }
 
-# Логи alembic идут в stderr: 2>&1, чтобы попасть и в лог шага, и в файл;
-# упавшую миграцию pipefail не прячет за tee. `-e` на время запуска снят:
+# Логи alembic — JSON-строки в stdout (configure_logging в alembic/env.py),
+# traceback упавшей миграции — в stderr: 2>&1, чтобы и то и другое попало в
+# лог шага и в файл; упавшую миграцию pipefail не прячет за tee. `-e` на время запуска снят:
 # после сбоя нужен ещё вопрос к базе, а код выхода шага — код upgrade.
 # migrate.log — вывод последней попытки: прежние откатились целиком.
 attempt=1
@@ -150,7 +152,14 @@ done
 # вторая линия к серверному флагу (infra/postgres.tf), иначе ALTER ROLE ...
 # PASSWORD лёг бы в pg_stat_statements открытым текстом. Тот же шаг — у
 # сервиса migrate в docker-compose.yml.
-"${migrations_run[@]}" -i --name dmc268-migrations "$API_IMAGE" python - <<'PY'
+#
+# Под timeout 60, как ask_current: своих тайм-аутов у этого подключения нет.
+# Упал — код в migrate-monitor.error, и summary пишет «миграции применены,
+# пароль не обновлён», а не упавшую миграцию: ревизии к этому моменту
+# зафиксированы. Шаг при этом красный — коллектор без пароля в базу не войдёт.
+rm -f "$report_dir/migrate-monitor.error"
+monitor_code=0
+timeout 60 "${migrations_run[@]}" -i --name dmc268-migrations "$API_IMAGE" python - <<'PY' || monitor_code=$?
 import os
 
 import psycopg
@@ -170,3 +179,8 @@ with psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor) as conn:
             (os.environ["POSTGRES_MONITOR_PASSWORD"],),
         )
 PY
+if [ "$monitor_code" -ne 0 ]; then
+  echo "$monitor_code" > "$report_dir/migrate-monitor.error"
+  echo "::error::миграции применены, но пароль роли мониторинга dmc268_monitor не обновлён (код $monitor_code)"
+  exit "$monitor_code"
+fi

@@ -58,13 +58,15 @@ esac
 # upgrade head` печатает вывод alembic из MIGRATE_LOG и выходит с
 # MIGRATE_EXIT; у N-й попытки — MIGRATE_LOG_N и MIGRATE_EXIT_N, если заданы.
 # `run … alembic current` печатает CURRENT (с CURRENT_FAIL — код 255, как при
-# оборванном ssh), `rm` контейнера, которого нет, — код 1.
+# оборванном ssh), `run … python -` (пароль роли мониторинга) с MONITOR_FAIL
+# выходит с этим кодом, `rm` контейнера, которого нет, — код 1.
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "docker $*" >> "$CALLS"
 case "$1" in
   run)
     case "$*" in
       *"alembic current"*) [ -z "${CURRENT_FAIL:-}" ] || exit 255; printf '%s\\n' "${CURRENT:-}" ;;
+      *" python -") cat > /dev/null; exit "${MONITOR_FAIL:-0}" ;;
       *)
         n=$(( $(cat "$CALLS.upgrades" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$CALLS.upgrades"
         log="MIGRATE_LOG_$n" code="MIGRATE_EXIT_$n"
@@ -694,6 +696,25 @@ def test_alembic_current_output_is_parsed() -> None:
     assert deploy_report.current_revision("\n") == ""
 
 
+# Настоящий stdout `alembic current` на стенде: JSON-логи миграций идут туда же
+# и раньше ревизии (alembic/env.py, configure_logging). Сверяет с живым выводом
+# tests/db/test_alembic_env.py.
+JSON_LOGGED_CURRENT = (
+    '{"timestamp": "2026-10-27T18:00:00.000000Z", "severity": "INFO", '
+    '"message": "Context impl PostgresqlImpl.", "service.name": "dmc-268-migrate"}\n'
+    '{"timestamp": "2026-10-27T18:00:00.000001Z", "severity": "INFO", '
+    '"message": "Will assume transactional DDL.", "service.name": "dmc-268-migrate"}\n'
+    "0012_b (head)\n"
+)
+
+
+def test_alembic_current_output_skips_json_log_lines() -> None:
+    """Ревью #130: первое слово первой строки было `{"timestamp":`, и повтор по блокировке не срабатывал."""
+    assert deploy_report.current_revision(JSON_LOGGED_CURRENT) == "0012_b"
+    # Пустая база: только логи, ревизии нет.
+    assert deploy_report.current_revision(JSON_LOGGED_CURRENT.replace("0012_b (head)\n", "")) == ""
+
+
 def failed_migrate_summary(tmp_path: Path, *, log: str = FAILED_MIGRATION_LOG, current: str | None) -> str:
     report = tmp_path / "report"
     report.mkdir()
@@ -865,6 +886,42 @@ def test_migrate_sets_the_monitor_password_after_a_success(tmp_path: Path) -> No
     assert (report / "migrate.log").read_text() == APPLIED_LOG
 
 
+def test_a_failed_monitor_password_step_is_not_a_failed_migration(tmp_path: Path) -> None:
+    """Ревью #130: миграции зафиксированы, упал отдельный шаг пароля — summary
+    не пишет «упала на ревизии», а пишет, что пароль не обновлён; шаг под timeout."""
+    (tmp_path / "alembic.log").write_text(APPLIED_LOG)
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"), MONITOR_FAIL="2",
+    )
+
+    assert result.returncode == 2
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert any(c.startswith("timeout 60 docker run ") and c.endswith(" python -") for c in calls), calls
+    assert (report / "migrate-monitor.error").read_text().strip() == "2"
+    assert (report / "migrate.log").read_text() == APPLIED_LOG
+
+    results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results)
+    assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 2 |" in text
+    assert "| Ревизия после | `dmc268.deploy.migrations.revision.to` | `0014_d` |" in text
+    assert "Упала на ревизии" not in text
+    assert "пароль роли мониторинга `dmc268_monitor` не обновлён (код 2)" in text
+
+
+def test_a_successful_monitor_password_step_leaves_no_marker(tmp_path: Path) -> None:
+    (tmp_path / "alembic.log").write_text(APPLIED_LOG)
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (report / "migrate-monitor.error").exists()
+
+
 def test_migrate_does_not_set_the_monitor_password_after_a_failure(tmp_path: Path) -> None:
     (tmp_path / "alembic.log").write_text(FAILED_MIGRATION_LOG)
     result, _, _ = run_script(
@@ -969,6 +1026,17 @@ def test_migrate_gives_up_after_three_attempts(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert len(upgrades) == 3
     assert (report / "migrate-attempts").read_text().strip() == "3"
+
+
+def test_migrate_retries_a_lock_timeout_behind_json_logs(tmp_path: Path) -> None:
+    """Ревью #130: `alembic current` печатает JSON-логи до ревизии — повтор всё равно срабатывает."""
+    result, _, upgrades = migrate(
+        tmp_path, MIGRATE_LOG_1=LOCKED_MIGRATION_LOG, MIGRATE_EXIT_1="1", MIGRATE_LOG_2=APPLIED_LOG,
+        CURRENT=JSON_LOGGED_CURRENT.rstrip("\n"),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(upgrades) == 2
 
 
 def test_migrate_does_not_retry_when_part_was_committed(tmp_path: Path) -> None:
