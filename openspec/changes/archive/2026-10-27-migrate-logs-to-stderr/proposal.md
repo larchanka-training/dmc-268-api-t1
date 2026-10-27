@@ -26,7 +26,7 @@
 
 ### Modified Capabilities
 
-- `observability`: «Логи — JSON с trace-контекстом» — логи миграций в stderr, новый сценарий.
+- `observability`: «Логи — JSON с trace-контекстом» больше не называет поток; новое требование «Поток логов» — API и воркер в stdout, миграции в stderr (отдельно, чтобы текст требования не превысил лимит `openspec validate --strict`).
 
 ## Impact
 
