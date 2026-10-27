@@ -1,0 +1,25 @@
+[
+  {
+    "review": [
+      {
+        "path": "app/billing/discount.py",
+        "line": 3,
+        "message": "Имя `d` не говорит, что это процент скидки.",
+        "category": "readability",
+        "severity": "low"
+      },
+      {
+        "path": "app/billing/discount.py",
+        "line": 7,
+        "message": "Скидка больше 100% даёт отрицательную цену: нет проверки границы.",
+        "category": "correctness",
+        "severity": "high"
+      }
+    ],
+    "tokens": 1200
+  },
+  {
+    "verify": [["F1", "keep"], ["F2", "drop"]],
+    "tokens": 300
+  }
+]

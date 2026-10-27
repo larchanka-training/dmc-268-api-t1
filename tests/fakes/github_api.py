@@ -20,7 +20,7 @@ import json
 import re
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -126,6 +126,30 @@ class CheckRun:
     summary: str
 
 
+# Сбои GitHub для песочницы: имя -> что моделирует. `latency=SEC` - с параметром.
+FAULTS: dict[str, str] = {
+    "review-502-stored": "POST …/reviews: 502, хотя GitHub ревью записал (дубликат при повторе)",
+    "review-502": "POST …/reviews: 502 до записи ревью, повтор публикует",
+    "review-rate-limit": "POST …/reviews: 429 вторичного лимита с Retry-After: 1, до записи",
+    "graphql-500": "каждый запрос GraphQL (треды) отвечает 500",
+    "review-comments-500": "GET …/reviews/{id}/comments отвечает 500: id комментариев не узнать",
+    "foreign-review": "на каждом PR уже есть ревью человека (login reviewer, type User)",
+    "latency=SEC": "задержка SEC секунд перед каждым ответом GitHub",
+}
+
+_REVIEW_FAILURES = {
+    "review-502-stored": CreateReviewFailure(502, stored=True),
+    "review-502": CreateReviewFailure(502, stored=False),
+    "review-rate-limit": CreateReviewFailure(
+        429, stored=False, headers={"Retry-After": "1"}, message="secondary rate limit"
+    ),
+}
+
+
+class FaultError(ValueError):
+    """Неизвестный или неверно заданный сбой GitHub."""
+
+
 @dataclass
 class FakeGitHub:
     """Один репозиторий одной инсталляции GitHub App."""
@@ -214,6 +238,39 @@ class FakeGitHub:
     def reviews_of(self, number: int) -> list[Review]:
         with self._lock:
             return [r for r in self.reviews if r.pr_number == number]
+
+    def apply_fault(self, spec: str, pr_numbers: Sequence[int]) -> None:
+        """Включить сбой из `FAULTS`; неизвестный - `FaultError` со списком имён.
+
+        Отказы `review-*` встают в общую очередь `create_review_failures`: она
+        одна на все PR и расходуется по одному отказу на запрос `POST …/reviews`,
+        в каком бы PR он ни был. Один `apply_fault` - один отказ; чтобы отказать
+        большему числу запросов, сбой задают несколько раз. `foreign-review`
+        кладёт ревью человека на каждый PR из `pr_numbers` - PR уже открыты.
+        `latency=SEC` перезаписывает задержку: действует последняя.
+        """
+        if spec in _REVIEW_FAILURES:
+            with self._lock:
+                self.create_review_failures.append(_REVIEW_FAILURES[spec])
+        elif spec == "graphql-500":
+            self.graphql_status = 500
+        elif spec == "review-comments-500":
+            self.review_comments_status = 500
+        elif spec == "foreign-review":
+            for number in pr_numbers:
+                self.add_foreign_review(
+                    number, "Посмотрел, есть вопросы.", login="reviewer", user_type="User"
+                )
+        elif spec.startswith("latency="):
+            try:
+                seconds = float(spec.removeprefix("latency="))
+            except ValueError:
+                seconds = -1.0
+            if not 0 <= seconds < float("inf"):
+                raise FaultError(f"сбой {spec!r}: SEC - число секунд не меньше нуля")
+            self.latency_seconds = seconds
+        else:
+            raise FaultError(f"неизвестный сбой GitHub {spec!r}, допустимы: {', '.join(FAULTS)}")
 
     # --- транспорт -------------------------------------------------------
 

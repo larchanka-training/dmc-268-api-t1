@@ -1,0 +1,21 @@
+# Кейс для --case-file в формате корпуса tests/eval/rules/corpus/.
+# Сочетается со сценарием llm-script.json: модель находит строки 3 и 7,
+# верификатор оставляет F1 (строка 3) и отбрасывает F2 (строка 7).
+title: Скидка на заказ - нет проверки границы процента
+pull_request:
+  title: "feat: скидка на заказ в процентах"
+  description: Биллинг получает расчёт цены заказа со скидкой в процентах.
+files:
+  app/billing/discount.py: |
+    """Скидка на заказ."""
+
+    def apply_discount(price: int, d: int) -> int:
+        """Цена в копейках после скидки в d процентов."""
+        if d <= 0:
+            return price
+        return price - price * d // 100
+expected:
+  - id: discount-over-100
+    path: app/billing/discount.py
+    contains: "return price - price * d // 100"
+    category: correctness

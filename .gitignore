@@ -39,3 +39,6 @@ override.tf.json
 *.egg-info/
 build/
 dist/
+
+# Лог фоновой ollama serve из make ollama-up
+.ollama.log

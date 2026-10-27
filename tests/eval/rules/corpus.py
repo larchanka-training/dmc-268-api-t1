@@ -73,7 +73,7 @@ def load_case(path: Path) -> Case:
         pr_title=raw["pull_request"]["title"],
         pr_description=raw["pull_request"]["description"],
         files=files,
-        expected=tuple(_expected(files, item, path.stem) for item in raw["expected"]),
+        expected=tuple(_expected(files, item, path.stem) for item in raw.get("expected") or []),
     )
 
 
