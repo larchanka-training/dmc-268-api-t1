@@ -6,7 +6,7 @@
 
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 from alembic import context
 from app.config import load_settings
@@ -35,6 +35,21 @@ if config.config_file_name is not None:
     configure_logging(MIGRATE_SERVICE)
 
 target_metadata = Base.metadata
+
+# Тайм-ауты сессии миграций — только онлайн: offline-SQL уходит на ревью или
+# DBA, и решать за него, сколько ждать, незачем. Деплой мигрирует живую базу,
+# пока работают старые API и воркер (.github/scripts/deploy/migrate.sh), а
+# ALTER TABLE, который ждёт блокировку горячей таблицы, ставит за собой в
+# очередь все её чтения — API висит, пока держатель не отпустит. 5 с ожидания
+# блокировки — и миграция падает, транзакция откатывается, стенд работает на
+# прежней схеме; повторный деплой попробует снова. statement_timeout — потолок
+# одного запроса: данные стенда мелкие, любой DDL и перенос данных идут
+# секунды, а 2 мин на запрос оставляют шагу миграций (timeout-minutes: 10 в
+# deploy.yml) время упасть самому, с логом и откатом, а не быть убитым
+# раннером. Обоснование — openspec/changes/archive/*-deploy-migrations-safety.
+LOCK_TIMEOUT = "5s"
+STATEMENT_TIMEOUT = "2min"
+
 
 def _dsn() -> str:
     """База, которую мигрируем.
@@ -86,6 +101,12 @@ def run_migrations_online() -> None:
             migrate_span(),
             connectable.connect() as connection,
         ):
+            # SET без LOCAL — на сессию: переживает commit и autocommit_block
+            # миграций. Commit закрывает автоначатую транзакцию: иначе alembic
+            # счёл бы её внешней и не зафиксировал бы миграции.
+            connection.execute(text(f"SET lock_timeout = '{LOCK_TIMEOUT}'"))
+            connection.execute(text(f"SET statement_timeout = '{STATEMENT_TIMEOUT}'"))
+            connection.commit()
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,

@@ -20,8 +20,10 @@ export REPORT_DIR="${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/deploy-report}"
 mkdir -p "$REPORT_DIR"
 
 # План полного выката строится до миграций: если они упали, apply не шёл и
-# файл плана с паролями остался — убрать его на любом исходе.
-rm -f infra/tfplan
+# файл плана с паролями остался — убрать его на любом исходе. Targeted-план
+# infra.sh убирает trap, но при отмене или таймауте шага trap может не
+# успеть — тогда его убирает этот шаг.
+rm -f infra/tfplan infra/infra.tfplan
 
 # timeout 30: ConnectTimeout через живой ControlMaster не действует, и
 # пропавший без разрыва master держал бы шаг до его timeout-minutes.

@@ -24,9 +24,10 @@ resource "docker_image" "postgres" {
   # `vector` сейчас не создаёт ни одна миграция. Образ остаётся: возврат на
   # postgres:18-alpine — снова смена библиотеки C и новый том (backend-delivery).
   # Тег плавающий: digest в name пересоздавал бы контейнер при каждом
-  # обновлении образа (#150). Теперь пересоздание идёт через SIGTERM:
-  # остановку при пересоздании обслуживает destroy_grace_seconds контейнера
-  # ниже (#102), и digest можно закрепить отдельной задачей.
+  # обновлении образа (#150), а замену базы деплой без allow_stateful_replace
+  # отклоняет (сторож плана, #213). Теперь пересоздание идёт через SIGTERM
+  # (destroy_grace_seconds у контейнера), и digest можно закрепить отдельной
+  # задачей.
   name         = "pgvector/pgvector:pg18"
   keep_locally = true
 }
@@ -48,9 +49,11 @@ resource "docker_container" "postgres" {
   # track_utility=off при preload обязателен: с ним утилитные выражения — в
   # том числе `ALTER ROLE … PASSWORD '…'` из replication-setup.sql и ранбуков —
   # не попадают в pg_stat_statements открытым текстом, а роль с pg_monitor
-  # статистику читает (замечание ревью PR #130, medium). По той же причине
-  # `SET LOCAL track_utility = off` стоит в 0013 и migrate.sh — на случай
-  # preload без этого флага (локальный compose).
+  # статистику читает (замечание ревью PR #130, medium). `SET LOCAL
+  # track_utility = off` в 0013, migrate.sh и миграциях compose — вторая линия:
+  # миграция не знает, на какой сервер её направил DATABASE_URL, а preload без
+  # флага есть — у тестовой базы CI (ci.yml, канареечный тест 0013 держится
+  # на этом SET LOCAL) и у любой своей базы разработчика.
   #
   # wal_level=replica и max_wal_senders у PostgreSQL 18 уже такие, какие нужны
   # реплике; задаём только то, чего нет по умолчанию. max_slot_wal_keep_size —
@@ -73,7 +76,9 @@ resource "docker_container" "postgres" {
   # поднимается с «not properly shut down» и восстановлением, брокер теряет
   # то, что не успел сбросить на диск. stop_timeout — окно docker stop,
   # destroy_grace_seconds — то же при пересоздании провайдером; 60 с — запас
-  # postgres на чекпоинт и чистую остановку.
+  # postgres на чекпоинт и чистую остановку. Деплой контейнер пересоздаёт
+  # только ручным запуском с allow_stateful_replace (сторож плана, infra.sh,
+  # #213).
   stop_timeout          = 60
   destroy_grace_seconds = 60
 

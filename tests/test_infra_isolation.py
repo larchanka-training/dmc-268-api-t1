@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 
 from tests.infra_text import read_infra_text
+from tests.shell_text import commands
 
 NOT_A_NETWORK_REFERENCE = "<не ссылка на docker_network>"
 
@@ -182,18 +183,31 @@ def test_every_container_is_in_exactly_its_networks() -> None:
 MIGRATE_SCRIPT = Path(".github/scripts/deploy/migrate.sh")
 
 
-def migrate_network(script: str) -> str | None:
-    """Сеть `docker run` миграций в шаге деплоя."""
-    match = re.search(r"^\s*--network[ =](\S+)", script, re.MULTILINE)
-    return match.group(1) if match else None
+def migrate_networks(script: str) -> list[str]:
+    """Сети всех `docker run` миграций в шаге деплоя, по одной на каждый `--network`.
+
+    Все, а не первая (ревью #220): `alembic current` после сбоя однажды остался
+    в сети `dmc268`, где базы нет, а проверка первого совпадения была зелёной.
+    Общие аргументы из массива bash подставляются в каждый запуск, комментарии
+    не считаются.
+    """
+    return re.findall(r"(?<!\S)--network[ =](\S+)", commands(script))
 
 
 def test_migrate_network_extractor() -> None:
-    assert (
-        migrate_network("docker run --rm \\\n  --network dmc268-backend \\\n")
-        == "dmc268-backend"
-    )
-    assert migrate_network("docker run --rm image") is None
+    assert migrate_networks("docker run --rm \\\n  --network dmc268-backend \\\n") == ["dmc268-backend"]
+    assert migrate_networks("docker run --rm image") == []
+    # Второй запуск в другой сети виден, а не прячется за первым.
+    assert migrate_networks(
+        "docker run --rm \\\n  --network dmc268-backend \\\n  img\n"
+        "timeout 60 docker run --rm --network dmc268 img\n"
+    ) == ["dmc268-backend", "dmc268"]
+    # Из массива — в каждый запуск, и добавка к одному из них тоже видна.
+    assert migrate_networks(
+        "run=(\n  docker run --rm\n  --network dmc268-backend\n)\n"
+        '"${run[@]}" img a\ntimeout 60 "${run[@]}" --network dmc268 img b\n'
+    ) == ["dmc268-backend", "dmc268-backend", "dmc268"]
+    assert migrate_networks("# --network dmc268 — так было до #102\n") == []
 
 
 def network_name(text: str, resource: str) -> str | None:
@@ -225,7 +239,11 @@ def test_migrations_run_in_the_database_network() -> None:
     assert None not in names, (
         f"не найдены имена сетей {sorted(postgres_networks)} в infra/*.tf"
     )
-    used = migrate_network(MIGRATE_SCRIPT.read_text())
-    assert used in names, (
-        f"{MIGRATE_SCRIPT}: миграции в сети {used!r}, а база — в {sorted(n for n in names if n)}"
+    script = MIGRATE_SCRIPT.read_text()
+    used = migrate_networks(script)
+    runs = re.findall(r"(?<!\S)docker run\b", commands(script))
+    # Каждый запуск — с сетью, и каждая сеть — сеть базы.
+    assert used and len(used) == len(runs), f"{MIGRATE_SCRIPT}: сети {used} на {len(runs)} запусков docker run"
+    assert set(used) <= names, (
+        f"{MIGRATE_SCRIPT}: миграции в сетях {sorted(set(used))}, а база — в {sorted(n for n in names if n)}"
     )

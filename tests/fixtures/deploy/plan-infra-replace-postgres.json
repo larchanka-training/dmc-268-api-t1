@@ -1,0 +1,85 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.13.2",
+  "resource_changes": [
+    {
+      "address": "docker_container.postgres",
+      "mode": "managed",
+      "type": "docker_container",
+      "name": "postgres",
+      "action_reason": "replace_because_cannot_update",
+      "change": {
+        "actions": [
+          "delete",
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "docker_container.rabbitmq",
+      "mode": "managed",
+      "type": "docker_container",
+      "name": "rabbitmq",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_image.postgres",
+      "mode": "managed",
+      "type": "docker_image",
+      "name": "postgres",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_image.rabbitmq",
+      "mode": "managed",
+      "type": "docker_image",
+      "name": "rabbitmq",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_network.dmc268",
+      "mode": "managed",
+      "type": "docker_network",
+      "name": "dmc268",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_volume.postgres",
+      "mode": "managed",
+      "type": "docker_volume",
+      "name": "postgres",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "docker_volume.rabbitmq",
+      "mode": "managed",
+      "type": "docker_volume",
+      "name": "rabbitmq",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    }
+  ]
+}
