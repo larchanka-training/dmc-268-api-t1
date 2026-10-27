@@ -7,9 +7,11 @@
 # из рабочей копии и передаёт через Docker API. Правка конфига пересоздаёт
 # контейнер следующим apply. Алиасы сети повторяют имена сервисов compose —
 # одни и те же адреса работают в обоих окружениях (prometheus.yml, grafana
-# datasources, endpoint коллектора). Наружу из стека не смотрит ничего:
-# сеть стека internal, а публикуемый порт Grafana живёт в отдельной
-# не-internal сети dmc268-grafana и открывается SSH-туннелем.
+# datasources, endpoint коллектора). Сеть стека internal; публикуемый порт
+# Grafana живёт в отдельной не-internal сети dmc268-grafana и открывается
+# SSH-туннелем. Выход в интернет через неё есть только у Grafana, и её
+# собственные походы наружу (статистика, проверки обновлений Grafana и
+# плагинов) выключены env.
 # Стек поднимается только при observability_enabled: count = 1 : 0 у образа,
 # сети и контейнера; выключение списка телеметрии см. local.telemetry_env.
 # Томам с данными count за флагом не нужен: они создаются всегда, поэтому
@@ -120,8 +122,9 @@ resource "docker_network" "observability_docker_proxy" {
 # (dmc268, там интерфейс dmc-268-ui-t1) и данных (backend): без этого из
 # контейнеров UI доступны Loki без аутентификации, Prometheus, Tempo и
 # приёмник OTLP (замечание ревью PR #130). Internal, как и сеть данных:
-# наружу из стека не ходит никто, а изоляция от интерфейса достигается самим
-# членством в сетях — dmc268 у стека нет вовсе. В backend из стека ходят
+# через неё в интернет не выйти, а изоляция от интерфейса достигается самим
+# членством в сетях — dmc268 у стека нет вовсе. Выход наружу есть только у
+# Grafana — через сеть публикации порта ниже. В backend из стека ходят
 # только prometheus (скрейпит rabbitmq) и коллектор (принимает OTLP api и
 # воркера, скрейпит postgres и rabbitmq).
 resource "docker_network" "observability" {
@@ -211,6 +214,14 @@ resource "docker_container" "loki" {
   log_driver  = "json-file"
   log_opts    = local.log_opts
 
+  # Хранилища стека заменяются обычной правкой (сторож их не держит, тома те
+  # же): 30 с на штатную остановку, чтобы Loki, Tempo и Prometheus сбросили
+  # WAL и буферы, а не получили SIGKILL сразу после стоп-сигнала. stop_timeout —
+  # окно docker stop, destroy_grace_seconds — то же при пересоздании
+  # провайдером. Так же у tempo, prometheus и grafana ниже.
+  stop_timeout          = 30
+  destroy_grace_seconds = 30
+
   security_opts = ["no-new-privileges:true"]
 
   upload {
@@ -242,6 +253,9 @@ resource "docker_container" "tempo" {
   log_driver  = "json-file"
   log_opts    = local.log_opts
 
+  stop_timeout          = 30
+  destroy_grace_seconds = 30
+
   security_opts = ["no-new-privileges:true"]
 
   upload {
@@ -272,6 +286,9 @@ resource "docker_container" "prometheus" {
   memory_swap = var.observability_memory_mb.prometheus
   log_driver  = "json-file"
   log_opts    = local.log_opts
+
+  stop_timeout          = 30
+  destroy_grace_seconds = 30
 
   security_opts = ["no-new-privileges:true"]
 
@@ -320,6 +337,9 @@ resource "docker_container" "grafana" {
   log_driver  = "json-file"
   log_opts    = local.log_opts
 
+  stop_timeout          = 30
+  destroy_grace_seconds = 30
+
   security_opts = ["no-new-privileges:true"]
 
   upload {
@@ -343,11 +363,12 @@ resource "docker_container" "grafana" {
     "GF_SECURITY_ADMIN_PASSWORD=${var.grafana_admin_password}",
     "GF_AUTH_ANONYMOUS_ENABLED=false",
     "GF_USERS_ALLOW_SIGN_UP=false",
-    # Телеметрия вендора off: статистика использования и проверка обновлений
-    # не должны уходить с сервера наружу. То же в compose и у Loki/Tempo в их
+    # Телеметрия вендора off: статистика использования и проверки обновлений
+    # Grafana и плагинов не должны уходить с сервера наружу. То же в compose и у Loki/Tempo в их
     # конфигах (loki.yaml, tempo.yaml).
     "GF_ANALYTICS_REPORTING_ENABLED=false",
     "GF_ANALYTICS_CHECK_FOR_UPDATES=false",
+    "GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false",
   ]
 
   volumes {

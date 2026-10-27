@@ -408,10 +408,14 @@ services:
     # grafana/grafana:13.2.4
     image: grafana/grafana@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     profiles: ["observability"]
+    # Сеть стека internal, а порты на internal-сети Docker не публикует:
+    # порт Grafana живёт в отдельной не-internal сети grafana, как на стенде
+    # (dmc268-grafana в infra/observability.tf).
     networks:
       observability:
         aliases:
           - grafana
+      grafana:
     ports:
       # Единственная точка стека, нужная человеку: http://127.0.0.1:3000.
       - "127.0.0.1:3000:3000"
@@ -422,11 +426,12 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
       GF_AUTH_BASIC_ENABLED: "false"
-      # Телеметрия вендора off: статистика использования и проверка обновлений
-      # не должны уходить с машины наружу. То же в main.tf и у Loki/Tempo в
+      # Телеметрия вендора off: статистика использования и проверки обновлений
+      # Grafana и плагинов не должны уходить с машины наружу. То же в main.tf и у Loki/Tempo в
       # их конфигах (loki.yaml, tempo.yaml).
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
     volumes:
       - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
@@ -551,4 +556,11 @@ volumes:
 networks:
   docker_proxy:
     internal: true
+  # Сеть стека: из default (там интерфейс) её не видно, в интернет из неё не
+  # выйти. Коллектор и Prometheus стоят и в default — приём OTLP и скрейп
+  # rabbitmq.
   observability:
+    internal: true
+  # Только ради публикации порта Grafana: порты на internal-сети Docker не
+  # публикует.
+  grafana:

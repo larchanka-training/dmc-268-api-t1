@@ -420,16 +420,19 @@ def test_stack_networks_split_the_stack_from_the_app_in_compose() -> None:
     """Сеть стека отдельна от default: из контейнеров интерфейса (в default)
     не видно Loki, Prometheus, Tempo и OTLP коллектора (замечание ревью
     PR #130). Коллектор и Prometheus двуподветочны (приём/скрейп rabbitmq),
-    остальной стек — только в сети стека; docker_proxy — internal."""
+    остальной стек — только в сети стека; сеть стека и docker_proxy —
+    internal, а порт Grafana публикуется через отдельную не-internal сеть
+    grafana, как на стенде."""
     networks = load_compose()["networks"]
-    assert "observability" in networks
     assert networks["docker_proxy"]["internal"] is True
-    assert not (networks["observability"] or {}).get("internal")
+    assert networks["observability"]["internal"] is True
+    assert not (networks["grafana"] or {}).get("internal")
 
     services = load_compose()["services"]
     assert set(services["collector"]["networks"]) == {"default", "observability"}
     assert set(services["prometheus"]["networks"]) == {"default", "observability"}
-    for service in ("loki", "tempo", "grafana", "node-exporter"):
+    assert set(services["grafana"]["networks"]) == {"observability", "grafana"}
+    for service in ("loki", "tempo", "node-exporter"):
         assert set(services[service]["networks"]) == {"observability"}, service
 
 
@@ -523,9 +526,11 @@ def test_vendor_telemetry_is_off() -> None:
     grafana_compose = load_compose()["services"]["grafana"]["environment"]
     assert grafana_compose["GF_ANALYTICS_REPORTING_ENABLED"] == "false"
     assert grafana_compose["GF_ANALYTICS_CHECK_FOR_UPDATES"] == "false"
+    assert grafana_compose["GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES"] == "false"
     observability_tf = OBSERVABILITY_TF.read_text(encoding="utf-8")
     assert '"GF_ANALYTICS_REPORTING_ENABLED=false"' in observability_tf
     assert '"GF_ANALYTICS_CHECK_FOR_UPDATES=false"' in observability_tf
+    assert '"GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false"' in observability_tf
 
 
 @pytest.mark.parametrize(

@@ -78,6 +78,19 @@ run "observability_stack_plans_protected" {
     ])
     error_message = "Каждый контейнер стека должен запрещать повышение привилегий: security_opts содержит no-new-privileges:true."
   }
+
+  # Хранилища стека сторож не держит: правка конфига — их замена. Окно
+  # штатной остановки, чтобы WAL и буферы сбрасывались, а не обрывались SIGKILL.
+  assert {
+    condition = alltrue([
+      for c in [
+        docker_container.loki[0], docker_container.tempo[0],
+        docker_container.prometheus[0], docker_container.grafana[0],
+      ] :
+      c.stop_timeout == 30 && c.destroy_grace_seconds == 30
+    ])
+    error_message = "Loki, Tempo, Prometheus и Grafana должны останавливаться с окном 30 с: stop_timeout = destroy_grace_seconds = 30, иначе замена — SIGKILL под пишущим хранилищем."
+  }
 }
 
 # Стек включён, секреты не заданы: незаданный секрет репозитория приходит в
@@ -129,7 +142,7 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
 
   assert {
     condition     = docker_network.observability[0].internal == true && docker_network.grafana[0].internal != true
-    error_message = "Сеть стека — internal (наружу из стека не ходит никто), сеть dmc268-grafana — не internal: порты на internal-сети Docker не публикует."
+    error_message = "Сеть стека — internal (из неё в интернет не выйти), сеть dmc268-grafana — не internal: порты на internal-сети Docker не публикует."
   }
 
   assert {
