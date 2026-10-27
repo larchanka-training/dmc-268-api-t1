@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 # Файлы крупнее этого в PR из git не берутся: дифф такого файла модели не нужен.
 MAX_FILE_BYTES = 200_000
 GIT_TIMEOUT_SECONDS = 30.0
+# Режим gitlink в дереве git: запись сабмодуля, а не файл.
+SUBMODULE_MODE = "160000"
 
 
 class InputError(ValueError):
@@ -121,7 +123,7 @@ def from_git(range_spec: str, repo: Path) -> PrInput:
 
     Дифф считается от merge-base, как у PR на GitHub (`BASE...HEAD`). База -
     файлы на merge-base, head - на `HEAD` диапазона. Бинарные и слишком
-    большие файлы пропускаются с предупреждением.
+    большие файлы, а также сабмодули (gitlink) пропускаются с предупреждением.
     """
     base, head = _parse_range(range_spec)
     if _git(repo, "rev-parse", "--is-inside-work-tree").strip() != b"true":
@@ -132,13 +134,19 @@ def from_git(range_spec: str, repo: Path) -> PrInput:
         except InputError as error:
             raise InputError(f"ревизии «{rev}» нет в {repo}") from error
     merge_base = _git(repo, "merge-base", base, head).decode().strip()
-    raw = _git(repo, "diff", "--name-status", "--no-renames", "-z", f"{base}...{head}")
+    # `--raw -z`: «:oldmode newmode oldsha newsha status\0path\0» - режимы
+    # нужны, чтобы отличить gitlink (160000) от файла.
+    raw = _git(repo, "diff", "--raw", "--no-renames", "-z", f"{base}...{head}")
     fields = raw.decode("utf-8", errors="surrogateescape").split("\0")
 
     base_files: dict[str, str] = {}
     head_files: dict[str, str | None] = {}
-    for status, path in zip(fields[0::2], fields[1::2], strict=False):
-        if not status or not path:
+    for meta, path in zip(fields[0::2], fields[1::2], strict=False):
+        if not meta or not path:
+            continue
+        old_mode, new_mode, *_, status = meta.lstrip(":").split()
+        if SUBMODULE_MODE in (old_mode, new_mode):
+            logger.warning("%s: пропущен, сабмодуль", path)
             continue
         kind = status[0]
         if kind != "A":
