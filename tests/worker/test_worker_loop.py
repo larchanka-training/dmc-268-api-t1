@@ -14,6 +14,7 @@ import pika
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
+from pika.exceptions import ChannelClosedByBroker
 
 from app.config import Settings
 from app.domain.llm_errors import LlmTimeoutError
@@ -32,16 +33,25 @@ class FakeChannel:
     def __init__(self, deliveries: list[tuple[Any, Any, Any]]) -> None:
         self._deliveries = deliveries
         self.acked: list[int] = []
+        self.requeued: list[int] = []
         self.cancelled = False
 
     def consume(self, queue: str, inactivity_timeout: float):
-        yield from self._deliveries
+        while self._deliveries:
+            yield self._deliveries.pop(0)
+
+    def get_waiting_message_count(self) -> int:
+        # Всё, что ещё не выдано циклу, — как буфер pika, уже полученный от брокера.
+        return len(self._deliveries)
 
     def basic_ack(self, tag: int) -> None:
         self.acked.append(tag)
 
     def basic_nack(self, tag: int, requeue: bool) -> None:
-        raise AssertionError("не ожидался nack")
+        # Возврат в очередь при остановке ожидаем, отказ в DLQ — нет.
+        if not requeue:
+            raise AssertionError("не ожидался nack в DLQ")
+        self.requeued.append(tag)
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -55,12 +65,29 @@ class RecordingChannel(FakeChannel):
         self.nacked: list[int] = []
 
     def basic_nack(self, tag: int, requeue: bool) -> None:
-        self.nacked.append(tag)
+        if requeue:
+            self.requeued.append(tag)
+        else:
+            self.nacked.append(tag)
+
+
+class NoLegacyQueueChannel:
+    """Канал брокера, где старой классической очереди нет: пассивное объявление — `404`."""
+
+    is_open = False
+
+    def queue_declare(self, queue: str, passive: bool) -> None:
+        raise ChannelClosedByBroker(404, f"NOT_FOUND - no queue '{queue}'")
 
 
 class FakeConnection:
     def __init__(self) -> None:
         self.closed = False
+        self.channels_opened = 0
+
+    def channel(self) -> NoLegacyQueueChannel:
+        self.channels_opened += 1
+        return NoLegacyQueueChannel()
 
     def close(self) -> None:
         self.closed = True
@@ -95,6 +122,24 @@ def test_sweep_is_throttled_by_the_interval() -> None:
     )
 
     assert calls == [1]  # первый проход сразу, остальные — не раньше интервала
+
+
+def test_legacy_jobs_are_moved_on_the_sweep_tick_and_a_failure_does_not_stop_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = [(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1), None, b"{}")]
+    channel = FakeChannel(ticks)
+    moves: list[int] = []
+
+    def move(connection: object) -> int:
+        moves.append(1)
+        raise RuntimeError("брокер ответил ошибкой")
+
+    monkeypatch.setattr(factory, "move_legacy_jobs", move)
+    _worker(channel).run(lambda body: None, limit=1, sweep_interval=3600)
+
+    assert moves == [1]  # на первом такте, дальше — не раньше интервала, и без `sweep`
+    assert channel.acked == [1]
 
 
 @pytest.mark.parametrize(
@@ -183,6 +228,7 @@ def test_a_stop_request_lets_the_current_message_finish_and_takes_no_more() -> N
     _worker(channel, connection).run(handler, stop=stop)
 
     assert channel.acked == [1]  # сообщение в работе подтверждено, второе не взято
+    assert channel.requeued == [2]  # а возвращено nack: закрытие соединения потратило бы попытку
     assert channel.cancelled and connection.closed
 
 
@@ -195,7 +241,8 @@ def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
     _worker(channel, connection).run(handled.append, stop=StopRequest(requested=True))
 
     assert handled == []
-    assert channel.acked == []  # не подтверждено: брокер вернёт его в очередь
+    assert channel.acked == []
+    assert channel.requeued == [1]
     assert channel.cancelled and connection.closed
 
 
@@ -211,6 +258,7 @@ def test_a_message_after_a_stop_during_the_sweep_is_not_taken() -> None:
 
     assert handled == []
     assert channel.acked == []
+    assert channel.requeued == [1]
 
 
 class IdleChannel(FakeChannel):
@@ -219,6 +267,9 @@ class IdleChannel(FakeChannel):
     def __init__(self) -> None:
         super().__init__([])
         self.idle_ticks = 0
+
+    def get_waiting_message_count(self) -> int:
+        return 0
 
     def consume(self, queue: str, inactivity_timeout: float) -> Iterator[Any]:
         while True:

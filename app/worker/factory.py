@@ -21,6 +21,7 @@ from typing import Protocol
 
 import pika
 from opentelemetry import trace
+from pika import spec
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
@@ -43,10 +44,12 @@ from app.domain.webhook_redelivery import RedeliveryPolicy
 from app.infrastructure.container import WORKER_VCS_LIMITS, build_container
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
+    LEGACY_QUEUE_NAME,
     QUEUE_NAME,
     consuming_span,
     declare_topology,
     from_wire_message,
+    move_legacy_jobs,
 )
 from app.infrastructure.telemetry import (
     REVIEW_RUN_ID,
@@ -120,7 +123,7 @@ class Worker:
         sweep_interval: float = SWEEP_INTERVAL_SECONDS,
         stop: StopRequest | None = None,
     ) -> None:
-        """Потреблять `review_jobs`.
+        """Потреблять очередь задач ревью (`QUEUE_NAME`).
 
         `limit=None` — бесконечно (боевой запуск `python -m app.worker`);
         конечное число — для тестов, чтобы не держать процесс висящим на
@@ -136,30 +139,33 @@ class Worker:
         дорабатывает и подтверждается, следующее не берётся, даже если брокер
         уже выдал его циклу. На простое цикл выходит на ближайшем такте, не
         позже `inactivity_timeout`. В `finally` `cancel()` возвращает в очередь
-        только сообщения из буфера pika (`pending_events`); уже выданное циклу,
-        но не подтверждённое брокер вернёт при `connection.close()`.
+        только сообщения из буфера pika (`pending_events`), но их цикл при штатном
+        выходе уже вернул сам: выданное циклу или лежащее в буфере, но не взятое в
+        работу, возвращается `nack` с requeue (`_return_unprocessed`).
+
+        На том же такте, что и `sweep`, остатки старой классической очереди
+        перекладываются в quorum-очередь (`move_legacy_jobs`, #223).
         """
         processed = 0
         last_sweep: float | None = None
         try:
-            for method, properties, body in self.channel.consume(
-                QUEUE_NAME, inactivity_timeout=1
-            ):
-                # Выданное, но не подтверждённое сообщение брокер вернёт в
-                # очередь при `connection.close()` в `finally`.
+            deliveries = self.channel.consume(QUEUE_NAME, inactivity_timeout=1)
+            for method, properties, body in deliveries:
                 if stop is not None and stop.requested:
+                    self._return_unprocessed(method)
                     break
-                if sweep is not None and (
-                    last_sweep is None or time.monotonic() - last_sweep >= sweep_interval
-                ):
+                if last_sweep is None or time.monotonic() - last_sweep >= sweep_interval:
                     last_sweep = time.monotonic()
-                    try:
-                        with sweep_span():
-                            sweep()
-                    except Exception:
-                        logger.exception("проход по зависшим прогонам завершился ошибкой")
+                    self._move_legacy_jobs()
+                    if sweep is not None:
+                        try:
+                            with sweep_span():
+                                sweep()
+                        except Exception:
+                            logger.exception("проход по зависшим прогонам завершился ошибкой")
                     # Сигнал мог прийти посреди прохода — сообщение этого такта не берём.
                     if stop is not None and stop.requested:
+                        self._return_unprocessed(method)
                         break
                 if method is None:
                     continue
@@ -184,9 +190,36 @@ class Worker:
                     break
                 if stop is not None and stop.requested:
                     break
+            # Выход без исключения: и то, что брокер уже положил в буфер pika, вернуть
+            # `nack` — `cancel()` вернул бы его `basic.reject`, а он попытку тратит.
+            while self.channel.get_waiting_message_count():
+                self._return_unprocessed(next(deliveries)[0])
         finally:
             self.channel.cancel()
             self.connection.close()
+
+    def _return_unprocessed(self, method: spec.Basic.Deliver | None) -> None:
+        """Вернуть в очередь выданное, но не взятое в работу сообщение — `nack` с requeue.
+
+        Без него сообщение вернул бы брокер при `connection.close()` (или pika через
+        `basic.reject` при `cancel()`), и quorum-очередь засчитала бы это неудачной
+        доставкой (#223): каждый деплой тратил бы попытку из `DELIVERY_LIMIT`.
+        `basic.nack` попытку не тратит.
+        """
+        if method is not None:
+            assert method.delivery_tag is not None
+            self.channel.basic_nack(method.delivery_tag, requeue=True)
+
+    def _move_legacy_jobs(self) -> None:
+        # Переход на quorum-очередь (#223): остатки классической `review_jobs`.
+        # Сбой не останавливает потребление — повторится на следующем такте.
+        try:
+            moved = move_legacy_jobs(self.connection)
+        except Exception:
+            logger.exception("перенос задач из старой очереди %s завершился ошибкой", LEGACY_QUEUE_NAME)
+            return
+        if moved:
+            logger.info("задач перенесено из старой очереди %s: %d", LEGACY_QUEUE_NAME, moved)
 
 
 def build_worker(settings: Settings) -> Worker:
