@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 
 from tests.infra_text import read_infra_text
+from tests.shell_text import commands
 
 NOT_FOUND = "не найдено"
 
@@ -113,7 +114,7 @@ def script_runs_migrations(script: str) -> bool:
         re.search(
             r"^\s*docker run --rm\b(?:[^\n]*\\\n)*?[^\n]*\"\$API_IMAGE\"\s+alembic upgrade head"
             r"(?:\s+2>&1\s*\|\s*tee\s[^\n]*)?\s*$",
-            script,
+            commands(script),
             re.MULTILINE,
         )
     )
@@ -134,8 +135,11 @@ MIGRATION_RESTRICTIONS = (
 
 
 def missing_migration_restrictions(script: str) -> list[str]:
-    """Ограничения, которых нет среди флагов `docker run` скрипта миграций."""
-    run = re.search(r"^\s*docker run --rm\b(?:[^\n]*\\\n)*[^\n]*$", script, re.MULTILINE)
+    """Ограничения, которых нет среди флагов `docker run` скрипта миграций.
+
+    Флаги из массива bash (`"${имя[@]}"`) подставляются в запуск (`commands`).
+    """
+    run = re.search(r"^\s*docker run --rm\b(?:[^\n]*\\\n)*[^\n]*$", commands(script), re.MULTILINE)
     flags = run.group(0) if run else ""
     return [flag for flag in MIGRATION_RESTRICTIONS if not re.search(rf"(?<!\S){re.escape(flag)}(?!\S)", flags)]
 
@@ -231,6 +235,11 @@ def test_extractors_find_facts_that_are_present() -> None:
     assert missing_migration_restrictions(
         "docker run --rm \\\n  " + " \\\n  ".join(MIGRATION_RESTRICTIONS) + ' \\\n  "$API_IMAGE" x\n'
     ) == []
+    # Общие флаги в массиве bash — тот же запуск.
+    assert missing_migration_restrictions(
+        "run=(\n  docker run --rm\n  " + "\n  ".join(MIGRATION_RESTRICTIONS) + '\n)\n"${run[@]}" "$API_IMAGE" x\n'
+    ) == []
+    assert script_runs_migrations('run=(\n  docker run --rm\n)\n"${run[@]}" "$API_IMAGE" alembic upgrade head\n')
     assert compose_worker_model_env(
         "services:\n  worker:\n    environment:\n      # комментарий\n"
         "      LLM_BACKEND: stub\n      DATABASE_URL: x\n  ollama:\n    environment:\n"
