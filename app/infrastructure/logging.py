@@ -3,7 +3,8 @@
 Одна точка настройки — `configure_logging(service_name)`: на root ставится
 единственный `StreamHandler(sys.stdout)` с JSON-форматтером и
 `TraceContextFilter`, логгеры `uvicorn.*` переводятся на этот же хендлер,
-чтобы весь stdout контейнера был JSON.
+чтобы весь stdout контейнера был JSON. Миграции пишут тот же JSON в stderr:
+их stdout — результат команды alembic, его читают скрипты деплоя.
 
 Формат — плоский JSON по модели OTel LogRecord: `timestamp` (RFC 3339, UTC),
 `severity`, `message`, `logger` (имя логгера), `trace_id`/`span_id`/`trace_flags`
@@ -269,8 +270,13 @@ class JsonFormatter(logging.Formatter):
 _handler: logging.StreamHandler[typing.TextIO] | None = None
 
 
-def configure_logging(service_name: str) -> None:
+def configure_logging(service_name: str, stream: typing.TextIO | None = None) -> None:
     """Поставить на root единственный JSON-хендлер в stdout; uvicorn — туда же.
+
+    `stream` — куда писать вместо stdout. Его передают миграции
+    (`alembic/env.py`, `sys.stderr`): stdout alembic CLI — результат команды
+    (`current`, `heads`), его читают скрипты деплоя. Без `stream` хендлер
+    остаётся на потоке, куда писал (при первом вызове — stdout).
 
     Логгеры HTTP-клиентов (`HTTP_CLIENT_LOGGERS`) переводятся на WARNING.
     Точки вызова — там же, где настраивается трассировка: фабрика приложения
@@ -281,9 +287,11 @@ def configure_logging(service_name: str) -> None:
     global _handler
     root = logging.getLogger()
     if _handler is None:
-        _handler = logging.StreamHandler(sys.stdout)
+        _handler = logging.StreamHandler(sys.stdout if stream is None else stream)
         _handler.addFilter(TraceContextFilter())
         _handler.addFilter(ReviewRunIdFilter())
+    elif stream is not None:
+        _handler.setStream(stream)
     _handler.setFormatter(JsonFormatter(service_name))
     if _handler not in root.handlers:
         root.addHandler(_handler)

@@ -427,7 +427,8 @@ def upgrade() -> None:
   «Во что обошёлся прогон» остаётся SQL по колонкам `review_runs`: метрики —
   для алертов, не для отчётов.
 - **Логи** — два транспорта из одной точки настройки. `configure_logging(service_name)`
-  ставит JSON-хендлер в stdout: поля по модели данных OTel — `timestamp`, `severity`,
+  ставит JSON-хендлер в stdout (миграции передают `stream=sys.stderr`: stdout alembic
+  CLI — результат команды, его читает `migrate.sh`): поля по модели данных OTel — `timestamp`, `severity`,
   `message`, `logger`, `service.name`, атрибуты из `extra` верхним уровнем
   (служебные поля `extra` перетереть не может); trace-поля
   (`trace_id`/`span_id`/`trace_flags`) добавляет `TraceContextFilter` из

@@ -197,7 +197,8 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 ### Логи
 
 Два транспорта из одной точки настройки: stdlib `logging` → JSON в stdout —
-всегда, для docker logs и локальной отладки; OTLP-экспорт из SDK при
+всегда, для docker logs и локальной отладки (у миграций — в stderr: stdout
+alembic CLI читают скрипты деплоя); OTLP-экспорт из SDK при
 `OTEL_LOGS_EXPORTER=otlp` (дефолт `none`) — путь в Loki через коллектор,
 принимающий логи только по OTLP. Чек-лист ревью логирующего кода:
 

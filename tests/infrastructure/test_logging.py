@@ -357,6 +357,27 @@ def test_configure_logging_routes_uvicorn_loggers_to_the_single_json_handler() -
     assert len(again) == 1
 
 
+def test_configure_logging_writes_to_the_given_stream() -> None:
+    """Миграции передают `sys.stderr`: stdout alembic CLI читают скрипты деплоя (#232)."""
+    configure_logging("dmc-268-api")
+    [handler] = [h for h in logging.getLogger().handlers if isinstance(h.formatter, JsonFormatter)]
+    assert isinstance(handler, logging.StreamHandler)
+    previous = handler.stream
+    stream = io.StringIO()
+    try:
+        configure_logging("dmc-268-migrate", stream=stream)
+        logging.getLogger("alembic.runtime.migration").info("Context impl PostgresqlImpl.")
+        record = json.loads(stream.getvalue())
+        assert record["service.name"] == "dmc-268-migrate"
+        assert record["message"] == "Context impl PostgresqlImpl."
+
+        # Повторный вызов без `stream` поток не меняет.
+        configure_logging("dmc-268-migrate")
+        assert handler.stream is stream
+    finally:
+        handler.setStream(previous)
+
+
 def test_uvicorn_error_records_arrive_as_json_except_the_duplicate() -> None:
     configure_logging("dmc-268-api")
     uvicorn = logging.getLogger("uvicorn.error")

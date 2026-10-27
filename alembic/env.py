@@ -4,6 +4,7 @@
 приложение и миграции не разошлись в том, о какой базе речь.
 """
 
+import sys
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool, text
@@ -23,16 +24,19 @@ from app.infrastructure.telemetry import (
 
 config = context.config
 
-# Логи миграций — тем же JSON, что API и воркер. `fileConfig` ниже снимает все
-# root-хендлеры (стандартное поведение logging.config), поэтому после него
-# вызов повторяется: на root не остаётся никого, вернуть может только наш
-# JSON-хендлер. `disable_existing_loggers=False` — чтобы логгеры, созданные
-# раньше fileConfig (внутри процесса тестов это логгеры приложения), не
-# гасились: проверки «в логе нет ключа» не проходили бы впустую.
-configure_logging(MIGRATE_SERVICE)
+# Логи миграций — тем же JSON, что API и воркер, но в stderr: stdout alembic
+# CLI — результат команды (`current`, `heads`, `history`), его читают скрипты
+# деплоя (`ask_current` в .github/scripts/deploy/migrate.sh, ревью #130, #232).
+# `fileConfig` ниже снимает все root-хендлеры (стандартное поведение
+# logging.config), поэтому после него вызов повторяется: на root не остаётся
+# никого, вернуть может только наш JSON-хендлер. `disable_existing_loggers=False`
+# — чтобы логгеры, созданные раньше fileConfig (внутри процесса тестов это
+# логгеры приложения), не гасились: проверки «в логе нет ключа» не проходили бы
+# впустую.
+configure_logging(MIGRATE_SERVICE, stream=sys.stderr)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
-    configure_logging(MIGRATE_SERVICE)
+    configure_logging(MIGRATE_SERVICE, stream=sys.stderr)
 
 target_metadata = Base.metadata
 

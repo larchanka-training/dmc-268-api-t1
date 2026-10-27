@@ -340,11 +340,11 @@ UPGRADE = re.compile(r"Running upgrade (\S*) -> ([^\s,]+)")
 def current_revision(text: str) -> str:
     """Ревизия из вывода `alembic current`: `0012 (head)` → `0012`; пусто — пустая база.
 
-    Логи миграций — JSON-строки в том же stdout (`configure_logging` в
-    `alembic/env.py`), и печатаются они раньше ревизии: `Context impl …`,
-    `Will assume transactional DDL.` Строки-объекты JSON пропускаются, иначе
-    ревизией стал бы `{"timestamp":`, и повтор по блокировке не срабатывал
-    бы никогда (ревью #130).
+    Логи миграций уходят в stderr (`alembic/env.py`, #232), и stdout несёт
+    только ревизию. Строки-объекты JSON всё равно пропускаются — страховка
+    на случай, если логи снова окажутся в stdout: раньше там шли `Context
+    impl …` и `Will assume transactional DDL.`, ревизией становился
+    `{"timestamp":`, и повтор по блокировке не срабатывал (ревью #130).
     """
     for line in text.splitlines():
         line = line.strip()

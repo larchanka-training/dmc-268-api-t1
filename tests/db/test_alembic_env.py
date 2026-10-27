@@ -7,6 +7,7 @@ URL проходит через alembic.ini, а это файл configparser, п
 """
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -156,7 +157,7 @@ def test_the_migrations_session_carries_both_timeouts(migrated) -> None:
 
 
 def _alembic_cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """`alembic` отдельным процессом, как на стенде: свой `env.py`, свои логи в stdout.
+    """`alembic` отдельным процессом, как на стенде: свой `env.py`, свои логи в stderr.
 
     База — через копию alembic.ini с `sqlalchemy.url`: `env.py` берёт опцию,
     выставленную до него, и Settings (весь env стенда) не нужны.
@@ -178,7 +179,7 @@ def _alembic_cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]
 @pytest.mark.integration
 @requires_db
 def test_the_deploy_report_reads_real_alembic_output(migrated, tmp_path: Path) -> None:
-    """Ревью #130: stdout `alembic current` на стенде — JSON-логи и только потом ревизия.
+    """Ревью #130, #232: stdout `alembic current` — только ревизия, JSON-логи — в stderr.
 
     `migrate.sh` кладёт stdout в migrate-current.log, а повтор по блокировке
     и summary берут ревизию оттуда. Разбор сверяется с настоящим выводом, а
@@ -195,10 +196,12 @@ def test_the_deploy_report_reads_real_alembic_output(migrated, tmp_path: Path) -
     previous = script.get_revision(head).down_revision
     assert isinstance(previous, str)
 
-    current = _alembic_cli(tmp_path, "current").stdout
-    # Лог в stdout — то, ради чего тест: без него разбор «первой строки» и работал.
-    assert current.lstrip().startswith("{"), current
-    assert deploy_report.current_revision(current) == head
+    current = _alembic_cli(tmp_path, "current")
+    # В stdout — ни одной строки лога: его читают скрипты деплоя.
+    assert current.stdout.split() == [head, "(head)"], current.stdout
+    assert deploy_report.current_revision(current.stdout) == head
+    # Логи никуда не делись — они JSON в stderr.
+    assert json.loads(current.stderr.splitlines()[0])["service.name"] == "dmc-268-migrate"
 
     command.downgrade(config, "-1")
     try:

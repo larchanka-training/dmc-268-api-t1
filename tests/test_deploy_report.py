@@ -696,9 +696,9 @@ def test_alembic_current_output_is_parsed() -> None:
     assert deploy_report.current_revision("\n") == ""
 
 
-# Настоящий stdout `alembic current` на стенде: JSON-логи миграций идут туда же
-# и раньше ревизии (alembic/env.py, configure_logging). Сверяет с живым выводом
-# tests/db/test_alembic_env.py.
+# stdout `alembic current`, когда JSON-логи миграций шли в него раньше ревизии
+# (до #232; теперь они в stderr, см. tests/db/test_alembic_env.py). Фильтр
+# остаётся страховкой, и этот вывод её проверяет.
 JSON_LOGGED_CURRENT = (
     '{"timestamp": "2026-10-27T18:00:00.000000Z", "severity": "INFO", '
     '"message": "Context impl PostgresqlImpl.", "service.name": "dmc-268-migrate"}\n'
