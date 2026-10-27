@@ -85,15 +85,15 @@ ollama-up: ## Поднять ollama serve в фоне, если она ещё н
 	else \
 		command -v ollama >/dev/null || { echo "ollama не установлена: brew install ollama" >&2; exit 1; }; \
 		echo "Запускаю ollama serve в фоне, лог - .ollama.log"; \
-		nohup ollama serve >.ollama.log 2>&1 & \
+		OLLAMA_HOST='$(OLLAMA_URL)' nohup ollama serve >.ollama.log 2>&1 & \
 		for i in $$(seq 1 30); do curl -sf '$(OLLAMA_URL)/api/tags' >/dev/null && exit 0; sleep 1; done; \
 		echo "Ollama не ответила за 30 с, см. .ollama.log" >&2; exit 1; \
 	fi
 
 ollama-pull: ## Скачать MODEL, если её ещё нет
-	@ollama list | awk 'NR > 1 {print $$1}' | grep -qx -e '$(MODEL)' -e '$(MODEL):latest' \
+	@OLLAMA_HOST='$(OLLAMA_URL)' ollama list | awk 'NR > 1 {print $$1}' | grep -qx -e '$(MODEL)' -e '$(MODEL):latest' \
 		&& echo "Модель $(MODEL) уже скачана" \
-		|| ollama pull '$(MODEL)'
+		|| OLLAMA_HOST='$(OLLAMA_URL)' ollama pull '$(MODEL)'
 
 # --- тесты по компонентам: без инфраструктуры --------------------------------------
 
