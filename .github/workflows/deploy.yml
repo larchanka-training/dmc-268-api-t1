@@ -12,7 +12,17 @@ on:
     workflows: [CI]
     types: [completed]
     branches: [develop]
+  # Ручной запуск — с develop (gate). allow_stateful_replace — осознанный обход
+  # сторожа замены контейнеров базы и брокера (scripts/deploy_report.py,
+  # STATEFUL): правка их env, command, памяти или образа иначе деплоем не
+  # выкатывается. `gh workflow run deploy.yml -f allow_stateful_replace=true`;
+  # повтор с флагом — новым dispatch, не Re-run. Тома защищены всегда.
   workflow_dispatch:
+    inputs:
+      allow_stateful_replace:
+        description: Разрешить замену контейнеров базы и брокера (тома защищены всегда)
+        type: boolean
+        default: false
 
 # packages: write нужен только job'у сборки — он и получает его у себя.
 permissions:
@@ -282,16 +292,21 @@ jobs:
           .github/scripts/deploy/diagnostics.sh
 
       # База и брокер — до миграций: на чистом сервере их ещё нет. На живом
-      # стенде это `No changes` за несколько секунд; предупреждение OpenTofu о
-      # -target здесь ожидаемое. postgres с `wait = true` (infra/postgres.tf):
-      # apply возвращается, когда база отвечает. Заодно обновляется выход
-      # migrate_env в состоянии — он зависит от этих контейнеров
-      # (infra/locals.tf). Переменные — те же, что у полного apply (якорь).
+      # стенде это `No changes` за несколько секунд. Targeted-план — в файл и
+      # через сторож (infra.sh): замену или удаление базы и брокера шаг
+      # отклоняет до apply. Переменные — те же, что у полного apply (якорь).
       - name: Поднять базу и брокер
         id: infra
         if: *fresh
-        working-directory: infra
         env: &tofu-env
+          # Обход сторожа базы и брокера — только из ручного запуска и только
+          # первой попытки: у workflow_run выражение даёт `false`, и push-деплой
+          # его не откроет, а Re-run повторяет inputs старого запуска — повтор с
+          # флагом делают новым dispatch. Сторож (infra.sh и plan.sh) верит
+          # только буквальному `true`. triggering_actor — кто запустил эту
+          # попытку, а не автор первой.
+          ALLOW_STATEFUL_REPLACE: ${{ github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && inputs.allow_stateful_replace }}
+          DEPLOY_ACTOR: ${{ github.triggering_actor }}
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
           AWS_DEFAULT_REGION: us-east-1
@@ -325,21 +340,16 @@ jobs:
           # Модели на стенде пока нет: заглушка выбрана явно, ревью пустые.
           TF_VAR_llm_backend: stub
         run: |
-          ../.github/scripts/deploy/mark.sh
-          set -euo pipefail
-          tofu init -input=false -no-color
-          tofu apply -input=false -no-color -auto-approve -lock-timeout=2m \
-            -target=docker_network.dmc268 \
-            -target=docker_network.backend \
-            -target=docker_container.postgres \
-            -target=docker_container.rabbitmq
+          .github/scripts/deploy/mark.sh
+          .github/scripts/deploy/infra.sh
 
       # План полного выката — в файл, сразу после targeted apply: план видит
       # его результат, а миграции состояние не трогают (`tofu output` только
       # читает), так что `apply tfplan` после них не устаревает. Тома защищает
       # prevent_destroy (infra/postgres.tf) — и здесь, и в targeted apply выше;
-      # сторож в plan.sh дублирует его для summary. Упал план — миграции не
-      # идут. Переменные — те же (якорь).
+      # сторож в plan.sh дублирует его для summary и, как в infra.sh, не
+      # пускает замену базы и брокера. Упал план — миграции не идут.
+      # Переменные — те же (якорь).
       - name: Спланировать и проверить план
         id: plan
         if: *fresh
@@ -350,10 +360,15 @@ jobs:
 
       # Миграции до выката нового кода: упали — полный apply не запускается,
       # на стенде остаётся прежняя версия API и воркера. Заодно скачивается
-      # образ, из которого полный apply создаст api и worker.
+      # образ, из которого полный apply создаст api и worker. Потолок шага —
+      # 10 мин: на запрос у миграций 2 мин statement_timeout, на блокировку —
+      # 5 с lock_timeout (alembic/env.py), остальное — pull образа и повторы
+      # после LockNotAvailable: последний начинается не позже 5 мин от старта
+      # (migrate.sh). Без потолка зависшая миграция держала бы job до его 60 минут.
       - name: Применить миграции
         id: migrate
         if: *fresh
+        timeout-minutes: 10
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
@@ -496,6 +511,9 @@ jobs:
         # случай, если повиснет что-то ещё: job ждал бы до своих 60 минут.
         timeout-minutes: 3
         env:
+          # Тот же флаг, что у сторожа: с ним подсказка «перезапустите» неверна —
+          # Re-run его не получит, нужен новый ручной запуск.
+          ALLOW_STATEFUL_REPLACE: ${{ github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && inputs.allow_stateful_replace }}
           IMAGE: ${{ needs.image.outputs.image }}
           SHA: ${{ needs.gate.outputs.sha }}
           JOB_STATUS: ${{ job.status }}
