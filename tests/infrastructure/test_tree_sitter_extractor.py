@@ -19,6 +19,7 @@ from app.infrastructure.parsing.tree_sitter_extractor import (
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "outline"
+LARGE_FILE_FUNCTIONS = 300
 
 CLASS = DefinitionKind.CLASS
 INTERFACE = DefinitionKind.INTERFACE
@@ -263,7 +264,7 @@ for d in ordered:
 """
 
 
-def test_large_file_does_not_crash_interpreter() -> None:
+def test_large_file_does_not_crash_interpreter(tmp_path: Path) -> None:
     """Контур файла длиннее 256 строк не роняет процесс (#226).
 
     В tree-sitter 0.26.0 геттеры `Point.row`/`Point.column` отдают
@@ -275,12 +276,17 @@ def test_large_file_does_not_crash_interpreter() -> None:
 
     Прогон идёт в дочернем процессе: segfault в процессе pytest убил бы весь
     прогон, а не один тест. Проверка диапазонов ловит испорченные значения,
-    даже когда раскладка памяти не довела до падения.
+    даже когда раскладка памяти не довела до падения: исходник сгенерирован,
+    поэтому строки каждого определения известны точно.
     """
-    fixture = FIXTURES / "deploy_report_53b6a28.py"
-    line_count = len(fixture.read_text(encoding="utf-8").splitlines())
+    # Каждая функция — три строки: `def`, `return`, пустая; итого 900 строк.
+    source = "".join(
+        f"def f{i}():\n    return {i}\n\n" for i in range(LARGE_FILE_FUNCTIONS)
+    )
+    path = tmp_path / "large.py"
+    path.write_text(source, encoding="utf-8")
     result = subprocess.run(
-        [sys.executable, "-X", "faulthandler", "-c", LARGE_FILE_SCRIPT, str(fixture)],
+        [sys.executable, "-X", "faulthandler", "-c", LARGE_FILE_SCRIPT, str(path)],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -289,7 +295,5 @@ def test_large_file_does_not_crash_interpreter() -> None:
     )
     assert result.returncode == 0, result.stderr
     count, *ranges = result.stdout.splitlines()
-    assert int(count) == 33
-    for pair in ranges:
-        line, end_line = map(int, pair.split())
-        assert 0 < line <= end_line <= line_count, pair
+    assert int(count) == LARGE_FILE_FUNCTIONS
+    assert ranges == [f"{3 * i + 1} {3 * i + 2}" for i in range(LARGE_FILE_FUNCTIONS)]
