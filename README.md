@@ -227,7 +227,7 @@ EUROROUTER_MODEL=qwen3-coder-next-80b uv run pytest -m live tests/live
 
 `uv run python -m tests.sandbox` запускает настоящий цикл потребления воркера (`Worker.run`) и пайплайн ревью `run_review` с промптами из `prompts/review/` на PR-кейсах из `tests/eval/rules/corpus/`, своих YAML-кейсах или диапазонах git.
 Docker, PostgreSQL, RabbitMQ и GitHub не нужны: база в памяти (`FakeUnitOfWork`), очередь - фейковый канал, GitHub - `FakeGitHub` за настоящими `GitHubAppAuth`/`GitHubVcsGateway`.
-Модель - локальная Ollama, заглушка, оракул по разметке или сценарий из JSON. Это POC для ручного прогона, в CI он не входит.
+Модель - локальная Ollama, заглушка, оракул по разметке или сценарий из JSON. Это POC для ручного прогона: сам прогон в CI не входит, а тесты песочницы (`tests/sandbox`) - часть обычного `uv run pytest` и идут в CI.
 
 ```bash
 ollama serve
@@ -254,7 +254,7 @@ uv run python -m tests.sandbox --llm oracle --case 04-users-sql-injection --rede
 - `--case-file <путь>` - YAML в формате корпуса (`title`, `pull_request`, `files`, необязательный `expected` с `contains:`), можно повторять;
 - `--from-git <BASE..HEAD>` и `--repo <каталог>` (по умолчанию текущий) - PR из диапазона git: дифф от merge-base, как на GitHub, заголовок и описание - из последнего коммита; бинарные и большие файлы пропускаются; можно повторять;
 - `--message <путь>` - сырое тело сообщения очереди, доставляется после PR как есть; можно повторять;
-- `--redeliver` - каждое сообщение PR приходит дважды, как при повторной доставке брокером;
+- `--redeliver` - каждое сообщение PR приходит повторно, как после потерянного ack; после nack повтора нет - сообщение уже в DLQ;
 - `--github-fault <сбой>` - сбой фейкового GitHub, можно повторять (список ниже);
 - `--json <путь>` - весь результат прогона в JSON;
 - `--rules {absent,rules,empty,adversarial}` - содержимое `.review/rules.md`, по умолчанию `rules`;

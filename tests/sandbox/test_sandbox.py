@@ -97,18 +97,25 @@ def test_a_model_error_on_review_fails_the_run(tmp_path: Path) -> None:
 def test_a_redelivered_message_does_not_publish_a_second_review() -> None:
     result = _oracle_run(redeliver=True)
 
-    assert result.deliveries == 2
+    assert result.status == "completed"
+    assert (result.deliveries, result.delivery_outcomes) == (2, ("ack", "ack"))
+    assert not result.nacked
     assert len(result.reviews) == 1
 
 
 def test_a_lost_review_response_does_not_duplicate_the_review() -> None:
-    result = _oracle_run(
-        prepare_github=lambda github, numbers: github.apply_fault(
-            "review-502-stored", numbers
-        )
-    )
+    githubs: list[FakeGitHub] = []
 
-    assert result.status == "completed"
+    def prepare(github: FakeGitHub, numbers: Sequence[int]) -> None:
+        githubs.append(github)
+        github.apply_fault("review-502-stored", numbers)
+
+    result = _oracle_run(prepare_github=prepare)
+
+    (github,) = githubs
+    # Отказ израсходован: POST …/reviews ответил 502, и воркер повторил запрос.
+    assert github.create_review_failures == []
+    assert (result.status, result.acked, result.nacked) == ("completed", True, False)
     assert len(result.reviews) == 1
 
 
@@ -241,6 +248,7 @@ def test_cli_exit_code_is_1_when_a_pr_run_fails(tmp_path: Path) -> None:
         (["--llm", "stub", "--github-fault", "nope"], "неизвестный сбой GitHub"),
         (["--llm", "stub", "--github-fault", "latency=-1"], "latency=-1"),
         (["--llm", "script"], "--llm-script"),
+        (["--llm", "stub", "--llm-script", "x.json"], "--llm-script"),
         (["--llm", "stub", "--case-file", "missing.yaml"], "missing.yaml"),
     ],
 )

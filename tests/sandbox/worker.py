@@ -3,14 +3,14 @@
 Боевой код: `Worker.run`, формат сообщения (`to_wire_message`), обработчик
 `build_review_handler`, промпты из `prompts/review/`, `GitHubAppAuth` и
 `GitHubVcsGateway`, AST-экстрактор, адаптер модели из `_build_llm_gateway`.
-Подменены: брокер (крошечные канал и соединение ниже), база
+Подменены: брокер (`FakeChannel`, `FakeConnection`), база
 (`FakeUnitOfWork`), кэш (`InMemoryCacheStore`) и GitHub (`FakeGitHub` на
 уровне HTTP). Postgres, RabbitMQ и Docker не нужны.
 """
 
 import hashlib
 import json
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -54,6 +54,7 @@ from app.worker.factory import (
 from ..eval.rules.corpus import CONFIGS
 from ..eval.scoring import ExpectedIssue
 from ..fakes.github_api import APP_ID, FakeGitHub, app_private_key
+from ..fakes.queue import FakeChannel, FakeConnection
 from ..fakes.unit_of_work import FakeUnitOfWork
 from .inputs import PrInput
 
@@ -82,44 +83,6 @@ class SandboxConfig:
     window_tokens: int | None = None
     context_max_tokens: int | None = None
     max_output_tokens: int | None = None
-
-
-# --- брокер ---------------------------------------------------------------
-
-
-class _Channel:
-    """Канал вместо pika: отдаёт заранее готовые доставки и запоминает ack/nack."""
-
-    def __init__(self, deliveries: Sequence[tuple[Any, Any, bytes]]) -> None:
-        self._deliveries = list(deliveries)
-        self.acked: list[int] = []
-        self.nacked: list[int] = []
-        self.cancelled = False
-        # Номер доставки, которую цикл сейчас обрабатывает; `None` - ещё ни одной.
-        self.current: int | None = None
-
-    def consume(
-        self, queue: str, inactivity_timeout: float
-    ) -> Iterator[tuple[Any, Any, bytes]]:
-        for index, delivery in enumerate(self._deliveries):
-            self.current = index
-            yield delivery
-
-    def basic_ack(self, tag: int) -> None:
-        self.acked.append(tag)
-
-    def basic_nack(self, tag: int, requeue: bool) -> None:
-        self.nacked.append(tag)
-
-    def cancel(self) -> None:
-        self.cancelled = True
-
-
-class _Connection:
-    """Соединение вместо pika: закрывать нечего."""
-
-    def close(self) -> None:
-        pass
 
 
 # --- зависимости обработчика ----------------------------------------------
@@ -331,6 +294,9 @@ class CaseResult:
     expected: tuple[ExpectedIssue, ...]
     # Сколько раз сообщение PR пришло воркеру (2 - при повторной доставке).
     deliveries: int = 1
+    # Исход каждой доставки по порядку: ack, nack или "не доставлено" - повтор
+    # после nack, сообщение уже в DLQ.
+    delivery_outcomes: tuple[str, ...] = ()
     unexpected_requests: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
@@ -359,13 +325,24 @@ class _Delivery:
     delivery_tag: int
 
 
+def delivery_outcome(channel: FakeChannel, tag: int) -> str:
+    """Чем кончилась доставка с тегом `tag` (теги - позиции с единицы)."""
+    if tag in channel.acked:
+        return "ack"
+    if tag in channel.nacked:
+        return "nack"
+    if tag - 1 in channel.skipped:
+        return "не доставлено"
+    return "не обработано"
+
+
 def _collect(
     case: PrInput,
     n: int,
     job: ReviewJob,
     uow: FakeUnitOfWork,
     github: FakeGitHub,
-    channel: _Channel,
+    channel: FakeChannel,
     tags: Sequence[int],
     unexpected: tuple[tuple[str, str], ...],
 ) -> CaseResult:
@@ -420,7 +397,8 @@ def _collect(
         acked=any(tag in channel.acked for tag in tags),
         nacked=any(tag in channel.nacked for tag in tags),
         expected=case.expected,
-        deliveries=len(tags),
+        deliveries=sum(tag - 1 not in channel.skipped for tag in tags),
+        delivery_outcomes=tuple(delivery_outcome(channel, tag) for tag in tags),
         unexpected_requests=unexpected,
     )
 
@@ -438,8 +416,9 @@ def run_sandbox(
     """Прогнать PR через настоящий воркер; одно сообщение очереди на PR.
 
     `llm` - свой шлюз модели вместо адаптера из настроек. `redeliver` -
-    каждое сообщение PR приходит дважды, второй раз с новым delivery tag, как
-    при повторной доставке брокером. `raw_messages` - сырые тела очереди после
+    каждое сообщение PR приходит повторно с новым delivery tag, как
+    после потерянного ack. Повтор - только после ack: после nack сообщение
+    уже в DLQ, и брокер его не вернёт. `raw_messages` - сырые тела очереди после
     сообщений PR; `raw_labels` - их подписи в результате (по умолчанию
     `raw#<номер>`). `prepare_github(github, номера PR)` вызывается после
     открытия всех PR и до потребления - место для внедрения сбоев.
@@ -475,9 +454,14 @@ def run_sandbox(
     # Владелец каждой доставки по её позиции: ("pr", номер PR) или ("raw", индекс).
     owners: list[tuple[str, int]] = []
     bodies: list[bytes] = []
+    # Номер повторной доставки -> номер исходной (с нуля).
+    redelivery_of: dict[int, int] = {}
     for n, job in zip(numbers, jobs, strict=True):
         body = json.dumps(to_wire_message(job)).encode("utf-8")
-        for _ in range(2 if redeliver else 1):
+        owners.append(("pr", n))
+        bodies.append(body)
+        if redeliver:
+            redelivery_of[len(bodies)] = len(bodies) - 1
             owners.append(("pr", n))
             bodies.append(body)
     for index, raw in enumerate(raw_messages):
@@ -496,7 +480,7 @@ def run_sandbox(
         llm_limits(settings),
         prompt_texts,
     )
-    channel = _Channel(deliveries)
+    channel = FakeChannel(deliveries, redelivery_of=redelivery_of)
 
     # Неожиданные запросы к GitHub - по PR: обработчик оборачивается и снимает
     # срез `github.unexpected` до и после своего сообщения. Чьё сообщение
@@ -518,7 +502,7 @@ def run_sandbox(
             if kind == "pr":
                 unexpected_by_case.setdefault(key, []).extend(github.unexpected[before:])
 
-    worker = Worker(connection=_Connection(), channel=channel)  # type: ignore[arg-type]
+    worker = Worker(connection=FakeConnection(), channel=channel)  # type: ignore[arg-type]
     worker.run(handle, limit=len(deliveries))
 
     tags_by_owner: dict[tuple[str, int], list[int]] = {}

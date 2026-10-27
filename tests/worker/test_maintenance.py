@@ -23,7 +23,7 @@ from app.worker.factory import build_maintenance, build_redelivery
 from ..conftest import requires_db
 from ..fakes import FakeVcs, webhook_payload
 from ..fakes.unit_of_work import FakeUnitOfWork
-from .test_worker_loop import FakeChannel, _worker
+from .test_worker_loop import _strict, _worker
 
 NOW = datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
 
@@ -159,7 +159,7 @@ def test_the_queries_of_the_pass_are_children_of_its_span(
     )
     try:
         # Один такт простоя: проход и ни одного сообщения.
-        _worker(FakeChannel([(None, None, None)])).run(
+        _worker(_strict([(None, None, None)])).run(
             lambda body: None, sweep=sweep, sweep_interval=0
         )
     finally:

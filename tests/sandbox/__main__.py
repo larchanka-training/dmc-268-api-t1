@@ -118,7 +118,8 @@ def _parse_args(
     parser.add_argument(
         "--redeliver",
         action="store_true",
-        help="каждое сообщение PR приходит дважды, как при повторной доставке брокером",
+        help="каждое сообщение PR приходит повторно, как после потерянного ack;"
+        " после nack повтора нет - сообщение уже в DLQ",
     )
     parser.add_argument(
         "--github-fault",
@@ -250,6 +251,11 @@ def _print_case(result: CaseResult) -> None:
         if result.acked
         else "не обработано"
     )
+    if len(result.delivery_outcomes) > 1:
+        delivery = ", повтор: ".join(
+            "nack (ушло бы в DLQ)" if outcome == "nack" else outcome
+            for outcome in result.delivery_outcomes
+        )
     print(
         f"статус: {result.status}; сообщение: {delivery}; модель: {result.model or '—'};"
         f" длительность: {_seconds(result.duration_seconds)}"
@@ -319,6 +325,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if args.llm == "script" and args.llm_script is None:
         print("для --llm script нужен --llm-script PATH", file=sys.stderr)
+        return 2
+    if args.llm_script is not None and args.llm != "script":
+        print("--llm-script работает только с --llm script", file=sys.stderr)
         return 2
     try:
         _check_faults(args.github_fault)
