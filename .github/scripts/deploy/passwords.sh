@@ -11,6 +11,10 @@
 # (`ignore_changes = [env]` в infra/postgres.tf и infra/rabbitmq.tf) и не
 # пересоздаются.
 #
+# Сначала — оба контейнера отвечают: брокер на чистом сервере дождался старта,
+# в postgres проходит `docker exec`. Иначе шаг упал бы между сменами, с уже
+# новым паролем базы и старым у брокера.
+#
 # Шаг идемпотентный: сначала вход новым паролем — у postgres по сети, как
 # входят API и миграции (`samenet`, scram), у брокера — `authenticate_user`. Вошёл
 # — ничего не меняется. Нет — пароль меняется и вход проверяется снова: не
@@ -41,12 +45,19 @@
 # stdin. Не-ASCII не проверялся — тоже отклоняется. Такой секрет шаг
 # отклоняет до сервера.
 #
+# Что сменено, шаг пишет в `passwords-changed` каталога отчёта — по строке
+# `postgres` или `rabbitmq`, ещё до смены: summary по нему предупреждает, что
+# деплой упал уже в окне смены (scripts/deploy_report.py).
+#
 # Нужны: DOCKER_HOST — ssh://stand (хост из ~/.ssh/config,
 # .github/actions/stand-ssh); PG_PASSWORD и RABBITMQ_PASSWORD — секреты
-# PG_PASSWORD_DMC268_T1 и RABBITMQ_PASSWORD_DMC268_T1.
+# PG_PASSWORD_DMC268_T1 и RABBITMQ_PASSWORD_DMC268_T1. REPORT_DIR — каталог
+# отчёта, по умолчанию $RUNNER_TEMP/deploy-report.
 set -euo pipefail
 
 : "${DOCKER_HOST:?нужен адрес демона Docker на сервере}"
+report_dir="${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/deploy-report}"
+mkdir -p "$report_dir"
 
 # Диапазон — по байтам: в локали C не-ASCII символ — это байты вне 0x21–0x7E,
 # и сверка не зависит от локали раннера.
@@ -62,18 +73,22 @@ done
 # POSTGRES_USER — роль, которую завёл initdb и под которой входят приложение и
 # миграции. `\password` спрашивает пароль дважды; без tty — из stdin.
 # ON_ERROR_STOP — чтобы сбой команды psql стал кодом возврата, а не строкой в
-# выводе; повторный вход ловит и то, что код не покажет.
+# выводе; повторный вход ловит и то, что код не покажет. Первый вход —
+# без stderr («password authentication failed» тут ожидаем), повторный — с ним:
+# не вошёл и после смены — причина (`too many clients`, pg_hba, DNS) видна в
+# логе. Пароля в сообщениях psql нет.
 # shellcheck disable=SC2016 # переменные раскрывает sh контейнера
 postgres_sh='set -eu
 IFS= read -r NEW_PASSWORD
 signs_in() {
   PGPASSWORD="$NEW_PASSWORD" psql -X -q -h dmc268-postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-    -tAc "select 1" < /dev/null > /dev/null 2>&1
+    -tAc "select 1" < /dev/null > /dev/null
 }
-if signs_in; then
+if signs_in 2> /dev/null; then
   echo "postgres: пароль роли $POSTGRES_USER совпадает с секретом"
   exit 0
 fi
+echo "postgres: пароль роли $POSTGRES_USER не совпадает с секретом — меняю"
 printf "%s %s\n%s\n%s\n" "\\password" "$POSTGRES_USER" "$NEW_PASSWORD" "$NEW_PASSWORD" \
   | psql -X -q -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" > /dev/null
 if ! signs_in; then
@@ -82,29 +97,19 @@ if ! signs_in; then
 fi
 echo "postgres: пароль роли $POSTGRES_USER сменён"'
 
-printf '%s\n' "$PG_PASSWORD" | docker exec -i dmc268-postgres sh -c "$postgres_sh"
-
 # Скрипт для `sh` контейнера брокера. Пользователь — тот, кого брокер завёл из
-# RABBITMQ_DEFAULT_USER на пустом томе. На чистом сервере брокер только что
-# создан (`wait` у его контейнера нет): ждём старта узла до двух минут.
+# RABBITMQ_DEFAULT_USER на пустом томе. Вход проверяется, как у postgres:
+# первый раз без stderr, повторный — с ним.
 # shellcheck disable=SC2016 # переменные раскрывает sh контейнера
 rabbitmq_sh='set -eu
 IFS= read -r NEW_PASSWORD
 user="$RABBITMQ_DEFAULT_USER"
-tries=0
-until rabbitmqctl -q await_startup > /dev/null 2>&1; do
-  tries=$((tries + 1))
-  if [ "$tries" -ge 60 ]; then
-    echo "::error::rabbitmq: узел не запустился за две минуты"
-    exit 1
-  fi
-  sleep 2
-done
-signs_in() { printf "%s\n" "$NEW_PASSWORD" | rabbitmqctl -q authenticate_user "$user" > /dev/null 2>&1; }
-if signs_in; then
+signs_in() { printf "%s\n" "$NEW_PASSWORD" | rabbitmqctl -q authenticate_user "$user" > /dev/null; }
+if signs_in 2> /dev/null; then
   echo "rabbitmq: пароль пользователя $user совпадает с секретом"
   exit 0
 fi
+echo "rabbitmq: пароль пользователя $user не совпадает с секретом — меняю"
 printf "%s\n" "$NEW_PASSWORD" | rabbitmqctl -q change_password "$user" > /dev/null
 if ! signs_in; then
   echo "::error::rabbitmq: пользователь $user не входит новым паролем и после смены"
@@ -112,4 +117,34 @@ if ! signs_in; then
 fi
 echo "rabbitmq: пароль пользователя $user сменён"'
 
-printf '%s\n' "$RABBITMQ_PASSWORD" | docker exec -i dmc268-rabbitmq sh -c "$rabbitmq_sh"
+# На чистом сервере брокер только что создан (`wait` у его контейнера нет):
+# ждём старта узла до двух минут.
+# shellcheck disable=SC2016 # переменные раскрывает sh контейнера
+rabbitmq_await_sh='tries=0
+until rabbitmqctl -q await_startup > /dev/null 2>&1; do
+  tries=$((tries + 1))
+  if [ "$tries" -ge 60 ]; then
+    echo "::error::rabbitmq: узел не запустился за две минуты"
+    exit 1
+  fi
+  sleep 2
+done'
+
+# Скрипт — в sh контейнера, пароль — первой строкой его stdin. Вывод — в лог
+# шага; дошло до смены («меняю») — сервис в `passwords-changed`, и упавший
+# после этого шаг тоже: пароль мог смениться.
+set_password() { # контейнер, сервис, скрипт, пароль
+  local out status=0
+  out="$(mktemp)"
+  printf '%s\n' "$4" | docker exec -i "$1" sh -c "$3" | tee "$out" || status=$?
+  if grep -q -- '— меняю$' "$out"; then
+    echo "$2" >> "$report_dir/passwords-changed"
+  fi
+  rm -f "$out"
+  return "$status"
+}
+
+docker exec -i dmc268-rabbitmq sh -c "$rabbitmq_await_sh" < /dev/null
+docker exec -i dmc268-postgres true < /dev/null
+set_password dmc268-postgres postgres "$postgres_sh" "$PG_PASSWORD"
+set_password dmc268-rabbitmq rabbitmq "$rabbitmq_sh" "$RABBITMQ_PASSWORD"

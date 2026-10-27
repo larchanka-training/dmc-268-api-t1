@@ -114,6 +114,7 @@ def run(
             "CALLS": str(tmp_path / "calls"),
             "STATE": str(state),
             "DOCKER_HOST": "ssh://stand",
+            "REPORT_DIR": str(tmp_path / "report"),
             "PG_PASSWORD": NEW_PG,
             "RABBITMQ_PASSWORD": NEW_RABBIT,
             **env,
@@ -127,6 +128,12 @@ def calls(tmp_path: Path) -> str:
     return path.read_text() if path.exists() else ""
 
 
+def changed(tmp_path: Path) -> list[str]:
+    """Сервисы из `passwords-changed` каталога отчёта — их видит summary."""
+    path = tmp_path / "report" / "passwords-changed"
+    return path.read_text().split() if path.exists() else []
+
+
 def test_new_secrets_reach_the_database_and_the_broker(tmp_path: Path) -> None:
     result, state = run(tmp_path)
 
@@ -135,6 +142,9 @@ def test_new_secrets_reach_the_database_and_the_broker(tmp_path: Path) -> None:
     assert (state / "rabbit").read_text() == NEW_RABBIT
     assert "postgres: пароль роли dmc268 сменён" in result.stdout
     assert "rabbitmq: пароль пользователя dmc268 сменён" in result.stdout
+    assert changed(tmp_path) == ["postgres", "rabbitmq"]
+    # Первый вход ждёт отказа: его stderr в лог не идёт.
+    assert "password authentication failed" not in result.stderr
 
 
 def test_passwords_never_reach_an_argument_or_the_log(tmp_path: Path) -> None:
@@ -155,10 +165,12 @@ def test_unchanged_passwords_are_left_alone(tmp_path: Path) -> None:
     result, state = run(tmp_path, pg=NEW_PG, rabbit=NEW_RABBIT)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert not (state / "pg.sql").exists()
+    assert not (state / "pg.stdin").exists()
+    assert not [c for c in calls(tmp_path).splitlines() if c.startswith("psql ") and " -h " not in c]
     assert not [c for c in calls(tmp_path).splitlines() if c.startswith("rabbitmqctl") and "change_password" in c]
     assert "postgres: пароль роли dmc268 совпадает с секретом" in result.stdout
     assert "rabbitmq: пароль пользователя dmc268 совпадает с секретом" in result.stdout
+    assert changed(tmp_path) == []
 
 
 def test_only_a_scram_hash_reaches_the_server(tmp_path: Path) -> None:
@@ -185,19 +197,28 @@ def test_only_a_scram_hash_reaches_the_server(tmp_path: Path) -> None:
 
 
 def test_a_password_that_did_not_take_stops_the_deploy(tmp_path: Path) -> None:
-    result, _ = run(tmp_path, PSQL_ALTER_NOOP="1")
+    result, state = run(tmp_path, PSQL_ALTER_NOOP="1")
 
     assert result.returncode != 0
     assert "::error::" in result.stdout
-    # До брокера не дошло: деплой и так остановлен.
-    assert "dmc268-rabbitmq" not in calls(tmp_path)
+    # Причина неудачного входа — в логе шага, а не заглушена.
+    assert "password authentication failed" in result.stderr
+    # До смены у брокера не дошло: деплой и так остановлен.
+    assert (state / "rabbit").read_text() == OLD_RABBIT
+    # Смена шла — summary должен знать, что деплой упал в окне смены.
+    assert changed(tmp_path) == ["postgres"]
 
 
-def test_a_missing_container_stops_the_deploy(tmp_path: Path) -> None:
-    result, state = run(tmp_path, DOCKER_MISSING="dmc268-rabbitmq")
+def test_a_missing_container_changes_no_password(tmp_path: Path) -> None:
+    """Оба контейнера проверяются до первой смены: иначе шаг упал бы с новым паролем базы и старым у брокера."""
+    for missing in ("dmc268-rabbitmq", "dmc268-postgres"):
+        (tmp_path / "calls").unlink(missing_ok=True)
+        result, state = run(tmp_path, DOCKER_MISSING=missing)
 
-    assert result.returncode != 0
-    assert (state / "pg").read_text() == NEW_PG
+        assert result.returncode != 0, missing
+        assert (state / "pg").read_text() == OLD_PG, missing
+        assert (state / "rabbit").read_text() == OLD_RABBIT, missing
+        assert changed(tmp_path) == [], missing
 
 
 def test_the_broker_is_awaited_on_a_clean_server(tmp_path: Path) -> None:
@@ -213,6 +234,7 @@ def test_a_broker_that_never_starts_stops_the_deploy(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert (state / "rabbit").read_text() == OLD_RABBIT
+    assert (state / "pg").read_text() == OLD_PG
 
 
 def test_a_password_with_whitespace_or_non_ascii_is_rejected_before_the_server(tmp_path: Path) -> None:

@@ -32,6 +32,8 @@ infra` — targeted-план шага «Поднять базу и брокер�
   `migrate-current.log` с выводом `alembic current` (`.error` рядом — база не
   ответила), `migrate-attempts` — номер последней попытки; исход шага
   миграций — из `STEP_RESULTS`;
+- `passwords-changed` — у каких сервисов (`postgres`, `rabbitmq`) шаг паролей
+  дошёл до смены (`passwords.sh`);
 - `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`);
 - `stale-tip` — вершина develop, если коммит прогона уже не она и деплой
   пропущен (`check-tip.sh`);
@@ -591,6 +593,9 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
                 "новый коммит выкатывает свой прогон."), "", *steps_section(steps, marks)]
         return "\n".join(out) + "\n"
 
+    if passwords := passwords_section(report_dir, steps, f"{env.get('GITHUB_SERVER_URL', '')}/"
+                                      f"{env.get('GITHUB_REPOSITORY', '')}/blob/{env.get('SHA', '')}"):
+        out += ["", *passwords]
     out += ["", *downtime_section(report_dir), "", *plan_section(report_dir)]
     if recovery := state_section(report_dir, env.get("ALLOW_STATEFUL_REPLACE") == "true"):
         out += ["", *recovery]
@@ -598,6 +603,29 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
     out += ["", *migrations_section(report_dir, marks, migrate), "", *disk_section(report_dir)]
     out += ["", *steps_section(steps, marks)]
     return "\n".join(out) + "\n"
+
+
+# Подписи сервисов из `passwords-changed`.
+PASSWORD_SERVICES = {"postgres": "база (`postgres`)", "rabbitmq": "брокер (`rabbitmq`)"}
+
+
+def passwords_section(report_dir: Path, steps: dict[str, dict[str, str]], blob_url: str) -> list[str]:
+    """Пароли, сменённые этим деплоем; без замены API — предупреждение об окне смены.
+
+    Смена пароля не рвёт открытых соединений, а новые со старым паролем
+    отклоняет: пока apply не заменил API и воркер, они не откроют новых. Упал
+    деплой до этого — окно смены не закрыто, а шаг паролей при этом зелёный.
+    """
+    services = [s for s in PASSWORD_SERVICES if s in read(report_dir / "passwords-changed").split()]
+    if not services:
+        return []
+    out = ["### Пароли", "", f"Сменены в этом деплое: {', '.join(PASSWORD_SERVICES[s] for s in services)}."]
+    if steps.get("apply", {}).get("conclusion") == "success":
+        return out
+    return [*out, "", "> [!WARNING]",
+            ("> Пароль сменён, а API и воркер не заменены: до следующего успешного деплоя старые API и воркер "
+             "не откроют новых соединений. Устранить причину и запустить деплой снова или вернуть старый пароль — "
+             f"[«Откат»]({blob_url}/infra/README.md#откат).")]
 
 
 def downtime_section(report_dir: Path) -> list[str]:

@@ -224,7 +224,7 @@ gh run watch "$(gh run list --workflow deploy.yml --limit 1 --json databaseId -q
 
 `$POSTGRES_PASSWORD` и `$RABBITMQ_DEFAULT_PASS` в `env` контейнеров базы и брокера для этого не годятся: там навсегда пароль инициализации тома (`ignore_changes`), а не текущий.
 
-**Что должно быть в деплое.** Шаг «Выставить пароли базы и брокера»: `postgres: пароль роли dmc268 сменён` (или `rabbitmq: … сменён`); у остальных — «совпадает с секретом». В summary: targeted-план без изменений, в полном — замена `docker_container` (`api`, `worker`, `replication-setup`, `postgres-backup`; для реплики — `replication-setup` и `postgres-replica`), базу и брокер план не пересоздаёт. Зелёные проверки API, воркера и реплики.
+**Что должно быть в деплое.** Шаг «Выставить пароли базы и брокера»: `postgres: пароль роли dmc268 сменён` (или `rabbitmq: … сменён`); у остальных — «совпадает с секретом». В summary: раздел «Пароли» с тем, что сменено, targeted-план без изменений, в полном — замена `docker_container` (`api`, `worker`, `replication-setup`, `postgres-backup`; для реплики — `replication-setup` и `postgres-replica`), базу и брокер план не пересоздаёт. Зелёные проверки API, воркера и реплики.
 
 **Проверка после** (`ssh stand`):
 
@@ -251,14 +251,24 @@ docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_n
 
 Секреты GitHub не читаются, и старого значения взять негде — откат идёт **вперёд**:
 
-- деплой упал после шага паролей (миграции, apply) — устранить причину и запустить деплой ещё раз: шаг скажет «совпадает», остальное пройдёт как обычно;
-- не устраняется быстро, а старый API должен открывать соединения — вернуть роли пароль старого API руками. Он в `~/old-db-url` (или `docker exec dmc268-api printenv DATABASE_URL`, после `dmc268:` до `@`), а `\password` шифрует его на стороне psql — в лог и в `ps` он не попадёт:
+- деплой упал после шага паролей (миграции, apply) — summary покажет это в разделе «Пароли»: «пароль сменён, а API и воркер не заменены». Устранить причину и запустить деплой ещё раз: шаг скажет «совпадает», остальное пройдёт как обычно;
+- не устраняется быстро, а старый API должен открывать соединения — вернуть роли пароль старого API руками. Он в `~/old-db-url` (не сохранили — `(umask 077; docker exec dmc268-api printenv DATABASE_URL > ~/old-db-url)`: API на стенде ещё старый), но закодирован `urlencode`: `a+b/c=d` там — `a%2Bb%2Fc%3Dd`. Раскодирует его `make_url` SQLAlchemy в контейнере API, и дважды — как спрашивает `\password` — он идёт трубой в psql: ни в аргументы, ни на экран, а на сервер PostgreSQL уходит только SCRAM-хеш:
 
   ```bash
-  docker exec -it dmc268-postgres psql -U dmc268 -d dmc268 -c '\password dmc268'
+  docker exec -i dmc268-api python -c 'import sys, sqlalchemy as s; p = s.make_url(sys.stdin.read().strip()).password; print(p); print(p)' < ~/old-db-url \
+    | docker exec -i dmc268-postgres psql -XqU dmc268 -d dmc268 -v ON_ERROR_STOP=1 -c '\password dmc268'
   ```
 
-  Секрет остаётся новым, и следующий деплой сам выставит его снова. У брокера то же — пароль из `~/old-amqp-url` и `docker exec -it dmc268-rabbitmq rabbitmqctl change_password dmc268` (пароль — на запрос).
+  У брокера то же — из `~/old-amqp-url`, раскодирует pika, `rabbitmqctl change_password` без пароля в аргументах читает его из stdin:
+
+  ```bash
+  docker exec -i dmc268-api python -c 'import sys, pika; print(pika.URLParameters(sys.stdin.read().strip()).credentials.password)' < ~/old-amqp-url \
+    | docker exec -i dmc268-rabbitmq rabbitmqctl -q change_password dmc268
+  ```
+
+  Секрет остаётся новым, и следующий деплой сам выставит его снова.
+
+**Реверт этого механизма** (#161) после хотя бы одной смены ломает деплой. Без `ignore_changes = [env]` у базы и брокера план видит, что пароль в их `env` (пароль инициализации тома) не совпадает с секретом, и пересоздаёт контейнеры (`postgres must be replaced`, `rabbitmq must be replaced` — проверено на dind); сторож отклоняет каждый такой деплой, а выход — только ручной запуск с `allow_stateful_replace`, то есть перезапуск базы и брокера. Поэтому при реверте `ignore_changes = [env]` в `infra/postgres.tf` и `infra/rabbitmq.tf` оставляют.
 
 ### Пароль утёк
 
