@@ -1091,7 +1091,7 @@
 
 ### Requirement: Тело запроса ограничено по размеру
 
-Тело запроса больше лимита SHALL отклоняться `413` с `code = REQUEST_BODY_TOO_LARGE` в формате Problem Details с `trace_id` и `X-Trace-ID`, до роутинга, разбора тела и сессии. По `Content-Length` отказ SHALL наступать без чтения тела, поток без длины SHALL NOT дочитываться дальше лимита. Лимит: `/api/v1/webhooks/` — `WEBHOOK_BODY_MAX_BYTES` (25 МиБ), остальное — `REQUEST_BODY_MAX_BYTES` (1 МиБ). Ответ SHALL нести `Connection: close`. Операции с телом SHALL объявлять `413` своей моделью ошибки.
+Тело запроса больше лимита SHALL отклоняться `413` с `code = REQUEST_BODY_TOO_LARGE` в формате Problem Details с `trace_id` и `X-Trace-ID`, до роутинга, разбора тела и сессии. По `Content-Length` отказ SHALL наступать без чтения тела, поток без длины SHALL NOT дочитываться дальше лимита. Лимит: `/api/v1/webhooks/` — `WEBHOOK_BODY_MAX_BYTES` (2 МиБ), остальное — `REQUEST_BODY_MAX_BYTES` (1 МиБ). Ответ SHALL нести `Connection: close`. Операции с телом SHALL объявлять `413` своей моделью ошибки.
 
 #### Scenario: Большое тело ручки с сессией
 

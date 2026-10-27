@@ -349,7 +349,7 @@ class NotImplementedProblem(Problem):
 class RequestBodyTooLargeProblem(Problem):
     """`413 REQUEST_BODY_TOO_LARGE`: тело запроса больше лимита.
 
-    Лимит: `WEBHOOK_BODY_MAX_BYTES` (25 МиБ) у приёма вебхука, `REQUEST_BODY_MAX_BYTES`
+    Лимит: `WEBHOOK_BODY_MAX_BYTES` (2 МиБ) у приёма вебхука, `REQUEST_BODY_MAX_BYTES`
     (1 МиБ) у остальных ручек; `detail` называет сработавший.
 
     Отказ — до разбора тела, сессии и подписи вебхука: по `Content-Length` тело не читается
@@ -357,7 +357,7 @@ class RequestBodyTooLargeProblem(Problem):
     """
 
     example = {
-        "detail": "Тело запроса больше лимита 26214400 байт.",
+        "detail": "Тело запроса больше лимита 2097152 байт.",
         "instance": "/api/v1/webhooks/github",
     }
 

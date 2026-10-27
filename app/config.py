@@ -149,18 +149,19 @@ class Settings(BaseSettings):
         ),
     )
     # Потолки тела HTTP-запроса API (#72): проверяются до разбора тела, сессии и подписи
-    # вебхука. Ручкам с JSON-телом хватает 1 МиБ. Приёму вебхука — 25 МиБ, не меньше потолка
-    # доставки GitHub («Payloads are capped at 25 MB», docs.github.com, Webhook events and
-    # payloads). Общий 25 МиБ на все ручки отдал бы 512 МБ памяти API двадцати запросам.
-    # `webhook_body_max_bytes` равен `client_max_body_size 25m` в `location /api/` nginx
-    # фронта (dmc-268-ui-t1, `nginx/site.conf`) — первого эшелона; меняются вместе.
+    # вебхука. Ручкам с JSON-телом хватает 1 МиБ. Приёму вебхука — 2 МиБ: принимаются только
+    # `pull_request` и `pull_request_review_thread`, их доставка — десятки КиБ (тело PR и
+    # комментария — до 65 536 символов). Потолок доставки GitHub (25 MB) нужен `push` и
+    # `release`, а 25 МиБ без подписи — OOM API с дюжины параллельных запросов.
+    # `client_max_body_size` в `location /api/` nginx фронта (dmc-268-ui-t1, `nginx/site.conf`)
+    # — первый эшелон — не меньше `webhook_body_max_bytes`.
     request_body_max_bytes: int = Field(
         default=1_048_576,
         gt=0,
         description="Большее тело запроса API, кроме вебхука, отклоняется 413 REQUEST_BODY_TOO_LARGE",
     )
     webhook_body_max_bytes: int = Field(
-        default=26_214_400,
+        default=2_097_152,
         gt=0,
         description="Большее тело доставки вебхука отклоняется 413 REQUEST_BODY_TOO_LARGE до чтения целиком",
     )

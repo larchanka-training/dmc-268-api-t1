@@ -34,9 +34,8 @@ SETTINGS = Settings(
     github_webhook_secret=SECRET,
     public_origin=ORIGIN,
 )
-# Умолчания: вебхук — 25 МиБ, не меньше потолка доставки GitHub («Payloads are capped at
-# 25 MB»); остальные ручки — 1 МиБ.
-LIMIT = 25 * 1024 * 1024
+# Умолчания: вебхук — 2 МиБ, с запасом над доставками принимаемых событий; остальные ручки — 1 МиБ.
+LIMIT = 2 * 1024 * 1024
 BODY_LIMIT = 1024 * 1024
 CHUNK = 1024 * 1024
 WEBHOOK = "/api/v1/webhooks/github"
@@ -95,8 +94,8 @@ class Wire:
         return payload
 
 
-def call(app: FastAPI, wire: Wire, headers: dict[str, str], path: str = WEBHOOK) -> None:
-    scope = {
+def scope(path: str, headers: dict[str, str]) -> dict[str, Any]:
+    return {
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
@@ -110,7 +109,10 @@ def call(app: FastAPI, wire: Wire, headers: dict[str, str], path: str = WEBHOOK)
         "client": ("127.0.0.1", 50000),
         "server": ("testserver", 80),
     }
-    asyncio.run(app(scope, wire.receive, wire.send))
+
+
+def call(app: FastAPI, wire: Wire, headers: dict[str, str], path: str = WEBHOOK) -> None:
+    asyncio.run(app(scope(path, headers), wire.receive, wire.send))
 
 
 def stream(total: int, chunk: int = CHUNK) -> Iterator[bytes]:
@@ -214,6 +216,58 @@ def test_handler_holds_one_copy_of_the_body(app: FastAPI, monkeypatch: pytest.Mo
     assert current <= 1.2 * LIMIT, f"{current / LIMIT:.2f} тела в памяти"
 
 
+class SlowWire(Wire):
+    """Сервер, который отдаёт цикл событий между кусками, — как сеть: доставки идут вперемешку."""
+
+    async def receive(self) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return await super().receive()
+
+
+def test_parallel_unsigned_deliveries_peak_at_one_and_a_half_bodies_each(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пик памяти параллельных доставок без подписи — не больше полутора тел на доставку (#218).
+
+    Тело читается до подписи: каждая лишняя копия в middleware или ручке умножает то, что
+    без подписи можно занять одновременными запросами. Сейчас пик — около 1,15 тела: склейка
+    идёт по одной доставке за раз. Куски, не отпущенные после склейки, дают 2,15.
+    """
+    deliveries = 8
+    app = create_app(SETTINGS)
+    wires = [SlowWire(stream(LIMIT, chunk=64 * 1024)) for _ in range(deliveries)]
+
+    async def deliver_all() -> None:
+        await asyncio.gather(*(
+            app(scope(WEBHOOK, {"content-length": str(LIMIT), "x-hub-signature-256": "sha256=00"}), w.receive, w.send)
+            for w in wires
+        ))
+
+    tracemalloc.start()
+    try:
+        asyncio.run(deliver_all())
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert [w.status for w in wires] == [401] * deliveries
+    assert peak <= 1.5 * LIMIT * deliveries, f"{peak / LIMIT / deliveries:.2f} тела на доставку"
+
+
+@pytest.mark.parametrize(
+    "headers", [{"content-length": "abc"}, {"content-length": "0", "transfer-encoding": "chunked"}]
+)
+def test_body_without_a_usable_length_is_counted(app: FastAPI, headers: dict[str, str]) -> None:
+    """`Content-Length` не из цифр или нулевой при chunked не пускает тело мимо лимита.
+
+    Сейчас такие заголовки отклоняет h11 до приложения, но защита не должна зависеть от парсера.
+    """
+    wire = Wire(stream(LIMIT + 10 * CHUNK))
+
+    call(app, wire, headers | {"x-hub-signature-256": "sha256=00"})
+
+    assert_too_large(wire)
+    assert wire.received == LIMIT + CHUNK
+
+
 def test_wrong_signature_within_the_limit_is_still_unauthorized(app: FastAPI) -> None:
     wire = Wire(stream(1024))
 
@@ -241,7 +295,7 @@ def test_body_route_rejects_an_oversize_stream_before_the_session(app: FastAPI) 
 def test_webhook_limit_does_not_apply_to_other_routes(app: FastAPI) -> None:
     """Тело, которое вебхук принимает, ручке с JSON-телом не достаётся: у неё свой 1 МиБ.
 
-    Иначе 25 МиБ на каждую ручку — и двадцать запросов без сессии занимают всю память API.
+    Иначе лимит вебхука достался бы каждой ручке без сессии.
     """
     size = BODY_LIMIT + 1
     headers = {"content-length": str(size), "content-type": "application/json", "origin": ORIGIN}
@@ -278,7 +332,7 @@ def test_oversize_body_is_a_problem_with_trace_id_over_http(app: FastAPI) -> Non
 
 
 def test_default_limits() -> None:
-    assert SETTINGS.webhook_body_max_bytes == LIMIT >= 25_000_000
+    assert SETTINGS.webhook_body_max_bytes == LIMIT
     assert SETTINGS.request_body_max_bytes == BODY_LIMIT
 
 

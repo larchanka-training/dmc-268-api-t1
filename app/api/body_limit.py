@@ -1,8 +1,10 @@
 """Лимит тела запроса: тело больше лимита не читается целиком (#72).
 
-Лимита два: `WEBHOOK_BODY_MAX_BYTES` (25 МиБ, потолок доставки GitHub) — для путей приёма
-вебхука, `REQUEST_BODY_MAX_BYTES` (1 МиБ) — для остальных. Путь выбирается по префиксу до
-роутинга: путь, который только начинается как вебхук, роутер всё равно не найдёт.
+Лимита два: `WEBHOOK_BODY_MAX_BYTES` (2 МиБ, с запасом над доставками принимаемых событий) —
+для путей приёма вебхука, `REQUEST_BODY_MAX_BYTES` (1 МиБ) — для остальных. Путь выбирается по
+префиксу до роутинга: путь, который только начинается как вебхук, роутер всё равно не найдёт.
+Тело несуществующего пути тоже читается до лимита, а `404` — потом: дороже доставки вебхука
+такой запрос не обходится.
 
 Приём вебхука открыт без сессии и читает сырое тело до проверки подписи — без лимита
 любой мог бы занять память процесса многогигабайтным телом. Ручки с JSON-телом читают
@@ -11,6 +13,7 @@
 
 - `Content-Length` больше лимита — `413` сразу, тело у сервера не запрашивается;
 - без `Content-Length` и `Transfer-Encoding` тела по HTTP/1.1 нет — запрос идёт мимо;
+  `Content-Length`, который длиной не разбирается, мимо не пускает: тело считается здесь;
 - иначе тело читается здесь, с подсчётом байтов, и на куске, где сумма перешла лимит,
   чтение обрывается — так ограничен и поток без `Content-Length` (chunked), и поток длиннее
   объявленной длины. Дочитанное в пределах лимита приложение получает одним сообщением.
@@ -35,10 +38,8 @@ from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api.errors import problem_response
+from app.api.origin import WEBHOOKS_PREFIX
 from app.api.problems import ErrorCode
-
-# Приём вебхука (`app/api/webhooks.py`): только ему нужен лимит доставки GitHub.
-WEBHOOK_PREFIX = "/api/v1/webhooks/"
 
 
 class RequestBodyLimitMiddleware:
@@ -51,13 +52,13 @@ class RequestBodyLimitMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        limit = self.webhook_max_bytes if scope["path"].startswith(WEBHOOK_PREFIX) else self.max_bytes
+        limit = self.webhook_max_bytes if scope["path"].startswith(WEBHOOKS_PREFIX) else self.max_bytes
         headers = Headers(scope=scope)
         declared = _declared_length(headers)
         if declared is not None and declared > limit:
             await _reject(scope, receive, send, limit)
             return
-        if not declared and "transfer-encoding" not in headers:
+        if "transfer-encoding" not in headers and (declared == 0 or "content-length" not in headers):
             # Ни длины, ни chunked: по HTTP/1.1 (RFC 9112, 6.3) тела у запроса нет. GET и
             # поток SSE идут мимо как есть: ждать тела, которого нет, здесь незачем.
             await self.app(scope, receive, send)
@@ -107,8 +108,8 @@ def _declared_length(headers: Headers) -> int | None:
     """`Content-Length` запроса или `None`, если его нет или он не из цифр ASCII.
 
     `str.isdigit()` без `isascii()` принимает «²» (заголовок декодирован как latin-1), и `int()`
-    на нём упал бы — `500`. Нечисловой `Content-Length` без `Transfer-Encoding` идёт мимо
-    подсчёта, как запрос без тела: такой заголовок отклоняет сервер (h11 — `400`) до приложения.
+    на нём упал бы — `500`. Нечисловой `Content-Length` под h11 до приложения не доходит (`400`),
+    но на это middleware не полагается: такое тело считается, как chunked.
     """
     value = headers.get("content-length")
     if value is None or not (value.isascii() and value.isdigit()):
