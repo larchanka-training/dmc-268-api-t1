@@ -274,8 +274,8 @@ class SqlAlchemyReviewRunRepo:
         )
         published_run = aliased(ReviewRunRow)
         last_published_at = (
-            select(func.max(published_run.created_at))
-            .join(PublishedCommentRow, PublishedCommentRow.review_run_id == published_run.id)
+            select(func.max(PublishedCommentRow.published_at))
+            .join(published_run, PublishedCommentRow.review_run_id == published_run.id)
             .where(published_run.merge_request_id == merge_request_id)
             .scalar_subquery()
         )
@@ -286,7 +286,8 @@ class SqlAlchemyReviewRunRepo:
                 ReviewRunRow.status == ReviewRunStatus.FAILED,
                 ReviewRunRow.failed_stage == ReviewRunStatus.PUBLISHING,
                 ~published.exists(),
-                or_(last_published_at.is_(None), ReviewRunRow.created_at > last_published_at),
+                # Время падения - `last_progress_at` последнего перехода, не создание.
+                or_(last_published_at.is_(None), ReviewRunRow.last_progress_at > last_published_at),
             )
             .order_by(ReviewRunRow.created_at, ReviewRunRow.id)
         ).all()

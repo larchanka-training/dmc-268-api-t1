@@ -47,6 +47,7 @@ def run_case(
     check_error: VcsError | None = None,
     uow: FakeUow | None = None,
     queue: FakeQueue | None = None,
+    base_ref: str | None = None,
 ) -> tuple[WebhookOutcome, FakeUow, FakeVcs, FakeQueue]:
     uow = uow if uow is not None else FakeUow()
     # Повторный вызов с тем же uow — это повторная доставка: репозиторий
@@ -61,7 +62,7 @@ def run_case(
     )
     queue = queue if queue is not None else FakeQueue()
     outcome = handle_webhook_event(
-        webhook_payload(action),
+        webhook_payload(action, base_ref=base_ref),
         uow,
         vcs,
         queue,
@@ -437,6 +438,23 @@ def test_redelivery_of_the_retarget_is_a_duplicate() -> None:
     assert len(queue.jobs) == 2
 
 
+def test_a_stale_retarget_event_does_not_retarget() -> None:
+    """Ревью #225: ветку сменили на `develop` и тут же вернули на `main`. Запоздавшее
+    `edited` на `develop` получило свежие метаданные уже с `main` - ретаргета нет,
+    иначе прогон ревьюил бы дифф против ветки, которой у PR уже нет."""
+    uow, queue, reviewed = reviewed_on_old_target()
+
+    outcome, uow, vcs, queue = run_case(
+        "edited", vcs_meta=pr_metadata(NEW_BASE, "main"), uow=uow, queue=queue, base_ref="develop"
+    )
+
+    assert outcome.kind == "duplicate"
+    assert outcome.run is reviewed
+    assert merge_request_of(uow).target_branch == "main"
+    assert vcs.checks == []
+    assert len(queue.jobs) == 1
+
+
 def test_redelivery_after_the_target_branch_moved_is_a_duplicate() -> None:
     """Вершина целевой ветки ушла вперёд (влили чужой PR), ветка та же: повтор
     доставки того же head - дубль, а не «целевая ветка сменилась» с новым прогоном."""
@@ -460,7 +478,9 @@ def test_edited_back_after_a_failed_review_of_the_new_target_reviews_again() -> 
     assert outcome.run is not None
     object.__setattr__(outcome.run, "status", ReviewRunStatus.FAILED)
 
-    outcome, uow, vcs, queue = run_case("edited", vcs_meta=OLD_TARGET, uow=uow, queue=queue)
+    outcome, uow, vcs, queue = run_case(
+        "edited", vcs_meta=OLD_TARGET, uow=uow, queue=queue, base_ref="main"
+    )
 
     assert outcome.kind == "success"
     assert [check.conclusion for _, check in vcs.checks] == ["failure"]

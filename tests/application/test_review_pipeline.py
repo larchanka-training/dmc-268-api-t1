@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
+from app.application.merge_gate_publish import build_failed_review_check
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.review_pipeline import run_review
 from app.domain.entities import (
@@ -38,7 +39,7 @@ from app.domain.llm_errors import (
 )
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import start_step
-from app.domain.vcs_errors import DiffTooLargeError, VcsError
+from app.domain.vcs_errors import DiffTooLargeError, VcsError, VcsTransientError
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.vcs.errors import VcsNotFoundError
 
@@ -1224,3 +1225,55 @@ def test_a_screening_failure_counts_the_review_tokens_in_the_run(
         _run(uow, ScriptedLlmGateway([review_response(tokens=25)]))
 
     assert _completed(uow).tokens_used == 25
+
+
+def _seed_earlier_review(uow: FakeUnitOfWork, *, run_id: UUID, at: datetime) -> None:
+    """Прогон на тот же head рядом с текущим: `completed` раньше или новый позже."""
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    uow.review_runs.add(
+        replace(run, id=run_id, status=ReviewRunStatus.COMPLETED, created_at=at, updated_at=at)
+    )
+
+
+def test_a_failed_review_after_an_earlier_one_blocks_the_head() -> None:
+    """Ревью #225: после смены ветки поправка gate не дошла, на head `success` прежнего
+    прогона по старому диффу - упавший новый прогон выставляет `failure`."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks == [build_failed_review_check()]
+
+
+def test_a_failed_review_superseded_on_the_head_leaves_the_gate_alone() -> None:
+    """За head отвечает уже более поздний прогон - упавший старый gate не трогает."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW + timedelta(minutes=5))
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks == []
+
+
+def test_a_failed_gate_of_a_failed_review_does_not_hide_the_failure() -> None:
+    """GitHub не принял `failure`: в логе сбой, наружу - исходное исключение прогона."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+    vcs.check_error = VcsTransientError("GitHub API: HTTP 502")
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    assert run.status == ReviewRunStatus.FAILED

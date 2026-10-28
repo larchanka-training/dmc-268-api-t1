@@ -228,7 +228,8 @@ class FakeReviewRunRepo:
     def list_unpublished_failures(self, merge_request_id: UUID) -> list[ReviewRun]:
         runs = [r for r in self._by_id.values() if r.merge_request_id == merge_request_id]
         last_published_at = max(
-            (r.created_at for r in runs if self._published.list_for_run(r.id)), default=None
+            (c.published_at for r in runs for c in self._published.list_for_run(r.id)),
+            default=None,
         )
         return sorted(
             (
@@ -237,7 +238,7 @@ class FakeReviewRunRepo:
                 if r.status is ReviewRunStatus.FAILED
                 and r.failed_stage is ReviewRunStatus.PUBLISHING
                 and not self._published.list_for_run(r.id)
-                and (last_published_at is None or r.created_at > last_published_at)
+                and (last_published_at is None or r.last_progress_at > last_published_at)
             ),
             key=lambda r: (r.created_at, r.id),
         )

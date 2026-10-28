@@ -9,8 +9,14 @@ from app.application.ports.vcs_review import MergeGateCheck
 from app.domain.entities import Finding
 from app.domain.enums import ReviewRunStatus
 from app.domain.merge_gate import merge_blocked_by_findings, untracked_findings
+from app.domain.vcs_errors import VcsError
 
 logger = logging.getLogger(__name__)
+
+# Поправку gate отправляет только тот, кто увидел смену прогона, и второй
+# возможности у неё нет: после сбоя на head остаётся `success` по старому диффу.
+# Адаптер сам повторяет 5xx и лимит; здесь - ещё попытки после его отказа.
+SETTLE_ATTEMPTS = 3
 
 
 def collect_open_findings(
@@ -56,6 +62,19 @@ def build_retarget_check() -> MergeGateCheck:
     )
 
 
+def build_failed_review_check() -> MergeGateCheck:
+    """Блокировка head, чей последний прогон упал (ревью #225).
+
+    Прогон мог упасть после блокировки смены ветки, а её POST - не дойти: тогда
+    на head остался бы `success` прежнего прогона по старому диффу.
+    """
+    return MergeGateCheck(
+        conclusion="failure",
+        title="Ревью не удалось",
+        summary="Последнее ревью этого коммита упало. Мердж заблокирован до успешного ревью.",
+    )
+
+
 def settle_merge_gate(
     uow: UnitOfWork,
     vcs: VcsGateway,
@@ -74,7 +93,8 @@ def settle_merge_gate(
     перечитывает последний прогон на head после своего POST: если приём уже
     закоммитил, здесь видна смена и gate переписывается; если нет - блокировка
     приёма придёт позже и перекроет `success`. Так любая перестановка кончается
-    gate актуального прогона. Сбой хостинга - `VcsError` вызывающему.
+    gate актуального прогона. Поправка повторяется `SETTLE_ATTEMPTS` раз; сбой
+    последней попытки - `VcsError` вызывающему.
     """
     with uow:
         latest = uow.review_runs.find_latest(merge_request_id, head_sha)
@@ -94,4 +114,18 @@ def settle_merge_gate(
         run_id,
         latest.id,
     )
-    vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
+    for attempt in range(1, SETTLE_ATTEMPTS + 1):
+        try:
+            vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
+            return
+        except VcsError:
+            if attempt == SETTLE_ATTEMPTS:
+                raise
+            logger.warning(
+                "поправка merge gate %s@%s не выставлена, попытка %d из %d",
+                repo_full_name,
+                head_sha,
+                attempt,
+                SETTLE_ATTEMPTS,
+                exc_info=True,
+            )

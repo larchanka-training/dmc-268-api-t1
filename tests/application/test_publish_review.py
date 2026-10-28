@@ -10,7 +10,7 @@ from uuid import UUID
 
 import pytest
 
-from app.application.merge_gate_publish import build_retarget_check
+from app.application.merge_gate_publish import SETTLE_ATTEMPTS, build_retarget_check
 from app.application.ports.llm_gateway import LlmReviewResult
 from app.application.ports.unit_of_work import ActiveRunConflict
 from app.application.ports.vcs_review import InlineCommentDraft, ReviewThreadState
@@ -750,6 +750,50 @@ def test_retarget_racing_the_gate_of_a_stale_run_ends_in_failure() -> None:
     assert vcs.checks[-1] == build_retarget_check()
 
 
+class _FailingCorrectionVcs(_RetargetDuringGateVcs):
+    """Поправку gate (POST после первого) GitHub отвергает `failures` раз подряд."""
+
+    def __init__(self, uow: FakeUnitOfWork, failures: int) -> None:
+        super().__init__(uow, ReviewRunStatus.QUEUED)
+        self._failures = failures
+        self.correction_attempts = 0
+
+    def set_merge_gate_check(self, *args: Any) -> None:
+        if self.checks:
+            self.correction_attempts += 1
+            if self.correction_attempts <= self._failures:
+                raise VcsTransientError("GitHub API: HTTP 502")
+        super().set_merge_gate_check(*args)
+
+
+def test_a_failed_gate_correction_is_retried() -> None:
+    """Ревью #225: поправку отправляет только тот, кто увидел смену прогона, - после
+    одного сбоя на head остался бы `success` по старому диффу."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    vcs = _FailingCorrectionVcs(uow, failures=SETTLE_ATTEMPTS - 1)
+
+    _publish_first_run(uow, run, vcs)
+
+    assert vcs.correction_attempts == SETTLE_ATTEMPTS
+    assert vcs.checks[-1] == build_retarget_check()
+
+
+def test_gate_correction_gives_up_after_its_attempts() -> None:
+    """GitHub отвергает все попытки: публикация не падает, сбой в логе, а head
+    закроет `failure` упавшего нового прогона (`run_review`)."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    vcs = _FailingCorrectionVcs(uow, failures=SETTLE_ATTEMPTS)
+
+    _publish_first_run(uow, run, vcs)
+
+    assert vcs.correction_attempts == SETTLE_ATTEMPTS
+    assert [c.conclusion for c in vcs.checks] == ["success"]
+
+
 def test_gate_of_a_stale_run_yields_to_a_completed_review_of_the_new_target() -> None:
     """Новый прогон успел завершиться: gate выставляется по нему, а не блокировкой."""
     uow = FakeUnitOfWork()
@@ -778,18 +822,13 @@ def test_orphan_adopted_by_a_concurrent_run_does_not_fail_publishing() -> None:
     assert uow.published_comments.list_for_run(ORPHAN_RUN_ID) == []
 
 
-def test_orphan_older_than_a_published_run_is_not_looked_up_again() -> None:
-    """Упавший прогон старше прогона, который потом опубликовал ревью: его уже
-    проверяли - GitHub ради него не листаем."""
-    uow = FakeUnitOfWork()
-    _seed_orphan(uow)
-    _current_finding(uow, severity=FindingSeverity.CRITICAL)
-    published_run = UUID(int=55)
+def _publish_another_run(uow: FakeUnitOfWork, at: datetime) -> None:
+    """Другой прогон PR опубликовал ревью в `at` - запись в `published_comments`."""
     orphan = uow.review_runs.get(ORPHAN_RUN_ID)
     assert orphan is not None
-    later = orphan.created_at + timedelta(minutes=1)
+    published_run = UUID(int=55)
     uow.review_runs.add(
-        replace(orphan, id=published_run, status=ReviewRunStatus.COMPLETED, failed_stage=None, created_at=later)
+        replace(orphan, id=published_run, status=ReviewRunStatus.COMPLETED, failed_stage=None, created_at=at)
     )
     uow.published_comments.add(
         PublishedComment(
@@ -798,13 +837,43 @@ def test_orphan_older_than_a_published_run_is_not_looked_up_again() -> None:
             finding_id=None,
             provider_comment_id="later-summary",
             kind=CommentKind.SUMMARY,
-            published_at=later,
-            created_at=later,
-            updated_at=later,
+            published_at=at,
+            created_at=at,
+            updated_at=at,
         )
     )
+
+
+def test_orphan_failed_before_a_later_publication_is_not_looked_up_again() -> None:
+    """Прогон упал раньше, чем другой прогон опубликовал ревью: тот его уже
+    проверял - GitHub ради него не листаем."""
+    uow = FakeUnitOfWork()
+    _seed_orphan(uow)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    orphan = uow.review_runs.get(ORPHAN_RUN_ID)
+    assert orphan is not None
+    _publish_another_run(uow, orphan.last_progress_at + timedelta(minutes=1))
     vcs = RecordingVcsGateway(stored_reviews={ORPHAN_RUN_ID})
 
     _publish(uow, vcs)
 
     assert vcs.found_review_requests == []
+
+
+def test_orphan_failed_by_the_sweep_after_a_later_publication_is_looked_up() -> None:
+    """Ревью #225: A сделал POST и умер на `publishing`, B его не видел (A ещё не
+    `failed`) и опубликовался, потом выметатель перевёл A в `failed`. A создан
+    раньше B, но упал позже - его ревью подбирается, а не дублируется."""
+    uow = FakeUnitOfWork()
+    _seed_orphan(uow)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    orphan = uow.review_runs.get(ORPHAN_RUN_ID)
+    assert orphan is not None
+    published_at = orphan.created_at + timedelta(minutes=1)
+    _publish_another_run(uow, published_at)
+    uow.review_runs.add(replace(orphan, last_progress_at=published_at + timedelta(minutes=1)))
+    vcs = RecordingVcsGateway(stored_reviews={ORPHAN_RUN_ID})
+
+    _publish(uow, vcs)
+
+    assert vcs.found_review_requests == [ORPHAN_RUN_ID]
