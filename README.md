@@ -168,7 +168,7 @@ openssl rand -base64 32 | gh secret set USER_TOKEN_KEY_DMC268_T1 -R larchanka-tr
 
 Короткие команды по компонентам - в `Makefile`, список - `make help`: `make test-worker`,
 `make test-db` (сам поднимет PostgreSQL и RabbitMQ из compose и базу `dmc268_test`),
-`make sandbox` (поднимет Ollama и скачает `MODEL`), `make sandbox-stub`, `make run-worker` и т. д.
+`make sandbox-demo` (песочница воркера с проверкой окружения), `make sandbox-stub`, `make run-worker` и т. д.
 Флаги pytest или песочницы передаются через `ARGS`: `make test-worker ARGS="-k loop -x"`.
 
 ```bash
@@ -225,77 +225,15 @@ EUROROUTER_MODEL=qwen3-coder-next-80b uv run pytest -m live tests/live
 
 ### Локальный прогон воркера без инфраструктуры
 
-`uv run python -m tests.sandbox` запускает настоящий цикл потребления воркера (`Worker.run`) и пайплайн ревью `run_review` с промптами из `prompts/review/` на PR-кейсах из `tests/eval/rules/corpus/`, своих YAML-кейсах или диапазонах git.
-Docker, PostgreSQL, RabbitMQ и GitHub не нужны: база в памяти (`FakeUnitOfWork`), очередь - фейковый канал, GitHub - `FakeGitHub` за настоящими `GitHubAppAuth`/`GitHubVcsGateway`.
-Модель - локальная Ollama, заглушка, оракул по разметке или сценарий из JSON. Это POC для ручного прогона: сам прогон в CI не входит, а тесты песочницы (`tests/sandbox`) - часть обычного `uv run pytest` и идут в CI.
+Настоящий воркер и пайплайн ревью на мок-PR, без Docker, PostgreSQL, RabbitMQ и GitHub — нужна только
+локальная Ollama. Одна команда проверит окружение, поднимет Ollama, скачает модель и прогонит мок-кейс:
 
 ```bash
-ollama serve
-ollama pull qwen2.5-coder:1.5b      # для примера - маленькая модель
-uv run python -m tests.sandbox --model qwen2.5-coder:1.5b --case 04-users-sql-injection
-uv run python -m tests.sandbox --llm stub     # офлайн, без модели
-uv run python -m tests.sandbox --llm oracle   # все кейсы корпуса, модель отвечает ровно разметкой
-uv run python -m tests.sandbox --llm script --llm-script tests/sandbox/examples/llm-script.json \
-  --case-file tests/sandbox/examples/case.yaml --json out.json
-uv run python -m tests.sandbox --llm stub --from-git develop..HEAD
-uv run python -m tests.sandbox --llm stub --message tests/sandbox/examples/bad-message.json
-uv run python -m tests.sandbox --llm oracle --case 04-users-sql-injection --redeliver \
-  --github-fault review-502-stored
+make sandbox-demo
 ```
 
-То же через `make`: `make sandbox-oracle`, `make sandbox-script` (`SCRIPT`, `CASE_FILE`), `make sandbox-git` (`RANGE`, по умолчанию `develop..HEAD`); сбои - `FAULTS="review-502-stored latency=0.2"` у любой цели песочницы.
-
-Вместо ключей можно задать `OLLAMA_MODEL` / `OLLAMA_BASE_URL`. Ключи:
-
-- `--llm {ollama,stub,oracle,script}` - модель, по умолчанию `ollama`: `stub` - пустые ответы, `oracle` - ровно размеченные нарушения кейса (`expected`), `script` - сценарий из файла;
-- `--llm-script <путь>` - JSON-сценарий модели, обязателен для `--llm script`;
-- `--model`, `--ollama-url` - модель и адрес Ollama (по умолчанию `http://localhost:11434`);
-- `--case <id>` - кейс из корпуса, можно повторять;
-- `--case-file <путь>` - YAML в формате корпуса (`title`, `pull_request`, `files`, необязательный `expected` с `contains:`), можно повторять;
-- `--from-git <BASE..HEAD>` и `--repo <каталог>` (по умолчанию текущий) - PR из диапазона git: дифф от merge-base, как на GitHub, заголовок и описание - из последнего коммита; бинарные и большие файлы пропускаются; можно повторять;
-- `--message <путь>` - сырое тело сообщения очереди, доставляется после PR как есть; можно повторять;
-- `--redeliver` - каждое сообщение PR приходит повторно, как после потерянного ack; после nack повтора нет - сообщение уже в DLQ;
-- `--github-fault <сбой>` - сбой фейкового GitHub, можно повторять (список ниже);
-- `--json <путь>` - весь результат прогона в JSON;
-- `--rules {absent,rules,empty,adversarial}` - содержимое `.review/rules.md`, по умолчанию `rules`;
-- `--window`, `--context-max-tokens` - под окно маленькой модели: если полный пакет в окно не влезает, воркер не стартует;
-- `-v` - логи воркера.
-
-PR собираются в порядке `--case`, `--case-file`, `--from-git`. Без них и без `--message` берутся все кейсы корпуса.
-
-Сценарий модели - JSON-список записей, по одной на вызов модели:
-
-```json
-[
-  {"review": [{"path": "app/billing/discount.py", "line": 7, "message": "...",
-               "category": "correctness", "severity": "high"}], "tokens": 1200},
-  {"verify": [["F1", "keep"]], "tokens": 300},
-  {"error": "output"}
-]
-```
-
-- `review` - ответ ревью: замечания `{path, line, message, category?, severity?, rule?: [имя, пункт], side?}` и необязательная `summary`;
-- `verify` - вердикты верификатора `keep` / `drop` по кандидатам `F1`, `F2`, … в порядке после отсева;
-- `error` - отказ модели: `output`, `timeout`, `rate_limited`, `unavailable`. На ревью он роняет прогон (`failed`), на верификации - кандидаты публикуются без неё.
-
-Список один на весь прогон, записи расходуются по порядку: на каждый PR - одна запись ревью, затем запись верификации, но только если после отсева остался хоть один кандидат; без кандидатов следующая запись достаётся ревью следующего PR. Записи кончились - `AssertionError` на лишнем вызове, сообщение уходит в nack.
-
-Сбои GitHub (`--github-fault`):
-
-- `review-502-stored` - `POST …/reviews` отвечает 502, хотя ревью записано: проверка, что повтор не публикует дубликат;
-- `review-502` - 502 до записи ревью, повтор публикует;
-- `review-rate-limit` - 429 вторичного лимита с `Retry-After: 1`;
-- `graphql-500` - каждый запрос GraphQL (треды) отвечает 500;
-- `review-comments-500` - `GET …/reviews/{id}/comments` отвечает 500;
-- `foreign-review` - на каждом PR уже есть ревью человека;
-- `latency=SEC` - задержка SEC секунд перед каждым ответом.
-
-Отказы `review-*` встают в одну очередь на все PR, по одному на запрос `POST …/reviews`; чтобы отказать дважды, сбой задают дважды.
-
-По каждому PR печатается отчёт: статус прогона, шаги с таймингом, опубликованные комментарии
-(`path:line [category] текст`) и ожидаемые находки для сравнения; по каждому сырому сообщению - ack или nack и ошибка обработчика.
-Код выхода 1 - сообщение какого-то PR ушло в nack или прогон не завершился как `completed`; сырые сообщения в код выхода не входят - их дело быть отвергнутыми.
-2 - вход не собрать (нет файла, не тот диапазон git, битый сценарий, неизвестный сбой), Ollama недоступна, модель не скачана или конфигурация окна не подходит.
+Свои мок-данные, режимы без модели (`make sandbox-stub`, `sandbox-oracle`, `sandbox-script`), сбои
+GitHub и очереди, все ключи и коды выхода — [`tests/sandbox/README.md`](tests/sandbox/README.md).
 
 ## Проверки
 

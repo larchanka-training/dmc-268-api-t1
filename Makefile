@@ -19,6 +19,8 @@ FAULTS     ?=
 # Сценарий модели и кейс для sandbox-script; диапазон git для sandbox-git.
 SCRIPT     ?= tests/sandbox/examples/llm-script.json
 CASE_FILE  ?= tests/sandbox/examples/case.yaml
+# Мок-PR для sandbox-demo.
+DEMO_CASE  ?= tests/sandbox/examples/case.yaml
 RANGE      ?= develop..HEAD
 # Дополнительные ключи: для sandbox - его флаги, для test-* - флаги pytest.
 ARGS       ?=
@@ -45,7 +47,7 @@ SERVICE_ENV = DATABASE_URL='$(DATABASE_URL)' RABBITMQ_URL='$(RABBITMQ_URL)' \
 
 .DEFAULT_GOAL := help
 .PHONY: help install check \
-	sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
+	sandbox-demo sandbox-doctor sandbox-down sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
 	test test-domain test-application test-worker test-api test-infrastructure \
 	test-db test-queue test-e2e test-all \
 	infra-up infra-down test-db-create migrate run-api run-worker stack-up stack-down
@@ -64,6 +66,36 @@ check: ## ruff, mypy, lint-imports
 
 # --- песочница воркера: всё подменено, кроме модели ------------------------------
 
+sandbox-demo: ## Начать отсюда: проверить окружение, поднять Ollama и модель, прогнать мок-PR (MODEL, DEMO_CASE)
+	@printf '\n\033[1m==> 1/4 Проверка окружения\033[0m\n'
+	@OLLAMA_URL='$(OLLAMA_URL)' MODEL='$(MODEL)' scripts/sandbox-doctor.sh
+	@printf '\n\033[1m==> 2/4 Зависимости Python (uv sync)\033[0m\n'
+	@uv sync --all-extras
+	@printf '\n\033[1m==> 3/4 Ollama и модель $(MODEL)\033[0m\n'
+	@$(MAKE) --no-print-directory ollama-up ollama-pull
+	@printf '\n\033[1m==> 4/4 Прогон воркера на мок-PR $(DEMO_CASE)\033[0m\n'
+	@uv run python -m tests.sandbox --llm ollama --model '$(MODEL)' --ollama-url '$(OLLAMA_URL)' \
+		--case-file '$(DEMO_CASE)' $(SANDBOX_FLAGS); status=$$?; echo; \
+	case $$status in \
+		0) printf '\033[32mГотово: прогон completed, сообщение подтверждено (ack).\033[0m\n' ;; \
+		1) printf '\033[31mПрогон не завершился или сообщение ушло в nack - см. отчёт выше; подробнее: make sandbox-demo ARGS=-v\033[0m\n' ;; \
+		*) printf '\033[31mВход или окружение не подошли (код %s) - причина в строке выше.\033[0m\n' $$status ;; \
+	esac; \
+	echo "Дальше: другая модель - MODEL=..., свой PR - DEMO_CASE=путь.yaml, остановить Ollama - make sandbox-down."; \
+	echo "Подробно: tests/sandbox/README.md"; \
+	exit $$status
+
+sandbox-doctor: ## Проверить окружение песочницы, ничего не меняя
+	@OLLAMA_URL='$(OLLAMA_URL)' MODEL='$(MODEL)' scripts/sandbox-doctor.sh
+
+sandbox-down: ## Остановить Ollama, если её запустил make ollama-up
+	@if [ -f .ollama.pid ] && ps -p "$$(cat .ollama.pid)" -o command= 2>/dev/null | grep -q ollama; then \
+		kill "$$(cat .ollama.pid)" && echo "Ollama (pid $$(cat .ollama.pid)) остановлена"; \
+	else \
+		echo "Ollama, запущенной через make, нет - ничего не делаю"; \
+	fi; \
+	rm -f .ollama.pid
+
 sandbox: ollama-up ollama-pull ## Воркер на корпусе PR с локальной Ollama (MODEL, CASE, RULES, FAULTS, ARGS)
 	uv run python -m tests.sandbox --llm ollama --model '$(MODEL)' --ollama-url '$(OLLAMA_URL)' $(SANDBOX_FLAGS)
 
@@ -79,13 +111,14 @@ sandbox-script: ## Воркер на CASE_FILE со сценарием моде�
 sandbox-git: ## Воркер на диапазоне git RANGE с заглушкой модели (RULES, FAULTS, ARGS)
 	uv run python -m tests.sandbox --llm stub --from-git '$(RANGE)' $(SANDBOX_FLAGS)
 
-ollama-up: ## Поднять ollama serve в фоне, если она ещё не отвечает
+ollama-up: ## Поднять ollama serve в фоне, если она ещё не отвечает (остановить - make sandbox-down)
 	@if curl -sf '$(OLLAMA_URL)/api/tags' >/dev/null; then \
 		echo "Ollama уже отвечает на $(OLLAMA_URL)"; \
 	else \
 		command -v ollama >/dev/null || { echo "ollama не установлена: brew install ollama" >&2; exit 1; }; \
 		echo "Запускаю ollama serve в фоне, лог - .ollama.log"; \
 		OLLAMA_HOST='$(OLLAMA_URL)' nohup ollama serve >.ollama.log 2>&1 & \
+		echo $$! >.ollama.pid; \
 		for i in $$(seq 1 30); do curl -sf '$(OLLAMA_URL)/api/tags' >/dev/null && exit 0; sleep 1; done; \
 		echo "Ollama не ответила за 30 с, см. .ollama.log" >&2; exit 1; \
 	fi
