@@ -20,19 +20,21 @@
 роняет прогон (`failed`), на верификации - fail-open (`unavailable`, кандидаты
 публикуются как есть). Кандидаты верификатора - `F1`, `F2`, … в порядке после
 отсева. Записи кончились - `AssertionError` на лишнем вызове.
+
+Формат записи - в `load_llm_script`: внутри конверта сценария - те же модели
+провода `app/application/llm_schema.py`, что проверяют ответ настоящей модели,
+поэтому своей проверки полей у сценария нет.
 """
 
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeIs
+from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from app.application.llm_schema import ReviewOutput, SummaryOutput, VerificationOutput
+from app.application.llm_schema import ReviewOutput, VerificationOutput
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse
-from app.domain.enums import DiffSide, FindingCategory, FindingSeverity, VerifierVerdict
 from app.domain.llm_errors import (
     LlmError,
     LlmOutputError,
@@ -125,13 +127,12 @@ LLM_SCRIPT_ERRORS: dict[str, type[LlmError]] = {
     "unavailable": LlmError,
 }
 _SCRIPT_MODEL = "script"
-_CANDIDATE_ID = re.compile(r"^F[1-9]\d*$")
-_ENTRY_KEYS = {
-    "review": {"review", "summary", "tokens"},
-    "verify": {"verify", "tokens"},
-    "error": {"error", "tokens"},
-}
-_FINDING_KEYS = {"path", "line", "message", "category", "severity", "rule", "side"}
+# Ключ вида записи и прочие ключи, кроме `tokens`, допустимые рядом с ним.
+_ENTRY_KEYS = {"review": {"summary"}, "verify": set(), "error": set()}
+# Чего нет в замечании или вердикте сценария, берётся отсюда; остальное
+# обязательно по схеме провода.
+_FINDING_DEFAULTS = {"side": "new", "category": "readability", "severity": "low", "confidence": None}
+_VERDICT_DEFAULTS = {"reason": "сценарий"}
 
 
 class ScriptError(ValueError):
@@ -141,15 +142,21 @@ class ScriptError(ValueError):
 def load_llm_script(path: Path) -> ScriptedLlmGateway:
     """Фейк модели над сценарием из JSON-файла: список записей, по одной на вызов.
 
-    Записи (порядок расхода - в docstring модуля):
+    Запись - ровно один из ключей `review`, `verify`, `error` и необязательный
+    `tokens` (целое от 0, по умолчанию 0):
 
-    - `{"review": [<замечание>, …], "summary"?: {"problem", "positives", "effort"},
-      "tokens"?: int}`, замечание - `{"path", "line", "message", "category"?,
-      "severity"?, "rule"?: [имя, пункт], "side"?}`;
-    - `{"verify": [["F1", "keep" | "drop"], …], "tokens"?: int}`;
-    - `{"error": "output" | "timeout" | "rate_limited" | "unavailable", "tokens"?: int}`.
+    - `{"review": [<FindingOutput>, …], "summary"?: <SummaryOutput>}` - замечания
+      в форме провода (`filePath`, `line`, `message`, `suggestion`: `{"diff"}`,
+      `rule`: `{"name", "check"}`, …); не указанные `side`, `category`,
+      `severity`, `confidence` - `new`, `readability`, `low`, `null`, сводка -
+      `SUMMARY`. Либо `{"review": <ReviewOutput>}` - ответ модели целиком,
+      со `schemaVersion` и `summary`, как его вернула модель;
+    - `{"verify": [<VerdictOutput>, …]}` - `{"id": "F1", "verdict": "keep" | "drop",
+      "reason"?}`, либо `{"verify": <VerificationOutput>}` целиком;
+    - `{"error": "output" | "timeout" | "rate_limited" | "unavailable"}`.
 
-    Лишний ключ, неизвестное значение или неверный тип - `ScriptError` с номером записи.
+    Ответ проверяют модели `app/application/llm_schema.py`: лишний ключ, чужое
+    значение или неверный тип - `ScriptError` с номером записи и местом в ней.
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -159,122 +166,60 @@ def load_llm_script(path: Path) -> ScriptedLlmGateway:
         raise ScriptError(f"сценарий модели {path} - не JSON: {error}") from error
     if not isinstance(raw, list):
         raise ScriptError(f"сценарий модели {path}: ждали JSON-список записей")
-    return ScriptedLlmGateway([_script_entry(item, i) for i, item in enumerate(raw)])
+    return ScriptedLlmGateway([_script_entry(item, f"запись {i}") for i, item in enumerate(raw)])
 
 
-def _script_entry(item: object, index: int) -> LlmResponse[Any] | Exception:
-    where = f"запись {index}"
+def _script_entry(item: object, where: str) -> LlmResponse[Any] | Exception:
     if not isinstance(item, dict):
         raise ScriptError(f"{where}: ждали объект JSON")
     kinds = [k for k in _ENTRY_KEYS if k in item]
     if len(kinds) != 1:
-        raise ScriptError(f"{where}: нужен ровно один из ключей review, verify, error")
+        raise ScriptError(f"{where}: нужен ровно один из ключей {', '.join(_ENTRY_KEYS)}")
     (kind,) = kinds
-    extra = set(item) - _ENTRY_KEYS[kind]
+    extra = set(item) - {kind, "tokens", *_ENTRY_KEYS[kind]}
     if extra:
         raise ScriptError(f"{where}: лишние ключи {sorted(extra)}")
     tokens = item.get("tokens", 0)
-    if not _is_int(tokens) or tokens < 0:
+    # `type is int`, а не `isinstance`: `true` в токенах - опечатка, а не 1.
+    if type(tokens) is not int or tokens < 0:
         raise ScriptError(f"{where}: tokens - целое число не меньше нуля")
-    if kind == "review":
-        return _script_review(item["review"], item.get("summary"), tokens, where)
-    if kind == "verify":
-        return _script_verify(item["verify"], tokens, where)
-    error_kind = item["error"]
-    if not isinstance(error_kind, str) or error_kind not in LLM_SCRIPT_ERRORS:
-        raise ScriptError(f"{where}: error - один из {', '.join(LLM_SCRIPT_ERRORS)}")
-    return LLM_SCRIPT_ERRORS[error_kind](
-        f"сценарий модели: отказ {error_kind}", tokens_used=tokens
+    if kind == "error":
+        error_kind = item["error"]
+        if not isinstance(error_kind, str) or error_kind not in LLM_SCRIPT_ERRORS:
+            raise ScriptError(f"{where}: error - один из {', '.join(LLM_SCRIPT_ERRORS)}")
+        return LLM_SCRIPT_ERRORS[error_kind](f"сценарий модели: отказ {error_kind}", tokens_used=tokens)
+    try:
+        content = _review(item, where) if kind == "review" else _verification(item["verify"])
+    except ValidationError as error:
+        raise ScriptError(f"{where}: {kind} не прошёл схему ответа модели: {error}") from error
+    return LlmResponse(model=_SCRIPT_MODEL, tokens_used=tokens, content=content)
+
+
+def _review(item: dict[str, Any], where: str) -> ReviewOutput:
+    findings = item["review"]
+    if isinstance(findings, dict):
+        if "summary" in item:
+            raise ScriptError(f"{where}: у ответа модели целиком summary - внутри review")
+        return ReviewOutput.model_validate(findings)
+    return ReviewOutput.model_validate(
+        {
+            "schemaVersion": "1",
+            "findings": _with_defaults(findings, _FINDING_DEFAULTS),
+            "summary": item.get("summary", SUMMARY),
+        }
     )
 
 
-def _script_review(
-    findings: object, summary: object, tokens: int, where: str
-) -> LlmResponse[ReviewOutput]:
-    if not isinstance(findings, list):
-        raise ScriptError(f"{where}: review - список замечаний")
-    payloads = [_script_finding(f, f"{where}, замечание {i}") for i, f in enumerate(findings)]
-    try:
-        response = review_response(*payloads, tokens=tokens, model=_SCRIPT_MODEL)
-    except ValidationError as error:
-        raise ScriptError(f"{where}: ответ ревью не прошёл схему: {error}") from error
-    if summary is None:
-        return response
-    if not isinstance(summary, dict):
-        raise ScriptError(f"{where}: summary - объект {{problem, positives, effort}}")
-    try:
-        validated = SummaryOutput.model_validate(summary)
-    except ValidationError as error:
-        raise ScriptError(f"{where}: summary не прошла схему: {error}") from error
-    content = response.content.model_copy(update={"summary": validated})
-    return LlmResponse(model=response.model, tokens_used=tokens, content=content)
-
-
-def _script_finding(item: object, where: str) -> dict[str, Any]:
-    if not isinstance(item, dict):
-        raise ScriptError(f"{where}: ждали объект JSON")
-    extra = set(item) - _FINDING_KEYS
-    if extra:
-        raise ScriptError(f"{where}: лишние ключи {sorted(extra)}")
-    path, line, message = item.get("path"), item.get("line"), item.get("message")
-    if not isinstance(path, str) or not path:
-        raise ScriptError(f"{where}: path - непустая строка")
-    if not _is_int(line) or line < 1:
-        raise ScriptError(f"{where}: line - целое число от 1")
-    if not isinstance(message, str) or not message:
-        raise ScriptError(f"{where}: message - непустая строка")
-    rule = item.get("rule")
-    rule_ref: tuple[str, int] | None = None
-    if rule is not None:
-        if not (
-            isinstance(rule, list)
-            and len(rule) == 2
-            and isinstance(rule[0], str)
-            and rule[0]
-            and _is_int(rule[1])
-            and rule[1] >= 1
-        ):
-            raise ScriptError(f"{where}: rule - пара [имя правила, номер пункта от 1]")
-        rule_ref = (rule[0], rule[1])
-    return finding_json(
-        path,
-        line,
-        message,
-        rule=rule_ref,
-        category=_choice(item.get("category", "readability"), FindingCategory, "category", where),
-        severity=_choice(item.get("severity", "low"), FindingSeverity, "severity", where),
-        side=_choice(item.get("side", "new"), DiffSide, "side", where),
+def _verification(verdicts: object) -> VerificationOutput:
+    if isinstance(verdicts, dict):
+        return VerificationOutput.model_validate(verdicts)
+    return VerificationOutput.model_validate(
+        {"schemaVersion": "1", "verdicts": _with_defaults(verdicts, _VERDICT_DEFAULTS)}
     )
 
 
-def _script_verify(
-    verdicts: object, tokens: int, where: str
-) -> LlmResponse[VerificationOutput]:
-    if not isinstance(verdicts, list):
-        raise ScriptError(f"{where}: verify - список пар [id, вердикт]")
-    pairs: list[tuple[str, str]] = []
-    for i, pair in enumerate(verdicts):
-        if not (isinstance(pair, list) and len(pair) == 2):
-            raise ScriptError(f"{where}, вердикт {i}: ждали пару [id, вердикт]")
-        vid, verdict = pair
-        if not isinstance(vid, str) or not _CANDIDATE_ID.match(vid):
-            raise ScriptError(f"{where}, вердикт {i}: id кандидата - F1, F2, …")
-        pairs.append((vid, _choice(verdict, VerifierVerdict, "вердикт", f"{where}, вердикт {i}")))
-    return verification_response(*pairs, tokens=tokens, model=_SCRIPT_MODEL)
-
-
-def _choice(
-    value: object,
-    enum: type[FindingCategory | FindingSeverity | DiffSide | VerifierVerdict],
-    name: str,
-    where: str,
-) -> str:
-    allowed = [v.value for v in enum]
-    if not isinstance(value, str) or value not in allowed:
-        raise ScriptError(f"{where}: {name} - один из {', '.join(allowed)}")
-    return value
-
-
-def _is_int(value: object) -> TypeIs[int]:
-    # `bool` - подкласс `int`, но `true` в номере строки - опечатка, а не 1.
-    return isinstance(value, int) and not isinstance(value, bool)
+def _with_defaults(items: object, defaults: dict[str, Any]) -> object:
+    """Дописать умолчания в объекты списка; что не список и не объект - схема отвергнет сама."""
+    if not isinstance(items, list):
+        return items
+    return [defaults | item if isinstance(item, dict) else item for item in items]

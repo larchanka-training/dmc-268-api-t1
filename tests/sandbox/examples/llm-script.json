@@ -2,24 +2,35 @@
   {
     "review": [
       {
-        "path": "app/billing/discount.py",
+        "filePath": "app/billing/discount.py",
         "line": 3,
         "message": "Имя `d` не говорит, что это процент скидки.",
-        "category": "readability",
-        "severity": "low"
+        "confidence": 0.4
       },
       {
-        "path": "app/billing/discount.py",
+        "filePath": "app/billing/discount.py",
         "line": 7,
-        "message": "Скидка больше 100% даёт отрицательную цену: нет проверки границы.",
         "category": "correctness",
-        "severity": "high"
+        "severity": "high",
+        "message": "Скидка больше 100% даёт отрицательную цену: нет проверки границы.",
+        "confidence": 0.9,
+        "suggestion": {
+          "diff": "-    return price - price * d // 100\n+    return price - price * min(d, 100) // 100"
+        }
       }
     ],
+    "summary": {
+      "problem": "Главная проблема - отрицательная цена при скидке больше 100%.",
+      "positives": ["Нулевая и отрицательная скидка обработаны отдельно."],
+      "effort": "Одна правка в одной функции."
+    },
     "tokens": 1200
   },
   {
-    "verify": [["F1", "keep"], ["F2", "drop"]],
+    "verify": [
+      {"id": "F1", "verdict": "drop", "reason": "Имя параметра - вкусовщина, поведение не меняет."},
+      {"id": "F2", "verdict": "keep", "reason": "При d > 100 цена уходит в минус: дефект подтверждён."}
+    ],
     "tokens": 300
   }
 ]
