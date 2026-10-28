@@ -1,0 +1,28 @@
+# Proposal
+
+## Why
+
+Кабинет (larchanka-training/dmc-268-ui-t1#49) шлёт трейсы браузера OTLP/HTTP на свой же адрес —
+`/otlp/v1/traces`, а nginx интерфейса должен проксировать их в коллектор. Сейчас коллектор стоит
+только в сетях `dmc268-backend` и `dmc268-observability`, а интерфейс — в `dmc268`: до коллектора
+nginx не дойдёт. Часть #108 (стек наблюдаемости на проде).
+
+## What Changes
+
+- Новая сеть `dmc268-otlp` (`internal`): коллектор и интерфейс. Создаётся без флага стека — к ней по
+  имени подключается стек `dmc-268-ui-t1`.
+- `dmc268-otelcol` подключается к `dmc268-otlp`. В `dmc268` коллектор не ставим: там у него был бы
+  выход в интернет, а интерфейс видел бы его соседей.
+- Тесты изоляции сетей (`tests/test_infra_isolation.py`, `infra/tests/observability.tftest.hcl`)
+  и таблица сетей в `infra/README.md`.
+- Прокси `/otlp/` в nginx — в `dmc-268-ui-t1`, отдельным пул-реквестом.
+
+## Capabilities
+
+### New Capabilities
+
+Нет.
+
+### Modified Capabilities
+
+- `observability`: новое требование «Трейсы браузера — через публичный вход».

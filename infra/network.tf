@@ -22,3 +22,15 @@ resource "docker_network" "backend" {
 resource "docker_network" "egress" {
   name = "dmc268-egress"
 }
+
+# Сеть приёма трейсов браузера: коллектор и интерфейс. nginx интерфейса
+# проксирует `/otlp/v1/traces` на OTLP/HTTP коллектора (dmc268-otelcol:4318),
+# поэтому кабинет шлёт трейсы на свой же origin. Отдельная сеть, а не dmc268:
+# в dmc268 у коллектора был бы выход в интернет, а интерфейс видел бы его
+# соседей. internal — шлюза нет. Создаётся без флага стека: к ней по имени
+# подключается стек dmc-268-ui-t1, и его data source не должен падать на
+# стенде без observability_enabled. Имя не менять.
+resource "docker_network" "otlp" {
+  name     = "dmc268-otlp"
+  internal = true
+}
