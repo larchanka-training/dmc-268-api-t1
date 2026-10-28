@@ -32,6 +32,18 @@ EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
     "replication_setup": frozenset({"backend"}),
     "api": frozenset({"dmc268", "backend"}),
     "worker": frozenset({"backend", "egress"}),
+    # Стек наблюдаемости: цели receiver-ов и OTLP — в сети данных, остальное
+    # — в своей сети. В dmc268 (там UI) из стека не ходит никто. Grafana —
+    # ещё и в отдельной сети dmc268-grafana: порты на internal-сети Docker не
+    # публикует, поэтому порт Grafana живёт в не-internal сети.
+    "otelcol": frozenset({"backend", "observability"}),
+    "loki": frozenset({"observability"}),
+    "tempo": frozenset({"observability"}),
+    "prometheus": frozenset({"backend", "observability"}),
+    "grafana": frozenset({"observability", "grafana"}),
+    "node_exporter": frozenset({"observability"}),
+    "cadvisor": frozenset({"observability", "observability_docker_proxy"}),
+    "docker_socket_proxy": frozenset({"observability_docker_proxy"}),
 }
 
 
@@ -52,9 +64,10 @@ def container_networks(text: str, name: str) -> frozenset[str] | None:
         return None
     networks: set[str] = set()
     # Блок целиком, а не «name сразу после скобки»: поле name может идти и после
-    # aliases или ipv4_address.
+    # aliases или ipv4_address. Индекс [0] — у count-ресурсов стека
+    # наблюдаемости (count = 1 : 0 за observability_enabled).
     for body in re.findall(r"networks_advanced\s*\{([^{}]*)\}", block):
-        ref = re.search(r"\bname\s*=\s*docker_network\.(\w+)\.name", body)
+        ref = re.search(r"\bname\s*=\s*docker_network\.(\w+)(?:\[\d+\])?\.name", body)
         networks.add(ref.group(1) if ref else NOT_A_NETWORK_REFERENCE)
     return frozenset(networks)
 
@@ -90,13 +103,18 @@ def test_extractors_find_facts_that_are_present() -> None:
         '    aliases = ["db"]\n'
         "    name    = docker_network.egress.name\n"
         "  }\n"
+        "  networks_advanced {\n"
+        "    name = docker_network.observability[0].name\n"
+        "  }\n"
         "  ports {\n"
         "    internal = 5432\n"
         "  }\n"
         "}\n"
     )
     assert network_is_internal(sample, "backend") is True
-    assert container_networks(sample, "postgres") == frozenset({"backend", "egress"})
+    assert container_networks(sample, "postgres") == frozenset(
+        {"backend", "egress", "observability"}
+    )
     assert container_publishes_ports(sample, "postgres") is True
 
 
@@ -111,6 +129,23 @@ def test_data_network_has_no_way_out() -> None:
     assert network_is_internal(read_infra_text(), "backend") is True, (
         "сеть данных dmc268-backend должна быть internal: без этого база и брокер "
         "получают выход в интернет"
+    )
+
+
+def test_observability_network_has_no_way_out() -> None:
+    """Сеть стека наблюдаемости internal, как и сеть данных: наружу из стека
+    не ходит никто. Сеть публикации порта Grafana dmc268-grafana — не
+    internal (порты на internal-сети Docker не публикует): проверяем именно
+    отсутствие internal = true — его постановка сломала бы публикацию порта.
+    """
+    text = read_infra_text()
+    assert network_is_internal(text, "observability") is True, (
+        "сеть стека dmc268-observability должна быть internal: без этого стек "
+        "получает выход в интернет"
+    )
+    assert network_is_internal(text, "grafana") is False, (
+        "сеть dmc268-grafana не должна быть internal: её единственное назначение — "
+        "публикуемый порт Grafana, а порты на internal-сети Docker не публикует"
     )
 
 

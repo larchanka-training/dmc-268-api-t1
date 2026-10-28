@@ -7,7 +7,8 @@
 
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, MutableMapping
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -24,25 +25,37 @@ RFC 9457 Problem Details (`application/problem+json`), клиент ветвит
 ответе — заголовок `X-Trace-ID`, в теле ошибки то же значение в `trace_id`.
 """
 
+HEALTH_PATH = "/health"
+
+
+def _is_health_check(scope: MutableMapping[str, Any]) -> bool:
+    """Health-check — для Docker и деплоя: спаны и метрики на нём не нужны.
+
+    Исключается целиком, опцией `exclude` встроенной телеметрии FastAPI. Спана нет,
+    поэтому `X-Trace-ID` такого ответа — случайное значение из `TraceIdMiddleware`:
+    проверка живости не для пользователей, связи с трейсом ей не нужно.
+    """
+    return scope["type"] == "http" and scope.get("path") == HEALTH_PATH
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Собрать ASGI-приложение.
 
     Явно переданные `settings` — это то, как тесты обходятся без настоящего
     окружения; без них настройки читаются из окружения и падают громко, если
-    обязательной не хватает.
+    обязательной не хватает, — но уже после настройки логов, телеметрии и
+    excepthook'ов: `ValidationError` pydantic выходит JSON-записью, которую
+    читает Loki, — при выходе из процесса её пишет excepthook, а не дефолтный
+    текстовый дамп в stderr, который коллектор дропает (замечание ревью
+    PR #130).
     """
-    if settings is None:
-        from app.config import load_settings
-
-        settings = load_settings()
-
     from pydantic.alias_generators import to_camel
 
     from app.api import openapi
     from app.api.errors import ERRORS_DEFAULT
     from app.infrastructure import telemetry
     from app.infrastructure.container import build_container
+    from app.infrastructure.logging import configure_logging, install_excepthooks
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -63,12 +76,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
         responses=ERRORS_DEFAULT,
         lifespan=lifespan,
-        # Провайдер ставит `configure_tracing`. `auto_configure` при заданном
+        # Провайдеры ставит `configure_telemetry`. `auto_configure` при заданном
         # `OTEL_EXPORTER_OTLP_ENDPOINT` повесил бы на него второй экспортёр — выключен
         # явно, а не только отсутствием `FASTAPI_OTEL_AUTO_CONFIGURE`. Встроенный
         # OTel-лог исключений FastAPI не используем: стектрейс `500` пишет наш
-        # обработчик (#89).
-        telemetry={"auto_configure": False, "logs": False},
+        # обработчик (#89). Health-check исключён из телеметрии целиком (`_is_health_check`):
+        # его опрашивают Docker и деплой, и спанов на нём быть не должно.
+        telemetry={"auto_configure": False, "logs": False, "exclude": _is_health_check},
         # operationId — имя функции роута в camelCase (`list_repositories` → `listRepositories`):
         # по нему фронт находит операцию в сгенерированных типах.
         generate_unique_id_function=lambda route: to_camel(route.name),
@@ -76,15 +90,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.api.events import StreamEventType
 
     openapi.install(app, extra_models=[StreamEventType])
+    # Логи — до первого запроса и до трассировки: её предупреждения при старте
+    # тоже должны выйти JSON-записями.
+    configure_logging(telemetry.API_SERVICE)
+    # До контейнера: провайдеры трейсов и метрик нужны телеметрии FastAPI с первого запроса.
+    telemetry.configure_telemetry(telemetry.API_SERVICE)
+    # Хук — за логами и до чтения окружения (замечание ревью PR #130): он
+    # общий для API и воркера (`app.infrastructure.logging`), и `ValidationError`
+    # pydantic из кривого окружения выходит из процесса JSON-записью с
+    # `exception.type`, а не текстом в stderr, который коллектор дропает.
+    install_excepthooks()
+    # Окружение читается после логов, телеметрии и excepthook'ов, не раньше
+    # (замечание ревью PR #130): падение на кривом окружении выходит
+    # JSON-записью в Loki.
+    # Между началом функции и этим местом настройки не нужны: приложение и
+    # OpenAPI-схема строятся без них. Явно переданные настройки (тесты)
+    # читаются как читались — из аргумента.
+    if settings is None:
+        from app.config import load_settings
+
+        settings = load_settings()
+
     app.state.settings = settings
-    # До контейнера: провайдер трейсов нужен телеметрии FastAPI с первого запроса.
-    telemetry.configure_tracing(telemetry.API_SERVICE)
     app.state.container = build_container(settings)
     if settings.user_token_key is None:
         # Видно в логе старта API: вход на таком стенде будет отказывать. Не в
         # контейнере — его собирает и воркер, которому ключ не передаётся.
         _log.warning("USER_TOKEN_ENCRYPTION_KEY не задан: вход отказывает, токены не хранятся")
     telemetry.instrument_engine(app.state.container.engine)
+    telemetry.instrument_pool(
+        app.state.container.engine, settings.db_pool_size, settings.db_max_overflow
+    )
 
     from app.api import errors, log_redaction
     from app.api.auth import router as auth_router
@@ -124,7 +160,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def read_root() -> dict[str, str]:
         return {"message": "Welcome to DMC-268 Team 1 API"}
 
-    @app.get("/health", include_in_schema=False)
+    @app.get(HEALTH_PATH, include_in_schema=False)
     def health_check() -> dict[str, str]:
         return {"status": "ok"}
 

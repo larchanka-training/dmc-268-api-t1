@@ -80,10 +80,26 @@ def test_trace_id_of_an_error_is_the_trace_id_of_the_request_span(
 def test_a_successful_response_carries_the_trace_id_of_its_span(
     spans: InMemorySpanExporter,
 ) -> None:
-    response = TestClient(_app()).get("/health")
+    # `/health` теперь вне трейсинга — обычный путь обязан нести trace id спана.
+    response = TestClient(_app()).get("/")
 
     assert response.status_code == 200
     assert response.headers["X-Trace-ID"] == _trace_id(_server_span(spans))
+
+
+def test_health_check_creates_no_span(spans: InMemorySpanExporter) -> None:
+    """Health-check опрашивают Docker и деплой: спанов на нём нет, трейс не шумит.
+
+    Другой путь спан создаёт — трейсинг выключен только для проверок живости.
+    """
+    client = TestClient(_app())
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert spans.get_finished_spans() == ()
+    assert client.get("/").status_code == 200
+    assert [s.kind for s in spans.get_finished_spans() if s.kind is SpanKind.SERVER]
 
 
 def test_a_failure_to_parse_traceparent_still_gives_a_problem_with_the_trace_id(
@@ -109,7 +125,7 @@ def test_a_valid_traceparent_becomes_a_link_not_the_parent(
 ) -> None:
     """Серверный спан — корень нового трейса с одной ссылкой на контекст клиента."""
     response = TestClient(_app()).get(
-        "/health",
+        "/",
         headers={
             "traceparent": FOREIGN_TRACEPARENT,
             "tracestate": "vendor=secret",
@@ -146,11 +162,11 @@ def test_a_not_sampled_traceparent_is_recorded_like_a_request_without_it(
 ) -> None:
     """Флаг `00` клиента не выключает запись: сэмплер решает как для запроса без заголовка."""
     client = TestClient(_app())
-    client.get("/health")
+    client.get("/")
     plain = _server_span(spans)
     spans.clear()
 
-    client.get("/health", headers={"traceparent": FOREIGN_TRACEPARENT[:-2] + "00"})
+    client.get("/", headers={"traceparent": FOREIGN_TRACEPARENT[:-2] + "00"})
 
     linked = _server_span(spans)
     assert linked.parent is None and plain.parent is None
@@ -176,10 +192,10 @@ def test_an_invalid_traceparent_gives_no_link_and_the_same_response(
     spans: InMemorySpanExporter, traceparent: str
 ) -> None:
     client = TestClient(_app())
-    expected = client.get("/health")
+    expected = client.get("/")
     spans.clear()
 
-    response = client.get("/health", headers={"traceparent": traceparent})
+    response = client.get("/", headers={"traceparent": traceparent})
 
     server = _server_span(spans)
     assert server.parent is None
@@ -191,7 +207,7 @@ def test_an_invalid_traceparent_gives_no_link_and_the_same_response(
 
 # Сэмплер берётся из `OTEL_TRACES_SAMPLER` при создании провайдера, а в этом процессе
 # провайдер — из `tests/conftest.py`. Поэтому проверка сэмплера — в отдельном процессе,
-# где провайдер ставит сам `configure_tracing`.
+# где провайдер ставит сам `configure_telemetry`.
 _SAMPLER_SCRIPT = """
 import sys
 
@@ -216,9 +232,11 @@ provider = trace.get_tracer_provider()
 assert isinstance(provider, TracerProvider)
 exporter = InMemorySpanExporter()
 provider.add_span_processor(SimpleSpanProcessor(exporter))
-response = TestClient(app).get("/health", headers={"traceparent": sys.argv[1]})
+response = TestClient(app).get("/", headers={"traceparent": sys.argv[1]})
 server = [s for s in exporter.get_finished_spans() if s.kind is SpanKind.SERVER]
-print(len(server), response.headers["X-Trace-ID"])
+# Маркер: остальной stdout процесса — JSON-записи логов (configure_logging),
+# числовая строка одна, но не единственная.
+print("RESULT", len(server), response.headers["X-Trace-ID"])
 """
 
 
@@ -245,7 +263,10 @@ def test_the_parentbased_sampler_ignores_the_client_context(
     )
 
     assert result.returncode == 0, result.stderr
-    finished, trace_id = result.stdout.split()
+    [line] = [
+        line for line in result.stdout.splitlines() if line.startswith("RESULT")
+    ]
+    _, finished, trace_id = line.split()
     assert int(finished) == recorded
     assert re.fullmatch(r"[0-9a-f]{32}", trace_id)
     assert trace_id != FOREIGN_TRACE_ID
@@ -273,7 +294,7 @@ def test_the_auth_callback_query_is_hidden_in_the_request_span(
 def test_the_query_outside_auth_stays_in_the_request_span(
     spans: InMemorySpanExporter,
 ) -> None:
-    TestClient(_app()).get("/health", params={"page": "2"})
+    TestClient(_app()).get("/", params={"page": "2"})
 
     attributes = _server_span(spans).attributes
     assert attributes is not None
@@ -306,8 +327,12 @@ assert isinstance(provider, TracerProvider)
 exporter = InMemorySpanExporter()
 provider.add_span_processor(SimpleSpanProcessor(exporter))
 client = TestClient(app)
-ids = [client.get("/health").headers["X-Trace-ID"] for _ in range(2)]
-print(len(exporter.get_finished_spans()), *ids)
+# `/` — трассируемый путь: health-check из телеметрии исключён и спана не даст,
+# даже если SDK включён, — на нём «0 спанов» ничего бы не доказывал.
+ids = [client.get("/").headers["X-Trace-ID"] for _ in range(2)]
+# Маркер: остальной stdout процесса — JSON-записи логов (configure_logging),
+# числовая строка одна, но не единственная.
+print("RESULT", len(exporter.get_finished_spans()), *ids)
 """
 
 
@@ -325,7 +350,10 @@ def test_with_tracing_disabled_the_trace_id_is_random_in_the_same_format() -> No
     )
 
     assert result.returncode == 0, result.stderr
-    finished, first, second = result.stdout.split()
+    [line] = [
+        line for line in result.stdout.splitlines() if line.startswith("RESULT")
+    ]
+    _, finished, first, second = line.split()
     assert finished == "0"  # трассировка действительно выключена
     assert re.fullmatch(r"[0-9a-f]{32}", first)
     assert re.fullmatch(r"[0-9a-f]{32}", second)

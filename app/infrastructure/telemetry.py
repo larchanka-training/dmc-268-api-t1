@@ -6,19 +6,42 @@
 
 Что включено:
 
-- SDK-провайдер трейсов в API и воркере (`configure_tracing`). Он нужен, даже когда
-  спаны никуда не уходят: без него у спанов нет настоящего trace id, а `X-Trace-ID` — это
-  trace id спана запроса;
-- HTTP-сервер — встроенная телеметрия FastAPI (она берёт глобальный провайдер сама,
+- SDK-провайдеры трейсов и метрик в API и воркере (`configure_telemetry`). Провайдер
+  трейсов нужен, даже когда спаны никуда не уходят: без него у спанов нет настоящего
+  trace id, а `X-Trace-ID` — это trace id спана запроса;
+- OTLP-экспорт логов — второй транспорт рядом с stdout-JSON (`configure_logging`):
+  записи Python logging уходят в коллектор по OTLP из SDK (LoggerProvider +
+  BatchLogRecordProcessor + хендлер на root);
+- HTTP-сервер — встроенная телеметрия FastAPI (она берёт глобальные провайдеры сама,
   отдельный пакет инструментирования не нужен); httpx (вызовы GitHub и модели) и
   SQLAlchemy — пакеты `opentelemetry-instrumentation-*`;
 - спаны этапов прогона — `OtelStageTracer`, адаптер порта, который зовёт `StepRecorder`;
-- спан периодического прохода воркера — `sweep_span`.
+- спан периодического прохода воркера — `sweep_span`;
+- спан прогона миграций — `migrate_span`, его открывает `alembic/env.py`;
+- бизнес-метрики для алертов: исходы прогонов (`record_run_finished` — пишет
+  адаптер `OtelRunOutcomeRecorder` через порт `RunOutcomeRecorder`),
+  длительность этапов (пишет `OtelStageTracer`) и вызовов модели (пишет
+  `FallbackLlmGateway` — на каждый фактический вызов провайдера, с исходом);
+- метрики пула соединений — снимками состояния (`instrument_pool`).
 
-Экспорт не настраиваем: по умолчанию спаны не уходят никуда и ошибок экспорта в логе
-нет. `OTEL_TRACES_EXPORTER=console` печатает их в stdout — для отладки. Остальные
-значения, в том числе `otlp`, пока не поддержаны: экспорт в хранилище трейсов — задача
-#89. Автонастройка экспортёров FastAPI и его OTel-лог исключений выключены явно
+Экспорт включается окружением, без правки кода: `OTEL_TRACES_EXPORTER` — список
+значений через запятую; `console` печатает законченные спаны в stdout, `otlp`
+отправляет их OTLP/HTTP — endpoint из `OTEL_EXPORTER_OTLP_ENDPOINT` читает сам
+экспортёр (приём делает коллектор телеметрии). Без настройки спаны никуда не
+уходят и ошибок экспорта в логе нет; неподдержанное значение выключает только
+свой экспортёр и предупреждает при старте. Метрики гейтит так же
+`OTEL_METRICS_EXPORTER`: по умолчанию (`none`) они собираются, но никуда не
+уходят — SDK без гейта сам ставит `otlp` и стучался бы в localhost:4318.
+Логи гейтит `OTEL_LOGS_EXPORTER` теми же значениями, но дефолт (`none`)
+выключает весь сигнал целиком: ни провайдера, ни хендлера на root — записи
+идут только в stdout-JSON. При `otlp` на root ставится хендлер из Python
+logging в OTLP: тело записи — сообщение, уровень — severity, `exc_info` —
+атрибуты `exception.*` (их гасит редакция коллектора, см. `configure_logging`).
+Endpoint и таймаут экспортёры всех трёх сигналов читают из
+`OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_TIMEOUT` сами; таймаут в
+Python SDK — в секундах, вопреки спецификации OTel (миллисекунды): проверено
+по установленному пакету (тест `test_telemetry.py`).
+Автонастройка экспортёров FastAPI и его OTel-лог исключений выключены явно
 (`create_app`, `telemetry=`).
 
 Query серверного спана на путях входа скрывается (`redact_query`, `QueryRedaction`): в
@@ -37,15 +60,21 @@ trace id, `X-Trace-ID` и решение сэмплера от заголовк�
 import contextlib
 import logging
 import os
-from collections.abc import Iterator
+import time
+import warnings
+from collections.abc import Callable, Iterator, Mapping
 from contextvars import Token
 from typing import Any
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
+from opentelemetry import _logs as otel_logs
 from opentelemetry import context as otel_context
 from opentelemetry import metrics, propagate, trace
 from opentelemetry.context import Context
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.utils import suppress_instrumentation
 from opentelemetry.propagators.textmap import (
@@ -56,13 +85,35 @@ from opentelemetry.propagators.textmap import (
     default_getter,
     default_setter,
 )
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import (
+    BatchLogRecordProcessor,
+    ConsoleLogRecordExporter,
+    LogRecordExporter,
+)
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import (
+    ConsoleMetricExporter,
+    MetricExporter,
+    PeriodicExportingMetricReader,
+)
+from opentelemetry.sdk.metrics.view import (
+    DropAggregation,
+    ExplicitBucketHistogramAggregation,
+    View,
+)
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-from opentelemetry.sdk.trace import Span, SpanProcessor, TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from opentelemetry.sdk.trace import Span, SpanLimits, SpanProcessor, TracerProvider
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    ConsoleSpanExporter,
+    SpanExporter,
+)
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON, ParentBased, Sampler
 from opentelemetry.trace import Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from sqlalchemy import Engine
+from sqlalchemy.pool import QueuePool
 
 from app.domain.enums import ReviewRunStage
 
@@ -70,11 +121,76 @@ logger = logging.getLogger(__name__)
 
 API_SERVICE = "dmc-268-api"
 WORKER_SERVICE = "dmc-268-worker"
+# Отдельное имя процессу миграций: в трейсе деплоя видно, что делал `migrate`,
+# а не API или воркер (change `add-observability-stack`, задачи 1.1 и 5.1).
+MIGRATE_SERVICE = "dmc-268-migrate"
 
 # Имя атрибута — как у поля в API и в логах: по нему трейс ищется от прогона.
 REVIEW_RUN_ID = "review_run_id"
 
+# Метрики пула соединений — снимками состояния, а не событиями: событийный
+# счётчик contrib (`db.client.connections.usage`) пропускает события внутри
+# `untraced()` (опрос `/events` живёт в подавлении инструментирования) и
+# дрейфует без шанса выправиться. Имена атрибутов — semconv пула соединений.
+CONNECTION_POOL = "app"
+_POOL_NAME_ATTRIBUTE = "db.client.connection.pool.name"
+_CONNECTION_COUNT = "db.client.connection.count"
+_CONNECTION_MAX = "db.client.connection.max"
+_STATE_ATTRIBUTE = "db.client.connection.state"
+
+# Бакеты гистограмм длительности, секунды: этапы прогона и вызовы модели
+# длятся от десятых доли до минут — на дефолтных миллисекундных бакетах
+# почти всё попадало в один бакет, и `histogram_quantile` бесполезен.
+DURATION_BUCKET_BOUNDARIES = (0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300)
+
+# Вид провайдера: конфигурация агрегации по именам приборов. `View` и
+# агрегации публичны в установленной SDK (`opentelemetry.sdk.metrics.view`);
+# advisory из спецификации (явные границы бакетов) в Python SDK задаётся
+# именно агрегацией `ExplicitBucketHistogramAggregation`.
+_VIEWS = (
+    # Событийный счётчик contrib всё ещё создаётся в `instrument_engine` и
+    # получает события (передать None в EngineTracer нельзя — его листенеры
+    # зовут `.add`), но не экспортируется: соединения считает снимок пула
+    # (`instrument_pool`).
+    View(instrument_name="db.client.connections.usage", aggregation=DropAggregation()),
+    *(
+        View(
+            instrument_name=name,
+            aggregation=ExplicitBucketHistogramAggregation(
+                boundaries=DURATION_BUCKET_BOUNDARIES
+            ),
+        )
+        for name in ("review_stage_duration", "review_llm_call_duration")
+    ),
+)
+
 _tracer = trace.get_tracer(__name__)
+
+# Метры бизнес-сигналов — из того же глобального провайдера, что и трейсы:
+# его ставит `configure_telemetry`, до этого инструменты — прокси без сбора.
+_meter = metrics.get_meter(__name__)
+
+# Бизнес-метрики — ручные сигналы для алертов (change `add-observability-stack`):
+# исходы прогонов, длительность этапов и вызовов модели. Метки — только
+# перечисления (`status`, `stage`, `task`, `model`) и исход вызова (`outcome`);
+# данные продукта — шаги и токены прогона — остаются в базе, из телеметрии ответы
+# не строятся. Бакеты гистограммам задаёт `_VIEWS`.
+_review_runs_total = _meter.create_counter(
+    "review_runs_total",
+    unit="{run}",
+    # Прогоны, доведённые до терминального статуса тем, кто этот переход
+    # сделал (пайплайн или выметатель), — не обработки сообщений: повторная
+    # доставка терминального прогона и сообщение без прогона не пишутся.
+    description="Прогоны по терминальному статусу.",
+)
+_review_stage_duration = _meter.create_histogram(
+    "review_stage_duration", unit="s", description="Длительность этапов прогона."
+)
+_review_llm_call_duration = _meter.create_histogram(
+    "review_llm_call_duration",
+    unit="s",
+    description="Длительность вызовов провайдеров модели.",
+)
 
 # Стабильные имена атрибутов semconv у пакетов contrib: `db.query.text` вместо
 # `db.statement`, `http.request.method` и `url.full` вместо `http.method` и `http.url`.
@@ -84,9 +200,39 @@ _tracer = trace.get_tracer(__name__)
 # только новые имена, без дубля старых.
 SEMCONV_STABILITY_OPT_IN = "database,http"
 
-# Провайдер, который поставил `configure_tracing`: его и закрывает `shutdown_tracing`.
-# Чужой провайдер (тест со своим экспортёром) не закрываем.
+# Провайдеры, которые поставил `configure_telemetry`: их и закрывает
+# `shutdown_tracing`. Чужие провайдеры (тест со своим экспортёром) не закрываем.
 _installed: TracerProvider | None = None
+_meter_installed: MeterProvider | None = None
+_logger_installed: LoggerProvider | None = None
+
+# Дефолт лимита длины значений атрибутов спана: без него `url.full` с длинными
+# путями и тексты ошибок раздували бы спан и трафик экспорта.
+DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT = 4096
+
+# Значение `OTEL_TRACES_EXPORTER` → фабрика экспортёра. Фабрика — функция, а не
+# класс: класс ищется в модуле в момент вызова, и тесты подменяют его потоком.
+# `otlp` берёт endpoint из `OTEL_EXPORTER_OTLP_ENDPOINT` сам.
+_EXPORTER_FACTORIES: dict[str, Callable[[], SpanExporter]] = {
+    "console": lambda: ConsoleSpanExporter(),
+    "otlp": lambda: OTLPSpanExporter(),
+}
+
+# Значение `OTEL_METRICS_EXPORTER` → фабрика экспортёра метрик; тот же список
+# через запятую, что у трейсов.
+_METRIC_EXPORTER_FACTORIES: dict[str, Callable[[], MetricExporter]] = {
+    "console": lambda: ConsoleMetricExporter(),
+    "otlp": lambda: OTLPMetricExporter(),
+}
+
+# Значение `OTEL_LOGS_EXPORTER` → фабрика экспортёра логов; тот же список
+# через запятую. Экспортёр логов живёт в приватном модуле `_log_exporter`:
+# публичного пути к нему пакет не даёт (модуль стабилен, имя — нет; тест
+# `otlp_exporter_installed` подменяет его тем же именем).
+_LOG_EXPORTER_FACTORIES: dict[str, Callable[[], LogRecordExporter]] = {
+    "console": lambda: ConsoleLogRecordExporter(),
+    "otlp": lambda: OTLPLogExporter(),
+}
 
 
 class _NoPropagation(TextMapPropagator):
@@ -145,14 +291,17 @@ def link_client_trace(traceparent: str | None) -> None:
         trace.get_current_span().add_link(client, {LINK_SOURCE: LINK_SOURCE_CLIENT})
 
 
-def configure_tracing(service_name: str) -> None:
-    """Поставить пустой пропагатор, SDK-провайдер трейсов и инструментирование.
+def configure_telemetry(service_name: str) -> None:
+    """Поставить пустой пропагатор, SDK-провайдеры трейсов, метрик и логов, инструментирование.
 
-    Провайдер глобальный и ставится один раз на процесс; если он уже стоит (второй
-    вызов или тест со своим `InMemorySpanExporter`), его не трогаем. `OTEL_SERVICE_NAME`
-    переопределяет `service_name`.
+    Провайдеры глобальные и ставятся один раз на процесс; если провайдер уже стоит
+    (второй вызов или тест со своим `InMemorySpanExporter`/`InMemoryMetricReader`),
+    его не трогаем. `OTEL_SERVICE_NAME` переопределяет `service_name`.
+
+    Логи ставятся только при включённом экспорте (`OTEL_LOGS_EXPORTER`): без него
+    провайдер не нужен вовсе, и root остаётся с одним stdout-JSON-хендлером.
     """
-    global _installed
+    global _installed, _meter_installed, _logger_installed
     # Пропагатор ставится всегда, и поверх `OTEL_PROPAGATORS`: доверие к входящим
     # заголовкам — правило сервиса, а не настройка окружения.
     propagate.set_global_textmap(_NoPropagation())
@@ -162,34 +311,189 @@ def configure_tracing(service_name: str) -> None:
         provider = build_tracer_provider(service_name)
         trace.set_tracer_provider(provider)
         _installed = provider
+    if not isinstance(metrics.get_meter_provider(), MeterProvider):
+        meter_provider = build_meter_provider(service_name)
+        metrics.set_meter_provider(meter_provider)
+        _meter_installed = meter_provider
+    if not isinstance(otel_logs.get_logger_provider(), LoggerProvider) and (
+        _logs_export_requested()
+    ):
+        logger_provider = build_logger_provider(service_name)
+        otel_logs.set_logger_provider(logger_provider)
+        _logger_installed = logger_provider
+        _install_log_handler(logger_provider)
 
 
 def shutdown_tracing() -> None:
-    """Выгрузить накопленные спаны и закрыть провайдер, который поставил `configure_tracing`.
+    """Выгрузить накопленные спаны, метрики и логи, закрыть провайдеры `configure_telemetry`.
 
     Зовётся при остановке: в lifespan API и при выходе воркера. `atexit` SDK закрыл бы
-    провайдер и сам, но только при обычном выходе интерпретатора — смерть от SIGTERM
-    с обработчиком по умолчанию его не вызывает, и спаны батч-процессора пропадают.
+    провайдеры и сам, но только при обычном выходе интерпретатора — смерть от SIGTERM
+    с обработчиком по умолчанию его не вызывает, и спаны батч-процессора, метрики
+    периодического ридера и логи батч-процессора пропадают.
     """
     if _installed is not None:
         _installed.shutdown()
+    if _meter_installed is not None:
+        _meter_installed.shutdown()
+    if _logger_installed is not None:
+        _logger_installed.shutdown()
 
 
-def build_tracer_provider(service_name: str) -> TracerProvider:
-    """SDK-провайдер с экспортом из `OTEL_TRACES_EXPORTER`: `console` или никакого."""
+def parse_exporters(value: str) -> list[str]:
+    """Разобрать `OTEL_TRACES_EXPORTER`: значения через запятую, без повторов.
+
+    Разбор по спецификации OTel: каждое значение `strip().lower()`; функция чистая и
+    валидацию поддержанности не делает — мусор остаётся в списке, предупреждение
+    про него пишет `_exporters`. Пустое значение — пустой список.
+    """
+    exporters: list[str] = []
+    for item in value.split(","):
+        name = item.strip().lower()
+        if name and name not in exporters:
+            exporters.append(name)
+    return exporters
+
+
+def _exporters(env_var: str, factories: Mapping[str, Callable[[], Any]]) -> list[Any]:
+    """Экспортёры сигнала из `OTEL_*_EXPORTER` — по фабрикам своего сигнала.
+
+    `none` — явное «без экспорта» по спецификации OTel; пустое значение —
+    пустой список; неподдержанное значение выключает только свой экспортёр
+    и получает одно предупреждение при старте.
+    """
+    exporters: list[Any] = []
+    for name in parse_exporters(os.environ.get(env_var, "")):
+        if name == "none":
+            continue
+        factory = factories.get(name)
+        if factory is None:
+            logger.warning(
+                "%s=%s не поддержан: записи этому экспортёру не уходят (поддержаны %s)",
+                env_var,
+                name,
+                ", ".join(sorted(factories)),
+            )
+            continue
+        exporters.append(factory())
+    return exporters
+
+
+def _service_resource(service_name: str) -> Resource:
+    """Resource трейсов и метрик: `service.name` из кода, остальное — из окружения.
+
+    `OTEL_SERVICE_NAME` переопределяет имя; `Resource.create` мержит
+    `OTEL_RESOURCE_ATTRIBUTES` сам — `service.version` и
+    `deployment.environment.name` задают compose и `infra/`, код не дублирует.
+    """
     attributes = (
         {} if os.environ.get("OTEL_SERVICE_NAME") else {SERVICE_NAME: service_name}
     )
-    provider = TracerProvider(resource=Resource.create(attributes), sampler=_sampler())
-    exporter = os.environ.get("OTEL_TRACES_EXPORTER", "none").strip().lower()
-    if exporter == "console":
-        provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
-    elif exporter not in ("", "none"):
-        logger.warning(
-            "OTEL_TRACES_EXPORTER=%s не поддержан: спаны не экспортируются (поддержан console)",
-            exporter,
-        )
+    return Resource.create(attributes)
+
+
+def build_tracer_provider(service_name: str) -> TracerProvider:
+    """SDK-провайдер с экспортом из `OTEL_TRACES_EXPORTER` — списком через запятую.
+
+    Процессор ставится на каждый поддержанный экспортёр; неподдержанное значение
+    выключает только свой экспортёр и получает одно предупреждение при старте.
+    `none` и пустое значение — экспорт выключен, без предупреждений. Сэмплирование
+    решает `_sampler`; лимит длины значений атрибутов без переменной — дефолт
+    в коде, с переменной значение валидирует SDK: мусор поднимает `ValueError`
+    при старте, осознанно — неверный конфиг телеметрии громче молчаливого
+    дефолта (замечание ревью PR #130).
+    """
+    provider = TracerProvider(
+        sampler=_sampler(),
+        resource=_service_resource(service_name),
+        span_limits=SpanLimits(
+            max_attribute_length=None
+            if "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT" in os.environ
+            else DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT
+        ),
+    )
+    for exporter in _exporters("OTEL_TRACES_EXPORTER", _EXPORTER_FACTORIES):
+        provider.add_span_processor(BatchSpanProcessor(exporter))
     return provider
+
+
+def build_meter_provider(service_name: str) -> MeterProvider:
+    """SDK-провайдер метрик с экспортом из `OTEL_METRICS_EXPORTER` — как у трейсов.
+
+    Ридер ставится на каждый поддержанный экспортёр; неподдержанное значение
+    выключает только свой экспортёр и получает одно предупреждение при старте.
+    `none` и пустое значение — экспорт выключен: ридеров нет, метрики никуда
+    не уходят и ошибок в логе нет. Гейт обязателен: SDK по умолчанию сам
+    ставит `otlp` и без него стучался бы в localhost:4318. Resource — тот же,
+    что у трейсов (`_service_resource`); агрегации отдельных приборов задаёт
+    `_VIEWS` (дроп старого счётчика contrib, бакеты гистограмм длительности).
+    """
+    readers = [
+        PeriodicExportingMetricReader(exporter)
+        for exporter in _exporters("OTEL_METRICS_EXPORTER", _METRIC_EXPORTER_FACTORIES)
+    ]
+    return MeterProvider(
+        resource=_service_resource(service_name), metric_readers=readers, views=_VIEWS
+    )
+
+
+def _logs_export_requested() -> bool:
+    """Экспорт логов запрошен: в `OTEL_LOGS_EXPORTER` есть значение кроме `none`.
+
+    Дефолт (`none` и пустая строка) выключает сигнал целиком: глобальный провайдер
+    остаётся прокси, root — без OTel-хендлера, записи идут только в stdout-JSON.
+    Гейт проверяется до постройки провайдера, потому что `set_logger_provider`
+    ставится один раз на процесс: отозвать установку провайдера без экспортёров
+    обратно уже нельзя.
+    """
+    return any(
+        name != "none"
+        for name in parse_exporters(os.environ.get("OTEL_LOGS_EXPORTER", ""))
+    )
+
+
+def build_logger_provider(service_name: str) -> LoggerProvider:
+    """SDK-провайдер логов с экспортом из `OTEL_LOGS_EXPORTER` — как у трейсов.
+
+    Процессор ставится на каждый поддержанный экспортёр; неподдержанное значение
+    выключает только свой экспортёр и получает одно предупреждение при старте.
+    `none` и пустое значение — экспорт выключен, без предупреждений. Resource —
+    тот же, что у трейсов и метрик (`_service_resource`): `service.name` из кода,
+    `service.version` и `deployment.environment.name` — из окружения. Лимиты
+    атрибутов записей (`OTEL_LOG_RECORD_ATTRIBUTE_COUNT_LIMIT` и прочие) не
+    трогаем — дефолты SDK.
+    """
+    provider = LoggerProvider(resource=_service_resource(service_name))
+    for exporter in _exporters("OTEL_LOGS_EXPORTER", _LOG_EXPORTER_FACTORIES):
+        provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+    return provider
+
+
+# Хендлер Python logging → OTLP — один на процесс и держится ссылкой: повторный
+# `configure_telemetry` не плодит записи на root (тот же приём, что у
+# stdout-хендлера в `configure_logging`).
+_log_handler: LoggingHandler | None = None
+
+
+def _install_log_handler(provider: LoggerProvider) -> None:
+    """Поставить на root хендлер, который переводит записи Python logging в OTLP.
+
+    Уровень хендлера — NOTSET, как у stdout-хендлера в `configure_logging`:
+    порог задаёт уровень root (INFO там же). Провайдер передаётся явно, а не
+    через глобальный, — хендлер ставится сразу после `set_logger_provider`.
+
+    `LoggingHandler` SDK-пакета логов помечен устаревшим в пользу хендлера из
+    `opentelemetry-instrumentation-logging`; депрекейшн глушится на месте —
+    решение о переходе отложено вместе с TODO в `app/infrastructure/logging.py`.
+    """
+    global _log_handler
+    if _log_handler is None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            _log_handler = LoggingHandler(logger_provider=provider)
+    root = logging.getLogger()
+    if _log_handler not in root.handlers:
+        root.addHandler(_log_handler)
 
 
 def _sampler() -> Sampler | None:
@@ -230,7 +534,15 @@ def instrument_engine(engine: Engine) -> None:
     2.1 молча ничего не делает, а с пропуском проверки ещё и подменяет
     `create_async_engine`, которому нужен `greenlet`. События движка
     (`before_cursor_execute` и т. п.) в 2.1 те же — спаны запросов проверяет сквозной
-    тест трейса. Счётчик соединений — no-op: метрик в сервисе нет.
+    тест трейса.
+
+    Счётчик соединений у contrib (`db.client.connections.usage`) — событийный:
+    события checkin/checkout внутри `untraced()` (подавление инструментирования,
+    живёт на опросе `/events`) им пропускаются, и счётчик дрейфует. Поэтому он
+    здесь только создаётся (передать None в `EngineTracer` нельзя — его
+    листенеры зовут `.add`), но гасится View-агрегацией в `build_meter_provider`;
+    соединения считает снимок пула — `instrument_pool` — и receiver `postgresql`
+    коллектора со стороны базы.
 
     `EngineTracer` — внутренний класс пакета, без обещаний совместимости: пакет держит
     верхняя граница в `pyproject.toml`, а если класс всё же переехал или сменил
@@ -249,7 +561,7 @@ def instrument_engine(engine: Engine) -> None:
         from opentelemetry.instrumentation.sqlalchemy.engine import EngineTracer
 
         tracer = trace.get_tracer("opentelemetry.instrumentation.sqlalchemy")
-        connections = metrics.get_meter(__name__).create_up_down_counter(
+        connections = _meter.create_up_down_counter(
             "db.client.connections.usage", unit="connections"
         )
         # Именем, а не позицией: если параметры сдвинутся, вызов упадёт `TypeError`, а
@@ -259,6 +571,46 @@ def instrument_engine(engine: Engine) -> None:
         logger.warning(
             "спаны запросов к базе выключены: EngineTracer несовместим", exc_info=True
         )
+
+
+def instrument_pool(engine: Engine, pool_size: int, max_overflow: int) -> None:
+    """Метрики пула соединений — снимками состояния, а не событиями.
+
+    `db.client.connection.count` — observable up/down counter: колбэк снимает
+    фактические `checkedout`/`checkedin` пула на момент сбора, поэтому
+    соединение, выданное внутри `untraced()`, не может увести снимок в минус,
+    как это было бы у событийного счётчика contrib. Предел пула —
+    `db.client.connection.max` = `pool_size + max_overflow`; аргументы те же,
+    что заданы `create_engine` в composition root, — иначе метрика разошлась
+    бы с фактической конфигурацией. Не-`QueuePool` (например, `StaticPool`
+    тестов) — тихий выход: у него нет ни `checkedout`, ни смысла в снимке.
+    """
+    pool = engine.pool
+    if not isinstance(pool, QueuePool):
+        return
+    labels = {_POOL_NAME_ATTRIBUTE: CONNECTION_POOL}
+
+    def _snapshot(_options: metrics.CallbackOptions) -> Iterator[metrics.Observation]:
+        yield metrics.Observation(
+            pool.checkedout(), {**labels, _STATE_ATTRIBUTE: "used"}
+        )
+        yield metrics.Observation(pool.checkedin(), {**labels, _STATE_ATTRIBUTE: "idle"})
+
+    def _limit(_options: metrics.CallbackOptions) -> Iterator[metrics.Observation]:
+        yield metrics.Observation(pool_size + max_overflow, labels)
+
+    _meter.create_observable_up_down_counter(
+        _CONNECTION_COUNT,
+        callbacks=[_snapshot],
+        unit="{connection}",
+        description="Соединения с базой по состоянию снимка пула.",
+    )
+    _meter.create_observable_gauge(
+        _CONNECTION_MAX,
+        callbacks=[_limit],
+        unit="{connection}",
+        description="Предел пула соединений: pool_size + max_overflow.",
+    )
 
 
 # Атрибуты серверного спана FastAPI (semconv HTTP).
@@ -300,7 +652,7 @@ _redactions: WeakKeyDictionary[TracerProvider, set[tuple[str, str]]] = WeakKeyDi
 def redact_query(path_prefix: str, marker: str) -> None:
     """Скрывать query серверных спанов на путях `path_prefix` — `QueryRedaction`.
 
-    Ставится на глобальный SDK-провайдер, поэтому зовётся после `configure_tracing`.
+    Ставится на глобальный SDK-провайдер, поэтому зовётся после `configure_telemetry`.
     """
     provider = trace.get_tracer_provider()
     if not isinstance(provider, TracerProvider):
@@ -324,6 +676,21 @@ def sweep_span() -> Iterator[None]:
         yield
 
 
+@contextlib.contextmanager
+def migrate_span() -> Iterator[None]:
+    """Корневой спан прогона миграций: SQL-запросы миграций — его детьми.
+
+    Открывается в `alembic/env.py` на весь online-прогон: в трейсе деплоя видно,
+    сколько шли миграции и на каком операторе задержка (change
+    `add-observability-stack`, задача 5.1). Исключение, вылетевшее из прогона,
+    спан записывает и закрывается со статусом ошибки — упавший прогон деплоя
+    тоже сигнал; исключение наружу не глотается. Без настроенного экспорта
+    спаны никуда не уходят — миграции идут как раньше.
+    """
+    with error_status_span(_tracer, "migrate"):
+        yield
+
+
 def untraced() -> contextlib.AbstractContextManager[None]:
     """Блок без спанов инструментирования (SQL, httpx) — для частого фонового опроса.
 
@@ -343,6 +710,39 @@ def record_current_exception(exc: BaseException) -> None:
     span = trace.get_current_span()
     span.record_exception(exc)
     span.set_status(error_status(exc))
+
+
+def record_run_finished(status: str) -> None:
+    """Отметить терминальный исход прогона в счётчике `review_runs_total`.
+
+    Бизнес-сигнал для алертов по исходам. Пишет тот, кто перевёл прогон в
+    терминальный статус, — пайплайн (`run_review`) или выметатель
+    (`sweep_stale_runs`), — поэтому счётчик считает прогоны, а не обработки
+    сообщений: прикладной слой зовёт его через порт `RunOutcomeRecorder`,
+    здесь — адаптер `OtelRunOutcomeRecorder`.
+    """
+    _review_runs_total.add(1, {"status": status})
+
+
+def record_llm_call_duration(
+    task: str, provider: str, duration_seconds: float, *, outcome: str, model: str | None = None
+) -> None:
+    """Записать длительность одного фактического вызова провайдера модели.
+
+    Пишет `FallbackLlmGateway` на каждый вызов провайдера, включая упавшие и
+    таймауты. `provider` — имя провайдера всегда: доля ошибок считается по
+    нему, а не по модели. `model` — модель ответа только у `ok` (её задаёт
+    сам провайдер, у сбоя модели нет — иначе один провайдер разъезжался бы
+    на две серии `model` и ошибки по модели не считались). `outcome` —
+    `ok`/`error`. Гистограмма показывает время каждого вызова модели
+    (аудит #89), фоллбэк виден двумя записями, а не одной суммой под моделью
+    ответившего последним. Бакеты в секундах задаёт View (`_VIEWS`): на
+    дефолтных миллисекундных `histogram_quantile` бесполезен.
+    """
+    labels: dict[str, str] = {"task": task, "provider": provider, "outcome": outcome}
+    if model is not None:
+        labels["model"] = model
+    _review_llm_call_duration.record(duration_seconds, labels)
 
 
 def error_status(exc: BaseException) -> Status:
@@ -385,9 +785,11 @@ def current_trace_id() -> str | None:
 
 
 class _OtelStageSpan:
-    def __init__(self, span: trace.Span, token: Token[Context]) -> None:
+    def __init__(self, span: trace.Span, token: Token[Context], stage: ReviewRunStage) -> None:
         self._span = span
         self._token = token
+        self._stage = stage
+        self._started = time.monotonic()
 
     def end(self, error_code: str | None) -> None:
         if error_code is not None:
@@ -395,6 +797,9 @@ class _OtelStageSpan:
             self._span.set_status(Status(StatusCode.ERROR, error_code))
         self._span.end()
         otel_context.detach(self._token)
+        _review_stage_duration.record(
+            time.monotonic() - self._started, {"stage": self._stage.value}
+        )
 
 
 class OtelStageTracer:
@@ -402,7 +807,8 @@ class OtelStageTracer:
 
     Спан этапа делается текущим, пока этап идёт: запросы httpx и SQLAlchemy этапа
     ложатся в трейс его детьми. Шаги идут строго по одному, поэтому снятие контекста
-    в `end` не нарушает порядок.
+    в `end` не нарушает порядок. Тем же адаптером пишется гистограмма
+    `review_stage_duration{stage}` — длительность этапа по монотонным часам.
     """
 
     def start(self, review_run_id: UUID, stage: ReviewRunStage) -> _OtelStageSpan:
@@ -411,4 +817,17 @@ class OtelStageTracer:
             attributes={REVIEW_RUN_ID: str(review_run_id), "review.stage": stage.value},
         )
         token = otel_context.attach(trace.set_span_in_context(span))
-        return _OtelStageSpan(span, token)
+        return _OtelStageSpan(span, token, stage)
+
+
+class OtelRunOutcomeRecorder:
+    """Адаптер `RunOutcomeRecorder`: исход прогона — в счётчик `review_runs_total`.
+
+    Передаётся composition root-ом (`run_worker`) в пайплайн и выметатель:
+    запись делает тот, кто перевёл прогон в терминальный статус, поэтому
+    повторная доставка терминального прогона и сообщение без прогона счётчик
+    не трогают.
+    """
+
+    def run_finished(self, status: str) -> None:
+        record_run_finished(status)

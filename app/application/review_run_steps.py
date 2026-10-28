@@ -68,7 +68,16 @@ def close_abandoned_steps(
                 uow.review_run_steps.update(step)
             uow.commit()
     except Exception:
-        logger.exception("не удалось закрыть брошенные шаги прогона %s", review_run_id)
+        # Идентификатор — атрибутом записи, не текстом (правило «Логи»): из
+        # пайплайна его приносит контекст сообщения воркера, из sweep-пути
+        # контекста нет — здесь его несёт extra. Имя — то же, что у атрибута
+        # спанов (REVIEW_RUN_ID в telemetry.py); взять константу из
+        # инфраструктуры слой приложения не может — зависимости направлены
+        # внутрь.
+        logger.exception(
+            "не удалось закрыть брошенные шаги прогона",
+            extra={"review_run_id": str(review_run_id)},
+        )
 
 
 class StepRecorder:
@@ -207,9 +216,9 @@ class StepRecorder:
                 write()
                 self._uow.commit()
         except Exception:
-            logger.exception(
-                "не удалось записать %s шага %s прогона %s", what, step.id, self._run_id
-            )
+            # Прогон — атрибутом review_run_id из контекста логов: шаги пишутся
+            # только во время обработки сообщения воркера.
+            logger.exception("не удалось записать %s шага %s", what, step.id)
             return False
         return True
 
