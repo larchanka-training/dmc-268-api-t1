@@ -1125,4 +1125,4 @@
 #### Scenario: Роль ниже maintain
 
 - **WHEN** GitHub отдаёт `octo-org/web` с ролью read, triage или write
-- **THEN** у `octo-org/web` в ответе `can_connect = false`, и `POST /repositories` с его `provider_id` его не подключает: `403` с `code = REPOSITORY_MANAGE_REQUIRED`, а публичный только с правом чтения — `404`, как невидимый
+- **THEN** у `octo-org/web` в ответе `can_connect = false`, и `POST /repositories` с его `provider_id` его не подключает: `403` с `code = REPOSITORY_MANAGE_REQUIRED`, а публичный только с правом чтения — `404`, как невидимый (такую строку GitHub в список не отдаёт: это ответ на прямой `POST`)

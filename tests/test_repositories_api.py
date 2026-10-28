@@ -70,6 +70,7 @@ ADMIN = RepositoryPermissions(admin=True, maintain=False, push=False, triage=Fal
 MAINTAIN = RepositoryPermissions(admin=False, maintain=True, push=False, triage=False)
 READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
 WRITE = RepositoryPermissions(admin=False, maintain=False, push=True, triage=False)
+TRIAGE = RepositoryPermissions(admin=False, maintain=False, push=False, triage=True)
 API = InstallationRepository(provider_id="101", full_name="octo-org/api", default_branch="main", permissions=ADMIN)
 WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", default_branch="trunk", permissions=READ)
 WRITER = InstallationRepository(provider_id="303", full_name="octo-org/docs", default_branch="main", permissions=WRITE)
@@ -341,7 +342,7 @@ def test_available_repositories_are_marked_when_already_connected() -> None:
 
 @pytest.mark.parametrize("connected", [False, True])
 @pytest.mark.parametrize("private", [False, True])
-@pytest.mark.parametrize("permissions", [ADMIN, MAINTAIN, WRITE, READ])
+@pytest.mark.parametrize("permissions", [ADMIN, MAINTAIN, WRITE, TRIAGE, READ])
 def test_can_connect_in_the_list_matches_what_connecting_answers(
     permissions: RepositoryPermissions, private: bool, connected: bool
 ) -> None:
