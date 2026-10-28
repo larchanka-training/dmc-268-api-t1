@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import re
+import sys
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -371,9 +372,10 @@ def test_configure_logging_writes_to_the_given_stream() -> None:
         assert record["service.name"] == "dmc-268-migrate"
         assert record["message"] == "Context impl PostgresqlImpl."
 
-        # Повторный вызов без `stream` поток не меняет.
-        configure_logging("dmc-268-migrate")
-        assert handler.stream is stream
+        # Вызов без `stream` возвращает stdout: миграции in-process в тестах
+        # не уводят логи API в чужой поток.
+        configure_logging("dmc-268-api")
+        assert handler.stream is sys.stdout
     finally:
         handler.setStream(previous)
 

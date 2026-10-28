@@ -275,8 +275,7 @@ def configure_logging(service_name: str, stream: typing.TextIO | None = None) ->
 
     `stream` — куда писать вместо stdout. Его передают миграции
     (`alembic/env.py`, `sys.stderr`): stdout alembic CLI — результат команды
-    (`current`, `heads`), его читают скрипты деплоя. Без `stream` хендлер
-    остаётся на потоке, куда писал (при первом вызове — stdout).
+    (`current`, `heads`), его читают скрипты деплоя. Без `stream` — stdout.
 
     Логгеры HTTP-клиентов (`HTTP_CLIENT_LOGGERS`) переводятся на WARNING.
     Точки вызова — там же, где настраивается трассировка: фабрика приложения
@@ -287,11 +286,11 @@ def configure_logging(service_name: str, stream: typing.TextIO | None = None) ->
     global _handler
     root = logging.getLogger()
     if _handler is None:
-        _handler = logging.StreamHandler(sys.stdout if stream is None else stream)
+        _handler = logging.StreamHandler()
         _handler.addFilter(TraceContextFilter())
         _handler.addFilter(ReviewRunIdFilter())
-    elif stream is not None:
-        _handler.setStream(stream)
+    # Поток — на каждом вызове: без `stream` — stdout, а не поток прошлого вызова.
+    _handler.setStream(sys.stdout if stream is None else stream)
     _handler.setFormatter(JsonFormatter(service_name))
     if _handler not in root.handlers:
         root.addHandler(_handler)
