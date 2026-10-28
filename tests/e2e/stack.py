@@ -64,12 +64,17 @@ from app.worker.factory import (
     load_checked_prompt_texts,
 )
 
-from ..fakes.github_api import APP_ID, FakeGitHub, PullRequest, app_private_key
+from ..fakes.github_api import (
+    APP_ID,
+    INSTALLATION_ID,
+    REPO_FULL_NAME,
+    REPO_PROVIDER_ID,
+    FakeGitHub,
+    PullRequest,
+    app_private_key,
+)
 from ..fakes.installation_catalog import FakeInstallationCatalog
 
-REPO_FULL_NAME = "acme/payments"
-REPO_PROVIDER_ID = "700100"
-INSTALLATION_ID = 31337
 WEBHOOK_SECRET = "e2e-webhook-secret"
 WEBHOOK_PATH = "/api/v1/webhooks/github"
 # Дольше любого шага прогона на заглушке модели; превышение - зависание, а не медленный тест.

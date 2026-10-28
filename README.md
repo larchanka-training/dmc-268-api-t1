@@ -95,7 +95,9 @@ Redis — локальная инфраструктура без потреби�
 Сервис читает `DATABASE_URL` и без него не стартует. Таблицы он не создаёт:
 схема появляется через миграции. Полный список переменных, которые читает
 процесс, — в [`.env.example`](.env.example); скопируйте его в `.env`, если не
-хотите экспортировать их руками.
+хотите экспортировать их руками. Секрет вебхуков там — `local-dev-secret`, тот же,
+что в `docker-compose.yml`: заглушка для локального запуска, с настоящей GitHub App
+его заменяют на webhook secret из её настроек.
 
 ```bash
 docker run -d --name dmc268-db -p 5432:5432 \
@@ -166,6 +168,14 @@ openssl rand -base64 32 | gh secret set USER_TOKEN_KEY_DMC268_T1 -R larchanka-tr
 
 Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
+Короткие команды - в `Makefile`, список - `make help`: `make check` (статические проверки как в CI),
+`make test-db` (сам поднимет PostgreSQL и RabbitMQ из compose и базу `dmc268_test`), `make test-all`
+(весь набор как в CI), `make sandbox` (песочница воркера с локальной Ollama), `make run-worker` и т. д.
+Флаги pytest или песочницы передаются через `ARGS`: `make test-db ARGS="-k migration -x"`.
+Тесты с брокером идут в отдельный vhost `dmc268_test` (`make test-queue-vhost`), а не в `/` стека разработки.
+`make run-api`, `make run-worker` и `make migrate` берут настройки из `.env`: процессу make передаёт только
+то, что вы задали явно - в команде (`make run-worker LLM_BACKEND=ollama`) или в окружении оболочки.
+
 ```bash
 uv run pytest                                       # чистые тесты, база не нужна
 TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest   # вместе с адаптерами, брокером и E2E
@@ -217,6 +227,18 @@ EUROROUTER_MODEL=qwen3-coder-next-80b uv run pytest -m live tests/live
 
 - Eval правил на живой модели (маркер `eval`): `gh workflow run "LLM eval"` или локально с ключами EUrouter и сервисами `uv run pytest -s -m eval tests/eval`; отчёт - в `EVAL_REPORT_DIR`.
 - Полный нагрузочный прогон (маркер `load`): `gh workflow run Load` или локально `uv run pytest -s -m load tests/load`; профиль и пороги - переменными `LOAD_*` (см. `tests/load/test_load.py`).
+
+### Локальный прогон воркера без инфраструктуры
+
+Настоящий воркер и пайплайн ревью на мок-PR, без Docker, PostgreSQL, RabbitMQ и GitHub — нужна только
+локальная Ollama. Команда поднимет Ollama, если она не отвечает, скачает модель и прогонит кейс корпуса:
+
+```bash
+make sandbox CASE=04-users-sql-injection
+```
+
+Свои мок-данные, режимы без модели (`make sandbox-stub`, `sandbox-oracle`, `sandbox-script`), все ключи
+и коды выхода — [`tests/sandbox/README.md`](tests/sandbox/README.md).
 
 ## Проверки
 

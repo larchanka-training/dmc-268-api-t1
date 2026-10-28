@@ -1,12 +1,12 @@
 """Целостность корпуса eval правил - без модели: битый кейс ловится на каждом PR."""
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from app.domain.repo_rules import applicable_rules, parse_rules_markdown
 
-from .corpus import CONFIGS, load_corpus
+from .corpus import CONFIGS, load_case, load_corpus
 
 CORPUS = load_corpus()
 VALID_RULES, VALID_REJECTED = parse_rules_markdown(CONFIGS["rules"] or "")
@@ -53,3 +53,16 @@ def test_case_files_are_python_sources_that_compile(case) -> None:
     for path, content in case.files.items():
         assert PurePosixPath(path).suffix == ".py"
         compile(content, path, "exec")
+
+
+def test_a_case_without_expected_is_rejected_unless_optional(tmp_path: Path) -> None:
+    # Потерянный `expected` иначе молча сделал бы кейс корпуса «чистым PR».
+    path = tmp_path / "no-expected.yaml"
+    path.write_text(
+        "title: т\npull_request: {title: т, description: о}\nfiles: {a.py: 'x = 1'}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KeyError, match="expected"):
+        load_case(path)
+    assert load_case(path, expected_required=False).expected == ()
