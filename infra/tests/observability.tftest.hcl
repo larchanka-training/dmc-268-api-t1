@@ -201,3 +201,14 @@ run "postgres_command_without_the_stack_has_no_preload" {
     error_message = "С выключенным стеком команда postgres не должна нести pg_stat_statements ни в каком виде."
   }
 }
+
+run "otlp_network_exists_without_the_stack" {
+  command = plan
+
+  # observability_enabled по умолчанию false. К dmc268-otlp по имени подключается
+  # стек dmc-268-ui-t1: без сети его plan упал бы на data source.
+  assert {
+    condition     = docker_network.otlp.name == "dmc268-otlp" && docker_network.otlp.internal == true
+    error_message = "Сеть dmc268-otlp должна создаваться и с выключенным стеком: на неё по имени ссылается стек интерфейса."
+  }
+}
