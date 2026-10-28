@@ -88,6 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     from app.api import errors, log_redaction
     from app.api.auth import router as auth_router
+    from app.api.body_limit import RequestBodyLimitMiddleware
     from app.api.events import router as events_router
     from app.api.origin import OriginMiddleware
     from app.api.pull_requests import router as pull_requests_router
@@ -100,7 +101,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Тот же query на путях входа скрыт и в серверном спане запроса.
     telemetry.redact_query(log_redaction.AUTH_PREFIX, log_redaction.REDACTED)
     errors.install(app)
-    # Последний добавленный — внешний: trace id ставится раньше, чем Origin может отказать.
+    # Последний добавленный — внешний: trace id ставится раньше, чем Origin или лимит тела
+    # могут отказать; чужой Origin отказывает, не читая тела, а тело читается с лимитом до
+    # роутинга, сессии и подписи вебхука.
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_bytes=settings.request_body_max_bytes,
+        webhook_max_bytes=settings.webhook_body_max_bytes,
+    )
     app.add_middleware(OriginMiddleware, public_origin=settings.public_origin)
     app.add_middleware(TraceIdMiddleware)
 

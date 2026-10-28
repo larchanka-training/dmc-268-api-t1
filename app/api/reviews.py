@@ -28,6 +28,7 @@ from app.api.errors import (
     ERRORS_403_ORIGIN,
     ERRORS_404_REVIEW,
     ERRORS_409_REVIEW_ACTIVE,
+    ERRORS_413_BODY,
     ERRORS_422,
     ERRORS_501_NOT_IMPLEMENTED,
     ERRORS_502_SCM_VISIBILITY,
@@ -388,7 +389,13 @@ def _repository_of(uow: UnitOfWork, run: ReviewRun) -> Repository:
     summary="Запустить ревью вручную",
     response_description="ReviewJob создан и поставлен в очередь.",
     description=_CREATE_REVIEW_DESCRIPTION,
-    responses={**ERRORS_403_ORIGIN, **ERRORS_409_REVIEW_ACTIVE, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+    responses={
+        **ERRORS_403_ORIGIN,
+        **ERRORS_409_REVIEW_ACTIVE,
+        **ERRORS_413_BODY,
+        **ERRORS_422,
+        **ERRORS_501_NOT_IMPLEMENTED,
+    },
 )
 def create_review(body: CreateReviewRequest) -> ReviewJob:
     raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Ручной запуск ревью ещё не реализован.")

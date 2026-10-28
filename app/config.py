@@ -148,6 +148,23 @@ class Settings(BaseSettings):
             "отзыв доступа на GitHub виден с этой задержкой"
         ),
     )
+    # Потолки тела HTTP-запроса API (#72): проверяются до разбора тела, сессии и подписи
+    # вебхука. Ручкам с JSON-телом хватает 1 МиБ. Приёму вебхука — 2 МиБ: принимаются только
+    # `pull_request` и `pull_request_review_thread`, их доставка — десятки КиБ (тело PR и
+    # комментария — до 65 536 символов). Потолок доставки GitHub (25 MB) нужен `push` и
+    # `release`, а 25 МиБ без подписи — OOM API с дюжины параллельных запросов.
+    # `client_max_body_size` в `location /api/` nginx фронта (dmc-268-ui-t1, `nginx/site.conf`)
+    # — первый эшелон — не меньше `webhook_body_max_bytes`.
+    request_body_max_bytes: int = Field(
+        default=1_048_576,
+        gt=0,
+        description="Большее тело запроса API, кроме вебхука, отклоняется 413 REQUEST_BODY_TOO_LARGE",
+    )
+    webhook_body_max_bytes: int = Field(
+        default=2_097_152,
+        gt=0,
+        description="Большее тело доставки вебхука отклоняется 413 REQUEST_BODY_TOO_LARGE до чтения целиком",
+    )
     # Потолок диффа прогона: тело читается потоком и обрывается на лимите,
     # больший дифф не ревьюится — прогон `failed` с `DIFF_TOO_LARGE` (#144).
     diff_max_bytes: int = Field(

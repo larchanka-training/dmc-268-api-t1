@@ -54,7 +54,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -74,6 +74,21 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/WebhookSignatureInvalidProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "413": {
+            "description": "Тело больше лимита (вебхук — `WEBHOOK_BODY_MAX_BYTES`, 2 МиБ; остальные — `REQUEST_BODY_MAX_BYTES`, 1 МиБ): по `Content-Length` отказ без чтения тела, поток без него обрывается на лимите. Ни разбора тела, ни сессии, ни подписи до отказа нет; соединение закрывается.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestBodyTooLargeProblem"
                 }
               }
             },
@@ -187,7 +202,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -311,7 +326,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -369,7 +384,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -424,7 +439,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -482,7 +497,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -574,7 +589,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -654,6 +669,21 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/RepositoryAlreadyConnectedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "413": {
+            "description": "Тело больше лимита (вебхук — `WEBHOOK_BODY_MAX_BYTES`, 2 МиБ; остальные — `REQUEST_BODY_MAX_BYTES`, 1 МиБ): по `Content-Length` отказ без чтения тела, поток без него обрывается на лимите. Ни разбора тела, ни сессии, ни подписи до отказа нет; соединение закрывается.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestBodyTooLargeProblem"
                 }
               }
             },
@@ -753,7 +783,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -859,7 +889,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -980,7 +1010,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1109,7 +1139,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1174,6 +1204,21 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "413": {
+            "description": "Тело больше лимита (вебхук — `WEBHOOK_BODY_MAX_BYTES`, 2 МиБ; остальные — `REQUEST_BODY_MAX_BYTES`, 1 МиБ): по `Content-Length` отказ без чтения тела, поток без него обрывается на лимите. Ни разбора тела, ни сессии, ни подписи до отказа нет; соединение закрывается.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestBodyTooLargeProblem"
                 }
               }
             },
@@ -1260,7 +1305,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1408,7 +1453,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1525,7 +1570,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1575,6 +1620,21 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/ReviewAlreadyActiveProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "413": {
+            "description": "Тело больше лимита (вебхук — `WEBHOOK_BODY_MAX_BYTES`, 2 МиБ; остальные — `REQUEST_BODY_MAX_BYTES`, 1 МиБ): по `Content-Length` отказ без чтения тела, поток без него обрывается на лимите. Ни разбора тела, ни сессии, ни подписи до отказа нет; соединение закрывается.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestBodyTooLargeProblem"
                 }
               }
             },
@@ -1812,7 +1872,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1918,7 +1978,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2039,7 +2099,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2175,7 +2235,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2306,7 +2366,7 @@
             }
           },
           "default": {
-            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2406,6 +2466,9 @@
             "$ref": "#/components/schemas/MethodNotAllowedProblem"
           },
           {
+            "$ref": "#/components/schemas/RequestBodyTooLargeProblem"
+          },
+          {
             "$ref": "#/components/schemas/NotImplementedProblem"
           },
           {
@@ -2416,7 +2479,7 @@
           }
         ],
         "title": "AnyProblem",
-        "description": "Любая ошибка — по модели на код, выбор по `code`.\n\nКоды, которые возможны на любом запросе: `ROUTE_NOT_FOUND` (такого пути нет),\n`METHOD_NOT_ALLOWED` (метод не объявлен), `HTTP_ERROR` (прочий отказ фреймворка) и\n`INTERNAL_ERROR` (сбой сервера). Остальные коды операция объявляет в своих ответах.",
+        "description": "Любая ошибка — по модели на код, выбор по `code`.\n\nКоды, которые возможны на любом запросе: `ROUTE_NOT_FOUND` (такого пути нет),\n`METHOD_NOT_ALLOWED` (метод не объявлен), `REQUEST_BODY_TOO_LARGE` (тело больше лимита),\n`HTTP_ERROR` (прочий отказ фреймворка) и `INTERNAL_ERROR` (сбой сервера). Остальные коды\nоперация объявляет в своих ответах; `413` — ещё и каждая операция с телом.",
         "discriminator": {
           "propertyName": "code",
           "mapping": {
@@ -2430,6 +2493,7 @@
             "REPOSITORY_MANAGE_REQUIRED": "#/components/schemas/RepositoryManageRequiredProblem",
             "REPOSITORY_NOT_FOUND": "#/components/schemas/RepositoryNotFoundProblem",
             "REPOSITORY_NOT_IN_INSTALLATION": "#/components/schemas/RepositoryNotInInstallationProblem",
+            "REQUEST_BODY_TOO_LARGE": "#/components/schemas/RequestBodyTooLargeProblem",
             "REVIEW_ALREADY_ACTIVE": "#/components/schemas/ReviewAlreadyActiveProblem",
             "REVIEW_NOT_FOUND": "#/components/schemas/ReviewNotFoundProblem",
             "ROUTE_NOT_FOUND": "#/components/schemas/RouteNotFoundProblem",
@@ -4235,6 +4299,77 @@
         ],
         "title": "RepositorySummary",
         "description": "Репозиторий запроса на изменение: ровно то, что нужно, чтобы его назвать и сослаться."
+      },
+      "RequestBodyTooLargeProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:request-body-too-large",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:request-body-too-large"
+          },
+          "title": {
+            "type": "string",
+            "const": "Тело запроса слишком большое",
+            "title": "Title",
+            "default": "Тело запроса слишком большое"
+          },
+          "status": {
+            "type": "integer",
+            "const": 413,
+            "title": "Status",
+            "default": 413
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "REQUEST_BODY_TOO_LARGE",
+            "title": "Code",
+            "default": "REQUEST_BODY_TOO_LARGE"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "RequestBodyTooLargeProblem",
+        "description": "`413 REQUEST_BODY_TOO_LARGE`: тело запроса больше лимита.\n\nЛимит: `WEBHOOK_BODY_MAX_BYTES` (2 МиБ) у приёма вебхука, `REQUEST_BODY_MAX_BYTES`\n(1 МиБ) у остальных ручек; `detail` называет сработавший.\n\nОтказ — до разбора тела, сессии и подписи вебхука: по `Content-Length` тело не читается\nвовсе, поток без него обрывается на лимите. Соединение после ответа закрывается.",
+        "examples": [
+          {
+            "code": "REQUEST_BODY_TOO_LARGE",
+            "detail": "Тело запроса больше лимита 2097152 байт.",
+            "instance": "/api/v1/webhooks/github",
+            "status": 413,
+            "title": "Тело запроса слишком большое",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:request-body-too-large"
+          }
+        ]
       },
       "ReviewAlreadyActiveProblem": {
         "properties": {
