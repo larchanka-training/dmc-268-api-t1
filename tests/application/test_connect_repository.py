@@ -86,7 +86,10 @@ def test_available_repositories_come_from_the_user_token_and_are_marked() -> Non
 
     available = list_available_repositories(catalog, uow, _user(), NOW)
 
-    assert available == [AvailableRepository(API, already_connected=True), AvailableRepository(WEB, already_connected=False)]
+    assert available == [
+        AvailableRepository(API, already_connected=True, can_connect=True),
+        AvailableRepository(WEB, already_connected=False, can_connect=False),
+    ]
     assert catalog.tokens == [Secret("ghu_login_access")]
 
 
