@@ -306,9 +306,10 @@ class SandboxResult:
 
 @dataclass(frozen=True, slots=True)
 class _Delivery:
-    """Атрибуты `method`, которые читает `Worker.run`."""
+    """Атрибуты `method`, которые читает `Worker.run`: песочница доставляет каждое сообщение впервые."""
 
     delivery_tag: int
+    redelivered: bool = False
 
 
 def _collect(
