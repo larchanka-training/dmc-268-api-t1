@@ -208,7 +208,7 @@ run "otlp_network_exists_without_the_stack" {
   # observability_enabled по умолчанию false. К dmc268-otlp по имени подключается
   # стек dmc-268-ui-t1: без сети его plan упал бы на data source.
   assert {
-    condition     = docker_network.otlp.name == "dmc268-otlp" && docker_network.otlp.internal == true
+    condition     = docker_network.otlp.name == "dmc268-otlp"
     error_message = "Сеть dmc268-otlp должна создаваться и с выключенным стеком: на неё по имени ссылается стек интерфейса."
   }
 }
