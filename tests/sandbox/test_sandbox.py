@@ -5,7 +5,6 @@
 """
 
 import json
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -22,7 +21,6 @@ from .inputs import from_case, from_git, load_case_file, load_raw_message
 from .worker import CaseResult, SandboxConfig, run_sandbox
 
 REPO_ROOT = Path(__file__).parents[2]
-FIXTURES = REPO_ROOT / "tests" / "fixtures" / "outline"
 EXAMPLES = Path(__file__).parent / "examples"
 SCRIPT = EXAMPLES / "llm-script.json"
 CASE_FILE = EXAMPLES / "case.yaml"
@@ -138,7 +136,12 @@ def test_a_message_without_job_id_is_nacked() -> None:
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
-        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        [
+            "git", "-C", str(repo),
+            "-c", "user.name=t", "-c", "user.email=t@t",
+            "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+            *args,
+        ],
         check=True,
         capture_output=True,
     )
@@ -175,7 +178,9 @@ def test_pr_with_a_python_file_over_256_lines_completes(tmp_path: Path) -> None:
     _git(repo, "init", "-q")
     _git(repo, "commit", "-q", "--allow-empty", "-m", "база")
     (repo / "scripts").mkdir()
-    shutil.copy(FIXTURES / "deploy_report_53b6a28.py", repo / "scripts" / "deploy_report.py")
+    # Тот же генератор, что в #227: 300 функций - больше 256 строк, на 0.26.0 процесс падал.
+    source = "".join(f"def f{i}():\n    return {i}\n\n" for i in range(300))
+    (repo / "scripts" / "deploy_report.py").write_text(source, encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "feat: отчёт деплоя")
     out = tmp_path / "out.json"
