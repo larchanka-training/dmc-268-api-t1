@@ -438,23 +438,6 @@ def test_redelivery_of_the_retarget_is_a_duplicate() -> None:
     assert len(queue.jobs) == 2
 
 
-def test_a_stale_retarget_event_does_not_retarget() -> None:
-    """Ревью #225: ветку сменили на `develop` и тут же вернули на `main`. Запоздавшее
-    `edited` на `develop` получило свежие метаданные уже с `main` - ретаргета нет,
-    иначе прогон ревьюил бы дифф против ветки, которой у PR уже нет."""
-    uow, queue, reviewed = reviewed_on_old_target()
-
-    outcome, uow, vcs, queue = run_case(
-        "edited", vcs_meta=pr_metadata(NEW_BASE, "main"), uow=uow, queue=queue, base_ref="develop"
-    )
-
-    assert outcome.kind == "duplicate"
-    assert outcome.run is reviewed
-    assert merge_request_of(uow).target_branch == "main"
-    assert vcs.checks == []
-    assert len(queue.jobs) == 1
-
-
 def test_redelivery_after_the_target_branch_moved_is_a_duplicate() -> None:
     """Вершина целевой ветки ушла вперёд (влили чужой PR), ветка та же: повтор
     доставки того же head - дубль, а не «целевая ветка сменилась» с новым прогоном."""

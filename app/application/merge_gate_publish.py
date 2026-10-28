@@ -93,39 +93,50 @@ def settle_merge_gate(
     перечитывает последний прогон на head после своего POST: если приём уже
     закоммитил, здесь видна смена и gate переписывается; если нет - блокировка
     приёма придёт позже и перекроет `success`. Так любая перестановка кончается
-    gate актуального прогона. Поправка повторяется `SETTLE_ATTEMPTS` раз; сбой
-    последней попытки - `VcsError` вызывающему.
+    gate актуального прогона. Каждая попытка поправки заново читает последний
+    прогон и собирает check; после сбоя `SETTLE_ATTEMPTS` попыток - `VcsError`
+    вызывающему.
     """
-    with uow:
-        latest = uow.review_runs.find_latest(merge_request_id, head_sha)
-    if latest is None or (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED):
-        return
-    if latest.status is ReviewRunStatus.COMPLETED:
-        # Новый прогон успел завершиться: его gate мог уйти раньше нашего POST.
-        check = build_merge_gate_check(
-            collect_open_findings(uow, merge_request_id, head_run_id=latest.id)
+    failures = 0
+    settled: UUID | None = None
+    while True:
+        # Перед каждой попыткой - заново: за время сбоя за head мог начать
+        # отвечать другой прогон, и повтор прежнего check вернул бы чужой итог.
+        with uow:
+            latest = uow.review_runs.find_latest(merge_request_id, head_sha)
+        if latest is None or (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED):
+            return
+        if latest.id == settled:
+            return
+        if latest.status is ReviewRunStatus.COMPLETED:
+            # Новый прогон успел завершиться: его gate мог уйти раньше нашего POST.
+            check = build_merge_gate_check(
+                collect_open_findings(uow, merge_request_id, head_run_id=latest.id)
+            )
+        else:
+            check = build_retarget_check()
+        logger.info(
+            "merge gate %s@%s переписан: прогон %s больше не отвечает за head, последний - %s",
+            repo_full_name,
+            head_sha,
+            run_id,
+            latest.id,
         )
-    else:
-        check = build_retarget_check()
-    logger.info(
-        "merge gate %s@%s переписан: прогон %s больше не отвечает за head, последний - %s",
-        repo_full_name,
-        head_sha,
-        run_id,
-        latest.id,
-    )
-    for attempt in range(1, SETTLE_ATTEMPTS + 1):
         try:
             vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
-            return
         except VcsError:
-            if attempt == SETTLE_ATTEMPTS:
+            failures += 1
+            if failures == SETTLE_ATTEMPTS:
                 raise
             logger.warning(
                 "поправка merge gate %s@%s не выставлена, попытка %d из %d",
                 repo_full_name,
                 head_sha,
-                attempt,
+                failures,
                 SETTLE_ATTEMPTS,
                 exc_info=True,
             )
+            continue
+        # Выставлен gate прогона `latest`: как и любой, кто выставил gate, после
+        # POST проверяем, что за head отвечает всё ещё он.
+        settled = latest.id

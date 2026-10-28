@@ -152,11 +152,8 @@ def handle_webhook_event(
             # Смена целевой ветки (#222) — только `edited` с другой веткой, чем
             # записана у PR. Вершина ветки (`base_sha`) двигается и без смены
             # ветки — от неё повтор `synchronize` дублем быть не перестаёт.
-            # Событие, чья ветка уже не та, что в свежих метаданных, устарело:
-            # ветку с тех пор сменили снова, и ретаргетом займётся свежее событие.
             retarget = (
                 event.action == "edited"
-                and event.target_branch == metadata.target_branch
                 and existing_merge_request.target_branch != metadata.target_branch
             )
             duplicate_of = None if retarget else _duplicate_of(

@@ -10,7 +10,11 @@ from uuid import UUID
 
 import pytest
 
-from app.application.merge_gate_publish import SETTLE_ATTEMPTS, build_retarget_check
+from app.application.merge_gate_publish import (
+    SETTLE_ATTEMPTS,
+    build_retarget_check,
+    settle_merge_gate,
+)
 from app.application.ports.llm_gateway import LlmReviewResult
 from app.application.ports.unit_of_work import ActiveRunConflict
 from app.application.ports.vcs_review import InlineCommentDraft, ReviewThreadState
@@ -778,6 +782,58 @@ def test_a_failed_gate_correction_is_retried() -> None:
 
     assert vcs.correction_attempts == SETTLE_ATTEMPTS
     assert vcs.checks[-1] == build_retarget_check()
+
+
+class _CompletedDuringFailureVcs(_FailingCorrectionVcs):
+    """Пока поправка не дошла, новый прогон успел завершиться."""
+
+    def set_merge_gate_check(self, *args: Any) -> None:
+        try:
+            super().set_merge_gate_check(*args)
+        except VcsError:
+            newer = self._uow.review_runs.get(UUID(int=77))
+            assert newer is not None
+            self._uow.review_runs.add(replace(newer, status=ReviewRunStatus.COMPLETED))
+            raise
+
+
+def test_a_retried_gate_correction_is_rebuilt_for_the_current_run() -> None:
+    """Повтор не отправляет check, собранный до сбоя: за время сбоя новый прогон
+    завершился, и блокировка смены ветки перекрыла бы его итог."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    vcs = _CompletedDuringFailureVcs(uow, failures=1)
+
+    _publish_first_run(uow, run, vcs)
+
+    assert [c.conclusion for c in vcs.checks] == ["success", "success"]
+    assert vcs.checks[-1] != build_retarget_check()
+
+
+def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
+    """Последний прогон на head сам отменён: блокировка выставляется один раз, и
+    цикл поправки не крутится на нём."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    moment = NOW + timedelta(minutes=1)
+    uow.review_runs.add(
+        replace(run, id=UUID(int=77), status=ReviewRunStatus.CANCELLED, created_at=moment, updated_at=moment)
+    )
+    vcs = RecordingVcsGateway()
+
+    settle_merge_gate(
+        uow,
+        vcs,
+        merge_request_id=MR_ID,
+        repo_full_name=JOB.repository_full_name,
+        head_sha=JOB.head_sha,
+        installation_id=JOB.installation_id,
+        run_id=run.id,
+    )
+
+    assert vcs.checks == [build_retarget_check()]
 
 
 def test_gate_correction_gives_up_after_its_attempts() -> None:
