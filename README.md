@@ -238,6 +238,9 @@ make sandbox-demo
 Свои мок-данные, режимы без модели (`make sandbox-stub`, `sandbox-oracle`, `sandbox-script`), сбои
 очереди, все ключи и коды выхода — [`tests/sandbox/README.md`](tests/sandbox/README.md).
 
+Что tree-sitter отдаёт модели из AST, офлайн и без модели, — `make sandbox-outline-demo`,
+подробно — [`tests/sandbox/outline/README.md`](tests/sandbox/outline/README.md).
+
 ## Проверки
 
 ```bash
