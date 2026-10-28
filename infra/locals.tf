@@ -28,7 +28,7 @@ locals {
 
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
   # Очередь review — quorum, и таймаут подтверждения брокера к ней применяется:
-  # он задан аргументом очереди (CONSUMER_TIMEOUT_SECONDS в
+  # он задан аргументом потребителя (CONSUMER_TIMEOUT_SECONDS в
   # app/infrastructure/queue/rabbitmq.py, 2 ч) с запасом больше этого грейса,
   # воркер проверяет запас на старте (check_consumer_timeout).
   # Деплой ждёт остановку воркера в `tofu apply`: timeout-minutes job deploy в

@@ -174,24 +174,46 @@ def test_without_a_legacy_queue_nothing_moves_and_the_connection_stays_usable(
         connection.close()
 
 
-def test_queue_carries_a_consumer_timeout(
+def test_the_queue_is_redeclared_without_a_consumer_timeout(
     channel: pika.adapters.blocking_connection.BlockingChannel,
 ) -> None:
-    """Quorum-очередь применяет таймаут подтверждения (#223): он объявлен с очередью.
+    """Таймаут подтверждения - не аргумент очереди: его правка не ломает объявление.
 
-    Аргументы объявленной очереди брокер не показывает, но повторное объявление с
-    другими аргументами отвергает - так видно, что `x-consumer-timeout` на месте."""
-    arguments = {
-        "x-queue-type": "quorum",
-        "x-delivery-limit": DELIVERY_LIMIT,
-        "x-dead-letter-exchange": DLX_NAME,
-        "x-consumer-timeout": CONSUMER_TIMEOUT_SECONDS * 1000,
-    }
-    channel.queue_declare(QUEUE_NAME, durable=True, arguments=arguments)
-
-    without_timeout = {k: v for k, v in arguments.items() if k != "x-consumer-timeout"}
-    # Отказ закрывает канал - свой, чтобы фикстура убрала за собой.
+    Повторное объявление с другими аргументами брокер отвергает (`406`), поэтому
+    аргумент очереди со значением таймаута уронил бы `declare_topology` у воркера и
+    API после первой же правки `CONSUMER_TIMEOUT_SECONDS`."""
     probe = channel.connection.channel()
     with pytest.raises(ChannelClosedByBroker) as rejected:
-        probe.queue_declare(QUEUE_NAME, durable=True, arguments=without_timeout)
+        probe.queue_declare(
+            QUEUE_NAME,
+            durable=True,
+            arguments={
+                "x-queue-type": "quorum",
+                "x-delivery-limit": DELIVERY_LIMIT,
+                "x-dead-letter-exchange": DLX_NAME,
+                "x-consumer-timeout": CONSUMER_TIMEOUT_SECONDS * 1000,
+            },
+        )
     assert rejected.value.reply_code == 406
+    declare_topology(channel)
+
+
+def test_the_broker_takes_a_message_from_a_consumer_past_its_timeout(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+) -> None:
+    """Quorum-очередь применяет `x-consumer-timeout` аргумента потребителя (#223).
+
+    Брокер проверяет таймауты раз в несколько секунд, поэтому ждём с запасом."""
+    RabbitMQJobQueue(TEST_RABBITMQ_URL or "").enqueue(JOB)
+    deliveries = channel.consume(
+        QUEUE_NAME, inactivity_timeout=1, arguments={"x-consumer-timeout": 1000}
+    )
+    method, _, _ = next(deliveries)
+    assert method is not None
+
+    deadline = time.monotonic() + 60
+    for method, _, _ in deliveries:
+        assert method is None, "после отмены брокер ничего не выдаёт"
+        assert time.monotonic() < deadline, "брокер не снял потребителя по таймауту"
+    # Генератор кончился: брокер прислал `basic.cancel`, сообщение вернулось.
+    assert channel.queue_declare(QUEUE_NAME, passive=True).method.message_count == 1

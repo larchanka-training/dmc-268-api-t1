@@ -19,7 +19,7 @@ from pika.exceptions import ChannelClosedByBroker
 
 from app.config import Settings
 from app.domain.llm_errors import LlmTimeoutError
-from app.infrastructure.queue.rabbitmq import to_wire_message
+from app.infrastructure.queue.rabbitmq import CONSUMER_ARGUMENTS, to_wire_message
 from app.infrastructure.telemetry import OtelStageTracer
 from app.worker import factory
 from app.worker.factory import StopRequest, Worker, build_review_handler
@@ -40,7 +40,8 @@ class FakeChannel:
         # подтверждения отдал бы следующее сообщение `basic.reject` (#223).
         self.events: list[str] = []
 
-    def consume(self, queue: str, inactivity_timeout: float):
+    def consume(self, queue: str, inactivity_timeout: float, arguments: dict[str, Any]):
+        self.consumer_arguments = arguments
         # Снятый потребитель новых доставок не получает.
         while self._deliveries and not self.cancelled:
             yield self._deliveries.pop(0)
@@ -273,7 +274,9 @@ class IdleChannel(FakeChannel):
         super().__init__([])
         self.idle_ticks = 0
 
-    def consume(self, queue: str, inactivity_timeout: float) -> Iterator[Any]:
+    def consume(
+        self, queue: str, inactivity_timeout: float, arguments: dict[str, Any]
+    ) -> Iterator[Any]:
         while True:
             self.idle_ticks += 1
             assert self.idle_ticks < 100, "цикл не вышел по просьбе остановиться"
@@ -370,6 +373,7 @@ def test_a_consumer_cancelled_by_the_broker_is_logged(caplog: pytest.LogCaptureF
         _worker(channel).run(lambda body: None)
 
     assert channel.events == []
+    assert channel.consumer_arguments == CONSUMER_ARGUMENTS
     (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert "отменил потребителя" in record.getMessage()
 

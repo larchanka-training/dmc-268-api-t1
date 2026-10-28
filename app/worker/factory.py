@@ -44,6 +44,7 @@ from app.domain.webhook_redelivery import RedeliveryPolicy
 from app.infrastructure.container import WORKER_VCS_LIMITS, build_container
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
+    CONSUMER_ARGUMENTS,
     CONSUMER_TIMEOUT_SECONDS,
     LEGACY_QUEUE_NAME,
     QUEUE_NAME,
@@ -155,7 +156,9 @@ class Worker:
         consuming = True
         legacy_queue = True
         try:
-            for method, properties, body in self.channel.consume(QUEUE_NAME, inactivity_timeout=1):
+            for method, properties, body in self.channel.consume(
+                QUEUE_NAME, inactivity_timeout=1, arguments=CONSUMER_ARGUMENTS
+            ):
                 if stop is not None and stop.requested:
                     consuming = self._stop_consuming(method)
                     break
@@ -387,7 +390,7 @@ def check_model_deadline(settings: Settings) -> None:
 
 
 def check_consumer_timeout(settings: Settings) -> None:
-    """Худший прогон короче таймаута подтверждения очереди (#223).
+    """Худший прогон короче таймаута подтверждения потребителя (#223).
 
     Иначе брокер забрал бы сообщение у живого воркера и отдал его следующему
     потребителю, и тот перевёл бы прогон в `failed` из-под первого. Худший прогон —
@@ -399,7 +402,7 @@ def check_consumer_timeout(settings: Settings) -> None:
         raise WorkerConfigError(
             f"прогон в худшем случае {worst:g} с (два вызова модели × LLM_TIMEOUT_SECONDS"
             f" × LLM_MAX_ATTEMPTS × провайдеры + 60) не короче таймаута подтверждения"
-            f" очереди {CONSUMER_TIMEOUT_SECONDS} с (CONSUMER_TIMEOUT_SECONDS)"
+            f" потребителя {CONSUMER_TIMEOUT_SECONDS} с (CONSUMER_TIMEOUT_SECONDS)"
         )
 
 

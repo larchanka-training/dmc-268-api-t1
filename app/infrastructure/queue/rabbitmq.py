@@ -54,9 +54,11 @@ DELIVERY_LIMIT = 5
 # применяет (по умолчанию у брокера 30 мин). Сообщение дольше таймаута брокер
 # забирает у воркера и отдаёт следующему потребителю, пока первый ещё работает.
 # Поэтому таймаут — с запасом больше худшего прогона (`check_consumer_timeout`
-# на старте воркера), а аргумент очереди после объявления не поменять — только
-# политикой `consumer-timeout` или новой очередью.
+# на старте воркера). Он задаётся аргументом потребителя, а не очереди: аргумент
+# очереди после объявления не поменять, повторное объявление с другим значением
+# брокер отвергает (`406 PRECONDITION_FAILED`) — и у воркера, и у API.
 CONSUMER_TIMEOUT_SECONDS = 2 * 60 * 60
+CONSUMER_ARGUMENTS = {"x-consumer-timeout": CONSUMER_TIMEOUT_SECONDS * 1000}
 # Классическая очередь до #223. Тип у объявленной очереди не меняется, поэтому
 # quorum-очередь — под новым именем, а остатки старой воркер перекладывает в неё
 # (`move_legacy_jobs`). Удаляется вместе со старой очередью, когда её на стенде нет.
@@ -144,7 +146,6 @@ def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel)
             "x-queue-type": "quorum",
             "x-delivery-limit": DELIVERY_LIMIT,
             "x-dead-letter-exchange": DLX_NAME,
-            "x-consumer-timeout": CONSUMER_TIMEOUT_SECONDS * 1000,
         },
     )
 

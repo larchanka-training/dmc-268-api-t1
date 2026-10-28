@@ -147,7 +147,7 @@ services:
     # Та же формула — local.worker_stop_seconds в infra/locals.tf: меняется там —
     # меняем и здесь.
     # Очередь review — quorum, таймаут подтверждения брокера к ней применяется:
-    # он задан аргументом очереди (CONSUMER_TIMEOUT_SECONDS, 2 ч) с запасом
+    # он задан аргументом потребителя (CONSUMER_TIMEOUT_SECONDS, 2 ч) с запасом
     # больше этого грейса, воркер проверяет запас на старте.
     stop_grace_period: 41m
 

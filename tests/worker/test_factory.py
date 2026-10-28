@@ -126,6 +126,29 @@ def test_a_stopping_worker_returns_the_message_without_spending_a_delivery(
     assert _delivery_count(channel) == 0
 
 
+def test_a_stop_during_processing_leaves_the_next_message_unspent(
+    channel: pika.adapters.blocking_connection.BlockingChannel, settings: Settings
+) -> None:
+    """Сигнал пришёл, пока сообщение в руках: оно подтверждается, а следующее брокер
+    не выдаёт и попытку на нём не тратит. Держится на порядке `cancel` → `ack` при
+    prefetch=1 — проверяем на живом брокере, а не на фейке."""
+    queue = RabbitMQJobQueue(TEST_RABBITMQ_URL or "")
+    queue.enqueue(JOB)
+    queue.enqueue(JOB)
+    stop = StopRequest()
+    handled: list[bytes] = []
+
+    def handle_and_stop(body: bytes) -> None:
+        handled.append(body)
+        stop.requested = True
+
+    build_worker(settings).run(handle_and_stop, stop=stop)
+
+    assert len(handled) == 1
+    assert _delivery_count(channel) == 0
+    assert channel.queue_declare(QUEUE_NAME, passive=True).method.message_count == 0
+
+
 def test_a_dying_worker_spends_a_delivery(
     channel: pika.adapters.blocking_connection.BlockingChannel, settings: Settings
 ) -> None:
