@@ -133,7 +133,7 @@ sandbox-outline-demo: ## tree-sitter: проверить окружение и �
 	@uv run python -m tests.sandbox.outline --rules $(RULES) --case-file '$(OUTLINE_CASE)' $(ARGS); status=$$?; echo; \
 	case $$status in \
 		0) printf '\033[32mГотово: контекст собран, отчёт выше.\033[0m\n' ;; \
-		1) printf '\033[31mЕсть проблемы разбора (parse_error, пустой контур или дифф не получен) - см. «проблемы» в отчёте.\033[0m\n' ;; \
+		1) printf '\033[31mЕсть проблемы разбора (parse_error, файл не загружен или дифф не получен) - см. «проблемы» в отчёте.\033[0m\n' ;; \
 		139) printf '\033[31mSegfault в tree-sitter - версия 0.26.0? См. #226: uv sync --all-extras.\033[0m\n' ;; \
 		*) printf '\033[31mВход или окружение не подошли (код %s) - причина в строке выше.\033[0m\n' $$status ;; \
 	esac; \

@@ -63,7 +63,7 @@ docs/orders.md  без грамматики
 | `fetch_review_diff`, `build_review_context`, бюджет пакета, `select_scopes` | настоящие |
 | tree-sitter и грамматики (`TreeSitterDefinitionExtractor`) | настоящие |
 | Лимиты контекста | из `Settings`, как у воркера (`context_limits`) |
-| GitHub | `FakeGitHub` за настоящими `GitHubAppAuth` и `GitHubVcsGateway`; дифф — `difflib` |
+| GitHub | `FakeGitHub` за настоящими `GitHubAppAuth` и `GitHubVcsGateway`; дифф — `difflib`, а с `LINES`/`lines:` — по номерам строк (`sources.touched_diff`): строки диапазона в базе заменены заглушками `<песочница: строка N>` |
 | База, кэш правил | `FakeUnitOfWork`, `FakeCache` в памяти |
 | Модель | не вызывается |
 
