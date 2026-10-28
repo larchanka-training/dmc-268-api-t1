@@ -1,0 +1,178 @@
+# Коллектор телеметрии — один конфиг для локального стека (docker compose,
+# профиль observability) и стенда (infra/main.tf): различия окружений — только
+# переменные запуска (реквизиты receiver postgresql) и сетевые алиасы,
+# совпадающие в обоих окружениях. Образ зафиксирован дайджестом в
+# docker-compose.yml и main.tf (тег в комментарии рядом): при обновлении
+# образа читаются breaking changes.
+
+receivers:
+  # Приём OTLP от сервисов приложения: трейсы, метрики и логи SDK при
+  # OTEL_TRACES_EXPORTER=otlp / OTEL_METRICS_EXPORTER=otlp /
+  # OTEL_LOGS_EXPORTER=otlp.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Метрики базы (решение #89): снимает сам коллектор receiver-ом postgresql —
+  # без отдельного контейнера экспортёра, в общий конвейер метрик. Роль
+  # только-чтение dmc268_monitor с привилегией pg_monitor создаёт миграция
+  # 0013; её реквизиты приходят переменными окружения — они различаются между
+  # локальным стеком и стендом, литералом в общем конфиге им не место.
+  # Endpoint — строго host:port, имя базы передаётся отдельно (databases):
+  # суффикс /dbname endpoint этого receiver не принимает. Расширение
+  # pg_stat_statements receiver не читает: медленные запросы им не собираются,
+  # расширение остаётся только для ручной диагностики (shared_preload_libraries
+  # включает контейнер базы — docker-compose.yml и infra/main.tf, расширение
+  # создаёт та же миграция 0013).
+  postgresql:
+    username: ${env:POSTGRESQL_USERNAME}
+    password: ${env:POSTGRESQL_PASSWORD}
+    endpoint: ${env:POSTGRESQL_ENDPOINT}
+    databases: ["${env:POSTGRESQL_DATABASE}"]
+    # База в нашей docker-сети и локально, и на стенде: TLS между коллектором
+    # и Postgres не поднимается ни в одном окружении — без этого receiver
+    # падает с «SSL is not enabled on the server».
+    tls:
+      insecure: true
+    collection_interval: 15s
+
+processors:
+  # Потолок памяти коллектора; в infra контейнеру задан лимит с запасом
+  # (observability_memory_mb.collector).
+  memory_limiter:
+    check_interval: 1s
+    spike_limit_mib: 64
+    limit_mib: 256
+  batch:
+    timeout: 5s
+
+  # service.name в ресурсе OTLP-лога: Loki берёт имя сервиса из ресурса
+  # (label service_name), иначе все записи идут как unknown_service. Имя
+  # приходит в ресурсе от SDK; groupbyattrs оставлен как нормализация на
+  # случай, если имя окажется на уровне записи.
+  groupbyattrs/service:
+    keys:
+      - service.name
+
+  # Вольные атрибуты ресурса — вон из лейблов Prometheus: ресурсная конверсия
+  # экспортёра переносит в лейблы ВСЕ атрибуты ресурса, и service_version
+  # (меняется каждым деплоем) с telemetry_sdk_* давали бы новый полный набор
+  # серий на каждый деплой — тот же эффект, что был у случайного
+  # service.instance.id (замечание ревью PR #130). service.name и
+  # service.instance.id стабильны и остаются; версию сервиса смотрят в env
+  # деплоя, а не в метриках. Редакция трейсов и логов не трогается.
+  transform/trim-metrics-resource:
+    error_mode: ignore
+    metric_statements:
+      - context: resource
+        statements:
+          - delete_key(attributes, "service.version")
+          - delete_key(attributes, "telemetry.sdk.version")
+          - delete_key(attributes, "telemetry.sdk.name")
+          - delete_key(attributes, "telemetry.sdk.language")
+
+  # Редакция логов — тот же второй рубеж после SDK, что transform/redact для  # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
+  # исключения несут значения ключей базы и текст ответа провайдера модели —
+  # те же поля semconv, что у событий exception в трейсах. Тело гасится у
+  # записей, несущих исключение: текст исключения мог попасть в сообщение
+  # библиотечного логгера, а правило событий exception в трейсах действует
+  # по тому же принципу — по наличию исключения, не по его типу.
+  transform/redact-logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["exception.stacktrace"], "<скрыто>") where attributes["exception.stacktrace"] != nil
+          - set(attributes["exception.message"], "<скрыто>") where attributes["exception.message"] != nil
+          # Тело записи приходит готовым из SDK — текст сообщения; у записей
+          # с исключением оно гасится.
+          - set(body, "<скрыто>") where attributes["exception.stacktrace"] != nil
+          # ANSI-дубль сообщения uvicorn удаляется целиком. delete_key молча
+          # пропускает отсутствие ключа — по документации OTTL это no-op для
+          # несуществующего, поэтому записи без color_message не дают ни
+          # ошибок, ни шума.
+          - delete_key(attributes, "color_message")
+
+  # Редакция чувствительных данных — второй рубеж после SDK (первый — фильтры
+  # app/api/log_redaction.py и статус по имени типа в
+  # app/infrastructure/telemetry.py). Значение заменяется маркером <скрыто>,
+  # атрибут остаётся на месте: наличие атрибута и тип исключения сохраняются —
+  # диагноз в трейсе остаётся, секреты нет. Примеры из аудита #89 накрывает
+  # тест tests/infrastructure/test_collector_redaction.py.
+  transform/redact:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          # query и полный URL httpx-спанов: имя приватного репозитория,
+          # пути файлов и токены в них.
+          - set(attributes["url.query"], "<скрыто>") where attributes["url.query"] != nil
+          - set(attributes["url.full"], "<скрыто>") where attributes["url.full"] != nil
+          # Значения db.*: SQL-текст, имя базы и пользователя — psycopg кладёт
+          # значения ключей в тексты ошибок. Имена старых semconv оставлены на
+          # случай инструментария, который их ещё пишет.
+          - set(attributes["db.system"], "<скрыто>") where attributes["db.system"] != nil
+          - set(attributes["db.name"], "<скрыто>") where attributes["db.name"] != nil
+          - set(attributes["db.statement"], "<скрыто>") where attributes["db.statement"] != nil
+          - set(attributes["db.operation"], "<скрыто>") where attributes["db.operation"] != nil
+          - set(attributes["db.user"], "<скрыто>") where attributes["db.user"] != nil
+          - set(attributes["db.sql.table"], "<скрыто>") where attributes["db.sql.table"] != nil
+          - set(attributes["db.system.name"], "<скрыто>") where attributes["db.system.name"] != nil
+          - set(attributes["db.namespace"], "<скрыто>") where attributes["db.namespace"] != nil
+          - set(attributes["db.query.text"], "<скрыто>") where attributes["db.query.text"] != nil
+          - set(attributes["db.operation.name"], "<скрыто>") where attributes["db.operation.name"] != nil
+          # Описание статуса SQL-спанов: в DETAIL psycopg — значения ключей.
+          # Только заполненное описание: у успешных SQL-спанов статус Unset и
+          # описание пустое — бессмысленный маркер им не ставится. Сравнение
+          # с пустой строкой, а не с nil: геттер status.message возвращает
+          # Go-строку (для Unset — ""), и nil-сравнение по правилам OTTL
+          # (string против nil — «not equal») было бы всегда истинным.
+          # Описания статусов прочих спанов не трогаются: после #122 это имя
+          # типа исключения, диагноз в трейсе остаётся.
+          - set(status.message, "<скрыто>") where (attributes["db.system.name"] != nil or attributes["db.system"] != nil) and status.message != ""
+      # message и stacktrace события exception: там текст ответа провайдера
+      # модели и значения ключей из ошибок базы. exception.type сохраняется.
+      - context: spanevent
+        statements:
+          - set(attributes["exception.message"], "<скрыто>") where name == "exception"
+          - set(attributes["exception.stacktrace"], "<скрыто>") where name == "exception"
+
+exporters:
+  # Трейсы — в Tempo по OTLP/HTTP.
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
+  # Логи — в Loki: нативный приём OTLP.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+  # Метрики — exporter-порт коллектора: Prometheus скрейпит его (job collector).
+  # resource_to_telemetry_conversion переносит атрибуты ресурса (service.name)
+  # в лейблы рядов: без неё job у всех рядов — "collector" (имя скрейп-джобы),
+  # а имя сервиса прячется в exported_job — ряды сервисов не различить ни в
+  # запросах, ни в алертах.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact, batch]
+      exporters: [otlphttp/tempo]
+    metrics:
+      receivers: [otlp, postgresql]
+      processors: [memory_limiter, transform/trim-metrics-resource, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact-logs, groupbyattrs/service, batch]
+      exporters: [otlphttp/loki]

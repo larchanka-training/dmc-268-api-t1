@@ -13,6 +13,7 @@ from app.domain.enums import (
 )
 from app.domain.run_steps import finish_step, start_step
 
+from ..fakes.run_outcome import RecordingRunOutcome
 from ..fakes.unit_of_work import FakeUnitOfWork
 
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
@@ -69,6 +70,22 @@ def test_a_run_within_the_limit_and_a_terminal_run_are_left_alone() -> None:
     assert swept == 0
     assert uow.review_runs.get(UUID(int=1)).status == ReviewRunStatus.ANALYSING  # type: ignore[union-attr]
     assert uow.review_runs.get(UUID(int=2)).status == ReviewRunStatus.COMPLETED  # type: ignore[union-attr]
+
+
+def test_each_swept_run_is_counted_as_failed_once() -> None:
+    """Счётчик исходов пишет выметатель: `failed` — по одному на каждый перевод."""
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.ANALYSING, timedelta(hours=1)))
+    uow.review_runs.add(_run(2, ReviewRunStatus.PUBLISHING, timedelta(hours=2)))
+    # Свежий и терминальный прогоны выметению не подлежат — записей у них нет.
+    uow.review_runs.add(_run(3, ReviewRunStatus.ANALYSING, timedelta(minutes=5)))
+    uow.review_runs.add(_run(4, ReviewRunStatus.COMPLETED, timedelta(hours=5)))
+    recorder = RecordingRunOutcome()
+
+    swept = sweep_stale_runs(uow, now=NOW, limit=LIMIT, queued_limit=QUEUED_LIMIT, run_outcome=recorder)
+
+    assert swept == 2
+    assert recorder.statuses == ["failed", "failed"]
 
 
 def test_a_swept_run_closes_the_step_its_worker_left_running() -> None:

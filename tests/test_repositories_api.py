@@ -70,6 +70,7 @@ ADMIN = RepositoryPermissions(admin=True, maintain=False, push=False, triage=Fal
 MAINTAIN = RepositoryPermissions(admin=False, maintain=True, push=False, triage=False)
 READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
 WRITE = RepositoryPermissions(admin=False, maintain=False, push=True, triage=False)
+TRIAGE = RepositoryPermissions(admin=False, maintain=False, push=False, triage=True)
 API = InstallationRepository(provider_id="101", full_name="octo-org/api", default_branch="main", permissions=ADMIN)
 WEB = InstallationRepository(provider_id="202", full_name="octo-org/web", default_branch="trunk", permissions=READ)
 WRITER = InstallationRepository(provider_id="303", full_name="octo-org/docs", default_branch="main", permissions=WRITE)
@@ -324,6 +325,7 @@ def test_available_repositories_are_marked_when_already_connected() -> None:
                 "full_name": "octo-org/api",
                 "default_branch": "main",
                 "already_connected": True,
+                "can_connect": True,
             },
             {
                 "provider": "github",
@@ -331,10 +333,30 @@ def test_available_repositories_are_marked_when_already_connected() -> None:
                 "full_name": "octo-org/web",
                 "default_branch": "trunk",
                 "already_connected": False,
+                "can_connect": False,
             },
         ]
     }
     assert [token.reveal() for token in catalog.tokens] == ["ghu_login_access"]
+
+
+@pytest.mark.parametrize("connected", [False, True])
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("permissions", [ADMIN, MAINTAIN, WRITE, TRIAGE, READ])
+def test_can_connect_in_the_list_matches_what_connecting_answers(
+    permissions: RepositoryPermissions, private: bool, connected: bool
+) -> None:
+    """`can_connect` в списке — то же решение, что принимает `POST /repositories` (ui#45):
+    `true` — подключение пройдёт (`201`) или репозиторий уже подключён (`409`), `false` — отказ."""
+    uow = FakeUnitOfWork()
+    if connected:
+        uow.repositories.add(_repository(101))
+    client = _client(uow, FakeInstallationCatalog([replace(API, permissions=permissions, private=private)]))
+
+    (item,) = client.get("/api/v1/repositories/available").json()["items"]
+    response = _connect(client, API.provider_id)
+
+    assert item["can_connect"] is (response.status_code in {201, 409}), response.json()
 
 
 def test_the_user_token_never_reaches_the_response() -> None:

@@ -193,7 +193,7 @@ def test_unhandled_exception_is_internal_error_without_details(client: TestClien
     assert "trace_id" in body["detail"]
 
 
-def test_unhandled_exception_writes_one_log_line_with_trace_id(
+def test_unhandled_exception_writes_one_record_with_the_stacktrace(
     client: TestClient, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # `fileConfig` в тестах Alembic отключает уже созданные логгеры.
@@ -204,14 +204,20 @@ def test_unhandled_exception_writes_one_log_line_with_trace_id(
 
     response = client.get("/api/v1/_boom", params={"q": SECRET_TEXT})
 
-    trace_id = response.json()["trace_id"]
+    assert response.status_code == 500
     records = [r for r in caplog.records if r.name == "app.api.errors"]
     assert len(records) == 1
     record = records[0]
     assert record.levelno == logging.ERROR
-    assert record.getMessage() == f"Необработанное исключение: trace_id={trace_id} GET /api/v1/_boom"
-    assert record.exc_info is None
-    assert SECRET_TEXT not in record.getMessage()
+    # Контекст — в атрибутах записи, а не в тексте: `trace_id` в поле записи
+    # ставит `TraceContextFilter` (проверяет тест под настоящим uvicorn),
+    # метод и путь — semconv-имена атрибутов спана.
+    assert record.getMessage() == "Необработанное исключение"
+    assert record.exc_info is not None
+    assert record.exc_info[0] is RuntimeError
+    assert record.__dict__["http.request.method"] == "GET"
+    assert record.__dict__["url.path"] == "/api/v1/_boom"
+    assert SECRET_TEXT not in record.getMessage()  # query в запись не попал
 
 
 def test_unhandled_exception_is_not_swallowed() -> None:

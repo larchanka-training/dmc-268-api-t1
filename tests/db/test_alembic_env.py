@@ -7,16 +7,23 @@ URL проходит через alembic.ini, а это файл configparser, п
 """
 
 import io
+import json
+import os
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import OperationalError
 
 from alembic import command
+from scripts import deploy_report
 
 from ..conftest import TEST_DATABASE_URL, requires_db
 
@@ -147,3 +154,60 @@ def test_the_migrations_session_carries_both_timeouts(migrated) -> None:
         event.remove(Engine, "after_cursor_execute", show)
 
     assert seen == {"lock_timeout": "5s", "statement_timeout": "2min"}
+
+
+def _alembic_cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """`alembic` отдельным процессом, как на стенде: свой `env.py`, свои логи в stderr.
+
+    База — через копию alembic.ini с `sqlalchemy.url`: `env.py` берёт опцию,
+    выставленную до него, и Settings (весь env стенда) не нужны.
+    """
+    assert TEST_DATABASE_URL is not None
+    ini = tmp_path / "alembic.ini"
+    ini.write_text(
+        Path("alembic.ini").read_text().replace(
+            "[alembic]\n", f"[alembic]\nsqlalchemy.url = {TEST_DATABASE_URL.replace('%', '%%')}\n", 1
+        )
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("OTEL_")}
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", str(ini), *args],
+        capture_output=True, text=True, check=True, env=env, timeout=120,
+    )
+
+
+@pytest.mark.integration
+@requires_db
+def test_the_deploy_report_reads_real_alembic_output(migrated, tmp_path: Path) -> None:
+    """Ревью #130, #232: stdout `alembic current` — только ревизия, JSON-логи — в stderr.
+
+    `migrate.sh` кладёт stdout в migrate-current.log, а повтор по блокировке
+    и summary берут ревизию оттуда. Разбор сверяется с настоящим выводом, а
+    не с подложным docker. Заодно — `Running upgrade` в JSON-логе upgrade:
+    по нему summary считает применённые ревизии.
+    """
+    assert TEST_DATABASE_URL is not None
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL.replace("%", "%%"))
+
+    script = ScriptDirectory.from_config(config)
+    head = script.get_current_head()
+    assert head is not None
+    previous = script.get_revision(head).down_revision
+    assert isinstance(previous, str)
+
+    current = _alembic_cli(tmp_path, "current")
+    # В stdout — ни одной строки лога: его читают скрипты деплоя.
+    assert current.stdout.split() == [head, "(head)"], current.stdout
+    assert deploy_report.current_revision(current.stdout) == head
+    # Логи никуда не делись — они JSON в stderr.
+    assert json.loads(current.stderr.splitlines()[0])["service.name"] == "dmc-268-migrate"
+
+    command.downgrade(config, "-1")
+    try:
+        upgrade = _alembic_cli(tmp_path, "upgrade", "head")
+    finally:
+        # Остальные тесты сессии ждут базу на head.
+        command.upgrade(config, "head")
+    log = upgrade.stdout + upgrade.stderr
+    assert deploy_report.migrations(log) == {"applied": 1, "from": previous, "to": head}

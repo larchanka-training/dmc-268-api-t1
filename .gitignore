@@ -40,6 +40,5 @@ override.tf.json
 build/
 dist/
 
-# Лог и PID фоновой ollama serve из make ollama-up
+# Лог фоновой ollama serve из make ollama-up
 .ollama.log
-.ollama.pid

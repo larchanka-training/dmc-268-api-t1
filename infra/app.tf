@@ -52,12 +52,18 @@ resource "docker_container" "api" {
   image   = local.api_image_ref
   restart = "unless-stopped"
 
-  # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
-  # принудительно (SIGKILL): lifespan не завершается, спаны не выгружаются.
-  # С ним — сначала SIGTERM и ожидание остановки; 10 с — как у `docker stop`.
-  # Укладываемся благодаря `--timeout-graceful-shutdown 5` в CMD образа: открытые
-  # потоки SSE uvicorn рвёт через 5 с, остальное время — на lifespan.
-  destroy_grace_seconds = 10
+  # Остановка api: SIGTERM и ожидание. Худший случай — 5 с graceful shutdown
+  # (рвутся потоки SSE), затем shutdown_tracing закрывает три провайдера
+  # телеметрии последовательно (трейсы, метрики, логи), и у каждого батча свой
+  # таймаут 4 с (OTEL_EXPORTER_OTLP_TIMEOUT в local.telemetry_env) — «5 + 4»
+  # было бы верно только для одного провайдера. Очереди батчей capped 512
+  # (OTEL_BSP/BLRP_MAX_QUEUE_SIZE там же): худший замер при лежащем коллекторе
+  # — 9,5 с вместо 17–18 с с очередью по умолчанию, когда 15 с не хватало и api
+  # получал SIGKILL со спанами (замечание ревью PR #130). Итого 5 + 9,5 ≤ 15 —
+  # запас есть. destroy_grace_seconds — то же окно при пересоздании провайдером;
+  # 15 с — как у stop_grace_period api в docker-compose.yml.
+  stop_timeout          = 15
+  destroy_grace_seconds = 15
 
   # Наш образ: пользователь не root (USER в Dockerfile), приложение ничего не
   # пишет на диск, поэтому файловая система только для чтения и без capabilities.
@@ -95,8 +101,10 @@ resource "docker_container" "api" {
 
   # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера,
   # OAuth и origin — у входа и проверки сессии, ключ токенов пользователя — у
-  # входа и ручек репозиториев.
-  env = concat(local.app_env, [
+  # входа и ручек репозиториев. Телеметрия — local.telemetry_env: со включённым
+  # стеком логи, трейсы и метрики идут по OTLP в коллектор.
+  env = concat(local.app_env, local.telemetry_env, [
+    "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-api",
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
     "GITHUB_APP_CLIENT_ID=${var.github_app_client_id}",
@@ -221,7 +229,9 @@ resource "docker_container" "worker" {
   # проверке устойчивой работы. Eurorouter подключается только вторым и только
   # флагом llm_hosted_fallback: тогда код проверяемых репозиториев уходит
   # hosted-провайдеру (docs/BACKEND_ARCHITECTURE.md, модель угроз).
-  env = concat(local.app_env, [
+  # Телеметрия — local.telemetry_env, как у api выше.
+  env = concat(local.app_env, local.telemetry_env, [
+    "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-worker",
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
     "LLM_BACKEND=${var.llm_backend}",

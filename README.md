@@ -95,7 +95,9 @@ Redis — локальная инфраструктура без потреби�
 Сервис читает `DATABASE_URL` и без него не стартует. Таблицы он не создаёт:
 схема появляется через миграции. Полный список переменных, которые читает
 процесс, — в [`.env.example`](.env.example); скопируйте его в `.env`, если не
-хотите экспортировать их руками.
+хотите экспортировать их руками. Секрет вебхуков там — `local-dev-secret`, тот же,
+что в `docker-compose.yml`: заглушка для локального запуска, с настоящей GitHub App
+его заменяют на webhook secret из её настроек.
 
 ```bash
 docker run -d --name dmc268-db -p 5432:5432 \
@@ -168,7 +170,7 @@ openssl rand -base64 32 | gh secret set USER_TOKEN_KEY_DMC268_T1 -R larchanka-tr
 
 Короткие команды - в `Makefile`, список - `make help`: `make check` (статические проверки как в CI),
 `make test-db` (сам поднимет PostgreSQL и RabbitMQ из compose и базу `dmc268_test`), `make test-all`
-(весь набор как в CI), `make sandbox-demo` (песочница воркера с проверкой окружения), `make run-worker` и т. д.
+(весь набор как в CI), `make sandbox` (песочница воркера с локальной Ollama), `make run-worker` и т. д.
 Флаги pytest или песочницы передаются через `ARGS`: `make test-db ARGS="-k migration -x"`.
 Тесты с брокером идут в отдельный vhost `dmc268_test` (`make test-queue-vhost`), а не в `/` стека разработки.
 `make run-api`, `make run-worker` и `make migrate` берут настройки из `.env`: процессу make передаёт только
@@ -229,14 +231,14 @@ EUROROUTER_MODEL=qwen3-coder-next-80b uv run pytest -m live tests/live
 ### Локальный прогон воркера без инфраструктуры
 
 Настоящий воркер и пайплайн ревью на мок-PR, без Docker, PostgreSQL, RabbitMQ и GitHub — нужна только
-локальная Ollama. Одна команда проверит окружение, поднимет Ollama, скачает модель и прогонит мок-кейс:
+локальная Ollama. Команда поднимет Ollama, если она не отвечает, скачает модель и прогонит кейс корпуса:
 
 ```bash
-make sandbox-demo
+make sandbox CASE=04-users-sql-injection
 ```
 
-Свои мок-данные, режимы без модели (`make sandbox-stub`, `sandbox-oracle`, `sandbox-script`), сбои
-очереди, все ключи и коды выхода — [`tests/sandbox/README.md`](tests/sandbox/README.md).
+Свои мок-данные, режимы без модели (`make sandbox-stub`, `sandbox-oracle`, `sandbox-script`), все ключи
+и коды выхода — [`tests/sandbox/README.md`](tests/sandbox/README.md).
 
 Что tree-sitter отдаёт модели из AST, офлайн и без модели, — `make sandbox-outline-demo`,
 подробно — [`tests/sandbox/outline/README.md`](tests/sandbox/outline/README.md).
@@ -280,7 +282,8 @@ uv run alembic heads               # должна быть ровно одна
 `GET /user/installations/{id}/repositories`): это ровно те репозитории установок, к
 которым у пользователя есть доступ, с его правами на каждый. Подключение — два запроса:
 репозиторий по id токеном пользователя и установка приложения на нём (JWT приложения).
-Подключить можно только с правом admin или maintain; роль read на приватном репозитории —
+Подключить можно только с правом admin или maintain — это `can_connect` в строке списка,
+по нему кабинет показывает кнопку «Подключить»; роль read на приватном репозитории —
 `403`. Репозиторий, которого пользователь не видит, публичный только с правом чтения (так
 GitHub отдаёт любой публичный репозиторий) и репозиторий, на
 котором приложение не установлено или установка приостановлена, — один и тот же `404`. Приложение должно быть установлено на репозиторий,

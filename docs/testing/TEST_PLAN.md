@@ -41,7 +41,14 @@ suggestion'ов — по решению модели угроз патч при�
 - **Модульный монолит.** `uvicorn app.main:app` и `python -m app.worker` — один образ,
   одна БД, одна очередь. E2E-стенд поднимает два процесса; «контрактов между
   микросервисами» здесь нет, контракты — только с внешним миром.
-- **Наблюдаемость — это колонки.** Метрики берутся из `review_runs`, а не из Prometheus.
+- **Наблюдаемость — это колонки.** Стек `infra/observability/` (коллектор, Loki,
+  Tempo, Prometheus, Grafana, node_exporter, cAdvisor, socket-proxy) обслуживает команду:
+  ручные метрики `review_runs_total{status}`, `review_stage_duration{stage}` и
+  `review_llm_call_duration{outcome}` (каждый вызов провайдера; учёт токенов — из
+  базы, не из метрик) — сигналы алертов,
+  не источник отчётов. Любой ответ «во что обошёлся прогон» и «почему он
+  тормозит» — SQL по колонкам `review_runs` и `review_run_steps`; из
+  телеметрии ответы API и отчёты не строятся.
 
 ### 2.2 Раскладка и CI
 
@@ -139,7 +146,7 @@ forbidden-контракте import-linter, layout обменов задаёт `
 | Изменяющий запрос без `Origin` или с чужим | `403 ORIGIN_FORBIDDEN`, сессия цела |
 | Вебхук без сессии и `Origin` | проверка подписи, а не сессии |
 | Значение cookie | в базе только SHA-256, самого значения нет |
-| Логи | ни `code`, ни значения cookie, ни `Set-Cookie`; access-лог без query на `/api/v1/auth/` |
+| Логи | ни `code`, ни значения cookie, ни `Set-Cookie`; access-лог без query на любом пути |
 | Поток SSE после выхода | закрыт не позже чем через 5 с и один круг опроса (≈1 с) без события, повторное подключение — `401` |
 
 ### 3.3 Контрактные [целевое]
@@ -190,6 +197,30 @@ p95 длительности на MR ≈300 строк и деградация �
 вебхуков без потери сообщений и дедлоков (действует: `tests/load/test_load_smoke.py` в CI,
 полный прогон с отчётом - workflow `Load`, см. [RULES_E2E_REPORT](RULES_E2E_REPORT.md) §4); убийство воркера и обрыв брокера не оставляют
 опубликованный комментарий без строки в `published_comments` и наоборот.
+
+### 3.7 Наблюдаемость [действует]
+
+Логи, трейсы и метрики проверяются без поднятия стека — по тем же швам, что и
+остальной код (change `add-observability-stack`):
+
+| Проверка | Где |
+|---|---|
+| Поля JSON-лога по модели OTel: `timestamp`, `severity`, `message`, `service.name`, атрибуты из `extra` верхним уровнем; запись внутри спана несёт его `trace_id`/`span_id` и `review_run_id` из `extra`, вне спана — без trace-полей и не теряется; дубль uvicorn отсечён, остальные записи проходят | `tests/infrastructure/test_logging.py` |
+| Запретный список в логах: нет тел запросов к модели, кода из диффа, токенов доступа, query любого пути (access-лог скрыт и на `/reviews`, и на входе), URL httpx — на примерах вызова модели, ответа GitHub и callback входа | `tests/infrastructure/test_logging.py` |
+| `500` под настоящим uvicorn: stdout — только JSON, ровно одна запись со стектрейсом, её `trace_id` равен `X-Trace-ID` ответа | `tests/api/test_internal_error_logging.py` |
+| SSE-трейс: «десять минут» просмотра добавляют ноль SQL-спанов, спан потока один; отключение клиента до терминального статуса закрывает спан без ошибки | `tests/test_events_api.py` |
+| Признак повторной доставки — всегда булев атрибут `messaging.rabbitmq.message.redelivered`, попытки различимы при любом значении | `tests/infrastructure/test_telemetry.py` |
+| Повторная доставка на настоящем брокере: unack возвращает сообщение в очередь, спан первой попытки — `redelivered=false`, второй — `true`, трейс тот же, что у publish | `tests/queue/test_consuming_span_redelivery.py` |
+| Экспорт по окружению: `parse_exporters` (запятая, пробелы, регистр, дубликаты, пустое значение), `none` по умолчанию — трейсы и метрики никуда не уходят; HTTP-метрики встроенной телеметрии FastAPI, ручки `/metrics` нет; resource несёт `service.version` и окружение | `tests/infrastructure/test_telemetry.py` |
+| Бизнес-метрики: упавший и завершённый прогон растят `review_runs_total{status}`, длительность этапа — в гистограмме `review_stage_duration{stage}` | `tests/worker/test_review_handler.py`, `tests/infrastructure/test_telemetry.py` |
+| Миграции в трейсе: `alembic upgrade head` даёт корневой спан `migrate` с SQL-детьми и не меняет результат — база стоит на head, миграционные тесты зелёные | `tests/db/test_migrate_trace.py` |
+| Редакция коллектора: правила из `infra/observability/otelcol.yaml` интерпретируются на примерах аудита (DETAIL psycopg с ключами, URL приватного репозитория, текст и стектрейс исключения) — секретов нет, спаны без секретов не тронуты | `tests/infrastructure/test_collector_redaction.py` |
+
+Валидацию конфига коллектора выполняет сам коллектор: `TestCollectorConfigValidation`
+в `test_collector_redaction.py` под маркером `docker` (нужны Docker и подтянутый
+образ: `uv run pytest -m docker tests/infrastructure/test_collector_redaction.py`).
+Поднятый стек — профиль `observability` в compose — делает ту же проверку на
+каждом старте: с невалидным конфигом коллектор не запускается.
 
 ## 4. Данные и стенды
 

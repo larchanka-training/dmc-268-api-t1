@@ -8,7 +8,7 @@ from .queue import FakeChannel, FakeConnection
 
 
 def _delivery(tag: int, body: bytes) -> tuple[SimpleNamespace, SimpleNamespace, bytes]:
-    return SimpleNamespace(delivery_tag=tag), SimpleNamespace(headers={}), body
+    return SimpleNamespace(delivery_tag=tag, redelivered=False), SimpleNamespace(headers={}), body
 
 
 def test_current_is_the_delivery_being_handled() -> None:

@@ -11,28 +11,24 @@ PostgreSQL, RabbitMQ и GitHub. Нужна только локальная мо�
 Из корня репозитория:
 
 ```bash
-make sandbox-demo
+uv sync --all-extras
+make sandbox CASE=04-users-sql-injection
 ```
 
-Одна команда проходит четыре шага и на каждом говорит, что делает:
-
-| Шаг | Что происходит | Если не так |
-|---|---|---|
-| 1. Проверка окружения | `uv`, Python 3.14, `git`, `curl`, `ollama`, место на диске, отвечает ли Ollama и скачана ли модель | печатает ✗ и команду, которая исправит; дальше не идёт |
-| 2. Зависимости | `uv sync --all-extras` | — |
-| 3. Ollama и модель | запускает `ollama serve` в фоне, если она не отвечает, и скачивает `MODEL` | лог — `.ollama.log` |
-| 4. Прогон | воркер разбирает мок-PR [`examples/case.yaml`](examples/case.yaml) и печатает отчёт | итог и подсказка — последней строкой |
+`make sandbox` запускает `ollama serve` в фоне, если Ollama не отвечает на `OLLAMA_URL`, скачивает
+`MODEL`, если её ещё нет, и прогоняет воркер на кейсе корпуса (без `CASE` — на всех кейсах). То же
+по шагам: `make ollama-up ollama-pull`, затем прогон. Запущенная так Ollama остаётся работать в фоне,
+её лог — `.ollama.log`.
 
 Первый запуск скачивает модель (`qwen2.5-coder:1.5b`, около 1 ГБ); повторные — секунды:
 уже работающая Ollama и скачанная модель пропускаются.
 
-Остановить Ollama, которую запустил `make`, — `make sandbox-down`. Свою, запущенную не через
-`make`, эта цель не трогает. Только проверить окружение, ничего не меняя, — `make sandbox-doctor`.
-
-Ставить заранее нужно только [uv](https://docs.astral.sh/uv/) и [Ollama](https://ollama.com/download)
-(на macOS — `brew install uv ollama`); остальное проверка подскажет сама.
+Ставить заранее нужно [uv](https://docs.astral.sh/uv/) и [Ollama](https://ollama.com/download)
+(на macOS — `brew install uv ollama`).
 
 ### Как читать отчёт
+
+Пример — прогон мок-PR [`examples/case.yaml`](examples/case.yaml) (`make sandbox ARGS="--case-file tests/sandbox/examples/case.yaml"`):
 
 ```text
 === [1] case: Скидка на заказ - нет проверки границы процента
@@ -55,7 +51,7 @@ make sandbox-demo
 
 Маленькая модель часто промахивается или отвечает не по формату (`verifying: failed`,
 `LLM_INVALID_OUTPUT`) — это результат прогона, а не поломка песочницы. Для осмысленных замечаний
-берите модель крупнее: `make sandbox-demo MODEL=qwen2.5-coder:7b`.
+берите модель крупнее: `make sandbox MODEL=qwen2.5-coder:7b CASE=04-users-sql-injection`.
 
 ## Что настоящее, а что подменено
 
@@ -88,7 +84,8 @@ expected:                     # необязательно: что ревью д
 ```
 
 ```bash
-make sandbox-demo DEMO_CASE=my-case.yaml
+make sandbox ARGS="--case-file my-case.yaml"     # на Ollama
+make sandbox-script CASE_FILE=my-case.yaml       # со сценарием модели SCRIPT
 ```
 
 **Кейс из корпуса.** Готовые PR с размеченными нарушениями лежат в
@@ -157,7 +154,6 @@ make sandbox-git RANGE=develop..HEAD
 |---|---|---|
 | `MODEL` | `$OLLAMA_MODEL` или `qwen2.5-coder:1.5b` | модель Ollama |
 | `OLLAMA_URL` | `$OLLAMA_BASE_URL` или `http://localhost:11434` | адрес Ollama |
-| `DEMO_CASE` | `tests/sandbox/examples/case.yaml` | мок-PR для `sandbox-demo` |
 | `CASE` | все кейсы | кейс корпуса для `sandbox`, `sandbox-stub`, `sandbox-oracle` |
 | `CASE_FILE`, `SCRIPT` | файлы из `examples/` | кейс и сценарий для `sandbox-script` |
 | `RANGE` | `develop..HEAD` | диапазон git для `sandbox-git` |
@@ -187,10 +183,9 @@ make sandbox-git RANGE=develop..HEAD
 
 | Симптом | Что сделать |
 |---|---|
-| `✗ uv не установлен` / `✗ ollama не установлена` | команда установки — строкой ниже в выводе проверки |
-| `✗ запуск не из корня репозитория` | `cd` в корень репозитория |
+| `ollama не установлена` | `brew install ollama` или [ollama.com/download](https://ollama.com/download) |
 | `Ollama не ответила за 30 с` | смотрите `.ollama.log`; порт занят — другой адрес: `OLLAMA_URL=http://localhost:11500` |
-| код 2, «модель не скачана» | `make ollama-pull MODEL=...` или повторите `make sandbox-demo` |
+| код 2, «модель не скачана» | `make ollama-pull MODEL=...` или повторите `make sandbox` |
 | код 2, про окно контекста | `ARGS="--window 32768"` или модель с бо́льшим окном |
 | `verifying: failed`, `LLM_INVALID_OUTPUT` | модель ответила не по формату — возьмите крупнее |
 | код 1, `nack` | причина — в отчёте; логи воркера — `ARGS=-v` |

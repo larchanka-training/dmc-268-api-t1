@@ -37,13 +37,48 @@ resource "docker_container" "postgres" {
   image   = docker_image.postgres.image_id
   restart = "unless-stopped"
 
-  # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
-  # принудительно (SIGKILL): база поднимается с «not properly shut down» и
-  # восстановлением, брокер теряет то, что не успел сбросить на диск. С ним —
-  # SIGTERM и ожидание штатной остановки; stop_timeout — то же для docker stop.
-  # 60 с хватает с запасом: контрольная точка при остановке на нашем объёме —
-  # секунды. Деплой контейнер пересоздаёт только ручным запуском с
-  # allow_stateful_replace (сторож плана, infra.sh, #213).
+  # Библиотека pg_stat_statements нужна ручной диагностике медленных запросов
+  # (расширение создаёт миграция 0013); загружаем её только вместе со стеком
+  # наблюдаемости — накладные расходы держать не просили. Receiver postgresql
+  # коллектора в расширении не нуждается — метрики базы он снимает обычными
+  # вьюхами статистики. Смена command пересоздаёт контейнер базы (том
+  # сохраняется): это происходит и при переключателе стека, и при смене
+  # digest образа. Локальный compose preload держит всегда (накладные расходы
+  # ничтожны, переключателя в compose нет).
+  #
+  # track_utility=off при preload обязателен: с ним утилитные выражения — в
+  # том числе `ALTER ROLE … PASSWORD '…'` из replication-setup.sql и ранбуков —
+  # не попадают в pg_stat_statements открытым текстом, а роль с pg_monitor
+  # статистику читает (замечание ревью PR #130, medium). `SET LOCAL
+  # track_utility = off` в 0013, migrate.sh и миграциях compose — вторая линия:
+  # миграция не знает, на какой сервер её направил DATABASE_URL, а preload без
+  # флага есть — у тестовой базы CI (ci.yml, канареечный тест 0013 держится
+  # на этом SET LOCAL) и у любой своей базы разработчика.
+  #
+  # wal_level=replica и max_wal_senders у PostgreSQL 18 уже такие, какие нужны
+  # реплике; задаём только то, чего нет по умолчанию. max_slot_wal_keep_size —
+  # потолок WAL, который удержит слот реплики: без него упавшая реплика копила
+  # бы WAL на основном сервере, пока не кончится диск. Перешагнувшая потолок
+  # реплика теряет слот; при следующем старте она заметит это сама и
+  # пересоберётся (infra/postgres/replica-entrypoint.sh).
+  command = concat([
+    "postgres",
+    "-c", "hba_file=/etc/postgresql/pg_hba.conf",
+    "-c", "max_slot_wal_keep_size=${var.postgres_max_slot_wal_keep_size}",
+    ], var.observability_enabled ? [
+    "-c", "shared_preload_libraries=pg_stat_statements",
+    "-c", "pg_stat_statements.track_utility=off",
+  ] : [])
+
+  # Окно остановки: смена command (переключатель observability_enabled или
+  # новый digest образа) пересоздаёт контейнер базы, и без окна провайдер
+  # делает SIGKILL под пишущей базой (замечание ревью PR #130, high): база
+  # поднимается с «not properly shut down» и восстановлением, брокер теряет
+  # то, что не успел сбросить на диск. stop_timeout — окно docker stop,
+  # destroy_grace_seconds — то же при пересоздании провайдером; 60 с — запас
+  # postgres на чекпоинт и чистую остановку. Деплой контейнер пересоздаёт
+  # только ручным запуском с allow_stateful_replace (сторож плана, infra.sh,
+  # #213).
   stop_timeout          = 60
   destroy_grace_seconds = 60
 
@@ -89,18 +124,6 @@ resource "docker_container" "postgres" {
       error_message = "postgres_user и postgres_db не совпадают с теми, с которыми заведён контейнер: имена в заведённом томе не меняются. Новое имя — новый том (infra/README.md, «Смена паролей»)."
     }
   }
-
-  # wal_level=replica и max_wal_senders у PostgreSQL 18 уже такие, какие нужны
-  # реплике; задаём только то, чего нет по умолчанию. max_slot_wal_keep_size —
-  # потолок WAL, который удержит слот реплики: без него упавшая реплика копила
-  # бы WAL на основном сервере, пока не кончится диск. Перешагнувшая потолок
-  # реплика теряет слот; при следующем старте она заметит это сама и
-  # пересоберётся (infra/postgres/replica-entrypoint.sh).
-  command = [
-    "postgres",
-    "-c", "hba_file=/etc/postgresql/pg_hba.conf",
-    "-c", "max_slot_wal_keep_size=${var.postgres_max_slot_wal_keep_size}",
-  ]
 
   upload {
     file    = "/etc/postgresql/pg_hba.conf"

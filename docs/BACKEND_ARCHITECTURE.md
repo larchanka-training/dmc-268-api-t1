@@ -344,18 +344,24 @@ def upgrade() -> None:
 которые нужны в любом случае, и ответ остаётся привязан к прогону, который
 человек смотрит.
 
-**Телеметрия — для команды.** Трассировка OpenTelemetry отвечает на
+**Телеметрия — для команды.** Трассировка и метрики OpenTelemetry отвечают на
 эксплуатационные вопросы: где тормозит, что падает, что происходило между
 вебхуком и публикацией. Пользователю она не показывается: спаны сэмплируются,
 хранятся ограниченно и не разделены по аккаунтам. Спаны этапов повторяют шаги
 прогона, но источником шагов для API не становятся; ни один ответ API не
-строится из телеметрии, это проверяет `tests/api/test_tracing.py`.
+строится из телеметрии, это проверяет `tests/api/test_tracing.py`. Граница
+распространяется и на метрики: в Prometheus уходят только сигналы алертов,
+любой отчёт по прогонам — SQL по таблицам, описанным выше.
 
 Трассировка нужна, хотя процессов два: запрос вебхука и работа воркера по нему
 разделены очередью, и без общего trace id их связывает только `review_run_id`.
-Как она устроена (`app/infrastructure/telemetry.py`, спека `observability`):
+Как устроено (`app/infrastructure/telemetry.py`, `app/infrastructure/logging.py`,
+стек `infra/observability/`; спека `observability`):
 
-- **Провайдер.** SDK-провайдер ставят `create_app` и `run_worker`. HTTP-сервер
+- **Провайдер.** SDK-провайдер ставят `create_app`, `run_worker` и
+  `alembic/env.py` — миграции идут с сервисом `dmc-268-migrate` и корневым
+  спаном `migrate`, SQL-миграции — его дети: в Tempo видно, сколько они занимают
+  при деплое. HTTP-сервер
   трассирует встроенная телеметрия FastAPI — снаружи всех middleware, поэтому
   `X-Trace-ID` и `trace_id` в problem+json, в том числе у `500`, — trace id
   спана запроса. httpx (GitHub, модель) — `opentelemetry-instrumentation-httpx`,
@@ -367,7 +373,12 @@ def upgrade() -> None:
   сообщения не меняется. Публикацию и приём делает адаптер очереди
   (`_publish`, `consuming_span`), а не автоинструментирование pika: для
   генератора `consume()` оно закрывает спан приёма сразу и держит его контекст
-  текущим на простое цикла.
+  текущим на простое цикла. Признак повторной доставки попадает в спан обработки
+  булевым атрибутом `messaging.rabbitmq.message.redelivered`.
+- **Поток событий.** Цикл опроса `GET /api/v1/events` идёт вне трейса: десять
+  минут просмотра в кабинете не добавляют в трейс SQL-спанов, а штатное
+  отключение клиента закрывает спан потока без ошибки (`untraced`,
+  `app/api/events.py`).
 - **Доверие.** Глобальный пропагатор пуст: входящий `traceparent` от HTTP-клиента
   не продолжает трейс (каждый запрос начинает новый), и httpx не отдаёт наш
   контекст GitHub и провайдерам модели. Заголовкам своей очереди доверяем —
@@ -392,11 +403,73 @@ def upgrade() -> None:
   спан. Слой приложения о OpenTelemetry не знает: шаги зовут порт
   `StageTracer`, адаптер — `OtelStageTracer`; `opentelemetry` в запрещённых
   вендорах внутренних слоёв (`lint-imports`).
-- **Экспорт** не настроен: по умолчанию спаны никуда не уходят и ошибок экспорта
-  в логе нет. `OTEL_TRACES_EXPORTER=console` печатает их в stdout для отладки.
-  Хранилище трейсов, OTLP, структурированные логи с trace id и метрики — задача
-  #89; автонастройка экспортёров FastAPI и его OTel-лог исключений выключены
-  явно (`telemetry={"auto_configure": False, "logs": False}` в `create_app`).
+- **Экспорт включается окружением.** Список экспортёров разбирает
+  `parse_exporters`: значение `OTEL_TRACES_EXPORTER` — через запятую,
+  поддержаны `console` и `otlp`, пробелы, регистр и дубликаты гасятся, мусорное
+  значение выключает только себя с одним предупреждением в лог. По умолчанию
+  `none`: спаны никуда не уходят и ошибок экспорта в логе нет. `console`
+  печатает их в stdout для отладки, `otlp` шлёт OTLP/HTTP в коллектор
+  (`OTEL_EXPORTER_OTLP_ENDPOINT`). Ресурс дополняют `OTEL_RESOURCE_ATTRIBUTES` —
+  `service.version` (в инфре — sha образа), `deployment.environment.name` и стабильный
+  `service.instance.id` по сервису (`dmc268-api`, `dmc268-worker`, `dmc268-migrate`): случайный
+  UUID на процесс растил бы в Prometheus серии `exported_instance`. Таймаут OTLP —
+  `OTEL_EXPORTER_OTLP_TIMEOUT=4`, в секундах: Python SDK читает переменную в секундах, вопреки
+  спецификации OTel с её миллисекундами (4000 означало бы 66 минут), значение меньше окна
+  graceful shutdown (5 с). Лимит длины атрибутов — `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`.
+  Автонастройка
+  экспортёров FastAPI и его OTel-лог исключений выключены явно
+  (`telemetry={"auto_configure": False, "logs": False}` в `create_app`).
+- **Метрики** — тот же SDK с отдельным гейтом: `configure_telemetry` собирает
+  `MeterProvider` с периодическим экспортом, включая его `OTEL_METRICS_EXPORTER`
+  — тот же список, `none` по умолчанию. HTTP-метрики даёт встроенная телеметрия
+  FastAPI, ручки `/metrics` нет — Prometheus собирает их через коллектор, а
+  `resource_to_telemetry_conversion` делает лейбл `job` равным `service.name`.
+  Ручные — только сигналы алертов: прогоны по статусам (`review_runs_total{status}`),
+  длительность этапов (`review_stage_duration{stage}`) и каждого фактического вызова
+  провайдера (`review_llm_call_duration{outcome}` — в `FallbackLlmGateway`; метка
+  `provider` стоит всегда, `model` — модель ответа только у `ok`, в гистограмму попадают
+  упавшие вызовы и таймауты), пул соединений — снимками состояния (`db.client.connection.*`);
+  стоимость — отдельное изменение (#119).
+  «Во что обошёлся прогон» остаётся SQL по колонкам `review_runs`: метрики —
+  для алертов, не для отчётов.
+- **Логи** — два транспорта из одной точки настройки. `configure_logging(service_name)`
+  ставит JSON-хендлер в stdout (миграции передают `stream=sys.stderr`: stdout alembic
+  CLI — результат команды, его читает `migrate.sh`): поля по модели данных OTel — `timestamp`, `severity`,
+  `message`, `logger`, `service.name`, атрибуты из `extra` верхним уровнем
+  (служебные поля `extra` перетереть не может); trace-поля
+  (`trace_id`/`span_id`/`trace_flags`) добавляет `TraceContextFilter` из
+  текущего спана, запись вне спана пишется без них и не теряется. `exc_info`
+  кладёт стектрейс и `exception.type` (qualname класса) в ту же запись,
+  дубль uvicorn «Exception in ASGI application» отсекается: на `500` в логе
+  ровно одна запись, и её `trace_id` равен `X-Trace-ID` ответа. Необработанное
+  исключение воркера — вплоть до `WorkerConfigError` старта — пишут excepthook'и
+  той же JSON-записью: текстовый дамп интерпретатора уходит в stderr и до
+  хранилища логов не доходит. stdout остаётся для `docker logs` и локальной
+  отладки; в Loki записи уходят вторым транспортом — по OTLP из SDK при
+  `OTEL_LOGS_EXPORTER=otlp` (дефолт `none` — только stdout): `configure_telemetry`
+  ставит `LoggerProvider` с `BatchLogRecordProcessor` и хендлер на root, resource
+  общий с трейсами, тело записи — текст сообщения, `exc_info` — атрибуты
+  `exception.*`. Коллектор принимает логи только по OTLP — каталог Docker не
+  читает, логов postgres и rabbitmq в Loki нет. От записи лога к трейсу в
+  Grafana ведёт переход по `trace_id` (derived field по structured metadata
+  OTLP-лога). На пути коллектор редактирует записи с исключениями: стектрейс,
+  текст и тело такой записи заменяются маркером `<скрыто>`, `exception.type`
+  остаётся диагнозом.
+- **Стек** — восемь контейнеров (коллектор, Loki, Tempo, Prometheus, Grafana,
+  node_exporter за сервер, cAdvisor за контейнеры и socket-proxy — доступ cAdvisor
+  к Docker API по белому списку эндпоинтов вместо маунта `docker.sock`) с
+  одними конфигами локально и на стенде: конфиги лежат в
+  `infra/observability/`, локально их монтирует профиль `observability` в
+  compose, на стенде те же файлы собирает `infra/` (Terraform), весь стек — за
+  флагом `observability_enabled` (по умолчанию выключен; потолки памяти и
+  объём диска — в `infra/README.md`). Метрики базы
+  снимает сам коллектор receiver-ом `postgresql` — отдельного экспортёра нет,
+  роль только-чтение `dmc268_monitor` с `pg_monitor` создаёт миграция 0013.
+  На входе трейсов и логов коллектор редактирует чувствительные данные — query
+  URL, значения `db.*`, тексты и стектрейсы исключений заменяются маркером
+  `<скрыто>`, атрибут остаётся; проверка — `tests/infrastructure/test_collector_redaction.py`.
+  Разворачивание стенда — по готовности DevOps; для включения экспорта сервису
+  нужен только `OTEL_EXPORTER_OTLP_ENDPOINT`, код при этом не меняется.
 - **Атрибуты** SQL и httpx — стабильные имена semconv:
   `OTEL_SEMCONV_STABILITY_OPT_IN=database,http` по умолчанию ставит код до первого
   инструментирования (пакеты читают переменную один раз на процесс).
@@ -505,9 +578,9 @@ nginx фронта (`client_max_body_size` в `location /api/`, не меньш�
 попадает (`Secret`), удаляется вместе с сессией. Утечка базы без ключа токенов не даёт;
 утечка ключа и базы вместе даёт токены живых сессий с правами пользователя в пределах
 разрешений приложения. Access-лог uvicorn
-пишет путь с query, а в query callback'а лежат `code` и `state`, поэтому
-`app/api/log_redaction.py` вырезает query на путях `/api/v1/auth/`; в серверном спане
-запроса тот же query скрывает `QueryRedaction` из `app/infrastructure/telemetry.py`. CSRF держат
+пишет путь с query, а там бывают `code` и `state` callback'а входа и поисковые query
+кабинета, поэтому `app/api/log_redaction.py` вырезает query на любом пути; в серверном спане
+запроса query путей входа скрывает `QueryRedaction` из `app/infrastructure/telemetry.py`. CSRF держат
 `SameSite=Lax` и проверка `Origin`. Обоснование — `openspec/changes/archive/2026-10-17-auth-session/design.md`.
 
 **Область действия учётных данных.** Для публикации комментариев нужен доступ
