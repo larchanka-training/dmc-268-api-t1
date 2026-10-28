@@ -132,7 +132,7 @@ class Container:
         """Собрать адаптер модели при первом обращении; конструирование - без сети."""
         gateway = self._llm_gateway
         if gateway is None:
-            gateway = _build_llm_gateway(self.settings)
+            gateway = build_llm_gateway(self.settings)
             object.__setattr__(self, "_llm_gateway", gateway)
         return gateway
 
@@ -269,7 +269,7 @@ def llm_http_timeout(settings: Settings) -> httpx.Timeout:
     return httpx.Timeout(settings.llm_timeout_seconds, connect=_LLM_CONNECT_TIMEOUT_SECONDS)
 
 
-def _build_llm_gateway(settings: Settings) -> LlmGateway:
+def build_llm_gateway(settings: Settings) -> LlmGateway:
     """Порядок провайдеров не выбирается: локальная модель первая, hosted -
     только вторым и только по флагу (change `add-llm-gateway`, design D3).
 

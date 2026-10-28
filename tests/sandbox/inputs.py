@@ -64,7 +64,7 @@ def load_case_file(path: Path) -> PrInput:
     if not path.is_file():
         raise InputError(f"файла кейса {path} нет")
     try:
-        case = load_case(path)
+        case = load_case(path, expected_required=False)
     except (KeyError, TypeError, ValueError) as error:
         raise InputError(f"кейс {path} не разобрать: {error}") from error
     return from_case(case)

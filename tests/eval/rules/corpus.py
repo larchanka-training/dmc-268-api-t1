@@ -64,8 +64,12 @@ def _expected(files: dict[str, str], raw: dict[str, Any], case_id: str) -> Expec
     )
 
 
-def load_case(path: Path) -> Case:
+def load_case(path: Path, *, expected_required: bool = True) -> Case:
+    """Кейс из YAML. В корпусе `expected` обязателен: потерянный ключ иначе
+    молча сделал бы кейс «чистым PR»; кейсу песочницы (`--case-file`) - нет."""
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if expected_required and "expected" not in raw:
+        raise KeyError(f"{path.name}: нет раздела expected (чистый PR - expected: [])")
     files = {str(p): str(content) for p, content in raw["files"].items()}
     return Case(
         id=path.stem,

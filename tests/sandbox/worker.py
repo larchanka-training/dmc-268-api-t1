@@ -2,7 +2,7 @@
 
 Боевой код: `Worker.run`, формат сообщения (`to_wire_message`), обработчик
 `build_review_handler`, промпты из `prompts/review/`, `GitHubAppAuth` и
-`GitHubVcsGateway`, AST-экстрактор, адаптер модели из `_build_llm_gateway`.
+`GitHubVcsGateway`, AST-экстрактор, адаптер модели из `build_llm_gateway`.
 Подменены: брокер (`FakeChannel`, `FakeConnection`), база
 (`FakeUnitOfWork`), кэш (`InMemoryCacheStore`) и GitHub (`FakeGitHub` на
 уровне HTTP). Postgres, RabbitMQ и Docker не нужны.
@@ -35,7 +35,7 @@ from app.domain.enums import (
 )
 from app.domain.repo_rules import RULES_PATH
 from app.infrastructure.cache.memory import InMemoryCacheStore
-from app.infrastructure.container import WORKER_VCS_LIMITS, _build_llm_gateway
+from app.infrastructure.container import WORKER_VCS_LIMITS, build_llm_gateway
 from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
 )
@@ -475,7 +475,7 @@ def run_sandbox(
     ]
 
     handler = build_review_handler(
-        _Deps(uow, llm if llm is not None else _build_llm_gateway(settings), vcs),
+        _Deps(uow, llm if llm is not None else build_llm_gateway(settings), vcs),
         context_limits(settings),
         llm_limits(settings),
         prompt_texts,
