@@ -321,6 +321,26 @@ def test_redaction_sits_in_the_traces_pipeline() -> None:
     assert "transform/redact" not in pipelines["logs"]["processors"]
 
 
+def test_browser_traces_go_only_to_their_own_pipeline() -> None:
+    """Приёмник браузера — только в traces/browser, а ресурс ставит коллектор.
+
+    Тело приходит из интернета через nginx интерфейса: в метрики и логи оно
+    не попадает, а спан, подписанный как dmc-268-api, получает имя dmc-268-ui.
+    """
+    config = load_config()
+    pipelines = config["service"]["pipelines"]
+    users = [name for name, p in pipelines.items() if "otlp/browser" in p["receivers"]]
+    assert users == ["traces/browser"]
+    processors = pipelines["traces/browser"]["processors"]
+    assert processors.index("transform/browser-resource") < processors.index("transform/redact")
+    assert config["receivers"]["otlp/browser"]["protocols"] == {
+        "http": {"endpoint": "0.0.0.0:4319", "max_request_body_size": 524288}
+    }
+    resource = config["processors"]["transform/browser-resource"]["trace_statements"][0]
+    assert resource["context"] == "resource"
+    assert resource["statements"][-1] == 'set(attributes["service.name"], "dmc-268-ui")'
+
+
 def test_private_repository_url_is_hidden(rules: list[Rule]) -> None:
     """Аудит #89: url.full httpx-спана с приватным репозиторием скрыт."""
     span = apply_rules(

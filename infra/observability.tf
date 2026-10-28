@@ -190,7 +190,8 @@ resource "docker_container" "otelcol" {
     name = docker_network.backend.name
   }
 
-  # Трейсы браузера: nginx интерфейса проксирует на dmc268-otelcol:4318.
+  # Трейсы браузера: nginx интерфейса проксирует на dmc268-otelcol:4319 —
+  # отдельный приёмник otlp/browser, только трейсы (otelcol.yaml).
   networks_advanced {
     name = docker_network.otlp.name
   }
