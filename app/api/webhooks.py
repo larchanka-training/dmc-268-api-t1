@@ -1,6 +1,8 @@
 """Эндпоинт приёма вебхуков.
 
-Порядок строго по спеке: сырое тело читается до любого разбора, подпись из
+Порядок строго по спеке: сырое тело читается с лимитом размера до любого разбора и
+до подписи (`RequestBodyLimitMiddleware`, `app/api/body_limit.py`: больше лимита — 413
+без чтения целиком), подпись из
 заголовка `X-Hub-Signature-256` проверяется чистой функцией `verify_hmac`,
 затем заголовок `X-GitHub-Event` отсекает чужие события — и только после
 этого payload разбирается и уходит в use case. Без подписи или с
@@ -39,6 +41,7 @@ from starlette.concurrency import run_in_threadpool
 from app.api.dependencies import get_container
 from app.api.errors import (
     ERRORS_401_WEBHOOK_SIGNATURE,
+    ERRORS_413_BODY,
     ERRORS_422,
     ERRORS_501_WEBHOOK_PROVIDER,
     ERRORS_502_SCM,
@@ -113,6 +116,7 @@ _ACKNOWLEDGED = WebhookAcknowledged(status="acknowledged")
     ),
     responses={
         **ERRORS_401_WEBHOOK_SIGNATURE,
+        **ERRORS_413_BODY,
         **ERRORS_422,
         **ERRORS_501_WEBHOOK_PROVIDER,
         **ERRORS_502_SCM,

@@ -215,12 +215,15 @@ def test_targeted_plan_with_a_new_database_password_is_rejected(tmp_path: Path) 
 
     Фикстура — настоящий `tofu show -json` targeted-плана шага на docker:29-dind.
     Раньше targeted apply пересоздавал базу мимо всякой проверки, SIGKILL'ом.
+    С #161 пароль замены не вызывает (`ignore_changes = [env]`), но план с
+    заменой базы по любому поводу сторож отклоняет так же — и подсказывает,
+    что пароль меняется без неё.
     """
     result, report, root = run_script(tmp_path, "infra.sh", plan="plan-infra-replace-postgres.json")
 
     assert result.returncode != 0
     assert "::error::план пересоздаёт или удаляет docker_container.postgres" in result.stdout
-    assert "#161" in result.stdout
+    assert "«Смена паролей»" in result.stdout
     calls = (tmp_path / "calls").read_text()
     assert "-target=docker_container.postgres" in calls
     assert " apply " not in calls, calls
@@ -766,13 +769,50 @@ def test_summary_of_migrations_that_failed_before_the_first_revision(tmp_path: P
 
 
 def test_summary_of_a_migrate_step_that_failed_before_alembic(tmp_path: Path) -> None:
-    """Сценарий ревью #220: `tofu output` или pull образа упали — лога alembic нет, но шаг шёл."""
+    """Сценарий ревью #220: `tofu output` упал — лога alembic нет, но шаг шёл (pull — свой шаг с #161)."""
     results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
 
     text = summary(tmp_path, tmp_path / "empty", JOB_STATUS="failure", STEP_RESULTS=results)
 
-    assert "Шаг миграций упал до alembic (`tofu output` или pull образа): схема не менялась." in text
+    assert "Шаг миграций упал до alembic (`tofu output`): схема не менялась." in text
     assert "Шаг миграций не запускался." not in text
+
+
+def test_summary_warns_when_migrations_failed_after_a_password_change(tmp_path: Path) -> None:
+    """Ревью #221: шаг паролей зелёный, а старые API и воркер до следующего деплоя не откроют новых соединений."""
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "migrate.log").write_text(FAILED_MIGRATION_LOG)
+    (report / "passwords-changed").write_text("postgres\n")
+    results = (ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
+               .replace("apply success success", "apply skipped skipped"))
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results,
+                   GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", SHA="abc123")
+
+    assert "Сменены в этом деплое: база (`postgres`)." in text
+    assert "> [!WARNING]\n> Пароль сменён, а API и воркер не заменены" in text
+    assert "[«Откат»](https://github.com/o/r/blob/abc123/infra/README.md#откат)" in text
+    # Раздел — сразу за таблицей исхода: дежурный видит его первым.
+    assert text.index("### Пароли") < text.index("### Простой API")
+
+
+def test_summary_of_a_password_change_that_reached_apply_has_no_warning(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "passwords-changed").write_text("postgres\nrabbitmq\n")
+
+    text = summary(tmp_path, report, JOB_STATUS="success", STEP_RESULTS=ALL_SUCCESS)
+
+    assert "Сменены в этом деплое: база (`postgres`), брокер (`rabbitmq`)." in text
+    assert "[!WARNING]" not in text
+
+
+def test_summary_of_a_failed_deploy_without_a_password_change_has_no_password_section(tmp_path: Path) -> None:
+    text = failed_migrate_summary(tmp_path, current="0012_b (head)")
+
+    assert "### Пароли" not in text
+    assert "Пароль сменён" not in text
 
 
 def test_summary_of_cancelled_migrations_claims_nothing(tmp_path: Path) -> None:

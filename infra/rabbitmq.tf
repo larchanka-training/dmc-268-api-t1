@@ -49,10 +49,30 @@ resource "docker_container" "rabbitmq" {
     name = docker_network.backend.name
   }
 
+  # Как у postgres: пользователя по умолчанию брокер заводит только на пустом
+  # томе, правку env контейнер не видит, а пароль выставляет шаг деплоя
+  # .github/scripts/deploy/passwords.sh (#161).
   env = [
     "RABBITMQ_DEFAULT_USER=${var.rabbitmq_user}",
     "RABBITMQ_DEFAULT_PASS=${var.rabbitmq_password}",
   ]
+
+  # Смена пароля контейнер не трогает, а смену имени пользователя ignore_changes
+  # спрятал бы: шаг паролей сменил бы пароль прежнего пользователя, а API и
+  # воркер входили бы новым. Новое имя в заведённом томе и не появится — ни
+  # сейчас, ни после замены контейнера. Поэтому plan падает до изменений на
+  # сервере: self.env при ignore_changes — то, с чем контейнер создан.
+  # replace_triggered_by от terraform_data не годится: первое создание такого
+  # ресурса — тоже повод к замене, и переход на эту конфигурацию пересоздал бы
+  # брокер (проверено на dind, #161).
+  lifecycle {
+    ignore_changes = [env]
+
+    postcondition {
+      condition     = contains(self.env, "RABBITMQ_DEFAULT_USER=${var.rabbitmq_user}")
+      error_message = "rabbitmq_user не совпадает с тем, с которыми заведён контейнер: имена в заведённом томе не меняются. Новое имя — новый том (infra/README.md, «Смена паролей»)."
+    }
+  }
 
   volumes {
     volume_name    = docker_volume.rabbitmq.name
