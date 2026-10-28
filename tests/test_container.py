@@ -200,6 +200,14 @@ def test_the_container_hands_out_a_job_queue() -> None:
     assert callable(queue.enqueue)
 
 
+def test_the_container_hands_out_a_run_outcome_recorder() -> None:
+    """Счётчик терминальных исходов — адаптер телеметрии за портом: роуты
+    телеметрию не импортируют (гард-тест и спека `observability`)."""
+    container = build_container(SETTINGS)
+    recorder = container.run_outcome()
+    assert callable(recorder.run_finished)
+
+
 def test_the_fastapi_dependency_is_port_typed() -> None:
     """Зависимость, которую видит router, обещает порт, а не реализацию."""
     signature = inspect.signature(get_unit_of_work)

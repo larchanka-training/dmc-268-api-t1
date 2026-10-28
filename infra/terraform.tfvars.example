@@ -57,3 +57,12 @@ llm_hosted_fallback = false
 # github_app_client_id     = ""
 # github_app_client_secret = ""
 # public_origin            = "https://<адрес интерфейса>"
+
+# --- стек наблюдаемости ---
+# По умолчанию выключен (observability_enabled = false): локальному apply
+# хватает памяти и секреты не нужны. При true валидации потребуют настоящий
+# пароль админа Grafana (grafana_admin_password) и пароль роли мониторинга
+# (postgres_monitor_password, не локальный дефолт dmc268_monitor).
+# observability_enabled     = true
+# grafana_admin_password    = "CHANGE_ME_GRAFANA_ADMIN"
+# postgres_monitor_password = "CHANGE_ME_PG_MONITOR"

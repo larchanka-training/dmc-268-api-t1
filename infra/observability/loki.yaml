@@ -1,0 +1,60 @@
+# Логи — Loki single-binary с файловым хранением. Конфиг один для локального
+# стека и стенда; различия окружений (объём тома, лимит памяти) — переменные
+# docker compose и infra, не разные конфиги.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+
+schema_config:
+  configs:
+    # v13 поверх tsdb — рекомендуемая схема Loki 3.x.
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+limits_config:
+  # Структурированные метаданные: trace_id из OTLP-логов хранится и фильтруется
+  # — работает переход трейс → лог в Grafana.
+  allow_structured_metadata: true
+  # Потолки приёма: логи идут по OTLP от сервисов приложения, сбои SDK не
+  # должны забить Loki и диск. Глобально — 1 МБ/с с burst 2 МБ, на поток —
+  # 512 КБ/с (сервисы единицы, их записи — килобайты); превышение Loki
+  # отвергает с 429, а не копит долг.
+  ingestion_rate_mb: 1
+  ingestion_burst_size_mb: 2
+  per_stream_rate_limit: 512KB
+  # Хранение логов — 30 дней. У Loki OSS retention только по времени: лимита
+  # по размеру нет (в отличие от Prometheus, у которого стоит
+  # --storage.tsdb.retention.size). Заполнение диска закрывает мониторинг
+  # файловой системы — алерты #100 по node_filesystem_avail_bytes
+  # от node-exporter.
+  retention_period: 720h
+
+# Телеметрия вендора off: Loki не должен отправлять анонимную статистику
+# использования наружу. В Loki 3.x ключ живёт в секции analytics
+# (проверено -verify-config на образе 3.7.9). То же у Tempo (tempo.yaml,
+# usage_report) и Grafana (GF_ANALYTICS_* в compose и main.tf).
+analytics:
+  reporting_enabled: false

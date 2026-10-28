@@ -35,6 +35,7 @@ from ..fakes import (
     FakeVcs,
     webhook_payload,
 )
+from ..fakes.run_outcome import RecordingRunOutcome
 
 SECRET = "test-webhook-secret"
 SIGNATURE_HEADER = "X-Hub-Signature-256"
@@ -53,6 +54,7 @@ class StubContainer:
     uow: FakeUow
     vcs: FakeVcs
     queue: FakeQueue
+    outcome: RecordingRunOutcome
 
     def unit_of_work(self) -> FakeUow:
         return self.uow
@@ -63,11 +65,15 @@ class StubContainer:
     def job_queue(self) -> FakeQueue:
         return self.queue
 
+    def run_outcome(self) -> RecordingRunOutcome:
+        return self.outcome
+
 
 def make_client(
     uow: FakeUow | None = None,
     vcs: FakeVcs | None = None,
     queue: FakeQueue | None = None,
+    outcome: RecordingRunOutcome | None = None,
     secret: str = SECRET,
     registered: bool = True,
 ) -> tuple[TestClient, StubContainer]:
@@ -89,6 +95,7 @@ def make_client(
         uow=uow,
         vcs=vcs if vcs is not None else FakeVcs(),
         queue=queue if queue is not None else FakeQueue(),
+        outcome=outcome if outcome is not None else RecordingRunOutcome(),
     )
     app = create_app(settings)
     app.state.container = container

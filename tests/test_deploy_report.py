@@ -58,13 +58,15 @@ esac
 # upgrade head` печатает вывод alembic из MIGRATE_LOG и выходит с
 # MIGRATE_EXIT; у N-й попытки — MIGRATE_LOG_N и MIGRATE_EXIT_N, если заданы.
 # `run … alembic current` печатает CURRENT (с CURRENT_FAIL — код 255, как при
-# оборванном ssh), `rm` контейнера, которого нет, — код 1.
+# оборванном ssh), `run … python -` (пароль роли мониторинга) с MONITOR_FAIL
+# выходит с этим кодом, `rm` контейнера, которого нет, — код 1.
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "docker $*" >> "$CALLS"
 case "$1" in
   run)
     case "$*" in
       *"alembic current"*) [ -z "${CURRENT_FAIL:-}" ] || exit 255; printf '%s\\n' "${CURRENT:-}" ;;
+      *" python -") cat > /dev/null; exit "${MONITOR_FAIL:-0}" ;;
       *)
         n=$(( $(cat "$CALLS.upgrades" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$CALLS.upgrades"
         log="MIGRATE_LOG_$n" code="MIGRATE_EXIT_$n"
@@ -392,7 +394,13 @@ def test_summary_shows_the_rejected_targeted_plan(tmp_path: Path) -> None:
 
 
 def volume_blocks() -> dict[str, str]:
-    """Ресурсы docker_volume из infra/*.tf: адрес → тело блока."""
+    """Ресурсы docker_volume из infra/*.tf: адрес → тело блока.
+
+    Адрес — как в плане tofu: просто `тип.имя`, `[0]` не нужен — томов с
+    count нет ни у данных приложения, ни у стека наблюдаемости: тома
+    создаются всегда, чтобы откат флага observability_enabled не строил план
+    их уничтожения.
+    """
     return {
         f"docker_volume.{name}": body
         for name, body in re.findall(
@@ -405,8 +413,20 @@ def volume_blocks() -> dict[str, str]:
 # и воркер в них не ходят, данные — в защищённых томах. Реплика
 # останавливается штатно (destroy_grace_seconds в infra/replica.tf), копия,
 # оборванная на полпути, остаётся *.partial и убирается следующим стартом. До
-# миграций они не нужны, поэтому и не в -target у infra.sh.
-REPLACEABLE_ON_VOLUMES = frozenset({"docker_container.postgres_replica", "docker_container.postgres_backup"})
+# миграций они не нужны, поэтому и не в -target у infra.sh. Хранилища стека
+# наблюдаемости (PR #130) — телеметрия команды, а не данные продукта: API и
+# воркер в них не пишут напрямую (только через коллектор, и без ответа
+# экспортёр просто теряет пачку), тома защищены сторожем томов, а WAL Loki,
+# Prometheus и Tempo доигрывают при старте. Замену приносит любая правка их
+# конфигурации — держать её за allow_stateful_replace незачем.
+REPLACEABLE_ON_VOLUMES = frozenset({
+    "docker_container.postgres_replica",
+    "docker_container.postgres_backup",
+    "docker_container.grafana",
+    "docker_container.loki",
+    "docker_container.prometheus",
+    "docker_container.tempo",
+})
 
 
 def test_every_container_on_a_data_volume_is_classified() -> None:
@@ -679,6 +699,25 @@ def test_alembic_current_output_is_parsed() -> None:
     assert deploy_report.current_revision("\n") == ""
 
 
+# stdout `alembic current`, когда JSON-логи миграций шли в него раньше ревизии
+# (до #232; теперь они в stderr, см. tests/db/test_alembic_env.py). Фильтр
+# остаётся страховкой, и этот вывод её проверяет.
+JSON_LOGGED_CURRENT = (
+    '{"timestamp": "2026-10-27T18:00:00.000000Z", "severity": "INFO", '
+    '"message": "Context impl PostgresqlImpl.", "service.name": "dmc-268-migrate"}\n'
+    '{"timestamp": "2026-10-27T18:00:00.000001Z", "severity": "INFO", '
+    '"message": "Will assume transactional DDL.", "service.name": "dmc-268-migrate"}\n'
+    "0012_b (head)\n"
+)
+
+
+def test_alembic_current_output_skips_json_log_lines() -> None:
+    """Ревью #130: первое слово первой строки было `{"timestamp":`, и повтор по блокировке не срабатывал."""
+    assert deploy_report.current_revision(JSON_LOGGED_CURRENT) == "0012_b"
+    # Пустая база: только логи, ревизии нет.
+    assert deploy_report.current_revision(JSON_LOGGED_CURRENT.replace("0012_b (head)\n", "")) == ""
+
+
 def failed_migrate_summary(tmp_path: Path, *, log: str = FAILED_MIGRATION_LOG, current: str | None) -> str:
     report = tmp_path / "report"
     report.mkdir()
@@ -848,10 +887,11 @@ def test_migrate_does_not_ask_after_a_success(tmp_path: Path) -> None:
 
 
 def test_every_migrations_container_is_restricted() -> None:
-    """И `alembic current` после сбоя идёт с теми же ограничениями, что upgrade."""
+    """И `alembic current` после сбоя, и шаг пароля роли мониторинга идут с
+    теми же ограничениями, что upgrade."""
     script = (SCRIPTS / "migrate.sh").read_text()
     runs = re.findall(r"^\s*(?:timeout \d+ )?docker run --rm\b(?:[^\n]*\\\n)*[^\n]*$", commands(script), re.MULTILINE)
-    assert len(runs) == 2, runs
+    assert len(runs) == 3, runs
     for run in runs:
         assert not missing_migration_restrictions(run.strip().removeprefix("timeout 60 ")), run
 
@@ -865,7 +905,73 @@ def test_every_migrations_run_takes_the_shared_arguments() -> None:
     script = (SCRIPTS / "migrate.sh").read_text()
     lines = [line for line in script.splitlines() if not line.lstrip().startswith("#")]
     assert len([line for line in lines if re.search(r"(?<!\S)docker run\b", line)]) == 1, lines
-    assert len([line for line in lines if '"${migrations_run[@]}"' in line]) == 2, lines
+    assert len([line for line in lines if '"${migrations_run[@]}"' in line]) == 3, lines
+
+
+def test_migrate_sets_the_monitor_password_after_a_success(tmp_path: Path) -> None:
+    """Шаг пароля роли мониторинга — один раз, после удачного upgrade, тем же
+    образом; вывод alembic в migrate.log он не перезаписывает."""
+    (tmp_path / "alembic.log").write_text(APPLIED_LOG)
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    runs = [c for c in (tmp_path / "calls").read_text().splitlines() if c.startswith("docker run ")]
+    assert "alembic upgrade head" in runs[0], runs
+    assert runs[-1].endswith('ghcr.io/o/r:t@sha256:' + "0" * 64 + " python -"), runs
+    assert len(runs) == 2, runs
+    assert (report / "migrate.log").read_text() == APPLIED_LOG
+
+
+def test_a_failed_monitor_password_step_is_not_a_failed_migration(tmp_path: Path) -> None:
+    """Ревью #130: миграции зафиксированы, упал отдельный шаг пароля — summary
+    не пишет «упала на ревизии», а пишет, что пароль не обновлён; шаг под timeout."""
+    (tmp_path / "alembic.log").write_text(APPLIED_LOG)
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"), MONITOR_FAIL="2",
+    )
+
+    assert result.returncode == 2
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert any(c.startswith("timeout 60 docker run ") and c.endswith(" python -") for c in calls), calls
+    assert (report / "migrate-monitor.error").read_text().strip() == "2"
+    assert (report / "migrate.log").read_text() == APPLIED_LOG
+
+    results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results)
+    assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 2 |" in text
+    assert "| Ревизия после | `dmc268.deploy.migrations.revision.to` | `0014_d` |" in text
+    assert "Упала на ревизии" not in text
+    assert "пароль роли мониторинга `dmc268_monitor` не обновлён (код 2)" in text
+
+
+def test_a_successful_monitor_password_step_leaves_no_marker(tmp_path: Path) -> None:
+    (tmp_path / "alembic.log").write_text(APPLIED_LOG)
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (report / "migrate-monitor.error").exists()
+
+
+def test_migrate_does_not_set_the_monitor_password_after_a_failure(tmp_path: Path) -> None:
+    (tmp_path / "alembic.log").write_text(FAILED_MIGRATION_LOG)
+    result, _, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"), MIGRATE_EXIT="1", CURRENT="0012_b",
+    )
+
+    assert result.returncode == 1
+    assert "python -" not in (tmp_path / "calls").read_text()
 
 
 def test_migrate_keeps_the_alembic_exit_code(tmp_path: Path) -> None:
@@ -960,6 +1066,17 @@ def test_migrate_gives_up_after_three_attempts(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert len(upgrades) == 3
     assert (report / "migrate-attempts").read_text().strip() == "3"
+
+
+def test_migrate_retries_a_lock_timeout_behind_json_logs(tmp_path: Path) -> None:
+    """Ревью #130: `alembic current` печатает JSON-логи до ревизии — повтор всё равно срабатывает."""
+    result, _, upgrades = migrate(
+        tmp_path, MIGRATE_LOG_1=LOCKED_MIGRATION_LOG, MIGRATE_EXIT_1="1", MIGRATE_LOG_2=APPLIED_LOG,
+        CURRENT=JSON_LOGGED_CURRENT.rstrip("\n"),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(upgrades) == 2
 
 
 def test_migrate_does_not_retry_when_part_was_committed(tmp_path: Path) -> None:

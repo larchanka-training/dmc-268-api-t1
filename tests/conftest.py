@@ -11,10 +11,14 @@
 """
 
 import os
+import sys
+import threading
 from collections.abc import Iterator
 
 import pytest
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -24,13 +28,16 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.infrastructure.db import models  # noqa: F401  (регистрирует таблицы)
 from app.infrastructure.db.base import Base
 
-# Провайдер трейсов глобальный и ставится один раз на процесс — до первого
-# `create_app`: тогда `configure_tracing` его не подменяет, и спаны всех тестов
-# ложатся в память (фикстура `spans`), а не уходят наружу.
+# Провайдеры глобальные и ставятся один раз на процесс — до первого
+# `create_app`: тогда `configure_telemetry` их не подменяет, и телеметрия всех
+# тестов ложится в память (фикстуры `spans` и `metric_reader`), а не уходит наружу.
 SPAN_EXPORTER = InMemorySpanExporter()
 _provider = TracerProvider()
 _provider.add_span_processor(SimpleSpanProcessor(SPAN_EXPORTER))
 trace.set_tracer_provider(_provider)
+
+METRIC_READER = InMemoryMetricReader()
+metrics.set_meter_provider(MeterProvider(metric_readers=[METRIC_READER]))
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 TEST_RABBITMQ_URL = os.environ.get("TEST_RABBITMQ_URL")
@@ -139,6 +146,30 @@ def _forget_spans() -> Iterator[None]:
     """Спаны теста не копятся в памяти до конца сессии: экспортёр общий на все тесты."""
     yield
     SPAN_EXPORTER.clear()
+
+
+@pytest.fixture(autouse=True)
+def _restore_excepthooks() -> Iterator[None]:
+    """`run_worker` ставит глобальные excepthook'и — тест возвращает прежние.
+
+    `run_worker` вызывается не только тестами старта воркера, но и тестами
+    цикла и телеметрии, поэтому фикстура общая на все тесты: без неё хуки
+    утекали бы на всю pytest-сессию.
+    """
+    sys_hook, thread_hook = sys.excepthook, threading.excepthook
+    yield
+    sys.excepthook = sys_hook
+    threading.excepthook = thread_hook
+
+
+@pytest.fixture(scope="session")
+def metric_reader() -> InMemoryMetricReader:
+    """Метрики бизнес-сигналов — из глобального провайдера в память.
+
+    Значения приборов копятся кумулятивно за сессию, поэтому тесты сверяют
+    приращение между двумя сборами, а не абсолют.
+    """
+    return METRIC_READER
 
 
 @pytest.fixture
