@@ -10,7 +10,7 @@
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -288,34 +288,16 @@ class CaseResult:
     steps: tuple[StepResult, ...]
     findings: tuple[FindingResult, ...]
     reviews: tuple[PublishedReview, ...]
-    # Подтверждена/отвергнута хотя бы одна доставка сообщения этого PR.
+    # Чем кончилась доставка сообщения PR: ack или nack (ушло бы в DLQ).
     acked: bool
     nacked: bool
     expected: tuple[ExpectedIssue, ...]
-    # Сколько раз сообщение PR пришло воркеру (2 - при повторной доставке).
-    deliveries: int = 1
-    # Исход каждой доставки по порядку: ack, nack или "не доставлено" - повтор
-    # после nack, сообщение уже в DLQ.
-    delivery_outcomes: tuple[str, ...] = ()
     unexpected_requests: tuple[tuple[str, str], ...] = field(default_factory=tuple)
-
-
-@dataclass(frozen=True, slots=True)
-class RawResult:
-    """Чем кончилась доставка сырого сообщения очереди."""
-
-    index: int
-    path_or_label: str
-    acked: bool
-    nacked: bool
-    # Тип и текст исключения обработчика; `None` - обработчик не упал.
-    error: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class SandboxResult:
     cases: list[CaseResult]
-    raw: list[RawResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,17 +307,6 @@ class _Delivery:
     delivery_tag: int
 
 
-def delivery_outcome(channel: FakeChannel, tag: int) -> str:
-    """Чем кончилась доставка с тегом `tag` (теги - позиции с единицы)."""
-    if tag in channel.acked:
-        return "ack"
-    if tag in channel.nacked:
-        return "nack"
-    if tag - 1 in channel.skipped:
-        return "не доставлено"
-    return "не обработано"
-
-
 def _collect(
     case: PrInput,
     n: int,
@@ -343,7 +314,6 @@ def _collect(
     uow: FakeUnitOfWork,
     github: FakeGitHub,
     channel: FakeChannel,
-    tags: Sequence[int],
     unexpected: tuple[tuple[str, str], ...],
 ) -> CaseResult:
     run = uow.review_runs.get(job.review_run_id)
@@ -394,11 +364,10 @@ def _collect(
         steps=steps,
         findings=findings,
         reviews=reviews,
-        acked=any(tag in channel.acked for tag in tags),
-        nacked=any(tag in channel.nacked for tag in tags),
+        # Тег доставки PR - его номер: одно сообщение на PR, теги с единицы.
+        acked=n in channel.acked,
+        nacked=n in channel.nacked,
         expected=case.expected,
-        deliveries=sum(tag - 1 not in channel.skipped for tag in tags),
-        delivery_outcomes=tuple(delivery_outcome(channel, tag) for tag in tags),
         unexpected_requests=unexpected,
     )
 
@@ -408,22 +377,11 @@ def run_sandbox(
     config: SandboxConfig,
     *,
     llm: LlmGateway | None = None,
-    raw_messages: Sequence[bytes] = (),
-    raw_labels: Sequence[str] = (),
-    redeliver: bool = False,
-    prepare_github: Callable[[FakeGitHub, Sequence[int]], None] | None = None,
 ) -> SandboxResult:
     """Прогнать PR через настоящий воркер; одно сообщение очереди на PR.
 
-    `llm` - свой шлюз модели вместо адаптера из настроек. `redeliver` -
-    каждое сообщение PR приходит повторно с новым delivery tag, как
-    после потерянного ack. Повтор - только после ack: после nack сообщение
-    уже в DLQ, и брокер его не вернёт. `raw_messages` - сырые тела очереди после
-    сообщений PR; `raw_labels` - их подписи в результате (по умолчанию
-    `raw#<номер>`). `prepare_github(github, номера PR)` вызывается после
-    открытия всех PR и до потребления - место для внедрения сбоев.
-
-    `WorkerConfigError` из проверки окна выходит наружу до первого сообщения.
+    `llm` - свой шлюз модели вместо адаптера из настроек. `WorkerConfigError`
+    из проверки окна выходит наружу до первого сообщения.
     """
     private_key = app_private_key()
     settings = build_settings(config, private_key, external_llm=llm is not None)
@@ -443,35 +401,20 @@ def run_sandbox(
 
     uow = FakeUnitOfWork()
     _seed_repository(uow, datetime.now(UTC))
+    numbers = range(1, len(prs) + 1)
     jobs = [
         seed_case(pr, n, github, uow, config.rules_config)
-        for n, pr in enumerate(prs, start=1)
+        for n, pr in zip(numbers, prs, strict=True)
     ]
-    numbers = list(range(1, len(prs) + 1))
-    if prepare_github is not None:
-        prepare_github(github, numbers)
-
-    # Владелец каждой доставки по её позиции: ("pr", номер PR) или ("raw", индекс).
-    owners: list[tuple[str, int]] = []
-    bodies: list[bytes] = []
-    # Номер повторной доставки -> номер исходной (с нуля).
-    redelivery_of: dict[int, int] = {}
-    for n, job in zip(numbers, jobs, strict=True):
-        body = json.dumps(to_wire_message(job)).encode("utf-8")
-        owners.append(("pr", n))
-        bodies.append(body)
-        if redeliver:
-            redelivery_of[len(bodies)] = len(bodies) - 1
-            owners.append(("pr", n))
-            bodies.append(body)
-    for index, raw in enumerate(raw_messages):
-        owners.append(("raw", index))
-        bodies.append(raw)
     # Без заголовков: `consuming_span` начнёт новый трейс, как для сообщения без
-    # traceparent. Тег доставки - её позиция с единицы, теги не повторяются.
+    # traceparent. Тег доставки - номер PR.
     deliveries = [
-        (_Delivery(delivery_tag=pos), SimpleNamespace(headers={}), body)
-        for pos, body in enumerate(bodies, start=1)
+        (
+            _Delivery(delivery_tag=n),
+            SimpleNamespace(headers={}),
+            json.dumps(to_wire_message(job)).encode("utf-8"),
+        )
+        for n, job in zip(numbers, jobs, strict=True)
     ]
 
     handler = build_review_handler(
@@ -480,60 +423,30 @@ def run_sandbox(
         llm_limits(settings),
         prompt_texts,
     )
-    channel = FakeChannel(deliveries, redelivery_of=redelivery_of)
+    channel = FakeChannel(deliveries)
 
     # Неожиданные запросы к GitHub - по PR: обработчик оборачивается и снимает
     # срез `github.unexpected` до и после своего сообщения. Чьё сообщение
     # обрабатывается, говорит канал (`current`), а не порядок вызовов.
     unexpected_by_case: dict[int, list[tuple[str, str]]] = {}
-    raw_errors: dict[int, str] = {}
 
     def handle(body: bytes) -> None:
         assert channel.current is not None, "обработчик вызван вне доставки"
-        kind, key = owners[channel.current]
+        n = numbers[channel.current]
         before = len(github.unexpected)
         try:
             handler(body)
-        except Exception as error:
-            if kind == "raw":
-                raw_errors[key] = f"{type(error).__name__}: {error}"
-            raise
         finally:
-            if kind == "pr":
-                unexpected_by_case.setdefault(key, []).extend(github.unexpected[before:])
+            unexpected_by_case.setdefault(n, []).extend(github.unexpected[before:])
 
     worker = Worker(connection=FakeConnection(), channel=channel)  # type: ignore[arg-type]
     worker.run(handle, limit=len(deliveries))
 
-    tags_by_owner: dict[tuple[str, int], list[int]] = {}
-    for pos, owner in enumerate(owners, start=1):
-        tags_by_owner.setdefault(owner, []).append(pos)
-
-    cases = [
-        _collect(
-            pr,
-            n,
-            job,
-            uow,
-            github,
-            channel,
-            tags_by_owner[("pr", n)],
-            tuple(unexpected_by_case.get(n, ())),
-        )
-        for n, pr, job in zip(numbers, prs, jobs, strict=True)
-    ]
-    raw_results = []
-    for index in range(len(raw_messages)):
-        tags = tags_by_owner[("raw", index)]
-        raw_results.append(
-            RawResult(
-                index=index,
-                path_or_label=raw_labels[index]
-                if index < len(raw_labels)
-                else f"raw#{index + 1}",
-                acked=any(tag in channel.acked for tag in tags),
-                nacked=any(tag in channel.nacked for tag in tags),
-                error=raw_errors.get(index),
+    return SandboxResult(
+        cases=[
+            _collect(
+                pr, n, job, uow, github, channel, tuple(unexpected_by_case.get(n, ()))
             )
-        )
-    return SandboxResult(cases=cases, raw=raw_results)
+            for n, pr, job in zip(numbers, prs, jobs, strict=True)
+        ]
+    )

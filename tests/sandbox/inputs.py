@@ -1,9 +1,7 @@
 """Что песочница ревьюит: PR из кейса корпуса, YAML-файла или диапазона git.
 
 Это «сторона API» песочницы: вместо вебхука и записи в базу - готовый PR,
-который `worker.seed_case` кладёт в фейковый GitHub и в фейковую базу. Сырое
-сообщение очереди (`load_raw_message`) идёт в обход PR - так проверяется,
-как воркер разбирает битое или чужое тело.
+который `worker.seed_case` кладёт в фейковый GitHub и в фейковую базу.
 """
 
 import logging
@@ -11,6 +9,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 from ..eval.rules.corpus import Case, load_case
 from ..eval.scoring import ExpectedIssue
@@ -60,22 +60,18 @@ def from_case(case: Case) -> PrInput:
 
 
 def load_case_file(path: Path) -> PrInput:
-    """YAML в формате корпуса; раздел `expected` необязателен."""
+    """YAML в формате корпуса; раздел `expected` необязателен.
+
+    Битый YAML и неверная структура (`files:` списком, нет ключа) - `InputError`,
+    а не traceback: плохой вход - код выхода 2, а не 1.
+    """
     if not path.is_file():
         raise InputError(f"файла кейса {path} нет")
     try:
         case = load_case(path, expected_required=False)
-    except (KeyError, TypeError, ValueError) as error:
+    except (yaml.YAMLError, AttributeError, KeyError, TypeError, ValueError) as error:
         raise InputError(f"кейс {path} не разобрать: {error}") from error
     return from_case(case)
-
-
-def load_raw_message(path: Path) -> bytes:
-    """Тело сообщения очереди как есть, без проверки формата."""
-    try:
-        return path.read_bytes()
-    except OSError as error:
-        raise InputError(f"файл сообщения {path} не прочитать: {error}") from error
 
 
 def _git(repo: Path, *args: str) -> bytes:

@@ -3,7 +3,8 @@
 Локальный прогон настоящего воркера на мок-данных: тот же цикл потребления (`Worker.run`), тот же
 пайплайн ревью (`run_review`) и промпты из `prompts/review/`, что в бою, — но без Docker,
 PostgreSQL, RabbitMQ и GitHub. Нужна только локальная модель в Ollama. Подходит для ручной
-отладки промптов, контекста и поведения при сбоях.
+отладки промптов и контекста. Сбои GitHub и повторная доставка сообщений здесь не моделируются —
+их проверяют тесты воркера (`tests/worker/`) и e2e (`tests/e2e/`).
 
 ## Быстрый старт
 
@@ -111,7 +112,7 @@ make sandbox-git RANGE=develop..HEAD
 | Цель | Модель отвечает |
 |---|---|
 | `make sandbox-stub` | пустыми ответами |
-| `make sandbox-oracle` | ровно размеченными нарушениями кейса (`expected`) |
+| `make sandbox-oracle` | ровно размеченными нарушениями кейса (`expected`); кейс узнаёт по пути файла, поэтому пути файлов в PR одного прогона не должны повторяться — иначе код 2 |
 | `make sandbox-script` | по сценарию из JSON (`SCRIPT`, кейс — `CASE_FILE`) |
 
 Сценарий модели — JSON-список записей, по одной на вызов модели
@@ -119,50 +120,34 @@ make sandbox-git RANGE=develop..HEAD
 
 ```json
 [
-  {"review": [{"path": "app/billing/discount.py", "line": 7, "message": "...",
-               "category": "correctness", "severity": "high"}], "tokens": 1200},
-  {"verify": [["F1", "keep"]], "tokens": 300},
+  {"review": [{"filePath": "app/billing/discount.py", "line": 7, "message": "...",
+               "category": "correctness", "severity": "high",
+               "suggestion": {"diff": "..."}}], "tokens": 1200},
+  {"verify": [{"id": "F1", "verdict": "keep", "reason": "..."}], "tokens": 300},
   {"error": "output"}
 ]
 ```
 
-- `review` — ответ ревью: замечания `{path, line, message, category?, severity?, rule?: [имя, пункт], side?}` и необязательная `summary`;
-- `verify` — вердикты верификатора `keep` / `drop` по кандидатам `F1`, `F2`, … в порядке после отсева;
-- `error` — отказ модели: `output`, `timeout`, `rate_limited`, `unavailable`. На ревью он роняет прогон (`failed`), на верификации кандидаты публикуются без неё.
+Запись — ровно один из ключей `review`, `verify`, `error` и необязательный `tokens` (целое от 0):
+
+- `{"review": [<замечание>, …], "summary"?: {…}}` — замечания в форме ответа модели
+  (`app/application/llm_schema.py`, camelCase): `filePath`, `line`, `message` обязательны;
+  `side` (`new`), `category` (`readability`), `severity` (`low`), `confidence` (`null`) — по
+  умолчанию; `suggestion: {"diff": "…"}` и `rule: {"name", "check"}` — по желанию. Без `summary` —
+  сводка-заглушка;
+- `{"verify": [{"id": "F1", "verdict": "keep" | "drop", "reason"?: "…"}, …]}` — кандидаты
+  `F1`, `F2`, … в порядке после отсева;
+- `{"error": "output" | "timeout" | "rate_limited" | "unavailable"}` — отказ модели: на ревью
+  роняет прогон (`failed`), на верификации кандидаты публикуются без неё.
+
+Ответ модели можно вставить целиком, как она его вернула: `{"review": {"schemaVersion": "1",
+"findings": […], "summary": {…}}}` или `{"verify": {"schemaVersion": "1", "verdicts": […]}}`.
+Проверяют те же модели, что и ответ настоящей модели: лишний ключ, чужое значение или неверный
+тип — ошибка с номером записи и местом в ней (`запись 0: … findings.1.severity`).
 
 Записи расходуются по порядку: на каждый PR — запись ревью, затем запись верификации, но только
 если после отсева остался хоть один кандидат. Записи кончились — `AssertionError` на лишнем вызове,
 сообщение уходит в nack.
-
-## Сбои GitHub и очереди
-
-Сбои фейкового GitHub — `FAULTS` у любой цели песочницы (через пробел) или `--github-fault`:
-
-```bash
-make sandbox-demo FAULTS="review-502-stored latency=0.2"
-```
-
-| Сбой | Что делает |
-|---|---|
-| `review-502-stored` | `POST …/reviews` отвечает 502, хотя ревью записано: повтор не должен опубликовать дубликат |
-| `review-502` | 502 до записи ревью, повтор публикует |
-| `review-rate-limit` | 429 вторичного лимита с `Retry-After: 1` |
-| `graphql-500` | каждый запрос GraphQL (треды) отвечает 500 |
-| `review-comments-500` | `GET …/reviews/{id}/comments` отвечает 500 |
-| `foreign-review` | на каждом PR уже есть ревью человека |
-| `latency=SEC` | задержка SEC секунд перед каждым ответом |
-
-Отказы `review-*` встают в одну очередь на все PR, по одному на запрос `POST …/reviews`; чтобы
-отказать дважды, сбой задают дважды.
-
-Очередь — флаги через `ARGS`:
-
-- `--redeliver` — каждое сообщение PR приходит повторно, как после потерянного ack; после nack повтора нет — сообщение уже в DLQ;
-- `--message <путь>` — сырое тело сообщения, доставляется после PR как есть (пример битого — [`examples/bad-message.json`](examples/bad-message.json)).
-
-```bash
-make sandbox-oracle CASE=04-users-sql-injection FAULTS=review-502-stored ARGS=--redeliver
-```
 
 ## Все параметры
 
@@ -177,25 +162,26 @@ make sandbox-oracle CASE=04-users-sql-injection FAULTS=review-502-stored ARGS=--
 | `CASE_FILE`, `SCRIPT` | файлы из `examples/` | кейс и сценарий для `sandbox-script` |
 | `RANGE` | `develop..HEAD` | диапазон git для `sandbox-git` |
 | `RULES` | `rules` | содержимое `.review/rules.md`: `absent`, `rules`, `empty`, `adversarial` |
-| `FAULTS` | — | сбои GitHub через пробел |
 | `ARGS` | — | любые ключи CLI ниже |
 
 Ключи CLI (`uv run python -m tests.sandbox --help`):
 
 - `--llm {ollama,stub,oracle,script}` — модель, по умолчанию `ollama`; `--llm-script <путь>` — сценарий для `script`;
 - `--model`, `--ollama-url` — модель и адрес Ollama;
-- `--case <id>`, `--case-file <путь>`, `--from-git <BASE..HEAD>` (и `--repo <каталог>`) — входные PR, можно повторять; собираются в этом порядке. Без них и без `--message` берутся все кейсы корпуса;
-- `--message <путь>`, `--redeliver`, `--github-fault <сбой>` — сбои, см. выше;
+- `--case <id>`, `--case-file <путь>`, `--from-git <BASE..HEAD>` (и `--repo <каталог>`) — входные PR, можно повторять; собираются в этом порядке. Без них берутся все кейсы корпуса;
 - `--rules {absent,rules,empty,adversarial}` — содержимое `.review/rules.md`;
-- `--window`, `--context-max-tokens` — под окно маленькой модели: если полный пакет в окно не влезает, воркер не стартует;
+- `--window`, `--context-max-tokens`, `--max-output-tokens` — под окно маленькой модели: если полный пакет вместе с потолком ответа в окно не влезает, воркер не стартует;
 - `--json <путь>` — весь результат прогона в JSON;
 - `-v` — логи воркера.
 
 Коды выхода:
 
 - `0` — все PR дошли до `completed`, сообщения подтверждены;
-- `1` — сообщение какого-то PR ушло в nack или прогон не `completed`; сырые сообщения (`--message`) в код не входят — их дело быть отвергнутыми;
-- `2` — вход не собрать (нет файла, не тот диапазон git, битый сценарий, неизвестный сбой), Ollama недоступна, модель не скачана или окно не подходит.
+- `1` — сообщение какого-то PR ушло в nack или прогон не `completed`;
+- `2` — вход не собрать (нет файла, битый YAML кейса, не тот диапазон git, битый сценарий, повтор пути файла с `--llm oracle`), Ollama недоступна, модель не скачана или окно не подходит.
+
+Неожиданные запросы к GitHub (маршрут, которого фейк не знает) печатаются в отчёте и считаются в
+итоге, но в код выхода не входят: песочница — для ручной отладки.
 
 ## Что пошло не так
 

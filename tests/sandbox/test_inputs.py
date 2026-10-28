@@ -1,11 +1,11 @@
-"""Сборка PR песочницы из диапазона git: `from_git` и `_parse_range`."""
+"""Сборка PR песочницы: YAML-кейс (`load_case_file`) и диапазон git (`from_git`)."""
 
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from .inputs import MAX_FILE_BYTES, InputError, _parse_range, from_git
+from .inputs import MAX_FILE_BYTES, InputError, _parse_range, from_git, load_case_file
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -16,6 +16,23 @@ def _git(repo: Path, *args: str) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "title: [не закрыт\n",
+        "title: t\npull_request: {title: t, description: d}\nfiles:\n  - a.py\n",
+    ],
+    ids=["broken-yaml", "files-as-list"],
+)
+def test_load_case_file_rejects_malformed_yaml(tmp_path: Path, text: str) -> None:
+    """Битый YAML и `files:` списком - `InputError` (код выхода 2), а не traceback."""
+    path = tmp_path / "case.yaml"
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(InputError, match="не разобрать"):
+        load_case_file(path)
 
 
 @pytest.mark.parametrize("range_spec", ["HEAD", "..HEAD", "HEAD..", "A...B"])

@@ -3,11 +3,11 @@
 Прогоняет PR через настоящий воркер на фейках и печатает, что воркер сделал:
 статус прогона, шаги, замечания и опубликованное ревью. PR - кейсы корпуса eval
 (`--case`), YAML-файлы в формате корпуса (`--case-file`) и диапазоны git
-(`--from-git`); сырые сообщения очереди (`--message`) идут после них. Модель -
-локальная Ollama (`--llm ollama`), заглушка (`stub`), оракул по разметке
-(`oracle`) или сценарий из JSON (`script`). Код выхода: 0 - все PR `completed`
-и подтверждены, 1 - есть nack или незавершённый прогон, 2 - вход или окружение
-не готовы. Сырые сообщения в код выхода не входят: их дело - быть отвергнутыми.
+(`--from-git`). Модель - локальная Ollama (`--llm ollama`), заглушка (`stub`),
+оракул по разметке (`oracle`) или сценарий из JSON (`script`). Код выхода:
+0 - все PR `completed` и подтверждены, 1 - есть nack или незавершённый прогон,
+2 - вход или окружение не готовы. Неожиданные запросы к GitHub печатаются в
+отчёте, но в код выхода не входят: песочница - для ручной отладки.
 """
 
 import argparse
@@ -28,17 +28,9 @@ from app.worker.factory import WorkerConfigError
 
 from ..eval.rules.corpus import CONFIGS, Case, load_corpus
 from ..eval.rules.oracle import OracleLlmGateway
-from ..fakes.github_api import FAULTS, FakeGitHub, FaultError
 from ..fakes.llm_gateway import ScriptError, load_llm_script
-from .inputs import (
-    InputError,
-    PrInput,
-    from_case,
-    from_git,
-    load_case_file,
-    load_raw_message,
-)
-from .worker import CaseResult, RawResult, SandboxConfig, run_sandbox
+from .inputs import InputError, PrInput, from_case, from_git, load_case_file
+from .worker import CaseResult, SandboxConfig, run_sandbox
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 PREFLIGHT_TIMEOUT_SECONDS = 3.0
@@ -82,8 +74,8 @@ def _parse_args(
         action="append",
         choices=case_ids,
         metavar="ID",
-        help="id кейса корпуса; можно повторять. Без --case, --case-file, --from-git"
-        " и --message - все кейсы: " + ", ".join(case_ids),
+        help="id кейса корпуса; можно повторять. Без --case, --case-file и --from-git"
+        " - все кейсы: " + ", ".join(case_ids),
     )
     parser.add_argument(
         "--case-file",
@@ -108,28 +100,6 @@ def _parse_args(
         help="репозиторий для --from-git (по умолчанию текущий каталог)",
     )
     parser.add_argument(
-        "--message",
-        action="append",
-        type=Path,
-        default=[],
-        metavar="PATH",
-        help="сырое тело сообщения очереди, доставляется после PR; можно повторять",
-    )
-    parser.add_argument(
-        "--redeliver",
-        action="store_true",
-        help="каждое сообщение PR приходит повторно, как после потерянного ack;"
-        " после nack повтора нет - сообщение уже в DLQ",
-    )
-    parser.add_argument(
-        "--github-fault",
-        action="append",
-        default=[],
-        metavar="SPEC",
-        help="сбой фейкового GitHub; можно повторять: "
-        + "; ".join(f"{name} - {what}" for name, what in FAULTS.items()),
-    )
-    parser.add_argument(
         "--json",
         type=Path,
         metavar="PATH",
@@ -150,6 +120,12 @@ def _parse_args(
         help="потолок пакета контекста (CONTEXT_MAX_TOKENS)",
     )
     parser.add_argument(
+        "--max-output-tokens",
+        type=_positive_int,
+        metavar="N",
+        help="потолок ответа модели в токенах (LLM_MAX_OUTPUT_TOKENS)",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="логи воркера уровня INFO"
     )
     args = parser.parse_args(argv)
@@ -158,11 +134,14 @@ def _parse_args(
     return args
 
 
-def _check_faults(specs: Sequence[str]) -> None:
-    """Неизвестный сбой - `FaultError` до прогона, а не посреди него."""
-    probe = FakeGitHub("", 0, "")
-    for spec in specs:
-        probe.apply_fault(spec, ())
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"нужно целое больше нуля, а не {value!r}")
+    return number
 
 
 def _collect_inputs(args: argparse.Namespace, by_id: dict[str, Case]) -> list[PrInput]:
@@ -170,9 +149,25 @@ def _collect_inputs(args: argparse.Namespace, by_id: dict[str, Case]) -> list[Pr
     prs = [from_case(by_id[i]) for i in args.case or ()]
     prs += [load_case_file(path) for path in args.case_file]
     prs += [from_git(spec, args.repo) for spec in args.from_git]
-    if not prs and not args.message:
+    if not prs:
         prs = [from_case(case) for case in by_id.values()]
     return prs
+
+
+def _check_oracle_paths(prs: Sequence[PrInput]) -> None:
+    """Оракул узнаёт кейс по пути файла: путь не должен повторяться между PR."""
+    owners: dict[str, str] = {}
+    for pr in prs:
+        for path, content in pr.head_files.items():
+            if content is None:
+                continue
+            if path in owners:
+                raise InputError(
+                    f"--llm oracle: файл {path} есть и в {owners[path]}, и в {pr.id};"
+                    " оракул узнаёт кейс по пути файла, поэтому пути PR не должны"
+                    " повторяться - уберите повтор или возьмите другую модель"
+                )
+            owners[path] = pr.id
 
 
 def _llm_gateway(args: argparse.Namespace, prs: Sequence[PrInput]) -> LlmGateway | None:
@@ -180,6 +175,7 @@ def _llm_gateway(args: argparse.Namespace, prs: Sequence[PrInput]) -> LlmGateway
     if args.llm == "stub":
         return StubLlmGateway()
     if args.llm == "oracle":
+        _check_oracle_paths(prs)
         return OracleLlmGateway(
             [
                 Case(
@@ -251,11 +247,6 @@ def _print_case(result: CaseResult) -> None:
         if result.acked
         else "не обработано"
     )
-    if len(result.delivery_outcomes) > 1:
-        delivery = ", повтор: ".join(
-            "nack (ушло бы в DLQ)" if outcome == "nack" else outcome
-            for outcome in result.delivery_outcomes
-        )
     print(
         f"статус: {result.status}; сообщение: {delivery}; модель: {result.model or '—'};"
         f" длительность: {_seconds(result.duration_seconds)}"
@@ -302,19 +293,6 @@ def _print_case(result: CaseResult) -> None:
             print(f"  {method} {path}")
 
 
-def _print_raw(result: RawResult) -> None:
-    delivery = (
-        "nack (ушло бы в DLQ)"
-        if result.nacked
-        else "ack"
-        if result.acked
-        else "не обработано"
-    )
-    print(f"\n=== сырое сообщение {result.path_or_label}: {delivery}")
-    if result.error:
-        print(f"ошибка обработчика: {_cut(result.error, COMMENT_LIMIT)}")
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     corpus = load_corpus()
     by_id = {case.id: case for case in corpus}
@@ -330,11 +308,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("--llm-script работает только с --llm script", file=sys.stderr)
         return 2
     try:
-        _check_faults(args.github_fault)
         prs = _collect_inputs(args, by_id)
-        messages = [load_raw_message(path) for path in args.message]
         llm = _llm_gateway(args, prs)
-    except (InputError, ScriptError, FaultError) as error:
+    except (InputError, ScriptError) as error:
         print(error, file=sys.stderr)
         return 2
 
@@ -351,34 +327,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         rules_config=args.rules,
         window_tokens=args.window,
         context_max_tokens=args.context_max_tokens,
+        max_output_tokens=args.max_output_tokens,
     )
-    faults = tuple(args.github_fault)
-
-    def prepare_github(github: FakeGitHub, numbers: Sequence[int]) -> None:
-        for spec in faults:
-            github.apply_fault(spec, numbers)
-
     model = args.model if args.llm == "ollama" else args.llm
     print(
-        f"песочница: {len(prs)} PR, сырых сообщений {len(messages)}, модель: {model},"
-        f" правила: {args.rules}",
+        f"песочница: {len(prs)} PR, модель: {model}, правила: {args.rules}",
         flush=True,
     )
     started = time.monotonic()
     try:
-        sandbox = run_sandbox(
-            prs,
-            config,
-            llm=llm,
-            raw_messages=messages,
-            raw_labels=[str(path) for path in args.message],
-            redeliver=args.redeliver,
-            prepare_github=prepare_github if faults else None,
-        )
+        sandbox = run_sandbox(prs, config, llm=llm)
     except WorkerConfigError as error:
         print(
             f"Воркер не стартует с такой конфигурацией окна: {error}\n"
-            "Увеличьте --window или уменьшите --context-max-tokens.",
+            "Увеличьте --window или уменьшите --context-max-tokens"
+            " и --max-output-tokens.",
             file=sys.stderr,
         )
         return 2
@@ -387,8 +350,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     for result in results:
         _print_case(result)
-    for raw in sandbox.raw:
-        _print_raw(raw)
 
     completed = sum(r.status == "completed" for r in results)
     nacked = sum(r.nacked for r in results)
@@ -398,9 +359,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         f"\nитого: кейсов {len(results)}, completed {completed}, nack {nacked},"
         f" inline-комментариев {comments}, ожидалось нарушений {expected},"
-        f" неожиданных запросов к GitHub {unexpected},"
-        f" сырых сообщений {len(sandbox.raw)} (nack {sum(r.nacked for r in sandbox.raw)}),"
-        f" время {elapsed:.1f} с"
+        f" неожиданных запросов к GitHub {unexpected}, время {elapsed:.1f} с"
     )
     if args.json is not None:
         args.json.write_text(
