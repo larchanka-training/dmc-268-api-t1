@@ -131,17 +131,15 @@ until rabbitmqctl -q await_startup > /dev/null 2>&1; do
 done'
 
 # Скрипт — в sh контейнера, пароль — первой строкой его stdin. Вывод — в лог
-# шага; дошло до смены («меняю») — сервис в `passwords-changed`, и упавший
-# после этого шаг тоже: пароль мог смениться.
+# шага построчно; дошло до смены («меняю») — сервис сразу в
+# `passwords-changed`: шаг, снятый по тайм-ауту или упавший после этого,
+# summary тоже покажет — пароль мог смениться. Код возврата `docker exec`
+# доходит до `set -e` через pipefail.
 set_password() { # контейнер, сервис, скрипт, пароль
-  local out status=0
-  out="$(mktemp)"
-  printf '%s\n' "$4" | docker exec -i "$1" sh -c "$3" | tee "$out" || status=$?
-  if grep -q -- '— меняю$' "$out"; then
-    echo "$2" >> "$report_dir/passwords-changed"
-  fi
-  rm -f "$out"
-  return "$status"
+  printf '%s\n' "$4" | docker exec -i "$1" sh -c "$3" | while IFS= read -r line; do
+    printf '%s\n' "$line"
+    case "$line" in *'— меняю') echo "$2" >> "$report_dir/passwords-changed" ;; esac
+  done
 }
 
 docker exec -i dmc268-rabbitmq sh -c "$rabbitmq_await_sh" < /dev/null

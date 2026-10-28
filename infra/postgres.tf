@@ -129,4 +129,3 @@ resource "docker_container" "postgres" {
     retries  = 5
   }
 }
-
