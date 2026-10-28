@@ -53,14 +53,18 @@ from app.worker.factory import (
 
 from ..eval.rules.corpus import CONFIGS
 from ..eval.scoring import ExpectedIssue
-from ..fakes.github_api import APP_ID, FakeGitHub, app_private_key
+from ..fakes.github_api import (
+    APP_ID,
+    INSTALLATION_ID,
+    REPO_FULL_NAME,
+    REPO_PROVIDER_ID,
+    FakeGitHub,
+    app_private_key,
+)
 from ..fakes.queue import FakeChannel, FakeConnection
 from ..fakes.unit_of_work import FakeUnitOfWork
 from .inputs import PrInput
 
-REPO_FULL_NAME = "acme/payments"
-REPO_PROVIDER_ID = "700100"
-INSTALLATION_ID = 31337
 REPOSITORY_ID = UUID(int=0x700100)
 # Заглушки адресов: песочница к ним не ходит, но `Settings` их требует.
 PLACEHOLDER_DATABASE_URL = "postgresql+psycopg://sandbox:sandbox@localhost:1/sandbox"
