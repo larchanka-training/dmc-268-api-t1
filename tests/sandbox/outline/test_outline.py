@@ -1,7 +1,10 @@
 """Песочница tree-sitter: входы (`--file`/`--lines`, ключ `lines:` кейса)."""
 
+import dataclasses
 import json
 import os
+import random
+import shutil
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError
@@ -19,15 +22,24 @@ from app.domain.enums import Language
 from ...fakes.github_api import file_diff
 from ..inputs import InputError, PrInput, load_case_file
 from ..worker import SandboxConfig
-from .__main__ import _print_pr, compress_lines, main
+from .__main__ import _print_pr, _problems, compress_lines, main
 from .grammars import main as grammars_main
 from .runner import _RecordingExtractor, run_outline
-from .sources import from_file, load_outline_case, parse_lines, with_touched
+from .sources import (
+    OutlinePr,
+    from_file,
+    load_outline_case,
+    parse_lines,
+    touched_diff,
+    with_touched,
+)
 
 
 def _touched(pr: PrInput, path: str) -> frozenset[int]:
-    """Затронутые строки файла в диффе, который построит фейковый GitHub."""
-    [parsed] = parse_diff(file_diff(path, pr.base_files.get(path), pr.head_files[path]))
+    """Затронутые строки файла в диффе, который увидит этап сборки контекста."""
+    diffs = pr.diffs if isinstance(pr, OutlinePr) else {}
+    diff = diffs.get(path) or file_diff(path, pr.base_files.get(path), pr.head_files[path])
+    [parsed] = parse_diff(diff)
     return touched_lines(parsed.hunks)
 
 
@@ -89,6 +101,71 @@ def test_from_file_lines_on_big_file_with_blank_borders(
     pr = from_file(tmp_path / "big.py", "123-130")
 
     assert _touched(pr, "big.py") == set(range(123, 131))
+
+
+def test_parse_lines_names_reversed_range() -> None:
+    with pytest.raises(InputError, match="перевёрнут"):
+        parse_lines("10-5", 20)
+
+
+# Хвост или промежуток, совпадающий с концом диапазона: difflib по тексту
+# сопоставил бы его с такой же строкой внутри диапазона (PR #236).
+_SHIFTING = [
+    # Неизменённая `...` сразу после диапазона, последняя строка диапазона - тоже `...`.
+    ("def a():\n    ...\n    ...\n", "1-2"),
+    # То же для одиночной строки.
+    ("x = 1\n    ...\n    ...\n", "2"),
+    # Пустая строка в промежутке двух диапазонов.
+    ("a = 1\n\n\n\nb = 2\n", "1-2, 4-5"),
+]
+
+
+@pytest.mark.parametrize(("source", "spec"), _SHIFTING)
+def test_from_file_lines_do_not_shift_onto_equal_lines(
+    tmp_path: Path, monkeypatch, source: str, spec: str
+) -> None:
+    (tmp_path / "m.py").write_text(source, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    pr = from_file(tmp_path / "m.py", spec)
+
+    assert _touched(pr, "m.py") == parse_lines(spec, len(source.splitlines()))
+    # Фейковый GitHub по тексту ошибся бы - иначе тест ничего не ловит.
+    [old] = parse_diff(file_diff("m.py", pr.base_files["m.py"], source))
+    assert touched_lines(old.hunks) != _touched(pr, "m.py")
+
+
+def test_touched_diff_is_exact_on_random_ranges_of_repo_files() -> None:
+    """Случайные диапазоны, одиночные и парами, по файлам репозитория."""
+    rnd = random.Random(236)
+    files = sorted(p for p in (REPO_ROOT / "app").rglob("*.py") if p.stat().st_size)
+    for _ in range(300):
+        path = rnd.choice(files)
+        text = path.read_text(encoding="utf-8")
+        total = len(text.splitlines())
+        start = rnd.randint(1, total)
+        lines = set(range(start, rnd.randint(start, min(total, start + 20)) + 1))
+        if rnd.random() < 0.5:
+            other = rnd.randint(1, total)
+            lines |= set(range(other, min(total, other + 5) + 1))
+        diff = touched_diff("m.py", text, frozenset(lines))
+        [parsed] = parse_diff(diff)
+        assert touched_lines(parsed.hunks) == lines, (path, sorted(lines))
+
+
+def test_from_file_outside_cwd_keeps_absolute_path(tmp_path: Path, monkeypatch) -> None:
+    """`../dir/m.py` - без `..` в пути PR: фейковый GitHub его находит."""
+    (tmp_path / "dir").mkdir()
+    (tmp_path / "dir" / "m.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
+
+    pr = from_file(Path("../dir/m.py"), None)
+
+    rel = (tmp_path / "dir" / "m.py").resolve().as_posix()
+    assert list(pr.head_files) == [rel]
+    [file] = run_outline([pr], SandboxConfig()).prs[0].files
+    assert (file.status, file.definitions) == ("in_context", 1)
 
 
 def test_from_file_rejects_missing_and_binary(tmp_path: Path) -> None:
@@ -355,6 +432,39 @@ def test_run_outline_drops_deep_scopes_at_minimal_budget() -> None:
     assert outline.omitted_count >= len(outline.omitted)
 
 
+def test_run_outline_twins_beyond_file_limit_are_skipped(monkeypatch) -> None:
+    """Одинаковый файл сверх `ast_max_files` не получает контур близнеца."""
+    monkeypatch.setenv("AST_MAX_FILES", "1")
+    util = "def helper() -> int:\n    return 1\n"
+    pr = _pr("twins", {}, {"pkg_a/util.py": util, "pkg_b/util.py": util})
+
+    [outline] = run_outline([pr], SandboxConfig()).prs
+
+    files = {f.path: f for f in outline.files}
+    assert files["pkg_a/util.py"].definitions == 1
+    twin = files["pkg_b/util.py"]
+    assert (twin.status, twin.reason, twin.definitions) == ("skipped", "file_limit", None)
+
+
+def test_run_outline_empty_ast_costs_zero_tokens() -> None:
+    [outline] = run_outline([_pr("md", {}, {"a.md": "x\n"})], SandboxConfig()).prs
+
+    assert (outline.ast, outline.ast_tokens) == ((), 0)
+
+
+@pytest.mark.parametrize("reason", ["missing", "unavailable", "parse_error"])
+def test_problems_flag_files_the_fake_github_should_have_served(reason: str) -> None:
+    [outline] = run_outline(
+        [_pr("p", {}, {"a.py": "def f():\n    return 1\n"})], SandboxConfig()
+    ).prs
+    [file] = outline.files
+    broken = dataclasses.replace(file, status="skipped", reason=reason)
+
+    assert _problems(dataclasses.replace(outline, files=(broken,))) == [
+        f"a.py: {reason}"
+    ]
+
+
 def test_run_outline_flags_empty_outline_and_too_large() -> None:
     """Код из одних выражений - пустой контур; файл больше `ast_max_file_bytes` - без AST."""
     huge = "".join(f"def f{n}() -> int:\n    return {n}\n\n\n" for n in range(9_000))
@@ -564,14 +674,30 @@ def test_main_bad_input_exits_2_with_one_line(
     assert err.count("\n") == 1
 
 
-def test_main_empty_outline_exits_1_unless_allowed(tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize(
+    "source", ["print(1)\nx = 2 + 3\n", '"""Пакет."""\n', "LIMIT = 10\n"]
+)
+def test_main_empty_outline_is_a_warning(tmp_path: Path, capsys, source: str) -> None:
+    """Пустой контур - и у нормальных файлов (docstring, константы): код 0."""
     script = tmp_path / "script.py"
-    script.write_text("print(1)\nx = 2 + 3\n", encoding="utf-8")
+    script.write_text(source, encoding="utf-8")
 
-    assert main(["--file", str(script)]) == 1
-    assert "пустой контур" in capsys.readouterr().out
-    assert main(["--file", str(script), "--allow-empty"]) == 0
-    assert "проблемы: -" in capsys.readouterr().out
+    assert main(["--file", str(script)]) == 0
+    out = capsys.readouterr().out
+    assert "предупреждение: пустой контур" in out
+    assert "проблемы: -" in out
+
+
+def test_main_json_write_error_exits_2(tmp_path: Path, capsys) -> None:
+    script = tmp_path / "m.py"
+    script.write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    code = main(["--file", str(script), "--json", str(tmp_path / "absent" / "x.json")])
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "результат не записан" in err
+    assert "Traceback" not in err
 
 
 def test_main_large_python_file_does_not_crash(tmp_path: Path) -> None:
@@ -631,7 +757,7 @@ def test_main_prints_every_status_line(tmp_path: Path, monkeypatch, capsys) -> N
     monkeypatch.chdir(tmp_path)
 
     code = main(
-        ["--case-file", "case.yaml", "--context-max-tokens", "1024", "--allow-empty"]
+        ["--case-file", "case.yaml", "--context-max-tokens", "1024"]
     )
 
     out = capsys.readouterr().out
@@ -766,8 +892,17 @@ def _doctor(*args: str, path: str | None = None) -> subprocess.CompletedProcess[
     )
 
 
-def test_doctor_without_uv_fails_with_hint() -> None:
-    result = _doctor(path="/usr/bin:/bin")
+def test_doctor_without_uv_fails_with_hint(tmp_path: Path) -> None:
+    """В `PATH` - только то, что нужно скрипту, без `uv`: системный `/usr/bin` может
+    его и содержать, если `uv` поставлен пакетным менеджером."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("bash", "git"):
+        found = shutil.which(tool)
+        assert found is not None, tool
+        (bin_dir / tool).symlink_to(found)
+
+    result = _doctor(path=str(bin_dir))
 
     assert result.returncode == 1, result.stdout
     assert "✗ uv не установлен" in result.stdout

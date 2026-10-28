@@ -43,6 +43,7 @@ from ...fakes.github_api import (
 from ...fakes.unit_of_work import FakeUnitOfWork
 from ..inputs import PrInput
 from ..worker import SandboxConfig, build_settings, seed_case
+from .sources import OutlinePr
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +123,28 @@ class _RecordingExtractor:
             raise
         self.outlines[(source, language)] = outline
         return outline
+
+
+class _RecordingVcs(GitHubVcsGateway):
+    """Настоящий адаптер, запоминающий, какие файлы этап реально загрузил.
+
+    Контур ищется по тексту файла, а одинаковые по содержимому файлы есть и в
+    одном PR: без этой записи файл сверх `ast_max_files` получил бы контур
+    своего близнеца.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.fetched: dict[tuple[str, str], str | None] = {}
+
+    def fetch_file(
+        self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
+    ) -> str | None:
+        source = super().fetch_file(
+            repo_full_name, path, sha, installation_id, max_bytes=max_bytes
+        )
+        self.fetched[(path, sha)] = source
+        return source
 
 
 def _unfence(fenced: str) -> str:
@@ -245,7 +268,7 @@ def run_outline(
     client = github.client()
     client.timeout = WORKER_VCS_LIMITS.timeout
     auth = GitHubAppAuth(APP_ID, private_key, client)
-    vcs = GitHubVcsGateway(
+    vcs = _RecordingVcs(
         auth,
         client,
         sleep=lambda _: None,
@@ -255,6 +278,9 @@ def run_outline(
     result = OutlineResult()
     for n, pr in enumerate(prs, start=1):
         job = seed_case(pr, n, github, FakeUnitOfWork(), config.rules_config)
+        if isinstance(pr, OutlinePr) and pr.diffs:
+            # Дифф по номерам строк вместо `difflib` фейкового GitHub (`sources`).
+            github.pulls[n].diff = pr.pull_diff()
         # Свой на каждый PR: файл с тем же текстом не наследует чужой контур.
         extractor = _RecordingExtractor(extractor_factory())
         try:
@@ -293,7 +319,8 @@ def run_outline(
         files = tuple(
             _file_report(
                 parsed,
-                pr.head_files.get(parsed.file_path),
+                # Текст - только у загруженного этапом файла, иначе контура нет.
+                vcs.fetched.get((parsed.file_path, job.head_sha)),
                 shown_hunks=assembled.hunks,
                 ast=ast,
                 omitted=omitted,
@@ -309,7 +336,7 @@ def run_outline(
                 files=files,
                 token_count=assembled.payload.token_count,
                 max_tokens=limits.max_tokens,
-                ast_tokens=estimate_tokens(serialize(ast)),
+                ast_tokens=estimate_tokens(serialize(ast)) if ast else 0,
                 omitted=tuple(omitted),
                 omitted_count=body["omitted_count"],
                 ast=tuple(ast),

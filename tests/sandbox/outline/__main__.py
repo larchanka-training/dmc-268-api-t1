@@ -6,9 +6,10 @@
 пакета и что отброшено. Модели, базы, брокера и сети нет. Входы - кейсы
 корпуса (`--case`), YAML-кейсы с ключом `lines:` (`--case-file`), диапазоны
 git (`--from-git`) и отдельные файлы (`--file` + `--lines`); без входов -
-`examples/outline-case.yaml`. Код выхода: 0 - всё разобрано; 1 - дифф PR не
-получен, `parse_error` или пустой контур (без `--allow-empty`); 2 - вход или
-настройки не подходят.
+`examples/outline-case.yaml`. Код выхода: 0 - всё разобрано (пустой контур -
+только предупреждение); 1 - дифф PR не получен, `parse_error` или файл не
+загружен (`missing`, `unavailable`); 2 - вход или настройки не подходят, отчёт
+не записан.
 """
 
 import argparse
@@ -35,6 +36,9 @@ EXAMPLE = Path(__file__).parent / "examples" / "outline-case.yaml"
 # Сколько записей «отброшено по бюджету» печатать, остальное - числом.
 DROPPED_LIMIT = 10
 
+# Причины пропуска AST, которых на фейковом GitHub быть не должно: это ошибка
+# самой песочницы, а не свойство файла.
+_BROKEN_REASONS = frozenset({"parse_error", "missing", "unavailable"})
 # Однострочные описания статусов без контура; у первых трёх язык не печатается.
 _NO_LANGUAGE = frozenset({"no_grammar", "filtered", "deleted"})
 _STATUS_LINES = {
@@ -124,11 +128,6 @@ def _parse_args(
     parser.add_argument(
         "--json", type=Path, metavar="PATH", help="записать результат в JSON"
     )
-    parser.add_argument(
-        "--allow-empty",
-        action="store_true",
-        help="пустой контур файла с кодом - не проблема (скрипты из одних выражений)",
-    )
     parser.add_argument("-v", "--verbose", action="store_true", help="логи уровня INFO")
     return parser.parse_args(argv)
 
@@ -162,13 +161,15 @@ def _indented(text: str, prefix: str = "    ") -> str:
     return "\n".join(prefix + line for line in text.split("\n"))
 
 
-def _problems(pr: PrOutline, *, allow_empty: bool) -> list[str]:
+def _problems(pr: PrOutline) -> list[str]:
+    """Проблемы PR. Пустой контур сюда не входит: это бывает и у нормального файла
+    (`__init__.py` из docstring, модуль из констант) - его печатает `_print_file`."""
     problems = [f"дифф не получен: {pr.error}"] if pr.error else []
-    for file in pr.files:
-        if file.status == "skipped" and file.reason == "parse_error":
-            problems.append(f"{file.path}: parse_error")
-        if file.empty_outline and not allow_empty:
-            problems.append(f"{file.path}: пустой контур")
+    problems += [
+        f"{file.path}: {file.reason}"
+        for file in pr.files
+        if file.status == "skipped" and file.reason in _BROKEN_REASONS
+    ]
     return problems
 
 
@@ -197,7 +198,10 @@ def _print_file(file: FileOutlineReport, *, full_outline: bool) -> None:
     if file.dropped:
         print(f"  отброшено бюджетом: {', '.join(file.dropped)}")
     if file.empty_outline:
-        print("  пустой контур: в непустом файле нет ни определений, ни импортов")
+        print(
+            "  предупреждение: пустой контур - в непустом файле нет ни определений,"
+            " ни импортов"
+        )
     elif file.status == "no_scopes":
         print("  в контекст: ничего - правка вне определений, импортов нет")
 
@@ -291,9 +295,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     elapsed = time.monotonic() - started
 
-    problems = {
-        pr.number: _problems(pr, allow_empty=args.allow_empty) for pr in result.prs
-    }
+    problems = {pr.number: _problems(pr) for pr in result.prs}
     if args.payload:
         print(_payload(result))
     else:
@@ -311,10 +313,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             f" время {elapsed:.1f} с"
         )
     if args.json is not None:
-        args.json.write_text(
-            json.dumps(dataclasses.asdict(result), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        try:
+            args.json.write_text(
+                json.dumps(dataclasses.asdict(result), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as error:
+            print(f"результат не записан в {args.json}: {error}", file=sys.stderr)
+            return 2
         # При --payload stdout - чистый JSON, поэтому строка о файле - в stderr.
         print(
             f"результат: {args.json}", file=sys.stderr if args.payload else sys.stdout
