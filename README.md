@@ -166,10 +166,13 @@ openssl rand -base64 32 | gh secret set USER_TOKEN_KEY_DMC268_T1 -R larchanka-tr
 
 Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
-Короткие команды по компонентам - в `Makefile`, список - `make help`: `make test-worker`,
-`make test-db` (сам поднимет PostgreSQL и RabbitMQ из compose и базу `dmc268_test`),
-`make sandbox-demo` (песочница воркера с проверкой окружения), `make sandbox-stub`, `make run-worker` и т. д.
-Флаги pytest или песочницы передаются через `ARGS`: `make test-worker ARGS="-k loop -x"`.
+Короткие команды - в `Makefile`, список - `make help`: `make check` (статические проверки как в CI),
+`make test-db` (сам поднимет PostgreSQL и RabbitMQ из compose и базу `dmc268_test`), `make test-all`
+(весь набор как в CI), `make sandbox-demo` (песочница воркера с проверкой окружения), `make run-worker` и т. д.
+Флаги pytest или песочницы передаются через `ARGS`: `make test-db ARGS="-k migration -x"`.
+Тесты с брокером идут в отдельный vhost `dmc268_test` (`make test-queue-vhost`), а не в `/` стека разработки.
+`make run-api`, `make run-worker` и `make migrate` берут настройки из `.env`: процессу make передаёт только
+то, что вы задали явно - в команде (`make run-worker LLM_BACKEND=ollama`) или в окружении оболочки.
 
 ```bash
 uv run pytest                                       # чистые тесты, база не нужна
@@ -233,7 +236,7 @@ make sandbox-demo
 ```
 
 Свои мок-данные, режимы без модели (`make sandbox-stub`, `sandbox-oracle`, `sandbox-script`), сбои
-GitHub и очереди, все ключи и коды выхода — [`tests/sandbox/README.md`](tests/sandbox/README.md).
+очереди, все ключи и коды выхода — [`tests/sandbox/README.md`](tests/sandbox/README.md).
 
 ## Проверки
 
