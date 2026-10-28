@@ -176,6 +176,38 @@ def test_from_file_rejects_missing_and_binary(tmp_path: Path) -> None:
         from_file(tmp_path / "bin.py", None)
 
 
+def _deny_read(monkeypatch, name: str) -> None:
+    """`read_text` файла `name` падает как без прав: от root и `chmod` не зависит."""
+    real = Path.read_text
+
+    def read_text(self: Path, *args, **kwargs) -> str:
+        if self.name == name:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+
+def test_main_unreadable_file_is_input_error(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Нечитаемый `--file` - код 2 и сообщение, а не traceback и код 1."""
+    (tmp_path / "m.py").write_text("a = 1\n", encoding="utf-8")
+    _deny_read(monkeypatch, "m.py")
+
+    code = main(["--file", str(tmp_path / "m.py")])
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "m.py не прочитать: Permission denied" in err
+    assert "Traceback" not in err
+
+
+def test_load_outline_case_unreadable_is_input_error(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "case.yaml").write_text("files: []\n", encoding="utf-8")
+    _deny_read(monkeypatch, "case.yaml")
+    with pytest.raises(InputError, match="case.yaml не прочитать: Permission denied"):
+        load_outline_case(tmp_path / "case.yaml")
+
+
 def test_from_file_lines_rejects_other_line_separators(tmp_path: Path) -> None:
     """`\\x0c` - разделитель для `str.splitlines()`: номера строк разошлись бы с редактором."""
     (tmp_path / "m.py").write_text("a = 1\n\x0c\nb = 2\nc = 3\n", encoding="utf-8")

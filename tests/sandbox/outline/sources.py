@@ -147,6 +147,8 @@ def from_file(path: Path, lines: str | None) -> OutlinePr:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
         raise InputError(f"файл {path} не в UTF-8") from error
+    except OSError as error:
+        raise InputError(f"файл {path} не прочитать: {error.strerror}") from error
     rel = _relative(path)
     base: dict[str, str] = {}
     diffs: dict[str, str] = {}
@@ -175,8 +177,11 @@ def load_outline_case(path: Path) -> OutlinePr:
     Файлы из `lines:` получают базу с заглушками, остальные остаются новыми.
     Для `make sandbox CASE_FILE=…` ключ безвреден: `load_case_file` его не читает.
     """
-    pr = load_case_file(path)
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        pr = load_case_file(path)
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise InputError(f"кейс {path} не прочитать: {error.strerror}") from error
     spec = raw.get("lines")
     if spec is None:
         spec = {}
