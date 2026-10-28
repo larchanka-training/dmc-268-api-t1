@@ -83,7 +83,11 @@ class ReviewRunRepo(Protocol):
 
     def list_unpublished_failures(self, merge_request_id: UUID) -> list[ReviewRun]:
         """Прогоны PR в `failed` с этапом сбоя `publishing` и без единой записи в
-        `published_comments`: их ревью могло остаться на хостинге без следа в базе."""
+        `published_comments`: их ревью могло остаться на хостинге без следа в базе.
+
+        Только созданные позже последнего прогона PR с записями: прогон, упавший до
+        чужой успешной публикации, уже проверяли, и каждый следующий прогон не
+        листает ради него ревью PR заново."""
         ...
 
     def list_changed(

@@ -10,6 +10,7 @@ from uuid import UUID
 from app.application.merge_gate_publish import (
     build_merge_gate_check,
     collect_open_findings,
+    settle_merge_gate,
 )
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
@@ -129,6 +130,16 @@ def refresh_merge_gate_for_merge_request(
         head_sha,
         installation_id,
         build_merge_gate_check(still_open),
+    )
+    # Целевую ветку могли сменить после чтения прогона выше (#222).
+    settle_merge_gate(
+        uow,
+        vcs,
+        merge_request_id=merge_request_id,
+        repo_full_name=repo_full_name,
+        head_sha=head_sha,
+        installation_id=installation_id,
+        run_id=head_run.id,
     )
 
 

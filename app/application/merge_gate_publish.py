@@ -1,11 +1,16 @@
 """Check run merge gate по открытым критичным тредам."""
 
+import logging
 from uuid import UUID
 
 from app.application.ports.unit_of_work import UnitOfWork
+from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import MergeGateCheck
 from app.domain.entities import Finding
+from app.domain.enums import ReviewRunStatus
 from app.domain.merge_gate import merge_blocked_by_findings, untracked_findings
+
+logger = logging.getLogger(__name__)
 
 
 def collect_open_findings(
@@ -49,3 +54,44 @@ def build_retarget_check() -> MergeGateCheck:
         title="Целевая ветка сменилась — идёт повторное ревью",
         summary="Прежнее ревью проверяло дифф против другой ветки. Мердж заблокирован до ревью нового диффа.",
     )
+
+
+def settle_merge_gate(
+    uow: UnitOfWork,
+    vcs: VcsGateway,
+    *,
+    merge_request_id: UUID,
+    repo_full_name: str,
+    head_sha: str,
+    installation_id: int,
+    run_id: UUID,
+) -> None:
+    """Поправить gate, только что выставленный по прогону `run_id`, если тот уже не
+    отвечает за head (#222).
+
+    Гонка со сменой целевой ветки: приём сначала коммитит отмену старого прогона и
+    новый прогон, потом выставляет блокировку. Кто выставил gate по старому прогону,
+    перечитывает последний прогон на head после своего POST: если приём уже
+    закоммитил, здесь видна смена и gate переписывается; если нет - блокировка
+    приёма придёт позже и перекроет `success`. Так любая перестановка кончается
+    gate актуального прогона. Сбой хостинга - `VcsError` вызывающему.
+    """
+    with uow:
+        latest = uow.review_runs.find_latest(merge_request_id, head_sha)
+    if latest is None or (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED):
+        return
+    if latest.status is ReviewRunStatus.COMPLETED:
+        # Новый прогон успел завершиться: его gate мог уйти раньше нашего POST.
+        check = build_merge_gate_check(
+            collect_open_findings(uow, merge_request_id, head_run_id=latest.id)
+        )
+    else:
+        check = build_retarget_check()
+    logger.info(
+        "merge gate %s@%s переписан: прогон %s больше не отвечает за head, последний - %s",
+        repo_full_name,
+        head_sha,
+        run_id,
+        latest.id,
+    )
+    vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)

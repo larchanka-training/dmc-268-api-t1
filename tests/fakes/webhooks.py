@@ -50,7 +50,9 @@ def webhook_payload(action: str = "opened") -> dict[str, Any]:
     return raw
 
 
-def pr_metadata(base_sha: str = "fedcba0987654321fedcba0987654321fedcba09") -> PRMetadata:
+def pr_metadata(
+    base_sha: str = "fedcba0987654321fedcba0987654321fedcba09", target_branch: str = "main"
+) -> PRMetadata:
     """Свежие метаданные VCS.
 
     Заголовок, автор и ветки нарочно отличаются от payload'а вебхука: так
@@ -65,7 +67,7 @@ def pr_metadata(base_sha: str = "fedcba0987654321fedcba0987654321fedcba09") -> P
         description="",
         author="grinv",
         source_branch="feat/webhook-intake-rebased",
-        target_branch="main",
+        target_branch=target_branch,
         state=MergeRequestState.OPEN,
     )
 

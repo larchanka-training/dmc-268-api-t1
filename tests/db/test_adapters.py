@@ -714,7 +714,7 @@ def test_bot_threads_of_a_merge_request_keep_resolution_and_coverage(uow) -> Non
 
 def test_unpublished_failures_are_runs_that_died_publishing_without_a_comment(uow) -> None:
     """#222: кандидаты на подбор ревью - `failed` на `publishing` без `published_comments`,
-    только своего PR."""
+    только своего PR и новее последнего прогона с записями: старшие уже проверяли."""
 
     def failed(mr_id, stage: ReviewRunStatus, at: dt.datetime) -> ReviewRun:
         return replace(
@@ -729,10 +729,11 @@ def test_unpublished_failures_are_runs_that_died_publishing_without_a_comment(uo
         work.merge_requests.add(other_mr)
         orphan = failed(mr.id, ReviewRunStatus.PUBLISHING, LATER)
         earlier_orphan = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW)
-        recorded = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW)
+        recorded = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW - dt.timedelta(minutes=1))
+        checked_before = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW - dt.timedelta(minutes=2))
         analysing = failed(mr.id, ReviewRunStatus.ANALYSING, NOW)
         foreign = failed(other_mr.id, ReviewRunStatus.PUBLISHING, NOW)
-        for run in (orphan, earlier_orphan, recorded, analysing, foreign):
+        for run in (orphan, earlier_orphan, recorded, checked_before, analysing, foreign):
             work.review_runs.add(run)
         work.commit()
     with uow as work:

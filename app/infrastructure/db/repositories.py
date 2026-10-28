@@ -28,7 +28,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import InstrumentedAttribute, Session
+from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 
 from app.domain.entities import (
     BotThread,
@@ -272,6 +272,13 @@ class SqlAlchemyReviewRunRepo:
         published = select(PublishedCommentRow.id).where(
             PublishedCommentRow.review_run_id == ReviewRunRow.id
         )
+        published_run = aliased(ReviewRunRow)
+        last_published_at = (
+            select(func.max(published_run.created_at))
+            .join(PublishedCommentRow, PublishedCommentRow.review_run_id == published_run.id)
+            .where(published_run.merge_request_id == merge_request_id)
+            .scalar_subquery()
+        )
         rows = self._session.scalars(
             select(ReviewRunRow)
             .where(
@@ -279,6 +286,7 @@ class SqlAlchemyReviewRunRepo:
                 ReviewRunRow.status == ReviewRunStatus.FAILED,
                 ReviewRunRow.failed_stage == ReviewRunStatus.PUBLISHING,
                 ~published.exists(),
+                or_(last_published_at.is_(None), ReviewRunRow.created_at > last_published_at),
             )
             .order_by(ReviewRunRow.created_at, ReviewRunRow.id)
         ).all()

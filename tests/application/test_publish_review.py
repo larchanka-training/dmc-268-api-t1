@@ -4,12 +4,15 @@ import itertools
 import logging
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import pytest
 
+from app.application.merge_gate_publish import build_retarget_check
 from app.application.ports.llm_gateway import LlmReviewResult
+from app.application.ports.unit_of_work import ActiveRunConflict
 from app.application.ports.vcs_review import InlineCommentDraft, ReviewThreadState
 from app.application.publish_review import publish_review
 from app.domain.entities import (
@@ -709,3 +712,99 @@ def test_run_cancelled_while_publishing_sets_no_merge_gate(caplog: pytest.LogCap
     assert len(vcs.publications) == 1
     assert vcs.checks == []
     assert any(str(RUN_ID) in r.getMessage() for r in caplog.records)
+
+
+class _RetargetDuringGateVcs(RecordingVcsGateway):
+    """GitHub, на чей первый POST check run гонкой приходится смена целевой ветки:
+    приём отменяет прогон и коммитит новый - ровно то, что делает `handle_webhook`."""
+
+    def __init__(self, uow: FakeUnitOfWork, new_status: ReviewRunStatus) -> None:
+        super().__init__()
+        self._uow = uow
+        self._new_status = new_status
+
+    def set_merge_gate_check(self, *args: Any) -> None:
+        super().set_merge_gate_check(*args)
+        if len(self.checks) > 1:
+            return
+        stale = self._uow.review_runs.get(RUN_ID)
+        assert stale is not None
+        self._uow.review_runs.add(replace(stale, status=ReviewRunStatus.CANCELLED))
+        moment = NOW + timedelta(minutes=1)
+        self._uow.review_runs.add(
+            replace(stale, id=UUID(int=77), status=self._new_status, created_at=moment, updated_at=moment)
+        )
+
+
+def test_retarget_racing_the_gate_of_a_stale_run_ends_in_failure() -> None:
+    """Блокер #225: прогон прочитал статус до отмены и выставил `success` по старому
+    диффу уже после блокировки приёма - он перечитывает прогон и возвращает блокировку."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    vcs = _RetargetDuringGateVcs(uow, ReviewRunStatus.QUEUED)
+
+    _publish_first_run(uow, run, vcs)
+
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
+    assert vcs.checks[-1] == build_retarget_check()
+
+
+def test_gate_of_a_stale_run_yields_to_a_completed_review_of_the_new_target() -> None:
+    """Новый прогон успел завершиться: gate выставляется по нему, а не блокировкой."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    vcs = _RetargetDuringGateVcs(uow, ReviewRunStatus.COMPLETED)
+
+    _publish_first_run(uow, run, vcs)
+
+    assert [c.conclusion for c in vcs.checks] == ["success", "success"]
+    assert vcs.checks[-1] != build_retarget_check()
+
+
+def test_orphan_adopted_by_a_concurrent_run_does_not_fail_publishing() -> None:
+    """Два прогона одновременно подобрали одно ревью: проигравший видит отказ
+    уникального индекса, откатывает подбор и публикует своё ревью."""
+    uow = FakeUnitOfWork()
+    _seed_orphan(uow)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    uow.commit_errors = [ActiveRunConflict("uq_published_comments_provider_comment_id")]
+    vcs = RecordingVcsGateway(stored_reviews={ORPHAN_RUN_ID})
+
+    _publish(uow, vcs)
+
+    assert len(vcs.publications) == 1
+    assert uow.published_comments.list_for_run(ORPHAN_RUN_ID) == []
+
+
+def test_orphan_older_than_a_published_run_is_not_looked_up_again() -> None:
+    """Упавший прогон старше прогона, который потом опубликовал ревью: его уже
+    проверяли - GitHub ради него не листаем."""
+    uow = FakeUnitOfWork()
+    _seed_orphan(uow)
+    _current_finding(uow, severity=FindingSeverity.CRITICAL)
+    published_run = UUID(int=55)
+    orphan = uow.review_runs.get(ORPHAN_RUN_ID)
+    assert orphan is not None
+    later = orphan.created_at + timedelta(minutes=1)
+    uow.review_runs.add(
+        replace(orphan, id=published_run, status=ReviewRunStatus.COMPLETED, failed_stage=None, created_at=later)
+    )
+    uow.published_comments.add(
+        PublishedComment(
+            id=UUID(int=56),
+            review_run_id=published_run,
+            finding_id=None,
+            provider_comment_id="later-summary",
+            kind=CommentKind.SUMMARY,
+            published_at=later,
+            created_at=later,
+            updated_at=later,
+        )
+    )
+    vcs = RecordingVcsGateway(stored_reviews={ORPHAN_RUN_ID})
+
+    _publish(uow, vcs)
+
+    assert vcs.found_review_requests == []
