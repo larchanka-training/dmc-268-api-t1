@@ -17,8 +17,6 @@ RULES      ?= rules
 # Сценарий модели и кейс для sandbox-script; диапазон git для sandbox-git.
 SCRIPT     ?= tests/sandbox/examples/llm-script.json
 CASE_FILE  ?= tests/sandbox/examples/case.yaml
-# Мок-PR для sandbox-demo.
-DEMO_CASE  ?= tests/sandbox/examples/case.yaml
 RANGE      ?= develop..HEAD
 # Дополнительные ключи: для sandbox - его флаги, для test-* - флаги pytest.
 ARGS       ?=
@@ -60,7 +58,7 @@ OPENSPEC := npx --yes @fission-ai/openspec@1.15.0
 
 .DEFAULT_GOAL := help
 .PHONY: help check \
-	sandbox-demo sandbox-doctor sandbox-down sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
+	sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
 	test-db test-queue test-e2e test-all \
 	infra-up infra-down test-db-create test-queue-vhost migrate run-api run-worker
 
@@ -79,36 +77,6 @@ check: ## Статические проверки как в CI: lock, ruff, lint
 
 # --- песочница воркера: всё подменено, кроме модели ------------------------------
 
-sandbox-demo: ## Начать отсюда: проверить окружение, поднять Ollama и модель, прогнать мок-PR (MODEL, DEMO_CASE)
-	@printf '\n\033[1m==> 1/4 Проверка окружения\033[0m\n'
-	@OLLAMA_URL='$(OLLAMA_URL)' MODEL='$(MODEL)' scripts/sandbox-doctor.sh
-	@printf '\n\033[1m==> 2/4 Зависимости Python (uv sync)\033[0m\n'
-	@uv sync --all-extras
-	@printf '\n\033[1m==> 3/4 Ollama и модель $(MODEL)\033[0m\n'
-	@$(MAKE) --no-print-directory ollama-up ollama-pull
-	@printf '\n\033[1m==> 4/4 Прогон воркера на мок-PR $(DEMO_CASE)\033[0m\n'
-	@uv run python -m tests.sandbox --llm ollama --model '$(MODEL)' --ollama-url '$(OLLAMA_URL)' \
-		--case-file '$(DEMO_CASE)' $(SANDBOX_FLAGS); status=$$?; echo; \
-	case $$status in \
-		0) printf '\033[32mГотово: прогон completed, сообщение подтверждено (ack).\033[0m\n' ;; \
-		1) printf '\033[31mПрогон не завершился или сообщение ушло в nack - см. отчёт выше; подробнее: make sandbox-demo ARGS=-v\033[0m\n' ;; \
-		*) printf '\033[31mВход или окружение не подошли (код %s) - причина в строке выше.\033[0m\n' $$status ;; \
-	esac; \
-	echo "Дальше: другая модель - MODEL=..., свой PR - DEMO_CASE=путь.yaml, остановить Ollama - make sandbox-down."; \
-	echo "Подробно: tests/sandbox/README.md"; \
-	exit $$status
-
-sandbox-doctor: ## Проверить окружение песочницы, ничего не меняя
-	@OLLAMA_URL='$(OLLAMA_URL)' MODEL='$(MODEL)' scripts/sandbox-doctor.sh
-
-sandbox-down: ## Остановить Ollama, если её запустил make ollama-up
-	@if [ -f .ollama.pid ] && ps -p "$$(cat .ollama.pid)" -o command= 2>/dev/null | grep -q ollama; then \
-		kill "$$(cat .ollama.pid)" && echo "Ollama (pid $$(cat .ollama.pid)) остановлена"; \
-	else \
-		echo "Ollama, запущенной через make, нет - ничего не делаю"; \
-	fi; \
-	rm -f .ollama.pid
-
 sandbox: ollama-up ollama-pull ## Воркер на корпусе PR с локальной Ollama (MODEL, CASE, RULES, ARGS)
 	uv run python -m tests.sandbox --llm ollama --model '$(MODEL)' --ollama-url '$(OLLAMA_URL)' $(SANDBOX_FLAGS)
 
@@ -124,14 +92,13 @@ sandbox-script: ## Воркер на CASE_FILE со сценарием моде�
 sandbox-git: ## Воркер на диапазоне git RANGE с заглушкой модели (RULES, ARGS)
 	uv run python -m tests.sandbox --llm stub --from-git '$(RANGE)' $(SANDBOX_FLAGS)
 
-ollama-up: ## Поднять ollama serve в фоне, если она ещё не отвечает (остановить - make sandbox-down)
+ollama-up: ## Поднять ollama serve в фоне, если она ещё не отвечает
 	@if curl -sf '$(OLLAMA_URL)/api/tags' >/dev/null; then \
 		echo "Ollama уже отвечает на $(OLLAMA_URL)"; \
 	else \
 		command -v ollama >/dev/null || { echo "ollama не установлена: brew install ollama" >&2; exit 1; }; \
 		echo "Запускаю ollama serve в фоне, лог - .ollama.log"; \
 		OLLAMA_HOST='$(OLLAMA_URL)' nohup ollama serve >.ollama.log 2>&1 & \
-		echo $$! >.ollama.pid; \
 		for i in $$(seq 1 30); do curl -sf '$(OLLAMA_URL)/api/tags' >/dev/null && exit 0; sleep 1; done; \
 		echo "Ollama не ответила за 30 с, см. .ollama.log" >&2; exit 1; \
 	fi
@@ -152,16 +119,9 @@ test-queue: infra-up test-queue-vhost ## Адаптер RabbitMQ: tests/queue
 test-e2e: infra-up test-db-create test-queue-vhost ## Сквозной стенд вебхук → воркер → GitHub: tests/e2e
 	$(INFRA_TEST_ENV) uv run pytest tests/e2e $(ARGS)
 
-# Как job'ы test и chaos в CI. Chaos-сьют (tests/chaos, маркер chaos) приходит с #225:
-# пока каталога нет, второй прогон пропускается с сообщением.
-test-all: infra-up test-db-create test-queue-vhost ## Весь набор как в CI, вместе с chaos: пропуск = провал
+# Как job test в CI.
+test-all: infra-up test-db-create test-queue-vhost ## Весь набор как job test в CI: пропуск = провал
 	PYTEST_FAIL_ON_SKIP=1 $(INFRA_TEST_ENV) uv run pytest -q -rs $(ARGS)
-	@if [ -d tests/chaos ]; then \
-		echo "PYTEST_FAIL_ON_SKIP=1 ... uv run pytest -m chaos -q -rs tests/chaos"; \
-		PYTEST_FAIL_ON_SKIP=1 $(INFRA_TEST_ENV) uv run pytest -m chaos -q -rs tests/chaos; \
-	else \
-		echo "tests/chaos нет в этой ветке - chaos-сьют пропущен"; \
-	fi
 
 # --- инфраструктура и сервисы -----------------------------------------------------
 
