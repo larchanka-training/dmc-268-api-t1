@@ -69,14 +69,18 @@ resource "docker_container" "replication_setup" {
     "PGPASSWORD=${var.postgres_password}",
     "PGDATABASE=${var.postgres_db}",
     "REPLICATION_PASSWORD=${var.postgres_replication_password}",
-    "SETUP_SQL=${file("${path.module}/postgres/replication-setup.sql")}",
+    "SETUP_SQL=${chomp(file("${path.module}/postgres/replication-setup.sql"))}",
   ]
 
   # depends_on не ждёт готовности базы (`wait` у postgres срабатывает только
-  # при его создании), поэтому повторяем.
+  # при его создании), поэтому повторяем. За SQL в stdin — пароль дважды: его
+  # читает `\password` последней строкой SQL (printf — встроенный в sh, в `ps`
+  # пароля нет; в логе — только его подсказки «Enter new password»). chomp у
+  # SQL — без него пустая строка после `\password` стала бы первым ответом, и
+  # psql отказал бы «Passwords didn't match» (проверено на dind).
   command = [
     "sh", "-c",
-    "for i in $(seq 1 30); do printf '%s\\n' \"$SETUP_SQL\" | psql -f - && exit 0; sleep 2; done; exit 1",
+    "for i in $(seq 1 30); do printf '%s\\n' \"$SETUP_SQL\" \"$REPLICATION_PASSWORD\" \"$REPLICATION_PASSWORD\" | psql -X -q -f - && exit 0; sleep 2; done; exit 1",
   ]
 
   lifecycle {

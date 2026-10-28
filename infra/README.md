@@ -101,7 +101,7 @@ cd infra && tofu init -backend=false -upgrade && tofu providers lock \
 
 Стенд катится сам при мерже в `develop` (`.github/workflows/deploy.yml`). `main` в деплое не участвует: сервер один, и два источника дрались бы за него.
 
-Порядок такой: образ собирается и публикуется в `ghcr.io/larchanka-training/dmc-268-api-t1` с тегом по commit sha → сверка, что коммит всё ещё вершина `develop` (`check-tip.sh`) → поднимается хранилище состояния и туннель к нему → targeted-план сети, базы и брокера в файл, сторож и его apply (`infra.sh`) → план полного выката в файл и сторож томов (`plan.sh`) → миграции (`.github/scripts/deploy/migrate.sh`) → `tofu apply` этого плана (`apply.sh`) → проверка `/health` через туннель и проверка воркера → уборка образов → summary (`summary.sh`). Если упал шаг, который пишет состояние, между apply и проверками идёт восстановление состояния (раздел «Если деплой упал посреди apply»).
+Порядок такой: образ собирается и публикуется в `ghcr.io/larchanka-training/dmc-268-api-t1` с тегом по commit sha → сверка, что коммит всё ещё вершина `develop` (`check-tip.sh`) → поднимается хранилище состояния и туннель к нему → targeted-план сети, базы и брокера в файл, сторож и его apply (`infra.sh`) → план полного выката в файл и сторож томов (`plan.sh`) → pull образа API → пароли базы и брокера из секретов (`passwords.sh`, раздел «Смена паролей») → миграции (`.github/scripts/deploy/migrate.sh`) → `tofu apply` этого плана (`apply.sh`) → проверка `/health` через туннель и проверка воркера → уборка образов → summary (`summary.sh`). Если упал шаг, который пишет состояние, между apply и проверками идёт восстановление состояния (раздел «Если деплой упал посреди apply»).
 
 **Устаревший коммит не катится.** `gate` сверяет коммит с вершиной `develop`, но только у `workflow_run` и только при своём запуске, а «Re-run failed jobs» успешный `gate` не перезапускает и берёт его выход `sha` из первой попытки. Поэтому первым шагом после checkout job `deploy` сверяет коммит ещё раз (`check-tip.sh`) — и для ручного запуска тоже: вершина ушла — остальные шаги пропускаются, job зелёный, в summary «пропущен: вершина develop уже …». Перезапуск упавшего деплоя, пока за ним не пришёл новый коммит, катит как обычно. Публичной проверки здесь нет: API снаружи не публикуется, а его доступность по `https://62.169.24.237/api/v1/` проверяет деплой интерфейса.
 
@@ -109,7 +109,7 @@ cd infra && tofu init -backend=false -upgrade && tofu providers lock \
 
 **Тома данных деплой не уничтожает.** У каждого тома (`docker_volume.postgres`, `docker_volume.rabbitmq`, `docker_volume.postgres_replica`, `docker_volume.postgres_backups`) — `lifecycle { prevent_destroy = true }`: план, который уничтожает или заменяет том, OpenTofu отклоняет до изменений на сервере с `Error: Resource instance cannot be destroyed`. Это действует и на targeted apply шага «Поднять базу и брокер» — `-target=docker_container.postgres` тянет том зависимостью; тот же сторож `scripts/deploy_report.py` смотрит и его план (`infra.sh`). Полный выкат идёт планом в файл: `plan.sh` строит `tofu plan -out=tfplan` сразу после targeted apply, и `scripts/deploy_report.py` по `tofu show -json` дублирует проверку для summary — падает, если план уничтожает или заменяет любой `docker_volume`, и apply не запускается. Списка адресов у сторожа нет: ресурс, переименованный без блока `moved`, уничтожается по старому адресу, и `prevent_destroy` у него уже нет — по списку его бы не поймать. Миграции идут между планом и apply: состояние они не трогают, план не устаревает. Применяется ровно проверенный план (`apply.sh`); если до него не дошло, файл плана удаляет `summary.sh`. Сменить том, как при смене сборки PostgreSQL или версии RabbitMQ, — новым ресурсом с новым адресом (с `prevent_destroy` — его наличие у каждого тома сверяет тест), а прежний снять с учёта блоком `removed { lifecycle { destroy = false } }`: план выйдет `forget` и `create`, старый том с данными останется на сервере до ручного `docker volume rm`. В плане и его JSON пароли лежат открытым текстом: JSON идёт только трубой, файл плана удаляется после apply и артефактом не загружается, обёртка `setup-opentofu`, копирующая stdout tofu в выходы шага, выключена.
 
-**Summary деплоя** пишет `summary.sh` на любом исходе: шаг падения, простой API с разбивкой (SIGTERM старому → выход → `Created` нового → `State.StartedAt` → событие `health_status: healthy` нового; всё, кроме `Created` и `StartedAt`, — из событий Docker, которые `apply.sh` читает потоком всё время apply. `State.Health.Log` — запасной путь, если событий нового контейнера нет: журнал держит пять последних проверок, и после долгого apply первой успешной в нём уже нет — summary тогда помечает простой как недостоверный), оба плана по типам ресурсов (targeted базы и брокера и полный), применённые миграции — а если шаг миграций упал, ревизия, на которой он упал, и ревизия базы по `alembic current`, который `migrate.sh` запускает после сбоя тем же образом под `timeout 60` (по логу alembic не сказать, что откатилось: `autocommit_block` фиксирует всё до себя, а при оборванном ssh код выхода теряется; не ответила база — summary пишет «ревизия базы неизвестна», без «откатено»); упал шаг до alembic (`tofu output`, pull) — так и сказано, свободное место на `/` и в каталоге Docker после уборки и длительность шагов — по засечкам `mark.sh`, без `actions: read` у токена. Подписи значений — ключи OpenTelemetry (`cicd.pipeline.*`, `container.image.*`, `system.filesystem.*`), свои — в `dmc268.deploy.*`.
+**Summary деплоя** пишет `summary.sh` на любом исходе: шаг падения, простой API с разбивкой (SIGTERM старому → выход → `Created` нового → `State.StartedAt` → событие `health_status: healthy` нового; всё, кроме `Created` и `StartedAt`, — из событий Docker, которые `apply.sh` читает потоком всё время apply. `State.Health.Log` — запасной путь, если событий нового контейнера нет: журнал держит пять последних проверок, и после долгого apply первой успешной в нём уже нет — summary тогда помечает простой как недостоверный), оба плана по типам ресурсов (targeted базы и брокера и полный), применённые миграции — а если шаг миграций упал, ревизия, на которой он упал, и ревизия базы по `alembic current`, который `migrate.sh` запускает после сбоя тем же образом под `timeout 60` (по логу alembic не сказать, что откатилось: `autocommit_block` фиксирует всё до себя, а при оборванном ssh код выхода теряется; не ответила база — summary пишет «ревизия базы неизвестна», без «откатено»); упал шаг до alembic (`tofu output`) — так и сказано, свободное место на `/` и в каталоге Docker после уборки и длительность шагов — по засечкам `mark.sh`, без `actions: read` у токена. Подписи значений — ключи OpenTelemetry (`cicd.pipeline.*`, `container.image.*`, `system.filesystem.*`), свои — в `dmc268.deploy.*`.
 
 **Миграции — шаг деплоя до полного `apply`, а не контейнер стека.** Шаг `Применить миграции` запускает `.github/scripts/deploy/migrate.sh`: одноразовый `docker run --rm` того же образа (тот же digest), что сейчас выкатится, с `alembic upgrade head` — на сервере через `DOCKER_HOST=ssh://stand`, в сети данных `dmc268-backend`. Окружение — выход `migrate_env` (`outputs.tf`): те же строки `local.app_env`, что у `api` и `worker`, через env-файл с правами 600, который удаляется после запуска. Упала миграция — шаг падает, полный `apply` не запускается, на стенде остаётся прежняя версия. Проверка `/health` этого не заметила бы: по контракту она отвечает независимо от базы.
 
@@ -117,7 +117,7 @@ cd infra && tofu init -backend=false -upgrade && tofu providers lock \
 
 Пока идут миграции, работает старый код: ломающая миграция (удаление или переименование колонки, которую он читает) даст на стенде короткий сбой во время выката. Пока нет пользователей, это допустимо; для прода — expand/contract в два деплоя (скилл `.agents/skills/alembic-migration`).
 
-Образ лежит в приватном пакете: перед миграциями job входит в `ghcr.io` на раннере (`docker/login-action`, `GITHUB_TOKEN` с `packages: read`), и docker CLI передаёт учётные данные демону сервера вместе с запросом pull. На сервере токен не остаётся. Этот pull в `migrate.sh` — единственный для образа API: учётных данных реестра у провайдера нет, и `api` с `worker` он создаёт из уже скачанного образа.
+Образ лежит в приватном пакете: перед миграциями job входит в `ghcr.io` на раннере (`docker/login-action`, `GITHUB_TOKEN` с `packages: read`), и docker CLI передаёт учётные данные демону сервера вместе с запросом pull. На сервере токен не остаётся. Этот pull — единственный для образа API, он идёт своим шагом «Скачать образ API» до шага паролей (окно смены пароля его не включает, раздел «Смена паролей»): учётных данных реестра у провайдера нет, и `api` с `worker` он создаёт из уже скачанного образа.
 
 **Чистый сервер.** База и брокер должны существовать до миграций, поэтому перед ними каждый деплой (`infra.sh`) строит и применяет targeted-план
 
@@ -129,7 +129,7 @@ tofu apply infra.tfplan
 
 На живом стенде это `No changes` и ожидаемое предупреждение OpenTofu о `-target`; на чистом — создание сети, томов, базы и брокера. У `postgres` `wait = true`: apply возвращается, когда healthcheck зелёный, и миграциям не нужен цикл повторов. Этот же apply обновляет в состоянии выход `migrate_env`: выход зависит от контейнеров базы и брокера (хосты в `local.app_env` — ссылки на них), а выход, не зависящий от целевых ресурсов, targeted apply не записывает. Руками ничего делать не нужно: первый деплой на пустой сервер проходит тем же путём (проверено на чистом локальном Docker 29.9.2).
 
-**Базу и брокер деплой не пересоздаёт.** План, который заменяет или удаляет `docker_container.postgres` или `docker_container.rabbitmq`, сторож отклоняет — и targeted, и полный: apply не запускается, контейнеры те же. Узнаёт он их и по имени контейнера на хосте (`dmc268-postgres`, `dmc268-rabbitmq` в `change.before`/`after` плана): ресурс, переименованный без `moved`, уничтожается по старому адресу, и сверка только по адресу его бы пропустила. Реплику (`docker_container.postgres_replica`) и копии (`docker_container.postgres_backup`) сторож не держит, хотя они тоже на томах данных: API и воркер в них не ходят, данные остаются в защищённых томах, а замена — обычная правка. Реплика при этом останавливается штатно (`destroy_grace_seconds` 60), копия, оборванная на полпути, остаётся `*.partial` и убирается следующим стартом. До миграций их не поднимают: targeted-план — только сети, основной сервер и брокер. Повод к замене — любая правка их env, памяти, `log_opts` или образа; смена `TF_VAR_postgres_password` тоже даёт `postgres must be replaced`, а пароль в существующем томе при этом не меняется (`POSTGRES_PASSWORD` читается только при инициализации), и миграции потом падают с `password authentication failed`. Правку env, `command`, памяти или образа базы и брокера выкатывает ручной запуск с осознанным обходом сторожа: `gh workflow run deploy.yml --ref develop -f allow_stateful_replace=true`. Флаг доходит до сторожа только из `workflow_dispatch` и только у первой попытки (у автоматического деплоя выражение в env шага даёт `false`; Re-run повторил бы inputs старого запуска, поэтому повтор с флагом — новым `gh workflow run`, а не Re-run), замена тогда — `::warning::` и пометка в summary с тем, кто запустил эту попытку (`github.triggering_actor`); уничтожение или замену томов флаг не разрешает никогда. Смену пароля флаг не чинит: контейнер пересоздастся, а пароль в существующем томе останется прежним — это runbook #161. У обоих контейнеров `destroy_grace_seconds = 60`: при ручной замене провайдер ждёт штатной остановки, а не шлёт SIGKILL сразу после стоп-сигнала (было: `kill 2` → `kill 9`, код 137).
+**Базу и брокер деплой не пересоздаёт.** План, который заменяет или удаляет `docker_container.postgres` или `docker_container.rabbitmq`, сторож отклоняет — и targeted, и полный: apply не запускается, контейнеры те же. Узнаёт он их и по имени контейнера на хосте (`dmc268-postgres`, `dmc268-rabbitmq` в `change.before`/`after` плана): ресурс, переименованный без `moved`, уничтожается по старому адресу, и сверка только по адресу его бы пропустила. Реплику (`docker_container.postgres_replica`) и копии (`docker_container.postgres_backup`) сторож не держит, хотя они тоже на томах данных: API и воркер в них не ходят, данные остаются в защищённых томах, а замена — обычная правка. Реплика при этом останавливается штатно (`destroy_grace_seconds` 60), копия, оборванная на полпути, остаётся `*.partial` и убирается следующим стартом. До миграций их не поднимают: targeted-план — только сети, основной сервер и брокер. Повод к замене — правка их `command`, памяти, `log_opts` или образа. Правку `env` план не видит (`ignore_changes = [env]`): там только переменные инициализации тома, и смена `TF_VAR_postgres_password` раньше давала `postgres must be replaced`, не меняя пароль в существующем томе, — миграции потом падали с `password authentication failed`. Пароль теперь выставляет шаг деплоя (раздел «Смена паролей»). Правку `command`, памяти или образа базы и брокера выкатывает ручной запуск с осознанным обходом сторожа: `gh workflow run deploy.yml --ref develop -f allow_stateful_replace=true`. Флаг доходит до сторожа только из `workflow_dispatch` и только у первой попытки (у автоматического деплоя выражение в env шага даёт `false`; Re-run повторил бы inputs старого запуска, поэтому повтор с флагом — новым `gh workflow run`, а не Re-run), замена тогда — `::warning::` и пометка в summary с тем, кто запустил эту попытку (`github.triggering_actor`); уничтожение или замену томов флаг не разрешает никогда. У обоих контейнеров `destroy_grace_seconds = 60`: при ручной замене провайдер ждёт штатной остановки, а не шлёт SIGKILL сразу после стоп-сигнала (было: `kill 2` → `kill 9`, код 137).
 
 **Контейнер `dmc268-migrate`** жил в стеке до #159. Блок `removed` в `app.tf` снимает его с учёта без уничтожения, а `migrate.sh` удаляет остановленный контейнер на сервере: его старые логи и код выхода легко принять за текущие, и он держит прежний образ.
 
@@ -171,6 +171,120 @@ Eurorouter подключается только фоллбэком после �
 | `public_origin` | `https://` + `VPS_DMC268_IP_T1`: интерфейс отдаётся по HTTPS на тот же адрес. Callback `<public_origin>/api/v1/auth/github/callback` регистрируется в настройках GitHub App |
 
 Из этого стека наружу не смотрит ничего. API, PostgreSQL и RabbitMQ публикуются на петле сервера, воркер не публикуется вовсе; снаружи доступен только интерфейс, и API — через его `/api/`.
+
+## Смена паролей
+
+Пароль базы и брокера меняется **обычным деплоем**: новый секрет → деплой. Ручной запуск с `allow_stateful_replace` не нужен, база и брокер не пересоздаются.
+
+**Пароль — печатный ASCII без пробела** (`0x21`–`0x7E`); совет — `openssl rand -hex 24`, но и `openssl rand -base64 24` годится. Пароль базы и брокера едет в URL подключения (`DATABASE_URL`, `RABBITMQ_URL` в `locals.tf`, они же `migrate_env`): `+`, `/`, `=`, `@`, `:`, `%`, кавычки и `\` `urlencode` кодирует в `%XX`, и SQLAlchemy (`make_url`) и pika (`URLParameters`) декодируют их верно — проверено на dind сквозь деплой: `a+b/c=d`, `p@ss:w%rd`, `x'y"z\$` и base64 для базы, брокера и `replicator` (`\password`, `passfile` реплики, `PGPASSWORD` копий). Ломаются пробельные символы: пробел `urlencode` пишет как `+`, а SQLAlchemy и pika читают `+` буквально; `rabbitmqctl` обрезает пробелы по краям — шаг был бы зелёным, а API не вошёл бы; перевод строки разрезал бы пароль в stdin. Пустой пароль, пробел, таб, перевод строки и не-ASCII шаг паролей отклоняет `::error::` до изменений на сервере. Пароль `replicator` шаг не проверяет — правило то же.
+
+`POSTGRES_PASSWORD` и `RABBITMQ_DEFAULT_PASS` образы читают только на пустом томе. Поэтому:
+
+- у `docker_container.postgres` и `docker_container.rabbitmq` — `lifecycle { ignore_changes = [env] }`: в их `env` только переменные инициализации тома, правку план не видит, контейнер не пересоздаётся. Переменной, которая действует при каждом старте, в этом `env` не место — её правка не дошла бы до контейнера (сверяет `tests/test_deploy_passwords.py`);
+- **смену имён** — `postgres_user`, `postgres_db`, `rabbitmq_user` — `ignore_changes` спрятал бы: шаг сменил бы пароль прежней роли, а API и миграции входили бы новой. Её отклоняет `postcondition` контейнера: при `ignore_changes` `self.env` — окружение, с которым контейнер создан, и plan падает `Resource postcondition failed` до изменений на сервере. Новое имя в заведённом томе не появится и после замены контейнера: это новый том. `postcondition` эту замену не поймает: при ручном запуске с `allow_stateful_replace` новый контейнер берёт `env` из конфига, проверка проходит, а в томе остаются старые имена — имена с таким запуском не меняют. `replace_triggered_by` от `terraform_data` не годится — первое создание такого ресурса тоже повод к замене, и переход на эту конфигурацию пересоздал бы базу (проверено на dind);
+- шаг деплоя «Выставить пароли базы и брокера» (`.github/scripts/deploy/passwords.sh`) идёт после проверенного плана и pull образа, до миграций. Он входит новым паролем — в базу по сети, как API (`samenet`, scram), в брокер — `rabbitmqctl authenticate_user`. Вошёл — ничего не меняет, это обычный деплой. Не вошёл — меняет пароль изнутри контейнера: `\password` в `psql` по локальному сокету (`trust` в `postgres/pg_hba.conf`, старый пароль не нужен) и `rabbitmqctl change_password`. Затем входит снова; не вошёл — шаг падает, миграции и apply не идут;
+- миграции и полный apply получают новый пароль из `TF_VAR_*`: apply пересоздаёт всех, у кого он в окружении.
+
+Пароль не попадает ни в аргументы команд (их видно в `ps` на сервере), ни в лог шага: он идёт первой строкой stdin `docker exec -i`, дальше — встроенным `printf` в stdin `psql` и `rabbitmqctl`. На сервер PostgreSQL открытый пароль не уходит вовсе: `\password` без tty читает его из stdin и шлёт `ALTER USER … PASSWORD 'SCRAM-SHA-256$…'` — в лог запросов (`log_statement`, `log_min_duration_statement`) и в `pg_stat_activity.query`, которую видит `pg_monitor`, попадает только хеш (проверено на pg18 с `log_statement = all` и `log_min_duration_statement = 0`). Так же теперь и `replication-setup`: `\password replicator` последней строкой `postgres/replication-setup.sql`.
+
+| Секрет | Чей пароль | Кто им входит | Что пересоздаёт apply |
+| --- | --- | --- | --- |
+| `PG_PASSWORD_DMC268_T1` | роль `dmc268`: владелец базы и суперпользователь кластера (`POSTGRES_USER`) | `api`, `worker`, миграции (`DATABASE_URL`), `replication-setup`, `postgres-backup` (`PGPASSWORD`) | `api`, `worker`, `replication-setup`, `postgres-backup` |
+| `RABBITMQ_PASSWORD_DMC268_T1` | пользователь `dmc268` брокера | `api`, `worker` (`RABBITMQ_URL`; у миграций он в окружении, но они в брокер не ходят) | `api`, `worker` |
+| `PG_REPLICATION_PASSWORD_DMC268_T1` | роль `replicator` | реплика (`passfile`) | `replication-setup` (он и меняет пароль роли), `postgres-replica` |
+| `PG_MONITOR_PASSWORD_DMC268_T1` | роль `dmc268_monitor` | коллектор метрик | на `develop` пока не используется: роль и коллектор приходят с PR #130, и там пароль переустанавливает шаг миграций на каждом деплое — порядок тот же, секрет → деплой |
+
+Проверки реплики (`check-replica.sh`, healthcheck реплики) входят по локальному сокету и пароля не знают.
+
+### Окно смены
+
+Открытые соединения смена пароля не рвёт — ни у PostgreSQL, ни у брокера. Новые соединения со старым паролем отклоняются сразу. Значит, от шага паролей до замены API в полном apply старые API и воркер работают на открытых соединениях, а новое соединение открыть не могут. Это окно: **шаг миграций** (с повторами после `LockNotAvailable` — до 5 мин) **и начало apply до остановки старого API**; после — обычная замена API, как на любом деплое. Pull образа в окно не входит: он — свой шаг «Скачать образ API» до шага паролей.
+
+Поставить шаг паролей после миграций, прямо перед apply, нельзя: миграции входят паролем из `migrate_env`, а он из того же секрета — то есть уже новым. Повторы миграций поэтому остаются внутри окна; обычно это одна попытка в пару секунд.
+
+Репетиция на `docker:29-dind` (Docker 29.9.2, OpenTofu 1.13.2, настоящий образ API с новым digest из реестра, локальное состояние): смена пароля базы — контейнеры `postgres`, `rabbitmq`, `postgres-replica` те же; pull — отдельным шагом до окна; окно 2,7 с от смены пароля до SIGTERM старому API (миграции 1,5 с и начало apply), затем 3,2 с замены API. Последовательные запросы к `/api/v1/auth/me` шли по открытому соединению пула и не падали; из 12 параллельных 6 получили `500` (новое соединение старым паролем). Долгая сессия со старым паролем пережила смену. Брокер — окно 2 с, долгое AMQP-соединение старым паролем живо, новый воркер подключился новым. На стенде окно дольше на ssh до сервера.
+
+Худший случай — **упали миграции** после смены: apply не идёт, и старые API и воркер до следующего деплоя не откроют новых соединений. Тогда — сразу чинить вперёд (ниже, «Откат»). Воркер, который в момент смены дорабатывает сообщение (до 41 мин), живёт на открытых соединениях; понадобится ему новое — это сообщение упадёт.
+
+### Плановая смена
+
+```bash
+openssl rand -hex 24 | gh secret set PG_PASSWORD_DMC268_T1      # значение не печатается
+gh workflow run deploy.yml --ref develop                         # без allow_stateful_replace
+gh run watch "$(gh run list --workflow deploy.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+```
+
+Новый секрет до деплоя ни на что не действует: окна нет, пока деплой не дошёл до шага паролей. Для брокера — `RABBITMQ_PASSWORD_DMC268_T1`, для реплики — `PG_REPLICATION_PASSWORD_DMC268_T1`. Несколько секретов можно сменить одним деплоем.
+
+**Перед деплоем** (`ssh stand`) — сохранить адреса старого API, ими потом проверяется, что старый пароль не принимается. Файлы с паролями — с правами 600, после проверки удалить:
+
+```bash
+(umask 077; docker exec dmc268-api printenv DATABASE_URL > ~/old-db-url; docker exec dmc268-api printenv RABBITMQ_URL > ~/old-amqp-url)
+```
+
+`$POSTGRES_PASSWORD` и `$RABBITMQ_DEFAULT_PASS` в `env` контейнеров базы и брокера для этого не годятся: там навсегда пароль инициализации тома (`ignore_changes`), а не текущий.
+
+**Что должно быть в деплое.** Шаг «Выставить пароли базы и брокера»: `postgres: пароль роли dmc268 сменён` (или `rabbitmq: … сменён`); у остальных — «совпадает с секретом». В summary: раздел «Пароли» с тем, что сменено, targeted-план без изменений, в полном — замена `docker_container` (`api`, `worker`, `replication-setup`, `postgres-backup`; для реплики — `replication-setup` и `postgres-replica`), базу и брокер план не пересоздаёт. Зелёные проверки API, воркера и реплики.
+
+**Проверка после** (`ssh stand`):
+
+```bash
+# старый пароль базы не принимается: ждём «password authentication failed»
+docker exec -i dmc268-api python -c 'import sys, sqlalchemy as s; s.create_engine(sys.stdin.read().strip()).connect()' < ~/old-db-url 2>&1 | grep -o 'password authentication failed'
+# старый пароль брокера не принимается: ждём ACCESS_REFUSED
+docker exec -i dmc268-api python -c 'import sys, pika; pika.BlockingConnection(pika.URLParameters(sys.stdin.read().strip()))' < ~/old-amqp-url 2>&1 | grep -o ACCESS_REFUSED
+rm -f ~/old-db-url ~/old-amqp-url
+# новые принимаются: API входит своими адресами
+docker exec dmc268-api python -c 'import os, sqlalchemy as s; s.create_engine(os.environ["DATABASE_URL"]).connect().close(); print("ok")'
+docker exec dmc268-api python -c 'import os, pika; pika.BlockingConnection(pika.URLParameters(os.environ["RABBITMQ_URL"])).close(); print("ok")'
+# все соединения роли — новые, открыты после смены
+docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_name, client_addr, backend_start from pg_stat_activity where usename = 'dmc268' and client_addr is not null"
+# копии идут новым паролем: первая копия снимается при старте контейнера
+docker logs --tail 3 dmc268-postgres-backup
+# брокер: воркер подключён после деплоя
+docker exec dmc268-rabbitmq rabbitmqctl -q list_connections user peer_host connected_at
+# реплика: поток идёт (для replicator)
+docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_name, state from pg_stat_replication"
+```
+
+### Откат
+
+Секреты GitHub не читаются, и старого значения взять негде — откат идёт **вперёд**:
+
+- деплой упал после шага паролей (миграции, apply) — summary покажет это в разделе «Пароли»: «пароль сменён, а API и воркер не заменены». Устранить причину и запустить деплой ещё раз: шаг скажет «совпадает», остальное пройдёт как обычно;
+- не устраняется быстро, а старый API должен открывать соединения — вернуть роли пароль старого API руками. Он в `~/old-db-url` (не сохранили — `(umask 077; docker exec dmc268-api printenv DATABASE_URL > ~/old-db-url)`: API на стенде ещё старый), но закодирован `urlencode`: `a+b/c=d` там — `a%2Bb%2Fc%3Dd`. Раскодирует его `make_url` SQLAlchemy в контейнере API, и дважды — как спрашивает `\password` — он идёт трубой в psql: ни в аргументы, ни на экран, а на сервер PostgreSQL уходит только SCRAM-хеш:
+
+  ```bash
+  docker exec -i dmc268-api python -c 'import sys, sqlalchemy as s; p = s.make_url(sys.stdin.read().strip()).password; print(p); print(p)' < ~/old-db-url \
+    | docker exec -i dmc268-postgres psql -XqU dmc268 -d dmc268 -v ON_ERROR_STOP=1 -c '\password dmc268'
+  ```
+
+  У брокера то же — из `~/old-amqp-url`, раскодирует pika, `rabbitmqctl change_password` без пароля в аргументах читает его из stdin:
+
+  ```bash
+  docker exec -i dmc268-api python -c 'import sys, pika; print(pika.URLParameters(sys.stdin.read().strip()).credentials.password)' < ~/old-amqp-url \
+    | docker exec -i dmc268-rabbitmq rabbitmqctl -q change_password dmc268
+  ```
+
+  Секрет остаётся новым, и следующий деплой сам выставит его снова.
+
+**Реверт этого механизма** (#161) после хотя бы одной смены ломает деплой. Без `ignore_changes = [env]` у базы и брокера план видит, что пароль в их `env` (пароль инициализации тома) не совпадает с секретом, и пересоздаёт контейнеры (`postgres must be replaced`, `rabbitmq must be replaced` — проверено на dind); сторож отклоняет каждый такой деплой, а выход — только ручной запуск с `allow_stateful_replace`, то есть перезапуск базы и брокера. Поэтому при реверте `ignore_changes = [env]` в `infra/postgres.tf` и `infra/rabbitmq.tf` оставляют.
+
+### Пароль утёк
+
+База и брокер портов наружу не публикуют (сеть `dmc268-backend` — `internal`), и войти утёкшим паролем можно только с сервера или из контейнера стека. Но смена — сразу:
+
+1. Сменить секрет и запустить деплой — как в плановой смене. Деплой в очереди (`concurrency: deploy`) ждёт текущий; отменять текущий нельзя — отменённый apply оставляет блокировку состояния.
+2. Если деплой сейчас не пройдёт (CI или раннер недоступны) — сменить пароль руками на сервере тем же значением, что в новом секрете: `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268 -c '\password dmc268'` или `docker exec -it dmc268-rabbitmq rabbitmqctl change_password dmc268`. Старые API и воркер до деплоя новых соединений не откроют — это цена; деплой потом скажет «совпадает».
+3. **Закрыть открытые соединения**: смена пароля их не рвёт, и вошедший утёкшим паролем остаётся внутри. После деплоя все свои клиенты пересозданы и подключены заново, поэтому всё, что открыто раньше смены, — чужое или старое:
+
+   ```bash
+   docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select pg_terminate_backend(pid) from pg_stat_activity where usename = 'dmc268' and client_addr is not null and backend_start < '<время смены, UTC>'"
+   docker exec dmc268-rabbitmq rabbitmqctl -q list_connections name user peer_host connected_at
+   docker exec dmc268-rabbitmq rabbitmqctl close_connection "<name>" "ротация пароля"
+   ```
+
+4. Где ещё лежит прежнее значение: в `env` контейнеров `dmc268-postgres` и `dmc268-rabbitmq` — пароль инициализации тома (`ignore_changes`, после смены не действует) и в состоянии OpenTofu (там все секреты стека — утечка состояния равна утечке всех паролей, их меняют все).
 
 ## Хранилище состояния
 

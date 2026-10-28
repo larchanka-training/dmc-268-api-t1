@@ -32,6 +32,8 @@ infra` — targeted-план шага «Поднять базу и брокер�
   `migrate-current.log` с выводом `alembic current` (`.error` рядом — база не
   ответила), `migrate-attempts` — номер последней попытки; исход шага
   миграций — из `STEP_RESULTS`;
+- `passwords-changed` — у каких сервисов (`postgres`, `rabbitmq`) шаг паролей
+  дошёл до смены (`passwords.sh`);
 - `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`);
 - `stale-tip` — вершина develop, если коммит прогона уже не она и деплой
   пропущен (`check-tip.sh`);
@@ -67,10 +69,11 @@ from typing import Any
 VOLUME = "docker_volume"
 
 # Контейнеры базы и брокера: деплой их не пересоздаёт. Замена гасит базу
-# посреди транзакций старого API и воркера, а повод к ней — смена env, памяти
-# или log_opts — на томе часто и не срабатывает: POSTGRES_PASSWORD postgres
-# читает только при инициализации тома, и после замены миграции падают на
-# пароле (#213). Такая правка — ручным запуском деплоя с
+# посреди транзакций старого API и воркера, а повод к ней — правка памяти,
+# command, log_opts или образа. env базы и брокера план не видит
+# (ignore_changes): это переменные инициализации тома, и смена пароля
+# пересоздавала бы базу, не меняя пароль в томе (#213); пароль выставляет шаг
+# деплоя passwords.sh (#161). Такая правка — ручным запуском деплоя с
 # `allow_stateful_replace` (`ALLOW_STATEFUL_REPLACE=true` в env, его ставит
 # только workflow_dispatch): тогда замена — предупреждение, а не отказ. Тома
 # (любой docker_volume) флаг не открывает никогда.
@@ -116,6 +119,8 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("diagnostics", "Доставки вебхука и сбои воркера с прошлого выката", ("diagnostics",)),
     ("infra", "Поднять базу и брокер", ("infra",)),
     ("plan", "Спланировать и проверить план", ("plan",)),
+    ("pull", "Скачать образ API", ("pull",)),
+    ("passwords", "Выставить пароли базы и брокера", ("passwords",)),
     ("migrate", "Применить миграции", ("migrate",)),
     ("apply", "Применить конфигурацию", ("apply",)),
     ("recover", "Восстановить состояние OpenTofu", ("recover", "state_artifact")),
@@ -204,10 +209,10 @@ def plan_command(report_dir: Path, name: str, allowed_by: str | None) -> int:
     for address in recreated:
         print(
             f"::error::план пересоздаёт или удаляет {address}: apply не запускается. "
-            "Деплой не гасит базу и брокер: правка их env, памяти, log_opts или образа — "
-            "ручным запуском `gh workflow run deploy.yml -f allow_stateful_replace=true`, "
-            "ротация пароля — по runbook (#161). "
-            "POSTGRES_PASSWORD на существующем томе замена контейнера не меняет."
+            "Деплой не гасит базу и брокер: правка их command, памяти, log_opts или образа — "
+            "ручным запуском `gh workflow run deploy.yml -f allow_stateful_replace=true`. "
+            "Пароль базы и брокера замены не требует: его выставляет шаг деплоя "
+            "из секрета (infra/README.md, «Смена паролей»)."
         )
     if deleted or recreated:
         return 1
@@ -588,6 +593,9 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
                 "новый коммит выкатывает свой прогон."), "", *steps_section(steps, marks)]
         return "\n".join(out) + "\n"
 
+    if passwords := passwords_section(report_dir, steps, f"{env.get('GITHUB_SERVER_URL', '')}/"
+                                      f"{env.get('GITHUB_REPOSITORY', '')}/blob/{env.get('SHA', '')}"):
+        out += ["", *passwords]
     out += ["", *downtime_section(report_dir), "", *plan_section(report_dir)]
     if recovery := state_section(report_dir, env.get("ALLOW_STATEFUL_REPLACE") == "true"):
         out += ["", *recovery]
@@ -595,6 +603,29 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
     out += ["", *migrations_section(report_dir, marks, migrate), "", *disk_section(report_dir)]
     out += ["", *steps_section(steps, marks)]
     return "\n".join(out) + "\n"
+
+
+# Подписи сервисов из `passwords-changed`.
+PASSWORD_SERVICES = {"postgres": "база (`postgres`)", "rabbitmq": "брокер (`rabbitmq`)"}
+
+
+def passwords_section(report_dir: Path, steps: dict[str, dict[str, str]], blob_url: str) -> list[str]:
+    """Пароли, сменённые этим деплоем; без замены API — предупреждение об окне смены.
+
+    Смена пароля не рвёт открытых соединений, а новые со старым паролем
+    отклоняет: пока apply не заменил API и воркер, они не откроют новых. Упал
+    деплой до этого — окно смены не закрыто, а шаг паролей при этом зелёный.
+    """
+    services = [s for s in PASSWORD_SERVICES if s in read(report_dir / "passwords-changed").split()]
+    if not services:
+        return []
+    out = ["### Пароли", "", f"Сменены в этом деплое: {', '.join(PASSWORD_SERVICES[s] for s in services)}."]
+    if steps.get("apply", {}).get("conclusion") == "success":
+        return out
+    return [*out, "", "> [!WARNING]",
+            ("> Пароль сменён, а API и воркер не заменены: до следующего успешного деплоя старые API и воркер "
+             "не откроют новых соединений. Устранить причину и запустить деплой снова или вернуть старый пароль — "
+             f"[«Откат»]({blob_url}/infra/README.md#откат).")]
 
 
 def downtime_section(report_dir: Path) -> list[str]:
@@ -735,7 +766,8 @@ def plan_section(report_dir: Path) -> list[str]:
         elif plan["stateful_deletes"]:
             out += ["", "> [!CAUTION]", (f"> Сторож остановил деплой до apply: план пересоздаёт или удаляет {stateful}"
                     " (`dmc268.deploy.plan.stateful_deletes`). Разрешить — ручным запуском с "
-                    "`allow_stateful_replace`; ротация пароля — по runbook (#161).")]
+                    "`allow_stateful_replace`. Пароль базы и брокера замены не требует: его выставляет шаг "
+                    "«Выставить пароли базы и брокера».")]
         else:
             out += ["", "Базу и брокер (`" + "`, `".join(STATEFUL) + "`) план не пересоздаёт."]
     return out
@@ -745,8 +777,8 @@ def migrations_section(report_dir: Path, marks: dict[str, float], outcome: str) 
     out = ["### Миграции", ""]
     if not (report_dir / "migrate.log").exists():
         if outcome == "failure":
-            # migrate.log появляется с запуском alembic; до него — tofu output и pull.
-            return [*out, "Шаг миграций упал до alembic (`tofu output` или pull образа): схема не менялась."]
+            # migrate.log появляется с запуском alembic; до него — tofu output.
+            return [*out, "Шаг миграций упал до alembic (`tofu output`): схема не менялась."]
         return [*out, "Шаг миграций не запускался."]
     if outcome == "cancelled":
         # Отмена убивает docker CLI на раннере, а не контейнер на сервере:
