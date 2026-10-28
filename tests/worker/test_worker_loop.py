@@ -5,6 +5,7 @@
 """
 
 import json
+import logging
 import signal
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -35,26 +36,30 @@ class FakeChannel:
         self.acked: list[int] = []
         self.requeued: list[int] = []
         self.cancelled = False
+        # Порядок `cancel` и подтверждений: с prefetch=1 `cancel` после
+        # подтверждения отдал бы следующее сообщение `basic.reject` (#223).
+        self.events: list[str] = []
 
     def consume(self, queue: str, inactivity_timeout: float):
-        while self._deliveries:
+        # Снятый потребитель новых доставок не получает.
+        while self._deliveries and not self.cancelled:
             yield self._deliveries.pop(0)
-
-    def get_waiting_message_count(self) -> int:
-        # Всё, что ещё не выдано циклу, — как буфер pika, уже полученный от брокера.
-        return len(self._deliveries)
 
     def basic_ack(self, tag: int) -> None:
         self.acked.append(tag)
+        self.events.append(f"ack {tag}")
 
     def basic_nack(self, tag: int, requeue: bool) -> None:
         # Возврат в очередь при остановке ожидаем, отказ в DLQ — нет.
         if not requeue:
             raise AssertionError("не ожидался nack в DLQ")
         self.requeued.append(tag)
+        self.events.append(f"requeue {tag}")
 
     def cancel(self) -> None:
+        assert not self.cancelled, "потребитель снят дважды"
         self.cancelled = True
+        self.events.append("cancel")
 
 
 class RecordingChannel(FakeChannel):
@@ -227,9 +232,10 @@ def test_a_stop_request_lets_the_current_message_finish_and_takes_no_more() -> N
 
     _worker(channel, connection).run(handler, stop=stop)
 
-    assert channel.acked == [1]  # сообщение в работе подтверждено, второе не взято
-    assert channel.requeued == [2]  # а возвращено nack: закрытие соединения потратило бы попытку
-    assert channel.cancelled and connection.closed
+    # Потребитель снят до подтверждения: пока сообщение держит prefetch=1, брокер
+    # второе не выдаст, и возвращать его `basic.reject` с тратой попытки не придётся.
+    assert channel.events == ["cancel", "ack 1"]
+    assert connection.closed
 
 
 def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
@@ -241,9 +247,9 @@ def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
     _worker(channel, connection).run(handled.append, stop=StopRequest(requested=True))
 
     assert handled == []
-    assert channel.acked == []
-    assert channel.requeued == [1]
-    assert channel.cancelled and connection.closed
+    # Сначала снять потребителя, потом отпустить: `nack` раньше освободил бы prefetch.
+    assert channel.events == ["cancel", "requeue 1"]
+    assert connection.closed
 
 
 def test_a_message_after_a_stop_during_the_sweep_is_not_taken() -> None:
@@ -257,8 +263,7 @@ def test_a_message_after_a_stop_during_the_sweep_is_not_taken() -> None:
     _worker(channel).run(handled.append, sweep=sweep, sweep_interval=0, stop=stop)
 
     assert handled == []
-    assert channel.acked == []
-    assert channel.requeued == [1]
+    assert channel.events == ["cancel", "requeue 1"]
 
 
 class IdleChannel(FakeChannel):
@@ -267,9 +272,6 @@ class IdleChannel(FakeChannel):
     def __init__(self) -> None:
         super().__init__([])
         self.idle_ticks = 0
-
-    def get_waiting_message_count(self) -> int:
-        return 0
 
     def consume(self, queue: str, inactivity_timeout: float) -> Iterator[Any]:
         while True:
@@ -349,3 +351,38 @@ def test_worker_connection_has_heartbeat_disabled(monkeypatch) -> None:
     )
 
     assert captured["heartbeat"] == 0
+
+
+def test_a_limited_run_takes_the_consumer_off_before_the_last_ack() -> None:
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=tag), None, b"{}") for tag in (1, 2)])
+
+    _worker(channel).run(lambda body: None, limit=1)
+
+    assert channel.events == ["cancel", "ack 1"]
+
+
+def test_a_consumer_cancelled_by_the_broker_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """`x-consumer-timeout`: брокер снял потребителя, `consume` кончился сам. Воркер
+    выходит не молча и второй раз потребителя не снимает."""
+    channel = FakeChannel([(None, None, None)])
+
+    with caplog.at_level(logging.WARNING, logger="app.worker.factory"):
+        _worker(channel).run(lambda body: None)
+
+    assert channel.events == []
+    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "отменил потребителя" in record.getMessage()
+
+
+def test_without_a_legacy_queue_it_is_asked_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Старой очереди нет: каждый проход давал бы `404` и строку `error` у брокера."""
+    channel = FakeChannel([(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    asked: list[int] = []
+
+    def move(connection: object) -> None:
+        asked.append(1)
+
+    monkeypatch.setattr(factory, "move_legacy_jobs", move)
+    _worker(channel).run(lambda body: None, limit=1, sweep_interval=0)
+
+    assert asked == [1]

@@ -6,6 +6,7 @@ from app.config import Settings
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
 from app.worker.factory import (
     WorkerConfigError,
+    check_consumer_timeout,
     check_model_deadline,
     check_sweep_thresholds,
     load_checked_prompt_texts,
@@ -103,3 +104,31 @@ def test_queued_threshold_not_above_the_stale_one_stops_the_worker(queued: int) 
     # Брокер недоступен: проверка срабатывает раньше подключения.
     with pytest.raises(WorkerConfigError, match="QUEUED_RUN_TIMEOUT_SECONDS"):
         run_worker(settings)
+
+
+def test_default_worst_run_fits_the_consumer_timeout_with_fallback() -> None:
+    """Стенд: два вызова по 1200 с с запасным провайдером и минута — меньше двух часов."""
+    check_consumer_timeout(
+        _settings(
+            llm_backend="ollama",
+            ollama_model="qwen2.5-coder:7b",
+            llm_hosted_fallback=True,
+            eurorouter_base_url="https://eurorouter.example/v1",
+            eurorouter_model="m",
+            eurorouter_api_keys="sk-1",
+        )
+    )
+
+
+def test_run_longer_than_the_consumer_timeout_stops_the_worker() -> None:
+    """Иначе брокер отдал бы сообщение живого прогона второму воркеру (#223)."""
+    settings = _settings(
+        llm_backend="ollama",
+        ollama_model="qwen2.5-coder:7b",
+        llm_timeout_seconds=1800,
+        stale_run_timeout_seconds=7200,
+    )
+
+    # 2 вызова × 1800 с × 2 попытки + 60 = 7260 с при таймауте 7200 с.
+    with pytest.raises(WorkerConfigError, match="7260 .* 7200"):
+        check_consumer_timeout(settings)

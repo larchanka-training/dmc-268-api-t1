@@ -7,10 +7,13 @@ from uuid import UUID
 
 import pika
 import pytest
+from pika.exceptions import ChannelClosedByBroker
 
 from app.domain.entities import ReviewJob
 from app.infrastructure.queue.rabbitmq import (
+    CONSUMER_TIMEOUT_SECONDS,
     DEFAULT_PRIORITY,
+    DELIVERY_LIMIT,
     DLQ_NAME,
     DLX_NAME,
     LEGACY_QUEUE_NAME,
@@ -163,9 +166,32 @@ def test_without_a_legacy_queue_nothing_moves_and_the_connection_stays_usable(
     connection = pika.BlockingConnection(pika.URLParameters(TEST_RABBITMQ_URL))
     try:
         consuming = connection.channel()
-        assert move_legacy_jobs(connection) == 0
+        assert move_legacy_jobs(connection) is None
         # `404` пассивного объявления закрыл только свой канал.
         assert consuming.is_open
         assert consuming.queue_declare(QUEUE_NAME, passive=True).method.message_count == 0
     finally:
         connection.close()
+
+
+def test_queue_carries_a_consumer_timeout(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+) -> None:
+    """Quorum-очередь применяет таймаут подтверждения (#223): он объявлен с очередью.
+
+    Аргументы объявленной очереди брокер не показывает, но повторное объявление с
+    другими аргументами отвергает - так видно, что `x-consumer-timeout` на месте."""
+    arguments = {
+        "x-queue-type": "quorum",
+        "x-delivery-limit": DELIVERY_LIMIT,
+        "x-dead-letter-exchange": DLX_NAME,
+        "x-consumer-timeout": CONSUMER_TIMEOUT_SECONDS * 1000,
+    }
+    channel.queue_declare(QUEUE_NAME, durable=True, arguments=arguments)
+
+    without_timeout = {k: v for k, v in arguments.items() if k != "x-consumer-timeout"}
+    # Отказ закрывает канал - свой, чтобы фикстура убрала за собой.
+    probe = channel.connection.channel()
+    with pytest.raises(ChannelClosedByBroker) as rejected:
+        probe.queue_declare(QUEUE_NAME, durable=True, arguments=without_timeout)
+    assert rejected.value.reply_code == 406

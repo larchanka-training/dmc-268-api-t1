@@ -58,8 +58,8 @@ API и воркер SHALL создавать спаны OpenTelemetry: API — �
 
 #### Scenario: Публикация и обработка задачи
 
-- **WHEN** API публикует задачу в `review_jobs` (default exchange, routing key — имя очереди), а воркер её обрабатывает
-- **THEN** спан публикации — `publish review_jobs`, `PRODUCER`, `messaging.operation.type` — `send`; спан обработки — `process review_jobs`, `CONSUMER`, `messaging.operation.type` — `process`, с delivery tag сообщения; у обоих `messaging.system` — `rabbitmq`, `messaging.destination.name` и routing key — `review_jobs`
+- **WHEN** API публикует задачу в `review_jobs.qq` (default exchange, routing key — имя очереди), а воркер её обрабатывает
+- **THEN** спан публикации — `publish review_jobs.qq`, `PRODUCER`, `messaging.operation.type` — `send`; спан обработки — `process review_jobs.qq`, `CONSUMER`, `messaging.operation.type` — `process`, с delivery tag сообщения; у обоих `messaging.system` — `rabbitmq`, `messaging.destination.name` и routing key — `review_jobs.qq`
 
 ### Requirement: Каждый шаг прогона — спан этапа
 
@@ -168,7 +168,7 @@ API и воркер SHALL создавать спаны OpenTelemetry: API — �
 #### Scenario: Сбой обработки сообщения
 
 - **WHEN** обработка сообщения падает с `LlmError("Eurorouter: HTTP 400: <фрагмент промпта>")`
-- **THEN** спан `process review_jobs` закрыт со статусом ошибки и описанием `LlmError`, а текст есть только в событии `exception`
+- **THEN** спан `process review_jobs.qq` закрыт со статусом ошибки и описанием `LlmError`, а текст есть только в событии `exception`
 
 #### Scenario: Пойманный сбой шага прохода
 

@@ -50,6 +50,13 @@ DLQ_NAME = "review_jobs.dlq"
 # (`REVIEW_RUN_STALE`). Запас — на рестарты при деплое: штатная остановка
 # возвращает сообщение `nack`, а он попытку не тратит (`Worker.run`).
 DELIVERY_LIMIT = 5
+# Таймаут подтверждения: quorum-очередь, в отличие от классической, его
+# применяет (по умолчанию у брокера 30 мин). Сообщение дольше таймаута брокер
+# забирает у воркера и отдаёт следующему потребителю, пока первый ещё работает.
+# Поэтому таймаут — с запасом больше худшего прогона (`check_consumer_timeout`
+# на старте воркера), а аргумент очереди после объявления не поменять — только
+# политикой `consumer-timeout` или новой очередью.
+CONSUMER_TIMEOUT_SECONDS = 2 * 60 * 60
 # Классическая очередь до #223. Тип у объявленной очереди не меняется, поэтому
 # quorum-очередь — под новым именем, а остатки старой воркер перекладывает в неё
 # (`move_legacy_jobs`). Удаляется вместе со старой очередью, когда её на стенде нет.
@@ -137,12 +144,16 @@ def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel)
             "x-queue-type": "quorum",
             "x-delivery-limit": DELIVERY_LIMIT,
             "x-dead-letter-exchange": DLX_NAME,
+            "x-consumer-timeout": CONSUMER_TIMEOUT_SECONDS * 1000,
         },
     )
 
 
-def move_legacy_jobs(connection: pika.BlockingConnection) -> int:
+def move_legacy_jobs(connection: pika.BlockingConnection) -> int | None:
     """Переложить сообщения из классической `review_jobs` в quorum-очередь; вернуть их число.
+
+    `None` — старой очереди нет: на свежем брокере её и не будет, и вызывающий
+    больше не спрашивает (каждый `404` — строка `error` в логе брокера).
 
     Нужен на время перехода (#223): в старой очереди на стенде лежит то, что не
     успели обработать до деплоя, и то, что старый API положил в окне деплоя, пока
@@ -163,7 +174,7 @@ def move_legacy_jobs(connection: pika.BlockingConnection) -> int:
             channel.queue_declare(queue=LEGACY_QUEUE_NAME, passive=True)
         except ChannelClosedByBroker as exc:
             if exc.reply_code == 404:
-                return 0
+                return None
             raise
         channel.confirm_delivery()
         moved = 0
