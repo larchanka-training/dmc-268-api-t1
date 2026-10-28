@@ -152,7 +152,7 @@ run-worker: migrate ## Воркер на хосте; адаптер модели
 	$(WORKER_ENV) uv run python -m app.worker
 
 # --- весь бэкенд локально против настоящего GitHub -----------------------------------
-# README, «Локальный запуск против настоящего GitHub». Процессы и логи - scripts/run_local.sh.
+# Руководство - docs/LOCAL_RUN.md. Процессы и логи - scripts/run_local.sh.
 
 # Модель run-local: явная MODEL или OLLAMA_MODEL, иначе OLLAMA_MODEL из .env, иначе 7b -
 # 1.5b песочницы для ревью настоящих PR слаба. Адрес и модель уходят воркеру переменными,
