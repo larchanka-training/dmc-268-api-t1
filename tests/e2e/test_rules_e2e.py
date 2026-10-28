@@ -18,14 +18,14 @@ from app.domain.repo_rules import RULES_PATH
 from app.infrastructure.queue.rabbitmq import DLQ_NAME
 
 from ..conftest import requires_broker, requires_db
-from ..fakes.github_api import PullRequest
+from ..fakes.github_api import REPO_FULL_NAME, PullRequest
 from ..fakes.llm_gateway import (
     ScriptedLlmGateway,
     finding_json,
     review_response,
     verification_response,
 )
-from .stack import REPO_FULL_NAME, Stack, deliver
+from .stack import Stack, deliver
 
 pytestmark = [pytest.mark.integration, requires_db, requires_broker]
 

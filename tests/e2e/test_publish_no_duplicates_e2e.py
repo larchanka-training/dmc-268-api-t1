@@ -12,14 +12,14 @@ from app.domain.enums import CommentKind, ReviewRunStatus
 from app.infrastructure.queue.rabbitmq import DLQ_NAME
 
 from ..conftest import requires_broker, requires_db
-from ..fakes.github_api import CreateReviewFailure, PullRequest
+from ..fakes.github_api import REPO_FULL_NAME, CreateReviewFailure, PullRequest
 from ..fakes.llm_gateway import (
     ScriptedLlmGateway,
     finding_json,
     review_response,
     verification_response,
 )
-from .stack import REPO_FULL_NAME, Stack, deliver
+from .stack import Stack, deliver
 
 pytestmark = [pytest.mark.integration, requires_db, requires_broker]
 
