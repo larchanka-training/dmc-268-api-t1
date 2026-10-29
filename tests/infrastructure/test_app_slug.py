@@ -77,14 +77,36 @@ def test_without_the_app_key_there_is_no_slug_and_no_request() -> None:
         lambda: httpx.Response(200, json={"slug": ""}),
     ],
 )
-def test_a_failed_get_app_is_no_slug_and_is_asked_again(
-    rsa_key_pair: RsaKeyPair, response: Callable[[], httpx.Response]
+def test_a_failed_get_app_is_no_slug_and_is_not_asked_again_for_a_minute(
+    rsa_key_pair: RsaKeyPair, response: Callable[[], httpx.Response], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    now = [1000.0]
+    monkeypatch.setattr("app.infrastructure.container.monotonic", lambda: now[0])
     seen: list[str] = []
     container = _container(_settings("123", rsa_key_pair.private_pem), _answering(seen, response))
 
     assert container.app_slug() is None
+    now[0] += 59.0
     assert container.app_slug() is None
+    assert seen == ["/app"]
+
+    now[0] += 1.0
+    assert container.app_slug() is None
+    assert seen == ["/app", "/app"]
+
+
+def test_after_the_failure_window_a_recovered_github_gives_the_slug(
+    rsa_key_pair: RsaKeyPair, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr("app.infrastructure.container.monotonic", lambda: now[0])
+    answers = iter([httpx.Response(502), httpx.Response(200, json={"id": 123, "slug": SLUG})])
+    seen: list[str] = []
+    container = _container(_settings("123", rsa_key_pair.private_pem), _answering(seen, lambda: next(answers)))
+
+    assert container.app_slug() is None
+    now[0] += 60.0
+    assert container.app_slug() == SLUG
     assert seen == ["/app", "/app"]
 
 
