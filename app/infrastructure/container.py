@@ -182,7 +182,8 @@ class Container:
     def visibility_catalog(self, catalog: InstallationCatalog, *, read: bool = True) -> InstallationCatalog:
         """`catalog` с кэшем списка видимых репозиториев — для видимости прогонов и репозиториев.
 
-        `read=False` — всегда к GitHub, свежий ответ в кэш: страница подключения.
+        `read=False` — всегда к GitHub, свежий ответ в кэш: возврат с установки
+        приложения (Setup URL, change `repositories-one-list`).
         Каталог — аргументом, а не свой: тесты подменяют каталог зависимостью API,
         и кэш должен лечь поверх подменённого.
         """

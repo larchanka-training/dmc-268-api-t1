@@ -126,6 +126,17 @@ variable "github_app_client_id" {
   default     = ""
 }
 
+variable "github_app_slug" {
+  type        = string
+  description = "Slug GitHub App из адреса https://github.com/apps/<slug> (GITHUB_APP_SLUG): ссылка на экран установки в списке репозиториев. Пустой — install_url: null."
+  default     = ""
+
+  validation {
+    condition     = can(regex("^([a-z0-9][a-z0-9-]*)?$", var.github_app_slug))
+    error_message = "github_app_slug — строчные латинские буквы, цифры и дефис, не с дефиса; пустой — без ссылки."
+  }
+}
+
 variable "github_app_client_secret" {
   type        = string
   description = "Client secret GitHub App для входа пользователей (GITHUB_APP_CLIENT_SECRET). Не коммитить."

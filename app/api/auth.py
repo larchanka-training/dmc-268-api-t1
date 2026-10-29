@@ -1,18 +1,19 @@
-"""Вход через OAuth, текущий пользователь и выход.
+"""Вход через OAuth, текущий пользователь, выход и возврат с установки GitHub App.
 
 `login` и `callback` открыты: сессии ещё нет. Выход идемпотентен и сессии не
 требует, только `Origin`: без сессии выходить уже не из чего, и это не ошибка. `state` и проверенный
 `redirect` между ними живут в cookie `oauth_state` — 10 минут и только на
 путях `/api/v1/auth`. `redirect` из неё проверяется ещё раз в use case:
 cookie приходит от клиента. Любая ошибка callback — `302` на
-`/login?error=<код>`.
+`/login?error=<код>`. Возврат с установки (Setup URL) требует сессию — пока
+заглушка `501` (change `repositories-one-list`).
 """
 
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
@@ -27,11 +28,14 @@ from app.api.dependencies import (
 from app.api.errors import (
     ERRORS_403_ORIGIN,
     ERRORS_404_LOGIN_PROVIDER,
+    ERRORS_422,
+    ERRORS_501_NOT_IMPLEMENTED,
     ApiError,
 )
 from app.api.problems import ErrorCode
 from app.api.session import (
     SESSION_COOKIE,
+    SESSION_REQUIRED,
     SESSION_RESPONSES,
     clear_session_cookie,
     current_user,
@@ -192,6 +196,58 @@ def finish_login(
         set_session_cookie(response, outcome.token)
     _clear_state_cookie(response)
     return response
+
+
+# Setup URL GitHub App — задача #243 (бэкенд-часть dmc-268-ui-t1#95): контракт первым.
+_SETUP_DESCRIPTION = (
+    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал "
+    "типы (задача #243). Setup URL GitHub App: сюда GitHub возвращает браузер после установки "
+    "приложения, её изменения (Redirect on update) или запроса установки владельцу организации. "
+    "Требует сессию; параметры проверяются до ответа 501. Когда ручка заработает: "
+    "`installation_id` из адреса не доверяется — сверяется с установками пользователя по его "
+    "токену (`GET /user/installations`), а кэш видимых репозиториев заменяется свежим ответом "
+    "GitHub. Установка с выбором «Only select repositories» — подключаются её репозитории, на "
+    "которых у пользователя роль admin или maintain и которых ещё нет в сервисе; выключенные "
+    "`DELETE` не включаются. С «All repositories» не подключается ничего: нужные включают "
+    "переключателем. Итог — редирект на страницу «Репозитории»."
+)
+
+
+@router.get(
+    "/github/setup",
+    status_code=HTTPStatus.FOUND,
+    response_class=RedirectResponse,
+    dependencies=SESSION_REQUIRED,
+    summary="Возврат с установки GitHub App",
+    description=_SETUP_DESCRIPTION,
+    responses={
+        HTTPStatus.FOUND: {
+            "description": (
+                "Редирект на /app/repositories с итогом: `?connected=<N>` — сколько репозиториев "
+                "подключено (при «All repositories» — 0); `?requested=true` — при "
+                "`setup_action=request`, запрос отправлен владельцу, ничего не подключено; "
+                "`?setup_error=installation_not_found` — установки нет среди установок "
+                "пользователя или нет `installation_id`; `?setup_error=provider_unavailable` — "
+                "GitHub не ответил. Токен пользователя непригоден — `401`, сессия закрыта."
+            ),
+            "headers": _LOCATION,
+        },
+        **SESSION_RESPONSES,
+        **ERRORS_422,
+        **ERRORS_501_NOT_IMPLEMENTED,
+    },
+)
+def finish_github_setup(
+    installation_id: int | None = Query(
+        default=None,
+        gt=0,
+        description="Id установки от GitHub; не доверяется, сверяется с установками пользователя. Нет при `request`.",
+    ),
+    setup_action: Literal["install", "update", "request"] = Query(
+        description="Что сделал пользователь на GitHub: установил, изменил установку или запросил её у владельца."
+    ),
+) -> Response:
+    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Возврат с установки ещё не реализован.")
 
 
 @router.get(

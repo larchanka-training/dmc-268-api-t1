@@ -346,6 +346,8 @@ jobs:
           TF_VAR_github_app_private_key: ${{ secrets.APP_PRIVATE_KEY_DMC268_T1 }}
           TF_VAR_github_app_client_id: ${{ vars.APP_CLIENT_ID_DMC268_T1 }}
           TF_VAR_github_app_client_secret: ${{ secrets.APP_CLIENT_SECRET_DMC268_T1 }}
+          # Slug приложения: нет переменной — пустая строка, install_url: null.
+          TF_VAR_github_app_slug: ${{ vars.APP_SLUG_DMC268_T1 }}
           # Ключ шифрования токенов пользователя. Нет секрета — пустая строка, и
           # проверка переменной в infra/variables.tf роняет apply: стенд не
           # стартует без шифрования молча.

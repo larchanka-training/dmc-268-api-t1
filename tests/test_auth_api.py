@@ -257,6 +257,52 @@ def test_a_session_without_a_provider_token_is_401_and_deleted_everywhere(stand,
     assert stand.uow.sessions.stored == []
 
 
+# --- Setup URL: контракт первым, реализация — следующим шагом #243 ----------------
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"installation_id": "42", "setup_action": "install"}, {"setup_action": "request"}],
+)
+def test_the_setup_return_is_planned_and_answers_501(stand, params) -> None:
+    client = stand.client()
+    sign_in(client)
+
+    response = client.get("/api/v1/auth/github/setup", params=params)
+
+    assert response.status_code == 501
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "NOT_IMPLEMENTED"
+
+
+def test_the_setup_return_requires_a_session(stand) -> None:
+    response = stand.client().get(
+        "/api/v1/auth/github/setup", params={"installation_id": "42", "setup_action": "install"}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"
+
+
+@pytest.mark.parametrize(
+    ("params", "where"),
+    [
+        ({"installation_id": "42"}, "query.setup_action"),
+        ({"installation_id": "42", "setup_action": "uninstall"}, "query.setup_action"),
+        ({"installation_id": "0", "setup_action": "install"}, "query.installation_id"),
+        ({"installation_id": "abc", "setup_action": "install"}, "query.installation_id"),
+    ],
+)
+def test_the_setup_return_checks_its_parameters_before_501(stand, params, where) -> None:
+    client = stand.client()
+    sign_in(client)
+
+    response = client.get("/api/v1/auth/github/setup", params=params)
+
+    assert response.status_code == 422
+    assert [error["where"] for error in response.json()["errors"]] == [where]
+
+
 def test_logout_ends_the_session_in_every_tab(stand) -> None:
     tab_1 = stand.client()
     sign_in(tab_1)

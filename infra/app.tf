@@ -109,6 +109,7 @@ resource "docker_container" "api" {
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
     "GITHUB_APP_CLIENT_ID=${var.github_app_client_id}",
     "GITHUB_APP_CLIENT_SECRET=${var.github_app_client_secret}",
+    "GITHUB_APP_SLUG=${var.github_app_slug}",
     "PUBLIC_ORIGIN=${var.public_origin}",
     # Ключ шифрования токенов пользователя GitHub — только API: воркер их не читает.
     "USER_TOKEN_ENCRYPTION_KEY=${var.user_token_encryption_key}",

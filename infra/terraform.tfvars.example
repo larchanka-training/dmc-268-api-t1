@@ -56,6 +56,7 @@ llm_hosted_fallback = false
 # github_app_private_key   = ""
 # github_app_client_id     = ""
 # github_app_client_secret = ""
+# github_app_slug          = ""
 # public_origin            = "https://<адрес интерфейса>"
 
 # --- стек наблюдаемости ---

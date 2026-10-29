@@ -278,3 +278,24 @@ def test_the_token_key_is_read_from_the_environment(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("USER_TOKEN_ENCRYPTION_KEY", TOKEN_KEY)
     settings = Settings(database_url=DATABASE_URL, rabbitmq_url=RABBITMQ_URL, github_webhook_secret=WEBHOOK_SECRET)
     assert settings.user_token_key is not None
+
+
+def test_the_app_slug_is_empty_by_default() -> None:
+    assert make_settings().github_app_slug == ""
+
+
+@pytest.mark.parametrize("slug", ["dmc-268-review", "app1"])
+def test_a_github_app_slug_is_accepted(slug: str) -> None:
+    settings = Settings(
+        database_url=DATABASE_URL, rabbitmq_url=RABBITMQ_URL, github_webhook_secret=WEBHOOK_SECRET, github_app_slug=slug
+    )
+    assert settings.github_app_slug == slug
+
+
+@pytest.mark.parametrize("slug", ["Dmc-Review", "../evil", "a b", "-lead", "x/installations"])
+def test_a_slug_that_would_break_the_install_url_is_rejected(slug: str) -> None:
+    """Slug идёт в путь `install_url`: только строчные буквы, цифры и дефис."""
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url=DATABASE_URL, rabbitmq_url=RABBITMQ_URL, github_webhook_secret=WEBHOOK_SECRET, github_app_slug=slug
+        )

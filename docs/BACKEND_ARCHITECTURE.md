@@ -147,7 +147,7 @@ compile-time зависимости от слоя приложения.
 `/auth/{provider}/callback` и `/health`. `POST /auth/logout` сессии не требует,
 только `Origin`: выход идемпотентен и всегда отвечает `204`.
 
-Ручки репозиториев (`/repositories/available`, `POST /repositories`) берут ещё и токен
+Ручки репозиториев (`GET /repositories`, `POST /repositories`) берут ещё и токен
 пользователя у провайдера, сохранённый при сессии (`call_with_user_token`,
 `app/application/use_cases/user_token.py`): истёкший — обмен по refresh token под
 блокировкой строки токена (сбой обмена при ещё действующем токене — прежний токен),
