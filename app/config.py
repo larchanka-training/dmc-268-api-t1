@@ -93,16 +93,6 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="Client secret GitHub App; из окружения GITHUB_APP_CLIENT_SECRET",
     )
-    # Slug того же GitHub App — из его адреса `https://github.com/apps/<slug>`: от
-    # него строится `install_url` списка репозиториев. Пустой — `install_url: null`,
-    # кнопка установки не показывается, остальное работает. Тот же slug VCS-шлюз
-    # берёт из `GET /app` для логина бота, но список не ходит за ним к GitHub.
-    github_app_slug: str = Field(
-        default="",
-        pattern=r"^([a-z0-9][a-z0-9-]*)?$",
-        max_length=100,
-        description="Slug GitHub App для ссылки на экран установки; из окружения GITHUB_APP_SLUG",
-    )
     # Публичный адрес сервиса без завершающего `/`: с ним сверяется `Origin`
     # изменяющих запросов, от него строится callback OAuth. Пустой не совпадёт
     # ни с одним `Origin` — изменяющие запросы с сессией отклоняются.

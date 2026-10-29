@@ -13,7 +13,7 @@
 Система SHALL предоставлять `GET /api/v1/repositories`, возвращающий
 постраничный список репозиториев установок, видимых пользователю, —
 подключённых и нет (требование «Список репозиториев установок, видимых
-пользователю»), по `full_name` без учёта регистра, затем по `provider_id`.
+пользователю»), по `full_name` без учёта регистра.
 Запрос SHALL
 принимать `limit` и `offset`; при отсутствии `limit` SHALL применяться
 значение по умолчанию, а значение выше зафиксированного потолка SHALL быть
@@ -39,7 +39,7 @@
 
 ### Requirement: Список репозиториев установок, видимых пользователю
 
-`GET /api/v1/repositories` SHALL требовать сессию и SHALL отдавать репозитории установок, которые GitHub отдаёт по токену пользователя, подключённые и нет: `connected`, `id` и `connected_at` (`null` у неподключённых), у ответа — `install_url`. Не отданное GitHub SHALL NOT попадать в ответ. Приостановленная установка и установка с `403` (не лимит) или `404` SHALL пропускаться. Страниц SHALL быть не больше 50. Сбой GitHub, `403` лимита и неожиданное тело SHALL давать `502 SCM_UNAVAILABLE`.
+`GET /api/v1/repositories` SHALL требовать сессию и SHALL отдавать репозитории установок, которые GitHub отдаёт по токену пользователя, подключённые и нет: `id` записи или `null`, `connected` и `connected_at` по включённости ревью, у ответа — `install_url`. Прочее SHALL NOT попадать в ответ. Приостановленная установка и установка с `403` (не лимит) или `404` SHALL пропускаться. Страниц SHALL быть не больше 50. Сбой GitHub, `403` лимита и неожиданное тело SHALL давать `502 SCM_UNAVAILABLE`.
 
 #### Scenario: Список с отметкой подключённых
 
@@ -109,13 +109,13 @@
 
 #### Scenario: Адрес установки приложения
 
-- **WHEN** задан `GITHUB_APP_SLUG=dmc-268-review`
-- **THEN** в ответе `install_url = "https://github.com/apps/dmc-268-review/installations/new"`
+- **WHEN** `GET /app` с ключом приложения отдаёт `slug = dmc-268-review`
+- **THEN** в ответе `install_url = "https://github.com/apps/dmc-268-review/installations/new"`, а `GET /app` запрашивается один раз на процесс — тот же ответ, что у логина бота
 
-#### Scenario: Slug не задан
+#### Scenario: Slug не узнать
 
-- **WHEN** `GITHUB_APP_SLUG` пуст
-- **THEN** в ответе `install_url = null`, остальное отвечает как обычно
+- **WHEN** у API нет ключа приложения или `GET /app` не удался
+- **THEN** в ответе `install_url = null`, список отвечает `200`; сбой `GET /app` не запоминается
 
 #### Scenario: Ручки списка доступных нет
 
@@ -379,7 +379,7 @@
 #### Scenario: Выключение администратором
 
 - **WHEN** у пользователя на подключённом репозитории роль admin или maintain, и вызывается `DELETE /api/v1/repositories/{repository_id}` со своим `Origin`
-- **THEN** ответ — `204`, в `GET /api/v1/repositories` у репозитория `connected = false` и `id = null`, а `GET /api/v1/repositories/{repository_id}` и его прогоны отвечают как раньше
+- **THEN** ответ — `204`, в `GET /api/v1/repositories` у репозитория `connected = false`, `connected_at = null` и прежний `id`, а `GET /api/v1/repositories/{repository_id}` и его прогоны отвечают как раньше
 
 #### Scenario: Уже выключен
 
@@ -408,7 +408,7 @@
 
 ### Requirement: Возврат с установки GitHub App
 
-`GET /api/v1/auth/github/setup` SHALL требовать сессию и SHALL сверять `installation_id` с установками пользователя по его токену. При «Only select repositories» SHALL подключаться репозитории установки, где у пользователя admin или maintain и которых нет в сервисе; при «All repositories» — ничего; выключенные SHALL NOT включаться. Ответ SHALL быть `302` на `/app/repositories` с итогом.
+`GET /api/v1/auth/github/setup` SHALL требовать сессию (без неё — `302` на `/login?redirect=/app/repositories`) и SHALL сверять `installation_id` с установками пользователя по его токену. При «Only select repositories» SHALL подключаться репозитории установки, где у пользователя admin или maintain и которых нет в сервисе; при «All repositories» — ничего; выключенные SHALL NOT включаться. Ответ SHALL быть `302` на `/app/repositories` с итогом.
 
 #### Scenario: Выбранные репозитории
 
@@ -437,8 +437,8 @@
 
 #### Scenario: Без сессии
 
-- **WHEN** вызывается `GET /api/v1/auth/github/setup` без сессии
-- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+- **WHEN** вызывается `GET /api/v1/auth/github/setup` без сессии или с недействительной cookie `session`
+- **THEN** ответ — `302` на `/login?redirect=/app/repositories`, недействительная cookie удаляется, ничего не подключено
 
 #### Scenario: Неверные параметры
 

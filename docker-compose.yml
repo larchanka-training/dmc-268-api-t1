@@ -167,8 +167,6 @@ services:
       # пустые — вход не работает, изменяющие запросы с сессией получают 403.
       GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
       GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
-      # Slug приложения для ссылки на экран установки: пустой — install_url: null.
-      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
       # Ключ шифрования токенов пользователя (openssl rand -base64 32): пустой —
       # вход отказывает, токен открытым не хранится никогда.
