@@ -181,12 +181,14 @@ variable "llm_backend" {
   # Зеркало проверки в app/config.py: без реквизитов воркер не стартует, и
   # выкат упал бы уже после пересоздания контейнеров.
   validation {
+    # Ключи разбираются так же, как в app/config.py: по запятой, без пустых и пробелов. Адрес
+    # только https, иначе код и ключи ушли бы открытым текстом.
     condition = var.llm_backend != "eurorouter" || (
-      var.eurorouter_base_url != ""
-      && var.eurorouter_model != ""
-      && var.eurorouter_api_keys != ""
+      startswith(trimspace(var.eurorouter_base_url), "https://")
+      && trimspace(var.eurorouter_model) != ""
+      && length([for k in split(",", var.eurorouter_api_keys) : trimspace(k) if trimspace(k) != ""]) > 0
     )
-    error_message = "llm_backend = eurorouter требует непустых eurorouter_base_url, eurorouter_model, eurorouter_api_keys."
+    error_message = "llm_backend = eurorouter требует eurorouter_base_url на https://, непустых eurorouter_model и хотя бы одного ключа в eurorouter_api_keys."
   }
 }
 
@@ -316,11 +318,11 @@ variable "llm_hosted_fallback" {
   validation {
     condition = !var.llm_hosted_fallback || (
       var.llm_backend == "ollama"
-      && var.eurorouter_base_url != ""
-      && var.eurorouter_model != ""
-      && var.eurorouter_api_keys != ""
+      && startswith(trimspace(var.eurorouter_base_url), "https://")
+      && trimspace(var.eurorouter_model) != ""
+      && length([for k in split(",", var.eurorouter_api_keys) : trimspace(k) if trimspace(k) != ""]) > 0
     )
-    error_message = "llm_hosted_fallback = true требует llm_backend = ollama и непустых eurorouter_base_url, eurorouter_model, eurorouter_api_keys."
+    error_message = "llm_hosted_fallback = true требует llm_backend = ollama, eurorouter_base_url на https://, непустых eurorouter_model и хотя бы одного ключа в eurorouter_api_keys."
   }
 }
 
