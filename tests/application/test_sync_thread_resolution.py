@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.application.merge_gate_publish import DISABLED_REVIEW_CHECK
 from app.application.sync_thread_resolution import (
     apply_review_thread_webhook,
     handle_review_thread_webhook,
@@ -169,9 +170,10 @@ def test_merge_gate_refresh_sees_a_critical_whose_inline_id_was_lost() -> None:
     assert check.conclusion == "failure"
 
 
-def test_thread_webhook_of_a_disconnected_repository_still_refreshes_the_merge_gate() -> None:
-    """Выключение ревью не замораживает merge gate (design D6): человек закрыл тред с
-    `critical` у выключенного репозитория — тред отмечен, check run становится зелёным."""
+def test_thread_webhook_of_a_disconnected_repository_sets_the_disabled_check() -> None:
+    """Выключенный репозиторий (design D6): человек закрыл один из двух `critical` тредов —
+    тред отмечен, а на head ставится «Ревью выключено в сервисе», а не пересчёт по тредам
+    (тот дал бы `failure` из-за второго открытого треда)."""
     uow = FakeUnitOfWork()
     repo_id, mr_id, run_id, finding_id = UUID(int=1), UUID(int=3), UUID(int=2), UUID(int=10)
     uow.repositories.add(
@@ -239,6 +241,31 @@ def test_thread_webhook_of_a_disconnected_repository_still_refreshes_the_merge_g
             finding_id=finding_id,
         )
     )
+    second_finding_id = UUID(int=12)
+    uow.findings.add(
+        Finding(
+            id=second_finding_id,
+            review_run_id=run_id,
+            anchor=DiffAnchor(file_path="b.py", side=DiffSide.NEW, new_line=2),
+            category=FindingCategory.SECURITY,
+            severity=FindingSeverity.CRITICAL,
+            message="ещё инъекция",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    uow.published_comments.add(
+        PublishedComment(
+            id=UUID(int=13),
+            review_run_id=run_id,
+            provider_comment_id="78",
+            kind=CommentKind.INLINE,
+            published_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+            finding_id=second_finding_id,
+        )
+    )
     vcs = RecordingVcsGateway()
     payload = {
         "action": "resolved",
@@ -252,5 +279,4 @@ def test_thread_webhook_of_a_disconnected_repository_still_refreshes_the_merge_g
 
     row = uow.published_comments.find_by_provider_comment_id("77")
     assert row is not None and row.thread_resolved is True
-    (check,) = vcs.checks
-    assert check.conclusion == "success"
+    assert vcs.checks == [DISABLED_REVIEW_CHECK]
