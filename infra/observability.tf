@@ -1,5 +1,6 @@
-# Стек наблюдаемости (change add-observability-stack): коллектор, Loki, Tempo,
-# Prometheus, Grafana, node-exporter и socket-proxy — те же конфиги
+# Стек наблюдаемости (change add-observability-stack): коллектор и его
+# экземпляр метрик контейнеров, Loki, Tempo, Prometheus, Grafana, node-exporter
+# и socket-proxy — те же конфиги
 # из observability/, что и в локальном compose. Метрики базы снимает receiver
 # postgresql самого коллектора (решение #89) — отдельного экспортёра нет.
 # Конфиги заливаются в контейнеры при создании
@@ -102,8 +103,8 @@ resource "docker_volume" "grafana" {
 }
 
 # Отдельная сеть для Docker API через socket-proxy: в ней только proxy и
-# коллектор (receiver docker_stats) — остальным контейнерам стека и приложения
-# доступ к демону Docker не нужен.
+# otelcol_docker (receiver docker_stats) — остальным контейнерам стека и
+# приложения доступ к демону Docker не нужен.
 resource "docker_network" "observability_docker_proxy" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-docker-proxy"
@@ -196,20 +197,55 @@ resource "docker_container" "otelcol" {
     aliases = ["collector"]
   }
 
-  # Метрики контейнеров: receiver docker_stats ходит к Docker API только через
-  # socket-proxy (dockerproxy:2375). Почему не cAdvisor — infra/README.md,
-  # «Метрики контейнеров».
+  depends_on = [
+    docker_container.loki,
+    docker_container.tempo,
+  ]
+}
+
+# Метрики контейнеров — отдельный экземпляр того же образа: ему нужен Docker
+# API через socket-proxy, а inspect отдаёт Env всех контейнеров. Входящего OTLP
+# у него нет, и в сетях данных и dmc268-otlp он не стоит: основной коллектор,
+# который разбирает OTLP из сети данных и из интернета, до proxy не дотянется.
+# Почему docker_stats, а не cAdvisor, — infra/README.md, «Метрики контейнеров».
+resource "docker_container" "otelcol_docker" {
+  count   = var.observability_enabled ? 1 : 0
+  name    = "dmc268-otelcol-docker"
+  image   = docker_image.otelcol[0].image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.collector_docker
+  memory_swap = var.observability_memory_mb.collector_docker
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  # Как у основного коллектора: без read_only из-за upload конфига.
+  tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=16m" }
+  security_opts = ["no-new-privileges:true"]
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  upload {
+    content = file("${path.module}/observability/otelcol-docker.yaml")
+    file    = "/etc/otelcol-contrib/config.yaml"
+  }
+
+  # Скрейп Prometheus: collector-docker:8889.
+  networks_advanced {
+    name    = docker_network.observability[0].name
+    aliases = ["collector-docker"]
+  }
+
+  # Docker API — только через socket-proxy (dockerproxy:2375).
   networks_advanced {
     name = docker_network.observability_docker_proxy[0].name
   }
 
-  # Proxy — тоже: receiver docker_stats на старте читает список контейнеров
-  # и без proxy не даёт подняться всему коллектору.
-  depends_on = [
-    docker_container.loki,
-    docker_container.tempo,
-    docker_container.docker_socket_proxy,
-  ]
+  # Receiver docker_stats на старте читает список контейнеров: без proxy этот
+  # экземпляр не поднимается.
+  depends_on = [docker_container.docker_socket_proxy]
 }
 
 resource "docker_container" "loki" {
@@ -322,7 +358,7 @@ resource "docker_container" "prometheus" {
   }
 
   # Скрейп rabbitmq — в сети данных; сеть стека — для целей collector,
-  # node-exporter и datasources Grafana, алиас — там же.
+  # collector-docker, node-exporter и datasources Grafana, алиас — там же.
   networks_advanced {
     name = docker_network.backend.name
   }
@@ -459,8 +495,8 @@ resource "docker_container" "node_exporter" {
   }
 }
 
-# Прокси над Docker API (/var/run/docker.sock): коллектор — единственный клиент,
-# docker.sock контейнерам больше не монтируется. Белый список путей — не
+# Прокси над Docker API (/var/run/docker.sock): otelcol_docker — единственный
+# клиент, docker.sock контейнерам больше не монтируется. Белый список путей — не
 # env-переменные образа (CONTAINERS=1 открывал ЛЮБОЙ GET под /containers —
 # /containers/{id}/archive?path=… читал любой файл любого контейнера, включая
 # том Postgres, /export отдавал файловую систему, inspect — полный Env;
@@ -468,7 +504,7 @@ resource "docker_container" "node_exporter" {
 # файл /usr/local/etc/haproxy/haproxy.cfg.template (sed подставляет адрес
 # прослушивания вместо ${BIND_CONFIG}) и стартует haproxy по результату.
 # Белый список и остаточный риск — в шапке observability/docker-socket-proxy.cfg.
-# Сеть — отдельная, только proxy и коллектор.
+# Сеть — отдельная, только proxy и otelcol_docker.
 resource "docker_container" "docker_socket_proxy" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-docker-proxy"

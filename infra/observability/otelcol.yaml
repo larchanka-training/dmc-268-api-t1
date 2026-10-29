@@ -50,16 +50,6 @@ receivers:
       insecure: true
     collection_interval: 15s
 
-  # Метрики контейнеров (CPU, память, сеть, диск) с именем контейнера — вместо
-  # cAdvisor (почему — infra/README.md, «Метрики контейнеров»). К Docker API —
-  # только через socket-proxy с белым списком путей
-  # (observability/docker-socket-proxy.cfg), docker.sock коллектору не
-  # монтируется. Предупреждение «Unauthenticated TCP connection» в логе
-  # ожидаемо: proxy — в отдельной internal-сети, TLS там не поднимается.
-  docker_stats:
-    endpoint: tcp://dockerproxy:2375
-    collection_interval: 15s
-
 processors:
   # Потолок памяти коллектора; в infra контейнеру задан лимит с запасом
   # (observability_memory_mb.collector).
@@ -84,9 +74,7 @@ processors:
   # серий на каждый деплой — тот же эффект, что был у случайного
   # service.instance.id (замечание ревью PR #130). service.name и
   # service.instance.id стабильны и остаются; версию сервиса смотрят в env
-  # деплоя, а не в метриках. У рядов docker_stats по той же причине убраны
-  # id, hostname (префикс id) и образ контейнера — меняются каждым деплоем;
-  # ряд различает container.name. Редакция трейсов и логов не трогается.
+  # деплоя, а не в метриках. Редакция трейсов и логов не трогается.
   transform/trim-metrics-resource:
     error_mode: ignore
     metric_statements:
@@ -96,9 +84,6 @@ processors:
           - delete_key(attributes, "telemetry.sdk.version")
           - delete_key(attributes, "telemetry.sdk.name")
           - delete_key(attributes, "telemetry.sdk.language")
-          - delete_key(attributes, "container.id")
-          - delete_key(attributes, "container.hostname")
-          - delete_key(attributes, "container.image.name")
 
   # Ресурс браузерных спанов задаёт коллектор, а не клиент: тело приходит из
   # интернета, и спан, подписанный как dmc-268-api, иначе встал бы в трейсы
@@ -213,7 +198,7 @@ service:
       processors: [memory_limiter, transform/browser-resource, transform/redact, batch]
       exporters: [otlphttp/tempo]
     metrics:
-      receivers: [otlp, postgresql, docker_stats]
+      receivers: [otlp, postgresql]
       processors: [memory_limiter, transform/trim-metrics-resource, batch]
       exporters: [prometheus]
     logs:

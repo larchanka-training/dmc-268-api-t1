@@ -4,8 +4,8 @@
 бы только на деплое. Тесты держат структуру: образы стека зафиксированы
 дайджестами одинаково в обоих местах, отдельного экспортёра Postgres больше
 нет (метрики базы снимает receiver postgresql коллектора, решение #89),
-сервер и контейнеры видны (node-exporter и receiver docker_stats коллектора —
-последний без docker.sock, через socket-proxy), у Prometheus есть потолок по размеру,
+сервер и контейнеры видны (node-exporter и receiver docker_stats отдельного
+экземпляра коллектора — без docker.sock, через socket-proxy), у Prometheus есть потолок по размеру,
 имена compose не сталкиваются с infra на общем хосте.
 Валидацию конфига самим коллектором делает класс
 TestCollectorConfigValidation в test_collector_redaction.py.
@@ -15,6 +15,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import pytest
 import yaml
@@ -39,6 +40,7 @@ DASHBOARD_JSON = DASHBOARDS_DIR / "dmc268-overview.json"
 # пар «сервис compose → local» обязан совпадать дайджестами в обоих файлах.
 STACK_SERVICES = {
     "collector": "otelcol_image",
+    "collector-docker": "otelcol_image",
     "loki": "loki_image",
     "tempo": "tempo_image",
     "prometheus": "prometheus_image",
@@ -312,12 +314,28 @@ def test_infra_preloads_pg_stat_statements_only_with_the_stack() -> None:
 # --- метрики контейнеров: docker_stats коллектора через socket-proxy -----------------
 
 
-def test_container_metrics_come_from_docker_stats_through_the_proxy() -> None:
-    """Метрики контейнеров снимает receiver docker_stats коллектора через
-    socket-proxy, в общем конвейере метрик (почему не cAdvisor — #249)."""
-    config = yaml.safe_load((OBSERVABILITY_DIR / "otelcol.yaml").read_text(encoding="utf-8"))
-    assert config["receivers"]["docker_stats"]["endpoint"] == "tcp://dockerproxy:2375"
-    assert "docker_stats" in config["service"]["pipelines"]["metrics"]["receivers"]
+def test_container_metrics_come_from_a_separate_collector_through_the_proxy() -> None:
+    """Метрики контейнеров снимает отдельный экземпляр коллектора с одним
+    receiver docker_stats через socket-proxy (почему не cAdvisor — #249).
+    Входящего OTLP у него нет, а у основного коллектора нет docker_stats:
+    inspect через proxy отдаёт Env всех контейнеров."""
+    docker = yaml.safe_load((OBSERVABILITY_DIR / "otelcol-docker.yaml").read_text(encoding="utf-8"))
+    assert set(docker["receivers"]) == {"docker_stats"}
+    assert docker["receivers"]["docker_stats"]["endpoint"] == "tcp://dockerproxy:2375"
+    assert docker["service"]["pipelines"]["metrics"]["receivers"] == ["docker_stats"]
+
+    main = yaml.safe_load((OBSERVABILITY_DIR / "otelcol.yaml").read_text(encoding="utf-8"))
+    assert "docker_stats" not in main["receivers"]
+    assert "dockerproxy" not in json.dumps(main)
+
+    compose = load_compose()["services"]["collector-docker"]
+    assert "./infra/observability/otelcol-docker.yaml:/etc/otelcol-contrib/config.yaml:ro" in compose["volumes"]
+    assert 'file("${path.module}/observability/otelcol-docker.yaml")' in _tf_container_block("otelcol_docker")
+
+
+def test_prometheus_scrapes_the_container_metrics_collector() -> None:
+    jobs = {job["job_name"]: job for job in load_prometheus()["scrape_configs"]}
+    assert jobs["docker-stats"]["static_configs"][0]["targets"] == ["collector-docker:8889"]
 
 
 SOCKET_PROXY_TEMPLATE = OBSERVABILITY_DIR / "docker-socket-proxy.cfg"
@@ -364,13 +382,62 @@ def test_socket_proxy_allows_only_the_docker_stats_paths() -> None:
     assert "    http-request deny\n    default_backend dockerbackend" in template
 
 
+def _socket_proxy_allows(url: str) -> bool:
+    """Пропустит ли proxy GET на url: регулярка allow-строки шаблона против
+    пути без query, раскодированного, как `path,url_dec` у haproxy (`-i` —
+    без учёта регистра)."""
+    template = SOCKET_PROXY_TEMPLATE.read_text(encoding="utf-8")
+    match = re.search(r"http-request allow if \{ path,url_dec -m reg -i (\S+) \}", template)
+    assert match is not None, "нет allow-строки в docker-socket-proxy.cfg"
+    return re.fullmatch(match.group(1), unquote(urlsplit(url).path), re.IGNORECASE) is not None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/containers/json",
+        "/v1.47/containers/json",
+        "/containers/abc/json",
+        "/v1.47/containers/abc/stats",
+        "/v1.47/containers/abc/stats?stream=false",
+        "/events",
+        "/v1.47/events?filters=%7B%7D",
+        "/info",
+        "/version",
+        "/_ping",
+    ],
+)
+def test_socket_proxy_lets_docker_stats_paths_through(url: str) -> None:
+    assert _socket_proxy_allows(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/containers/abc/logs",
+        "/containers/abc/archive",
+        "/containers/abc/export",
+        "/exec/abc/json",
+        "/containers/a/b/stats",
+        # Слэш, закодированный в id, раскрывается до проверки.
+        "/containers/a%2Fb/stats",
+        "/v1.47/events/x",
+        "/images/json",
+    ],
+)
+def test_socket_proxy_rejects_other_paths(url: str) -> None:
+    assert not _socket_proxy_allows(url)
+
+
 def test_docker_socket_is_mounted_only_to_the_proxy() -> None:
     """docker.sock — только у proxy, в compose и в infra; коллектор ходит к
     Docker по TCP-адресу proxy (сети сверяют тесты сетей ниже)."""
     services = load_compose()["services"]
-    assert not any("docker.sock" in volume for volume in services["collector"]["volumes"])
+    for collector in ("collector", "collector-docker"):
+        assert not any("docker.sock" in volume for volume in services[collector]["volumes"])
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["dockerproxy"]["volumes"]
     assert "/var/run/docker.sock" not in _tf_container_block("otelcol")
+    assert "/var/run/docker.sock" not in _tf_container_block("otelcol_docker")
     assert "/var/run/docker.sock" in _tf_container_block("docker_socket_proxy")
 
 
@@ -390,7 +457,14 @@ def test_stack_networks_split_the_stack_from_the_app_in_compose() -> None:
     assert not (networks["grafana"] or {}).get("internal")
 
     services = load_compose()["services"]
-    assert set(services["collector"]["networks"]) == {"default", "observability", "docker_proxy"}
+    assert set(services["collector"]["networks"]) == {"default", "observability"}
+    assert set(services["collector-docker"]["networks"]) == {"observability", "docker_proxy"}
+    # В сети proxy — только он сам и экземпляр коллектора с docker_stats:
+    # inspect отдаёт Env всех контейнеров.
+    assert {name for name, service in services.items() if "docker_proxy" in (service.get("networks") or {})} == {
+        "dockerproxy",
+        "collector-docker",
+    }
     assert set(services["prometheus"]["networks"]) == {"default", "observability"}
     assert set(services["grafana"]["networks"]) == {"observability", "grafana"}
     for service in ("loki", "tempo", "node-exporter"):

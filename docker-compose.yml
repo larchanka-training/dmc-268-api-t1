@@ -313,10 +313,10 @@ services:
 
   # Стек наблюдаемости — те же конфиги из infra/observability/, что и на
   # стенде (спека observability: различия окружений — переменные, не конфиги).
-  # Семь сервисов: коллектор (трейсы, логи, метрики приложения, базы и
-  # контейнеров), Loki (логи), Tempo (трейсы), Prometheus (метрики), Grafana
-  # (интерфейс), node-exporter (сервер) и socket-proxy (доступ receiver
-  # docker_stats коллектора к Docker API без docker.sock). Без профиля
+  # Восемь сервисов: коллектор (трейсы, логи, метрики приложения и базы),
+  # collector-docker (метрики контейнеров), Loki (логи), Tempo (трейсы),
+  # Prometheus (метрики), Grafana (интерфейс), node-exporter (сервер) и
+  # socket-proxy (доступ collector-docker к Docker API без docker.sock). Без профиля
   # ничего из этого не поднимается. Экспорт включают переменные api/worker —
   # см. комментарий у OTEL_TRACES_EXPORTER.
   #
@@ -336,8 +336,6 @@ services:
         aliases:
           - collector
       observability:
-      # Receiver docker_stats — к Docker API через socket-proxy.
-      docker_proxy:
     # Логи приложения приходят по OTLP из SDK (OTEL_LOGS_EXPORTER у api и
     # worker): файлы Docker коллектор не читает, и root ему не нужен.
     volumes:
@@ -358,8 +356,29 @@ services:
     depends_on:
       - loki
       - tempo
-      # receiver docker_stats на старте читает список контейнеров: без proxy
-      # не поднимается весь коллектор.
+
+  # Метрики контейнеров — отдельный экземпляр коллектора с доступом к Docker
+  # API через socket-proxy: inspect отдаёт Env всех контейнеров, поэтому
+  # основной коллектор (принимает OTLP) в сеть proxy не ходит, а у этого нет
+  # входящего OTLP. Как dmc268-otelcol-docker в infra/observability.tf.
+  collector-docker:
+    # otel/opentelemetry-collector-contrib:0.158.0
+    image: otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
+    profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - collector-docker
+      docker_proxy:
+    volumes:
+      - ./infra/observability/otelcol-docker.yaml:/etc/otelcol-contrib/config.yaml:ro
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    # receiver docker_stats на старте читает список контейнеров: без proxy
+    # экземпляр не поднимается.
+    depends_on:
       - dockerproxy
 
   loki:
@@ -463,7 +482,7 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
 
-  # Прокси над Docker API (/var/run/docker.sock): коллектор — единственный
+  # Прокси над Docker API (/var/run/docker.sock): collector-docker — единственный
   # клиент, docker.sock контейнерам больше не монтируется. Белый список путей —
   # не env-переменные образа (CONTAINERS=1 открывал ЛЮБОЙ GET под /containers:
   # /containers/{id}/archive?path=… — любой файл любого контейнера, включая том
@@ -471,7 +490,7 @@ services:
   # образа рендерит именно его и стартует haproxy по результату. Разрешены
   # только пути receiver docker_stats (правила и остаточный риск с Env — в
   # шапке файла). Сеть — отдельная (docker_proxy), в ней только proxy и
-  # коллектор.
+  # collector-docker.
   dockerproxy:
     # tecnativa/docker-socket-proxy:v0.4.1
     image: tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e
@@ -510,7 +529,7 @@ volumes:
   grafana_data:
 
 # Сети стека наблюдаемости. docker_proxy — для доступа к Docker API через
-# socket-proxy: в ней только dockerproxy и коллектор, internal — наружу в
+# socket-proxy: в ней только dockerproxy и collector-docker, internal — наружу в
 # интернет им идти не нужно (публиковать там нечего). observability — весь
 # стек, отдельно от default-сети приложения: из контейнеров интерфейса
 # (подключаются к default) не должны быть доступны Loki без аутентификации,

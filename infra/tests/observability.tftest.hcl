@@ -38,7 +38,8 @@ run "observability_stack_plans_protected" {
   assert {
     condition = alltrue([
       for c in [
-        docker_container.otelcol[0], docker_container.loki[0],
+        docker_container.otelcol[0], docker_container.otelcol_docker[0],
+        docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
         docker_container.docker_socket_proxy[0],
@@ -53,7 +54,8 @@ run "observability_stack_plans_protected" {
   assert {
     condition = alltrue([
       for c in [
-        docker_container.otelcol[0], docker_container.loki[0],
+        docker_container.otelcol[0], docker_container.otelcol_docker[0],
+        docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
         docker_container.docker_socket_proxy[0],
@@ -69,7 +71,8 @@ run "observability_stack_plans_protected" {
   assert {
     condition = alltrue([
       for c in [
-        docker_container.otelcol[0], docker_container.loki[0],
+        docker_container.otelcol[0], docker_container.otelcol_docker[0],
+        docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
         docker_container.docker_socket_proxy[0],
@@ -111,10 +114,10 @@ run "observability_stack_without_secrets_rejected" {
 }
 
 # Сети и порт стека по плану (то же сверяет tests/test_infra_isolation.py по
-# тексту): collector — в данных, в стеке, в dmc268-otlp и в сети socket-proxy,
-# prometheus — в данных и в стеке, grafana — в стеке и в сети публикации порта; сети стека и
-# dmc268-otlp internal, сеть порта Grafana — нет; порт Grafana публикуется на
-# bind_ip.
+# тексту): collector — в данных, в стеке и в dmc268-otlp, collector-docker —
+# только в стеке и в сети socket-proxy, prometheus — в данных и в стеке,
+# grafana — в стеке и в сети публикации порта; сети стека и dmc268-otlp
+# internal, сеть порта Grafana — нет; порт Grafana публикуется на bind_ip.
 run "stack_networks_and_grafana_port_follow_their_purpose" {
   command = plan
 
@@ -127,16 +130,22 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
   assert {
     condition = toset([for n in docker_container.otelcol[0].networks_advanced : n.name]) == toset([
       docker_network.backend.name, docker_network.observability[0].name, docker_network.otlp.name,
-      docker_network.observability_docker_proxy[0].name,
     ])
-    error_message = "Коллектор должен стоять ровно в четырёх сетях: данных (receiver postgres и приём OTLP сервисов), стека (экспортёры, скрейп collector), dmc268-otlp (трейсы браузера через nginx интерфейса) и socket-proxy (receiver docker_stats)."
+    error_message = "Коллектор должен стоять ровно в трёх сетях: данных (receiver postgres и приём OTLP сервисов), стека (экспортёры, скрейп collector) и dmc268-otlp (трейсы браузера через nginx интерфейса). В сети socket-proxy его быть не должно: inspect отдаёт Env всех контейнеров."
+  }
+
+  assert {
+    condition = toset([for n in docker_container.otelcol_docker[0].networks_advanced : n.name]) == toset([
+      docker_network.observability[0].name, docker_network.observability_docker_proxy[0].name,
+    ])
+    error_message = "Экземпляр метрик контейнеров должен стоять ровно в двух сетях: стека (скрейп collector-docker) и socket-proxy (receiver docker_stats). Без сети данных и dmc268-otlp: OTLP он не принимает."
   }
 
   assert {
     condition = toset([for n in docker_container.prometheus[0].networks_advanced : n.name]) == toset([
       docker_network.backend.name, docker_network.observability[0].name,
     ])
-    error_message = "Prometheus должен стоять ровно в двух сетях: данных (скрейп rabbitmq) и стека (скрейп collector и node-exporter)."
+    error_message = "Prometheus должен стоять ровно в двух сетях: данных (скрейп rabbitmq) и стека (скрейп collector, collector-docker и node-exporter)."
   }
 
   assert {

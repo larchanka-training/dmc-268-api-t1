@@ -1,0 +1,55 @@
+# Второй экземпляр коллектора (dmc268-otelcol-docker) — только метрики
+# контейнеров. Отдельно от основного (otelcol.yaml), потому что ему нужен Docker
+# API: inspect через socket-proxy отдаёт Env всех контейнеров, а основной
+# коллектор разбирает OTLP из сети данных и из интернета (трейсы браузера).
+# Здесь входящего OTLP нет вовсе, а без proxy не стартует только этот
+# экземпляр — трейсы и логи идут через основной. Образ тот же, что у основного;
+# конфиг один для compose и infra.
+
+receivers:
+  # Почему docker_stats, а не cAdvisor, — infra/README.md, «Метрики
+  # контейнеров». К Docker API — только через socket-proxy с белым списком
+  # путей (observability/docker-socket-proxy.cfg), docker.sock не монтируется.
+  # Предупреждение «Unauthenticated TCP connection» в логе ожидаемо: proxy — в
+  # отдельной internal-сети, TLS там не поднимается.
+  docker_stats:
+    endpoint: tcp://dockerproxy:2375
+    collection_interval: 15s
+
+processors:
+  # Потолок памяти; контейнеру задан лимит с запасом
+  # (observability_memory_mb.collector_docker).
+  memory_limiter:
+    check_interval: 1s
+    spike_limit_mib: 16
+    limit_mib: 64
+  batch:
+    timeout: 5s
+
+  # id, hostname (префикс id) и образ контейнера меняются каждым деплоем: в
+  # лейблах Prometheus они давали бы новый набор серий на каждый деплой. Ряд
+  # различает container.name.
+  transform/trim-metrics-resource:
+    error_mode: ignore
+    metric_statements:
+      - context: resource
+        statements:
+          - delete_key(attributes, "container.id")
+          - delete_key(attributes, "container.hostname")
+          - delete_key(attributes, "container.image.name")
+
+exporters:
+  # Prometheus скрейпит collector-docker:8889 (job docker-stats).
+  # resource_to_telemetry_conversion переносит атрибуты ресурса в лейблы:
+  # без неё не было бы container_name.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  pipelines:
+    metrics:
+      receivers: [docker_stats]
+      processors: [memory_limiter, transform/trim-metrics-resource, batch]
+      exporters: [prometheus]

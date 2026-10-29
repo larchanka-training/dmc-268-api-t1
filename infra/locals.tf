@@ -63,7 +63,7 @@ locals {
   prometheus_image    = "prom/prometheus@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2"
   grafana_image       = "grafana/grafana@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f"
   node_exporter_image = "quay.io/prometheus/node-exporter@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a"
-  # socket-proxy: доступ коллектора к Docker API без docker.sock — белый список
+  # socket-proxy: доступ otelcol_docker к Docker API без docker.sock — белый список
   # путей в своём шаблоне haproxy (observability/docker-socket-proxy.cfg),
   # минимум прав там же и в комментариях у контейнера в observability.tf.
   docker_socket_proxy_image = "tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e"
