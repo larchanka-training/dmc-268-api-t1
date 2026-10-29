@@ -98,7 +98,7 @@ class Container:
     # tokens обязан пережить один вызов builder'а, иначе теряется смысл
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
-    _vcs_gateway: VcsGateway | None
+    _vcs_gateway: GitHubVcsGateway | None
     # Таймаут и ожидание лимита VCS-шлюза: у API и воркера свои.
     _vcs_limits: VcsClientLimits
     # Репозитории, видимые пользователю, — запросы с его токеном; App-реквизиты
@@ -139,7 +139,7 @@ class Container:
             object.__setattr__(self, "_llm_gateway", gateway)
         return gateway
 
-    def vcs_gateway(self) -> VcsGateway:
+    def vcs_gateway(self) -> GitHubVcsGateway:
         """Собрать VCS-шлюз при первом обращении; конструирование — без сети."""
         gateway = self._vcs_gateway
         if gateway is None:
@@ -156,12 +156,8 @@ class Container:
         """
         if not self.settings.github_app_configured:
             return None
-        gateway = self.vcs_gateway()
-        # Подменённый шлюз (тесты) не знает `GET /app`.
-        if not isinstance(gateway, GitHubVcsGateway):
-            return None
         try:
-            return gateway.app_slug()
+            return self.vcs_gateway().app_slug()
         except VcsError:
             logger.warning("slug GitHub App не получен: install_url не отдаётся", exc_info=True)
             return None

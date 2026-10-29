@@ -57,7 +57,7 @@ def test_the_slug_comes_from_get_app_once_per_process_and_is_shared_with_the_bot
 
     assert container.app_slug() == SLUG
     assert container.app_slug() == SLUG
-    assert container.vcs_gateway().bot_login() == f"{SLUG}[bot]"  # type: ignore[attr-defined]
+    assert container.vcs_gateway().bot_login() == f"{SLUG}[bot]"
     assert seen == ["/app"]
 
 
