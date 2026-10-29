@@ -1,5 +1,6 @@
 # Общие значения стека: ротация логов, окружение процессов из образа
-# приложения и грейс-период остановки воркера.
+# приложения, телеметрия (экспорт и версия сервиса) и грейс-период остановки
+# воркера.
 
 locals {
   # Ротация логов: без неё json-file растёт, пока не кончится диск сервера.
@@ -8,6 +9,65 @@ locals {
     "max-size" = "10m"
     "max-file" = "3"
   }
+
+  # Версия сервиса для телеметрии — тег образа API: deploy.yml публикует образ
+  # с тегом по sha коммита, а git внутрь образа не попадает, поэтому версия
+  # приходит окружением (OTEL_RESOURCE_ATTRIBUTES). Тег — между последним
+  # двоеточием и концом или «@дайджестом»: реестр с портом
+  # (localhost:5000/repo:sha) и формат с дайджестом (repo:tag@sha256:hex —
+  # после #204) не ломают разбор (замечание ревью PR #130).
+  service_version = try(
+    regex(":(?P<tag>[^/:@]+)@", var.api_image)["tag"],
+    regex(":(?P<tag>[^/:@]+)$", var.api_image)["tag"],
+    "unknown",
+  )
+
+  # Экспорт телеметрии сервисами приложения (change add-observability-stack):
+  # коллектор в той же сети, логи и трейсы с метриками идут по OTLP. Таймаут
+  # OTLP меньше окна graceful shutdown API (5 с), чтобы выгрузка спанов при
+  # остановке успевала даже при недоступном коллекторе (замечание из #89).
+  # Python SDK читает таймаут в СЕКУНДАХ, вопреки спеке OTel (мс).
+  # Стек выключен — список пуст: SDK без OTEL_*_EXPORTER ничего не отправляет
+  # и в лог ошибок не пишет, а concat в env api и воркера не ломается.
+  telemetry_env = var.observability_enabled ? [
+    "OTEL_TRACES_EXPORTER=otlp",
+    "OTEL_METRICS_EXPORTER=otlp",
+    "OTEL_LOGS_EXPORTER=otlp",
+    "OTEL_EXPORTER_OTLP_ENDPOINT=http://dmc268-otelcol:4318",
+    "OTEL_EXPORTER_OTLP_TIMEOUT=4",
+    # Потолки очередей батч-процессоров спанов (BSP) и логов (BLRP). При
+    # остановке shutdown_tracing закрывает три провайдера телеметрии
+    # последовательно, и у каждого батча свой таймаут 4 с
+    # (OTEL_EXPORTER_OTLP_TIMEOUT выше): с очередью по умолчанию недоставленный
+    # батч досылается все 4 с, и замер ревью PR #130 при лежащем коллекторе
+    # давал 17–18 с — окно stop_timeout = 15 у api рвалось SIGKILL-ом. Очередь
+    # 512 записей — 9,5 с на всё: влезает в стоп-окно с запасом.
+    "OTEL_BSP_MAX_QUEUE_SIZE=512",
+    "OTEL_BLRP_MAX_QUEUE_SIZE=512",
+  ] : []
+
+  # Общая часть OTEL_RESOURCE_ATTRIBUTES; service.instance.id каждый контейнер
+  # дописывает своим стабильным именем (см. env ниже): случайный UUID на
+  # процесс растил бы в Prometheus серии exported_instance — ресурс
+  # конвертируется в лейблы рядов.
+  telemetry_resource = "service.version=${local.service_version},deployment.environment.name=${var.deployment_environment_name}"
+
+  # Образы стека наблюдаемости — те же версии, что в docker-compose.yml:
+  # конфиги в observability/ общие. Зафиксированы дайджестом манифест-листа
+  # (multi-arch, разрешён `docker buildx imagetools inspect <имя:тег>`) —
+  # одинаково в обоих местах; тег в комментарии рядом, обновление образа —
+  # осознанная замена дайджеста в обоих файлах с чтением breaking changes.
+  otelcol_image       = "otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5"
+  loki_image          = "grafana/loki@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28"
+  tempo_image         = "grafana/tempo@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044"
+  prometheus_image    = "prom/prometheus@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2"
+  grafana_image       = "grafana/grafana@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f"
+  node_exporter_image = "quay.io/prometheus/node-exporter@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a"
+  cadvisor_image      = "gcr.io/cadvisor/cadvisor@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435"
+  # socket-proxy: доступ cAdvisor к Docker API без docker.sock — белый список
+  # путей в своём шаблоне haproxy (observability/docker-socket-proxy.cfg),
+  # минимум прав там же и в комментариях у контейнера в observability.tf.
+  docker_socket_proxy_image = "tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e"
 
   # Окружение, без которого не загрузятся общие настройки (`load_settings`):
   # его получают оба контейнера из образа приложения — api и worker — и

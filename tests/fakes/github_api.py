@@ -33,6 +33,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 API_URL = "https://api.github.com"
 APP_ID = "424242"
+# Репозиторий и установка App фейкового GitHub: общие для e2e-стенда и песочницы.
+REPO_FULL_NAME = "acme/payments"
+REPO_PROVIDER_ID = "700100"
+INSTALLATION_ID = 31337
 # Slug приложения: GitHub отдаёт его в `GET /app`, а ревью App подписывает
 # пользователем `<slug>[bot]` с `type: Bot`.
 APP_SLUG = "dmc-268-review"

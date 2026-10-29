@@ -29,6 +29,7 @@ from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
 from app.application.ports.llm_gateway import LlmGateway, RetryListener
+from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.stage_tracer import NO_STAGE_TRACING, StageTracer
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.publish_review import publish_review
@@ -79,6 +80,7 @@ def _mark_failed(
     exc: Exception,
     now: datetime,
     *,
+    run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
     unrecorded_tokens: int = 0,
     unwritten_steps: Mapping[UUID, ReviewRunStep] | None = None,
 ) -> None:
@@ -92,7 +94,9 @@ def _mark_failed(
     модели, и `unrecorded_tokens` - токены ответов, ещё не записанные в прогон.
     Шаги, оставшиеся `running`, закрываются следом (`close_abandoned_steps`):
     шаг из `unwritten_steps` - своим незаписанным исходом, прочие -
-    `REVIEW_RUN_STALE`.
+    `REVIEW_RUN_STALE`. Запись в счётчик исходов — только за фактический
+    терминальный переход: ранний выход (прогона нет, он уже терминален) и
+    сбой записи прогоном не считаются.
     """
     spent = unrecorded_tokens + (exc.tokens_used if isinstance(exc, LlmError) else 0)
     try:
@@ -109,8 +113,9 @@ def _mark_failed(
             uow.review_runs.update(failed)
             uow.commit()
     except Exception:
-        logger.exception("не удалось перевести прогон %s в failed", run_id)
+        logger.exception("не удалось перевести прогон в failed")
         return
+    run_outcome.run_finished(ReviewRunStatus.FAILED.value)
     close_abandoned_steps(uow, run_id, now=now, known=unwritten_steps)
 
 
@@ -159,6 +164,7 @@ def run_review(
     monotonic: Callable[[], float],
     new_id: Callable[[], UUID],
     stage_tracer: StageTracer = NO_STAGE_TRACING,
+    run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
 ) -> None:
     """Довести прогон до терминального состояния.
 
@@ -168,7 +174,9 @@ def run_review(
     разность монотонных часов, которую тест проверяет точно. Длительность
     шага — та же разность на его границах.
     `stage_tracer` открывает спан трассировки на каждый шаг; это телеметрия,
-    результат прогона от неё не зависит.
+    результат прогона от неё не зависит. `run_outcome` пишет исход прогона в
+    бизнес-метрики на фактическом терминальном переходе — телеметрия, на
+    результат которой прогон тоже не влияет.
 
     Сбой любого шага переводит прогон в `failed` и **пробрасывается**: воркер
     отклоняет сообщение, и оно попадает в DLQ для разбора (`job-queue`).
@@ -302,6 +310,7 @@ def run_review(
         run = replace(run, duration_seconds=monotonic() - started_at)
         moment = now()
         _transition(uow, run, ReviewRunStatus.COMPLETED, moment)
+        run_outcome.run_finished(ReviewRunStatus.COMPLETED.value)
         # Шаг, чей исход не записался, или брошенная попытка прошлой доставки
         # иначе остались бы `running` у завершённого прогона.
         close_abandoned_steps(uow, run.id, now=moment, known=steps.unwritten)
@@ -312,6 +321,7 @@ def run_review(
             job.review_run_id,
             exc,
             now(),
+            run_outcome=run_outcome,
             unrecorded_tokens=unrecorded_tokens,
             unwritten_steps=steps.unwritten,
         )
@@ -357,9 +367,9 @@ def _verify(
             context, texts, gateway, candidates, limits=limits, on_retry=on_retry
         )
     except LlmError as error:
+        # Идентификатор прогона — атрибутом из контекста логов, не в тексте.
         logger.warning(
-            "верификатор недоступен для прогона %s, публикуются замечания после отсева",
-            run_id,
+            "верификатор недоступен, публикуются замечания после отсева",
             exc_info=True,
         )
         return _Verification(
@@ -371,9 +381,7 @@ def _verify(
             error_code=error.code,
         )
     if not answer.verdicts.ok:
-        logger.warning(
-            "ответ верификатора для прогона %s не принят: %s", run_id, answer.verdicts.error
-        )
+        logger.warning("ответ верификатора не принят: %s", answer.verdicts.error)
         return _Verification(
             tuple(candidates),
             VerificationOutcome.UNAVAILABLE,
@@ -385,8 +393,7 @@ def _verify(
     applied = apply_verdicts(candidates, answer.verdicts.unwrap())
     for finding, reason in applied.dropped:
         logger.info(
-            "прогон %s: верификатор отбросил замечание %s (%s/%s): %s",
-            run_id,
+            "верификатор отбросил замечание %s (%s/%s): %s",
             _where(finding),
             finding.category,
             finding.severity,
@@ -394,8 +401,7 @@ def _verify(
         )
     for finding, reason in applied.overruled:
         logger.warning(
-            "прогон %s: верификатор хотел отбросить замечание %s (%s/%s), оно оставлено: %s",
-            run_id,
+            "верификатор хотел отбросить замечание %s (%s/%s), оно оставлено: %s",
             _where(finding),
             finding.category,
             finding.severity,

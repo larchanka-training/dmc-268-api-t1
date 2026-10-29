@@ -1,0 +1,45 @@
+# Метрики: Prometheus скрейпит exporter-порт коллектора — туда через OTLP
+# приходят ручные метрики, HTTP-метрики FastAPI и метрики базы (receiver
+# postgresql коллектора, решение #89: отдельного экспортёра Postgres нет).
+# RabbitMQ — плагин rabbitmq_prometheus (включён в образе
+# rabbitmq:4.4-alpine), сервер — node-exporter, контейнеры — cAdvisor. Имена
+# хостов совпадают локально и на стенде: в compose это имена сервисов и
+# алиасы сети, в infra — алиасы сети dmc268.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: collector
+    # honor_labels обязателен: exporter-порт коллектора отдаёт ряды с лейблом
+    # job = service.name (resource_to_telemetry_conversion в otelcol.yaml).
+    # Без honor_labels Prometheus перезаписал бы job именем скрейп-джобы
+    # ("collector"), а имя сервиса уехал бы в exported_job — панели дашборда,
+    # которые фильтруют по job, остались бы пустыми.
+    honor_labels: true
+    static_configs:
+      - targets: ["collector:8889"]
+
+  - job_name: rabbitmq
+    # per-object, а не агрегированный /metrics: панель очереди строится по
+    # лейблу queue (rabbitmq_queue_messages{queue="review_jobs"}), возраст
+    # старшего сообщения — rabbitmq_queue_head_message_timestamp; агрегат
+    # лейблы теряет. Очередей у сервиса единицы — per-object дорогого
+    # не стоит.
+    metrics_path: /metrics/per-object
+    static_configs:
+      - targets: ["dmc268-rabbitmq:15692"]
+
+  # Метрики сервера: CPU, память, диски и файловые системы (алерты #100 —
+  # свободное место, включая потолок Prometheus по размеру).
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # Метрики контейнеров: CPU и память каждого контейнера, включая сам стек.
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["prometheus:9090"]

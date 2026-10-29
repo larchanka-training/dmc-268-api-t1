@@ -31,6 +31,7 @@ from app.application.ports import (
     VcsGateway,
 )
 from app.application.ports.llm_gateway import LlmGateway
+from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.application.review_pipeline import run_review
 from app.application.session_purge import purge_expired_sessions
@@ -41,6 +42,11 @@ from app.domain.ids import new_id
 from app.domain.prompt import PromptTexts, check_window_config
 from app.domain.webhook_redelivery import RedeliveryPolicy
 from app.infrastructure.container import WORKER_VCS_LIMITS, build_container
+from app.infrastructure.logging import (
+    configure_logging,
+    install_excepthooks,
+    review_run_id_scope,
+)
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
     QUEUE_NAME,
@@ -51,9 +57,11 @@ from app.infrastructure.queue.rabbitmq import (
 from app.infrastructure.telemetry import (
     REVIEW_RUN_ID,
     WORKER_SERVICE,
+    OtelRunOutcomeRecorder,
     OtelStageTracer,
-    configure_tracing,
+    configure_telemetry,
     instrument_engine,
+    instrument_pool,
     record_current_exception,
     shutdown_tracing,
     sweep_span,
@@ -171,7 +179,7 @@ class Worker:
                 # Исключение ловится снаружи спана: он успевает записать его и
                 # закрыться со статусом ошибки, а не OK при nack в DLQ.
                 try:
-                    with consuming_span(properties, method.delivery_tag):
+                    with consuming_span(properties, method.delivery_tag, method.redelivered):
                         handler(body)
                 except Exception as caught:  # noqa: BLE001 — любая ошибка уводит сообщение в DLQ, а не роняет процесс
                     exc = caught
@@ -244,35 +252,48 @@ def build_review_handler(
     limits: ContextLimits,
     model_limits: LlmLimits,
     prompt_texts: PromptTexts,
+    *,
+    run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
 ) -> MessageHandler:
+    """Собрать обработчик сообщения: разбор + `run_review`.
+
+    `run_outcome` — запись исходов прогонов в бизнес-метрики; в проде его
+    передаёт composition root (`run_worker`) адаптером телеметрии, общим для
+    обработчика и прохода очистки. Обработчик сам счётчик не пишет: прогон
+    считается на фактическом терминальном переходе, который делает пайплайн.
+    """
     stage_tracer = OtelStageTracer()
 
     def handle(body: bytes) -> None:
         job = from_wire_message(body)
         trace.get_current_span().set_attribute(REVIEW_RUN_ID, str(job.review_run_id))
-        try:
-            run_review(
-                job,
-                uow=deps.unit_of_work(),
-                llm_gateway=deps.llm_gateway(),
-                vcs_gateway=deps.vcs_gateway(),
-                definition_extractor=deps.definition_extractor(),
-                cache_store=deps.cache_store(),
-                context_limits=limits,
-                llm_limits=model_limits,
-                prompt_texts=prompt_texts,
-                now=lambda: datetime.now(UTC),
-                monotonic=time.monotonic,
-                new_id=new_id,
-                stage_tracer=stage_tracer,
-            )
-        except Exception:
-            # Сообщение уйдёт в DLQ; по job_id видно, какая это постановка
-            # прогона, по review_run_id — какой прогон.
-            logger.exception(
-                "задача %s (прогон %s) завершилась ошибкой", job.id, job.review_run_id
-            )
-            raise
+        # Контекст логов на всё сообщение: каждую запись пайплайна фильтр
+        # хендлера дополняет атрибутом review_run_id — по полю его ищут Loki
+        # и алерты, вклейка в текст не ищется (спека «Логи»).
+        with review_run_id_scope(str(job.review_run_id)):
+            try:
+                run_review(
+                    job,
+                    uow=deps.unit_of_work(),
+                    llm_gateway=deps.llm_gateway(),
+                    vcs_gateway=deps.vcs_gateway(),
+                    definition_extractor=deps.definition_extractor(),
+                    cache_store=deps.cache_store(),
+                    context_limits=limits,
+                    llm_limits=model_limits,
+                    prompt_texts=prompt_texts,
+                    now=lambda: datetime.now(UTC),
+                    monotonic=time.monotonic,
+                    new_id=new_id,
+                    stage_tracer=stage_tracer,
+                    run_outcome=run_outcome,
+                )
+            except Exception:
+                # job.id остаётся в тексте: это идентификатор задачи очереди, у
+                # спанов поля с таким именем нет. Прогон ищется по атрибуту
+                # review_run_id, который ставит фильтр из контекста выше.
+                logger.exception("задача %s завершилась ошибкой", job.id)
+                raise
 
     return handle
 
@@ -384,6 +405,7 @@ def build_maintenance(
     now: Callable[[], datetime],
     redeliver: Callable[[], int] | None = None,
     redelivery_interval: timedelta = timedelta(seconds=300),
+    run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
 ) -> Callable[[], None]:
     """Периодический проход: зависшие прогоны, истёкшие сессии, повтор доставок.
 
@@ -391,6 +413,8 @@ def build_maintenance(
     (`review.sweep`) и не мешает другому. Повтор доставок ходит в GitHub, поэтому
     идёт реже прохода — не чаще `redelivery_interval`; время его попытки
     запоминается и при сбое, чтобы отказ лимита не повторялся каждую минуту.
+    Выметенные прогоны — терминальные исходы, их пишет `run_outcome`, как и
+    пайплайн свои.
     """
     last_redelivery: datetime | None = None
 
@@ -398,7 +422,11 @@ def build_maintenance(
         nonlocal last_redelivery
         try:
             swept = sweep_stale_runs(
-                uow_factory(), now=now(), limit=stale_limit, queued_limit=queued_limit
+                uow_factory(),
+                now=now(),
+                limit=stale_limit,
+                queued_limit=queued_limit,
+                run_outcome=run_outcome,
             )
             if swept:
                 logger.warning("зависших прогонов переведено в failed: %d", swept)
@@ -429,8 +457,31 @@ def build_maintenance(
     return maintenance
 
 
-def run_worker(settings: Settings) -> None:
-    """Собрать зависимости и запустить воркер бесконечно. Вызывается из `__main__.py`."""
+def run_worker(load_settings: Callable[[], Settings]) -> None:
+    """Собрать зависимости и запустить воркер бесконечно. Вызывается из `__main__.py`.
+
+    Настройки приходят загрузчиком, а не готовыми: `load_settings` вызывается
+    внутри, уже после настройки логов, телеметрии и excepthook'ов. Иначе
+    `ValidationError` pydantic из кривого окружения выходила бы до настройки
+    логов текстом в stderr, коллектор её дропал бы, и crash-loop воркера был
+    бы невидим в Loki (замечание ревью PR #130).
+    """
+    configure_logging(WORKER_SERVICE)
+    # Телеметрия — сразу за логами и до чтения окружения: OTLP-хендлер
+    # должен стоять, когда WorkerConfigError пишется, иначе ошибка старта
+    # воркера до Loki не доходит (замечание ревью PR #130). Провайдер собирается
+    # из env, настройки сервиса ему не нужны.
+    configure_telemetry(WORKER_SERVICE)
+    # Хук общий для API и воркера (живёт в `app.infrastructure.logging`):
+    # необработанное исключение любого потока и ошибка старта выходят
+    # JSON-записью, а не текстовым дампом в stderr, который коллектор
+    # дропает (замечание ревью PR #130).
+    install_excepthooks()
+    # Окружение читается последним из стартовых шагов: любая ошибка чтения
+    # конфигурации — `ValidationError` pydantic или `WorkerConfigError` —
+    # выходит из процесса JSON-записью через уже стоящий excepthook
+    # (замечание ревью PR #130), и crash-loop воркера виден в Loki.
+    settings = load_settings()
     # До подключения к брокеру: с непригодной конфигурацией воркер не поднимается.
     # Заглушка модели выбирается только явно - иначе прогоны молча выходили бы
     # пустыми (change `add-llm-gateway`, требование «Выбор заглушки явный»).
@@ -438,12 +489,17 @@ def run_worker(settings: Settings) -> None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
     check_model_deadline(settings)
     check_sweep_thresholds(settings)
-    configure_tracing(WORKER_SERVICE)
+    # Воркеру — свои потолки VCS-клиента: дифф и ревью крупного PR дольше,
+    # чем ответ на вебхук у api.
     container = build_container(settings, vcs_limits=WORKER_VCS_LIMITS)
     instrument_engine(container.engine)
+    instrument_pool(container.engine, settings.db_pool_size, settings.db_max_overflow)
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
     # Собрать адаптер модели сразу: порядок провайдеров уходит в лог при старте.
     container.llm_gateway()
+    # Один адаптер на оба потребителя: запись исходов — общая бизнес-метрика
+    # пайплайна и прохода очистки.
+    run_outcome = OtelRunOutcomeRecorder()
     sweep = build_maintenance(
         container.unit_of_work,
         stale_limit=timedelta(seconds=settings.stale_run_timeout_seconds),
@@ -456,9 +512,14 @@ def run_worker(settings: Settings) -> None:
             now=lambda: datetime.now(UTC),
         ),
         redelivery_interval=timedelta(seconds=settings.webhook_redelivery_interval_seconds),
+        run_outcome=run_outcome,
     )
     handler = build_review_handler(
-        container, context_limits(settings), llm_limits(settings), prompt_texts
+        container,
+        context_limits(settings),
+        llm_limits(settings),
+        prompt_texts,
+        run_outcome=run_outcome,
     )
     with stop_on_signals() as stop:
         try:

@@ -21,8 +21,8 @@ from app.domain.enums import ReviewRunStage, ReviewRunStatus, ReviewRunStepStatu
 from app.infrastructure.queue.rabbitmq import DLQ_NAME, QUEUE_NAME
 
 from ..conftest import requires_broker, requires_db
-from ..e2e.stack import REPO_FULL_NAME, Stack, deliver
-from ..fakes.github_api import NetworkFault, PullRequest
+from ..e2e.stack import Stack, deliver
+from ..fakes.github_api import REPO_FULL_NAME, NetworkFault, PullRequest
 from ..fakes.llm_gateway import ScriptedLlmGateway
 from ..fakes.llm_provider import FakeLlmProvider
 from .scenario import (

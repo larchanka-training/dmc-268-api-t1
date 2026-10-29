@@ -55,6 +55,7 @@ from uuid import UUID
 
 from app.application.merge_gate_publish import build_retarget_check
 from app.application.ports.job_queue import JobQueue
+from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.domain.entities import (
@@ -112,11 +113,15 @@ def handle_webhook_event(
     *,
     now: Callable[[], datetime],
     new_id: Callable[[], UUID],
+    run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
 ) -> WebhookOutcome:
     """Принять вебхук: от payload'а до закоммиченного прогона и задачи.
 
     `now` и `new_id` передаются вызывающим, чтобы тесты фиксировали точные
     значения. Вне тестов это `datetime.now(UTC)` и `app.domain.ids.new_id`.
+    `run_outcome` пишет терминальный переход компенсации `_fail_unenqueued`
+    в счётчик прогонов: без записи алерт по доле упавших слеп при падении
+    брокера — пайплайн и выметатель этот переход не делают.
     """
     event = extract_github_event(payload)
     if event is None:
@@ -253,7 +258,7 @@ def handle_webhook_event(
                 event.head_sha,
                 exc_info=True,
             )
-            _fail_unenqueued(uow, run.id, exc, now())
+            _fail_unenqueued(uow, run.id, exc, now(), run_outcome)
             if existing_merge_request is not None:
                 _restore_target_branch(
                     uow, merge_request.id, existing_merge_request.target_branch, now()
@@ -286,7 +291,7 @@ def handle_webhook_event(
         # терминальное состояние не блокирует следующую доставку. Ошибка идёт
         # дальше — вебхук ответит 5xx. Сам GitHub упавшую доставку не повторяет:
         # её переотправляет проход воркера (#149).
-        _fail_unenqueued(uow, run.id, exc, now())
+        _fail_unenqueued(uow, run.id, exc, now(), run_outcome)
         raise
     return WebhookOutcome(
         kind="success", run=run, merge_request=merge_request, repository=repository
@@ -325,12 +330,18 @@ def _supersede(work: UnitOfWork, merge_request_id: UUID, head_sha: str, now: dat
 
 
 def _fail_unenqueued(
-    uow: UnitOfWork, run_id: UUID, cause: Exception, now: datetime
+    uow: UnitOfWork,
+    run_id: UUID,
+    cause: Exception,
+    now: datetime,
+    run_outcome: RunOutcomeRecorder,
 ) -> None:
     """Перевести закоммиченный прогон в failed, когда задача не ушла в брокер.
 
     Отказ компенсации (база недоступна) не маскирует исходную ошибку —
-    прогон останется до sweep обработки (#36).
+    прогон останется до sweep обработки (#36). Успешный перевод —
+    терминальный переход, его пишет `run_outcome` после коммита: счётчик
+    считает прогоны, а не обработки сообщений.
     """
     try:
         with uow as work:
@@ -343,8 +354,15 @@ def _fail_unenqueued(
             )
             work.review_runs.update(failed)
             work.commit()
+            run_outcome.run_finished(ReviewRunStatus.FAILED.value)
     except Exception:
-        logger.exception("не удалось перевести прогон %s в failed после сбоя очереди", run_id)
+        # Идентификатор — атрибутом записи, не текстом (правило «Логи»):
+        # контекста сообщения воркера на пути вебхука нет, поэтому его несёт
+        # extra; имя — то же, что у атрибута спанов.
+        logger.exception(
+            "не удалось перевести прогон в failed после сбоя очереди",
+            extra={"review_run_id": str(run_id)},
+        )
 
 
 def _restore_target_branch(

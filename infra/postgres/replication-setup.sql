@@ -11,16 +11,21 @@
 -- каждой пересборке — так потерянный или удалённый слот пересоздаётся без
 -- ручных шагов.
 --
--- Пароль берётся из окружения (`\getenv`), а не аргументом psql: аргументы
--- видны в `ps` на хосте.
+-- Пароль — не в тексте SQL: `\password` в конце файла читает его из stdin
+-- (две строки, их дописывает команда контейнера dmc268-replication-setup) и
+-- шлёт на сервер только SCRAM-хеш. Открытый пароль в запросе попал бы в лог
+-- запросов и в `pg_stat_activity.query` — её видит `pg_monitor` (#130, #161).
+-- Аргументом psql он тоже не идёт: аргументы видны в `ps` на хосте.
 
 \set ON_ERROR_STOP on
-\getenv replication_password REPLICATION_PASSWORD
 
 SELECT 'CREATE ROLE replicator'
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'replicator')
 \gexec
 
+ALTER ROLE replicator WITH LOGIN REPLICATION NOSUPERUSER;
+
 -- Пароль переустанавливается каждый раз: смена секрета доходит до базы обычным
--- деплоем, а реплика при пересоздании перепишет свой passfile.
-ALTER ROLE replicator WITH LOGIN REPLICATION NOSUPERUSER PASSWORD :'replication_password';
+-- деплоем, а реплика при пересоздании перепишет свой passfile. Последняя
+-- команда файла: следующие строки stdin — пароль и его повтор.
+\password replicator

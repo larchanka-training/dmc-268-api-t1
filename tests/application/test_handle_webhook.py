@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict
 from app.application.use_cases.handle_webhook import (
     WebhookOutcome,
@@ -33,6 +34,7 @@ from ..fakes import (
     pr_metadata,
     webhook_payload,
 )
+from ..fakes.run_outcome import RecordingRunOutcome
 
 # Приём берёт только метаданные: дифф достаёт воркер с лимитом размера.
 EXPECTED_VCS_CALLS = [("metadata", REPO_FULL_NAME, 6, INSTALLATION_ID)]
@@ -48,6 +50,7 @@ def run_case(
     uow: FakeUow | None = None,
     queue: FakeQueue | None = None,
     base_ref: str | None = None,
+    run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
 ) -> tuple[WebhookOutcome, FakeUow, FakeVcs, FakeQueue]:
     uow = uow if uow is not None else FakeUow()
     # Повторный вызов с тем же uow — это повторная доставка: репозиторий
@@ -68,6 +71,7 @@ def run_case(
         queue,
         now=lambda: NOW,
         new_id=uuid4,
+        run_outcome=run_outcome,
     )
     return outcome, uow, vcs, queue
 
@@ -353,6 +357,22 @@ def test_broker_failure_fails_the_run_and_next_delivery_starts_a_new_one() -> No
     assert outcome.kind == "success"
     assert len(uow.review_runs.added) == 2
     assert len(queue.jobs) == 1
+
+
+def test_broker_failure_is_counted_as_a_failed_run() -> None:
+    """Компенсация «закоммитили, но не поставили» — терминальный переход, его
+    пишет `run_outcome`: без записи алерт по доле упавших прогонов слеп именно
+    при падении RabbitMQ — пайплайн и выметатель этот переход не делают."""
+
+    class BrokenQueue(FakeQueue):
+        def enqueue(self, job) -> None:
+            raise RuntimeError("брокер недоступен")
+
+    outcome_recorder = RecordingRunOutcome()
+    with pytest.raises(RuntimeError, match="брокер недоступен"):
+        run_case(queue=BrokenQueue(), run_outcome=outcome_recorder)
+
+    assert outcome_recorder.statuses == ["failed"]
 
 
 def test_new_head_after_active_run_starts_new_run() -> None:

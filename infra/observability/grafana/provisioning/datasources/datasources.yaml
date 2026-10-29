@@ -1,0 +1,55 @@
+# Datasources Grafana и переходы лог <-> трейс по trace_id:
+# Loki -> Tempo — derived field берёт trace_id из structured metadata
+# OTLP-лога; Tempo -> Loki — trace-to-logs, фильтр по trace_id из тех же
+# структурированных метаданных (allow_structured_metadata в loki.yaml).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      derivedFields:
+        # trace_id лежит в structured metadata OTLP-лога (блок trace: {} в
+        # json_parser коллектора), поэтому берётся лейблом. Регэксп по телу
+        # не совпадал: json.dumps пишет "trace_id": "…" с пробелом после
+        # двоеточия, а после переноса message в тело записи искать в теле
+        # и вовсе нечего.
+        - name: TraceID
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: tempo
+          # $$ — экранирование $ в provisioning-файлах Grafana.
+          url: "$${__value.raw}"
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      nodeGraph:
+        enabled: true
+      tracesToLogsV2:
+        datasourceUid: loki
+        # Логи записи шире окна спана: границы поиска сдвинуты на час в обе
+        # стороны.
+        spanStartTimeShift: "-1h"
+        spanEndTimeShift: "1h"
+        tags:
+          - key: service.name
+            value: service.name
+        filterByTraceID: true
+        filterBySpanID: false

@@ -40,6 +40,8 @@ class ConnectRefusal(StrEnum):
 class AvailableRepository:
     repository: InstallationRepository
     already_connected: bool
+    # Подсказка интерфейсу, а не защита: `connect_repository` проверяет права сам (ui#45).
+    can_connect: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,12 +55,16 @@ class UserContext:
 def list_available_repositories(
     catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, now: datetime
 ) -> list[AvailableRepository]:
-    """Репозитории установок, видимые пользователю, с отметкой, зарегистрирован ли каждый."""
+    """Репозитории установок, видимые пользователю, с отметками: зарегистрирован ли каждый и
+    может ли пользователь его подключить — по правам из того же ответа GitHub."""
     repositories = list_user_repositories(catalog, uow, user, now)
     with uow:
         provider_ids = [repository.provider_id for repository in repositories]
         connected = {r.provider_id for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
-    return [AvailableRepository(r, already_connected=r.provider_id in connected) for r in repositories]
+    return [
+        AvailableRepository(r, already_connected=r.provider_id in connected, can_connect=can_connect(r.permissions))
+        for r in repositories
+    ]
 
 
 def list_user_repositories(

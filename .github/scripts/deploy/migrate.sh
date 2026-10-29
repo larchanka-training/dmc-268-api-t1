@@ -28,10 +28,10 @@
 # `migrate-retry`.
 #
 # Нужны:
-#   API_IMAGE    — ссылка на образ с digest (выход job'а image);
+#   API_IMAGE    — ссылка на образ с digest (выход job'а image), уже скачанный
+#                  на сервер шагом «Скачать образ API» (deploy.yml): pull вынесен
+#                  из этого шага, чтобы не удлинять окно смены пароля (#161);
 #   DOCKER_HOST  — ssh://stand (хост из ~/.ssh/config, .github/actions/stand-ssh);
-#   `docker login ghcr.io` на раннере: docker CLI передаёт учётные данные
-#   удалённому демону вместе с запросом pull — образ лежит в приватном пакете;
 #   инициализированный infra/ и учётные данные хранилища состояния:
 #   `tofu output` читает состояние через туннель (.github/actions/s3-backend).
 # Параметры (env): REPORT_DIR — каталог отчёта деплоя, по умолчанию
@@ -62,10 +62,6 @@ tofu -chdir=infra output -raw migrate_env > "$env_file"
 # прежний образ, который иначе убрала бы чистка образов. Нужен один раз, на
 # первом деплое после #159; дальше это no-op.
 docker rm -f dmc268-migrate >/dev/null 2>&1 || true
-
-# Этот pull — единственный для образа API: контейнеры api и worker полный apply
-# создаёт из уже скачанного образа по той же ссылке (infra/app.tf).
-docker pull --quiet "$API_IMAGE"
 
 # Остаток прошлого запуска: раннер, убивший шаг по таймауту, убивает только
 # docker CLI, а контейнер на сервере живёт дальше — и следующий деплой падал
@@ -100,8 +96,9 @@ migrations_run=(
 # autocommit_block (0003) фиксирует всё до себя, а при оборванном ssh сирота
 # мог довести миграции до commit, и код выхода тогда потерян (ревью #220).
 # Ревизию summary и решение о повторе берут отсюда — `alembic current` тем же
-# образом и окружением; сначала убирается сирота, чтобы он не дописал
-# миграции после ответа. Не ответила база или ssh за 60 с — код в
+# образом и окружением. В файл идёт только stdout — ревизия; JSON-логи alembic
+# пишет в stderr (alembic/env.py), и они остаются в логе шага. Сначала
+# убирается сирота, чтобы он не дописал миграции после ответа. Не ответила база или ssh за 60 с — код в
 # migrate-current.error, и summary пишет «ревизия неизвестна». Файлы прошлой
 # попытки убираются: ответ — всегда о последней.
 ask_current() {
@@ -112,8 +109,9 @@ ask_current() {
   [ "$code" -eq 0 ] || echo "$code" > "$report_dir/migrate-current.error"
 }
 
-# Логи alembic идут в stderr: 2>&1, чтобы попасть и в лог шага, и в файл;
-# упавшую миграцию pipefail не прячет за tee. `-e` на время запуска снят:
+# Логи alembic — JSON-строки в stderr (alembic/env.py), туда же traceback
+# упавшей миграции: 2>&1, чтобы всё попало в лог шага и в файл; упавшую
+# миграцию pipefail не прячет за tee. `-e` на время запуска снят:
 # после сбоя нужен ещё вопрос к базе, а код выхода шага — код upgrade.
 # migrate.log — вывод последней попытки: прежние откатились целиком.
 attempt=1
@@ -124,7 +122,7 @@ while :; do
     "$API_IMAGE" alembic upgrade head 2>&1 | tee "$report_dir/migrate.log"
   status=$?
   set -e
-  [ "$status" -eq 0 ] && exit 0
+  [ "$status" -eq 0 ] && break
   ask_current
   if [ "$attempt" -lt "$attempts" ] && [ $((SECONDS + pause)) -lt "$deadline" ] \
     && REPORT_DIR="$report_dir" python3 scripts/deploy_report.py migrate-retry; then
@@ -135,3 +133,50 @@ while :; do
   fi
   exit "$status"
 done
+
+# После миграций — перегенерация пароля роли мониторинга dmc268_monitor
+# (создаёт миграция 0013): ALTER ROLE идемпотентен, пароль сводится с
+# POSTGRES_MONITOR_PASSWORD из выхода migrate_env (infra/outputs.tf) на каждом
+# деплое, а старый пароль из прошлого секрета перестаёт действовать. Отдельный
+# запуск, а не хвост upgrade: повтор по блокировке касается только миграций, а
+# migrate.log остаётся выводом alembic, по которому summary считает ревизии.
+# Имя — то же, что у upgrade: сироту уберёт trap и следующий деплой.
+#
+# Пароль — параметром запроса psycopg, не литералом команды: литерал осел бы в
+# /proc и docker logs. Скрипт приходит на stdin (-i), пароль — из окружения.
+# track_utility выключается той же транзакцией (SET LOCAL живёт до COMMIT):
+# вторая линия к серверному флагу (infra/postgres.tf), иначе ALTER ROLE ...
+# PASSWORD лёг бы в pg_stat_statements открытым текстом. Тот же шаг — у
+# сервиса migrate в docker-compose.yml.
+#
+# Под timeout 60, как ask_current: своих тайм-аутов у этого подключения нет.
+# Упал — код в migrate-monitor.error, и summary пишет «миграции применены,
+# пароль не обновлён», а не упавшую миграцию: ревизии к этому моменту
+# зафиксированы. Шаг при этом красный — коллектор без пароля в базу не войдёт.
+rm -f "$report_dir/migrate-monitor.error"
+monitor_code=0
+timeout 60 "${migrations_run[@]}" -i --name dmc268-migrations "$API_IMAGE" python - <<'PY' || monitor_code=$?
+import os
+
+import psycopg
+
+# DATABASE_URL настроек — под схемой SQLAlchemy (postgresql+psycopg://);
+# psycopg ждёт стандартную схему postgresql://. Привязка значений — на
+# клиенте (ClientCursor): серверная не проходит по грамматике ALTER ROLE
+# (PASSWORD принимает только литерал, не $1), а литерал руками собирать
+# нельзя — psycopg экранирует сам.
+dsn = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
+with psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor) as conn:
+    with conn.transaction():
+        conn.execute("SET LOCAL pg_stat_statements.track_utility = off")
+        # Имя роли зашито — то же, что в миграции 0013 и env коллектора.
+        conn.execute(
+            "ALTER ROLE dmc268_monitor PASSWORD %s",
+            (os.environ["POSTGRES_MONITOR_PASSWORD"],),
+        )
+PY
+if [ "$monitor_code" -ne 0 ]; then
+  echo "$monitor_code" > "$report_dir/migrate-monitor.error"
+  echo "::error::миграции применены, но пароль роли мониторинга dmc268_monitor не обновлён (код $monitor_code)"
+  exit "$monitor_code"
+fi

@@ -23,7 +23,8 @@ from app.api.problems import ErrorCode
 
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _GUARDED_PREFIX = "/api/v1/"
-_WEBHOOKS_PREFIX = "/api/v1/webhooks/"
+# Приём вебхука (`app/api/webhooks.py`): без Origin и со своим лимитом тела (`body_limit.py`).
+WEBHOOKS_PREFIX = "/api/v1/webhooks/"
 _DETAIL = "Изменяющий запрос пришёл без Origin или с Origin другого сайта."
 
 
@@ -32,7 +33,7 @@ def origin_required(method: str, path: str) -> bool:
     return (
         method in UNSAFE_METHODS
         and path.startswith(_GUARDED_PREFIX)
-        and not path.startswith(_WEBHOOKS_PREFIX)
+        and not path.startswith(WEBHOOKS_PREFIX)
     )
 
 

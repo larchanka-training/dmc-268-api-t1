@@ -13,16 +13,13 @@ from app.domain.enums import ReviewRunStatus
 from app.domain.repo_rules import RULES_PATH
 
 from ..conftest import requires_broker, requires_db
-from ..e2e.stack import (
+from ..e2e.stack import WEBHOOK_PATH, Stack, deliver, webhook_headers
+from ..fakes.github_api import (
     INSTALLATION_ID,
     REPO_FULL_NAME,
     REPO_PROVIDER_ID,
-    WEBHOOK_PATH,
-    Stack,
-    deliver,
-    webhook_headers,
+    PullRequest,
 )
-from ..fakes.github_api import PullRequest
 from ..fakes.llm_gateway import (
     ScriptedLlmGateway,
     finding_json,

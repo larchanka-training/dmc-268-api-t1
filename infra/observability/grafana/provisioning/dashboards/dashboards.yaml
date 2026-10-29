@@ -1,0 +1,17 @@
+# Провижининг дашбордов Grafana: файл-провайдер сканирует каталог, где лежит
+# сам JSON. Отдельный каталог в томе не нужен: provisioning смонтирован в
+# контейнер целиком (compose) или залит файлами (infra/main.tf). Несовпадающие
+# файлы Grafana игнорирует: из каталога провайдер читает только *.json.
+apiVersion: 1
+
+providers:
+  - name: dmc268
+    orgId: 1
+    folder: dmc268
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false
