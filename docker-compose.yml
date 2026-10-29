@@ -357,10 +357,8 @@ services:
       - loki
       - tempo
 
-  # Метрики контейнеров — отдельный экземпляр коллектора с доступом к Docker
-  # API через socket-proxy: inspect отдаёт Env всех контейнеров, поэтому
-  # основной коллектор (принимает OTLP) в сеть proxy не ходит, а у этого нет
-  # входящего OTLP. Как dmc268-otelcol-docker в infra/observability.tf.
+  # Метрики контейнеров — отдельный экземпляр коллектора, как dmc268-otelcol-docker
+  # в infra/observability.tf. Почему отдельно — infra/README.md, «Метрики контейнеров».
   collector-docker:
     # otel/opentelemetry-collector-contrib:0.158.0
     image: otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
@@ -380,6 +378,9 @@ services:
     # экземпляр не поднимается.
     depends_on:
       - dockerproxy
+    # depends_on ждёт запуска контейнера, а не порта haproxy: упавший на старте
+    # docker_stats поднимается заново.
+    restart: unless-stopped
 
   loki:
     # grafana/loki:3.7.9

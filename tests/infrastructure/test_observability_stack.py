@@ -138,10 +138,13 @@ def test_host_and_container_exporters_in_infra(container: str) -> None:
     assert f"var.observability_memory_mb.{memory_variable}" in text
 
 
-def test_prometheus_scrapes_new_exporters_by_service_hosts() -> None:
-    """Job node-exporter по хостнейму сервиса и его порту."""
-    jobs = {job["job_name"]: job for job in load_prometheus()["scrape_configs"]}
-    assert jobs["node-exporter"]["static_configs"][0]["targets"] == ["node-exporter:9100"]
+@pytest.mark.parametrize(
+    ("job", "target"), [("node-exporter", "node-exporter:9100"), ("docker-stats", "collector-docker:8889")]
+)
+def test_prometheus_scrapes_exporters_by_service_hosts(job: str, target: str) -> None:
+    """Job по хостнейму сервиса и его порту."""
+    jobs = {j["job_name"]: j for j in load_prometheus()["scrape_configs"]}
+    assert jobs[job]["static_configs"][0]["targets"] == [target]
 
 
 def test_rabbitmq_job_scrapes_per_object_metrics() -> None:
@@ -331,11 +334,6 @@ def test_container_metrics_come_from_a_separate_collector_through_the_proxy() ->
     compose = load_compose()["services"]["collector-docker"]
     assert "./infra/observability/otelcol-docker.yaml:/etc/otelcol-contrib/config.yaml:ro" in compose["volumes"]
     assert 'file("${path.module}/observability/otelcol-docker.yaml")' in _tf_container_block("otelcol_docker")
-
-
-def test_prometheus_scrapes_the_container_metrics_collector() -> None:
-    jobs = {job["job_name"]: job for job in load_prometheus()["scrape_configs"]}
-    assert jobs["docker-stats"]["static_configs"][0]["targets"] == ["collector-docker:8889"]
 
 
 SOCKET_PROXY_TEMPLATE = OBSERVABILITY_DIR / "docker-socket-proxy.cfg"

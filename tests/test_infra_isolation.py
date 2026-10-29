@@ -38,8 +38,7 @@ EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
     # подключается и интерфейс. Grafana — ещё и в отдельной сети dmc268-grafana:
     # порты на internal-сети Docker не публикует, поэтому порт Grafana живёт в
     # не-internal сети. В сети socket-proxy — только proxy и экземпляр
-    # коллектора с receiver docker_stats: inspect отдаёт Env всех контейнеров,
-    # а основной коллектор принимает OTLP из сети данных и из интернета.
+    # коллектора с receiver docker_stats (почему — infra/README.md, «Метрики контейнеров»).
     "otelcol": frozenset({"backend", "observability", "otlp"}),
     "otelcol_docker": frozenset({"observability", "observability_docker_proxy"}),
     "loki": frozenset({"observability"}),

@@ -1,7 +1,6 @@
-# Стек наблюдаемости (change add-observability-stack): коллектор и его
-# экземпляр метрик контейнеров, Loki, Tempo, Prometheus, Grafana, node-exporter
-# и socket-proxy — те же конфиги
-# из observability/, что и в локальном compose. Метрики базы снимает receiver
+# Стек наблюдаемости (change add-observability-stack): коллектор и его экземпляр
+# метрик контейнеров, Loki, Tempo, Prometheus, Grafana, node-exporter и
+# socket-proxy — те же конфиги из observability/, что и в локальном compose. Метрики базы снимает receiver
 # postgresql самого коллектора (решение #89) — отдельного экспортёра нет.
 # Конфиги заливаются в контейнеры при создании
 # (upload), поэтому на сервере не нужен чекаут репозитория: tofu читает файлы
@@ -203,11 +202,9 @@ resource "docker_container" "otelcol" {
   ]
 }
 
-# Метрики контейнеров — отдельный экземпляр того же образа: ему нужен Docker
-# API через socket-proxy, а inspect отдаёт Env всех контейнеров. Входящего OTLP
-# у него нет, и в сетях данных и dmc268-otlp он не стоит: основной коллектор,
-# который разбирает OTLP из сети данных и из интернета, до proxy не дотянется.
-# Почему docker_stats, а не cAdvisor, — infra/README.md, «Метрики контейнеров».
+# Метрики контейнеров — отдельный экземпляр того же образа: Docker API через
+# socket-proxy, без входящего OTLP и без сетей данных. Почему так —
+# infra/README.md, «Метрики контейнеров».
 resource "docker_container" "otelcol_docker" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-otelcol-docker"

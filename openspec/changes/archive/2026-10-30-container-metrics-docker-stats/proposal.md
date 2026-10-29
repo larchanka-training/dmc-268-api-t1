@@ -45,5 +45,6 @@ google/cadvisor#3910 не смёржено, а сокет containerd — пол�
   `docker-compose.yml`, тесты стека и изоляции сетей, `infra/tests/observability.tftest.hcl`,
   `infra/README.md`, `docs/BACKEND_ARCHITECTURE.md`, `docs/testing/TEST_PLAN.md`,
   `.github/workflows/ci.yml` (`otelcol validate` нового конфига).
-- Деплой удаляет `dmc268-cadvisor`, создаёт `dmc268-otelcol-docker` и пересоздаёт socket-proxy;
-  база и брокер не трогаются.
+- Деплой удаляет `dmc268-cadvisor`, создаёт `dmc268-otelcol-docker` и пересоздаёт socket-proxy,
+  Prometheus и Grafana (сменились их конфиги): короткая пауза в метриках и в Grafana. Основной
+  коллектор, приём трейсов и логов, база и брокер не трогаются.

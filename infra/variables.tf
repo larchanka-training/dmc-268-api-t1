@@ -198,7 +198,7 @@ variable "deployment_environment_name" {
 # Деплой стенда включает его (deploy.yml, TF_VAR_observability_enabled).
 variable "observability_enabled" {
   type        = bool
-  description = "Поднимать стек наблюдаемости: коллектор, Loki, Tempo, Prometheus, Grafana, node-exporter и socket-proxy."
+  description = "Поднимать стек наблюдаемости: коллектор и его экземпляр метрик контейнеров, Loki, Tempo, Prometheus, Grafana, node-exporter и socket-proxy."
   default     = false
 }
 
