@@ -258,12 +258,15 @@ def test_unregistered_repository_returns_202_ignored() -> None:
     assert response.json() == {"status": "ignored"}
     assert container.uow.review_runs.added == []
     assert container.queue.jobs == []
+    # Записи нет — репозиторий не наш: проверку на его PR не ставим.
+    assert container.vcs.calls == []
 
 
 @pytest.mark.parametrize("action", ["opened", "synchronize"])
-def test_disconnected_repository_returns_202_ignored_like_an_unregistered_one(action: str) -> None:
-    """Выключенный `DELETE /repositories/{id}` — запись осталась, но ревью нет: к GitHub не ходим."""
-    from ..fakes import a_repository
+def test_disconnected_repository_returns_202_ignored_and_passes_the_merge_gate(action: str) -> None:
+    """Выключенный `DELETE /repositories/{id}` — запись осталась, ревью нет. На head одна
+    проверка `success`: обязательная проверка в ruleset не держит PR в «Expected»."""
+    from ..fakes import REPO_FULL_NAME, a_repository
 
     uow = FakeUow()
     disconnected = replace(a_repository(), connected_at=None)
@@ -277,8 +280,27 @@ def test_disconnected_repository_returns_202_ignored_like_an_unregistered_one(ac
     assert container.uow.merge_requests.added == []
     assert container.uow.review_runs.added == []
     assert container.queue.jobs == []
-    assert container.vcs.calls == []
+    head_sha = webhook_payload(action)["pull_request"]["head"]["sha"]
+    assert container.vcs.calls == [("check", REPO_FULL_NAME, head_sha, "success")]
+    assert [check.title for check in container.vcs.checks] == ["Ревью выключено в сервисе"]
     assert list(container.uow.repositories.stored.values()) == [disconnected]
+
+
+def test_a_github_failure_on_the_disabled_check_is_still_202_ignored(caplog) -> None:
+    """Проверка выключенного — best-effort: сбой GitHub не даёт 502 и переотправки доставки."""
+    from ..fakes import a_repository
+
+    uow = FakeUow()
+    uow.repositories.add(replace(a_repository(), connected_at=None))
+    client, container = make_client(uow=uow, registered=False, vcs=FakeVcs(error=VcsError("HTTP 503")))
+
+    response = post_webhook(client, "opened")
+
+    assert response.status_code == 202
+    assert response.json() == {"status": "ignored"}
+    assert [call[0] for call in container.vcs.calls] == ["check"]
+    assert container.uow.review_runs.added == []
+    assert "check run выключенного репозитория" in caplog.text
 
 
 def test_vcs_failure_returns_502_without_records() -> None:

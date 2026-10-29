@@ -50,6 +50,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+from app.application.merge_gate_publish import DISABLED_REVIEW_CHECK
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
@@ -125,9 +126,13 @@ def handle_webhook_event(
         repository = work.repositories.find_by_provider(
             Provider.GITHUB, event.repo_provider_id
         )
-    # Выключенный (`DELETE /repositories/{id}`) — как незарегистрированный: запись осталась
-    # ради истории, а ревью не нужно.
-    if repository is None or repository.connected_at is None:
+    if repository is None:
+        return WebhookOutcome(kind="ignored")
+    # Выключенный (`DELETE /repositories/{id}`): запись осталась ради истории, а ревью не
+    # нужно. Прогона и задачи нет, но на head ставится `success`, иначе обязательная
+    # проверка в ruleset держала бы PR в «Expected — Waiting for status».
+    if repository.connected_at is None:
+        _pass_merge_gate_of_disabled(vcs, event)
         return WebhookOutcome(kind="ignored")
 
     # VCS между транзакциями: соединение пула не занято, пока GitHub отвечает.
@@ -249,6 +254,22 @@ def handle_webhook_event(
     return WebhookOutcome(
         kind="success", run=run, merge_request=merge_request, repository=repository
     )
+
+
+def _pass_merge_gate_of_disabled(vcs: VcsGateway, event: WebhookEvent) -> None:
+    """Check run `success` «Ревью выключено в сервисе» на head; best-effort.
+
+    Сбой GitHub не меняет ответ (`ignored`) и не даёт 502: переотправка доставки ради
+    проверки выключенного репозитория не нужна, следующий push поставит её снова.
+    """
+    try:
+        vcs.set_merge_gate_check(
+            event.repo_full_name, event.head_sha, event.installation_id, DISABLED_REVIEW_CHECK
+        )
+    except VcsError:
+        logger.warning(
+            "check run выключенного репозитория %s не поставлен", event.repo_full_name, exc_info=True
+        )
 
 
 def _fail_unenqueued(
