@@ -493,3 +493,10 @@ def test_installation_repositories_closed_for_the_token_is_a_vcs_error(status: i
 
     with pytest.raises(VcsError):
         catalog.installation_repositories(TOKEN, 7)
+
+
+def test_an_unknown_selection_does_not_break_the_repository_list() -> None:
+    """Значение `repository_selection` нужно только Setup URL: незнакомое не роняет список."""
+    catalog = make_catalog(router([installation(7, selection="future")], {7: [repo_json(1, admin=True)]}))
+
+    assert [r.provider_id for r in catalog.list_repositories(TOKEN)] == ["1"]
