@@ -126,10 +126,12 @@ start_api() {
 start_worker() {
 	launch worker uv run python -m app.worker
 	# Ошибки конфигурации воркер выдаёт в первые секунды: ждём их, прежде чем рапортовать.
+	# Трейсбек сам по себе не падение: обработанные ошибки (например, сбой повтора доставок)
+	# воркер пишет со стектрейсом и работает дальше. Падение - выход процесса или WorkerConfigError.
 	local i
 	for i in $(seq 1 10); do
 		running_pid worker >/dev/null || fail_with_log worker "воркер завершился при старте"
-		if grep -qE 'Traceback|WorkerConfigError' "$(log_file worker)"; then
+		if grep -q 'WorkerConfigError' "$(log_file worker)"; then
 			fail_with_log worker "воркер упал при старте"
 		fi
 		sleep 1
