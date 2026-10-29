@@ -46,7 +46,7 @@ class Repository:
     created_at: datetime
     updated_at: datetime
     # Когда ревью включено последний раз; `None` — выключено (`DELETE /repositories/{id}`):
-    # запись остаётся ради истории, вебхук `pull_request` по ней игнорируется.
+    # запись остаётся ради истории, вебхук `pull_request` прогона не создаёт.
     connected_at: datetime | None
 
 

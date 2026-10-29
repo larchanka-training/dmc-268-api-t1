@@ -15,7 +15,7 @@
 - [x] 2.2 Use case списка: подключённым считается запись с `connected_at`, `connected_at` строки — из колонки
 - [x] 2.3 Use case `disconnect_repository` и адаптер `RepositoryRepository.disconnect`; `DELETE /repositories/{id}` вместо заглушки
 - [x] 2.4 Повторное включение в `connect_repository`: `UPDATE … WHERE connected_at IS NULL RETURNING`, затем вставка; интеграционный тест гонки
-- [x] 2.5 Приём вебхука: выключенный репозиторий — `202 ignored`, как незарегистрированный
+- [x] 2.5 Приём вебхука: выключенный репозиторий — `202 ignored` без прогона, как незарегистрированный, и check run `success` «Ревью выключено в сервисе» на head (best-effort)
 
 ## 3. Setup URL
 
