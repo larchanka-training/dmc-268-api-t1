@@ -61,7 +61,7 @@ OPENSPEC := npx --yes @fission-ai/openspec@1.15.0
 	sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
 	test-db test-queue test-e2e test-all \
 	infra-up infra-down test-db-create test-queue-vhost migrate run-api run-worker \
-	local-env local-doctor run-local stop-local logs-local
+	run-local stop-local
 
 help: ## Список целей
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -162,20 +162,9 @@ LOCAL_MODEL = $(if $(or $(call explicit,MODEL),$(call explicit,OLLAMA_MODEL)),$(
 # 0 - без туннеля cloudflared: вебхуки GitHub до локального API не дойдут.
 TUNNEL ?= 1
 
-local-env: ## Создать .env для run-local и ключ шифрования токенов; заполненное не трогает
-	@scripts/init_local_env.sh
-
-local-doctor: ## Проверить инструменты и настройки GitHub App, не печатая секретов
-	@uv run python -m scripts.check_local_env
-
-run-local: local-doctor ## Весь бэкенд против GitHub: Ollama, база, брокер, API, воркер, туннель (MODEL, TUNNEL=0)
-	@$(MAKE) --no-print-directory ollama-up ollama-pull MODEL='$(LOCAL_MODEL)'
-	@$(MAKE) --no-print-directory migrate
-	@LLM_BACKEND=ollama OLLAMA_BASE_URL='$(OLLAMA_URL)' OLLAMA_MODEL='$(LOCAL_MODEL)' TUNNEL='$(TUNNEL)' \
+run-local: ## Весь бэкенд против GitHub: проверить и поднять всё, что нужно, или подсказать, как исправить (MODEL, TUNNEL=0)
+	@MAKE='$(MAKE)' LOCAL_MODEL='$(LOCAL_MODEL)' OLLAMA_URL='$(OLLAMA_URL)' TUNNEL='$(TUNNEL)' \
 		scripts/run_local.sh start
 
 stop-local: ## Остановить API, воркер и туннель из run-local (база, брокер и Ollama остаются)
 	@scripts/run_local.sh stop
-
-logs-local: ## Хвост логов API, воркера и туннеля из run-local
-	@scripts/run_local.sh logs

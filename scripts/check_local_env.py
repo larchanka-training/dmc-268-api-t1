@@ -1,4 +1,4 @@
-"""Проверка окружения локального запуска против настоящего GitHub (make local-doctor).
+"""Проверка окружения локального запуска против настоящего GitHub (шаг make run-local).
 
 Ничего не меняет: смотрит инструменты и настройки из окружения и `.env`, печатает ✓/!/✗ и
 подсказку. Значения секретов не печатает никогда — только «задан / не задан»; ошибка
@@ -100,7 +100,13 @@ def check_settings(
     if env_file.is_file():
         checks.append(Check(Level.OK, f"{env_file} есть"))
     else:
-        checks.append(Check(Level.FAIL, f"{env_file} нет", "make local-env"))
+        checks.append(
+            Check(
+                Level.FAIL,
+                f"{env_file} нет",
+                "make run-local создаст его из .env.example",
+            )
+        )
     try:
         settings = load()
     except ValidationError as exc:
@@ -166,7 +172,7 @@ def check_settings(
     required(
         bool(settings.user_token_encryption_key.get_secret_value().strip()),
         "USER_TOKEN_ENCRYPTION_KEY",
-        "make local-env сгенерирует его",
+        "make run-local сгенерирует его",
     )
     if settings.public_origin:
         # Origin не секрет: печатаем callback, его же регистрируют в App.
@@ -208,11 +214,9 @@ def main() -> int:
         check.level is Level.FAIL for _, checks in sections for check in checks
     )
     if errors:
-        print(
-            f"\nОкружение не готово: ошибок — {errors}. Исправьте отмеченное ✗ и повторите."
-        )
+        print(f"\nОкружение не готово: ошибок — {errors}.")
         return 1
-    print("\nОкружение готово: make run-local")
+    print("\nОкружение готово.")
     return 0
 
 

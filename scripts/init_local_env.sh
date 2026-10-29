@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Подготовить .env для локального запуска против настоящего GitHub (make local-env).
+# Подготовить .env для локального запуска против настоящего GitHub (шаг make run-local).
 #
 # Создаёт .env из .env.example, если его нет, и генерирует USER_TOKEN_ENCRYPTION_KEY, если
 # он пуст. Заполненные значения не трогает, ключ не печатает. Модель и адрес Ollama make
@@ -38,15 +38,3 @@ else
 	mv "$tmp" "$ENV_FILE"
 	echo "  USER_TOKEN_ENCRYPTION_KEY сгенерирован"
 fi
-
-cat <<'EOF'
-
-Заполните в .env своим редактором значения вашей GitHub App (docs/LOCAL_RUN.md):
-  GITHUB_APP_ID, GITHUB_APP_CLIENT_ID, GITHUB_APP_CLIENT_SECRET,
-  GITHUB_WEBHOOK_SECRET (вместо local-dev-secret),
-  GITHUB_APP_PRIVATE_KEY - PEM целиком, в двойных кавычках, с переносами строк:
-    GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----
-    MIIE...
-    -----END RSA PRIVATE KEY-----"
-Затем: make local-doctor
-EOF

@@ -11,12 +11,23 @@ App: PR в тестовом репозитории получает ревью �
 при первом запуске; 1.5b песочницы для ревью настоящих PR слаба.
 
 ```bash
-make local-env       # .env из .env.example и ключ шифрования токенов; заполненное не трогает
-# заполнить в .env значения своей GitHub App (шаг 1 ниже)
-make local-doctor    # инструменты и настройки: ✓/✗ с подсказкой, секреты не печатаются
-make run-local       # Ollama и модель, база, брокер, миграции, API, воркер, туннель
-make logs-local      # хвост логов; make stop-local — остановить
+make run-local    # проверить и поднять всё; чего не хватает - перечислит с подсказкой
+make stop-local   # остановить API, воркер и туннель
 ```
+
+`make run-local` идёт по шагам и на каждом либо поднимает нужное сам, либо говорит, как исправить:
+
+| Шаг | Сам | Подскажет |
+|---|---|---|
+| Инструменты | — | нет `uv`, `docker`, `ollama`, `curl`, `openssl`; нет `cloudflared` — только предупреждение |
+| Docker | запустит Docker Desktop на macOS и дождётся демона | Docker не отвечает |
+| `.env` | создаст из `.env.example`, сгенерирует `USER_TOKEN_ENCRYPTION_KEY` | какие значения GitHub App не заданы (шаг 1 ниже) |
+| Ollama и модель | `ollama serve` в фоне, `ollama pull` модели | — |
+| База, брокер, миграции | `docker compose up` PostgreSQL и RabbitMQ, `alembic upgrade head` | — |
+| API, воркер, туннель | в фоне, логи в `.local/` | упавший процесс — с хвостом его лога |
+
+Чего-то не хватает — исправьте отмеченное ✗ и запустите `make run-local` снова: сделанное
+повторно не делается, заполненный `.env` не перетирается, секреты не печатаются.
 
 ## 1. Своя dev GitHub App
 
@@ -47,7 +58,7 @@ MIIE...
 
 ## 2. Запуск и туннель
 
-`make run-local` начинает с `local-doctor` и не идёт дальше при ✗. Процессы работают в фоне,
+Пока проверка окружения находит ✗, дальше неё `make run-local` не идёт. Процессы работают в фоне,
 логи и PID-файлы — в `.local/`; `make stop-local` гасит только то, что запустил `run-local`, база,
 брокер и Ollama остаются (`make infra-down` — остановить контейнеры). Модель — `MODEL=…`,
 иначе `OLLAMA_MODEL` из `.env`, иначе `qwen2.5-coder:7b`. Адрес и модель Ollama воркер получает
@@ -88,10 +99,10 @@ MIIE...
 
 | Симптом | Причина | Что делать |
 |---|---|---|
-| Доставка — timeout или 502 от туннеля | туннель упал или адрес устарел | `make logs-local`, новый URL — в App |
+| Доставка — timeout или 502 от туннеля | туннель упал или адрес устарел | `tail -F .local/*.log`, новый URL — в App |
 | Доставка — `401` | `GITHUB_WEBHOOK_SECRET` не совпадает с секретом App | поправить `.env`, `make stop-local && make run-local` |
 | `202`, а прогона нет | репозиторий не подключён или `auto_review_enabled=false` | шаг 3.2 |
-| Вебхук — `502` | неверный `GITHUB_APP_ID` или private key | `make local-doctor` |
+| Вебхук — `502` | неверный `GITHUB_APP_ID` или private key | проверить значения в `.env`, `make stop-local && make run-local` |
 | GitHub: redirect_uri mismatch | Callback URL ≠ `PUBLIC_ORIGIN` + `/api/v1/auth/github/callback` | поправить Callback URL App |
 | `verifying` — `LLM_INVALID_OUTPUT` | модель мала или сбивается с формата | модель 7b и больше |
 | Ревью без правил, `rules.status = unavailable` | у App нет Contents: read | права App |

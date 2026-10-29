@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Процессы локального запуска против настоящего GitHub (make run-local, stop-local, logs-local).
+# Локальный запуск против настоящего GitHub (make run-local, make stop-local).
 #
-#   scripts/run_local.sh start   # API, воркер и туннель в фоне; база, брокер и Ollama уже подняты make
+#   scripts/run_local.sh start   # проверить и поднять всё: Docker, .env, Ollama и модель, база,
+#                                # брокер, миграции, API, воркер, туннель
 #   scripts/run_local.sh stop    # погасить только то, что запустил start
-#   scripts/run_local.sh logs    # хвост логов
+#
+# Чего нет и что не поднять самому (инструмент не установлен, значения GitHub App не заданы) -
+# start перечисляет разом, с подсказкой, и выходит с кодом 1; .env без значений создаёт сам.
 #
 # Логи и PID-файлы - в .local/ (не коммитится). Каждый процесс запускается своей группой
 # процессов: stop гасит группу целиком (uv, uvicorn, python), а не только родителя.
 # Настройки процессы берут из окружения и .env, как make run-api; секреты в командную
 # строку не попадают.
 #
-# Переменные: TUNNEL (0 - без cloudflared), API_PORT (по умолчанию 8000).
+# Переменные: TUNNEL (0 - без cloudflared), API_PORT (по умолчанию 8000); от make -
+# MAKE, LOCAL_MODEL (модель) и OLLAMA_URL (адрес Ollama).
 
 set -euo pipefail
 
@@ -18,6 +22,9 @@ STATE_DIR=.local
 API_PORT="${API_PORT:-8000}"
 API_URL="http://localhost:$API_PORT"
 TUNNEL="${TUNNEL:-1}"
+MAKE="${MAKE:-make}"
+LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5-coder:7b}"
+OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
 # Процессы в порядке запуска; гасим в обратном.
 SERVICES=(api worker tunnel)
 
@@ -62,6 +69,41 @@ fail_with_log() {
 	printf '\n%s--- последние строки %s ---%s\n' "$DIM" "$(log_file "$name")" "$RESET" >&2
 	tail -n 30 "$(log_file "$name")" >&2 || true
 	die "$reason. Остановить остальное: make stop-local"
+}
+
+step() { printf '\n%s%s%s\n' "$BOLD" "$1" "$RESET"; }
+
+# Docker установлен, но не запущен: на macOS поднимаем Docker Desktop и ждём демона.
+ensure_docker() {
+	command -v docker >/dev/null || return 0 # отсутствие покажет проверка окружения
+	docker info >/dev/null 2>&1 && return 0
+	if [[ "$(uname -s)" == Darwin && -d /Applications/Docker.app ]]; then
+		printf '  Docker не запущен - запускаю Docker Desktop\n'
+		open -a Docker
+		local i
+		for i in $(seq 1 90); do
+			docker info >/dev/null 2>&1 && { ok "Docker запущен"; return 0; }
+			sleep 2
+		done
+		warn "Docker Desktop не ответил за 3 минуты"
+	fi
+	# Дальше разберётся проверка окружения: она покажет «Docker не отвечает» с подсказкой.
+}
+
+prepare() {
+	step "Окружение"
+	command -v uv >/dev/null || die "uv не установлен: curl -LsSf https://astral.sh/uv/install.sh | sh  (или brew install uv)"
+	scripts/init_local_env.sh
+	ensure_docker
+	if ! uv run python -m scripts.check_local_env; then
+		printf '\nИсправьте отмеченное ✗ (подробно - docs/LOCAL_RUN.md) и снова: make run-local\n' >&2
+		exit 1
+	fi
+	step "Ollama и модель $LOCAL_MODEL"
+	"$MAKE" --no-print-directory ollama-up ollama-pull MODEL="$LOCAL_MODEL" OLLAMA_URL="$OLLAMA_URL"
+	step "PostgreSQL, RabbitMQ и миграции"
+	"$MAKE" --no-print-directory migrate
+	step "Процессы"
 }
 
 start_api() {
@@ -130,7 +172,7 @@ summary() {
 		printf '  %sWebhook URL для настроек GitHub App:%s %s/api/v1/webhooks/github\n' "$BOLD" "$RESET" "$tunnel_url"
 		printf '  %sАдрес туннеля новый при каждом запуске - обновите его в App.%s\n' "$DIM" "$RESET"
 	fi
-	printf '  Логи:           make logs-local\n'
+	printf '  Логи:           tail -F %s/*.log\n' "$STATE_DIR"
 	printf '  Остановить:     make stop-local\n'
 }
 
@@ -143,6 +185,9 @@ cmd_start() {
 		fi
 	done
 	rm -f "$STATE_DIR/tunnel.url"
+	prepare
+	# Модель и адрес Ollama - переменными, а не правкой .env: тот же .env читает docker compose.
+	export LLM_BACKEND=ollama OLLAMA_BASE_URL="$OLLAMA_URL" OLLAMA_MODEL="$LOCAL_MODEL"
 	# Воркер стартует после здорового API: миграции к этому моменту уже прошли.
 	start_api
 	start_worker
@@ -178,21 +223,11 @@ cmd_stop() {
 	printf '  %sБаза, брокер и Ollama работают дальше: make infra-down - остановить контейнеры.%s\n' "$DIM" "$RESET"
 }
 
-cmd_logs() {
-	local logs=() name
-	for name in "${SERVICES[@]}"; do
-		[[ -f "$(log_file "$name")" ]] && logs+=("$(log_file "$name")")
-	done
-	((${#logs[@]} > 0)) || die "логов нет: make run-local ещё не запускался"
-	exec tail -n 50 -F "${logs[@]}"
-}
-
 case "${1:-}" in
 	start) cmd_start ;;
 	stop) cmd_stop ;;
-	logs) cmd_logs ;;
 	*)
-		echo "использование: $0 start|stop|logs" >&2
+		echo "использование: $0 start|stop" >&2
 		exit 2
 		;;
 esac
