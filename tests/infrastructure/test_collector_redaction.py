@@ -338,7 +338,10 @@ def test_browser_traces_go_only_to_their_own_pipeline() -> None:
     }
     resource = config["processors"]["transform/browser-resource"]["trace_statements"][0]
     assert resource["context"] == "resource"
-    assert resource["statements"][-1] == 'set(attributes["service.name"], "dmc-268-ui")'
+    assert resource["statements"] == [
+        'keep_keys(attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version", "service.version", "deployment.environment.name"])',
+        'set(attributes["service.name"], "dmc-268-ui")',
+    ]
 
 
 def test_private_repository_url_is_hidden(rules: list[Rule]) -> None:

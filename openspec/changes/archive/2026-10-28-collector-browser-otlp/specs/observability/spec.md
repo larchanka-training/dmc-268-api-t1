@@ -26,7 +26,7 @@ SHALL NOT подключаться, порт OTLP на хосте SHALL NOT пу
 Приёмник браузера `otlp/browser` (OTLP/HTTP, порт 4319) SHALL входить только в конвейер
 `traces/browser`: тело из интернета SHALL NOT попадать в метрики и логи. Ресурс браузерных спанов
 SHALL задавать коллектор: `service.name` — `dmc-268-ui`, прочие атрибуты ресурса, кроме
-`telemetry.sdk.*`, удаляются.
+`telemetry.sdk.*`, `service.version` и `deployment.environment.name`, удаляются.
 
 #### Scenario: Браузер подписал спан чужим сервисом
 

@@ -88,15 +88,18 @@ processors:
   # Ресурс браузерных спанов задаёт коллектор, а не клиент: тело приходит из
   # интернета, и спан, подписанный как dmc-268-api, иначе встал бы в трейсы
   # бэкенда. Чужие атрибуты ресурса удаляются, имя сервиса ставится заново.
+  # Версия и окружение сборки кабинета остаются: их подделка запутает только
+  # поиск по сборке, в трейсы бэкенда спан всё равно не попадёт.
   transform/browser-resource:
     error_mode: ignore
     trace_statements:
       - context: resource
         statements:
-          - keep_keys(attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version"])
+          - keep_keys(attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version", "service.version", "deployment.environment.name"])
           - set(attributes["service.name"], "dmc-268-ui")
 
-  # Редакция логов — тот же второй рубеж после SDK, что transform/redact для  # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
+  # Редакция логов — тот же второй рубеж после SDK, что transform/redact для
+  # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
   # исключения несут значения ключей базы и текст ответа провайдера модели —
   # те же поля semconv, что у событий exception в трейсах. Тело гасится у
   # записей, несущих исключение: текст исключения мог попасть в сообщение
