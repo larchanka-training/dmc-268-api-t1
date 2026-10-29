@@ -251,16 +251,8 @@ NOTHING`. Двое включают одновременно — запись о
 Задаёт владелец приложения, один раз. Что из этого уже стоит у нашего приложения, видно только в
 его настройках; по логам стенда (ни одной доставки от GitHub) Webhook URL сейчас не работает.
 
-| Поле | Значение |
-|---|---|
-| Callback URL (вход) | `https://62.169.24.237/api/v1/auth/github/callback` |
-| Webhook → Active | включено |
-| Webhook URL | `https://62.169.24.237/api/v1/webhooks/github` |
-| Webhook secret | то же значение, что секрет `WEBHOOK_SECRET_DMC268_T1` |
-| Permissions | Metadata: read; Contents: read (дифф, `.review/rules.md`); Pull requests: read & write (ревью и комментарии); Checks: write (merge gate) |
-| Subscribe to events | Pull request, Pull request review thread. `installation` и `installation_repositories` GitHub присылает приложению без подписки; сейчас они получают `202 ignored`, обработку добавит #243 |
-| Setup URL, Redirect on update | планируется — адрес ручки возврата из #243 |
-| Where can this GitHub App be installed | нужно «Any account» (ui#95) — чтобы пользователи ставили приложение на свои аккаунты; «Only on this account» пускает только в `larchanka-training` |
+Полная таблица — что выставить и что сломается без каждого поля — в `README.md`, раздел
+«Настройки GitHub App»: она одна, чтобы не разъехаться.
 
 Без Webhook URL подключение работает, но прогонов нет: GitHub некуда слать события.
 
