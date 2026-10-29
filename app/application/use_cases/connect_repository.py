@@ -14,6 +14,7 @@
 правом admin или maintain (`app/domain/repository_access.py`).
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -23,9 +24,13 @@ from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.use_cases.user_token import call_with_user_token
-from app.domain.entities import InstallationRepository, Repository
-from app.domain.enums import Provider
-from app.domain.repository_access import can_connect, visible_for_connect
+from app.domain.entities import InstallationRepository, Repository, Secret
+from app.domain.enums import Provider, RepositorySelection
+from app.domain.repository_access import (
+    can_connect,
+    to_connect_on_setup,
+    visible_for_connect,
+)
 
 
 class ConnectRefusal(StrEnum):
@@ -165,3 +170,56 @@ def disconnect_repository(
         uow.commit()
     return None
 
+
+
+def connect_installation(
+    catalog: InstallationCatalog,
+    uow: UnitOfWork,
+    user: UserContext,
+    installation_id: int,
+    new_id: Callable[[], UUID],
+    now: datetime,
+) -> int | None:
+    """Возврат с установки GitHub App (Setup URL): подключить выбранные репозитории установки.
+
+    `installation_id` из адреса не доверяется — ищется среди установок пользователя по его
+    токену; нет — `None`. Найдена — свежий список видимых пишется в кэш (`catalog` с
+    `read=False`, design D3). «All repositories» — не подключается ничего; «Only select
+    repositories» — `to_connect_on_setup`: только вставка, выключенные не включаются (design
+    D7), поэтому не `connect_repository`. Вернуть число подключённых.
+    """
+
+    def from_github(token: Secret) -> list[InstallationRepository] | None:
+        selection = catalog.installation_selection(token, installation_id)
+        if selection is None:
+            return None
+        # Ради кэша: репозитории новой установки сразу видны в списке.
+        catalog.list_repositories(token)
+        if selection is RepositorySelection.ALL:
+            return []
+        return catalog.installation_repositories(token, installation_id)
+
+    repositories = call_with_user_token(uow, user.oauth, user.session_id, now, from_github)
+    if repositories is None:
+        return None
+    connected = 0
+    with uow:
+        provider_ids = [repository.provider_id for repository in repositories]
+        registered = {r.provider_id for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
+        for found in to_connect_on_setup(repositories, registered):
+            repository = Repository(
+                id=new_id(),
+                provider=Provider.GITHUB,
+                provider_id=found.provider_id,
+                full_name=found.full_name,
+                default_branch=found.default_branch,
+                auto_review_enabled=True,
+                created_at=now,
+                updated_at=now,
+                connected_at=now,
+            )
+            # Параллельный POST /repositories мог успеть: вставка его не перетирает.
+            if uow.repositories.add(repository):
+                connected += 1
+        uow.commit()
+    return connected

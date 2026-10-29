@@ -110,7 +110,7 @@
 #### Scenario: Адрес установки приложения
 
 - **WHEN** `GET /app` с ключом приложения отдаёт `slug = dmc-268-review`
-- **THEN** в ответе `install_url = "https://github.com/apps/dmc-268-review/installations/new"`, а `GET /app` запрашивается один раз на процесс — тот же ответ, что у логина бота
+- **THEN** в ответе `install_url = "https://github.com/apps/dmc-268-review/installations/new?state=<state>"`, где `state` привязан к сессии, а `GET /app` запрашивается один раз на процесс — тот же ответ, что у логина бота
 
 #### Scenario: Slug не узнать
 
@@ -408,7 +408,22 @@
 
 ### Requirement: Возврат с установки GitHub App
 
-`GET /api/v1/auth/github/setup` SHALL требовать сессию (без неё — `302` на `/login?redirect=/app/repositories`) и SHALL сверять `installation_id` с установками пользователя по его токену. При «Only select repositories» SHALL подключаться репозитории установки, где у пользователя admin или maintain и которых нет в сервисе; при «All repositories» — ничего; выключенные SHALL NOT включаться. Ответ SHALL быть `302` на `/app/repositories` с итогом.
+`GET /api/v1/auth/github/setup` SHALL требовать сессию и `state` из `install_url` этой сессии и SHALL сверять `installation_id` с установками пользователя по его токену. При «Only select repositories» SHALL подключаться репозитории установки с admin или maintain, которых нет в сервисе; выключенные SHALL NOT включаться; при «All repositories» — ничего. Ответ SHALL быть `302` на `/app/repositories` с итогом.
+
+#### Scenario: Возврат без своего state
+
+- **WHEN** пользователь с сессией приходит на `GET /api/v1/auth/github/setup` с `setup_action=install` и без `state` или со `state` другой сессии — например, по подделанной ссылке с чужого сайта
+- **THEN** ответ — `302` на `/app/repositories?connected=0`, ничего не подключено, к GitHub запроса нет
+
+#### Scenario: Выключенный не включается
+
+- **WHEN** среди выбранных репозиториев установки есть выключенный, и пользователь возвращается на Setup URL со своим `state` и `setup_action=update`
+- **THEN** выключенный остаётся выключенным, ответ — `302` на `/app/repositories?connected=0`
+
+#### Scenario: Токен пользователя непригоден
+
+- **WHEN** GitHub отверг токен пользователя, и обменять его по refresh token нельзя
+- **THEN** сессия закрыта, ответ — `302` на `/login?redirect=/app/repositories`, cookie `session` удаляется
 
 #### Scenario: Выбранные репозитории
 

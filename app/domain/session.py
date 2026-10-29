@@ -6,6 +6,7 @@
 """
 
 import hashlib
+import hmac
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -34,3 +35,17 @@ def open_session(session_id: UUID, user_id: UUID, token: str, now: datetime) -> 
 def is_expired(session: Session, now: datetime) -> bool:
     """Сессия недействительна начиная с `expires_at`."""
     return now >= session.expires_at
+
+
+def setup_state(token: str) -> str:
+    """`state` установки GitHub App, привязанный к сессии: HMAC с ключом — значением cookie.
+
+    Уходит в `install_url` и возвращается GitHub на Setup URL; без него Setup URL ничего не
+    подключает — подделанный переход с чужого сайта не знает cookie жертвы (design D7).
+    """
+    return hmac.new(token.encode(), b"github-app-setup", hashlib.sha256).hexdigest()
+
+
+def setup_state_matches(token: str, state: str) -> bool:
+    """`state` с Setup URL выдан этой сессии; сравнение — за постоянное время."""
+    return hmac.compare_digest(setup_state(token).encode(), state.encode())

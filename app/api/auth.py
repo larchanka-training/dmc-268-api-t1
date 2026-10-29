@@ -5,8 +5,9 @@
 `redirect` между ними живут в cookie `oauth_state` — 10 минут и только на
 путях `/api/v1/auth`. `redirect` из неё проверяется ещё раз в use case:
 cookie приходит от клиента. Любая ошибка callback — `302` на
-`/login?error=<код>`. Возврат с установки (Setup URL) без сессии уводит на вход
-с возвратом на «Репозитории»; пока заглушка `501` (change `repositories-one-list`).
+`/login?error=<код>`. Возврат с установки (Setup URL) подключает выбранные репозитории
+установки и уводит на «Репозитории» с итогом; без сессии — на вход с возвратом туда же
+(change `repositories-one-list`, design D7).
 """
 
 import secrets
@@ -22,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from app.api.dependencies import (
     get_oauth_provider,
+    get_refreshing_catalog,
     get_token_provider,
     get_unit_of_work_factory,
 )
@@ -29,7 +31,6 @@ from app.api.errors import (
     ERRORS_403_ORIGIN,
     ERRORS_404_LOGIN_PROVIDER,
     ERRORS_422,
-    ERRORS_501_NOT_IMPLEMENTED,
     ApiError,
 )
 from app.api.problems import ErrorCode
@@ -40,7 +41,8 @@ from app.api.session import (
     current_user,
     set_session_cookie,
 )
-from app.application.ports import OAuthProvider, UnitOfWork
+from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
+from app.application.use_cases import connect_repository as connecting
 from app.application.use_cases.auth import (
     LoginFailed,
     authenticate,
@@ -48,10 +50,13 @@ from app.application.use_cases.auth import (
     logout,
     start_login,
 )
-from app.application.use_cases.user_token import revoke_quietly
+from app.application.use_cases.user_token import SessionClosed, revoke_quietly
 from app.domain.entities import User
 from app.domain.enums import Provider
 from app.domain.ids import new_id
+from app.domain.login import OAuthProviderUnavailable
+from app.domain.session import setup_state_matches
+from app.domain.vcs_errors import VcsError
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -198,15 +203,23 @@ def finish_login(
     return response
 
 
-# Setup URL GitHub App — задача #243 (бэкенд-часть dmc-268-ui-t1#95): контракт первым.
+# Setup URL GitHub App — задача #243 (бэкенд-часть dmc-268-ui-t1#95), design D7.
 _SETUP_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED (задача #243). Setup URL GitHub App: сюда GitHub "
-    "возвращает браузер после установки приложения, её изменения или запроса владельцу. При "
-    "«Only select repositories» подключает выбранные репозитории, где у пользователя admin или "
-    "maintain, при «All repositories» — ничего."
+    "Setup URL GitHub App: сюда GitHub возвращает браузер после установки приложения, её "
+    "изменения или запроса владельцу. Требует сессию; без неё или с недействительной cookie "
+    "session — на вход. `setup_action=request` — ничего не подключает. Иначе нужен `state` из "
+    "`install_url` списка GET /repositories, выданный этой сессии: без него или с чужим — "
+    "ничего не подключает (`?connected=0`), к GitHub не обращается. `installation_id` не "
+    "доверяется: ищется среди установок пользователя по его токену (`GET /user/installations`), "
+    "свежий список видимых репозиториев пишется в кэш. При «Only select repositories» подключает "
+    "репозитории установки, где у пользователя admin или maintain и которых в сервисе ещё нет; "
+    "выключенные не включает. При «All repositories» — ничего. Токен пользователя непригоден — "
+    "сессия закрывается, редирект на вход."
 )
 # Куда вернуть после входа, если сессии нет: та же страница, куда ведёт итог.
 _SETUP_LOGIN = "/login?redirect=/app/repositories"
+# Итог — только на свою страницу: адрес собирается из констант и числа.
+_SETUP_DONE = "/app/repositories"
 
 
 @router.get(
@@ -226,7 +239,6 @@ _SETUP_LOGIN = "/login?redirect=/app/repositories"
             "headers": _LOCATION,
         },
         **ERRORS_422,
-        **ERRORS_501_NOT_IMPLEMENTED,
     },
 )
 def finish_github_setup(
@@ -239,16 +251,49 @@ def finish_github_setup(
     setup_action: Literal["install", "update", "request"] = Query(
         description="Что сделал пользователь на GitHub: установил, изменил установку или запросил её у владельца."
     ),
+    state: str | None = Query(
+        default=None,
+        max_length=128,
+        description="`state` из `install_url`, который GitHub возвращает на Setup URL; привязан к сессии.",
+    ),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+    catalog: InstallationCatalog = Depends(get_refreshing_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
 ) -> Response:
     token = request.cookies.get(SESSION_COOKIE)
-    if authenticate(uow_factory(), token, datetime.now(UTC)) is None:
-        # Браузер пришёл с GitHub, а не из кабинета: JSON `401` ему показать некому.
-        response = RedirectResponse(_SETUP_LOGIN, status_code=HTTPStatus.FOUND)
-        if SESSION_COOKIE in request.cookies:
-            clear_session_cookie(response)
-        return response
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Возврат с установки ещё не реализован.")
+    now = datetime.now(UTC)
+    signed_in = authenticate(uow_factory(), token, now)
+    if token is None or signed_in is None:
+        return _setup_login(request)
+    if setup_action == "request":
+        return _setup_done("requested=true")
+    if installation_id is None:
+        return _setup_done("setup_error=installation_not_found")
+    # Подделанный переход с чужого сайта `state` этой сессии не знает: ничего не подключаем.
+    if state is None or not setup_state_matches(token, state):
+        return _setup_done("connected=0")
+    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
+    try:
+        connected = connecting.connect_installation(catalog, uow_factory(), user, installation_id, new_id, now)
+    except SessionClosed:
+        return _setup_login(request)
+    except (VcsError, OAuthProviderUnavailable):
+        return _setup_done("setup_error=provider_unavailable")
+    if connected is None:
+        return _setup_done("setup_error=installation_not_found")
+    return _setup_done(f"connected={connected}")
+
+
+def _setup_login(request: Request) -> Response:
+    """Браузер пришёл с GitHub, а не из кабинета: JSON `401` ему показать некому — на вход."""
+    response = RedirectResponse(_SETUP_LOGIN, status_code=HTTPStatus.FOUND)
+    if SESSION_COOKIE in request.cookies:
+        clear_session_cookie(response)
+    return response
+
+
+def _setup_done(outcome: str) -> Response:
+    return RedirectResponse(f"{_SETUP_DONE}?{outcome}", status_code=HTTPStatus.FOUND)
 
 
 @router.get(

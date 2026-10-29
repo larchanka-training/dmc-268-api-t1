@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import (
+    get_app_slug,
     get_clock,
     get_installation_catalog,
     get_oauth_provider,
@@ -21,8 +22,17 @@ from app.api.dependencies import (
 from app.api.factory import create_app
 from app.application.use_cases.auth import logout
 from app.config import Settings
+from app.domain.entities import (
+    InstallationRepository,
+    Repository,
+    RepositoryPermissions,
+)
+from app.domain.enums import Provider, RepositorySelection
 from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
+from app.domain.provider_token import ProviderTokenRejected
+from app.domain.session import setup_state
+from app.domain.vcs_errors import VcsError
 from app.infrastructure.oauth.github import GitHubOAuthProvider
 
 from .fakes.installation_catalog import FakeInstallationCatalog
@@ -257,22 +267,162 @@ def test_a_session_without_a_provider_token_is_401_and_deleted_everywhere(stand,
     assert stand.uow.sessions.stored == []
 
 
-# --- Setup URL: контракт первым, реализация — следующим шагом #243 ----------------
+# --- Setup URL: возврат с установки GitHub App (#243, design D7) --------------------
+
+ADMIN = RepositoryPermissions(admin=True, maintain=False, push=False, triage=False)
+WRITE = RepositoryPermissions(admin=False, maintain=False, push=True, triage=False)
+OWNED = InstallationRepository("101", "octo-org/api", "main", ADMIN)
+WRITTEN = InstallationRepository("202", "octo-org/web", "main", WRITE)
+SETUP = "/api/v1/auth/github/setup"
 
 
-@pytest.mark.parametrize(
-    "params",
-    [{"installation_id": "42", "setup_action": "install"}, {"setup_action": "request"}],
-)
-def test_the_setup_return_is_planned_and_answers_501(stand, params) -> None:
+def _setup_stand(stand: Stand, installations: dict[int, tuple[RepositorySelection, list[InstallationRepository]]], *, error: Exception | None = None) -> tuple[TestClient, FakeInstallationCatalog]:
+    """Вошедший пользователь; GitHub отдаёт ему эти установки и все их репозитории."""
+    visible = [r for _, repositories in installations.values() for r in repositories]
+    catalog = FakeInstallationCatalog(visible, error, installations=installations)
+    stand.app.dependency_overrides[get_installation_catalog] = lambda: catalog
     client = stand.client()
     sign_in(client)
+    return client, catalog
 
-    response = client.get("/api/v1/auth/github/setup", params=params)
 
-    assert response.status_code == 501
-    assert response.headers["content-type"] == "application/problem+json"
-    assert response.json()["code"] == "NOT_IMPLEMENTED"
+def _return_from_github(client: TestClient, installation_id: int = 7, *, state: str | None = "own", action: str = "install"):
+    params: dict[str, str | int] = {"installation_id": installation_id, "setup_action": action}
+    if state == "own":
+        params["state"] = setup_state(client.cookies["session"])
+    elif state is not None:
+        params["state"] = state
+    return client.get(SETUP, params=params)
+
+
+def _registered(stand: Stand) -> dict[str, Repository]:
+    return {provider_id: r for (_, provider_id), r in stand.uow.repositories.stored.items()}
+
+
+def test_selected_repositories_with_manage_rights_are_connected(stand) -> None:
+    client, _ = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED, WRITTEN])})
+
+    response = _return_from_github(client)
+
+    assert (response.status_code, response.headers["location"]) == (302, "/app/repositories?connected=1")
+    registered = _registered(stand)
+    assert list(registered) == ["101"]
+    assert registered["101"].connected_at is not None and registered["101"].auto_review_enabled
+
+
+def test_a_disconnected_repository_is_not_reconnected_by_the_setup_return(stand) -> None:
+    """Выключение — решение пользователя; `update` приходит и при правке чужого списка установки."""
+    client, _ = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])})
+    disconnected = Repository(
+        id=new_id(),
+        provider=Provider.GITHUB,
+        provider_id="101",
+        full_name="octo-org/api",
+        default_branch="main",
+        auto_review_enabled=True,
+        created_at=datetime(2026, 9, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 9, 1, tzinfo=UTC),
+        connected_at=None,
+    )
+    stand.uow.repositories.add(disconnected)
+
+    response = _return_from_github(client, action="update")
+
+    assert response.headers["location"] == "/app/repositories?connected=0"
+    assert _registered(stand) == {"101": disconnected}
+
+
+def test_all_repositories_connect_nothing(stand) -> None:
+    client, catalog = _setup_stand(stand, {7: (RepositorySelection.ALL, [OWNED])})
+
+    response = _return_from_github(client)
+
+    assert response.headers["location"] == "/app/repositories?connected=0"
+    assert _registered(stand) == {}
+    assert "installation_repositories" not in catalog.calls
+
+
+def test_a_request_to_the_owner_connects_nothing_and_asks_github_nothing(stand) -> None:
+    client, catalog = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])})
+
+    response = client.get(SETUP, params={"setup_action": "request"})
+
+    assert response.headers["location"] == "/app/repositories?requested=true"
+    assert (_registered(stand), catalog.calls) == ({}, [])
+
+
+@pytest.mark.parametrize("params", [{"installation_id": "8", "setup_action": "install"}, {"setup_action": "update"}])
+def test_a_foreign_or_missing_installation_is_not_found(stand, params) -> None:
+    """`installation_id` из адреса не доверяется: установки 8 у пользователя нет."""
+    client, _ = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])})
+
+    response = client.get(SETUP, params=params | {"state": setup_state(client.cookies["session"])})
+
+    assert response.headers["location"] == "/app/repositories?setup_error=installation_not_found"
+    assert _registered(stand) == {}
+
+
+def test_github_unavailable_is_reported_and_connects_nothing(stand) -> None:
+    client, _ = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])}, error=VcsError("GitHub API: HTTP 503"))
+
+    response = _return_from_github(client)
+
+    assert response.headers["location"] == "/app/repositories?setup_error=provider_unavailable"
+    assert _registered(stand) == {}
+
+
+def test_a_rejected_token_closes_the_session_and_goes_to_login(stand) -> None:
+    client, _ = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])}, error=ProviderTokenRejected("401"))
+    stand.provider.refresh_error = ProviderTokenRejected("bad_refresh_token")
+
+    response = _return_from_github(client)
+
+    assert response.headers["location"] == "/login?redirect=/app/repositories"
+    assert "Max-Age=0" in set_cookies(response)["session"]
+    assert client.get("/api/v1/auth/me").status_code == 401
+
+
+@pytest.mark.parametrize("state", [None, "forged", "é" * 10])
+def test_without_the_state_of_this_session_nothing_is_connected(stand, state) -> None:
+    """Подделанный переход с чужого сайта: `state` этой сессии он не знает — к GitHub не идём."""
+    client, catalog = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])})
+
+    response = _return_from_github(client, state=state)
+
+    assert response.headers["location"] == "/app/repositories?connected=0"
+    assert (_registered(stand), catalog.calls) == ({}, [])
+
+
+def test_the_state_of_another_session_is_refused(stand) -> None:
+    client, catalog = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])})
+
+    response = _return_from_github(client, state=setup_state("cookie-of-someone-else"))
+
+    assert response.headers["location"] == "/app/repositories?connected=0"
+    assert catalog.calls == []
+
+
+def test_the_install_url_state_is_accepted_and_the_new_repository_is_listed_at_once(stand) -> None:
+    """Сквозной путь: `state` из `install_url` списка; свежий ответ GitHub — в кэш, без ожидания TTL."""
+    current = {"catalog": FakeInstallationCatalog([WRITTEN])}
+    stand.app.dependency_overrides[get_installation_catalog] = lambda: current["catalog"]
+    stand.app.dependency_overrides[get_app_slug] = lambda: lambda: "dmc-268-review"
+    client = stand.client()
+    sign_in(client)
+    before = client.get("/api/v1/repositories").json()
+    state = parse_qs(urlsplit(before["install_url"]).query)["state"][0]
+    # Пользователь поставил приложение на `octo-org/api`; кэш видимости ещё помнит старый ответ.
+    current["catalog"] = FakeInstallationCatalog(
+        [WRITTEN, OWNED], installations={7: (RepositorySelection.SELECTED, [OWNED])}
+    )
+
+    response = client.get(SETUP, params={"installation_id": 7, "setup_action": "install", "state": state})
+    after = client.get("/api/v1/repositories").json()["items"]
+
+    assert [row["full_name"] for row in before["items"]] == ["octo-org/web"]
+    assert response.headers["location"] == "/app/repositories?connected=1"
+    assert [(row["full_name"], row["connected"]) for row in after] == [("octo-org/api", True), ("octo-org/web", False)]
+    assert current["catalog"].calls.count("list_repositories") == 1
 
 
 def test_the_setup_return_without_a_session_goes_to_login_and_back(stand) -> None:
@@ -304,7 +454,7 @@ def test_the_setup_return_with_a_dead_session_clears_the_cookie(stand) -> None:
         ({"installation_id": "abc", "setup_action": "install"}, "query.installation_id"),
     ],
 )
-def test_the_setup_return_checks_its_parameters_before_501(stand, params, where) -> None:
+def test_the_setup_return_checks_its_parameters_first(stand, params, where) -> None:
     client = stand.client()
     sign_in(client)
 

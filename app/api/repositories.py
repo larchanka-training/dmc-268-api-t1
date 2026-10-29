@@ -11,7 +11,7 @@ from http import HTTPStatus
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path, Response
+from fastapi import APIRouter, Depends, Path, Request, Response
 from pydantic import BaseModel, Field, RootModel, StringConstraints, field_validator
 from pydantic_core import PydanticCustomError
 
@@ -38,6 +38,7 @@ from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
 from app.api.schemas import RepositoryBase, StrictRequest, UtcDatetime
 from app.api.session import (
+    SESSION_COOKIE,
     SESSION_REQUIRED,
     SESSION_RESPONSES,
     Unauthenticated,
@@ -54,6 +55,7 @@ from app.domain.enums import FindingSeverity, Provider, RulesStatus
 from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
 from app.domain.repo_rules import RULES_PATH
+from app.domain.session import setup_state
 from app.domain.vcs_errors import VcsError
 
 # Один список вместо двух — change `repositories-one-list` (#243, dmc-268-ui-t1#95).
@@ -206,12 +208,13 @@ class RepositoryListResponse(BaseModel):
     )
     install_url: str | None = Field(
         description=(
-            "Экран установки GitHub App (`https://github.com/apps/<slug>/installations/new`): выбрать "
-            "аккаунт и репозитории. `null`, если slug приложения узнать не удалось: нет ключа приложения "
-            "или GitHub не ответил на `GET /app`."
+            "Экран установки GitHub App (`https://github.com/apps/<slug>/installations/new?state=<state>`): "
+            "выбрать аккаунт и репозитории. `state` привязан к сессии, GitHub возвращает его на Setup URL "
+            "(GET /auth/github/setup): без него возврат ничего не подключает. `null`, если slug приложения "
+            "узнать не удалось: нет ключа приложения или GitHub не ответил на `GET /app`."
         ),
         json_schema_extra={"format": "uri"},
-        examples=["https://github.com/apps/dmc-268-review/installations/new"],
+        examples=["https://github.com/apps/dmc-268-review/installations/new?state=3f2a9c0e"],
     )
 
 
@@ -350,6 +353,7 @@ def connect_repository(
     responses={**ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
 def list_repositories(
+    request: Request,
     limit: Limit = DEFAULT_LIMIT,
     offset: Offset = 0,
     signed_in: SignedIn = Depends(current_session),
@@ -366,7 +370,9 @@ def list_repositories(
     # Строк не больше, чем отдаёт GitHub пользователю: страница — срез в памяти.
     page = listed[offset : offset + page_size(limit)]
     slug = app_slug()
-    install_url = f"https://github.com/apps/{slug}/installations/new" if slug else None
+    # Cookie проверена `current_session`; `state` — от неё, Setup URL сверит его с той же cookie.
+    state = setup_state(request.cookies[SESSION_COOKIE])
+    install_url = f"https://github.com/apps/{slug}/installations/new?state={state}" if slug else None
     return RepositoryListResponse(items=[_list_item(item) for item in page], install_url=install_url)
 
 

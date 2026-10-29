@@ -17,7 +17,8 @@ change `repositories-one-list`) спрашивает GitHub и пишет све
 или выход — другой ключ, старая запись недостижима и уходит по TTL; сам токен в
 кэше не хранится. Сбои GitHub не кэшируются. Сбой хранилища — промах, а не
 ошибка (`CacheStore`). Проверки подключения (`user_repository`, `app_installed`)
-идут мимо кэша.
+и установка Setup URL (`installation_selection`, `installation_repositories`) идут
+мимо кэша.
 
 Хранилище — `CacheStore` процесса API: процесс один, кэш в нём корректен. Со
 второй репликой у каждой будет свой кэш — запросов к GitHub больше, но ответы
@@ -34,6 +35,7 @@ from typing import Any
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.installation_catalog import InstallationCatalog
 from app.domain.entities import InstallationRepository, RepositoryPermissions, Secret
+from app.domain.enums import RepositorySelection
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,12 @@ class CachedInstallationCatalog:
 
     def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
         return self._catalog.user_repository(access_token, provider_id)
+
+    def installation_selection(self, access_token: Secret, installation_id: int) -> RepositorySelection | None:
+        return self._catalog.installation_selection(access_token, installation_id)
+
+    def installation_repositories(self, access_token: Secret, installation_id: int) -> list[InstallationRepository]:
+        return self._catalog.installation_repositories(access_token, installation_id)
 
     def app_installed(self, full_name: str) -> bool:
         return self._catalog.app_installed(full_name)

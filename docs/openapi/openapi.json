@@ -365,7 +365,7 @@
           "auth"
         ],
         "summary": "Возврат с установки GitHub App",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED (задача #243). Setup URL GitHub App: сюда GitHub возвращает браузер после установки приложения, её изменения или запроса владельцу. При «Only select repositories» подключает выбранные репозитории, где у пользователя admin или maintain, при «All repositories» — ничего.",
+        "description": "Setup URL GitHub App: сюда GitHub возвращает браузер после установки приложения, её изменения или запроса владельцу. Требует сессию; без неё или с недействительной cookie session — на вход. `setup_action=request` — ничего не подключает. Иначе нужен `state` из `install_url` списка GET /repositories, выданный этой сессии: без него или с чужим — ничего не подключает (`?connected=0`), к GitHub не обращается. `installation_id` не доверяется: ищется среди установок пользователя по его токену (`GET /user/installations`), свежий список видимых репозиториев пишется в кэш. При «Only select repositories» подключает репозитории установки, где у пользователя admin или maintain и которых в сервисе ещё нет; выключенные не включает. При «All repositories» — ничего. Токен пользователя непригоден — сессия закрывается, редирект на вход.",
         "operationId": "finishGithubSetup",
         "parameters": [
           {
@@ -402,6 +402,25 @@
               "title": "Setup Action"
             },
             "description": "Что сделал пользователь на GitHub: установил, изменил установку или запросил её у владельца."
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`state` из `install_url`, который GitHub возвращает на Setup URL; привязан к сессии.",
+              "title": "State"
+            },
+            "description": "`state` из `install_url`, который GitHub возвращает на Setup URL; привязан к сессии."
           }
         ],
         "responses": {
@@ -440,21 +459,6 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/ValidationProblem"
-                }
-              }
-            },
-            "headers": {
-              "X-Trace-ID": {
-                "$ref": "#/components/headers/X-Trace-ID"
-              }
-            }
-          },
-          "501": {
-            "description": "Ручка ещё не реализована.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NotImplementedProblem"
                 }
               }
             },
@@ -4092,9 +4096,9 @@
             ],
             "format": "uri",
             "title": "Install Url",
-            "description": "Экран установки GitHub App (`https://github.com/apps/<slug>/installations/new`): выбрать аккаунт и репозитории. `null`, если slug приложения узнать не удалось: нет ключа приложения или GitHub не ответил на `GET /app`.",
+            "description": "Экран установки GitHub App (`https://github.com/apps/<slug>/installations/new?state=<state>`): выбрать аккаунт и репозитории. `state` привязан к сессии, GitHub возвращает его на Setup URL (GET /auth/github/setup): без него возврат ничего не подключает. `null`, если slug приложения узнать не удалось: нет ключа приложения или GitHub не ответил на `GET /app`.",
             "examples": [
-              "https://github.com/apps/dmc-268-review/installations/new"
+              "https://github.com/apps/dmc-268-review/installations/new?state=3f2a9c0e"
             ]
           }
         },

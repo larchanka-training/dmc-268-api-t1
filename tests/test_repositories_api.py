@@ -36,7 +36,7 @@ from app.domain.enums import Provider
 from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
 from app.domain.provider_token import ProviderTokenRejected, token_from_grant
-from app.domain.session import open_session
+from app.domain.session import open_session, setup_state
 from app.domain.vcs_errors import VcsError
 
 from .fakes.auth import SIGNED_IN
@@ -359,7 +359,7 @@ def test_the_list_holds_connected_and_unconnected_repositories_together() -> Non
                 "connected_at": None,
             },
         ],
-        "install_url": "https://github.com/apps/dmc-268-review/installations/new",
+        "install_url": f"https://github.com/apps/dmc-268-review/installations/new?state={setup_state(COOKIE)}",
     }
     assert [token.reveal() for token in catalog.tokens] == ["ghu_login_access"]
 
