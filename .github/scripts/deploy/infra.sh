@@ -30,6 +30,10 @@
 set -euo pipefail
 
 export REPORT_DIR="${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/deploy-report}"
+# Модель Eurorouter — одна на стенд и eval: файл .github/eurorouter-model, а
+# не переменная в deploy.yml (#245). apply.sh применяет готовый план, ему не нужна.
+TF_VAR_eurorouter_model="$(cat "${BASH_SOURCE[0]%/*}/../../eurorouter-model")"
+export TF_VAR_eurorouter_model
 trap 'rm -f infra/infra.tfplan' EXIT
 
 # -lock-timeout: чужая короткая блокировка того же ключа (ручной plan) не роняет

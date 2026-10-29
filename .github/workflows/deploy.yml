@@ -352,18 +352,12 @@ jobs:
           TF_VAR_user_token_encryption_key: ${{ secrets.USER_TOKEN_KEY_DMC268_T1 }}
           # Ollama на стенде нет: модель - Eurorouter основным (#245), код
           # проверяемых репозиториев уходит ему. Адрес и ключи - те же, что у
-          # eval.yml; модель - из .github/eurorouter-model, в run этого шага.
+          # eval.yml; модель - из .github/eurorouter-model, её читают infra.sh и plan.sh.
           TF_VAR_llm_backend: eurorouter
           TF_VAR_eurorouter_base_url: ${{ vars.AI_DMC268_URL }}
           TF_VAR_eurorouter_api_keys: ${{ secrets.AI_DMC268_T1 }}
         run: |
           .github/scripts/deploy/mark.sh
-          # Модель Eurorouter — одна на стенд и eval (.github/eurorouter-model):
-          # якорь окружения файлы не читает, поэтому здесь — для этого шага и
-          # через GITHUB_ENV для полного apply ниже.
-          TF_VAR_eurorouter_model="$(cat .github/eurorouter-model)"
-          export TF_VAR_eurorouter_model
-          echo "TF_VAR_eurorouter_model=$TF_VAR_eurorouter_model" >> "$GITHUB_ENV"
           .github/scripts/deploy/infra.sh
 
       # План полного выката — в файл, сразу после targeted apply: план видит

@@ -163,7 +163,7 @@ tofu apply infra.tfplan
 | `bind_ip` | `127.0.0.1`: API снаружи не публикуется, к нему ходит интерфейс изнутри docker-сети |
 | `llm_backend` | `eurorouter` прямо в `deploy.yml` (#245) |
 | `eurorouter_base_url` | переменная `AI_DMC268_URL`, та же, что у `eval.yml` |
-| `eurorouter_model` | файл `.github/eurorouter-model`, читает шаг «Поднять базу и брокер» в `deploy.yml` |
+| `eurorouter_model` | файл `.github/eurorouter-model`, читают `.github/scripts/deploy/infra.sh` и `plan.sh` |
 | `eurorouter_api_keys` | секрет `AI_DMC268_T1`, тот же, что у `eval.yml` |
 
 Без следующих `apply` пройдёт, но VCS-шлюз и вход пользователей через GitHub работать не будут:
