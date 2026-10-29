@@ -163,8 +163,8 @@ erDiagram
 ссылаются запросы на изменение (`ON DELETE RESTRICT`), история остаётся, а
 повторное включение возвращает прежний `id`. Вебхук `pull_request` выключенного
 прогона не создаёт, а на head ставит проверку `success` «Ревью выключено в
-сервисе»; `pull_request_review_thread` обрабатывается: иначе merge gate текущего
-head застрял бы красным.
+сервисе»; на `pull_request_review_thread` тред записывается, а на head ставится
+та же проверка.
 
 **`merge_requests`**: pull request в GitHub или merge request в GitLab. Хранит
 то, что общее для всех его ревью: номер, заголовок, ветки, автора. `head_sha`
