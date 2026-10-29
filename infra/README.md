@@ -291,11 +291,11 @@ docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_n
 
 ## Стек наблюдаемости
 
-Рядом с API на стенде стоит стек телеметрии из восьми контейнеров: OTel Collector
+Рядом с API на стенде стоит стек телеметрии из семи контейнеров: OTel Collector
 (`dmc268-otelcol`), Loki (логи), Tempo (трейсы), Prometheus (метрики), Grafana (интерфейс,
-`grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU, память, диски), `cAdvisor`
-(контейнеры) и socket-proxy (`dmc268-docker-proxy`: Docker API для cAdvisor по белому списку
-эндпоинтов вместо маунта `docker.sock`; отдельная сеть, где кроме proxy и cAdvisor никого).
+`grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU, память, диски) и socket-proxy
+(`dmc268-docker-proxy`: Docker API для receiver `docker_stats` коллектора по белому списку
+эндпоинтов вместо маунта `docker.sock`; отдельная сеть, где кроме proxy и коллектора никого).
 Сеть стека `dmc268-observability` — `internal`, как и сеть данных: из неё в интернет не выйти,
 а публикуемый порт Grafana живёт в отдельной не-internal сети `dmc268-grafana` — порты на
 internal-сети Docker не публикует. Выход наружу через эту сеть есть только у Grafana, и её
@@ -397,9 +397,32 @@ api, воркера и миграций — и `command` контейнера Po
 не читает (медленные запросы им не собираются), расширение оставлено только для ручной диагностики;
 `shared_preload_libraries` включает контейнер Postgres. RabbitMQ отдаёт метрики встроенным
 плагином `rabbitmq_prometheus` (порт 15692 в сети, per-object эндпоинт — метрики очередей с
-лейблом `queue`); сервер — `node-exporter` (9100), контейнеры — `cAdvisor` (8080); все скреятся
-`prometheus.yml`. Дашборд «Обзор dmc-268» провиженится из репозитория
-(`observability/grafana/provisioning/dashboards/`). Применение стека на стенд — задача DevOps (#108).
+лейблом `queue`); сервер — `node-exporter` (9100), контейнеры — receiver `docker_stats` коллектора
+(через его exporter-порт 8889); все скреятся `prometheus.yml`. Дашборд «Обзор dmc-268» провиженится
+из репозитория (`observability/grafana/provisioning/dashboards/`). Применение стека на стенд —
+задача DevOps (#108).
+
+### Метрики контейнеров
+
+CPU, память, сеть и диск по каждому контейнеру снимает receiver `docker_stats` коллектора: он
+спрашивает Docker API (`/containers/{id}/stats`) через socket-proxy, ряды различает лейбл
+`container_name`. Белый список proxy — список, inspect, статистика и события контейнеров
+(`/events`: без них новые контейнеры не находятся), `/info`, `/version`, `/_ping`; события и
+статистика отдают имя, образ, метки, цифры и командные строки `docker exec` — без Env и файлов.
+
+**Почему не cAdvisor (#249).** До #249 метрики контейнеров снимал cAdvisor v0.52.1, и на стенде
+он не видел ни одного контейнера: панели «CPU контейнеров» и «Память контейнеров» были пустыми,
+в логе — `failed to identify the read-write layer ID` на каждый контейнер. Причина — Docker 29 на
+стенде хранит образы в containerd (`docker info`: `driver-type io.containerd.snapshotter.v1`), и
+каталога `/var/lib/docker/image/overlayfs/layerdb`, откуда cAdvisor берёт слой контейнера, нет.
+Поддержка containerd snapshotter есть в cAdvisor с v0.54 (google/cadvisor#3709), но до последней
+v0.60.6 включительно без сокета `/run/containerd/containerd.sock` фабрика docker не регистрируется
+вовсе — исправление (google/cadvisor#3910) не смёржено. Сокет containerd — полный доступ к хосту,
+а cAdvisor на ревью PR #130 сознательно увели от сокетов, корня хоста и root. Отключать
+containerd snapshotter в Docker на стенде — перезапуск демона и перекачка всех образов. Поэтому
+cAdvisor убран, а `docker_stats` берёт те же сигналы у Docker API: Docker отдаёт статистику
+контейнера как бы ни хранил образы. Чего нет по сравнению с cAdvisor: метрик файловой системы
+контейнера, PSI и OOM-событий — в дашборде и алертах их не было.
 
 ### Память стека
 
@@ -414,20 +437,19 @@ api, воркера и миграций — и `command` контейнера Po
 | Prometheus | 768 |
 | Grafana | 512 |
 | node-exporter | 64 |
-| cAdvisor | 256 |
 | socket-proxy | 64 |
-| **Итого стек** | **3584 (~3,5 ГБ)** |
+| **Итого стек** | **3328 (~3,3 ГБ)** |
 
 Рядом — лимиты контейнеров приложения (`app.tf`, `postgres.tf`, `rabbitmq.tf`, `replica.tf`):
 `postgres` 1024, `api`, `worker`, `rabbitmq` и реплика (`postgres_replica_memory`) по 512,
 резервные копии (`dmc268-postgres-backup`) 256 — итого 3328 МБ (~3,3 ГБ) постоянно живущих.
 Миграции (`docker run` в `migrate.sh` с `--memory 256m`) и одноразовый
 `dmc268-replication-setup` (64) — шаги деплоя, в постоянный лимит стенда не входят.
-Суммарный потолок стенда — 6912 МБ (~6,9 ГБ) по постоянно живущим контейнерам.
+Суммарный потолок стенда — 6656 МБ (~6,7 ГБ) по постоянно живущим контейнерам.
 
 Память стека без нагрузки — по замерам ревью PR #130 (Grafana ~350 МБ, Tempo ~200 МБ, Loki
 ~90 МБ, коллектор ~85 МБ) и локальному прогону Docker Desktop (2026-10-24: node-exporter
-~13 МБ, cAdvisor ~45 МБ, коллектор ~65 МБ, Prometheus сразу после старта ~170 МБ и растёт
+~13 МБ, коллектор ~65 МБ, Prometheus сразу после старта ~170 МБ и растёт
 по мере накопления). Фактическое потребление — ориентир при пересмотре
 `observability_memory_mb`, а не гарантия (под нагрузкой Loki и Tempo растут).
 

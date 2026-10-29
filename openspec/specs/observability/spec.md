@@ -438,8 +438,8 @@ stacktrace события `exception`; в логах — атрибуты `excep
 
 ### Requirement: Стек наблюдаемости одинаков локально и на проде
 
-Наблюдаемость SHALL работать в стеке из восьми контейнеров из официальных образов с зафиксированными
-версиями: OTel Collector, Loki, Tempo, Prometheus, Grafana, node_exporter, cAdvisor и socket-proxy.
+Наблюдаемость SHALL работать в стеке из семи контейнеров из официальных образов с зафиксированными
+версиями: OTel Collector, Loki, Tempo, Prometheus, Grafana, node_exporter и socket-proxy.
 Конфигурации
 SHALL быть одними и теми же локально и на стенде: различаться SHALL только ресурсы, хранение и
 доступ — через переменные и оверрайды, не через разные конфиги. По `trace_id` из записи лога SHALL
@@ -448,7 +448,7 @@ SHALL быть одними и теми же локально и на стенд
 #### Scenario: Локальный стек поднимается теми же конфигами
 
 - **WHEN** разработчик поднимает локальный стек с профилем наблюдаемости
-- **THEN** коллектор, Loki, Tempo, Prometheus, Grafana, node_exporter, cAdvisor и socket-proxy
+- **THEN** коллектор, Loki, Tempo, Prometheus, Grafana, node_exporter и socket-proxy
   подняты теми же
   конфигами, что на стенде, и логи с трейсами локального прогона видны в Grafana
 
@@ -494,8 +494,9 @@ SHALL быть одними и теми же локально и на стенд
 - **WHEN** Prometheus скрейпит стек
 - **THEN** очередь отдаёт метрики плагином `rabbitmq_prometheus`, база — receiver `postgresql`
   коллектора (роль только-чтение `dmc268_monitor` с `pg_monitor`; собирать медленные запросы из
-  `pg_stat_statements` не требуется — расширение остаётся для ручной диагностики), сервер и
-  контейнеры — node_exporter и cAdvisor
+  `pg_stat_statements` не требуется — расширение остаётся для ручной диагностики), сервер —
+  node_exporter, контейнеры — receiver `docker_stats` коллектора через socket-proxy, с именем
+  контейнера в лейбле `container_name`
 
 #### Scenario: Ручки /metrics нет
 

@@ -42,7 +42,7 @@ suggestion'ов — по решению модели угроз патч при�
   одна БД, одна очередь. E2E-стенд поднимает два процесса; «контрактов между
   микросервисами» здесь нет, контракты — только с внешним миром.
 - **Наблюдаемость — это колонки.** Стек `infra/observability/` (коллектор, Loki,
-  Tempo, Prometheus, Grafana, node_exporter, cAdvisor, socket-proxy) обслуживает команду:
+  Tempo, Prometheus, Grafana, node_exporter, socket-proxy) обслуживает команду:
   ручные метрики `review_runs_total{status}`, `review_stage_duration{stage}` и
   `review_llm_call_duration{outcome}` (каждый вызов провайдера; учёт токенов — из
   базы, не из метрик) — сигналы алертов,

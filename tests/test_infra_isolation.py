@@ -36,13 +36,13 @@ EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
     # — в своей сети. В dmc268 (там UI) из стека не ходит никто. Grafana —
     # ещё и в отдельной сети dmc268-grafana: порты на internal-сети Docker не
     # публикует, поэтому порт Grafana живёт в не-internal сети.
-    "otelcol": frozenset({"backend", "observability"}),
+    # Коллектор — ещё и в сети socket-proxy: receiver docker_stats.
+    "otelcol": frozenset({"backend", "observability", "observability_docker_proxy"}),
     "loki": frozenset({"observability"}),
     "tempo": frozenset({"observability"}),
     "prometheus": frozenset({"backend", "observability"}),
     "grafana": frozenset({"observability", "grafana"}),
     "node_exporter": frozenset({"observability"}),
-    "cadvisor": frozenset({"observability", "observability_docker_proxy"}),
     "docker_socket_proxy": frozenset({"observability_docker_proxy"}),
 }
 

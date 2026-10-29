@@ -4,8 +4,8 @@
 бы только на деплое. Тесты держат структуру: образы стека зафиксированы
 дайджестами одинаково в обоих местах, отдельного экспортёра Postgres больше
 нет (метрики базы снимает receiver postgresql коллектора, решение #89),
-сервер и контейнеры видны (node-exporter, cAdvisor — последний без
-docker.sock, через socket-proxy), у Prometheus есть потолок по размеру,
+сервер и контейнеры видны (node-exporter и receiver docker_stats коллектора —
+последний без docker.sock, через socket-proxy), у Prometheus есть потолок по размеру,
 имена compose не сталкиваются с infra на общем хосте.
 Валидацию конфига самим коллектором делает класс
 TestCollectorConfigValidation в test_collector_redaction.py.
@@ -44,7 +44,6 @@ STACK_SERVICES = {
     "prometheus": "prometheus_image",
     "grafana": "grafana_image",
     "node-exporter": "node_exporter_image",
-    "cadvisor": "cadvisor_image",
     "dockerproxy": "docker_socket_proxy_image",
 }
 
@@ -117,17 +116,17 @@ def test_prometheus_has_no_postgres_job() -> None:
     assert "postgres" not in jobs
 
 
-# --- node-exporter и cAdvisor в обоих окружениях ------------------------------------
+# --- node-exporter и socket-proxy в обоих окружениях ------------------------------------
 
 
-@pytest.mark.parametrize("service", ["node-exporter", "cadvisor", "dockerproxy"])
+@pytest.mark.parametrize("service", ["node-exporter", "dockerproxy"])
 def test_host_and_container_exporters_in_compose(service: str) -> None:
     """Сервер, контейнеры и прокси Docker API — в профиле observability, без портов наружу."""
     service_config = load_compose()["services"][service]
     assert "observability" in service_config["profiles"]
 
 
-@pytest.mark.parametrize("container", ["node_exporter", "cadvisor", "docker_socket_proxy"])
+@pytest.mark.parametrize("container", ["node_exporter", "docker_socket_proxy"])
 def test_host_and_container_exporters_in_infra(container: str) -> None:
     """То же в infra: контейнер, образ из locals и потолок памяти из переменной."""
     text = OBSERVABILITY_TF.read_text(encoding="utf-8")
@@ -138,10 +137,9 @@ def test_host_and_container_exporters_in_infra(container: str) -> None:
 
 
 def test_prometheus_scrapes_new_exporters_by_service_hosts() -> None:
-    """Jobs node-exporter и cadvisor по хостнеймам сервисов и их портам."""
+    """Job node-exporter по хостнейму сервиса и его порту."""
     jobs = {job["job_name"]: job for job in load_prometheus()["scrape_configs"]}
     assert jobs["node-exporter"]["static_configs"][0]["targets"] == ["node-exporter:9100"]
-    assert jobs["cadvisor"]["static_configs"][0]["targets"] == ["cadvisor:8080"]
 
 
 def test_rabbitmq_job_scrapes_per_object_metrics() -> None:
@@ -311,50 +309,34 @@ def test_infra_preloads_pg_stat_statements_only_with_the_stack() -> None:
     assert '"-c", "shared_preload_libraries=pg_stat_statements",' in block
 
 
-# --- cAdvisor ходит к Docker только через socket-proxy -------------------------------
+# --- метрики контейнеров: docker_stats коллектора через socket-proxy -----------------
 
 
-@pytest.mark.parametrize("path", ["/", "/var/run/docker.sock", "/var/run", "/var/lib/docker"])
-def test_cadvisor_mounts_no_host_root_or_docker_paths_in_compose(path: str) -> None:
-    """Маунтов Docker и корня хоста у cAdvisor нет в compose: Docker API —
-    только через socket-proxy; рекурсивный /rootfs открывал бы unix-сокет
-    через /rootfs/run/docker.sock (root на хосте) и Env всех контейнеров
-    (замечание ревью PR #130, high). Хостовые файловые метрики —
-    node-exporter."""
-    mounts = [mount.split(":")[0] for mount in load_compose()["services"]["cadvisor"]["volumes"]]
-    assert path not in mounts
-
-
-def test_cadvisor_is_not_root_and_is_hardened_in_both_places() -> None:
-    """cAdvisor — не root (nobody) и в жёсткой упаковке api: чтение /sys
-    и cgroup v2 работает и от nobody (проверено запуском образа)."""
-    compose_cadvisor = load_compose()["services"]["cadvisor"]
-    assert compose_cadvisor["user"] == "65534"
-    assert compose_cadvisor["read_only"] is True
-    assert compose_cadvisor["cap_drop"] == ["ALL"]
-    assert "no-new-privileges:true" in compose_cadvisor["security_opt"]
-
-    cadvisor = _tf_container_block("cadvisor")
-    assert re.search(r'user\s*=\s*"65534"', cadvisor)
-    assert re.search(r"read_only\s*=\s*true", cadvisor)
-    assert re.search(r'capabilities\s*\{\s*drop\s*=\s*\["ALL"\]\s*\}', cadvisor)
-    assert 'container_path = "/rootfs"' not in cadvisor
+def test_container_metrics_come_from_docker_stats_through_the_proxy() -> None:
+    """Метрики контейнеров снимает receiver docker_stats коллектора через
+    socket-proxy, в общем конвейере метрик (почему не cAdvisor — #249)."""
+    config = yaml.safe_load((OBSERVABILITY_DIR / "otelcol.yaml").read_text(encoding="utf-8"))
+    assert config["receivers"]["docker_stats"]["endpoint"] == "tcp://dockerproxy:2375"
+    assert "docker_stats" in config["service"]["pipelines"]["metrics"]["receivers"]
 
 
 SOCKET_PROXY_TEMPLATE = OBSERVABILITY_DIR / "docker-socket-proxy.cfg"
 SOCKET_PROXY_TEMPLATE_PATH = "/usr/local/etc/haproxy/haproxy.cfg.template"
 # Единственный белый список путей proxy (замечание ревью PR #130).
-_SOCKET_PROXY_ALLOW = r"^(/v[\d\.]+)?/(containers/json|containers/[^/]+/json|info|version|_ping)$"
+_SOCKET_PROXY_ALLOW = (
+    r"^(/v[\d\.]+)?/(containers/json|containers/[^/]+/json|containers/[^/]+/stats|events"
+    r"|info|version|_ping)$"
+)
 
 
-def test_socket_proxy_allows_only_the_cadvisor_paths() -> None:
+def test_socket_proxy_allows_only_the_docker_stats_paths() -> None:
     """Белый список путей proxy живёт в шаблоне haproxy, а не в env образа.
 
     CONTAINERS=1 у tecnativa/docker-socket-proxy открывал ЛЮБОЙ GET под
     /containers — /containers/{id}/archive?path=… (любой файл любого
     контейнера, включая том Postgres), /export и inspect с полным Env
-    (замечание ревью PR #130). Свой шаблон разрешает только то, что cAdvisor
-    берёт через API; статистику он читает из cgroup, не через API. Шаблон один
+    (замечание ревью PR #130). Свой шаблон разрешает только то, что берёт
+    receiver docker_stats: список, inspect, статистику и события. Шаблон один
     и тот же в обоих окружениях: compose монтирует файл по пути, который
     рендерит entrypoint образа, infra заливает его upload-ом по тому же пути.
     """
@@ -382,35 +364,14 @@ def test_socket_proxy_allows_only_the_cadvisor_paths() -> None:
     assert "    http-request deny\n    default_backend dockerbackend" in template
 
 
-def test_cadvisor_reaches_docker_through_the_proxy_in_compose() -> None:
-    """cAdvisor идёт к Docker по TCP-адресу proxy в отдельной сети; socket
-    смонтирован только у proxy. Из сетей приложения cAdvisor исключён."""
+def test_docker_socket_is_mounted_only_to_the_proxy() -> None:
+    """docker.sock — только у proxy, в compose и в infra; коллектор ходит к
+    Docker по TCP-адресу proxy (сети сверяют тесты сетей ниже)."""
     services = load_compose()["services"]
-    assert services["cadvisor"]["command"] == ["--docker=tcp://dockerproxy:2375"]
-    assert set(services["cadvisor"]["networks"]) == {"observability", "docker_proxy"}
-    assert services["dockerproxy"]["networks"] == {
-        "docker_proxy": {"aliases": ["dockerproxy"]},
-    }
+    assert not any("docker.sock" in volume for volume in services["collector"]["volumes"])
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["dockerproxy"]["volumes"]
-
-
-def test_cadvisor_reaches_docker_through_the_proxy_in_infra() -> None:
-    """То же в infra: у cAdvisor флаг -docker и две сети стека (observability
-    для Prometheus и отдельная для proxy), сети приложения и proxy-socket —
-    только у своих."""
-    cadvisor = _tf_container_block("cadvisor")
-    proxy = _tf_container_block("docker_socket_proxy")
-    assert '"--docker=tcp://dockerproxy:2375"' in cadvisor
-    assert "/var/run/docker.sock" not in cadvisor
-    assert "/var/lib/docker" not in cadvisor
-    assert 'container_path = "/rootfs"' not in cadvisor
-    assert 'host_path      = "/"' not in cadvisor
-    assert "docker_network.dmc268" not in cadvisor
-    assert "docker_network.observability" in cadvisor
-    assert "docker_network.observability_docker_proxy" in cadvisor
-    assert "/var/run/docker.sock" in proxy
-    assert "docker_network.dmc268" not in proxy
-    assert "docker_network.observability_docker_proxy" in proxy
+    assert "/var/run/docker.sock" not in _tf_container_block("otelcol")
+    assert "/var/run/docker.sock" in _tf_container_block("docker_socket_proxy")
 
 
 # --- сети: стек отдельно от приложения -------------------------------------------------
@@ -429,7 +390,7 @@ def test_stack_networks_split_the_stack_from_the_app_in_compose() -> None:
     assert not (networks["grafana"] or {}).get("internal")
 
     services = load_compose()["services"]
-    assert set(services["collector"]["networks"]) == {"default", "observability"}
+    assert set(services["collector"]["networks"]) == {"default", "observability", "docker_proxy"}
     assert set(services["prometheus"]["networks"]) == {"default", "observability"}
     assert set(services["grafana"]["networks"]) == {"observability", "grafana"}
     for service in ("loki", "tempo", "node-exporter"):
@@ -437,7 +398,7 @@ def test_stack_networks_split_the_stack_from_the_app_in_compose() -> None:
 
 
 def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
-    """То же в infra: у loki/tempo/grafana/node-exporter/cadvisor сети
+    """То же в infra: у loki/tempo/grafana/node-exporter сети
     dmc268 нет; collector и prometheus — в данных (backend: postgres-
     receiver, скрейп rabbitmq) и сети стека; сеть стека internal, а порт
     Grafana публикуется через отдельную не-internal сеть dmc268-grafana:
@@ -457,7 +418,7 @@ def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
     )
     assert grafana_network is not None, "нет docker_network.grafana в observability.tf"
     assert not re.search(r"^\s*internal\s*=", grafana_network.group(1), re.MULTILINE)
-    for name in ("loki", "tempo", "node_exporter", "cadvisor"):
+    for name in ("loki", "tempo", "node_exporter"):
         block = _tf_container_block(name)
         assert "docker_network.dmc268" not in block, name
         assert "docker_network.observability[" in block, name
@@ -750,8 +711,8 @@ def test_dashboard_queries_cover_the_expected_signals() -> None:
         "node_cpu_seconds_total",
         "node_memory_MemAvailable_bytes",
         "node_filesystem_avail_bytes",
-        "container_cpu_usage_seconds_total",
-        "container_memory_usage_bytes",
+        "container_cpu_usage_nanoseconds_total",
+        "container_memory_usage_total_bytes",
     )
     missing = [signal for signal in expected if signal not in expressions]
     assert not missing, f"нет сигналов в выражениях дашборда: {missing}"

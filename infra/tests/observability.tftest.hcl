@@ -41,7 +41,7 @@ run "observability_stack_plans_protected" {
         docker_container.otelcol[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
-        docker_container.cadvisor[0], docker_container.docker_socket_proxy[0],
+        docker_container.docker_socket_proxy[0],
       ] :
       c.memory > 0 && c.memory == c.memory_swap
     ])
@@ -56,7 +56,7 @@ run "observability_stack_plans_protected" {
         docker_container.otelcol[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
-        docker_container.cadvisor[0], docker_container.docker_socket_proxy[0],
+        docker_container.docker_socket_proxy[0],
       ] :
       c.log_driver == "json-file" && jsonencode(c.log_opts) == jsonencode(local.log_opts)
     ])
@@ -72,7 +72,7 @@ run "observability_stack_plans_protected" {
         docker_container.otelcol[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
-        docker_container.cadvisor[0], docker_container.docker_socket_proxy[0],
+        docker_container.docker_socket_proxy[0],
       ] :
       contains(c.security_opts, "no-new-privileges:true")
     ])
@@ -111,7 +111,8 @@ run "observability_stack_without_secrets_rejected" {
 }
 
 # Сети и порт стека по плану (то же сверяет tests/test_infra_isolation.py по
-# тексту): collector и prometheus — в данных и в стеке, grafana — в стеке и
+# тексту): collector и prometheus — в данных и в стеке (collector ещё и в
+# сети socket-proxy), grafana — в стеке и
 # в сети публикации порта; сеть стека internal, сеть порта Grafana — нет;
 # порт Grafana публикуется на bind_ip.
 run "stack_networks_and_grafana_port_follow_their_purpose" {
@@ -124,13 +125,18 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
   }
 
   assert {
-    condition = alltrue([
-      for c in [docker_container.otelcol[0], docker_container.prometheus[0]] :
-      toset([for n in c.networks_advanced : n.name]) == toset([
-        docker_network.backend.name, docker_network.observability[0].name,
-      ])
+    condition = toset([for n in docker_container.otelcol[0].networks_advanced : n.name]) == toset([
+      docker_network.backend.name, docker_network.observability[0].name,
+      docker_network.observability_docker_proxy[0].name,
     ])
-    error_message = "Коллектор и Prometheus должны стоять ровно в двух сетях: данных (receiver postgres, скрейп rabbitmq и приём OTLP) и стека (экспортёры, скрейп collector/node-exporter/cadvisor)."
+    error_message = "Коллектор должен стоять ровно в трёх сетях: данных (receiver postgres и приём OTLP), стека (экспортёры, скрейп collector) и socket-proxy (receiver docker_stats)."
+  }
+
+  assert {
+    condition = toset([for n in docker_container.prometheus[0].networks_advanced : n.name]) == toset([
+      docker_network.backend.name, docker_network.observability[0].name,
+    ])
+    error_message = "Prometheus должен стоять ровно в двух сетях: данных (скрейп rabbitmq) и стека (скрейп collector и node-exporter)."
   }
 
   assert {

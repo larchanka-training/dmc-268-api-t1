@@ -455,9 +455,10 @@ def upgrade() -> None:
   OTLP-лога). На пути коллектор редактирует записи с исключениями: стектрейс,
   текст и тело такой записи заменяются маркером `<скрыто>`, `exception.type`
   остаётся диагнозом.
-- **Стек** — восемь контейнеров (коллектор, Loki, Tempo, Prometheus, Grafana,
-  node_exporter за сервер, cAdvisor за контейнеры и socket-proxy — доступ cAdvisor
-  к Docker API по белому списку эндпоинтов вместо маунта `docker.sock`) с
+- **Стек** — семь контейнеров (коллектор, Loki, Tempo, Prometheus, Grafana,
+  node_exporter за сервер и socket-proxy — доступ receiver `docker_stats` коллектора,
+  он снимает метрики контейнеров, к Docker API по белому списку эндпоинтов вместо
+  маунта `docker.sock`) с
   одними конфигами локально и на стенде: конфиги лежат в
   `infra/observability/`, локально их монтирует профиль `observability` в
   compose, на стенде те же файлы собирает `infra/` (Terraform), весь стек — за
