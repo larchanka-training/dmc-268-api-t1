@@ -24,9 +24,10 @@
 
 Повторная доставка на тот же коммит не создаёт второй прогон: `find_active`
 находит существующий активный, `find_reviewed` — завершённый не-failed прогон
-по вебхуку (исход `duplicate` в обоих случаях, #75), если его база та же. Смена
-целевой ветки (`edited`, #222) даёт новый прогон, а активный на старой базе
-отменяется. Таблицы ключей
+по вебхуку (исход `duplicate` в обоих случаях, #75), если последний прогон на
+коммит не упал и не отменён. Смена целевой ветки (`edited` с другой веткой, чем
+записана у PR, #222) даёт новый прогон: активный на старой ветке отменяется, а
+head блокируется после коммита, до постановки задачи. Таблицы ключей
 `X-GitHub-Delivery` нет: повтор после нашего сбоя постановки приходит с тем же
 ключом и был бы отброшен, а так `failed` прогон повтор не блокирует. Гонку параллельных
 доставок страхуют частичные уникальные индексы — отказ любого из них
@@ -54,6 +55,7 @@ from uuid import UUID
 
 from app.application.merge_gate_publish import build_retarget_check
 from app.application.ports.job_queue import JobQueue
+from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.domain.entities import (
@@ -75,6 +77,9 @@ from app.domain.vcs_errors import VcsError
 from app.domain.webhook import extract_github_event
 
 logger = logging.getLogger(__name__)
+
+# Последний прогон на коммит в этих статусах повтор доставки не блокирует.
+_RETRYABLE_STATUSES = frozenset({ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED})
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,11 +113,15 @@ def handle_webhook_event(
     *,
     now: Callable[[], datetime],
     new_id: Callable[[], UUID],
+    run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
 ) -> WebhookOutcome:
     """Принять вебхук: от payload'а до закоммиченного прогона и задачи.
 
     `now` и `new_id` передаются вызывающим, чтобы тесты фиксировали точные
     значения. Вне тестов это `datetime.now(UTC)` и `app.domain.ids.new_id`.
+    `run_outcome` пишет терминальный переход компенсации `_fail_unenqueued`
+    в счётчик прогонов: без записи алерт по доле упавших слеп при падении
+    брокера — пайплайн и выметатель этот переход не делают.
     """
     event = extract_github_event(payload)
     if event is None:
@@ -137,7 +146,7 @@ def handle_webhook_event(
     except VcsError:
         return WebhookOutcome(kind="failure")
 
-    existing_run: ReviewRun | None = None
+    retarget = False
     with uow as work:
         # Дубль проверяется до upsert'а merge_request: на PR один активный
         # прогон, повторная доставка его не трогает.
@@ -145,52 +154,30 @@ def handle_webhook_event(
             repository.id, event.pr_number
         )
         if existing_merge_request is not None:
-            # Дубль — активный прогон на этот коммит или завершённый не-failed
-            # прогон по вебхуку (#75) с той же базой: GitHub переотправляет
-            # доставку с тем же `X-GitHub-Delivery`, так что тот же коммит на той
-            # же базе ещё раз — повтор, а не новое событие. Другая база (смена
-            # целевой ветки, #222) — другой дифф: не дубль.
-            existing_run = work.review_runs.find_active(
-                existing_merge_request.id, event.head_sha
-            ) or work.review_runs.find_reviewed(existing_merge_request.id, event.head_sha)
-            if existing_run is not None and _same_base(
-                existing_run, metadata.base_sha, event.action
-            ):
+            # Смена целевой ветки (#222) — только `edited` с другой веткой, чем
+            # записана у PR. Вершина ветки (`base_sha`) двигается и без смены
+            # ветки — от неё повтор `synchronize` дублем быть не перестаёт.
+            retarget = (
+                event.action == "edited"
+                and existing_merge_request.target_branch != metadata.target_branch
+            )
+            duplicate_of = None if retarget else _duplicate_of(
+                work, existing_merge_request.id, event.head_sha
+            )
+            if duplicate_of is not None:
                 return WebhookOutcome(
                     kind="duplicate",
-                    run=existing_run,
+                    run=duplicate_of,
                     merge_request=existing_merge_request,
                     repository=repository,
                 )
 
-    if existing_run is not None:
-        # Прогон на этот коммит есть, а база другая — целевую ветку сменили
-        # (#222). Check run висит на коммите: до ревью нового диффа на нём
-        # остался бы `success` старого. Блокировка — до записей и между
-        # транзакциями, как метаданные: не удалась — 502 без записей, доставку
-        # повторит проход воркера (#149), а не новый прогон под старым `success`.
-        try:
-            vcs.set_merge_gate_check(
-                event.repo_full_name,
-                event.head_sha,
-                event.installation_id,
-                build_retarget_check(),
-            )
-        except VcsError:
-            logger.warning(
-                "merge gate %s@%s не заблокирован после смены целевой ветки",
-                event.repo_full_name,
-                event.head_sha,
-                exc_info=True,
-            )
-            return WebhookOutcome(kind="failure")
-
     with uow as work:
-        if existing_run is not None:
-            # Прогон на старой базе ещё идёт — выставил бы gate по диффу, которого
+        if retarget and existing_merge_request is not None:
+            # Прогон на старой ветке ещё идёт — выставил бы gate по диффу, которого
             # в PR уже нет. Отмена — своим коммитом до вставки нового прогона:
             # частичный индекс допускает один активный прогон на коммит.
-            _supersede(work, existing_run.id, now())
+            _supersede(work, existing_merge_request.id, event.head_sha, now())
 
         merge_request = _upsert_merge_request(
             work, repository.id, existing_merge_request, event, metadata, now(), new_id
@@ -247,6 +234,37 @@ def handle_webhook_event(
                     repository=repository,
                 )
 
+    if retarget:
+        # Check run висит на коммите: до ревью нового диффа на нём остался бы
+        # `success` старого. Блокировка — после коммита отмены и нового прогона:
+        # воркер старого прогона и пересчёт по треду, выставив gate, перечитывают
+        # последний прогон на head (`settle_merge_gate`), так что любая
+        # перестановка с ними кончается `failure`. Задача — после блокировки:
+        # новый прогон не выставит gate раньше неё.
+        try:
+            vcs.set_merge_gate_check(
+                event.repo_full_name,
+                event.head_sha,
+                event.installation_id,
+                build_retarget_check(),
+            )
+        except VcsError as exc:
+            # 502 и откат: прогон — в `failed` (повтор доставки он дублем не
+            # делает), PR — на прежнюю ветку, чтобы повтор (#149) снова увидел
+            # смену и заблокировал head.
+            logger.warning(
+                "merge gate %s@%s не заблокирован после смены целевой ветки",
+                event.repo_full_name,
+                event.head_sha,
+                exc_info=True,
+            )
+            _fail_unenqueued(uow, run.id, exc, now(), run_outcome)
+            if existing_merge_request is not None:
+                _restore_target_branch(
+                    uow, merge_request.id, existing_merge_request.target_branch, now()
+                )
+            return WebhookOutcome(kind="failure")
+
     # Задача — после коммита: воркер #36 ожидает, что прогон уже виден в базе,
     # и сообщение без строки кладёт в DLQ. `id` — идентификатор сообщения,
     # новый на каждую постановку (§4.2, спека job-queue); прогон указывает
@@ -273,30 +291,33 @@ def handle_webhook_event(
         # терминальное состояние не блокирует следующую доставку. Ошибка идёт
         # дальше — вебхук ответит 5xx. Сам GitHub упавшую доставку не повторяет:
         # её переотправляет проход воркера (#149).
-        _fail_unenqueued(uow, run.id, exc, now())
+        _fail_unenqueued(uow, run.id, exc, now(), run_outcome)
         raise
     return WebhookOutcome(
         kind="success", run=run, merge_request=merge_request, repository=repository
     )
 
 
-def _same_base(run: ReviewRun, base_sha: str, action: str) -> bool:
-    """Прогон ревьюил тот же дифф: тот же head (по выборке) и та же база.
+def _duplicate_of(work: UnitOfWork, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+    """Прогон, повтором доставки которого считается вебхук на этот коммит.
 
-    Прогон без записанной базы на повторе `opened`/`synchronize` считается
-    ревью любой базы: сравнить не с чем, а лишний прогон на каждый повтор
-    хуже. На `edited` (смена целевой ветки) — нет: fail closed, база заведомо
-    менялась."""
-    if run.base_sha is None:
-        return action != "edited"
-    return run.base_sha == base_sha
+    Активный прогон или завершённый не-failed по вебхуку (#75) — но только если
+    последний прогон на коммит не `failed` и не `cancelled`: прогон после смены
+    ветки упал или отменён — head не проверен, и повтор доставки даёт новый
+    прогон, а не дубль более старого (#222)."""
+    latest = work.review_runs.find_latest(merge_request_id, head_sha)
+    if latest is None or latest.status in _RETRYABLE_STATUSES:
+        return None
+    return work.review_runs.find_active(merge_request_id, head_sha) or (
+        work.review_runs.find_reviewed(merge_request_id, head_sha)
+    )
 
 
-def _supersede(work: UnitOfWork, run_id: UUID, now: datetime) -> None:
-    """Отменить прогон на старой базе, если он ещё идёт. Строка читается заново:
-    воркер мог успеть его завершить - тогда отменять нечего."""
-    run = work.review_runs.get(run_id)
-    if run is None or run.status in TERMINAL_STATUSES:
+def _supersede(work: UnitOfWork, merge_request_id: UUID, head_sha: str, now: datetime) -> None:
+    """Отменить активный прогон на этот коммит, если он есть: он ревьюит дифф
+    против прежней целевой ветки."""
+    run = work.review_runs.find_active(merge_request_id, head_sha)
+    if run is None:
         return
     cancelled = advance(run, ReviewRunStatus.CANCELLED, now)
     if not cancelled.ok:
@@ -309,12 +330,18 @@ def _supersede(work: UnitOfWork, run_id: UUID, now: datetime) -> None:
 
 
 def _fail_unenqueued(
-    uow: UnitOfWork, run_id: UUID, cause: Exception, now: datetime
+    uow: UnitOfWork,
+    run_id: UUID,
+    cause: Exception,
+    now: datetime,
+    run_outcome: RunOutcomeRecorder,
 ) -> None:
     """Перевести закоммиченный прогон в failed, когда задача не ушла в брокер.
 
     Отказ компенсации (база недоступна) не маскирует исходную ошибку —
-    прогон останется до sweep обработки (#36).
+    прогон останется до sweep обработки (#36). Успешный перевод —
+    терминальный переход, его пишет `run_outcome` после коммита: счётчик
+    считает прогоны, а не обработки сообщений.
     """
     try:
         with uow as work:
@@ -327,8 +354,35 @@ def _fail_unenqueued(
             )
             work.review_runs.update(failed)
             work.commit()
+            run_outcome.run_finished(ReviewRunStatus.FAILED.value)
     except Exception:
-        logger.exception("не удалось перевести прогон %s в failed после сбоя очереди", run_id)
+        # Идентификатор — атрибутом записи, не текстом (правило «Логи»):
+        # контекста сообщения воркера на пути вебхука нет, поэтому его несёт
+        # extra; имя — то же, что у атрибута спанов.
+        logger.exception(
+            "не удалось перевести прогон в failed после сбоя очереди",
+            extra={"review_run_id": str(run_id)},
+        )
+
+
+def _restore_target_branch(
+    uow: UnitOfWork, merge_request_id: UUID, target_branch: str, now: datetime
+) -> None:
+    """Вернуть PR прежнюю целевую ветку, когда смену не удалось довести до блокировки.
+
+    Сбой (база недоступна) пишется в лог: повтор доставки тогда сочтёт смену
+    уже записанной и создаст прогон без блокировки — head закроет его gate."""
+    try:
+        with uow as work:
+            current = work.merge_requests.get(merge_request_id)
+            if current is None:
+                return
+            work.merge_requests.update(
+                replace(current, target_branch=target_branch, updated_at=now)
+            )
+            work.commit()
+    except Exception:
+        logger.exception("не удалось вернуть PR %s прежнюю целевую ветку", merge_request_id)
 
 
 def _find_survivor(

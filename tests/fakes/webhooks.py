@@ -35,8 +35,10 @@ DIFF = (
 )
 
 
-def webhook_payload(action: str = "opened") -> dict[str, Any]:
-    """Записанный payload GitHub; для прочих действий — тело `opened` с заменой."""
+def webhook_payload(action: str = "opened", *, base_ref: str | None = None) -> dict[str, Any]:
+    """Записанный payload GitHub; для прочих действий — тело `opened` с заменой.
+
+    `base_ref` - целевая ветка в payload'е, если не та, что в записи."""
     name = (
         "github_webhook_synchronize.json"
         if action == "synchronize"
@@ -47,10 +49,14 @@ def webhook_payload(action: str = "opened") -> dict[str, Any]:
     if action == "edited":
         # `edited` в тестах - смена целевой ветки: иное `edited` ревью не запускает.
         raw["changes"] = {"base": {"ref": {"from": "evil-staging"}, "sha": {"from": "0" * 40}}}
+    if base_ref is not None:
+        raw["pull_request"]["base"]["ref"] = base_ref
     return raw
 
 
-def pr_metadata(base_sha: str = "fedcba0987654321fedcba0987654321fedcba09") -> PRMetadata:
+def pr_metadata(
+    base_sha: str = "fedcba0987654321fedcba0987654321fedcba09", target_branch: str = "main"
+) -> PRMetadata:
     """Свежие метаданные VCS.
 
     Заголовок, автор и ветки нарочно отличаются от payload'а вебхука: так
@@ -65,7 +71,7 @@ def pr_metadata(base_sha: str = "fedcba0987654321fedcba0987654321fedcba09") -> P
         description="",
         author="grinv",
         source_branch="feat/webhook-intake-rebased",
-        target_branch="main",
+        target_branch=target_branch,
         state=MergeRequestState.OPEN,
     )
 

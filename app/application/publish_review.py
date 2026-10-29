@@ -9,9 +9,10 @@ from uuid import UUID
 from app.application.merge_gate_publish import (
     build_merge_gate_check,
     collect_open_findings,
+    settle_merge_gate,
 )
 from app.application.ports.llm_gateway import LlmReviewResult, LlmReviewSummary
-from app.application.ports.unit_of_work import UnitOfWork
+from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import (
     InlineCommentDraft,
@@ -132,6 +133,16 @@ def publish_review(
             job.installation_id,
             build_merge_gate_check(still_open),
         )
+        # Ветку могли сменить между проверкой статуса выше и POST (#222).
+        settle_merge_gate(
+            uow,
+            vcs,
+            merge_request_id=run.merge_request_id,
+            repo_full_name=job.repository_full_name,
+            head_sha=job.head_sha,
+            installation_id=job.installation_id,
+            run_id=run.id,
+        )
     except VcsError:
         logger.warning(
             "прогон %s: ревью опубликовано, а check run merge gate на %s не выставлен",
@@ -236,14 +247,24 @@ def _adopt_orphaned_reviews(
             continue
         if publication is None:
             continue
+        with uow:
+            _record_publication(uow, orphan.id, findings, publication, now=now, new_id=new_id)
+            try:
+                uow.commit()
+            except ActiveRunConflict:
+                # Соседний прогон PR подобрал это ревью раньше: записи уже есть.
+                uow.rollback()
+                logger.info(
+                    "прогон %s: ревью упавшего прогона %s уже записал другой прогон",
+                    run.id,
+                    orphan.id,
+                )
+                continue
         logger.warning(
             "прогон %s: ревью упавшего прогона %s найдено по маркеру и записано",
             run.id,
             orphan.id,
         )
-        with uow:
-            _record_publication(uow, orphan.id, findings, publication, now=now, new_id=new_id)
-            uow.commit()
 
 
 def _sync_threads_with_host(

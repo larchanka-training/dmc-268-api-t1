@@ -15,7 +15,6 @@ import pika
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
-from pika.exceptions import ChannelClosedByBroker
 
 from app.config import Settings
 from app.domain.llm_errors import LlmTimeoutError
@@ -26,77 +25,14 @@ from app.worker.factory import StopRequest, Worker, build_review_handler
 
 from ..application.test_review_pipeline import _run, _seed_run
 from ..fakes.llm_gateway import ScriptedLlmGateway
+from ..fakes.queue import FakeChannel, FakeConnection
 from ..fakes.unit_of_work import FakeUnitOfWork
 from .test_review_handler import JOB, LIMITS, LLM_LIMITS, TEXTS, _Deps
 
 
-class FakeChannel:
-    def __init__(self, deliveries: list[tuple[Any, Any, Any]]) -> None:
-        self._deliveries = deliveries
-        self.acked: list[int] = []
-        self.requeued: list[int] = []
-        self.cancelled = False
-        # Порядок `cancel` и подтверждений: с prefetch=1 `cancel` после
-        # подтверждения отдал бы следующее сообщение `basic.reject` (#223).
-        self.events: list[str] = []
-
-    def consume(self, queue: str, inactivity_timeout: float, arguments: dict[str, Any]):
-        self.consumer_arguments = arguments
-        # Снятый потребитель новых доставок не получает.
-        while self._deliveries and not self.cancelled:
-            yield self._deliveries.pop(0)
-
-    def basic_ack(self, tag: int) -> None:
-        self.acked.append(tag)
-        self.events.append(f"ack {tag}")
-
-    def basic_nack(self, tag: int, requeue: bool) -> None:
-        # Возврат в очередь при остановке ожидаем, отказ в DLQ — нет.
-        if not requeue:
-            raise AssertionError("не ожидался nack в DLQ")
-        self.requeued.append(tag)
-        self.events.append(f"requeue {tag}")
-
-    def cancel(self) -> None:
-        assert not self.cancelled, "потребитель снят дважды"
-        self.cancelled = True
-        self.events.append("cancel")
-
-
-class RecordingChannel(FakeChannel):
-    """Канал, который принимает и nack — сообщение ушло бы в DLQ."""
-
-    def __init__(self, deliveries: list[tuple[Any, Any, Any]]) -> None:
-        super().__init__(deliveries)
-        self.nacked: list[int] = []
-
-    def basic_nack(self, tag: int, requeue: bool) -> None:
-        if requeue:
-            self.requeued.append(tag)
-        else:
-            self.nacked.append(tag)
-
-
-class NoLegacyQueueChannel:
-    """Канал брокера, где старой классической очереди нет: пассивное объявление — `404`."""
-
-    is_open = False
-
-    def queue_declare(self, queue: str, passive: bool) -> None:
-        raise ChannelClosedByBroker(404, f"NOT_FOUND - no queue '{queue}'")
-
-
-class FakeConnection:
-    def __init__(self) -> None:
-        self.closed = False
-        self.channels_opened = 0
-
-    def channel(self) -> NoLegacyQueueChannel:
-        self.channels_opened += 1
-        return NoLegacyQueueChannel()
-
-    def close(self) -> None:
-        self.closed = True
+def _strict(deliveries: list[tuple[Any, Any, Any]]) -> FakeChannel:
+    """Канал, в котором nack роняет тест: сообщение не должно уйти в DLQ."""
+    return FakeChannel(deliveries, allow_nack=False)
 
 
 def _worker(channel: FakeChannel, connection: FakeConnection | None = None) -> Worker:
@@ -104,8 +40,8 @@ def _worker(channel: FakeChannel, connection: FakeConnection | None = None) -> W
 
 
 def test_sweep_runs_on_idle_ticks_and_a_failing_sweep_does_not_stop_consumption() -> None:
-    message = (SimpleNamespace(delivery_tag=1), None, b"{}")
-    channel = FakeChannel([(None, None, None), message])
+    message = (SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")
+    channel = _strict([(None, None, None), message])
     calls: list[int] = []
 
     def sweep() -> None:
@@ -119,8 +55,8 @@ def test_sweep_runs_on_idle_ticks_and_a_failing_sweep_does_not_stop_consumption(
 
 
 def test_sweep_is_throttled_by_the_interval() -> None:
-    ticks = [(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1), None, b"{}")]
-    channel = FakeChannel(ticks)
+    ticks = [(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")]
+    channel = _strict(ticks)
     calls: list[int] = []
 
     _worker(channel).run(
@@ -133,7 +69,7 @@ def test_sweep_is_throttled_by_the_interval() -> None:
 def test_legacy_jobs_are_moved_on_the_sweep_tick_and_a_failure_does_not_stop_consumption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ticks = [(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1), None, b"{}")]
+    ticks = [(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")]
     channel = FakeChannel(ticks)
     moves: list[int] = []
 
@@ -164,7 +100,7 @@ def test_legacy_jobs_are_moved_on_the_sweep_tick_and_a_failure_does_not_stop_con
 def test_a_failed_message_closes_its_span_with_the_error(
     spans: InMemorySpanExporter, body: bytes, review_run_id: str | None
 ) -> None:
-    channel = RecordingChannel([(SimpleNamespace(delivery_tag=1), None, body)])
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1, redelivered=False), None, body)])
     handler = build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, LLM_LIMITS, TEXTS)
 
     _worker(channel).run(handler, limit=1)
@@ -177,7 +113,7 @@ def test_a_failed_message_closes_its_span_with_the_error(
 
 
 def test_a_processed_message_closes_its_span_ok(spans: InMemorySpanExporter) -> None:
-    channel = FakeChannel([(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
 
     _worker(channel).run(lambda body: None, limit=1)
 
@@ -199,11 +135,11 @@ def test_a_stage_of_a_failed_message_does_not_leak_into_the_next_spans(
         if body == b"fail":
             _run(uow, next(gateways), stage_tracer=OtelStageTracer())
 
-    channel = RecordingChannel(
+    channel = FakeChannel(
         [
-            (SimpleNamespace(delivery_tag=1), None, b"fail"),
+            (SimpleNamespace(delivery_tag=1, redelivered=False), None, b"fail"),
             (None, None, None),
-            (SimpleNamespace(delivery_tag=2), None, b"ok"),
+            (SimpleNamespace(delivery_tag=2, redelivered=False), None, b"ok"),
         ]
     )
 
@@ -223,8 +159,8 @@ def test_a_stage_of_a_failed_message_does_not_leak_into_the_next_spans(
 
 
 def test_a_stop_request_lets_the_current_message_finish_and_takes_no_more() -> None:
-    first, second = [(SimpleNamespace(delivery_tag=tag), None, b"{}") for tag in (1, 2)]
-    channel = FakeChannel([first, second])
+    first, second = [(SimpleNamespace(delivery_tag=tag, redelivered=False), None, b"{}") for tag in (1, 2)]
+    channel = _strict([first, second])
     connection = FakeConnection()
     stop = StopRequest()
 
@@ -241,7 +177,7 @@ def test_a_stop_request_lets_the_current_message_finish_and_takes_no_more() -> N
 
 def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
     # Сигнал пришёл на простое или в окно ожидания, и тут же доставлено сообщение.
-    channel = FakeChannel([(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
     connection = FakeConnection()
     handled: list[bytes] = []
 
@@ -254,7 +190,7 @@ def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
 
 
 def test_a_message_after_a_stop_during_the_sweep_is_not_taken() -> None:
-    channel = FakeChannel([(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
     stop = StopRequest()
     handled: list[bytes] = []
 
@@ -271,11 +207,11 @@ class IdleChannel(FakeChannel):
     """Пустая очередь: только такты простоя, бесконечно."""
 
     def __init__(self) -> None:
-        super().__init__([])
+        super().__init__([], allow_nack=False)
         self.idle_ticks = 0
 
     def consume(
-        self, queue: str, inactivity_timeout: float, arguments: dict[str, Any]
+        self, queue: str, inactivity_timeout: float, arguments: dict[str, Any] | None = None
     ) -> Iterator[Any]:
         while True:
             self.idle_ticks += 1
@@ -314,14 +250,14 @@ def test_a_stop_signal_stops_the_worker_and_flushes_the_traces(
     monkeypatch.setattr(factory, "build_worker", lambda settings: _Worker())
     monkeypatch.setattr(factory, "shutdown_tracing", lambda: flushed.append(True))
 
-    factory.run_worker(
-        Settings(
-            database_url="postgresql+psycopg://t:t@localhost/t",
-            rabbitmq_url="amqp://guest:guest@localhost//",
-            github_webhook_secret="s",
-            llm_backend="stub",
-        )
+    settings = Settings(
+        database_url="postgresql+psycopg://t:t@localhost/t",
+        rabbitmq_url="amqp://guest:guest@localhost//",
+        github_webhook_secret="s",
+        llm_backend="stub",
     )
+    # Настройки — загрузчиком: `run_worker` читает их сам после настройки логов.
+    factory.run_worker(lambda: settings)
 
     assert seen == {"requested": True, "restored": True}
     assert flushed == [True]  # провайдер трейсов закрыт после выхода цикла
@@ -357,7 +293,7 @@ def test_worker_connection_has_heartbeat_disabled(monkeypatch) -> None:
 
 
 def test_a_limited_run_takes_the_consumer_off_before_the_last_ack() -> None:
-    channel = FakeChannel([(SimpleNamespace(delivery_tag=tag), None, b"{}") for tag in (1, 2)])
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=tag, redelivered=False), None, b"{}") for tag in (1, 2)])
 
     _worker(channel).run(lambda body: None, limit=1)
 
@@ -380,7 +316,7 @@ def test_a_consumer_cancelled_by_the_broker_is_logged(caplog: pytest.LogCaptureF
 
 def test_without_a_legacy_queue_it_is_asked_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """Старой очереди нет: каждый проход давал бы `404` и строку `error` у брокера."""
-    channel = FakeChannel([(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1), None, b"{}")])
+    channel = FakeChannel([(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
     asked: list[int] = []
 
     def move(connection: object) -> None:

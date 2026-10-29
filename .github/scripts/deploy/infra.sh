@@ -12,7 +12,8 @@
 # проверки (#213). Осознанный обход — ручной запуск
 # `gh workflow run deploy.yml -f allow_stateful_replace=true`
 # (ALLOW_STATEFUL_REPLACE в env): замена тогда — предупреждение; тома флаг не
-# открывает. Ротация пароля — runbook (#161), не деплой.
+# открывает. Смена пароля базы и брокера сюда не доходит: их env план не
+# видит (ignore_changes), пароль выставляет следующий шаг — passwords.sh (#161).
 #
 # Предупреждение OpenTofu о -target здесь ожидаемое. У postgres `wait = true`
 # (infra/postgres.tf): apply возвращается, когда база отвечает. Этот же apply

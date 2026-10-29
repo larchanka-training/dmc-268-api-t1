@@ -23,6 +23,7 @@ from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.oauth_provider import OAuthProvider
+from app.application.ports.run_outcome import RunOutcomeRecorder
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.config import Settings
@@ -39,6 +40,7 @@ from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
 )
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue
+from app.infrastructure.telemetry import OtelRunOutcomeRecorder
 from app.infrastructure.vcs.cached_installations import CachedInstallationCatalog
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
@@ -132,7 +134,7 @@ class Container:
         """Собрать адаптер модели при первом обращении; конструирование - без сети."""
         gateway = self._llm_gateway
         if gateway is None:
-            gateway = _build_llm_gateway(self.settings)
+            gateway = build_llm_gateway(self.settings)
             object.__setattr__(self, "_llm_gateway", gateway)
         return gateway
 
@@ -198,6 +200,14 @@ class Container:
     def run_changes(self) -> RunChanges:
         return self._run_changes
 
+    def run_outcome(self) -> RunOutcomeRecorder:
+        """Счётчик терминальных исходов прогонов — адаптер телеметрии.
+
+        Роуты телеметрию не импортируют (гард-тест и спека `observability`):
+        порт на адаптер связывает composition root.
+        """
+        return OtelRunOutcomeRecorder()
+
     async def aclose(self) -> None:
         """Закрыть то, что живёт в event loop процесса: слушатель изменений прогонов."""
         await self._run_changes.close()
@@ -219,7 +229,14 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
     # (`record_exception`, статус спана).
     return Container(
         engine=create_engine(
-            settings.database_url, future=True, pool_pre_ping=True, hide_parameters=True
+            settings.database_url,
+            future=True,
+            pool_pre_ping=True,
+            hide_parameters=True,
+            # Пул — явно из настроек, а не умолчанием диалекта: предел,
+            # который публикует `instrument_pool`, обязан совпадать с фактом.
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
         ),
         settings=settings,
         _token_cipher=_token_cipher(settings),
@@ -269,7 +286,7 @@ def llm_http_timeout(settings: Settings) -> httpx.Timeout:
     return httpx.Timeout(settings.llm_timeout_seconds, connect=_LLM_CONNECT_TIMEOUT_SECONDS)
 
 
-def _build_llm_gateway(settings: Settings) -> LlmGateway:
+def build_llm_gateway(settings: Settings) -> LlmGateway:
     """Порядок провайдеров не выбирается: локальная модель первая, hosted -
     только вторым и только по флагу (change `add-llm-gateway`, design D3).
 

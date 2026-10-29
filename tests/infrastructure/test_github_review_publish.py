@@ -163,6 +163,9 @@ class _GitHub:
         self.reviews: list[dict[str, Any]] = []
         self.seen: list[tuple[str, str]] = []
         self.comments_status = 200
+        self.comments: list[dict[str, Any]] = [
+            {"id": 42, "path": "a.py", "line": 3, "side": "RIGHT", "body": DRAFT.body}
+        ]
         # Статус `GET /app` до первого и после первого `POST …/reviews`.
         self.app_status_before_post = 200
         self.app_status_after_post = 200
@@ -184,7 +187,7 @@ class _GitHub:
         if request.method == "GET" and path.endswith("/comments"):
             if self.comments_status != 200:
                 return httpx.Response(self.comments_status, json={"message": "Bad Gateway"})
-            return httpx.Response(200, json=[{"id": 42, "path": "a.py", "line": 3, "side": "RIGHT"}])
+            return httpx.Response(200, json=self.comments)
         return httpx.Response(404)
 
     def posts(self) -> int:
@@ -431,3 +434,15 @@ def test_lost_inline_list_of_a_found_review_is_an_error_not_an_empty_match(
 
     with pytest.raises(VcsError):
         _find(make_gateway(rsa_key_pair, github.handler), DRAFT)
+
+
+def test_found_review_inline_is_matched_by_text_too(rsa_key_pair: RsaKeyPair) -> None:
+    """Две находки упавшего прогона на одной строке, опубликована одна (другую покрыл
+    тред): id уходит той, чей текст совпал, а не первой по порядку."""
+    github = _GitHub(_never_posts)
+    github.reviews = [{"id": 9001, "user": BOT, "body": MARKER}]
+    covered = InlineCommentDraft(file_path="a.py", side=DiffSide.NEW, line=3, body="покрытое тредом")
+
+    publication = _find(make_gateway(rsa_key_pair, github.handler), covered, DRAFT)
+
+    assert [c.provider_comment_id if c else None for c in publication.inline_comments] == [None, "42"]

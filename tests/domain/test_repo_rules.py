@@ -388,7 +388,9 @@ def test_exclude_follows_gitignore_semantics_too() -> None:
 
 # --- #222: glob без экспоненциального перебора ---------------------------------
 
-REDOS_PATTERNS = ("*a" * 24 + "*x", "/".join(["**", "*a*a*a*a*a*a*a*a*a*a*b"] * 6), "?*" * 30 + "z")
+# Размер подобран так, чтобы прежний `full_match` думал секунды, а не часы: мутация
+# «вернуть `full_match`» краснит тест по времени, а не вешает job до таймаута CI.
+REDOS_PATTERNS = ("*a" * 7 + "*x", "/".join(["**", "*a*a*b"] * 6))
 
 
 @pytest.mark.parametrize("pattern", REDOS_PATTERNS)
@@ -449,3 +451,10 @@ def test_wildcards_inside_a_segment_never_cross_a_slash(pattern: str, path: str)
     `full_match` на этих парах отвечал «да» - отрицательный класс у него съедал `/`."""
     rule = RepoRule(name="R", patterns=(pattern,), excludes=(), checks=("c",))
     assert rule_applies_to(rule, path) is False
+
+
+def test_question_mark_segment_matches_a_single_character_name_only() -> None:
+    """Сегмент `?` в шаблоне - имя из одного символа, а не любой сегмент."""
+    rule = RepoRule(name="R", patterns=("app/?/x.py",), excludes=(), checks=("c",))
+    assert rule_applies_to(rule, "app/a/x.py")
+    assert not rule_applies_to(rule, "app/ab/x.py")

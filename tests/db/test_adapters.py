@@ -714,11 +714,18 @@ def test_bot_threads_of_a_merge_request_keep_resolution_and_coverage(uow) -> Non
 
 def test_unpublished_failures_are_runs_that_died_publishing_without_a_comment(uow) -> None:
     """#222: кандидаты на подбор ревью - `failed` на `publishing` без `published_comments`,
-    только своего PR."""
+    только своего PR и упавшие позже последней записи: упавшие раньше уже проверяли.
+    Время падения - `last_progress_at`, а не создание (ревью #225)."""
 
-    def failed(mr_id, stage: ReviewRunStatus, at: dt.datetime) -> ReviewRun:
+    def failed(
+        mr_id, stage: ReviewRunStatus, at: dt.datetime, created_at: dt.datetime | None = None
+    ) -> ReviewRun:
         return replace(
-            a_run(mr_id), status=ReviewRunStatus.FAILED, failed_stage=stage, created_at=at
+            a_run(mr_id),
+            status=ReviewRunStatus.FAILED,
+            failed_stage=stage,
+            created_at=created_at or at,
+            last_progress_at=at,
         )
 
     with uow as work:
@@ -729,10 +736,18 @@ def test_unpublished_failures_are_runs_that_died_publishing_without_a_comment(uo
         work.merge_requests.add(other_mr)
         orphan = failed(mr.id, ReviewRunStatus.PUBLISHING, LATER)
         earlier_orphan = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW)
-        recorded = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW)
+        recorded = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW - dt.timedelta(minutes=1))
+        checked_before = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW - dt.timedelta(minutes=2))
+        # Создан раньше записанного, а упал (выметатель) уже после его публикации.
+        swept_later = failed(
+            mr.id,
+            ReviewRunStatus.PUBLISHING,
+            NOW + dt.timedelta(minutes=1),
+            created_at=NOW - dt.timedelta(minutes=3),
+        )
         analysing = failed(mr.id, ReviewRunStatus.ANALYSING, NOW)
         foreign = failed(other_mr.id, ReviewRunStatus.PUBLISHING, NOW)
-        for run in (orphan, earlier_orphan, recorded, analysing, foreign):
+        for run in (orphan, earlier_orphan, recorded, checked_before, swept_later, analysing, foreign):
             work.review_runs.add(run)
         work.commit()
     with uow as work:
@@ -743,7 +758,7 @@ def test_unpublished_failures_are_runs_that_died_publishing_without_a_comment(uo
                 finding_id=None,
                 provider_comment_id="9001",
                 kind=CommentKind.SUMMARY,
-                published_at=NOW,
+                published_at=NOW - dt.timedelta(minutes=1),
                 created_at=NOW,
                 updated_at=NOW,
             )
@@ -753,7 +768,7 @@ def test_unpublished_failures_are_runs_that_died_publishing_without_a_comment(uo
     with uow as work:
         found = work.review_runs.list_unpublished_failures(mr.id)
 
-    assert [r.id for r in found] == [earlier_orphan.id, orphan.id]
+    assert [r.id for r in found] == [swept_later.id, earlier_orphan.id, orphan.id]
 
 
 def test_latest_run_on_a_head_is_the_newest_in_any_status(uow) -> None:

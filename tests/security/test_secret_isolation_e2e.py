@@ -17,8 +17,8 @@ from app.domain.enums import ReviewRunStatus
 
 from ..chaos.scenario import accept
 from ..conftest import requires_broker, requires_db
-from ..e2e.stack import REPO_FULL_NAME, WEBHOOK_SECRET, Stack
-from ..fakes.github_api import CreateReviewFailure, PullRequest
+from ..e2e.stack import WEBHOOK_SECRET, Stack
+from ..fakes.github_api import REPO_FULL_NAME, CreateReviewFailure, PullRequest
 from ..fakes.llm_gateway import finding_json, review_response, verification_response
 from ..fakes.llm_provider import FakeLlmProvider
 

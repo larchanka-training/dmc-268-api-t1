@@ -78,10 +78,14 @@ def compose_applies_migrations(text: str) -> bool:
     """Compose применяет миграции отдельным сервисом, от которого зависят api и воркер.
 
     Одного сервиса мало: без `service_completed_successfully` API стартовал бы
-    параллельно с миграциями (или против непромигрированной базы).
+    параллельно с миграциями (или против непромигрированной базы). Команда —
+    список exec (`["alembic", "upgrade", "head"]`) или скрипт sh -c, когда
+    после миграций идёт шаг роли мониторинга (PR #130).
     """
     migrate = re.search(r"^  migrate:\n(.*?)(?=^  \S)", text, re.MULTILINE | re.DOTALL)
-    if not migrate or not re.search(r'"alembic",\s*"upgrade",\s*"head"', migrate.group(1)):
+    if not migrate or not re.search(
+        r"alembic upgrade head|\"alembic\",\s*\"upgrade\",\s*\"head\"", migrate.group(1)
+    ):
         return False
     waits = re.findall(
         r"migrate:\s*\n\s*condition:\s*service_completed_successfully", text

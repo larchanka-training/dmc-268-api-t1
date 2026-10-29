@@ -160,7 +160,8 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 
 ## Наблюдаемость
 
-Требования — спека `observability`, устройство — `app/infrastructure/telemetry.py`.
+Требования — спека `observability`, устройство — `app/infrastructure/telemetry.py`
+и `app/infrastructure/logging.py`.
 
 ### Трассировка
 
@@ -190,14 +191,41 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
   `traceparent` — только span link серверного спана (`link_client_trace`, `link.source = "client"`),
   не родитель: trace id и сэмплирование остаются нашими.
 - **Граница**: телеметрия — для команды. Данные продукта (шаги, токены, длительность) — из базы,
-  ответы API из телеметрии не строятся.
+  ответы API из телеметрии не строятся. Метрики — та же телеметрия: в Prometheus — сигналы
+  алертов, отчёты по прогонам — SQL по колонкам.
 
 ### Логи
 
-Структурированные логи с `trace_id` и `review_run_id` — задача #89; правила допишет она.
-Уже сейчас: OTel Logs SDK в Python — статус Development, логи через него не отправляем; заменим,
-когда станет Stable. `LoggingHandler` тогда — только из `opentelemetry-instrumentation-logging`:
-версия в `opentelemetry.sdk._logs` устарела с 1.40.0 и будет удалена.
+Два транспорта из одной точки настройки: stdlib `logging` → JSON в stdout —
+всегда, для docker logs и локальной отладки (у миграций — в stderr: stdout
+alembic CLI читают скрипты деплоя); OTLP-экспорт из SDK при
+`OTEL_LOGS_EXPORTER=otlp` (дефолт `none`) — путь в Loki через коллектор,
+принимающий логи только по OTLP. Чек-лист ревью логирующего кода:
+
+- **Только stdlib**: `logging.getLogger(__name__)`. Посредников (loguru,
+  structlog, свои обёртки) не заводим — мимо них выпадают `extra`, `Filter` и
+  trace-контекст.
+- **Поля записи — по спецификации JSON-лога**, их собирает `configure_logging`
+  (`app/infrastructure/logging.py`), а не вызов: `timestamp`, `severity`,
+  `message`, `service.name`, атрибуты из `extra` — верхним уровнем;
+  `trace_id`/`span_id`/`trace_flags` добавляет `TraceContextFilter` из текущего
+  спана. Свой форматтер и вклейку контекста в текст сообщения не пишем.
+- **Бизнес-контекст — через `extra`/`Filter`**, и теми же именами, что в
+  атрибутах спанов (`review_run_id`, см. «Трассировка»), не строкой в тексте:
+  по полю ищут Loki и алерты, вклеенное в сообщение не ищется.
+- **Запретный список** (проверяет `tests/infrastructure/test_logging.py`):
+  тела запросов к модели и ответы, код из диффа, токены доступа, query путей
+  входа. Для отладки — идентификаторы (`review_run_id`, `trace_id`), статусы и
+  счётчики, не содержимое.
+- **Стектрейс — через `exc_info`**: одна запись с полем стектрейса, а не
+  вторая запись с `traceback.format_exc()` в сообщении. Эталон — `500` под
+  настоящим uvicorn (`tests/api/test_internal_error_logging.py`).
+- **OTLP-экспорт — из SDK**: при `OTEL_LOGS_EXPORTER=otlp` `configure_telemetry`
+  ставит на root хендлер `opentelemetry.sdk._logs` — в коллектор уходят тело
+  записи (текст сообщения), severity и `exception.*`; ресурс общий с трейсами,
+  `service.name` в нём. Хендлер из `opentelemetry.sdk._logs` помечен устаревшим:
+  переход на `LoggingHandler` из `opentelemetry-instrumentation-logging` — TODO
+  в `configure_logging`, сбор stdout при этом не убирается.
 
 ## Тесты
 
@@ -225,10 +253,17 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
   обходится. Сменить том — новым ресурсом, а старый снять блоком
   `removed { lifecycle { destroy = false } }`: план выйдет `forget`, том останется на сервере;
 - **заменяет или удаляет контейнер `postgres` или `rabbitmq`**. Замену вызывает почти любая
-  правка их блока в `infra/`: `env`, `command`, память, `log_opts`, образ. Такая правка
+  правка их блока в `infra/`: `command`, память, `log_opts`, образ (`env` план не видит —
+  `ignore_changes`, там только переменные инициализации тома). Такая правка
   выкатывается только ручным запуском:
   `gh workflow run deploy.yml --ref develop -f allow_stateful_replace=true` — и это пишут в
-  описании пул-реквеста. Повтор — новым запуском, а не Re-run: у повторной попытки флага нет. Смену пароля так не выкатить: пароль хранится в томе (#161).
+  описании пул-реквеста. Повтор — новым запуском, а не Re-run: у повторной попытки флага нет.
+
+Пароль базы, брокера или `replicator` меняется обычным деплоем: новый секрет
+(например, `openssl rand -hex 24 | gh secret set <СЕКРЕТ>`; пустой пароль, пробелы, таб, перевод
+строки и не-ASCII шаг отклоняет — они ломаются в URL подключения) и `gh workflow run deploy.yml --ref develop`, без
+флага. Пароль выставляет шаг «Выставить пароли базы и брокера»; проверка и откат —
+[`infra/README.md`](../../infra/README.md), «Смена паролей».
 
 Проверить заранее, что даст правка в `infra/`: `tofu plan` и строка `must be replaced`.
 Подробно — [`infra/README.md`](../../infra/README.md).

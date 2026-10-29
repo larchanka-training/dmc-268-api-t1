@@ -27,6 +27,7 @@ from app.api.errors import (
     ERRORS_404_NOT_IN_INSTALLATION,
     ERRORS_404_REPOSITORY,
     ERRORS_409_ALREADY_CONNECTED,
+    ERRORS_413_BODY,
     ERRORS_422,
     ERRORS_501_NOT_IMPLEMENTED,
     ERRORS_502_SCM_REPOSITORIES,
@@ -63,7 +64,8 @@ _AVAILABLE_DESCRIPTION = (
     "`GET /user/installations/{id}/repositories`): это пересечение «доступно приложению» и "
     "«доступно пользователю», остальные репозитории установок в ответ не попадают, это не "
     "ошибка. Публичный репозиторий, на котором у пользователя нет роли, тоже не попадает. "
-    "Подключить из списка можно только с правом admin или maintain: с push или triage "
+    "Подключить из списка можно только с правом admin или maintain, это показывает "
+    "`can_connect` в каждой строке. С push или triage "
     "подключение ответит `403 REPOSITORY_MANAGE_REQUIRED`, как и на приватном только с правом "
     "чтения; на публичном только с правом чтения — `404 REPOSITORY_NOT_IN_INSTALLATION`. Токен пользователя отозван, истёк без "
     "возможности обновления или его нет (сессия открыта до хранения токенов) — "
@@ -165,13 +167,19 @@ class RepositoryListResponse(BaseModel):
 
 
 class AvailableRepositoryResponse(BaseModel):
-    """Репозиторий у провайдера, который вошедший пользователь может подключить к сервису."""
+    """Репозиторий у провайдера, доступный вошедшему пользователю; подключить его можно, если `can_connect`."""
 
     provider: Provider = Field(description="Хостинг репозитория.", examples=["github"])
     provider_id: str = Field(description="Идентификатор репозитория у провайдера.", examples=["123456789"])
     full_name: str = Field(description="Полное имя у провайдера: владелец/репозиторий.", examples=["octo-org/api"])
     default_branch: str = Field(description="Ветка по умолчанию у провайдера.", examples=["main"])
     already_connected: bool = Field(description="Репозиторий уже зарегистрирован в сервисе.")
+    can_connect: bool = Field(
+        description=(
+            "У пользователя на репозитории роль admin или maintain — то же правило, что у POST /repositories. "
+            "Подсказка интерфейсу: POST /repositories проверяет права сам."
+        )
+    )
 
 
 class AvailableRepositoryListResponse(BaseModel):
@@ -297,6 +305,7 @@ def list_available_repositories(
                 full_name=item.repository.full_name,
                 default_branch=item.repository.default_branch,
                 already_connected=item.already_connected,
+                can_connect=item.can_connect,
             )
             for item in available
         ]
@@ -314,6 +323,7 @@ def list_available_repositories(
         **ERRORS_403_ORIGIN_OR_MANAGE,
         **ERRORS_404_NOT_IN_INSTALLATION,
         **ERRORS_409_ALREADY_CONNECTED,
+        **ERRORS_413_BODY,
         **ERRORS_422,
         **ERRORS_502_SCM_REPOSITORIES,
     },
@@ -542,6 +552,7 @@ def get_repository_settings(repository_id: RepositoryIdPath) -> RepositorySettin
     responses={
         **ERRORS_403_ORIGIN_OR_MANAGE,
         **ERRORS_404_REPOSITORY,
+        **ERRORS_413_BODY,
         **ERRORS_422,
         **ERRORS_501_NOT_IMPLEMENTED,
     },

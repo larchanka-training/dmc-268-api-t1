@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
+from app.application.merge_gate_publish import build_failed_review_check
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.review_pipeline import run_review
 from app.domain.entities import (
@@ -38,7 +39,7 @@ from app.domain.llm_errors import (
 )
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import start_step
-from app.domain.vcs_errors import DiffTooLargeError, VcsError
+from app.domain.vcs_errors import DiffTooLargeError, VcsError, VcsTransientError
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.vcs.errors import VcsNotFoundError
 
@@ -49,6 +50,7 @@ from ..fakes.llm_gateway import (
     review_response,
     verification_response,
 )
+from ..fakes.run_outcome import RecordingRunOutcome
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
 from ..fakes.webhooks import FakeVcs
@@ -184,6 +186,72 @@ def test_context_is_built_from_the_real_diff() -> None:
     assert payload.file_paths == (CHANGED_FILE,)
     assert payload.body["schema"] == "context-payload/v1"
     assert "+new" in payload.body["diff"][0]["hunk"]
+
+
+# --- счётчик исходов: терминальный переход, а не обработка сообщения -----------------
+
+
+def test_a_completed_run_is_counted_once() -> None:
+    """Доведённый до терминального статуса прогон — ровно одна запись `completed`."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    recorder = RecordingRunOutcome()
+
+    _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
+
+    assert recorder.statuses == ["completed"]
+
+
+def test_a_failed_run_is_counted_once() -> None:
+    """Упавший прогон — ровно одна запись `failed`, даже при повторных коммитах."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    recorder = RecordingRunOutcome()
+
+    with pytest.raises(LlmTimeoutError):
+        _run(
+            uow,
+            ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=1)]),
+            run_outcome=recorder,
+        )
+
+    assert recorder.statuses == ["failed"]
+    assert uow.review_runs.get(JOB.review_run_id).status is ReviewRunStatus.FAILED  # type: ignore[union-attr]
+
+
+def test_a_failed_translation_is_not_counted() -> None:
+    """Сбой записи перевода в failed — записи в счётчике нет: прогон ещё не терминален."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    uow.commit_error = RuntimeError("база недоступна")
+    recorder = RecordingRunOutcome()
+
+    with pytest.raises(RuntimeError, match="база недоступна"):
+        _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
+
+    assert recorder.statuses == []
+
+
+def test_a_redelivered_terminal_run_is_not_counted() -> None:
+    """Повторная доставка терминального прогона возвращается молча — счётчик не растёт."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, status=ReviewRunStatus.COMPLETED)
+    recorder = RecordingRunOutcome()
+
+    _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
+
+    assert recorder.statuses == []
+
+
+def test_a_message_without_a_run_is_not_counted() -> None:
+    """Прогона нет (`LookupError`) — считать нечего: это не исход прогона."""
+    uow = FakeUnitOfWork()
+    recorder = RecordingRunOutcome()
+
+    with pytest.raises(LookupError):
+        _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
+
+    assert recorder.statuses == []
 
 
 def test_diff_failure_marks_the_run_failed_and_reraises() -> None:
@@ -1224,3 +1292,55 @@ def test_a_screening_failure_counts_the_review_tokens_in_the_run(
         _run(uow, ScriptedLlmGateway([review_response(tokens=25)]))
 
     assert _completed(uow).tokens_used == 25
+
+
+def _seed_earlier_review(uow: FakeUnitOfWork, *, run_id: UUID, at: datetime) -> None:
+    """Прогон на тот же head рядом с текущим: `completed` раньше или новый позже."""
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    uow.review_runs.add(
+        replace(run, id=run_id, status=ReviewRunStatus.COMPLETED, created_at=at, updated_at=at)
+    )
+
+
+def test_a_failed_review_after_an_earlier_one_blocks_the_head() -> None:
+    """Ревью #225: после смены ветки поправка gate не дошла, на head `success` прежнего
+    прогона по старому диффу - упавший новый прогон выставляет `failure`."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks == [build_failed_review_check()]
+
+
+def test_a_failed_review_superseded_on_the_head_leaves_the_gate_alone() -> None:
+    """За head отвечает уже более поздний прогон - упавший старый gate не трогает."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW + timedelta(minutes=5))
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks == []
+
+
+def test_a_failed_gate_of_a_failed_review_does_not_hide_the_failure() -> None:
+    """GitHub не принял `failure`: в логе сбой, наружу - исходное исключение прогона."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+    vcs.check_error = VcsTransientError("GitHub API: HTTP 502")
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    assert run.status == ReviewRunStatus.FAILED

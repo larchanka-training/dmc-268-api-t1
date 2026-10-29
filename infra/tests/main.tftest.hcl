@@ -46,14 +46,35 @@ run "app_containers_get_connection_settings" {
     error_message = "Без GITHUB_WEBHOOK_SECRET общие настройки приложения не загрузятся."
   }
 
-  # Окружение миграций — то же описание, что у контейнеров приложения, а не
-  # копия: каждая строка migrate_env есть и у api, и у worker.
+  # Окружение миграций — общая часть (app_env) плюс свои строки: телеметрия
+  # (trейс деплоя) и пароль роли мониторинга, шаг которой едет вместе с
+  # миграциями. Каждая строка app_env есть и у api, и у worker, а обратное
+  # не требуется.
   assert {
     condition = alltrue([
-      for line in split("\n", output.migrate_env) :
-      contains(docker_container.api.env, line) && contains(docker_container.worker.env, line)
+      for line in local.app_env :
+      contains(split("\n", output.migrate_env), line)
     ])
-    error_message = "migrate_env должен состоять из строк local.app_env, общих у api и worker."
+    error_message = "migrate_env должен содержать все строки local.app_env."
+  }
+
+  # Шаг роли мониторинга не теряется при переносе миграций: пароль едет в
+  # migrate_env вместе с миграциями (замечание ревью PR #130).
+  assert {
+    condition = contains(
+      split("\n", output.migrate_env),
+      "POSTGRES_MONITOR_PASSWORD=${var.postgres_monitor_password}",
+    )
+    error_message = "migrate_env должен содержать POSTGRES_MONITOR_PASSWORD: шаг роли едет вместе с миграциями."
+  }
+
+  # service.instance.id миграций — стабильное имя dmc268-migrations.
+  assert {
+    condition = contains(
+      split("\n", output.migrate_env),
+      "OTEL_RESOURCE_ATTRIBUTES=service.version=0123abc,deployment.environment.name=production,service.instance.id=dmc268-migrations",
+    )
+    error_message = "migrate_env должен содержать OTEL_RESOURCE_ATTRIBUTES со стабильным service.instance.id миграций."
   }
 }
 

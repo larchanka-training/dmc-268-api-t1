@@ -39,13 +39,15 @@ FROM_REVISION, LOCKED_TABLE, ADDED_COLUMN = "0011", "findings", "covered_by_find
 FAKE_TOFU = """#!/usr/bin/env bash
 case "$*" in
   *"output -raw migrate_env") printf '%s\\n' "DATABASE_URL=$MIGRATE_DATABASE_URL" \\
-    "RABBITMQ_URL=amqp://guest:guest@localhost:5672/%2F" "GITHUB_WEBHOOK_SECRET=chaos" ;;
+    "RABBITMQ_URL=amqp://guest:guest@localhost:5672/%2F" "GITHUB_WEBHOOK_SECRET=chaos" \\
+    "POSTGRES_MONITOR_PASSWORD=chaos-monitor" ;;
   *) exit 3 ;;
 esac
 """
 
 # `run`: флаги migrations_run из migrate.sh отбрасываются, переменные из
-# --env-file экспортируются, после образа — команда alembic. `pull` и `rm` — no-op.
+# --env-file экспортируются, после образа — команда alembic или `python -` со
+# скриптом на stdin (пароль роли мониторинга после миграций). `pull` и `rm` — no-op.
 FAKE_DOCKER = """#!/usr/bin/env bash
 case "$1" in
   run)
@@ -53,15 +55,17 @@ case "$1" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --env-file) while IFS= read -r line; do export "$line"; done < "$2"; shift 2 ;;
-        --rm|--read-only|--init) shift ;;
+        --rm|--read-only|--init|-i) shift ;;
         --*) shift 2 ;;
         *) break ;;
       esac
     done
     shift
-    [ "$1" = alembic ] || exit 125
-    shift
-    exec "$ALEMBIC" "$@" ;;
+    case "$1" in
+      alembic) shift; exec "$ALEMBIC" "$@" ;;
+      python) shift; exec "$PYTHON" "$@" ;;
+      *) exit 125 ;;
+    esac ;;
   pull|rm) exit 0 ;;
   *) exit 125 ;;
 esac
@@ -117,6 +121,7 @@ def run_migrate(tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], Path]
             "MIGRATE_RETRY_PAUSE": "1",
             "MIGRATE_DATABASE_URL": TEST_DATABASE_URL,
             "ALEMBIC": str(Path(sys.executable).parent / "alembic"),
+            "PYTHON": sys.executable,
         },
     )
     return result, report

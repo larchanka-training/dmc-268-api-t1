@@ -4,15 +4,17 @@ import logging
 from dataclasses import replace
 
 import pytest
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from app.application.llm_schema import ReviewOutput
 from app.application.ports.llm_gateway import LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
-from app.domain.llm_errors import LlmError, LlmOutputError
+from app.domain.llm_errors import LlmError, LlmOutputError, LlmTimeoutError
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 
 from ..fakes.llm_gateway import ScriptedLlmGateway, review_response
+from ..metrics import metric_delta, metric_snapshot
 
 MESSAGES = (PromptMessage(PromptRole.USER, "код"),)
 REQUEST = LlmRequest(LlmTask.REVIEW, MESSAGES, ReviewOutput, max_output_tokens=4_096)
@@ -80,7 +82,10 @@ def test_single_provider_failure_is_raised_as_is() -> None:
 def test_handover_is_logged_with_provider_and_failure_class(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    local = ScriptedLlmGateway([LlmOutputError("не по схеме")])
+    """Текст ошибки в лог не пишется: в нём бывает ответ провайдера (секрет,
+    до 200 символов текста валидации). Диагноз — тип исключения и его код
+    из каталога ошибок; в трейсах тот же текст гасит редакция коллектора."""
+    local = ScriptedLlmGateway([LlmOutputError("не по схеме: поле findings")])
     hosted = ScriptedLlmGateway([review_response()])
 
     with caplog.at_level(logging.WARNING):
@@ -88,7 +93,8 @@ def test_handover_is_logged_with_provider_and_failure_class(
 
     (record,) = caplog.records
     assert record.getMessage() == (
-        "модель Ollama не ответила на review (LlmOutputError: не по схеме), запрос уходит Eurorouter"
+        "модель Ollama не ответила на review (LlmOutputError, код LLM_INVALID_OUTPUT), "
+        "запрос уходит Eurorouter"
     )
 
 
@@ -140,3 +146,96 @@ def test_a_request_without_a_listener_reaches_providers_unchanged() -> None:
     FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(REQUEST)
 
     assert hosted.requests[0] is REQUEST
+
+
+# --- длительность вызовов: на уровне провайдера, с исходом ---------------------------
+
+
+def test_each_provider_call_lands_in_the_duration_histogram_with_its_outcome(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Длительность — на каждый фактический вызов провайдера, с исходом.
+
+    Успешный вызов несёт модель ответа, сбой (включая таймаут) — имя
+    провайдера: фоллбэк виден двумя записями, а не одной суммой под моделью
+    ответившего последним. Метрика заявлена аудитом #89 как время КАЖДОГО
+    вызова модели — упавшие вызовы из неё не выпадают.
+    """
+    local = ScriptedLlmGateway([LlmTimeoutError("нет ответа за таймаут")])
+    hosted = ScriptedLlmGateway([review_response(model="mistral")])
+    gateway = FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted)))
+
+    before = metric_snapshot(metric_reader)
+    gateway.complete(REQUEST)
+
+    failed, _ = metric_delta(
+        metric_reader, before, "review_llm_call_duration",
+        task="review", provider="Ollama", outcome="error",
+    )
+    answered, _ = metric_delta(
+        metric_reader, before, "review_llm_call_duration",
+        task="review", provider="Eurorouter", model="mistral", outcome="ok",
+    )
+    assert failed == 1
+    assert answered == 1
+
+
+def test_the_histogram_records_the_measured_duration(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Запись несёт измеренное время вызова, а не счёт наблюдений: часы для
+    теста идут шагами по полторы секунды, каждая запись — ровно один шаг."""
+    ticks = 0.0
+
+    def clock() -> float:
+        nonlocal ticks
+        ticks += 1.5
+        return ticks
+
+    gateway = FallbackLlmGateway(
+        (("Ollama", ScriptedLlmGateway([review_response(model="mistral")])),),
+        clock=clock,
+    )
+
+    before = metric_snapshot(metric_reader)
+    gateway.complete(REQUEST)
+
+    calls, total = metric_delta(
+        metric_reader, before, "review_llm_call_duration",
+        task="review", provider="Ollama", model="mistral", outcome="ok",
+    )
+    assert calls == 1
+    assert total == pytest.approx(1.5)
+
+
+def test_calls_failing_everywhere_still_reach_the_histogram(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Вызов, упавший у всех провайдеров, остаётся в гистограмме: каждая
+    попытка — запись с исходом `error` и именем своего провайдера."""
+    local = ScriptedLlmGateway([LlmError("нет связи")])
+    hosted = ScriptedLlmGateway([LlmOutputError("ответ не по схеме")])
+    gateway = FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted)))
+
+    before = metric_snapshot(metric_reader)
+    with pytest.raises(LlmOutputError):
+        gateway.complete(REQUEST)
+
+    for provider in ("Ollama", "Eurorouter"):
+        calls, _ = metric_delta(
+            metric_reader, before, "review_llm_call_duration",
+            task="review", provider=provider, outcome="error",
+        )
+        assert calls == 1
+
+
+def test_calls_create_no_token_counter(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Токены модели — не метрика этого PR: учёт по каждому вызову провайдера,
+    с типами токенов и стоимостью, переделывает #119, счётчик удалён."""
+    gateway = FallbackLlmGateway((("Ollama", ScriptedLlmGateway([review_response(tokens=30)])),))
+
+    gateway.complete(REQUEST)
+
+    assert [key for key in metric_snapshot(metric_reader) if key[0] == "review_llm_tokens"] == []

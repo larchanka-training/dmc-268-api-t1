@@ -48,6 +48,7 @@ from app.api.problems import (
     RepositoryManageRequiredProblem,
     RepositoryNotFoundProblem,
     RepositoryNotInInstallationProblem,
+    RequestBodyTooLargeProblem,
     ReviewAlreadyActiveProblem,
     ReviewNotFoundProblem,
     ScmUnavailableProblem,
@@ -74,7 +75,16 @@ ERRORS_DEFAULT = _doc(
     "default",
     AnyProblem,
     "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят "
-    "`404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+    "`404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и "
+    "`500 INTERNAL_ERROR`.",
+)
+ERRORS_413_BODY = _doc(
+    HTTPStatus.CONTENT_TOO_LARGE,
+    RequestBodyTooLargeProblem,
+    "Тело больше лимита (вебхук — `WEBHOOK_BODY_MAX_BYTES`, 2 МиБ; остальные — `REQUEST_BODY_MAX_BYTES`, "
+    "1 МиБ): по `Content-Length` отказ без чтения "
+    "тела, поток без него обрывается на лимите. Ни разбора тела, ни сессии, ни подписи до отказа нет; "
+    "соединение закрывается.",
 )
 ERRORS_422 = _doc(
     HTTPStatus.UNPROCESSABLE_CONTENT,
@@ -344,11 +354,13 @@ def _http_exception_handler(request: Request, error: Exception) -> Response:
 def _internal_error_handler(request: Request, error: Exception) -> Response:
     """Ответ на необработанное исключение — без текста исключения и стектрейса.
 
-    Пишет в лог одну строку уровня error: `trace_id`, метод и путь без query — по ней
-    сообщение пользователя с `trace_id` находит запрос. Стектрейса и текста
-    исключения в этой строке нет: `ServerErrorMiddleware` Starlette после ответа
-    поднимает исключение дальше, и сервер (uvicorn) пишет его со стектрейсом сам.
-    `logger.exception` здесь задвоил бы стектрейс.
+    Стектрейс пишется в лог — ровно одной записью уровня error: с `trace_id`
+    (поле записи ставит `TraceContextFilter` из текущего спана запроса — ответ
+    отдаётся снаружи middleware, но ещё внутри спана встроенной телеметрии
+    FastAPI), методом и путём без query атрибутами semconv. После ответа
+    Starlette поднимает исключение дальше, и uvicorn пишет его ещё раз («Exception
+    in ASGI application»), уже без `trace_id`; этот дубль отсекает
+    `UvicornDuplicateFilter` (`app/infrastructure/logging.py`).
     """
     response = problem_response(
         request,
@@ -357,10 +369,12 @@ def _internal_error_handler(request: Request, error: Exception) -> Response:
         "Сервер не смог обработать запрос. Если ошибка повторяется, сообщите trace_id.",
     )
     logger.error(
-        "Необработанное исключение: trace_id=%s %s %s",
-        request.state.trace_id,
-        request.method,
-        request_path(request),
+        "Необработанное исключение",
+        exc_info=error,
+        extra={
+            "http.request.method": request.method,
+            "url.path": request_path(request),
+        },
     )
     return response
 
