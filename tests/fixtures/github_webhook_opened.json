@@ -17,6 +17,7 @@
     "number": 6,
     "state": "open",
     "title": "feat: приём вебхуков и VCS-шлюз",
+    "author_association": "MEMBER",
     "user": {
       "login": "ilyassakhanov",
       "id": 25091015,

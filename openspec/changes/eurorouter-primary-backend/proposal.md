@@ -9,6 +9,7 @@
 - `build_llm_gateway`: Eurorouter единственным провайдером; лог старта называет, что код уходит hosted-провайдеру.
 - `backend-delivery`: развёртывание отклоняет `llm_backend = "eurorouter"` без реквизитов Eurorouter до изменений на сервере. `infra/variables.tf` и тесты OpenTofu.
 - `deploy.yml`: `llm_backend = eurorouter`; адрес и ключи — `vars.AI_DMC268_URL` и `secrets.AI_DMC268_T1`, те же, что у `eval.yml`; модель — из `.github/eurorouter-model`.
+- `webhook-intake`: ревью только для PR своих авторов (`author_association` — `OWNER`, `MEMBER`, `COLLABORATOR`). Иначе любой пользователь GitHub тратил бы ключ модели PR'ами из форка в публичный репозиторий. Временно, до биллинга.
 - Документация: `README.md`, `infra/README.md`, `.env.example`.
 
 ## Capabilities
@@ -19,6 +20,7 @@
 
 - `llm-gateway`: hosted-провайдер может быть выбран основным.
 - `backend-delivery`: проверка реквизитов Eurorouter при выборе его основным.
+- `webhook-intake`: ревью только для PR своих авторов.
 
 ## Impact
 

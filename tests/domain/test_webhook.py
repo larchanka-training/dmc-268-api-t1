@@ -111,3 +111,23 @@ def test_payload_without_installation_is_ignored() -> None:
 def test_garbage_payload_is_ignored_without_raising(payload: dict[str, Any]) -> None:
     """Мусорный payload — `None`, эндпоинт не должен падать на 500."""
     assert extract_github_event(payload) is None
+
+
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
+def test_a_pr_of_an_own_author_starts_a_review(association: str) -> None:
+    payload = _load_payload("github_webhook_opened.json")
+    payload["pull_request"]["author_association"] = association
+    assert extract_github_event(payload) is not None
+
+
+@pytest.mark.parametrize(
+    "association", ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "MANNEQUIN", "NONE", None]
+)
+def test_a_pr_of_an_outside_author_is_ignored(association: str | None) -> None:
+    """PR из форка в публичный репозиторий от постороннего не тратит ключ модели."""
+    payload = _load_payload("github_webhook_opened.json")
+    if association is None:
+        del payload["pull_request"]["author_association"]
+    else:
+        payload["pull_request"]["author_association"] = association
+    assert extract_github_event(payload) is None
