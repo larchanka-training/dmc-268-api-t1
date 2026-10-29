@@ -270,34 +270,10 @@ uv run alembic heads               # должна быть ровно одна
 ## Настройки GitHub App
 
 Сервис работает через одно GitHub App (сейчас id `5262828`, переменная `APP_ID_DMC268_T1`).
-Его настройки меняет владелец приложения в GitHub → Settings → Developer settings → GitHub
-Apps. Меняете приложение или создаёте своё — выставьте всё из таблицы: пропущенная строка не
-ломает старт, а молча отключает часть работы (последний столбец).
-
-| Поле | Значение | Если не так |
-|---|---|---|
-| Callback URL | `https://62.169.24.237/api/v1/auth/github/callback` (`<PUBLIC_ORIGIN>/api/v1/auth/github/callback`) | вход в сервис падает |
-| Webhook → Active | включено | GitHub не шлёт событий — прогонов нет |
-| Webhook URL | `https://62.169.24.237/api/v1/webhooks/github` | то же |
-| Webhook secret | значение секрета `WEBHOOK_SECRET_DMC268_T1` | каждая доставка — `401`, прогонов нет |
-| Permissions → Metadata | Read-only | обязательно, GitHub выставляет само |
-| Permissions → Contents | Read-only | ревью без `.review/rules.md` и AST-окружения (`rules.status = unavailable`) |
-| Permissions → Pull requests | Read and write | нет диффа и не публикуется ревью |
-| Permissions → Checks | Read and write | нет проверки `dmc-268-ai-review`, merge gate не работает |
-| Subscribe to events | Pull request; Pull request review thread | без первого — нет прогонов; без второго — проверка не пересчитывается при закрытии треда |
-| Setup URL, Redirect on update | после #243 — ручка возврата после установки | после установки GitHub не вернёт пользователя в сервис |
-| Where can this GitHub App be installed | «Any account» — ставить на любые аккаунты; «Only on this account» — только в `larchanka-training` | с «Only on this account» пользователи не поставят приложение на свои репозитории |
-
-**«Any account» и деньги.** Со стендом на Eurorouter (#245) каждый прогон платит за модель с
-ключа `AI_DMC268_T1`, а
-лимитов, баланса и списка разрешённых аккаунтов нет. С «Any account» любой пользователь
-GitHub может поставить приложение на свои репозитории, подключить их в сервисе и ревьюить
-свои PR за этот счёт. Остановить быстро: вернуть «Only on this account» или выкатить стенд с
-`TF_VAR_llm_backend: stub`.
-
-Реквизиты приложения на стенде (App ID, Client ID и secret, private key, webhook secret) —
-`infra/README.md`, таблица «Откуда»; как сменить приложение и что при этом сломается —
-[`docs/GITHUB_APP.md`](docs/GITHUB_APP.md), «Реквизиты приложения на стенде».
+Меняете приложение или создаёте своё — выставьте все поля из таблицы в
+[`docs/GITHUB_APP.md`](docs/GITHUB_APP.md), раздел «Настройки приложения»: пропущенное поле не
+ломает старт, а молча отключает часть работы. Там же — чем грозит «Any account» и как сменить
+приложение на стенде.
 
 ## Регистрация репозитория
 
