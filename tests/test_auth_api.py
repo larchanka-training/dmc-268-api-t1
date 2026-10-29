@@ -358,6 +358,20 @@ def test_an_update_of_the_installation_connects_nothing_but_refreshes_the_cache(
     assert "installation_repositories" not in catalog.calls
 
 
+def test_an_update_without_state_refreshes_the_cache_and_does_not_warn(stand, caplog) -> None:
+    """«Redirect on update»: GitHub возвращает после правки установки, `state` может не быть.
+    `update` ничего не подключает, поэтому `state` ему не нужен — кэш обновляется без warning."""
+    client, catalog = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])})
+
+    with caplog.at_level(logging.INFO):
+        response = _return_from_github(client, state=None, action="update")
+
+    assert response.headers["location"] == "/app/repositories?connected=0"
+    assert _registered(stand) == {}
+    assert "list_repositories" in catalog.calls
+    assert not [r for r in caplog.records if r.name == "app.api.auth" and r.levelno >= logging.WARNING]
+
+
 def test_a_failed_cache_refresh_does_not_stop_the_connection(stand, caplog) -> None:
     """Обход всех установок нужен только кэшу: его сбой не мешает подключить по нужной установке."""
     client, catalog = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])})

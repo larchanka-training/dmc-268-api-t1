@@ -408,7 +408,7 @@
 
 ### Requirement: Возврат с установки GitHub App
 
-`GET /api/v1/auth/github/setup` SHALL требовать сессию и `state` из `install_url` этой сессии и SHALL сверять `installation_id` с установками пользователя по его токену. Подключать SHALL только `setup_action=install` при «Only select repositories»: репозитории установки с admin или maintain, которых нет в сервисе; выключенные SHALL NOT включаться. `update` и «All repositories» SHALL NOT подключать ничего. Ответ SHALL быть `302` на `/app/repositories` с итогом.
+`GET /api/v1/auth/github/setup` SHALL требовать сессию, для `setup_action=install` — `state` из `install_url` этой сессии, и SHALL сверять `installation_id` с установками пользователя по его токену. Подключать SHALL только `setup_action=install` при «Only select repositories»: репозитории установки с admin или maintain, которых нет в сервисе; выключенные SHALL NOT включаться. `update` и «All repositories» SHALL NOT подключать ничего. Ответ SHALL быть `302` на `/app/repositories` с итогом.
 
 #### Scenario: Возврат без своего state
 
@@ -422,7 +422,7 @@
 
 #### Scenario: Изменение установки ничего не подключает
 
-- **WHEN** в установке выбраны A, B и C, ревью включено только у A, пользователь дописал в установку D и вернулся на Setup URL со своим `state` и `setup_action=update`
+- **WHEN** в установке выбраны A, B и C, ревью включено только у A, пользователь дописал в установку D и вернулся на Setup URL с `setup_action=update` — со `state` или без него
 - **THEN** ответ — `302` на `/app/repositories?connected=0`, B, C и D не подключены, кэш видимости обновлён
 
 #### Scenario: Сбой обновления кэша не мешает подключению

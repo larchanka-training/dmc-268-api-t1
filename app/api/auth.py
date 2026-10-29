@@ -210,9 +210,10 @@ def finish_login(
 _SETUP_DESCRIPTION = (
     "Setup URL GitHub App: сюда GitHub возвращает браузер после установки приложения, её "
     "изменения или запроса владельцу. Требует сессию; без неё или с недействительной cookie "
-    "session — на вход. `setup_action=request` — ничего не подключает. Иначе нужен `state` из "
+    "session — на вход. `setup_action=request` — ничего не подключает. `install` требует `state` из "
     "`install_url` списка GET /repositories, выданный этой сессии: без него или с чужим — "
-    "ничего не подключает (`?connected=0`), к GitHub не обращается. `installation_id` не "
+    "ничего не подключает (`?connected=0`), к GitHub не обращается; `update` `state` не "
+    "проверяет: он ничего не подключает. `installation_id` не "
     "доверяется: ищется среди установок пользователя по его токену (`GET /user/installations`), "
     "свежий список видимых репозиториев пишется в кэш (сбой этого шага подключению не мешает). "
     "Подключает только `setup_action=install` при «Only select repositories»: репозитории "
@@ -276,8 +277,9 @@ def finish_github_setup(
         return _setup_done("setup_error=installation_not_found")
     # Подделанный переход с чужого сайта `state` этой сессии не знает: ничего не подключаем.
     # Итог тот же, что «нечего подключать», а запись в логе показывает на стенде, вернул ли
-    # GitHub `state` (design D7). Значение `state` в лог не пишется.
-    if state is None or not setup_state_matches(token, state):
+    # GitHub `state` (design D7). Значение `state` в лог не пишется. `update` ничего не
+    # подключает, только обновляет кэш, и `state` ему не нужен.
+    if setup_action == "install" and (state is None or not setup_state_matches(token, state)):
         _log.warning("Setup URL: state не совпал (%s), ничего не подключено", "нет" if state is None else "чужой")
         return _setup_done("connected=0")
     user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
