@@ -39,8 +39,8 @@ class ConnectRefusal(StrEnum):
 @dataclass(frozen=True, slots=True)
 class ListedRepository:
     repository: InstallationRepository
-    # Запись в сервисе, если репозиторий подключён; `None` — не подключён.
-    connection: Repository | None
+    # Запись в сервисе, если репозиторий подключали (в том числе выключенный); `None` — нет.
+    record: Repository | None
     # Подсказка интерфейсу, а не защита: `connect_repository` проверяет права сам (ui#45).
     can_connect: bool
 
@@ -53,24 +53,24 @@ class UserContext:
     session_id: UUID
 
 
-def list_repositories(
+def list_with_connections(
     catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, now: datetime
 ) -> list[ListedRepository]:
     """Репозитории установок, видимые пользователю, подключённые и нет, — по имени.
 
     Подключён ли каждый, читается из базы одним запросом; может ли пользователь его
     подключить — по правам из того же ответа GitHub. Порядок — `full_name` без учёта
-    регистра, затем `provider_id`: стабильный для страниц, как список на GitHub.
+    регистра: у GitHub он уникален, страницы стабильны.
     """
     repositories = list_user_repositories(catalog, uow, user, now)
     with uow:
         provider_ids = [repository.provider_id for repository in repositories]
-        connected = {r.provider_id: r for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
+        records = {r.provider_id: r for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
     listed = [
-        ListedRepository(r, connection=connected.get(r.provider_id), can_connect=can_connect(r.permissions))
+        ListedRepository(r, record=records.get(r.provider_id), can_connect=can_connect(r.permissions))
         for r in repositories
     ]
-    return sorted(listed, key=lambda item: (item.repository.full_name.casefold(), item.repository.provider_id))
+    return sorted(listed, key=lambda item: item.repository.full_name.casefold())
 
 
 def list_user_repositories(

@@ -27,6 +27,7 @@ from app.application.ports.run_outcome import RunOutcomeRecorder
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.config import Settings
+from app.domain.vcs_errors import VcsError
 from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
 from app.infrastructure.db.token_cipher import TokenCipher
@@ -145,6 +146,25 @@ class Container:
             gateway = self._build_vcs_gateway(self._vcs_limits)
             object.__setattr__(self, "_vcs_gateway", gateway)
         return gateway
+
+    def app_slug(self) -> str | None:
+        """Slug GitHub App для ссылки на экран установки; `None` — узнать не удалось.
+
+        Тот же `GET /app` и тот же кэш шлюза, что у логина бота: запрос один на
+        процесс. Без ключа приложения GitHub не спрашиваем; сбой GitHub — `None` и
+        предупреждение в лог, а не ошибка списка: список от ключа приложения не зависит.
+        """
+        if not self.settings.github_app_configured:
+            return None
+        gateway = self.vcs_gateway()
+        # Подменённый шлюз (тесты) не знает `GET /app`.
+        if not isinstance(gateway, GitHubVcsGateway):
+            return None
+        try:
+            return gateway.app_slug()
+        except VcsError:
+            logger.warning("slug GitHub App не получен: install_url не отдаётся", exc_info=True)
+            return None
 
     def redelivery_vcs_gateway(self) -> VcsGateway:
         """VCS-шлюз прохода повтора доставок (#149): лимит GitHub не пережидается.

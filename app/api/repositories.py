@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, RootModel, StringConstraints, field_valid
 from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
-    get_install_url,
+    get_app_slug,
     get_installation_catalog,
     get_token_provider,
     get_unit_of_work_factory,
@@ -30,7 +30,6 @@ from app.api.errors import (
     ERRORS_413_BODY,
     ERRORS_422,
     ERRORS_501_NOT_IMPLEMENTED,
-    ERRORS_502_SCM_DISCONNECT,
     ERRORS_502_SCM_REPOSITORIES,
     ERRORS_502_SCM_VISIBILITY,
     ApiError,
@@ -59,21 +58,13 @@ from app.domain.vcs_errors import VcsError
 
 # Один список вместо двух — change `repositories-one-list` (#243, dmc-268-ui-t1#95).
 _LIST_DESCRIPTION = (
-    "Требует сессию. Все репозитории установок GitHub App, которые GitHub отдаёт вошедшему "
-    "пользователю по его токену, сохранённому при входе (`GET /user/installations` и "
-    "`GET /user/installations/{id}/repositories`), подключённые и нет вместе: `connected` — "
-    "включено ли ревью, `id` и `connected_at` — только у подключённых, `can_connect` — роль "
-    "admin или maintain, без неё переключатель неактивен. Остальные репозитории установок в "
-    "ответ не попадают, это не ошибка; публичный репозиторий, на котором у пользователя нет "
-    "роли, тоже. Ответ GitHub берётся из кэша видимости (по умолчанию 30 с, как у "
-    "GET /reviews и GET /events), подключён ли репозиторий — из базы на каждый запрос. "
-    "`install_url` — экран установки приложения для кнопки «Добавить репозитории из GitHub»; "
-    "`null`, если slug приложения не настроен. Постранично, по `full_name` без учёта регистра, "
-    "затем по `provider_id`. limit выше 200 не отклоняется, а приводится к 200. Общего числа "
-    "записей в ответе нет: конец списка — страница короче limit. Токен пользователя отозван, "
-    "истёк без возможности обновления или его нет — `401 UNAUTHENTICATED`, сессия "
-    "закрывается, cookie удаляется: нужен новый вход. Если GitHub не ответил или ответил "
-    "ошибкой — `502 SCM_UNAVAILABLE`."
+    "Требует сессию. Все репозитории установок GitHub App, которые GitHub отдаёт пользователю по "
+    "его токену, сохранённому при входе, подключённые и нет; публичный репозиторий, на котором у "
+    "пользователя нет роли, в ответ не попадает. Ответ GitHub — из кэша видимости (по умолчанию "
+    "30 с, как у GET /reviews и GET /events), подключён ли репозиторий — из базы. Постранично, "
+    "по `full_name` без учёта регистра; limit выше 200 приводится к 200, конец списка — страница "
+    "короче limit. Токен пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается; "
+    "GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`."
 )
 _CONNECT_DESCRIPTION = (
     "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. "
@@ -95,20 +86,10 @@ _CONNECT_DESCRIPTION = (
     "репозиторий не записан."
 )
 _DISCONNECT_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал "
-    "типы (задача #243). Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии, "
-    "id репозитория — до ответа 501. Когда ручка заработает: выключает ревью репозитория — "
-    "переключатель «Ревью» в выкл. Выключение мягкое: запись репозитория остаётся с отметкой "
-    "«выключено», прогоны и запросы на изменение сохраняются, вебхуки репозитория получают "
-    "`202 ignored`, в GET /repositories строка приходит с `connected = false`, а повторный "
-    "POST /repositories включает ревью обратно с прежним `id`. Проверки по порядку: "
-    "репозитория нет или пользователь не видит его на GitHub — `404 REPOSITORY_NOT_FOUND`, "
-    "ответ один; нет роли admin или maintain — `403 REPOSITORY_MANAGE_REQUIRED`, права — как у "
-    "POST /repositories, запросом к GitHub токеном пользователя мимо кэша. Уже выключен — тоже "
-    "`204`: повтор и параллельное выключение — успех; включение и выключение одновременно — "
-    "побеждает последнее. Токен пользователя непригоден — `401 UNAUTHENTICATED`, сессия "
-    "закрывается. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, "
-    "репозиторий не выключен."
+    "Не реализовано: отвечает 501 NOT_IMPLEMENTED (задача #243). Выключает ревью мягко: запись "
+    "и история прогонов остаются, повторный POST /repositories включает обратно; уже выключен — "
+    "тоже `204`. Права — как у POST /repositories: без admin или maintain — "
+    "`403 REPOSITORY_MANAGE_REQUIRED`."
 )
 # Настройки и статус rules.md — задача #113 (бэкенд-часть dmc-268-ui-t1#28): контракт первым,
 # реализация отдельно.
@@ -195,8 +176,8 @@ class RepositoryListItem(BaseModel):
     connected: bool = Field(description="Ревью включено: репозиторий подключён к сервису и не выключен.")
     id: UUID | None = Field(
         description=(
-            "Идентификатор репозитория в сервисе — для настроек, прогонов и DELETE /repositories/{id}; "
-            "`null`, если репозиторий не подключён."
+            "Идентификатор репозитория в сервисе — для настроек, прогонов и DELETE /repositories/{id}. "
+            "Есть и у выключенного: история остаётся; `null`, если репозиторий не подключали."
         )
     )
     can_connect: bool = Field(
@@ -207,7 +188,7 @@ class RepositoryListItem(BaseModel):
         )
     )
     connected_at: UtcDatetime | None = Field(
-        description="Когда ревью включено; `null`, если репозиторий не подключён."
+        description="Когда ревью включено последний раз; `null`, если ревью не включено."
     )
 
 
@@ -220,7 +201,8 @@ class RepositoryListResponse(BaseModel):
     install_url: str | None = Field(
         description=(
             "Экран установки GitHub App (`https://github.com/apps/<slug>/installations/new`): выбрать "
-            "аккаунт и репозитории. `null`, если slug приложения не настроен (`GITHUB_APP_SLUG`)."
+            "аккаунт и репозитории. `null`, если slug приложения узнать не удалось: нет ключа приложения "
+            "или GitHub не ответил на `GET /app`."
         ),
         json_schema_extra={"format": "uri"},
         examples=["https://github.com/apps/dmc-268-review/installations/new"],
@@ -364,28 +346,33 @@ def list_repositories(
     catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
-    install_url: str | None = Depends(get_install_url),
+    app_slug: Callable[[], str | None] = Depends(get_app_slug),
 ) -> RepositoryListResponse:
     # GitHub — в теле, а не зависимостью: при 422 limit или offset запроса к нему нет.
     now = datetime.now(UTC)
-    listed = _as_user(signed_in, oauth, lambda user: connecting.list_repositories(catalog, uow_factory(), user, now))
+    listed = _as_user(
+        signed_in, oauth, lambda user: connecting.list_with_connections(catalog, uow_factory(), user, now)
+    )
     # Строк не больше, чем отдаёт GitHub пользователю: страница — срез в памяти.
     page = listed[offset : offset + page_size(limit)]
+    slug = app_slug()
+    install_url = f"https://github.com/apps/{slug}/installations/new" if slug else None
     return RepositoryListResponse(items=[_list_item(item) for item in page], install_url=install_url)
 
 
 def _list_item(item: connecting.ListedRepository) -> RepositoryListItem:
-    connection = item.connection
+    record = item.record
+    # До миграции мягкого выключения запись есть только у включённых, а время включения —
+    # время записи; потом `connected` и `connected_at` — по `connected_at` (design D4, D5).
     return RepositoryListItem(
         provider=Provider.GITHUB,
         provider_id=item.repository.provider_id,
         full_name=item.repository.full_name,
         default_branch=item.repository.default_branch,
-        connected=connection is not None,
-        id=connection.id if connection is not None else None,
+        connected=record is not None,
+        id=record.id if record is not None else None,
         can_connect=item.can_connect,
-        # До мягкого выключения запись есть только у включённых, время включения — время записи.
-        connected_at=connection.created_at if connection is not None else None,
+        connected_at=record.created_at if record is not None else None,
     )
 
 
@@ -552,7 +539,7 @@ def get_repository(
         **ERRORS_404_REPOSITORY,
         **ERRORS_422,
         **ERRORS_501_NOT_IMPLEMENTED,
-        **ERRORS_502_SCM_DISCONNECT,
+        **ERRORS_502_SCM_VISIBILITY,
     },
 )
 def disconnect_repository(repository_id: RepositoryIdPath) -> Response:

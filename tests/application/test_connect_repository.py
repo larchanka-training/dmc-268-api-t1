@@ -11,7 +11,7 @@ from app.application.use_cases.connect_repository import (
     ListedRepository,
     UserContext,
     connect_repository,
-    list_repositories,
+    list_with_connections,
 )
 from app.application.use_cases.user_token import SessionClosed
 from app.domain.entities import (
@@ -85,32 +85,33 @@ def test_the_list_comes_from_the_user_token_and_carries_the_connection() -> None
     uow.repositories.add(registered)
     catalog = FakeInstallationCatalog([WEB, API])
 
-    listed = list_repositories(catalog, uow, _user(), NOW)
+    listed = list_with_connections(catalog, uow, _user(), NOW)
 
     assert listed == [
-        ListedRepository(API, connection=registered, can_connect=True),
-        ListedRepository(WEB, connection=None, can_connect=False),
+        ListedRepository(API, record=registered, can_connect=True),
+        ListedRepository(WEB, record=None, can_connect=False),
     ]
     assert catalog.tokens == [Secret("ghu_login_access")]
 
 
-def test_the_list_is_ordered_by_name_ignoring_case_then_by_id() -> None:
+def test_the_list_is_ordered_by_name_ignoring_case() -> None:
+    """Только по имени: при равенстве без учёта регистра — порядок ответа GitHub."""
     upper = _repo("909", "API", ADMIN)
     catalog = FakeInstallationCatalog([WEB, upper, DOCS, API])
 
-    listed = list_repositories(catalog, _signed_in(), _user(), NOW)
+    listed = list_with_connections(catalog, _signed_in(), _user(), NOW)
 
-    assert [item.repository for item in listed] == [API, upper, DOCS, WEB]
+    assert [item.repository for item in listed] == [upper, API, DOCS, WEB]
 
 
 def test_nothing_visible_is_an_empty_list() -> None:
-    assert list_repositories(FakeInstallationCatalog([]), _signed_in(), _user(), NOW) == []
+    assert list_with_connections(FakeInstallationCatalog([]), _signed_in(), _user(), NOW) == []
 
 
 def test_a_github_failure_passes_up_and_keeps_the_session() -> None:
     uow = _signed_in()
     with pytest.raises(VcsError):
-        list_repositories(FakeInstallationCatalog(error=VcsError("HTTP 503")), uow, _user(), NOW)
+        list_with_connections(FakeInstallationCatalog(error=VcsError("HTTP 503")), uow, _user(), NOW)
     assert [s.id for s in uow.sessions.stored] == [SESSION_ID]
 
 
@@ -119,7 +120,7 @@ def test_a_rejected_token_closes_the_session() -> None:
     catalog = FakeInstallationCatalog(error=ProviderTokenRejected("401"))
 
     with pytest.raises(SessionClosed):
-        list_repositories(catalog, uow, _user(), NOW)
+        list_with_connections(catalog, uow, _user(), NOW)
 
     assert uow.sessions.stored == []
     assert uow.provider_tokens.stored == {}

@@ -115,11 +115,6 @@ ERRORS_502_SCM = _doc(
 ERRORS_502_SCM_REPOSITORIES = _doc(
     HTTPStatus.BAD_GATEWAY, ScmUnavailableProblem, "GitHub не ответил или ответил ошибкой; репозиторий не подключён."
 )
-ERRORS_502_SCM_DISCONNECT = _doc(
-    HTTPStatus.BAD_GATEWAY,
-    ScmUnavailableProblem,
-    "GitHub не ответил или ответил ошибкой, когда проверялись видимость и права или обновлялся токен пользователя; репозиторий не выключен.",
-)
 ERRORS_502_SCM_EVENTS = _doc(
     HTTPStatus.BAD_GATEWAY,
     ScmUnavailableProblem,

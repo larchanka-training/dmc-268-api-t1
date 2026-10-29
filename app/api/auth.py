@@ -5,8 +5,8 @@
 `redirect` между ними живут в cookie `oauth_state` — 10 минут и только на
 путях `/api/v1/auth`. `redirect` из неё проверяется ещё раз в use case:
 cookie приходит от клиента. Любая ошибка callback — `302` на
-`/login?error=<код>`. Возврат с установки (Setup URL) требует сессию — пока
-заглушка `501` (change `repositories-one-list`).
+`/login?error=<код>`. Возврат с установки (Setup URL) без сессии уводит на вход
+с возвратом на «Репозитории»; пока заглушка `501` (change `repositories-one-list`).
 """
 
 import secrets
@@ -35,7 +35,6 @@ from app.api.errors import (
 from app.api.problems import ErrorCode
 from app.api.session import (
     SESSION_COOKIE,
-    SESSION_REQUIRED,
     SESSION_RESPONSES,
     clear_session_cookie,
     current_user,
@@ -44,6 +43,7 @@ from app.api.session import (
 from app.application.ports import OAuthProvider, UnitOfWork
 from app.application.use_cases.auth import (
     LoginFailed,
+    authenticate,
     complete_login,
     logout,
     start_login,
@@ -200,44 +200,37 @@ def finish_login(
 
 # Setup URL GitHub App — задача #243 (бэкенд-часть dmc-268-ui-t1#95): контракт первым.
 _SETUP_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал "
-    "типы (задача #243). Setup URL GitHub App: сюда GitHub возвращает браузер после установки "
-    "приложения, её изменения (Redirect on update) или запроса установки владельцу организации. "
-    "Требует сессию; параметры проверяются до ответа 501. Когда ручка заработает: "
-    "`installation_id` из адреса не доверяется — сверяется с установками пользователя по его "
-    "токену (`GET /user/installations`), а кэш видимых репозиториев заменяется свежим ответом "
-    "GitHub. Установка с выбором «Only select repositories» — подключаются её репозитории, на "
-    "которых у пользователя роль admin или maintain и которых ещё нет в сервисе; выключенные "
-    "`DELETE` не включаются. С «All repositories» не подключается ничего: нужные включают "
-    "переключателем. Итог — редирект на страницу «Репозитории»."
+    "Не реализовано: отвечает 501 NOT_IMPLEMENTED (задача #243). Setup URL GitHub App: сюда GitHub "
+    "возвращает браузер после установки приложения, её изменения или запроса владельцу. При "
+    "«Only select repositories» подключает выбранные репозитории, где у пользователя admin или "
+    "maintain, при «All repositories» — ничего."
 )
+# Куда вернуть после входа, если сессии нет: та же страница, куда ведёт итог.
+_SETUP_LOGIN = "/login?redirect=/app/repositories"
 
 
 @router.get(
     "/github/setup",
     status_code=HTTPStatus.FOUND,
     response_class=RedirectResponse,
-    dependencies=SESSION_REQUIRED,
+    openapi_extra={"security": [{"session": []}]},
     summary="Возврат с установки GitHub App",
     description=_SETUP_DESCRIPTION,
     responses={
         HTTPStatus.FOUND: {
             "description": (
-                "Редирект на /app/repositories с итогом: `?connected=<N>` — сколько репозиториев "
-                "подключено (при «All repositories» — 0); `?requested=true` — при "
-                "`setup_action=request`, запрос отправлен владельцу, ничего не подключено; "
-                "`?setup_error=installation_not_found` — установки нет среди установок "
-                "пользователя или нет `installation_id`; `?setup_error=provider_unavailable` — "
-                "GitHub не ответил. Токен пользователя непригоден — `401`, сессия закрыта."
+                "Редирект на /app/repositories с итогом: `?connected=<N>`, `?requested=true`, "
+                "`?setup_error=installation_not_found` или `?setup_error=provider_unavailable`. Без "
+                "сессии — на /login?redirect=/app/repositories, недействительная cookie session удаляется."
             ),
             "headers": _LOCATION,
         },
-        **SESSION_RESPONSES,
         **ERRORS_422,
         **ERRORS_501_NOT_IMPLEMENTED,
     },
 )
 def finish_github_setup(
+    request: Request,
     installation_id: int | None = Query(
         default=None,
         gt=0,
@@ -246,7 +239,15 @@ def finish_github_setup(
     setup_action: Literal["install", "update", "request"] = Query(
         description="Что сделал пользователь на GitHub: установил, изменил установку или запросил её у владельца."
     ),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> Response:
+    token = request.cookies.get(SESSION_COOKIE)
+    if authenticate(uow_factory(), token, datetime.now(UTC)) is None:
+        # Браузер пришёл с GitHub, а не из кабинета: JSON `401` ему показать некому.
+        response = RedirectResponse(_SETUP_LOGIN, status_code=HTTPStatus.FOUND)
+        if SESSION_COOKIE in request.cookies:
+            clear_session_cookie(response)
+        return response
     raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Возврат с установки ещё не реализован.")
 
 

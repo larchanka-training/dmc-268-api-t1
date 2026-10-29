@@ -84,7 +84,7 @@ class GitHubVcsGateway:
         self._max_attempts = max_attempts
         self._backoff_base_seconds = backoff_base_seconds
         self._rate_limit_budget_seconds = rate_limit_budget_seconds
-        self._bot_login: str | None = None
+        self._app_slug: str | None = None
         self._review = GitHubReviewClient(self)
 
     def fetch_diff(
@@ -268,13 +268,20 @@ class GitHubVcsGateway:
         return data
 
     def bot_login(self) -> str:
-        """Логин бота App на GitHub - `<slug>[bot]`; slug - из `GET /app` с JWT приложения.
+        """Логин бота App на GitHub - `<slug>[bot]`.
 
-        Запрашивается один раз на процесс и только когда нужен: при поиске
-        своего ревью по маркеру.
+        Нужен при поиске своего ревью по маркеру; slug - `app_slug`.
         """
-        if self._bot_login is not None:
-            return self._bot_login
+        return f"{self.app_slug()}[bot]"
+
+    def app_slug(self) -> str:
+        """Slug App из `GET /app` с JWT приложения: логин бота и ссылка на экран установки.
+
+        Запрашивается один раз на процесс и только когда нужен; сбой не
+        запоминается - следующий вызов спросит снова.
+        """
+        if self._app_slug is not None:
+            return self._app_slug
         try:
             response = self._client.get(
                 "/app",
@@ -290,8 +297,8 @@ class GitHubVcsGateway:
             raise VcsError(f"GitHub API вернул неожиданное тело на GET /app: {error!r}") from error
         if not isinstance(slug, str) or not slug:
             raise VcsError("GitHub API вернул пустой slug на GET /app")
-        self._bot_login = f"{slug}[bot]"
-        return self._bot_login
+        self._app_slug = slug
+        return slug
 
     def _request(
         self,

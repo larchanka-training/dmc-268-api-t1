@@ -275,13 +275,24 @@ def test_the_setup_return_is_planned_and_answers_501(stand, params) -> None:
     assert response.json()["code"] == "NOT_IMPLEMENTED"
 
 
-def test_the_setup_return_requires_a_session(stand) -> None:
+def test_the_setup_return_without_a_session_goes_to_login_and_back(stand) -> None:
+    """Браузер пришёл с GitHub: вместо JSON `401` — вход с возвратом на «Репозитории»."""
     response = stand.client().get(
         "/api/v1/auth/github/setup", params={"installation_id": "42", "setup_action": "install"}
     )
 
-    assert response.status_code == 401
-    assert response.json()["code"] == "UNAUTHENTICATED"
+    assert (response.status_code, response.headers["location"]) == (302, "/login?redirect=/app/repositories")
+    assert "set-cookie" not in response.headers
+
+
+def test_the_setup_return_with_a_dead_session_clears_the_cookie(stand) -> None:
+    client = stand.client()
+    client.cookies.set("session", "never-issued", domain="review.example")
+
+    response = client.get("/api/v1/auth/github/setup", params={"setup_action": "request"})
+
+    assert (response.status_code, response.headers["location"]) == (302, "/login?redirect=/app/repositories")
+    assert "Max-Age=0" in set_cookies(response)["session"]
 
 
 @pytest.mark.parametrize(

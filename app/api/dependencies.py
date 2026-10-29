@@ -50,10 +50,9 @@ def get_visibility_catalog(
     return container.visibility_catalog(catalog)
 
 
-def get_install_url(container: Container = Depends(get_container)) -> str | None:
-    """Экран установки GitHub App; `None` — slug приложения не задан (`GITHUB_APP_SLUG`)."""
-    slug = container.settings.github_app_slug
-    return f"https://github.com/apps/{slug}/installations/new" if slug else None
+def get_app_slug(container: Container = Depends(get_container)) -> Callable[[], str | None]:
+    """Как узнать slug GitHub App; вызывается в теле ручки — при `422` запроса к GitHub нет."""
+    return container.app_slug
 
 
 def get_token_provider(container: Container = Depends(get_container)) -> OAuthProvider:

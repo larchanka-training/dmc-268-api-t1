@@ -12,8 +12,10 @@ from uuid import UUID
 import httpx2
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from app.api.dependencies import (
+    get_app_slug,
     get_installation_catalog,
     get_token_provider,
     get_unit_of_work,
@@ -90,10 +92,14 @@ def _client(
     signed_in: bool = True,
     with_token: bool = True,
     oauth: FakeOAuthProvider | None = None,
-    app_slug: str = "",
+    app_slug: str | None = None,
+    settings: dict[str, object] | None = None,
 ) -> TestClient:
-    """Клиент с живой сессией в `uow` и токеном, выданным при входе только что."""
-    app = create_app(SETTINGS.model_copy(update={"public_origin": ORIGIN, "github_app_slug": app_slug}))
+    """Клиент с живой сессией в `uow` и токеном, выданным при входе только что.
+
+    `app_slug` — что ответил бы `GET /app`; без него — настоящий контейнер без ключа App.
+    """
+    app = create_app(SETTINGS.model_copy(update={"public_origin": ORIGIN, **(settings or {})}))
     now = datetime.now(UTC)
     uow.users.add(SIGNED_IN)
     uow.sessions.add(open_session(SESSION_ID, SIGNED_IN.id, COOKIE, now))
@@ -107,6 +113,8 @@ def _client(
     app.dependency_overrides[get_unit_of_work_factory] = lambda: lambda: uow
     app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog()
     app.dependency_overrides[get_token_provider] = lambda: oauth or FakeOAuthProvider()
+    if app_slug is not None:
+        app.dependency_overrides[get_app_slug] = lambda: lambda: app_slug
     client = TestClient(app, base_url=ORIGIN)
     if signed_in:
         client.cookies.set(SESSION_COOKIE, COOKIE)
@@ -224,7 +232,7 @@ def test_the_list_holds_only_repositories_seen_on_github() -> None:
 
 
 def test_the_list_is_paged_by_name_ignoring_case() -> None:
-    """Порядок — `full_name` без учёта регистра, затем `provider_id`; подключённые и нет вперемешку."""
+    """Порядок — `full_name` без учёта регистра; подключённые и нет вперемешку."""
     names = ["octo/delta", "Octo/Alpha", "octo/charlie", "octo/bravo", "octo/echo"]
     seen = [InstallationRepository(str(100 + n), name, "main", ADMIN) for n, name in enumerate(names)]
     uow = FakeUnitOfWork()
@@ -354,11 +362,38 @@ def test_the_list_holds_connected_and_unconnected_repositories_together() -> Non
     assert [token.reveal() for token in catalog.tokens] == ["ghu_login_access"]
 
 
-def test_without_an_app_slug_the_install_url_is_null() -> None:
+def test_without_the_app_key_the_install_url_is_null_and_the_list_works() -> None:
+    """Контейнер без `GITHUB_APP_ID` и ключа: slug не узнать, к GitHub за ним не ходим."""
     response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API])).get("/api/v1/repositories")
 
     assert response.status_code == 200
     assert response.json()["install_url"] is None
+    assert [item["full_name"] for item in response.json()["items"]] == [API.full_name]
+
+
+def test_a_failed_slug_lookup_is_a_null_install_url_not_an_error() -> None:
+    """Ключ App задан, но не подписывает JWT: `GET /app` не удался — `install_url: null`, список — `200`."""
+    settings = {"github_app_id": "123", "github_app_private_key": SecretStr("not a pem")}
+
+    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API]), settings=settings).get("/api/v1/repositories")
+
+    assert response.status_code == 200
+    assert response.json()["install_url"] is None
+    assert [item["full_name"] for item in response.json()["items"]] == [API.full_name]
+
+
+def test_an_invalid_limit_does_not_ask_github_for_the_slug() -> None:
+    asked: list[str] = []
+
+    def slug() -> str:
+        asked.append("GET /app")
+        return "dmc-268-review"
+
+    client = _client(FakeUnitOfWork(), FakeInstallationCatalog([API]))
+    client.app.dependency_overrides[get_app_slug] = lambda: slug  # type: ignore[attr-defined]
+
+    assert client.get("/api/v1/repositories", params={"limit": 0}).status_code == 422
+    assert asked == []
 
 
 def test_a_registered_repository_github_does_not_show_is_not_listed_as_connected() -> None:

@@ -365,13 +365,8 @@
           "auth"
         ],
         "summary": "Возврат с установки GitHub App",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #243). Setup URL GitHub App: сюда GitHub возвращает браузер после установки приложения, её изменения (Redirect on update) или запроса установки владельцу организации. Требует сессию; параметры проверяются до ответа 501. Когда ручка заработает: `installation_id` из адреса не доверяется — сверяется с установками пользователя по его токену (`GET /user/installations`), а кэш видимых репозиториев заменяется свежим ответом GitHub. Установка с выбором «Only select repositories» — подключаются её репозитории, на которых у пользователя роль admin или maintain и которых ещё нет в сервисе; выключенные `DELETE` не включаются. С «All repositories» не подключается ничего: нужные включают переключателем. Итог — редирект на страницу «Репозитории».",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED (задача #243). Setup URL GitHub App: сюда GitHub возвращает браузер после установки приложения, её изменения или запроса владельцу. При «Only select repositories» подключает выбранные репозитории, где у пользователя admin или maintain, при «All repositories» — ничего.",
         "operationId": "finishGithubSetup",
-        "security": [
-          {
-            "session": []
-          }
-        ],
         "parameters": [
           {
             "name": "installation_id",
@@ -411,7 +406,7 @@
         ],
         "responses": {
           "302": {
-            "description": "Редирект на /app/repositories с итогом: `?connected=<N>` — сколько репозиториев подключено (при «All repositories» — 0); `?requested=true` — при `setup_action=request`, запрос отправлен владельцу, ничего не подключено; `?setup_error=installation_not_found` — установки нет среди установок пользователя или нет `installation_id`; `?setup_error=provider_unavailable` — GitHub не ответил. Токен пользователя непригоден — `401`, сессия закрыта.",
+            "description": "Редирект на /app/repositories с итогом: `?connected=<N>`, `?requested=true`, `?setup_error=installation_not_found` или `?setup_error=provider_unavailable`. Без сессии — на /login?redirect=/app/repositories, недействительная cookie session удаляется.",
             "headers": {
               "Location": {
                 "description": "Куда перенаправлен браузер.",
@@ -430,21 +425,6 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/AnyProblem"
-                }
-              }
-            },
-            "headers": {
-              "X-Trace-ID": {
-                "$ref": "#/components/headers/X-Trace-ID"
-              }
-            }
-          },
-          "401": {
-            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UnauthenticatedProblem"
                 }
               }
             },
@@ -484,7 +464,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/auth/me": {
@@ -781,7 +766,7 @@
           "repositories"
         ],
         "summary": "Список репозиториев",
-        "description": "Требует сессию. Все репозитории установок GitHub App, которые GitHub отдаёт вошедшему пользователю по его токену, сохранённому при входе (`GET /user/installations` и `GET /user/installations/{id}/repositories`), подключённые и нет вместе: `connected` — включено ли ревью, `id` и `connected_at` — только у подключённых, `can_connect` — роль admin или maintain, без неё переключатель неактивен. Остальные репозитории установок в ответ не попадают, это не ошибка; публичный репозиторий, на котором у пользователя нет роли, тоже. Ответ GitHub берётся из кэша видимости (по умолчанию 30 с, как у GET /reviews и GET /events), подключён ли репозиторий — из базы на каждый запрос. `install_url` — экран установки приложения для кнопки «Добавить репозитории из GitHub»; `null`, если slug приложения не настроен. Постранично, по `full_name` без учёта регистра, затем по `provider_id`. limit выше 200 не отклоняется, а приводится к 200. Общего числа записей в ответе нет: конец списка — страница короче limit. Токен пользователя отозван, истёк без возможности обновления или его нет — `401 UNAUTHENTICATED`, сессия закрывается, cookie удаляется: нужен новый вход. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`.",
+        "description": "Требует сессию. Все репозитории установок GitHub App, которые GitHub отдаёт пользователю по его токену, сохранённому при входе, подключённые и нет; публичный репозиторий, на котором у пользователя нет роли, в ответ не попадает. Ответ GitHub — из кэша видимости (по умолчанию 30 с, как у GET /reviews и GET /events), подключён ли репозиторий — из базы. Постранично, по `full_name` без учёта регистра; limit выше 200 приводится к 200, конец списка — страница короче limit. Токен пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается; GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`.",
         "operationId": "listRepositories",
         "security": [
           {
@@ -1021,7 +1006,7 @@
           "repositories"
         ],
         "summary": "Выключить ревью репозитория",
-        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #243). Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии, id репозитория — до ответа 501. Когда ручка заработает: выключает ревью репозитория — переключатель «Ревью» в выкл. Выключение мягкое: запись репозитория остаётся с отметкой «выключено», прогоны и запросы на изменение сохраняются, вебхуки репозитория получают `202 ignored`, в GET /repositories строка приходит с `connected = false`, а повторный POST /repositories включает ревью обратно с прежним `id`. Проверки по порядку: репозитория нет или пользователь не видит его на GitHub — `404 REPOSITORY_NOT_FOUND`, ответ один; нет роли admin или maintain — `403 REPOSITORY_MANAGE_REQUIRED`, права — как у POST /repositories, запросом к GitHub токеном пользователя мимо кэша. Уже выключен — тоже `204`: повтор и параллельное выключение — успех; включение и выключение одновременно — побеждает последнее. Токен пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, репозиторий не выключен.",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED (задача #243). Выключает ревью мягко: запись и история прогонов остаются, повторный POST /repositories включает обратно; уже выключен — тоже `204`. Права — как у POST /repositories: без admin или maintain — `403 REPOSITORY_MANAGE_REQUIRED`.",
         "operationId": "disconnectRepository",
         "security": [
           {
@@ -1157,7 +1142,7 @@
             }
           },
           "502": {
-            "description": "GitHub не ответил или ответил ошибкой, когда проверялись видимость и права или обновлялся токен пользователя; репозиторий не выключен.",
+            "description": "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4062,7 +4047,7 @@
               }
             ],
             "title": "Id",
-            "description": "Идентификатор репозитория в сервисе — для настроек, прогонов и DELETE /repositories/{id}; `null`, если репозиторий не подключён."
+            "description": "Идентификатор репозитория в сервисе — для настроек, прогонов и DELETE /repositories/{id}. Есть и у выключенного: история остаётся; `null`, если репозиторий не подключали."
           },
           "can_connect": {
             "type": "boolean",
@@ -4084,7 +4069,7 @@
               }
             ],
             "title": "Connected At",
-            "description": "Когда ревью включено; `null`, если репозиторий не подключён."
+            "description": "Когда ревью включено последний раз; `null`, если ревью не включено."
           }
         },
         "type": "object",
@@ -4122,7 +4107,7 @@
             ],
             "format": "uri",
             "title": "Install Url",
-            "description": "Экран установки GitHub App (`https://github.com/apps/<slug>/installations/new`): выбрать аккаунт и репозитории. `null`, если slug приложения не настроен (`GITHUB_APP_SLUG`).",
+            "description": "Экран установки GitHub App (`https://github.com/apps/<slug>/installations/new`): выбрать аккаунт и репозитории. `null`, если slug приложения узнать не удалось: нет ключа приложения или GitHub не ответил на `GET /app`.",
             "examples": [
               "https://github.com/apps/dmc-268-review/installations/new"
             ]
