@@ -280,9 +280,11 @@ uv run alembic heads               # должна быть ровно одна
 
 Включить ревью — `POST /api/v1/repositories`: только с правом admin или maintain, проверка —
 два запроса к GitHub, репозиторий по id токеном пользователя и установка приложения на нём.
-Выключить (`DELETE /api/v1/repositories/{id}`) и возврат с экрана установки (Setup URL
-`GET /api/v1/auth/github/setup`) пока описаны в контракте и отвечают `501` (#243); Setup URL
-в настройках GitHub App не прописываем, пока ручка не заработает. Запросы идут из лимита
+Выключить — `DELETE /api/v1/repositories/{id}`, с теми же правами: запись и история прогонов
+остаются, вебхуки по репозиторию игнорируются, повторный `POST` включает его обратно с прежним
+`id`. Возврат с экрана установки (Setup URL `GET /api/v1/auth/github/setup`) пока описан в
+контракте и отвечает `501` (#243); Setup URL в настройках GitHub App не прописываем, пока ручка
+не заработает. Запросы идут из лимита
 пользователя, `installation_id` не хранится. Нужен ключ `USER_TOKEN_ENCRYPTION_KEY` (см. «Ключ
 шифрования токенов пользователя»); разрешений App сверх **Metadata: read** список не требует.
 Истёкший user access token сервис обновляет сам по refresh token.
@@ -292,15 +294,16 @@ uv run alembic heads               # должна быть ровно одна
 ```bash
 psql "$DATABASE_URL" -c "
   INSERT INTO repositories (id, provider, provider_id, full_name,
-                            default_branch, auto_review_enabled)
+                            default_branch, auto_review_enabled, connected_at)
   VALUES (gen_random_uuid(), 'github', '<числовой id репозитория>',
-          '<owner>/<имя>', '<ветка по умолчанию>', true);"
+          '<owner>/<имя>', '<ветка по умолчанию>', true, now());"
 ```
 
 Числовой `id` и `full_name` репозитория — из API хостинга (`GET /repos/{owner}/{repo}`).
 Повторная вставка того же `(provider, provider_id)` упадёт на уникальном
 индексе `uq_repositories_provider_id` — повторное внесение невозможно по
-конструкции.
+конструкции. Без `connected_at` запись считается выключенной, и вебхуки по ней
+игнорируются.
 
 ## Правила ревью и разрешения GitHub App
 

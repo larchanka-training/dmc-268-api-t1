@@ -253,6 +253,7 @@ class Stack:
                     auto_review_enabled=True,
                     created_at=now,
                     updated_at=now,
+                    connected_at=now,
                 )
             )
             work.commit()

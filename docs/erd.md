@@ -32,6 +32,7 @@ erDiagram
         text full_name
         text default_branch
         bool auto_review_enabled "ревью на каждый push"
+        timestamptz connected_at "NULL — ревью выключено"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
@@ -157,6 +158,11 @@ erDiagram
 
 **`repositories`**: репозиторий, который сервису разрешено ревьюить, одна строка
 на хостинг. Здесь же лежит переключатель автоматического ревью для репозитория.
+`connected_at` — когда ревью включено последний раз; `NULL` — выключено
+(`DELETE /api/v1/repositories/{id}`). Выключение строку не удаляет: на неё
+ссылаются запросы на изменение (`ON DELETE RESTRICT`), история остаётся, а
+повторное включение возвращает прежний `id`. Вебхуки выключенного
+игнорируются, как вебхуки незарегистрированного.
 
 **`merge_requests`**: pull request в GitHub или merge request в GitLab. Хранит
 то, что общее для всех его ревью: номер, заголовок, ветки, автора. `head_sha`

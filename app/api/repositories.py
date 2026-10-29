@@ -1,5 +1,5 @@
 """Репозитории: список видимых пользователю, чтение, подключение, выключение, настройки и
-статус `.review/rules.md` (выключение, настройки и правила — пока заглушки).
+статус `.review/rules.md` (настройки и правила — пока заглушки).
 
 Транспорт: разбор запроса, вызов порта или use case, формат ответа. Пагинация —
 `app/api/pagination.py`. Правила подключения — `app/application/use_cases/connect_repository.py`.
@@ -86,10 +86,15 @@ _CONNECT_DESCRIPTION = (
     "репозиторий не записан."
 )
 _DISCONNECT_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED (задача #243). Выключает ревью мягко: запись "
-    "и история прогонов остаются, повторный POST /repositories включает обратно; уже выключен — "
-    "тоже `204`. Права — как у POST /repositories: без admin или maintain — "
-    "`403 REPOSITORY_MANAGE_REQUIRED`."
+    "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии. Выключает ревью мягко: "
+    "запись, запросы на изменение и история прогонов остаются, вебхуки по репозиторию игнорируются, "
+    "повторный POST /repositories включает обратно; уже выключен — тоже `204`. Прогон, поставленный "
+    "в очередь до выключения, доводится до конца. Проверки по порядку: репозитория нет или "
+    "пользователь не видит его на GitHub (кэш видимости, как у GET /repositories/{id}) — "
+    "`404 REPOSITORY_NOT_FOUND`, ответ один и тот же; права — как у POST /repositories, запросом к "
+    "GitHub мимо кэша: без admin или maintain — `403 REPOSITORY_MANAGE_REQUIRED`. Токен "
+    "пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается; GitHub не ответил или "
+    "ответил ошибкой — `502 SCM_UNAVAILABLE`, ревью не выключено."
 )
 # Настройки и статус rules.md — задача #113 (бэкенд-часть dmc-268-ui-t1#28): контракт первым,
 # реализация отдельно.
@@ -290,8 +295,12 @@ def visible_repository(
     with uow_factory() as uow:
         repository = uow.repositories.get(repository_id)
     if repository is None or not is_visible(repository, provider_ids):
-        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REPOSITORY_NOT_FOUND, "Репозитория с таким id нет.")
+        raise _repository_not_found()
     return repository
+
+
+def _repository_not_found() -> ApiError:
+    return ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REPOSITORY_NOT_FOUND, "Репозитория с таким id нет.")
 
 
 @router.post(
@@ -362,17 +371,17 @@ def list_repositories(
 
 def _list_item(item: connecting.ListedRepository) -> RepositoryListItem:
     record = item.record
-    # До миграции мягкого выключения запись есть только у включённых, а время включения —
-    # время записи; потом `connected` и `connected_at` — по `connected_at` (design D4, D5).
+    # `id` — если запись есть, в том числе у выключенного; включён ли — по `connected_at` (design D5).
+    connected_at = record.connected_at if record is not None else None
     return RepositoryListItem(
         provider=Provider.GITHUB,
         provider_id=item.repository.provider_id,
         full_name=item.repository.full_name,
         default_branch=item.repository.default_branch,
-        connected=record is not None,
+        connected=connected_at is not None,
         id=record.id if record is not None else None,
         can_connect=item.can_connect,
-        connected_at=record.created_at if record is not None else None,
+        connected_at=connected_at,
     )
 
 
@@ -538,12 +547,31 @@ def get_repository(
         **ERRORS_403_ORIGIN_OR_MANAGE,
         **ERRORS_404_REPOSITORY,
         **ERRORS_422,
-        **ERRORS_501_NOT_IMPLEMENTED,
         **ERRORS_502_SCM_VISIBILITY,
     },
 )
-def disconnect_repository(repository_id: RepositoryIdPath) -> Response:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Выключение репозитория ещё не реализовано.")
+def disconnect_repository(
+    repository_id: RepositoryIdPath,
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> Response:
+    repository = visible_repository(repository_id, signed_in, catalog, oauth, uow_factory)
+    # Права — мимо кэша: `user_repository` кэш видимости не читает.
+    now = datetime.now(UTC)
+    refusal = _as_user(
+        signed_in, oauth, lambda user: connecting.disconnect_repository(catalog, uow_factory(), user, repository, now)
+    )
+    if refusal is connecting.ConnectRefusal.NOT_IN_INSTALLATION:
+        raise _repository_not_found()
+    if refusal is connecting.ConnectRefusal.MANAGE_REQUIRED:
+        raise ApiError(
+            HTTPStatus.FORBIDDEN,
+            ErrorCode.REPOSITORY_MANAGE_REQUIRED,
+            "Выключать ревью может только пользователь с правом admin или maintain на репозиторий.",
+        )
+    return Response(status_code=HTTPStatus.NO_CONTENT)
 
 
 @router.get(

@@ -45,6 +45,9 @@ class Repository:
     auto_review_enabled: bool
     created_at: datetime
     updated_at: datetime
+    # Когда ревью включено последний раз; `None` — выключено (`DELETE /repositories/{id}`):
+    # запись остаётся ради истории, вебхуки по ней игнорируются.
+    connected_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)

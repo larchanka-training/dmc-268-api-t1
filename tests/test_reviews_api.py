@@ -86,6 +86,7 @@ def _merge_request(uow: FakeUnitOfWork, provider: Provider = Provider.GITHUB) ->
         auto_review_enabled=True,
         created_at=NOW,
         updated_at=NOW,
+        connected_at=NOW,
     )
     uow.repositories.add(repository)
     merge_request = MergeRequest(

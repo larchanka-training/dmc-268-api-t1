@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from uuid import uuid4
 
 import pytest
@@ -258,6 +258,27 @@ def test_unregistered_repository_returns_202_ignored() -> None:
     assert response.json() == {"status": "ignored"}
     assert container.uow.review_runs.added == []
     assert container.queue.jobs == []
+
+
+@pytest.mark.parametrize("action", ["opened", "synchronize"])
+def test_disconnected_repository_returns_202_ignored_like_an_unregistered_one(action: str) -> None:
+    """Выключенный `DELETE /repositories/{id}` — запись осталась, но ревью нет: к GitHub не ходим."""
+    from ..fakes import a_repository
+
+    uow = FakeUow()
+    disconnected = replace(a_repository(), connected_at=None)
+    uow.repositories.add(disconnected)
+    client, container = make_client(uow=uow, registered=False)
+
+    response = post_webhook(client, action)
+
+    assert response.status_code == 202
+    assert response.json() == {"status": "ignored"}
+    assert container.uow.merge_requests.added == []
+    assert container.uow.review_runs.added == []
+    assert container.queue.jobs == []
+    assert container.vcs.calls == []
+    assert list(container.uow.repositories.stored.values()) == [disconnected]
 
 
 def test_vcs_failure_returns_502_without_records() -> None:

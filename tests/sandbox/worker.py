@@ -172,6 +172,7 @@ def _seed_repository(uow: FakeUnitOfWork, now: datetime) -> None:
             auto_review_enabled=True,
             created_at=now,
             updated_at=now,
+            connected_at=now,
         )
     )
 

@@ -1,4 +1,4 @@
-"""Подключение репозитория к сервису: список репозиториев и регистрация.
+"""Подключение репозитория к сервису: список репозиториев, регистрация и выключение.
 
 Провайдер скрыт за портом `InstallationCatalog`, токен пользователя — за
 `call_with_user_token` (`app/application/use_cases/user_token.py`), хранение —
@@ -100,8 +100,9 @@ def connect_repository(
     виден пользователю (в том числе публичный только с правом чтения — так GitHub
     отдаёт любой публичный репозиторий) или приложение не установлено (приостановлено) —
     `NOT_IN_INSTALLATION`, один отказ без различия; нет права admin или
-    maintain — `MANAGE_REQUIRED`; уже подключён — `ALREADY_CONNECTED`. Права проверяются раньше «уже подключён»:
-    пользователь без прав не узнаёт, подключён ли репозиторий.
+    maintain — `MANAGE_REQUIRED`; уже подключён и включён — `ALREADY_CONNECTED`. Права проверяются раньше
+    «уже подключён»: пользователь без прав не узнаёт, подключён ли репозиторий. Выключенный включается
+    обратно: ответ — его прежняя запись.
     """
     if provider is not Provider.GITHUB:
         return ConnectRefusal.NOT_IN_INSTALLATION
@@ -129,13 +130,38 @@ def connect_repository(
         auto_review_enabled=True,
         created_at=now,
         updated_at=now,
+        connected_at=now,
     )
+    # Сначала включаем выключенную запись — прежний `id` и история остаются; её нет —
+    # вставка. Обе операции сами разбирают гонку (design D4): проигравший параллельный
+    # запрос не находит выключенной записи и упирается в ключ — `ALREADY_CONNECTED`.
     with uow:
-        if uow.repositories.find_by_provider(provider, repository.provider_id) is not None:
-            return ConnectRefusal.ALREADY_CONNECTED
-        # Параллельное подключение могло успеть между проверкой и вставкой.
-        if not uow.repositories.add(repository):
+        reconnected = uow.repositories.reconnect(repository)
+        if reconnected is None and not uow.repositories.add(repository):
             return ConnectRefusal.ALREADY_CONNECTED
         uow.commit()
-    return repository
+    return reconnected or repository
+
+
+def disconnect_repository(
+    catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, repository: Repository, now: datetime
+) -> ConnectRefusal | None:
+    """Выключить ревью видимого пользователю репозитория; `None` — выключено.
+
+    Видимость по кэшу проверяет вызывающий, права — здесь, запросом к провайдеру мимо кэша,
+    тем же правилом, что у подключения (design D6). Провайдер репозиторий не отдаёт —
+    `NOT_IN_INSTALLATION`; нет admin или maintain — `MANAGE_REQUIRED`. Уже выключенный
+    выключается ещё раз без ошибки.
+    """
+    found = call_with_user_token(
+        uow, user.oauth, user.session_id, now, lambda token: catalog.user_repository(token, repository.provider_id)
+    )
+    if found is None:
+        return ConnectRefusal.NOT_IN_INSTALLATION
+    if not can_connect(found.permissions):
+        return ConnectRefusal.MANAGE_REQUIRED
+    with uow:
+        uow.repositories.disconnect(repository.id, now)
+        uow.commit()
+    return None
 

@@ -125,7 +125,9 @@ def handle_webhook_event(
         repository = work.repositories.find_by_provider(
             Provider.GITHUB, event.repo_provider_id
         )
-    if repository is None:
+    # Выключенный (`DELETE /repositories/{id}`) — как незарегистрированный: запись осталась
+    # ради истории, а ревью не нужно.
+    if repository is None or repository.connected_at is None:
         return WebhookOutcome(kind="ignored")
 
     # VCS между транзакциями: соединение пула не занято, пока GitHub отвечает.

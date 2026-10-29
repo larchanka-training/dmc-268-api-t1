@@ -70,6 +70,7 @@ def _registered(provider_id: str) -> Repository:
         auto_review_enabled=True,
         created_at=NOW,
         updated_at=NOW,
+        connected_at=NOW,
     )
 
 
@@ -140,6 +141,7 @@ def test_admin_connects_and_the_repository_is_recorded() -> None:
         auto_review_enabled=True,
         created_at=NOW,
         updated_at=NOW,
+        connected_at=NOW,
     )
     assert outcome == expected
     assert uow.repositories.get(NEW_ID) == expected
