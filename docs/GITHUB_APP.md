@@ -312,8 +312,8 @@ larchanka-training/dmc-268-api-t1    [●━━] вкл     Настройки
 | Webhook URL | `<PUBLIC_ORIGIN>/api/v1/webhooks/github` | то же |
 | Webhook secret | значение секрета `WEBHOOK_SECRET_DMC268_T1` | каждая доставка получает `401`, прогонов нет |
 | Permissions → Metadata | Read-only | обязательно, GitHub выставляет само |
-| Permissions → Contents | Read-only | ревью без `.review/rules.md` и AST-окружения |
-| Permissions → Pull requests | Read and write | нет диффа, ревью не публикуется |
+| Permissions → Contents | Read-only | нет диффа (`GET /repos/{r}/compare/…` требует Contents): прогон падает |
+| Permissions → Pull requests | Read and write | нет метаданных PR, ревью не публикуется, треды не читаются |
 | Permissions → Checks | Read and write | нет проверки `dmc-268-ai-review`, merge gate не работает |
 | Subscribe to events | Pull request; Pull request review thread | без первого нет прогонов; без второго проверка не пересчитывается при закрытии треда |
 | Setup URL, Redirect on update | после #243: `<PUBLIC_ORIGIN>/api/v1/auth/github/setup`, Redirect on update включён. Сейчас этой ручки нет, поле не заполнять | после установки GitHub не вернёт пользователя в сервис |
@@ -321,20 +321,27 @@ larchanka-training/dmc-268-api-t1    [●━━] вкл     Настройки
 
 **«Any account» и деньги.** После #246 каждый прогон будет платить за модель с ключа
 `AI_DMC268_T1`, а ограничений нет. С «Any account» любой пользователь GitHub сможет поставить
-приложение на свои репозитории, подключить их и ревьюить свои PR за этот счёт. Как остановить:
+приложение на свои репозитории, подключить их и ревьюить свои PR за этот счёт. Как остановить,
+по порядку:
 
-- «Only on this account» закрывает **новые** установки; уже поставленные, судя по документации
-  GitHub, продолжают работать и тратить, их это не снимает;
-- приостановить конкретную установку: `PUT /app/installations/{installation_id}/suspended` с JWT
-  приложения (по документации GitHub);
-- перестать платить сразу за всё: отозвать или сменить ключ `AI_DMC268_T1`, либо выкатить стенд с
-  `TF_VAR_llm_backend: stub`. Это правка `deploy.yml` и деплой, а не одна кнопка.
+1. Быстрее всего перестать платить: отозвать или сменить ключ `AI_DMC268_T1` у провайдера.
+   Прогоны начнут падать, но траты прекратятся сразу.
+2. Чужие установки приостановить (`PUT /app/installations/{installation_id}/suspended` с JWT
+   приложения) или удалить. Пока приложение установлено на других аккаунтах, GitHub не даёт
+   переключить его в «Only on this account».
+3. Потом закрыть новые установки: «Only on this account».
+4. Вернуть стенд к заглушке: `TF_VAR_llm_backend: stub` в `deploy.yml` и деплой.
 
 ## Реквизиты приложения на стенде
 
 Стенд берёт пять значений (App ID, Client ID, Client secret, Private key, Webhook secret) из переменных и секретов
 репозитория `dmc-268-api-t1`. Имена и переменные OpenTofu перечислены в `infra/README.md`,
 таблица «Откуда».
+
+Секрет вебхука берите случайный и длинный: `openssl rand -hex 32`. Private key меняется без
+простоя: сгенерировать новый в настройках App, положить в секрет, выкатить стенд, удалить старый
+ключ в App. Если ключ утёк, одной ротации мало: проверьте, не появилось ли чужих установок, и
+посмотрите Recent Deliveries за время утечки.
 
 Сменить приложение, например на своё с нужными настройками: создать GitHub App по таблице выше,
 заменить пять значений и перезапустить деплой. После смены:
