@@ -147,5 +147,5 @@ migrate: infra-up ## Применить миграции к локальной �
 run-api: migrate ## API на хосте с автоперезагрузкой (порт 8000)
 	$(SERVICE_ENV) uv run uvicorn app.main:app --reload
 
-run-worker: migrate ## Воркер на хосте; адаптер модели - из .env или LLM_BACKEND=stub|ollama (для ollama - MODEL)
+run-worker: migrate ## Воркер на хосте; адаптер модели - из .env или LLM_BACKEND=stub|ollama|eurorouter (для ollama - MODEL, для eurorouter - EUROROUTER_* в .env)
 	$(WORKER_ENV) uv run python -m app.worker

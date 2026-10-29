@@ -401,6 +401,19 @@ run "eurorouter_primary_without_keys_rejected" {
   expect_failures = [var.llm_backend]
 }
 
+run "eurorouter_primary_without_model_rejected" {
+  command = plan
+
+  variables {
+    llm_backend         = "eurorouter"
+    eurorouter_base_url = "https://eurorouter.example/v1"
+    eurorouter_model    = ""
+    eurorouter_api_keys = "k1"
+  }
+
+  expect_failures = [var.llm_backend]
+}
+
 run "eurorouter_primary_reaches_the_worker" {
   command = plan
 
