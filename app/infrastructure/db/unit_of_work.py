@@ -43,6 +43,8 @@ _RACE_CONSTRAINTS = (
     "uq_review_runs_one_active_per_commit",
     # два merge_request на пару репозиторий+номер (гонка первых доставок PR)
     "uq_merge_requests_repo_number",
+    # два прогона одновременно подобрали одно ревью упавшего прогона (#222)
+    "uq_published_comments_provider_comment_id",
 )
 
 

@@ -227,6 +227,7 @@ EUROROUTER_MODEL=qwen3-coder-next-80b uv run pytest -m live tests/live
 
 - Eval правил на живой модели (маркер `eval`): `gh workflow run "LLM eval"` или локально с ключами EUrouter и сервисами `uv run pytest -s -m eval tests/eval`; отчёт - в `EVAL_REPORT_DIR`.
 - Полный нагрузочный прогон (маркер `load`): `gh workflow run Load` или локально `uv run pytest -s -m load tests/load`; профиль и пороги - переменными `LOAD_*` (см. `tests/load/test_load.py`).
+- Chaos-сьют (маркер `chaos`): job `chaos` в CI на каждом PR, локально с сервисами `uv run pytest -m chaos tests/chaos`; сценарии отказов, регрессии и security-аудита - в [`docs/testing/SECURITY_AND_REGRESSION_REPORT.md`](docs/testing/SECURITY_AND_REGRESSION_REPORT.md).
 
 ### Локальный прогон воркера без инфраструктуры
 

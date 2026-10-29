@@ -97,6 +97,22 @@ class VcsGateway(Protocol):
         """
         ...
 
+    def find_published_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
+    ) -> PullRequestReviewPublication | None:
+        """Ревью прогона `review_run_id`, уже опубликованное ботом на хостинге; `None` - его нет.
+
+        Inline-комментарии ревью сопоставляются с черновиками по файлу, стороне и
+        строке, как при публикации; черновик без пары - `None`. Сбой хостинга - `VcsError`.
+        """
+        ...
+
     def fetch_review_threads_state(
         self,
         repo_full_name: str,

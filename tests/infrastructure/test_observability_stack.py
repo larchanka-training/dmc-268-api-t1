@@ -146,7 +146,7 @@ def test_prometheus_scrapes_new_exporters_by_service_hosts() -> None:
 
 def test_rabbitmq_job_scrapes_per_object_metrics() -> None:
     """RabbitMQ скреится с per-object эндпоинта: агрегированный /metrics
-    теряет лейбл queue, по которому панель очереди фильтрует review_jobs."""
+    теряет лейбл queue, по которому панель очереди фильтрует review_jobs.qq."""
     jobs = {job["job_name"]: job for job in load_prometheus()["scrape_configs"]}
     assert jobs["rabbitmq"]["metrics_path"] == "/metrics/per-object"
     assert jobs["rabbitmq"]["static_configs"][0]["targets"] == ["dmc268-rabbitmq:15692"]
@@ -741,8 +741,9 @@ def test_dashboard_queries_cover_the_expected_signals() -> None:
         "review_llm_call_duration_seconds",
         "review_stage_duration_seconds",
         "review_runs_total",
-        'rabbitmq_queue_messages{queue="review_jobs"}',
-        'rabbitmq_queue_head_message_timestamp{queue="review_jobs"}',
+        'rabbitmq_queue_messages{queue="review_jobs.qq"}',
+        'rabbitmq_queue_consumers{queue="review_jobs.qq"}',
+        'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}',
         "db_client_connection_count",
         "db_client_connection_max",
         "postgresql_backends",

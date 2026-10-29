@@ -196,7 +196,9 @@ forbidden-контракте import-linter, layout обменов задаёт `
 p95 длительности на MR ≈300 строк и деградация на 10× большем; 50 одновременных
 вебхуков без потери сообщений и дедлоков (действует: `tests/load/test_load_smoke.py` в CI,
 полный прогон с отчётом - workflow `Load`, см. [RULES_E2E_REPORT](RULES_E2E_REPORT.md) §4); убийство воркера и обрыв брокера не оставляют
-опубликованный комментарий без строки в `published_comments` и наоборот.
+опубликованный комментарий без строки в `published_comments` и наоборот. Отказоустойчивость (сбои модели, сеть до GitHub, смерть
+воркера посреди прогона) - chaos-сьют `tests/chaos/`, job `chaos` в CI; регрессия инкрементального ревью и security-аудит -
+`tests/e2e/test_incremental_review_e2e.py`, `tests/security/`; результаты - [SECURITY_AND_REGRESSION_REPORT](SECURITY_AND_REGRESSION_REPORT.md) (#222).
 
 ### 3.7 Наблюдаемость [действует]
 

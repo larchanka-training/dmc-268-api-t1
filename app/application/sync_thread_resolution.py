@@ -1,5 +1,6 @@
 """Сверка `thread_resolved` с состоянием треда на GitHub."""
 
+import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime
@@ -9,12 +10,15 @@ from uuid import UUID
 from app.application.merge_gate_publish import (
     build_merge_gate_check,
     collect_open_findings,
+    settle_merge_gate,
 )
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import ReviewThreadState
-from app.domain.enums import CommentKind, Provider
+from app.domain.enums import CommentKind, Provider, ReviewRunStatus
 from app.domain.webhook import THREAD_ACTIONS
+
+logger = logging.getLogger(__name__)
 
 
 def _thread_comment_provider_ids(thread: Mapping[str, Any]) -> tuple[str, ...]:
@@ -108,15 +112,34 @@ def refresh_merge_gate_for_merge_request(
         now=now,
     )
     with uow:
-        head_run = uow.review_runs.find_reviewed(merge_request_id, head_sha)
-    still_open = collect_open_findings(
-        uow, merge_request_id, head_run_id=head_run.id if head_run is not None else None
-    )
+        head_run = uow.review_runs.find_latest(merge_request_id, head_sha)
+    if head_run is None or head_run.status is not ReviewRunStatus.COMPLETED:
+        # Head не проверен: ревью идёт, упало или отменено сменой целевой ветки
+        # (#222). Gate выставит прогон, который его проверит; до тех пор пересчёт
+        # не даёт `success` непроверенному коммиту.
+        logger.info(
+            "merge gate %s@%s не пересчитан: последний прогон на head - %s",
+            repo_full_name,
+            head_sha,
+            head_run.status if head_run is not None else "нет",
+        )
+        return
+    still_open = collect_open_findings(uow, merge_request_id, head_run_id=head_run.id)
     vcs.set_merge_gate_check(
         repo_full_name,
         head_sha,
         installation_id,
         build_merge_gate_check(still_open),
+    )
+    # Целевую ветку могли сменить после чтения прогона выше (#222).
+    settle_merge_gate(
+        uow,
+        vcs,
+        merge_request_id=merge_request_id,
+        repo_full_name=repo_full_name,
+        head_sha=head_sha,
+        installation_id=installation_id,
+        run_id=head_run.id,
     )
 
 

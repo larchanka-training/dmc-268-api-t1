@@ -710,3 +710,89 @@ def test_bot_threads_of_a_merge_request_keep_resolution_and_coverage(uow) -> Non
     }
     assert [t.root_provider_comment_id for t in open_threads] == ["c1"]
     assert stored.covered_by_finding_id == open_finding.id
+
+
+def test_unpublished_failures_are_runs_that_died_publishing_without_a_comment(uow) -> None:
+    """#222: кандидаты на подбор ревью - `failed` на `publishing` без `published_comments`,
+    только своего PR и упавшие позже последней записи: упавшие раньше уже проверяли.
+    Время падения - `last_progress_at`, а не создание (ревью #225)."""
+
+    def failed(
+        mr_id, stage: ReviewRunStatus, at: dt.datetime, created_at: dt.datetime | None = None
+    ) -> ReviewRun:
+        return replace(
+            a_run(mr_id),
+            status=ReviewRunStatus.FAILED,
+            failed_stage=stage,
+            created_at=created_at or at,
+            last_progress_at=at,
+        )
+
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr, other_mr = a_merge_request(repo.id), replace(a_merge_request(repo.id), number=2)
+        work.merge_requests.add(mr)
+        work.merge_requests.add(other_mr)
+        orphan = failed(mr.id, ReviewRunStatus.PUBLISHING, LATER)
+        earlier_orphan = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW)
+        recorded = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW - dt.timedelta(minutes=1))
+        checked_before = failed(mr.id, ReviewRunStatus.PUBLISHING, NOW - dt.timedelta(minutes=2))
+        # Создан раньше записанного, а упал (выметатель) уже после его публикации.
+        swept_later = failed(
+            mr.id,
+            ReviewRunStatus.PUBLISHING,
+            NOW + dt.timedelta(minutes=1),
+            created_at=NOW - dt.timedelta(minutes=3),
+        )
+        analysing = failed(mr.id, ReviewRunStatus.ANALYSING, NOW)
+        foreign = failed(other_mr.id, ReviewRunStatus.PUBLISHING, NOW)
+        for run in (orphan, earlier_orphan, recorded, checked_before, swept_later, analysing, foreign):
+            work.review_runs.add(run)
+        work.commit()
+    with uow as work:
+        work.published_comments.add(
+            PublishedComment(
+                id=new_id(),
+                review_run_id=recorded.id,
+                finding_id=None,
+                provider_comment_id="9001",
+                kind=CommentKind.SUMMARY,
+                published_at=NOW - dt.timedelta(minutes=1),
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        work.commit()
+
+    with uow as work:
+        found = work.review_runs.list_unpublished_failures(mr.id)
+
+    assert [r.id for r in found] == [swept_later.id, earlier_orphan.id, orphan.id]
+
+
+def test_latest_run_on_a_head_is_the_newest_in_any_status(uow) -> None:
+    """#222: за gate head отвечает последний прогон, в том числе упавший."""
+    with uow as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        completed = replace(a_run(mr.id), status=ReviewRunStatus.COMPLETED, created_at=NOW)
+        failed = replace(
+            a_run(mr.id),
+            status=ReviewRunStatus.FAILED,
+            failed_stage=ReviewRunStatus.ANALYSING,
+            created_at=LATER,
+        )
+        other_head = replace(a_run(mr.id), head_sha="other", created_at=LATER + dt.timedelta(minutes=1))
+        for run in (completed, failed, other_head):
+            work.review_runs.add(run)
+        work.commit()
+
+    with uow as work:
+        latest = work.review_runs.find_latest(mr.id, "abc123")
+        nothing = work.review_runs.find_latest(mr.id, "missing")
+
+    assert latest is not None and latest.id == failed.id
+    assert nothing is None

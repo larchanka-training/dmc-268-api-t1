@@ -253,3 +253,48 @@ jobs:
         # Живые тесты против EUrouter (маркер live) - платные: `addopts` в
         # pyproject.toml их не собирает, их гоняет llm-live.yml с ключом.
         run: uv run pytest -q -rs
+
+  # Chaos-сьют (#222): отказы модели, GitHub и смерть воркера посреди прогона на
+  # сквозном стенде (tests/chaos/). Отдельным job'ом, а не в `test`: провал
+  # отказоустойчивости виден своей галочкой, а основной прогон его не ждёт.
+  # Основной `pytest` сьют не собирает (маркер `chaos` исключён в addopts);
+  # `-m chaos` в командной строке перекрывает фильтр addopts. Сервисы - те же,
+  # что у `test`: стенд ходит в настоящие PostgreSQL и RabbitMQ.
+  chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
+        env:
+          POSTGRES_USER: dmc268
+          POSTGRES_PASSWORD: dmc268
+          POSTGRES_DB: dmc268
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dmc268 -d dmc268"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:4.4-alpine@sha256:5b70d54d53d0ce9558b84ad93cb237d06fa2e8c57115fa0ff7223b9eaffa44ed
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://dmc268:dmc268@localhost:5432/dmc268
+      TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672/%2F
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/python-env
+      - name: chaos-сьют (пропуск теста — провал)
+        env:
+          PYTEST_FAIL_ON_SKIP: "1"
+        run: uv run pytest -m chaos -q -rs tests/chaos

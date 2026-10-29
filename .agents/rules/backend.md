@@ -168,7 +168,7 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 - **Одна сущность — одно имя везде**: `review_run_id` (полный, не `run_id`) — одинаково в
   атрибутах спанов, полях логов и API.
 - **Имена спанов**: этапы прогона — `review.<этап>`, проход очистки — `review.sweep`; очередь —
-  по semconv messaging: `publish review_jobs` и `process review_jobs` с `messaging.system`,
+  по semconv messaging: `publish review_jobs.qq` и `process review_jobs.qq` с `messaging.system`,
   `messaging.operation.name`/`.type`, `messaging.destination.name`,
   `messaging.rabbitmq.destination.routing_key`, у обработки — `messaging.rabbitmq.message.delivery_tag`.
 - **Атрибуты**: стандартные — только стабильные имена semconv (код ставит

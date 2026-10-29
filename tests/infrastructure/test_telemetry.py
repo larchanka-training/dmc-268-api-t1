@@ -171,17 +171,17 @@ def test_queue_spans_follow_the_messaging_semantic_conventions(
     publish, process = spans.get_finished_spans()
     destination = {
         "messaging.system": "rabbitmq",
-        "messaging.destination.name": "review_jobs",
-        "messaging.rabbitmq.destination.routing_key": "review_jobs",
+        "messaging.destination.name": "review_jobs.qq",
+        "messaging.rabbitmq.destination.routing_key": "review_jobs.qq",
     }
-    assert publish.name == "publish review_jobs"
+    assert publish.name == "publish review_jobs.qq"
     assert dict(publish.attributes or {}) == {
         **destination,
         "messaging.operation.name": "publish",
         "messaging.operation.type": "send",
         "review_run_id": str(RUN_ID),
     }
-    assert process.name == "process review_jobs"
+    assert process.name == "process review_jobs.qq"
     assert dict(process.attributes or {}) == {
         **destination,
         "messaging.operation.name": "process",

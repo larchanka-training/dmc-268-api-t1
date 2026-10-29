@@ -20,7 +20,7 @@ from app.infrastructure.queue.rabbitmq import (
     RabbitMQJobQueue,
     declare_topology,
 )
-from app.worker.factory import build_worker
+from app.worker.factory import StopRequest, build_worker
 
 from ..conftest import TEST_RABBITMQ_URL, requires_broker
 
@@ -97,3 +97,68 @@ def test_worker_nacks_to_dlq_when_the_handler_raises(
             break
         time.sleep(0.05)
     assert dlq_method is not None
+
+
+# --- штатная остановка не тратит попытку доставки (#223) ----------------------
+
+
+class _ProcessDied(BaseException):
+    """Смерть процесса посреди обработки: consume-цикл её не ловит."""
+
+
+def _delivery_count(channel: pika.adapters.blocking_connection.BlockingChannel) -> int:
+    """Сколько неудачных доставок quorum-очередь насчитала сообщению (`x-delivery-count`)."""
+    method, properties, _ = channel.basic_get(QUEUE_NAME, auto_ack=True)
+    assert method is not None, "сообщение не вернулось в очередь"
+    assert properties is not None
+    return int((properties.headers or {}).get("x-delivery-count", 0))
+
+
+def test_a_stopping_worker_returns_the_message_without_spending_a_delivery(
+    channel: pika.adapters.blocking_connection.BlockingChannel, settings: Settings
+) -> None:
+    RabbitMQJobQueue(TEST_RABBITMQ_URL or "").enqueue(JOB)
+    handled: list[bytes] = []
+
+    build_worker(settings).run(handled.append, stop=StopRequest(requested=True))
+
+    assert handled == []
+    assert _delivery_count(channel) == 0
+
+
+def test_a_stop_during_processing_leaves_the_next_message_unspent(
+    channel: pika.adapters.blocking_connection.BlockingChannel, settings: Settings
+) -> None:
+    """Сигнал пришёл, пока сообщение в руках: оно подтверждается, а следующее брокер
+    не выдаёт и попытку на нём не тратит. Держится на порядке `cancel` → `ack` при
+    prefetch=1 — проверяем на живом брокере, а не на фейке."""
+    queue = RabbitMQJobQueue(TEST_RABBITMQ_URL or "")
+    queue.enqueue(JOB)
+    queue.enqueue(JOB)
+    stop = StopRequest()
+    handled: list[bytes] = []
+
+    def handle_and_stop(body: bytes) -> None:
+        handled.append(body)
+        stop.requested = True
+
+    build_worker(settings).run(handle_and_stop, stop=stop)
+
+    assert len(handled) == 1
+    assert _delivery_count(channel) == 0
+    assert channel.queue_declare(QUEUE_NAME, passive=True).method.message_count == 0
+
+
+def test_a_dying_worker_spends_a_delivery(
+    channel: pika.adapters.blocking_connection.BlockingChannel, settings: Settings
+) -> None:
+    """Контроль к тесту выше: без `nack` возврат при закрытии соединения засчитывается."""
+    RabbitMQJobQueue(TEST_RABBITMQ_URL or "").enqueue(JOB)
+
+    def die(body: bytes) -> None:
+        raise _ProcessDied
+
+    with pytest.raises(_ProcessDied):
+        build_worker(settings).run(die)
+
+    assert _delivery_count(channel) == 1

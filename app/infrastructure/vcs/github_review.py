@@ -58,7 +58,14 @@ def _thread_current_line(thread: dict[str, Any]) -> int | None:
 def _map_fetched_inline_comments(
     drafts: tuple[InlineCommentDraft, ...],
     raw_comments: list[dict[str, Any]],
+    *,
+    match_body: bool = False,
 ) -> tuple[PublishedInlineComment | None, ...]:
+    """Сопоставить комментарии ревью с черновиками по файлу, стороне и строке.
+
+    `match_body` - сверять ещё и текст: при подборе ревью упавшего прогона
+    черновики строятся из всех его находок, а опубликована была только часть,
+    и две находки на одной строке без текста не различить (#222)."""
     published: list[PublishedInlineComment | None] = []
     used_provider_ids: set[str] = set()
     for draft in drafts:
@@ -72,6 +79,7 @@ def _map_fetched_inline_comments(
                 and raw.get("path") == draft.file_path
                 and _raw_comment_line(raw) == want_line
                 and raw.get("side", "RIGHT") == want_side
+                and (not match_body or raw.get("body") == draft.body)
             ),
             None,
         )
@@ -149,8 +157,8 @@ class GitHubReviewClient:
         published: tuple[PublishedInlineComment | None, ...] = ()
         if inline_comments:
             try:
-                raw_comments = self._gw._get_json_list_paginated(
-                    f"{reviews_url}/{review_id}/comments", installation_id
+                published = self._inline_comments_of(
+                    reviews_url, review_id, installation_id, inline_comments
                 )
             except VcsError:
                 logger.warning(
@@ -159,12 +167,54 @@ class GitHubReviewClient:
                     review_id,
                     exc_info=True,
                 )
-                raw_comments = []
-            published = _map_fetched_inline_comments(inline_comments, raw_comments)
+                published = tuple(None for _ in inline_comments)
         return PullRequestReviewPublication(
             summary_provider_comment_id=review_id,
             inline_comments=published,
         )
+
+    def find_published_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
+    ) -> PullRequestReviewPublication | None:
+        """Ревью прогона, которое бот уже опубликовал: поиск по маркеру и его inline.
+
+        В отличие от публикации, сбой чтения inline - `VcsError`: вызывающий
+        записывает найденное и не должен принять потерю id за отсутствие.
+        """
+        reviews_url = f"/repos/{repo_full_name}/pulls/{pr_number}/reviews"
+        review_id = self._find_review_by_marker(
+            reviews_url, installation_id, review_run_marker(review_run_id)
+        )
+        if review_id is None:
+            return None
+        published: tuple[PublishedInlineComment | None, ...] = ()
+        if inline_comments:
+            published = self._inline_comments_of(
+                reviews_url, review_id, installation_id, inline_comments, match_body=True
+            )
+        return PullRequestReviewPublication(
+            summary_provider_comment_id=review_id, inline_comments=published
+        )
+
+    def _inline_comments_of(
+        self,
+        reviews_url: str,
+        review_id: str,
+        installation_id: int,
+        inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        match_body: bool = False,
+    ) -> tuple[PublishedInlineComment | None, ...]:
+        raw_comments = self._gw._get_json_list_paginated(
+            f"{reviews_url}/{review_id}/comments", installation_id
+        )
+        return _map_fetched_inline_comments(inline_comments, raw_comments, match_body=match_body)
 
     def _learn_bot_login(self) -> None:
         """Логин бота - до `POST`, best-effort: он нужен поиску по маркеру, а поиск

@@ -74,7 +74,23 @@ class ReviewRunRepo(Protocol):
         """Самый поздний прогон по вебхуку на этот коммит в `REVIEWED_STATUSES`."""
         ...
 
+    def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        """Самый поздний прогон на этот коммит в любом статусе: им решается, чьё
+        ревью сейчас отвечает за merge gate head-коммита."""
+        ...
+
     def list_unfinished(self) -> list[ReviewRun]: ...
+
+    def list_unpublished_failures(self, merge_request_id: UUID) -> list[ReviewRun]:
+        """Прогоны PR в `failed` с этапом сбоя `publishing` и без единой записи в
+        `published_comments`: их ревью могло остаться на хостинге без следа в базе.
+
+        Только упавшие позже последней записи PR в `published_comments`: прогон,
+        упавший до чужой успешной публикации, уже проверяли, и каждый следующий
+        прогон не листает ради него ревью PR заново. Сравнивается время падения, а
+        не создания: прогон, умерший на `publishing`, выметатель переводит в
+        `failed` позже, и прогон, опубликованный тем временем, его не видел."""
+        ...
 
     def list_changed(
         self,

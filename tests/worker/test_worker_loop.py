@@ -5,6 +5,7 @@
 """
 
 import json
+import logging
 import signal
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 
 from app.config import Settings
 from app.domain.llm_errors import LlmTimeoutError
-from app.infrastructure.queue.rabbitmq import to_wire_message
+from app.infrastructure.queue.rabbitmq import CONSUMER_ARGUMENTS, to_wire_message
 from app.infrastructure.telemetry import OtelStageTracer
 from app.worker import factory
 from app.worker.factory import StopRequest, Worker, build_review_handler
@@ -63,6 +64,24 @@ def test_sweep_is_throttled_by_the_interval() -> None:
     )
 
     assert calls == [1]  # первый проход сразу, остальные — не раньше интервала
+
+
+def test_legacy_jobs_are_moved_on_the_sweep_tick_and_a_failure_does_not_stop_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = [(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")]
+    channel = FakeChannel(ticks)
+    moves: list[int] = []
+
+    def move(connection: object) -> int:
+        moves.append(1)
+        raise RuntimeError("брокер ответил ошибкой")
+
+    monkeypatch.setattr(factory, "move_legacy_jobs", move)
+    _worker(channel).run(lambda body: None, limit=1, sweep_interval=3600)
+
+    assert moves == [1]  # на первом такте, дальше — не раньше интервала, и без `sweep`
+    assert channel.acked == [1]
 
 
 @pytest.mark.parametrize(
@@ -150,8 +169,10 @@ def test_a_stop_request_lets_the_current_message_finish_and_takes_no_more() -> N
 
     _worker(channel, connection).run(handler, stop=stop)
 
-    assert channel.acked == [1]  # сообщение в работе подтверждено, второе не взято
-    assert channel.cancelled and connection.closed
+    # Потребитель снят до подтверждения: пока сообщение держит prefetch=1, брокер
+    # второе не выдаст, и возвращать его `basic.reject` с тратой попытки не придётся.
+    assert channel.events == ["cancel", "ack 1"]
+    assert connection.closed
 
 
 def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
@@ -163,8 +184,9 @@ def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
     _worker(channel, connection).run(handled.append, stop=StopRequest(requested=True))
 
     assert handled == []
-    assert channel.acked == []  # не подтверждено: брокер вернёт его в очередь
-    assert channel.cancelled and connection.closed
+    # Сначала снять потребителя, потом отпустить: `nack` раньше освободил бы prefetch.
+    assert channel.events == ["cancel", "requeue 1"]
+    assert connection.closed
 
 
 def test_a_message_after_a_stop_during_the_sweep_is_not_taken() -> None:
@@ -178,7 +200,7 @@ def test_a_message_after_a_stop_during_the_sweep_is_not_taken() -> None:
     _worker(channel).run(handled.append, sweep=sweep, sweep_interval=0, stop=stop)
 
     assert handled == []
-    assert channel.acked == []
+    assert channel.events == ["cancel", "requeue 1"]
 
 
 class IdleChannel(FakeChannel):
@@ -188,7 +210,9 @@ class IdleChannel(FakeChannel):
         super().__init__([], allow_nack=False)
         self.idle_ticks = 0
 
-    def consume(self, queue: str, inactivity_timeout: float) -> Iterator[Any]:
+    def consume(
+        self, queue: str, inactivity_timeout: float, arguments: dict[str, Any] | None = None
+    ) -> Iterator[Any]:
         while True:
             self.idle_ticks += 1
             assert self.idle_ticks < 100, "цикл не вышел по просьбе остановиться"
@@ -266,3 +290,39 @@ def test_worker_connection_has_heartbeat_disabled(monkeypatch) -> None:
     )
 
     assert captured["heartbeat"] == 0
+
+
+def test_a_limited_run_takes_the_consumer_off_before_the_last_ack() -> None:
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=tag, redelivered=False), None, b"{}") for tag in (1, 2)])
+
+    _worker(channel).run(lambda body: None, limit=1)
+
+    assert channel.events == ["cancel", "ack 1"]
+
+
+def test_a_consumer_cancelled_by_the_broker_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """`x-consumer-timeout`: брокер снял потребителя, `consume` кончился сам. Воркер
+    выходит не молча и второй раз потребителя не снимает."""
+    channel = FakeChannel([(None, None, None)])
+
+    with caplog.at_level(logging.WARNING, logger="app.worker.factory"):
+        _worker(channel).run(lambda body: None)
+
+    assert channel.events == []
+    assert channel.consumer_arguments == CONSUMER_ARGUMENTS
+    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "отменил потребителя" in record.getMessage()
+
+
+def test_without_a_legacy_queue_it_is_asked_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Старой очереди нет: каждый проход давал бы `404` и строку `error` у брокера."""
+    channel = FakeChannel([(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+    asked: list[int] = []
+
+    def move(connection: object) -> None:
+        asked.append(1)
+
+    monkeypatch.setattr(factory, "move_legacy_jobs", move)
+    _worker(channel).run(lambda body: None, limit=1, sweep_interval=0)
+
+    assert asked == [1]

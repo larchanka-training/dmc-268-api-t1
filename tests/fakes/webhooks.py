@@ -35,8 +35,10 @@ DIFF = (
 )
 
 
-def webhook_payload(action: str = "opened") -> dict[str, Any]:
-    """Записанный payload GitHub; для прочих действий — тело `opened` с заменой."""
+def webhook_payload(action: str = "opened", *, base_ref: str | None = None) -> dict[str, Any]:
+    """Записанный payload GitHub; для прочих действий — тело `opened` с заменой.
+
+    `base_ref` - целевая ветка в payload'е, если не та, что в записи."""
     name = (
         "github_webhook_synchronize.json"
         if action == "synchronize"
@@ -44,10 +46,17 @@ def webhook_payload(action: str = "opened") -> dict[str, Any]:
     )
     raw: dict[str, Any] = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
     raw["action"] = action
+    if action == "edited":
+        # `edited` в тестах - смена целевой ветки: иное `edited` ревью не запускает.
+        raw["changes"] = {"base": {"ref": {"from": "evil-staging"}, "sha": {"from": "0" * 40}}}
+    if base_ref is not None:
+        raw["pull_request"]["base"]["ref"] = base_ref
     return raw
 
 
-def pr_metadata(base_sha: str = "fedcba0987654321fedcba0987654321fedcba09") -> PRMetadata:
+def pr_metadata(
+    base_sha: str = "fedcba0987654321fedcba0987654321fedcba09", target_branch: str = "main"
+) -> PRMetadata:
     """Свежие метаданные VCS.
 
     Заголовок, автор и ветки нарочно отличаются от payload'а вебхука: так
@@ -62,7 +71,7 @@ def pr_metadata(base_sha: str = "fedcba0987654321fedcba0987654321fedcba09") -> P
         description="",
         author="grinv",
         source_branch="feat/webhook-intake-rebased",
-        target_branch="main",
+        target_branch=target_branch,
         state=MergeRequestState.OPEN,
     )
 
@@ -95,6 +104,9 @@ class FakeVcs:
     commits_error: VcsError | None = None
     # Сбой только метаданных PR - дифф при этом достаётся.
     metadata_error: VcsError | None = None
+    # Сбой только check run merge gate; выставленные check run - (head_sha, check).
+    check_error: VcsError | None = None
+    checks: list[tuple[str, MergeGateCheck]] = field(default_factory=list)
     calls: list[tuple[Any, ...]] = field(default_factory=list)
 
     def fetch_diff(
@@ -155,6 +167,20 @@ class FakeVcs:
             raise self.error
         return PullRequestReviewPublication(summary_provider_comment_id=None, inline_comments=())
 
+    def find_published_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
+    ) -> PullRequestReviewPublication | None:
+        self.calls.append(("find_review", review_run_id))
+        if self.error is not None:
+            raise self.error
+        return None
+
     def fetch_review_threads_state(
         self,
         repo_full_name: str,
@@ -177,6 +203,9 @@ class FakeVcs:
         self.calls.append(("check", repo_full_name, head_sha, check.conclusion))
         if self.error is not None:
             raise self.error
+        if self.check_error is not None:
+            raise self.check_error
+        self.checks.append((head_sha, check))
 
 
 @dataclass
