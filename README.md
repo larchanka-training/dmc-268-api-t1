@@ -281,8 +281,9 @@ uv run alembic heads               # должна быть ровно одна
 Включить ревью — `POST /api/v1/repositories`: только с правом admin или maintain, проверка —
 два запроса к GitHub, репозиторий по id токеном пользователя и установка приложения на нём.
 Выключить — `DELETE /api/v1/repositories/{id}`, с теми же правами: запись и история прогонов
-остаются, вебхуки по репозиторию игнорируются, повторный `POST` включает его обратно с прежним
-`id`. Возврат с экрана установки — Setup URL `GET /api/v1/auth/github/setup`: при «Only select
+остаются; вебхук `pull_request` игнорируется, а `pull_request_review_thread` обрабатывается:
+иначе merge gate текущего head застрял бы красным. Повторный `POST` включает его обратно с
+прежним `id`. Возврат с экрана установки — Setup URL `GET /api/v1/auth/github/setup`: при «Only select
 repositories» подключает выбранные репозитории, где у пользователя admin или maintain и которых
 в сервисе ещё нет, только с `state` из `install_url` этой сессии. Прописываем его в настройках
 GitHub App после проверки на стенде, что GitHub возвращает `state` (design D7 change
