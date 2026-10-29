@@ -98,7 +98,9 @@ def settle_merge_gate(
     вызывающему.
     """
     failures = 0
-    settled: UUID | None = None
+    # Прогон и статус, по которым выставлен последний check: итог зависит от статуса,
+    # и завершение прогона после нашей блокировки требует выставить его gate.
+    settled: tuple[UUID, ReviewRunStatus] | None = None
     while True:
         # Перед каждой попыткой - заново: за время сбоя за head мог начать
         # отвечать другой прогон, и повтор прежнего check вернул бы чужой итог.
@@ -106,7 +108,7 @@ def settle_merge_gate(
             latest = uow.review_runs.find_latest(merge_request_id, head_sha)
         if latest is None or (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED):
             return
-        if latest.id == settled:
+        if (latest.id, latest.status) == settled:
             return
         if latest.status is ReviewRunStatus.COMPLETED:
             # Новый прогон успел завершиться: его gate мог уйти раньше нашего POST.
@@ -139,4 +141,4 @@ def settle_merge_gate(
             continue
         # Выставлен gate прогона `latest`: как и любой, кто выставил gate, после
         # POST проверяем, что за head отвечает всё ещё он.
-        settled = latest.id
+        settled = (latest.id, latest.status)

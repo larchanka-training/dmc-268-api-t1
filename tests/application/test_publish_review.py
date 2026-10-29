@@ -836,6 +836,33 @@ def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
     assert vcs.checks == [build_retarget_check()]
 
 
+class _CompletedDuringCorrectionVcs(_RetargetDuringGateVcs):
+    """Поправка-блокировка дошла уже после того, как новый прогон завершился и
+    выставил свой gate (ревью #225): POST блокировки обгоняет завершение."""
+
+    def set_merge_gate_check(self, *args: Any) -> None:
+        super().set_merge_gate_check(*args)
+        if len(self.checks) != 2:
+            return
+        newer = self._uow.review_runs.get(UUID(int=77))
+        assert newer is not None
+        self._uow.review_runs.add(replace(newer, status=ReviewRunStatus.COMPLETED))
+
+
+def test_a_review_completed_behind_the_correction_gets_its_gate_back() -> None:
+    """Блокировка легла поверх `success` завершившегося нового прогона: поправка
+    видит, что тот уже `completed`, и выставляет его итог, а не оставляет блокировку."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    vcs = _CompletedDuringCorrectionVcs(uow, ReviewRunStatus.QUEUED)
+
+    _publish_first_run(uow, run, vcs)
+
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure", "success"]
+    assert vcs.checks[-1] != build_retarget_check()
+
+
 def test_gate_correction_gives_up_after_its_attempts() -> None:
     """GitHub отвергает все попытки: публикация не падает, сбой в логе, а head
     закроет `failure` упавшего нового прогона (`run_review`)."""
