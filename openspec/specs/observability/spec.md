@@ -553,3 +553,35 @@ Grafana SHALL получать дашборд «Обзор dmc-268» через 
 - **WHEN** спан попадает в хранилище трейсов
 - **THEN** у него `service.version` — sha образа и `deployment.environment.name` — окружение
   запуска
+
+### Requirement: Трейсы браузера — через публичный вход
+
+Коллектор SHALL принимать трейсы браузера только через nginx интерфейса: кабинет шлёт их на свой
+origin (`/otlp/v1/traces`), nginx проксирует на приёмник коллектора `otlp/browser`. Для этого коллектор и
+интерфейс SHALL стоять в отдельной `internal`-сети `dmc268-otlp`. В сеть входа `dmc268` коллектор
+SHALL NOT подключаться, порт OTLP на хосте SHALL NOT публиковаться. Сеть `dmc268-otlp` SHALL
+создаваться и при выключенном стеке: стек интерфейса подключается к ней по имени.
+
+#### Scenario: Стек включён
+
+- **WHEN** стенд развёрнут с `observability_enabled = true`
+- **THEN** `dmc268-otelcol` стоит в `dmc268-backend`, `dmc268-observability` и `dmc268-otlp`, а не в `dmc268`
+- **AND** у `dmc268-otlp` нет шлюза: из неё не выйти в интернет
+
+#### Scenario: Стек выключен
+
+- **WHEN** стенд развёрнут с `observability_enabled = false`
+- **THEN** сеть `dmc268-otlp` есть, коллектора нет, и стек интерфейса разворачивается без ошибок
+
+### Requirement: Трейсы браузера — только трейсы и под своим именем
+
+Приёмник браузера `otlp/browser` (OTLP/HTTP, порт 4319) SHALL входить только в конвейер
+`traces/browser`: тело из интернета SHALL NOT попадать в метрики и логи. Ресурс браузерных спанов
+SHALL задавать коллектор: `service.name` — `dmc-268-ui`, прочие атрибуты ресурса, кроме
+`telemetry.sdk.*`, `service.version` и `deployment.environment.name`, удаляются.
+
+#### Scenario: Браузер подписал спан чужим сервисом
+
+- **WHEN** на `/otlp/v1/traces` приходит спан с ресурсом `service.name = dmc-268-api` и своими атрибутами
+- **THEN** в Tempo спан лежит с `service.name = dmc-268-ui` и без чужих атрибутов ресурса
+- **AND** ни метрик, ни логов из этого запроса не появляется
