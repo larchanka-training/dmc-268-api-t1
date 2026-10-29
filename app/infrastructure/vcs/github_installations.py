@@ -126,9 +126,14 @@ class GitHubInstallationCatalog:
                 continue
             if installation.suspended_at is not None:
                 return None
-            if installation.repository_selection is None:
-                raise VcsError("GitHub API вернул установку без repository_selection на GET /user/installations")
-            return installation.repository_selection
+            # Поле строкой, а не enum в модели: неизвестное значение у любой установки ронял бы
+            # разбор всего `GET /user/installations`, а с ним и список репозиториев.
+            try:
+                return RepositorySelection(installation.repository_selection or "")
+            except ValueError:
+                raise VcsError(
+                    "GitHub API вернул установку без известного repository_selection на GET /user/installations"
+                ) from None
         return None
 
     def installation_repositories(self, access_token: Secret, installation_id: int) -> list[InstallationRepository]:
@@ -266,7 +271,7 @@ class _Installation(_GitHubModel):
     # Нет поля — не приостановлена: в документации оно есть всегда, `null` у живой.
     suspended_at: datetime | None = None
     # Нужно только Setup URL; в обоих ответах документации поле есть.
-    repository_selection: RepositorySelection | None = None
+    repository_selection: str | None = None
 
 
 class _Permissions(_GitHubModel):

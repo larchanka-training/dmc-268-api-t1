@@ -171,7 +171,6 @@ def disconnect_repository(
     return None
 
 
-
 def connect_installation(
     catalog: InstallationCatalog,
     uow: UnitOfWork,
