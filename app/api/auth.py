@@ -5,11 +5,12 @@
 `redirect` между ними живут в cookie `oauth_state` — 10 минут и только на
 путях `/api/v1/auth`. `redirect` из неё проверяется ещё раз в use case:
 cookie приходит от клиента. Любая ошибка callback — `302` на
-`/login?error=<код>`. Возврат с установки (Setup URL) подключает выбранные репозитории
-установки и уводит на «Репозитории» с итогом; без сессии — на вход с возвратом туда же
+`/login?error=<код>`. Возврат с установки (Setup URL) после `setup_action=install` подключает
+выбранные репозитории установки и уводит на «Репозитории» с итогом; без сессии — на вход с возвратом туда же
 (change `repositories-one-list`, design D7).
 """
 
+import logging
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -57,6 +58,8 @@ from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
 from app.domain.session import setup_state_matches
 from app.domain.vcs_errors import VcsError
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -211,10 +214,12 @@ _SETUP_DESCRIPTION = (
     "`install_url` списка GET /repositories, выданный этой сессии: без него или с чужим — "
     "ничего не подключает (`?connected=0`), к GitHub не обращается. `installation_id` не "
     "доверяется: ищется среди установок пользователя по его токену (`GET /user/installations`), "
-    "свежий список видимых репозиториев пишется в кэш. При «Only select repositories» подключает "
-    "репозитории установки, где у пользователя admin или maintain и которых в сервисе ещё нет; "
-    "выключенные не включает. При «All repositories» — ничего. Токен пользователя непригоден — "
-    "сессия закрывается, редирект на вход."
+    "свежий список видимых репозиториев пишется в кэш (сбой этого шага подключению не мешает). "
+    "Подключает только `setup_action=install` при «Only select repositories»: репозитории "
+    "установки, где у пользователя admin или maintain и которых в сервисе ещё нет; выключенные "
+    "не включает. `setup_action=update` и «All repositories» ничего не подключают "
+    "(`?connected=0`), кэш обновляется. Токен пользователя непригоден — сессия закрывается, "
+    "редирект на вход."
 )
 # Куда вернуть после входа, если сессии нет: та же страница, куда ведёт итог.
 _SETUP_LOGIN = "/login?redirect=/app/repositories"
@@ -270,14 +275,22 @@ def finish_github_setup(
     if installation_id is None:
         return _setup_done("setup_error=installation_not_found")
     # Подделанный переход с чужого сайта `state` этой сессии не знает: ничего не подключаем.
+    # Итог тот же, что «нечего подключать», а запись в логе показывает на стенде, вернул ли
+    # GitHub `state` (design D7). Значение `state` в лог не пишется.
     if state is None or not setup_state_matches(token, state):
+        _log.warning("Setup URL: state не совпал (%s), ничего не подключено", "нет" if state is None else "чужой")
         return _setup_done("connected=0")
     user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
     try:
-        connected = connecting.connect_installation(catalog, uow_factory(), user, installation_id, new_id, now)
+        connected = connecting.connect_installation(
+            catalog, uow_factory(), user, installation_id, new_id, now, connect_selected=setup_action == "install"
+        )
     except SessionClosed:
         return _setup_login(request)
-    except (VcsError, OAuthProviderUnavailable):
+    except (VcsError, OAuthProviderUnavailable) as error:
+        # Текст ошибки несёт HTTP-статус GitHub: `403` (например, SSO организации не
+        # авторизован для токена) так отличим от недоступного GitHub.
+        _log.warning("Setup URL: GitHub отказал: %s", error)
         return _setup_done("setup_error=provider_unavailable")
     if connected is None:
         return _setup_done("setup_error=installation_not_found")

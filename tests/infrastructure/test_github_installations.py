@@ -491,7 +491,15 @@ def test_installation_repositories_closed_for_the_token_is_a_vcs_error(status: i
     """Установку только что нашли: пустой список вместо сбоя скрыл бы его."""
     catalog = make_catalog(lambda request: httpx.Response(status, json={"message": "Not Found"}))
 
-    with pytest.raises(VcsError):
+    with pytest.raises(VcsError, match=f"HTTP {status}"):
+        catalog.installation_repositories(TOKEN, 7)
+
+
+def test_a_forbidden_installation_says_access_is_denied_not_that_github_is_down() -> None:
+    """`403` (SSO не авторизован) виден в тексте ошибки: в логе Setup URL — не «GitHub не ответил»."""
+    catalog = make_catalog(lambda request: httpx.Response(403, json={"message": "Resource protected by SAML"}))
+
+    with pytest.raises(VcsError, match="HTTP 403 .*SSO"):
         catalog.installation_repositories(TOKEN, 7)
 
 

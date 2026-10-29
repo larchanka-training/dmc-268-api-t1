@@ -14,6 +14,7 @@
 правом admin или maintain (`app/domain/repository_access.py`).
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,6 +32,9 @@ from app.domain.repository_access import (
     to_connect_on_setup,
     visible_for_connect,
 )
+from app.domain.vcs_errors import VcsError
+
+_log = logging.getLogger(__name__)
 
 
 class ConnectRefusal(StrEnum):
@@ -178,23 +182,30 @@ def connect_installation(
     installation_id: int,
     new_id: Callable[[], UUID],
     now: datetime,
+    *,
+    connect_selected: bool,
 ) -> int | None:
     """Возврат с установки GitHub App (Setup URL): подключить выбранные репозитории установки.
 
     `installation_id` из адреса не доверяется — ищется среди установок пользователя по его
     токену; нет — `None`. Найдена — свежий список видимых пишется в кэш (`catalog` с
-    `read=False`, design D3). «All repositories» — не подключается ничего; «Only select
-    repositories» — `to_connect_on_setup`: только вставка, выключенные не включаются (design
-    D7), поэтому не `connect_repository`. Вернуть число подключённых.
+    `read=False`, design D3), best-effort: сбой обхода установок в лог, подключение идёт
+    дальше. Подключает только `connect_selected` (`setup_action=install`) и только при «Only
+    select repositories» — `to_connect_on_setup`: только вставка, выключенные не включаются
+    (design D7), поэтому не `connect_repository`. Вернуть число подключённых.
     """
 
     def from_github(token: Secret) -> list[InstallationRepository] | None:
         selection = catalog.installation_selection(token, installation_id)
         if selection is None:
             return None
-        # Ради кэша: репозитории новой установки сразу видны в списке.
-        catalog.list_repositories(token)
-        if selection is RepositorySelection.ALL:
+        # Ради кэша: репозитории новой установки сразу видны в списке. Нужен только кэшу,
+        # поэтому сбой — не причина отказать в подключении по найденной установке.
+        try:
+            catalog.list_repositories(token)
+        except VcsError:
+            _log.warning("Setup URL: кэш видимости не обновлён, подключение продолжается", exc_info=True)
+        if not connect_selected or selection is RepositorySelection.ALL:
             return []
         return catalog.installation_repositories(token, installation_id)
 

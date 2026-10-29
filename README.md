@@ -283,9 +283,10 @@ uv run alembic heads               # должна быть ровно одна
 Выключить — `DELETE /api/v1/repositories/{id}`, с теми же правами: запись и история прогонов
 остаются; вебхук `pull_request` игнорируется, а `pull_request_review_thread` обрабатывается:
 иначе merge gate текущего head застрял бы красным. Повторный `POST` включает его обратно с
-прежним `id`. Возврат с экрана установки — Setup URL `GET /api/v1/auth/github/setup`: при «Only select
-repositories» подключает выбранные репозитории, где у пользователя admin или maintain и которых
-в сервисе ещё нет, только с `state` из `install_url` этой сессии. Прописываем его в настройках
+прежним `id`. Возврат с экрана установки — Setup URL `GET /api/v1/auth/github/setup`: после
+установки (`setup_action=install`) при «Only select repositories» подключает выбранные
+репозитории, где у пользователя admin или maintain и которых в сервисе ещё нет, только с `state`
+из `install_url` этой сессии; после изменения установки (`update`) только обновляет список. Прописываем его в настройках
 GitHub App после проверки на стенде, что GitHub возвращает `state` (design D7 change
 `repositories-one-list`). Запросы идут из лимита
 пользователя, `installation_id` не хранится. Нужен ключ `USER_TOKEN_ENCRYPTION_KEY` (см. «Ключ

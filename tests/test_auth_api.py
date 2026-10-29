@@ -326,10 +326,53 @@ def test_a_disconnected_repository_is_not_reconnected_by_the_setup_return(stand)
     )
     stand.uow.repositories.add(disconnected)
 
-    response = _return_from_github(client, action="update")
+    response = _return_from_github(client)
 
     assert response.headers["location"] == "/app/repositories?connected=0"
     assert _registered(stand) == {"101": disconnected}
+
+
+def test_an_update_of_the_installation_connects_nothing_but_refreshes_the_cache(stand) -> None:
+    """В установке A, B и C, ревью включено только у A: B и C оставлены выключенными намеренно.
+    Пользователь дописал в установку D и вернулся с `update` — ничего не включается."""
+    a, b, c, d = (InstallationRepository(str(n), f"octo-org/r{n}", "main", ADMIN) for n in (1, 2, 3, 4))
+    client, catalog = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [a, b, c, d])})
+    enabled = Repository(
+        id=new_id(),
+        provider=Provider.GITHUB,
+        provider_id="1",
+        full_name="octo-org/r1",
+        default_branch="main",
+        auto_review_enabled=True,
+        created_at=datetime(2026, 9, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 9, 1, tzinfo=UTC),
+        connected_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    stand.uow.repositories.add(enabled)
+
+    response = _return_from_github(client, action="update")
+
+    assert response.headers["location"] == "/app/repositories?connected=0"
+    assert _registered(stand) == {"1": enabled}
+    assert "list_repositories" in catalog.calls
+    assert "installation_repositories" not in catalog.calls
+
+
+def test_a_failed_cache_refresh_does_not_stop_the_connection(stand, caplog) -> None:
+    """Обход всех установок нужен только кэшу: его сбой не мешает подключить по нужной установке."""
+    client, catalog = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])})
+
+    def other_installation_fails(access_token):
+        raise VcsError("GitHub API: HTTP 503 на GET /user/installations/9/repositories")
+
+    catalog.list_repositories = other_installation_fails  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.WARNING):
+        response = _return_from_github(client)
+
+    assert response.headers["location"] == "/app/repositories?connected=1"
+    assert list(_registered(stand)) == ["101"]
+    assert "кэш видимости не обновлён" in caplog.text
 
 
 def test_all_repositories_connect_nothing(stand) -> None:
@@ -362,13 +405,16 @@ def test_a_foreign_or_missing_installation_is_not_found(stand, params) -> None:
     assert _registered(stand) == {}
 
 
-def test_github_unavailable_is_reported_and_connects_nothing(stand) -> None:
-    client, _ = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])}, error=VcsError("GitHub API: HTTP 503"))
+def test_github_unavailable_is_reported_and_connects_nothing(stand, caplog) -> None:
+    """Статус GitHub попадает в лог: `403` (SSO) отличим от недоступного GitHub."""
+    client, _ = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])}, error=VcsError("GitHub API: HTTP 403"))
 
-    response = _return_from_github(client)
+    with caplog.at_level(logging.WARNING):
+        response = _return_from_github(client)
 
     assert response.headers["location"] == "/app/repositories?setup_error=provider_unavailable"
     assert _registered(stand) == {}
+    assert "HTTP 403" in caplog.text
 
 
 def test_a_rejected_token_closes_the_session_and_goes_to_login(stand) -> None:
@@ -383,14 +429,21 @@ def test_a_rejected_token_closes_the_session_and_goes_to_login(stand) -> None:
 
 
 @pytest.mark.parametrize("state", [None, "forged", "é" * 10])
-def test_without_the_state_of_this_session_nothing_is_connected(stand, state) -> None:
-    """Подделанный переход с чужого сайта: `state` этой сессии он не знает — к GitHub не идём."""
+def test_without_the_state_of_this_session_nothing_is_connected(stand, caplog, state) -> None:
+    """Подделанный переход с чужого сайта: `state` этой сессии он не знает — к GitHub не идём.
+    В логе — что `state` не совпал (проверка на стенде), но не его значение."""
     client, catalog = _setup_stand(stand, {7: (RepositorySelection.SELECTED, [OWNED])})
 
-    response = _return_from_github(client, state=state)
+    with caplog.at_level(logging.INFO):
+        response = _return_from_github(client, state=state)
 
     assert response.headers["location"] == "/app/repositories?connected=0"
     assert (_registered(stand), catalog.calls) == ({}, [])
+    # Только записи сервиса: тестовый клиент httpx сам пишет адрес запроса в лог.
+    logged = " ".join(r.getMessage() for r in caplog.records if r.name == "app.api.auth")
+    assert "state не совпал" in logged
+    if state is not None:
+        assert state not in logged
 
 
 def test_the_state_of_another_session_is_refused(stand) -> None:

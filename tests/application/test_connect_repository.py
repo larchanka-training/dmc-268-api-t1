@@ -284,4 +284,4 @@ def test_setup_counts_only_rows_it_actually_inserted() -> None:
     uow.repositories.add = lambda repository: False  # type: ignore[method-assign]
     catalog = FakeInstallationCatalog([API], installations={7: (RepositorySelection.SELECTED, [API])})
 
-    assert connect_installation(catalog, uow, _user(), 7, lambda: NEW_ID, NOW) == 0
+    assert connect_installation(catalog, uow, _user(), 7, lambda: NEW_ID, NOW, connect_selected=True) == 0

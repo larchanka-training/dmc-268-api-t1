@@ -408,17 +408,27 @@
 
 ### Requirement: Возврат с установки GitHub App
 
-`GET /api/v1/auth/github/setup` SHALL требовать сессию и `state` из `install_url` этой сессии и SHALL сверять `installation_id` с установками пользователя по его токену. При «Only select repositories» SHALL подключаться репозитории установки с admin или maintain, которых нет в сервисе; выключенные SHALL NOT включаться; при «All repositories» — ничего. Ответ SHALL быть `302` на `/app/repositories` с итогом.
+`GET /api/v1/auth/github/setup` SHALL требовать сессию и `state` из `install_url` этой сессии и SHALL сверять `installation_id` с установками пользователя по его токену. Подключать SHALL только `setup_action=install` при «Only select repositories»: репозитории установки с admin или maintain, которых нет в сервисе; выключенные SHALL NOT включаться. `update` и «All repositories» SHALL NOT подключать ничего. Ответ SHALL быть `302` на `/app/repositories` с итогом.
 
 #### Scenario: Возврат без своего state
 
 - **WHEN** пользователь с сессией приходит на `GET /api/v1/auth/github/setup` с `setup_action=install` и без `state` или со `state` другой сессии — например, по подделанной ссылке с чужого сайта
-- **THEN** ответ — `302` на `/app/repositories?connected=0`, ничего не подключено, к GitHub запроса нет
+- **THEN** ответ — `302` на `/app/repositories?connected=0`, ничего не подключено, к GitHub запроса нет; в логе — что `state` не совпал, без его значения
 
 #### Scenario: Выключенный не включается
 
-- **WHEN** среди выбранных репозиториев установки есть выключенный, и пользователь возвращается на Setup URL со своим `state` и `setup_action=update`
+- **WHEN** среди выбранных репозиториев установки есть выключенный, и пользователь возвращается на Setup URL со своим `state` и `setup_action=install`
 - **THEN** выключенный остаётся выключенным, ответ — `302` на `/app/repositories?connected=0`
+
+#### Scenario: Изменение установки ничего не подключает
+
+- **WHEN** в установке выбраны A, B и C, ревью включено только у A, пользователь дописал в установку D и вернулся на Setup URL со своим `state` и `setup_action=update`
+- **THEN** ответ — `302` на `/app/repositories?connected=0`, B, C и D не подключены, кэш видимости обновлён
+
+#### Scenario: Сбой обновления кэша не мешает подключению
+
+- **WHEN** установка найдена и выбранные репозитории GitHub отдал, а обход всех установок пользователя для кэша упал на другой установке
+- **THEN** выбранные репозитории подключены, ответ — `302` на `/app/repositories?connected=<N>`, сбой записан в лог
 
 #### Scenario: Токен пользователя непригоден
 
@@ -447,8 +457,8 @@
 
 #### Scenario: GitHub недоступен
 
-- **WHEN** GitHub не ответил при сверке установки или списка репозиториев
-- **THEN** ответ — `302` на `/app/repositories?setup_error=provider_unavailable`
+- **WHEN** GitHub не ответил или отказал (например, `403`: SSO организации не авторизован) при сверке установки или чтении её репозиториев
+- **THEN** ответ — `302` на `/app/repositories?setup_error=provider_unavailable`, HTTP-статус GitHub записан в лог
 
 #### Scenario: Без сессии
 

@@ -142,8 +142,10 @@ class GitHubInstallationCatalog:
         try:
             return [r for batch in self._installation_repositories(access_token, installation_id) for r in batch]
         except _Inaccessible as failure:
+            # `403` не из-за лимита — чаще всего SSO организации не авторизован для токена.
+            hint = " (доступ запрещён, например SSO организации не авторизован)" if failure.status == 403 else ""
             raise VcsError(
-                f"GitHub API: HTTP {failure.status} на GET /user/installations/{installation_id}/repositories"
+                f"GitHub API: HTTP {failure.status} на GET /user/installations/{installation_id}/repositories{hint}"
             ) from None
 
     def app_installed(self, full_name: str) -> bool:
