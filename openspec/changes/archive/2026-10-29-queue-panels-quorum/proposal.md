@@ -5,6 +5,7 @@
 ## What Changes
 
 - Панели очереди и комментарий скрейпа RabbitMQ в Prometheus смотрят на `review_jobs.qq`.
+- Панель «Возраст старшего сообщения» заменена на «Потребители и сообщения в работе»: `rabbitmq_queue_head_message_timestamp` quorum-очередь не экспортирует (проверено на `rabbitmq:4.4-alpine`, per-object), а зависший воркер видно по `rabbitmq_queue_consumers` = 0 или по `rabbitmq_queue_messages_unacked`, который держится дольше худшего прогона.
 
 ## Capabilities
 

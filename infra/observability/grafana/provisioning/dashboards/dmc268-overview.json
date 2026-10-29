@@ -177,14 +177,15 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Возраст старшего сообщения в review_jobs.qq",
-      "description": "Сколько секунд лежит первое сообщение очереди — сигнал зависшего воркера при малой глубине. Очередь classic, метрику поддерживает плагин; пока очередь пуста, она равна NaN и панель без данных — это норма.",
+      "title": "Потребители и сообщения в работе review_jobs.qq",
+      "description": "Сигнал зависшего воркера при малой глубине: 0 потребителей — воркер не слушает очередь; сообщение в работе (unacked) дольше худшего прогона — воркер завис на нём. Возраст первого сообщения (head_message_timestamp) quorum-очередь не отдаёт.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 6, "x": 6, "y": 16 },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
+          "unit": "short",
           "min": 0,
+          "decimals": 0,
           "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
         },
         "overrides": []
@@ -197,10 +198,18 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "time() - rabbitmq_queue_head_message_timestamp{queue=\"review_jobs.qq\"}",
-          "legendFormat": "возраст, с",
+          "expr": "rabbitmq_queue_consumers{queue=\"review_jobs.qq\"}",
+          "legendFormat": "потребители",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "rabbitmq_queue_messages_unacked{queue=\"review_jobs.qq\"}",
+          "legendFormat": "в работе",
+          "range": true,
+          "refId": "B"
         }
       ]
     },

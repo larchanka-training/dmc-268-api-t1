@@ -21,8 +21,8 @@ scrape_configs:
 
   - job_name: rabbitmq
     # per-object, а не агрегированный /metrics: панель очереди строится по
-    # лейблу queue (rabbitmq_queue_messages{queue="review_jobs.qq"}), возраст
-    # старшего сообщения — rabbitmq_queue_head_message_timestamp; агрегат
+    # лейблу queue (rabbitmq_queue_messages{queue="review_jobs.qq"}), потребители
+    # и сообщения в работе — rabbitmq_queue_consumers и _messages_unacked; агрегат
     # лейблы теряет. Очередей у сервиса единицы — per-object дорогого
     # не стоит.
     metrics_path: /metrics/per-object
