@@ -111,10 +111,10 @@ run "observability_stack_without_secrets_rejected" {
 }
 
 # Сети и порт стека по плану (то же сверяет tests/test_infra_isolation.py по
-# тексту): collector и prometheus — в данных и в стеке (collector ещё и в
-# сети socket-proxy), grafana — в стеке и
-# в сети публикации порта; сеть стека internal, сеть порта Grafana — нет;
-# порт Grafana публикуется на bind_ip.
+# тексту): collector — в данных, в стеке, в dmc268-otlp и в сети socket-proxy,
+# prometheus — в данных и в стеке, grafana — в стеке и в сети публикации порта; сети стека и
+# dmc268-otlp internal, сеть порта Grafana — нет; порт Grafana публикуется на
+# bind_ip.
 run "stack_networks_and_grafana_port_follow_their_purpose" {
   command = plan
 
@@ -126,10 +126,10 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
 
   assert {
     condition = toset([for n in docker_container.otelcol[0].networks_advanced : n.name]) == toset([
-      docker_network.backend.name, docker_network.observability[0].name,
+      docker_network.backend.name, docker_network.observability[0].name, docker_network.otlp.name,
       docker_network.observability_docker_proxy[0].name,
     ])
-    error_message = "Коллектор должен стоять ровно в трёх сетях: данных (receiver postgres и приём OTLP), стека (экспортёры, скрейп collector) и socket-proxy (receiver docker_stats)."
+    error_message = "Коллектор должен стоять ровно в четырёх сетях: данных (receiver postgres и приём OTLP сервисов), стека (экспортёры, скрейп collector), dmc268-otlp (трейсы браузера через nginx интерфейса) и socket-proxy (receiver docker_stats)."
   }
 
   assert {
@@ -137,6 +137,11 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
       docker_network.backend.name, docker_network.observability[0].name,
     ])
     error_message = "Prometheus должен стоять ровно в двух сетях: данных (скрейп rabbitmq) и стека (скрейп collector и node-exporter)."
+  }
+
+  assert {
+    condition     = docker_network.otlp.internal == true
+    error_message = "Сеть dmc268-otlp — internal: через неё интерфейс ходит в коллектор, выхода в интернет у коллектора быть не должно."
   }
 
   assert {
@@ -195,5 +200,16 @@ run "postgres_command_without_the_stack_has_no_preload" {
       && !contains(docker_container.postgres.command, "pg_stat_statements.track_utility=off")
     )
     error_message = "С выключенным стеком команда postgres не должна нести pg_stat_statements ни в каком виде."
+  }
+}
+
+run "otlp_network_exists_without_the_stack" {
+  command = plan
+
+  # observability_enabled по умолчанию false. К dmc268-otlp по имени подключается
+  # стек dmc-268-ui-t1: без сети его plan упал бы на data source.
+  assert {
+    condition     = docker_network.otlp.name == "dmc268-otlp"
+    error_message = "Сеть dmc268-otlp должна создаваться и с выключенным стеком: на неё по имени ссылается стек интерфейса."
   }
 }

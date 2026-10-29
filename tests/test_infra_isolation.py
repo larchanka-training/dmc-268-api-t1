@@ -33,11 +33,13 @@ EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
     "api": frozenset({"dmc268", "backend"}),
     "worker": frozenset({"backend", "egress"}),
     # Стек наблюдаемости: цели receiver-ов и OTLP — в сети данных, остальное
-    # — в своей сети. В dmc268 (там UI) из стека не ходит никто. Grafana —
-    # ещё и в отдельной сети dmc268-grafana: порты на internal-сети Docker не
-    # публикует, поэтому порт Grafana живёт в не-internal сети.
-    # Коллектор — ещё и в сети socket-proxy: receiver docker_stats.
-    "otelcol": frozenset({"backend", "observability", "observability_docker_proxy"}),
+    # — в своей сети. В dmc268 (там UI) из стека не ходит никто: трейсы
+    # браузера коллектор принимает из отдельной internal-сети dmc268-otlp, куда
+    # подключается и интерфейс. Grafana — ещё и в отдельной сети dmc268-grafana:
+    # порты на internal-сети Docker не публикует, поэтому порт Grafana живёт в
+    # не-internal сети. Коллектор — ещё и в сети socket-proxy: receiver
+    # docker_stats.
+    "otelcol": frozenset({"backend", "observability", "otlp", "observability_docker_proxy"}),
     "loki": frozenset({"observability"}),
     "tempo": frozenset({"observability"}),
     "prometheus": frozenset({"backend", "observability"}),
@@ -146,6 +148,13 @@ def test_observability_network_has_no_way_out() -> None:
     assert network_is_internal(text, "grafana") is False, (
         "сеть dmc268-grafana не должна быть internal: её единственное назначение — "
         "публикуемый порт Grafana, а порты на internal-сети Docker не публикует"
+    )
+
+
+def test_browser_otlp_network_has_no_way_out() -> None:
+    assert network_is_internal(read_infra_text(), "otlp") is True, (
+        "сеть dmc268-otlp должна быть internal: через неё интерфейс ходит в коллектор, "
+        "а без internal коллектор получает выход в интернет"
     )
 
 
