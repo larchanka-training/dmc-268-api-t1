@@ -39,3 +39,17 @@ def test_connected_at_is_filled_from_created_at_and_dropped_on_downgrade(clean_d
     with clean_db.connect() as conn:
         rows = conn.execute(text("SELECT id, connected_at FROM repositories")).all()
     assert [tuple(row) for row in rows] == [(repo_id, NOW)]
+
+
+def test_an_insert_without_connected_at_creates_a_connected_repository(clean_db) -> None:
+    """Старый код в окне деплоя и ручная вставка из README колонку не знают: запись — включённая."""
+    with clean_db.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO repositories (id, provider, provider_id, full_name, default_branch, auto_review_enabled)"
+                " VALUES (gen_random_uuid(), 'github', '1', 'acme/api', 'main', true)"
+            )
+        )
+    with clean_db.connect() as conn:
+        connected_at = conn.execute(text("SELECT connected_at FROM repositories")).scalar_one()
+    assert connected_at is not None

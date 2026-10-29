@@ -294,16 +294,15 @@ uv run alembic heads               # должна быть ровно одна
 ```bash
 psql "$DATABASE_URL" -c "
   INSERT INTO repositories (id, provider, provider_id, full_name,
-                            default_branch, auto_review_enabled, connected_at)
+                            default_branch, auto_review_enabled)
   VALUES (gen_random_uuid(), 'github', '<числовой id репозитория>',
-          '<owner>/<имя>', '<ветка по умолчанию>', true, now());"
+          '<owner>/<имя>', '<ветка по умолчанию>', true);"
 ```
 
 Числовой `id` и `full_name` репозитория — из API хостинга (`GET /repos/{owner}/{repo}`).
 Повторная вставка того же `(provider, provider_id)` упадёт на уникальном
 индексе `uq_repositories_provider_id` — повторное внесение невозможно по
-конструкции. Без `connected_at` запись считается выключенной, и вебхуки по ней
-игнорируются.
+конструкции.
 
 ## Правила ревью и разрешения GitHub App
 

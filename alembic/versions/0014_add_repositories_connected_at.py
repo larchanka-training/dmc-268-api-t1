@@ -26,11 +26,16 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     """Upgrade схемы."""
-    op.add_column('repositories', sa.Column('connected_at', sa.DateTime(timezone=True), nullable=True))
+    # Умолчание `now()`: в окне деплоя старый API пишет на новую схему без колонки, и его
+    # подключение без умолчания создало бы выключенный репозиторий.
+    op.add_column(
+        'repositories',
+        sa.Column('connected_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
+    )
     # Таблица маленькая — одним UPDATE, без пачек.
     op.execute('UPDATE repositories SET connected_at = created_at')
 
 
 def downgrade() -> None:
-    """Downgrade схемы."""
+    """Downgrade схемы: выключенные снова включаются — состояние выключения хранить негде."""
     op.drop_column('repositories', 'connected_at')

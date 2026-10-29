@@ -30,6 +30,7 @@ from app.domain.entities import (
     ProviderToken,
     Repository,
     RepositoryPermissions,
+    Secret,
 )
 from app.domain.enums import Provider
 from app.domain.ids import new_id
@@ -812,6 +813,32 @@ def test_disconnecting_an_invisible_repository_looks_exactly_like_a_missing_one(
     strip = lambda body: {k: v for k, v in body.items() if k not in {"trace_id", "instance"}}
     assert strip(invisible.json()) == strip(missing.json())
     assert invisible.json()["code"] == "REPOSITORY_NOT_FOUND"
+    assert uow.repositories.get(repository.id) == repository
+
+
+class _AccessRevokedCatalog(FakeInstallationCatalog):
+    """Кэш видимости ещё отдаёт репозиторий, а свежий `GET /repositories/{id}` — уже нет."""
+
+    def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
+        super().user_repository(access_token, provider_id)
+        return None
+
+
+def test_disconnecting_a_repository_github_no_longer_shows_looks_like_a_missing_one() -> None:
+    """Доступ отозван в пределах TTL кэша: тот же `404`, что у несуществующего (design D6)."""
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    catalog = _AccessRevokedCatalog([API])
+    client = _client(uow, catalog)
+
+    revoked = _disconnect(client, str(repository.id))
+    missing = _disconnect(client, str(new_id()))
+
+    assert "user_repository" in catalog.calls
+    assert revoked.status_code == missing.status_code == 404
+    strip = lambda body: {k: v for k, v in body.items() if k not in {"trace_id", "instance"}}
+    assert strip(revoked.json()) == strip(missing.json())
+    assert revoked.json()["code"] == "REPOSITORY_NOT_FOUND"
     assert uow.repositories.get(repository.id) == repository
 
 
