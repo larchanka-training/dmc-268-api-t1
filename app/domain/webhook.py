@@ -1,8 +1,9 @@
 """Извлечение события вебхука GitHub из payload'а.
 
-Запускают ревью только `opened` и `synchronize` от своих авторов (`OWNER`,
-`MEMBER`, `COLLABORATOR`); `reopened`, `closed`, прочие действия и PR посторонних
-игнорируются — пользователь переназначает бота ревьюером сам.
+Запускают ревью только `opened` и `synchronize`; `reopened`, `closed` и прочие
+действия игнорируются — пользователь переназначает бота ревьюером сам. Автора
+PR проверяет `is_trusted_author` у вызывающего: ревьюятся только свои авторы
+(`OWNER`, `MEMBER`, `COLLABORATOR`), отказ use case пишет в лог.
 Функция чистая и робкая к мусорному payload'у: всё, что не похоже на событие
 pull request, даёт `None`, чтобы эндпоинт отвечал «ignored», а не 500.
 `installation_id` достаётся из каждого payload'а — мульти-репозиторий по
@@ -33,8 +34,6 @@ def extract_github_event(payload: dict[str, Any]) -> WebhookEvent | None:
         if payload["action"] not in TRIGGERING_ACTIONS:
             return None
         pull_request = payload["pull_request"]
-        if pull_request.get("author_association") not in TRUSTED_AUTHOR_ASSOCIATIONS:
-            return None
         head = pull_request["head"]
         base = pull_request["base"]
         return WebhookEvent(
@@ -48,6 +47,12 @@ def extract_github_event(payload: dict[str, Any]) -> WebhookEvent | None:
             target_branch=base["ref"],
             title=pull_request["title"],
             author=pull_request["user"]["login"],
+            author_association=pull_request.get("author_association"),
         )
     except (KeyError, TypeError):
         return None
+
+
+def is_trusted_author(event: WebhookEvent) -> bool:
+    """Автор PR — свой: ревью тратит ключ модели только на его PR."""
+    return event.author_association in TRUSTED_AUTHOR_ASSOCIATIONS

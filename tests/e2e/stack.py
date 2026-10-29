@@ -99,6 +99,7 @@ def webhook_body(pull: PullRequest, action: str = "opened") -> bytes:
             "title": pull.title,
             "body": pull.body or None,
             "user": {"login": pull.author},
+            "author_association": "MEMBER",
             "head": {"sha": pull.head_sha, "ref": pull.head_ref},
             "base": {"sha": pull.base_sha, "ref": pull.base_ref},
         },

@@ -326,6 +326,11 @@ App нужно разрешение **Contents: read**. Без него прог
 того, у кого есть право записи. С источником GitHub не даст смёржить, если статус выставил
 кто-то другой.
 
+PR авторов вне `OWNER`, `MEMBER` и `COLLABORATOR` (по `author_association` из вебхука) бот
+не ревьюит, и проверки `dmc-268-ai-review` на таком PR нет: это временная защита ключа
+модели от PR'ов из форков, до биллинга. Если проверка обязательная, такой PR смёржит
+только admin в обход правила.
+
 В интерфейсе: Settings → Rules → Rulesets → New branch ruleset → Require status checks
 to pass → Add checks → `dmc-268-ai-review`, источник — наш App вместо «Any source». App
 появляется в списке источников, только когда он недавно ставил check run в этом

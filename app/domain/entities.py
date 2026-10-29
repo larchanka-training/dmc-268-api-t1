@@ -366,6 +366,8 @@ class WebhookEvent:
     нейтральны к нему. `action` — исходное действие GitHub (`opened`,
     `synchronize`): только эти два проходят через `extract_github_event`,
     и оно же переезжает в `ReviewJob.action` без преобразований.
+    `author_association` — связь автора с репозиторием по GitHub (`None`, если
+    поля нет); по ней `is_trusted_author` отсекает PR посторонних.
     """
 
     action: str
@@ -378,6 +380,7 @@ class WebhookEvent:
     target_branch: str
     title: str
     author: str
+    author_association: str | None
 
 
 @dataclass(frozen=True, slots=True)

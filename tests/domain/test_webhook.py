@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from app.domain.entities import WebhookEvent
-from app.domain.webhook import extract_github_event
+from app.domain.webhook import extract_github_event, is_trusted_author
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 
@@ -37,6 +37,7 @@ def test_opened_payload_returns_full_event() -> None:
         target_branch="develop",
         title="feat: приём вебхуков и VCS-шлюз",
         author="ilyassakhanov",
+        author_association="MEMBER",
     )
 
 
@@ -117,7 +118,9 @@ def test_garbage_payload_is_ignored_without_raising(payload: dict[str, Any]) -> 
 def test_a_pr_of_an_own_author_starts_a_review(association: str) -> None:
     payload = _load_payload("github_webhook_opened.json")
     payload["pull_request"]["author_association"] = association
-    assert extract_github_event(payload) is not None
+    event = extract_github_event(payload)
+    assert event is not None
+    assert is_trusted_author(event)
 
 
 @pytest.mark.parametrize(
@@ -130,4 +133,6 @@ def test_a_pr_of_an_outside_author_is_ignored(association: str | None) -> None:
         del payload["pull_request"]["author_association"]
     else:
         payload["pull_request"]["author_association"] = association
-    assert extract_github_event(payload) is None
+    event = extract_github_event(payload)
+    assert event is not None
+    assert not is_trusted_author(event)

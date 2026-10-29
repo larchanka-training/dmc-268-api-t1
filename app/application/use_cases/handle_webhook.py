@@ -1,7 +1,9 @@
 """Use case приёма вебхука GitHub: от события до задачи в очереди.
 
 Оркестрирует чистые функции домена и порты: извлекает событие из payload'а,
-ищет зарегистрированный репозиторий, достаёт метаданные PR через
+отсекает PR посторонних авторов (ревьюятся только `OWNER`, `MEMBER`,
+`COLLABORATOR` — временная защита ключа модели до биллинга; отказ — `ignored`
+и запись в лог), ищет зарегистрированный репозиторий, достаёт метаданные PR через
 `VcsGateway` (сбой — 502 ещё до создания записей) и создаёт `ReviewRun`.
 Дифф use case не запрашивает: его размер задаёт автор PR, а GitHub ждёт ответа
 на доставку 10 секунд. Дифф с лимитом размера достаёт и разбирает воркер
@@ -70,7 +72,7 @@ from app.domain.enums import (
 )
 from app.domain.lifecycle import advance
 from app.domain.vcs_errors import VcsError
-from app.domain.webhook import extract_github_event
+from app.domain.webhook import extract_github_event, is_trusted_author
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +82,7 @@ class WebhookOutcome:
     """Результат приёма вебхука: одна из пяти веток.
 
     `ignored` — событие не запускает ревью (`reopened`, неизвестное действие,
-    незарегистрированный репозиторий): записей нет, задачи нет. `failure` —
+    PR постороннего автора, незарегистрированный репозиторий): записей нет, задачи нет. `failure` —
     VCS недоступен: прогон не создан, задачи нет. `duplicate` — на этот
     коммит уже есть активный или завершённый не-failed прогон по вебхуку,
     найденный до вставки и до обновления merge_request. `conflict` — гонку отклонил уникальный индекс, проигравший
@@ -118,6 +120,14 @@ def handle_webhook_event(
     """
     event = extract_github_event(payload)
     if event is None:
+        return WebhookOutcome(kind="ignored")
+    if not is_trusted_author(event):
+        # Логин не пишем: связи с репозиторием и номера PR хватает для разбора.
+        logger.info(
+            "PR #%d не ревьюится: автор не свой (author_association=%s)",
+            event.pr_number,
+            event.author_association,
+        )
         return WebhookOutcome(kind="ignored")
 
     # Короткое чтение: транзакция живёт только на SELECT репозитория.

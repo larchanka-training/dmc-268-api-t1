@@ -6,6 +6,7 @@ success — с точными записями и задачей, а не с «�
 тем же браузером событий.
 """
 
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -176,6 +177,27 @@ def test_unknown_actions_are_ignored(action: str) -> None:
     assert outcome.kind == "ignored"
     assert uow.commits == 0
     assert queue.jobs == []
+
+
+def test_a_pr_of_an_outside_author_is_ignored_and_logged(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Отказ не тихий: в логе связь автора и номер PR, логина нет."""
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(logging.getLogger("app.application.use_cases.handle_webhook"), "disabled", False)
+    payload = webhook_payload()
+    payload["pull_request"]["author_association"] = "FIRST_TIME_CONTRIBUTOR"
+    uow = FakeUow()
+    uow.repositories.add(a_repository())
+    vcs = FakeVcs()
+    queue = FakeQueue()
+
+    outcome = handle_webhook_event(payload, uow, vcs, queue, now=lambda: NOW, new_id=uuid4)
+
+    assert outcome.kind == "ignored"
+    assert (vcs.calls, uow.commits, queue.jobs) == ([], 0, [])
+    assert "PR #6 не ревьюится: автор не свой (author_association=FIRST_TIME_CONTRIBUTOR)" in caplog.text
+    assert payload["pull_request"]["user"]["login"] not in caplog.text
 
 
 def test_unregistered_repository_is_ignored_without_records() -> None:
