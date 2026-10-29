@@ -366,6 +366,7 @@ EOF
 
 - `stub` - заглушка без похода к модели: прогон доходит до `completed` с пустым ревью. Её выбирает `.env.example`; у `docker compose` значения по умолчанию нет.
 - `ollama` - локальная модель в нашей сети (`OLLAMA_BASE_URL`, `OLLAMA_MODEL`).
+- `eurorouter` - hosted-провайдер Eurorouter основным и единственным (`EUROROUTER_BASE_URL`, `EUROROUTER_MODEL`, `EUROROUTER_API_KEYS`): код проверяемых репозиториев уходит ему на каждом прогоне. Так работает стенд — Ollama там нет (#245).
 
 Локальная модель поднимается профилем compose:
 
@@ -376,8 +377,8 @@ docker compose exec ollama ollama pull qwen2.5-coder:7b
 docker compose up -d worker
 ```
 
-Eurorouter (OpenAI-совместимый hosted-провайдер) подключается только фоллбэком после локальной модели и только при `LLM_HOSTED_FALLBACK=true` вместе с `EUROROUTER_BASE_URL`, `EUROROUTER_MODEL` и `EUROROUTER_API_KEYS` (ключи через запятую).
-Включение отправляет код проверяемых репозиториев за пределы нашей сети; какие провайдеры включены, воркер пишет в лог при старте.
+Фоллбэком после локальной модели Eurorouter подключается при `LLM_BACKEND=ollama` и `LLM_HOSTED_FALLBACK=true` вместе с `EUROROUTER_BASE_URL`, `EUROROUTER_MODEL` и `EUROROUTER_API_KEYS` (ключи через запятую).
+С `LLM_BACKEND=eurorouter` фоллбэк не сочетается. Оба способа отправляют код проверяемых репозиториев за пределы нашей сети; какие провайдеры включены, воркер пишет в лог при старте.
 
 Окно модели (`LLM_CONTEXT_WINDOW_TOKENS`) должно вмещать пакет контекста (`CONTEXT_MAX_TOKENS`), системный промпт и резерв ответа (`LLM_MAX_OUTPUT_TOKENS`): иначе воркер не стартует.
 Все переменные с пояснениями - в [`.env.example`](.env.example).

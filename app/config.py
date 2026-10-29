@@ -219,9 +219,11 @@ class Settings(BaseSettings):
     # Провайдеры модели (change add-llm-gateway, design D3 и D7). Не задан -
     # воркер не стартует: заглушка выбирается только явно. Необязательна здесь,
     # потому что настройки общие с API, которому модель не нужна.
-    llm_backend: Literal["stub", "ollama"] | None = Field(
+    # eurorouter - hosted-провайдер основным и единственным: явный выбор отправлять
+    # код проверяемых репозиториев наружу (change eurorouter-primary-backend).
+    llm_backend: Literal["stub", "ollama", "eurorouter"] | None = Field(
         default=None,
-        description="Адаптер модели воркера: stub или ollama; обязателен для воркера",
+        description="Адаптер модели воркера: stub, ollama или eurorouter; обязателен для воркера",
     )
     ollama_base_url: str = Field(
         default="http://ollama:11434",
@@ -231,8 +233,8 @@ class Settings(BaseSettings):
         default="",
         description="Модель Ollama; обязательна при LLM_BACKEND=ollama",
     )
-    # Код проверяемого репозитория уходит hosted-провайдеру только при явном
-    # включении и только после сбоя локальной модели: основным он не бывает.
+    # Код проверяемого репозитория уходит hosted-провайдеру только по явному
+    # выбору: этим флагом - после сбоя локальной модели, или LLM_BACKEND=eurorouter.
     llm_hosted_fallback: bool = Field(
         default=False,
         description="Включить Eurorouter фоллбэком после локальной модели",
@@ -305,10 +307,10 @@ class Settings(BaseSettings):
     def _check_model_providers(self) -> Self:
         if self.llm_backend == "ollama" and not self.ollama_model:
             raise ValueError("OLLAMA_MODEL обязателен при LLM_BACKEND=ollama")
-        if not self.llm_hosted_fallback:
+        if self.llm_hosted_fallback and self.llm_backend != "ollama":
+            raise ValueError("LLM_HOSTED_FALLBACK требует LLM_BACKEND=ollama: фоллбэк - только после локальной модели")
+        if not self.llm_hosted_fallback and self.llm_backend != "eurorouter":
             return self
-        if self.llm_backend != "ollama":
-            raise ValueError("LLM_HOSTED_FALLBACK требует LLM_BACKEND=ollama: hosted - только фоллбэк")
         missing = [
             name
             for name, value in (
@@ -319,13 +321,14 @@ class Settings(BaseSettings):
             if not value
         ]
         if missing:
-            raise ValueError(f"LLM_HOSTED_FALLBACK=true требует {', '.join(missing)}")
+            needs = "LLM_BACKEND=eurorouter" if self.llm_backend == "eurorouter" else "LLM_HOSTED_FALLBACK=true"
+            raise ValueError(f"{needs} требует {', '.join(missing)}")
         return self
 
     @property
     def llm_call_worst_case_seconds(self) -> float:
         """Худший случай одного вызова модели: таймаут × попытки × провайдеры."""
-        if self.llm_backend != "ollama":
+        if self.llm_backend not in ("ollama", "eurorouter"):
             return 0.0
         providers = 2 if self.llm_hosted_fallback else 1
         return self.llm_timeout_seconds * self.llm_max_attempts * providers

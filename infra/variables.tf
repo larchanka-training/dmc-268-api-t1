@@ -171,11 +171,22 @@ variable "github_webhook_secret" {
 # молча публиковал бы пустые ревью (спека llm-gateway, «Выбор заглушки явный»).
 variable "llm_backend" {
   type        = string
-  description = "Адаптер модели воркера (LLM_BACKEND): stub - без похода к модели, ollama - локальная модель."
+  description = "Адаптер модели воркера (LLM_BACKEND): stub - без похода к модели, ollama - локальная модель, eurorouter - hosted-провайдер основным (код проверяемых репозиториев уходит ему)."
 
   validation {
-    condition     = contains(["stub", "ollama"], var.llm_backend)
-    error_message = "llm_backend - stub или ollama."
+    condition     = contains(["stub", "ollama", "eurorouter"], var.llm_backend)
+    error_message = "llm_backend - stub, ollama или eurorouter."
+  }
+
+  # Зеркало проверки в app/config.py: без реквизитов воркер не стартует, и
+  # выкат упал бы уже после пересоздания контейнеров.
+  validation {
+    condition = var.llm_backend != "eurorouter" || (
+      var.eurorouter_base_url != ""
+      && var.eurorouter_model != ""
+      && var.eurorouter_api_keys != ""
+    )
+    error_message = "llm_backend = eurorouter требует непустых eurorouter_base_url, eurorouter_model, eurorouter_api_keys."
   }
 }
 

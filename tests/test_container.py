@@ -266,6 +266,19 @@ def test_hosted_provider_is_only_ever_the_second(caplog: pytest.LogCaptureFixtur
     )
 
 
+def test_eurorouter_backend_is_the_only_provider_and_says_the_code_leaves(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    log = _built_gateway_log(caplog, llm_backend="eurorouter", **HOSTED)
+    assert log == (
+        "модель: Eurorouter (mistral-large-2411) основной, без фоллбэка: "
+        "код проверяемых репозиториев уходит hosted-провайдеру"
+    )
+    gateway = build_container(_model_settings(llm_backend="eurorouter", **HOSTED)).llm_gateway()
+    assert isinstance(gateway, FallbackLlmGateway)
+    assert [name for name, _ in gateway._providers] == ["Eurorouter"]
+
+
 def test_connection_to_a_model_host_times_out_long_before_the_answer_does() -> None:
     timeout = llm_http_timeout(_model_settings(**LOCAL, llm_timeout_seconds=300))
     assert (timeout.connect, timeout.read) == (10.0, 300)

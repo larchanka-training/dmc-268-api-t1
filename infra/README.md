@@ -144,9 +144,9 @@ tofu apply infra.tfplan
 
 **Воркер** `dmc268-worker` разворачивается из того же образа, что и API, с командой `python -m app.worker`. Портов у него нет: с остальным стеком он говорит только через очередь и базу, наружу — исходящими запросами к GitHub API (дифф, `.review/rules.md`, файлы для AST), поэтому получает те же `GITHUB_APP_ID` и `GITHUB_APP_PRIVATE_KEY`, что и API. Стартует, как и API, после миграций. HTTP-проверки у него нет, поэтому деплой считает воркер живым, если контейнер 30 секунд подряд запущен и ни разу не перезапустился.
 
-Адаптер модели воркера задаёт `llm_backend` (`LLM_BACKEND`): `stub` - без похода к модели, `ollama` - локальная модель. Значения по умолчанию нет: заглушка выбирается только явно, и деплой стенда передаёт `TF_VAR_llm_backend: stub` в `.github/workflows/deploy.yml`.
+Адаптер модели воркера задаёт `llm_backend` (`LLM_BACKEND`): `stub` - без похода к модели, `ollama` - локальная модель, `eurorouter` - hosted-провайдер основным. Значения по умолчанию нет: заглушка выбирается только явно. Деплой стенда передаёт `TF_VAR_llm_backend: eurorouter` в `.github/workflows/deploy.yml` (#245): Ollama на стенде нет, код проверяемых репозиториев уходит Eurorouter. `eurorouter` требует `eurorouter_base_url`, `eurorouter_model` и `eurorouter_api_keys`, без них план падает.
 `ollama` требует `ollama_model` и развёрнутой Ollama по `ollama_base_url`.
-Eurorouter подключается только фоллбэком после локальной модели и только при `llm_hosted_fallback = true` с `eurorouter_base_url`, `eurorouter_model` и `eurorouter_api_keys`: это решение отправляет код проверяемых репозиториев hosted-провайдеру.
+Фоллбэком после локальной модели Eurorouter подключается при `llm_hosted_fallback = true` с `eurorouter_base_url`, `eurorouter_model` и `eurorouter_api_keys`: это решение отправляет код проверяемых репозиториев hosted-провайдеру.
 
 Переменные, без которых `apply` не пройдёт (в CI приходят через `TF_VAR_*`):
 
@@ -161,7 +161,10 @@ Eurorouter подключается только фоллбэком после �
 | `user_token_encryption_key` | секрет `USER_TOKEN_KEY_DMC268_T1` — 32 байта в base64 (`openssl rand -base64 32`). Без него или с битым значением `apply` падает на проверке переменной: стенд не стартует без шифрования токенов пользователя. Генерация и установка — `README.md`, «Ключ шифрования токенов пользователя» |
 | `docker_host` | `ssh://stand`: хост `stand` в `~/.ssh/config` собирает `.github/actions/stand-ssh` из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
 | `bind_ip` | `127.0.0.1`: API снаружи не публикуется, к нему ходит интерфейс изнутри docker-сети |
-| `llm_backend` | `stub` прямо в `deploy.yml`: модели на стенде пока нет |
+| `llm_backend` | `eurorouter` прямо в `deploy.yml` (#245) |
+| `eurorouter_base_url` | переменная `AI_DMC268_URL`, та же, что у `eval.yml` |
+| `eurorouter_model` | файл `.github/eurorouter-model`, читает шаг «Поднять базу и брокер» в `deploy.yml` |
+| `eurorouter_api_keys` | секрет `AI_DMC268_T1`, тот же, что у `eval.yml` |
 
 Без следующих `apply` пройдёт, но VCS-шлюз и вход пользователей через GitHub работать не будут:
 
