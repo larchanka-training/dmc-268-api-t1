@@ -174,6 +174,25 @@ def test_a_delivery_without_a_pull_request_in_its_payload_is_skipped() -> None:
     assert hooks.redelivered == []
 
 
+def test_a_delivery_of_an_outside_author_is_not_redelivered(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Приём ответил бы `ignored`: повтор только потратил бы запрос к GitHub."""
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(logging.getLogger("app.application.webhook_redelivery"), "disabled", False)
+    hooks = FakeDeliveries([delivery(1, "a")])
+    payload = webhook_payload("opened")
+    payload["pull_request"]["author_association"] = "NONE"
+    payload["pull_request"]["head"]["repo"] = {"id": 1, "full_name": "stranger/dmc-268-api-t1", "fork": True}
+    hooks.delivery_payload = lambda delivery_id: payload  # type: ignore[method-assign]
+    vcs = FakeVcs()
+
+    assert run(hooks, vcs) == 0
+
+    assert (hooks.redelivered, vcs.calls) == ([], [])
+    assert "не запускает ревью (действие или автор)" in caplog.text
+
+
 def test_the_pass_stops_when_its_time_budget_is_spent(caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     """Часы — монотонные и подменены: каждый вызов на 12 с позже предыдущего."""
     caplog.set_level(logging.INFO)
