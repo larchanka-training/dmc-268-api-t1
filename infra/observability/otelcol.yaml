@@ -199,7 +199,8 @@ service:
       exporters: [otlphttp/tempo]
     metrics:
       receivers: [otlp, postgresql]
-      processors: [memory_limiter, transform/trim-metrics-resource, batch]
+      # Без batch: prometheus отдаёт точки по pull, пачка их только задерживала бы.
+      processors: [memory_limiter, transform/trim-metrics-resource]
       exporters: [prometheus]
     logs:
       receivers: [otlp]
