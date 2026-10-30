@@ -1,4 +1,4 @@
-"""Подключение репозитория к сервису: список доступных и регистрация.
+"""Подключение репозитория к сервису: список репозиториев и регистрация.
 
 Провайдер скрыт за портом `InstallationCatalog`, токен пользователя — за
 `call_with_user_token` (`app/application/use_cases/user_token.py`), хранение —
@@ -9,7 +9,7 @@
 
 Что пользователь видит, решает GitHub: список — ответ `/user/installations…`
 по токену пользователя, то есть пересечение «доступно приложению» и
-«доступно пользователю». Подключение — `GET /repositories/{id}` токеном
+«доступно пользователю», подключённые и нет вместе (change `repositories-one-list`). Подключение — `GET /repositories/{id}` токеном
 пользователя и проверка установки приложения на репозитории. Подключать — с
 правом admin или maintain (`app/domain/repository_access.py`).
 """
@@ -37,9 +37,10 @@ class ConnectRefusal(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class AvailableRepository:
+class ListedRepository:
     repository: InstallationRepository
-    already_connected: bool
+    # Запись в сервисе, если репозиторий подключали (в том числе выключенный); `None` — нет.
+    record: Repository | None
     # Подсказка интерфейсу, а не защита: `connect_repository` проверяет права сам (ui#45).
     can_connect: bool
 
@@ -52,19 +53,24 @@ class UserContext:
     session_id: UUID
 
 
-def list_available_repositories(
+def list_with_connections(
     catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, now: datetime
-) -> list[AvailableRepository]:
-    """Репозитории установок, видимые пользователю, с отметками: зарегистрирован ли каждый и
-    может ли пользователь его подключить — по правам из того же ответа GitHub."""
+) -> list[ListedRepository]:
+    """Репозитории установок, видимые пользователю, подключённые и нет, — по имени.
+
+    Подключён ли каждый, читается из базы одним запросом; может ли пользователь его
+    подключить — по правам из того же ответа GitHub. Порядок — `full_name` без учёта
+    регистра: у GitHub он уникален, страницы стабильны.
+    """
     repositories = list_user_repositories(catalog, uow, user, now)
     with uow:
         provider_ids = [repository.provider_id for repository in repositories]
-        connected = {r.provider_id for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
-    return [
-        AvailableRepository(r, already_connected=r.provider_id in connected, can_connect=can_connect(r.permissions))
+        records = {r.provider_id: r for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
+    listed = [
+        ListedRepository(r, record=records.get(r.provider_id), can_connect=can_connect(r.permissions))
         for r in repositories
     ]
+    return sorted(listed, key=lambda item: item.repository.full_name.casefold())
 
 
 def list_user_repositories(
@@ -73,7 +79,7 @@ def list_user_repositories(
     """Репозитории установок, видимые пользователю у провайдера, — ответ GitHub без чтения своей базы.
 
     Видимость прогонов (GET /reviews, GET /events) сопоставляет их с подключёнными
-    сама, одним запросом, — отметка `already_connected` ей не нужна.
+    сама, одним запросом, — запись в сервисе ей не нужна.
     """
     return call_with_user_token(uow, user.oauth, user.session_id, now, catalog.list_repositories)
 

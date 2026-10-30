@@ -284,10 +284,10 @@ def test_the_api_vcs_client_keeps_a_short_timeout_and_the_worker_gets_thirty_sec
     api = build_container(SETTINGS).vcs_gateway()
     worker = build_container(SETTINGS, vcs_limits=WORKER_VCS_LIMITS).vcs_gateway()
 
-    assert api._client.timeout == httpx.Timeout(5.0)  # type: ignore[attr-defined]
-    assert api._rate_limit_budget_seconds == 0.0  # type: ignore[attr-defined]
-    assert worker._client.timeout == httpx.Timeout(30.0, connect=5.0)  # type: ignore[attr-defined]
-    assert worker._rate_limit_budget_seconds == 60.0  # type: ignore[attr-defined]
+    assert api._client.timeout == httpx.Timeout(5.0)
+    assert api._rate_limit_budget_seconds == 0.0
+    assert worker._client.timeout == httpx.Timeout(30.0, connect=5.0)
+    assert worker._rate_limit_budget_seconds == 60.0
 
 
 def test_the_redelivery_pass_gets_a_gateway_that_does_not_wait_out_rate_limits() -> None:

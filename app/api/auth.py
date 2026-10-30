@@ -1,18 +1,19 @@
-"""Вход через OAuth, текущий пользователь и выход.
+"""Вход через OAuth, текущий пользователь, выход и возврат с установки GitHub App.
 
 `login` и `callback` открыты: сессии ещё нет. Выход идемпотентен и сессии не
 требует, только `Origin`: без сессии выходить уже не из чего, и это не ошибка. `state` и проверенный
 `redirect` между ними живут в cookie `oauth_state` — 10 минут и только на
 путях `/api/v1/auth`. `redirect` из неё проверяется ещё раз в use case:
 cookie приходит от клиента. Любая ошибка callback — `302` на
-`/login?error=<код>`.
+`/login?error=<код>`. Возврат с установки (Setup URL) без сессии уводит на вход
+с возвратом на «Репозитории»; пока заглушка `501` (change `repositories-one-list`).
 """
 
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
@@ -27,6 +28,8 @@ from app.api.dependencies import (
 from app.api.errors import (
     ERRORS_403_ORIGIN,
     ERRORS_404_LOGIN_PROVIDER,
+    ERRORS_422,
+    ERRORS_501_NOT_IMPLEMENTED,
     ApiError,
 )
 from app.api.problems import ErrorCode
@@ -40,6 +43,7 @@ from app.api.session import (
 from app.application.ports import OAuthProvider, UnitOfWork
 from app.application.use_cases.auth import (
     LoginFailed,
+    authenticate,
     complete_login,
     logout,
     start_login,
@@ -192,6 +196,59 @@ def finish_login(
         set_session_cookie(response, outcome.token)
     _clear_state_cookie(response)
     return response
+
+
+# Setup URL GitHub App — задача #243 (бэкенд-часть dmc-268-ui-t1#95): контракт первым.
+_SETUP_DESCRIPTION = (
+    "Не реализовано: отвечает 501 NOT_IMPLEMENTED (задача #243). Setup URL GitHub App: сюда GitHub "
+    "возвращает браузер после установки приложения, её изменения или запроса владельцу. При "
+    "«Only select repositories» подключает выбранные репозитории, где у пользователя admin или "
+    "maintain, при «All repositories» — ничего."
+)
+# Куда вернуть после входа, если сессии нет: та же страница, куда ведёт итог.
+_SETUP_LOGIN = "/login?redirect=/app/repositories"
+
+
+@router.get(
+    "/github/setup",
+    status_code=HTTPStatus.FOUND,
+    response_class=RedirectResponse,
+    openapi_extra={"security": [{"session": []}]},
+    summary="Возврат с установки GitHub App",
+    description=_SETUP_DESCRIPTION,
+    responses={
+        HTTPStatus.FOUND: {
+            "description": (
+                "Редирект на /app/repositories с итогом: `?connected=<N>`, `?requested=true`, "
+                "`?setup_error=installation_not_found` или `?setup_error=provider_unavailable`. Без "
+                "сессии — на /login?redirect=/app/repositories, недействительная cookie session удаляется."
+            ),
+            "headers": _LOCATION,
+        },
+        **ERRORS_422,
+        **ERRORS_501_NOT_IMPLEMENTED,
+    },
+)
+def finish_github_setup(
+    request: Request,
+    installation_id: int | None = Query(
+        default=None,
+        gt=0,
+        description="Id установки от GitHub; не доверяется, сверяется с установками пользователя. Нет при `request`.",
+    ),
+    setup_action: Literal["install", "update", "request"] = Query(
+        description="Что сделал пользователь на GitHub: установил, изменил установку или запросил её у владельца."
+    ),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> Response:
+    token = request.cookies.get(SESSION_COOKIE)
+    if authenticate(uow_factory(), token, datetime.now(UTC)) is None:
+        # Браузер пришёл с GitHub, а не из кабинета: JSON `401` ему показать некому.
+        response = RedirectResponse(_SETUP_LOGIN, status_code=HTTPStatus.FOUND)
+        if SESSION_COOKIE in request.cookies:
+            clear_session_cookie(response)
+        return response
+    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Возврат с установки ещё не реализован.")
 
 
 @router.get(

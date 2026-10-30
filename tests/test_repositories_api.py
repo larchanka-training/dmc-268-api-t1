@@ -6,14 +6,16 @@
 
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx2
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from app.api.dependencies import (
+    get_app_slug,
     get_installation_catalog,
     get_token_provider,
     get_unit_of_work,
@@ -90,9 +92,14 @@ def _client(
     signed_in: bool = True,
     with_token: bool = True,
     oauth: FakeOAuthProvider | None = None,
+    app_slug: str | None = None,
+    settings: dict[str, object] | None = None,
 ) -> TestClient:
-    """Клиент с живой сессией в `uow` и токеном, выданным при входе только что."""
-    app = create_app(SETTINGS.model_copy(update={"public_origin": ORIGIN}))
+    """Клиент с живой сессией в `uow` и токеном, выданным при входе только что.
+
+    `app_slug` — что ответил бы `GET /app`; без него — настоящий контейнер без ключа App.
+    """
+    app = create_app(SETTINGS.model_copy(update={"public_origin": ORIGIN, **(settings or {})}))
     now = datetime.now(UTC)
     uow.users.add(SIGNED_IN)
     uow.sessions.add(open_session(SESSION_ID, SIGNED_IN.id, COOKIE, now))
@@ -106,6 +113,8 @@ def _client(
     app.dependency_overrides[get_unit_of_work_factory] = lambda: lambda: uow
     app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog()
     app.dependency_overrides[get_token_provider] = lambda: oauth or FakeOAuthProvider()
+    if app_slug is not None:
+        app.dependency_overrides[get_app_slug] = lambda: lambda: app_slug
     client = TestClient(app, base_url=ORIGIN)
     if signed_in:
         client.cookies.set(SESSION_COOKIE, COOKIE)
@@ -141,17 +150,18 @@ def test_returns_registered_repositories() -> None:
     assert {item["full_name"] for item in body["items"]} == {"owner/repo-1", "owner/repo-2"}
 
 
-def test_one_repository_by_id_has_the_shape_of_a_list_row() -> None:
+def test_one_repository_by_id_is_the_one_behind_its_list_row() -> None:
     uow = FakeUnitOfWork()
     repository = _repository(1)
     uow.repositories.add(repository)
     client = _client(uow, _seen(repository))
 
     one = client.get(f"/api/v1/repositories/{repository.id}")
-    row = client.get("/api/v1/repositories").json()["items"][0]
+    (row,) = client.get("/api/v1/repositories").json()["items"]
 
     assert one.status_code == 200
-    assert one.json() == row
+    assert one.json()["id"] == row["id"] == str(repository.id)
+    assert one.json()["full_name"] == row["full_name"]
 
 
 def test_a_repository_beyond_the_first_page_is_found_by_id() -> None:
@@ -221,16 +231,20 @@ def test_the_list_holds_only_repositories_seen_on_github() -> None:
     assert [item["id"] for item in response.json()["items"]] == [str(seen.id)]
 
 
-def test_the_visible_list_is_paged_in_registration_order() -> None:
+def test_the_list_is_paged_by_name_ignoring_case() -> None:
+    """Порядок — `full_name` без учёта регистра; подключённые и нет вперемешку."""
+    names = ["octo/delta", "Octo/Alpha", "octo/charlie", "octo/bravo", "octo/echo"]
+    seen = [InstallationRepository(str(100 + n), name, "main", ADMIN) for n, name in enumerate(names)]
     uow = FakeUnitOfWork()
-    repositories = [replace(_repository(n), created_at=NOW + timedelta(minutes=n)) for n in range(5)]
-    for repository in reversed(repositories):
-        uow.repositories.add(repository)
-    client = _client(uow, _seen(*repositories))
+    uow.repositories.add(replace(_repository(102), full_name="octo/charlie"))
+    client = _client(uow, FakeInstallationCatalog(seen))
 
+    whole = client.get("/api/v1/repositories").json()["items"]
     page = client.get("/api/v1/repositories", params={"limit": 2, "offset": 2}).json()["items"]
 
-    assert [item["id"] for item in page] == [str(r.id) for r in repositories[2:4]]
+    assert [item["full_name"] for item in whole] == ["Octo/Alpha", "octo/bravo", "octo/charlie", "octo/delta", "octo/echo"]
+    assert [item["full_name"] for item in page] == ["octo/charlie", "octo/delta"]
+    assert [item["connected"] for item in page] == [True, False]
 
 
 def test_a_repository_hidden_on_github_is_404_like_a_missing_one() -> None:
@@ -308,13 +322,15 @@ def test_a_limit_below_one_is_a_validation_error() -> None:
     assert body["errors"] == [{"where": "query.limit", "reason": "должно быть не меньше 1"}]
 
 
-def test_available_repositories_are_marked_when_already_connected() -> None:
+def test_the_list_holds_connected_and_unconnected_repositories_together() -> None:
+    """Один список: всё, что GitHub отдал по токену, у подключённых — `id` и `connected_at`."""
     uow = FakeUnitOfWork()
-    uow.repositories.add(_repository(101))
-    catalog = FakeInstallationCatalog([API, WEB])
-    client = _client(uow, catalog)
+    registered = replace(_repository(101), full_name="octo-org/old-name", default_branch="master")
+    uow.repositories.add(registered)
+    catalog = FakeInstallationCatalog([WEB, API])
+    client = _client(uow, catalog, app_slug="dmc-268-review")
 
-    response = client.get("/api/v1/repositories/available")
+    response = client.get("/api/v1/repositories")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -322,22 +338,84 @@ def test_available_repositories_are_marked_when_already_connected() -> None:
             {
                 "provider": "github",
                 "provider_id": "101",
+                # Имя и ветка — из ответа GitHub, а не из записи: репозиторий могли переименовать.
                 "full_name": "octo-org/api",
                 "default_branch": "main",
-                "already_connected": True,
+                "connected": True,
+                "id": str(registered.id),
                 "can_connect": True,
+                "connected_at": "2026-09-29T00:00:00Z",
             },
             {
                 "provider": "github",
                 "provider_id": "202",
                 "full_name": "octo-org/web",
                 "default_branch": "trunk",
-                "already_connected": False,
+                "connected": False,
+                "id": None,
                 "can_connect": False,
+                "connected_at": None,
             },
-        ]
+        ],
+        "install_url": "https://github.com/apps/dmc-268-review/installations/new",
     }
     assert [token.reveal() for token in catalog.tokens] == ["ghu_login_access"]
+
+
+def test_without_the_app_key_the_install_url_is_null_and_the_list_works() -> None:
+    """Контейнер без `GITHUB_APP_ID` и ключа: slug не узнать, к GitHub за ним не ходим."""
+    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API])).get("/api/v1/repositories")
+
+    assert response.status_code == 200
+    assert response.json()["install_url"] is None
+    assert [item["full_name"] for item in response.json()["items"]] == [API.full_name]
+
+
+def test_a_failed_slug_lookup_is_a_null_install_url_not_an_error() -> None:
+    """Ключ App задан, но не подписывает JWT: `GET /app` не удался — `install_url: null`, список — `200`."""
+    settings = {"github_app_id": "123", "github_app_private_key": SecretStr("not a pem")}
+
+    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API]), settings=settings).get("/api/v1/repositories")
+
+    assert response.status_code == 200
+    assert response.json()["install_url"] is None
+    assert [item["full_name"] for item in response.json()["items"]] == [API.full_name]
+
+
+def test_an_invalid_limit_does_not_ask_github_for_the_slug() -> None:
+    asked: list[str] = []
+
+    def slug() -> str:
+        asked.append("GET /app")
+        return "dmc-268-review"
+
+    client = _client(FakeUnitOfWork(), FakeInstallationCatalog([API]))
+    client.app.dependency_overrides[get_app_slug] = lambda: slug  # type: ignore[attr-defined]
+
+    assert client.get("/api/v1/repositories", params={"limit": 0}).status_code == 422
+    assert asked == []
+
+
+def test_a_registered_repository_github_does_not_show_is_not_listed_as_connected() -> None:
+    """Подключённый, которого GitHub пользователю не отдаёт, в списке не появляется вовсе."""
+    uow = FakeUnitOfWork()
+    uow.repositories.add(_repository(101))
+
+    items = _client(uow, FakeInstallationCatalog([WEB])).get("/api/v1/repositories").json()["items"]
+
+    assert [(item["full_name"], item["connected"]) for item in items] == [("octo-org/web", False)]
+
+
+def test_the_connect_list_endpoint_is_gone() -> None:
+    """`/available` удалена: путь разбирается как id репозитория, к GitHub запроса нет."""
+    catalog = FakeInstallationCatalog([API])
+
+    response = _client(FakeUnitOfWork(), catalog).get("/api/v1/repositories/available")
+
+    assert response.status_code == 422
+    assert response.json()["errors"] == [{"where": "path.repository_id", "reason": "ожидается UUID"}]
+    assert catalog.calls == []
+    assert "/api/v1/repositories/available" not in create_app(SETTINGS).openapi()["paths"]
 
 
 @pytest.mark.parametrize("connected", [False, True])
@@ -353,14 +431,14 @@ def test_can_connect_in_the_list_matches_what_connecting_answers(
         uow.repositories.add(_repository(101))
     client = _client(uow, FakeInstallationCatalog([replace(API, permissions=permissions, private=private)]))
 
-    (item,) = client.get("/api/v1/repositories/available").json()["items"]
+    (item,) = client.get("/api/v1/repositories").json()["items"]
     response = _connect(client, API.provider_id)
 
     assert item["can_connect"] is (response.status_code in {201, 409}), response.json()
 
 
 def test_the_user_token_never_reaches_the_response() -> None:
-    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API])).get("/api/v1/repositories/available")
+    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API])).get("/api/v1/repositories")
 
     assert response.status_code == 200
     for value in ("ghu_login_access", "ghr_login_refresh"):
@@ -373,7 +451,7 @@ def test_a_read_only_user_sees_the_repository_but_cannot_connect_it() -> None:
     uow = FakeUnitOfWork()
     client = _client(uow, FakeInstallationCatalog([WEB]))
 
-    listed = client.get("/api/v1/repositories/available")
+    listed = client.get("/api/v1/repositories")
     connected = _connect(client, WEB.provider_id)
 
     assert listed.status_code == 200
@@ -414,18 +492,18 @@ def test_a_maintainer_connects_a_repository() -> None:
     assert _connect(_client(FakeUnitOfWork(), catalog)).status_code == 201
 
 
-def test_available_repositories_are_empty_when_github_shows_nothing() -> None:
-    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([])).get("/api/v1/repositories/available")
+def test_the_list_is_empty_when_github_shows_nothing() -> None:
+    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([])).get("/api/v1/repositories")
 
     assert response.status_code == 200
-    assert response.json() == {"items": []}
+    assert response.json() == {"items": [], "install_url": None}
 
 
-def test_available_repositories_answer_502_when_github_fails() -> None:
+def test_the_list_answers_502_when_github_fails_and_keeps_the_session() -> None:
     uow = FakeUnitOfWork()
     client = _client(uow, FakeInstallationCatalog(error=VcsError("GitHub API: HTTP 503")))
 
-    response = client.get("/api/v1/repositories/available")
+    response = client.get("/api/v1/repositories")
 
     assert response.status_code == 502
     assert response.headers["content-type"] == "application/problem+json"
@@ -433,13 +511,14 @@ def test_available_repositories_answer_502_when_github_fails() -> None:
     assert len(uow.sessions.stored) == 1
 
 
-def test_available_repositories_require_a_session() -> None:
-    response = _client(FakeUnitOfWork(), FakeInstallationCatalog([API]), signed_in=False).get(
-        "/api/v1/repositories/available"
-    )
+def test_the_list_requires_a_session() -> None:
+    catalog = FakeInstallationCatalog([API])
+
+    response = _client(FakeUnitOfWork(), catalog, signed_in=False).get("/api/v1/repositories")
 
     assert response.status_code == 401
     assert response.json()["code"] == "UNAUTHENTICATED"
+    assert catalog.calls == []
 
 
 def test_a_session_without_a_stored_token_must_sign_in_again() -> None:
@@ -447,7 +526,7 @@ def test_a_session_without_a_stored_token_must_sign_in_again() -> None:
     uow = FakeUnitOfWork()
     client = _client(uow, FakeInstallationCatalog([API]), with_token=False)
 
-    for response in (client.get("/api/v1/repositories/available"), _connect(_client(uow, with_token=False))):
+    for response in (client.get("/api/v1/repositories"), _connect(_client(uow, with_token=False))):
         assert response.status_code == 401
         assert response.json()["code"] == "UNAUTHENTICATED"
         assert _session_cookie_cleared(response)
@@ -458,7 +537,7 @@ def test_a_revoked_token_closes_the_session() -> None:
     uow = FakeUnitOfWork()
     client = _client(uow, FakeInstallationCatalog(error=ProviderTokenRejected("401")))
 
-    response = client.get("/api/v1/repositories/available")
+    response = client.get("/api/v1/repositories")
 
     assert response.status_code == 401
     assert response.json()["code"] == "UNAUTHENTICATED"
@@ -498,7 +577,7 @@ def test_github_unavailable_on_refresh_is_502_and_keeps_the_session() -> None:
     client = _client(uow, FakeInstallationCatalog([API]), oauth=oauth)
     uow.provider_tokens.save(SESSION_ID, _expired_but_refreshable())
 
-    response = client.get("/api/v1/repositories/available")
+    response = client.get("/api/v1/repositories")
 
     assert response.status_code == 502
     assert response.json()["code"] == "SCM_UNAVAILABLE"
@@ -631,40 +710,50 @@ def test_a_connected_repository_is_listed_at_once_without_waiting_for_the_ttl() 
     """Кэшируется только ответ GitHub, подключённые читаются из базы: подключённый виден сразу."""
     catalog = FakeInstallationCatalog([API])
     client = _client(FakeUnitOfWork(), catalog)
-    assert client.get("/api/v1/repositories").json()["items"] == []
+    (before,) = client.get("/api/v1/repositories").json()["items"]
 
-    assert _connect(client).status_code == 201
-    listed = client.get("/api/v1/repositories").json()["items"]
-
-    assert [item["full_name"] for item in listed] == [API.full_name]
-    assert _github_listings(catalog) == 1
-
-
-def test_the_connect_page_always_asks_github() -> None:
-    """Страница подключения мимо кэша: только что поставленное приложение видно сразу."""
-    catalog = FakeInstallationCatalog([API])
-    client = _client(FakeUnitOfWork(), catalog)
-
-    client.get("/api/v1/repositories")
-    client.get("/api/v1/repositories/available")
-    client.get("/api/v1/repositories/available")
-
-    assert _github_listings(catalog) == 3
-
-
-def test_a_repository_installed_within_the_ttl_is_listed_once_connected() -> None:
-    """Приложение поставили на новый репозиторий, пока кэш жив: страница подключения
-    пишет свежий ответ GitHub в кэш, и подключённый репозиторий виден сразу везде."""
-    catalog = FakeInstallationCatalog([])
-    client = _client(FakeUnitOfWork(), catalog)
-    assert client.get("/api/v1/repositories").json()["items"] == []
-
-    catalog._repositories.append(API)  # приложение поставили на GitHub
-    available = client.get("/api/v1/repositories/available").json()["items"]
     connected = _connect(client)
+    (after,) = client.get("/api/v1/repositories").json()["items"]
 
-    assert [item["full_name"] for item in available] == [API.full_name]
+    assert (before["connected"], before["id"]) == (False, None)
     assert connected.status_code == 201
-    listed = client.get("/api/v1/repositories").json()["items"]
-    assert [item["full_name"] for item in listed] == [API.full_name]
-    assert client.get(f"/api/v1/repositories/{connected.json()['id']}").status_code == 200
+    assert (after["connected"], after["id"]) == (True, connected.json()["id"])
+    assert after["connected_at"] == connected.json()["created_at"]
+    assert _github_listings(catalog) == 1
+    assert client.get(f"/api/v1/repositories/{after['id']}").status_code == 200
+
+
+# --- выключение ревью: контракт первым, реализация — следующим шагом #243 -----------
+
+
+def _disconnect(client: TestClient, repository_id: str, *, origin: str | None = ORIGIN) -> httpx2.Response:
+    headers = {"Origin": origin} if origin else {}
+    response: httpx2.Response = client.delete(f"/api/v1/repositories/{repository_id}", headers=headers)
+    return response
+
+
+def test_disconnecting_is_planned_and_answers_501() -> None:
+    uow = FakeUnitOfWork()
+    repository = _repository(101)
+    uow.repositories.add(repository)
+
+    response = _disconnect(_client(uow, _seen(repository)), str(repository.id))
+
+    assert response.status_code == 501
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "NOT_IMPLEMENTED"
+    assert list(uow.repositories.stored.values()) == [repository]
+
+
+def test_disconnecting_checks_origin_session_and_id_before_501() -> None:
+    uow = FakeUnitOfWork()
+
+    without_origin = _disconnect(_client(uow), str(new_id()), origin=None)
+    without_session = _disconnect(_client(uow, signed_in=False), str(new_id()))
+    bad_id = _disconnect(_client(uow), "repo-1")
+
+    assert without_origin.status_code == 403
+    assert without_origin.json()["code"] == "ORIGIN_FORBIDDEN"
+    assert without_session.status_code == 401
+    assert bad_id.status_code == 422
+    assert bad_id.json()["errors"] == [{"where": "path.repository_id", "reason": "ожидается UUID"}]

@@ -1,0 +1,29 @@
+## 1. Контракт и один список
+
+- [x] 1.1 Slug App из `GET /app`: `GitHubVcsGateway.app_slug` (общий кэш с `bot_login`), `Container.app_slug` (`None` без ключа и при сбое), зависимость `get_app_slug` (`app/api/dependencies.py`)
+- [x] 1.2 Use case `list_with_connections` (`app/application/use_cases/connect_repository.py`): строки из ответа GitHub, запись сервиса (`record`) из базы, `can_connect`, порядок по `full_name` без учёта регистра; `list_available_repositories` и `AvailableRepository` удалены
+- [x] 1.3 `GET /api/v1/repositories` (`app/api/repositories.py`): `RepositoryListItem`, `install_url` из slug в теле ручки, пагинация срезом, кэш видимости, `401`/`502`
+- [x] 1.4 `GET /api/v1/repositories/available`, её модели, зависимость `get_refreshing_catalog` и тесты удалены; описания `GET /events`, `GET /reviews` и `docs/BACKEND_ARCHITECTURE.md` ссылаются на `GET /repositories`
+- [x] 1.5 Заглушка `DELETE /api/v1/repositories/{repository_id}` с полной схемой (`204`, `403`, `404`, `422`, `501`, `502`); описание `POST` — повторное включение и `409` как успех
+- [x] 1.6 Заглушка Setup URL `GET /api/v1/auth/github/setup` (`app/api/auth.py`) с параметрами и редиректом в схеме; без сессии — `302` на `/login?redirect=/app/repositories`
+- [x] 1.7 Тесты: состав и поля строк, порядок и страницы, `install_url` — slug известен, ключа нет, сбой `GET /app`; отсутствие `/available`, `501` и проверки до него у новых ручек, вход без сессии у Setup URL
+- [x] 1.8 `README.md`, «Регистрация репозитория»; экспорт `docs/openapi/openapi.json` (`uv run python scripts/export_openapi.py`)
+
+## 2. Мягкое выключение
+
+- [ ] 2.1 Миграция: `repositories.connected_at timestamptz NULL`, заполнение из `created_at`, откат; поле в `Repository` и адаптере
+- [ ] 2.2 Use case списка: подключённым считается запись с `connected_at`, `connected_at` строки — из колонки
+- [ ] 2.3 Use case `disconnect_repository` и адаптер `RepositoryRepository.disconnect`; `DELETE /repositories/{id}` вместо заглушки
+- [ ] 2.4 Повторное включение в `connect_repository`: `UPDATE … WHERE connected_at IS NULL RETURNING`, затем вставка; интеграционный тест гонки
+- [ ] 2.5 Приём вебхука: выключенный репозиторий — `202 ignored`, как незарегистрированный
+
+## 3. Setup URL
+
+- [ ] 3.1 Порт и адаптер: установки пользователя с `repository_selection` (`GET /user/installations`) и репозитории одной установки
+- [ ] 3.2 Чистая функция выбора репозиториев к подключению (selected, admin или maintain, без записи) и use case возврата с установки
+- [ ] 3.3 Ручка вместо заглушки: сверка установки, свежий ответ в кэш (`read=False`), редирект с итогом; проверить запуском, приходит ли `state` на Setup URL (design D7)
+
+## 4. Завершение
+
+- [ ] 4.1 `docs/GITHUB_APP.md` (PR #244): «Планируется» привести к сделанному
+- [ ] 4.2 Экспорт контракта, синхронизация спек и `openspec archive repositories-one-list`

@@ -45,22 +45,14 @@ def get_visibility_catalog(
 ) -> InstallationCatalog:
     """Каталог с кэшем видимых репозиториев: видимость прогонов и репозиториев (#126).
 
-    Подключение берёт `get_installation_catalog` — без кэша, страница подключения —
-    `get_refreshing_catalog`.
+    Подключение берёт `get_installation_catalog` — без кэша.
     """
     return container.visibility_catalog(catalog)
 
 
-def get_refreshing_catalog(
-    catalog: InstallationCatalog = Depends(get_installation_catalog),
-    container: Container = Depends(get_container),
-) -> InstallationCatalog:
-    """Каталог страницы подключения: всегда к GitHub, свежий ответ — в кэш видимости.
-
-    После установки приложения на GitHub новый репозиторий виден и на странице, и —
-    когда его подключат — в списке, прогонах и потоке, без ожидания TTL.
-    """
-    return container.visibility_catalog(catalog, read=False)
+def get_app_slug(container: Container = Depends(get_container)) -> Callable[[], str | None]:
+    """Как узнать slug GitHub App; вызывается в теле ручки — при `422` запроса к GitHub нет."""
+    return container.app_slug
 
 
 def get_token_provider(container: Container = Depends(get_container)) -> OAuthProvider:

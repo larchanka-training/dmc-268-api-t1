@@ -257,6 +257,63 @@ def test_a_session_without_a_provider_token_is_401_and_deleted_everywhere(stand,
     assert stand.uow.sessions.stored == []
 
 
+# --- Setup URL: контракт первым, реализация — следующим шагом #243 ----------------
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"installation_id": "42", "setup_action": "install"}, {"setup_action": "request"}],
+)
+def test_the_setup_return_is_planned_and_answers_501(stand, params) -> None:
+    client = stand.client()
+    sign_in(client)
+
+    response = client.get("/api/v1/auth/github/setup", params=params)
+
+    assert response.status_code == 501
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "NOT_IMPLEMENTED"
+
+
+def test_the_setup_return_without_a_session_goes_to_login_and_back(stand) -> None:
+    """Браузер пришёл с GitHub: вместо JSON `401` — вход с возвратом на «Репозитории»."""
+    response = stand.client().get(
+        "/api/v1/auth/github/setup", params={"installation_id": "42", "setup_action": "install"}
+    )
+
+    assert (response.status_code, response.headers["location"]) == (302, "/login?redirect=/app/repositories")
+    assert "set-cookie" not in response.headers
+
+
+def test_the_setup_return_with_a_dead_session_clears_the_cookie(stand) -> None:
+    client = stand.client()
+    client.cookies.set("session", "never-issued", domain="review.example")
+
+    response = client.get("/api/v1/auth/github/setup", params={"setup_action": "request"})
+
+    assert (response.status_code, response.headers["location"]) == (302, "/login?redirect=/app/repositories")
+    assert "Max-Age=0" in set_cookies(response)["session"]
+
+
+@pytest.mark.parametrize(
+    ("params", "where"),
+    [
+        ({"installation_id": "42"}, "query.setup_action"),
+        ({"installation_id": "42", "setup_action": "uninstall"}, "query.setup_action"),
+        ({"installation_id": "0", "setup_action": "install"}, "query.installation_id"),
+        ({"installation_id": "abc", "setup_action": "install"}, "query.installation_id"),
+    ],
+)
+def test_the_setup_return_checks_its_parameters_before_501(stand, params, where) -> None:
+    client = stand.client()
+    sign_in(client)
+
+    response = client.get("/api/v1/auth/github/setup", params=params)
+
+    assert response.status_code == 422
+    assert [error["where"] for error in response.json()["errors"]] == [where]
+
+
 def test_logout_ends_the_session_in_every_tab(stand) -> None:
     tab_1 = stand.client()
     sign_in(tab_1)

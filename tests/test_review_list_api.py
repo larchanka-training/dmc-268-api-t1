@@ -315,7 +315,7 @@ def test_values_the_database_cannot_take_are_422_not_500(params: dict[str, str],
     assert catalog.calls == []
 
 
-# --- токен пользователя: те же ответы, что у GET /repositories/available и GET /events ---
+# --- токен пользователя: те же ответы, что у GET /repositories и GET /events ---
 
 
 def _expired_but_refreshable(world: World) -> None:
