@@ -377,19 +377,16 @@ def test_container_logs_go_through_the_logs_collector() -> None:
     файле — infra/README.md, «Логи контейнеров»."""
     services = load_compose()["services"]
     overrides = yaml.safe_load(COMPOSE_LOGS_FILE.read_text(encoding="utf-8"))["services"]
+    tf_block = re.search(r"fluentd_log_opts = \{(.*?)\n  \}", LOCALS_TF.read_text(encoding="utf-8"), re.DOTALL)
+    assert tf_block is not None
+    tf_opts = dict(re.findall(r'"([\w-]+)"\s*=\s*"([^"]*)"', tf_block.group(1)))
+    assert tf_opts.pop("tag") == "{{.Name}}"
     for service in ("postgres", "rabbitmq"):
         assert "logging" not in services[service], service
         assert overrides[service]["logging"] == {
             "driver": "fluentd",
-            "options": {
-                "fluentd-address": "tcp://127.0.0.1:24224",
-                "fluentd-async": "true",
-                "fluentd-sub-second-precision": "true",
-                "fluentd-buffer-limit": "10000",
-                "cache-max-size": "10m",
-                "cache-max-file": "3",
-                "tag": f"dmc268-{service}",
-            },
+            # В compose нет container_name: тег — имя контейнера на стенде.
+            "options": tf_opts | {"tag": f"dmc268-{service}"},
         }, service
         block = _tf_container_block(service)
         assert 'log_driver = var.observability_enabled ? "fluentd" : "json-file"' in block, service
