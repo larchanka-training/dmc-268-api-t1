@@ -108,6 +108,42 @@ ollama-pull: ## Скачать MODEL, если её ещё нет
 		&& echo "Модель $(MODEL) уже скачана" \
 		|| OLLAMA_HOST='$(OLLAMA_URL)' ollama pull '$(MODEL)'
 
+# --- песочница tree-sitter: контекст модели без модели ----------------------------
+# CASE, CASE_FILE, RANGE, RULES и ARGS - общие с песочницей воркера. У CASE_FILE и
+# RANGE есть значения по умолчанию, поэтому сюда они уходят, только если заданы явно.
+OUTLINE_CASE ?= tests/sandbox/outline/examples/outline-case.yaml
+# FILE (свой файл) и LINES (его изменённые строки: N, N-M или список через запятую)
+# берутся только из командной строки make: LINES - высота терминала, её экспортируют
+# bash, zsh и CI, и из окружения она молча сузила бы диапазон.
+cmdline = $(filter command line,$(origin $(1)))
+OUTLINE_FLAGS = --rules $(RULES) $(if $(CASE),--case $(CASE)) \
+	$(if $(call explicit,CASE_FILE),--case-file '$(CASE_FILE)') \
+	$(if $(call explicit,RANGE),--from-git '$(RANGE)') \
+	$(if $(call cmdline,FILE),--file '$(FILE)') $(if $(call cmdline,LINES),--lines '$(LINES)') $(ARGS)
+
+.PHONY: sandbox-outline-demo sandbox-outline
+
+sandbox-outline-demo: ## tree-sitter: проверить окружение и грамматики, разобрать мок-PR (OUTLINE_CASE, ARGS)
+	@printf '\n\033[1m==> 1/3 Проверка окружения\033[0m\n'
+	@scripts/sandbox-outline-doctor.sh
+	@printf '\n\033[1m==> 2/3 Зависимости Python (uv sync) и грамматики tree-sitter\033[0m\n'
+	@uv sync --all-extras
+	@scripts/sandbox-outline-doctor.sh --grammars
+	@printf '\n\033[1m==> 3/3 Разбор мок-PR $(OUTLINE_CASE)\033[0m\n'
+	@uv run python -m tests.sandbox.outline --rules $(RULES) --case-file '$(OUTLINE_CASE)' $(ARGS); status=$$?; echo; \
+	case $$status in \
+		0) printf '\033[32mГотово: контекст собран, отчёт выше.\033[0m\n' ;; \
+		1) printf '\033[31mЕсть проблемы разбора (parse_error, файл не загружен или дифф не получен) - см. «проблемы» в отчёте.\033[0m\n' ;; \
+		139) printf '\033[31mSegfault в tree-sitter - версия 0.26.0? См. #226: uv sync --all-extras.\033[0m\n' ;; \
+		*) printf '\033[31mВход или окружение не подошли (код %s) - причина в строке выше.\033[0m\n' $$status ;; \
+	esac; \
+	echo "Дальше: свой файл - make sandbox-outline FILE=app/x.py LINES=10-20, свои коммиты - make sandbox-outline RANGE=develop..HEAD."; \
+	echo "Подробно: tests/sandbox/outline/README.md"; \
+	exit $$status
+
+sandbox-outline: ## tree-sitter на CASE / CASE_FILE / RANGE / FILE (+ LINES); без входов - мок-PR (RULES, ARGS)
+	uv run python -m tests.sandbox.outline $(OUTLINE_FLAGS)
+
 # --- тесты по компонентам: с PostgreSQL и RabbitMQ из compose ----------------------
 
 test-db: infra-up test-db-create ## Адаптеры базы и миграции: tests/db

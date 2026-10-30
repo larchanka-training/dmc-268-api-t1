@@ -192,5 +192,8 @@ make sandbox-git RANGE=develop..HEAD
 
 ## Тесты песочницы
 
-Тесты самой песочницы — `tests/sandbox/test_*.py` — часть обычного `uv run pytest` и идут в CI.
+Тесты самой песочницы — `tests/sandbox/**/test_*.py` — часть обычного `uv run pytest` и идут в CI.
 Ручной прогон с моделью в CI не входит.
+
+Что tree-sitter отдаёт модели из AST, без модели и без сети, —
+[`outline/README.md`](outline/README.md) (`make sandbox-outline-demo`).
