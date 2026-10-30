@@ -20,4 +20,4 @@
 
 ## 4. Стенд
 
-- [ ] 4.1 После выката лог старта воркера называет Eurorouter и модель из `.github/eurorouter-model`
+- [x] 4.1 После выката лог старта воркера называет Eurorouter и модель из `.github/eurorouter-model`

@@ -440,6 +440,33 @@ run "eurorouter_primary_over_plain_http_rejected" {
   expect_failures = [var.llm_backend]
 }
 
+# Пробелы разбираются как в Settings: адрес не обрезается, модель обрезается.
+run "eurorouter_primary_with_a_space_before_the_address_rejected" {
+  command = plan
+
+  variables {
+    llm_backend         = "eurorouter"
+    eurorouter_base_url = " https://eurorouter.example/v1"
+    eurorouter_model    = "model"
+    eurorouter_api_keys = "k1"
+  }
+
+  expect_failures = [var.llm_backend]
+}
+
+run "eurorouter_primary_with_a_blank_model_rejected" {
+  command = plan
+
+  variables {
+    llm_backend         = "eurorouter"
+    eurorouter_base_url = "https://eurorouter.example/v1"
+    eurorouter_model    = "   "
+    eurorouter_api_keys = "k1"
+  }
+
+  expect_failures = [var.llm_backend]
+}
+
 run "eurorouter_primary_reaches_the_worker" {
   command = plan
 
