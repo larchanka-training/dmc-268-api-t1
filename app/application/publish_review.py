@@ -97,6 +97,16 @@ def publish_review(
 
     inline_drafts = _inline_drafts(to_publish)
 
+    with uow:
+        current = uow.review_runs.get(run.id)
+    if current is not None and current.status is ReviewRunStatus.CANCELLED:
+        # Целевую ветку сменили, пока прогон работал (#222): его ревью и gate
+        # описывали бы дифф против старой ветки, а замечания стали бы тредами в gate
+        # нового прогона. Head заблокировал приём, ревью и gate выставит новый прогон.
+        # Отмену после этой проверки поправит `settle_merge_gate` после POST gate.
+        logger.info("прогон %s отменён до публикации: ревью не публикуется", run.id)
+        return
+
     publication = vcs.publish_pull_request_review(
         job.repository_full_name,
         job.pull_request_number,
@@ -113,13 +123,6 @@ def publish_review(
             uow.findings.mark_covered(finding_id, thread.finding.id)
         uow.commit()
 
-    with uow:
-        current = uow.review_runs.get(run.id)
-    if current is not None and current.status is ReviewRunStatus.CANCELLED:
-        # Целевую ветку сменили, пока прогон работал (#222): его gate описывал бы
-        # дифф, которого в PR уже нет. Head заблокировал приём, gate выставит новый прогон.
-        logger.info("прогон %s отменён во время публикации: merge gate не выставляется", run.id)
-        return
     # Треды сверены с GitHub до публикации: gate - по базе, с находками этого
     # прогона, чей id inline не получен.
     still_open = collect_open_findings(uow, run.merge_request_id, head_run_id=run.id)
@@ -133,7 +136,7 @@ def publish_review(
             job.installation_id,
             build_merge_gate_check(still_open),
         )
-        # Ветку могли сменить между проверкой статуса выше и POST (#222).
+        # Ветку могли сменить после проверки статуса до публикации (#222).
         settle_merge_gate(
             uow,
             vcs,

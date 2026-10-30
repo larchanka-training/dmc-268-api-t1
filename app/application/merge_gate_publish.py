@@ -115,6 +115,9 @@ def settle_merge_gate(
             check = build_merge_gate_check(
                 collect_open_findings(uow, merge_request_id, head_run_id=latest.id)
             )
+        elif latest.status is ReviewRunStatus.FAILED:
+            # Новый прогон уже упал: повторного ревью не будет, head ждёт push.
+            check = build_failed_review_check()
         else:
             check = build_retarget_check()
         logger.info(

@@ -108,9 +108,12 @@ class SqlAlchemyUnitOfWork:
             # чтобы вызывающий после ActiveRunConflict мог перечитать записи
             # победителя гонки по естественному ключу.
             self.rollback()
-            if any(name in str(error.orig) for name in _RACE_CONSTRAINTS):
+            violated = next((name for name in _RACE_CONSTRAINTS if name in str(error.orig)), None)
+            if violated is not None:
+                # Имя ограничения в тексте: гонку доставок PR и подбор одного ревью
+                # двумя прогонами при разборе иначе не различить.
                 raise ActiveRunConflict(
-                    "параллельная доставка закоммитила записи этого PR раньше"
+                    f"параллельная транзакция закоммитила конфликтующую запись раньше: {violated}"
                 ) from error
             raise
 

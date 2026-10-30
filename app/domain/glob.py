@@ -14,49 +14,34 @@ PR. `PurePosixPath.full_match` переводит шаблон в регуляр
 сегмента с 3.14 тоже без экспоненциального перебора (атомарные группы).
 """
 
-from collections.abc import Callable, Sequence
 from fnmatch import fnmatchcase
 
 _GLOBSTAR = "**"
+# Шаблон кончился: с ним не совпадает ни один сегмент.
+_END = "/"
 
 
 def glob_full_match(path: str, pattern: str) -> bool:
-    """Путь целиком совпадает с шаблоном - как `PurePosixPath(path).full_match(pattern)`."""
+    """Путь целиком совпадает с шаблоном - как `PurePosixPath(path).full_match(pattern)`.
+
+    Жадное сопоставление: при неудаче `**`, встреченный последним, забирает на
+    сегмент больше. Откат только к нему даёт O(сегменты пути * сегменты шаблона) -
+    более ранним `**` переигрывать нечего.
+    """
+    names = _segments(path)
     # `None` - любой один сегмент: так хвостовой `**` требует хотя бы один.
     parts: list[str | None] = list(_segments(pattern))
     if parts and parts[-1] == _GLOBSTAR:
         parts.insert(len(parts) - 1, None)
-    return _match(
-        _segments(path),
-        parts,
-        is_star=lambda part: part == _GLOBSTAR,
-        accepts=lambda part, name: part is None or fnmatchcase(name, part),
-    )
-
-
-def _segments(text: str) -> list[str]:
-    # Как у PurePosixPath: пустые сегменты и `.` схлопываются.
-    return [s for s in text.split("/") if s not in ("", ".")]
-
-
-def _match[I, P](
-    items: Sequence[I],
-    pattern: Sequence[P],
-    *,
-    is_star: Callable[[P], bool],
-    accepts: Callable[[P, I], bool],
-) -> bool:
-    """Жадное сопоставление со звёздочкой: при неудаче звёздочка, встреченная
-    последней, забирает на один элемент больше. Откат только к ней даёт
-    O(len(items) * len(pattern)) - более ранним звёздочкам переигрывать нечего."""
     i = j = 0
     star_j = -1
     star_i = 0
-    while i < len(items):
-        if j < len(pattern) and is_star(pattern[j]):
+    while i < len(names):
+        part = parts[j] if j < len(parts) else _END
+        if part == _GLOBSTAR:
             star_j, star_i = j, i
             j += 1
-        elif j < len(pattern) and accepts(pattern[j], items[i]):
+        elif part is None or (part != _END and fnmatchcase(names[i], part)):
             i += 1
             j += 1
         elif star_j >= 0:
@@ -64,6 +49,11 @@ def _match[I, P](
             i, j = star_i, star_j + 1
         else:
             return False
-    while j < len(pattern) and is_star(pattern[j]):
+    while j < len(parts) and parts[j] == _GLOBSTAR:
         j += 1
-    return j == len(pattern)
+    return j == len(parts)
+
+
+def _segments(text: str) -> list[str]:
+    # Как у PurePosixPath: пустые сегменты и `.` схлопываются.
+    return [s for s in text.split("/") if s not in ("", ".")]

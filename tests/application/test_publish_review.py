@@ -12,6 +12,7 @@ import pytest
 
 from app.application.merge_gate_publish import (
     SETTLE_ATTEMPTS,
+    build_failed_review_check,
     build_retarget_check,
     settle_merge_gate,
 )
@@ -702,9 +703,12 @@ def test_failed_lookup_of_an_orphan_review_does_not_stop_publishing(
     assert record.exc_info is not None and record.exc_info[1] is error
 
 
-def test_run_cancelled_while_publishing_sets_no_merge_gate(caplog: pytest.LogCaptureFixture) -> None:
-    """Целевую ветку сменили, пока прогон публиковал (#222): его gate описывал бы
-    дифф, которого в PR уже нет, - check run не выставляется, ревью уже в PR."""
+def test_run_cancelled_before_publishing_posts_neither_review_nor_gate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Целевую ветку сменили до POST ревью (#222, ревью #225): ревью по диффу против
+    старой ветки не публикуется - его замечания стали бы тредами в gate нового
+    прогона, - и check run не выставляется."""
     uow = FakeUnitOfWork()
     run = _run_with_critical_finding(uow)
     uow.review_runs.add(replace(run, status=ReviewRunStatus.CANCELLED))
@@ -713,7 +717,7 @@ def test_run_cancelled_while_publishing_sets_no_merge_gate(caplog: pytest.LogCap
     with caplog.at_level(logging.INFO, logger="app.application.publish_review"):
         _publish_first_run(uow, run, vcs)
 
-    assert len(vcs.publications) == 1
+    assert vcs.publications == []
     assert vcs.checks == []
     assert any(str(RUN_ID) in r.getMessage() for r in caplog.records)
 
@@ -834,6 +838,33 @@ def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
     )
 
     assert vcs.checks == [build_retarget_check()]
+
+
+def test_settling_on_a_failed_latest_run_keeps_the_failure() -> None:
+    """Ревью #225: после ретаргета новый прогон быстро упал и выставил «Ревью не
+    удалось». Поправка от старого прогона не подменяет его блокировкой «идёт
+    повторное ревью» - повторного ревью не будет."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    uow.review_runs.add(replace(run, status=ReviewRunStatus.CANCELLED))
+    moment = NOW + timedelta(minutes=1)
+    uow.review_runs.add(
+        replace(run, id=UUID(int=77), status=ReviewRunStatus.FAILED, created_at=moment, updated_at=moment)
+    )
+    vcs = RecordingVcsGateway()
+
+    settle_merge_gate(
+        uow,
+        vcs,
+        merge_request_id=MR_ID,
+        repo_full_name=JOB.repository_full_name,
+        head_sha=JOB.head_sha,
+        installation_id=JOB.installation_id,
+        run_id=run.id,
+    )
+
+    assert vcs.checks == [build_failed_review_check()]
 
 
 class _CompletedDuringCorrectionVcs(_RetargetDuringGateVcs):

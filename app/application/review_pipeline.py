@@ -119,6 +119,18 @@ def _mark_failed(
     close_abandoned_steps(uow, run_id, now=now, known=unwritten_steps)
 
 
+def _was_cancelled(uow: UnitOfWork, run_id: UUID) -> bool:
+    """Отменён ли прогон по свежей строке из базы. Сбой чтения - `False`: исходное
+    исключение тогда уходит наружу, как и без проверки."""
+    try:
+        with uow:
+            run = uow.review_runs.get(run_id)
+    except Exception:
+        logger.exception("не удалось перечитать статус прогона %s", run_id)
+        return False
+    return run is not None and run.status is ReviewRunStatus.CANCELLED
+
+
 def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) -> None:
     """Выставить `failure` на head, если упавший прогон на нём последний, а до него
     на этот head уже было ревью (ревью #225).
@@ -325,6 +337,13 @@ def run_review(
             unrecorded_tokens=unrecorded_tokens,
             unwritten_steps=steps.unwritten,
         )
+        if _was_cancelled(uow, job.review_run_id):
+            # Ретаргет отменил прогон посреди ревью (`_supersede`): его переход
+            # бросил на терминальном статусе. Это не сбой - сообщение уходит в ack,
+            # а не в DLQ, и head отвечает новый прогон.
+            logger.info("прогон %s отменён во время ревью, результат отброшен", job.review_run_id)
+            close_abandoned_steps(uow, job.review_run_id, now=now(), known=steps.unwritten)
+            return
         _block_head_of_failed_run(uow, vcs_gateway, job)
         raise
     except BaseException as exc:
