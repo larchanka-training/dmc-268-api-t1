@@ -105,7 +105,7 @@ MIIE...
 |---|---|---|
 | Доставка — timeout или 502 от туннеля | туннель упал или адрес устарел | `tail -F .local/*.log`, новый URL — в App |
 | Доставка — `401` | `GITHUB_WEBHOOK_SECRET` не совпадает с секретом App | поправить `.env`, `make stop-local && make run-local` |
-| `202`, а прогона нет | репозиторий не подключён или выключен, либо PR из форка от автора не `OWNER`, `MEMBER` или `COLLABORATOR` | шаг 3.2 |
+| `202`, а прогона нет | репозиторий не подключён или выключен — или PR из форка от автора не `OWNER`, `MEMBER` или `COLLABORATOR` | шаг 3.2; для форка — `docs/GITHUB_APP.md`, «Модель и деньги» |
 | Вебхук — `502` | неверный `GITHUB_APP_ID` или private key | причина — в `tail -F .local/api.log`; проверить значения в `.env`, `make stop-local && make run-local` |
 | GitHub: redirect_uri mismatch | Callback URL ≠ `PUBLIC_ORIGIN` + `/api/v1/auth/github/callback` | поправить Callback URL App |
 | `verifying` — `LLM_INVALID_OUTPUT` | модель мала или сбивается с формата | модель 7b и больше |
