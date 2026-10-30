@@ -670,20 +670,24 @@ def test_the_postgresql_receiver_takes_connection_from_the_environment() -> None
 # replace_pattern(body, "регэксп", "замена"): регэкспы — общее подмножество RE2
 # и re (без обратных ссылок), поэтому re.sub даёт то же, что OTTL.
 # Строки OTTL экранируют \\ и \" (в YAML они остаются как есть).
-_REPLACE_BODY = re.compile(r'^replace_pattern\(body, "(?P<pattern>(?:[^"\\]|\\.)+)", "(?P<replacement>[^"$]+)"\)$')
+_REPLACE_BODY = re.compile(
+    r'^replace_pattern\(body, "(?P<pattern>(?:[^"\\]|\\.)+)", "(?P<replacement>[^"$]+)"\)'
+    r'(?: where attributes\["service.name"\] == "(?P<service>[^"]+)")?$'
+)
 
 
 def _unescape_ottl(text: str) -> str:
     return re.sub(r"\\(.)", r"\1", text)
 
 
-def mask_container_log(line: str) -> str:
-    """Тело записи после правил replace_pattern из `otelcol-logs.yaml`."""
+def mask_container_log(line: str, service: str = "dmc268-ui") -> str:
+    """Тело записи после правил replace_pattern из `otelcol-logs.yaml`, в порядке
+    конфига; правило с where применяется, только если service.name совпал."""
     config = yaml.safe_load(COLLECTOR_CONFIG.with_name("otelcol-logs.yaml").read_text(encoding="utf-8"))
     (block,) = config["processors"]["transform/container-logs"]["log_statements"]
     for statement in block["statements"]:
         match = _REPLACE_BODY.match(statement)
-        if match is not None:
+        if match is not None and match.group("service") in (None, service):
             line = re.sub(_unescape_ottl(match.group("pattern")), match.group("replacement"), line)
     return line
 
@@ -710,6 +714,10 @@ def mask_container_log(line: str) -> str:
         (
             "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD E'a\\b'",
             f"UTC [77] STATEMENT:  ALTER ROLE r PASSWORD '{REDACTED}'",
+        ),
+        (
+            "UTC [77] STATEMENT:  CREATE ROLE x PASSWORD 'ab?cd'",
+            f"UTC [77] STATEMENT:  CREATE ROLE x PASSWORD '{REDACTED}'",
         ),
         (
             "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD\t'x'",
@@ -755,6 +763,12 @@ def test_container_logs_hide_ip_addresses_and_secrets(line: str, masked: str) ->
     """IP клиента nginx (в начале access-лога и в error-логе), адреса соединений,
     пароль в тексте SQL и DETAIL postgres скрыты маркером; прочее — без изменений."""
     assert mask_container_log(line) == masked
+
+
+def test_container_logs_keep_the_jsonb_operator_outside_nginx() -> None:
+    """Query скрывается только у nginx: в STATEMENT postgres «?» — оператор JSONB."""
+    line = "UTC [77] STATEMENT:  select data ? 'k' from t"
+    assert mask_container_log(line, "dmc268-postgres") == line
 
 
 class TestCollectorConfigValidation:

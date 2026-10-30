@@ -372,11 +372,9 @@ def test_container_metrics_come_from_a_separate_collector_through_the_proxy() ->
 
 
 def test_container_logs_go_through_the_logs_collector() -> None:
-    """Логи postgres и rabbitmq шлёт драйвер fluentd демона Docker в отдельный
-    экземпляр коллектора: файлов и Docker API у коллекторов нет. В compose — те же
-    опции, что local.fluentd_log_opts на стенде (там только при стеке, а тег —
-    имя контейнера). В compose драйвер лежит в отдельном файле, а не в основном:
-    podman его не знает. Коллектор логов отдаёт записи основному, где Loki."""
+    """Логи postgres, rabbitmq и реплики шлёт драйвер fluentd в коллектор логов;
+    в compose опции те же, что local.fluentd_log_opts. Почему драйвер в отдельном
+    файле — infra/README.md, «Логи контейнеров»."""
     services = load_compose()["services"]
     overrides = yaml.safe_load(COMPOSE_LOGS_FILE.read_text(encoding="utf-8"))["services"]
     for service in ("postgres", "rabbitmq"):
@@ -393,6 +391,11 @@ def test_container_logs_go_through_the_logs_collector() -> None:
         block = _tf_container_block(service)
         assert 'log_driver = var.observability_enabled ? "fluentd" : "json-file"' in block, service
         assert "log_opts   = var.observability_enabled ? local.fluentd_log_opts : local.log_opts" in block, service
+
+    # Реплики в compose нет, на стенде она пишет так же.
+    replica = _tf_container_block("postgres_replica")
+    assert 'log_driver = var.observability_enabled ? "fluentd" : "json-file"' in replica
+    assert "log_opts   = var.observability_enabled ? local.fluentd_log_opts : local.log_opts" in replica
 
     logs = yaml.safe_load((OBSERVABILITY_DIR / "otelcol-logs.yaml").read_text(encoding="utf-8"))
     assert set(logs["receivers"]) == {"fluent_forward"}

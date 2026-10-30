@@ -228,10 +228,10 @@ run "container_logs_go_to_the_logs_collector_with_the_stack" {
 
   assert {
     condition = alltrue([
-      for c in [docker_container.postgres, docker_container.rabbitmq] :
+      for c in [docker_container.postgres, docker_container.postgres_replica, docker_container.rabbitmq] :
       c.log_driver == "fluentd" && jsonencode(c.log_opts) == jsonencode(local.fluentd_log_opts)
     ])
-    error_message = "Со стеком postgres и rabbitmq пишут логи драйвером fluentd с local.fluentd_log_opts."
+    error_message = "Со стеком postgres, его реплика и rabbitmq пишут логи драйвером fluentd с local.fluentd_log_opts."
   }
 }
 

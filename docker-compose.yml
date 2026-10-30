@@ -386,10 +386,9 @@ services:
     # docker_stats поднимается заново.
     restart: unless-stopped
 
-  # Логи postgres и rabbitmq — экземпляр коллектора с приёмом fluentd, как
-  # dmc268-otelcol-logs в infra/observability.tf. Почему так — infra/README.md,
-  # «Логи контейнеров». Драйвер fluentd у postgres и rabbitmq включает отдельный
-  # файл infra/observability/compose.logs.yml.
+  # Логи postgres и rabbitmq, как dmc268-otelcol-logs в infra/observability.tf;
+  # драйвер включает infra/observability/compose.logs.yml (infra/README.md,
+  # «Логи контейнеров»).
   collector-logs:
     # otel/opentelemetry-collector-contrib:0.158.0
     image: otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5

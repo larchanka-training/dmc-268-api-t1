@@ -66,8 +66,9 @@ NOT требовать правок кода.
 #### Scenario: Логи postgres и rabbitmq доходят в Loki без адресов и секретов
 
 - **WHEN** при включённом стеке контейнер postgres или rabbitmq пишет строку в stdout
-- **THEN** в Loki есть запись с лейблом `service_name`, равным имени контейнера, а IP-адреса,
-  query в URL, пароль в `PASSWORD '…'` и текст `DETAIL` с данными заменены маркером
+- **THEN** в Loki есть запись с лейблом `service_name`, равным имени контейнера, а IPv4-адреса,
+  query в URL у nginx, пароль в `PASSWORD '…'` и `DETAIL: Key …` / `DETAIL: Failing row
+  contains …` заменены маркером
 
 #### Scenario: Без коллектора логов база работает
 

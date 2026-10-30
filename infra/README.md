@@ -359,7 +359,7 @@ rabbitmq — от `dmc268-otelcol-logs` («Логи контейнеров»); �
 (`count = 1 : 0` у каждого ресурса), `telemetry_env` — `OTEL_*_EXPORTER=otlp`, адрес коллектора
 и таймаут в env api, воркера и миграций, — `command` контейнера Postgres (при флаге база
 стартует с `shared_preload_libraries=pg_stat_statements`, без флага — с родным `CMD` образа) и
-драйвер логов Postgres и RabbitMQ (`fluentd` вместо `json-file`, «Логи контейнеров»). Смена
+драйвер логов Postgres, его реплики и RabbitMQ (`fluentd` вместо `json-file`, «Логи контейнеров»). Смена
 `command` и драйвера пересоздаёт контейнеры (тома данные сохраняют), поэтому переключение флага —
 осознанное действие.
 
@@ -475,18 +475,20 @@ cAdvisor убран, а `docker_stats` берёт те же сигналы у Do
 
 ### Логи контейнеров
 
-У Postgres и RabbitMQ нет OTel SDK, поэтому со стеком их stdout забирает сам демон Docker:
+У Postgres, его реплики и RabbitMQ нет OTel SDK, поэтому со стеком их stdout забирает сам демон Docker:
 драйвер логов `fluentd` (`local.fluentd_log_opts` в `locals.tf`, `logging` в
 `observability/compose.logs.yml` для compose) шлёт
 каждую строку на `tcp://127.0.0.1:24224`. Там слушает третий экземпляр коллектора
 `dmc268-otelcol-logs` (тот же образ, конфиг `observability/otelcol-logs.yaml`): receiver
 `fluent_forward`, имя сервиса из тега драйвера (имя контейнера), маскирование и отдача основному
 коллектору по OTLP (`collector:4318`), а дальше — общий конвейер логов в Loki:
-`{service_name="dmc268-postgres"}`, `{service_name="dmc268-rabbitmq"}`. Коллектор логов заменяет
+`{service_name="dmc268-postgres"}`, `{service_name="dmc268-postgres-replica"}`,
+`{service_name="dmc268-rabbitmq"}`. Коллектор логов заменяет
 маркером `<скрыто>` IPv4-адреса (клиент в начале access-лога nginx, `client:` в его error-логе,
-адреса соединений брокера), query в URL (коды OAuth в запросе обратного вызова и в Referer),
-пароль в `PASSWORD '…'` (Postgres пишет упавший запрос в `STATEMENT`, а `ALTER ROLE` шагов
-деплоя несёт пароль литералом) и `DETAIL` ошибок Postgres со значениями ключей и строк таблиц
+адреса соединений брокера), query в URL у nginx (коды OAuth в запросе обратного вызова и в Referer; у postgres «?» не
+трогается: это JSONB-оператор),
+пароль в `PASSWORD '…'` (Postgres пишет упавший запрос в `STATEMENT`; шаги деплоя шлют
+SCRAM-хеш литералом, открытый пароль попадает туда только при ручном `ALTER`/`CREATE ROLE`) и `DETAIL` ошибок Postgres со значениями ключей и строк таблиц
 (`Key (…)=(…)`, `Failing row contains`). IPv6 не маскируется: сети Docker стенда только IPv4.
 Примеры — `tests/infrastructure/test_collector_redaction.py`.
 
@@ -494,8 +496,8 @@ cAdvisor убран, а `docker_stats` берёт те же сигналы у Do
 Env всех контейнеров (пароли базы, брокера, репликации, Grafana, ключи S3), а Docker API отдаёт
 тот же Env через inspect. Поэтому ни файлов, ни Docker API у коллекторов за логами нет: строки
 приносит демон, и коллектор логов видит только их. Порт `24224` опубликован лишь на `127.0.0.1`
-хоста: к нему подключается демон Docker, а протокол без аутентификации — извне сервера и из
-других контейнеров порт недоступен. С internal-сети Docker порт не публикует, поэтому коллектор
+хоста: к нему подключается демон Docker, а протокол без аутентификации — извне сервера порт
+недоступен; из сети стека он доступен, как и OTLP основного коллектора. С internal-сети Docker порт не публикует, поэтому коллектор
 логов, как Grafana, стоит в отдельной не-internal сети `dmc268-logs` (больше там никого) и в сети
 стека — для отдачи основному коллектору; сетей данных и socket-proxy у него нет.
 
@@ -508,13 +510,15 @@ Env всех контейнеров (пароли базы, брокера, ре
 `docker compose -f docker-compose.yml -f infra/observability/compose.logs.yml --profile
 observability up -d`; без файла `docker logs` у postgres и rabbitmq работает как обычно, в Loki
 записи не уходят. Реплика PostgreSQL (`dmc268-postgres-replica`) есть только на стенде, в compose
-её нет.
+её нет; на стенде она тоже пишет через `fluentd`.
 
-Выкат. Смена драйвера пересоздаёт `dmc268-postgres` и `dmc268-rabbitmq` (тома прежние), и сторож
+Выкат. Смена драйвера пересоздаёт `dmc268-postgres`, `dmc268-rabbitmq` и
+`dmc268-postgres-replica` (тома прежние), и сторож
 плана такую замену автоматическим деплоем не пропустит — выкат, как и включение флага выше,
 ручным запуском `gh workflow run deploy.yml --ref develop -f allow_stateful_replace=true`.
 Targeted-шаг пересоздаёт базу и брокер с окном остановки 60 с до миграций; полный `apply` после
-них поднимает `dmc268-otelcol-logs`, и накопленные записи уходят в Loki. Пока идёт замена, api и
+них пересоздаёт реплику (она снова проходит `check-replica.sh`) и поднимает
+`dmc268-otelcol-logs`, и накопленные записи уходят в Loki. Пока идёт замена, api и
 воркер отвечают ошибками базы и брокера.
 
 nginx интерфейса подключается так же в `dmc-268-ui-t1`: у `dmc268-ui` драйвер `fluentd` с теми
@@ -571,7 +575,7 @@ access- и error-лог по умолчанию.
 | логи Loki | только 30 дней (`retention_period: 720h`), лимита по размеру нет | `observability/loki.yaml` |
 | трейсы Tempo | только 14 дней (`block_retention: 336h`), лимита по размеру нет | `observability/tempo.yaml` |
 | логи контейнеров (json-file) | 30 МБ на контейнер (3 файла × 10 МБ) | `local.log_opts` в `locals.tf`, `logging.options` в compose |
-| кэш `docker logs` у postgres и rabbitmq (драйвер fluentd) | 100 МБ на контейнер до сжатия (5 файлов × 20 МБ) | dual logging Docker, значения по умолчанию |
+| кэш `docker logs` у postgres, реплики и rabbitmq (драйвер fluentd) | 100 МБ на контейнер до сжатия (5 файлов × 20 МБ) | dual logging Docker, значения по умолчанию |
 
 Единственный компонент с потолком по размеру — Prometheus (8 ГБ): всплеск кардинальности не
 забьёт диск раньше срока хранения. У Loki и Tempo такого лимита нет: записи старше срока
@@ -582,11 +586,11 @@ Loki отбрасывает с 429 и долг не копит, но всё пр
 никакой — ни лимита, ни алерта; после #100 заполнение ловят алерты по
 `node_filesystem_avail_bytes` от node-exporter.
 
-Ожидаемые объёмы: под ротацию json-file попадает 14 контейнеров этого стека (5 приложения —
-api, worker, реплика, копии, replication-setup — и 9 наблюдаемости) — не больше 420 МБ, и ещё
-до 200 МБ — кэш `docker logs` у postgres и rabbitmq. В Loki пишут api, worker, одноразовый
-migrate, postgres и rabbitmq. При допущении «запись в секунду на сервис по 1 КБ» — 5 КБ/с ≈
-430 МБ в сутки ≈ 13 ГБ за 30 дней на все пять; индекс TSDB Loki (период 24 ч) и рабочие файлы compactor в оценку не входят.
+Ожидаемые объёмы: под ротацию json-file попадает 13 контейнеров этого стека (4 приложения —
+api, worker, копии, replication-setup — и 9 наблюдаемости) — не больше 390 МБ, и ещё
+до 300 МБ — кэш `docker logs` у postgres, реплики и rabbitmq. В Loki пишут api, worker,
+одноразовый migrate, postgres, реплика и rabbitmq. При допущении «запись в секунду на сервис по 1 КБ» — 6 КБ/с ≈
+520 МБ в сутки ≈ 15,5 ГБ за 30 дней на все шесть; индекс TSDB Loki (период 24 ч) и рабочие файлы compactor в оценку не входят.
 
 ## Хранилище состояния
 
