@@ -15,15 +15,15 @@
 ## 3. Логи контейнеров без SDK
 
 - [x] 3.1 `infra/observability/otelcol-logs.yaml`: `fluent_forward` → маскирование → основной коллектор по OTLP; `groupbyattrs/service` основного переносит имя сервиса в ресурс
-- [x] 3.2 `dmc268-otelcol-logs` и сеть `dmc268-logs` в `infra/observability.tf` и compose; драйвер `fluentd` у postgres и rabbitmq (`local.fluentd_log_opts`, в infra — только со стеком)
+- [x] 3.2 `dmc268-otelcol-logs` и сеть `dmc268-logs` в `infra/observability.tf` и compose; драйвер `fluentd` у postgres, реплики и rabbitmq (`local.fluentd_log_opts`, в infra — только со стеком; в compose — `compose.logs.yml`)
 - [x] 3.3 Тесты: `tests/test_infra_isolation.py`, `tests/infrastructure/test_observability_stack.py`, `test_collector_redaction.py`, `infra/tests/observability.tftest.hcl`
 - [x] 3.4 `infra/README.md` («Логи контейнеров»), `docs/BACKEND_ARCHITECTURE.md`
 
 ## 4. Стенд
 
 - [ ] 4.1 Из трейса API в Grafana открываются его логи
-- [ ] 4.2 Цели `collector-self`, `collector-docker-self`, `loki`, `tempo` в Prometheus `up`; в логе коллектора нет WARN про `otlphttp`
+- [ ] 4.2 Цели `collector-self`, `collector-docker-self`, `collector-logs-self`, `loki`, `tempo` в Prometheus `up`; в логе коллектора нет WARN про `otlphttp`
 - [ ] 4.3 В Loki нет записей `GET /health`
-- [ ] 4.4 Выкат ручным запуском с `allow_stateful_replace=true`: `dmc268-postgres` и `dmc268-rabbitmq` пересозданы на прежних томах, `docker inspect -f '{{.HostConfig.LogConfig.Type}}'` — `fluentd`, `docker logs` у них показывает записи
+- [ ] 4.4 Выкат ручным запуском с `allow_stateful_replace=true`: `dmc268-postgres`, `dmc268-postgres-replica` и `dmc268-rabbitmq` пересозданы на прежних томах, `docker inspect -f '{{.HostConfig.LogConfig.Type}}'` — `fluentd`, `docker logs` у них показывает записи
 - [ ] 4.5 В Loki есть `{service_name="dmc268-postgres"}` и `{service_name="dmc268-rabbitmq"}`; в записях соединений rabbitmq адреса — маркер
 - [ ] 4.6 `ss -ltn` на сервере: порт 24224 слушается только на `127.0.0.1`

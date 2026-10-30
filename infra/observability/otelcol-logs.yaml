@@ -31,16 +31,17 @@ processors:
           # IPv4 где угодно в строке: клиент в начале access-лога nginx,
           # «client:» в его error-логе, адреса соединений rabbitmq.
           - replace_pattern(body, "[0-9]{1,3}([.][0-9]{1,3}){3}", "<скрыто>")
-          # Пароль в тексте SQL: postgres пишет упавший запрос в STATEMENT. Шаги
-          # деплоя шлют SCRAM-хеш литералом (\password), открытый пароль попадает
-          # сюда только при ручном ALTER/CREATE ROLE (в том числе E'…').
+          # Пароль в тексте SQL: postgres пишет упавший запрос в STATEMENT.
+          # Пароль роли мониторинга migrate.sh и миграция 0013 шлют литералом
+          # (привязка на клиенте) — если ALTER ROLE упадёт, он окажется здесь.
           - replace_pattern(body, "(?i)password\\s+E?'([^']|'')*'", "PASSWORD '<скрыто>'")
           # Query в URL: коды OAuth (code, state) в запросе обратного вызова и
           # в Referer, как скрывает app/api/log_redaction.py. Query кончается
-          # пробелом или кавычкой поля access-лога. Только у nginx: в STATEMENT
-          # postgres «?» бывает JSONB-оператором. Пароль скрыт раньше: в нём тоже
-          # может быть «?».
-          - 'replace_pattern(body, "[?][^ \"]*", "?<скрыто>") where attributes["service.name"] == "dmc268-ui"'
+          # пробелом или кавычкой поля access-лога. У всех, кроме postgres: там
+          # «?» в STATEMENT бывает JSONB-оператором; имена postgres задаёт этот
+          # репозиторий, а новый сервис по умолчанию маскируется. Пароль скрыт
+          # раньше: в нём тоже может быть «?».
+          - 'replace_pattern(body, "[?][^ \"]*", "?<скрыто>") where attributes["service.name"] != "dmc268-postgres" and attributes["service.name"] != "dmc268-postgres-replica"'
           # DETAIL ошибок postgres со значениями ключей и строк таблиц; прочие
           # (слот репликации, deadlock) данных не несут.
           - 'replace_pattern(body, "DETAIL:  (Key |Failing row contains).*", "DETAIL:  <скрыто>")'

@@ -25,8 +25,8 @@ scrape_configs:
     static_configs:
       - targets: ["collector-docker:8889"]
 
-  # Свои метрики экземпляров коллектора (otelcol_*), Loki
-  # и Tempo: отказы приёма, сбои экспорта, объём.
+  # Свои метрики экземпляров коллектора (otelcol_*), Loki и Tempo: отказы
+  # приёма, сбои экспорта, объём.
   - job_name: collector-self
     static_configs:
       - targets: ["collector:8888"]

@@ -2,9 +2,7 @@
 # collector-logs. Подключается явно вместе со стеком:
 #   docker compose -f docker-compose.yml -f infra/observability/compose.logs.yml \
 #     --profile observability up -d
-# Почему файл отдельный, а не в основном compose, и зачем fluentd-async, что
-# опции совпадают с local.fluentd_log_opts, а тег равен имени контейнера на
-# стенде: infra/README.md, «Логи контейнеров».
+# Почему так: infra/README.md, «Логи контейнеров».
 services:
   postgres:
     logging:
