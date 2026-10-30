@@ -51,8 +51,6 @@ _RAW_ACCEPT = "application/vnd.github.raw+json"
 # Отказ лимита без `retry-after` и `x-ratelimit-reset`: «wait for at least one
 # minute before retrying» («Rate limits for the REST API»).
 _RATE_LIMIT_DEFAULT_WAIT_SECONDS = 60.0
-# Сбой `GET /app` помнится минуту: повторные вызовы не ждут таймаута GitHub каждый.
-_APP_SLUG_RETRY_SECONDS = 60.0
 
 
 def _translate_state(data: dict[str, Any]) -> MergeRequestState:
@@ -73,25 +71,20 @@ class GitHubVcsGateway:
         *,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.time,
-        monotonic: Callable[[], float] = time.monotonic,
         max_attempts: int = 3,
         backoff_base_seconds: float = 0.5,
         rate_limit_budget_seconds: float = 60.0,
     ) -> None:
         """`rate_limit_budget_seconds` - сколько один запрос может ждать снятия лимита
-        суммарно; `clock` - стенные часы для `x-ratelimit-reset` (эпоха, секунды);
-        `monotonic` - часы окна повтора `app_slug`."""
+        суммарно; `clock` - стенные часы для `x-ratelimit-reset` (эпоха, секунды)."""
         self._auth = auth
         self._client = client
         self._sleep = sleep
         self._clock = clock
-        self._monotonic = monotonic
         self._max_attempts = max_attempts
         self._backoff_base_seconds = backoff_base_seconds
         self._rate_limit_budget_seconds = rate_limit_budget_seconds
         self._app_slug: str | None = None
-        # Время `monotonic`, до которого `app_slug` после сбоя не спрашивает GitHub.
-        self._app_slug_retry_at = 0.0
         self._review = GitHubReviewClient(self)
 
     def fetch_diff(
@@ -284,23 +277,13 @@ class GitHubVcsGateway:
     def app_slug(self) -> str:
         """Slug App из `GET /app` с JWT приложения: логин бота и ссылка на экран установки.
 
-        Запрашивается один раз на процесс и только когда нужен. После сбоя
-        `_APP_SLUG_RETRY_SECONDS` GitHub не спрашивается и сразу поднимается
-        `VcsError`: страницы списка подряд не ждут таймаута GitHub каждая.
+        Запрашивается один раз на процесс и только когда нужен; сбой здесь не
+        запоминается - следующий вызов спросит снова: так воркер находит своё ревью
+        после потерянного ответа на POST. Окно повтора для страниц списка держит
+        `Container.app_slug`.
         """
         if self._app_slug is not None:
             return self._app_slug
-        if self._monotonic() < self._app_slug_retry_at:
-            raise VcsError("GitHub API: GET /app недавно не удался, повтор позже")
-        try:
-            slug = self._fetch_app_slug()
-        except VcsError:
-            self._app_slug_retry_at = self._monotonic() + _APP_SLUG_RETRY_SECONDS
-            raise
-        self._app_slug = slug
-        return slug
-
-    def _fetch_app_slug(self) -> str:
         try:
             response = self._client.get(
                 "/app",
@@ -316,6 +299,7 @@ class GitHubVcsGateway:
             raise VcsError(f"GitHub API вернул неожиданное тело на GET /app: {error!r}") from error
         if not isinstance(slug, str) or not slug:
             raise VcsError("GitHub API вернул пустой slug на GET /app")
+        self._app_slug = slug
         return slug
 
     def _request(

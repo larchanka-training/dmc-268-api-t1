@@ -271,6 +271,25 @@ def test_timeout_on_create_review_looks_the_review_up_instead_of_repeating(
     assert publication.summary_provider_comment_id == "9001"
 
 
+def test_failed_bot_login_before_a_lost_post_does_not_stop_the_lookup(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """`GET /app` упал до POST, ответ на POST потерян: поиск по маркеру спрашивает `GET /app`
+    снова и находит ревью, а не роняет прогон."""
+
+    def create(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    github = _GitHub(create)
+    github.app_status_before_post = 502
+    github.reviews = [{"id": 9001, "body": f"сводка\n\n{MARKER}", "user": BOT}]
+
+    publication = _publish(make_gateway(rsa_key_pair, github.handler))
+
+    assert github.posts() == 1
+    assert publication.summary_provider_comment_id == "9001"
+
+
 def _sleeping_gateway(
     rsa_key_pair: RsaKeyPair, handler: Callable[[httpx.Request], httpx.Response], sleeps: list[float]
 ) -> GitHubVcsGateway:

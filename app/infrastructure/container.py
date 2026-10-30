@@ -9,6 +9,7 @@
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from time import monotonic
 
 import httpx
 from sqlalchemy import Engine, create_engine
@@ -76,6 +77,9 @@ API_VCS_LIMITS = VcsClientLimits(timeout=httpx.Timeout(5.0), rate_limit_budget_s
 WORKER_VCS_LIMITS = VcsClientLimits(
     timeout=httpx.Timeout(30.0, connect=5.0), rate_limit_budget_seconds=60.0
 )
+# Сбой `GET /app` для `install_url` помнится минуту: страницы списка, запрошенные
+# подряд, не ждут таймаута GitHub каждая и не пишут по предупреждению на страницу.
+_APP_SLUG_RETRY_SECONDS = 60.0
 # Callback входа: путь роутера `/auth`, зарегистрированный в настройках GitHub App.
 _OAUTH_CALLBACK_PATH = "/api/v1/auth/{provider}/callback"
 
@@ -118,6 +122,9 @@ class Container:
     _llm_gateway: LlmGateway | None
     # Ленивый, как VCS-шлюз: процессу API парсеры грамматик не нужны.
     _definition_extractor: DefinitionExtractor | None
+    # Время `monotonic()`, до которого `app_slug` после сбоя не спрашивает
+    # GitHub; `0.0` — сбоя не было.
+    _app_slug_retry_at: float
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine, self._token_cipher)
@@ -153,13 +160,16 @@ class Container:
         Тот же `GET /app` и тот же кэш шлюза, что у логина бота: запрос один на
         процесс. Без ключа приложения GitHub не спрашиваем; сбой GitHub — `None` и
         предупреждение в лог, а не ошибка списка: список от ключа приложения не зависит.
-        Окно повтора после сбоя держит сам шлюз.
+        После сбоя `_APP_SLUG_RETRY_SECONDS` GitHub не спрашиваем и сразу отдаём `None`.
         """
         if not self.settings.github_app_configured:
+            return None
+        if monotonic() < self._app_slug_retry_at:
             return None
         try:
             return self.vcs_gateway().app_slug()
         except VcsError:
+            object.__setattr__(self, "_app_slug_retry_at", monotonic() + _APP_SLUG_RETRY_SECONDS)
             logger.warning("slug GitHub App не получен: install_url не отдаётся", exc_info=True)
             return None
 
@@ -274,6 +284,7 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
         _run_changes=PostgresRunChanges(listen_conninfo(settings.database_url)),
         _llm_gateway=None,
         _definition_extractor=None,
+        _app_slug_retry_at=0.0,
     )
 
 
