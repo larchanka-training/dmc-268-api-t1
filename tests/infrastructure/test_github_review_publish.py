@@ -55,13 +55,10 @@ def test_publish_pull_request_review_fetches_inline_ids(rsa_key_pair: RsaKeyPair
         if request.method == "GET" and "/reviews/9001/comments" in request.url.path:
             return httpx.Response(
                 200,
+                # Так отвечает GitHub: line и side пустые, есть только position (#265).
                 json=[
-                    {
-                        "id": 42,
-                        "path": "a.py",
-                        "line": 3,
-                        "side": "RIGHT",
-                    }
+                    {"id": 41, "path": "a.py", "body": "другое", "line": None, "side": None, "position": 3},
+                    {"id": 42, "path": "a.py", "body": "замечание", "line": None, "side": None, "position": 3},
                 ],
             )
         return httpx.Response(404)
@@ -78,7 +75,9 @@ def test_publish_pull_request_review_fetches_inline_ids(rsa_key_pair: RsaKeyPair
     )
 
     assert publication.summary_provider_comment_id == "9001"
-    assert publication.inline_comments[0].provider_comment_id == "42"
+    (inline,) = publication.inline_comments
+    assert inline is not None
+    assert (inline.provider_comment_id, inline.side, inline.line) == ("42", DiffSide.NEW, 3)
     assert any("/pulls/7/reviews/9001/comments" in r.url.path for r in seen)
 
 
@@ -183,7 +182,7 @@ class _GitHub:
         if request.method == "GET" and path.endswith("/comments"):
             if self.comments_status != 200:
                 return httpx.Response(self.comments_status, json={"message": "Bad Gateway"})
-            return httpx.Response(200, json=[{"id": 42, "path": "a.py", "line": 3, "side": "RIGHT"}])
+            return httpx.Response(200, json=[{"id": 42, "path": "a.py", "body": "замечание", "line": None, "side": None}])
         return httpx.Response(404)
 
     def posts(self) -> int:
