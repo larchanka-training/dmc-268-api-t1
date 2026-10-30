@@ -762,6 +762,10 @@ def mask_container_log(line: str) -> str:
             f'[error] 29#29: *1 upstream timed out, client: {REDACTED}, request: "GET /cb?{REDACTED} HTTP/1.1", host: "h"',
         ),
         (
+            "UTC [77] FATAL:  could not connect: Is the server accepting TCP/IP connections?",
+            "UTC [77] FATAL:  could not connect: Is the server accepting TCP/IP connections?",
+        ),
+        (
             'UTC [77] FATAL:  password authentication failed for user "dmc268"; PostgreSQL 18.1, RabbitMQ 4.4.0',
             'UTC [77] FATAL:  password authentication failed for user "dmc268"; PostgreSQL 18.1, RabbitMQ 4.4.0',
         ),
