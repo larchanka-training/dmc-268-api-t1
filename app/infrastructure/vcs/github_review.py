@@ -49,9 +49,11 @@ def _map_fetched_inline_comments(
 ) -> tuple[PublishedInlineComment | None, ...]:
     """Сопоставляет черновики с комментариями созданного ревью по пути и тексту.
 
-    `GET …/reviews/{id}/comments` отдаёт `line` и `side` пустыми (проверено на
-    живом PR, #265), поэтому строку и сторону берём из черновика: текст
-    комментария сервис пишет сам.
+    `GET …/reviews/{id}/comments` отдаёт `line`, `side` и `original_line`
+    пустыми, есть только `position` (проверено на живом PR, #265), поэтому
+    строку и сторону берём из черновика: текст комментария сервис пишет сам.
+    Одинаковые тексты в одном файле разбираются в порядке ответа: GitHub
+    отдаёт комментарии ревью в порядке создания.
     """
     published: list[PublishedInlineComment | None] = []
     used_provider_ids: set[str] = set()

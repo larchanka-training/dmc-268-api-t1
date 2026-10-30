@@ -81,6 +81,36 @@ def test_publish_pull_request_review_fetches_inline_ids(rsa_key_pair: RsaKeyPair
     assert any("/pulls/7/reviews/9001/comments" in r.url.path for r in seen)
 
 
+def test_identical_inline_texts_get_ids_in_response_order(rsa_key_pair: RsaKeyPair) -> None:
+    """Два одинаковых замечания в одном файле: id раздаются в порядке ответа GitHub."""
+    first = InlineCommentDraft(file_path="a.py", side=DiffSide.NEW, line=10, body="замечание")
+    second = InlineCommentDraft(file_path="a.py", side=DiffSide.NEW, line=20, body="замечание")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        if request.method == "POST" and request.url.path.endswith("/reviews"):
+            return httpx.Response(200, json={"id": 9001})
+        if request.method == "GET" and "/reviews/9001/comments" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": 51, "path": "a.py", "body": "замечание", "line": None, "side": None, "position": 10},
+                    {"id": 52, "path": "a.py", "body": "замечание", "line": None, "side": None, "position": 20},
+                ],
+            )
+        return httpx.Response(404)
+
+    publication = make_gateway(rsa_key_pair, handler).publish_pull_request_review(
+        "o/r", 7, "c" * 40, INSTALLATION_ID, "сводка", (first, second), review_run_id=RUN_ID
+    )
+
+    assert [(c.line, c.provider_comment_id) for c in publication.inline_comments if c is not None] == [
+        (10, "51"),
+        (20, "52"),
+    ]
+
+
 def test_set_merge_gate_check_posts_check_run(rsa_key_pair: RsaKeyPair) -> None:
     payloads: list[dict[str, Any]] = []
 
