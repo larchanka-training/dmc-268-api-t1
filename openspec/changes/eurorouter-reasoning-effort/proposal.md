@@ -7,7 +7,7 @@
 - `llm-gateway`: необязательный параметр рассуждения hosted-провайдера задаётся конфигурацией и уходит в запрос, только когда задан. Каталог Eurorouter отдаёт `reasoning_effort` не у каждой модели (у `qwen3-coder-next-80b` его нет), а неизвестный параметр шлюз может отвергнуть.
 - `app/config.py`: `EUROROUTER_REASONING_EFFORT` — `low`, `medium`, `high` или пусто; пустая строка — не задано.
 - `OpenAiCompatibleGateway`: `reasoning_effort` в теле запроса только при заданном значении; контейнер, live-тесты и eval передают его из настроек.
-- Развёртывание: файл `.github/eurorouter-reasoning-effort` рядом с `.github/eurorouter-model`, его читают `infra.sh`, `plan.sh`, `eval.yml` и `llm-live.yml`; переменная OpenTofu `eurorouter_reasoning_effort` с проверкой значения; у воркера `EUROROUTER_REASONING_EFFORT` только при непустом значении.
+- Развёртывание: файл `.github/eurorouter-reasoning-effort` рядом с `.github/eurorouter-model`, его читают `infra.sh`, `plan.sh`, `eval.yml` и `llm-live.yml`; переменная OpenTofu `eurorouter_reasoning_effort` с проверкой значения; у воркера `EUROROUTER_REASONING_EFFORT` всегда, пустое значение настройки читают как «не задано».
 - `.github/eurorouter-model` — `glm-5.3`, `.github/eurorouter-reasoning-effort` — `low`.
 - Документация: `README.md`, `infra/README.md`, `.env.example`, `docker-compose.yml`.
 

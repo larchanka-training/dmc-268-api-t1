@@ -7,7 +7,7 @@
 ## 2. Развёртывание
 
 - [x] 2.1 `.github/eurorouter-reasoning-effort` (`low`), его читают `infra.sh`, `plan.sh`, `eval.yml`, `llm-live.yml`; `.github/eurorouter-model` — `glm-5.3`
-- [x] 2.2 `infra/variables.tf`: `eurorouter_reasoning_effort` с проверкой; `infra/app.tf`: env воркера только при непустом значении; тесты `infra/tests/main.tftest.hcl`
+- [x] 2.2 `infra/variables.tf`: `eurorouter_reasoning_effort` с проверкой; `infra/app.tf`: env воркера (пусто — не задано); тесты `infra/tests/main.tftest.hcl`
 - [x] 2.3 `docker-compose.yml`, `.env.example`, `README.md`, `infra/README.md`
 
 ## 3. Стенд
