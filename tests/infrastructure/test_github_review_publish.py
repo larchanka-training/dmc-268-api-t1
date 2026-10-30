@@ -288,6 +288,8 @@ def test_failed_bot_login_before_a_lost_post_does_not_stop_the_lookup(
 
     assert github.posts() == 1
     assert publication.summary_provider_comment_id == "9001"
+    # Суть регрессии: сбой `GET /app` не запомнен, поиск спрашивает его снова.
+    assert [path for _, path in github.seen if path == "/app"] == ["/app", "/app"]
 
 
 def _sleeping_gateway(
