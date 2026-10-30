@@ -84,6 +84,7 @@ jobs:
       # сравнимы только при одной модели. Числа в docs/testing/RULES_E2E_REPORT.md
       # сняты на прежней qwen3-coder-30b-a3b (#93, #95).
       - run: echo "EUROROUTER_MODEL=$(cat .github/eurorouter-model)" >> "$GITHUB_ENV"
+      - run: echo "EUROROUTER_REASONING_EFFORT=$(cat .github/eurorouter-reasoning-effort)" >> "$GITHUB_ENV"
       - uses: ./.github/actions/python-env
       - name: pytest -m eval (пропуск теста - провал)
         env:

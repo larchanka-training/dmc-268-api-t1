@@ -252,6 +252,18 @@ def test_eurorouter_settings_are_checked_like_opentofu(field: str, value: str, n
         _llm_settings(**{**PRIMARY, field: value})
 
 
+@pytest.mark.parametrize(("value", "expected"), [(None, None), ("", None), ("low", "low")])
+def test_reasoning_effort_is_unset_when_empty(value: str | None, expected: str | None) -> None:
+    """Пустое значение - как в docker compose и в env стенда без файла: параметр не задан."""
+    settings = _llm_settings(**PRIMARY, eurorouter_reasoning_effort=value)
+    assert settings.eurorouter_reasoning_effort == expected
+
+
+def test_unknown_reasoning_effort_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="eurorouter_reasoning_effort"):
+        _llm_settings(**PRIMARY, eurorouter_reasoning_effort="max")
+
+
 def test_hosted_fallback_is_refused_when_eurorouter_is_already_primary() -> None:
     with pytest.raises(ValidationError, match="LLM_HOSTED_FALLBACK требует LLM_BACKEND=ollama"):
         _llm_settings(**PRIMARY, llm_hosted_fallback=True)
