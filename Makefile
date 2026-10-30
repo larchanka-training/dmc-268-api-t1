@@ -60,7 +60,8 @@ OPENSPEC := npx --yes @fission-ai/openspec@1.15.0
 .PHONY: help check \
 	sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
 	test-db test-queue test-e2e test-all \
-	infra-up infra-down test-db-create test-queue-vhost migrate run-api run-worker
+	infra-up infra-down test-db-create test-queue-vhost migrate run-api run-worker \
+	run-local stop-local
 
 help: ## Список целей
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -108,6 +109,42 @@ ollama-pull: ## Скачать MODEL, если её ещё нет
 		&& echo "Модель $(MODEL) уже скачана" \
 		|| OLLAMA_HOST='$(OLLAMA_URL)' ollama pull '$(MODEL)'
 
+# --- песочница tree-sitter: контекст модели без модели ----------------------------
+# CASE, CASE_FILE, RANGE, RULES и ARGS - общие с песочницей воркера. У CASE_FILE и
+# RANGE есть значения по умолчанию, поэтому сюда они уходят, только если заданы явно.
+OUTLINE_CASE ?= tests/sandbox/outline/examples/outline-case.yaml
+# FILE (свой файл) и LINES (его изменённые строки: N, N-M или список через запятую)
+# берутся только из командной строки make: LINES - высота терминала, её экспортируют
+# bash, zsh и CI, и из окружения она молча сузила бы диапазон.
+cmdline = $(filter command line,$(origin $(1)))
+OUTLINE_FLAGS = --rules $(RULES) $(if $(CASE),--case $(CASE)) \
+	$(if $(call explicit,CASE_FILE),--case-file '$(CASE_FILE)') \
+	$(if $(call explicit,RANGE),--from-git '$(RANGE)') \
+	$(if $(call cmdline,FILE),--file '$(FILE)') $(if $(call cmdline,LINES),--lines '$(LINES)') $(ARGS)
+
+.PHONY: sandbox-outline-demo sandbox-outline
+
+sandbox-outline-demo: ## tree-sitter: проверить окружение и грамматики, разобрать мок-PR (OUTLINE_CASE, ARGS)
+	@printf '\n\033[1m==> 1/3 Проверка окружения\033[0m\n'
+	@scripts/sandbox-outline-doctor.sh
+	@printf '\n\033[1m==> 2/3 Зависимости Python (uv sync) и грамматики tree-sitter\033[0m\n'
+	@uv sync --all-extras
+	@scripts/sandbox-outline-doctor.sh --grammars
+	@printf '\n\033[1m==> 3/3 Разбор мок-PR $(OUTLINE_CASE)\033[0m\n'
+	@uv run python -m tests.sandbox.outline --rules $(RULES) --case-file '$(OUTLINE_CASE)' $(ARGS); status=$$?; echo; \
+	case $$status in \
+		0) printf '\033[32mГотово: контекст собран, отчёт выше.\033[0m\n' ;; \
+		1) printf '\033[31mЕсть проблемы разбора (parse_error, файл не загружен или дифф не получен) - см. «проблемы» в отчёте.\033[0m\n' ;; \
+		139) printf '\033[31mSegfault в tree-sitter - версия 0.26.0? См. #226: uv sync --all-extras.\033[0m\n' ;; \
+		*) printf '\033[31mВход или окружение не подошли (код %s) - причина в строке выше.\033[0m\n' $$status ;; \
+	esac; \
+	echo "Дальше: свой файл - make sandbox-outline FILE=app/x.py LINES=10-20, свои коммиты - make sandbox-outline RANGE=develop..HEAD."; \
+	echo "Подробно: tests/sandbox/outline/README.md"; \
+	exit $$status
+
+sandbox-outline: ## tree-sitter на CASE / CASE_FILE / RANGE / FILE (+ LINES); без входов - мок-PR (RULES, ARGS)
+	uv run python -m tests.sandbox.outline $(OUTLINE_FLAGS)
+
 # --- тесты по компонентам: с PostgreSQL и RabbitMQ из compose ----------------------
 
 test-db: infra-up test-db-create ## Адаптеры базы и миграции: tests/db
@@ -149,3 +186,21 @@ run-api: migrate ## API на хосте с автоперезагрузкой (�
 
 run-worker: migrate ## Воркер на хосте; адаптер модели - из .env или LLM_BACKEND=stub|ollama (для ollama - MODEL)
 	$(WORKER_ENV) uv run python -m app.worker
+
+# --- весь бэкенд локально против настоящего GitHub -----------------------------------
+# Руководство - docs/LOCAL_RUN.md. Процессы и логи - scripts/run_local.sh.
+
+# Модель run-local: явная MODEL или OLLAMA_MODEL, иначе OLLAMA_MODEL из .env, иначе 7b -
+# 1.5b песочницы для ревью настоящих PR слаба. Адрес и модель уходят воркеру переменными,
+# а не правкой .env: тот же .env читает docker compose, там Ollama - http://ollama:11434.
+ENV_OLLAMA_MODEL := $(shell sed -n 's/^OLLAMA_MODEL=//p' .env 2>/dev/null | tail -n 1 | tr -d "\"'")
+LOCAL_MODEL = $(if $(or $(call explicit,MODEL),$(call explicit,OLLAMA_MODEL)),$(MODEL),$(or $(ENV_OLLAMA_MODEL),qwen2.5-coder:7b))
+# 0 - без туннеля cloudflared: вебхуки GitHub до локального API не дойдут.
+TUNNEL ?= 1
+
+run-local: ## Весь бэкенд против GitHub: проверить и поднять всё, что нужно, или подсказать, как исправить (MODEL, TUNNEL=0)
+	@MAKE='$(MAKE)' LOCAL_MODEL='$(LOCAL_MODEL)' OLLAMA_URL='$(OLLAMA_URL)' TUNNEL='$(TUNNEL)' \
+		scripts/run_local.sh start
+
+stop-local: ## Остановить API, воркер и туннель из run-local (база, брокер и Ollama остаются)
+	@scripts/run_local.sh stop
