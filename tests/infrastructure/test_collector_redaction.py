@@ -675,9 +675,10 @@ class TestCollectorConfigValidation:
     """
 
     @pytest.mark.docker
-    def test_collector_accepts_the_config(self) -> None:
+    @pytest.mark.parametrize("config", [COLLECTOR_CONFIG, COLLECTOR_CONFIG.with_name("otelcol-docker.yaml")])
+    def test_collector_accepts_the_config(self, config: Path) -> None:
         image = compose_collector_image()
-        mount = f"{COLLECTOR_CONFIG}:/etc/otelcol-contrib/config.yaml:ro"
+        mount = f"{config}:/etc/otelcol-contrib/config.yaml:ro"
         # Реквизиты receiver postgresql конфиг берёт из окружения: при
         # валидации достаточно любых непустых значений — проверяется схема,
         # а не доступ к базе.
