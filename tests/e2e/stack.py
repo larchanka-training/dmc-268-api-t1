@@ -169,6 +169,7 @@ class Stack:
             _run_changes=PostgresRunChanges(listen_conninfo(self.settings.database_url)),
             _llm_gateway=llm,
             _definition_extractor=TreeSitterDefinitionExtractor(),
+            _app_slug_retry_at=0.0,
         )
 
     def api(self) -> FastAPI:
@@ -254,6 +255,7 @@ class Stack:
                     auto_review_enabled=True,
                     created_at=now,
                     updated_at=now,
+                    connected_at=now,
                 )
             )
             work.commit()

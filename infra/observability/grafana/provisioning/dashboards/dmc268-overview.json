@@ -450,7 +450,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "CPU контейнеров",
-      "description": "Процессорное время по контейнерам (cAdvisor), включая сам стек наблюдаемости.",
+      "description": "Процессорное время по контейнерам (receiver docker_stats коллектора), включая сам стек наблюдаемости; 100% — одно ядро.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 40 },
       "fieldConfig": {
@@ -469,8 +469,8 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name!=\"\"}[$__rate_interval])) * 100",
-          "legendFormat": "{{name}}",
+          "expr": "sum by (container_name) (rate(container_cpu_usage_nanoseconds_total[$__rate_interval])) / 1e7",
+          "legendFormat": "{{container_name}}",
           "range": true,
           "refId": "A"
         }
@@ -480,7 +480,7 @@
       "id": 15,
       "type": "timeseries",
       "title": "Память контейнеров",
-      "description": "Потребление памяти по контейнерам (cAdvisor), включая сам стек наблюдаемости: фактические цифры — ориентир при пересмотре observability_memory_mb.",
+      "description": "Потребление памяти по контейнерам (receiver docker_stats коллектора, без страничного кэша), включая сам стек наблюдаемости: фактические цифры — ориентир при пересмотре observability_memory_mb.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 40 },
       "fieldConfig": {
@@ -499,8 +499,8 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "container_memory_usage_bytes{name!=\"\"}",
-          "legendFormat": "{{name}}",
+          "expr": "sum by (container_name) (container_memory_usage_total_bytes)",
+          "legendFormat": "{{container_name}}",
           "range": true,
           "refId": "A"
         }

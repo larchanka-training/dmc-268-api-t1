@@ -42,3 +42,6 @@ dist/
 
 # Лог фоновой ollama serve из make ollama-up
 .ollama.log
+
+# Логи и PID-файлы make run-local
+.local/

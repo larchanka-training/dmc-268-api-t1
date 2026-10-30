@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-10-28
+# Поведение сервиса не меняется: добавляются две песочницы для локальной отладки —
+# воркера (#229) и tree-sitter (#236). Правки только в tests/, scripts/, Makefile и
+# документации; в app/ — переименование build_llm_gateway в публичное.
+skip_specs: true

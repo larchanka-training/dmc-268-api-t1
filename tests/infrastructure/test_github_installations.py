@@ -23,6 +23,7 @@ import jwt
 import pytest
 
 from app.domain.entities import InstallationRepository, RepositoryPermissions, Secret
+from app.domain.enums import RepositorySelection
 from app.domain.provider_token import ProviderTokenRejected
 from app.infrastructure.vcs.errors import VcsError, VcsUnavailableError
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
@@ -45,14 +46,14 @@ class _UnusedAppAuth:
         raise AssertionError("JWT приложения не должен запрашиваться")
 
 
-def installation(installation_id: int, suspended_at: str | None = None) -> dict[str, Any]:
+def installation(installation_id: int, suspended_at: str | None = None, selection: str = "selected") -> dict[str, Any]:
     """Установка из примера ответа документации, урезанная до полей, что читает адаптер, и соседей."""
     return {
         "id": installation_id,
         "account": {"login": "octo-org", "id": 1, "type": "Organization"},
         "app_id": 1,
         "target_type": "Organization",
-        "repository_selection": "selected",
+        "repository_selection": selection,
         "suspended_at": suspended_at,
         "suspended_by": None,
     }
@@ -438,3 +439,72 @@ def test_a_malformed_suspended_at_is_rejected(rsa_key_pair: RsaKeyPair) -> None:
     response = httpx.Response(200, json=installation(7, suspended_at="вчера"))
     with pytest.raises(VcsError):
         _app_catalog(response, rsa_key_pair, []).app_installed("o/r")
+
+
+# --- Setup URL: установка пользователя и её репозитории ------------------------------
+
+
+def test_installation_selection_finds_the_installation_among_the_users_own() -> None:
+    installations = [installation(i) for i in range(1, 101)] + [installation(150, selection="all")]
+    catalog = make_catalog(router(installations, {}))
+
+    assert catalog.installation_selection(TOKEN, 3) is RepositorySelection.SELECTED
+    assert catalog.installation_selection(TOKEN, 150) is RepositorySelection.ALL
+    # Чужой id из адреса Setup URL — не среди установок пользователя.
+    assert catalog.installation_selection(TOKEN, 999) is None
+
+
+def test_a_suspended_installation_has_no_selection() -> None:
+    catalog = make_catalog(router([installation(7, suspended_at="2026-10-01T00:00:00Z")], {}))
+
+    assert catalog.installation_selection(TOKEN, 7) is None
+
+
+def test_an_unknown_or_missing_selection_is_a_vcs_error() -> None:
+    unknown = make_catalog(router([installation(7, selection="some")], {}))
+    without = installation(7)
+    del without["repository_selection"]
+    missing = make_catalog(router([without], {}))
+
+    with pytest.raises(VcsError):
+        unknown.installation_selection(TOKEN, 7)
+    with pytest.raises(VcsError):
+        missing.installation_selection(TOKEN, 7)
+
+
+def test_installation_repositories_reads_every_page_of_one_installation() -> None:
+    seen: list[str] = []
+    catalog = make_catalog(router([installation(7)], {7: [repo_json(n, admin=n == 1) for n in range(1, 151)]}, seen))
+
+    repositories = catalog.installation_repositories(TOKEN, 7)
+
+    assert len(repositories) == 150
+    assert repositories[0].permissions.admin is True
+    assert seen == [
+        "/user/installations/7/repositories?per_page=100&page=1",
+        "/user/installations/7/repositories?per_page=100&page=2",
+    ]
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_installation_repositories_closed_for_the_token_is_a_vcs_error(status: int) -> None:
+    """Установку только что нашли: пустой список вместо сбоя скрыл бы его."""
+    catalog = make_catalog(lambda request: httpx.Response(status, json={"message": "Not Found"}))
+
+    with pytest.raises(VcsError, match=f"HTTP {status}"):
+        catalog.installation_repositories(TOKEN, 7)
+
+
+def test_a_forbidden_installation_says_access_is_denied_not_that_github_is_down() -> None:
+    """`403` (SSO не авторизован) виден в тексте ошибки: в логе Setup URL — не «GitHub не ответил»."""
+    catalog = make_catalog(lambda request: httpx.Response(403, json={"message": "Resource protected by SAML"}))
+
+    with pytest.raises(VcsError, match="HTTP 403 .*SSO"):
+        catalog.installation_repositories(TOKEN, 7)
+
+
+def test_an_unknown_selection_does_not_break_the_repository_list() -> None:
+    """Значение `repository_selection` нужно только Setup URL: незнакомое не роняет список."""
+    catalog = make_catalog(router([installation(7, selection="future")], {7: [repo_json(1, admin=True)]}))
+
+    assert [r.provider_id for r in catalog.list_repositories(TOKEN)] == ["1"]

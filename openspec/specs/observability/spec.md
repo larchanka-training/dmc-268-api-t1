@@ -439,7 +439,8 @@ stacktrace события `exception`; в логах — атрибуты `excep
 ### Requirement: Стек наблюдаемости одинаков локально и на проде
 
 Наблюдаемость SHALL работать в стеке из восьми контейнеров из официальных образов с зафиксированными
-версиями: OTel Collector, Loki, Tempo, Prometheus, Grafana, node_exporter, cAdvisor и socket-proxy.
+версиями: два экземпляра OTel Collector, Loki, Tempo, Prometheus, Grafana, node_exporter и
+socket-proxy.
 Конфигурации
 SHALL быть одними и теми же локально и на стенде: различаться SHALL только ресурсы, хранение и
 доступ — через переменные и оверрайды, не через разные конфиги. По `trace_id` из записи лога SHALL
@@ -448,8 +449,8 @@ SHALL быть одними и теми же локально и на стенд
 #### Scenario: Локальный стек поднимается теми же конфигами
 
 - **WHEN** разработчик поднимает локальный стек с профилем наблюдаемости
-- **THEN** коллектор, Loki, Tempo, Prometheus, Grafana, node_exporter, cAdvisor и socket-proxy
-  подняты теми же
+- **THEN** оба экземпляра коллектора, Loki, Tempo, Prometheus, Grafana, node_exporter и
+  socket-proxy подняты теми же
   конфигами, что на стенде, и логи с трейсами локального прогона видны в Grafana
 
 #### Scenario: Из лога в трейс
@@ -494,8 +495,9 @@ SHALL быть одними и теми же локально и на стенд
 - **WHEN** Prometheus скрейпит стек
 - **THEN** очередь отдаёт метрики плагином `rabbitmq_prometheus`, база — receiver `postgresql`
   коллектора (роль только-чтение `dmc268_monitor` с `pg_monitor`; собирать медленные запросы из
-  `pg_stat_statements` не требуется — расширение остаётся для ручной диагностики), сервер и
-  контейнеры — node_exporter и cAdvisor
+  `pg_stat_statements` не требуется — расширение остаётся для ручной диагностики), сервер —
+  node_exporter, контейнеры — receiver `docker_stats` отдельного экземпляра коллектора через
+  socket-proxy, с именем контейнера в лейбле `container_name`
 
 #### Scenario: Ручки /metrics нет
 
@@ -553,3 +555,56 @@ Grafana SHALL получать дашборд «Обзор dmc-268» через 
 - **WHEN** спан попадает в хранилище трейсов
 - **THEN** у него `service.version` — sha образа и `deployment.environment.name` — окружение
   запуска
+
+### Requirement: Docker API — только у экземпляра коллектора без входящего OTLP
+
+Метрики контейнеров SHALL снимать отдельный экземпляр коллектора `dmc268-otelcol-docker` с
+одним receiver `docker_stats`. Он SHALL ходить к Docker API только через socket-proxy и SHALL NOT
+принимать OTLP. В сети socket-proxy `dmc268-docker-proxy` SHALL стоять только proxy и этот
+экземпляр: inspect через proxy отдаёт Env всех контейнеров. Основной коллектор, который принимает
+OTLP из сети данных и трейсы браузера, SHALL NOT стоять в этой сети и SHALL NOT зависеть от proxy.
+
+#### Scenario: Сети стека с метриками контейнеров
+
+- **WHEN** стенд развёрнут с `observability_enabled = true`
+- **THEN** в `dmc268-docker-proxy` стоят только `dmc268-docker-proxy` и `dmc268-otelcol-docker`
+- **AND** `dmc268-otelcol-docker` стоит ещё только в `dmc268-observability`, без сети данных и
+  `dmc268-otlp`
+
+#### Scenario: Proxy недоступен
+
+- **WHEN** socket-proxy не отвечает
+- **THEN** пропадают только метрики контейнеров, а трейсы, логи и метрики сервисов принимает
+  основной коллектор
+
+### Requirement: Трейсы браузера — через публичный вход
+
+Коллектор SHALL принимать трейсы браузера только через nginx интерфейса: кабинет шлёт их на свой
+origin (`/otlp/v1/traces`), nginx проксирует на приёмник коллектора `otlp/browser`. Для этого коллектор и
+интерфейс SHALL стоять в отдельной `internal`-сети `dmc268-otlp`. В сеть входа `dmc268` коллектор
+SHALL NOT подключаться, порт OTLP на хосте SHALL NOT публиковаться. Сеть `dmc268-otlp` SHALL
+создаваться и при выключенном стеке: стек интерфейса подключается к ней по имени.
+
+#### Scenario: Стек включён
+
+- **WHEN** стенд развёрнут с `observability_enabled = true`
+- **THEN** `dmc268-otelcol` стоит в `dmc268-backend`, `dmc268-observability` и `dmc268-otlp`, а не в `dmc268`
+- **AND** у `dmc268-otlp` нет шлюза: из неё не выйти в интернет
+
+#### Scenario: Стек выключен
+
+- **WHEN** стенд развёрнут с `observability_enabled = false`
+- **THEN** сеть `dmc268-otlp` есть, коллектора нет, и стек интерфейса разворачивается без ошибок
+
+### Requirement: Трейсы браузера — только трейсы и под своим именем
+
+Приёмник браузера `otlp/browser` (OTLP/HTTP, порт 4319) SHALL входить только в конвейер
+`traces/browser`: тело из интернета SHALL NOT попадать в метрики и логи. Ресурс браузерных спанов
+SHALL задавать коллектор: `service.name` — `dmc-268-ui`, прочие атрибуты ресурса, кроме
+`telemetry.sdk.*`, `service.version` и `deployment.environment.name`, удаляются.
+
+#### Scenario: Браузер подписал спан чужим сервисом
+
+- **WHEN** на `/otlp/v1/traces` приходит спан с ресурсом `service.name = dmc-268-api` и своими атрибутами
+- **THEN** в Tempo спан лежит с `service.name = dmc-268-ui` и без чужих атрибутов ресурса
+- **AND** ни метрик, ни логов из этого запроса не появляется

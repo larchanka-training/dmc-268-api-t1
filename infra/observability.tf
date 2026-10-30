@@ -1,8 +1,8 @@
-# Стек наблюдаемости (change add-observability-stack): коллектор, Loki, Tempo,
-# Prometheus, Grafana, node-exporter, cAdvisor и socket-proxy — те же конфиги
-# из observability/, что и в локальном compose. Метрики базы снимает receiver
-# postgresql самого коллектора (решение #89) — отдельного экспортёра нет.
-# Конфиги заливаются в контейнеры при создании
+# Стек наблюдаемости (change add-observability-stack): коллектор и его экземпляр
+# метрик контейнеров, Loki, Tempo, Prometheus, Grafana, node-exporter и
+# socket-proxy — те же конфиги из observability/, что и в локальном compose.
+# Метрики базы снимает receiver postgresql самого коллектора (решение #89) —
+# отдельного экспортёра нет. Конфиги заливаются в контейнеры при создании
 # (upload), поэтому на сервере не нужен чекаут репозитория: tofu читает файлы
 # из рабочей копии и передаёт через Docker API. Правка конфига пересоздаёт
 # контейнер следующим apply. Алиасы сети повторяют имена сервисов compose —
@@ -54,12 +54,6 @@ resource "docker_image" "node_exporter" {
   keep_locally = true
 }
 
-resource "docker_image" "cadvisor" {
-  count        = var.observability_enabled ? 1 : 0
-  name         = local.cadvisor_image
-  keep_locally = true
-}
-
 resource "docker_image" "docker_socket_proxy" {
   count        = var.observability_enabled ? 1 : 0
   name         = local.docker_socket_proxy_image
@@ -108,13 +102,12 @@ resource "docker_volume" "grafana" {
 }
 
 # Отдельная сеть для Docker API через socket-proxy: в ней только proxy и
-# cAdvisor — остальным контейнерам стека и приложения доступ к демону Docker
-# не нужен. cAdvisor — единственный, кто ходит и в эту сеть (к proxy), и в
-# observability (оттуда его скреит Prometheus).
+# otelcol_docker (receiver docker_stats) — остальным контейнерам стека и
+# приложения доступ к демону Docker не нужен.
 resource "docker_network" "observability_docker_proxy" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-docker-proxy"
-  # Без выхода наружу: proxy и cAdvisor в интернет не ходят.
+  # Без выхода наружу: proxy в интернет не ходит.
   internal = true
 }
 
@@ -190,6 +183,12 @@ resource "docker_container" "otelcol" {
     name = docker_network.backend.name
   }
 
+  # Трейсы браузера: nginx интерфейса проксирует на dmc268-otelcol:4319 —
+  # отдельный приёмник otlp/browser, только трейсы (otelcol.yaml).
+  networks_advanced {
+    name = docker_network.otlp.name
+  }
+
   # Экспортёры (Loki, Tempo) и скрейп Prometheus — в сети стека; алиас —
   # там же: collector:8889 скреит Prometheus.
   networks_advanced {
@@ -201,6 +200,49 @@ resource "docker_container" "otelcol" {
     docker_container.loki,
     docker_container.tempo,
   ]
+}
+
+# Метрики контейнеров — отдельный экземпляр того же образа: Docker API через
+# socket-proxy, без входящего OTLP и без сетей данных. Почему так —
+# infra/README.md, «Метрики контейнеров».
+resource "docker_container" "otelcol_docker" {
+  count   = var.observability_enabled ? 1 : 0
+  name    = "dmc268-otelcol-docker"
+  image   = docker_image.otelcol[0].image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.collector_docker
+  memory_swap = var.observability_memory_mb.collector_docker
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  # Как у основного коллектора: без read_only из-за upload конфига.
+  tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=16m" }
+  security_opts = ["no-new-privileges:true"]
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  upload {
+    content = file("${path.module}/observability/otelcol-docker.yaml")
+    file    = "/etc/otelcol-contrib/config.yaml"
+  }
+
+  # Скрейп Prometheus: collector-docker:8889.
+  networks_advanced {
+    name    = docker_network.observability[0].name
+    aliases = ["collector-docker"]
+  }
+
+  # Docker API — только через socket-proxy (dockerproxy:2375).
+  networks_advanced {
+    name = docker_network.observability_docker_proxy[0].name
+  }
+
+  # Receiver docker_stats на старте читает список контейнеров: без proxy этот
+  # экземпляр не поднимается.
+  depends_on = [docker_container.docker_socket_proxy]
 }
 
 resource "docker_container" "loki" {
@@ -313,7 +355,7 @@ resource "docker_container" "prometheus" {
   }
 
   # Скрейп rabbitmq — в сети данных; сеть стека — для целей collector,
-  # node-exporter, cadvisor и datasources Grafana, алиас — там же.
+  # collector-docker, node-exporter и datasources Grafana, алиас — там же.
   networks_advanced {
     name = docker_network.backend.name
   }
@@ -450,78 +492,16 @@ resource "docker_container" "node_exporter" {
   }
 }
 
-# Метрики контейнеров: CPU и память каждого, включая сам стек наблюдаемости.
-# К Docker API cAdvisor ходит только через socket-proxy (флаг -docker —
-# проверено по --help образа v0.52.1; ENV у образа флаги не читает): маунтов
-# docker.sock и /var/lib/docker больше нет. Маунты / и /sys — каноничные из
-# документации cAdvisor (только чтение): без них не видно cgroup-иерархии, по
-# которой находятся контейнеры, — проверено запуском. Без --privileged и
-# /dev/kmsg недоступны OOM- и perf-коллекторы, CPU, память, диски и сеть
-# остаются. Новые контейнеры cAdvisor находит сам, без подписки на события
-# Docker: опрашивает cgroup-иерархию и запрашивает у proxy inspect новых
-# (проверено запуском нового контейнера рядом).
-resource "docker_container" "cadvisor" {
-  count   = var.observability_enabled ? 1 : 0
-  name    = "dmc268-cadvisor"
-  image   = docker_image.cadvisor[0].image_id
-  restart = "unless-stopped"
-
-  memory      = var.observability_memory_mb.cadvisor
-  memory_swap = var.observability_memory_mb.cadvisor
-  log_driver  = "json-file"
-  log_opts    = local.log_opts
-
-  # Без root, без маунта «/» и без capabilities: рекурсивный /rootfs открывал
-  # бы unix-сокет Docker (/rootfs/run/docker.sock — полный Docker API, то есть
-  # root на хосте) и Env всех контейнеров — socket-proxy это не оправдывает
-  # (замечание ревью PR #130, high). Метрики контейнеров — через dockerproxy,
-  # хостовые файловые — node-exporter; cgroup v2 в /sys читается nobody.
-  user          = "65534"
-  read_only     = true
-  tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=64m" }
-  security_opts = ["no-new-privileges:true"]
-
-  capabilities {
-    drop = ["ALL"]
-  }
-
-  command = [
-    # Имя dockerproxy резолвится в отдельной сети socket-proxy (алиас у
-    # docker_container.docker_socket_proxy) — так же контейнер зовут и в
-    # docker-compose.yml.
-    "--docker=tcp://dockerproxy:2375",
-  ]
-
-  volumes {
-    host_path      = "/sys"
-    container_path = "/sys"
-    read_only      = true
-  }
-
-  networks_advanced {
-    name    = docker_network.observability[0].name
-    aliases = ["cadvisor"]
-  }
-
-  networks_advanced {
-    name = docker_network.observability_docker_proxy[0].name
-  }
-
-  depends_on = [docker_container.docker_socket_proxy]
-}
-
-# Прокси над Docker API (/var/run/docker.sock): cAdvisor — единственный клиент,
-# docker.sock контейнерам больше не монтируется. Белый список путей — не
+# Прокси над Docker API (/var/run/docker.sock): otelcol_docker — единственный
+# клиент, docker.sock контейнерам больше не монтируется. Белый список путей — не
 # env-переменные образа (CONTAINERS=1 открывал ЛЮБОЙ GET под /containers —
 # /containers/{id}/archive?path=… читал любой файл любого контейнера, включая
 # том Postgres, /export отдавал файловую систему, inspect — полный Env;
 # замечание ревью PR #130), а свой шаблон haproxy: entrypoint образа рендерит
 # файл /usr/local/etc/haproxy/haproxy.cfg.template (sed подставляет адрес
 # прослушивания вместо ${BIND_CONFIG}) и стартует haproxy по результату.
-# Разрешены только пути cAdvisor — /containers/json, inspect контейнера,
-# /info, /version и /_ping; статистику cAdvisor читает из cgroup, не через API.
-# События Docker (/events) не нужны: новые контейнеры находятся опросом
-# cgroup-иерархии. Сеть — отдельная, только proxy и cAdvisor.
+# Белый список и остаточный риск — в шапке observability/docker-socket-proxy.cfg.
+# Сеть — отдельная, только proxy и otelcol_docker.
 resource "docker_container" "docker_socket_proxy" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-docker-proxy"

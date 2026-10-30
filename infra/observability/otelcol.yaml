@@ -16,6 +16,17 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
 
+  # Трейсы браузера: только OTLP/HTTP, сюда проксирует nginx интерфейса
+  # (/otlp/v1/traces через сеть dmc268-otlp). Отдельный порт — отдельный
+  # конвейер traces/browser: тело из интернета не попадает ни в метрики, ни в
+  # логи, а имя сервиса ставит коллектор (transform/browser-resource). Потолок
+  # тела — как у nginx (512 КБ).
+  otlp/browser:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4319
+        max_request_body_size: 524288
+
   # Метрики базы (решение #89): снимает сам коллектор receiver-ом postgresql —
   # без отдельного контейнера экспортёра, в общий конвейер метрик. Роль
   # только-чтение dmc268_monitor с привилегией pg_monitor создаёт миграция
@@ -74,7 +85,21 @@ processors:
           - delete_key(attributes, "telemetry.sdk.name")
           - delete_key(attributes, "telemetry.sdk.language")
 
-  # Редакция логов — тот же второй рубеж после SDK, что transform/redact для  # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
+  # Ресурс браузерных спанов задаёт коллектор, а не клиент: тело приходит из
+  # интернета, и спан, подписанный как dmc-268-api, иначе встал бы в трейсы
+  # бэкенда. Чужие атрибуты ресурса удаляются, имя сервиса ставится заново.
+  # Версия и окружение сборки кабинета остаются: их подделка запутает только
+  # поиск по сборке, в трейсы бэкенда спан всё равно не попадёт.
+  transform/browser-resource:
+    error_mode: ignore
+    trace_statements:
+      - context: resource
+        statements:
+          - keep_keys(attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version", "service.version", "deployment.environment.name"])
+          - set(attributes["service.name"], "dmc-268-ui")
+
+  # Редакция логов — тот же второй рубеж после SDK, что transform/redact для
+  # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
   # исключения несут значения ключей базы и текст ответа провайдера модели —
   # те же поля semconv, что у событий exception в трейсах. Тело гасится у
   # записей, несущих исключение: текст исключения мог попасть в сообщение
@@ -167,6 +192,10 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, transform/redact, batch]
+      exporters: [otlphttp/tempo]
+    traces/browser:
+      receivers: [otlp/browser]
+      processors: [memory_limiter, transform/browser-resource, transform/redact, batch]
       exporters: [otlphttp/tempo]
     metrics:
       receivers: [otlp, postgresql]
