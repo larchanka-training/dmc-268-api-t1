@@ -385,6 +385,9 @@ def test_container_logs_go_through_the_logs_collector() -> None:
                 "fluentd-address": "tcp://127.0.0.1:24224",
                 "fluentd-async": "true",
                 "fluentd-sub-second-precision": "true",
+                "fluentd-buffer-limit": "10000",
+                "cache-max-size": "10m",
+                "cache-max-file": "3",
                 "tag": f"dmc268-{service}",
             },
         }, service

@@ -25,6 +25,6 @@
 - [ ] 4.2 Цели `collector-self`, `collector-docker-self`, `collector-logs-self`, `loki`, `tempo` в Prometheus `up`; в логе коллектора нет WARN про `otlphttp`
 - [ ] 4.3 В Loki нет записей `GET /health`
 - [ ] 4.4 Выкат ручным запуском с `allow_stateful_replace=true`: `dmc268-postgres`, `dmc268-postgres-replica` и `dmc268-rabbitmq` пересозданы на прежних томах, `docker inspect -f '{{.HostConfig.LogConfig.Type}}'` — `fluentd`, `docker logs` у них показывает записи
-- [ ] 4.5 В Loki есть `{service_name="dmc268-postgres"}` и `{service_name="dmc268-rabbitmq"}`; в записях соединений rabbitmq адреса — маркер
+- [ ] 4.5 В Loki есть `{service_name="dmc268-postgres"}`, `{service_name="dmc268-postgres-replica"}` и `{service_name="dmc268-rabbitmq"}`; в записях соединений rabbitmq адреса — маркер
 - [ ] 4.6 `ss -ltn` на сервере: порт 24224 слушается только на `127.0.0.1`
 - [ ] 4.7 nginx интерфейса: драйвер `fluentd` у `dmc268-ui` (PR в `dmc-268-ui-t1`), в Loki есть `{service_name="dmc268-ui"}`, query и IP скрыты; change не архивируется до него

@@ -511,10 +511,9 @@ Env всех контейнеров (пароли базы, брокера, ре
 
 `fluentd-async`: контейнер стартует и пишет и без приёмника — драйвер копит записи в памяти
 демона и досылает, когда коллектор логов поднимется; база и брокер от него не зависят. Буфер
-по умолчанию — 1 048 576 записей на контейнер (`fluentd-buffer-limit`), сверх него записи
-теряются.
-`docker logs` у них работает через кэш dual logging Docker (по умолчанию 5 файлов по 20 МБ на
-контейнер), а не через `json-file`. Без стека драйвер — прежний `json-file`. В основном
+— 10 000 записей на контейнер (`fluentd-buffer-limit`, по умолчанию было бы 1 048 576 в памяти
+dockerd без потолка), сверх него записи теряются. `docker logs` у них работает через кэш dual
+logging Docker с теми же потолками, что у `json-file` (`cache-max-size`, `cache-max-file`). Без стека драйвер — прежний `json-file`. В основном
 `docker-compose.yml` драйвера `fluentd` нет: podman его не знает, а без приёмника демон зря
 копит буфер. Его включает отдельный файл вместе со стеком:
 `docker compose -f docker-compose.yml -f infra/observability/compose.logs.yml --profile
@@ -587,8 +586,7 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | метрики Prometheus | ≤ 8 ГБ и не дольше 30 дней | `--storage.tsdb.retention.size=8GB` и `--storage.tsdb.retention.time=30d` (`observability.tf`, compose) |
 | логи Loki | только 30 дней (`retention_period: 720h`), лимита по размеру нет | `observability/loki.yaml` |
 | трейсы Tempo | только 14 дней (`block_retention: 336h`), лимита по размеру нет | `observability/tempo.yaml` |
-| логи контейнеров (json-file) | 30 МБ на контейнер (3 файла × 10 МБ) | `local.log_opts` в `locals.tf`, `logging.options` в compose |
-| кэш `docker logs` у postgres, реплики и rabbitmq (драйвер fluentd) | 100 МБ на контейнер до сжатия (5 файлов × 20 МБ) | dual logging Docker, значения по умолчанию |
+| логи контейнеров (json-file; у postgres, реплики и rabbitmq со стеком — кэш `docker logs` драйвера fluentd) | 30 МБ на контейнер (3 файла × 10 МБ) | `local.log_opts` и `local.fluentd_log_opts` в `locals.tf`, `logging.options` в compose |
 
 Единственный компонент с потолком по размеру — Prometheus (8 ГБ): всплеск кардинальности не
 забьёт диск раньше срока хранения. У Loki и Tempo такого лимита нет: записи старше срока
@@ -601,7 +599,7 @@ Loki отбрасывает с 429 и долг не копит, но всё пр
 
 Ожидаемые объёмы: под ротацию json-file попадает 13 контейнеров этого стека (4 приложения —
 api, worker, копии, replication-setup — и 9 наблюдаемости) — не больше 390 МБ, и ещё
-до 300 МБ — кэш `docker logs` у postgres, реплики и rabbitmq. В Loki пишут api, worker,
+до 90 МБ — кэш `docker logs` у postgres, реплики и rabbitmq. В Loki пишут api, worker,
 одноразовый migrate, postgres, реплика и rabbitmq. При допущении «запись в секунду на сервис по 1 КБ» — 6 КБ/с ≈
 520 МБ в сутки ≈ 15,5 ГБ за 30 дней на все шесть; индекс TSDB Loki (период 24 ч) и рабочие файлы compactor в оценку не входят.
 

@@ -14,11 +14,15 @@ locals {
   # стеке: драйвер fluentd шлёт их в коллектор логов на петле хоста; зачем
   # async — infra/README.md, «Логи контейнеров». Доли секунды сохраняют порядок
   # строк ERROR/DETAIL/STATEMENT одной секунды; из тега коллектор берёт
-  # service.name.
+  # service.name. Буфер в памяти dockerd и кэш docker logs — с потолками, как
+  # у log_opts.
   fluentd_log_opts = {
     "fluentd-address"              = "tcp://127.0.0.1:24224"
     "fluentd-async"                = "true"
     "fluentd-sub-second-precision" = "true"
+    "fluentd-buffer-limit"         = "10000"
+    "cache-max-size"               = "10m"
+    "cache-max-file"               = "3"
     "tag"                          = "{{.Name}}"
   }
 
