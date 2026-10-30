@@ -26,7 +26,9 @@
 Дубль uvicorn «Exception in ASGI application» (сервер пишет его после ответа
 на необработанное исключение — когда обработчик `500` уже записал ту же
 ошибку с `trace_id` и стектрейсом) отсекается `UvicornDuplicateFilter` на
-логгере `uvicorn.error`.
+логгере `uvicorn.error`. Access-записи health-check'а (`GET /health` контейнерного
+healthcheck — почти весь access-лог API) отсекает `HealthCheckAccessFilter` на
+`uvicorn.access`.
 
 Необработанные исключения процесса — тоже записи этого лога: `install_excepthooks`
 ставит `sys.excepthook` и `threading.excepthook`, пишущие через логгер этого
@@ -119,6 +121,10 @@ class ReviewRunIdFilter(logging.Filter):
 # Запись uvicorn о необработанном исключении; завершающий перевод строки —
 # часть сообщения (uvicorn пишет «Exception in ASGI application\n»).
 UVICORN_DUPLICATE_MESSAGE = "Exception in ASGI application"
+
+# Путь health-check'а API (`HEALTH_PATH` в `app/api/factory.py`: слой
+# инфраструктуры API не импортирует).
+HEALTH_PATH = "/health"
 
 # Атрибуты, которые stdlib кладёт в LogRecord сам, строятся из пустой записи:
 # новый атрибут LogRecord из будущей версии Python (как `taskName` в 3.12)
@@ -242,10 +248,25 @@ class UvicornDuplicateFilter(logging.Filter):
         return record.getMessage().rstrip("\n") != UVICORN_DUPLICATE_MESSAGE
 
 
+class HealthCheckAccessFilter(logging.Filter):
+    """Отсекает access-запись uvicorn о запросе health-check'а.
+
+    Аргументы записи — как в `AccessQueryRedaction` (`app/api/log_redaction.py`):
+    путь с query — третий.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
+            return args[2].partition("?")[0] != HEALTH_PATH
+        return True
+
+
 # Один экземпляр на процесс: `addFilter` не добавляет тот же объект дважды,
 # поэтому повторный вызов `configure_logging` (второй `create_app` в тестах)
 # не плодит фильтры.
 UVICORN_DUPLICATE_FILTER = UvicornDuplicateFilter()
+HEALTH_CHECK_ACCESS_FILTER = HealthCheckAccessFilter()
 
 
 class JsonFormatter(logging.Formatter):
@@ -306,6 +327,7 @@ def configure_logging(service_name: str, stream: typing.TextIO | None = None) ->
         uvicorn.handlers.clear()
         uvicorn.propagate = True
     logging.getLogger("uvicorn.error").addFilter(UVICORN_DUPLICATE_FILTER)
+    logging.getLogger("uvicorn.access").addFilter(HEALTH_CHECK_ACCESS_FILTER)
 
 
 def _log_unhandled_exception(

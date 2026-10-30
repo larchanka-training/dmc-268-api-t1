@@ -28,6 +28,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from pydantic import SecretStr
 
 from app.api import log_redaction
+from app.api.factory import HEALTH_PATH
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.use_cases.build_review_context import (
     build_review_context,
@@ -36,6 +37,7 @@ from app.application.use_cases.build_review_context import (
 from app.domain.llm_errors import LlmError
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 from app.infrastructure.logging import (
+    HealthCheckAccessFilter,
     JsonFormatter,
     ReviewRunIdFilter,
     TraceContextFilter,
@@ -333,6 +335,22 @@ def test_the_uvicorn_duplicate_is_dropped_and_other_records_pass() -> None:
     assert fltr.filter(_uvicorn_record("Application startup complete.")) is True
 
 
+def _access_record(path: str) -> logging.LogRecord:
+    # Формат uvicorn: '%s - "%s %s HTTP/%s" %d' — адрес, метод, путь, версия, статус.
+    args = ("127.0.0.1:50000", "GET", path, "1.1", 200)
+    return logging.LogRecord(
+        "uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d', args, None
+    )
+
+
+def test_the_health_check_access_record_is_dropped_and_others_pass() -> None:
+    """Путь — тот, на котором API отвечает health-check'у."""
+    fltr = HealthCheckAccessFilter()
+
+    assert fltr.filter(_access_record(HEALTH_PATH)) is False
+    assert fltr.filter(_access_record("/api/v1/reviews")) is True
+
+
 def test_configure_logging_routes_uvicorn_loggers_to_the_single_json_handler() -> None:
     configure_logging("dmc-268-api")
     root = logging.getLogger()
@@ -348,6 +366,8 @@ def test_configure_logging_routes_uvicorn_loggers_to_the_single_json_handler() -
         assert uvicorn.propagate is True
     installed = logging.getLogger("uvicorn.error").filters
     assert any(isinstance(f, UvicornDuplicateFilter) for f in installed)
+    access = logging.getLogger("uvicorn.access").filters
+    assert any(isinstance(f, HealthCheckAccessFilter) for f in access)
 
     configure_logging("dmc-268-worker")  # повторный вызов не плодит хендлеры
     again = [

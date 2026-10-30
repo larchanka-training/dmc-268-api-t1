@@ -441,7 +441,8 @@ def upgrade() -> None:
   текущего спана, запись вне спана пишется без них и не теряется. `exc_info`
   кладёт стектрейс и `exception.type` (qualname класса) в ту же запись,
   дубль uvicorn «Exception in ASGI application» отсекается: на `500` в логе
-  ровно одна запись, и её `trace_id` равен `X-Trace-ID` ответа. Необработанное
+  ровно одна запись, и её `trace_id` равен `X-Trace-ID` ответа. Access-запись
+  health-check'а не пишется (`HealthCheckAccessFilter`). Необработанное
   исключение воркера — вплоть до `WorkerConfigError` старта — пишут excepthook'и
   той же JSON-записью: текстовый дамп интерпретатора уходит в stderr и до
   хранилища логов не доходит. stdout остаётся для `docker logs` и локальной
@@ -450,9 +451,9 @@ def upgrade() -> None:
   ставит `LoggerProvider` с `BatchLogRecordProcessor` и хендлер на root, resource
   общий с трейсами, тело записи — текст сообщения, `exc_info` — атрибуты
   `exception.*`. Коллектор принимает логи только по OTLP — каталог Docker не
-  читает, логов postgres и rabbitmq в Loki нет. От записи лога к трейсу в
-  Grafana ведёт переход по `trace_id` (derived field по structured metadata
-  OTLP-лога). На пути коллектор редактирует записи с исключениями: стектрейс,
+  читает, логов postgres и rabbitmq в Loki нет. Между записью лога и трейсом в
+  Grafana переход по `trace_id` в обе стороны (structured metadata OTLP-лога,
+  `observability/grafana/provisioning/datasources/datasources.yaml`). На пути коллектор редактирует записи с исключениями: стектрейс,
   текст и тело такой записи заменяются маркером `<скрыто>`, `exception.type`
   остаётся диагнозом.
 - **Стек** — восемь контейнеров (коллектор, его второй экземпляр с receiver
