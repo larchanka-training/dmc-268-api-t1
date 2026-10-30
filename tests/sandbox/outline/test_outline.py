@@ -283,6 +283,16 @@ def test_load_outline_case_rejects_bad_lines(
         load_outline_case(path)
 
 
+@pytest.mark.parametrize("text", ["- a\n- b\n", "просто строка\n", ""], ids=["list", "scalar", "empty"])
+def test_load_outline_case_not_a_mapping_is_input_error(tmp_path: Path, text: str) -> None:
+    """YAML не словарём - `InputError` (код 2), а не `AttributeError` на `raw.get`."""
+    path = tmp_path / "case.yaml"
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(InputError, match="не разобрать"):
+        load_outline_case(path)
+
+
 def test_load_outline_case_lines_rejects_other_line_separators(tmp_path: Path) -> None:
     """Имя файла в сообщении - один раз: «кейс …: a.py: разделители …»."""
     path = tmp_path / "case.yaml"
