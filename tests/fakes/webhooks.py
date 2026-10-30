@@ -77,6 +77,7 @@ def a_repository() -> Repository:
         auto_review_enabled=True,
         created_at=NOW,
         updated_at=NOW,
+        connected_at=NOW,
     )
 
 
@@ -96,6 +97,8 @@ class FakeVcs:
     # Сбой только метаданных PR - дифф при этом достаётся.
     metadata_error: VcsError | None = None
     calls: list[tuple[Any, ...]] = field(default_factory=list)
+    # Поставленные check run целиком: заголовок и текст, а не только conclusion из `calls`.
+    checks: list[MergeGateCheck] = field(default_factory=list)
 
     def fetch_diff(
         self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
@@ -177,6 +180,7 @@ class FakeVcs:
         self.calls.append(("check", repo_full_name, head_sha, check.conclusion))
         if self.error is not None:
             raise self.error
+        self.checks.append(check)
 
 
 @dataclass

@@ -95,6 +95,7 @@ def _repository(provider_id: str, full_name: str) -> Repository:
         auto_review_enabled=True,
         created_at=PAST,
         updated_at=PAST,
+        connected_at=PAST,
     )
 
 

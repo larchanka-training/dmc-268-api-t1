@@ -11,17 +11,21 @@
 
 ## 2. Мягкое выключение
 
-- [ ] 2.1 Миграция: `repositories.connected_at timestamptz NULL`, заполнение из `created_at`, откат; поле в `Repository` и адаптере
-- [ ] 2.2 Use case списка: подключённым считается запись с `connected_at`, `connected_at` строки — из колонки
-- [ ] 2.3 Use case `disconnect_repository` и адаптер `RepositoryRepository.disconnect`; `DELETE /repositories/{id}` вместо заглушки
-- [ ] 2.4 Повторное включение в `connect_repository`: `UPDATE … WHERE connected_at IS NULL RETURNING`, затем вставка; интеграционный тест гонки
-- [ ] 2.5 Приём вебхука: выключенный репозиторий — `202 ignored`, как незарегистрированный
+- [x] 2.1 Миграция: `repositories.connected_at timestamptz NULL`, заполнение из `created_at`, откат; поле в `Repository` и адаптере
+- [x] 2.2 Use case списка: подключённым считается запись с `connected_at`, `connected_at` строки — из колонки
+- [x] 2.3 Use case `disconnect_repository` и адаптер `RepositoryRepository.disconnect`; `DELETE /repositories/{id}` вместо заглушки
+- [x] 2.4 Повторное включение в `connect_repository`: `UPDATE … WHERE connected_at IS NULL RETURNING`, затем вставка; интеграционный тест гонки
+- [x] 2.5 Приём вебхука: выключенный репозиторий — `202 ignored` без прогона, как незарегистрированный, и check run `success` «Ревью выключено в сервисе» на head (best-effort)
 
 ## 3. Setup URL
 
 - [ ] 3.1 Порт и адаптер: установки пользователя с `repository_selection` (`GET /user/installations`) и репозитории одной установки
 - [ ] 3.2 Чистая функция выбора репозиториев к подключению (selected, admin или maintain, без записи) и use case возврата с установки
 - [ ] 3.3 Ручка вместо заглушки: сверка установки, свежий ответ в кэш (`read=False`), редирект с итогом; проверить запуском, приходит ли `state` на Setup URL (design D7)
+
+Заметка к 3.2: `connect_repository` после шага 2 включает выключенные обратно (`reconnect`), а
+Setup URL выключенные включать не должен (design D7, п. 2). Из Setup URL его как есть звать
+нельзя: выключенные отсеиваются до подключения или подключение идёт только вставкой.
 
 ## 4. Завершение
 

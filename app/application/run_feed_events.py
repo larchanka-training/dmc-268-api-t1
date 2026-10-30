@@ -34,7 +34,7 @@ type FeedItem = RunFeedEvent | PingEvent
 
 
 def visible_repository_ids(uow: UnitOfWork, repositories: Iterable[InstallationRepository]) -> frozenset[UUID]:
-    """Зарегистрированные репозитории из списка видимых пользователю.
+    """Зарегистрированные репозитории из списка видимых пользователю, выключенные тоже: история остаётся.
 
     Список — ответ `list_user_repositories`, того же запроса к GitHub, что у
     GET /repositories: правило видимости одно и живёт там. Здесь только

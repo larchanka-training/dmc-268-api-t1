@@ -30,6 +30,7 @@ from app.domain.entities import (
     ProviderToken,
     Repository,
     RepositoryPermissions,
+    Secret,
 )
 from app.domain.enums import Provider
 from app.domain.ids import new_id
@@ -64,6 +65,7 @@ def _repository(n: int) -> Repository:
         auto_review_enabled=True,
         created_at=NOW,
         updated_at=NOW,
+        connected_at=NOW,
     )
 
 
@@ -723,7 +725,7 @@ def test_a_connected_repository_is_listed_at_once_without_waiting_for_the_ttl() 
     assert client.get(f"/api/v1/repositories/{after['id']}").status_code == 200
 
 
-# --- выключение ревью: контракт первым, реализация — следующим шагом #243 -----------
+# --- выключение ревью и повторное включение (#243, design D4–D6) -------------------
 
 
 def _disconnect(client: TestClient, repository_id: str, *, origin: str | None = ORIGIN) -> httpx2.Response:
@@ -732,20 +734,128 @@ def _disconnect(client: TestClient, repository_id: str, *, origin: str | None = 
     return response
 
 
-def test_disconnecting_is_planned_and_answers_501() -> None:
+def _registered_api(uow: FakeUnitOfWork) -> Repository:
+    """`octo-org/api` подключён; у пользователя на нём admin."""
+    repository = replace(_repository(101), full_name=API.full_name)
+    uow.repositories.add(repository)
+    return repository
+
+
+def test_disconnecting_keeps_the_record_and_its_history() -> None:
+    """Мягкое выключение: в списке `connected = false` с прежним `id`, запись и история на месте."""
     uow = FakeUnitOfWork()
-    repository = _repository(101)
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    response = _disconnect(client, str(repository.id))
+
+    assert response.status_code == 204
+    assert response.content == b""
+    (row,) = client.get("/api/v1/repositories").json()["items"]
+    assert (row["connected"], row["id"], row["connected_at"]) == (False, str(repository.id), None)
+    stored = uow.repositories.get(repository.id)
+    assert stored is not None and stored.connected_at is None
+    assert client.get(f"/api/v1/repositories/{repository.id}").status_code == 200
+    assert client.get(f"/api/v1/repositories/{repository.id}/pull-requests").status_code == 200
+
+
+def test_disconnecting_a_disconnected_repository_is_204_again() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    first, second = _disconnect(client, str(repository.id)), _disconnect(client, str(repository.id))
+
+    assert (first.status_code, second.status_code) == (204, 204)
+    stored = uow.repositories.get(repository.id)
+    assert stored is not None and stored.connected_at is None
+
+
+def test_reconnecting_a_disconnected_repository_returns_its_record_instead_of_409() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+    _disconnect(client, str(repository.id))
+
+    response = _connect(client)
+
+    assert response.status_code == 201
+    assert response.json()["id"] == str(repository.id)
+    assert response.json()["created_at"] == "2026-09-29T00:00:00Z"
+    (row,) = client.get("/api/v1/repositories").json()["items"]
+    assert (row["connected"], row["id"]) == (True, str(repository.id))
+    # Время последнего включения, а не регистрации.
+    assert row["connected_at"] == response.json()["updated_at"] != response.json()["created_at"]
+    assert _connect(client).status_code == 409
+
+
+def test_disconnecting_without_manage_rights_is_403_and_keeps_the_review_on() -> None:
+    uow = FakeUnitOfWork()
+    repository = replace(_repository(303), full_name=WRITER.full_name)
     uow.repositories.add(repository)
 
-    response = _disconnect(_client(uow, _seen(repository)), str(repository.id))
+    response = _disconnect(_client(uow, FakeInstallationCatalog([WRITER])), str(repository.id))
 
-    assert response.status_code == 501
-    assert response.headers["content-type"] == "application/problem+json"
-    assert response.json()["code"] == "NOT_IMPLEMENTED"
-    assert list(uow.repositories.stored.values()) == [repository]
+    assert response.status_code == 403
+    assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    assert uow.repositories.get(repository.id) == repository
 
 
-def test_disconnecting_checks_origin_session_and_id_before_501() -> None:
+def test_disconnecting_an_invisible_repository_looks_exactly_like_a_missing_one() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([WEB]))
+
+    invisible = _disconnect(client, str(repository.id))
+    missing = _disconnect(client, str(new_id()))
+
+    assert invisible.status_code == missing.status_code == 404
+    strip = lambda body: {k: v for k, v in body.items() if k not in {"trace_id", "instance"}}
+    assert strip(invisible.json()) == strip(missing.json())
+    assert invisible.json()["code"] == "REPOSITORY_NOT_FOUND"
+    assert uow.repositories.get(repository.id) == repository
+
+
+class _AccessRevokedCatalog(FakeInstallationCatalog):
+    """Кэш видимости ещё отдаёт репозиторий, а свежий `GET /repositories/{id}` — уже нет."""
+
+    def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
+        super().user_repository(access_token, provider_id)
+        return None
+
+
+def test_disconnecting_a_repository_github_no_longer_shows_looks_like_a_missing_one() -> None:
+    """Доступ отозван в пределах TTL кэша: тот же `404`, что у несуществующего (design D6)."""
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    catalog = _AccessRevokedCatalog([API])
+    client = _client(uow, catalog)
+
+    revoked = _disconnect(client, str(repository.id))
+    missing = _disconnect(client, str(new_id()))
+
+    assert "user_repository" in catalog.calls
+    assert revoked.status_code == missing.status_code == 404
+    strip = lambda body: {k: v for k, v in body.items() if k not in {"trace_id", "instance"}}
+    assert strip(revoked.json()) == strip(missing.json())
+    assert revoked.json()["code"] == "REPOSITORY_NOT_FOUND"
+    assert uow.repositories.get(repository.id) == repository
+
+
+def test_disconnecting_answers_502_when_github_fails_and_keeps_the_review_on() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+
+    response = _disconnect(
+        _client(uow, FakeInstallationCatalog(error=VcsError("GitHub API: HTTP 503"))), str(repository.id)
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+    assert uow.repositories.get(repository.id) == repository
+
+
+def test_disconnecting_checks_origin_session_and_id() -> None:
     uow = FakeUnitOfWork()
 
     without_origin = _disconnect(_client(uow), str(new_id()), origin=None)

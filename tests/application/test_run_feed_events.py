@@ -46,6 +46,7 @@ REPOSITORY = Repository(
     auto_review_enabled=True,
     created_at=CONNECTED,
     updated_at=CONNECTED,
+    connected_at=CONNECTED,
 )
 MERGE_REQUEST = MergeRequest(
     id=UUID(int=2),

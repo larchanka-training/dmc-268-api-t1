@@ -63,6 +63,7 @@ def _repository(source: InstallationRepository) -> Repository:
         auto_review_enabled=True,
         created_at=T0,
         updated_at=T0,
+        connected_at=T0,
     )
 
 
@@ -155,6 +156,18 @@ def test_list_shows_only_runs_of_repositories_visible_on_github() -> None:
     body = _list(world)
 
     assert _ids(body) == [str(visible.id)]
+    assert body["total"] == 1
+
+
+def test_list_keeps_runs_of_a_disconnected_repository() -> None:
+    """Выключение ревью история не прячет: прогоны выключенного видны, пока GitHub его отдаёт (design D5)."""
+    world = World()
+    run = world.run(world.merge_request(world.api, 1))
+    world.uow.repositories.disconnect(world.api.id, T0)
+
+    body = _list(world)
+
+    assert _ids(body) == [str(run.id)]
     assert body["total"] == 1
 
 

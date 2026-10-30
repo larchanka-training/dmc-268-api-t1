@@ -118,11 +118,39 @@ class SqlAlchemyRepositoryRepo:
                     auto_review_enabled=repository.auto_review_enabled,
                     created_at=repository.created_at,
                     updated_at=repository.updated_at,
+                    connected_at=repository.connected_at,
                 )
                 .on_conflict_do_nothing(constraint="uq_repositories_provider_id")
                 .returning(RepositoryRow.id)
             ).first()
         return inserted is not None
+
+    def reconnect(self, repository: Repository) -> Repository | None:
+        # Условие `connected_at IS NULL` — в самом UPDATE: второе параллельное
+        # включение ждёт блокировку строки, перечитывает её и уже не совпадает.
+        row = self._session.scalars(
+            update(RepositoryRow)
+            .where(
+                RepositoryRow.provider == repository.provider,
+                RepositoryRow.provider_id == repository.provider_id,
+                RepositoryRow.connected_at.is_(None),
+            )
+            .values(
+                connected_at=repository.connected_at,
+                full_name=repository.full_name,
+                default_branch=repository.default_branch,
+                updated_at=repository.updated_at,
+            )
+            .returning(RepositoryRow)
+        ).one_or_none()
+        return m.repository_to_domain(row) if row else None
+
+    def disconnect(self, repository_id: UUID, now: dt.datetime) -> None:
+        self._session.execute(
+            update(RepositoryRow)
+            .where(RepositoryRow.id == repository_id)
+            .values(connected_at=None, updated_at=now)
+        )
 
     def update(self, repository: Repository) -> None:
         row = self._session.get(RepositoryRow, repository.id)

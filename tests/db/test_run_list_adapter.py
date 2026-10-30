@@ -42,6 +42,7 @@ def _repository(provider_id: str) -> Repository:
         auto_review_enabled=True,
         created_at=T0,
         updated_at=T0,
+        connected_at=T0,
     )
 
 
