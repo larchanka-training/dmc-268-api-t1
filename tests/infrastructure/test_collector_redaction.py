@@ -720,6 +720,14 @@ def mask_container_log(line: str) -> str:
             f"UTC [77] STATEMENT:  CREATE ROLE x PASSWORD '{REDACTED}'",
         ),
         (
+            "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD E'a\\'b'",
+            f"UTC [77] STATEMENT:  ALTER ROLE r PASSWORD '{REDACTED}'",
+        ),
+        (
+            "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD 'first-line-of",
+            f"UTC [77] STATEMENT:  ALTER ROLE r PASSWORD '{REDACTED}'",
+        ),
+        (
             "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD\t'x'",
             f"UTC [77] STATEMENT:  ALTER ROLE r PASSWORD '{REDACTED}'",
         ),

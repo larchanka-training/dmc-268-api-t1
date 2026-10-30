@@ -6,7 +6,7 @@
 
 - Grafana: переход «трейс → логи» по лейблу Loki `service_name` и `trace_id` из structured metadata.
 - Дашборд: соединения приложения с базой — по `db_client_connection_state`, CPU сервера — доля занятости.
-- Prometheus скрейпит свои метрики обоих коллекторов (`otelcol_*`), Loki и Tempo.
+- Prometheus скрейпит свои метрики всех экземпляров коллектора (`otelcol_*`), Loki и Tempo.
 - Экспортёры коллектора — тип `otlp_http` вместо устаревшего алиаса `otlphttp`.
 - Access-запись health-check'а в лог не пишется.
 - Ошибка шага прохода очистки воркера несёт поле `maintenance_step`.

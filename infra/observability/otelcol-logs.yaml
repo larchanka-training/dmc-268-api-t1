@@ -35,14 +35,14 @@ processors:
           # Пароль в тексте SQL: postgres пишет упавший запрос в STATEMENT.
           # Пароль роли мониторинга migrate.sh и миграция 0013 шлют литералом
           # (привязка на клиенте) — если ALTER ROLE упадёт, он окажется здесь.
-          - replace_pattern(body, "(?i)password\\s+E?'([^']|'')*'", "PASSWORD '<скрыто>'")
+          - replace_pattern(body, "(?i)password\\s+E?'.*", "PASSWORD '<скрыто>'")
           # Query в URL: коды OAuth (code, state) в запросе обратного вызова и
           # в Referer, как скрывает app/api/log_redaction.py. Query кончается
           # пробелом или кавычкой поля access-лога. Пароль скрыт раньше: в нём
           # тоже может быть «?».
           - replace_pattern(body, "[?][^ \"]*", "?<скрыто>")
           # DETAIL ошибок postgres со значениями ключей и строк таблиц; прочие
-          # (слот репликации, deadlock) данных не несут.
+          # DETAIL — диагностика, но значения из данных бывают и в них, как в ERROR.
           - 'replace_pattern(body, "DETAIL:  (Key |Failing row contains).*", "DETAIL:  <скрыто>")'
 
 exporters:
