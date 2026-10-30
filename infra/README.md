@@ -297,8 +297,8 @@ docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_n
 
 Рядом с API на стенде стоит стек телеметрии из девяти контейнеров: OTel Collector
 (`dmc268-otelcol`: трейсы, логи, метрики приложения и базы), его второй экземпляр
-`dmc268-otelcol-docker` (метрики контейнеров), третий `dmc268-otelcol-logs` (логи postgres и
-rabbitmq, см. «Логи контейнеров»), Loki (логи), Tempo (трейсы), Prometheus
+`dmc268-otelcol-docker` (метрики контейнеров), третий `dmc268-otelcol-logs` (логи postgres, его
+реплики и rabbitmq, см. «Логи контейнеров»), Loki (логи), Tempo (трейсы), Prometheus
 (метрики), Grafana (интерфейс, `grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU,
 память, диски) и socket-proxy (`dmc268-docker-proxy`: Docker API для `dmc268-otelcol-docker` по
 белому списку эндпоинтов вместо маунта `docker.sock`; отдельная сеть `dmc268-docker-proxy`, где
@@ -342,8 +342,8 @@ OTEL_LOGS_EXPORTER=otlp docker compose -f docker-compose.yml -f infra/observabil
 `migrate_env`, локально в compose — `dmc268-migrate`) — вместо случайного UUID на
 процесс, который растил бы в Prometheus серии `exported_instance`. Таймаут OTLP — 4 секунды
 (`OTEL_EXPORTER_OTLP_TIMEOUT`): Python SDK читает переменную в секундах, вопреки спецификации
-OTel с её миллисекундами. Логи сервисов коллектор получает только по OTLP, логи postgres и
-rabbitmq — от `dmc268-otelcol-logs` («Логи контейнеров»); каталог Docker не читает ни один
+OTel с её миллисекундами. Логи сервисов коллектор получает только по OTLP, логи postgres, его
+реплики и rabbitmq — от `dmc268-otelcol-logs` («Логи контейнеров»); каталог Docker не читает ни один
 коллектор. Чувствительные данные он редактирует до отправки — правила в `observability/otelcol.yaml`, тест `tests/infrastructure/test_collector_redaction.py`.
 
 ### Включение и выключение: observability_enabled
@@ -486,8 +486,7 @@ cAdvisor убран, а `docker_stats` берёт те же сигналы у Do
 `{service_name="dmc268-rabbitmq"}`. Коллектор логов заменяет
 маркером `<скрыто>` IPv4-адреса (клиент в начале access-лога nginx, `client:` в его error-логе,
 адреса соединений брокера), query в URL (коды OAuth в запросе обратного вызова nginx и в
-Referer) у всех, кроме двух контейнеров Postgres (там «?» бывает JSONB-оператором), пароль в
-`PASSWORD '…'` и `DETAIL` ошибок Postgres со значениями ключей и строк таблиц (`Key (…)=(…)`,
+Referer; «?» в SQL тоже заменится, это безвредно), пароль в `PASSWORD '…'` и `DETAIL` ошибок Postgres со значениями ключей и строк таблиц (`Key (…)=(…)`,
 `Failing row contains`). Пароль роли мониторинга `migrate.sh` и миграция 0013 шлют литералом:
 если `ALTER ROLE` упадёт, Postgres запишет запрос в `STATEMENT`, и скрывает пароль только это
 правило. IPv6 не маскируется: сети Docker стенда только IPv4. Примеры —
@@ -532,7 +531,7 @@ Targeted-шаг пересоздаёт базу и брокер с окном о
 
 nginx интерфейса подключается так же в `dmc-268-ui-t1`: у `dmc268-ui` драйвер `fluentd` с теми
 же опциями. Правила IP и query рассчитаны на его access- и error-лог по умолчанию и от тега не
-зависят.
+зависят (задача 4.7 в `openspec/changes/observability-audit-fixes/tasks.md`).
 
 ### Память стека
 

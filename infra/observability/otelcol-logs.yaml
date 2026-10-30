@@ -1,5 +1,6 @@
 # Третий экземпляр коллектора (dmc268-otelcol-logs): логи контейнеров без SDK —
-# postgres, rabbitmq, nginx интерфейса — от драйвера fluentd демона Docker.
+# postgres, его реплики, rabbitmq (nginx интерфейса — из dmc-268-ui-t1) — от
+# драйвера fluentd демона Docker.
 # Почему так — infra/README.md, «Логи контейнеров». Конфиг один для compose и
 # infra.
 
@@ -37,11 +38,9 @@ processors:
           - replace_pattern(body, "(?i)password\\s+E?'([^']|'')*'", "PASSWORD '<скрыто>'")
           # Query в URL: коды OAuth (code, state) в запросе обратного вызова и
           # в Referer, как скрывает app/api/log_redaction.py. Query кончается
-          # пробелом или кавычкой поля access-лога. У всех, кроме postgres: там
-          # «?» в STATEMENT бывает JSONB-оператором; имена postgres задаёт этот
-          # репозиторий, а новый сервис по умолчанию маскируется. Пароль скрыт
-          # раньше: в нём тоже может быть «?».
-          - 'replace_pattern(body, "[?][^ \"]*", "?<скрыто>") where attributes["service.name"] != "dmc268-postgres" and attributes["service.name"] != "dmc268-postgres-replica"'
+          # пробелом или кавычкой поля access-лога. Пароль скрыт раньше: в нём
+          # тоже может быть «?».
+          - replace_pattern(body, "[?][^ \"]*", "?<скрыто>")
           # DETAIL ошибок postgres со значениями ключей и строк таблиц; прочие
           # (слот репликации, deadlock) данных не несут.
           - 'replace_pattern(body, "DETAIL:  (Key |Failing row contains).*", "DETAIL:  <скрыто>")'

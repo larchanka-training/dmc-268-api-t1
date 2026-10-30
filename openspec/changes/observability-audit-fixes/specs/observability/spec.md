@@ -68,7 +68,7 @@ NOT требовать правок кода.
 - **WHEN** при включённом стеке контейнер postgres, rabbitmq или nginx интерфейса пишет строку в
   stdout
 - **THEN** в Loki есть запись с лейблом `service_name`, равным тегу драйвера (имени контейнера на
-  стенде), а IPv4-адреса, query в URL (кроме записей postgres), пароль в `PASSWORD '…'` и
+  стенде), а IPv4-адреса, query в URL, пароль в `PASSWORD '…'` и
   `DETAIL: Key …` / `DETAIL: Failing row contains …` заменены маркером
 
 #### Scenario: Без коллектора логов база работает

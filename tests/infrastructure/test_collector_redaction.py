@@ -671,8 +671,7 @@ def test_the_postgresql_receiver_takes_connection_from_the_environment() -> None
 # и re (без обратных ссылок), поэтому re.sub даёт то же, что OTTL.
 # Строки OTTL экранируют \\ и \" (в YAML они остаются как есть).
 _REPLACE_BODY = re.compile(
-    r'^replace_pattern\(body, "(?P<pattern>(?:[^"\\]|\\.)+)", "(?P<replacement>[^"$]+)"\)'
-    r'(?: where (?P<where>attributes\["service.name"\] != "[^"]+"(?: and attributes\["service.name"\] != "[^"]+")*))?$'
+    r'^replace_pattern\(body, "(?P<pattern>(?:[^"\\]|\\.)+)", "(?P<replacement>[^"$]+)"\)$'
 )
 
 
@@ -680,16 +679,15 @@ def _unescape_ottl(text: str) -> str:
     return re.sub(r"\\(.)", r"\1", text)
 
 
-def mask_container_log(line: str, service: str = "dmc268-ui") -> str:
-    """Тело записи после правил replace_pattern из `otelcol-logs.yaml`, в порядке
-    конфига; правило с where не применяется к перечисленным в нём сервисам."""
+def mask_container_log(line: str) -> str:
+    """Тело записи после правил replace_pattern из `otelcol-logs.yaml`, в порядке конфига."""
     config = yaml.safe_load(COLLECTOR_CONFIG.with_name("otelcol-logs.yaml").read_text(encoding="utf-8"))
     (block,) = config["processors"]["transform/container-logs"]["log_statements"]
     for statement in block["statements"]:
         match = _REPLACE_BODY.match(statement)
         # Правило в другой форме не должно тихо выпасть из эмуляции.
         assert match is not None or not statement.startswith("replace_pattern"), statement
-        if match is not None and service not in re.findall(r'!= "([^"]+)"', match.group("where") or ""):
+        if match is not None:
             line = re.sub(_unescape_ottl(match.group("pattern")), match.group("replacement"), line)
     return line
 
@@ -765,19 +763,6 @@ def test_container_logs_hide_ip_addresses_and_secrets(line: str, masked: str) ->
     """IP клиента nginx (в начале access-лога и в error-логе), адреса соединений,
     пароль в тексте SQL и DETAIL postgres скрыты маркером; прочее — без изменений."""
     assert mask_container_log(line) == masked
-
-
-@pytest.mark.parametrize("service", ["dmc268-postgres", "dmc268-postgres-replica"])
-def test_container_logs_keep_the_jsonb_operator_in_postgres(service: str) -> None:
-    """У postgres query не скрывается: в STATEMENT «?» — оператор JSONB."""
-    line = "UTC [77] STATEMENT:  select data ? 'k' from t"
-    assert mask_container_log(line, service) == line
-
-
-def test_container_logs_hide_query_of_any_other_service() -> None:
-    """Query скрыт и у сервиса с незнакомым тегом: правило не завязано на имя nginx."""
-    line = "GET /cb?code=X&state=Y HTTP/1.1"
-    assert mask_container_log(line, "dmc268-whatever") == f"GET /cb?{REDACTED} HTTP/1.1"
 
 
 class TestCollectorConfigValidation:
