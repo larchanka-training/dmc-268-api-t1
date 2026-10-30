@@ -54,6 +54,7 @@ from app.domain.entities import InstallationRepository, Repository
 from app.domain.enums import FindingSeverity, Provider, RulesStatus
 from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
+from app.domain.provider_links import app_install_url
 from app.domain.repo_rules import RULES_PATH
 from app.domain.session import setup_state
 from app.domain.vcs_errors import VcsError
@@ -333,15 +334,13 @@ def connect_repository(
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositoryResponse:
-    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
-    try:
-        outcome = connecting.connect_repository(
+    outcome = _as_user(
+        signed_in,
+        oauth,
+        lambda user: connecting.connect_repository(
             catalog, uow_factory(), user, body.provider, body.provider_id, new_id(), datetime.now(UTC)
-        )
-    except SessionClosed:
-        raise Unauthenticated(had_cookie=True) from None
-    except (VcsError, OAuthProviderUnavailable) as error:
-        raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
+        ),
+    )
     if isinstance(outcome, connecting.ConnectRefusal):
         raise ApiError(*_REFUSALS[outcome])
     return RepositoryResponse.model_validate(outcome, from_attributes=True)
@@ -375,7 +374,7 @@ def list_repositories(
     slug = app_slug()
     # Cookie проверена `current_session`; `state` — от неё, Setup URL сверит его с той же cookie.
     state = setup_state(request.cookies[SESSION_COOKIE])
-    install_url = f"https://github.com/apps/{slug}/installations/new?state={state}" if slug else None
+    install_url = app_install_url(slug, state) if slug else None
     return RepositoryListResponse(items=[_list_item(item) for item in page], install_url=install_url)
 
 
