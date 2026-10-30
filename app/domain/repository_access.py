@@ -51,8 +51,8 @@ def to_connect_on_setup(
     """Что подключить на возврате с установки «Only select repositories»: репозитории с правом
     admin или maintain, у которых ещё нет записи в сервисе.
 
-    Выключенный (запись есть) не включается: выключение — явное решение пользователя, а `update`
-    приходит и при правке чужого списка установки (change `repositories-one-list`, design D7).
+    Выключенный (запись есть) не включается: выключение — явное решение пользователя
+    (change `repositories-one-list`, design D7).
     """
     return [
         repository
