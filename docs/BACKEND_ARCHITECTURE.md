@@ -443,9 +443,9 @@ def upgrade() -> None:
   кладёт стектрейс и `exception.type` (qualname класса) в ту же запись,
   дубль uvicorn «Exception in ASGI application» отсекается: на `500` в логе
   ровно одна запись, и её `trace_id` равен `X-Trace-ID` ответа. Access-запись
-  health-check'а не пишется (`HealthCheckAccessFilter` в `app/api/log_redaction.py`). Необработанное
-  исключение воркера — вплоть до `WorkerConfigError` старта — пишут excepthook'и
-  той же JSON-записью: текстовый дамп интерпретатора уходит в stderr и до
+  health-check'а не пишется (`HealthCheckAccessFilter` в `app/api/log_redaction.py`).
+  Необработанное исключение воркера — вплоть до `WorkerConfigError` старта — пишут
+  excepthook'и той же JSON-записью: текстовый дамп интерпретатора уходит в stderr и до
   хранилища логов не доходит. stdout остаётся для `docker logs` и локальной
   отладки; в Loki записи уходят вторым транспортом — по OTLP из SDK при
   `OTEL_LOGS_EXPORTER=otlp` (дефолт `none` — только stdout): `configure_telemetry`
