@@ -5,11 +5,11 @@
 ## What Changes
 
 - `llm-gateway`: требование «Локальная модель основная, hosted-провайдер только явным фоллбэком» переименовано и расширено — hosted-провайдер получает код только по явному выбору: фоллбэком после локальной модели (как раньше) или основным и единственным через `LLM_BACKEND=eurorouter`. Без явного выбора код по-прежнему не покидает нашу сеть.
-- `app/config.py`: значение `eurorouter`; обязательны `EUROROUTER_BASE_URL`, `EUROROUTER_MODEL`, `EUROROUTER_API_KEYS`; `LLM_HOSTED_FALLBACK` с ним не сочетается — фоллбэк остаётся только после локальной модели.
+- `app/config.py`: значение `eurorouter`; обязательны `EUROROUTER_BASE_URL`, `EUROROUTER_MODEL`, `EUROROUTER_API_KEYS`, адрес только `https://`; `LLM_HOSTED_FALLBACK` с ним не сочетается — фоллбэк остаётся только после локальной модели.
 - `build_llm_gateway`: Eurorouter единственным провайдером; лог старта называет, что код уходит hosted-провайдеру.
-- `backend-delivery`: развёртывание отклоняет `llm_backend = "eurorouter"` без реквизитов Eurorouter до изменений на сервере. `infra/variables.tf` и тесты OpenTofu.
+- `backend-delivery`: развёртывание отклоняет `llm_backend = "eurorouter"` без реквизитов Eurorouter или с адресом не на `https://` до изменений на сервере. `infra/variables.tf` и тесты OpenTofu.
 - `deploy.yml`: `llm_backend = eurorouter`; адрес и ключи — `vars.AI_DMC268_URL` и `secrets.AI_DMC268_T1`, те же, что у `eval.yml`; модель — из `.github/eurorouter-model`.
-- `webhook-intake`: ревью только для PR своих авторов (`author_association` — `OWNER`, `MEMBER`, `COLLABORATOR`). Иначе любой пользователь GitHub тратил бы ключ модели PR'ами из форка в публичный репозиторий. Временно, до биллинга.
+- `webhook-intake`: ревью только для своих PR — из ветки самого репозитория или от автора с `author_association` `OWNER`, `MEMBER`, `COLLABORATOR`. Иначе любой пользователь GitHub тратил бы ключ модели PR'ами из форка в публичный репозиторий. Одной `author_association` мало: скрытое членство в организации GitHub пишет в вебхук как `CONTRIBUTOR`. Повтор упавших доставок PR посторонних не переотправляет. Касается приёма вебхуков во всех подключённых репозиториях. Временно, до биллинга.
 - Документация: `README.md`, `infra/README.md`, `.env.example`.
 
 ## Capabilities
@@ -20,7 +20,7 @@
 
 - `llm-gateway`: hosted-провайдер может быть выбран основным.
 - `backend-delivery`: проверка реквизитов Eurorouter при выборе его основным.
-- `webhook-intake`: ревью только для PR своих авторов.
+- `webhook-intake`: ревью только для своих PR, повтор доставок — тоже.
 
 ## Impact
 

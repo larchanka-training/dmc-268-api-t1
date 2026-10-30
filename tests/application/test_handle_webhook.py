@@ -187,6 +187,7 @@ def test_a_pr_of_an_outside_author_is_ignored_and_logged(
     monkeypatch.setattr(logging.getLogger("app.application.use_cases.handle_webhook"), "disabled", False)
     payload = webhook_payload()
     payload["pull_request"]["author_association"] = "FIRST_TIME_CONTRIBUTOR"
+    payload["pull_request"]["head"]["repo"] = {"id": 1, "full_name": "stranger/dmc-268-api-t1", "fork": True}
     uow = FakeUow()
     uow.repositories.add(a_repository())
     vcs = FakeVcs()
@@ -196,7 +197,12 @@ def test_a_pr_of_an_outside_author_is_ignored_and_logged(
 
     assert outcome.kind == "ignored"
     assert (vcs.calls, uow.commits, queue.jobs) == ([], 0, [])
-    assert "PR #6 не ревьюится: автор не свой (author_association=FIRST_TIME_CONTRIBUTOR)" in caplog.text
+    [record] = [r for r in caplog.records if r.getMessage() == "PR не ревьюится: автор не свой"]
+    assert (record.repo_full_name, record.pr_number, record.author_association) == (  # type: ignore[attr-defined]
+        "larchanka-training/dmc-268-api-t1",
+        6,
+        "FIRST_TIME_CONTRIBUTOR",
+    )
     assert payload["pull_request"]["user"]["login"] not in caplog.text
 
 

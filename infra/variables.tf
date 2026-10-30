@@ -310,7 +310,8 @@ variable "ollama_model" {
   }
 }
 
-# Зеркало проверки в app/config.py — по той же причине, что у ollama_model.
+# Зеркало проверки в app/config.py — по той же причине, что у ollama_model. Условие на
+# реквизиты Eurorouter то же, что у llm_backend = eurorouter: две копии держать одинаковыми.
 variable "llm_hosted_fallback" {
   type        = bool
   description = "Подключить Eurorouter фоллбэком после локальной модели (LLM_HOSTED_FALLBACK). Включение отправляет код проверяемых репозиториев hosted-провайдеру."

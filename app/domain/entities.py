@@ -370,7 +370,8 @@ class WebhookEvent:
     `synchronize`): только эти два проходят через `extract_github_event`,
     и оно же переезжает в `ReviewJob.action` без преобразований.
     `author_association` — связь автора с репозиторием по GitHub (`None`, если
-    поля нет); по ней `is_trusted_author` отсекает PR посторонних.
+    поля нет), `from_fork` — ветка PR не в самом репозитории; по ним
+    `is_trusted_author` отсекает PR посторонних.
     """
 
     action: str
@@ -384,6 +385,7 @@ class WebhookEvent:
     title: str
     author: str
     author_association: str | None
+    from_fork: bool
 
 
 @dataclass(frozen=True, slots=True)

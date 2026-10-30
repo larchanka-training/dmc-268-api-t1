@@ -125,11 +125,14 @@ def handle_webhook_event(
     if event is None:
         return WebhookOutcome(kind="ignored")
     if not is_trusted_author(event):
-        # Логин не пишем: связи с репозиторием и номера PR хватает для разбора.
+        # Логин не пишем: репозитория, номера PR и связи автора хватает для разбора.
         logger.info(
-            "PR #%d не ревьюится: автор не свой (author_association=%s)",
-            event.pr_number,
-            event.author_association,
+            "PR не ревьюится: автор не свой",
+            extra={
+                "repo_full_name": event.repo_full_name,
+                "pr_number": event.pr_number,
+                "author_association": event.author_association,
+            },
         )
         return WebhookOutcome(kind="ignored")
 

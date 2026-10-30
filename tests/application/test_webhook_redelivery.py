@@ -183,6 +183,7 @@ def test_a_delivery_of_an_outside_author_is_not_redelivered(
     hooks = FakeDeliveries([delivery(1, "a")])
     payload = webhook_payload("opened")
     payload["pull_request"]["author_association"] = "NONE"
+    payload["pull_request"]["head"]["repo"] = {"id": 1, "full_name": "stranger/dmc-268-api-t1", "fork": True}
     hooks.delivery_payload = lambda delivery_id: payload  # type: ignore[method-assign]
     vcs = FakeVcs()
 

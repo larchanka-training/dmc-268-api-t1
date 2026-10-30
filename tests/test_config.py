@@ -231,6 +231,13 @@ def test_eurorouter_backend_names_each_missing_parameter(missing: str, named: st
         _llm_settings(**{**PRIMARY, missing: ""})
 
 
+@pytest.mark.parametrize("profile", [PRIMARY, HOSTED], ids=["eurorouter", "fallback"])
+def test_eurorouter_over_plain_http_is_refused(profile: dict[str, object]) -> None:
+    """То же правило, что в infra/variables.tf: код и ключи не уходят открытым текстом."""
+    with pytest.raises(ValidationError, match="EUROROUTER_BASE_URL - только https://"):
+        _llm_settings(**{**profile, "eurorouter_base_url": "http://eurorouter.example/v1"})
+
+
 def test_hosted_fallback_is_refused_when_eurorouter_is_already_primary() -> None:
     with pytest.raises(ValidationError, match="LLM_HOSTED_FALLBACK требует LLM_BACKEND=ollama"):
         _llm_settings(**PRIMARY, llm_hosted_fallback=True)
