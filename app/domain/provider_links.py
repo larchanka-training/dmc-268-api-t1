@@ -14,3 +14,8 @@ def merge_request_url(provider: Provider, full_name: str, number: int) -> str | 
             return f"https://github.com/{full_name}/pull/{number}"
         case _:
             return None
+
+
+def app_install_url(slug: str, state: str) -> str:
+    """Экран установки GitHub App; `state` вернётся в Setup URL."""
+    return f"https://github.com/apps/{slug}/installations/new?state={state}"
