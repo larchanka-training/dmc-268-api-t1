@@ -319,8 +319,11 @@ psql "$DATABASE_URL" -c "
 
 Воркер довыбирает через contents API `.review/rules.md` (с коммита целевой
 ветки PR) и изменённые файлы (с `head_sha`) для AST-окружения, поэтому GitHub
-App нужно разрешение **Contents: read**. Без него прогон не падает: правила
-уходят в дефолтный фоллбэк (`rules.status = unavailable`), AST пропускается.
+App нужно разрешение **Contents: read**. Без него прогон падает: дифф берётся
+через `GET /repos/{r}/compare/…`, а ему тоже нужен Contents (см.
+[`docs/GITHUB_APP.md`](docs/GITHUB_APP.md), «Настройки приложения»). Если
+недоступен только `.review/rules.md`, правила уходят в дефолтный фоллбэк
+(`rules.status = unavailable`).
 Формат правил — [`prompts/review/custom-rules.md`](prompts/review/custom-rules.md),
 лимиты сборки контекста (`CONTEXT_MAX_TOKENS`, `DIFF_MAX_BYTES`, `RULES_MAX_BYTES`,
 `AST_MAX_FILES`, …) — в [`app/config.py`](app/config.py).
