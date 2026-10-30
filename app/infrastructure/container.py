@@ -324,6 +324,7 @@ def _eurorouter(settings: Settings, timeout: httpx.Timeout) -> tuple[str, LlmGat
             settings.eurorouter_keys,
             name="Eurorouter",
             max_attempts=settings.llm_max_attempts,
+            reasoning_effort=settings.eurorouter_reasoning_effort,
         ),
     )
 

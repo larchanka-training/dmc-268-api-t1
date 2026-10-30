@@ -20,6 +20,7 @@ from app.infrastructure.container import (
     llm_http_timeout,
 )
 from app.infrastructure.llm.fallback import FallbackLlmGateway
+from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 from app.infrastructure.llm.stub import StubLlmGateway
 
 SETTINGS = Settings(
@@ -277,6 +278,15 @@ def test_eurorouter_backend_is_the_only_provider_and_says_the_code_leaves(
     gateway = build_container(_model_settings(llm_backend="eurorouter", **HOSTED)).llm_gateway()
     assert isinstance(gateway, FallbackLlmGateway)
     assert [name for name, _ in gateway._providers] == ["Eurorouter"]
+
+
+def test_eurorouter_gets_the_reasoning_effort_from_settings() -> None:
+    settings = _model_settings(llm_backend="eurorouter", eurorouter_reasoning_effort="low", **HOSTED)
+    gateway = build_container(settings).llm_gateway()
+    assert isinstance(gateway, FallbackLlmGateway)
+    ((_, eurorouter),) = gateway._providers
+    assert isinstance(eurorouter, OpenAiCompatibleGateway)
+    assert eurorouter._reasoning_effort == "low"
 
 
 def test_connection_to_a_model_host_times_out_long_before_the_answer_does() -> None:

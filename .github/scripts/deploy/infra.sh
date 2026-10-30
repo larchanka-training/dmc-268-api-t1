@@ -34,6 +34,9 @@ export REPORT_DIR="${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/deploy-report}"
 # не переменная в deploy.yml (#245). apply.sh применяет готовый план, ему не нужна.
 TF_VAR_eurorouter_model="$(tr -d '[:space:]' < "${BASH_SOURCE[0]%/*}/../../eurorouter-model")"
 export TF_VAR_eurorouter_model
+# reasoning_effort — из соседнего файла: пустой — параметр не задан (#267).
+TF_VAR_eurorouter_reasoning_effort="$(tr -d '[:space:]' < "${BASH_SOURCE[0]%/*}/../../eurorouter-reasoning-effort")"
+export TF_VAR_eurorouter_reasoning_effort
 trap 'rm -f infra/infra.tfplan' EXIT
 
 # -lock-timeout: чужая короткая блокировка того же ключа (ручной plan) не роняет

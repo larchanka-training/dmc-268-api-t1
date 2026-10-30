@@ -242,5 +242,7 @@ resource "docker_container" "worker" {
     "EUROROUTER_BASE_URL=${var.eurorouter_base_url}",
     "EUROROUTER_MODEL=${var.eurorouter_model}",
     "EUROROUTER_API_KEYS=${var.eurorouter_api_keys}",
+    ], var.eurorouter_reasoning_effort == "" ? [] : [
+    "EUROROUTER_REASONING_EFFORT=${var.eurorouter_reasoning_effort}",
   ])
 }
