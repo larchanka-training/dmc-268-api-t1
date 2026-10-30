@@ -182,7 +182,7 @@ variable "llm_backend" {
   # выкат упал бы уже после пересоздания контейнеров.
   validation {
     # Ключи разбираются так же, как в app/config.py: по запятой, без пустых и пробелов. Адрес
-    # только https, иначе код и ключи ушли бы открытым текстом.
+    # только https, иначе код и ключи ушли бы открытым текстом, и не обрезается, как в Settings.
     condition = var.llm_backend != "eurorouter" || (
       startswith(var.eurorouter_base_url, "https://")
       && trimspace(var.eurorouter_model) != ""
