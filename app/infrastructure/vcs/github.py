@@ -189,6 +189,9 @@ class GitHubVcsGateway:
             )
         except VcsNotFoundError:
             return None
+        # На каталог GitHub отвечает 200 с JSON-листингом, а не raw: файла нет.
+        if not response.headers.get("content-type", "").startswith(_RAW_ACCEPT):
+            return None
         return response.text
 
     def _get_json_list(self, url: str, installation_id: int) -> list[dict[str, Any]]:

@@ -344,7 +344,7 @@ class FakeGitHub:
             return httpx.Response(404, json={"message": "Not Found"})
         if "raw" not in request.headers.get("Accept", ""):
             return httpx.Response(415, json={"message": "Unsupported Accept"})
-        return httpx.Response(200, text=content)
+        return httpx.Response(200, text=content, headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"})
 
     def _create_review(self, request: httpx.Request, number: str) -> httpx.Response:
         pull = self._find_pull(number)
