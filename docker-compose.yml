@@ -35,7 +35,8 @@ services:
       # entrypoint refuse to start against an empty, wrongly-shaped volume.
       - postgres_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dmc268 -d dmc268"]
+      # По TCP: временный сервер инициализации на пустом томе слушает только сокет (#254).
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U dmc268 -d dmc268"]
       interval: 5s
       timeout: 5s
       retries: 10
