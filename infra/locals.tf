@@ -10,6 +10,19 @@ locals {
     "max-file" = "3"
   }
 
+  # Логи контейнеров без SDK (postgres, rabbitmq; nginx интерфейса — в
+  # dmc-268-ui-t1) при включённом стеке: драйвер fluentd демона Docker шлёт их
+  # в коллектор логов на петле хоста. Почему так — infra/README.md, «Логи
+  # контейнеров». async — контейнер стартует и пишет и без приёмника, драйвер
+  # копит записи в памяти; доли секунды — порядок строк ERROR/DETAIL/STATEMENT
+  # одной секунды; из тега коллектор берёт service.name.
+  fluentd_log_opts = {
+    "fluentd-address"              = "tcp://127.0.0.1:24224"
+    "fluentd-async"                = "true"
+    "fluentd-sub-second-precision" = "true"
+    "tag"                          = "{{.Name}}"
+  }
+
   # Версия сервиса для телеметрии — тег образа API: deploy.yml публикует образ
   # с тегом по sha коммита, а git внутрь образа не попадает, поэтому версия
   # приходит окружением (OTEL_RESOURCE_ATTRIBUTES). Тег — между последним

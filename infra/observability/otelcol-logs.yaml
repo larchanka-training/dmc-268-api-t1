@@ -1,0 +1,48 @@
+# Третий экземпляр коллектора (dmc268-otelcol-logs): логи контейнеров без SDK —
+# postgres, rabbitmq, nginx интерфейса — от драйвера fluentd демона Docker.
+# Почему так — infra/README.md, «Логи контейнеров». Конфиг один для compose и
+# infra.
+
+receivers:
+  # Порт опубликован только на 127.0.0.1 хоста: подключается демон Docker.
+  fluent_forward:
+    endpoint: 0.0.0.0:24224
+
+processors:
+  # Потолок памяти; контейнеру задан лимит с запасом
+  # (observability_memory_mb.collector_logs).
+  memory_limiter:
+    check_interval: 1s
+    spike_limit_mib: 16
+    limit_mib: 64
+
+  # Имя сервиса — тег драйвера (имя контейнера); в ресурс его переносит
+  # groupbyattrs/service основного коллектора. Тело — строка лога как есть,
+  # поэтому редакция — по тексту, маркером, как в otelcol.yaml.
+  transform/container-logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["service.name"], attributes["fluent.tag"])
+          - delete_key(attributes, "fluent.tag")
+          # IPv4 где угодно в строке: клиент в начале access-лога nginx,
+          # «client:» в его error-логе, адреса соединений rabbitmq.
+          - replace_pattern(body, "[0-9]{1,3}([.][0-9]{1,3}){3}", "<скрыто>")
+          # Пароль в тексте SQL: postgres пишет упавший запрос в STATEMENT, а
+          # ALTER ROLE шагов деплоя несёт пароль литералом.
+          - replace_pattern(body, "(?i)password +'([^']|'')*'", "PASSWORD '<скрыто>'")
+          # DETAIL ошибок postgres — значения ключей и строк таблиц.
+          - 'replace_pattern(body, "DETAIL:.*", "DETAIL:  <скрыто>")'
+
+exporters:
+  # Основному коллектору: там редакция логов, имя сервиса в ресурсе и Loki.
+  otlp_http/collector:
+    endpoint: http://collector:4318
+
+service:
+  pipelines:
+    logs:
+      receivers: [fluent_forward]
+      processors: [memory_limiter, transform/container-logs]
+      exporters: [otlp_http/collector]

@@ -61,9 +61,9 @@ processors:
     timeout: 5s
 
   # service.name в ресурсе OTLP-лога: Loki берёт имя сервиса из ресурса
-  # (label service_name), иначе все записи идут как unknown_service. Имя
-  # приходит в ресурсе от SDK; groupbyattrs оставлен как нормализация на
-  # случай, если имя окажется на уровне записи.
+  # (label service_name), иначе все записи идут как unknown_service. От SDK
+  # имя приходит в ресурсе, а от коллектора логов контейнеров
+  # (otelcol-logs.yaml) — на уровне записи: groupbyattrs переносит его в ресурс.
   groupbyattrs/service:
     keys:
       - service.name

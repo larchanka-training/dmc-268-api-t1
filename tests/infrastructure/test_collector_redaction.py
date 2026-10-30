@@ -665,6 +665,59 @@ def test_the_postgresql_receiver_takes_connection_from_the_environment() -> None
     assert receiver["collection_interval"] == "15s"
 
 
+# --- логи контейнеров: маскирование в коллекторе логов ------------------------------
+
+# replace_pattern(body, "регэксп", "замена"): регэкспы — общее подмножество RE2
+# и re (без обратных ссылок), поэтому re.sub даёт то же, что OTTL.
+_REPLACE_BODY = re.compile(r'^replace_pattern\(body, "(?P<pattern>[^"]+)", "(?P<replacement>[^"$]+)"\)$')
+
+
+def mask_container_log(line: str) -> str:
+    """Тело записи после правил replace_pattern из `otelcol-logs.yaml`."""
+    config = yaml.safe_load(COLLECTOR_CONFIG.with_name("otelcol-logs.yaml").read_text(encoding="utf-8"))
+    (block,) = config["processors"]["transform/container-logs"]["log_statements"]
+    for statement in block["statements"]:
+        match = _REPLACE_BODY.match(statement)
+        if match is not None:
+            line = re.sub(match.group("pattern"), match.group("replacement"), line)
+    return line
+
+
+@pytest.mark.parametrize(
+    ("line", "masked"),
+    [
+        (
+            '203.0.113.7 - - [30/Oct/2026:12:00:00 +0000] "GET /api/v1/runs HTTP/1.1" 200 512 "-" "curl/8"',
+            f'{REDACTED} - - [30/Oct/2026:12:00:00 +0000] "GET /api/v1/runs HTTP/1.1" 200 512 "-" "curl/8"',
+        ),
+        (
+            "[error] 29#29: *1 connect() failed, client: 198.51.100.4, server: _",
+            f"[error] 29#29: *1 connect() failed, client: {REDACTED}, server: _",
+        ),
+        (
+            "[info] <0.1234.0> accepting AMQP connection 172.20.0.6:39654 -> 172.20.0.3:5672",
+            f"[info] <0.1234.0> accepting AMQP connection {REDACTED}:39654 -> {REDACTED}:5672",
+        ),
+        (
+            "UTC [77] STATEMENT:  ALTER ROLE dmc268_monitor password 'top''secret'",
+            f"UTC [77] STATEMENT:  ALTER ROLE dmc268_monitor PASSWORD '{REDACTED}'",
+        ),
+        (
+            "UTC [77] DETAIL:  Key (installation_id)=(42) already exists.",
+            f"UTC [77] DETAIL:  {REDACTED}",
+        ),
+        (
+            'UTC [77] FATAL:  password authentication failed for user "dmc268"; PostgreSQL 18.1, RabbitMQ 4.4.0',
+            'UTC [77] FATAL:  password authentication failed for user "dmc268"; PostgreSQL 18.1, RabbitMQ 4.4.0',
+        ),
+    ],
+)
+def test_container_logs_hide_ip_addresses_and_secrets(line: str, masked: str) -> None:
+    """IP клиента nginx (в начале access-лога и в error-логе), адреса соединений,
+    пароль в тексте SQL и DETAIL postgres скрыты маркером; прочее — без изменений."""
+    assert mask_container_log(line) == masked
+
+
 class TestCollectorConfigValidation:
     """Конфиг валидируется самим коллектором.
 
@@ -675,7 +728,10 @@ class TestCollectorConfigValidation:
     """
 
     @pytest.mark.docker
-    @pytest.mark.parametrize("config", [COLLECTOR_CONFIG, COLLECTOR_CONFIG.with_name("otelcol-docker.yaml")])
+    @pytest.mark.parametrize(
+        "config",
+        [COLLECTOR_CONFIG, *(COLLECTOR_CONFIG.with_name(name) for name in ("otelcol-docker.yaml", "otelcol-logs.yaml"))],
+    )
     def test_collector_accepts_the_config(self, config: Path) -> None:
         image = compose_collector_image()
         mount = f"{config}:/etc/otelcol-contrib/config.yaml:ro"
