@@ -50,6 +50,15 @@ def get_visibility_catalog(
     return container.visibility_catalog(catalog)
 
 
+def get_refreshing_catalog(
+    catalog: InstallationCatalog = Depends(get_installation_catalog),
+    container: Container = Depends(get_container),
+) -> InstallationCatalog:
+    """Каталог, который всегда спрашивает GitHub и пишет свежий ответ в кэш видимости:
+    возврат с установки приложения (Setup URL, design D3)."""
+    return container.visibility_catalog(catalog, read=False)
+
+
 def get_app_slug(container: Container = Depends(get_container)) -> Callable[[], str | None]:
     """Как узнать slug GitHub App; вызывается в теле ручки — при `422` запроса к GitHub нет."""
     return container.app_slug

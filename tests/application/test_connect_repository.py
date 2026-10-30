@@ -10,6 +10,7 @@ from app.application.use_cases.connect_repository import (
     ConnectRefusal,
     ListedRepository,
     UserContext,
+    connect_installation,
     connect_repository,
     list_with_connections,
 )
@@ -20,7 +21,7 @@ from app.domain.entities import (
     RepositoryPermissions,
     Secret,
 )
-from app.domain.enums import Provider
+from app.domain.enums import Provider, RepositorySelection
 from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.session import open_session
 from app.domain.vcs_errors import VcsError
@@ -273,3 +274,14 @@ def test_the_installation_is_not_checked_for_a_repository_the_user_cannot_see() 
 
 def test_without_rights_on_an_installed_repository_it_is_403() -> None:
     assert _connect(FakeInstallationCatalog([DOCS]), _signed_in(), "303") is ConnectRefusal.MANAGE_REQUIRED
+
+
+def test_setup_counts_only_rows_it_actually_inserted() -> None:
+    """Параллельный POST /repositories успел вставить запись между чтением и вставкой Setup URL:
+    вставка не перетирает её и в «подключено N» не попадает."""
+    uow = _signed_in()
+    uow.repositories.list_by_provider_ids = lambda provider, provider_ids: []  # type: ignore[method-assign]
+    uow.repositories.add = lambda repository: False  # type: ignore[method-assign]
+    catalog = FakeInstallationCatalog([API], installations={7: (RepositorySelection.SELECTED, [API])})
+
+    assert connect_installation(catalog, uow, _user(), 7, lambda: NEW_ID, NOW, connect_selected=True) == 0

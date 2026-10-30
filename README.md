@@ -310,9 +310,12 @@ uv run alembic heads               # должна быть ровно одна
 остаются; на вебхук `pull_request` прогона нет, а на head ставится проверка `success`
 «Ревью выключено в сервисе» (см. «Merge gate»); на `pull_request_review_thread` тред
 записывается, а на head ставится та же проверка. Повторный `POST` включает его обратно с
-прежним `id`. Возврат с экрана установки (Setup URL `GET /api/v1/auth/github/setup`) пока описан в
-контракте и отвечает `501` (#243); Setup URL в настройках GitHub App не прописываем, пока ручка
-не заработает. Запросы идут из лимита
+прежним `id`. Возврат с экрана установки — Setup URL `GET /api/v1/auth/github/setup`: после
+установки (`setup_action=install`) при «Only select repositories» подключает выбранные
+репозитории, где у пользователя admin или maintain и которых в сервисе ещё нет, только с `state`
+из `install_url` этой сессии; после изменения установки (`update`) только обновляет список. Прописываем его в настройках
+GitHub App после проверки на стенде, что GitHub возвращает `state` (design D7 change
+`repositories-one-list`). Запросы идут из лимита
 пользователя, `installation_id` не хранится. Нужен ключ `USER_TOKEN_ENCRYPTION_KEY` (см. «Ключ
 шифрования токенов пользователя»); разрешений App сверх **Metadata: read** список не требует.
 Истёкший user access token сервис обновляет сам по refresh token.
