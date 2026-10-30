@@ -330,8 +330,9 @@ docker compose (профиль `observability`): различия окружен
 её до всякого пути): вместо неё — `cap_drop ALL` и `no-new-privileges`. Локальный коллектор
 read_only: конфиг приходит read-only маунтом. Локально тот же
 стек поднимается профилем: `OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp
-OTEL_LOGS_EXPORTER=otlp docker compose --profile observability up -d` (Grafana —
-http://127.0.0.1:3000 без логина).
+OTEL_LOGS_EXPORTER=otlp docker compose -f docker-compose.yml -f infra/observability/compose.logs.yml
+--profile observability up -d` (Grafana — http://127.0.0.1:3000 без логина; второй файл
+отправляет логи postgres и rabbitmq в Loki, без него стек поднимается и на podman).
 
 Экспорт телеметрии API, воркера и миграций включён окружением (`local.telemetry_env`): трейсы,
 метрики и логи уходят коллектору по OTLP. `service.version` берётся из тега `api_image` (это sha
@@ -407,7 +408,7 @@ rabbitmq — от `dmc268-otelcol-logs` («Логи контейнеров»); �
 плагином `rabbitmq_prometheus` (порт 15692 в сети, per-object эндпоинт — метрики очередей с
 лейблом `queue`); сервер — `node-exporter` (9100), контейнеры — receiver `docker_stats`
 экземпляра `dmc268-otelcol-docker` (`collector-docker:8889`, job `docker-stats`); свои метрики
-отдают `dmc268-otelcol` и `dmc268-otelcol-docker` (`otelcol_*` на `:8888`, на хосте не публикуется), Loki и Tempo; все скрейпятся
+отдают `dmc268-otelcol`, `dmc268-otelcol-docker` и `dmc268-otelcol-logs` (`otelcol_*` на `:8888`, на хосте не публикуется), Loki и Tempo; все скрейпятся
 `prometheus.yml`. Дашборд «Обзор dmc-268» провиженится из репозитория
 (`observability/grafana/provisioning/dashboards/`). Применение стека на стенд — задача DevOps
 (#108).
@@ -426,7 +427,7 @@ rabbitmq — от `dmc268-otelcol-logs` («Логи контейнеров»); �
 | RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
 | Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
 | Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes` | `container_name` | CPU и память контейнеров |
-| Коллекторы, Loki, Tempo, Prometheus | `collector-self`, `collector-docker-self`, `loki`, `tempo`, `prometheus` | `otelcol_*`, `loki_*`, `tempo_*`, `prometheus_*` | `receiver`, `exporter` | нет |
+| Коллекторы, Loki, Tempo, Prometheus | `collector-self`, `collector-docker-self`, `collector-logs-self`, `loki`, `tempo`, `prometheus` | `otelcol_*`, `loki_*`, `tempo_*`, `prometheus_*` | `receiver`, `exporter` | нет |
 
 Документация по стандартным метрикам:
 
@@ -475,16 +476,19 @@ cAdvisor убран, а `docker_stats` берёт те же сигналы у Do
 ### Логи контейнеров
 
 У Postgres и RabbitMQ нет OTel SDK, поэтому со стеком их stdout забирает сам демон Docker:
-драйвер логов `fluentd` (`local.fluentd_log_opts` в `locals.tf`, `logging` в compose) шлёт
+драйвер логов `fluentd` (`local.fluentd_log_opts` в `locals.tf`, `logging` в
+`observability/compose.logs.yml` для compose) шлёт
 каждую строку на `tcp://127.0.0.1:24224`. Там слушает третий экземпляр коллектора
 `dmc268-otelcol-logs` (тот же образ, конфиг `observability/otelcol-logs.yaml`): receiver
 `fluent_forward`, имя сервиса из тега драйвера (имя контейнера), маскирование и отдача основному
 коллектору по OTLP (`collector:4318`), а дальше — общий конвейер логов в Loki:
 `{service_name="dmc268-postgres"}`, `{service_name="dmc268-rabbitmq"}`. Коллектор логов заменяет
 маркером `<скрыто>` IPv4-адреса (клиент в начале access-лога nginx, `client:` в его error-логе,
-адреса соединений брокера), пароль в `PASSWORD '…'` (Postgres пишет упавший запрос в
-`STATEMENT`, а `ALTER ROLE` шагов деплоя несёт пароль литералом) и текст `DETAIL` ошибок Postgres
-(значения ключей и строк таблиц). Примеры — `tests/infrastructure/test_collector_redaction.py`.
+адреса соединений брокера), query в URL (коды OAuth в запросе обратного вызова и в Referer),
+пароль в `PASSWORD '…'` (Postgres пишет упавший запрос в `STATEMENT`, а `ALTER ROLE` шагов
+деплоя несёт пароль литералом) и `DETAIL` ошибок Postgres со значениями ключей и строк таблиц
+(`Key (…)=(…)`, `Failing row contains`). IPv6 не маскируется: сети Docker стенда только IPv4.
+Примеры — `tests/infrastructure/test_collector_redaction.py`.
 
 Почему не чтение файлов. В `/var/lib/docker/containers` рядом с логами лежит `config.v2.json` с
 Env всех контейнеров (пароли базы, брокера, репликации, Grafana, ключи S3), а Docker API отдаёт
@@ -498,8 +502,13 @@ Env всех контейнеров (пароли базы, брокера, ре
 `fluentd-async`: контейнер стартует и пишет и без приёмника — драйвер копит записи в памяти
 демона и досылает, когда коллектор логов поднимется; база и брокер от него не зависят.
 `docker logs` у них работает через кэш dual logging Docker (по умолчанию 5 файлов по 20 МБ на
-контейнер), а не через `json-file`. Без стека драйвер — прежний `json-file`; в compose без профиля
-`observability` записи в Loki не уходят, `docker logs` работает.
+контейнер), а не через `json-file`. Без стека драйвер — прежний `json-file`. В основном
+`docker-compose.yml` драйвера `fluentd` нет: podman его не знает, а без приёмника демон зря
+копит буфер. Его включает отдельный файл вместе со стеком:
+`docker compose -f docker-compose.yml -f infra/observability/compose.logs.yml --profile
+observability up -d`; без файла `docker logs` у postgres и rabbitmq работает как обычно, в Loki
+записи не уходят. Реплика PostgreSQL (`dmc268-postgres-replica`) есть только на стенде, в compose
+её нет.
 
 Выкат. Смена драйвера пересоздаёт `dmc268-postgres` и `dmc268-rabbitmq` (тома прежние), и сторож
 плана такую замену автоматическим деплоем не пропустит — выкат, как и включение флага выше,

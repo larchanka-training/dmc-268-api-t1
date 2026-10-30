@@ -18,7 +18,9 @@ processors:
 
   # Имя сервиса — тег драйвера (имя контейнера); в ресурс его переносит
   # groupbyattrs/service основного коллектора. Тело — строка лога как есть,
-  # поэтому редакция — по тексту, маркером, как в otelcol.yaml.
+  # поэтому редакция — по тексту, маркером. Вся редакция логов контейнеров
+  # здесь: transform/redact-logs основного коллектора трогает только записи
+  # с exception.*.
   transform/container-logs:
     error_mode: ignore
     log_statements:
@@ -29,18 +31,32 @@ processors:
           # IPv4 где угодно в строке: клиент в начале access-лога nginx,
           # «client:» в его error-логе, адреса соединений rabbitmq.
           - replace_pattern(body, "[0-9]{1,3}([.][0-9]{1,3}){3}", "<скрыто>")
+          # Query в URL: коды OAuth (code, state) в запросе обратного вызова и
+          # в Referer, как скрывает app/api/log_redaction.py. Query кончается
+          # пробелом или кавычкой поля access-лога.
+          - 'replace_pattern(body, "[?][^ \"]*", "?<скрыто>")'
           # Пароль в тексте SQL: postgres пишет упавший запрос в STATEMENT, а
-          # ALTER ROLE шагов деплоя несёт пароль литералом.
-          - replace_pattern(body, "(?i)password +'([^']|'')*'", "PASSWORD '<скрыто>'")
-          # DETAIL ошибок postgres — значения ключей и строк таблиц.
-          - 'replace_pattern(body, "DETAIL:.*", "DETAIL:  <скрыто>")'
+          # ALTER ROLE шагов деплоя несёт пароль литералом (в том числе E'…').
+          - replace_pattern(body, "(?i)password\\s+E?'([^']|'')*'", "PASSWORD '<скрыто>'")
+          # DETAIL ошибок postgres со значениями ключей и строк таблиц; прочие
+          # (слот репликации, deadlock) данных не несут.
+          - 'replace_pattern(body, "DETAIL:  (Key |Failing row contains).*", "DETAIL:  <скрыто>")'
 
 exporters:
-  # Основному коллектору: там редакция логов, имя сервиса в ресурсе и Loki.
+  # Основному коллектору: там имя сервиса в ресурсе и отправка в Loki.
   otlp_http/collector:
     endpoint: http://collector:4318
 
 service:
+  # Свои метрики, как у основного коллектора (otelcol.yaml): job collector-logs-self.
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
   pipelines:
     logs:
       receivers: [fluent_forward]

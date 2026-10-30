@@ -40,17 +40,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    # Логи — в коллектор логов (collector-logs), как на стенде: опции и почему —
-    # local.fluentd_log_opts в infra/locals.tf; тег — имя контейнера стенда.
-    # Без профиля observability приёмника нет: записи копит демон, а
-    # docker logs читает их из своего кэша (dual logging).
-    logging:
-      driver: fluentd
-      options:
-        fluentd-address: tcp://127.0.0.1:24224
-        fluentd-async: "true"
-        fluentd-sub-second-precision: "true"
-        tag: dmc268-postgres
 
   # Local infrastructure only: no application code talks to this yet. It is
   # provisioned ahead of the first caller (idempotency, rate limiting, or
@@ -90,14 +79,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    # Как у postgres.
-    logging:
-      driver: fluentd
-      options:
-        fluentd-address: tcp://127.0.0.1:24224
-        fluentd-async: "true"
-        fluentd-sub-second-precision: "true"
-        tag: dmc268-rabbitmq
 
   # Одноразовая миграция схемы: API и воркер стартуют только после её успешного
   # завершения, поэтому миграция идёт один раз, а не при каждом старте API.
@@ -202,7 +183,8 @@ services:
       # (профиль observability ниже) запускают так:
       #   OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp \
       #   OTEL_LOGS_EXPORTER=otlp \
-      #   docker compose --profile observability up -d
+      #   docker compose -f docker-compose.yml \
+      #     -f infra/observability/compose.logs.yml --profile observability up -d
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://collector:4318}
       # Таймаут OTLP меньше окна graceful shutdown (5 с): выгрузка спанов при
       # остановке успевает даже при недоступном коллекторе (замечание из #89).
@@ -406,13 +388,16 @@ services:
 
   # Логи postgres и rabbitmq — экземпляр коллектора с приёмом fluentd, как
   # dmc268-otelcol-logs в infra/observability.tf. Почему так — infra/README.md,
-  # «Логи контейнеров».
+  # «Логи контейнеров». Драйвер fluentd у postgres и rabbitmq включает отдельный
+  # файл infra/observability/compose.logs.yml.
   collector-logs:
     # otel/opentelemetry-collector-contrib:0.158.0
     image: otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
     profiles: ["observability"]
     networks:
       observability:
+        aliases:
+          - collector-logs
       logs:
     # Демон Docker подключается с хоста, поэтому порт — только на петле.
     ports:
@@ -423,6 +408,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    restart: unless-stopped
 
   loki:
     # grafana/loki:3.7.9

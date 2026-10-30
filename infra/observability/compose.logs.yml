@@ -1,0 +1,28 @@
+# Логи postgres и rabbitmq в Loki: драйвер fluentd демона Docker шлёт их в
+# collector-logs. Подключается явно вместе со стеком:
+#   docker compose -f docker-compose.yml -f infra/observability/compose.logs.yml \
+#     --profile observability up -d
+# Вне основного compose, потому что без приёмника на 127.0.0.1:24224 демон зря
+# копит записи в памяти, а podman драйвер fluentd не знает ("invalid log driver").
+# Опции те же, что local.fluentd_log_opts в infra/locals.tf; тег — имя
+# контейнера на стенде. Почему так — infra/README.md, «Логи контейнеров».
+x-fluentd-logging: &fluentd-logging
+  driver: fluentd
+  options: &fluentd-options
+    fluentd-address: tcp://127.0.0.1:24224
+    fluentd-async: "true"
+    fluentd-sub-second-precision: "true"
+
+services:
+  postgres:
+    logging:
+      <<: *fluentd-logging
+      options:
+        <<: *fluentd-options
+        tag: dmc268-postgres
+  rabbitmq:
+    logging:
+      <<: *fluentd-logging
+      options:
+        <<: *fluentd-options
+        tag: dmc268-rabbitmq

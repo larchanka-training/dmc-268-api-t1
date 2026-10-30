@@ -669,7 +669,12 @@ def test_the_postgresql_receiver_takes_connection_from_the_environment() -> None
 
 # replace_pattern(body, "регэксп", "замена"): регэкспы — общее подмножество RE2
 # и re (без обратных ссылок), поэтому re.sub даёт то же, что OTTL.
-_REPLACE_BODY = re.compile(r'^replace_pattern\(body, "(?P<pattern>[^"]+)", "(?P<replacement>[^"$]+)"\)$')
+# Строки OTTL экранируют \\ и \" (в YAML они остаются как есть).
+_REPLACE_BODY = re.compile(r'^replace_pattern\(body, "(?P<pattern>(?:[^"\\]|\\.)+)", "(?P<replacement>[^"$]+)"\)$')
+
+
+def _unescape_ottl(text: str) -> str:
+    return re.sub(r"\\(.)", r"\1", text)
 
 
 def mask_container_log(line: str) -> str:
@@ -679,7 +684,7 @@ def mask_container_log(line: str) -> str:
     for statement in block["statements"]:
         match = _REPLACE_BODY.match(statement)
         if match is not None:
-            line = re.sub(match.group("pattern"), match.group("replacement"), line)
+            line = re.sub(_unescape_ottl(match.group("pattern")), match.group("replacement"), line)
     return line
 
 
@@ -703,8 +708,42 @@ def mask_container_log(line: str) -> str:
             f"UTC [77] STATEMENT:  ALTER ROLE dmc268_monitor PASSWORD '{REDACTED}'",
         ),
         (
+            "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD E'a\\b'",
+            f"UTC [77] STATEMENT:  ALTER ROLE r PASSWORD '{REDACTED}'",
+        ),
+        (
+            "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD\t'x'",
+            f"UTC [77] STATEMENT:  ALTER ROLE r PASSWORD '{REDACTED}'",
+        ),
+        (
             "UTC [77] DETAIL:  Key (installation_id)=(42) already exists.",
             f"UTC [77] DETAIL:  {REDACTED}",
+        ),
+        (
+            "UTC [77] DETAIL:  Failing row contains (1, secret).",
+            f"UTC [77] DETAIL:  {REDACTED}",
+        ),
+        (
+            "UTC [77] DETAIL:  The slot \"standby\" is active for PID 5.",
+            "UTC [77] DETAIL:  The slot \"standby\" is active for PID 5.",
+        ),
+        (
+            "UTC [77] DETAIL:  Process 5 waits for ShareLock on transaction 9; blocked by process 6.",
+            "UTC [77] DETAIL:  Process 5 waits for ShareLock on transaction 9; blocked by process 6.",
+        ),
+        (
+            (
+                '203.0.113.7 - - [30/Oct/2026:12:00:00 +0000] "GET /api/v1/auth/github/callback?code=X&state=Y HTTP/1.1" '
+                '302 0 "https://github.com/login?return_to=%2Fx&client_id=Z" "curl/8"'
+            ),
+            (
+                f'{REDACTED} - - [30/Oct/2026:12:00:00 +0000] "GET /api/v1/auth/github/callback?{REDACTED} HTTP/1.1" '
+                f'302 0 "https://github.com/login?{REDACTED}" "curl/8"'
+            ),
+        ),
+        (
+            '[error] 29#29: *1 upstream timed out, client: 198.51.100.4, request: "GET /cb?code=X&state=Y HTTP/1.1", host: "h"',
+            f'[error] 29#29: *1 upstream timed out, client: {REDACTED}, request: "GET /cb?{REDACTED} HTTP/1.1", host: "h"',
         ),
         (
             'UTC [77] FATAL:  password authentication failed for user "dmc268"; PostgreSQL 18.1, RabbitMQ 4.4.0',

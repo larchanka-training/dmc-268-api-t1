@@ -54,6 +54,9 @@ STACK_SERVICES = {
 _DIGEST = re.compile(r"^(?P<name>[^@\s]+)@sha256:(?P<digest>[0-9a-f]{64})$")
 
 
+COMPOSE_LOGS_FILE = OBSERVABILITY_DIR / "compose.logs.yml"
+
+
 def load_compose() -> dict[str, Any]:
     compose: dict[str, Any] = yaml.safe_load(COMPOSE_FILE.read_text(encoding="utf-8"))
     return compose
@@ -146,6 +149,7 @@ def test_host_and_container_exporters_in_infra(container: str) -> None:
         ("docker-stats", "collector-docker:8889"),
         ("collector-self", "collector:8888"),
         ("collector-docker-self", "collector-docker:8888"),
+        ("collector-logs-self", "collector-logs:8888"),
         ("loki", "loki:3100"),
         ("tempo", "tempo:3200"),
     ],
@@ -156,7 +160,7 @@ def test_prometheus_scrapes_exporters_by_service_hosts(job: str, target: str) ->
     assert jobs[job]["static_configs"][0]["targets"] == [target]
 
 
-@pytest.mark.parametrize("config", ["otelcol.yaml", "otelcol-docker.yaml"])
+@pytest.mark.parametrize("config", ["otelcol.yaml", "otelcol-docker.yaml", "otelcol-logs.yaml"])
 def test_collector_serves_own_metrics_beyond_localhost(config: str) -> None:
     """По умолчанию свои метрики коллектор отдаёт только на 127.0.0.1 — Prometheus их не видит."""
     collector = yaml.safe_load((OBSERVABILITY_DIR / config).read_text(encoding="utf-8"))
@@ -371,10 +375,13 @@ def test_container_logs_go_through_the_logs_collector() -> None:
     """Логи postgres и rabbitmq шлёт драйвер fluentd демона Docker в отдельный
     экземпляр коллектора: файлов и Docker API у коллекторов нет. В compose — те же
     опции, что local.fluentd_log_opts на стенде (там только при стеке, а тег —
-    имя контейнера); коллектор логов отдаёт их основному, где редакция и Loki."""
+    имя контейнера). В compose драйвер лежит в отдельном файле, а не в основном:
+    podman его не знает. Коллектор логов отдаёт записи основному, где Loki."""
     services = load_compose()["services"]
+    overrides = yaml.safe_load(COMPOSE_LOGS_FILE.read_text(encoding="utf-8"))["services"]
     for service in ("postgres", "rabbitmq"):
-        assert services[service]["logging"] == {
+        assert "logging" not in services[service], service
+        assert overrides[service]["logging"] == {
             "driver": "fluentd",
             "options": {
                 "fluentd-address": "tcp://127.0.0.1:24224",

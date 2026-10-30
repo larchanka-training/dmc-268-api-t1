@@ -287,9 +287,11 @@ resource "docker_container" "otelcol_logs" {
     ip       = "127.0.0.1"
   }
 
-  # Отдача основному коллектору (collector:4318).
+  # Отдача основному коллектору (collector:4318) и скрейп Prometheus
+  # (collector-logs:8888).
   networks_advanced {
-    name = docker_network.observability[0].name
+    name    = docker_network.observability[0].name
+    aliases = ["collector-logs"]
   }
 
   networks_advanced {
