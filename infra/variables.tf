@@ -184,7 +184,7 @@ variable "llm_backend" {
     # Ключи разбираются так же, как в app/config.py: по запятой, без пустых и пробелов. Адрес
     # только https, иначе код и ключи ушли бы открытым текстом.
     condition = var.llm_backend != "eurorouter" || (
-      startswith(trimspace(var.eurorouter_base_url), "https://")
+      startswith(var.eurorouter_base_url, "https://")
       && trimspace(var.eurorouter_model) != ""
       && length([for k in split(",", var.eurorouter_api_keys) : trimspace(k) if trimspace(k) != ""]) > 0
     )
@@ -320,7 +320,7 @@ variable "llm_hosted_fallback" {
   validation {
     condition = !var.llm_hosted_fallback || (
       var.llm_backend == "ollama"
-      && startswith(trimspace(var.eurorouter_base_url), "https://")
+      && startswith(var.eurorouter_base_url, "https://")
       && trimspace(var.eurorouter_model) != ""
       && length([for k in split(",", var.eurorouter_api_keys) : trimspace(k) if trimspace(k) != ""]) > 0
     )

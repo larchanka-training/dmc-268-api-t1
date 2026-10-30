@@ -238,6 +238,20 @@ def test_eurorouter_over_plain_http_is_refused(profile: dict[str, object]) -> No
         _llm_settings(**{**profile, "eurorouter_base_url": "http://eurorouter.example/v1"})
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "named"),
+    [
+        ("eurorouter_model", "   ", "EUROROUTER_MODEL"),
+        ("eurorouter_base_url", " https://eurorouter.example/v1", "EUROROUTER_BASE_URL - только https://"),
+    ],
+    ids=["модель из пробелов", "адрес с пробелом впереди"],
+)
+def test_eurorouter_settings_are_checked_like_opentofu(field: str, value: str, named: str) -> None:
+    """Пробелы разбираются так же, как в infra/variables.tf: план и старт воркера согласны."""
+    with pytest.raises(ValidationError, match=named):
+        _llm_settings(**{**PRIMARY, field: value})
+
+
 def test_hosted_fallback_is_refused_when_eurorouter_is_already_primary() -> None:
     with pytest.raises(ValidationError, match="LLM_HOSTED_FALLBACK требует LLM_BACKEND=ollama"):
         _llm_settings(**PRIMARY, llm_hosted_fallback=True)
