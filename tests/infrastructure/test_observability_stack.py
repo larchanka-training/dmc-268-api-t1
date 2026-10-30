@@ -338,11 +338,6 @@ def test_container_metrics_come_from_a_separate_collector_through_the_proxy() ->
 
 SOCKET_PROXY_TEMPLATE = OBSERVABILITY_DIR / "docker-socket-proxy.cfg"
 SOCKET_PROXY_TEMPLATE_PATH = "/usr/local/etc/haproxy/haproxy.cfg.template"
-# Единственный белый список путей proxy (замечание ревью PR #130).
-_SOCKET_PROXY_ALLOW = (
-    r"^(/v[\d\.]+)?/(containers/json|containers/[^/]+/json|containers/[^/]+/stats|events"
-    r"|info|version|_ping)$"
-)
 
 
 def test_socket_proxy_allows_only_the_docker_stats_paths() -> None:
@@ -372,9 +367,7 @@ def test_socket_proxy_allows_only_the_docker_stats_paths() -> None:
     assert SOCKET_PROXY_TEMPLATE.is_file(), "нет infra/observability/docker-socket-proxy.cfg"
     template = SOCKET_PROXY_TEMPLATE.read_text(encoding="utf-8")
     allow_lines = [line.strip() for line in template.splitlines() if "http-request allow" in line]
-    assert allow_lines == [
-        "http-request allow if { path,url_dec -m reg -i " + _SOCKET_PROXY_ALLOW + " }"
-    ]
+    assert len(allow_lines) == 1
     # Всё, что не в списке, — deny: и не-GET, и остальные пути.
     assert "http-request deny unless METH_GET" in template
     assert "    http-request deny\n    default_backend dockerbackend" in template

@@ -20,9 +20,7 @@ scrape_configs:
     static_configs:
       - targets: ["collector:8889"]
 
-  # Метрики контейнеров: экземпляр коллектора с одним receiver docker_stats
-  # (otelcol-docker.yaml). honor_labels не нужен: service.name в ресурсе нет,
-  # job у рядов — имя этой джобы. Панели дашборда фильтруют по container_name.
+  # Метрики контейнеров: otelcol-docker.yaml. Панели фильтруют по container_name.
   - job_name: docker-stats
     static_configs:
       - targets: ["collector-docker:8889"]
