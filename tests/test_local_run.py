@@ -112,6 +112,8 @@ def test_invalid_setting_reports_field_without_value(env_file: Path) -> None:
 
     output = check_local_env.render([("", checks)])
     assert "USER_TOKEN_ENCRYPTION_KEY" in output
+    # Подсказка из сообщения валидатора, а не голый тип ошибки.
+    assert "base64" in output
     assert bad_key not in output
     assert failures(checks)
 
@@ -186,3 +188,13 @@ def test_init_fills_empty_key_in_existing_env(repo_copy: Path) -> None:
         )
         == 32
     )
+
+
+def test_init_restricts_permissions_of_existing_env(repo_copy: Path) -> None:
+    env = repo_copy / ".env"
+    env.write_text("USER_TOKEN_ENCRYPTION_KEY=existing\n")
+    env.chmod(0o644)
+
+    run_init(repo_copy)
+
+    assert env.stat().st_mode & 0o777 == 0o600

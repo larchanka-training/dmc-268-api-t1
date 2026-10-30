@@ -33,8 +33,10 @@ make stop-local   # остановить API, воркер и туннель
 
 Берите **свою** App, а не командную: у App один Webhook URL, и командная App, перенаправленная
 на туннель ноутбука, перестаёт слать вебхуки стенду — ревью на стенде молча встают у всей
-команды. Своя создаётся за пару минут: GitHub → Settings → Developer settings → GitHub Apps →
-New GitHub App.
+команды. Ключ командной App в `.env` не кладите и без смены URL: локальный воркер будет писать
+ревью и check runs в подключённые к ней репозитории от её имени, а переотправка доставок по её
+JWT затронет доставки стенда. В `.env` — только своя App. Своя создаётся за пару минут: GitHub →
+Settings → Developer settings → GitHub Apps → New GitHub App.
 
 - **Permissions**: Pull requests — Read and write, Contents — Read-only, Checks — Read and write,
   Metadata — Read-only.
@@ -69,7 +71,9 @@ MIIE...
 запроса как есть — подпись `X-Hub-Signature-256` сходится. В итоге `make run-local` печатает
 строку «Webhook URL для настроек GitHub App» — вставьте её в App и сохраните. Адрес новый при
 каждом запуске: после `stop-local` / `run-local` обновите его снова. Свой туннель (ngrok) —
-`make run-local TUNNEL=0` и `ngrok http 8000`.
+`make run-local TUNNEL=0` и `ngrok http 8000`. Пока туннель поднят, в интернет открыт весь
+локальный API (`/docs`, `/api/v1/auth/github/login` и остальное), а не только вебхук, — держите
+в этом экземпляре только тестовые данные.
 
 ## 3. Вход, репозиторий, PR
 
@@ -102,7 +106,7 @@ MIIE...
 | Доставка — timeout или 502 от туннеля | туннель упал или адрес устарел | `tail -F .local/*.log`, новый URL — в App |
 | Доставка — `401` | `GITHUB_WEBHOOK_SECRET` не совпадает с секретом App | поправить `.env`, `make stop-local && make run-local` |
 | `202`, а прогона нет | репозиторий не подключён или `auto_review_enabled=false` | шаг 3.2 |
-| Вебхук — `502` | неверный `GITHUB_APP_ID` или private key | проверить значения в `.env`, `make stop-local && make run-local` |
+| Вебхук — `502` | неверный `GITHUB_APP_ID` или private key | причина — в `tail -F .local/api.log`; проверить значения в `.env`, `make stop-local && make run-local` |
 | GitHub: redirect_uri mismatch | Callback URL ≠ `PUBLIC_ORIGIN` + `/api/v1/auth/github/callback` | поправить Callback URL App |
 | `verifying` — `LLM_INVALID_OUTPUT` | модель мала или сбивается с формата | модель 7b и больше |
 | Ревью без правил, `rules.status = unavailable` | у App нет Contents: read | права App |

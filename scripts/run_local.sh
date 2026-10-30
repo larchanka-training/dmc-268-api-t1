@@ -13,13 +13,15 @@
 # Настройки процессы берут из окружения и .env, как make run-api; секреты в командную
 # строку не попадают.
 #
-# Переменные: TUNNEL (0 - без cloudflared), API_PORT (по умолчанию 8000); от make -
-# MAKE, LOCAL_MODEL (модель) и OLLAMA_URL (адрес Ollama).
+# Переменные: TUNNEL (0 - без cloudflared); от make - MAKE, LOCAL_MODEL (модель) и
+# OLLAMA_URL (адрес Ollama).
 
 set -euo pipefail
 
 STATE_DIR=.local
-API_PORT="${API_PORT:-8000}"
+# Порт не настраивается: на 8000 завязаны PUBLIC_ORIGIN и callback GitHub App, на другом
+# порту запросы получат 403 ORIGIN_FORBIDDEN.
+API_PORT=8000
 API_URL="http://localhost:$API_PORT"
 TUNNEL="${TUNNEL:-1}"
 MAKE="${MAKE:-make}"
@@ -44,13 +46,26 @@ die() {
 pid_file() { printf '%s/%s.pid' "$STATE_DIR" "$1"; }
 log_file() { printf '%s/%s.log' "$STATE_DIR" "$1"; }
 
-# PID процесса, если он запущен нами и ещё жив.
+# Чем должен быть процесс сервиса: шаблон его командной строки.
+service_pattern() {
+	case "$1" in
+		api) printf 'uvicorn' ;;
+		worker) printf 'app.worker' ;;
+		tunnel) printf 'cloudflared' ;;
+	esac
+}
+
+# PID процесса, если он запущен нами и ещё жив. После перезагрузки PID из файла может
+# принадлежать чужому процессу: сверяем командную строку, иначе считаем, что не запущен.
 running_pid() {
-	local file pid
+	local file pid cmd
 	file=$(pid_file "$1")
 	[[ -f "$file" ]] || return 1
 	pid=$(<"$file")
-	[[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s' "$pid"
+	[[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+	cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
+	[[ "$cmd" == *"$(service_pattern "$1")"* ]] || return 1
+	printf '%s' "$pid"
 }
 
 # Запустить команду в фоне своей группой процессов: PGID = PID.
@@ -126,14 +141,12 @@ start_api() {
 start_worker() {
 	launch worker uv run python -m app.worker
 	# Ошибки конфигурации воркер выдаёт в первые секунды: ждём их, прежде чем рапортовать.
-	# Трейсбек сам по себе не падение: обработанные ошибки (например, сбой повтора доставок)
-	# воркер пишет со стектрейсом и работает дальше. Падение - выход процесса или WorkerConfigError.
+	# Падение - выход процесса (ошибка конфигурации тоже завершает его). Трейсбек в логе
+	# падением не считаем: обработанные ошибки (например, сбой повтора доставок) воркер пишет
+	# со стектрейсом и работает дальше.
 	local i
 	for i in $(seq 1 10); do
 		running_pid worker >/dev/null || fail_with_log worker "воркер завершился при старте"
-		if grep -q 'WorkerConfigError' "$(log_file worker)"; then
-			fail_with_log worker "воркер упал при старте"
-		fi
 		sleep 1
 	done
 	ok "воркер запущен, модель ${OLLAMA_MODEL:-из .env} ${DIM}(лог $(log_file worker))${RESET}"
@@ -173,7 +186,9 @@ summary() {
 	if [[ -n "$tunnel_url" ]]; then
 		printf '  %sWebhook URL для настроек GitHub App:%s %s/api/v1/webhooks/github\n' "$BOLD" "$RESET" "$tunnel_url"
 		printf '  %sАдрес туннеля новый при каждом запуске - обновите его в App.%s\n' "$DIM" "$RESET"
+		warn "пока туннель поднят, наружу открыт весь API (/docs, вход и остальное) - только тестовые данные"
 	fi
+	printf '  %sGitHub App в .env - ваша dev App, не командная.%s\n' "$DIM" "$RESET"
 	printf '  Логи:           tail -F %s/*.log\n' "$STATE_DIR"
 	printf '  Остановить:     make stop-local\n'
 }
@@ -190,11 +205,17 @@ cmd_start() {
 	prepare
 	# Модель и адрес Ollama - переменными, а не правкой .env: тот же .env читает docker compose.
 	export LLM_BACKEND=ollama OLLAMA_BASE_URL="$OLLAMA_URL" OLLAMA_MODEL="$LOCAL_MODEL"
+	# Код настоящих репозиториев остаётся на машине: в hosted-фолбэк не уходит, даже если
+	# в .env со стенда стоит true.
+	export LLM_HOSTED_FALLBACK=false
+	# Ctrl-C посреди запуска гасит уже поднятое, а не оставляет его сиротами.
+	trap 'printf "\n  запуск прерван - останавливаю запущенное\n"; cmd_stop; exit 130' INT TERM
 	# Воркер стартует после здорового API: миграции к этому моменту уже прошли.
 	start_api
 	start_worker
 	start_tunnel
 	summary
+	trap - INT TERM
 }
 
 stop_one() {

@@ -15,7 +15,9 @@ if [[ ! -f .env.example ]]; then
 fi
 
 if [[ -f "$ENV_FILE" ]]; then
-	echo "  $ENV_FILE уже есть - дополняю только пустое"
+	# Права 600 и у существующего файла: в нём ключ и секреты App.
+	chmod 600 "$ENV_FILE"
+	echo "  $ENV_FILE уже есть - дополняю только пустое, права 600"
 else
 	# Права 600 до записи секретов: файл читает только владелец.
 	(umask 077 && cp .env.example "$ENV_FILE")
@@ -27,6 +29,8 @@ if grep -qE '^USER_TOKEN_ENCRYPTION_KEY=.+' "$ENV_FILE"; then
 else
 	key=$(openssl rand -base64 32)
 	tmp=$(mktemp "$ENV_FILE.XXXXXX")
+	# Упавший awk не оставляет рядом .env.XXXXXX с ключом.
+	trap 'rm -f "$tmp"' EXIT
 	# Ключ уходит в файл через окружение awk, а не аргументом: в выводе и в ps его нет.
 	KEY="$key" awk '
 		/^USER_TOKEN_ENCRYPTION_KEY=/ { print "USER_TOKEN_ENCRYPTION_KEY=" ENVIRON["KEY"]; done = 1; next }
