@@ -60,7 +60,8 @@ OPENSPEC := npx --yes @fission-ai/openspec@1.15.0
 .PHONY: help check \
 	sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
 	test-db test-queue test-e2e test-all \
-	infra-up infra-down test-db-create test-queue-vhost migrate run-api run-worker
+	infra-up infra-down test-db-create test-queue-vhost migrate run-api run-worker \
+	run-local stop-local
 
 help: ## Список целей
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -185,3 +186,21 @@ run-api: migrate ## API на хосте с автоперезагрузкой (�
 
 run-worker: migrate ## Воркер на хосте; адаптер модели - из .env или LLM_BACKEND=stub|ollama (для ollama - MODEL)
 	$(WORKER_ENV) uv run python -m app.worker
+
+# --- весь бэкенд локально против настоящего GitHub -----------------------------------
+# Руководство - docs/LOCAL_RUN.md. Процессы и логи - scripts/run_local.sh.
+
+# Модель run-local: явная MODEL или OLLAMA_MODEL, иначе OLLAMA_MODEL из .env, иначе 7b -
+# 1.5b песочницы для ревью настоящих PR слаба. Адрес и модель уходят воркеру переменными,
+# а не правкой .env: тот же .env читает docker compose, там Ollama - http://ollama:11434.
+ENV_OLLAMA_MODEL := $(shell sed -n 's/^OLLAMA_MODEL=//p' .env 2>/dev/null | tail -n 1 | tr -d "\"'")
+LOCAL_MODEL = $(if $(or $(call explicit,MODEL),$(call explicit,OLLAMA_MODEL)),$(MODEL),$(or $(ENV_OLLAMA_MODEL),qwen2.5-coder:7b))
+# 0 - без туннеля cloudflared: вебхуки GitHub до локального API не дойдут.
+TUNNEL ?= 1
+
+run-local: ## Весь бэкенд против GitHub: проверить и поднять всё, что нужно, или подсказать, как исправить (MODEL, TUNNEL=0)
+	@MAKE='$(MAKE)' LOCAL_MODEL='$(LOCAL_MODEL)' OLLAMA_URL='$(OLLAMA_URL)' TUNNEL='$(TUNNEL)' \
+		scripts/run_local.sh start
+
+stop-local: ## Остановить API, воркер и туннель из run-local (база, брокер и Ollama остаются)
+	@scripts/run_local.sh stop
