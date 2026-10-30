@@ -39,13 +39,14 @@ API публикуется на `bind_ip`, в деплое это `127.0.0.1`. �
 
 ## Сети
 
-Контейнеры разнесены по трём docker-сетям, каждый видит только тех, с кем говорит:
+Контейнеры приложения разнесены по docker-сетям (сети стека наблюдаемости — в его разделе), каждый видит только тех, с кем говорит:
 
 | Сеть | Кто в ней | Зачем |
 | --- | --- | --- |
 | `dmc268` | интерфейс (из `dmc-268-ui-t1`), `api` | публичный вход: nginx интерфейса проксирует `/api/` в API. Имя прежнее — интерфейс подключается к ней по имени |
 | `dmc268-backend` (`internal`) | `postgres`, `postgres-replica`, `postgres-backup`, `rabbitmq`, `replication-setup`, `api`, `worker`, миграции шага деплоя | данные. У сети нет шлюза: из неё не выйти в интернет, а интерфейса в ней нет |
 | `dmc268-egress` | `worker` | исходящие запросы воркера к GitHub API и провайдеру модели |
+| `dmc268-otlp` (`internal`) | интерфейс, `otelcol` (при `observability_enabled`) | трейсы браузера: nginx интерфейса проксирует `/otlp/v1/traces` на отдельный приёмник коллектора `dmc268-otelcol:4319`: только трейсы, `service.name` ставит коллектор (`dmc-268-ui`), кабинет шлёт их на свой же origin. Сеть создаётся и без стека: интерфейс подключается к ней по имени, и без коллектора `/otlp/v1/traces` отвечает 502, а остальное работает |
 
 API — единственный, кто стоит и во входе, и в данных. С `internal`-сети Docker не публикует порты, поэтому у базы и брокера портов на хосте нет: для отладки — `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268` и `docker exec dmc268-rabbitmq rabbitmq-diagnostics status`. Изоляцию проверяют `tests/test_infra_isolation.py` (по тексту `infra/*.tf`) и `infra/tests/main.tftest.hcl` (по плану).
 
@@ -154,7 +155,7 @@ Eurorouter подключается только фоллбэком после �
 | --- | --- |
 | `api_image` | тег и digest собранного образа (`outputs.digest` у `docker/build-push-action`) |
 | `postgres_password`, `rabbitmq_password` | секреты `PG_PASSWORD_DMC268_T1`, `RABBITMQ_PASSWORD_DMC268_T1` |
-| `grafana_admin_password` | секрет `GRAFANA_ADMIN_PASSWORD_DMC268_T1` — пароль админа Grafana (`GF_SECURITY_ADMIN_PASSWORD` контейнера `dmc268-grafana`). Дефолт переменной пустой, и при `observability_enabled = true` валидация требует непустого значения: без секрета `apply` падает на проверке. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 \| gh secret set GRAFANA_ADMIN_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` — или своим паролем; локальному стеку он не нужен, Grafana там без логина. **`GF_SECURITY_ADMIN_PASSWORD` действует только при первом старте Grafana** (создание `grafana.db` в томе): смена секрета пароль уже работающей Grafana **не** меняет — коллектор и алерты от этого не зависят, но вход по старому паролю сохранится. Ротация — на сервере, командой внутри контейнера: `docker exec -it dmc268-grafana grafana cli admin reset-admin-password <новый>` |
+| `grafana_admin_password` | секрет `GRAFANA_ADMIN_PASSWORD_DMC268_T1` — пароль админа Grafana (`GF_SECURITY_ADMIN_PASSWORD` контейнера `dmc268-grafana`). Дефолт переменной пустой, и при `observability_enabled = true` валидация требует непустого значения: без секрета `apply` падает на проверке. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 \| gh secret set GRAFANA_ADMIN_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` — или своим паролем; локальному стеку он не нужен, Grafana там без логина. **`GF_SECURITY_ADMIN_PASSWORD` действует только при первом старте Grafana** (создание `grafana.db` в томе): смена секрета пароль уже работающей Grafana **не** меняет — коллектор и алерты от этого не зависят, но вход по старому паролю сохранится. Ротация — на сервере, командой внутри контейнера, пароль — через stdin: `read -rs P && printf '%s' "$P" \| docker exec -i dmc268-grafana grafana cli admin reset-admin-password --password-from-stdin`. Не аргументом: командная строка `docker exec` видна в `/events` клиенту socket-proxy (`dmc268-otelcol-docker`) |
 | `postgres_monitor_password` | секрет `PG_MONITOR_PASSWORD_DMC268_T1` — пароль роли `dmc268_monitor` (`pg_monitor`), которую создаёт миграция 0013 и под которой коллектор снимает метрики базы (`POSTGRESQL_PASSWORD` его env). Дефолт переменной — локальный `dmc268_monitor`, а при `observability_enabled = true` валидация требует настоящего пароля: без секрета `apply` падает на проверке. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 \| gh secret set PG_MONITOR_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` |
 | `postgres_replication_password` | секрет `PG_REPLICATION_PASSWORD_DMC268_T1`, не короче 16 символов |
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
@@ -292,10 +293,12 @@ docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_n
 ## Стек наблюдаемости
 
 Рядом с API на стенде стоит стек телеметрии из восьми контейнеров: OTel Collector
-(`dmc268-otelcol`), Loki (логи), Tempo (трейсы), Prometheus (метрики), Grafana (интерфейс,
-`grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU, память, диски), `cAdvisor`
-(контейнеры) и socket-proxy (`dmc268-docker-proxy`: Docker API для cAdvisor по белому списку
-эндпоинтов вместо маунта `docker.sock`; отдельная сеть, где кроме proxy и cAdvisor никого).
+(`dmc268-otelcol`: трейсы, логи, метрики приложения и базы), его второй экземпляр
+`dmc268-otelcol-docker` (метрики контейнеров), Loki (логи), Tempo (трейсы), Prometheus
+(метрики), Grafana (интерфейс, `grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU,
+память, диски) и socket-proxy (`dmc268-docker-proxy`: Docker API для `dmc268-otelcol-docker` по
+белому списку эндпоинтов вместо маунта `docker.sock`; отдельная сеть `dmc268-docker-proxy`, где
+кроме proxy и `dmc268-otelcol-docker` никого).
 Сеть стека `dmc268-observability` — `internal`, как и сеть данных: из неё в интернет не выйти,
 а публикуемый порт Grafana живёт в отдельной не-internal сети `dmc268-grafana` — порты на
 internal-сети Docker не публикует. Выход наружу через эту сеть есть только у Grafana, и её
@@ -397,9 +400,46 @@ api, воркера и миграций — и `command` контейнера Po
 не читает (медленные запросы им не собираются), расширение оставлено только для ручной диагностики;
 `shared_preload_libraries` включает контейнер Postgres. RabbitMQ отдаёт метрики встроенным
 плагином `rabbitmq_prometheus` (порт 15692 в сети, per-object эндпоинт — метрики очередей с
-лейблом `queue`); сервер — `node-exporter` (9100), контейнеры — `cAdvisor` (8080); все скреятся
+лейблом `queue`); сервер — `node-exporter` (9100), контейнеры — receiver `docker_stats`
+экземпляра `dmc268-otelcol-docker` (`collector-docker:8889`, job `docker-stats`); все скреятся
 `prometheus.yml`. Дашборд «Обзор dmc-268» провиженится из репозитория
-(`observability/grafana/provisioning/dashboards/`). Применение стека на стенд — задача DevOps (#108).
+(`observability/grafana/provisioning/dashboards/`). Применение стека на стенд — задача DevOps
+(#108).
+
+### Метрики контейнеров
+
+CPU, память, сеть и диск по каждому контейнеру снимает receiver `docker_stats`: он
+спрашивает Docker API (`/containers/{id}/stats`) через socket-proxy, ряды различает лейбл
+`container_name`. Белый список proxy — список, inspect, статистика и события контейнеров
+(`/events`: без них новые контейнеры не находятся), `/info`, `/version`, `/_ping`; события и
+статистика отдают имя, образ, метки, цифры и командные строки `docker exec` — без Env и файлов.
+Поэтому секреты в командной строке `docker exec` не передаём (ротация пароля Grafana — через
+stdin, см. `grafana_admin_password` в «Деплой»).
+
+Receiver живёт в отдельном экземпляре коллектора `dmc268-otelcol-docker` (тот же образ, конфиг
+`observability/otelcol-docker.yaml`), а не в основном `dmc268-otelcol`. Inspect через proxy
+отдаёт Env всех контейнеров: ключи S3 бэкапа, пароль репликации, пароли Grafana и брокера.
+Основной коллектор разбирает OTLP без аутентификации из сети данных и, через nginx интерфейса,
+из интернета (`otlp/browser`); с доступом к proxy ошибка в разборе OTLP стала бы утечкой этих
+секретов. У `dmc268-otelcol-docker` входящего OTLP нет, он стоит только в
+`dmc268-observability` (оттуда его скрейпит Prometheus) и `dmc268-docker-proxy`. Второй довод —
+надёжность: receiver на старте читает список контейнеров и без proxy не даёт подняться
+процессу. В отдельном экземпляре сбой proxy гасит только метрики контейнеров, трейсы и логи
+идут дальше.
+
+**Почему не cAdvisor (#249).** До #249 метрики контейнеров снимал cAdvisor v0.52.1, и на стенде
+он не видел ни одного контейнера: панели «CPU контейнеров» и «Память контейнеров» были пустыми,
+в логе — `failed to identify the read-write layer ID` на каждый контейнер. Причина — Docker 29 на
+стенде хранит образы в containerd (`docker info`: `driver-type io.containerd.snapshotter.v1`), и
+каталога `/var/lib/docker/image/overlayfs/layerdb`, откуда cAdvisor берёт слой контейнера, нет.
+Поддержка containerd snapshotter есть в cAdvisor с v0.54 (google/cadvisor#3709), но до последней
+v0.60.6 включительно без сокета `/run/containerd/containerd.sock` фабрика docker не регистрируется
+вовсе — исправление (google/cadvisor#3910) не смёржено. Сокет containerd — полный доступ к хосту,
+а cAdvisor на ревью PR #130 сознательно увели от сокетов, корня хоста и root. Отключать
+containerd snapshotter в Docker на стенде — перезапуск демона и перекачка всех образов. Поэтому
+cAdvisor убран, а `docker_stats` берёт те же сигналы у Docker API: Docker отдаёт статистику
+контейнера как бы ни хранил образы. Чего нет по сравнению с cAdvisor: метрик файловой системы
+контейнера, PSI и OOM-событий — в дашборде и алертах их не было.
 
 ### Память стека
 
@@ -409,27 +449,34 @@ api, воркера и миграций — и `command` контейнера Po
 | Компонент | Потолок, МБ |
 | --- | --- |
 | коллектор `dmc268-otelcol` | 384 |
+| коллектор метрик контейнеров `dmc268-otelcol-docker` | 96 |
 | Loki | 768 |
 | Tempo | 768 |
 | Prometheus | 768 |
 | Grafana | 512 |
 | node-exporter | 64 |
-| cAdvisor | 256 |
 | socket-proxy | 64 |
-| **Итого стек** | **3584 (~3,5 ГБ)** |
+| **Итого стек** | **3424 (~3,4 ГБ)** |
 
 Рядом — лимиты контейнеров приложения (`app.tf`, `postgres.tf`, `rabbitmq.tf`, `replica.tf`):
 `postgres` 1024, `api`, `worker`, `rabbitmq` и реплика (`postgres_replica_memory`) по 512,
 резервные копии (`dmc268-postgres-backup`) 256 — итого 3328 МБ (~3,3 ГБ) постоянно живущих.
 Миграции (`docker run` в `migrate.sh` с `--memory 256m`) и одноразовый
 `dmc268-replication-setup` (64) — шаги деплоя, в постоянный лимит стенда не входят.
-Суммарный потолок стенда — 6912 МБ (~6,9 ГБ) по постоянно живущим контейнерам.
+Суммарный потолок стенда — 6752 МБ (~6,8 ГБ) по постоянно живущим контейнерам.
+
+На VPS 7947 МБ (~7,9 ГБ) памяти и нет свопа (`free -m`, 2026-10-28): запас над потолками около
+1,2 ГБ, и из него же живут контейнеры без потолка — интерфейс (`dmc268-ui`) и хранилище состояния
+(`dmc268-s3`, ~220 МБ). Через 30 минут после первого выката стека занято 2,2 ГБ; ближе всех к
+своему потолку Grafana — 413 из 512 МБ (`docker stats`). Поднимать потолки стека — только за счёт
+этого запаса.
 
 Память стека без нагрузки — по замерам ревью PR #130 (Grafana ~350 МБ, Tempo ~200 МБ, Loki
 ~90 МБ, коллектор ~85 МБ) и локальному прогону Docker Desktop (2026-10-24: node-exporter
-~13 МБ, cAdvisor ~45 МБ, коллектор ~65 МБ, Prometheus сразу после старта ~170 МБ и растёт
-по мере накопления). Фактическое потребление — ориентир при пересмотре
-`observability_memory_mb`, а не гарантия (под нагрузкой Loki и Tempo растут).
+~13 МБ, коллектор ~65 МБ, Prometheus сразу после старта ~170 МБ и растёт
+по мере накопления; 2026-10-30: `dmc268-otelcol-docker` на 15 контейнерах ~47 МБ).
+Фактическое потребление — ориентир при пересмотре `observability_memory_mb`, а не гарантия
+(под нагрузкой Loki и Tempo растут).
 
 ### Диск
 

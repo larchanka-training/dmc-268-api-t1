@@ -198,12 +198,13 @@ variable "deployment_environment_name" {
 # Деплой стенда включает его (deploy.yml, TF_VAR_observability_enabled).
 variable "observability_enabled" {
   type        = bool
-  description = "Поднимать стек наблюдаемости: коллектор, Loki, Tempo, Prometheus, Grafana, node-exporter, cAdvisor и socket-proxy."
+  description = "Поднимать стек наблюдаемости: коллектор и его экземпляр метрик контейнеров, Loki, Tempo, Prometheus, Grafana, node-exporter и socket-proxy."
   default     = false
 }
 
 # Восемь контейнеров стека на VPS — риск из design.md change'а
-# add-observability-stack (восьмой, socket-proxy, добавлен позже остальных);
+# add-observability-stack (socket-proxy добавлен позже, cAdvisor заменён
+# экземпляром коллектора с docker_stats — #249);
 # потолки памяти без свопа (как у postgres/api выше), прод-размеры поднимаются
 # этой переменной.
 variable "observability_memory_mb" {
@@ -214,23 +215,23 @@ variable "observability_memory_mb" {
     prometheus = number
     grafana    = number
     # node_exporter — статический сборщик с фиксированным набором collectors:
-    # десятков мегабайт хватает. cAdvisor держит статистику по каждому
-    # контейнеру хоста — потолок с запасом на десятки контейнеров.
-    # socket-proxy — haproxy над демоном Docker: несколько соединений cAdvisor.
-    node_exporter = number
-    cadvisor      = number
-    docker_proxy  = number
+    # десятков мегабайт хватает. socket-proxy — haproxy над демоном Docker:
+    # несколько соединений receiver docker_stats. collector_docker — экземпляр
+    # коллектора только с docker_stats (~15 контейнеров стенда).
+    node_exporter    = number
+    docker_proxy     = number
+    collector_docker = number
   })
   description = "Потолки памяти контейнеров стека наблюдаемости, МБ, без свопа."
   default = {
-    collector     = 384
-    loki          = 768
-    tempo         = 768
-    prometheus    = 768
-    grafana       = 512
-    node_exporter = 64
-    cadvisor      = 256
-    docker_proxy  = 64
+    collector        = 384
+    loki             = 768
+    tempo            = 768
+    prometheus       = 768
+    grafana          = 512
+    node_exporter    = 64
+    docker_proxy     = 64
+    collector_docker = 96
   }
 }
 
