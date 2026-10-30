@@ -405,10 +405,35 @@ api, воркера и миграций — и `command` контейнера Po
 плагином `rabbitmq_prometheus` (порт 15692 в сети, per-object эндпоинт — метрики очередей с
 лейблом `queue`); сервер — `node-exporter` (9100), контейнеры — receiver `docker_stats`
 экземпляра `dmc268-otelcol-docker` (`collector-docker:8889`, job `docker-stats`); свои метрики
-отдают оба коллектора (`otelcol_*` на `:8888`, только в сети стека), Loki и Tempo; все скреятся
+отдают оба коллектора (`otelcol_*` на `:8888`, на хосте не публикуется), Loki и Tempo; все скрейпятся
 `prometheus.yml`. Дашборд «Обзор dmc-268» провиженится из репозитория
 (`observability/grafana/provisioning/dashboards/`). Применение стека на стенд — задача DevOps
 (#108).
+
+### Какие метрики есть
+
+Имена в Prometheus такие же, как в таблице; полные списки стандартных метрик лежат по ссылкам
+под ней. У метрик приложения `job` равен `service.name` (`resource_to_telemetry_conversion`),
+лейбл `deployment_environment_name` есть у всех.
+
+| Источник | `job` | Главные метрики | Ключевые лейблы | Панели «Обзора» |
+| --- | --- | --- | --- | --- |
+| API (OTel SDK) | `dmc-268-api` | `http_server_request_duration_seconds_*`, `http_server_active_requests`, `http_client_request_duration_seconds_*`, `db_client_connection_count`, `db_client_connection_max` | `http_route`, `http_request_method`, `http_response_status_code`, `db_client_connection_state` | RPS API; доля ошибок 5xx; длительность HTTP-запросов; соединения приложения с базой |
+| Воркер (OTel SDK) | `dmc-268-worker` | `review_runs_total`, `review_stage_duration_seconds_*`, `review_llm_call_duration_seconds_*`, `http_client_request_duration_seconds_*`, `db_client_connection_*` | `status`, `stage`, `provider`, `model`, `outcome` | прогоны по статусам; длительность этапов; длительность вызова модели; соединения приложения с базой |
+| PostgreSQL (receiver `postgresql` основного коллектора) | `collector` | `postgresql_backends`, `postgresql_connection_max`, `postgresql_replication_data_delay_bytes`, `postgresql_db_size_bytes`, `postgresql_table_size_bytes` | `postgresql_database_name` | соединения базы |
+| RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
+| Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
+| Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes` | `container_name` | CPU и память контейнеров |
+| Коллекторы, Loki, Tempo, Prometheus | `collector-self`, `collector-docker-self`, `loki`, `tempo`, `prometheus` | `otelcol_*`, `loki_*`, `tempo_*`, `prometheus_*` | `receiver`, `exporter` | нет |
+
+Документация по стандартным метрикам:
+
+- [HTTP-метрики OTel](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/) и
+  [метрики клиента БД OTel](https://opentelemetry.io/docs/specs/semconv/db/database-metrics/);
+- receiver [`postgresql`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/postgresqlreceiver/documentation.md)
+  и [`docker_stats`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/dockerstatsreceiver/documentation.md);
+- [node_exporter](https://github.com/prometheus/node_exporter);
+- [плагин Prometheus в RabbitMQ](https://www.rabbitmq.com/docs/prometheus).
 
 ### Метрики контейнеров
 

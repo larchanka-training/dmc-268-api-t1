@@ -8,7 +8,7 @@
 
 ## 2. Код
 
-- [x] 2.1 `HealthCheckAccessFilter` на `uvicorn.access`, тест в `tests/infrastructure/test_logging.py`
+- [x] 2.1 `HealthCheckAccessFilter` на `uvicorn.access` (`app/api/log_redaction.py`), тест в `tests/infrastructure/test_logging.py`
 - [x] 2.2 `build_maintenance`: `maintenance_step` в `extra` у трёх шагов, тест в `tests/worker/test_maintenance.py`
 - [x] 2.3 `infra/README.md`, `docs/BACKEND_ARCHITECTURE.md`
 

@@ -24,5 +24,5 @@
 ## Impact
 
 - Конфиги `infra/observability/*`: на стенде пересоздаются оба коллектора, Prometheus и Grafana (конфиги заливаются upload-ом).
-- Порт 8888 коллекторов открыт только внутри сети `dmc268-observability`, на хосте не публикуется.
+- Порт 8888 коллекторов слушает только в сетях контейнера и на хосте не публикуется.
 - `app/infrastructure/logging.py`, `app/worker/factory.py`.

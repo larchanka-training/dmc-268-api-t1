@@ -10,6 +10,8 @@ access-лог не пишет, поэтому фильтр трогает тол
 
 import logging
 
+from app.api.factory import HEALTH_PATH
+
 # Пути входа, где query скрыт ещё и в серверном спане (`telemetry.redact_query`).
 AUTH_PREFIX = "/api/v1/auth/"
 # Чем заменяется query: в логе — после `?`, в спане — значением `url.query`.
@@ -37,10 +39,26 @@ class AccessQueryRedaction(logging.Filter):
         return True
 
 
+class HealthCheckAccessFilter(logging.Filter):
+    """Отсекает access-запись о health-check'е: контейнерный healthcheck даёт
+    почти весь access-лог API и ничего не говорит о работе сервиса."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5:
+            path = args[_PATH_ARG]
+            if isinstance(path, str):
+                return path.partition("?")[0] != HEALTH_PATH
+        return True
+
+
 # Один экземпляр: `addFilter` не добавляет тот же объект дважды, поэтому
 # повторный `create_app` (в тестах) не плодит фильтры.
 ACCESS_QUERY_REDACTION = AccessQueryRedaction()
+HEALTH_CHECK_ACCESS_FILTER = HealthCheckAccessFilter()
 
 
 def install() -> None:
-    logging.getLogger("uvicorn.access").addFilter(ACCESS_QUERY_REDACTION)
+    access = logging.getLogger("uvicorn.access")
+    access.addFilter(ACCESS_QUERY_REDACTION)
+    access.addFilter(HEALTH_CHECK_ACCESS_FILTER)
