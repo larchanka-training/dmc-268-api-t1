@@ -7,7 +7,7 @@ server:
 
 distributor:
   receivers:
-    # Приём OTLP от коллектора (exporter otlphttp/tempo).
+    # Приём OTLP от коллектора (exporter otlp_http/tempo).
     otlp:
       protocols:
         grpc:

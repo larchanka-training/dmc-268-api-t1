@@ -139,6 +139,13 @@ resource "docker_network" "grafana" {
   name  = "dmc268-grafana"
 }
 
+# Сеть публикации порта коллектора логов — как dmc268-grafana: порты на
+# internal-сети Docker не публикует.
+resource "docker_network" "logs" {
+  count = var.observability_enabled ? 1 : 0
+  name  = "dmc268-logs"
+}
+
 resource "docker_container" "otelcol" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-otelcol"
@@ -190,7 +197,7 @@ resource "docker_container" "otelcol" {
   }
 
   # Экспортёры (Loki, Tempo) и скрейп Prometheus — в сети стека; алиас —
-  # там же: collector:8889 скреит Prometheus.
+  # там же: collector:8889 и :8888 скреит Prometheus.
   networks_advanced {
     name    = docker_network.observability[0].name
     aliases = ["collector"]
@@ -229,7 +236,7 @@ resource "docker_container" "otelcol_docker" {
     file    = "/etc/otelcol-contrib/config.yaml"
   }
 
-  # Скрейп Prometheus: collector-docker:8889.
+  # Скрейп Prometheus: collector-docker:8889 и :8888.
   networks_advanced {
     name    = docker_network.observability[0].name
     aliases = ["collector-docker"]
@@ -243,6 +250,53 @@ resource "docker_container" "otelcol_docker" {
   # Receiver docker_stats на старте читает список контейнеров: без proxy этот
   # экземпляр не поднимается.
   depends_on = [docker_container.docker_socket_proxy]
+}
+
+# Логи контейнеров без SDK — третий экземпляр того же образа: приём fluentd
+# от демона Docker на петле хоста, отдача основному коллектору по OTLP. Почему
+# так — infra/README.md, «Логи контейнеров».
+resource "docker_container" "otelcol_logs" {
+  count   = var.observability_enabled ? 1 : 0
+  name    = "dmc268-otelcol-logs"
+  image   = docker_image.otelcol[0].image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.collector_logs
+  memory_swap = var.observability_memory_mb.collector_logs
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  # Как у основного коллектора: без read_only из-за upload конфига.
+  tmpfs         = { "/tmp" = "rw,noexec,nosuid,size=16m" }
+  security_opts = ["no-new-privileges:true"]
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  upload {
+    content = file("${path.module}/observability/otelcol-logs.yaml")
+    file    = "/etc/otelcol-contrib/config.yaml"
+  }
+
+  # Демон Docker подключается с хоста: порт — только на петле, адрес — в
+  # local.fluentd_log_opts.
+  ports {
+    internal = 24224
+    external = 24224
+    ip       = "127.0.0.1"
+  }
+
+  # Отдача основному коллектору (collector:4318) и скрейп Prometheus
+  # (collector-logs:8888).
+  networks_advanced {
+    name    = docker_network.observability[0].name
+    aliases = ["collector-logs"]
+  }
+
+  networks_advanced {
+    name = docker_network.logs[0].name
+  }
 }
 
 resource "docker_container" "loki" {

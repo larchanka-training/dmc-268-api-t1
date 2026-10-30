@@ -1,7 +1,7 @@
 # Стек наблюдаемости в плане (спека backend-delivery, «Каждый контейнер стека
 # SHALL иметь потолок памяти и SHALL ограничивать объём своих логов на диске»):
 # остальные tftest гоняют конфигурацию с observability_enabled = false, у всех
-# ресурсов стека count = 0, и защита его восьми контейнеров вместе с
+# ресурсов стека count = 0, и защита его девяти контейнеров вместе с
 # валидациями секретов оставалась бы непроверенной — правка observability.tf
 # не вскрылась бы ни одним тестом (замечание ревью PR #130, issue #140). Без
 # Docker: mock-провайдер, только plan. Запуск: `cd infra && tofu init
@@ -32,14 +32,14 @@ run "observability_stack_plans_protected" {
   }
 
   # Ресурсы стека считаются (count = 1 : 0), поэтому каждый адресуется по
-  # индексу: с включённым флагом все восемь есть в плане. Список — по
+  # индексу: с включённым флагом все девять есть в плане. Список — по
   # docker_container.* из observability.tf; новый контейнер стека обязан
   # добавляться сюда.
   assert {
     condition = alltrue([
       for c in [
         docker_container.otelcol[0], docker_container.otelcol_docker[0],
-        docker_container.loki[0],
+        docker_container.otelcol_logs[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
         docker_container.docker_socket_proxy[0],
@@ -55,7 +55,7 @@ run "observability_stack_plans_protected" {
     condition = alltrue([
       for c in [
         docker_container.otelcol[0], docker_container.otelcol_docker[0],
-        docker_container.loki[0],
+        docker_container.otelcol_logs[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
         docker_container.docker_socket_proxy[0],
@@ -72,7 +72,7 @@ run "observability_stack_plans_protected" {
     condition = alltrue([
       for c in [
         docker_container.otelcol[0], docker_container.otelcol_docker[0],
-        docker_container.loki[0],
+        docker_container.otelcol_logs[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
         docker_container.docker_socket_proxy[0],
@@ -116,8 +116,9 @@ run "observability_stack_without_secrets_rejected" {
 # Сети и порт стека по плану (то же сверяет tests/test_infra_isolation.py по
 # тексту): collector — в данных, в стеке и в dmc268-otlp, collector-docker —
 # только в стеке и в сети socket-proxy, prometheus — в данных и в стеке,
-# grafana — в стеке и в сети публикации порта; сети стека и dmc268-otlp
-# internal, сеть порта Grafana — нет; порт Grafana публикуется на bind_ip.
+# grafana и коллектор логов — в стеке и в сети публикации своего порта; сети
+# стека и dmc268-otlp internal, сети портов — нет; порт Grafana публикуется на
+# bind_ip, порт коллектора логов — на 127.0.0.1, куда шлёт драйвер fluentd.
 run "stack_networks_and_grafana_port_follow_their_purpose" {
   command = plan
 
@@ -139,6 +140,22 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
       docker_network.observability[0].name, docker_network.observability_docker_proxy[0].name,
     ])
     error_message = "Экземпляр метрик контейнеров должен стоять ровно в двух сетях: стека (скрейп collector-docker) и socket-proxy (receiver docker_stats). Без сети данных и dmc268-otlp: OTLP он не принимает."
+  }
+
+  assert {
+    condition = toset([for n in docker_container.otelcol_logs[0].networks_advanced : n.name]) == toset([
+      docker_network.observability[0].name, docker_network.logs[0].name,
+    ]) && docker_network.logs[0].internal != true
+    error_message = "Коллектор логов должен стоять ровно в двух сетях: стека (отдача основному коллектору) и dmc268-logs — не internal, там публикуется его порт. Без сетей данных и socket-proxy."
+  }
+
+  assert {
+    condition = (
+      length(docker_container.otelcol_logs[0].ports) == 1
+      && docker_container.otelcol_logs[0].ports[0].ip == "127.0.0.1"
+      && local.fluentd_log_opts["fluentd-address"] == "tcp://127.0.0.1:${docker_container.otelcol_logs[0].ports[0].external}"
+    )
+    error_message = "Коллектор логов публикует ровно один порт — на 127.0.0.1, и драйвер fluentd шлёт именно туда (local.fluentd_log_opts)."
   }
 
   assert {
@@ -195,6 +212,26 @@ run "postgres_command_tracks_the_stack_flag" {
       && contains(docker_container.postgres.command, "pg_stat_statements.track_utility=off")
     )
     error_message = "С включённым стеком postgres должен нести preload pg_stat_statements и track_utility=off: пароли из ALTER ROLE не попадают в pg_stat_statements."
+  }
+}
+
+# Логи базы и брокера — в коллектор логов только со стеком: без него
+# остаётся json-file с ротацией (hardening.tftest.hcl).
+run "container_logs_go_to_the_logs_collector_with_the_stack" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+  }
+
+  assert {
+    condition = alltrue([
+      for c in [docker_container.postgres, docker_container.postgres_replica, docker_container.rabbitmq] :
+      c.log_driver == "fluentd" && jsonencode(c.log_opts) == jsonencode(local.fluentd_log_opts)
+    ])
+    error_message = "Со стеком postgres, его реплика и rabbitmq пишут логи драйвером fluentd с local.fluentd_log_opts."
   }
 }
 

@@ -182,6 +182,11 @@ jobs:
           docker run --rm \
             -v "$PWD/infra/observability/otelcol-docker.yaml:/etc/otelcol-contrib/config.yaml:ro" \
             "$OTELCOL" validate --config=/etc/otelcol-contrib/config.yaml
+      - name: Коллектор логов контейнеров (otelcol validate)
+        run: |
+          docker run --rm \
+            -v "$PWD/infra/observability/otelcol-logs.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+            "$OTELCOL" validate --config=/etc/otelcol-contrib/config.yaml
       - name: Prometheus (promtool check config)
         run: |
           docker run --rm --entrypoint promtool \

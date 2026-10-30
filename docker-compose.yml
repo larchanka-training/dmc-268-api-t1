@@ -183,7 +183,8 @@ services:
       # (профиль observability ниже) запускают так:
       #   OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp \
       #   OTEL_LOGS_EXPORTER=otlp \
-      #   docker compose --profile observability up -d
+      #   docker compose -f docker-compose.yml \
+      #     -f infra/observability/compose.logs.yml --profile observability up -d
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://collector:4318}
       # Таймаут OTLP меньше окна graceful shutdown (5 с): выгрузка спанов при
       # остановке успевает даже при недоступном коллекторе (замечание из #89).
@@ -315,8 +316,9 @@ services:
 
   # Стек наблюдаемости — те же конфиги из infra/observability/, что и на
   # стенде (спека observability: различия окружений — переменные, не конфиги).
-  # Восемь сервисов: коллектор (трейсы, логи, метрики приложения и базы),
-  # collector-docker (метрики контейнеров), Loki (логи), Tempo (трейсы),
+  # Девять сервисов: коллектор (трейсы, логи, метрики приложения и базы),
+  # collector-docker (метрики контейнеров), collector-logs (логи postgres и
+  # rabbitmq), Loki (логи), Tempo (трейсы),
   # Prometheus (метрики), Grafana (интерфейс), node-exporter (сервер) и
   # socket-proxy (доступ collector-docker к Docker API без docker.sock). Без профиля
   # ничего из этого не поднимается. Экспорт включают переменные api/worker —
@@ -382,6 +384,29 @@ services:
       - dockerproxy
     # depends_on ждёт запуска контейнера, а не порта haproxy: упавший на старте
     # docker_stats поднимается заново.
+    restart: unless-stopped
+
+  # Логи postgres и rabbitmq, как dmc268-otelcol-logs в infra/observability.tf;
+  # драйвер включает infra/observability/compose.logs.yml (infra/README.md,
+  # «Логи контейнеров»).
+  collector-logs:
+    # otel/opentelemetry-collector-contrib:0.158.0
+    image: otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
+    profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - collector-logs
+      logs:
+    # Демон Docker подключается с хоста, поэтому порт — только на петле.
+    ports:
+      - "127.0.0.1:24224:24224"
+    volumes:
+      - ./infra/observability/otelcol-logs.yaml:/etc/otelcol-contrib/config.yaml:ro
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
     restart: unless-stopped
 
   loki:
@@ -554,3 +579,5 @@ networks:
   # Только ради публикации порта Grafana: порты на internal-сети Docker не
   # публикует.
   grafana:
+  # То же для порта collector-logs.
+  logs:

@@ -10,6 +10,22 @@ locals {
     "max-file" = "3"
   }
 
+  # Логи контейнеров без SDK (postgres, его реплика, rabbitmq) при включённом
+  # стеке: драйвер fluentd шлёт их в коллектор логов на петле хоста; зачем
+  # async — infra/README.md, «Логи контейнеров». Доли секунды сохраняют порядок
+  # строк ERROR/DETAIL/STATEMENT одной секунды; из тега коллектор берёт
+  # service.name. Буфер в памяти dockerd — 10 000 записей, кэш docker logs —
+  # те же потолки, что в log_opts.
+  fluentd_log_opts = {
+    "fluentd-address"              = "tcp://127.0.0.1:24224"
+    "fluentd-async"                = "true"
+    "fluentd-sub-second-precision" = "true"
+    "fluentd-buffer-limit"         = "10000"
+    "cache-max-size"               = "10m"
+    "cache-max-file"               = "3"
+    "tag"                          = "{{.Name}}"
+  }
+
   # Версия сервиса для телеметрии — тег образа API: deploy.yml публикует образ
   # с тегом по sha коммита, а git внутрь образа не попадает, поэтому версия
   # приходит окружением (OTEL_RESOURCE_ATTRIBUTES). Тег — между последним

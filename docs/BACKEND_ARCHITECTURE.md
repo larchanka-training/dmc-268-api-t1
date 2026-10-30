@@ -429,7 +429,8 @@ def upgrade() -> None:
   провайдера (`review_llm_call_duration{outcome}` — в `FallbackLlmGateway`; метка
   `provider` стоит всегда, `model` — модель ответа только у `ok`, в гистограмму попадают
   упавшие вызовы и таймауты), пул соединений — снимками состояния (`db.client.connection.*`);
-  стоимость — отдельное изменение (#119).
+  стоимость — отдельное изменение (#119). Какие метрики есть и откуда — таблица
+  «Какие метрики есть» в `infra/README.md`.
   «Во что обошёлся прогон» остаётся SQL по колонкам `review_runs`: метрики —
   для алертов, не для отчётов.
 - **Логи** — два транспорта из одной точки настройки. `configure_logging(service_name)`
@@ -441,22 +442,25 @@ def upgrade() -> None:
   текущего спана, запись вне спана пишется без них и не теряется. `exc_info`
   кладёт стектрейс и `exception.type` (qualname класса) в ту же запись,
   дубль uvicorn «Exception in ASGI application» отсекается: на `500` в логе
-  ровно одна запись, и её `trace_id` равен `X-Trace-ID` ответа. Необработанное
-  исключение воркера — вплоть до `WorkerConfigError` старта — пишут excepthook'и
-  той же JSON-записью: текстовый дамп интерпретатора уходит в stderr и до
+  ровно одна запись, и её `trace_id` равен `X-Trace-ID` ответа. Access-запись
+  health-check'а не пишется (`HealthCheckAccessFilter` в `app/api/log_redaction.py`).
+  Необработанное исключение воркера — вплоть до `WorkerConfigError` старта — пишут
+  excepthook'и той же JSON-записью: текстовый дамп интерпретатора уходит в stderr и до
   хранилища логов не доходит. stdout остаётся для `docker logs` и локальной
   отладки; в Loki записи уходят вторым транспортом — по OTLP из SDK при
   `OTEL_LOGS_EXPORTER=otlp` (дефолт `none` — только stdout): `configure_telemetry`
   ставит `LoggerProvider` с `BatchLogRecordProcessor` и хендлер на root, resource
   общий с трейсами, тело записи — текст сообщения, `exc_info` — атрибуты
-  `exception.*`. Коллектор принимает логи только по OTLP — каталог Docker не
-  читает, логов postgres и rabbitmq в Loki нет. От записи лога к трейсу в
-  Grafana ведёт переход по `trace_id` (derived field по structured metadata
-  OTLP-лога). На пути коллектор редактирует записи с исключениями: стектрейс,
-  текст и тело такой записи заменяются маркером `<скрыто>`, `exception.type`
-  остаётся диагнозом.
-- **Стек** — восемь контейнеров (коллектор, его второй экземпляр с receiver
-  `docker_stats` за метрики контейнеров, Loki, Tempo, Prometheus, Grafana,
+  `exception.*`. Логи сервисов коллектор принимает только по OTLP; логи postgres,
+  его реплики и rabbitmq приносит драйвер `fluentd` демона Docker в отдельный
+  экземпляр коллектора, каталог Docker не читает ни один (`infra/README.md`,
+  «Логи контейнеров»). Между записью лога и трейсом в Grafana переход по `trace_id` в обе стороны (structured metadata OTLP-лога,
+  `observability/grafana/provisioning/datasources/datasources.yaml`). На пути
+  коллектор редактирует записи с исключениями: стектрейс, текст и тело такой
+  записи заменяются маркером `<скрыто>`, `exception.type` остаётся диагнозом.
+- **Стек** — девять контейнеров (коллектор, его второй экземпляр с receiver
+  `docker_stats` за метрики контейнеров, третий — приём логов postgres, его реплики и rabbitmq
+  от драйвера `fluentd`, Loki, Tempo, Prometheus, Grafana,
   node_exporter за сервер и socket-proxy — доступ этого экземпляра к Docker API по
   белому списку эндпоинтов вместо маунта `docker.sock`) с
   одними конфигами локально и на стенде: конфиги лежат в

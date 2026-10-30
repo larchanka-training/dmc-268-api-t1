@@ -20,12 +20,32 @@ scrape_configs:
     static_configs:
       - targets: ["collector:8889"]
 
-  # Метрики контейнеров: экземпляр коллектора с одним receiver docker_stats
-  # (otelcol-docker.yaml). honor_labels не нужен: service.name в ресурсе нет,
-  # job у рядов — имя этой джобы. Панели дашборда фильтруют по container_name.
+  # Метрики контейнеров: otelcol-docker.yaml. Панели фильтруют по container_name.
   - job_name: docker-stats
     static_configs:
       - targets: ["collector-docker:8889"]
+
+  # Свои метрики экземпляров коллектора (otelcol_*), Loki и Tempo: отказы
+  # приёма, сбои экспорта, объём.
+  - job_name: collector-self
+    static_configs:
+      - targets: ["collector:8888"]
+
+  - job_name: collector-docker-self
+    static_configs:
+      - targets: ["collector-docker:8888"]
+
+  - job_name: collector-logs-self
+    static_configs:
+      - targets: ["collector-logs:8888"]
+
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]
 
   - job_name: rabbitmq
     # per-object, а не агрегированный /metrics: панель очереди строится по

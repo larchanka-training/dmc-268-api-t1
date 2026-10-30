@@ -10,12 +10,12 @@
 | --- | --- |
 | `versions.tf` | версия OpenTofu, провайдер `kreuzwerker/docker` и его настройки (хост Docker) |
 | `backend.tf` | хранилище состояния (S3 на сервере) |
-| `locals.tf` | общие значения: ротация логов, окружение процессов приложения, грейс-период воркера |
+| `locals.tf` | общие значения: ротация логов, драйвер fluentd, окружение процессов приложения, грейс-период воркера |
 | `network.tf` | три сети: вход `dmc268` (общая со стеком `dmc-268-ui-t1`), данные `dmc268-backend`, исходящая `dmc268-egress` |
 | `postgres.tf` | образ, том и контейнер PostgreSQL |
 | `rabbitmq.tf` | образ, том и контейнер RabbitMQ |
 | `app.tf` | контейнеры `api`, `worker` из образа API по digest |
-| `observability.tf` | стек наблюдаемости: образы, тома, сети и восемь контейнеров |
+| `observability.tf` | стек наблюдаемости: образы, тома, сети и девять контейнеров |
 | `replica.tf` | роль репликации, горячая реплика и резервные копии PostgreSQL |
 | `postgres/` | то, что загружается в контейнеры PostgreSQL: `pg_hba.conf`, SQL роли, entrypoint реплики, скрипт копий |
 | `variables.tf` | входные переменные, по секциям тех же доменов |
@@ -295,9 +295,10 @@ docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_n
 
 ## Стек наблюдаемости
 
-Рядом с API на стенде стоит стек телеметрии из восьми контейнеров: OTel Collector
+Рядом с API на стенде стоит стек телеметрии из девяти контейнеров: OTel Collector
 (`dmc268-otelcol`: трейсы, логи, метрики приложения и базы), его второй экземпляр
-`dmc268-otelcol-docker` (метрики контейнеров), Loki (логи), Tempo (трейсы), Prometheus
+`dmc268-otelcol-docker` (метрики контейнеров), третий `dmc268-otelcol-logs` (логи postgres, его
+реплики и rabbitmq, см. «Логи контейнеров»), Loki (логи), Tempo (трейсы), Prometheus
 (метрики), Grafana (интерфейс, `grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU,
 память, диски) и socket-proxy (`dmc268-docker-proxy`: Docker API для `dmc268-otelcol-docker` по
 белому списку эндпоинтов вместо маунта `docker.sock`; отдельная сеть `dmc268-docker-proxy`, где
@@ -329,8 +330,9 @@ docker compose (профиль `observability`): различия окружен
 её до всякого пути): вместо неё — `cap_drop ALL` и `no-new-privileges`. Локальный коллектор
 read_only: конфиг приходит read-only маунтом. Локально тот же
 стек поднимается профилем: `OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp
-OTEL_LOGS_EXPORTER=otlp docker compose --profile observability up -d` (Grafana —
-http://127.0.0.1:3000 без логина).
+OTEL_LOGS_EXPORTER=otlp docker compose -f docker-compose.yml -f infra/observability/compose.logs.yml
+--profile observability up -d` (Grafana — http://127.0.0.1:3000 без логина; второй файл
+отправляет логи postgres и rabbitmq в Loki, без него стек поднимается и на podman).
 
 Экспорт телеметрии API, воркера и миграций включён окружением (`local.telemetry_env`): трейсы,
 метрики и логи уходят коллектору по OTLP. `service.version` берётся из тега `api_image` (это sha
@@ -340,9 +342,11 @@ http://127.0.0.1:3000 без логина).
 `migrate_env`, локально в compose — `dmc268-migrate`) — вместо случайного UUID на
 процесс, который растил бы в Prometheus серии `exported_instance`. Таймаут OTLP — 4 секунды
 (`OTEL_EXPORTER_OTLP_TIMEOUT`): Python SDK читает переменную в секундах, вопреки спецификации
-OTel с её миллисекундами. Логи коллектор получает только по OTLP от сервисов — каталог Docker
-не читает, логов postgres и rabbitmq в Loki нет; чувствительные данные он редактирует до
-отправки — правила в `observability/otelcol.yaml`, тест `tests/infrastructure/test_collector_redaction.py`.
+OTel с её миллисекундами. Логи сервисов коллектор получает только по OTLP, логи postgres, его
+реплики и rabbitmq — от `dmc268-otelcol-logs` («Логи контейнеров»); каталог Docker не читает ни один
+коллектор. Чувствительные данные основной коллектор редактирует до отправки
+(`observability/otelcol.yaml`), коллектор логов — своими правилами (`observability/otelcol-logs.yaml`);
+тест `tests/infrastructure/test_collector_redaction.py`.
 
 ### Включение и выключение: observability_enabled
 
@@ -352,12 +356,13 @@ OTel с её миллисекундами. Логи коллектор полу�
 `observability_enabled = true` в `terraform.tfvars` (пример закомментирован в
 `terraform.tfvars.example`); эффект одинаковый.
 
-За флагом идёт всё разом: восемь контейнеров стека и их образы, обе сети стека —
-`dmc268-observability` и `dmc268-grafana` — вместе с сетью socket-proxy (`count = 1 : 0` у
-каждого ресурса), `telemetry_env` — `OTEL_*_EXPORTER=otlp`, адрес коллектора и таймаут в env
-api, воркера и миграций — и `command` контейнера Postgres: при флаге база стартует с
-`shared_preload_libraries=pg_stat_statements`, без флага — с родным `CMD` образа. Смена
-`command` пересоздаёт контейнер Postgres (том данные сохраняет), поэтому переключение флага —
+За флагом идёт всё разом: девять контейнеров стека и их образы, сети стека —
+`dmc268-observability`, `dmc268-grafana` и `dmc268-logs` — вместе с сетью socket-proxy
+(`count = 1 : 0` у каждого ресурса), `telemetry_env` — `OTEL_*_EXPORTER=otlp`, адрес коллектора
+и таймаут в env api, воркера и миграций, — `command` контейнера Postgres (при флаге база
+стартует с `shared_preload_libraries=pg_stat_statements`, без флага — с родным `CMD` образа) и
+драйвер логов Postgres, его реплики и RabbitMQ (`fluentd` вместо `json-file`, «Логи контейнеров»). Смена
+`command` и драйвера пересоздаёт контейнеры (тома данные сохраняют), поэтому переключение флага —
 осознанное действие.
 
 Первый деплой после включения флага требует замены базы, и автоматический деплой её не
@@ -395,7 +400,7 @@ api, воркера и миграций — и `command` контейнера Po
 
 Переменные стека: `observability_enabled` (контейнеры, образы и сети стека — за флагом, см.
 выше; тома с данными — нет), `observability_memory_mb`
-(потолки памяти без свопа, восемь контейнеров — таблица ниже), `grafana_port`, `grafana_admin_password`
+(потолки памяти без свопа, девять контейнеров — таблица ниже), `grafana_port`, `grafana_admin_password`
 (секрет; локально Grafana без логина, на стенде — по учётке), `postgres_monitor_password` (секрет, см.
 таблицу выше), `deployment_environment_name`.
 Метрики базы коллектор снимает receiver-ом `postgresql`: роль только-чтение `dmc268_monitor` с
@@ -404,10 +409,36 @@ api, воркера и миграций — и `command` контейнера Po
 `shared_preload_libraries` включает контейнер Postgres. RabbitMQ отдаёт метрики встроенным
 плагином `rabbitmq_prometheus` (порт 15692 в сети, per-object эндпоинт — метрики очередей с
 лейблом `queue`); сервер — `node-exporter` (9100), контейнеры — receiver `docker_stats`
-экземпляра `dmc268-otelcol-docker` (`collector-docker:8889`, job `docker-stats`); все скреятся
+экземпляра `dmc268-otelcol-docker` (`collector-docker:8889`, job `docker-stats`); свои метрики
+отдают `dmc268-otelcol`, `dmc268-otelcol-docker` и `dmc268-otelcol-logs` (`otelcol_*` на `:8888`, на хосте не публикуется), Loki и Tempo; все скрейпятся
 `prometheus.yml`. Дашборд «Обзор dmc-268» провиженится из репозитория
 (`observability/grafana/provisioning/dashboards/`). Применение стека на стенд — задача DevOps
 (#108).
+
+### Какие метрики есть
+
+Имена в Prometheus такие же, как в таблице; полные списки стандартных метрик лежат по ссылкам
+под ней. У метрик приложения `job` равен `service.name` (`resource_to_telemetry_conversion`),
+лейбл `deployment_environment_name` есть у всех.
+
+| Источник | `job` | Главные метрики | Ключевые лейблы | Панели «Обзора» |
+| --- | --- | --- | --- | --- |
+| API (OTel SDK) | `dmc-268-api` | `http_server_request_duration_seconds_*`, `http_server_active_requests`, `http_client_request_duration_seconds_*`, `db_client_connection_count`, `db_client_connection_max` | `http_route`, `http_request_method`, `http_response_status_code`, `db_client_connection_state` | RPS API; доля ошибок 5xx; длительность HTTP-запросов; соединения приложения с базой |
+| Воркер (OTel SDK) | `dmc-268-worker` | `review_runs_total`, `review_stage_duration_seconds_*`, `review_llm_call_duration_seconds_*`, `http_client_request_duration_seconds_*`, `db_client_connection_*` | `status`, `stage`, `provider`, `model`, `outcome` | прогоны по статусам; длительность этапов; длительность вызова модели; соединения приложения с базой |
+| PostgreSQL (receiver `postgresql` основного коллектора) | `collector` | `postgresql_backends`, `postgresql_connection_max`, `postgresql_replication_data_delay_bytes`, `postgresql_db_size_bytes`, `postgresql_table_size_bytes` | `postgresql_database_name` | соединения базы |
+| RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
+| Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
+| Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes` | `container_name` | CPU и память контейнеров |
+| Коллекторы, Loki, Tempo, Prometheus | `collector-self`, `collector-docker-self`, `collector-logs-self`, `loki`, `tempo`, `prometheus` | `otelcol_*`, `loki_*`, `tempo_*`, `prometheus_*` | `receiver`, `exporter` | нет |
+
+Документация по стандартным метрикам:
+
+- [HTTP-метрики OTel](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/) и
+  [метрики клиента БД OTel](https://opentelemetry.io/docs/specs/semconv/db/database-metrics/);
+- receiver [`postgresql`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/postgresqlreceiver/documentation.md)
+  и [`docker_stats`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/dockerstatsreceiver/documentation.md);
+- [node_exporter](https://github.com/prometheus/node_exporter);
+- [плагин Prometheus в RabbitMQ](https://www.rabbitmq.com/docs/prometheus).
 
 ### Метрики контейнеров
 
@@ -444,6 +475,73 @@ cAdvisor убран, а `docker_stats` берёт те же сигналы у Do
 контейнера как бы ни хранил образы. Чего нет по сравнению с cAdvisor: метрик файловой системы
 контейнера, PSI и OOM-событий — в дашборде и алертах их не было.
 
+### Логи контейнеров
+
+У Postgres, его реплики и RabbitMQ нет OTel SDK, поэтому со стеком их stdout забирает сам демон Docker:
+драйвер логов `fluentd` (`local.fluentd_log_opts` в `locals.tf`, `logging` в
+`observability/compose.logs.yml` для compose) шлёт
+каждую строку на `tcp://127.0.0.1:24224`. Там слушает третий экземпляр коллектора
+`dmc268-otelcol-logs` (тот же образ, конфиг `observability/otelcol-logs.yaml`): receiver
+`fluent_forward`, имя сервиса из тега драйвера (имя контейнера), маскирование и отдача основному
+коллектору по OTLP (`collector:4318`), а дальше — общий конвейер логов в Loki:
+`{service_name="dmc268-postgres"}`, `{service_name="dmc268-postgres-replica"}`,
+`{service_name="dmc268-rabbitmq"}`. Коллектор логов заменяет
+маркером `<скрыто>` IPv4-адреса (клиент в начале access-лога nginx, `client:` в его error-логе,
+адреса соединений брокера), query в URL (коды OAuth в запросе обратного вызова nginx и в
+Referer), пароль в `PASSWORD '…'` и `DETAIL` ошибок Postgres со значениями ключей и строк таблиц (`Key (…)=(…)`,
+`Failing row contains`). Пароль роли мониторинга `migrate.sh` и миграция 0013 шлют литералом:
+если `ALTER ROLE` упадёт, Postgres запишет запрос в `STATEMENT`, и скрывает пароль только это
+правило. IPv6 не маскируется: сети Docker стенда только IPv4. Примеры —
+`tests/infrastructure/test_collector_redaction.py`.
+
+Маскирование построчное, поэтому в Loki остаются: текст `ERROR` (например, значение, не
+прошедшее приведение типа), прочие `DETAIL` (например, `Token "…" is invalid` у jsonb),
+`CONTEXT`, `STATEMENT` (значения параметров psycopg привязывает на сервере, в тексте только
+`$N`) и продолжения многострочного значения после `DETAIL`. Пароль скрывается до конца строки:
+литерал с `\'` скрыт целиком, а у многострочного скрыта только первая строка.
+
+Почему отдельный экземпляр, а не receiver основного коллектора: публикация порта требует
+не-internal сети, а основной коллектор, который принимает трейсы браузера из интернета, стоит
+только в internal-сетях и выхода наружу не имеет.
+
+Почему не чтение файлов. В `/var/lib/docker/containers` рядом с логами лежит `config.v2.json` с
+Env всех контейнеров (пароли базы, брокера, репликации, Grafana, ключи S3), а Docker API отдаёт
+тот же Env через inspect. Поэтому ни файлов, ни Docker API у коллекторов за логами нет: строки
+приносит демон, и коллектор логов видит только их. Порт `24224` опубликован лишь на `127.0.0.1`
+хоста, к нему подключается демон Docker. Протокол без аутентификации, поэтому извне сервера
+порт недоступен; из сети стека доступен, как OTLP основного коллектора. С internal-сети Docker порт не публикует, поэтому коллектор
+логов, как Grafana, стоит в отдельной не-internal сети `dmc268-logs` (больше там никого) и в сети
+стека — для отдачи основному коллектору; сетей данных и socket-proxy у него нет.
+
+`fluentd-async`: контейнер стартует и пишет и без приёмника — драйвер копит записи в памяти
+демона и досылает, когда коллектор логов поднимется; база и брокер от него не зависят. Буфер
+— 10 000 записей на контейнер (`fluentd-buffer-limit`; по умолчанию 1 048 576, фактически без
+потолка). Записи сверх него в Loki не попадают, а уходят ошибкой `Error writing log message` с
+текстом строки в журнал dockerd (не больше 333 в секунду). `docker logs` у них работает через кэш dual
+logging Docker с теми же потолками, что у `json-file` (`cache-max-size`, `cache-max-file`). Без стека драйвер — прежний `json-file`. В основном
+`docker-compose.yml` драйвера `fluentd` нет: podman его не знает, а без приёмника демон зря
+копит буфер. Его включает отдельный файл вместе со стеком:
+`docker compose -f docker-compose.yml -f infra/observability/compose.logs.yml --profile
+observability up -d`; без файла `docker logs` у postgres и rabbitmq работает как обычно, в Loki
+записи не уходят. Реплика PostgreSQL (`dmc268-postgres-replica`) есть только на стенде, в compose
+её нет; на стенде она тоже пишет через `fluentd`.
+
+Выкат. Смена драйвера пересоздаёт `dmc268-postgres`, `dmc268-rabbitmq` и
+`dmc268-postgres-replica` (тома прежние), и сторож
+плана такую замену автоматическим деплоем не пропустит — выкат, как и включение флага выше,
+ручным запуском `gh workflow run deploy.yml --ref develop -f allow_stateful_replace=true`.
+Targeted-шаг пересоздаёт базу и брокер с окном остановки 60 с до миграций; полный `apply` после
+них пересоздаёт реплику (она снова проходит `check-replica.sh`) и поднимает
+`dmc268-otelcol-logs`, и накопленные записи уходят в Loki. Пока идёт замена, api и
+воркер отвечают ошибками базы и брокера.
+
+Тег драйвера становится `service_name`. В infra это `{{.Name}}`, имя контейнера; в compose
+`container_name` нет, и тег в `compose.logs.yml` записан тем же именем, что на стенде.
+
+nginx интерфейса подключается так же в `dmc-268-ui-t1`: у `dmc268-ui` драйвер `fluentd` с теми
+же опциями. Правила IP и query рассчитаны на его access- и error-лог по умолчанию и от тега не
+зависят (задача 4.7 в `openspec/changes/observability-audit-fixes/tasks.md`).
+
 ### Память стека
 
 Потолки памяти без свопа (`memory` = `memory_swap`) задаются переменной `observability_memory_mb`,
@@ -453,23 +551,24 @@ cAdvisor убран, а `docker_stats` берёт те же сигналы у Do
 | --- | --- |
 | коллектор `dmc268-otelcol` | 384 |
 | коллектор метрик контейнеров `dmc268-otelcol-docker` | 96 |
+| коллектор логов контейнеров `dmc268-otelcol-logs` | 96 |
 | Loki | 768 |
 | Tempo | 768 |
 | Prometheus | 768 |
 | Grafana | 512 |
 | node-exporter | 64 |
 | socket-proxy | 64 |
-| **Итого стек** | **3424 (~3,4 ГБ)** |
+| **Итого стек** | **3520 (~3,5 ГБ)** |
 
 Рядом — лимиты контейнеров приложения (`app.tf`, `postgres.tf`, `rabbitmq.tf`, `replica.tf`):
 `postgres` 1024, `api`, `worker`, `rabbitmq` и реплика (`postgres_replica_memory`) по 512,
 резервные копии (`dmc268-postgres-backup`) 256 — итого 3328 МБ (~3,3 ГБ) постоянно живущих.
 Миграции (`docker run` в `migrate.sh` с `--memory 256m`) и одноразовый
 `dmc268-replication-setup` (64) — шаги деплоя, в постоянный лимит стенда не входят.
-Суммарный потолок стенда — 6752 МБ (~6,8 ГБ) по постоянно живущим контейнерам.
+Суммарный потолок стенда — 6848 МБ (~6,8 ГБ) по постоянно живущим контейнерам.
 
 На VPS 7947 МБ (~7,9 ГБ) памяти и нет свопа (`free -m`, 2026-10-28): запас над потолками около
-1,2 ГБ, и из него же живут контейнеры без потолка — интерфейс (`dmc268-ui`) и хранилище состояния
+1,1 ГБ, и из него же живут контейнеры без потолка — интерфейс (`dmc268-ui`) и хранилище состояния
 (`dmc268-s3`, ~220 МБ). Через 30 минут после первого выката стека занято 2,2 ГБ; ближе всех к
 своему потолку Grafana — 413 из 512 МБ (`docker stats`). Поднимать потолки стека — только за счёт
 этого запаса.
@@ -492,7 +591,7 @@ cAdvisor убран, а `docker_stats` берёт те же сигналы у Do
 | метрики Prometheus | ≤ 8 ГБ и не дольше 30 дней | `--storage.tsdb.retention.size=8GB` и `--storage.tsdb.retention.time=30d` (`observability.tf`, compose) |
 | логи Loki | только 30 дней (`retention_period: 720h`), лимита по размеру нет | `observability/loki.yaml` |
 | трейсы Tempo | только 14 дней (`block_retention: 336h`), лимита по размеру нет | `observability/tempo.yaml` |
-| логи контейнеров (json-file) | 30 МБ на контейнер (3 файла × 10 МБ) | `local.log_opts` в `locals.tf`, `logging.options` в compose |
+| логи контейнеров (json-file; у postgres, реплики и rabbitmq со стеком — кэш `docker logs` драйвера fluentd) | 30 МБ на контейнер (3 файла × 10 МБ) | `local.log_opts` и `local.fluentd_log_opts` в `locals.tf`, `logging.options` в compose и `observability/compose.logs.yml` |
 
 Единственный компонент с потолком по размеру — Prometheus (8 ГБ): всплеск кардинальности не
 забьёт диск раньше срока хранения. У Loki и Tempo такого лимита нет: записи старше срока
@@ -503,12 +602,11 @@ Loki отбрасывает с 429 и долг не копит, но всё пр
 никакой — ни лимита, ни алерта; после #100 заполнение ловят алерты по
 `node_filesystem_avail_bytes` от node-exporter.
 
-Ожидаемые объёмы: под ротацию json-file попадает 15 контейнеров этого стека (7 приложения —
-api, worker, postgres, rabbitmq, реплика, копии, replication-setup — и 8 наблюдаемости) — не
-больше 450 МБ. В Loki пишут только три сервиса приложения — api, worker
-и одноразовый migrate (логи postgres и rabbitmq туда не попадают: приём только OTLP). При
-допущении «запись в секунду на сервис по 1 КБ» — 3 КБ/с ≈ 260 МБ в сутки ≈ 7,8 ГБ за 30 дней
-на все три; индекс TSDB Loki (период 24 ч) и рабочие файлы compactor в оценку не входят.
+Ожидаемые объёмы: под ротацию json-file попадает 13 контейнеров этого стека (4 приложения —
+api, worker, копии, replication-setup — и 9 наблюдаемости) — не больше 390 МБ, и ещё
+до 90 МБ — кэш `docker logs` у postgres, реплики и rabbitmq. В Loki пишут api, worker,
+одноразовый migrate, postgres, реплика и rabbitmq. При допущении «запись в секунду на сервис по 1 КБ» — 6 КБ/с ≈
+520 МБ в сутки ≈ 15,5 ГБ за 30 дней на все шесть; индекс TSDB Loki (период 24 ч) и рабочие файлы compactor в оценку не входят.
 
 ## Хранилище состояния
 

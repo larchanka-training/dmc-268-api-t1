@@ -11,6 +11,12 @@ receivers:
   docker_stats:
     endpoint: tcp://dockerproxy:2375
     collection_interval: 15s
+    # id, hostname и образ меняются каждым деплоем и плодили бы новые серии
+    # в Prometheus; ряд различает container.name.
+    resource_attributes:
+      container.id: {enabled: false}
+      container.hostname: {enabled: false}
+      container.image.name: {enabled: false}
 
 processors:
   # Потолок памяти; контейнеру задан лимит с запасом
@@ -19,20 +25,6 @@ processors:
     check_interval: 1s
     spike_limit_mib: 16
     limit_mib: 64
-  batch:
-    timeout: 5s
-
-  # id, hostname (префикс id) и образ контейнера меняются каждым деплоем: в
-  # лейблах Prometheus они давали бы новый набор серий на каждый деплой. Ряд
-  # различает container.name.
-  transform/trim-metrics-resource:
-    error_mode: ignore
-    metric_statements:
-      - context: resource
-        statements:
-          - delete_key(attributes, "container.id")
-          - delete_key(attributes, "container.hostname")
-          - delete_key(attributes, "container.image.name")
 
 exporters:
   # Prometheus скрейпит collector-docker:8889 (job docker-stats).
@@ -44,8 +36,17 @@ exporters:
       enabled: true
 
 service:
+  # Свои метрики, как у основного коллектора (otelcol.yaml): job collector-docker-self.
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
   pipelines:
     metrics:
       receivers: [docker_stats]
-      processors: [memory_limiter, transform/trim-metrics-resource, batch]
+      processors: [memory_limiter]
       exporters: [prometheus]
