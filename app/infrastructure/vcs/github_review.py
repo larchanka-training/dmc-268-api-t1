@@ -52,8 +52,9 @@ def _map_fetched_inline_comments(
     `GET …/reviews/{id}/comments` отдаёт `line`, `side` и `original_line`
     пустыми, есть только `position` (проверено на живом PR, #265), поэтому
     строку и сторону берём из черновика: текст комментария сервис пишет сам.
-    Одинаковые тексты в одном файле разбираются в порядке ответа: GitHub
-    отдаёт комментарии ревью в порядке создания.
+    Одинаковые тексты в одном файле разбираются в порядке ответа; если
+    GitHub переставит их, id поменяются у одинаковых замечаний, на merge gate
+    это не влияет.
     """
     published: list[PublishedInlineComment | None] = []
     used_provider_ids: set[str] = set()
@@ -153,6 +154,16 @@ class GitHubReviewClient:
                 )
                 raw_comments = []
             published = _map_fetched_inline_comments(inline_comments, raw_comments)
+            unmatched = published.count(None)
+            if unmatched and raw_comments:
+                # Иначе поломка сопоставления видна только по «Опубликовано inline: 0» (#265).
+                logger.warning(
+                    "прогон %s: ревью %s, не сопоставлено inline %d из %d",
+                    review_run_id,
+                    review_id,
+                    unmatched,
+                    len(published),
+                )
         return PullRequestReviewPublication(
             summary_provider_comment_id=review_id,
             inline_comments=published,
