@@ -1,7 +1,8 @@
 """Извлечение события вебхука GitHub из payload'а.
 
-Запускают ревью только `opened` и `synchronize`; `reopened`, `closed` и любые
-прочие действия игнорируются — пользователь переназначает бота ревьюером сам.
+Запускают ревью только `opened` и `synchronize`; `reopened`, `closed` и прочие
+действия игнорируются — пользователь переназначает бота ревьюером сам. Свой ли
+PR, решает `is_trusted_author` (правило — у `TRUSTED_AUTHOR_ASSOCIATIONS`).
 Функция чистая и робкая к мусорному payload'у: всё, что не похоже на событие
 pull request, даёт `None`, чтобы эндпоинт отвечал «ignored», а не 500.
 `installation_id` достаётся из каждого payload'а — мульти-репозиторий по
@@ -13,6 +14,13 @@ from typing import Any
 from app.domain.entities import WebhookEvent
 
 TRIGGERING_ACTIONS: frozenset[str] = frozenset({"opened", "synchronize"})
+# shortcut: ревьюим только PR своих — ветка в самом репозитории (запушить её может только
+# тот, у кого есть право записи) или автор-владелец, участник организации, коллаборатор
+# (`author_association` считает GitHub, тело подписано). Одной связи мало: скрытое членство
+# в организации GitHub пишет в вебхук как `CONTRIBUTOR` (#246). Без фильтра любой
+# пользователь GitHub тратил бы ключ модели PR'ами из форка в публичный репозиторий.
+# Временная защита до биллинга: после него — правило оплаты, а не запрет.
+TRUSTED_AUTHOR_ASSOCIATIONS: frozenset[str] = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 # Действия `pull_request_review_thread`, которые сверяют закрытие треда.
 THREAD_ACTIONS: frozenset[str] = frozenset({"resolved", "unresolved"})
 
@@ -40,6 +48,14 @@ def extract_github_event(payload: dict[str, Any]) -> WebhookEvent | None:
             target_branch=base["ref"],
             title=pull_request["title"],
             author=pull_request["user"]["login"],
+            author_association=pull_request.get("author_association"),
+            # У head PR из удалённого форка `repo` пуст: такой PR считается чужим.
+            from_fork=(head.get("repo") or {}).get("id") != payload["repository"]["id"],
         )
     except (KeyError, TypeError):
         return None
+
+
+def is_trusted_author(event: WebhookEvent) -> bool:
+    """PR свой: ревью тратит ключ модели только на него."""
+    return not event.from_fork or event.author_association in TRUSTED_AUTHOR_ASSOCIATIONS

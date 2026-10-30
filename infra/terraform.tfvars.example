@@ -42,7 +42,8 @@ postgres_replica_memory         = 512
 backup_keep_days                = 7
 
 # --- модель воркера ---
-# Eurorouter включается только фоллбэком после локальной модели:
+# Eurorouter - основным при llm_backend = "eurorouter" (нужны все eurorouter_*)
+# или фоллбэком после локальной модели:
 # llm_hosted_fallback = true требует llm_backend = "ollama" и всех eurorouter_*
 # и отправляет код проверяемых репозиториев hosted-провайдеру. Ключи - через
 # запятую, в CI из секрета.

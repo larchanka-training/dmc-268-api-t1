@@ -315,19 +315,39 @@ def llm_http_timeout(settings: Settings) -> httpx.Timeout:
     return httpx.Timeout(settings.llm_timeout_seconds, connect=_LLM_CONNECT_TIMEOUT_SECONDS)
 
 
+def _eurorouter(settings: Settings, timeout: httpx.Timeout) -> tuple[str, LlmGateway]:
+    return (
+        "Eurorouter",
+        OpenAiCompatibleGateway(
+            httpx.Client(base_url=settings.eurorouter_base_url, timeout=timeout),
+            settings.eurorouter_model,
+            settings.eurorouter_keys,
+            name="Eurorouter",
+            max_attempts=settings.llm_max_attempts,
+        ),
+    )
+
+
 def build_llm_gateway(settings: Settings) -> LlmGateway:
     """Порядок провайдеров не выбирается: локальная модель первая, hosted -
-    только вторым и только по флагу (change `add-llm-gateway`, design D3).
+    только вторым и только по флагу (change `add-llm-gateway`, design D3), или
+    hosted единственным при `LLM_BACKEND=eurorouter` (change `eurorouter-primary-backend`).
 
     Итог пишется в лог: по нему видно, может ли код проверяемых
     репозиториев уйти за пределы нашей сети.
     """
     if settings.llm_backend is None:
-        raise RuntimeError("LLM_BACKEND не задан: выберите stub или ollama")
+        raise RuntimeError("LLM_BACKEND не задан: выберите stub, ollama или eurorouter")
     if settings.llm_backend == "stub":
         logger.info("модель: заглушка без похода к модели")
         return StubLlmGateway()
     timeout = llm_http_timeout(settings)
+    if settings.llm_backend == "eurorouter":
+        logger.info(
+            "модель: Eurorouter (%s) основной, без фоллбэка: код проверяемых репозиториев уходит hosted-провайдеру",
+            settings.eurorouter_model,
+        )
+        return FallbackLlmGateway([_eurorouter(settings, timeout)])
     providers: list[tuple[str, LlmGateway]] = [
         (
             "Ollama",
@@ -343,18 +363,7 @@ def build_llm_gateway(settings: Settings) -> LlmGateway:
     if not settings.llm_hosted_fallback:
         logger.info("%s; hosted-фоллбэк выключен", local)
         return FallbackLlmGateway(providers)
-    providers.append(
-        (
-            "Eurorouter",
-            OpenAiCompatibleGateway(
-                httpx.Client(base_url=settings.eurorouter_base_url, timeout=timeout),
-                settings.eurorouter_model,
-                settings.eurorouter_keys,
-                name="Eurorouter",
-                max_attempts=settings.llm_max_attempts,
-            ),
-        )
-    )
+    providers.append(_eurorouter(settings, timeout))
     logger.info(
         "%s; фоллбэк - Eurorouter (%s): при сбое локальной модели код уходит hosted-провайдеру",
         local,

@@ -226,9 +226,10 @@ resource "docker_container" "worker" {
   # Реквизиты App нужны: сборка контекста довыбирает дифф, `.review/rules.md`
   # и изменённые файлы через VCS-шлюз.
   # Адаптер модели: без LLM_BACKEND воркер не стартует, и деплой падает на
-  # проверке устойчивой работы. Eurorouter подключается только вторым и только
-  # флагом llm_hosted_fallback: тогда код проверяемых репозиториев уходит
-  # hosted-провайдеру (docs/BACKEND_ARCHITECTURE.md, модель угроз).
+  # проверке устойчивой работы. Eurorouter подключается вторым флагом
+  # llm_hosted_fallback или основным при llm_backend = eurorouter: в обоих
+  # случаях код проверяемых репозиториев уходит hosted-провайдеру
+  # (docs/BACKEND_ARCHITECTURE.md, модель угроз).
   # Телеметрия — local.telemetry_env, как у api выше.
   env = concat(local.app_env, local.telemetry_env, [
     "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-worker",

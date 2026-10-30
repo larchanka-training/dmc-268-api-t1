@@ -366,6 +366,13 @@ App нужно разрешение **Contents: read**. Без него прог
 того, у кого есть право записи. С источником GitHub не даст смёржить, если статус выставил
 кто-то другой.
 
+PR из форка от авторов вне `OWNER`, `MEMBER` и `COLLABORATOR` (по `author_association` из
+вебхука) бот не ревьюит, и проверки `dmc-268-ai-review` на таком PR нет: это временная защита
+ключа модели, до биллинга. PR из ветки самого репозитория ревьюится всегда: запушить её может
+только тот, у кого есть право записи, а скрытое членство в организации GitHub пишет в вебхук
+как `CONTRIBUTOR`. Если проверка обязательная, такой PR смёржит
+только admin в обход правила.
+
 В интерфейсе: Settings → Rules → Rulesets → New branch ruleset → Require status checks
 to pass → Add checks → `dmc-268-ai-review`, источник — наш App вместо «Any source». App
 появляется в списке источников, только когда он недавно ставил check run в этом
@@ -406,6 +413,7 @@ EOF
 
 - `stub` - заглушка без похода к модели: прогон доходит до `completed` с пустым ревью. Её выбирает `.env.example`; у `docker compose` значения по умолчанию нет.
 - `ollama` - локальная модель в нашей сети (`OLLAMA_BASE_URL`, `OLLAMA_MODEL`).
+- `eurorouter` - hosted-провайдер Eurorouter основным и единственным (`EUROROUTER_BASE_URL` только на `https://`, `EUROROUTER_MODEL`, `EUROROUTER_API_KEYS`): код проверяемых репозиториев уходит ему на каждом прогоне. Так работает стенд — Ollama там нет (#245).
 
 Локальная модель поднимается профилем compose:
 
@@ -416,8 +424,8 @@ docker compose exec ollama ollama pull qwen2.5-coder:7b
 docker compose up -d worker
 ```
 
-Eurorouter (OpenAI-совместимый hosted-провайдер) подключается только фоллбэком после локальной модели и только при `LLM_HOSTED_FALLBACK=true` вместе с `EUROROUTER_BASE_URL`, `EUROROUTER_MODEL` и `EUROROUTER_API_KEYS` (ключи через запятую).
-Включение отправляет код проверяемых репозиториев за пределы нашей сети; какие провайдеры включены, воркер пишет в лог при старте.
+Фоллбэком после локальной модели Eurorouter подключается при `LLM_BACKEND=ollama` и `LLM_HOSTED_FALLBACK=true` вместе с `EUROROUTER_BASE_URL`, `EUROROUTER_MODEL` и `EUROROUTER_API_KEYS` (ключи через запятую).
+С `LLM_BACKEND=eurorouter` фоллбэк не сочетается. Оба способа отправляют код проверяемых репозиториев за пределы нашей сети; какие провайдеры включены, воркер пишет в лог при старте.
 
 Окно модели (`LLM_CONTEXT_WINDOW_TOKENS`) должно вмещать пакет контекста (`CONTEXT_MAX_TOKENS`), системный промпт и резерв ответа (`LLM_MAX_OUTPUT_TOKENS`): иначе воркер не стартует.
 Все переменные с пояснениями - в [`.env.example`](.env.example).

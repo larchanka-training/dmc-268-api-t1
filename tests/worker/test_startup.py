@@ -170,7 +170,7 @@ def test_unhandled_exceptions_of_both_hooks_go_through_the_logger() -> None:
 
     with _json_log(hook_log) as out:
         try:
-            raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
+            raise WorkerConfigError("LLM_BACKEND не задан: выберите stub, ollama или eurorouter")
         except WorkerConfigError:
             # Как интерпретатор на выходе исключения из `main()` точки входа.
             sys.excepthook(*sys.exc_info())
