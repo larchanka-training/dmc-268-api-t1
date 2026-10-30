@@ -325,6 +325,10 @@ def test_container_metrics_come_from_a_separate_collector_through_the_proxy() ->
     docker = yaml.safe_load((OBSERVABILITY_DIR / "otelcol-docker.yaml").read_text(encoding="utf-8"))
     assert set(docker["receivers"]) == {"docker_stats"}
     assert docker["receivers"]["docker_stats"]["endpoint"] == "tcp://dockerproxy:2375"
+    # Опечатку в имени атрибута коллектор не отвергает: id, hostname и образ меняются каждым деплоем.
+    assert docker["receivers"]["docker_stats"]["resource_attributes"] == {
+        name: {"enabled": False} for name in ("container.id", "container.hostname", "container.image.name")
+    }
     assert docker["service"]["pipelines"]["metrics"]["receivers"] == ["docker_stats"]
 
     main = yaml.safe_load((OBSERVABILITY_DIR / "otelcol.yaml").read_text(encoding="utf-8"))
@@ -414,6 +418,12 @@ def test_socket_proxy_lets_docker_stats_paths_through(url: str) -> None:
         "/containers/a%2Fb/stats",
         "/v1.47/events/x",
         "/images/json",
+        # Процессы с командными строками, список файлов, потоки stdio контейнера.
+        "/containers/abc/top",
+        "/containers/abc/changes",
+        "/containers/abc/attach/ws",
+        "/volumes",
+        "/system/df",
     ],
 )
 def test_socket_proxy_rejects_other_paths(url: str) -> None:
