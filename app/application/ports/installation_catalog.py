@@ -12,6 +12,7 @@
 from typing import Protocol
 
 from app.domain.entities import InstallationRepository, Secret
+from app.domain.enums import RepositorySelection
 
 
 class InstallationCatalog(Protocol):
@@ -21,6 +22,15 @@ class InstallationCatalog(Protocol):
 
     def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
         """Репозиторий по id так, как его видит владелец токена, с его правами; не виден — `None`."""
+        ...
+
+    def installation_selection(self, access_token: Secret, installation_id: int) -> RepositorySelection | None:
+        """Выбор репозиториев установки, если она среди установок владельца токена и не
+        приостановлена; иначе `None`."""
+        ...
+
+    def installation_repositories(self, access_token: Secret, installation_id: int) -> list[InstallationRepository]:
+        """Репозитории одной установки, доступные владельцу токена, с его правами."""
         ...
 
     def app_installed(self, full_name: str) -> bool:

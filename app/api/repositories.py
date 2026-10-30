@@ -1,5 +1,5 @@
-"""Зарегистрированные репозитории: чтение, подключение, настройки и статус `.review/rules.md`
-(настройки и правила — пока заглушки).
+"""Репозитории: список видимых пользователю, чтение, подключение, выключение, настройки и
+статус `.review/rules.md` (настройки и правила — пока заглушки).
 
 Транспорт: разбор запроса, вызов порта или use case, формат ответа. Пагинация —
 `app/api/pagination.py`. Правила подключения — `app/application/use_cases/connect_repository.py`.
@@ -11,13 +11,13 @@ from http import HTTPStatus
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Request, Response
 from pydantic import BaseModel, Field, RootModel, StringConstraints, field_validator
 from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
+    get_app_slug,
     get_installation_catalog,
-    get_refreshing_catalog,
     get_token_provider,
     get_unit_of_work_factory,
     get_visibility_catalog,
@@ -38,6 +38,7 @@ from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
 from app.api.schemas import RepositoryBase, StrictRequest, UtcDatetime
 from app.api.session import (
+    SESSION_COOKIE,
     SESSION_REQUIRED,
     SESSION_RESPONSES,
     Unauthenticated,
@@ -54,22 +55,17 @@ from app.domain.enums import FindingSeverity, Provider, RulesStatus
 from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
 from app.domain.repo_rules import RULES_PATH
+from app.domain.session import setup_state
 from app.domain.vcs_errors import VcsError
 
-# Форма — вариант A решения 3 в dmc-268-ui-t1#37; поведение — change `repositories-via-user-token`.
-_AVAILABLE_DESCRIPTION = (
-    "Требует сессию. Репозитории установок GitHub App, доступные вошедшему пользователю, с "
-    "отметкой `already_connected` — зарегистрирован ли репозиторий в сервисе. Список отдаёт "
-    "GitHub по токену пользователя, сохранённому при входе (`GET /user/installations` и "
-    "`GET /user/installations/{id}/repositories`): это пересечение «доступно приложению» и "
-    "«доступно пользователю», остальные репозитории установок в ответ не попадают, это не "
-    "ошибка. Публичный репозиторий, на котором у пользователя нет роли, тоже не попадает. "
-    "Подключить из списка можно только с правом admin или maintain, это показывает "
-    "`can_connect` в каждой строке. С push или triage "
-    "подключение ответит `403 REPOSITORY_MANAGE_REQUIRED`, как и на приватном только с правом "
-    "чтения; на публичном только с правом чтения — `404 REPOSITORY_NOT_IN_INSTALLATION`. Токен пользователя отозван, истёк без "
-    "возможности обновления или его нет (сессия открыта до хранения токенов) — "
-    "`401 UNAUTHENTICATED`, сессия закрывается, cookie удаляется: нужен новый вход. Если "
+# Один список вместо двух — change `repositories-one-list` (#243, dmc-268-ui-t1#95).
+_LIST_DESCRIPTION = (
+    "Требует сессию. Все репозитории установок GitHub App, которые GitHub отдаёт пользователю по "
+    "его токену, сохранённому при входе, подключённые и нет; публичный репозиторий, на котором у "
+    "пользователя нет роли, в ответ не попадает. Ответ GitHub — из кэша видимости (по умолчанию "
+    "30 с, как у GET /reviews и GET /events), подключён ли репозиторий — из базы. Постранично, "
+    "по `full_name` без учёта регистра; limit выше 200 приводится к 200, конец списка — страница "
+    "короче limit. Токен пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается; "
     "GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`."
 )
 _CONNECT_DESCRIPTION = (
@@ -84,10 +80,26 @@ _CONNECT_DESCRIPTION = (
     "пользователя нет права admin или "
     "maintain на репозиторий в GitHub, в том числе роль read на приватном — "
     "`403 REPOSITORY_MANAGE_REQUIRED`; репозиторий уже "
-    "подключён — `409 REPOSITORY_ALREADY_CONNECTED`. Пользователь без прав получает `403` и не "
-    "узнаёт, подключён ли репозиторий. Токен пользователя непригоден — `401 UNAUTHENTICATED`, "
+    "подключён и включён — `409 REPOSITORY_ALREADY_CONNECTED`; интерфейс считает его успехом: "
+    "ревью уже включено, в том числе параллельным запросом. Выключенный `DELETE` репозиторий "
+    "включается обратно — `201` с прежним `id`, история прогонов сохраняется. После повторного включения head, запушенный в выключенный период, остаётся с проверкой «Ревью выключено» до следующего push. Пользователь без "
+    "прав получает `403` и не узнаёт, подключён ли репозиторий. Токен пользователя непригоден — `401 UNAUTHENTICATED`, "
     "сессия закрывается. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, "
     "репозиторий не записан."
+)
+_DISCONNECT_DESCRIPTION = (
+    "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии. Выключает ревью мягко: "
+    "запись, запросы на изменение и история прогонов остаются; на вебхук `pull_request` прогона нет, "
+    "а на head ставится проверка `success` «Ревью выключено в сервисе»; на вебхук "
+    "`pull_request_review_thread` тред записывается, а на head ставится та же проверка. Повторный "
+    "POST /repositories включает обратно; уже выключен — тоже `204`. Прогон, поставленный в "
+    "очередь до выключения, доводится до конца. Уже стоящую проверку выключение не меняет: открытый "
+    "PR с `failure` разблокирует push или закрытие треда. Проверки по порядку: репозитория нет или "
+    "пользователь не видит его на GitHub (кэш видимости, как у GET /repositories/{id}) — "
+    "`404 REPOSITORY_NOT_FOUND`, ответ один и тот же; права — как у POST /repositories, запросом к "
+    "GitHub мимо кэша: без admin или maintain — `403 REPOSITORY_MANAGE_REQUIRED`. Токен "
+    "пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается; GitHub не ответил или "
+    "ответил ошибкой — `502 SCM_UNAVAILABLE`, ревью не выключено."
 )
 # Настройки и статус rules.md — задача #113 (бэкенд-часть dmc-268-ui-t1#28): контракт первым,
 # реализация отдельно.
@@ -149,7 +161,8 @@ router = APIRouter(
 
 
 class RepositoryResponse(RepositoryBase):
-    """Репозиторий, зарегистрированный в сервисе: его запросы на изменение ревьюятся."""
+    """Репозиторий, зарегистрированный в сервисе, в том числе выключенный: его запросы на изменение ревьюятся,
+    пока ревью включено."""
 
     provider_id: str = Field(description="Идентификатор репозитория у провайдера.", examples=["123456789"])
     default_branch: str = Field(description="Ветка по умолчанию у провайдера.", examples=["main"])
@@ -158,34 +171,54 @@ class RepositoryResponse(RepositoryBase):
     updated_at: UtcDatetime = Field(description="Когда запись последний раз менялась.")
 
 
-class RepositoryListResponse(BaseModel):
-    """Страница списка репозиториев."""
+class RepositoryListItem(BaseModel):
+    """Репозиторий установки GitHub App, видимый пользователю: подключённый или нет.
 
-    items: list[RepositoryResponse] = Field(
-        description="Репозитории страницы; меньше limit — значит, страница последняя."
-    )
-
-
-class AvailableRepositoryResponse(BaseModel):
-    """Репозиторий у провайдера, доступный вошедшему пользователю; подключить его можно, если `can_connect`."""
+    Подключённый — ревью включено, его запросы на изменение ревьюятся; неподключённый можно
+    подключить, если `can_connect`.
+    """
 
     provider: Provider = Field(description="Хостинг репозитория.", examples=["github"])
     provider_id: str = Field(description="Идентификатор репозитория у провайдера.", examples=["123456789"])
-    full_name: str = Field(description="Полное имя у провайдера: владелец/репозиторий.", examples=["octo-org/api"])
-    default_branch: str = Field(description="Ветка по умолчанию у провайдера.", examples=["main"])
-    already_connected: bool = Field(description="Репозиторий уже зарегистрирован в сервисе.")
+    full_name: str = Field(
+        description="Полное имя у провайдера: владелец/репозиторий, из ответа GitHub.", examples=["octo-org/api"]
+    )
+    default_branch: str = Field(description="Ветка по умолчанию у провайдера, из ответа GitHub.", examples=["main"])
+    connected: bool = Field(description="Ревью включено: репозиторий подключён к сервису и не выключен.")
+    id: UUID | None = Field(
+        description=(
+            "Идентификатор репозитория в сервисе — для настроек, прогонов и DELETE /repositories/{id}. "
+            "Есть и у выключенного: история остаётся; `null`, если репозиторий не подключали."
+        )
+    )
     can_connect: bool = Field(
         description=(
-            "У пользователя на репозитории роль admin или maintain — то же правило, что у POST /repositories. "
-            "Подсказка интерфейсу: POST /repositories проверяет права сам."
+            "У пользователя на репозитории роль admin или maintain — то же правило, что у POST и DELETE "
+            "/repositories. Подсказка интерфейсу: без неё переключатель «Ревью» неактивен; ручки проверяют "
+            "права сами."
         )
+    )
+    connected_at: UtcDatetime | None = Field(
+        description="Когда ревью включено последний раз; `null`, если ревью не включено."
     )
 
 
-class AvailableRepositoryListResponse(BaseModel):
-    """Репозитории, доступные для подключения."""
+class RepositoryListResponse(BaseModel):
+    """Страница списка репозиториев и адрес установки приложения."""
 
-    items: list[AvailableRepositoryResponse] = Field(description="Репозитории установок GitHub App, доступные пользователю.")
+    items: list[RepositoryListItem] = Field(
+        description="Репозитории страницы; меньше limit — значит, страница последняя."
+    )
+    install_url: str | None = Field(
+        description=(
+            "Экран установки GitHub App (`https://github.com/apps/<slug>/installations/new?state=<state>`): "
+            "выбрать аккаунт и репозитории. `state` привязан к сессии, GitHub возвращает его на Setup URL "
+            "(GET /auth/github/setup): без него возврат ничего не подключает. `null`, если slug приложения "
+            "узнать не удалось: нет ключа приложения или GitHub не ответил на `GET /app`."
+        ),
+        json_schema_extra={"format": "uri"},
+        examples=["https://github.com/apps/dmc-268-review/installations/new?state=3f2a9c0e"],
+    )
 
 
 class ConnectRepositoryRequest(StrictRequest):
@@ -198,7 +231,7 @@ class ConnectRepositoryRequest(StrictRequest):
         min_length=1,
         max_length=255,
         pattern=r"^[1-9][0-9]*$",
-        description="Идентификатор репозитория у провайдера (из списка доступных): число без ведущих нулей.",
+        description="Идентификатор репозитория у провайдера (из списка репозиториев): число без ведущих нулей.",
         examples=["123456789"],
     )
 
@@ -218,30 +251,17 @@ def _as_user[T](signed_in: SignedIn, oauth: OAuthProvider, call: Callable[[conne
         raise ApiError(HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, _SCM_UNAVAILABLE_DETAIL) from error
 
 
-def available_repositories(
-    signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_refreshing_catalog),
-    oauth: OAuthProvider = Depends(get_token_provider),
-    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
-) -> list[connecting.AvailableRepository]:
-    """Репозитории, видимые пользователю у провайдера по его токену, с отметкой подключённых."""
-    now = datetime.now(UTC)
-    return _as_user(
-        signed_in, oauth, lambda user: connecting.list_available_repositories(catalog, uow_factory(), user, now)
-    )
-
-
 def user_repositories(
     signed_in: SignedIn = Depends(current_session),
     catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> list[InstallationRepository]:
-    """Те же репозитории без отметки подключённых — видимость прогонов и репозиториев.
+    """Репозитории, видимые пользователю на GitHub, без отметки подключённых, — видимость
+    прогонов и репозиториев.
 
-    Список тот же, что у GET /repositories/available, но из кэша в пределах TTL;
-    страница подключения пишет туда свежий. Правило видимости одно — поменяется
-    здесь, поменяется у всех.
+    Тот же ответ GitHub, что строки GET /repositories, из кэша в пределах TTL. Правило
+    видимости одно — поменяется здесь, поменяется у всех.
     """
     now = datetime.now(UTC)
     return _as_user(signed_in, oauth, lambda user: connecting.list_user_repositories(catalog, uow_factory(), user, now))
@@ -282,34 +302,12 @@ def visible_repository(
     with uow_factory() as uow:
         repository = uow.repositories.get(repository_id)
     if repository is None or not is_visible(repository, provider_ids):
-        raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REPOSITORY_NOT_FOUND, "Репозитория с таким id нет.")
+        raise _repository_not_found()
     return repository
 
 
-@router.get(
-    "/available",
-    response_model=AvailableRepositoryListResponse,
-    summary="Репозитории, доступные для подключения",
-    response_description="Репозитории установок GitHub App, доступные пользователю.",
-    description=_AVAILABLE_DESCRIPTION,
-    responses=ERRORS_502_SCM_REPOSITORIES,
-)
-def list_available_repositories(
-    available: list[connecting.AvailableRepository] = Depends(available_repositories),
-) -> AvailableRepositoryListResponse:
-    return AvailableRepositoryListResponse(
-        items=[
-            AvailableRepositoryResponse(
-                provider=Provider.GITHUB,
-                provider_id=item.repository.provider_id,
-                full_name=item.repository.full_name,
-                default_branch=item.repository.default_branch,
-                already_connected=item.already_connected,
-                can_connect=item.can_connect,
-            )
-            for item in available
-        ]
-    )
+def _repository_not_found() -> ApiError:
+    return ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REPOSITORY_NOT_FOUND, "Репозитория с таким id нет.")
 
 
 @router.post(
@@ -352,32 +350,49 @@ def connect_repository(
 @router.get(
     "",
     response_model=RepositoryListResponse,
-    summary="Список зарегистрированных репозиториев",
-    response_description="Страница репозиториев.",
-    description=(
-        "Требует сессию. Только репозитории, которые пользователь видит на GitHub по своему "
-        "токену, — то же правило, что у GET /reviews и GET /events. Постранично, по времени "
-        "регистрации, затем по id. limit выше 200 не отклоняется, а приводится к 200. Общего числа "
-        "записей в ответе нет: конец списка — страница короче limit."
-    ),
+    summary="Список репозиториев",
+    response_description="Страница репозиториев и адрес установки приложения.",
+    description=_LIST_DESCRIPTION,
     responses={**ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
 def list_repositories(
+    request: Request,
     limit: Limit = DEFAULT_LIMIT,
     offset: Offset = 0,
     signed_in: SignedIn = Depends(current_session),
     catalog: InstallationCatalog = Depends(get_visibility_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+    app_slug: Callable[[], str | None] = Depends(get_app_slug),
 ) -> RepositoryListResponse:
     # GitHub — в теле, а не зависимостью: при 422 limit или offset запроса к нему нет.
-    provider_ids = visible_provider_ids(signed_in, catalog, oauth, uow_factory)
-    with uow_factory() as uow:
-        visible = uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)
-    # Видимых не больше, чем отдаёт GitHub пользователю: страница — срез в памяти.
-    ordered = sorted(visible, key=lambda r: (r.created_at, r.id))
-    page = ordered[offset : offset + page_size(limit)]
-    return RepositoryListResponse(items=[RepositoryResponse.model_validate(r, from_attributes=True) for r in page])
+    now = datetime.now(UTC)
+    listed = _as_user(
+        signed_in, oauth, lambda user: connecting.list_with_connections(catalog, uow_factory(), user, now)
+    )
+    # Строк не больше, чем отдаёт GitHub пользователю: страница — срез в памяти.
+    page = listed[offset : offset + page_size(limit)]
+    slug = app_slug()
+    # Cookie проверена `current_session`; `state` — от неё, Setup URL сверит его с той же cookie.
+    state = setup_state(request.cookies[SESSION_COOKIE])
+    install_url = f"https://github.com/apps/{slug}/installations/new?state={state}" if slug else None
+    return RepositoryListResponse(items=[_list_item(item) for item in page], install_url=install_url)
+
+
+def _list_item(item: connecting.ListedRepository) -> RepositoryListItem:
+    record = item.record
+    # `id` — если запись есть, в том числе у выключенного; включён ли — по `connected_at` (design D5).
+    connected_at = record.connected_at if record is not None else None
+    return RepositoryListItem(
+        provider=Provider.GITHUB,
+        provider_id=item.repository.provider_id,
+        full_name=item.repository.full_name,
+        default_branch=item.repository.default_branch,
+        connected=connected_at is not None,
+        id=record.id if record is not None else None,
+        can_connect=item.can_connect,
+        connected_at=connected_at,
+    )
 
 
 # Ограничения фильтра веток в настройках.
@@ -514,7 +529,7 @@ class RulesStatusResponse(
     summary="Зарегистрированный репозиторий",
     response_description="Репозиторий.",
     description=(
-        "Требует сессию. Один зарегистрированный репозиторий по id — та же форма, что строка "
+        "Требует сессию. Один зарегистрированный репозиторий по id — тот же `id`, что у строки "
         "GET /repositories. 404 REPOSITORY_NOT_FOUND, если репозитория нет или пользователь не "
         "видит его на GitHub — ответ один и тот же."
     ),
@@ -529,6 +544,44 @@ def get_repository(
 ) -> RepositoryResponse:
     repository = visible_repository(repository_id, signed_in, catalog, oauth, uow_factory)
     return RepositoryResponse.model_validate(repository, from_attributes=True)
+
+
+@router.delete(
+    "/{repository_id}",
+    status_code=HTTPStatus.NO_CONTENT,
+    response_class=Response,
+    summary="Выключить ревью репозитория",
+    description=_DISCONNECT_DESCRIPTION,
+    responses={
+        HTTPStatus.NO_CONTENT: {"description": "Ревью выключено или уже было выключено."},
+        **ERRORS_403_ORIGIN_OR_MANAGE,
+        **ERRORS_404_REPOSITORY,
+        **ERRORS_422,
+        **ERRORS_502_SCM_VISIBILITY,
+    },
+)
+def disconnect_repository(
+    repository_id: RepositoryIdPath,
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> Response:
+    repository = visible_repository(repository_id, signed_in, catalog, oauth, uow_factory)
+    # Права — мимо кэша: `user_repository` кэш видимости не читает.
+    now = datetime.now(UTC)
+    refusal = _as_user(
+        signed_in, oauth, lambda user: connecting.disconnect_repository(catalog, uow_factory(), user, repository, now)
+    )
+    if refusal is connecting.ConnectRefusal.NOT_IN_INSTALLATION:
+        raise _repository_not_found()
+    if refusal is connecting.ConnectRefusal.MANAGE_REQUIRED:
+        raise ApiError(
+            HTTPStatus.FORBIDDEN,
+            ErrorCode.REPOSITORY_MANAGE_REQUIRED,
+            "Выключать ревью может только пользователь с правом admin или maintain на репозиторий.",
+        )
+    return Response(status_code=HTTPStatus.NO_CONTENT)
 
 
 @router.get(

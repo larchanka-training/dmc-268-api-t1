@@ -54,6 +54,7 @@ def _repository_with_a_pull_request(uow: FakeUnitOfWork) -> Repository:
         auto_review_enabled=True,
         created_at=NOW,
         updated_at=NOW,
+        connected_at=NOW,
     )
     uow.repositories.add(repo)
     uow.merge_requests.add(

@@ -2,7 +2,14 @@ import datetime as dt
 import hashlib
 from uuid import UUID
 
-from app.domain.session import SESSION_LIFETIME, hash_token, is_expired, open_session
+from app.domain.session import (
+    SESSION_LIFETIME,
+    hash_token,
+    is_expired,
+    open_session,
+    setup_state,
+    setup_state_matches,
+)
 
 NOW = dt.datetime(2026, 10, 17, 12, 0, tzinfo=dt.UTC)
 USER_ID = UUID("01920000-0000-7000-8000-000000000001")
@@ -29,3 +36,12 @@ def test_a_session_is_valid_until_its_expiry_and_not_at_it() -> None:
 
     assert not is_expired(session, session.expires_at - dt.timedelta(microseconds=1))
     assert is_expired(session, session.expires_at)
+
+
+def test_the_setup_state_is_bound_to_the_session_cookie_and_hides_it() -> None:
+    state = setup_state("token")
+
+    assert setup_state_matches("token", state)
+    assert not setup_state_matches("other-token", state)
+    assert not setup_state_matches("token", "é" * 64)
+    assert "token" not in state and state != hashlib.sha256(b"token").hexdigest()

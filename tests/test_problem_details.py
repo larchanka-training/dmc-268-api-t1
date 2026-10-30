@@ -296,8 +296,8 @@ def test_planned_endpoint_checks_origin_session_and_body_first(client: TestClien
 
 def test_repository_connect_checks_session_origin_and_body_first(client: TestClient) -> None:
     """Подключение проверяет `Origin`, сессию и тело раньше похода к GitHub."""
-    response = client.get("/api/v1/repositories/available")
-    assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/repositories/available")
+    response = client.get("/api/v1/repositories")
+    assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/repositories")
     response = client.post("/api/v1/repositories", json=CONNECT_BODY)
     assert_problem(response, 403, "ORIGIN_FORBIDDEN", "/api/v1/repositories")
     response = client.post("/api/v1/repositories", json=CONNECT_BODY, headers={"Origin": ORIGIN})
