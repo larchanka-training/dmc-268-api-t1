@@ -36,6 +36,15 @@ exporters:
       enabled: true
 
 service:
+  # Свои метрики, как у основного коллектора (otelcol.yaml): job collector-docker-self.
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
   pipelines:
     metrics:
       receivers: [docker_stats]

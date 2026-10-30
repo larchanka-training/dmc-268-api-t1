@@ -595,7 +595,7 @@ def test_the_logs_pipeline_takes_otlp_and_redacts_before_grouping() -> None:
         "groupbyattrs/service",
         "batch",
     ]
-    assert pipelines["logs"]["exporters"] == ["otlphttp/loki"]
+    assert pipelines["logs"]["exporters"] == ["otlp_http/loki"]
     for processor in ("transform/redact-logs", "groupbyattrs/service"):
         assert processor not in pipelines["traces"]["processors"]
         assert processor not in pipelines["metrics"]["processors"]

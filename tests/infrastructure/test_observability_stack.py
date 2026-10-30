@@ -139,12 +139,28 @@ def test_host_and_container_exporters_in_infra(container: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("job", "target"), [("node-exporter", "node-exporter:9100"), ("docker-stats", "collector-docker:8889")]
+    ("job", "target"),
+    [
+        ("node-exporter", "node-exporter:9100"),
+        ("docker-stats", "collector-docker:8889"),
+        ("collector-self", "collector:8888"),
+        ("collector-docker-self", "collector-docker:8888"),
+        ("loki", "loki:3100"),
+        ("tempo", "tempo:3200"),
+    ],
 )
 def test_prometheus_scrapes_exporters_by_service_hosts(job: str, target: str) -> None:
     """Job по хостнейму сервиса и его порту."""
     jobs = {j["job_name"]: j for j in load_prometheus()["scrape_configs"]}
     assert jobs[job]["static_configs"][0]["targets"] == [target]
+
+
+@pytest.mark.parametrize("config", ["otelcol.yaml", "otelcol-docker.yaml"])
+def test_collector_serves_own_metrics_beyond_localhost(config: str) -> None:
+    """По умолчанию свои метрики коллектор отдаёт только на 127.0.0.1 — Prometheus их не видит."""
+    collector = yaml.safe_load((OBSERVABILITY_DIR / config).read_text(encoding="utf-8"))
+    (reader,) = collector["service"]["telemetry"]["metrics"]["readers"]
+    assert reader["pull"]["exporter"]["prometheus"] == {"host": "0.0.0.0", "port": 8888}
 
 
 def test_rabbitmq_job_scrapes_per_object_metrics() -> None:

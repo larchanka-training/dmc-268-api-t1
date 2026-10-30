@@ -190,7 +190,7 @@ resource "docker_container" "otelcol" {
   }
 
   # Экспортёры (Loki, Tempo) и скрейп Prometheus — в сети стека; алиас —
-  # там же: collector:8889 скреит Prometheus.
+  # там же: collector:8889 и :8888 скреит Prometheus.
   networks_advanced {
     name    = docker_network.observability[0].name
     aliases = ["collector"]
@@ -229,7 +229,7 @@ resource "docker_container" "otelcol_docker" {
     file    = "/etc/otelcol-contrib/config.yaml"
   }
 
-  # Скрейп Prometheus: collector-docker:8889.
+  # Скрейп Prometheus: collector-docker:8889 и :8888.
   networks_advanced {
     name    = docker_network.observability[0].name
     aliases = ["collector-docker"]

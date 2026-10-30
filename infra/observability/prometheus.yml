@@ -25,6 +25,24 @@ scrape_configs:
     static_configs:
       - targets: ["collector-docker:8889"]
 
+  # Свои метрики обоих коллекторов (otelcol_*), Loki и Tempo: отказы приёма,
+  # сбои экспорта, объём.
+  - job_name: collector-self
+    static_configs:
+      - targets: ["collector:8888"]
+
+  - job_name: collector-docker-self
+    static_configs:
+      - targets: ["collector-docker:8888"]
+
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]
+
   - job_name: rabbitmq
     # per-object, а не агрегированный /metrics: панель очереди строится по
     # лейблу queue (rabbitmq_queue_messages{queue="review_jobs"}), возраст

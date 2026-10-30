@@ -167,10 +167,10 @@ processors:
 
 exporters:
   # Трейсы — в Tempo по OTLP/HTTP.
-  otlphttp/tempo:
+  otlp_http/tempo:
     endpoint: http://tempo:4318
   # Логи — в Loki: нативный приём OTLP.
-  otlphttp/loki:
+  otlp_http/loki:
     endpoint: http://loki:3100/otlp
   # Метрики — exporter-порт коллектора: Prometheus скрейпит его (job collector).
   # resource_to_telemetry_conversion переносит атрибуты ресурса (service.name)
@@ -187,16 +187,27 @@ extensions:
     endpoint: 0.0.0.0:13133
 
 service:
+  # Свои метрики коллектора (otelcol_*: отказы приёма, сбои экспорта) — pull на
+  # 8888, его скрейпит Prometheus (job collector-self). По умолчанию порт слушает
+  # только 127.0.0.1 и снаружи контейнера не виден.
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
   extensions: [health_check]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, transform/redact, batch]
-      exporters: [otlphttp/tempo]
+      exporters: [otlp_http/tempo]
     traces/browser:
       receivers: [otlp/browser]
       processors: [memory_limiter, transform/browser-resource, transform/redact, batch]
-      exporters: [otlphttp/tempo]
+      exporters: [otlp_http/tempo]
     metrics:
       receivers: [otlp, postgresql]
       # Без batch: prometheus отдаёт точки по pull, пачка их только задерживала бы.
@@ -205,4 +216,4 @@ service:
     logs:
       receivers: [otlp]
       processors: [memory_limiter, transform/redact-logs, groupbyattrs/service, batch]
-      exporters: [otlphttp/loki]
+      exporters: [otlp_http/loki]

@@ -404,7 +404,8 @@ api, воркера и миграций — и `command` контейнера Po
 `shared_preload_libraries` включает контейнер Postgres. RabbitMQ отдаёт метрики встроенным
 плагином `rabbitmq_prometheus` (порт 15692 в сети, per-object эндпоинт — метрики очередей с
 лейблом `queue`); сервер — `node-exporter` (9100), контейнеры — receiver `docker_stats`
-экземпляра `dmc268-otelcol-docker` (`collector-docker:8889`, job `docker-stats`); все скреятся
+экземпляра `dmc268-otelcol-docker` (`collector-docker:8889`, job `docker-stats`); свои метрики
+отдают оба коллектора (`otelcol_*` на `:8888`, только в сети стека), Loki и Tempo; все скреятся
 `prometheus.yml`. Дашборд «Обзор dmc-268» провиженится из репозитория
 (`observability/grafana/provisioning/dashboards/`). Применение стека на стенд — задача DevOps
 (#108).
