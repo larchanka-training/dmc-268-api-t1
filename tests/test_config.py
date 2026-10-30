@@ -210,6 +210,58 @@ def test_hosted_fallback_names_each_missing_parameter(missing: str, named: str) 
         _llm_settings(**{**HOSTED, missing: ""})
 
 
+PRIMARY = {
+    "llm_backend": "eurorouter",
+    "eurorouter_base_url": "https://eurorouter.example/v1",
+    "eurorouter_model": "mistral-large-2411",
+    "eurorouter_api_keys": "sk-secret-one",
+}
+
+
+@pytest.mark.parametrize(
+    ("missing", "named"),
+    [
+        ("eurorouter_base_url", "EUROROUTER_BASE_URL"),
+        ("eurorouter_model", "EUROROUTER_MODEL"),
+        ("eurorouter_api_keys", "EUROROUTER_API_KEYS"),
+    ],
+)
+def test_eurorouter_backend_names_each_missing_parameter(missing: str, named: str) -> None:
+    with pytest.raises(ValidationError, match=f"LLM_BACKEND=eurorouter требует {named}"):
+        _llm_settings(**{**PRIMARY, missing: ""})
+
+
+@pytest.mark.parametrize("profile", [PRIMARY, HOSTED], ids=["eurorouter", "fallback"])
+def test_eurorouter_over_plain_http_is_refused(profile: dict[str, object]) -> None:
+    """То же правило, что в infra/variables.tf: код и ключи не уходят открытым текстом."""
+    with pytest.raises(ValidationError, match="EUROROUTER_BASE_URL - только https://"):
+        _llm_settings(**{**profile, "eurorouter_base_url": "http://eurorouter.example/v1"})
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "named"),
+    [
+        ("eurorouter_model", "   ", "EUROROUTER_MODEL"),
+        ("eurorouter_base_url", " https://eurorouter.example/v1", "EUROROUTER_BASE_URL - только https://"),
+    ],
+    ids=["модель из пробелов", "адрес с пробелом впереди"],
+)
+def test_eurorouter_settings_are_checked_like_opentofu(field: str, value: str, named: str) -> None:
+    """Пробелы разбираются так же, как в infra/variables.tf: план и старт воркера согласны."""
+    with pytest.raises(ValidationError, match=named):
+        _llm_settings(**{**PRIMARY, field: value})
+
+
+def test_hosted_fallback_is_refused_when_eurorouter_is_already_primary() -> None:
+    with pytest.raises(ValidationError, match="LLM_HOSTED_FALLBACK требует LLM_BACKEND=ollama"):
+        _llm_settings(**PRIMARY, llm_hosted_fallback=True)
+
+
+def test_eurorouter_backend_counts_one_provider_in_the_worst_case() -> None:
+    settings = _llm_settings(**PRIMARY, llm_timeout_seconds=300, llm_max_attempts=2)
+    assert settings.llm_call_worst_case_seconds == 600
+
+
 def test_hosted_keys_are_split_on_commas_and_hidden_from_repr() -> None:
     settings = _llm_settings(**HOSTED)
     assert [key.get_secret_value() for key in settings.eurorouter_keys] == [

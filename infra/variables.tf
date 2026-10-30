@@ -171,11 +171,24 @@ variable "github_webhook_secret" {
 # молча публиковал бы пустые ревью (спека llm-gateway, «Выбор заглушки явный»).
 variable "llm_backend" {
   type        = string
-  description = "Адаптер модели воркера (LLM_BACKEND): stub - без похода к модели, ollama - локальная модель."
+  description = "Адаптер модели воркера (LLM_BACKEND): stub - без похода к модели, ollama - локальная модель, eurorouter - hosted-провайдер основным (код проверяемых репозиториев уходит ему)."
 
   validation {
-    condition     = contains(["stub", "ollama"], var.llm_backend)
-    error_message = "llm_backend - stub или ollama."
+    condition     = contains(["stub", "ollama", "eurorouter"], var.llm_backend)
+    error_message = "llm_backend - stub, ollama или eurorouter."
+  }
+
+  # Зеркало проверки в app/config.py: без реквизитов воркер не стартует, и
+  # выкат упал бы уже после пересоздания контейнеров.
+  validation {
+    # Ключи разбираются так же, как в app/config.py: по запятой, без пустых и пробелов. Адрес
+    # только https, иначе код и ключи ушли бы открытым текстом.
+    condition = var.llm_backend != "eurorouter" || (
+      startswith(var.eurorouter_base_url, "https://")
+      && trimspace(var.eurorouter_model) != ""
+      && length([for k in split(",", var.eurorouter_api_keys) : trimspace(k) if trimspace(k) != ""]) > 0
+    )
+    error_message = "llm_backend = eurorouter требует eurorouter_base_url на https://, непустых eurorouter_model и хотя бы одного ключа в eurorouter_api_keys."
   }
 }
 
@@ -297,7 +310,8 @@ variable "ollama_model" {
   }
 }
 
-# Зеркало проверки в app/config.py — по той же причине, что у ollama_model.
+# Зеркало проверки в app/config.py — по той же причине, что у ollama_model. Условие на
+# реквизиты Eurorouter то же, что у llm_backend = eurorouter: две копии держать одинаковыми.
 variable "llm_hosted_fallback" {
   type        = bool
   description = "Подключить Eurorouter фоллбэком после локальной модели (LLM_HOSTED_FALLBACK). Включение отправляет код проверяемых репозиториев hosted-провайдеру."
@@ -306,11 +320,11 @@ variable "llm_hosted_fallback" {
   validation {
     condition = !var.llm_hosted_fallback || (
       var.llm_backend == "ollama"
-      && var.eurorouter_base_url != ""
-      && var.eurorouter_model != ""
-      && var.eurorouter_api_keys != ""
+      && startswith(var.eurorouter_base_url, "https://")
+      && trimspace(var.eurorouter_model) != ""
+      && length([for k in split(",", var.eurorouter_api_keys) : trimspace(k) if trimspace(k) != ""]) > 0
     )
-    error_message = "llm_hosted_fallback = true требует llm_backend = ollama и непустых eurorouter_base_url, eurorouter_model, eurorouter_api_keys."
+    error_message = "llm_hosted_fallback = true требует llm_backend = ollama, eurorouter_base_url на https://, непустых eurorouter_model и хотя бы одного ключа в eurorouter_api_keys."
   }
 }
 

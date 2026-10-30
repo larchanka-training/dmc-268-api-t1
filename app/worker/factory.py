@@ -486,7 +486,7 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
     # Заглушка модели выбирается только явно - иначе прогоны молча выходили бы
     # пустыми (change `add-llm-gateway`, требование «Выбор заглушки явный»).
     if settings.llm_backend is None:
-        raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
+        raise WorkerConfigError("LLM_BACKEND не задан: выберите stub, ollama или eurorouter")
     check_model_deadline(settings)
     check_sweep_thresholds(settings)
     # Воркеру — свои потолки VCS-клиента: дифф и ревью крупного PR дольше,

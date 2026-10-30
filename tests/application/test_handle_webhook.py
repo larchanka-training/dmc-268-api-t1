@@ -6,6 +6,8 @@ success — с точными записями и задачей, а не с «�
 тем же браузером событий.
 """
 
+import logging
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
@@ -176,6 +178,35 @@ def test_unknown_actions_are_ignored(action: str) -> None:
     assert outcome.kind == "ignored"
     assert uow.commits == 0
     assert queue.jobs == []
+
+
+@pytest.mark.parametrize("connected", [True, False], ids=["включён", "выключен"])
+def test_a_pr_of_an_outside_author_is_ignored_and_logged(
+    connected: bool, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Отказ не тихий: в логе связь автора и номер PR, логина нет. У выключенного репозитория
+    посторонний тоже не получает проверку «Ревью выключено»: к GitHub запросов нет."""
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(logging.getLogger("app.application.use_cases.handle_webhook"), "disabled", False)
+    payload = webhook_payload()
+    payload["pull_request"]["author_association"] = "FIRST_TIME_CONTRIBUTOR"
+    payload["pull_request"]["head"]["repo"] = {"id": 1, "full_name": "stranger/dmc-268-api-t1", "fork": True}
+    uow = FakeUow()
+    uow.repositories.add(a_repository() if connected else replace(a_repository(), connected_at=None))
+    vcs = FakeVcs()
+    queue = FakeQueue()
+
+    outcome = handle_webhook_event(payload, uow, vcs, queue, now=lambda: NOW, new_id=uuid4)
+
+    assert outcome.kind == "ignored"
+    assert (vcs.calls, uow.commits, queue.jobs) == ([], 0, [])
+    [record] = [r for r in caplog.records if r.getMessage() == "PR не ревьюится: автор не свой"]
+    assert (record.repo_full_name, record.pr_number, record.author_association) == (  # type: ignore[attr-defined]
+        "larchanka-training/dmc-268-api-t1",
+        6,
+        "FIRST_TIME_CONTRIBUTOR",
+    )
+    assert payload["pull_request"]["user"]["login"] not in caplog.text
 
 
 def test_unregistered_repository_is_ignored_without_records() -> None:

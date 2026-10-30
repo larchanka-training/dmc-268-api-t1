@@ -2,7 +2,8 @@
 
 Порядок собирает composition root, и выбора там нет: локальная модель
 первая, hosted-провайдер - только вторым и только при явном включении
-(change `add-llm-gateway`, design D3). Здесь лишь применяется порядок.
+(change `add-llm-gateway`, design D3), или он один при `LLM_BACKEND=eurorouter`
+(change `eurorouter-primary-backend`). Здесь лишь применяется порядок.
 
 Сбой модели любого класса (`LlmError`, включая `LlmOutputError`) передаёт тот
 же запрос следующему провайдеру; после последнего пробрасывается его сбой.
