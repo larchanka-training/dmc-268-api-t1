@@ -272,7 +272,7 @@ def test_eurorouter_backend_is_the_only_provider_and_says_the_code_leaves(
 ) -> None:
     log = _built_gateway_log(caplog, llm_backend="eurorouter", **HOSTED)
     assert log == (
-        "модель: Eurorouter (mistral-large-2411) основной, без фоллбэка: "
+        "модель: Eurorouter (mistral-large-2411, reasoning_effort не задан) основной, без фоллбэка: "
         "код проверяемых репозиториев уходит hosted-провайдеру"
     )
     gateway = build_container(_model_settings(llm_backend="eurorouter", **HOSTED)).llm_gateway()

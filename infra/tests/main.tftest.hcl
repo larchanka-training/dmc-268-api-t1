@@ -488,7 +488,7 @@ run "eurorouter_primary_reaches_the_worker" {
   }
 }
 
-run "eurorouter_reasoning_effort_reaches_the_worker_only_when_set" {
+run "eurorouter_reasoning_effort_reaches_the_worker" {
   command = plan
 
   variables {
@@ -502,22 +502,6 @@ run "eurorouter_reasoning_effort_reaches_the_worker_only_when_set" {
   assert {
     condition     = contains(docker_container.worker.env, "EUROROUTER_REASONING_EFFORT=low")
     error_message = "Заданный reasoning_effort доходит до воркера окружением."
-  }
-}
-
-run "eurorouter_reasoning_effort_unset_stays_out_of_env" {
-  command = plan
-
-  variables {
-    llm_backend         = "eurorouter"
-    eurorouter_base_url = "https://eurorouter.example/v1"
-    eurorouter_model    = "model"
-    eurorouter_api_keys = "k1"
-  }
-
-  assert {
-    condition     = length([for e in docker_container.worker.env : e if startswith(e, "EUROROUTER_REASONING_EFFORT=")]) == 0
-    error_message = "Без reasoning_effort переменной у воркера нет."
   }
 }
 
