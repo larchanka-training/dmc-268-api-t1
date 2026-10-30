@@ -344,7 +344,9 @@ OTEL_LOGS_EXPORTER=otlp docker compose -f docker-compose.yml -f infra/observabil
 (`OTEL_EXPORTER_OTLP_TIMEOUT`): Python SDK читает переменную в секундах, вопреки спецификации
 OTel с её миллисекундами. Логи сервисов коллектор получает только по OTLP, логи postgres, его
 реплики и rabbitmq — от `dmc268-otelcol-logs` («Логи контейнеров»); каталог Docker не читает ни один
-коллектор. Чувствительные данные он редактирует до отправки — правила в `observability/otelcol.yaml`, тест `tests/infrastructure/test_collector_redaction.py`.
+коллектор. Чувствительные данные основной коллектор редактирует до отправки
+(`observability/otelcol.yaml`), коллектор логов — своими правилами (`observability/otelcol-logs.yaml`);
+тест `tests/infrastructure/test_collector_redaction.py`.
 
 ### Включение и выключение: observability_enabled
 
@@ -495,8 +497,8 @@ Referer; «?» в SQL тоже заменится, это безвредно), �
 Маскирование построчное, поэтому в Loki остаются: текст `ERROR` (например, значение, не
 прошедшее приведение типа), прочие `DETAIL` (например, `Token "…" is invalid` у jsonb),
 `CONTEXT`, `STATEMENT` (значения параметров psycopg привязывает на сервере, в тексте только
-`$N`) и продолжения многострочного значения после `DETAIL`. Пароль скрывается до конца строки,
-поэтому и литерал с `\'` или оборванный переводом строки не утекает.
+`$N`) и продолжения многострочного значения после `DETAIL`. Пароль скрывается до конца строки:
+литерал с `\'` скрыт целиком, а у многострочного скрыта только первая строка.
 
 Почему не чтение файлов. В `/var/lib/docker/containers` рядом с логами лежит `config.v2.json` с
 Env всех контейнеров (пароли базы, брокера, репликации, Grafana, ключи S3), а Docker API отдаёт

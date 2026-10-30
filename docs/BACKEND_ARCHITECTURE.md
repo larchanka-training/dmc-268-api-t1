@@ -451,11 +451,10 @@ def upgrade() -> None:
   `OTEL_LOGS_EXPORTER=otlp` (дефолт `none` — только stdout): `configure_telemetry`
   ставит `LoggerProvider` с `BatchLogRecordProcessor` и хендлер на root, resource
   общий с трейсами, тело записи — текст сообщения, `exc_info` — атрибуты
-  `exception.*`. Логи сервисов коллектор принимает только по OTLP; логи postgres
-  и rabbitmq приносит драйвер `fluentd` демона Docker в отдельный экземпляр
-  коллектора, каталог Docker не читает ни один (`infra/README.md`, «Логи
-  контейнеров»). Между записью лога и трейсом в
-  Grafana переход по `trace_id` в обе стороны (structured metadata OTLP-лога,
+  `exception.*`. Логи сервисов коллектор принимает только по OTLP; логи postgres,
+  его реплики и rabbitmq приносит драйвер `fluentd` демона Docker в отдельный
+  экземпляр коллектора, каталог Docker не читает ни один (`infra/README.md`,
+  «Логи контейнеров»). Между записью лога и трейсом в Grafana переход по `trace_id` в обе стороны (structured metadata OTLP-лога,
   `observability/grafana/provisioning/datasources/datasources.yaml`). На пути
   коллектор редактирует записи с исключениями: стектрейс, текст и тело такой
   записи заменяются маркером `<скрыто>`, `exception.type` остаётся диагнозом.
