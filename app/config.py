@@ -315,7 +315,7 @@ class Settings(BaseSettings):
             name
             for name, value in (
                 ("EUROROUTER_BASE_URL", self.eurorouter_base_url),
-                ("EUROROUTER_MODEL", self.eurorouter_model),
+                ("EUROROUTER_MODEL", self.eurorouter_model.strip()),
                 ("EUROROUTER_API_KEYS", self.eurorouter_keys),
             )
             if not value
@@ -323,7 +323,7 @@ class Settings(BaseSettings):
         if missing:
             needs = "LLM_BACKEND=eurorouter" if self.llm_backend == "eurorouter" else "LLM_HOSTED_FALLBACK=true"
             raise ValueError(f"{needs} требует {', '.join(missing)}")
-        if not self.eurorouter_base_url.strip().startswith("https://"):
+        if not self.eurorouter_base_url.startswith("https://"):
             raise ValueError("EUROROUTER_BASE_URL - только https://: иначе код и ключи ушли бы открытым текстом")
         return self
 

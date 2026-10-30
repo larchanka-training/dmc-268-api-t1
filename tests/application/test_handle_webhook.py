@@ -7,6 +7,7 @@ success — с точными записями и задачей, а не с «�
 """
 
 import logging
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
@@ -179,17 +180,19 @@ def test_unknown_actions_are_ignored(action: str) -> None:
     assert queue.jobs == []
 
 
+@pytest.mark.parametrize("connected", [True, False], ids=["включён", "выключен"])
 def test_a_pr_of_an_outside_author_is_ignored_and_logged(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    connected: bool, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Отказ не тихий: в логе связь автора и номер PR, логина нет."""
+    """Отказ не тихий: в логе связь автора и номер PR, логина нет. У выключенного репозитория
+    посторонний тоже не получает проверку «Ревью выключено»: к GitHub запросов нет."""
     caplog.set_level(logging.INFO)
     monkeypatch.setattr(logging.getLogger("app.application.use_cases.handle_webhook"), "disabled", False)
     payload = webhook_payload()
     payload["pull_request"]["author_association"] = "FIRST_TIME_CONTRIBUTOR"
     payload["pull_request"]["head"]["repo"] = {"id": 1, "full_name": "stranger/dmc-268-api-t1", "fork": True}
     uow = FakeUow()
-    uow.repositories.add(a_repository())
+    uow.repositories.add(a_repository() if connected else replace(a_repository(), connected_at=None))
     vcs = FakeVcs()
     queue = FakeQueue()
 

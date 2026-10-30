@@ -100,7 +100,7 @@ def webhook_body(pull: PullRequest, action: str = "opened") -> bytes:
             "body": pull.body or None,
             "user": {"login": pull.author},
             "author_association": "MEMBER",
-            "head": {"sha": pull.head_sha, "ref": pull.head_ref},
+            "head": {"sha": pull.head_sha, "ref": pull.head_ref, "repo": {"id": int(REPO_PROVIDER_ID)}},
             "base": {"sha": pull.base_sha, "ref": pull.base_ref},
         },
     }

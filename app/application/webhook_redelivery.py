@@ -108,7 +108,7 @@ def _still_current(hooks: WebhookDeliveries, vcs: VcsGateway, delivery: WebhookD
     if event is None or not is_trusted_author(event):
         # Действие не запускает ревью, автор PR не свой или payload не разобран —
         # приём ответил бы `ignored`, переотправлять нечего.
-        logger.warning(
+        logger.info(
             "доставка %s (%s) не запускает ревью (действие или автор), не переотправляется", delivery.id, delivery.guid
         )
         return False
