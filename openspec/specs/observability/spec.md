@@ -66,12 +66,12 @@ RabbitMQ: имя — `{messaging.operation.name} {destination}`, стандар�
 
 #### Scenario: Публикация и обработка задачи
 
-- **WHEN** API публикует задачу в `review_jobs` (default exchange, routing key — имя очереди), а
+- **WHEN** API публикует задачу в `review_jobs.qq` (default exchange, routing key — имя очереди), а
   воркер её обрабатывает
-- **THEN** спан публикации — `publish review_jobs`, `PRODUCER`, `messaging.operation.type` — `send`;
-  спан обработки — `process review_jobs`, `CONSUMER`, `messaging.operation.type` — `process`, с
+- **THEN** спан публикации — `publish review_jobs.qq`, `PRODUCER`, `messaging.operation.type` — `send`;
+  спан обработки — `process review_jobs.qq`, `CONSUMER`, `messaging.operation.type` — `process`, с
   delivery tag сообщения; у обоих `messaging.system` — `rabbitmq`, `messaging.destination.name` и
-  routing key — `review_jobs`
+  routing key — `review_jobs.qq`
 
 #### Scenario: Повторная доставка сообщения
 
@@ -234,7 +234,7 @@ SHALL NOT расти с длительностью просмотра. Штат�
 #### Scenario: Сбой обработки сообщения
 
 - **WHEN** обработка сообщения падает с `LlmError("Eurorouter: HTTP 400: <фрагмент промпта>")`
-- **THEN** спан `process review_jobs` закрыт со статусом ошибки и описанием `LlmError`, а текст есть только в событии `exception`
+- **THEN** спан `process review_jobs.qq` закрыт со статусом ошибки и описанием `LlmError`, а текст есть только в событии `exception`
 
 #### Scenario: Пойманный сбой шага прохода
 
@@ -524,7 +524,7 @@ Grafana SHALL получать дашборд «Обзор dmc-268» через 
 
 - **WHEN** дашборд «Обзор dmc-268» открыт в Grafana
 - **THEN** панели покрывают RPS и 5xx, длительность HTTP-запросов и вызова модели, очередь
-  `review_jobs`, прогоны по статусам, длительность этапов, соединения приложения и базы,
+  `review_jobs.qq`, прогоны по статусам, длительность этапов, соединения приложения и базы,
   CPU/память/диски сервера и контейнеров
 
 ### Requirement: Миграции — в трейсе деплоя

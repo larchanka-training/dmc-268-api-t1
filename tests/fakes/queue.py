@@ -11,8 +11,9 @@ from typing import Any
 class FakeChannel:
     """Канал вместо pika.
 
-    `allow_nack=False` - nack роняет тест: в нём сообщение не должно уйти в
-    DLQ. `current` - номер (с нуля) доставки, которую цикл сейчас обрабатывает.
+    `allow_nack=False` - nack в DLQ роняет тест: в нём сообщение не должно уйти в
+    DLQ; возврат в очередь (`requeue`) - штатная остановка, он разрешён всегда.
+    `current` - номер (с нуля) доставки, которую цикл сейчас обрабатывает.
     """
 
     def __init__(
@@ -28,22 +29,38 @@ class FakeChannel:
         self.cancelled = False
         # Номер доставки, которую цикл сейчас обрабатывает; `None` - ещё ни одной.
         self.current: int | None = None
+        # Порядок `cancel` и подтверждений: с prefetch=1 `cancel` после
+        # подтверждения отдал бы следующее сообщение `basic.reject` (#223).
+        self.events: list[str] = []
+        self.consumer_arguments: dict[str, Any] | None = None
 
-    def consume(self, queue: str, inactivity_timeout: float) -> Iterator[Any]:
+    def consume(
+        self, queue: str, inactivity_timeout: float, arguments: dict[str, Any] | None = None
+    ) -> Iterator[Any]:
+        self.consumer_arguments = arguments
         for index, delivery in enumerate(self._deliveries):
+            # Снятый потребитель новых доставок не получает.
+            if self.cancelled:
+                return
             self.current = index
             yield delivery
 
     def basic_ack(self, tag: int) -> None:
         self.acked.append(tag)
+        self.events.append(f"ack {tag}")
 
     def basic_nack(self, tag: int, requeue: bool) -> None:
+        if requeue:
+            self.events.append(f"requeue {tag}")
+            return
         if not self._allow_nack:
-            raise AssertionError("не ожидался nack")
+            raise AssertionError("не ожидался nack в DLQ")
         self.nacked.append(tag)
 
     def cancel(self) -> None:
+        assert not self.cancelled, "потребитель снят дважды"
         self.cancelled = True
+        self.events.append("cancel")
 
 
 class FakeConnection:

@@ -37,10 +37,27 @@ from pika.exchange_type import ExchangeType
 from app.domain.entities import ReviewJob
 from app.infrastructure.telemetry import REVIEW_RUN_ID, error_status_span
 
-QUEUE_NAME = "review_jobs"
+# Quorum-очередь (#223): считает неудачные доставки, в том числе смерть
+# потребителя с неподтверждённым сообщением, и после `DELIVERY_LIMIT` уводит
+# сообщение в DLX. Классическая очередь этого не умеет, и сообщение, убивающее
+# воркер на каждой доставке, крутилось бы вечно. Приоритеты 0–31 у quorum-очереди
+# (RabbitMQ 4.3+) включены всегда, `x-max-priority` ей не нужен.
+QUEUE_NAME = "review_jobs.qq"
 DLX_NAME = "review_jobs.dlx"
 DLQ_NAME = "review_jobs.dlq"
-MAX_PRIORITY = 9
+# Обычная смерть воркера стоит двух доставок: на второй прогон уходит в `failed`
+# (`REVIEW_RUN_STALE`). Запас — на рестарты при деплое: штатная остановка
+# возвращает сообщение `nack`, а он попытку не тратит (`Worker.run`).
+DELIVERY_LIMIT = 5
+# Таймаут подтверждения: quorum-очередь, в отличие от классической, его
+# применяет (по умолчанию у брокера 30 мин). Сообщение дольше таймаута брокер
+# забирает у воркера и отдаёт следующему потребителю, пока первый ещё работает.
+# Поэтому таймаут — с запасом больше худшего прогона (`check_consumer_timeout`
+# на старте воркера). Он задаётся аргументом потребителя, а не очереди: аргумент
+# очереди после объявления не поменять, повторное объявление с другим значением
+# брокер отвергает (`406 PRECONDITION_FAILED`) — и у воркера, и у API.
+CONSUMER_TIMEOUT_SECONDS = 2 * 60 * 60
+CONSUMER_ARGUMENTS = {"x-consumer-timeout": CONSUMER_TIMEOUT_SECONDS * 1000}
 # Приоритет должен был бы зависеть от тарифа аккаунта, но `accounts` ещё не
 # реализован (см. BACKEND_ARCHITECTURE.md, "Спроектированы, но не
 # реализованы") — фиксированный дефолт до тех пор, см. design.md
@@ -121,7 +138,8 @@ def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel)
         queue=QUEUE_NAME,
         durable=True,
         arguments={
-            "x-max-priority": MAX_PRIORITY,
+            "x-queue-type": "quorum",
+            "x-delivery-limit": DELIVERY_LIMIT,
             "x-dead-letter-exchange": DLX_NAME,
         },
     )

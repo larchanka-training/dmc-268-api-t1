@@ -102,8 +102,10 @@ locals {
   ]
 
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
-  # consumer_timeout RabbitMQ его не ограничивает: в 4.4 таймаут подтверждения
-  # есть только у quorum-очередей, а очередь review — classic.
+  # Очередь review — quorum, и таймаут подтверждения брокера к ней применяется:
+  # он задан аргументом потребителя (CONSUMER_TIMEOUT_SECONDS в
+  # app/infrastructure/queue/rabbitmq.py, 2 ч) с запасом больше этого грейса,
+  # воркер проверяет запас на старте (check_consumer_timeout).
   # Деплой ждёт остановку воркера в `tofu apply`: timeout-minutes job deploy в
   # .github/workflows/deploy.yml обязан быть больше максимума (2460 с) с запасом.
   # Та же формула — у stop_grace_period воркера в docker-compose.yml.
