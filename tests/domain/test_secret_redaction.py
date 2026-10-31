@@ -18,6 +18,9 @@ PEM = "-----BEGIN RSA PRIVATE KEY-----\n+MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn\n+-----
         "AKIAIOSFODNN7EXAMPLE",
         "xoxb-1234567890-abcdefghij",
         "sk-" + "proj_" + "x" * 30,
+        "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc",
+        "rk_test_" + "Z" * 24,
+        "AIza" + "SyD-" + "a" * 31,
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
     ],
 )
@@ -27,6 +30,17 @@ def test_a_known_secret_is_replaced(secret: str) -> None:
 
 def test_a_private_key_spanning_diff_lines_is_replaced_whole() -> None:
     assert redact_secrets(f"+key = '''\n+{PEM}\n+'''\n+x = 1") == f"+key = '''\n+{REDACTED}\n+'''\n+x = 1"
+
+
+def test_a_pgp_private_key_block_is_replaced_whole() -> None:
+    pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\n+lQOYBF0abc\n+-----END PGP PRIVATE KEY BLOCK-----"
+    assert redact_secrets(f"+{pgp}\n+x = 1") == f"+{REDACTED}\n+x = 1"
+
+
+def test_two_keys_with_one_end_are_replaced_together() -> None:
+    """Перередакция — только в базе, а пропустить второй ключ нельзя."""
+    text = f"+-----BEGIN PRIVATE KEY-----\n+AAA\n+y = 2\n+{PEM}\n+x = 1"
+    assert redact_secrets(text) == f"+{REDACTED}\n+x = 1"
 
 
 def test_a_private_key_cut_off_by_the_hunk_is_replaced_to_the_end() -> None:
@@ -40,6 +54,7 @@ def test_a_private_key_cut_off_by_the_hunk_is_replaced_to_the_end() -> None:
         "+ghp_short = 1",
         "+def ask(sk-learn): ...",
         "+header = 'eyJ'",
+        "+task-sk-abcdefghijklmnopqrstuvw = 1",
     ],
 )
 def test_ordinary_code_is_left_as_is(text: str) -> None:
