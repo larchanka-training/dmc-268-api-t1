@@ -410,6 +410,61 @@ def test_404_on_compare_raises_the_domain_not_found(rsa_key_pair: RsaKeyPair) ->
         gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
 
 
+# Ответ GitHub на compare v6.0...v6.10 у torvalds/linux, снят 2026-10-31.
+DIFF_TOO_SLOW_BODY = {
+    "message": "The diff is taking too long to generate.",
+    "documentation_url": "https://docs.github.com/rest/commits/commits#compare-two-commits",
+    "status": "422",
+}
+
+
+def _answering(status: int, body: dict[str, Any], seen: list[httpx.Request]) -> Handler:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        seen.append(request)
+        return httpx.Response(status, json=body)
+
+    return handler
+
+
+def test_422_on_compare_is_a_too_large_diff_without_retry(rsa_key_pair: RsaKeyPair) -> None:
+    """GitHub сам не строит слишком большой дифф: это исход лимита, а не сбой VCS."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, _answering(422, DIFF_TOO_SLOW_BODY, seen), sleeps)
+
+    with pytest.raises(VcsFileTooLargeError):
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+    assert len(seen) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("status", [403, 409])
+def test_other_4xx_on_compare_stays_a_plain_vcs_error(
+    rsa_key_pair: RsaKeyPair, status: int
+) -> None:
+    gateway = make_gateway(
+        rsa_key_pair, _answering(status, {"message": "Resource not accessible"}, []), []
+    )
+
+    with pytest.raises(VcsError) as caught:
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+    assert not isinstance(caught.value, VcsFileTooLargeError)
+
+
+def test_422_outside_the_diff_stays_a_plain_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """«Слишком большой» значит 422 только у compare: у прочих ручек это просто отказ."""
+    gateway = make_gateway(rsa_key_pair, _answering(422, DIFF_TOO_SLOW_BODY, []), [])
+
+    with pytest.raises(VcsError) as caught:
+        gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
+
+    assert not isinstance(caught.value, VcsFileTooLargeError)
+
+
 def _moved(seen: list[httpx.Request]) -> Handler:
     """Handler: репозиторий переименован — API отвечает `301` с телом-ссылкой."""
 

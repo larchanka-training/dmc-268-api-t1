@@ -7,6 +7,10 @@
 
 В кэше — сырой дифф, на попадании он разбирается заново: повторный разбор
 дешевле JSON-кодека представления, а запись втрое меньше (замер в PR #308).
+Проверки лимитов на попадании нет: в кэш пишется только дифф, прошедший оба
+лимита (байты и строки), а кэш живёт в памяти процесса и пропадает при рестарте
+вместе со сменой лимита.
+
 Модель ответа собирает слой API. TTL — константа: запись по паре коммитов не
 устаревает, час лишь освобождает память от прогонов, которые никто не открывает.
 """
@@ -29,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 _CACHE_PREFIX = "run-diff:v1"
 _CACHE_TTL_SECONDS = 3600
+# Потолок строк сырого диффа: байтовый лимит строк не ограничивает (2 МиБ однобайтовых
+# строк — около миллиона строк, и разбор с представлением не помещаются в память контейнера).
+RUN_DIFF_MAX_LINES = 50_000
 
 
 class RunDiffUnavailable(Exception):
@@ -63,7 +70,8 @@ def load_run_diff(
     """Представление диффа `base_sha...head_sha` прогона.
 
     Отказы не кэшируются: `RunDiffUnavailable`, `RepositoryNotInstalled`,
-    `DiffTooLargeError`, `RunCommitNotFound`; прочий `VcsError` — наружу как есть.
+    `DiffTooLargeError` (больше `max_bytes` байт, больше `RUN_DIFF_MAX_LINES` строк
+    или провайдер отказался строить дифф), `RunCommitNotFound`; прочий `VcsError` — наружу как есть.
     Сбой кэша — промах.
     """
     if run.base_sha is None:
@@ -83,6 +91,9 @@ def load_run_diff(
         raise DiffTooLargeError(f"дифф прогона {run.id} больше {max_bytes} байт") from error
     except VcsNotFoundError as error:
         raise RunCommitNotFound(f"провайдер не знает коммиты прогона {run.id}") from error
+    # Считаем строки до разбора: разбор и представление и есть то, что не помещается в память.
+    if raw.count("\n") > RUN_DIFF_MAX_LINES:
+        raise DiffTooLargeError(f"дифф прогона {run.id} больше {RUN_DIFF_MAX_LINES} строк")
     view = build_diff_view(parse_diff(raw))
     _write_cache(cache, key, raw)
     return view

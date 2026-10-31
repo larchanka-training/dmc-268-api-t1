@@ -64,6 +64,7 @@ from app.application.ports.vcs_gateway import VcsGateway
 from app.application.run_feed_events import visible_repository_ids
 from app.application.use_cases.auth import SignedIn
 from app.application.use_cases.run_diff import (
+    RUN_DIFF_MAX_LINES,
     RepositoryNotInstalled,
     RunCommitNotFound,
     RunDiffUnavailable,
@@ -104,7 +105,8 @@ _DIFF_DESCRIPTION = (
     "номер установки приложения спрашивается у GitHub на каждом промахе кэша. Отказы не кэшируются: 409 DIFF_UNAVAILABLE — у прогона нет base_sha, "
     "к GitHub не ходили; 404 REPOSITORY_NOT_IN_INSTALLATION — приложение не установлено на репозиторий или "
     "установка приостановлена; 410 COMMIT_NOT_FOUND — GitHub не знает коммит прогона; 422 DIFF_TOO_LARGE — "
-    "дифф больше RUN_DIFF_MAX_BYTES (2 МиБ); 502 SCM_UNAVAILABLE — прочий сбой GitHub."
+    f"дифф больше RUN_DIFF_MAX_BYTES (2 МиБ) или {RUN_DIFF_MAX_LINES} строк, либо GitHub сам отказался его строить "
+    "(422 на сравнение); 502 SCM_UNAVAILABLE — прочий сбой GitHub."
 )
 _STEPS_DESCRIPTION = (
     "Требует сессию. Шаги воркера по порядку начала (при равном начале — по id): этап, статус, начало, "
@@ -635,7 +637,8 @@ def get_review_diff(
         raise ApiError(
             HTTPStatus.UNPROCESSABLE_CONTENT,
             ErrorCode.DIFF_TOO_LARGE,
-            f"Дифф прогона больше лимита {settings.run_diff_max_bytes} байт.",
+            f"Дифф прогона больше лимита: {settings.run_diff_max_bytes} байт или {RUN_DIFF_MAX_LINES} строк, "
+            "либо GitHub отказался его строить.",
         ) from None
     except VcsError as error:
         # После `DiffTooLargeError`: он тоже `VcsError`.

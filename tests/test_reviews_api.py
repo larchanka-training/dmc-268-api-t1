@@ -18,6 +18,7 @@ from app.api.factory import create_app
 from app.api.reviews import review_run_list_item
 from app.api.session import current_session
 from app.application.use_cases.auth import SignedIn
+from app.application.use_cases.run_diff import RUN_DIFF_MAX_LINES
 from app.config import Settings
 from app.domain.entities import (
     DiffAnchor,
@@ -913,6 +914,24 @@ def test_gateway_too_large_error_is_422() -> None:
 
     assert response.status_code == 422
     assert response.json()["code"] == "DIFF_TOO_LARGE"
+
+
+def test_diff_over_the_line_limit_is_422_with_a_generic_detail() -> None:
+    """Сценарий «Дифф больше лимита строк»: короткие строки укладываются в байты, но не в `RUN_DIFF_MAX_LINES`."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    added = RUN_DIFF_MAX_LINES + 1 - 5
+    long_diff = (
+        "diff --git a/many.txt b/many.txt\nnew file mode 100644\n--- /dev/null\n+++ b/many.txt\n"
+        f"@@ -0,0 +1,{added} @@\n" + "+x\n" * added
+    )
+
+    response = _client(uow, vcs=FakeVcs(diff=long_diff)).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "DIFF_TOO_LARGE"
+    assert f"{RUN_DIFF_MAX_LINES} строк" in body["detail"]
 
 
 def test_github_failure_on_the_diff_is_502() -> None:
