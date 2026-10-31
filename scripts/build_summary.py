@@ -141,7 +141,7 @@ def _image_section(
             f"| {delta(size, _bytes(bi, 'size'))} |"
         )
     compressed = _bytes(img, "compressed")
-    if compressed:
+    if compressed is not None:
         out.append(
             "| Сжатый (`docker save` \\| gzip) | `dmc268.build.image.size.compressed` "
             f"| {human_bytes(compressed)} "

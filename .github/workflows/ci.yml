@@ -188,6 +188,7 @@ jobs:
       - name: Метрики develop для следующих прогонов
         id: base
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/develop' }}
+        continue-on-error: true
         run: |
           if [ -f build-summary/metrics.json ]; then
             mkdir -p build-base && cp build-summary/metrics.json build-base/metrics.json
