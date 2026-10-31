@@ -263,6 +263,43 @@ def test_the_adapter_refuses_an_illegal_transition(uow) -> None:
             work.review_runs.update(replace(stored, status=ReviewRunStatus.COMPLETED))
 
 
+def test_a_cancel_committed_during_a_worker_transition_is_not_overwritten(clean_db) -> None:
+    """Ревью #225: воркер прочитал прогон `analysing`, приём в это время коммитит
+    `cancelled` (смена целевой ветки). Переход воркера не воскрешает прогон: иначе
+    вставка нового прогона упрётся в индекс активного, а старый опубликует `success`
+    по диффу против прежней ветки."""
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        run = a_run(mr.id)
+        for status in (ReviewRunStatus.BUILDING_CONTEXT, ReviewRunStatus.ANALYSING):
+            run = advance(run, status, NOW).unwrap()
+        work.review_runs.add(run)
+        work.commit()
+    read = threading.Event()
+
+    def cancel() -> None:
+        read.wait()
+        with SqlAlchemyUnitOfWork(clean_db) as work:
+            work.review_runs.update(advance(run, ReviewRunStatus.CANCELLED, LATER).unwrap())
+            work.commit()
+
+    thread = threading.Thread(target=cancel)
+    thread.start()
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        work.review_runs.update(advance(run, ReviewRunStatus.PUBLISHING, LATER).unwrap())
+        read.set()
+        time.sleep(0.3)
+        work.commit()
+    thread.join(timeout=10)
+
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        stored = work.review_runs.get(run.id)
+    assert stored is not None and stored.status is ReviewRunStatus.CANCELLED
+
+
 def test_a_finished_run_refuses_a_same_status_update(uow) -> None:
     now = NOW
     with uow as work:

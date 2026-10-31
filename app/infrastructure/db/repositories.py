@@ -456,7 +456,12 @@ class SqlAlchemyReviewRunRepo:
         итог верификации считает пайплайн чистыми функциями и приносит в
         сущности, поэтому ими, как и всем остальным, владеет вызывающий.
         """
-        row = self._session.get(ReviewRunRow, run.id)
+        # Блокировка строки: приём коммитит отмену параллельно переходу воркера (#222),
+        # и без неё переход по прочитанному статусу перезаписал бы `cancelled`.
+        # populate_existing: строка могла остаться в identity map от чтения до блокировки.
+        row = self._session.get(
+            ReviewRunRow, run.id, with_for_update=True, populate_existing=True
+        )
         if row is None:
             raise LookupError(f"review run {run.id} is not stored")
         # Терминальная строка проходит через next_status, даже если статус не
