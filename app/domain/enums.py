@@ -1,8 +1,8 @@
-"""Ограниченные наборы значений, на которые опираются и схема, и пайплайн.
+"""Ограниченные наборы значений домена.
 
-Определены здесь один раз; модели SQLAlchemy строят из них нативные enum'ы
-PostgreSQL, поэтому значение нельзя добавить в одном месте и забыть в
-другом.
+Определены здесь один раз. Часть из них модели SQLAlchemy превращают в
+нативные enum'ы PostgreSQL — такое значение нельзя добавить в одном месте и
+забыть в другом; остальные (например, вид строки диффа) живут только в коде.
 """
 
 from enum import StrEnum
@@ -177,6 +177,23 @@ class DefinitionKind(StrEnum):
     INTERFACE = "interface"
     FUNCTION = "function"
     METHOD = "method"
+
+
+class DiffFileStatus(StrEnum):
+    """Что произошло с файлом в диффе прогона."""
+
+    ADDED = "added"
+    MODIFIED = "modified"
+    DELETED = "deleted"
+    RENAMED = "renamed"
+
+
+class DiffLineKind(StrEnum):
+    """Вид строки ханка в диффе прогона."""
+
+    ADDED = "added"
+    REMOVED = "removed"
+    CONTEXT = "context"
 
 
 # Этапы обработки — то, что может стоять в `failed_stage`. `queued` сюда не

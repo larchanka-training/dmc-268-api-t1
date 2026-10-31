@@ -343,7 +343,7 @@ class GitHubVcsGateway:
           иначе минута и вдвое больше на каждый следующий отказ («Rate limits for
           the REST API»); пауза сверх бюджета - сразу `VcsUnavailableError`;
         - 5xx - экспоненциальный backoff;
-        - прочие ошибки - сразу ошибка адаптера (404 на GET - `VcsNotFoundError`).
+        - прочие ошибки и 3xx - сразу ошибка адаптера (404 на GET - `VcsNotFoundError`).
 
         Обрыв сети запроса без `already_done` не повторяется. С `already_done` -
         запрос без идемпотентности - на обрыв, 5xx и лимит после паузы спрашивает
@@ -372,6 +372,10 @@ class GitHubVcsGateway:
                     token = self._auth.installation_token(installation_id)
                     token_refreshed = True
                     continue
+                if 300 <= status < 400:
+                    # Переименованный репозиторий отвечает 301 — тело редиректа не
+                    # дифф и не JSON сущности, а переход шлюз не делает.
+                    raise VcsError(f"GitHub API: HTTP {status} (редирект) на {where}")
                 limited = response if is_rate_limited(response, graphql=graphql) else None
                 if not response.is_error and limited is None:
                     return response

@@ -162,6 +162,39 @@ class Settings(BaseSettings):
             "отзыв доступа на GitHub виден с этой задержкой"
         ),
     )
+    installation_id_cache_ttl_seconds: int = Field(
+        default=300,
+        gt=0,
+        description=(
+            "Сколько живёт в CacheStore номер установки приложения на репозитории; "
+            "удаление или приостановка установки видны с этой задержкой"
+        ),
+    )
+    # Дифф прогона в кабинете (change review-run-diff, D4): API читает его у
+    # GitHub на запрос и кэширует по паре коммитов в своём хранилище, а не в
+    # общем `cache_store()`. Лимиты держат память API (контейнер 512 МБ): на
+    # запрос — потолок диффа, на кэш — байты всего и одной записи (JSON
+    # представления больше сырого диффа). Значения — оценка до замера RSS.
+    run_diff_max_bytes: int = Field(
+        default=2_097_152,
+        gt=0,
+        description="Больший дифф прогона кабинет не дочитывает и отвечает 422 DIFF_TOO_LARGE",
+    )
+    run_diff_cache_max_bytes: int = Field(
+        default=50_331_648,
+        gt=0,
+        description="Сколько байт UTF-8 всего занимает кэш диффов прогонов в API",
+    )
+    run_diff_cache_entry_max_bytes: int = Field(
+        default=8_388_608,
+        gt=0,
+        description="Большая запись кэша диффов прогонов не сохраняется; не больше RUN_DIFF_CACHE_MAX_BYTES",
+    )
+    run_diff_cache_ttl_seconds: int = Field(
+        default=3_600,
+        gt=0,
+        description="Сколько живёт запись кэша диффов прогонов",
+    )
     # Потолки тела HTTP-запроса API (#72): проверяются до разбора тела, сессии и подписи
     # вебхука. Ручкам с JSON-телом хватает 1 МиБ. Приёму вебхука — 2 МиБ: принимаются только
     # `pull_request` и `pull_request_review_thread`, их доставка — десятки КиБ (тело PR и
@@ -325,6 +358,14 @@ class Settings(BaseSettings):
             raise ValueError(f"{needs} требует {', '.join(missing)}")
         if not self.eurorouter_base_url.startswith("https://"):
             raise ValueError("EUROROUTER_BASE_URL - только https://: иначе код и ключи ушли бы открытым текстом")
+        return self
+
+    @model_validator(mode="after")
+    def _check_run_diff_cache(self) -> Self:
+        # Запись больше всего кэша не поместилась бы никогда — это опечатка в
+        # окружении, а не настройка.
+        if self.run_diff_cache_entry_max_bytes > self.run_diff_cache_max_bytes:
+            raise ValueError("RUN_DIFF_CACHE_ENTRY_MAX_BYTES не может быть больше RUN_DIFF_CACHE_MAX_BYTES")
         return self
 
     @property

@@ -52,3 +52,65 @@ def test_overflow_evicts_the_oldest_live_entry() -> None:
     cache.set("c", "3", ttl_seconds=100)
     assert cache.get("a") is None
     assert (cache.get("b"), cache.get("c")) == ("2", "3")
+
+
+def test_entry_larger_than_entry_limit_is_not_stored_and_drops_previous() -> None:
+    cache = InMemoryCacheStore(max_entry_bytes=4)
+    cache.set("k", "old", ttl_seconds=100)
+    cache.set("k", "12345", ttl_seconds=100)
+    assert cache.get("k") is None
+
+
+def test_entry_size_is_utf8_length_not_character_count() -> None:
+    # «ё» — два байта в UTF-8: три символа — шесть байт.
+    cache = InMemoryCacheStore(max_entry_bytes=5)
+    cache.set("k", "ёёё", ttl_seconds=100)
+    assert cache.get("k") is None
+    cache.set("k", "ёё", ttl_seconds=100)
+    assert cache.get("k") == "ёё"
+
+
+def test_byte_overflow_evicts_expired_entries_first() -> None:
+    clock = _Clock()
+    cache = InMemoryCacheStore(monotonic=clock, max_bytes=6)
+    cache.set("short", "aaa", ttl_seconds=1)
+    cache.set("long", "bbb", ttl_seconds=100)
+    clock.now = 5
+    cache.set("fresh", "ccc", ttl_seconds=100)
+    assert cache.get("long") == "bbb"
+    assert cache.get("fresh") == "ccc"
+
+
+def test_byte_overflow_evicts_oldest_until_limit_holds() -> None:
+    cache = InMemoryCacheStore(max_bytes=6)
+    cache.set("a", "11", ttl_seconds=100)
+    cache.set("b", "22", ttl_seconds=100)
+    cache.set("c", "33", ttl_seconds=100)
+    cache.set("d", "4444", ttl_seconds=100)
+    assert (cache.get("a"), cache.get("b")) == (None, None)
+    assert (cache.get("c"), cache.get("d")) == ("33", "4444")
+
+
+def test_overwrite_recounts_entry_size() -> None:
+    cache = InMemoryCacheStore(max_bytes=6)
+    cache.set("a", "11111", ttl_seconds=100)
+    cache.set("a", "1", ttl_seconds=100)
+    cache.set("b", "22222", ttl_seconds=100)
+    assert (cache.get("a"), cache.get("b")) == ("1", "22222")
+
+
+def test_entry_count_limit_still_applies_with_byte_limit() -> None:
+    cache = InMemoryCacheStore(max_entries=2, max_bytes=1000)
+    cache.set("a", "1", ttl_seconds=100)
+    cache.set("b", "2", ttl_seconds=100)
+    cache.set("c", "3", ttl_seconds=100)
+    assert cache.get("a") is None
+    assert (cache.get("b"), cache.get("c")) == ("2", "3")
+
+
+def test_value_larger_than_whole_cache_is_not_stored_and_keeps_others() -> None:
+    cache = InMemoryCacheStore(max_bytes=4)
+    cache.set("a", "11", ttl_seconds=100)
+    cache.set("b", "12345", ttl_seconds=100)
+    assert cache.get("a") == "11"
+    assert cache.get("b") is None

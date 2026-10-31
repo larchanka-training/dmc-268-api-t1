@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
+from app.domain import vcs_errors
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
 from app.domain.vcs_errors import VcsFileTooLargeError
@@ -399,6 +400,55 @@ def test_404_raises_immediately_without_retry(rsa_key_pair: RsaKeyPair) -> None:
     assert caught.value.code == "PR_NOT_FOUND"
     assert len(seen) == 1
     assert sleeps == []
+
+
+def test_404_on_compare_raises_the_domain_not_found(rsa_key_pair: RsaKeyPair) -> None:
+    """Слой приложения ловит «не найдено» доменным классом, не зная адаптера."""
+    gateway = make_gateway(rsa_key_pair, responding([404], httpx.Response(200, json={}), []), [])
+
+    with pytest.raises(vcs_errors.VcsNotFoundError):
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+
+def _moved(seen: list[httpx.Request]) -> Handler:
+    """Handler: репозиторий переименован — API отвечает `301` с телом-ссылкой."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        seen.append(request)
+        return httpx.Response(
+            301,
+            json={"message": "Moved Permanently", "url": "https://api.github.com/repositories/1"},
+            headers={"location": "https://api.github.com/repositories/1"},
+        )
+
+    return handler
+
+
+def test_redirect_on_compare_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """`301` на compare — ошибка, а не тело редиректа под видом диффа."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, _moved(seen), sleeps)
+
+    with pytest.raises(VcsError) as caught:
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+    assert not isinstance(caught.value, (VcsNotFoundError, VcsUnavailableError))
+    assert len(seen) == 1
+    assert sleeps == []
+
+
+def test_redirect_on_metadata_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """`301` на чтение PR — та же ошибка, без повторов."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, _moved(seen), [])
+
+    with pytest.raises(VcsError):
+        gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
+
+    assert len(seen) == 1
 
 
 def failing_transport(

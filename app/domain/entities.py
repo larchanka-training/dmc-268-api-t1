@@ -350,6 +350,7 @@ class ParsedFile:
     `old_path` заполнен только у переименования. Бинарные файлы на hunk'и не
     разбираются — ревьюить там нечего, их остаётся только отфильтровать.
     `is_deleted` — у файла нет новой стороны: AST-окружение строить не из чего.
+    `is_added` — у файла нет старой стороны: статус `added` в диффе прогона.
     """
 
     file_path: str
@@ -357,6 +358,7 @@ class ParsedFile:
     is_binary: bool = False
     is_deleted: bool = False
     hunks: tuple[Hunk, ...] = ()
+    is_added: bool = False
 
 
 @dataclass(frozen=True, slots=True)
