@@ -13,11 +13,8 @@ from app.domain.enums import ReviewRunStatus
 from app.domain.repo_rules import RULES_PATH
 
 from ..conftest import requires_broker, requires_db
-from ..e2e.stack import WEBHOOK_PATH, Stack, deliver, webhook_headers
+from ..e2e.stack import WEBHOOK_PATH, Stack, deliver, webhook_body, webhook_headers
 from ..fakes.github_api import (
-    INSTALLATION_ID,
-    REPO_FULL_NAME,
-    REPO_PROVIDER_ID,
     PullRequest,
 )
 from ..fakes.llm_gateway import (
@@ -45,23 +42,9 @@ def _accept(stack: Stack, pull: PullRequest, action: str = "opened") -> str:
 
 def _retarget(stack: Stack, pull: PullRequest, *, old_ref: str, old_sha: str) -> dict[str, object]:
     """Вебхук `edited` о смене целевой ветки - как его шлёт GitHub."""
-    body = json.dumps(
-        {
-            "action": "edited",
-            "number": pull.number,
-            "changes": {"base": {"ref": {"from": old_ref}, "sha": {"from": old_sha}}},
-            "installation": {"id": INSTALLATION_ID},
-            "repository": {"id": int(REPO_PROVIDER_ID), "full_name": REPO_FULL_NAME},
-            "pull_request": {
-                "number": pull.number,
-                "title": pull.title,
-                "body": None,
-                "user": {"login": pull.author},
-                "head": {"sha": pull.head_sha, "ref": pull.head_ref},
-                "base": {"sha": pull.base_sha, "ref": pull.base_ref},
-            },
-        }
-    ).encode()
+    edited = json.loads(webhook_body(pull, "edited"))
+    edited["changes"] = {"base": {"ref": {"from": old_ref}, "sha": {"from": old_sha}}}
+    body = json.dumps(edited).encode()
     response = TestClient(stack.api()).post(
         WEBHOOK_PATH, content=body, headers=webhook_headers(body, "d-edited")
     )
