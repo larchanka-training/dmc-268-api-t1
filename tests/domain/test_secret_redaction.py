@@ -31,6 +31,35 @@ def test_a_known_secret_is_replaced(secret: str) -> None:
     assert redact_secrets(f'+API_KEY = "{secret}"  # prod') == f'+API_KEY = "{REDACTED}"  # prod'
 
 
+@pytest.mark.parametrize(
+    ("name", "secret"),
+    [
+        ("GITHUB_TOKEN_", "ghp_" + "a1B2" * 9),
+        ("key_", "AKIAIOSFODNN7EXAMPLE"),
+        ("api_", "sk-" + "x" * 30),
+        ("slack_", "xoxb-1234567890-abcdefghij"),
+        ("stripe_", "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc"),
+        ("google_", "AIza" + "SyD-" + "a" * 31),
+    ],
+)
+def test_a_secret_glued_to_an_underscore_is_replaced(name: str, secret: str) -> None:
+    """Имя переменной перед токеном: `\\b` между `_` и буквой границы не видит."""
+    assert redact_secrets(f"+{name}{secret} = 1") == f"+{name}{REDACTED} = 1"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('+url = "postgres://app:hunter2@db/x"', f'+url = "postgres://{REDACTED}@db/x"'),
+        ("+redis://:hunter2@cache:6379", f"+redis://{REDACTED}@cache:6379"),
+        ('+-H "Authorization: Basic dXNlcjpwYXNz"', f'+-H "{REDACTED}"'),
+        ('+{"Authorization": "Basic dXNlcjpwYXNz"}', f'+{{"{REDACTED}"}}'),
+    ],
+)
+def test_credentials_in_a_url_or_basic_auth_are_replaced(text: str, expected: str) -> None:
+    assert redact_secrets(text) == expected
+
+
 def test_a_private_key_spanning_diff_lines_is_replaced_whole() -> None:
     assert redact_secrets(f"+key = '''\n+{PEM}\n+'''\n+x = 1") == f"+key = '''\n+{REDACTED}\n+'''\n+x = 1"
 
@@ -69,6 +98,9 @@ def test_a_private_key_cut_off_by_the_hunk_is_replaced_to_the_end() -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "+if line.startswith('-----BEGIN PRIVATE KEY-----'):\n+    return parse(line)\n+x = 1",
+        "+url = 'https://example.com/a:b@c'",
+        "+Basic authentication is supported",
         "+password = os.environ['DB_PASSWORD']",
         "+ghp_short = 1",
         "+def ask(sk-learn): ...",
@@ -81,13 +113,24 @@ def test_ordinary_code_is_left_as_is(text: str) -> None:
     assert redact_secrets(text) == text
 
 
-@pytest.mark.parametrize("unit", ["--eyJ", "-eyJ-"])
+def _seconds(text: str) -> float:
+    """Лучшее из трёх: шум нагрузки CI только добавляет время."""
+    best = float("inf")
+    for _ in range(3):
+        started = time.perf_counter()
+        redact_secrets(text)
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+@pytest.mark.parametrize("unit", ["--eyJ", "-eyJ-", "_eyJ", "_sk-", "://a:"])
 def test_a_hostile_run_of_token_characters_is_scanned_in_linear_time(unit: str) -> None:
-    """Вход из PR длиной вдвое больше пакета: квадратичный поиск шёл бы секунды."""
-    text = unit * (256_000 // len(unit))
-    started = time.perf_counter()
-    redact_secrets(text)
-    assert time.perf_counter() - started < 1
+    """Вчетверо длиннее вход — линейный поиск вчетверо дольше, квадратичный в 16 раз.
+
+    Сравнение двух размеров, а не порог в секундах: от скорости машины CI не зависит.
+    """
+    small = unit * (64_000 // len(unit))
+    assert _seconds(small * 4) < 8 * _seconds(small)
 
 
 def test_strings_are_redacted_at_any_depth_and_the_input_is_not_changed() -> None:
