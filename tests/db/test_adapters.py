@@ -11,12 +11,14 @@ from sqlalchemy import text
 from app.application.ports.unit_of_work import ActiveRunConflict
 from app.application.stale_sweep import sweep_stale_runs
 from app.domain.entities import (
+    DEFAULT_REPOSITORY_SETTINGS,
     ContextPayload,
     DiffAnchor,
     Finding,
     MergeRequest,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewRun,
     ReviewRunStep,
     RuleRef,
@@ -154,6 +156,89 @@ def test_disconnect_and_reconnect_keep_one_record_with_its_id(uow) -> None:
 def test_reconnect_without_a_record_finds_nothing(uow) -> None:
     with uow as work:
         assert work.repositories.reconnect(a_repository()) is None
+
+
+HIGH_ON_MAIN = RepositorySettings(
+    auto_review_enabled=False,
+    branch_filter=("main", "release/*"),
+    min_severity=FindingSeverity.HIGH,
+)
+
+
+def test_a_repository_is_added_and_read_with_its_settings(uow) -> None:
+    """`text[]` ↔ tuple и enum порога переживают запись и чтение."""
+    repo = replace(a_repository(), branch_filter=("main", "release/*"), min_severity=FindingSeverity.HIGH)
+    with uow as work:
+        work.repositories.add(repo)
+        work.commit()
+    with uow as work:
+        assert work.repositories.get(repo.id) == repo
+
+
+def test_update_settings_writes_three_columns_and_updated_at(uow) -> None:
+    repo = a_repository()
+    with uow as work:
+        work.repositories.add(repo)
+        work.commit()
+    with uow as work:
+        work.repositories.update_settings(repo.id, HIGH_ON_MAIN, LATER)
+        work.commit()
+    with uow as work:
+        stored = work.repositories.get(repo.id)
+    assert stored == replace(
+        repo,
+        auto_review_enabled=False,
+        branch_filter=("main", "release/*"),
+        min_severity=FindingSeverity.HIGH,
+        updated_at=LATER,
+    )
+
+    # Полная замена: пустой список стирает паттерны.
+    with uow as work:
+        work.repositories.update_settings(repo.id, DEFAULT_REPOSITORY_SETTINGS, LATER)
+        work.commit()
+    with uow as work:
+        assert work.repositories.get(repo.id) == replace(repo, updated_at=LATER)
+
+
+def test_disconnect_and_reconnect_keep_the_saved_settings(uow) -> None:
+    repo = a_repository()
+    with uow as work:
+        work.repositories.add(repo)
+        work.repositories.update_settings(repo.id, HIGH_ON_MAIN, NOW)
+        work.repositories.disconnect(repo.id, LATER)
+        work.commit()
+    # Путь подключения несёт умолчания в сущности — они не должны затереть сохранённое.
+    candidate = replace(a_repository(), connected_at=LATER, updated_at=LATER)
+    with uow as work:
+        reconnected = work.repositories.reconnect(candidate)
+        work.commit()
+    assert reconnected is not None
+    assert (reconnected.auto_review_enabled, reconnected.branch_filter, reconnected.min_severity) == (
+        False,
+        ("main", "release/*"),
+        FindingSeverity.HIGH,
+    )
+
+
+def test_update_does_not_overwrite_the_settings(uow) -> None:
+    repo = a_repository()
+    with uow as work:
+        work.repositories.add(repo)
+        work.repositories.update_settings(repo.id, HIGH_ON_MAIN, NOW)
+        work.commit()
+    with uow as work:
+        work.repositories.update(replace(repo, full_name="acme/renamed", default_branch="trunk"))
+        work.commit()
+    with uow as work:
+        stored = work.repositories.get(repo.id)
+    assert stored is not None
+    assert (stored.full_name, stored.default_branch) == ("acme/renamed", "trunk")
+    assert (stored.auto_review_enabled, stored.branch_filter, stored.min_severity) == (
+        False,
+        ("main", "release/*"),
+        FindingSeverity.HIGH,
+    )
 
 
 def test_two_concurrent_reconnects_leave_one_record_and_one_winner(clean_db) -> None:

@@ -1,4 +1,4 @@
-"""Check run merge gate по открытым критичным тредам."""
+"""Check run merge gate по открытым тредам не ниже порога репозитория."""
 
 import logging
 from uuid import UUID
@@ -6,8 +6,8 @@ from uuid import UUID
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import MergeGateCheck
-from app.domain.entities import Finding
-from app.domain.enums import ReviewRunStatus
+from app.domain.entities import DEFAULT_REPOSITORY_SETTINGS, Finding, MergeRequest
+from app.domain.enums import FindingSeverity, ReviewPause, ReviewRunStatus
 from app.domain.merge_gate import merge_blocked_by_findings, untracked_findings
 from app.domain.vcs_errors import VcsError
 
@@ -27,13 +27,41 @@ def collect_open_findings(
     `head_run_id` - прогон, чьё ревью стоит на текущем head; `None` - такого нет.
     """
     with uow:
-        threads = uow.published_comments.list_open_threads_for_merge_request(merge_request_id)
-        untracked: tuple[Finding, ...] = ()
-        if head_run_id is not None:
-            untracked = untracked_findings(
-                uow.findings.list_for_run(head_run_id),
-                uow.published_comments.list_for_run(head_run_id),
-            )
+        return _open_findings(uow, merge_request_id, head_run_id)
+
+
+def collect_merge_gate_inputs(
+    uow: UnitOfWork, merge_request: MergeRequest, *, head_run_id: UUID | None
+) -> tuple[tuple[Finding, ...], FindingSeverity]:
+    """Открытые находки PR и порог `min_severity` его репозитория — одной транзакцией.
+
+    Порог читается из записи репозитория, а не из задачи: смена порога после постановки
+    действует на публикации (design D4). Записи нет (её не удаляют, выключение мягкое) —
+    порог по умолчанию: ревью уже опубликовано, падать поздно.
+    """
+    with uow:
+        repository = uow.repositories.get(merge_request.repository_id)
+        open_findings = _open_findings(uow, merge_request.id, head_run_id)
+    if repository is None:
+        logger.warning(
+            "merge gate: нет записи репозитория %s у PR %s — порог по умолчанию",
+            merge_request.repository_id,
+            merge_request.id,
+        )
+        return open_findings, DEFAULT_REPOSITORY_SETTINGS.min_severity
+    return open_findings, repository.min_severity
+
+
+def _open_findings(
+    uow: UnitOfWork, merge_request_id: UUID, head_run_id: UUID | None
+) -> tuple[Finding, ...]:
+    threads = uow.published_comments.list_open_threads_for_merge_request(merge_request_id)
+    untracked: tuple[Finding, ...] = ()
+    if head_run_id is not None:
+        untracked = untracked_findings(
+            uow.findings.list_for_run(head_run_id),
+            uow.published_comments.list_for_run(head_run_id),
+        )
     return tuple(t.finding for t in threads) + untracked
 
 
@@ -45,17 +73,43 @@ DISABLED_REVIEW_CHECK = MergeGateCheck(
     summary="Ревью этого репозитория выключено в сервисе: проверка мёрж не блокирует.",
 )
 
+# Включённый репозиторий с `auto_review_enabled = false`: тот же путь, что у выключенного, но
+# свой текст — включается настройкой в кабинете, а не повторным подключением (design D5).
+AUTO_REVIEW_OFF_CHECK = MergeGateCheck(
+    conclusion="success",
+    title="Авторевью выключено в настройках",
+    summary=(
+        "Автоматическое ревью выключено в настройках репозитория в кабинете; "
+        "проверка мёрж не блокирует."
+    ),
+)
 
-def build_merge_gate_check(open_findings: tuple[Finding, ...]) -> MergeGateCheck:
-    blocked = merge_blocked_by_findings(open_findings)
-    conclusion = "failure" if blocked else "success"
-    title = "Есть критичные замечания" if blocked else "Ревью пройдено"
-    summary = (
-        "Остаются незакрытые замечания уровня critical — мердж заблокирован."
-        if blocked
-        else "Критичных незакрытых замечаний нет."
+# Check run на head по причине паузы ревью (`review_pause`): вебхук PR и вебхук треда.
+PAUSE_CHECKS: dict[ReviewPause, MergeGateCheck] = {
+    ReviewPause.DISCONNECTED: DISABLED_REVIEW_CHECK,
+    ReviewPause.AUTO_REVIEW_OFF: AUTO_REVIEW_OFF_CHECK,
+}
+
+
+def build_merge_gate_check(
+    open_findings: tuple[Finding, ...], min_severity: FindingSeverity
+) -> MergeGateCheck:
+    """Check run merge gate: заголовок и текст называют порог, и при `critical` тоже (design D4)."""
+    blocked = merge_blocked_by_findings(open_findings, min_severity)
+    threshold = min_severity.value
+    if blocked:
+        return MergeGateCheck(
+            conclusion="failure",
+            title=f"Есть незакрытые замечания уровня {threshold} и выше",
+            summary=(
+                f"Остаются незакрытые замечания уровня {threshold} и выше — мердж заблокирован."
+            ),
+        )
+    return MergeGateCheck(
+        conclusion="success",
+        title="Ревью пройдено",
+        summary=f"Незакрытых замечаний уровня {threshold} и выше нет.",
     )
-    return MergeGateCheck(conclusion=conclusion, title=title, summary=summary)
 
 
 def build_retarget_check() -> MergeGateCheck:
@@ -94,6 +148,7 @@ def settle_merge_gate(
     installation_id: int,
     run_id: UUID,
     check: MergeGateCheck,
+    min_severity: FindingSeverity,
 ) -> None:
     """Выставить gate прогона `run_id` - `check` - или, если тот уже не отвечает
     за head, gate того, кто отвечает (#222).
@@ -104,7 +159,8 @@ def settle_merge_gate(
     закоммитил, здесь видна смена и gate переписывается; если нет - блокировка
     приёма придёт позже и перекроет `success`. Так любая перестановка кончается
     gate актуального прогона. После сбоя `SETTLE_ATTEMPTS` попыток - `VcsError`
-    вызывающему.
+    вызывающему. `min_severity` - порог репозитория для gate завершённого чужого
+    прогона: тот же, что вызывающий взял для `check`.
     """
     failures = 0
     # Прогон и статус, по которым выставлен последний check: итог зависит от статуса,
@@ -122,7 +178,8 @@ def settle_merge_gate(
         elif latest.status is ReviewRunStatus.COMPLETED:
             # Новый прогон успел завершиться: его gate мог уйти раньше нашего POST.
             current = build_merge_gate_check(
-                collect_open_findings(uow, merge_request_id, head_run_id=latest.id)
+                collect_open_findings(uow, merge_request_id, head_run_id=latest.id),
+                min_severity,
             )
         elif latest.status is ReviewRunStatus.FAILED:
             # Новый прогон уже упал: повторного ревью не будет, head ждёт push.

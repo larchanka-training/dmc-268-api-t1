@@ -26,7 +26,12 @@ from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.use_cases.user_token import call_with_user_token
-from app.domain.entities import InstallationRepository, Repository, Secret
+from app.domain.entities import (
+    InstallationRepository,
+    Repository,
+    RepositorySettings,
+    Secret,
+)
 from app.domain.enums import Provider, RepositorySelection
 from app.domain.repository_access import (
     can_connect,
@@ -153,6 +158,25 @@ def connect_repository(
     return reconnected or repository
 
 
+def _manage_refusal(
+    catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, repository: Repository, now: datetime
+) -> ConnectRefusal | None:
+    """Может ли пользователь управлять репозиторием; `None` — может.
+
+    Запрос к провайдеру мимо кэша видимости: роль, отозванная после кэширования, видна сразу.
+    Провайдер репозиторий не отдаёт — `NOT_IN_INSTALLATION`; нет admin или maintain —
+    `MANAGE_REQUIRED`.
+    """
+    found = call_with_user_token(
+        uow, user.oauth, user.session_id, now, lambda token: catalog.user_repository(token, repository.provider_id)
+    )
+    if found is None:
+        return ConnectRefusal.NOT_IN_INSTALLATION
+    if not can_connect(found.permissions):
+        return ConnectRefusal.MANAGE_REQUIRED
+    return None
+
+
 def disconnect_repository(
     catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, repository: Repository, now: datetime
 ) -> ConnectRefusal | None:
@@ -163,15 +187,36 @@ def disconnect_repository(
     `NOT_IN_INSTALLATION`; нет admin или maintain — `MANAGE_REQUIRED`. Уже выключенный
     выключается ещё раз без ошибки.
     """
-    found = call_with_user_token(
-        uow, user.oauth, user.session_id, now, lambda token: catalog.user_repository(token, repository.provider_id)
-    )
-    if found is None:
-        return ConnectRefusal.NOT_IN_INSTALLATION
-    if not can_connect(found.permissions):
-        return ConnectRefusal.MANAGE_REQUIRED
+    refusal = _manage_refusal(catalog, uow, user, repository, now)
+    if refusal is not None:
+        return refusal
     with uow:
         uow.repositories.disconnect(repository.id, now)
+        uow.commit()
+    return None
+
+
+def save_repository_settings(
+    catalog: InstallationCatalog,
+    uow: UnitOfWork,
+    user: UserContext,
+    repository: Repository,
+    settings: RepositorySettings,
+    now: datetime,
+) -> ConnectRefusal | None:
+    """Записать настройки ревью видимого пользователю репозитория; `None` — записано.
+
+    Права — тем же правилом и тем же запросом к провайдеру мимо кэша, что у выключения
+    (design D6): не отдан — `NOT_IN_INSTALLATION`, нет admin или maintain —
+    `MANAGE_REQUIRED`; при отказе ничего не пишется. Замена полная, повтор того же тела
+    даёт ту же запись. Выключенный репозиторий настройки получает, но не включается:
+    `connected_at` не трогаем, включение — `connect_repository`.
+    """
+    refusal = _manage_refusal(catalog, uow, user, repository, now)
+    if refusal is not None:
+        return refusal
+    with uow:
+        uow.repositories.update_settings(repository.id, settings, now)
         uow.commit()
     return None
 

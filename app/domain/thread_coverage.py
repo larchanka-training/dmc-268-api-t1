@@ -14,13 +14,7 @@ from dataclasses import dataclass
 
 from app.domain.entities import BotThread, Finding
 from app.domain.enums import FindingSeverity
-
-_RANK: dict[FindingSeverity, int] = {
-    FindingSeverity.LOW: 0,
-    FindingSeverity.MEDIUM: 1,
-    FindingSeverity.HIGH: 2,
-    FindingSeverity.CRITICAL: 3,
-}
+from app.domain.merge_gate import severity_at_least
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +42,7 @@ def thread_coverage(
     ]
     open_threads = [t for t in same_place if not t.resolved]
     for thread in open_threads:
-        if _RANK[thread.finding.severity] >= _RANK[finding.severity]:
+        if severity_at_least(thread.finding.severity, finding.severity):
             return ThreadCoverage(covered_by=thread)
     for thread in same_place:
         if thread.resolved and not thread.resolved_by_bot and not _escalated_to_critical(

@@ -23,6 +23,7 @@ from app.domain.entities import (
     ProviderToken,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewRun,
     ReviewRunListEntry,
     ReviewRunStep,
@@ -103,9 +104,24 @@ class FakeRepositoryRepo:
             self._by_id[repository_id] = replace(stored, connected_at=None, updated_at=now)
 
     def update(self, repository: Repository) -> None:
-        if repository.id not in self._by_id:
+        stored = self._by_id.get(repository.id)
+        if stored is None:
             raise LookupError(f"repository {repository.id} is not stored")
-        self._by_id[repository.id] = repository
+        # Как адаптер: настройки ревью пишет только `update_settings`.
+        self._by_id[repository.id] = replace(
+            stored, full_name=repository.full_name, default_branch=repository.default_branch
+        )
+
+    def update_settings(self, repository_id: UUID, settings: RepositorySettings, now: datetime) -> None:
+        stored = self._by_id.get(repository_id)
+        if stored is not None:
+            self._by_id[repository_id] = replace(
+                stored,
+                auto_review_enabled=settings.auto_review_enabled,
+                branch_filter=settings.branch_filter,
+                min_severity=settings.min_severity,
+                updated_at=now,
+            )
 
 
 class FakeMergeRequestRepo:

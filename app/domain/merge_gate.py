@@ -1,13 +1,29 @@
-"""Решение о блокировке мерджа по открытым критичным замечаниям."""
+"""Решение о блокировке мерджа по открытым замечаниям не ниже порога важности."""
 
 from collections.abc import Iterable
 
 from app.domain.entities import Finding, PublishedComment
 from app.domain.enums import CommentKind, FindingSeverity
 
+# Единственный ранг важности в домене: порог merge gate и покрытие тредом сравнивают по нему.
+_RANK: dict[FindingSeverity, int] = {
+    FindingSeverity.LOW: 0,
+    FindingSeverity.MEDIUM: 1,
+    FindingSeverity.HIGH: 2,
+    FindingSeverity.CRITICAL: 3,
+}
 
-def merge_blocked_by_findings(open_findings: tuple[Finding, ...]) -> bool:
-    return any(f.severity is FindingSeverity.CRITICAL for f in open_findings)
+
+def severity_at_least(severity: FindingSeverity, threshold: FindingSeverity) -> bool:
+    """Не ниже ли важность `severity` порога `threshold`."""
+    return _RANK[severity] >= _RANK[threshold]
+
+
+def merge_blocked_by_findings(
+    open_findings: tuple[Finding, ...], min_severity: FindingSeverity
+) -> bool:
+    """Блокирует мердж открытая находка с важностью не ниже порога `min_severity`."""
+    return any(severity_at_least(f.severity, min_severity) for f in open_findings)
 
 
 def untracked_findings(

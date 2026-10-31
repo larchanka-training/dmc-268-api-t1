@@ -78,6 +78,7 @@ def build_review_context(
         cache=cache,
         max_bytes=limits.rules_max_bytes,
         cache_ttl_seconds=limits.rules_cache_ttl_seconds,
+        now=now,
     )
     asts, skipped = _collect_asts(job, filter_diff_files(files), vcs, extractor, limits)
     return assemble_context(

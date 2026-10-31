@@ -12,7 +12,7 @@ from app.application.ports.vcs_review import (
 )
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
-from app.domain.vcs_errors import VcsFileTooLargeError
+from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 
 # Как у `FakeVcs`: первая строка `app/main.py` в диффе для сборки контекста.
 _PIPELINE_DIFF = (
@@ -52,6 +52,8 @@ class RecordingVcsGateway:
     stored_reviews: set[UUID] = field(default_factory=set)
     found_review_requests: list[UUID] = field(default_factory=list)
     find_review_error: Exception | None = None
+    # Sha ветки по её имени; ветки нет в словаре — `VcsError`, как 422 GitHub.
+    branch_shas: dict[str, str] = field(default_factory=dict)
 
     def fetch_diff(
         self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
@@ -84,6 +86,11 @@ class RecordingVcsGateway:
         self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
     ) -> str | None:
         return self.files.get((path, sha))
+
+    def resolve_branch_sha(self, repo_full_name: str, branch: str, installation_id: int) -> str:
+        if branch not in self.branch_shas:
+            raise VcsError(f"ветки {branch} нет")
+        return self.branch_shas[branch]
 
     def publish_pull_request_review(
         self,

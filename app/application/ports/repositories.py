@@ -20,6 +20,7 @@ from app.domain.entities import (
     ProviderToken,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewRun,
     ReviewRunListEntry,
     ReviewRunStep,
@@ -61,7 +62,13 @@ class RepositoryRepo(Protocol):
         """Выключить ревью: `connected_at = NULL`; уже выключенный или отсутствующий — без ошибки."""
         ...
 
-    def update(self, repository: Repository) -> None: ...
+    def update(self, repository: Repository) -> None:
+        """Записать имя и ветку по умолчанию; настройки ревью не трогает — их пишет `update_settings`."""
+        ...
+
+    def update_settings(self, repository_id: UUID, settings: RepositorySettings, now: datetime) -> None:
+        """Заменить настройки ревью целиком и `updated_at = now`; отсутствующий — без ошибки."""
+        ...
 
 
 class MergeRequestRepo(Protocol):
