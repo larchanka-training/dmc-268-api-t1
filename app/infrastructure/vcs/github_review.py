@@ -30,18 +30,6 @@ def _github_side(side: DiffSide) -> str:
     return "RIGHT" if side is DiffSide.NEW else "LEFT"
 
 
-def _raw_comment_line(raw: dict[str, Any]) -> int | None:
-    line = raw.get("line")
-    if line is None:
-        line = raw.get("original_line")
-    if line is None:
-        return None
-    try:
-        return int(line)
-    except (TypeError, ValueError):
-        return None
-
-
 def _thread_current_line(thread: dict[str, Any]) -> int | None:
     """Строка треда в текущем диффе PR; у устаревшего треда её нет.
 
@@ -58,42 +46,39 @@ def _thread_current_line(thread: dict[str, Any]) -> int | None:
 def _map_fetched_inline_comments(
     drafts: tuple[InlineCommentDraft, ...],
     raw_comments: list[dict[str, Any]],
-    *,
-    match_body: bool = False,
 ) -> tuple[PublishedInlineComment | None, ...]:
-    """Сопоставить комментарии ревью с черновиками по файлу, стороне и строке.
+    """Сопоставляет черновики с комментариями созданного ревью по пути и тексту.
 
-    `match_body` - сверять ещё и текст: при подборе ревью упавшего прогона
-    черновики строятся из всех его находок, а опубликована была только часть,
-    и две находки на одной строке без текста не различить (#222)."""
+    `GET …/reviews/{id}/comments` отдаёт `line`, `side` и `original_line`
+    пустыми, есть только `position` (проверено на живом PR, #265), поэтому
+    строку и сторону берём из черновика: текст комментария сервис пишет сам.
+    Одинаковые тексты в одном файле разбираются в порядке ответа; если
+    GitHub переставит их, id поменяются у одинаковых замечаний, на merge gate
+    это не влияет.
+    """
     published: list[PublishedInlineComment | None] = []
     used_provider_ids: set[str] = set()
     for draft in drafts:
-        want_side = _github_side(draft.side)
-        want_line = draft.line
         match = next(
             (
                 raw
                 for raw in raw_comments
                 if str(raw.get("id")) not in used_provider_ids
                 and raw.get("path") == draft.file_path
-                and _raw_comment_line(raw) == want_line
-                and raw.get("side", "RIGHT") == want_side
-                and (not match_body or raw.get("body") == draft.body)
+                and str(raw.get("body", "")).strip() == draft.body.strip()
             ),
             None,
         )
         if match is None:
             published.append(None)
             continue
-        side = DiffSide.NEW if match.get("side", "RIGHT") == "RIGHT" else DiffSide.OLD
         provider_id = str(match["id"])
         used_provider_ids.add(provider_id)
         published.append(
             PublishedInlineComment(
                 file_path=draft.file_path,
-                side=side,
-                line=want_line,
+                side=draft.side,
+                line=draft.line,
                 provider_comment_id=provider_id,
             )
         )
@@ -158,7 +143,7 @@ class GitHubReviewClient:
         if inline_comments:
             try:
                 published = self._inline_comments_of(
-                    reviews_url, review_id, installation_id, inline_comments
+                    reviews_url, review_id, installation_id, inline_comments, review_run_id
                 )
             except VcsError:
                 logger.warning(
@@ -196,7 +181,7 @@ class GitHubReviewClient:
         published: tuple[PublishedInlineComment | None, ...] = ()
         if inline_comments:
             published = self._inline_comments_of(
-                reviews_url, review_id, installation_id, inline_comments, match_body=True
+                reviews_url, review_id, installation_id, inline_comments, review_run_id
             )
         return PullRequestReviewPublication(
             summary_provider_comment_id=review_id, inline_comments=published
@@ -208,13 +193,23 @@ class GitHubReviewClient:
         review_id: str,
         installation_id: int,
         inline_comments: tuple[InlineCommentDraft, ...],
-        *,
-        match_body: bool = False,
+        review_run_id: UUID,
     ) -> tuple[PublishedInlineComment | None, ...]:
         raw_comments = self._gw._get_json_list_paginated(
             f"{reviews_url}/{review_id}/comments", installation_id
         )
-        return _map_fetched_inline_comments(inline_comments, raw_comments, match_body=match_body)
+        published = _map_fetched_inline_comments(inline_comments, raw_comments)
+        unmatched = published.count(None)
+        if unmatched and raw_comments:
+            # Иначе поломка сопоставления видна только по «Опубликовано inline: 0» (#265).
+            logger.warning(
+                "прогон %s: ревью %s, не сопоставлено inline %d из %d",
+                review_run_id,
+                review_id,
+                unmatched,
+                len(published),
+            )
+        return published
 
     def _learn_bot_login(self) -> None:
         """Логин бота - до `POST`, best-effort: он нужен поиску по маркеру, а поиск

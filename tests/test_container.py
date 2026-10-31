@@ -266,6 +266,19 @@ def test_hosted_provider_is_only_ever_the_second(caplog: pytest.LogCaptureFixtur
     )
 
 
+def test_eurorouter_backend_is_the_only_provider_and_says_the_code_leaves(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    log = _built_gateway_log(caplog, llm_backend="eurorouter", **HOSTED)
+    assert log == (
+        "модель: Eurorouter (mistral-large-2411) основной, без фоллбэка: "
+        "код проверяемых репозиториев уходит hosted-провайдеру"
+    )
+    gateway = build_container(_model_settings(llm_backend="eurorouter", **HOSTED)).llm_gateway()
+    assert isinstance(gateway, FallbackLlmGateway)
+    assert [name for name, _ in gateway._providers] == ["Eurorouter"]
+
+
 def test_connection_to_a_model_host_times_out_long_before_the_answer_does() -> None:
     timeout = llm_http_timeout(_model_settings(**LOCAL, llm_timeout_seconds=300))
     assert (timeout.connect, timeout.read) == (10.0, 300)
@@ -284,10 +297,10 @@ def test_the_api_vcs_client_keeps_a_short_timeout_and_the_worker_gets_thirty_sec
     api = build_container(SETTINGS).vcs_gateway()
     worker = build_container(SETTINGS, vcs_limits=WORKER_VCS_LIMITS).vcs_gateway()
 
-    assert api._client.timeout == httpx.Timeout(5.0)  # type: ignore[attr-defined]
-    assert api._rate_limit_budget_seconds == 0.0  # type: ignore[attr-defined]
-    assert worker._client.timeout == httpx.Timeout(30.0, connect=5.0)  # type: ignore[attr-defined]
-    assert worker._rate_limit_budget_seconds == 60.0  # type: ignore[attr-defined]
+    assert api._client.timeout == httpx.Timeout(5.0)
+    assert api._rate_limit_budget_seconds == 0.0
+    assert worker._client.timeout == httpx.Timeout(30.0, connect=5.0)
+    assert worker._rate_limit_budget_seconds == 60.0
 
 
 def test_the_redelivery_pass_gets_a_gateway_that_does_not_wait_out_rate_limits() -> None:

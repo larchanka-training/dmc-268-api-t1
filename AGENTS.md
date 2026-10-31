@@ -87,6 +87,7 @@
 | Система целиком, границы сервисов, оба стека | `docs/SYSTEM_DESIGN.md` (в работе, PR #6) |
 | Установка, запуск, тесты, миграции | [`README.md`](README.md) |
 | Локальный стек на Terraform | [`infra/README.md`](infra/README.md) |
+| Весь бэкенд локально против настоящего GitHub (`make run-local`) | [`docs/LOCAL_RUN.md`](docs/LOCAL_RUN.md) |
 | Правила стека | [`.agents/rules/backend.md`](.agents/rules/backend.md) |
 | Ветки, задачи, пул-реквесты, треды | [`.agents/rules/git-and-pr.md`](.agents/rules/git-and-pr.md) |
 | Скиллы и шаблоны | [`.agents/skills/`](.agents/skills/), [`.agents/templates/backend/`](.agents/templates/backend/) |

@@ -83,6 +83,25 @@ class FakeRepositoryRepo:
         self._by_id[repository.id] = repository
         return True
 
+    def reconnect(self, repository: Repository) -> Repository | None:
+        stored = self.find_by_provider(repository.provider, repository.provider_id)
+        if stored is None or stored.connected_at is not None:
+            return None
+        reconnected = replace(
+            stored,
+            connected_at=repository.connected_at,
+            full_name=repository.full_name,
+            default_branch=repository.default_branch,
+            updated_at=repository.updated_at,
+        )
+        self._by_id[stored.id] = reconnected
+        return reconnected
+
+    def disconnect(self, repository_id: UUID, now: datetime) -> None:
+        stored = self._by_id.get(repository_id)
+        if stored is not None:
+            self._by_id[repository_id] = replace(stored, connected_at=None, updated_at=now)
+
     def update(self, repository: Repository) -> None:
         if repository.id not in self._by_id:
             raise LookupError(f"repository {repository.id} is not stored")

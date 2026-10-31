@@ -37,7 +37,7 @@ class RepositoryRepo(Protocol):
     def find_by_provider(self, provider: Provider, provider_id: str) -> Repository | None: ...
 
     def list_by_provider_ids(self, provider: Provider, provider_ids: Collection[str]) -> list[Repository]:
-        """Зарегистрированные репозитории провайдера из списка его id; незарегистрированных нет."""
+        """Зарегистрированные репозитории провайдера из списка его id, выключенные тоже; незарегистрированных нет."""
         ...
 
     def add(self, repository: Repository) -> bool:
@@ -46,6 +46,19 @@ class RepositoryRepo(Protocol):
         Два параллельных подключения одного репозитория не должны давать
         ошибку базы: проигравший получает `False` и отвечает конфликтом.
         """
+        ...
+
+    def reconnect(self, repository: Repository) -> Repository | None:
+        """Включить выключенную запись той же пары провайдер + id: `connected_at`, имя, ветка и
+        `updated_at` — из `repository`; прежние `id` и история остаются.
+
+        Вернуть обновлённую запись; `None` — выключенной записи нет (нет вовсе или уже включена,
+        в том числе параллельным запросом).
+        """
+        ...
+
+    def disconnect(self, repository_id: UUID, now: datetime) -> None:
+        """Выключить ревью: `connected_at = NULL`; уже выключенный или отсутствующий — без ошибки."""
         ...
 
     def update(self, repository: Repository) -> None: ...

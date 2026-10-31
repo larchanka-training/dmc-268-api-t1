@@ -9,6 +9,7 @@
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from time import monotonic
 
 import httpx
 from sqlalchemy import Engine, create_engine
@@ -27,6 +28,7 @@ from app.application.ports.run_outcome import RunOutcomeRecorder
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.config import Settings
+from app.domain.vcs_errors import VcsError
 from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
 from app.infrastructure.db.token_cipher import TokenCipher
@@ -75,6 +77,9 @@ API_VCS_LIMITS = VcsClientLimits(timeout=httpx.Timeout(5.0), rate_limit_budget_s
 WORKER_VCS_LIMITS = VcsClientLimits(
     timeout=httpx.Timeout(30.0, connect=5.0), rate_limit_budget_seconds=60.0
 )
+# Сбой `GET /app` для `install_url` помнится минуту: страницы списка, запрошенные
+# подряд, не ждут таймаута GitHub каждая и не пишут по предупреждению на страницу.
+_APP_SLUG_RETRY_SECONDS = 60.0
 # Callback входа: путь роутера `/auth`, зарегистрированный в настройках GitHub App.
 _OAUTH_CALLBACK_PATH = "/api/v1/auth/{provider}/callback"
 
@@ -97,7 +102,7 @@ class Container:
     # tokens обязан пережить один вызов builder'а, иначе теряется смысл
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
-    _vcs_gateway: VcsGateway | None
+    _vcs_gateway: GitHubVcsGateway | None
     # Таймаут и ожидание лимита VCS-шлюза: у API и воркера свои.
     _vcs_limits: VcsClientLimits
     # Репозитории, видимые пользователю, — запросы с его токеном; App-реквизиты
@@ -117,6 +122,9 @@ class Container:
     _llm_gateway: LlmGateway | None
     # Ленивый, как VCS-шлюз: процессу API парсеры грамматик не нужны.
     _definition_extractor: DefinitionExtractor | None
+    # Время `monotonic()`, до которого `app_slug` после сбоя не спрашивает
+    # GitHub; `0.0` — сбоя не было.
+    _app_slug_retry_at: float
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine, self._token_cipher)
@@ -138,13 +146,32 @@ class Container:
             object.__setattr__(self, "_llm_gateway", gateway)
         return gateway
 
-    def vcs_gateway(self) -> VcsGateway:
+    def vcs_gateway(self) -> GitHubVcsGateway:
         """Собрать VCS-шлюз при первом обращении; конструирование — без сети."""
         gateway = self._vcs_gateway
         if gateway is None:
             gateway = self._build_vcs_gateway(self._vcs_limits)
             object.__setattr__(self, "_vcs_gateway", gateway)
         return gateway
+
+    def app_slug(self) -> str | None:
+        """Slug GitHub App для ссылки на экран установки; `None` — узнать не удалось.
+
+        Тот же `GET /app` и тот же кэш шлюза, что у логина бота: запрос один на
+        процесс. Без ключа приложения GitHub не спрашиваем; сбой GitHub — `None` и
+        предупреждение в лог, а не ошибка списка: список от ключа приложения не зависит.
+        После сбоя `_APP_SLUG_RETRY_SECONDS` GitHub не спрашиваем и сразу отдаём `None`.
+        """
+        if not self.settings.github_app_configured:
+            return None
+        if monotonic() < self._app_slug_retry_at:
+            return None
+        try:
+            return self.vcs_gateway().app_slug()
+        except VcsError:
+            object.__setattr__(self, "_app_slug_retry_at", monotonic() + _APP_SLUG_RETRY_SECONDS)
+            logger.warning("slug GitHub App не получен: install_url не отдаётся", exc_info=True)
+            return None
 
     def redelivery_vcs_gateway(self) -> VcsGateway:
         """VCS-шлюз прохода повтора доставок (#149): лимит GitHub не пережидается.
@@ -182,7 +209,8 @@ class Container:
     def visibility_catalog(self, catalog: InstallationCatalog, *, read: bool = True) -> InstallationCatalog:
         """`catalog` с кэшем списка видимых репозиториев — для видимости прогонов и репозиториев.
 
-        `read=False` — всегда к GitHub, свежий ответ в кэш: страница подключения.
+        `read=False` — всегда к GitHub, свежий ответ в кэш: возврат с установки
+        приложения (Setup URL, change `repositories-one-list`).
         Каталог — аргументом, а не свой: тесты подменяют каталог зависимостью API,
         и кэш должен лечь поверх подменённого.
         """
@@ -256,6 +284,7 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
         _run_changes=PostgresRunChanges(listen_conninfo(settings.database_url)),
         _llm_gateway=None,
         _definition_extractor=None,
+        _app_slug_retry_at=0.0,
     )
 
 
@@ -286,19 +315,39 @@ def llm_http_timeout(settings: Settings) -> httpx.Timeout:
     return httpx.Timeout(settings.llm_timeout_seconds, connect=_LLM_CONNECT_TIMEOUT_SECONDS)
 
 
+def _eurorouter(settings: Settings, timeout: httpx.Timeout) -> tuple[str, LlmGateway]:
+    return (
+        "Eurorouter",
+        OpenAiCompatibleGateway(
+            httpx.Client(base_url=settings.eurorouter_base_url, timeout=timeout),
+            settings.eurorouter_model,
+            settings.eurorouter_keys,
+            name="Eurorouter",
+            max_attempts=settings.llm_max_attempts,
+        ),
+    )
+
+
 def build_llm_gateway(settings: Settings) -> LlmGateway:
     """Порядок провайдеров не выбирается: локальная модель первая, hosted -
-    только вторым и только по флагу (change `add-llm-gateway`, design D3).
+    только вторым и только по флагу (change `add-llm-gateway`, design D3), или
+    hosted единственным при `LLM_BACKEND=eurorouter` (change `eurorouter-primary-backend`).
 
     Итог пишется в лог: по нему видно, может ли код проверяемых
     репозиториев уйти за пределы нашей сети.
     """
     if settings.llm_backend is None:
-        raise RuntimeError("LLM_BACKEND не задан: выберите stub или ollama")
+        raise RuntimeError("LLM_BACKEND не задан: выберите stub, ollama или eurorouter")
     if settings.llm_backend == "stub":
         logger.info("модель: заглушка без похода к модели")
         return StubLlmGateway()
     timeout = llm_http_timeout(settings)
+    if settings.llm_backend == "eurorouter":
+        logger.info(
+            "модель: Eurorouter (%s) основной, без фоллбэка: код проверяемых репозиториев уходит hosted-провайдеру",
+            settings.eurorouter_model,
+        )
+        return FallbackLlmGateway([_eurorouter(settings, timeout)])
     providers: list[tuple[str, LlmGateway]] = [
         (
             "Ollama",
@@ -314,18 +363,7 @@ def build_llm_gateway(settings: Settings) -> LlmGateway:
     if not settings.llm_hosted_fallback:
         logger.info("%s; hosted-фоллбэк выключен", local)
         return FallbackLlmGateway(providers)
-    providers.append(
-        (
-            "Eurorouter",
-            OpenAiCompatibleGateway(
-                httpx.Client(base_url=settings.eurorouter_base_url, timeout=timeout),
-                settings.eurorouter_model,
-                settings.eurorouter_keys,
-                name="Eurorouter",
-                max_attempts=settings.llm_max_attempts,
-            ),
-        )
-    )
+    providers.append(_eurorouter(settings, timeout))
     logger.info(
         "%s; фоллбэк - Eurorouter (%s): при сбое локальной модели код уходит hosted-провайдеру",
         local,

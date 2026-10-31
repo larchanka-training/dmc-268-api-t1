@@ -28,6 +28,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from pydantic import SecretStr
 
 from app.api import log_redaction
+from app.api.factory import HEALTH_PATH
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.use_cases.build_review_context import (
     build_review_context,
@@ -647,3 +648,29 @@ def test_the_query_is_redacted_on_any_path_of_the_access_log() -> None:
     [fields] = log.fields()
     assert "поиск-по-замечаниям" not in fields["message"]
     assert "/api/v1/reviews?<скрыто>" in fields["message"]
+
+
+def _access_record(path: str) -> logging.LogRecord:
+    # Формат uvicorn: '%s - "%s %s HTTP/%s" %d' — адрес, метод, путь, версия, статус.
+    args = ("127.0.0.1:50000", "GET", path, "1.1", 200)
+    return logging.LogRecord(
+        "uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d', args, None
+    )
+
+
+def test_the_health_check_access_record_is_dropped_and_others_pass() -> None:
+    """Путь — тот, на котором API отвечает health-check'у; query его не прячет."""
+    fltr = log_redaction.HealthCheckAccessFilter()
+
+    assert fltr.filter(_access_record(HEALTH_PATH)) is False
+    assert fltr.filter(_access_record(f"{HEALTH_PATH}?probe=1")) is False
+    assert fltr.filter(_access_record("/healthz")) is True
+    assert fltr.filter(_access_record("/api/v1/reviews")) is True
+
+
+def test_install_puts_both_filters_on_the_access_logger() -> None:
+    log_redaction.install()
+
+    access = logging.getLogger("uvicorn.access").filters
+    assert log_redaction.ACCESS_QUERY_REDACTION in access
+    assert log_redaction.HEALTH_CHECK_ACCESS_FILTER in access

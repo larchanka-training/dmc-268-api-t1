@@ -48,8 +48,10 @@ datasources:
         # стороны.
         spanStartTimeShift: "-1h"
         spanEndTimeShift: "1h"
+        # key — атрибут спана, value — лейбл Loki. trace_id лежит в structured
+        # metadata, а filterByTraceID ищет его в тексте строки — поэтому свой запрос.
         tags:
           - key: service.name
-            value: service.name
-        filterByTraceID: true
-        filterBySpanID: false
+            value: service_name
+        customQuery: true
+        query: '{$${__tags}} | trace_id="$${__trace.traceId}"'

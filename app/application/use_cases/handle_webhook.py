@@ -1,8 +1,9 @@
 """Use case приёма вебхука GitHub: от события до задачи в очереди.
 
 Оркестрирует чистые функции домена и порты: извлекает событие из payload'а,
-ищет зарегистрированный репозиторий, достаёт метаданные PR через
-`VcsGateway` (сбой — 502 ещё до создания записей) и создаёт `ReviewRun`.
+отсекает чужие PR (`is_trusted_author`; отказ — `ignored` и запись в лог), ищет
+зарегистрированный репозиторий, достаёт метаданные PR через `VcsGateway` (сбой —
+502 ещё до создания записей) и создаёт `ReviewRun`.
 Дифф use case не запрашивает: его размер задаёт автор PR, а GitHub ждёт ответа
 на доставку 10 секунд. Дифф с лимитом размера достаёт и разбирает воркер
 (design D3) по идентификаторам из задачи (#144).
@@ -53,7 +54,10 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from app.application.merge_gate_publish import build_retarget_check
+from app.application.merge_gate_publish import (
+    DISABLED_REVIEW_CHECK,
+    build_retarget_check,
+)
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
@@ -74,7 +78,7 @@ from app.domain.enums import (
 )
 from app.domain.lifecycle import advance
 from app.domain.vcs_errors import VcsError
-from app.domain.webhook import extract_github_event
+from app.domain.webhook import extract_github_event, is_trusted_author
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +91,9 @@ class WebhookOutcome:
     """Результат приёма вебхука: одна из пяти веток.
 
     `ignored` — событие не запускает ревью (`reopened`, неизвестное действие,
-    незарегистрированный репозиторий): записей нет, задачи нет. `failure` —
+    PR постороннего автора, незарегистрированный или выключенный репозиторий): записей нет,
+    задачи нет. У выключенного при этом уходит VCS-вызов: check run «Ревью выключено в сервисе»
+    на head. `failure` —
     VCS недоступен: прогон не создан, задачи нет. `duplicate` — на этот
     коммит уже есть активный или завершённый не-failed прогон по вебхуку,
     найденный до вставки и до обновления merge_request. `conflict` — гонку отклонил уникальный индекс, проигравший
@@ -126,6 +132,16 @@ def handle_webhook_event(
     event = extract_github_event(payload)
     if event is None:
         return WebhookOutcome(kind="ignored")
+    if not is_trusted_author(event):
+        logger.info(
+            "PR не ревьюится: автор не свой",
+            extra={
+                "repo_full_name": event.repo_full_name,
+                "pr_number": event.pr_number,
+                "author_association": event.author_association,
+            },
+        )
+        return WebhookOutcome(kind="ignored")
 
     # Короткое чтение: транзакция живёт только на SELECT репозитория.
     with uow as work:
@@ -133,6 +149,12 @@ def handle_webhook_event(
             Provider.GITHUB, event.repo_provider_id
         )
     if repository is None:
+        return WebhookOutcome(kind="ignored")
+    # Выключенный (`DELETE /repositories/{id}`): запись осталась ради истории, а ревью не
+    # нужно. Прогона и задачи нет, но на head ставится `success`, иначе обязательная
+    # проверка в ruleset держала бы PR в «Expected — Waiting for status».
+    if repository.connected_at is None:
+        _pass_merge_gate_of_disabled(vcs, event)
         return WebhookOutcome(kind="ignored")
 
     # VCS между транзакциями: соединение пула не занято, пока GitHub отвечает.
@@ -327,6 +349,22 @@ def _supersede(work: UnitOfWork, merge_request_id: UUID, head_sha: str, now: dat
     logger.info(
         "прогон %s отменён: целевая ветка PR сменилась, база %s устарела", run.id, run.base_sha
     )
+
+
+def _pass_merge_gate_of_disabled(vcs: VcsGateway, event: WebhookEvent) -> None:
+    """Check run `success` «Ревью выключено в сервисе» на head; best-effort.
+
+    Сбой GitHub не меняет ответ (`ignored`) и не даёт 502: переотправка доставки ради
+    проверки выключенного репозитория не нужна, следующий push поставит её снова.
+    """
+    try:
+        vcs.set_merge_gate_check(
+            event.repo_full_name, event.head_sha, event.installation_id, DISABLED_REVIEW_CHECK
+        )
+    except VcsError:
+        logger.warning(
+            "check run выключенного репозитория %s не поставлен", event.repo_full_name, exc_info=True
+        )
 
 
 def _fail_unenqueued(

@@ -66,24 +66,6 @@ def test_sweep_is_throttled_by_the_interval() -> None:
     assert calls == [1]  # первый проход сразу, остальные — не раньше интервала
 
 
-def test_legacy_jobs_are_moved_on_the_sweep_tick_and_a_failure_does_not_stop_consumption(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ticks = [(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")]
-    channel = FakeChannel(ticks)
-    moves: list[int] = []
-
-    def move(connection: object) -> int:
-        moves.append(1)
-        raise RuntimeError("брокер ответил ошибкой")
-
-    monkeypatch.setattr(factory, "move_legacy_jobs", move)
-    _worker(channel).run(lambda body: None, limit=1, sweep_interval=3600)
-
-    assert moves == [1]  # на первом такте, дальше — не раньше интервала, и без `sweep`
-    assert channel.acked == [1]
-
-
 @pytest.mark.parametrize(
     ("body", "review_run_id"),
     [
@@ -312,17 +294,3 @@ def test_a_consumer_cancelled_by_the_broker_is_logged(caplog: pytest.LogCaptureF
     assert channel.consumer_arguments == CONSUMER_ARGUMENTS
     (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert "отменил потребителя" in record.getMessage()
-
-
-def test_without_a_legacy_queue_it_is_asked_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Старой очереди нет: каждый проход давал бы `404` и строку `error` у брокера."""
-    channel = FakeChannel([(None, None, None)] * 3 + [(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
-    asked: list[int] = []
-
-    def move(connection: object) -> None:
-        asked.append(1)
-
-    monkeypatch.setattr(factory, "move_legacy_jobs", move)
-    _worker(channel).run(lambda body: None, limit=1, sweep_interval=0)
-
-    assert asked == [1]

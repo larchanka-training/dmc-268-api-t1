@@ -7,8 +7,6 @@ ack/nack. Без брокера.
 from collections.abc import Iterator, Sequence
 from typing import Any
 
-from pika.exceptions import ChannelClosedByBroker
-
 
 class FakeChannel:
     """Канал вместо pika.
@@ -28,7 +26,6 @@ class FakeChannel:
         self._allow_nack = allow_nack
         self.acked: list[int] = []
         self.nacked: list[int] = []
-        self.requeued: list[int] = []
         self.cancelled = False
         # Номер доставки, которую цикл сейчас обрабатывает; `None` - ещё ни одной.
         self.current: int | None = None
@@ -54,7 +51,6 @@ class FakeChannel:
 
     def basic_nack(self, tag: int, requeue: bool) -> None:
         if requeue:
-            self.requeued.append(tag)
             self.events.append(f"requeue {tag}")
             return
         if not self._allow_nack:
@@ -67,25 +63,11 @@ class FakeChannel:
         self.events.append("cancel")
 
 
-class NoLegacyQueueChannel:
-    """Канал брокера, где старой классической очереди нет: пассивное объявление — `404`."""
-
-    is_open = False
-
-    def queue_declare(self, queue: str, passive: bool) -> None:
-        raise ChannelClosedByBroker(404, f"NOT_FOUND - no queue '{queue}'")
-
-
 class FakeConnection:
-    """Соединение вместо pika: помнит, что его закрыли; старой очереди у брокера нет."""
+    """Соединение вместо pika: помнит, что его закрыли."""
 
     def __init__(self) -> None:
         self.closed = False
-        self.channels_opened = 0
-
-    def channel(self) -> NoLegacyQueueChannel:
-        self.channels_opened += 1
-        return NoLegacyQueueChannel()
 
     def close(self) -> None:
         self.closed = True

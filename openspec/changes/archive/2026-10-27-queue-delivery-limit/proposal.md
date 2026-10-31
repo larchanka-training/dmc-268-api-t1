@@ -7,18 +7,17 @@
 - Основная очередь — quorum-очередь `review_jobs.qq` с `x-delivery-limit` = 5 и тем же DLX: брокер считает доставки, вернувшиеся при закрытии соединения умершего воркера, и после лимита уводит сообщение в `review_jobs.dlq`. DLQ остаётся классической.
 - Приоритет сохраняется: у quorum-очереди RabbitMQ 4.3+ строгие приоритеты 0–31 включены всегда, `x-max-priority` не нужен; публикация — тем же фиксированным приоритетом.
 - Штатная остановка воркера возвращает выданное, но не взятое в работу сообщение `basic.nack` с requeue — он попытку не тратит. Иначе каждый деплой, заставший сообщение в очереди, съедал бы попытку из лимита.
-- Переход на стенде: тип объявленной очереди не меняется, поэтому quorum-очередь — под новым именем. Воркер на первом такте и на каждом проходе выметателя перекладывает остатки классической `review_jobs` в новую очередь (свойства — как есть). Старую очередь не удаляет: старый API в окне деплоя ещё публикует в неё.
+- Переход на стенде: тип объявленной очереди не меняется, поэтому quorum-очередь — под новым именем. Старую классическую `review_jobs` после выката удаляют на брокере: `rabbitmqctl delete_queue review_jobs --if-empty`. Кода переноса нет: стенд без пользователей, а задачи, оставшиеся в старой очереди, выметатель переводит в `failed`, и PR перепроверяется следующим push.
 
 ## Capabilities
 
 ### Modified Capabilities
 
-- `job-queue`: приоритетная очередь — quorum; новое требование о лимите доставок, о штатной остановке без траты попытки и о переносе из старой очереди.
+- `job-queue`: приоритетная очередь — quorum; новое требование о лимите доставок и о штатной остановке без траты попытки.
 
 ## Impact
 
-- Код: `declare_topology`, `move_legacy_jobs` и константы в `app/infrastructure/queue/rabbitmq.py`; `Worker.run` в `app/worker/factory.py`.
+- Код: `declare_topology` и константы в `app/infrastructure/queue/rabbitmq.py`; `Worker.run` в `app/worker/factory.py`.
 - Тесты: `tests/queue/test_rabbitmq_job_queue.py`, `tests/worker/test_factory.py`, `tests/worker/test_worker_loop.py`; chaos — `tests/chaos/test_poison_message_chaos.py`.
 - Документация: `docs/SYSTEM_DESIGN.md` §4.2, `docs/BACKEND_ARCHITECTURE.md`, `docs/testing/SECURITY_AND_REGRESSION_REPORT.md`, `.agents/rules/backend.md` (имена спанов).
 - Infra и схема базы не меняются. Спаны очереди называются `publish review_jobs.qq` / `process review_jobs.qq` — дашборды и запросы по старому имени надо поправить.
-- После деплоя, когда старая `review_jobs` на стенде пуста, перенос и `LEGACY_QUEUE_NAME` удаляются отдельным PR вместе с самой очередью.

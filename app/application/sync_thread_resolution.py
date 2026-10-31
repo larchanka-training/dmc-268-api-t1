@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from app.application.merge_gate_publish import (
+    DISABLED_REVIEW_CHECK,
     build_merge_gate_check,
     collect_open_findings,
     settle_merge_gate,
@@ -125,12 +126,6 @@ def refresh_merge_gate_for_merge_request(
         )
         return
     still_open = collect_open_findings(uow, merge_request_id, head_run_id=head_run.id)
-    vcs.set_merge_gate_check(
-        repo_full_name,
-        head_sha,
-        installation_id,
-        build_merge_gate_check(still_open),
-    )
     # Целевую ветку могли сменить после чтения прогона выше (#222).
     settle_merge_gate(
         uow,
@@ -140,6 +135,7 @@ def refresh_merge_gate_for_merge_request(
         head_sha=head_sha,
         installation_id=installation_id,
         run_id=head_run.id,
+        check=build_merge_gate_check(still_open),
     )
 
 
@@ -194,7 +190,12 @@ def handle_review_thread_webhook(
     vcs: VcsGateway,
     now: Callable[[], datetime],
 ) -> bool:
-    """Обновить тред и сразу перевыставить merge gate на head PR."""
+    """Обновить тред и сразу перевыставить merge gate на head PR.
+
+    У выключенного репозитория (`connected_at IS NULL`) тред записывается так же, но на head
+    ставится `DISABLED_REVIEW_CHECK`: пересчёт по тредам поставил бы `failure` на head с
+    проверкой «Ревью выключено» или `success` «Ревью пройдено» на непроверенный head.
+    """
     if not apply_review_thread_webhook(payload, uow=uow, now=now):
         return False
     pull_request = payload.get("pull_request")
@@ -220,10 +221,14 @@ def handle_review_thread_webhook(
         repo = uow.repositories.find_by_provider(Provider.GITHUB, str(provider_repo_id))
         if repo is None:
             return True
+        disabled = repo.connected_at is None
         merge_request = uow.merge_requests.find_by_number(repo.id, pr_number)
         if merge_request is None:
             return True
         merge_request_id = merge_request.id
+    if disabled:
+        vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, DISABLED_REVIEW_CHECK)
+        return True
     refresh_merge_gate_for_merge_request(
         merge_request_id,
         repo_full_name=repo_full_name,

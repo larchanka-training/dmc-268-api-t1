@@ -192,7 +192,7 @@ class ReviewJob(AllFieldsResponse):
 
 
 class RepositoryBase(BaseModel):
-    """Поля репозитория, общие для списка репозиториев и сводки в прогоне ревью."""
+    """Поля репозитория, общие для репозитория по id и сводки в прогоне ревью."""
 
     id: UUID
     provider: Provider = Field(description="Хостинг репозитория.", examples=["github"])

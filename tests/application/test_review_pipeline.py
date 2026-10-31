@@ -1,5 +1,6 @@
 """Оркестрация одного прогона ревью — фейковый `UnitOfWork`, без БД и брокера."""
 
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -633,6 +634,93 @@ def test_a_publication_failure_keeps_the_model_and_the_tokens() -> None:
     assert run.status is ReviewRunStatus.FAILED
     assert run.failed_stage is ReviewRunStatus.PUBLISHING
     assert (run.model, run.tokens_used) == ("qwen", 1400)
+
+
+class _RetargetDuringPublication(RecordingVcsGateway):
+    """Смена целевой ветки приходится на POST ревью: приём переводит прогон в
+    `cancelled`, как `_supersede` в `handle_webhook`."""
+
+    def __init__(self, uow: FakeUnitOfWork) -> None:
+        super().__init__()
+        self._uow = uow
+
+    def publish_pull_request_review(self, *args: Any, **kwargs: Any) -> Any:
+        current = self._uow.review_runs.get(JOB.review_run_id)
+        assert current is not None
+        self._uow.review_runs.update(replace(current, status=ReviewRunStatus.CANCELLED))
+        return super().publish_pull_request_review(*args, **kwargs)
+
+
+def test_a_run_cancelled_by_a_retarget_is_acked_not_dead_lettered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Блокер ревью #225: переход отменённого прогона бросает `cancelled is terminal`.
+    Воркер не пробрасывает его - иначе сообщение уходит в DLQ - и не трогает gate:
+    head отвечает новый прогон."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = _RetargetDuringPublication(uow)
+
+    with caplog.at_level(logging.INFO, logger="app.application.review_pipeline"):
+        _run(uow, ScriptedLlmGateway([review_response()]), vcs_gateway=vcs)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.CANCELLED
+    assert build_failed_review_check() not in vcs.checks
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert all(
+        step.status is not ReviewRunStepStatus.RUNNING
+        for step in uow.review_run_steps.list_for_run(JOB.review_run_id)
+    )
+
+
+def test_a_run_cancelled_before_its_review_is_posted_leaves_the_step_abandoned() -> None:
+    """Отмена между переходом в `publishing` и POST ревью: ревью не публикуется, а шаг
+    публикации не выглядит завершённым - его исхода нет."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    update = uow.review_runs.update
+
+    def retarget_on_publishing(run: ReviewRun) -> None:
+        update(run)
+        if run.status is ReviewRunStatus.PUBLISHING:
+            update(replace(run, status=ReviewRunStatus.CANCELLED))
+
+    uow.review_runs.update = retarget_on_publishing  # type: ignore[method-assign]
+    vcs = RecordingVcsGateway()
+    _run(uow, ScriptedLlmGateway([review_response()]), vcs_gateway=vcs)
+
+    assert _completed(uow).status is ReviewRunStatus.CANCELLED
+    assert (vcs.publications, vcs.checks) == ([], [])
+    (publishing,) = [
+        step
+        for step in uow.review_run_steps.list_for_run(JOB.review_run_id)
+        if step.stage is ReviewRunStage.PUBLISHING
+    ]
+    assert (publishing.status, publishing.error_code) == (
+        ReviewRunStepStatus.FAILED,
+        "REVIEW_RUN_STALE",
+    )
+
+
+def test_a_run_cancelled_while_the_model_answers_is_acked() -> None:
+    """Отмена чаще приходится на вызов модели: следующий переход прогона тоже бросает,
+    и сообщение тоже не уходит в DLQ."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    class RetargetedGateway:
+        def complete(self, request: object) -> NoReturn:
+            current = uow.review_runs.get(JOB.review_run_id)
+            assert current is not None
+            uow.review_runs.update(replace(current, status=ReviewRunStatus.CANCELLED))
+            raise LlmTimeoutError("модель не ответила")
+
+    vcs = RecordingVcsGateway()
+    _run(uow, RetargetedGateway(), vcs_gateway=vcs)
+
+    assert _completed(uow).status is ReviewRunStatus.CANCELLED
+    assert vcs.publications == []
 
 
 DEFAULT_SUMMARY = "Критичных проблем в диффе не обнаружено."

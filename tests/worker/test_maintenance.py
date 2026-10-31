@@ -95,7 +95,9 @@ def test_a_failing_step_is_logged_and_does_not_stop_the_other(caplog, monkeypatc
 
     assert calls == 2
     assert uow.sessions.stored == []
-    assert "проход по зависшим прогонам завершился ошибкой" in caplog.text
+    (record,) = caplog.records
+    assert record.getMessage() == "проход по зависшим прогонам завершился ошибкой"
+    assert record.maintenance_step == "sweep_stale_runs"
 
 
 def test_a_failing_step_marks_the_pass_span_as_an_error(
@@ -224,7 +226,8 @@ def test_a_failing_redelivery_does_not_stop_the_other_steps(
         )()
 
     assert uow.sessions.stored == []
-    assert "повтор упавших доставок вебхука завершился ошибкой" in caplog.text
+    (record,) = caplog.records
+    assert record.maintenance_step == "redeliver_webhooks"
     (pass_span,) = [s for s in spans.get_finished_spans() if s.name == "review.sweep"]
     assert pass_span.status.status_code is StatusCode.ERROR
 

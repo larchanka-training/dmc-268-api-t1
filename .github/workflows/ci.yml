@@ -177,6 +177,16 @@ jobs:
             -e POSTGRESQL_DATABASE=dmc268 \
             -v "$PWD/infra/observability/otelcol.yaml:/etc/otelcol-contrib/config.yaml:ro" \
             "$OTELCOL" validate --config=/etc/otelcol-contrib/config.yaml
+      - name: Коллектор метрик контейнеров (otelcol validate)
+        run: |
+          docker run --rm \
+            -v "$PWD/infra/observability/otelcol-docker.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+            "$OTELCOL" validate --config=/etc/otelcol-contrib/config.yaml
+      - name: Коллектор логов контейнеров (otelcol validate)
+        run: |
+          docker run --rm \
+            -v "$PWD/infra/observability/otelcol-logs.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+            "$OTELCOL" validate --config=/etc/otelcol-contrib/config.yaml
       - name: Prometheus (promtool check config)
         run: |
           docker run --rm --entrypoint promtool \
@@ -236,11 +246,12 @@ jobs:
             -e POSTGRES_USER=dmc268 -e POSTGRES_PASSWORD=dmc268 -e POSTGRES_DB=dmc268 \
             postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5 \
             -c shared_preload_libraries=pg_stat_statements
+          # По TCP: временный сервер инициализации слушает только сокет и отвечал бы «готов» до перезапуска (#254).
           for _ in $(seq 1 30); do
-            docker exec ci-postgres pg_isready -U dmc268 -d dmc268 -q && break
+            docker exec ci-postgres pg_isready -h 127.0.0.1 -U dmc268 -d dmc268 -q && break
             sleep 1
           done
-          docker exec ci-postgres pg_isready -U dmc268 -d dmc268
+          docker exec ci-postgres pg_isready -h 127.0.0.1 -U dmc268 -d dmc268
       - uses: ./.github/actions/python-env
       - name: pytest (пропуск теста — провал)
         env:

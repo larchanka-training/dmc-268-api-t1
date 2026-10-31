@@ -86,6 +86,7 @@ def a_repository() -> Repository:
         auto_review_enabled=True,
         created_at=NOW,
         updated_at=NOW,
+        connected_at=NOW,
     )
 
 
