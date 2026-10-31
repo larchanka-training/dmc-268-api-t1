@@ -106,12 +106,15 @@ class _ProcessDied(BaseException):
     """Смерть процесса посреди обработки: consume-цикл её не ловит."""
 
 
-def _delivery_count(channel: pika.adapters.blocking_connection.BlockingChannel) -> int:
-    """Сколько неудачных доставок quorum-очередь насчитала сообщению (`x-delivery-count`)."""
+def _returned_headers(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+) -> dict[str, object]:
+    """Заголовки вернувшегося в очередь сообщения: `x-delivery-count` — неудачные
+    доставки, `x-acquired-count` — возвраты без траты попытки (`nack` с requeue)."""
     method, properties, _ = channel.basic_get(QUEUE_NAME, auto_ack=True)
     assert method is not None, "сообщение не вернулось в очередь"
     assert properties is not None
-    return int((properties.headers or {}).get("x-delivery-count", 0))
+    return dict(properties.headers or {})
 
 
 def test_a_stopping_worker_returns_the_message_without_spending_a_delivery(
@@ -123,7 +126,10 @@ def test_a_stopping_worker_returns_the_message_without_spending_a_delivery(
     build_worker(settings).run(handled.append, stop=StopRequest(requested=True))
 
     assert handled == []
-    assert _delivery_count(channel) == 0
+    headers = _returned_headers(channel)
+    # Сообщение воркеру выдавалось и вернулось `nack`, а не осталось невыданным.
+    assert headers.get("x-acquired-count") == 1
+    assert headers.get("x-delivery-count", 0) == 0
 
 
 def test_a_stop_during_processing_leaves_the_next_message_unspent(
@@ -145,7 +151,7 @@ def test_a_stop_during_processing_leaves_the_next_message_unspent(
     build_worker(settings).run(handle_and_stop, stop=stop)
 
     assert len(handled) == 1
-    assert _delivery_count(channel) == 0
+    assert _returned_headers(channel).get("x-delivery-count", 0) == 0
     assert channel.queue_declare(QUEUE_NAME, passive=True).method.message_count == 0
 
 
@@ -161,4 +167,4 @@ def test_a_dying_worker_spends_a_delivery(
     with pytest.raises(_ProcessDied):
         build_worker(settings).run(die)
 
-    assert _delivery_count(channel) == 1
+    assert _returned_headers(channel).get("x-delivery-count") == 1

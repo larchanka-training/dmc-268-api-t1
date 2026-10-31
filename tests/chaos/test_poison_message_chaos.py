@@ -10,6 +10,7 @@
 
 import json
 import threading
+import time
 
 import pika
 import pytest
@@ -71,14 +72,14 @@ def _dead_letter(stack: Stack) -> tuple[str, dict[str, object]]:
 def test_a_message_killing_the_worker_on_every_delivery_ends_in_the_dlq(stack: Stack) -> None:
     run_id = accept(stack, open_pull(stack))
 
-    deaths = 0
-    while stack.queue_depth(DLQ_NAME) == 0:
-        assert deaths <= DELIVERY_LIMIT, f"сообщение пережило {deaths} смертей воркера и не ушло в DLQ"
-        _die_on_next_delivery(stack)
-        deaths += 1
-
     # Первая доставка и `DELIVERY_LIMIT` повторных, потом - dead-letter.
-    assert deaths == DELIVERY_LIMIT + 1
+    for _ in range(DELIVERY_LIMIT + 1):
+        _die_on_next_delivery(stack)
+    # Лидер quorum-очереди перекладывает сообщение в DLX асинхронно после обрыва соединения.
+    deadline = time.monotonic() + DIE_TIMEOUT_SECONDS
+    while stack.queue_depth(DLQ_NAME) == 0 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert stack.queue_depth(DLQ_NAME) == 1, "сообщение не ушло в DLQ после лимита доставок"
     assert stack.queue_depth(QUEUE_NAME) == 0
     body, headers = _dead_letter(stack)
     assert json.loads(body)["review_run_id"] == run_id

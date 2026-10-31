@@ -26,7 +26,6 @@ class FakeChannel:
         self._allow_nack = allow_nack
         self.acked: list[int] = []
         self.nacked: list[int] = []
-        self.requeued: list[int] = []
         self.cancelled = False
         # Номер доставки, которую цикл сейчас обрабатывает; `None` - ещё ни одной.
         self.current: int | None = None
@@ -52,7 +51,6 @@ class FakeChannel:
 
     def basic_nack(self, tag: int, requeue: bool) -> None:
         if requeue:
-            self.requeued.append(tag)
             self.events.append(f"requeue {tag}")
             return
         if not self._allow_nack:
