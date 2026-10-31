@@ -205,6 +205,8 @@ def _trivy_section(report: Mapping[str, Any] | None) -> list[str]:
 def _hadolint_section(findings: list[Any] | None) -> list[str]:
     if not isinstance(findings, list):
         return []
+    # Файл пишет внешний action: элемент не той формы пропускаем, а не падаем.
+    findings = [f for f in findings if isinstance(f, Mapping)]
     out = ["### hadolint", ""]
     if not findings:
         return [*out, "Замечаний нет.", ""]

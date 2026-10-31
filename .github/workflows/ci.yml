@@ -128,14 +128,17 @@ jobs:
           format: table
 
       # Summary сборки (change ci-build-summary): ниже шаги ничего не роняют —
-      # падает только gate выше, а summary нужен и тогда. Находки сканеров —
-      # вторым запуском с json, чтобы увидеть и то, что gate пропускает
-      # (unfixed у trivy, style у hadolint).
+      # падает только gate выше, а summary нужен и тогда. continue-on-error —
+      # на случай несобранного образа: trivy и collect на нём упадут сами.
+      # Находки сканеров — вторым запуском с json, чтобы увидеть и то, что
+      # gate пропускает (unfixed у trivy, style у hadolint).
       - name: Каталог summary
         if: ${{ !cancelled() }}
+        continue-on-error: true
         run: mkdir -p build-summary
       - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         if: ${{ !cancelled() }}
+        continue-on-error: true
         with:
           dockerfile: Dockerfile
           format: json
@@ -143,6 +146,7 @@ jobs:
           no-fail: true
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         if: ${{ !cancelled() }}
+        continue-on-error: true
         with:
           image-ref: dmc268-api:ci
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
@@ -153,6 +157,7 @@ jobs:
       # окружение проекта ради него ставить незачем.
       - name: Метрики образа
         if: ${{ !cancelled() }}
+        continue-on-error: true
         run: >-
           python3 scripts/build_summary.py collect
           --image dmc268-api:ci
@@ -162,12 +167,14 @@ jobs:
       # чужого прогона. Кэш пул-реквеста видит кэш его базовой ветки.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ !cancelled() }}
+        continue-on-error: true
         with:
           path: build-base
           key: build-metrics-${{ github.sha }}
           restore-keys: build-metrics-
       - name: Summary сборки
         if: ${{ !cancelled() }}
+        continue-on-error: true
         run: >-
           python3 scripts/build_summary.py render
           --metrics build-summary/metrics.json

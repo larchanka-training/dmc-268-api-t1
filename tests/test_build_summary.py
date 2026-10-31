@@ -208,6 +208,17 @@ def test_render_clean_hadolint_is_one_line():
     assert "### hadolint\n\nЗамечаний нет." in md
 
 
+def test_render_hadolint_skips_items_that_are_not_objects():
+    findings = [
+        "oops",
+        1,
+        None,
+        {"code": "DL3059", "level": "style", "line": 3, "message": "m"},
+    ]
+    md = build_summary.render(fixture("metrics.json"), hadolint=findings, env=ENV)
+    assert "| style — ниже порога job'а | 1 |" in md
+
+
 def test_render_without_scanner_reports_omits_sections():
     md = build_summary.render(fixture("metrics.json"), env=ENV)
     assert "### trivy" not in md
