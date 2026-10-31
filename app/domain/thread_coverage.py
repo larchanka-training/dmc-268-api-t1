@@ -13,8 +13,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from app.domain.entities import BotThread, Finding
-from app.domain.enums import FindingSeverity
-from app.domain.merge_gate import severity_at_least
+from app.domain.enums import FindingSeverity, severity_at_least
 
 
 @dataclass(frozen=True, slots=True)

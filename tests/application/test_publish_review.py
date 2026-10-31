@@ -1078,12 +1078,8 @@ def test_default_threshold_keeps_high_below_the_gate() -> None:
     assert "critical" in check.summary
 
 
-def test_missing_repository_record_falls_back_to_the_default_threshold_with_a_warning(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Записи репозитория нет: ревью уже опубликовано, порог — `critical`, в лог — warning с id."""
-    monkeypatch.setattr(logging.getLogger("app.application.merge_gate_publish"), "disabled", False)
-    caplog.set_level(logging.WARNING, logger="app.application.merge_gate_publish")
+def test_missing_repository_record_is_a_lookup_error() -> None:
+    """Записи репозитория нет: FK `ON DELETE RESTRICT` и записи не удаляются — это ошибка данных."""
     uow = FakeUnitOfWork()
     _seed_previous_critical_thread(uow, FindingSeverity.HIGH, with_repository=False)
     uow.review_runs.add(
@@ -1098,20 +1094,14 @@ def test_missing_repository_record_falls_back_to_the_default_threshold_with_a_wa
             updated_at=NOW,
         )
     )
-    vcs = RecordingVcsGateway()
 
-    publish_review(
-        JOB,
-        uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
-        LlmReviewResult(model="m", tokens_used=0, findings=()),
-        uow=uow,
-        vcs=vcs,
-        now=NOW,
-        new_id=lambda: UUID(int=300),
-    )
-
-    (check,) = vcs.checks
-    assert check.conclusion == "success" and "critical" in check.summary
-    [record] = [r for r in caplog.records if r.name == "app.application.merge_gate_publish"]
-    assert record.levelno == logging.WARNING
-    assert str(UUID(int=9)) in record.getMessage() and str(MR_ID) in record.getMessage()
+    with pytest.raises(LookupError, match=str(UUID(int=9))):
+        publish_review(
+            JOB,
+            uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
+            LlmReviewResult(model="m", tokens_used=0, findings=()),
+            uow=uow,
+            vcs=RecordingVcsGateway(),
+            now=NOW,
+            new_id=lambda: UUID(int=300),
+        )

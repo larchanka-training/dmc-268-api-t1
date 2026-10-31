@@ -94,13 +94,18 @@ class FindingSeverity(StrEnum):
     CRITICAL = "critical"
 
 
-class ReviewPause(StrEnum):
-    """Почему вебхук не запускает ревью репозитория."""
+# Единственный ранг важности в домене: порог merge gate и покрытие тредом сравнивают по нему.
+_RANK: dict[FindingSeverity, int] = {
+    FindingSeverity.LOW: 0,
+    FindingSeverity.MEDIUM: 1,
+    FindingSeverity.HIGH: 2,
+    FindingSeverity.CRITICAL: 3,
+}
 
-    # Репозиторий выключен в сервисе (`connected_at is None`), лечится подключением.
-    DISCONNECTED = "disconnected"
-    # Авторевью выключено в настройках репозитория, лечится экраном настроек.
-    AUTO_REVIEW_OFF = "auto_review_off"
+
+def severity_at_least(severity: FindingSeverity, threshold: FindingSeverity) -> bool:
+    """Не ниже ли важность `severity` порога `threshold`."""
+    return _RANK[severity] >= _RANK[threshold]
 
 
 class CommentKind(StrEnum):

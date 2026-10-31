@@ -11,7 +11,6 @@ from sqlalchemy import text
 from app.application.ports.unit_of_work import ActiveRunConflict
 from app.application.stale_sweep import sweep_stale_runs
 from app.domain.entities import (
-    DEFAULT_REPOSITORY_SETTINGS,
     ContextPayload,
     DiffAnchor,
     Finding,
@@ -195,7 +194,13 @@ def test_update_settings_writes_three_columns_and_updated_at(uow) -> None:
 
     # Полная замена: пустой список стирает паттерны.
     with uow as work:
-        work.repositories.update_settings(repo.id, DEFAULT_REPOSITORY_SETTINGS, LATER)
+        work.repositories.update_settings(
+            repo.id,
+            RepositorySettings(
+                auto_review_enabled=True, branch_filter=(), min_severity=FindingSeverity.CRITICAL
+            ),
+            LATER,
+        )
         work.commit()
     with uow as work:
         assert work.repositories.get(repo.id) == replace(repo, updated_at=LATER)

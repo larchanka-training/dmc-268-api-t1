@@ -3,20 +3,7 @@
 from collections.abc import Iterable
 
 from app.domain.entities import Finding, PublishedComment
-from app.domain.enums import CommentKind, FindingSeverity
-
-# Единственный ранг важности в домене: порог merge gate и покрытие тредом сравнивают по нему.
-_RANK: dict[FindingSeverity, int] = {
-    FindingSeverity.LOW: 0,
-    FindingSeverity.MEDIUM: 1,
-    FindingSeverity.HIGH: 2,
-    FindingSeverity.CRITICAL: 3,
-}
-
-
-def severity_at_least(severity: FindingSeverity, threshold: FindingSeverity) -> bool:
-    """Не ниже ли важность `severity` порога `threshold`."""
-    return _RANK[severity] >= _RANK[threshold]
+from app.domain.enums import CommentKind, FindingSeverity, severity_at_least
 
 
 def merge_blocked_by_findings(

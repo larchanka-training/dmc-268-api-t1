@@ -64,14 +64,6 @@ class RepositorySettings:
     min_severity: FindingSeverity
 
 
-# Умолчания нового репозитория — те же, что `server_default` колонок `repositories`.
-DEFAULT_REPOSITORY_SETTINGS = RepositorySettings(
-    auto_review_enabled=True,
-    branch_filter=(),
-    min_severity=FindingSeverity.CRITICAL,
-)
-
-
 @dataclass(frozen=True, slots=True)
 class RepositoryPermissions:
     """Права пользователя на репозиторий так, как их отдаёт провайдер.

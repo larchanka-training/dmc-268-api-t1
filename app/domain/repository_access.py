@@ -12,10 +12,8 @@ from collections.abc import Collection, Iterable
 
 from app.domain.entities import (
     InstallationRepository,
-    Repository,
     RepositoryPermissions,
 )
-from app.domain.enums import ReviewPause
 
 
 def has_explicit_access(permissions: RepositoryPermissions) -> bool:
@@ -65,15 +63,3 @@ def to_connect_on_setup(
         if can_connect(repository.permissions) and repository.provider_id not in registered_provider_ids
     ]
 
-
-def review_pause(repository: Repository) -> ReviewPause | None:
-    """Почему ревью по вебхуку не идёт; `None` — идёт.
-
-    Выключение репозитория важнее настройки: при обоих признаках — `DISCONNECTED`,
-    чтобы пользователь чинил то, что действительно мешает (сначала подключение).
-    """
-    if repository.connected_at is None:
-        return ReviewPause.DISCONNECTED
-    if not repository.auto_review_enabled:
-        return ReviewPause.AUTO_REVIEW_OFF
-    return None

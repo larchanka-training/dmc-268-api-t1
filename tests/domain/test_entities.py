@@ -5,9 +5,7 @@ from uuid import UUID
 import pytest
 
 from app.domain.entities import (
-    DEFAULT_REPOSITORY_SETTINGS,
     Repository,
-    RepositorySettings,
     ReviewJob,
 )
 from app.domain.enums import FindingSeverity, Provider
@@ -46,12 +44,6 @@ def test_review_job_is_frozen() -> None:
         job.head_sha = "mutated"  # type: ignore[misc]
 
 
-def test_default_repository_settings_are_review_on_all_branches_blocking_on_critical() -> None:
-    assert DEFAULT_REPOSITORY_SETTINGS == RepositorySettings(
-        auto_review_enabled=True, branch_filter=(), min_severity=FindingSeverity.CRITICAL
-    )
-
-
 def test_repository_without_settings_fields_gets_default_filter_and_threshold() -> None:
     repository = Repository(
         id=UUID(int=1),
@@ -65,5 +57,5 @@ def test_repository_without_settings_fields_gets_default_filter_and_threshold() 
         connected_at=NOW,
     )
 
-    assert repository.branch_filter == DEFAULT_REPOSITORY_SETTINGS.branch_filter
-    assert repository.min_severity is DEFAULT_REPOSITORY_SETTINGS.min_severity
+    assert repository.branch_filter == ()
+    assert repository.min_severity is FindingSeverity.CRITICAL

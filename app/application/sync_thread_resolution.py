@@ -8,16 +8,15 @@ from typing import Any
 from uuid import UUID
 
 from app.application.merge_gate_publish import (
-    PAUSE_CHECKS,
     build_merge_gate_check,
     collect_open_findings,
+    pause_check,
     settle_merge_gate,
 )
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import ReviewThreadState
 from app.domain.enums import CommentKind, FindingSeverity, Provider, ReviewRunStatus
-from app.domain.repository_access import review_pause
 from app.domain.webhook import THREAD_ACTIONS
 
 logger = logging.getLogger(__name__)
@@ -197,7 +196,7 @@ def handle_review_thread_webhook(
     """Обновить тред и сразу перевыставить merge gate на head PR.
 
     Порог gate — `min_severity` из прочитанной записи репозитория: смена порога действует
-    на следующем закрытии треда. При паузе ревью (`review_pause`: репозиторий выключен или
+    на следующем закрытии треда. При паузе ревью (`pause_check`: репозиторий выключен или
     `auto_review_enabled = false`) тред записывается так же, но на head ставится check run
     паузы, без сверки тредов: пересчёт поставил бы `failure` на head с проверкой паузы или
     `success` «Ревью пройдено» на непроверенный head.
@@ -227,14 +226,14 @@ def handle_review_thread_webhook(
         repo = uow.repositories.find_by_provider(Provider.GITHUB, str(provider_repo_id))
         if repo is None:
             return True
-        pause = review_pause(repo)
+        check = pause_check(repo)
         min_severity = repo.min_severity
         merge_request = uow.merge_requests.find_by_number(repo.id, pr_number)
         if merge_request is None:
             return True
         merge_request_id = merge_request.id
-    if pause is not None:
-        vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, PAUSE_CHECKS[pause])
+    if check is not None:
+        vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
         return True
     refresh_merge_gate_for_merge_request(
         merge_request_id,

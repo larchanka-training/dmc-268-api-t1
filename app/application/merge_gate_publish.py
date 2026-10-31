@@ -6,8 +6,8 @@ from uuid import UUID
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import MergeGateCheck
-from app.domain.entities import DEFAULT_REPOSITORY_SETTINGS, Finding, MergeRequest
-from app.domain.enums import FindingSeverity, ReviewPause, ReviewRunStatus
+from app.domain.entities import Finding, MergeRequest, Repository
+from app.domain.enums import FindingSeverity, ReviewRunStatus
 from app.domain.merge_gate import merge_blocked_by_findings, untracked_findings
 from app.domain.vcs_errors import VcsError
 
@@ -36,19 +36,13 @@ def collect_merge_gate_inputs(
     """Открытые находки PR и порог `min_severity` его репозитория — одной транзакцией.
 
     Порог читается из записи репозитория, а не из задачи: смена порога после постановки
-    действует на публикации (design D4). Записи нет (её не удаляют, выключение мягкое) —
-    порог по умолчанию: ревью уже опубликовано, падать поздно.
+    действует на публикации (design D4).
     """
     with uow:
         repository = uow.repositories.get(merge_request.repository_id)
         open_findings = _open_findings(uow, merge_request.id, head_run_id)
     if repository is None:
-        logger.warning(
-            "merge gate: нет записи репозитория %s у PR %s — порог по умолчанию",
-            merge_request.repository_id,
-            merge_request.id,
-        )
-        return open_findings, DEFAULT_REPOSITORY_SETTINGS.min_severity
+        raise LookupError(f"repository {merge_request.repository_id} not found")
     return open_findings, repository.min_severity
 
 
@@ -84,11 +78,18 @@ AUTO_REVIEW_OFF_CHECK = MergeGateCheck(
     ),
 )
 
-# Check run на head по причине паузы ревью (`review_pause`): вебхук PR и вебхук треда.
-PAUSE_CHECKS: dict[ReviewPause, MergeGateCheck] = {
-    ReviewPause.DISCONNECTED: DISABLED_REVIEW_CHECK,
-    ReviewPause.AUTO_REVIEW_OFF: AUTO_REVIEW_OFF_CHECK,
-}
+def pause_check(repository: Repository) -> MergeGateCheck | None:
+    """Check run на head, если ревью по вебхуку не идёт; `None` — идёт.
+
+    Выключение репозитория важнее настройки: при обоих признаках — `DISABLED_REVIEW_CHECK`,
+    чтобы пользователь чинил то, что действительно мешает (сначала подключение).
+    Вызывают вебхук PR и вебхук треда.
+    """
+    if repository.connected_at is None:
+        return DISABLED_REVIEW_CHECK
+    if not repository.auto_review_enabled:
+        return AUTO_REVIEW_OFF_CHECK
+    return None
 
 
 def build_merge_gate_check(

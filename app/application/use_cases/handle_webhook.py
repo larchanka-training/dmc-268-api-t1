@@ -54,7 +54,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from app.application.merge_gate_publish import PAUSE_CHECKS, build_retarget_check
+from app.application.merge_gate_publish import build_retarget_check, pause_check
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
@@ -75,7 +75,6 @@ from app.domain.enums import (
     TriggerSource,
 )
 from app.domain.lifecycle import advance
-from app.domain.repository_access import review_pause
 from app.domain.vcs_errors import VcsError
 from app.domain.webhook import extract_github_event, is_trusted_author
 
@@ -154,9 +153,9 @@ def handle_webhook_event(
     # есть, а ревью не нужно. Прогона и задачи нет, но на head ставится `success` по причине
     # паузы, иначе обязательная проверка в ruleset держала бы PR в «Expected — Waiting for
     # status». `branch_filter` здесь пока не применяется.
-    pause = review_pause(repository)
-    if pause is not None:
-        _pass_merge_gate_of_paused(vcs, event, PAUSE_CHECKS[pause])
+    check = pause_check(repository)
+    if check is not None:
+        _pass_merge_gate_of_paused(vcs, event, check)
         return WebhookOutcome(kind="ignored")
 
     # VCS между транзакциями: соединение пула не занято, пока GitHub отвечает.
