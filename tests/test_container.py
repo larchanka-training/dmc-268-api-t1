@@ -4,7 +4,7 @@ import base64
 import inspect
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -22,9 +22,6 @@ from app.infrastructure.container import (
 )
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.stub import StubLlmGateway
-
-from .fakes.context import FakeCache
-from .fakes.installation_catalog import FakeInstallationCatalog
 
 SETTINGS = Settings(
     database_url="postgresql+psycopg://test:test@localhost/test",
@@ -198,31 +195,15 @@ def test_the_run_diff_cache_is_its_own_store_kept_per_container() -> None:
     assert container.run_diff_cache() is not container.cache_store()
 
 
-def test_the_run_diff_cache_takes_its_byte_limits_from_settings() -> None:
-    settings = SETTINGS.model_copy(
-        update={"run_diff_cache_max_bytes": 10, "run_diff_cache_entry_max_bytes": 5}
-    )
-    cache = build_container(settings).run_diff_cache()
+def test_the_run_diff_cache_keeps_24_entries() -> None:
+    """Объём кэша диффов — число записей: 24 × RUN_DIFF_MAX_BYTES, старшая запись вытесняется."""
+    cache = build_container(SETTINGS).run_diff_cache()
 
-    cache.set("too-big", "123456", ttl_seconds=100)
-    assert cache.get("too-big") is None
+    for index in range(25):
+        cache.set(f"run-{index}", "дифф", ttl_seconds=100)
 
-    for key in ("a", "b", "c"):
-        cache.set(key, "12345", ttl_seconds=100)
-    assert cache.get("a") is None
-    assert (cache.get("b"), cache.get("c")) == ("12345", "12345")
-
-
-def test_the_visibility_catalog_caches_the_installation_id_for_its_ttl() -> None:
-    """Номер установки ложится в общий кэш видимости со своим TTL из настроек."""
-    cache = FakeCache()
-    settings = SETTINGS.model_copy(update={"installation_id_cache_ttl_seconds": 123})
-    container = replace(build_container(settings), _cache_store=cache)
-
-    catalog = container.visibility_catalog(FakeInstallationCatalog(installation_ids={"octo-org/api": 42}))
-
-    assert catalog.repository_installation_id("octo-org/api") == 42
-    assert cache.sets == [("installation-id:v1:octo-org/api", "42", 123)]
+    assert cache.get("run-0") is None
+    assert all(cache.get(f"run-{index}") == "дифф" for index in range(1, 25))
 
 
 def test_the_container_builds_the_parser_once() -> None:

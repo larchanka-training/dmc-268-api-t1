@@ -29,7 +29,8 @@ class FakeInstallationCatalog:
         # Установки пользователя для Setup URL: id — выбор и репозитории установки.
         self._installations = dict(installations or {})
         # Номер установки по `full_name`; не задан — `1` у любого установленного репозитория.
-        self._installation_ids = dict(installation_ids or {})
+        # Публичный: тест меняет номер посреди сценария — переустановка приложения.
+        self.installation_ids = dict(installation_ids or {})
         # Сбой только запроса номера установки: видимость при этом считается.
         self._installation_id_error = installation_id_error
         self.tokens: list[Secret] = []
@@ -68,7 +69,7 @@ class FakeInstallationCatalog:
             raise error
         if full_name in self._not_installed:
             return None
-        return self._installation_ids.get(full_name, 1)
+        return self.installation_ids.get(full_name, 1)
 
     def _record(self, call: str, access_token: Secret) -> None:
         self.calls.append(call)
