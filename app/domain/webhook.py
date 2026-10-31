@@ -1,8 +1,9 @@
 """Извлечение события вебхука GitHub из payload'а.
 
-Запускают ревью только `opened` и `synchronize`; `reopened`, `closed` и прочие
-действия игнорируются — пользователь переназначает бота ревьюером сам. Свой ли
-PR, решает `is_trusted_author` (правило — у `TRUSTED_AUTHOR_ASSOCIATIONS`).
+Запускают ревью `opened`, `synchronize` и `edited` со сменой целевой ветки;
+`edited` без неё, `reopened`, `closed` и любые прочие действия игнорируются —
+пользователь переназначает бота ревьюером сам. Свой ли PR, решает
+`is_trusted_author` (правило — у `TRUSTED_AUTHOR_ASSOCIATIONS`).
 Функция чистая и робкая к мусорному payload'у: всё, что не похоже на событие
 pull request, даёт `None`, чтобы эндпоинт отвечал «ignored», а не 500.
 `installation_id` достаётся из каждого payload'а — мульти-репозиторий по
@@ -13,7 +14,9 @@ from typing import Any
 
 from app.domain.entities import WebhookEvent
 
-TRIGGERING_ACTIONS: frozenset[str] = frozenset({"opened", "synchronize"})
+# `edited` - только смена целевой ветки (`changes.base`): тот же head с другой
+# базой - другой дифф, а check run висит на head и о базе не знает (#222).
+TRIGGERING_ACTIONS: frozenset[str] = frozenset({"opened", "synchronize", "edited"})
 # shortcut: ревьюим только PR своих — ветка в самом репозитории (запушить её может только
 # тот, у кого есть право записи) или автор-владелец, участник организации, коллаборатор
 # (`author_association` считает GitHub, тело подписано). Одной связи мало: скрытое членство
@@ -33,6 +36,8 @@ def extract_github_event(payload: dict[str, Any]) -> WebhookEvent | None:
     """
     try:
         if payload["action"] not in TRIGGERING_ACTIONS:
+            return None
+        if payload["action"] == "edited" and not _base_changed(payload):
             return None
         pull_request = payload["pull_request"]
         head = pull_request["head"]
@@ -54,6 +59,11 @@ def extract_github_event(payload: dict[str, Any]) -> WebhookEvent | None:
         )
     except (KeyError, TypeError):
         return None
+
+
+def _base_changed(payload: dict[str, Any]) -> bool:
+    changes = payload.get("changes")
+    return isinstance(changes, dict) and isinstance(changes.get("base"), dict)
 
 
 def is_trusted_author(event: WebhookEvent) -> bool:

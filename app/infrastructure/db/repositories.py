@@ -28,7 +28,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import InstrumentedAttribute, Session
+from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 
 from app.domain.entities import (
     BotThread,
@@ -51,6 +51,7 @@ from app.domain.enums import (
     TERMINAL_STATUSES,
     CommentKind,
     Provider,
+    ReviewRunStatus,
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
@@ -277,9 +278,46 @@ class SqlAlchemyReviewRunRepo:
         ).first()
         return m.review_run_to_domain(row) if row else None
 
+    def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        row = self._session.scalars(
+            select(ReviewRunRow)
+            .where(
+                ReviewRunRow.merge_request_id == merge_request_id,
+                ReviewRunRow.head_sha == head_sha,
+            )
+            .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+            .limit(1)
+        ).first()
+        return m.review_run_to_domain(row) if row else None
+
     def list_unfinished(self) -> list[ReviewRun]:
         rows = self._session.scalars(
             select(ReviewRunRow).where(ReviewRunRow.status.not_in(TERMINAL_STATUSES))
+        ).all()
+        return [m.review_run_to_domain(row) for row in rows]
+
+    def list_unpublished_failures(self, merge_request_id: UUID) -> list[ReviewRun]:
+        published = select(PublishedCommentRow.id).where(
+            PublishedCommentRow.review_run_id == ReviewRunRow.id
+        )
+        published_run = aliased(ReviewRunRow)
+        last_published_at = (
+            select(func.max(PublishedCommentRow.published_at))
+            .join(published_run, PublishedCommentRow.review_run_id == published_run.id)
+            .where(published_run.merge_request_id == merge_request_id)
+            .scalar_subquery()
+        )
+        rows = self._session.scalars(
+            select(ReviewRunRow)
+            .where(
+                ReviewRunRow.merge_request_id == merge_request_id,
+                ReviewRunRow.status == ReviewRunStatus.FAILED,
+                ReviewRunRow.failed_stage == ReviewRunStatus.PUBLISHING,
+                ~published.exists(),
+                # Время падения - `last_progress_at` последнего перехода, не создание.
+                or_(last_published_at.is_(None), ReviewRunRow.last_progress_at > last_published_at),
+            )
+            .order_by(ReviewRunRow.created_at, ReviewRunRow.id)
         ).all()
         return [m.review_run_to_domain(row) for row in rows]
 
@@ -418,7 +456,12 @@ class SqlAlchemyReviewRunRepo:
         итог верификации считает пайплайн чистыми функциями и приносит в
         сущности, поэтому ими, как и всем остальным, владеет вызывающий.
         """
-        row = self._session.get(ReviewRunRow, run.id)
+        # Блокировка строки: приём коммитит отмену параллельно переходу воркера (#222),
+        # и без неё переход по прочитанному статусу перезаписал бы `cancelled`.
+        # populate_existing: строка могла остаться в identity map от чтения до блокировки.
+        row = self._session.get(
+            ReviewRunRow, run.id, with_for_update=True, populate_existing=True
+        )
         if row is None:
             raise LookupError(f"review run {run.id} is not stored")
         # Терминальная строка проходит через next_status, даже если статус не

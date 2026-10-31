@@ -8,6 +8,7 @@ success — с точными записями и задачей, а не с «�
 
 import logging
 from dataclasses import replace
+from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -47,8 +48,10 @@ def run_case(
     vcs_error: VcsError | None = None,
     vcs_diff: str = DIFF,
     vcs_meta=None,
+    check_error: VcsError | None = None,
     uow: FakeUow | None = None,
     queue: FakeQueue | None = None,
+    base_ref: str | None = None,
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
 ) -> tuple[WebhookOutcome, FakeUow, FakeVcs, FakeQueue]:
     uow = uow if uow is not None else FakeUow()
@@ -60,10 +63,11 @@ def run_case(
         diff=vcs_diff,
         meta=vcs_meta if vcs_meta is not None else pr_metadata(),
         error=vcs_error,
+        check_error=check_error,
     )
     queue = queue if queue is not None else FakeQueue()
     outcome = handle_webhook_event(
-        webhook_payload(action),
+        webhook_payload(action, base_ref=base_ref),
         uow,
         vcs,
         queue,
@@ -260,8 +264,7 @@ def test_duplicate_delivery_returns_existing_run_and_enqueues_nothing() -> None:
     assert len(queue.jobs) == 1
 
 
-@pytest.mark.parametrize("status", [ReviewRunStatus.COMPLETED, ReviewRunStatus.CANCELLED])
-def test_redelivery_after_a_finished_run_is_a_duplicate(status: ReviewRunStatus) -> None:
+def test_redelivery_after_a_finished_run_is_a_duplicate() -> None:
     """#75: повтор после завершения не даёт второго прогона и второго ревью.
 
     GitHub переотправляет доставку с тем же `X-GitHub-Delivery`, а запуск
@@ -270,7 +273,7 @@ def test_redelivery_after_a_finished_run_is_a_duplicate(status: ReviewRunStatus)
     _, uow, _, queue = run_case()
     (finished,) = uow.review_runs.added
     (original_mr,) = uow.merge_requests.added
-    object.__setattr__(finished, "status", status)
+    object.__setattr__(finished, "status", ReviewRunStatus.COMPLETED)
 
     outcome, uow, _, queue = run_case(uow=uow, queue=queue)
     assert outcome.kind == "duplicate"
@@ -429,3 +432,185 @@ def test_diff_is_never_persisted() -> None:
     (job,) = queue.jobs
     for stored in (mr, run, job):
         assert "package-lock.json" not in str(stored)
+
+
+# --- #222: смена целевой ветки -------------------------------------------------
+
+OLD_BASE = "0" * 40
+NEW_BASE = "1" * 40
+OLD_TARGET = pr_metadata(OLD_BASE, "main")
+NEW_TARGET = pr_metadata(NEW_BASE, "develop")
+
+
+def reviewed_on_old_target() -> tuple[FakeUow, FakeQueue, Any]:
+    _, uow, _, queue = run_case(vcs_meta=OLD_TARGET)
+    (reviewed,) = uow.review_runs.added
+    object.__setattr__(reviewed, "status", ReviewRunStatus.COMPLETED)
+    # Старше прогонов, которые тест создаст следом в `NOW`: «последний» - по времени.
+    object.__setattr__(reviewed, "created_at", NOW - timedelta(minutes=1))
+    return uow, queue, reviewed
+
+
+def test_retarget_after_a_completed_review_starts_a_review_of_the_new_diff() -> None:
+    """Обход merge gate: ревью на старой ветке не делает дублем смену ветки."""
+    uow, queue, _ = reviewed_on_old_target()
+
+    outcome, uow, _, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert outcome.run is not None and outcome.run.base_sha == NEW_BASE
+    assert merge_request_of(uow).target_branch == "develop"
+    assert [job.base_sha for job in queue.jobs] == [OLD_BASE, NEW_BASE]
+    assert [job.action for job in queue.jobs] == ["opened", "edited"]
+
+
+def test_retarget_during_an_active_review_cancels_it_and_starts_a_new_one() -> None:
+    """Прогон на старой ветке ещё идёт: он отменяется, новый ставится в очередь -
+    иначе он выставил бы merge gate по диффу, которого в PR больше нет."""
+    _, uow, _, queue = run_case(vcs_meta=OLD_TARGET)
+    (stale,) = uow.review_runs.added
+
+    outcome, uow, _, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    cancelled = uow.review_runs.get(stale.id)
+    assert cancelled is not None and cancelled.status is ReviewRunStatus.CANCELLED
+    assert outcome.run is not None and outcome.run.status is ReviewRunStatus.QUEUED
+    assert len(queue.jobs) == 2
+
+
+def test_redelivery_of_the_retarget_is_a_duplicate() -> None:
+    uow, queue, _ = reviewed_on_old_target()
+    run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    outcome, uow, _, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "duplicate"
+    assert len(queue.jobs) == 2
+
+
+def test_redelivery_after_the_target_branch_moved_is_a_duplicate() -> None:
+    """Вершина целевой ветки ушла вперёд (влили чужой PR), ветка та же: повтор
+    доставки того же head - дубль, а не «целевая ветка сменилась» с новым прогоном."""
+    uow, queue, reviewed = reviewed_on_old_target()
+
+    outcome, uow, vcs, queue = run_case(
+        vcs_meta=pr_metadata(NEW_BASE, "main"), uow=uow, queue=queue
+    )
+
+    assert outcome.kind == "duplicate"
+    assert outcome.run is reviewed
+    assert vcs.checks == []
+    assert len(queue.jobs) == 1
+
+
+def test_edited_back_after_a_failed_review_of_the_new_target_reviews_again() -> None:
+    """A -> B, ревью B упало, B -> A: прогон на A старше упавшего - head не
+    проверен, нужен новый прогон с блокировкой, а не дубль прогона на A."""
+    uow, queue, _ = reviewed_on_old_target()
+    outcome, uow, _, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+    assert outcome.run is not None
+    object.__setattr__(outcome.run, "status", ReviewRunStatus.FAILED)
+
+    outcome, uow, vcs, queue = run_case(
+        "edited", vcs_meta=OLD_TARGET, uow=uow, queue=queue, base_ref="main"
+    )
+
+    assert outcome.kind == "success"
+    assert [check.conclusion for _, check in vcs.checks] == ["failure"]
+    assert len(queue.jobs) == 3
+
+
+def test_redelivery_after_a_failed_review_of_the_new_target_reviews_again() -> None:
+    """Последний прогон на head упал после смены ветки: повтор доставки не
+    дубль более старого `completed` на прежней ветке."""
+    uow, queue, _ = reviewed_on_old_target()
+    outcome, uow, _, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+    assert outcome.run is not None
+    object.__setattr__(outcome.run, "status", ReviewRunStatus.FAILED)
+
+    outcome, uow, _, queue = run_case(vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert len(queue.jobs) == 3
+
+
+def test_cancelled_latest_run_is_not_a_duplicate() -> None:
+    """Отменён - значит, его ревью заменили: если замены нет, повтор доставки ревьюит."""
+    _, uow, _, queue = run_case()
+    (cancelled,) = uow.review_runs.added
+    object.__setattr__(cancelled, "status", ReviewRunStatus.CANCELLED)
+
+    outcome, uow, _, queue = run_case(uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert len(queue.jobs) == 2
+
+
+def test_retarget_blocks_the_merge_gate_before_the_job_is_enqueued() -> None:
+    """Пока новый дифф не проверен, на head висит блокирующий check, а не прежний
+    `success`; блокировка - после коммита нового прогона и до задачи."""
+    uow, queue, _ = reviewed_on_old_target()
+    order: list[str] = []
+    commit = uow.commit
+
+    def tracking_commit() -> None:
+        order.append("commit")
+        commit()
+
+    uow.commit = tracking_commit  # type: ignore[method-assign]
+    vcs = FakeVcs(diff=DIFF, meta=NEW_TARGET)
+    record_check = vcs.set_merge_gate_check
+    enqueue = queue.enqueue
+
+    def tracking_check(*args: Any) -> None:
+        order.append("check")
+        record_check(*args)
+
+    def tracking_enqueue(job: Any) -> None:
+        order.append("enqueue")
+        enqueue(job)
+
+    vcs.set_merge_gate_check = tracking_check  # type: ignore[method-assign,assignment]
+    queue.enqueue = tracking_enqueue  # type: ignore[method-assign]
+    outcome = handle_webhook_event(
+        webhook_payload("edited"), uow, vcs, queue, now=lambda: NOW, new_id=uuid4
+    )
+
+    assert outcome.kind == "success"
+    assert outcome.run is not None
+    ((head_sha, check),) = vcs.checks
+    assert head_sha == outcome.run.head_sha
+    assert check.conclusion == "failure"
+    assert order == ["commit", "check", "enqueue"]
+
+
+def test_retarget_whose_gate_cannot_be_blocked_is_rolled_back() -> None:
+    """GitHub недоступен на блокировке gate: 502, задачи нет, новый прогон - в
+    `failed`, PR - на прежней ветке. Повтор доставки (#149) снова видит смену
+    ветки и блокирует head, а не ревьюит под прежним `success`."""
+    uow, queue, _ = reviewed_on_old_target()
+
+    outcome, uow, _, queue = run_case(
+        "edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue, check_error=VcsError("502")
+    )
+
+    assert outcome.kind == "failure"
+    assert len(queue.jobs) == 1
+    (_, attempted) = uow.review_runs.added
+    failed = uow.review_runs.get(attempted.id)
+    assert failed is not None and failed.status is ReviewRunStatus.FAILED
+    assert merge_request_of(uow).target_branch == "main"
+
+    outcome, uow, vcs, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert [check.conclusion for _, check in vcs.checks] == ["failure"]
+    assert len(queue.jobs) == 2
+
+
+def test_first_review_and_redelivery_touch_no_gate() -> None:
+    _, uow, vcs, queue = run_case()
+    assert vcs.checks == []
+    _, uow, vcs, queue = run_case(uow=uow, queue=queue)
+    assert vcs.checks == []

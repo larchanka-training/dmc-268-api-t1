@@ -1,5 +1,6 @@
 """Оркестрация одного прогона ревью — фейковый `UnitOfWork`, без БД и брокера."""
 
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -12,6 +13,7 @@ from pydantic import BaseModel
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
+from app.application.merge_gate_publish import build_failed_review_check
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.review_pipeline import run_review
 from app.domain.entities import (
@@ -38,7 +40,7 @@ from app.domain.llm_errors import (
 )
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import start_step
-from app.domain.vcs_errors import DiffTooLargeError, VcsError
+from app.domain.vcs_errors import DiffTooLargeError, VcsError, VcsTransientError
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.vcs.errors import VcsNotFoundError
 
@@ -632,6 +634,93 @@ def test_a_publication_failure_keeps_the_model_and_the_tokens() -> None:
     assert run.status is ReviewRunStatus.FAILED
     assert run.failed_stage is ReviewRunStatus.PUBLISHING
     assert (run.model, run.tokens_used) == ("qwen", 1400)
+
+
+class _RetargetDuringPublication(RecordingVcsGateway):
+    """Смена целевой ветки приходится на POST ревью: приём переводит прогон в
+    `cancelled`, как `_supersede` в `handle_webhook`."""
+
+    def __init__(self, uow: FakeUnitOfWork) -> None:
+        super().__init__()
+        self._uow = uow
+
+    def publish_pull_request_review(self, *args: Any, **kwargs: Any) -> Any:
+        current = self._uow.review_runs.get(JOB.review_run_id)
+        assert current is not None
+        self._uow.review_runs.update(replace(current, status=ReviewRunStatus.CANCELLED))
+        return super().publish_pull_request_review(*args, **kwargs)
+
+
+def test_a_run_cancelled_by_a_retarget_is_acked_not_dead_lettered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Блокер ревью #225: переход отменённого прогона бросает `cancelled is terminal`.
+    Воркер не пробрасывает его - иначе сообщение уходит в DLQ - и не трогает gate:
+    head отвечает новый прогон."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = _RetargetDuringPublication(uow)
+
+    with caplog.at_level(logging.INFO, logger="app.application.review_pipeline"):
+        _run(uow, ScriptedLlmGateway([review_response()]), vcs_gateway=vcs)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.CANCELLED
+    assert build_failed_review_check() not in vcs.checks
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert all(
+        step.status is not ReviewRunStepStatus.RUNNING
+        for step in uow.review_run_steps.list_for_run(JOB.review_run_id)
+    )
+
+
+def test_a_run_cancelled_before_its_review_is_posted_leaves_the_step_abandoned() -> None:
+    """Отмена между переходом в `publishing` и POST ревью: ревью не публикуется, а шаг
+    публикации не выглядит завершённым - его исхода нет."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    update = uow.review_runs.update
+
+    def retarget_on_publishing(run: ReviewRun) -> None:
+        update(run)
+        if run.status is ReviewRunStatus.PUBLISHING:
+            update(replace(run, status=ReviewRunStatus.CANCELLED))
+
+    uow.review_runs.update = retarget_on_publishing  # type: ignore[method-assign]
+    vcs = RecordingVcsGateway()
+    _run(uow, ScriptedLlmGateway([review_response()]), vcs_gateway=vcs)
+
+    assert _completed(uow).status is ReviewRunStatus.CANCELLED
+    assert (vcs.publications, vcs.checks) == ([], [])
+    (publishing,) = [
+        step
+        for step in uow.review_run_steps.list_for_run(JOB.review_run_id)
+        if step.stage is ReviewRunStage.PUBLISHING
+    ]
+    assert (publishing.status, publishing.error_code) == (
+        ReviewRunStepStatus.FAILED,
+        "REVIEW_RUN_STALE",
+    )
+
+
+def test_a_run_cancelled_while_the_model_answers_is_acked() -> None:
+    """Отмена чаще приходится на вызов модели: следующий переход прогона тоже бросает,
+    и сообщение тоже не уходит в DLQ."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    class RetargetedGateway:
+        def complete(self, request: object) -> NoReturn:
+            current = uow.review_runs.get(JOB.review_run_id)
+            assert current is not None
+            uow.review_runs.update(replace(current, status=ReviewRunStatus.CANCELLED))
+            raise LlmTimeoutError("модель не ответила")
+
+    vcs = RecordingVcsGateway()
+    _run(uow, RetargetedGateway(), vcs_gateway=vcs)
+
+    assert _completed(uow).status is ReviewRunStatus.CANCELLED
+    assert vcs.publications == []
 
 
 DEFAULT_SUMMARY = "Критичных проблем в диффе не обнаружено."
@@ -1291,3 +1380,55 @@ def test_a_screening_failure_counts_the_review_tokens_in_the_run(
         _run(uow, ScriptedLlmGateway([review_response(tokens=25)]))
 
     assert _completed(uow).tokens_used == 25
+
+
+def _seed_earlier_review(uow: FakeUnitOfWork, *, run_id: UUID, at: datetime) -> None:
+    """Прогон на тот же head рядом с текущим: `completed` раньше или новый позже."""
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    uow.review_runs.add(
+        replace(run, id=run_id, status=ReviewRunStatus.COMPLETED, created_at=at, updated_at=at)
+    )
+
+
+def test_a_failed_review_after_an_earlier_one_blocks_the_head() -> None:
+    """Ревью #225: после смены ветки поправка gate не дошла, на head `success` прежнего
+    прогона по старому диффу - упавший новый прогон выставляет `failure`."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks == [build_failed_review_check()]
+
+
+def test_a_failed_review_superseded_on_the_head_leaves_the_gate_alone() -> None:
+    """За head отвечает уже более поздний прогон - упавший старый gate не трогает."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW + timedelta(minutes=5))
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks == []
+
+
+def test_a_failed_gate_of_a_failed_review_does_not_hide_the_failure() -> None:
+    """GitHub не принял `failure`: в логе сбой, наружу - исходное исключение прогона."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+    vcs.check_error = VcsTransientError("GitHub API: HTTP 502")
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    assert run.status == ReviewRunStatus.FAILED

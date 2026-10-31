@@ -115,6 +115,36 @@ def test_garbage_payload_is_ignored_without_raising(payload: dict[str, Any]) -> 
     assert extract_github_event(payload) is None
 
 
+# --- #222: смена целевой ветки запускает ревью --------------------------------
+
+
+def test_edited_with_a_new_base_branch_is_a_review_event() -> None:
+    """Смена целевой ветки меняет дифф PR при том же head: прежний check run про него ничего не знает."""
+    payload = _load_payload("github_webhook_opened.json")
+    payload["action"] = "edited"
+    payload["changes"] = {"base": {"ref": {"from": "evil-staging"}, "sha": {"from": "0" * 40}}}
+
+    event = extract_github_event(payload)
+
+    assert event is not None
+    assert event.action == "edited"
+    assert event.head_sha == "a1b2c3d4e5f6789012345678abcdef0123456789"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [None, {}, {"title": {"from": "старый заголовок"}}, {"body": {"from": ""}}, {"base": None}],
+)
+def test_edited_without_a_base_change_is_ignored(changes: Any) -> None:
+    """Правка заголовка или описания дифф не меняет - ревью не запускается."""
+    payload = _load_payload("github_webhook_opened.json")
+    payload["action"] = "edited"
+    if changes is not None:
+        payload["changes"] = changes
+
+    assert extract_github_event(payload) is None
+
+
 @pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
 def test_a_pr_of_an_own_author_from_a_fork_starts_a_review(association: str) -> None:
     payload = _load_payload("github_webhook_opened.json")

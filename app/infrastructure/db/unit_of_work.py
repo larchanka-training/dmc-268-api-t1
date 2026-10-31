@@ -43,6 +43,8 @@ _RACE_CONSTRAINTS = (
     "uq_review_runs_one_active_per_commit",
     # два merge_request на пару репозиторий+номер (гонка первых доставок PR)
     "uq_merge_requests_repo_number",
+    # два прогона одновременно подобрали одно ревью упавшего прогона (#222)
+    "uq_published_comments_provider_comment_id",
 )
 
 
@@ -106,9 +108,12 @@ class SqlAlchemyUnitOfWork:
             # чтобы вызывающий после ActiveRunConflict мог перечитать записи
             # победителя гонки по естественному ключу.
             self.rollback()
-            if any(name in str(error.orig) for name in _RACE_CONSTRAINTS):
+            violated = next((name for name in _RACE_CONSTRAINTS if name in str(error.orig)), None)
+            if violated is not None:
+                # Имя ограничения в тексте: гонку доставок PR и подбор одного ревью
+                # двумя прогонами при разборе иначе не различить.
                 raise ActiveRunConflict(
-                    "параллельная доставка закоммитила записи этого PR раньше"
+                    f"параллельная транзакция закоммитила конфликтующую запись раньше: {violated}"
                 ) from error
             raise
 

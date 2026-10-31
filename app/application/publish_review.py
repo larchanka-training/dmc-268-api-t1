@@ -9,11 +9,15 @@ from uuid import UUID
 from app.application.merge_gate_publish import (
     build_merge_gate_check,
     collect_open_findings,
+    settle_merge_gate,
 )
 from app.application.ports.llm_gateway import LlmReviewResult, LlmReviewSummary
-from app.application.ports.unit_of_work import UnitOfWork
+from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
-from app.application.ports.vcs_review import InlineCommentDraft
+from app.application.ports.vcs_review import (
+    InlineCommentDraft,
+    PullRequestReviewPublication,
+)
 from app.application.sync_thread_resolution import record_threads_resolved_on_host
 from app.domain.entities import (
     BotThread,
@@ -22,7 +26,7 @@ from app.domain.entities import (
     ReviewJob,
     ReviewRun,
 )
-from app.domain.enums import CommentKind
+from app.domain.enums import CommentKind, ReviewRunStatus
 from app.domain.review_comment import (
     format_inline_finding_comment,
     format_summary_comment,
@@ -54,6 +58,10 @@ def _line_for_anchor(finding: Finding) -> int:
     return line
 
 
+class RunCancelledError(Exception):
+    """Прогон отменили сменой целевой ветки до POST ревью: публиковать нечего."""
+
+
 def publish_review(
     job: ReviewJob,
     run: ReviewRun,
@@ -72,6 +80,7 @@ def publish_review(
     закрывают: модель читает дифф, который пишет автор PR, и её «исправлено»
     снимало бы блокировку мерджа по инъекции (#73). Тред закрывает человек.
     """
+    _adopt_orphaned_reviews(job, run, uow=uow, vcs=vcs, now=now, new_id=new_id)
     with uow:
         findings = tuple(uow.findings.list_for_run(run.id))
         threads = tuple(uow.published_comments.list_threads_for_merge_request(run.merge_request_id))
@@ -90,15 +99,16 @@ def publish_review(
     summary = result.summary or _default_summary(findings)
     summary_body = format_summary_comment(summary.problem, summary.positives, summary.effort)
 
-    inline_drafts = tuple(
-        InlineCommentDraft(
-            file_path=finding.anchor.file_path,
-            side=finding.anchor.side,
-            line=_line_for_anchor(finding),
-            body=format_inline_finding_comment(finding),
-        )
-        for finding in to_publish
-    )
+    inline_drafts = _inline_drafts(to_publish)
+
+    with uow:
+        current = uow.review_runs.get(run.id)
+    if current is not None and current.status is ReviewRunStatus.CANCELLED:
+        # Целевую ветку сменили, пока прогон работал (#222): его ревью и gate
+        # описывали бы дифф против старой ветки, а замечания стали бы тредами в gate
+        # нового прогона. Head заблокировал приём, ревью и gate выставит новый прогон.
+        # Отмену после этой проверки поправит `settle_merge_gate` после POST gate.
+        raise RunCancelledError(f"прогон {run.id} отменён до публикации: ревью не публикуется")
 
     publication = vcs.publish_pull_request_review(
         job.repository_full_name,
@@ -110,39 +120,8 @@ def publish_review(
         review_run_id=run.id,
     )
 
-    moment = now
     with uow:
-        if publication.summary_provider_comment_id is not None:
-            uow.published_comments.add(
-                PublishedComment(
-                    id=new_id(),
-                    review_run_id=run.id,
-                    finding_id=None,
-                    provider_comment_id=publication.summary_provider_comment_id,
-                    kind=CommentKind.SUMMARY,
-                    published_at=moment,
-                    created_at=moment,
-                    updated_at=moment,
-                )
-            )
-        for finding, published_item in zip(
-            to_publish, publication.inline_comments, strict=True
-        ):
-            if published_item is None:
-                continue
-            provider_id = published_item.provider_comment_id
-            uow.published_comments.add(
-                PublishedComment(
-                    id=new_id(),
-                    review_run_id=run.id,
-                    finding_id=finding.id,
-                    provider_comment_id=provider_id,
-                    kind=CommentKind.INLINE,
-                    published_at=moment,
-                    created_at=moment,
-                    updated_at=moment,
-                )
-            )
+        _record_publication(uow, run.id, to_publish, publication, now=now, new_id=new_id)
         for finding_id, thread in covered.items():
             uow.findings.mark_covered(finding_id, thread.finding.id)
         uow.commit()
@@ -154,11 +133,16 @@ def publish_review(
     # прогону и второму ревью. Без check run обязательная проверка не даёт мерджа
     # до следующего прогона или вебхука закрытия треда.
     try:
-        vcs.set_merge_gate_check(
-            job.repository_full_name,
-            job.head_sha,
-            job.installation_id,
-            build_merge_gate_check(still_open),
+        # Ветку могли сменить после проверки статуса до публикации (#222).
+        settle_merge_gate(
+            uow,
+            vcs,
+            merge_request_id=run.merge_request_id,
+            repo_full_name=job.repository_full_name,
+            head_sha=job.head_sha,
+            installation_id=job.installation_id,
+            run_id=run.id,
+            check=build_merge_gate_check(still_open),
         )
     except VcsError:
         logger.warning(
@@ -166,6 +150,121 @@ def publish_review(
             run.id,
             job.head_sha,
             exc_info=True,
+        )
+
+
+def _inline_drafts(findings: tuple[Finding, ...]) -> tuple[InlineCommentDraft, ...]:
+    return tuple(
+        InlineCommentDraft(
+            file_path=finding.anchor.file_path,
+            side=finding.anchor.side,
+            line=_line_for_anchor(finding),
+            body=format_inline_finding_comment(finding),
+        )
+        for finding in findings
+    )
+
+
+def _record_publication(
+    uow: UnitOfWork,
+    run_id: UUID,
+    findings: tuple[Finding, ...],
+    publication: PullRequestReviewPublication,
+    *,
+    now: datetime,
+    new_id: Callable[[], UUID],
+) -> None:
+    """Записать ревью прогона в `published_comments` (без коммита): сводку и inline
+    с id, сопоставленные с находками в порядке черновиков."""
+    if publication.summary_provider_comment_id is not None:
+        uow.published_comments.add(
+            PublishedComment(
+                id=new_id(),
+                review_run_id=run_id,
+                finding_id=None,
+                provider_comment_id=publication.summary_provider_comment_id,
+                kind=CommentKind.SUMMARY,
+                published_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    for finding, published_item in zip(findings, publication.inline_comments, strict=True):
+        if published_item is None:
+            continue
+        uow.published_comments.add(
+            PublishedComment(
+                id=new_id(),
+                review_run_id=run_id,
+                finding_id=finding.id,
+                provider_comment_id=published_item.provider_comment_id,
+                kind=CommentKind.INLINE,
+                published_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+
+def _adopt_orphaned_reviews(
+    job: ReviewJob,
+    run: ReviewRun,
+    *,
+    uow: UnitOfWork,
+    vcs: VcsGateway,
+    now: datetime,
+    new_id: Callable[[], UUID],
+) -> None:
+    """Записать ревью прогонов PR, упавших на публикации без следа в базе (#222).
+
+    Воркер умер между `POST …/reviews` и записью `published_comments`: ревью с
+    маркером прогона есть на GitHub, а отсев по треду его не видит и повторил бы
+    замечание. Найденное ревью записывается упавшему прогону, его inline
+    сопоставляются с его находками. Best-effort: сбой хостинга - warning, без
+    подбора публикация идёт как раньше. Ошибки кода (не `VcsError`) не гасятся.
+    """
+    with uow:
+        orphans = [
+            (orphan, tuple(uow.findings.list_for_run(orphan.id)))
+            for orphan in uow.review_runs.list_unpublished_failures(run.merge_request_id)
+        ]
+    for orphan, findings in orphans:
+        drafts = _inline_drafts(findings)
+        try:
+            publication = vcs.find_published_review(
+                job.repository_full_name,
+                job.pull_request_number,
+                job.installation_id,
+                drafts,
+                review_run_id=orphan.id,
+            )
+        except VcsError:
+            logger.warning(
+                "прогон %s: ревью упавшего прогона %s на GitHub не проверено",
+                run.id,
+                orphan.id,
+                exc_info=True,
+            )
+            continue
+        if publication is None:
+            continue
+        with uow:
+            _record_publication(uow, orphan.id, findings, publication, now=now, new_id=new_id)
+            try:
+                uow.commit()
+            except ActiveRunConflict:
+                # Соседний прогон PR подобрал это ревью раньше: записи уже есть.
+                uow.rollback()
+                logger.info(
+                    "прогон %s: ревью упавшего прогона %s уже записал другой прогон",
+                    run.id,
+                    orphan.id,
+                )
+                continue
+        logger.warning(
+            "прогон %s: ревью упавшего прогона %s найдено по маркеру и записано",
+            run.id,
+            orphan.id,
         )
 
 

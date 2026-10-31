@@ -23,8 +23,14 @@ from pydantic import ValidationError
 from app.api.factory import create_app
 from app.api.schemas import UTC_DATETIME_PATTERN, ReviewJob
 from app.config import Settings
-from app.domain.entities import MergeRequest, PublishedComment
-from app.domain.enums import CommentKind, MergeRequestState, Provider
+from app.domain.entities import MergeRequest, PublishedComment, ReviewRun
+from app.domain.enums import (
+    CommentKind,
+    MergeRequestState,
+    Provider,
+    ReviewRunStatus,
+    TriggerSource,
+)
 from app.domain.vcs_errors import VcsError
 
 from ..fakes import (
@@ -282,7 +288,7 @@ def test_disconnected_repository_returns_202_ignored_and_passes_the_merge_gate(a
     assert container.queue.jobs == []
     head_sha = webhook_payload(action)["pull_request"]["head"]["sha"]
     assert container.vcs.calls == [("check", REPO_FULL_NAME, head_sha, "success")]
-    assert [check.title for check in container.vcs.checks] == ["Ревью выключено в сервисе"]
+    assert [check.title for _, check in container.vcs.checks] == ["Ревью выключено в сервисе"]
     assert list(container.uow.repositories.stored.values()) == [disconnected]
 
 
@@ -358,9 +364,10 @@ def with_published_thread(uow: FakeUow) -> PublishedComment:
     repository = uow.repositories.find_by_provider(Provider.GITHUB, REGISTERED_PROVIDER_ID)
     assert repository is not None
     pull_request = webhook_payload("opened")["pull_request"]
+    merge_request_id = uuid4()
     uow.merge_requests.add(
         MergeRequest(
-            id=uuid4(),
+            id=merge_request_id,
             repository_id=repository.id,
             number=pull_request["number"],
             title="t",
@@ -374,9 +381,23 @@ def with_published_thread(uow: FakeUow) -> PublishedComment:
             updated_at=NOW,
         )
     )
+    # Тред оставил завершённый прогон на текущем head: по нему пересчитывается gate (#222).
+    run = ReviewRun(
+        id=uuid4(),
+        merge_request_id=merge_request_id,
+        head_sha=pull_request["head"]["sha"],
+        status=ReviewRunStatus.COMPLETED,
+        trigger=TriggerSource.WEBHOOK,
+        last_progress_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    uow.review_runs.add(run)
+    # Прогон - состояние до вебхука, а не запись приёма: тесты сверяют `added` с приёмом.
+    uow.review_runs.added.clear()
     comment = PublishedComment(
         id=uuid4(),
-        review_run_id=uuid4(),
+        review_run_id=run.id,
         provider_comment_id=ROOT_COMMENT_ID,
         kind=CommentKind.INLINE,
         published_at=NOW,

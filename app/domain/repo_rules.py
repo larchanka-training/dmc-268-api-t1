@@ -24,10 +24,10 @@
 
 import re
 from collections.abc import Iterable
-from pathlib import PurePosixPath
 
 from app.domain.diff_parser import split_lines
 from app.domain.entities import RejectedRule, RepoRule
+from app.domain.glob import glob_full_match
 
 RULES_PATH = ".review/rules.md"
 
@@ -159,19 +159,20 @@ def parse_rules_markdown(text: str) -> tuple[tuple[RepoRule, ...], tuple[Rejecte
 
 def rule_applies_to(rule: RepoRule, path: str) -> bool:
     """Файл подходит под паттерн правила и не подпадает под исключение."""
-    candidate = PurePosixPath(path)
-    return any(_glob_matches(candidate, p) for p in rule.patterns) and not any(
-        _glob_matches(candidate, e) for e in rule.excludes
+    return any(_glob_matches(path, p) for p in rule.patterns) and not any(
+        _glob_matches(path, e) for e in rule.excludes
     )
 
 
-def _glob_matches(path: PurePosixPath, pattern: str) -> bool:
+def _glob_matches(path: str, pattern: str) -> bool:
     """Glob с семантикой `.gitignore`.
 
     Шаблон без `/` (кроме завершающего) — имя на любой глубине: `*.py` = `**/*.py`.
     Завершающий `/` — только каталог со всем содержимым: `app/` = `**/app/**`. Шаблон без
     завершающего `/` совпадает и с файлом, и с содержимым каталога: `app/api` = `app/api/**`.
     `/` в начале или середине привязывает шаблон к корню репозитория.
+    Сопоставление - `glob_full_match`, без регулярных выражений: шаблон не может
+    повесить воркер (#222).
     """
     body = pattern.strip("/")
     if not body:
@@ -180,8 +181,8 @@ def _glob_matches(path: PurePosixPath, pattern: str) -> bool:
     if not anchored:
         body = "**/" + body
     if pattern.endswith("/"):
-        return path.full_match(body + "/**")
-    return path.full_match(body) or path.full_match(body + "/**")
+        return glob_full_match(path, body + "/**")
+    return glob_full_match(path, body) or glob_full_match(path, body + "/**")
 
 
 def applicable_rules(

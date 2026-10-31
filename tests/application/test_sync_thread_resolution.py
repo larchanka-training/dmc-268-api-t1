@@ -1,7 +1,11 @@
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
-from app.application.merge_gate_publish import DISABLED_REVIEW_CHECK
+from app.application.merge_gate_publish import (
+    DISABLED_REVIEW_CHECK,
+    build_retarget_check,
+)
 from app.application.sync_thread_resolution import (
     apply_review_thread_webhook,
     handle_review_thread_webhook,
@@ -168,6 +172,103 @@ def test_merge_gate_refresh_sees_a_critical_whose_inline_id_was_lost() -> None:
 
     (check,) = vcs.checks
     assert check.conclusion == "failure"
+
+
+# --- #222: пересчёт gate - только по завершённому ревью head ----------------------
+
+MR_ID = UUID(int=3)
+
+
+def _run(run_id: int, status: ReviewRunStatus, *, at: int, base: str = "base1") -> ReviewRun:
+    moment = NOW.replace(minute=at)
+    return ReviewRun(
+        id=UUID(int=run_id),
+        merge_request_id=MR_ID,
+        head_sha="sha1",
+        base_sha=base,
+        status=status,
+        trigger=TriggerSource.WEBHOOK,
+        last_progress_at=moment,
+        created_at=moment,
+        updated_at=moment,
+    )
+
+
+def _refresh(uow: FakeUnitOfWork) -> RecordingVcsGateway:
+    vcs = RecordingVcsGateway()
+    refresh_merge_gate_for_merge_request(
+        MR_ID,
+        repo_full_name="o/r",
+        pr_number=7,
+        head_sha="sha1",
+        installation_id=1,
+        uow=uow,
+        vcs=vcs,
+        now=NOW,
+    )
+    return vcs
+
+
+def test_closing_a_thread_before_the_head_is_reviewed_sets_no_gate() -> None:
+    """Обход: push, ревью нового head ещё идёт, автор закрывает тред - `success` на
+    непроверенный коммит не выставляется."""
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.ANALYSING, at=1))
+
+    assert _refresh(uow).checks == []
+
+
+def test_closing_a_thread_after_the_review_of_a_new_base_failed_sets_no_gate() -> None:
+    """Целевую ветку сменили, ревью нового диффа упало: прогон на старой базе
+    `success` уже не даёт."""
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.COMPLETED, at=1, base="old"))
+    uow.review_runs.add(_run(2, ReviewRunStatus.FAILED, at=2, base="new"))
+
+    assert _refresh(uow).checks == []
+
+
+def test_closing_a_thread_after_a_completed_review_of_the_head_sets_the_gate() -> None:
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.CANCELLED, at=1, base="old"))
+    uow.review_runs.add(_run(2, ReviewRunStatus.COMPLETED, at=2, base="new"))
+
+    (check,) = _refresh(uow).checks
+    assert check.conclusion == "success"
+
+
+class _RetargetDuringGateVcs(RecordingVcsGateway):
+    """На первый POST check run гонкой приходится смена ветки: приём коммитит новый прогон."""
+
+    def __init__(self, uow: FakeUnitOfWork) -> None:
+        super().__init__()
+        self._uow = uow
+
+    def set_merge_gate_check(self, *args: Any) -> None:
+        super().set_merge_gate_check(*args)
+        if len(self.checks) == 1:
+            self._uow.review_runs.add(_run(2, ReviewRunStatus.QUEUED, at=2, base="new"))
+
+
+def test_retarget_racing_a_thread_refresh_ends_in_failure() -> None:
+    """Пересчёт прочитал `completed` на старой ветке до коммита приёма и выставил
+    `success` после его блокировки - перечитав последний прогон, он её возвращает."""
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.COMPLETED, at=1, base="old"))
+    vcs = _RetargetDuringGateVcs(uow)
+    refresh_merge_gate_for_merge_request(
+        MR_ID,
+        repo_full_name="o/r",
+        pr_number=7,
+        head_sha="sha1",
+        installation_id=1,
+        uow=uow,
+        vcs=vcs,
+        now=NOW,
+    )
+
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
+    assert vcs.checks[-1] == build_retarget_check()
 
 
 def test_thread_webhook_of_a_disconnected_repository_sets_the_disabled_check() -> None:

@@ -14,6 +14,7 @@ from app.application.ports.vcs_review import (
     ReviewThreadState,
 )
 from app.domain.enums import DiffSide
+from app.domain.vcs_errors import VcsError
 from app.infrastructure.vcs.errors import VcsUnavailableError
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
@@ -191,6 +192,9 @@ class _GitHub:
         self.reviews: list[dict[str, Any]] = []
         self.seen: list[tuple[str, str]] = []
         self.comments_status = 200
+        self.comments: list[dict[str, Any]] = [
+            {"id": 42, "path": "a.py", "line": None, "side": None, "body": DRAFT.body}
+        ]
         # Статус `GET /app` до первого и после первого `POST …/reviews`.
         self.app_status_before_post = 200
         self.app_status_after_post = 200
@@ -212,7 +216,7 @@ class _GitHub:
         if request.method == "GET" and path.endswith("/comments"):
             if self.comments_status != 200:
                 return httpx.Response(self.comments_status, json={"message": "Bad Gateway"})
-            return httpx.Response(200, json=[{"id": 42, "path": "a.py", "body": "замечание", "line": None, "side": None}])
+            return httpx.Response(200, json=self.comments)
         return httpx.Response(404)
 
     def posts(self) -> int:
@@ -434,3 +438,61 @@ def test_graphql_rate_limited_with_http_200_is_retried(rsa_key_pair: RsaKeyPair)
     assert gateway.fetch_review_threads_state("o/r", 7, INSTALLATION_ID, frozenset({"11"})) == {}
     assert len(calls) == 2
     assert sleeps == [10.0]
+
+
+# --- #222: ревью упавшего прогона ------------------------------------------------
+
+UNMATCHED = InlineCommentDraft(file_path="b.py", side=DiffSide.NEW, line=9, body="другое")
+
+
+def _find(gateway: GitHubVcsGateway, *drafts: InlineCommentDraft) -> Any:
+    return gateway.find_published_review("o/r", 7, INSTALLATION_ID, drafts, review_run_id=RUN_ID)
+
+
+def _never_posts(request: httpx.Request) -> httpx.Response:
+    raise AssertionError("поиск ревью не должен ничего создавать")
+
+
+def test_published_review_of_a_run_is_found_by_marker_with_its_inline_ids(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    github = _GitHub(_never_posts)
+    github.reviews = [{"id": 9001, "user": BOT, "body": f"сводка\n\n{MARKER}"}]
+
+    publication = _find(make_gateway(rsa_key_pair, github.handler), DRAFT, UNMATCHED)
+
+    assert publication.summary_provider_comment_id == "9001"
+    assert [c.provider_comment_id if c else None for c in publication.inline_comments] == ["42", None]
+
+
+def test_no_review_with_the_marker_is_none(rsa_key_pair: RsaKeyPair) -> None:
+    """Ревью человека с тем же маркером своим не считается."""
+    github = _GitHub(_never_posts)
+    github.reviews = [{"id": 9001, "user": {"login": "mallory", "type": "User"}, "body": MARKER}]
+
+    assert _find(make_gateway(rsa_key_pair, github.handler), DRAFT) is None
+    assert not any(path.endswith("/comments") for _, path in github.seen)
+
+
+def test_lost_inline_list_of_a_found_review_is_an_error_not_an_empty_match(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """При поиске потеря id inline - сбой: иначе вызывающий записал бы ревью без тредов."""
+    github = _GitHub(_never_posts)
+    github.reviews = [{"id": 9001, "user": BOT, "body": MARKER}]
+    github.comments_status = 404
+
+    with pytest.raises(VcsError):
+        _find(make_gateway(rsa_key_pair, github.handler), DRAFT)
+
+
+def test_found_review_inline_is_matched_by_text_too(rsa_key_pair: RsaKeyPair) -> None:
+    """Две находки упавшего прогона на одной строке, опубликована одна (другую покрыл
+    тред): id уходит той, чей текст совпал, а не первой по порядку."""
+    github = _GitHub(_never_posts)
+    github.reviews = [{"id": 9001, "user": BOT, "body": MARKER}]
+    covered = InlineCommentDraft(file_path="a.py", side=DiffSide.NEW, line=3, body="покрытое тредом")
+
+    publication = _find(make_gateway(rsa_key_pair, github.handler), covered, DRAFT)
+
+    assert [c.provider_comment_id if c else None for c in publication.inline_comments] == [None, "42"]

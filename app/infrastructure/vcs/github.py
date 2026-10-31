@@ -159,6 +159,23 @@ class GitHubVcsGateway:
             review_run_id=review_run_id,
         )
 
+    def find_published_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        installation_id: int,
+        inline_comments: tuple[InlineCommentDraft, ...],
+        *,
+        review_run_id: UUID,
+    ) -> PullRequestReviewPublication | None:
+        return self._review.find_published_review(
+            repo_full_name,
+            pr_number,
+            installation_id,
+            inline_comments,
+            review_run_id=review_run_id,
+        )
+
     def fetch_review_threads_state(
         self,
         repo_full_name: str,

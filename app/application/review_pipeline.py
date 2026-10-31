@@ -24,6 +24,7 @@ from uuid import UUID
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits, request_review, request_verification
+from app.application.merge_gate_publish import build_failed_review_check
 from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
@@ -116,6 +117,48 @@ def _mark_failed(
         return
     run_outcome.run_finished(ReviewRunStatus.FAILED.value)
     close_abandoned_steps(uow, run_id, now=now, known=unwritten_steps)
+
+
+def _was_cancelled(uow: UnitOfWork, run_id: UUID) -> bool:
+    """Отменён ли прогон по свежей строке из базы. Сбой чтения - `False`: исходное
+    исключение тогда уходит наружу, как и без проверки."""
+    try:
+        with uow:
+            run = uow.review_runs.get(run_id)
+    except Exception:
+        logger.exception("не удалось перечитать статус прогона %s", run_id)
+        return False
+    return run is not None and run.status is ReviewRunStatus.CANCELLED
+
+
+def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) -> None:
+    """Выставить `failure` на head, если упавший прогон на нём последний, а до него
+    на этот head уже было ревью (ревью #225).
+
+    Иначе на head мог остаться `success` прежнего прогона по старому диффу: его
+    поправку после смены ветки (`settle_merge_gate`) GitHub не принял. Без
+    прежнего ревью check run на head нет, обязательная проверка и так не даёт
+    мерджа, и упавший прогон на PR ничего не оставляет. Прогон, за которым на head
+    уже есть новый, gate не трогает - head отвечает тот. Best-effort, как
+    `_mark_failed`: сбой пишется в лог и не подменяет исходное исключение.
+    """
+    try:
+        with uow:
+            run = uow.review_runs.get(job.review_run_id)
+            if run is None or run.status is not ReviewRunStatus.FAILED:
+                return
+            latest = uow.review_runs.find_latest(run.merge_request_id, job.head_sha)
+            earlier = uow.review_runs.find_reviewed(run.merge_request_id, job.head_sha)
+        if latest is None or latest.id != run.id or earlier is None:
+            return
+        vcs.set_merge_gate_check(
+            job.repository_full_name,
+            job.head_sha,
+            job.installation_id,
+            build_failed_review_check(),
+        )
+    except Exception:
+        logger.exception("прогон %s упал, а check run merge gate на %s не выставлен", job.review_run_id, job.head_sha)
 
 
 def run_review(
@@ -284,6 +327,14 @@ def run_review(
         # иначе остались бы `running` у завершённого прогона.
         close_abandoned_steps(uow, run.id, now=moment, known=steps.unwritten)
     except Exception as exc:
+        if _was_cancelled(uow, job.review_run_id):
+            # Ретаргет отменил прогон посреди ревью (`_supersede`): переход бросил на
+            # терминальном статусе или публикация отказалась. Это не сбой - открытый
+            # шаг брошен, сообщение уходит в ack, а не в DLQ, head отвечает новый прогон.
+            steps.abandon()
+            logger.info("прогон %s отменён во время ревью, результат отброшен", job.review_run_id)
+            close_abandoned_steps(uow, job.review_run_id, now=now(), known=steps.unwritten)
+            return
         steps.fail(exc)
         _mark_failed(
             uow,
@@ -294,6 +345,7 @@ def run_review(
             unrecorded_tokens=unrecorded_tokens,
             unwritten_steps=steps.unwritten,
         )
+        _block_head_of_failed_run(uow, vcs_gateway, job)
         raise
     except BaseException as exc:
         steps.interrupt(exc)
