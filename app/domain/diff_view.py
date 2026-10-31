@@ -101,7 +101,10 @@ def _hunk_view(hunk: Hunk) -> DiffHunkView:
     """Разложить ханк на строки той же нумерацией, что у парсера (`number_lines`)."""
     header_line, *body = split_lines(hunk.text)
     match = _HEADER_TAIL.match(header_line)
-    lines = tuple(DiffLine(*numbered) for numbered in number_lines(body, hunk.old_start, hunk.new_start))
+    lines = tuple(
+        DiffLine(kind=kind, old_line=old_line, new_line=new_line, content=content)
+        for kind, old_line, new_line, content in number_lines(body, hunk.old_start, hunk.new_start)
+    )
     return DiffHunkView(
         header=match.group(1) if match is not None else "",
         old_start=hunk.old_start,
