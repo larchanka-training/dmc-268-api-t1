@@ -4,7 +4,7 @@ import base64
 import inspect
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import httpx
@@ -15,12 +15,16 @@ from app.api.dependencies import get_unit_of_work
 from app.application import ports
 from app.config import Settings
 from app.infrastructure.container import (
+    CABINET_VCS_LIMITS,
     WORKER_VCS_LIMITS,
     build_container,
     llm_http_timeout,
 )
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.stub import StubLlmGateway
+
+from .fakes.context import FakeCache
+from .fakes.installation_catalog import FakeInstallationCatalog
 
 SETTINGS = Settings(
     database_url="postgresql+psycopg://test:test@localhost/test",
@@ -187,6 +191,40 @@ def test_the_container_keeps_one_cache_per_process() -> None:
     assert container.cache_store() is container.cache_store()
 
 
+def test_the_run_diff_cache_is_its_own_store_kept_per_container() -> None:
+    """Диффы прогонов не вытесняют записи видимости: своё хранилище, одно на контейнер."""
+    container = build_container(SETTINGS)
+    assert container.run_diff_cache() is container.run_diff_cache()
+    assert container.run_diff_cache() is not container.cache_store()
+
+
+def test_the_run_diff_cache_takes_its_byte_limits_from_settings() -> None:
+    settings = SETTINGS.model_copy(
+        update={"run_diff_cache_max_bytes": 10, "run_diff_cache_entry_max_bytes": 5}
+    )
+    cache = build_container(settings).run_diff_cache()
+
+    cache.set("too-big", "123456", ttl_seconds=100)
+    assert cache.get("too-big") is None
+
+    for key in ("a", "b", "c"):
+        cache.set(key, "12345", ttl_seconds=100)
+    assert cache.get("a") is None
+    assert (cache.get("b"), cache.get("c")) == ("12345", "12345")
+
+
+def test_the_visibility_catalog_caches_the_installation_id_for_its_ttl() -> None:
+    """Номер установки ложится в общий кэш видимости со своим TTL из настроек."""
+    cache = FakeCache()
+    settings = SETTINGS.model_copy(update={"installation_id_cache_ttl_seconds": 123})
+    container = replace(build_container(settings), _cache_store=cache)
+
+    catalog = container.visibility_catalog(FakeInstallationCatalog(installation_ids={"octo-org/api": 42}))
+
+    assert catalog.repository_installation_id("octo-org/api") == 42
+    assert cache.sets == [("installation-id:v1:octo-org/api", "42", 123)]
+
+
 def test_the_container_builds_the_parser_once() -> None:
     container = build_container(SETTINGS)
     extractor = container.definition_extractor()
@@ -309,3 +347,18 @@ def test_the_redelivery_pass_gets_a_gateway_that_does_not_wait_out_rate_limits()
 
     assert gateway._rate_limit_budget_seconds == 0.0  # type: ignore[attr-defined]
     assert gateway._client.timeout == httpx.Timeout(5.0)  # type: ignore[attr-defined]
+
+
+def test_the_cabinet_gets_its_own_gateway_with_twenty_seconds_and_no_rate_limit_wait() -> None:
+    """Дифф прогона в кабинете: 20 с на фазу, подключение 5 с, лимит не пережидается
+    (поток threadpool не спит минуту); шлюз API для вебхука остаётся с 5 с."""
+    container = build_container(SETTINGS)
+
+    cabinet = container.cabinet_vcs_gateway()
+
+    assert container.cabinet_vcs_gateway() is cabinet
+    assert cabinet is not container.vcs_gateway()
+    assert CABINET_VCS_LIMITS.timeout == httpx.Timeout(20.0, connect=5.0)
+    assert cabinet._client.timeout == httpx.Timeout(20.0, connect=5.0)  # type: ignore[attr-defined]
+    assert cabinet._rate_limit_budget_seconds == 0.0  # type: ignore[attr-defined]
+    assert container.vcs_gateway()._client.timeout == httpx.Timeout(5.0)

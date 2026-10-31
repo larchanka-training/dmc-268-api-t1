@@ -103,6 +103,40 @@ def test_context_limits_have_defaults() -> None:
     assert settings.rules_max_tokens < settings.context_max_tokens
 
 
+def test_installation_id_cache_ttl_defaults_to_five_minutes() -> None:
+    assert make_settings().installation_id_cache_ttl_seconds == 300
+
+
+def test_run_diff_limits_have_defaults() -> None:
+    settings = make_settings()
+    assert settings.run_diff_max_bytes == 2 * 1024 * 1024
+    assert settings.run_diff_cache_max_bytes == 48 * 1024 * 1024
+    assert settings.run_diff_cache_entry_max_bytes == 8 * 1024 * 1024
+    assert settings.run_diff_cache_ttl_seconds == 3_600
+
+
+def test_run_diff_cache_entry_larger_than_the_whole_cache_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="RUN_DIFF_CACHE_ENTRY_MAX_BYTES"):
+        Settings(
+            database_url=DATABASE_URL,
+            rabbitmq_url=RABBITMQ_URL,
+            github_webhook_secret=WEBHOOK_SECRET,
+            run_diff_cache_max_bytes=1_000,
+            run_diff_cache_entry_max_bytes=1_001,
+        )
+
+
+def test_run_diff_cache_entry_equal_to_the_whole_cache_is_allowed() -> None:
+    settings = Settings(
+        database_url=DATABASE_URL,
+        rabbitmq_url=RABBITMQ_URL,
+        github_webhook_secret=WEBHOOK_SECRET,
+        run_diff_cache_max_bytes=1_000,
+        run_diff_cache_entry_max_bytes=1_000,
+    )
+    assert settings.run_diff_cache_entry_max_bytes == 1_000
+
+
 def test_llm_limits_have_defaults() -> None:
     settings = make_settings()
     assert settings.llm_context_window_tokens == 65_536
@@ -136,6 +170,11 @@ def test_context_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatc
         "request_body_max_bytes",
         "webhook_body_max_bytes",
         "visible_repositories_cache_ttl_seconds",
+        "installation_id_cache_ttl_seconds",
+        "run_diff_max_bytes",
+        "run_diff_cache_max_bytes",
+        "run_diff_cache_entry_max_bytes",
+        "run_diff_cache_ttl_seconds",
         "ast_max_files",
         "ast_max_file_bytes",
         "llm_context_window_tokens",

@@ -77,6 +77,12 @@ API_VCS_LIMITS = VcsClientLimits(timeout=httpx.Timeout(5.0), rate_limit_budget_s
 WORKER_VCS_LIMITS = VcsClientLimits(
     timeout=httpx.Timeout(30.0, connect=5.0), rate_limit_budget_seconds=60.0
 )
+# Чтения кабинета (дифф прогона): крупный compare дольше 5 секунд вебхука, но
+# запрос пользователя не ждёт минуту лимита — поток threadpool не спит, отказ
+# лимита уходит 502 сразу.
+CABINET_VCS_LIMITS = VcsClientLimits(
+    timeout=httpx.Timeout(20.0, connect=5.0), rate_limit_budget_seconds=0.0
+)
 # Сбой `GET /app` для `install_url` помнится минуту: страницы списка, запрошенные
 # подряд, не ждут таймаута GitHub каждая и не пишут по предупреждению на страницу.
 _APP_SLUG_RETRY_SECONDS = 60.0
@@ -103,6 +109,9 @@ class Container:
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
     _vcs_gateway: GitHubVcsGateway | None
+    # Ленивый шлюз чтений кабинета со своими лимитами (`CABINET_VCS_LIMITS`):
+    # свой клиент и свой кэш installation tokens, бюджет вебхука не трогает.
+    _cabinet_vcs_gateway: VcsGateway | None
     # Таймаут и ожидание лимита VCS-шлюза: у API и воркера свои.
     _vcs_limits: VcsClientLimits
     # Репозитории, видимые пользователю, — запросы с его токеном; App-реквизиты
@@ -114,6 +123,10 @@ class Container:
     # In-process кэш живёт, пока жив процесс, — только если он один на
     # контейнер: фабрика на каждый вызов теряла бы всё между прогонами.
     _cache_store: CacheStore
+    # Диффы прогонов кабинета (change review-run-diff, D4) — своё хранилище с
+    # лимитом в байтах: в общем они вытесняли бы записи видимости (FIFO по
+    # числу) и занимали бы до 1024 × размер диффа.
+    _run_diff_cache: CacheStore
     # Слушатель изменений прогонов для потока событий API: соединение `LISTEN`
     # открывается при первой подписке, воркеру оно не нужно.
     _run_changes: PostgresRunChanges
@@ -173,6 +186,18 @@ class Container:
             logger.warning("slug GitHub App не получен: install_url не отдаётся", exc_info=True)
             return None
 
+    def cabinet_vcs_gateway(self) -> VcsGateway:
+        """VCS-шлюз чтений кабинета (дифф прогона): 20 с на запрос, лимит не пережидается.
+
+        Не `vcs_gateway()`: у того 5 с — бюджет ответа на вебхук. Собирается при
+        первом обращении и живёт с контейнером; конструирование — без сети.
+        """
+        gateway = self._cabinet_vcs_gateway
+        if gateway is None:
+            gateway = self._build_vcs_gateway(CABINET_VCS_LIMITS)
+            object.__setattr__(self, "_cabinet_vcs_gateway", gateway)
+        return gateway
+
     def redelivery_vcs_gateway(self) -> VcsGateway:
         """VCS-шлюз прохода повтора доставок (#149): лимит GitHub не пережидается.
 
@@ -215,7 +240,11 @@ class Container:
         и кэш должен лечь поверх подменённого.
         """
         return CachedInstallationCatalog(
-            catalog, self._cache_store, self.settings.visible_repositories_cache_ttl_seconds, read=read
+            catalog,
+            self._cache_store,
+            self.settings.visible_repositories_cache_ttl_seconds,
+            installation_id_ttl_seconds=self.settings.installation_id_cache_ttl_seconds,
+            read=read,
         )
 
     def oauth_provider(self, name: str) -> OAuthProvider | None:
@@ -224,6 +253,10 @@ class Container:
 
     def cache_store(self) -> CacheStore:
         return self._cache_store
+
+    def run_diff_cache(self) -> CacheStore:
+        """Кэш диффов прогонов по паре коммитов; не `cache_store()`."""
+        return self._run_diff_cache
 
     def run_changes(self) -> RunChanges:
         return self._run_changes
@@ -270,6 +303,7 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
         _token_cipher=_token_cipher(settings),
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
+        _cabinet_vcs_gateway=None,
         _vcs_limits=vcs_limits,
         _installation_catalog=_build_installation_catalog(settings),
         _oauth_providers={
@@ -281,6 +315,10 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
             ),
         },
         _cache_store=InMemoryCacheStore(),
+        _run_diff_cache=InMemoryCacheStore(
+            max_bytes=settings.run_diff_cache_max_bytes,
+            max_entry_bytes=settings.run_diff_cache_entry_max_bytes,
+        ),
         _run_changes=PostgresRunChanges(listen_conninfo(settings.database_url)),
         _llm_gateway=None,
         _definition_extractor=None,

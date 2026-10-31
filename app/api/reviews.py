@@ -19,6 +19,9 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
+    get_cabinet_vcs_gateway,
+    get_run_diff_cache,
+    get_settings,
     get_token_provider,
     get_unit_of_work,
     get_unit_of_work_factory,
@@ -27,10 +30,15 @@ from app.api.dependencies import (
 from app.api.errors import (
     ERRORS_403_ORIGIN,
     ERRORS_404_REVIEW,
+    ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION,
+    ERRORS_409_DIFF_UNAVAILABLE,
     ERRORS_409_REVIEW_ACTIVE,
+    ERRORS_410_COMMIT_NOT_FOUND,
     ERRORS_413_BODY,
     ERRORS_422,
+    ERRORS_422_OR_DIFF_TOO_LARGE,
     ERRORS_501_NOT_IMPLEMENTED,
+    ERRORS_502_SCM_DIFF,
     ERRORS_502_SCM_VISIBILITY,
     ApiError,
 )
@@ -50,8 +58,17 @@ from app.api.schemas import (
 )
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES, current_session
 from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
+from app.application.ports.cache_store import CacheStore
+from app.application.ports.vcs_gateway import VcsGateway
 from app.application.run_feed_events import visible_repository_ids
 from app.application.use_cases.auth import SignedIn
+from app.application.use_cases.run_diff import (
+    RepositoryNotInstalled,
+    RunCommitNotFound,
+    RunDiffUnavailable,
+    load_run_diff,
+)
+from app.config import Settings
 from app.domain.entities import MergeRequest, Repository, ReviewRun, ReviewRunListEntry
 from app.domain.enums import (
     CommentKind,
@@ -65,6 +82,7 @@ from app.domain.enums import (
 )
 from app.domain.provider_links import merge_request_url
 from app.domain.run_list import run_list_filter
+from app.domain.vcs_errors import DiffTooLargeError, VcsError
 
 # Задачи на реализацию ручного запуска пока нет — ссылка появится в описании операции.
 _CREATE_REVIEW_DESCRIPTION = (
@@ -75,12 +93,18 @@ _CREATE_REVIEW_DESCRIPTION = (
     "проверяется раньше сессии и разбора тела."
 )
 
-# Решения 2 и 4 в dmc-268-ui-t1#37; реализация — отдельными задачами, ссылка появится здесь.
+# Решения 2 и 4 в dmc-268-ui-t1#37; реализация — #87 (change review-run-diff).
 _DIFF_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #82). Требует сессию; прогон проверяется до ответа 501 — 404 REVIEW_NOT_FOUND, если его нет "
-    "или он не виден пользователю. Когда ручка заработает: полный дифф запроса на изменение у провайдера "
-    "между base_sha и head_sha прогона."
+    "Требует сессию. Дифф пары коммитов base_sha...head_sha прогона у GitHub (задача #87): все изменённые "
+    "файлы в порядке диффа, включая файлы, которые ревью отфильтровало (lock-файлы, сгенерированное). "
+    "Видимость прогона — то же правило, что у GET /reviews: невидимый или несуществующий прогон — "
+    "404 REVIEW_NOT_FOUND, без запроса установки приложения и диффа к GitHub. Разобранный дифф кэшируется "
+    "в памяти API по паре коммитов на RUN_DIFF_CACHE_TTL_SECONDS (по умолчанию час), без привязки к "
+    "пользователю: видимость проверяется до чтения кэша; номер установки приложения — на "
+    "INSTALLATION_ID_CACHE_TTL_SECONDS. Отказы не кэшируются: 409 DIFF_UNAVAILABLE — у прогона нет base_sha, "
+    "к GitHub не ходили; 404 REPOSITORY_NOT_IN_INSTALLATION — приложение не установлено на репозиторий или "
+    "установка приостановлена; 410 COMMIT_NOT_FOUND — GitHub не знает коммит прогона; 422 DIFF_TOO_LARGE — "
+    "дифф больше RUN_DIFF_MAX_BYTES (2 МиБ); 502 SCM_UNAVAILABLE — прочий сбой GitHub."
 )
 _STEPS_DESCRIPTION = (
     "Требует сессию. Шаги воркера по порядку начала (при равном начале — по id): этап, статус, начало, "
@@ -349,14 +373,17 @@ class ReviewRunListQuery(BaseModel):
         return created_to
 
 
-def visible_run(
-    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
-    signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_visibility_catalog),
-    oauth: OAuthProvider = Depends(get_token_provider),
-    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
-) -> ReviewRun:
-    """Прогон, если он виден пользователю, — по тому же правилу, что список и поток.
+_RunId = Annotated[UUID, Path(description="Идентификатор прогона ревью.")]
+
+
+def _visible_run_and_repository(
+    review_run_id: UUID,
+    signed_in: SignedIn,
+    catalog: InstallationCatalog,
+    oauth: OAuthProvider,
+    uow_factory: Callable[[], UnitOfWork],
+) -> tuple[ReviewRun, Repository]:
+    """Прогон и его репозиторий, если прогон виден пользователю, — по тому же правилу, что список и поток.
 
     Невидимый прогон отвечает так же, как несуществующий, `404 REVIEW_NOT_FOUND`. GitHub
     спрашиваем до чтения прогона и при любом id: иначе `502`, `401` или задержка ответа
@@ -368,7 +395,29 @@ def visible_run(
         repository = None if run is None else _repository_of(uow, run)
     if run is None or repository is None or not is_visible(repository, provider_ids):
         raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
-    return run
+    return run, repository
+
+
+def visible_run(
+    review_run_id: _RunId,
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> ReviewRun:
+    """Прогон, если он виден пользователю; иначе `404 REVIEW_NOT_FOUND`."""
+    return _visible_run_and_repository(review_run_id, signed_in, catalog, oauth, uow_factory)[0]
+
+
+def visible_run_with_repository(
+    review_run_id: _RunId,
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> tuple[ReviewRun, Repository]:
+    """Видимый прогон вместе с репозиторием — для ручек, которым нужен репозиторий у провайдера (дифф)."""
+    return _visible_run_and_repository(review_run_id, signed_in, catalog, oauth, uow_factory)
 
 
 def _repository_of(uow: UnitOfWork, run: ReviewRun) -> Repository:
@@ -559,10 +608,59 @@ class ReviewRunStepListResponse(BaseModel):
     summary="Дифф прогона",
     response_description="Изменённые файлы с ханками.",
     description=_DIFF_DESCRIPTION,
-    responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED, **ERRORS_502_SCM_VISIBILITY},
+    responses={
+        **ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION,
+        **ERRORS_409_DIFF_UNAVAILABLE,
+        **ERRORS_410_COMMIT_NOT_FOUND,
+        **ERRORS_422_OR_DIFF_TOO_LARGE,
+        **ERRORS_502_SCM_DIFF,
+    },
 )
-def get_review_diff(run: ReviewRun = Depends(visible_run)) -> ReviewDiffResponse:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Дифф прогона ещё не реализован.")
+def get_review_diff(
+    run_and_repository: tuple[ReviewRun, Repository] = Depends(visible_run_with_repository),
+    installations: InstallationCatalog = Depends(get_visibility_catalog),
+    vcs: VcsGateway = Depends(get_cabinet_vcs_gateway),
+    cache: CacheStore = Depends(get_run_diff_cache),
+    settings: Settings = Depends(get_settings),
+) -> ReviewDiffResponse:
+    # Синхронная `def`: шлюз и кэш блокирующие, FastAPI уводит ручку в threadpool.
+    run, repository = run_and_repository
+    try:
+        view = load_run_diff(
+            run,
+            repository,
+            installations=installations,
+            vcs=vcs,
+            cache=cache,
+            max_bytes=settings.run_diff_max_bytes,
+            ttl_seconds=settings.run_diff_cache_ttl_seconds,
+        )
+    except RunDiffUnavailable:
+        raise ApiError(
+            HTTPStatus.CONFLICT, ErrorCode.DIFF_UNAVAILABLE, "У прогона нет базового коммита: дифф построить не из чего."
+        ) from None
+    except RepositoryNotInstalled:
+        raise ApiError(
+            HTTPStatus.NOT_FOUND,
+            ErrorCode.REPOSITORY_NOT_IN_INSTALLATION,
+            "Приложение не установлено на репозиторий прогона или установка приостановлена.",
+        ) from None
+    except RunCommitNotFound:
+        raise ApiError(
+            HTTPStatus.GONE, ErrorCode.COMMIT_NOT_FOUND, "GitHub не знает коммиты прогона: дифф больше не получить."
+        ) from None
+    except DiffTooLargeError:
+        raise ApiError(
+            HTTPStatus.UNPROCESSABLE_CONTENT,
+            ErrorCode.DIFF_TOO_LARGE,
+            f"Дифф прогона больше лимита {settings.run_diff_max_bytes} байт.",
+        ) from None
+    except VcsError as error:
+        # После `DiffTooLargeError`: он тоже `VcsError`.
+        raise ApiError(
+            HTTPStatus.BAD_GATEWAY, ErrorCode.SCM_UNAVAILABLE, "GitHub не ответил или ответил ошибкой."
+        ) from error
+    return ReviewDiffResponse.model_validate({"files": [asdict(file) for file in view]})
 
 
 @router.get(

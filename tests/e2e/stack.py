@@ -156,17 +156,24 @@ class Stack:
         auth = GitHubAppAuth(
             APP_ID, self.settings.github_app_private_key.get_secret_value(), client
         )
+        gateway = GitHubVcsGateway(auth, client, sleep=lambda _: None)
         return Container(
             engine=self.engine,
             settings=self.settings,
             # Вход и подключение репозиториев стенд не проходит: токенов пользователя нет.
             _token_cipher=None,
             _job_queue=RabbitMQJobQueue(self.rabbitmq_url),
-            _vcs_gateway=GitHubVcsGateway(auth, client, sleep=lambda _: None),
+            _vcs_gateway=gateway,
+            # Кабинет ходит в тот же поддельный GitHub: свои лимиты стенду не нужны.
+            _cabinet_vcs_gateway=gateway,
             _vcs_limits=WORKER_VCS_LIMITS,
             _installation_catalog=FakeInstallationCatalog([]),
             _oauth_providers={},
             _cache_store=InMemoryCacheStore(),
+            _run_diff_cache=InMemoryCacheStore(
+                max_bytes=self.settings.run_diff_cache_max_bytes,
+                max_entry_bytes=self.settings.run_diff_cache_entry_max_bytes,
+            ),
             _run_changes=PostgresRunChanges(listen_conninfo(self.settings.database_url)),
             _llm_gateway=llm,
             _definition_extractor=TreeSitterDefinitionExtractor(),

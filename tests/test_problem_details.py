@@ -684,7 +684,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     Каждый код из `ErrorCode` здесь представлен хотя бы одним настоящим ответом — кроме
     `REVIEW_ALREADY_ACTIVE`: его отдаст ручной запуск, а он пока отвечает `501`.
     """
-    from app.domain.vcs_errors import VcsError
+    from app.domain.vcs_errors import VcsError, VcsNotFoundError
 
     from .api.test_webhooks import make_client, post_webhook
     from .fakes import FakeUow, FakeVcs
@@ -694,16 +694,30 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     from .test_repositories_api import _client as repositories_client
     from .test_repositories_api import _connect as connect_repository
     from .test_repositories_api import _repository as registered_repository
+    from .test_reviews_api import BASE_SHA, RUN_DIFF
+    from .test_reviews_api import _add_run as add_run
     from .test_reviews_api import _client as reviews_client
 
     signed_in = repositories_client(FakeUnitOfWork())
     connected = FakeUnitOfWork()
     connected.repositories.add(registered_repository(101))
     scm_down, _ = make_client(uow=FakeUow(), vcs=FakeVcs(error=VcsError("HTTP 502")))
+    # Дифф прогона: свой unit of work на клиента — фейк откатывает незакоммиченное по выходу.
+    without_base, commit_gone, too_large = FakeUnitOfWork(), FakeUnitOfWork(), FakeUnitOfWork()
+    run_without_base = add_run(without_base)
+    run_commit_gone = add_run(commit_gone, base_sha=BASE_SHA)
+    run_too_large = add_run(too_large, base_sha=BASE_SHA)
     responses = [
         client.post("/api/v1/webhooks/bitbucket"),
         signed_in.get("/api/v1/repositories", params={"limit": "abc"}),
         reviews_client(FakeUnitOfWork()).get("/api/v1/reviews/00000000-0000-0000-0000-000000000001"),
+        reviews_client(without_base).get(f"/api/v1/reviews/{run_without_base.id}/diff"),
+        reviews_client(commit_gone, vcs=FakeVcs(error=VcsNotFoundError("HTTP 404"))).get(
+            f"/api/v1/reviews/{run_commit_gone.id}/diff"
+        ),
+        reviews_client(
+            too_large, vcs=FakeVcs(diff=RUN_DIFF), settings=SETTINGS.model_copy(update={"run_diff_max_bytes": 1})
+        ).get(f"/api/v1/reviews/{run_too_large.id}/diff"),
         pull_requests_client(FakeUnitOfWork()).get(
             "/api/v1/repositories/00000000-0000-0000-0000-000000000001/pull-requests"
         ),
