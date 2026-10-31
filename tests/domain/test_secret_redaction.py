@@ -1,5 +1,6 @@
 """Секреты в сохраняемом контексте прогона заменяются меткой (#28)."""
 
+import time
 from typing import Any
 
 import pytest
@@ -71,10 +72,20 @@ def test_a_private_key_cut_off_by_the_hunk_is_replaced_to_the_end() -> None:
         "+def ask(sk-learn): ...",
         "+header = 'eyJ'",
         "+task-sk-abcdefghijklmnopqrstuvw = 1",
+        "+task-eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
     ],
 )
 def test_ordinary_code_is_left_as_is(text: str) -> None:
     assert redact_secrets(text) == text
+
+
+@pytest.mark.parametrize("unit", ["--eyJ", "-eyJ-", "--sk-", "\n-eyJ-"])
+def test_a_hostile_run_of_token_characters_is_scanned_in_linear_time(unit: str) -> None:
+    """Вход из PR длиной вдвое больше пакета: квадратичный поиск шёл бы секунды."""
+    text = unit * (256_000 // len(unit))
+    started = time.perf_counter()
+    redact_secrets(text)
+    assert time.perf_counter() - started < 1
 
 
 def test_strings_are_redacted_at_any_depth_and_the_input_is_not_changed() -> None:
