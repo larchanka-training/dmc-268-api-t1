@@ -243,7 +243,7 @@ class ReviewRunStepRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
 
 
 class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
-    """Что показали модели; хранится, чтобы прогон оставался воспроизводимым.
+    """Что показали модели, с метками вместо секретов; по нему отслеживают, откуда замечание.
 
     В этой таблице дословно лежит чужой исходный код. Секреты из него вычищает
     запись (`redact_secrets` в `SqlAlchemyContextPayloadRepo.add`), а не сборщик:
