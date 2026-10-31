@@ -80,6 +80,94 @@ flowchart TB
 
 Сплошные узлы и связи — построено. Пунктир — запланированные швы (таблица «Designed, not built» в BACKEND_ARCHITECTURE.md): порт не пишется раньше первого вызова, шов описывается заранее и бесплатно.
 
+### 1.1 Диаграмма контейнеров (C4, уровень Container)
+
+Что выкатывает деплой на стенд: один хост, Docker, ресурсы `docker_container` из `infra/*.tf`. Узел — контейнер (имя на хосте), подпись связи — протокол. Подграфы — сети Docker (`infra/network.tf`, `infra/observability.tf`); контейнер в нескольких сетях нарисован в той, где его основная роль, остальные сети перечислены в узле.
+
+```mermaid
+flowchart LR
+    %% External
+    DEV["Разработчик<br/>браузер"]
+    GH["GitHub<br/>вебхуки · REST API · GitHub App"]
+    EURO["Eurorouter<br/>hosted LLM API · OpenAI-совместимый"]
+
+    subgraph HOST["Сервер стенда · Docker · OpenTofu infra/"]
+        subgraph PUBLIC["сеть dmc268 · публичный вход"]
+            UI["UI · nginx + SPA<br/>репозиторий dmc-268-ui-t1<br/>проксирует /api/ на API"]
+            API["dmc268-api<br/>uvicorn app.main:app · :8000 на 127.0.0.1<br/>сети: dmc268, dmc268-backend · 512 МБ"]
+        end
+
+        subgraph EGRESS["сеть dmc268-egress · исходящая"]
+            WORKER["dmc268-worker<br/>python -m app.worker<br/>сети: dmc268-egress, dmc268-backend · 512 МБ"]
+        end
+
+        subgraph BACKEND["сеть dmc268-backend · internal, без шлюза"]
+            PG[("dmc268-postgres<br/>PostgreSQL · том postgres · 1 ГБ")]
+            PGR[("dmc268-postgres-replica<br/>потоковая реплика")]
+            PGB["dmc268-postgres-backup<br/>ежесуточный pg_dump с реплики<br/>том postgres_backups"]
+            MQ["dmc268-rabbitmq<br/>quorum-очередь review_jobs.qq<br/>DLX/DLQ review_jobs.dlx / .dlq · 512 МБ"]
+        end
+
+        subgraph OBS["сеть dmc268-observability · internal"]
+            OTEL["dmc268-otelcol<br/>OTLP: трейсы, метрики, логи<br/>сети: dmc268-backend, dmc268-otlp"]
+            OTELD["dmc268-otelcol-docker<br/>метрики и события контейнеров"]
+            OTELL["dmc268-otelcol-logs<br/>fluentd :24224 · логи контейнеров"]
+            PROXY["dmc268-docker-proxy<br/>socket-proxy, только чтение"]
+            NODE["dmc268-node-exporter<br/>CPU · память · диски"]
+            TEMPO[("dmc268-tempo · трейсы")]
+            LOKI[("dmc268-loki · логи")]
+            PROM[("dmc268-prometheus · метрики")]
+            GRAF["dmc268-grafana<br/>порт на 127.0.0.1, вход по SSH-туннелю"]
+        end
+    end
+
+    DEV -->|HTTPS| UI
+    GH -->|"вебхук HTTPS, HMAC"| UI
+    UI -->|"HTTP /api/"| API
+    UI -.->|"OTLP трейсы браузера, сеть dmc268-otlp"| OTEL
+    API -->|"HTTPS: дифф, метаданные PR, OAuth"| GH
+    API -->|"SQL · LISTEN/NOTIFY"| PG
+    API -->|"AMQP publish, confirms"| MQ
+    MQ -->|"AMQP consume"| WORKER
+    WORKER -->|SQL| PG
+    WORKER -->|"HTTPS: файлы, ревью, check run"| GH
+    WORKER -->|"HTTPS: вызов модели"| EURO
+    PG -->|"WAL-репликация"| PGR
+    PGR -->|"pg_dump раз в сутки"| PGB
+
+    API -.->|OTLP| OTEL
+    WORKER -.->|OTLP| OTEL
+    OTEL -.-> TEMPO
+    OTEL -.-> LOKI
+    OTEL -.->|"receiver postgresql, сеть dmc268-backend"| PG
+    PROM -.->|scrape| OTEL
+    OTELD -.-> PROXY
+    PROM -.->|scrape| OTELD
+    OTELL -.-> LOKI
+    PROM -.->|scrape| NODE
+    PROM -.->|"scrape, сеть dmc268-backend"| MQ
+    GRAF -.-> TEMPO
+    GRAF -.-> LOKI
+    GRAF -.-> PROM
+
+    classDef external fill:#f5f5f5,stroke:#555,color:#111;
+    classDef core fill:#e8f4ff,stroke:#2878c8,color:#111;
+    classDef infra fill:#fff6e8,stroke:#c88719,color:#111;
+    classDef db fill:#f7eefc,stroke:#8a4db8,color:#111;
+    classDef obs fill:#eef8ef,stroke:#368a4a,color:#111;
+
+    class DEV,GH,EURO,UI external;
+    class API,WORKER core;
+    class MQ infra;
+    class PG,PGR,PGB db;
+    class OTEL,OTELD,OTELL,PROXY,NODE,TEMPO,LOKI,PROM,GRAF obs;
+```
+
+- **Модель на стенде** — Eurorouter основным и единственным провайдером (`TF_VAR_llm_backend: eurorouter` в `.github/workflows/deploy.yml`, #245). Ollama на стенде не развёрнута, поэтому на диаграмме её нет; на диаграмме компонентов выше она — основной провайдер по дизайну.
+- **UI** — контейнер стека `dmc-268-ui-t1`, подключается к сети `dmc268` по имени; в этом репозитории не описан и показан как внешний.
+- **Изоляция**: у `dmc268-backend` и `dmc268-observability` нет шлюза — база, брокер и хранилища наблюдаемости не видны ни из интернета, ни из публичной сети. Наружу ходят API (через `dmc268`) и воркер (через `dmc268-egress`). Стек наблюдаемости поднимается флагом `observability_enabled`, на стенде он включён.
+- **Миграции** — не контейнер стека: одноразовый `docker run --rm` того же образа в сети `dmc268-backend` до `apply` (`infra/README.md`, «Миграции»).
+
 ## 2. Общая архитектура (компоненты и границы ответственности)
 
 Система — **событийно-ориентированный модульный монолит**: один кодбейс, один образ, два процесса, которые общаются через очередь, а не по HTTP. Это осознанно не микросервисы: микросервисы решают организационную проблему независимых команд, которой здесь нет, а их цену — сетевые вызовы вместо вызовов функций, частичные отказы, версионирование контрактов, идемпотентность на каждой границе — платить нечем. Полное обоснование — раздел «Process shape» в BACKEND_ARCHITECTURE.md.
@@ -110,6 +198,65 @@ flowchart TB
 7. **Валидация**: детерминированный отсев - `validate_anchor` отбрасывает замечания вне диффа, ссылка на правило проверяется по показанным модели правилам, `deduplicate` убирает повторы (отклонения считаются на прогоне); затем второй вызов - верификатор (Reflection Pass) - отбрасывает галлюцинации, а при сбое прогон продолжается с замечаниями после отсева (fail-open); переходы статуса - через `next_status`.
 8. **Публикация**: `VcsGateway` публикует Review Comments и статусы; каждый опубликованный комментарий фиксируется в `published_comments`.
 9. **Телеметрия**: `model`, `tokens_used`, `duration_seconds`, `failure_reason` пишутся в `review_runs`.
+
+### 3.1 Диаграмма последовательности основного потока
+
+Тот же поток по шагам, с ветками отказа. Таймауты и лимиты на стрелках — из раздела 7.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GH as GitHub
+    participant API as app/api
+    participant DB as PostgreSQL
+    participant MQ as RabbitMQ review_jobs.qq
+    participant W as app/worker
+    participant LLM as LlmGateway / модель
+
+    GH->>API: POST вебхук pull_request (тело до 2 МиБ)
+    API->>API: HMAC по сырому телу, constant-time
+    alt подпись неверна
+        API-->>GH: 401
+    else действие не opened / synchronize / смена базы, или автор вне команды
+        API-->>GH: 202, прогон не создаётся
+    end
+    API->>GH: VcsGateway: данные PR (таймаут 5 с, без ожидания лимита)
+    alt сбой VCS
+        API-->>GH: 502 до записей, доставку переотправит воркер
+    end
+    API->>DB: MergeRequest + ReviewRun queued (частичный уникальный индекс)
+    API->>MQ: JobQueue.enqueue, publisher confirm
+    alt брокер не подтвердил
+        API->>DB: компенсация: ReviewRun failed
+    end
+    API-->>GH: 202
+
+    MQ->>W: доставка (consumer timeout 2 ч, лимит доставок 5)
+    W->>DB: ReviewRun building_context
+    W->>GH: дифф (до 5 МиБ), контекст PR, rules.md по base_sha, файлы для AST
+    alt дифф больше лимита или сбой получения диффа
+        W->>DB: ReviewRun failed
+    end
+    W->>W: assemble_context: пакет до 32 000 токенов, проверка окна модели
+    W->>DB: context_payloads, ReviewRun analysing
+    W->>LLM: вызов ревью (300 с × 2 попытки на провайдера)
+    LLM-->>W: findings по Pydantic-схеме
+    W->>W: validate_anchor, ссылка на правило, deduplicate
+    W->>DB: прогресс прогона (last_progress_at)
+    W->>LLM: вызов верификатора
+    alt сбой верификатора
+        W->>W: fail-open: замечания после отсева
+    end
+    W->>DB: ReviewRun publishing
+    W->>GH: ревью с комментариями к строкам, check run
+    W->>DB: published_comments, ReviewRun completed, model / tokens_used / duration_seconds
+    DB-->>API: NOTIFY, API шлёт событие кабинету по SSE
+    W->>MQ: ack
+
+    opt воркер умер с сообщением в работе
+        MQ->>W: повторная доставка, после 5 доставок — в review_jobs.dlq
+    end
+```
 
 ## 4. Правила взаимодействия с VCS, форматы очередей и кэширование
 
@@ -212,3 +359,68 @@ AST-уровень — первый кандидат на вынос из мон
 **GitHub PR → Webhook (HMAC) → `app/api` → `JobQueue` / RabbitMQ → `app/worker` → Context Assembly → вызов ревью → отсев → вызов верификатора → `VcsGateway` → GitHub Review**
 
 Построено: webhook intake с проверкой HMAC, постановка задачи в очередь (`JobQueue` → RabbitMQ), парсинг/фильтрация диффа чистыми функциями домена - на стороне воркера, Context Assembly (дифф, контекст PR, AST-окружение, правила владельца под лимитом токенов), транспорт к модели (`LlmGateway`: локальная модель в Ollama, Eurorouter - явным фоллбэком), детерминированный отсев, верификатор и публикация через `VcsGateway`. Запланированные швы: `IdempotencyStore` (в живой цепочке его место - между `app/api` и очередью); развёртывание Ollama на стенде - отдельная задача.
+
+## 7. Нефункциональные требования
+
+Числа ниже — из кода и конфигурации, у каждого указан источник; меняется источник — правится эта таблица. Значения по умолчанию из `app/config.py` переопределяются переменной окружения того же имени в верхнем регистре; стенд их не переопределяет, кроме выбора модели (`.github/workflows/deploy.yml`, шаг деплоя).
+
+**Целевые значения задержки (SLO) не установлены**: в спеках, дашборде и алертах их нет, а выдумывать их этот документ не берётся. Есть жёсткие потолки — после них запрос или прогон обрывается — и замеры на дашборде Grafana. Цель, когда появится, вводится через OpenSpec-change вместе с алертом, а не правкой этого раздела.
+
+### 7.1 Задержка
+
+| Что | Потолок | Источник |
+|---|---|---|
+| Ответ на доставку вебхука | GitHub ждёт ответа 10 с, дольше — доставка считается упавшей | [документация GitHub](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks#respond-within-10-seconds) |
+| Запрос к GitHub из API (приём вебхука) | 5 с на запрос; лимит GitHub не пережидается (бюджет ожидания 0) — ответ 502, доставку переотправит воркер | `API_VCS_LIMITS`, `app/infrastructure/container.py` |
+| Запрос к GitHub из воркера | 30 с на запрос, соединение 5 с; ожидание лимита GitHub — до 60 с | `WORKER_VCS_LIMITS`, `app/infrastructure/container.py` |
+| Соединение с провайдером модели | 10 с, отдельно от ответа | спека `llm-gateway` |
+| Ответ модели, одна попытка | 300 с (`llm_timeout_seconds`) | `app/config.py` |
+| Вызов модели в худшем случае | `llm_timeout_seconds` × `llm_max_attempts` (2) × провайдеры: на стенде (один провайдер) — 600 с, с фоллбэком — 1 200 с | `Settings.llm_call_worst_case_seconds` |
+| Прогон в худшем случае | два вызова модели (ревью и верификатор) + 60 с на GitHub и базу: на стенде 1 260 с, с фоллбэком 2 460 с; столько же воркер дорабатывает сообщение при остановке | `check_consumer_timeout`, `app/worker/factory.py`; `local.worker_stop_seconds`, `infra/app.tf` |
+| Прогон без прогресса считается зависшим | 1 800 с (`stale_run_timeout_seconds`); должен быть больше вызова модели в худшем случае — иначе воркер не стартует | `app/config.py`, `check_model_deadline` |
+| Прогон, не взятый из очереди | 21 600 с (`queued_run_timeout_seconds`), больше порога зависшего | `app/config.py`, `check_sweep_thresholds` |
+| Подтверждение сообщения потребителем | 2 ч (`x-consumer-timeout`), больше прогона в худшем случае — иначе воркер не стартует | `CONSUMER_TIMEOUT_SECONDS`, `app/infrastructure/queue/rabbitmq.py` |
+
+Замеры — дашборд Grafana `dmc268-overview` (`infra/observability/grafana/provisioning/dashboards/dmc268-overview.json`), перцентили p50 и p95:
+
+| Что | Панель | Метрика |
+|---|---|---|
+| HTTP-запросы API, кроме SSE | «Длительность HTTP-запросов, p50/p95» | `http_server_request_duration_seconds` |
+| Вызов модели, по провайдеру | «Длительность вызова модели, p50/p95 (по провайдеру)» | `review_llm_call_duration_seconds` |
+| Этапы прогона | «Длительность этапов прогона, p50/p95 (по этапу)» | `review_stage_duration_seconds` |
+| Ожидание в очереди | «Глубина очереди review_jobs.qq», «Потребители и сообщения в работе» | `rabbitmq_queue_messages`, `rabbitmq_queue_messages_unacked` |
+
+Длительность каждого прогона хранится и в базе — `review_runs.duration_seconds`; отчёты по прогонам строятся SQL по ней, а не по телеметрии (`.agents/rules/backend.md`, «Наблюдаемость»).
+
+### 7.2 Лимиты входа и контекста
+
+| Что | Значение | Что при превышении | Источник |
+|---|---|---|---|
+| Тело доставки вебхука | 2 МиБ (`webhook_body_max_bytes`) | 413 `REQUEST_BODY_TOO_LARGE` до чтения целиком | `app/config.py` |
+| Тело прочих запросов API | 1 МиБ (`request_body_max_bytes`) | 413 `REQUEST_BODY_TOO_LARGE` | `app/config.py` |
+| Unified diff PR | 5 МиБ (`diff_max_bytes`) | прогон `failed` с `DIFF_TOO_LARGE` | `app/config.py` |
+| Файлы для уровня `ast` | 20 файлов (`ast_max_files`), 256 КиБ на файл (`ast_max_file_bytes`) | файлы сверх числа не довыбираются; больший файл идёт в контекст без AST-окружения | `app/config.py` |
+| `.review/rules.md` | 32 КиБ (`rules_max_bytes`), 4 000 токенов в пакете (`rules_max_tokens`) | стандартные критерии, прогон не прерывается | `app/config.py` |
+| Контекст PR (заголовок, описание, коммиты) | 1 000 токенов (`pr_context_max_tokens`), неистраченное уходит диффу | описание обрезается, не вошедшее — в `omitted` | `app/config.py`, `app/application/context_assembly.py` |
+| Пакет контекста | 32 000 токенов (`context_max_tokens`), оценка — байты UTF-8 / 4 | приоритет: контекст PR → правила → дифф → AST, не поместившееся — в `omitted` | `app/config.py`, `app.domain.context_budget` |
+| Окно модели | 65 536 токенов (`llm_context_window_tokens`), из них резерв ответа 4 096 (`llm_max_output_tokens`) | запрос, не помещающийся с резервом, не отправляется | `app/config.py` |
+
+### 7.3 Надёжность и доставка
+
+| Что | Значение | Источник |
+|---|---|---|
+| Повторные доставки сообщения | quorum-очередь, после 5 доставок (`DELIVERY_LIMIT`) — в `review_jobs.dlq` | `app/infrastructure/queue/rabbitmq.py` |
+| Попытки вызова модели | 2 на провайдера (`llm_max_attempts`), ответ не по схеме тоже повторяется | `app/config.py` |
+| Переотправка упавших доставок вебхука | проверка раз в 300 с; до 5 переотправок одной доставки, первая — через 300 с, дальше пауза удваивается; до 10 доставок и до 30 с за проход | `webhook_redelivery_*`, `app/config.py` |
+| Кэш правил владельца | 3 600 с по ключу (репозиторий, `base_sha`) | `rules_cache_ttl_seconds`, `app/config.py` |
+
+### 7.4 Доступность стенда
+
+Стенд — **один сервер без резервирования**: целевой доступности нет, отказ сервера — простой всего сервиса. Что есть:
+
+- **перезапуск**: у всех контейнеров `restart = "unless-stopped"` (`infra/*.tf`);
+- **healthcheck API**: `GET /health` каждые 30 с, таймаут 5 с, 3 неудачи — `unhealthy`; деплой считает API выкаченным только по `healthy` (`local.api_healthcheck`, `infra/app.tf`);
+- **проверка воркера при деплое**: непрерывные 30 с работы без перезапуска, иначе деплой падает (спека `backend-delivery`);
+- **простой API при деплое**: контейнер пересоздаётся, окно — секунды; каждый деплой пишет его разбивку в summary (`infra/README.md`, «Summary деплоя»);
+- **данные**: потоковая реплика PostgreSQL и ежесуточный `pg_dump` с реплики (`infra/replica.tf`); тома базы и брокера деплой не пересоздаёт (`.agents/rules/backend.md`, «Деплой»);
+- **память контейнеров**: API и воркер по 512 МБ, PostgreSQL 1 ГБ, RabbitMQ 512 МБ (`memory` в `infra/*.tf`).
