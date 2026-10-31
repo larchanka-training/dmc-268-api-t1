@@ -147,9 +147,7 @@ class Worker:
         дорабатывает и подтверждается, следующее не берётся, даже если брокер
         уже выдал его циклу. На простое цикл выходит на ближайшем такте, не
         позже `inactivity_timeout`. Потребитель снимается до того, как выданное
-        сообщение отпущено (`nack` с requeue или `ack`): с prefetch=1 брокер не
-        пришлёт следующее, и `cancel()` не придётся возвращать его `basic.reject`,
-        который тратит попытку доставки (#223).
+        сообщение отпущено, — почему, сказано у `_stop_consuming`.
 
         Брокер может сам отменить потребителя (`x-consumer-timeout`): цикл тогда
         кончается, это пишется в лог, и процесс выходит под перезапуск.
@@ -165,14 +163,15 @@ class Worker:
                     self._stop_consuming(method)
                     consuming = False
                     break
-                if last_sweep is None or time.monotonic() - last_sweep >= sweep_interval:
+                if sweep is not None and (
+                    last_sweep is None or time.monotonic() - last_sweep >= sweep_interval
+                ):
                     last_sweep = time.monotonic()
-                    if sweep is not None:
-                        try:
-                            with sweep_span():
-                                sweep()
-                        except Exception:
-                            logger.exception("проход по зависшим прогонам завершился ошибкой")
+                    try:
+                        with sweep_span():
+                            sweep()
+                    except Exception:
+                        logger.exception("проход по зависшим прогонам завершился ошибкой")
                     # Сигнал мог прийти посреди прохода — сообщение этого такта не берём.
                     if stop is not None and stop.requested:
                         self._stop_consuming(method)
@@ -197,9 +196,7 @@ class Worker:
                     stop is not None and stop.requested
                 )
                 if last:
-                    # Снять потребителя, пока сообщение держит prefetch: после ack
-                    # брокер сразу выдал бы следующее, и `cancel()` вернул бы его
-                    # `basic.reject`, потратив попытку.
+                    # До ack, как в `_stop_consuming`.
                     self.channel.cancel()
                     consuming = False
                 if should_ack(exc):
@@ -223,21 +220,15 @@ class Worker:
             self.connection.close()
 
     def _stop_consuming(self, method: spec.Basic.Deliver | None) -> None:
-        """Штатная остановка: снять потребителя, потом вернуть в очередь выданное, не
-        взятое в работу сообщение — `nack` с requeue.
-
-        Без `nack` сообщение вернул бы брокер при `connection.close()` (или pika через
-        `basic.reject` при `cancel()`), и quorum-очередь засчитала бы это неудачной
-        доставкой (#223): каждый деплой тратил бы попытку из `DELIVERY_LIMIT`.
-        `basic.nack` попытку не тратит. Порядок важен: пока выданное держит
-        prefetch=1, брокер следующего не пришлёт; `nack` раньше `cancel` освободил бы
-        слот, и пришедшее следом сообщение `cancel()` вернул бы `basic.reject`.
-        """
+        """Штатная остановка: снять потребителя, потом вернуть выданное сообщение `nack`
+        с requeue — он попытку доставки не тратит, а `basic.reject` от `cancel()` и
+        возврат при закрытии соединения тратят (#223). Сначала `cancel`: пока
+        сообщение держит prefetch=1, брокер не пришлёт следующее, которое `cancel()`
+        вернул бы `basic.reject`."""
         self.channel.cancel()
         if method is not None:
             assert method.delivery_tag is not None
             self.channel.basic_nack(method.delivery_tag, requeue=True)
-
 
 
 def build_worker(settings: Settings) -> Worker:

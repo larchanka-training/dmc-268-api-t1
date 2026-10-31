@@ -424,7 +424,7 @@ def test_exception_event_message_and_stacktrace_hidden_type_kept(
     span = apply_rules(
         rules,
         Span(
-            name="process review_jobs",
+            name="process review_jobs.qq",
             status_message="ValueError",
             events=[
                 {
