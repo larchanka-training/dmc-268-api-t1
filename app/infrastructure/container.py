@@ -314,7 +314,9 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
             ),
         },
         _cache_store=InMemoryCacheStore(),
-        # shortcut: 24 × RUN_DIFF_MAX_BYTES ≈ 48 МиБ; считать байты, если лимит диффа поднимут
+        # shortcut: 24 × RUN_DIFF_MAX_BYTES: ≈ 48 МиБ ASCII, ≈ 96 МиБ с кириллицей,
+        # до ≈ 192 МиБ с символом вне BMP (PEP 393); считать байты, если лимит
+        # или число записей поднимут
         _run_diff_cache=InMemoryCacheStore(max_entries=24),
         _run_changes=PostgresRunChanges(listen_conninfo(settings.database_url)),
         _llm_gateway=None,

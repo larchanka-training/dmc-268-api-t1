@@ -167,7 +167,8 @@ ERRORS_422_OR_DIFF_TOO_LARGE = _doc(
     HTTPStatus.UNPROCESSABLE_CONTENT,
     Annotated[ValidationProblem | DiffTooLargeProblem, Field(discriminator="code")],
     "`VALIDATION_ERROR` — параметр пути не прошёл проверку, в `errors` — где и почему; "
-    "`DIFF_TOO_LARGE` — дифф прогона больше `RUN_DIFF_MAX_BYTES` (2 МиБ), тело ответа GitHub дальше лимита не читалось.",
+    "`DIFF_TOO_LARGE` — дифф прогона больше `RUN_DIFF_MAX_BYTES` (2 МиБ) или 50 000 строк, либо GitHub сам "
+    "отказался его строить (`422` на сравнение); тело ответа GitHub дальше лимита байт не читалось.",
 )
 ERRORS_502_SCM_DIFF = _doc(
     HTTPStatus.BAD_GATEWAY,

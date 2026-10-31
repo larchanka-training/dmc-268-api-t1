@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from app.application.use_cases.run_diff import (
+    RUN_DIFF_MAX_LINES,
     RepositoryNotInstalled,
     RunCommitNotFound,
     RunDiffUnavailable,
@@ -220,6 +221,43 @@ def test_diff_over_the_callers_limit_is_too_large() -> None:
         )
 
     assert cache.get(_key(repository)) is None
+
+
+def diff_of_lines(total: int) -> str:
+    """Корректный unified diff ровно из `total` строк: новый файл из коротких добавленных строк."""
+    header = 5
+    added = total - header
+    return (
+        "diff --git a/many.txt b/many.txt\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/many.txt\n"
+        f"@@ -0,0 +1,{added} @@\n" + "+x\n" * added
+    )
+
+
+def test_diff_over_the_line_limit_is_too_large_and_not_cached() -> None:
+    """Байтовый лимит строк не ограничивает: дифф на строку длиннее `RUN_DIFF_MAX_LINES` — отказ до разбора."""
+    repository = a_repository()
+    vcs = FakeVcs(diff=diff_of_lines(RUN_DIFF_MAX_LINES + 1))
+    cache = InMemoryCacheStore()
+
+    with pytest.raises(DiffTooLargeError):
+        load(a_run(), repository, installations=FakeInstallationCatalog(), vcs=vcs, cache=cache, max_bytes=1_000_000)
+
+    assert cache.get(_key(repository)) is None
+
+
+def test_diff_exactly_at_the_line_limit_is_built_and_cached() -> None:
+    """Граница: ровно `RUN_DIFF_MAX_LINES` строк — представление строится и пишется в кэш."""
+    repository = a_repository()
+    vcs = FakeVcs(diff=diff_of_lines(RUN_DIFF_MAX_LINES))
+    cache = InMemoryCacheStore()
+
+    view = load(a_run(), repository, installations=FakeInstallationCatalog(), vcs=vcs, cache=cache, max_bytes=1_000_000)
+
+    assert [(file.path, file.additions) for file in view] == [("many.txt", RUN_DIFF_MAX_LINES - 5)]
+    assert cache.get(_key(repository)) == vcs.diff
 
 
 def test_provider_not_knowing_the_commit_means_the_commit_is_gone() -> None:

@@ -17,6 +17,7 @@ HTML, GitHub сменил форму ответа).
 
 import time
 from collections.abc import Callable
+from http import HTTPStatus
 from typing import Any
 from urllib.parse import quote
 from uuid import UUID
@@ -96,6 +97,10 @@ class GitHubVcsGateway:
             installation_id,
             accept=_DIFF_ACCEPT,
             max_bytes=max_bytes,
+            # Свой лимит GitHub: слишком большой дифф compare не строит и отвечает
+            # 422 «The diff is taking too long to generate.» (снято на torvalds/linux
+            # v6.0...v6.10) — это исход лимита, а не сбой VCS.
+            too_large_statuses=frozenset({HTTPStatus.UNPROCESSABLE_CONTENT}),
         )
         return response.text
 
@@ -333,6 +338,7 @@ class GitHubVcsGateway:
         max_bytes: int | None = None,
         graphql: bool = False,
         already_done: Callable[[], httpx.Response | None] | None = None,
+        too_large_statuses: frozenset[int] = frozenset(),
     ) -> httpx.Response:
         """Один цикл повторов на все запросы к API.
 
@@ -343,7 +349,8 @@ class GitHubVcsGateway:
           иначе минута и вдвое больше на каждый следующий отказ («Rate limits for
           the REST API»); пауза сверх бюджета - сразу `VcsUnavailableError`;
         - 5xx - экспоненциальный backoff;
-        - прочие ошибки и 3xx - сразу ошибка адаптера (404 на GET - `VcsNotFoundError`).
+        - прочие ошибки и 3xx - сразу ошибка адаптера (404 на GET - `VcsNotFoundError`,
+          статус из `too_large_statuses` - `VcsFileTooLargeError`).
 
         Обрыв сети запроса без `already_done` не повторяется. С `already_done` -
         запрос без идемпотентности - на обрыв, 5xx и лимит после паузы спрашивает
@@ -380,6 +387,10 @@ class GitHubVcsGateway:
                 if not response.is_error and limited is None:
                     return response
                 if limited is None and status < 500:
+                    if status in too_large_statuses:
+                        raise VcsFileTooLargeError(
+                            f"GitHub API: HTTP {status} на {where}: GitHub не строит такой большой дифф"
+                        )
                     if status == 404 and method == "GET":
                         raise VcsNotFoundError(f"GitHub API: HTTP 404 на {where}")
                     raise VcsError(f"GitHub API: HTTP {status} на {where}")
