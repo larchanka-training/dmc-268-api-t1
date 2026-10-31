@@ -232,7 +232,7 @@ export TEST_DATABASE_URL="postgresql+psycopg://dmc:dmc@localhost:5432/dmc268_tes
 
 ```bash
 EUROROUTER_API_KEYS=... EUROROUTER_BASE_URL=https://api.eurouter.ai/api/v1 \
-EUROROUTER_MODEL=qwen3-coder-next-80b uv run pytest -m live tests/live
+EUROROUTER_MODEL=glm-5.3 EUROROUTER_REASONING_EFFORT=low uv run pytest -m live tests/live
 ```
 
 Сквозной стенд (`tests/e2e/stack.py`) прогоняет подписанный вебхук через API, базу, RabbitMQ и воркер до публикации в GitHub; GitHub подменён на уровне HTTP, модель - за портом.
@@ -439,7 +439,8 @@ docker compose up -d worker
 ```
 
 Фоллбэком после локальной модели Eurorouter подключается при `LLM_BACKEND=ollama` и `LLM_HOSTED_FALLBACK=true` вместе с `EUROROUTER_BASE_URL`, `EUROROUTER_MODEL` и `EUROROUTER_API_KEYS` (ключи через запятую).
-С `LLM_BACKEND=eurorouter` фоллбэк не сочетается. Оба способа отправляют код проверяемых репозиториев за пределы нашей сети; какие провайдеры включены, воркер пишет в лог при старте.
+С `LLM_BACKEND=eurorouter` фоллбэк не сочетается.
+`EUROROUTER_REASONING_EFFORT` (`low`, `medium`, `high`) добавляет `reasoning_effort` в запрос к Eurorouter; пусто — параметр не отправляется: модель, которая его не знает, шлюз может отвергнуть. Стенд, `llm-live` и eval берут модель и параметр из `.github/eurorouter-model` и `.github/eurorouter-reasoning-effort` (#267). Оба способа отправляют код проверяемых репозиториев за пределы нашей сети; какие провайдеры включены, воркер пишет в лог при старте.
 
 Окно модели (`LLM_CONTEXT_WINDOW_TOKENS`) должно вмещать пакет контекста (`CONTEXT_MAX_TOKENS`), системный промпт и резерв ответа (`LLM_MAX_OUTPUT_TOKENS`): иначе воркер не стартует.
 Все переменные с пояснениями - в [`.env.example`](.env.example).

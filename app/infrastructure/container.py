@@ -324,6 +324,7 @@ def _eurorouter(settings: Settings, timeout: httpx.Timeout) -> tuple[str, LlmGat
             settings.eurorouter_keys,
             name="Eurorouter",
             max_attempts=settings.llm_max_attempts,
+            reasoning_effort=settings.eurorouter_reasoning_effort,
         ),
     )
 
@@ -344,8 +345,9 @@ def build_llm_gateway(settings: Settings) -> LlmGateway:
     timeout = llm_http_timeout(settings)
     if settings.llm_backend == "eurorouter":
         logger.info(
-            "модель: Eurorouter (%s) основной, без фоллбэка: код проверяемых репозиториев уходит hosted-провайдеру",
+            "модель: Eurorouter (%s, reasoning_effort %s) основной, без фоллбэка: код проверяемых репозиториев уходит hosted-провайдеру",
             settings.eurorouter_model,
+            settings.eurorouter_reasoning_effort or "не задан",
         )
         return FallbackLlmGateway([_eurorouter(settings, timeout)])
     providers: list[tuple[str, LlmGateway]] = [

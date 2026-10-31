@@ -165,6 +165,7 @@ tofu apply infra.tfplan
 | `llm_backend` | `eurorouter` прямо в `deploy.yml` (#245) |
 | `eurorouter_base_url` | переменная `AI_DMC268_URL`, та же, что у `eval.yml` |
 | `eurorouter_model` | файл `.github/eurorouter-model`, читают `.github/scripts/deploy/infra.sh` и `plan.sh` |
+| `eurorouter_reasoning_effort` | файл `.github/eurorouter-reasoning-effort` (`low`, `medium`, `high` или пусто), читают те же скрипты. Файл обязателен, пустой — параметр не уходит в запрос (#267) |
 | `eurorouter_api_keys` | секрет `AI_DMC268_T1`, тот же, что у `eval.yml` |
 
 Без следующих `apply` пройдёт, но VCS-шлюз и вход пользователей через GitHub работать не будут:
