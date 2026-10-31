@@ -32,6 +32,22 @@ def test_a_private_key_spanning_diff_lines_is_replaced_whole() -> None:
     assert redact_secrets(f"+key = '''\n+{PEM}\n+'''\n+x = 1") == f"+key = '''\n+{REDACTED}\n+'''\n+x = 1"
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "sk-proj-" + "A" * 40,
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    ],
+)
+def test_a_bare_secret_on_a_removed_diff_line_is_replaced(secret: str) -> None:
+    """PR, который удаляет закоммиченный ключ: строка диффа начинается с `-`."""
+    assert redact_secrets(f"+x = 1\n-{secret}\n+y = 2") == f"+x = 1\n-{REDACTED}\n+y = 2"
+
+
+def test_code_between_two_complete_keys_is_kept() -> None:
+    assert redact_secrets(f"+{PEM}\n+x = 1\n+{PEM}") == f"+{REDACTED}\n+x = 1\n+{REDACTED}"
+
+
 def test_a_pgp_private_key_block_is_replaced_whole() -> None:
     pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\n+lQOYBF0abc\n+-----END PGP PRIVATE KEY BLOCK-----"
     assert redact_secrets(f"+{pgp}\n+x = 1") == f"+{REDACTED}\n+x = 1"
