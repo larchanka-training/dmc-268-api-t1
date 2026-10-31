@@ -58,6 +58,10 @@ def _line_for_anchor(finding: Finding) -> int:
     return line
 
 
+class RunCancelledError(Exception):
+    """Прогон отменили сменой целевой ветки до POST ревью: публиковать нечего."""
+
+
 def publish_review(
     job: ReviewJob,
     run: ReviewRun,
@@ -104,8 +108,7 @@ def publish_review(
         # описывали бы дифф против старой ветки, а замечания стали бы тредами в gate
         # нового прогона. Head заблокировал приём, ревью и gate выставит новый прогон.
         # Отмену после этой проверки поправит `settle_merge_gate` после POST gate.
-        logger.info("прогон %s отменён до публикации: ревью не публикуется", run.id)
-        return
+        raise RunCancelledError(f"прогон {run.id} отменён до публикации: ревью не публикуется")
 
     publication = vcs.publish_pull_request_review(
         job.repository_full_name,

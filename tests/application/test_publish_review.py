@@ -19,7 +19,7 @@ from app.application.merge_gate_publish import (
 from app.application.ports.llm_gateway import LlmReviewResult
 from app.application.ports.unit_of_work import ActiveRunConflict
 from app.application.ports.vcs_review import InlineCommentDraft, ReviewThreadState
-from app.application.publish_review import publish_review
+from app.application.publish_review import RunCancelledError, publish_review
 from app.domain.entities import (
     DiffAnchor,
     Finding,
@@ -703,9 +703,7 @@ def test_failed_lookup_of_an_orphan_review_does_not_stop_publishing(
     assert record.exc_info is not None and record.exc_info[1] is error
 
 
-def test_run_cancelled_before_publishing_posts_neither_review_nor_gate(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_run_cancelled_before_publishing_posts_neither_review_nor_gate() -> None:
     """Целевую ветку сменили до POST ревью (#222, ревью #225): ревью по диффу против
     старой ветки не публикуется - его замечания стали бы тредами в gate нового
     прогона, - и check run не выставляется."""
@@ -714,12 +712,11 @@ def test_run_cancelled_before_publishing_posts_neither_review_nor_gate(
     uow.review_runs.add(replace(run, status=ReviewRunStatus.CANCELLED))
     vcs = RecordingVcsGateway()
 
-    with caplog.at_level(logging.INFO, logger="app.application.publish_review"):
+    with pytest.raises(RunCancelledError, match=str(RUN_ID)):
         _publish_first_run(uow, run, vcs)
 
     assert vcs.publications == []
     assert vcs.checks == []
-    assert any(str(RUN_ID) in r.getMessage() for r in caplog.records)
 
 
 class _RetargetDuringGateVcs(RecordingVcsGateway):

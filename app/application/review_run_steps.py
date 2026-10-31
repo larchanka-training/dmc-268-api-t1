@@ -28,7 +28,13 @@ from app.application.ports.stage_tracer import NO_STAGE_TRACING, StageSpan, Stag
 from app.domain.entities import ReviewRunStep
 from app.domain.enums import ReviewRunStage
 from app.domain.llm_errors import LlmError, PromptTooLargeError
-from app.domain.run_steps import abandon_steps, error_code, finish_step, start_step
+from app.domain.run_steps import (
+    ABANDONED,
+    abandon_steps,
+    error_code,
+    finish_step,
+    start_step,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +162,12 @@ class StepRecorder:
         """
         if self._stage is not None:
             self.finish(tokens_used=spent_tokens(error), error_code=error_code(error))
+
+    def abandon(self) -> None:
+        """Закрыть открытый этап брошенным (`REVIEW_RUN_STALE`): прогон отменили, и
+        исхода у этапа нет; нет открытого — ничего."""
+        if self._stage is not None:
+            self.finish(error_code=ABANDONED)
 
     def interrupt(self, error: BaseException) -> None:
         """Закрыть спан открытого этапа упавшим: прогон прерван не `Exception`.
