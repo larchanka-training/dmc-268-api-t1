@@ -3,9 +3,10 @@
 Use case принимает unit of work, через него добирается до репозиториев и
 делает один коммит. Ниже этой строки никто не знает, что такое сессия.
 
-`ActiveRunConflict` — отказ коммита из-за гонки двух доставок одного PR:
-гонку страхуют уникальные индексы `uq_review_runs_one_active_per_commit`
-и `uq_merge_requests_repo_number`. Исключение определено в порту, а не
+`ActiveRunConflict` — отказ коммита из-за гонки параллельных транзакций:
+двух доставок одного PR (уникальные индексы `uq_review_runs_one_active_per_commit`
+и `uq_merge_requests_repo_number`) или двух прогонов, подобравших одно ревью
+упавшего (`uq_published_comments_provider_comment_id`). Текст называет ограничение. Исключение определено в порту, а не
 заимствовано у вендора хранилища: use case ловит его, не зная SQLAlchemy.
 """
 

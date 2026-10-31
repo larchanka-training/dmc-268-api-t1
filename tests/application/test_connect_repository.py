@@ -7,11 +7,12 @@ from uuid import UUID
 import pytest
 
 from app.application.use_cases.connect_repository import (
-    AvailableRepository,
     ConnectRefusal,
+    ListedRepository,
     UserContext,
+    connect_installation,
     connect_repository,
-    list_available_repositories,
+    list_with_connections,
 )
 from app.application.use_cases.user_token import SessionClosed
 from app.domain.entities import (
@@ -20,7 +21,7 @@ from app.domain.entities import (
     RepositoryPermissions,
     Secret,
 )
-from app.domain.enums import Provider
+from app.domain.enums import Provider, RepositorySelection
 from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.session import open_session
 from app.domain.vcs_errors import VcsError
@@ -70,6 +71,7 @@ def _registered(provider_id: str) -> Repository:
         auto_review_enabled=True,
         created_at=NOW,
         updated_at=NOW,
+        connected_at=NOW,
     )
 
 
@@ -79,28 +81,39 @@ def _connect(
     return connect_repository(catalog, uow, _user(), provider, provider_id, NEW_ID, NOW)
 
 
-def test_available_repositories_come_from_the_user_token_and_are_marked() -> None:
+def test_the_list_comes_from_the_user_token_and_carries_the_connection() -> None:
     uow = _signed_in()
-    uow.repositories.add(_registered("101"))
-    catalog = FakeInstallationCatalog([API, WEB])
+    registered = _registered("101")
+    uow.repositories.add(registered)
+    catalog = FakeInstallationCatalog([WEB, API])
 
-    available = list_available_repositories(catalog, uow, _user(), NOW)
+    listed = list_with_connections(catalog, uow, _user(), NOW)
 
-    assert available == [
-        AvailableRepository(API, already_connected=True, can_connect=True),
-        AvailableRepository(WEB, already_connected=False, can_connect=False),
+    assert listed == [
+        ListedRepository(API, record=registered, can_connect=True),
+        ListedRepository(WEB, record=None, can_connect=False),
     ]
     assert catalog.tokens == [Secret("ghu_login_access")]
 
 
+def test_the_list_is_ordered_by_name_ignoring_case() -> None:
+    """Только по имени: при равенстве без учёта регистра — порядок ответа GitHub."""
+    upper = _repo("909", "API", ADMIN)
+    catalog = FakeInstallationCatalog([WEB, upper, DOCS, API])
+
+    listed = list_with_connections(catalog, _signed_in(), _user(), NOW)
+
+    assert [item.repository for item in listed] == [upper, API, DOCS, WEB]
+
+
 def test_nothing_visible_is_an_empty_list() -> None:
-    assert list_available_repositories(FakeInstallationCatalog([]), _signed_in(), _user(), NOW) == []
+    assert list_with_connections(FakeInstallationCatalog([]), _signed_in(), _user(), NOW) == []
 
 
 def test_a_github_failure_passes_up_and_keeps_the_session() -> None:
     uow = _signed_in()
     with pytest.raises(VcsError):
-        list_available_repositories(FakeInstallationCatalog(error=VcsError("HTTP 503")), uow, _user(), NOW)
+        list_with_connections(FakeInstallationCatalog(error=VcsError("HTTP 503")), uow, _user(), NOW)
     assert [s.id for s in uow.sessions.stored] == [SESSION_ID]
 
 
@@ -109,7 +122,7 @@ def test_a_rejected_token_closes_the_session() -> None:
     catalog = FakeInstallationCatalog(error=ProviderTokenRejected("401"))
 
     with pytest.raises(SessionClosed):
-        list_available_repositories(catalog, uow, _user(), NOW)
+        list_with_connections(catalog, uow, _user(), NOW)
 
     assert uow.sessions.stored == []
     assert uow.provider_tokens.stored == {}
@@ -129,6 +142,7 @@ def test_admin_connects_and_the_repository_is_recorded() -> None:
         auto_review_enabled=True,
         created_at=NOW,
         updated_at=NOW,
+        connected_at=NOW,
     )
     assert outcome == expected
     assert uow.repositories.get(NEW_ID) == expected
@@ -260,3 +274,14 @@ def test_the_installation_is_not_checked_for_a_repository_the_user_cannot_see() 
 
 def test_without_rights_on_an_installed_repository_it_is_403() -> None:
     assert _connect(FakeInstallationCatalog([DOCS]), _signed_in(), "303") is ConnectRefusal.MANAGE_REQUIRED
+
+
+def test_setup_counts_only_rows_it_actually_inserted() -> None:
+    """Параллельный POST /repositories успел вставить запись между чтением и вставкой Setup URL:
+    вставка не перетирает её и в «подключено N» не попадает."""
+    uow = _signed_in()
+    uow.repositories.list_by_provider_ids = lambda provider, provider_ids: []  # type: ignore[method-assign]
+    uow.repositories.add = lambda repository: False  # type: ignore[method-assign]
+    catalog = FakeInstallationCatalog([API], installations={7: (RepositorySelection.SELECTED, [API])})
+
+    assert connect_installation(catalog, uow, _user(), 7, lambda: NEW_ID, NOW, connect_selected=True) == 0

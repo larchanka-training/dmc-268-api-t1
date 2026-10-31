@@ -388,6 +388,106 @@ run "hosted_fallback_without_eurorouter_rejected" {
   expect_failures = [var.llm_hosted_fallback]
 }
 
+run "eurorouter_primary_without_keys_rejected" {
+  command = plan
+
+  variables {
+    llm_backend         = "eurorouter"
+    eurorouter_base_url = "https://eurorouter.example/v1"
+    eurorouter_model    = "model"
+    eurorouter_api_keys = ""
+  }
+
+  expect_failures = [var.llm_backend]
+}
+
+run "eurorouter_primary_without_model_rejected" {
+  command = plan
+
+  variables {
+    llm_backend         = "eurorouter"
+    eurorouter_base_url = "https://eurorouter.example/v1"
+    eurorouter_model    = ""
+    eurorouter_api_keys = "k1"
+  }
+
+  expect_failures = [var.llm_backend]
+}
+
+run "eurorouter_primary_with_blank_keys_rejected" {
+  command = plan
+
+  variables {
+    llm_backend         = "eurorouter"
+    eurorouter_base_url = "https://eurorouter.example/v1"
+    eurorouter_model    = "model"
+    eurorouter_api_keys = " , "
+  }
+
+  expect_failures = [var.llm_backend]
+}
+
+run "eurorouter_primary_over_plain_http_rejected" {
+  command = plan
+
+  variables {
+    llm_backend         = "eurorouter"
+    eurorouter_base_url = "http://eurorouter.example/v1"
+    eurorouter_model    = "model"
+    eurorouter_api_keys = "k1"
+  }
+
+  expect_failures = [var.llm_backend]
+}
+
+# Пробелы разбираются как в Settings: адрес не обрезается, модель обрезается.
+run "eurorouter_primary_with_a_space_before_the_address_rejected" {
+  command = plan
+
+  variables {
+    llm_backend         = "eurorouter"
+    eurorouter_base_url = " https://eurorouter.example/v1"
+    eurorouter_model    = "model"
+    eurorouter_api_keys = "k1"
+  }
+
+  expect_failures = [var.llm_backend]
+}
+
+run "eurorouter_primary_with_a_blank_model_rejected" {
+  command = plan
+
+  variables {
+    llm_backend         = "eurorouter"
+    eurorouter_base_url = "https://eurorouter.example/v1"
+    eurorouter_model    = "   "
+    eurorouter_api_keys = "k1"
+  }
+
+  expect_failures = [var.llm_backend]
+}
+
+run "eurorouter_primary_reaches_the_worker" {
+  command = plan
+
+  variables {
+    llm_backend         = "eurorouter"
+    eurorouter_base_url = "https://eurorouter.example/v1"
+    eurorouter_model    = "model"
+    eurorouter_api_keys = "k1"
+  }
+
+  assert {
+    condition     = contains(docker_container.worker.env, "LLM_BACKEND=eurorouter") && contains(docker_container.worker.env, "EUROROUTER_MODEL=model")
+    error_message = "Eurorouter основным доходит до воркера окружением."
+  }
+
+  assert {
+    condition     = docker_container.worker.stop_timeout == 1260
+    error_message = "Провайдер один: воркер ждёт столько же, сколько с одной локальной моделью."
+  }
+}
+
 run "api_image_without_digest_rejected" {
   command = plan
 

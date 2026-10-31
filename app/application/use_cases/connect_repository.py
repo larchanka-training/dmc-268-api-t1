@@ -1,4 +1,4 @@
-"""Подключение репозитория к сервису: список доступных и регистрация.
+"""Подключение репозитория к сервису: список репозиториев, регистрация и выключение.
 
 Провайдер скрыт за портом `InstallationCatalog`, токен пользователя — за
 `call_with_user_token` (`app/application/use_cases/user_token.py`), хранение —
@@ -9,11 +9,14 @@
 
 Что пользователь видит, решает GitHub: список — ответ `/user/installations…`
 по токену пользователя, то есть пересечение «доступно приложению» и
-«доступно пользователю». Подключение — `GET /repositories/{id}` токеном
+«доступно пользователю», подключённые и нет вместе (change
+`repositories-one-list`). Подключение — `GET /repositories/{id}` токеном
 пользователя и проверка установки приложения на репозитории. Подключать — с
 правом admin или maintain (`app/domain/repository_access.py`).
 """
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -23,9 +26,16 @@ from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.use_cases.user_token import call_with_user_token
-from app.domain.entities import InstallationRepository, Repository
-from app.domain.enums import Provider
-from app.domain.repository_access import can_connect, visible_for_connect
+from app.domain.entities import InstallationRepository, Repository, Secret
+from app.domain.enums import Provider, RepositorySelection
+from app.domain.repository_access import (
+    can_connect,
+    to_connect_on_setup,
+    visible_for_connect,
+)
+from app.domain.vcs_errors import VcsError
+
+_log = logging.getLogger(__name__)
 
 
 class ConnectRefusal(StrEnum):
@@ -37,9 +47,10 @@ class ConnectRefusal(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class AvailableRepository:
+class ListedRepository:
     repository: InstallationRepository
-    already_connected: bool
+    # Запись в сервисе, если репозиторий подключали (в том числе выключенный); `None` — нет.
+    record: Repository | None
     # Подсказка интерфейсу, а не защита: `connect_repository` проверяет права сам (ui#45).
     can_connect: bool
 
@@ -52,19 +63,24 @@ class UserContext:
     session_id: UUID
 
 
-def list_available_repositories(
+def list_with_connections(
     catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, now: datetime
-) -> list[AvailableRepository]:
-    """Репозитории установок, видимые пользователю, с отметками: зарегистрирован ли каждый и
-    может ли пользователь его подключить — по правам из того же ответа GitHub."""
+) -> list[ListedRepository]:
+    """Репозитории установок, видимые пользователю, подключённые и нет, — по имени.
+
+    Подключён ли каждый, читается из базы одним запросом; может ли пользователь его
+    подключить — по правам из того же ответа GitHub. Порядок — `full_name` без учёта
+    регистра: у GitHub он уникален, страницы стабильны.
+    """
     repositories = list_user_repositories(catalog, uow, user, now)
     with uow:
         provider_ids = [repository.provider_id for repository in repositories]
-        connected = {r.provider_id for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
-    return [
-        AvailableRepository(r, already_connected=r.provider_id in connected, can_connect=can_connect(r.permissions))
+        records = {r.provider_id: r for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
+    listed = [
+        ListedRepository(r, record=records.get(r.provider_id), can_connect=can_connect(r.permissions))
         for r in repositories
     ]
+    return sorted(listed, key=lambda item: item.repository.full_name.casefold())
 
 
 def list_user_repositories(
@@ -73,7 +89,7 @@ def list_user_repositories(
     """Репозитории установок, видимые пользователю у провайдера, — ответ GitHub без чтения своей базы.
 
     Видимость прогонов (GET /reviews, GET /events) сопоставляет их с подключёнными
-    сама, одним запросом, — отметка `already_connected` ей не нужна.
+    сама, одним запросом, — запись в сервисе ей не нужна.
     """
     return call_with_user_token(uow, user.oauth, user.session_id, now, catalog.list_repositories)
 
@@ -94,8 +110,9 @@ def connect_repository(
     виден пользователю (в том числе публичный только с правом чтения — так GitHub
     отдаёт любой публичный репозиторий) или приложение не установлено (приостановлено) —
     `NOT_IN_INSTALLATION`, один отказ без различия; нет права admin или
-    maintain — `MANAGE_REQUIRED`; уже подключён — `ALREADY_CONNECTED`. Права проверяются раньше «уже подключён»:
-    пользователь без прав не узнаёт, подключён ли репозиторий.
+    maintain — `MANAGE_REQUIRED`; уже подключён и включён — `ALREADY_CONNECTED`. Права проверяются раньше
+    «уже подключён»: пользователь без прав не узнаёт, подключён ли репозиторий. Выключенный включается
+    обратно: ответ — его прежняя запись.
     """
     if provider is not Provider.GITHUB:
         return ConnectRefusal.NOT_IN_INSTALLATION
@@ -123,13 +140,97 @@ def connect_repository(
         auto_review_enabled=True,
         created_at=now,
         updated_at=now,
+        connected_at=now,
     )
+    # Сначала включаем выключенную запись — прежний `id` и история остаются; её нет —
+    # вставка. Обе операции сами разбирают гонку (design D4): проигравший параллельный
+    # запрос не находит выключенной записи и упирается в ключ — `ALREADY_CONNECTED`.
     with uow:
-        if uow.repositories.find_by_provider(provider, repository.provider_id) is not None:
-            return ConnectRefusal.ALREADY_CONNECTED
-        # Параллельное подключение могло успеть между проверкой и вставкой.
-        if not uow.repositories.add(repository):
+        reconnected = uow.repositories.reconnect(repository)
+        if reconnected is None and not uow.repositories.add(repository):
             return ConnectRefusal.ALREADY_CONNECTED
         uow.commit()
-    return repository
+    return reconnected or repository
 
+
+def disconnect_repository(
+    catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, repository: Repository, now: datetime
+) -> ConnectRefusal | None:
+    """Выключить ревью видимого пользователю репозитория; `None` — выключено.
+
+    Видимость по кэшу проверяет вызывающий, права — здесь, запросом к провайдеру мимо кэша,
+    тем же правилом, что у подключения (design D6). Провайдер репозиторий не отдаёт —
+    `NOT_IN_INSTALLATION`; нет admin или maintain — `MANAGE_REQUIRED`. Уже выключенный
+    выключается ещё раз без ошибки.
+    """
+    found = call_with_user_token(
+        uow, user.oauth, user.session_id, now, lambda token: catalog.user_repository(token, repository.provider_id)
+    )
+    if found is None:
+        return ConnectRefusal.NOT_IN_INSTALLATION
+    if not can_connect(found.permissions):
+        return ConnectRefusal.MANAGE_REQUIRED
+    with uow:
+        uow.repositories.disconnect(repository.id, now)
+        uow.commit()
+    return None
+
+
+def connect_installation(
+    catalog: InstallationCatalog,
+    uow: UnitOfWork,
+    user: UserContext,
+    installation_id: int,
+    new_id: Callable[[], UUID],
+    now: datetime,
+    *,
+    connect_selected: bool,
+) -> int | None:
+    """Возврат с установки GitHub App (Setup URL): подключить выбранные репозитории установки.
+
+    `installation_id` из адреса не доверяется — ищется среди установок пользователя по его
+    токену; нет — `None`. Найдена — свежий список видимых пишется в кэш (`catalog` с
+    `read=False`, design D3), best-effort: сбой обхода установок в лог, подключение идёт
+    дальше. Подключает только `connect_selected` (`setup_action=install`) и только при «Only
+    select repositories» — `to_connect_on_setup`: только вставка, выключенные не включаются
+    (design D7), поэтому не `connect_repository`. Вернуть число подключённых.
+    """
+
+    def from_github(token: Secret) -> list[InstallationRepository] | None:
+        selection = catalog.installation_selection(token, installation_id)
+        if selection is None:
+            return None
+        # Ради кэша: репозитории новой установки сразу видны в списке. Нужен только кэшу,
+        # поэтому сбой — не причина отказать в подключении по найденной установке.
+        try:
+            catalog.list_repositories(token)
+        except VcsError:
+            _log.warning("Setup URL: кэш видимости не обновлён, подключение продолжается", exc_info=True)
+        if not connect_selected or selection is RepositorySelection.ALL:
+            return []
+        return catalog.installation_repositories(token, installation_id)
+
+    repositories = call_with_user_token(uow, user.oauth, user.session_id, now, from_github)
+    if repositories is None:
+        return None
+    connected = 0
+    with uow:
+        provider_ids = [repository.provider_id for repository in repositories]
+        registered = {r.provider_id for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
+        for found in to_connect_on_setup(repositories, registered):
+            repository = Repository(
+                id=new_id(),
+                provider=Provider.GITHUB,
+                provider_id=found.provider_id,
+                full_name=found.full_name,
+                default_branch=found.default_branch,
+                auto_review_enabled=True,
+                created_at=now,
+                updated_at=now,
+                connected_at=now,
+            )
+            # Параллельный POST /repositories мог успеть: вставка его не перетирает.
+            if uow.repositories.add(repository):
+                connected += 1
+        uow.commit()
+    return connected

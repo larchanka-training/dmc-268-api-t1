@@ -45,6 +45,9 @@ class Repository:
     auto_review_enabled: bool
     created_at: datetime
     updated_at: datetime
+    # Когда ревью включено последний раз; `None` — выключено (`DELETE /repositories/{id}`):
+    # запись остаётся ради истории, вебхук `pull_request` прогона не создаёт.
+    connected_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +370,9 @@ class WebhookEvent:
     `synchronize`, `edited` со сменой целевой ветки): только они проходят через
     `extract_github_event`, и оно же переезжает в `ReviewJob.action` без
     преобразований.
+    `author_association` — связь автора с репозиторием по GitHub (`None`, если
+    поля нет), `from_fork` — ветка PR не в самом репозитории; по ним
+    `is_trusted_author` отсекает PR посторонних.
     """
 
     action: str
@@ -379,6 +385,8 @@ class WebhookEvent:
     target_branch: str
     title: str
     author: str
+    author_association: str | None
+    from_fork: bool
 
 
 @dataclass(frozen=True, slots=True)

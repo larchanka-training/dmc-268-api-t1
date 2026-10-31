@@ -35,7 +35,8 @@ services:
       # entrypoint refuse to start against an empty, wrongly-shaped volume.
       - postgres_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dmc268 -d dmc268"]
+      # По TCP: временный сервер инициализации на пустом томе слушает только сокет (#254).
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U dmc268 -d dmc268"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -182,7 +183,8 @@ services:
       # (профиль observability ниже) запускают так:
       #   OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp \
       #   OTEL_LOGS_EXPORTER=otlp \
-      #   docker compose --profile observability up -d
+      #   docker compose -f docker-compose.yml \
+      #     -f infra/observability/compose.logs.yml --profile observability up -d
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://collector:4318}
       # Таймаут OTLP меньше окна graceful shutdown (5 с): выгрузка спанов при
       # остановке успевает даже при недоступном коллекторе (замечание из #89).
@@ -247,8 +249,9 @@ services:
       # Адаптер модели. stub - без похода к модели, ollama - локальная модель
       # (профиль ollama ниже, модель - OLLAMA_MODEL). Значения по умолчанию нет
       # намеренно: без LLM_BACKEND в .env воркер не стартует, а не публикует
-      # пустые ревью. Eurorouter подключается только вторым и только флагом
-      # LLM_HOSTED_FALLBACK=true: тогда код уходит hosted-провайдеру.
+      # пустые ревью. Eurorouter подключается вторым флагом
+      # LLM_HOSTED_FALLBACK=true или основным при LLM_BACKEND=eurorouter: в обоих
+      # случаях код уходит hosted-провайдеру.
       LLM_BACKEND: ${LLM_BACKEND:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-}
@@ -314,10 +317,11 @@ services:
 
   # Стек наблюдаемости — те же конфиги из infra/observability/, что и на
   # стенде (спека observability: различия окружений — переменные, не конфиги).
-  # Восемь сервисов: коллектор (трейсы, логи, метрики приложения и базы), Loki
-  # (логи), Tempo (трейсы), Prometheus (метрики), Grafana (интерфейс),
-  # node-exporter (сервер), cAdvisor (контейнеры, через socket-proxy) и сам
-  # socket-proxy (доступ cAdvisor к Docker API без docker.sock). Без профиля
+  # Девять сервисов: коллектор (трейсы, логи, метрики приложения и базы),
+  # collector-docker (метрики контейнеров), collector-logs (логи postgres и
+  # rabbitmq), Loki (логи), Tempo (трейсы),
+  # Prometheus (метрики), Grafana (интерфейс), node-exporter (сервер) и
+  # socket-proxy (доступ collector-docker к Docker API без docker.sock). Без профиля
   # ничего из этого не поднимается. Экспорт включают переменные api/worker —
   # см. комментарий у OTEL_TRACES_EXPORTER.
   #
@@ -357,6 +361,54 @@ services:
     depends_on:
       - loki
       - tempo
+
+  # Метрики контейнеров — отдельный экземпляр коллектора, как dmc268-otelcol-docker
+  # в infra/observability.tf. Почему отдельно — infra/README.md, «Метрики контейнеров».
+  collector-docker:
+    # otel/opentelemetry-collector-contrib:0.158.0
+    image: otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
+    profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - collector-docker
+      docker_proxy:
+    volumes:
+      - ./infra/observability/otelcol-docker.yaml:/etc/otelcol-contrib/config.yaml:ro
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    # receiver docker_stats на старте читает список контейнеров: без proxy
+    # экземпляр не поднимается.
+    depends_on:
+      - dockerproxy
+    # depends_on ждёт запуска контейнера, а не порта haproxy: упавший на старте
+    # docker_stats поднимается заново.
+    restart: unless-stopped
+
+  # Логи postgres и rabbitmq, как dmc268-otelcol-logs в infra/observability.tf;
+  # драйвер включает infra/observability/compose.logs.yml (infra/README.md,
+  # «Логи контейнеров»).
+  collector-logs:
+    # otel/opentelemetry-collector-contrib:0.158.0
+    image: otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
+    profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - collector-logs
+      logs:
+    # Демон Docker подключается с хоста, поэтому порт — только на петле.
+    ports:
+      - "127.0.0.1:24224:24224"
+    volumes:
+      - ./infra/observability/otelcol-logs.yaml:/etc/otelcol-contrib/config.yaml:ro
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
 
   loki:
     # grafana/loki:3.7.9
@@ -459,17 +511,15 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
 
-  # Прокси над Docker API (/var/run/docker.sock): cAdvisor — единственный
+  # Прокси над Docker API (/var/run/docker.sock): collector-docker — единственный
   # клиент, docker.sock контейнерам больше не монтируется. Белый список путей —
   # не env-переменные образа (CONTAINERS=1 открывал ЛЮБОЙ GET под /containers:
   # /containers/{id}/archive?path=… — любой файл любого контейнера, включая том
   # Postgres; замечание ревью PR #130), а свой шаблон haproxy ниже: entrypoint
   # образа рендерит именно его и стартует haproxy по результату. Разрешены
-  # только пути cAdvisor — /containers/json, inspect контейнера, /info,
-  # /version, /_ping (правила и остаточный риск с Env — в шапке файла);
-  # статистику cAdvisor читает из cgroup, не через API. События Docker
-  # (/events) не нужны: новые контейнеры находятся опросом cgroup-иерархии.
-  # Сеть — отдельная (docker_proxy), в ней только proxy и cAdvisor.
+  # только пути receiver docker_stats (правила и остаточный риск с Env — в
+  # шапке файла). Сеть — отдельная (docker_proxy), в ней только proxy и
+  # collector-docker.
   dockerproxy:
     # tecnativa/docker-socket-proxy:v0.4.1
     image: tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e
@@ -484,41 +534,6 @@ services:
       docker_proxy:
         aliases:
           - dockerproxy
-
-  # Метрики контейнеров: CPU и память каждого, включая сам стек. К Docker API
-  # ходит только через socket-proxy (флаг -docker — проверено по --help образа
-  # v0.52.1; ENV у образа флаги не читает): маунтов docker.sock и
-  # /var/lib/docker больше нет. Маунты / и /sys — каноничные из документации
-  # cAdvisor (только чтение): без них не видно cgroup-иерархии, по которой
-  # находятся контейнеры, — проверено запуском. Без --privileged и /dev/kmsg
-  # недоступны OOM- и perf-коллекторы, CPU, память, диски и сеть остаются.
-  # Новые контейнеры cAdvisor находит сам, без подписки на события Docker:
-  # опрашивает cgroup-иерархию и запрашивает у proxy inspect новых (проверено
-  # запуском нового контейнера рядом). На Docker Desktop контейнеры живут в
-  # ВМ — метрики хоста там не видны.
-  cadvisor:
-    # gcr.io/cadvisor/cadvisor:v0.52.1
-    image: gcr.io/cadvisor/cadvisor@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435
-    profiles: ["observability"]
-    # Без root и без маунта «/» — как в infra (см. комментарий там): /rootfs
-    # открывал бы unix-сокет Docker и Env всех контейнеров.
-    user: "65534"
-    read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    command:
-      - --docker=tcp://dockerproxy:2375
-    volumes:
-      - /sys:/sys:ro
-    networks:
-      observability:
-        aliases:
-          - cadvisor
-      docker_proxy:
 
 volumes:
   postgres_data:
@@ -543,7 +558,7 @@ volumes:
   grafana_data:
 
 # Сети стека наблюдаемости. docker_proxy — для доступа к Docker API через
-# socket-proxy: в ней только dockerproxy и cAdvisor, internal — наружу в
+# socket-proxy: в ней только dockerproxy и collector-docker, internal — наружу в
 # интернет им идти не нужно (публиковать там нечего). observability — весь
 # стек, отдельно от default-сети приложения: из контейнеров интерфейса
 # (подключаются к default) не должны быть доступны Loki без аутентификации,
@@ -565,3 +580,5 @@ networks:
   # Только ради публикации порта Grafana: порты на internal-сети Docker не
   # публикует.
   grafana:
+  # То же для порта collector-logs.
+  logs:

@@ -10,6 +10,22 @@ locals {
     "max-file" = "3"
   }
 
+  # Логи контейнеров без SDK (postgres, его реплика, rabbitmq) при включённом
+  # стеке: драйвер fluentd шлёт их в коллектор логов на петле хоста; зачем
+  # async — infra/README.md, «Логи контейнеров». Доли секунды сохраняют порядок
+  # строк ERROR/DETAIL/STATEMENT одной секунды; из тега коллектор берёт
+  # service.name. Буфер в памяти dockerd — 10 000 записей, кэш docker logs —
+  # те же потолки, что в log_opts.
+  fluentd_log_opts = {
+    "fluentd-address"              = "tcp://127.0.0.1:24224"
+    "fluentd-async"                = "true"
+    "fluentd-sub-second-precision" = "true"
+    "fluentd-buffer-limit"         = "10000"
+    "cache-max-size"               = "10m"
+    "cache-max-file"               = "3"
+    "tag"                          = "{{.Name}}"
+  }
+
   # Версия сервиса для телеметрии — тег образа API: deploy.yml публикует образ
   # с тегом по sha коммита, а git внутрь образа не попадает, поэтому версия
   # приходит окружением (OTEL_RESOURCE_ATTRIBUTES). Тег — между последним
@@ -63,8 +79,7 @@ locals {
   prometheus_image    = "prom/prometheus@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2"
   grafana_image       = "grafana/grafana@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f"
   node_exporter_image = "quay.io/prometheus/node-exporter@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a"
-  cadvisor_image      = "gcr.io/cadvisor/cadvisor@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435"
-  # socket-proxy: доступ cAdvisor к Docker API без docker.sock — белый список
+  # socket-proxy: доступ otelcol_docker к Docker API без docker.sock — белый список
   # путей в своём шаблоне haproxy (observability/docker-socket-proxy.cfg),
   # минимум прав там же и в комментариях у контейнера в observability.tf.
   docker_socket_proxy_image = "tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e"

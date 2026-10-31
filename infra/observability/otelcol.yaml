@@ -16,6 +16,17 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
 
+  # Трейсы браузера: только OTLP/HTTP, сюда проксирует nginx интерфейса
+  # (/otlp/v1/traces через сеть dmc268-otlp). Отдельный порт — отдельный
+  # конвейер traces/browser: тело из интернета не попадает ни в метрики, ни в
+  # логи, а имя сервиса ставит коллектор (transform/browser-resource). Потолок
+  # тела — как у nginx (512 КБ).
+  otlp/browser:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4319
+        max_request_body_size: 524288
+
   # Метрики базы (решение #89): снимает сам коллектор receiver-ом postgresql —
   # без отдельного контейнера экспортёра, в общий конвейер метрик. Роль
   # только-чтение dmc268_monitor с привилегией pg_monitor создаёт миграция
@@ -50,9 +61,9 @@ processors:
     timeout: 5s
 
   # service.name в ресурсе OTLP-лога: Loki берёт имя сервиса из ресурса
-  # (label service_name), иначе все записи идут как unknown_service. Имя
-  # приходит в ресурсе от SDK; groupbyattrs оставлен как нормализация на
-  # случай, если имя окажется на уровне записи.
+  # (label service_name), иначе все записи идут как unknown_service. От SDK
+  # имя приходит в ресурсе, а от коллектора логов контейнеров
+  # (otelcol-logs.yaml) — на уровне записи: groupbyattrs переносит его в ресурс.
   groupbyattrs/service:
     keys:
       - service.name
@@ -74,7 +85,21 @@ processors:
           - delete_key(attributes, "telemetry.sdk.name")
           - delete_key(attributes, "telemetry.sdk.language")
 
-  # Редакция логов — тот же второй рубеж после SDK, что transform/redact для  # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
+  # Ресурс браузерных спанов задаёт коллектор, а не клиент: тело приходит из
+  # интернета, и спан, подписанный как dmc-268-api, иначе встал бы в трейсы
+  # бэкенда. Чужие атрибуты ресурса удаляются, имя сервиса ставится заново.
+  # Версия и окружение сборки кабинета остаются: их подделка запутает только
+  # поиск по сборке, в трейсы бэкенда спан всё равно не попадёт.
+  transform/browser-resource:
+    error_mode: ignore
+    trace_statements:
+      - context: resource
+        statements:
+          - keep_keys(attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version", "service.version", "deployment.environment.name"])
+          - set(attributes["service.name"], "dmc-268-ui")
+
+  # Редакция логов — тот же второй рубеж после SDK, что transform/redact для
+  # трейсов (первый — фильтры app/api/log_redaction.py). Стектрейс и сообщение
   # исключения несут значения ключей базы и текст ответа провайдера модели —
   # те же поля semconv, что у событий exception в трейсах. Тело гасится у
   # записей, несущих исключение: текст исключения мог попасть в сообщение
@@ -142,10 +167,10 @@ processors:
 
 exporters:
   # Трейсы — в Tempo по OTLP/HTTP.
-  otlphttp/tempo:
+  otlp_http/tempo:
     endpoint: http://tempo:4318
   # Логи — в Loki: нативный приём OTLP.
-  otlphttp/loki:
+  otlp_http/loki:
     endpoint: http://loki:3100/otlp
   # Метрики — exporter-порт коллектора: Prometheus скрейпит его (job collector).
   # resource_to_telemetry_conversion переносит атрибуты ресурса (service.name)
@@ -162,17 +187,33 @@ extensions:
     endpoint: 0.0.0.0:13133
 
 service:
+  # Свои метрики коллектора (otelcol_*: отказы приёма, сбои экспорта) — pull на
+  # 8888, его скрейпит Prometheus (job collector-self). По умолчанию порт слушает
+  # только 127.0.0.1 и снаружи контейнера не виден.
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
   extensions: [health_check]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, transform/redact, batch]
-      exporters: [otlphttp/tempo]
+      exporters: [otlp_http/tempo]
+    traces/browser:
+      receivers: [otlp/browser]
+      processors: [memory_limiter, transform/browser-resource, transform/redact, batch]
+      exporters: [otlp_http/tempo]
     metrics:
       receivers: [otlp, postgresql]
-      processors: [memory_limiter, transform/trim-metrics-resource, batch]
+      # Без batch: prometheus отдаёт точки по pull, пачка их только задерживала бы.
+      processors: [memory_limiter, transform/trim-metrics-resource]
       exporters: [prometheus]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, transform/redact-logs, groupbyattrs/service, batch]
-      exporters: [otlphttp/loki]
+      exporters: [otlp_http/loki]

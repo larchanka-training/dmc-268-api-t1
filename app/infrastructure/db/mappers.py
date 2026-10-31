@@ -42,6 +42,7 @@ def repository_to_domain(row: RepositoryRow) -> Repository:
         auto_review_enabled=row.auto_review_enabled,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        connected_at=row.connected_at,
     )
 
 

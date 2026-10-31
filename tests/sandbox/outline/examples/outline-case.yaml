@@ -1,0 +1,96 @@
+# Мок-PR песочницы tree-sitter: по файлу на язык, правки заданы ключом lines:
+# (путь -> "N", "N-M" или список через запятую). База файла из lines: - тот же файл,
+# где эти строки заменены заглушками, поэтому дифф затрагивает ровно их; остальные
+# файлы новые. Кейс читает и песочница воркера (make sandbox CASE_FILE=...): там
+# ключ lines: игнорируется и все файлы новые.
+title: Мультиязычный мок-PR
+pull_request:
+  title: "feat: заказы - скидка, ключи репозитория и форматирование цен"
+  description: Правки в Python, TypeScript, TSX, JavaScript и Go для разбора tree-sitter.
+files:
+  app/billing/discount.py: |
+    """Скидка на заказ."""
+    from decimal import Decimal
+
+
+    class Discount:
+        """Скидка в процентах."""
+
+        def __init__(self, percent: int) -> None:
+            self.percent = percent
+
+        @staticmethod
+        def apply(price: Decimal, percent: int) -> Decimal:
+            return price - price * percent / 100
+  # Синтаксическая ошибка в total (строка 2): tree-sitter не падает: сигнатура total
+  # захватывает обрывок тела, правка в average (строка 6) всё равно находит своё определение.
+  app/billing/broken.py: |
+    def total(items: list[int]) -> int:
+        return sum(items) +
+
+
+    def average(items: list[int]) -> float:
+        return total(items) / len(items)
+  web/api/handler.ts: |
+    import { Request } from "./http";
+
+    export interface Handler {
+      handle(request: Request): string;
+    }
+
+    export class EchoHandler implements Handler {
+      prefix = "echo";
+
+      handle = (request: Request): string => {
+        return `${this.prefix}: ${request.body}`;
+      };
+    }
+  web/ui/Badge.tsx: |
+    import React from "react";
+
+    type BadgeProps = { label: string };
+
+    export function Badge({ label }: BadgeProps) {
+      return <span className="badge">{label}</span>;
+    }
+  web/legacy/format.js: |
+    import { pad } from "./pad.js";
+
+    export function formatPrice(cents) {
+      return `${(cents / 100).toFixed(2)} ₽`;
+    }
+
+    export const formatPercent = (value) => {
+      return `${pad(value)}%`;
+    };
+  services/orders/repo.go: |
+    package orders
+
+    import "fmt"
+
+    type Repo struct {
+    	prefix string
+    }
+
+    func (r *Repo) Key(id int) string {
+    	return fmt.Sprintf("%s:%d", r.prefix, id)
+    }
+
+    func First[T any](items []T) (T, bool) {
+    	var zero T
+    	if len(items) == 0 {
+    		return zero, false
+    	}
+    	return items[0], true
+    }
+  docs/orders.md: |
+    # Заказы
+
+    Скидка считается в процентах от цены заказа.
+lines:
+  app/billing/discount.py: "13"
+  app/billing/broken.py: "6"
+  web/api/handler.ts: "4, 11"
+  web/ui/Badge.tsx: "6"
+  web/legacy/format.js: "4, 8"
+  services/orders/repo.go: "10, 15"

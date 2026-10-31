@@ -6,6 +6,7 @@ from app.domain.entities import InstallationRepository, RepositoryPermissions
 from app.domain.repository_access import (
     can_connect,
     has_explicit_access,
+    to_connect_on_setup,
     visible_for_connect,
 )
 
@@ -39,3 +40,13 @@ def test_a_private_repository_is_visible_with_read_a_public_one_is_not(private: 
     """Приватный GitHub отдаёт только участнику — роль read уже доступ."""
     repository = InstallationRepository("1", "octo-org/repo", "main", _permissions(*granted), private=private)
     assert visible_for_connect(repository) is expected
+
+
+def test_setup_connects_only_manageable_repositories_without_a_record() -> None:
+    """Admin или maintain и записи нет; есть запись (в том числе выключенная) — не трогаем."""
+    admin = InstallationRepository("1", "o/admin", "main", _permissions("admin"))
+    maintain = InstallationRepository("2", "o/maintain", "main", _permissions("maintain"))
+    write = InstallationRepository("3", "o/write", "main", _permissions("push"))
+    registered = InstallationRepository("4", "o/registered", "main", _permissions("admin"))
+
+    assert to_connect_on_setup([admin, maintain, write, registered], {"4"}) == [admin, maintain]

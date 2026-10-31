@@ -48,6 +48,7 @@ from app.domain.entities import (
     RepositoryPermissions,
     Secret,
 )
+from app.domain.enums import RepositorySelection
 from app.domain.provider_token import ProviderTokenRejected
 from app.infrastructure.oauth.bearer import BearerAuth
 from app.infrastructure.vcs.errors import VcsAuthError, VcsError, VcsUnavailableError
@@ -115,6 +116,37 @@ class GitHubInstallationCatalog:
             return self._get(access_token, url, _Repository).to_domain()
         except _Inaccessible:
             return None
+
+    def installation_selection(self, access_token: Secret, installation_id: int) -> RepositorySelection | None:
+        """Установка из `GET /user/installations`: id из адреса Setup URL не доверяется
+        («About the setup URL»), ищется среди установок владельца токена. Приостановленная —
+        как отсутствующая: её репозитории токену не отдаются."""
+        for installation in self._installations(access_token):
+            if installation.id != installation_id:
+                continue
+            if installation.suspended_at is not None:
+                return None
+            # Поле строкой, а не enum в модели: неизвестное значение у любой установки ронял бы
+            # разбор всего `GET /user/installations`, а с ним и список репозиториев.
+            try:
+                return RepositorySelection(installation.repository_selection or "")
+            except ValueError:
+                raise VcsError(
+                    "GitHub API вернул установку без известного repository_selection на GET /user/installations"
+                ) from None
+        return None
+
+    def installation_repositories(self, access_token: Secret, installation_id: int) -> list[InstallationRepository]:
+        """`GET /user/installations/{id}/repositories` постранично; `403` и `404` — `VcsError`:
+        установку только что нашли, и молча вернуть пустой список значило бы скрыть сбой."""
+        try:
+            return [r for batch in self._installation_repositories(access_token, installation_id) for r in batch]
+        except _Inaccessible as failure:
+            # `403` не из-за лимита — чаще всего SSO организации не авторизован для токена.
+            hint = " (доступ запрещён, например SSO организации не авторизован)" if failure.status == 403 else ""
+            raise VcsError(
+                f"GitHub API: HTTP {failure.status} на GET /user/installations/{installation_id}/repositories{hint}"
+            ) from None
 
     def app_installed(self, full_name: str) -> bool:
         """`GET /repos/{owner}/{repo}/installation` с JWT приложения («Get a repository
@@ -240,6 +272,8 @@ class _Installation(_GitHubModel):
     id: int
     # Нет поля — не приостановлена: в документации оно есть всегда, `null` у живой.
     suspended_at: datetime | None = None
+    # Нужно только Setup URL; в обоих ответах документации поле есть.
+    repository_selection: str | None = None
 
 
 class _Permissions(_GitHubModel):

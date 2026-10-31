@@ -15,6 +15,13 @@ class Provider(StrEnum):
     GITLAB = "gitlab"
 
 
+class RepositorySelection(StrEnum):
+    """Какие репозитории владельца выбраны в установке GitHub App."""
+
+    ALL = "all"
+    SELECTED = "selected"
+
+
 class TriggerSource(StrEnum):
     """Из-за чего был создан прогон ревью."""
 

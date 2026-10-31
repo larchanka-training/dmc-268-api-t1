@@ -1,6 +1,7 @@
 """Фейк порта `InstallationCatalog`: репозитории, видимые пользователю, — из литералов теста."""
 
 from app.domain.entities import InstallationRepository, Secret
+from app.domain.enums import RepositorySelection
 
 
 class FakeInstallationCatalog:
@@ -10,6 +11,7 @@ class FakeInstallationCatalog:
         error: Exception | None = None,
         *,
         not_installed: set[str] | None = None,
+        installations: dict[int, tuple[RepositorySelection, list[InstallationRepository]]] | None = None,
     ) -> None:
         # То, что GitHub отдал бы по токену пользователя: невидимых тут нет.
         self._repositories = list(repositories or [])
@@ -17,6 +19,8 @@ class FakeInstallationCatalog:
         self._error: Exception | None = error
         # `full_name` репозиториев, где приложение не установлено или приостановлено.
         self._not_installed = set(not_installed or ())
+        # Установки пользователя для Setup URL: id — выбор и репозитории установки.
+        self._installations = dict(installations or {})
         self.tokens: list[Secret] = []
         self.calls: list[str] = []
 
@@ -30,6 +34,15 @@ class FakeInstallationCatalog:
         if not (provider_id.isascii() and provider_id.isdigit()):
             return None
         return next((r for r in self._repositories if r.provider_id == str(int(provider_id))), None)
+
+    def installation_selection(self, access_token: Secret, installation_id: int) -> RepositorySelection | None:
+        self._record("installation_selection", access_token)
+        found = self._installations.get(installation_id)
+        return found[0] if found is not None else None
+
+    def installation_repositories(self, access_token: Secret, installation_id: int) -> list[InstallationRepository]:
+        self._record("installation_repositories", access_token)
+        return list(self._installations[installation_id][1])
 
     def app_installed(self, full_name: str) -> bool:
         self.calls.append("app_installed")

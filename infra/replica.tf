@@ -128,8 +128,9 @@ resource "docker_container" "postgres_replica" {
   init          = true
   memory        = var.postgres_replica_memory
   memory_swap   = var.postgres_replica_memory
-  log_driver    = "json-file"
-  log_opts      = local.log_opts
+  # Как у основного сервера: со стеком в Loki через коллектор логов.
+  log_driver = var.observability_enabled ? "fluentd" : "json-file"
+  log_opts   = var.observability_enabled ? local.fluentd_log_opts : local.log_opts
 
   depends_on = [docker_container.replication_setup]
 

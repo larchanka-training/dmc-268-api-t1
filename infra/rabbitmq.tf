@@ -42,8 +42,9 @@ resource "docker_container" "rabbitmq" {
   security_opts = ["no-new-privileges:true"]
   memory        = 512
   memory_swap   = 512
-  log_driver    = "json-file"
-  log_opts      = local.log_opts
+  # Со стеком — в Loki через коллектор логов (local.fluentd_log_opts).
+  log_driver = var.observability_enabled ? "fluentd" : "json-file"
+  log_opts   = var.observability_enabled ? local.fluentd_log_opts : local.log_opts
 
   networks_advanced {
     name = docker_network.backend.name

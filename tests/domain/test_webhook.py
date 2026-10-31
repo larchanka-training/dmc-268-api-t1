@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from app.domain.entities import WebhookEvent
-from app.domain.webhook import extract_github_event
+from app.domain.webhook import extract_github_event, is_trusted_author
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 
@@ -37,6 +37,8 @@ def test_opened_payload_returns_full_event() -> None:
         target_branch="develop",
         title="feat: приём вебхуков и VCS-шлюз",
         author="ilyassakhanov",
+        author_association="MEMBER",
+        from_fork=False,
     )
 
 
@@ -141,3 +143,51 @@ def test_edited_without_a_base_change_is_ignored(changes: Any) -> None:
         payload["changes"] = changes
 
     assert extract_github_event(payload) is None
+
+
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
+def test_a_pr_of_an_own_author_from_a_fork_starts_a_review(association: str) -> None:
+    payload = _load_payload("github_webhook_opened.json")
+    payload["pull_request"]["head"]["repo"] = {"id": 1, "full_name": "stranger/dmc-268-api-t1", "fork": True}
+    payload["pull_request"]["author_association"] = association
+    event = extract_github_event(payload)
+    assert event is not None
+    assert is_trusted_author(event)
+
+
+@pytest.mark.parametrize(
+    "association", ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "MANNEQUIN", "NONE", None]
+)
+def test_a_pr_of_an_outside_author_is_ignored(association: str | None) -> None:
+    """PR из форка в публичный репозиторий от постороннего не тратит ключ модели."""
+    payload = _load_payload("github_webhook_opened.json")
+    payload["pull_request"]["head"]["repo"] = {"id": 1, "full_name": "stranger/dmc-268-api-t1", "fork": True}
+    if association is None:
+        del payload["pull_request"]["author_association"]
+    else:
+        payload["pull_request"]["author_association"] = association
+    event = extract_github_event(payload)
+    assert event is not None
+    assert not is_trusted_author(event)
+
+
+def test_a_pr_from_a_branch_of_the_repository_starts_a_review_whatever_the_association() -> None:
+    """Скрытый участник организации приходит в вебхуке `CONTRIBUTOR`, но ветку в репозитории
+    запушить может только тот, у кого есть право записи."""
+    payload = _load_payload("github_webhook_opened.json")
+    payload["pull_request"]["author_association"] = "CONTRIBUTOR"
+    event = extract_github_event(payload)
+    assert event is not None
+    assert not event.from_fork
+    assert is_trusted_author(event)
+
+
+def test_a_pr_whose_fork_was_deleted_counts_as_a_fork() -> None:
+    """У head PR из удалённого форка `repo` пуст: свою ветку это не доказывает."""
+    payload = _load_payload("github_webhook_opened.json")
+    payload["pull_request"]["head"]["repo"] = None
+    payload["pull_request"]["author_association"] = "CONTRIBUTOR"
+    event = extract_github_event(payload)
+    assert event is not None
+    assert event.from_fork
+    assert not is_trusted_author(event)

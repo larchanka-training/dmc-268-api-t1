@@ -375,7 +375,7 @@ class FakeGitHub:
             return httpx.Response(404, json={"message": "Not Found"})
         if "raw" not in request.headers.get("Accept", ""):
             return httpx.Response(415, json={"message": "Unsupported Accept"})
-        return httpx.Response(200, text=content)
+        return httpx.Response(200, text=content, headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"})
 
     def _create_review(self, request: httpx.Request, number: str) -> httpx.Response:
         pull = self._find_pull(number)
@@ -445,7 +445,8 @@ class FakeGitHub:
             return httpx.Response(404, json={"message": "Not Found"})
         items = (
             [
-                {"id": c.id, "path": c.path, "line": c.line, "side": c.side, "body": c.body}
+                # Как у GitHub: line и side пустые, строка только в position (#265).
+                {"id": c.id, "path": c.path, "line": None, "side": None, "position": c.line, "body": c.body}
                 for c in review.comments
             ]
             if page == 1

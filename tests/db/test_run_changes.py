@@ -46,6 +46,7 @@ def merge_request(clean_db) -> MergeRequest:
         auto_review_enabled=True,
         created_at=T0,
         updated_at=T0,
+        connected_at=T0,
     )
     merge_request = MergeRequest(
         id=new_id(),

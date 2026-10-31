@@ -171,11 +171,24 @@ variable "github_webhook_secret" {
 # молча публиковал бы пустые ревью (спека llm-gateway, «Выбор заглушки явный»).
 variable "llm_backend" {
   type        = string
-  description = "Адаптер модели воркера (LLM_BACKEND): stub - без похода к модели, ollama - локальная модель."
+  description = "Адаптер модели воркера (LLM_BACKEND): stub - без похода к модели, ollama - локальная модель, eurorouter - hosted-провайдер основным (код проверяемых репозиториев уходит ему)."
 
   validation {
-    condition     = contains(["stub", "ollama"], var.llm_backend)
-    error_message = "llm_backend - stub или ollama."
+    condition     = contains(["stub", "ollama", "eurorouter"], var.llm_backend)
+    error_message = "llm_backend - stub, ollama или eurorouter."
+  }
+
+  # Зеркало проверки в app/config.py: без реквизитов воркер не стартует, и
+  # выкат упал бы уже после пересоздания контейнеров.
+  validation {
+    # Ключи разбираются так же, как в app/config.py: по запятой, без пустых и пробелов. Адрес
+    # только https (иначе код и ключи ушли бы открытым текстом) и не обрезается, как в Settings.
+    condition = var.llm_backend != "eurorouter" || (
+      startswith(var.eurorouter_base_url, "https://")
+      && trimspace(var.eurorouter_model) != ""
+      && length([for k in split(",", var.eurorouter_api_keys) : trimspace(k) if trimspace(k) != ""]) > 0
+    )
+    error_message = "llm_backend = eurorouter требует eurorouter_base_url на https://, непустых eurorouter_model и хотя бы одного ключа в eurorouter_api_keys."
   }
 }
 
@@ -198,12 +211,13 @@ variable "deployment_environment_name" {
 # Деплой стенда включает его (deploy.yml, TF_VAR_observability_enabled).
 variable "observability_enabled" {
   type        = bool
-  description = "Поднимать стек наблюдаемости: коллектор, Loki, Tempo, Prometheus, Grafana, node-exporter, cAdvisor и socket-proxy."
+  description = "Поднимать стек наблюдаемости: коллектор и его экземпляры метрик и логов контейнеров, Loki, Tempo, Prometheus, Grafana, node-exporter и socket-proxy."
   default     = false
 }
 
-# Восемь контейнеров стека на VPS — риск из design.md change'а
-# add-observability-stack (восьмой, socket-proxy, добавлен позже остальных);
+# Девять контейнеров стека на VPS — риск из design.md change'а
+# add-observability-stack (socket-proxy добавлен позже, cAdvisor заменён
+# экземпляром коллектора с docker_stats — #249, коллектор логов — #263);
 # потолки памяти без свопа (как у postgres/api выше), прод-размеры поднимаются
 # этой переменной.
 variable "observability_memory_mb" {
@@ -214,23 +228,26 @@ variable "observability_memory_mb" {
     prometheus = number
     grafana    = number
     # node_exporter — статический сборщик с фиксированным набором collectors:
-    # десятков мегабайт хватает. cAdvisor держит статистику по каждому
-    # контейнеру хоста — потолок с запасом на десятки контейнеров.
-    # socket-proxy — haproxy над демоном Docker: несколько соединений cAdvisor.
-    node_exporter = number
-    cadvisor      = number
-    docker_proxy  = number
+    # десятков мегабайт хватает. socket-proxy — haproxy над демоном Docker:
+    # несколько соединений receiver docker_stats. collector_docker — экземпляр
+    # коллектора только с docker_stats (~15 контейнеров стенда), collector_logs —
+    # с приёмом fluentd.
+    node_exporter    = number
+    docker_proxy     = number
+    collector_docker = number
+    collector_logs   = number
   })
   description = "Потолки памяти контейнеров стека наблюдаемости, МБ, без свопа."
   default = {
-    collector     = 384
-    loki          = 768
-    tempo         = 768
-    prometheus    = 768
-    grafana       = 512
-    node_exporter = 64
-    cadvisor      = 256
-    docker_proxy  = 64
+    collector        = 384
+    loki             = 768
+    tempo            = 768
+    prometheus       = 768
+    grafana          = 512
+    node_exporter    = 64
+    docker_proxy     = 64
+    collector_docker = 96
+    collector_logs   = 96
   }
 }
 
@@ -296,7 +313,8 @@ variable "ollama_model" {
   }
 }
 
-# Зеркало проверки в app/config.py — по той же причине, что у ollama_model.
+# Зеркало проверки в app/config.py — по той же причине, что у ollama_model. Условие на
+# реквизиты Eurorouter то же, что у llm_backend = eurorouter: две копии держать одинаковыми.
 variable "llm_hosted_fallback" {
   type        = bool
   description = "Подключить Eurorouter фоллбэком после локальной модели (LLM_HOSTED_FALLBACK). Включение отправляет код проверяемых репозиториев hosted-провайдеру."
@@ -305,11 +323,11 @@ variable "llm_hosted_fallback" {
   validation {
     condition = !var.llm_hosted_fallback || (
       var.llm_backend == "ollama"
-      && var.eurorouter_base_url != ""
-      && var.eurorouter_model != ""
-      && var.eurorouter_api_keys != ""
+      && startswith(var.eurorouter_base_url, "https://")
+      && trimspace(var.eurorouter_model) != ""
+      && length([for k in split(",", var.eurorouter_api_keys) : trimspace(k) if trimspace(k) != ""]) > 0
     )
-    error_message = "llm_hosted_fallback = true требует llm_backend = ollama и непустых eurorouter_base_url, eurorouter_model, eurorouter_api_keys."
+    error_message = "llm_hosted_fallback = true требует llm_backend = ollama, eurorouter_base_url на https://, непустых eurorouter_model и хотя бы одного ключа в eurorouter_api_keys."
   }
 }
 

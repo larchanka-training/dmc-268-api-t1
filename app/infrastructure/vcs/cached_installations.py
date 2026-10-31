@@ -8,17 +8,17 @@
 Кэшируется только ответ `list_repositories` — что пользователь видит на GitHub.
 Подключён ли репозиторий, вызывающий по-прежнему читает из базы, поэтому
 подключение само кэш не трогает. Но ответ GitHub меняется, когда пользователь
-ставит приложение на новый репозиторий: страница подключения
-(`GET /repositories/available`) всегда спрашивает GitHub и пишет свежий ответ в
-кэш (`read=False`). Подключить можно только оттуда, поэтому к моменту
-подключения кэш уже знает о новом репозитории. Цена кэша — отзыв доступа на
-GitHub виден с задержкой до TTL.
+ставит приложение на новый репозиторий: возврат с экрана установки (Setup URL,
+change `repositories-one-list`) спрашивает GitHub и пишет свежий ответ в кэш
+(`read=False`). Список репозиториев (`GET /repositories`) читает кэш. Цена
+кэша — отзыв доступа на GitHub и установка мимо Setup URL видны с задержкой до TTL.
 
 Ключ — sha256 токена: тот же пользователь с тем же токеном. Обновлённый токен
 или выход — другой ключ, старая запись недостижима и уходит по TTL; сам токен в
 кэше не хранится. Сбои GitHub не кэшируются. Сбой хранилища — промах, а не
 ошибка (`CacheStore`). Проверки подключения (`user_repository`, `app_installed`)
-идут мимо кэша.
+и установка Setup URL (`installation_selection`, `installation_repositories`) идут
+мимо кэша.
 
 Хранилище — `CacheStore` процесса API: процесс один, кэш в нём корректен. Со
 второй репликой у каждой будет свой кэш — запросов к GitHub больше, но ответы
@@ -35,6 +35,7 @@ from typing import Any
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.installation_catalog import InstallationCatalog
 from app.domain.entities import InstallationRepository, RepositoryPermissions, Secret
+from app.domain.enums import RepositorySelection
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class CachedInstallationCatalog:
         self._catalog = catalog
         self._cache = cache
         self._ttl_seconds = ttl_seconds
-        # `False` — всегда к GitHub, ответ — в кэш: страница подключения.
+        # `False` — всегда к GitHub, ответ — в кэш: возврат с установки приложения.
         self._read_cache = read
 
     def list_repositories(self, access_token: Secret) -> list[InstallationRepository]:
@@ -66,6 +67,12 @@ class CachedInstallationCatalog:
 
     def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
         return self._catalog.user_repository(access_token, provider_id)
+
+    def installation_selection(self, access_token: Secret, installation_id: int) -> RepositorySelection | None:
+        return self._catalog.installation_selection(access_token, installation_id)
+
+    def installation_repositories(self, access_token: Secret, installation_id: int) -> list[InstallationRepository]:
+        return self._catalog.installation_repositories(access_token, installation_id)
 
     def app_installed(self, full_name: str) -> bool:
         return self._catalog.app_installed(full_name)
