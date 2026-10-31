@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -34,7 +35,9 @@ def fixture(name: str):
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
-def vuln(vuln_id: str, severity: str, fixed: str | None = None, pkg: str = "pkg") -> dict:
+def vuln(
+    vuln_id: str, severity: str, fixed: str | None = None, pkg: str = "pkg"
+) -> dict[str, Any]:
     v = {"VulnerabilityID": vuln_id, "PkgName": pkg, "Severity": severity}
     if fixed:
         v["FixedVersion"] = fixed
@@ -89,7 +92,9 @@ def test_trivy_unknown_severity_counts_as_unknown():
 
 
 def test_render_trivy_table_and_unfixed_list():
-    md = build_summary.render(fixture("metrics.json"), trivy=fixture("trivy.json"), env=ENV)
+    md = build_summary.render(
+        fixture("metrics.json"), trivy=fixture("trivy.json"), env=ENV
+    )
     assert "### trivy" in md
     assert "| CRITICAL — роняет job, если есть исправление | 1 | 0 | 1 |" in md
     assert "| HIGH — роняет job, если есть исправление | 0 | 1 | 1 |" in md
@@ -103,7 +108,11 @@ def test_render_trivy_table_and_unfixed_list():
 def test_render_trivy_truncates_unfixed_list():
     report = {
         "Results": [
-            {"Vulnerabilities": [vuln(f"CVE-2026-{i:04}", "HIGH") for i in range(1, 13)]}
+            {
+                "Vulnerabilities": [
+                    vuln(f"CVE-2026-{i:04}", "HIGH") for i in range(1, 13)
+                ]
+            }
         ]
     }
     md = build_summary.render(fixture("metrics.json"), trivy=report, env=ENV)
@@ -116,7 +125,9 @@ def test_render_trivy_truncates_unfixed_list():
 
 
 def test_render_with_base_shows_image_delta():
-    md = build_summary.render(fixture("metrics.json"), base=fixture("base.json"), env=ENV)
+    md = build_summary.render(
+        fixture("metrics.json"), base=fixture("base.json"), env=ENV
+    )
     assert "Δ — к последнему успешному прогону CI на develop." in md
     assert "| Образ | `container.image.name` | `dmc268-api:ci` | |" in md
     assert "| ID | `container.image.id` | `sha256:0123456789ab` | |" in md
@@ -148,7 +159,9 @@ def test_render_pipeline_section():
         "| Прогон | `cicd.pipeline.run.id` | "
         "[42](https://github.com/larchanka-training/dmc-268-api-t1/actions/runs/42) |"
     ) in md
-    assert "`cicd.pipeline.task.name` | `image` (`cicd.pipeline.task.type`: `build`)" in md
+    assert (
+        "`cicd.pipeline.task.name` | `image` (`cicd.pipeline.task.type`: `build`)" in md
+    )
     assert "| Коммит | `vcs.ref.head.revision` | `aaaaaaaaaaaa` |" in md
 
 
@@ -163,7 +176,9 @@ def test_render_escapes_pipe_in_table_cells():
 
 
 def test_render_hadolint_levels_and_findings_below_gate():
-    md = build_summary.render(fixture("metrics.json"), hadolint=fixture("hadolint.json"), env=ENV)
+    md = build_summary.render(
+        fixture("metrics.json"), hadolint=fixture("hadolint.json"), env=ENV
+    )
     assert "| warning | 1 |" in md
     assert "| style — ниже порога job'а | 1 |" in md
     assert "- `DL3059`, строка 33: Multiple consecutive `RUN` instructions." in md
@@ -173,7 +188,8 @@ def test_render_hadolint_levels_and_findings_below_gate():
 
 def test_render_hadolint_truncates_findings_below_gate():
     findings = [
-        {"code": f"DL{i}", "level": "style", "line": i, "message": "m"} for i in range(12)
+        {"code": f"DL{i}", "level": "style", "line": i, "message": "m"}
+        for i in range(12)
     ]
     md = build_summary.render(fixture("metrics.json"), hadolint=findings, env=ENV)
     assert "- `DL9`, строка 9: m" in md
@@ -195,7 +211,9 @@ def test_render_without_scanner_reports_omits_sections():
 # --- CLI ------------------------------------------------------------------
 
 
-def run_cli(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+def run_cli(
+    *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True,
@@ -214,13 +232,17 @@ def test_cli_render_from_fixtures():
         "--hadolint", str(FIXTURES / "hadolint.json"),
     )  # fmt: skip
     assert r.returncode == 0, r.stderr
-    assert r.stdout == build_summary.render(
-        fixture("metrics.json"),
-        base=fixture("base.json"),
-        trivy=fixture("trivy.json"),
-        hadolint=fixture("hadolint.json"),
-        env=ENV,
-    ) + "\n"
+    assert (
+        r.stdout
+        == build_summary.render(
+            fixture("metrics.json"),
+            base=fixture("base.json"),
+            trivy=fixture("trivy.json"),
+            hadolint=fixture("hadolint.json"),
+            env=ENV,
+        )
+        + "\n"
+    )
 
 
 def test_cli_render_skips_missing_and_broken_optional_files(tmp_path):
@@ -274,7 +296,11 @@ def fake_docker(tmp_path):
     docker.write_text(FAKE_DOCKER, encoding="utf-8")
     docker.chmod(0o755)
     calls = tmp_path / "calls.log"
-    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "CALLS": str(calls)}
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "CALLS": str(calls),
+    }
     return env, calls
 
 
@@ -304,7 +330,9 @@ def test_cli_collect_writes_image_metrics(tmp_path, fake_docker):
 def test_cli_collect_fails_without_writing_metrics(tmp_path, fake_docker, broken):
     env, _ = fake_docker
     out = tmp_path / "metrics.json"
-    r = run_cli("collect", "--image", "dmc268-api:ci", "--out", str(out), env={**env, **broken})
+    r = run_cli(
+        "collect", "--image", "dmc268-api:ci", "--out", str(out), env={**env, **broken}
+    )
     assert r.returncode == 1
     assert "Traceback" not in r.stderr
     assert not out.exists()

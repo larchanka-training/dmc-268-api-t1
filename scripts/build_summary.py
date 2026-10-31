@@ -31,6 +31,7 @@ import sys
 import zlib
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 MAX_LISTED = 10
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
@@ -41,7 +42,9 @@ HADOLINT_LEVELS = ("error", "warning", "info", "style")
 HADOLINT_GATE = ("error", "warning", "info")
 
 CHUNK = 1024 * 1024
-NO_METRICS = "## Summary сборки\n\nМетрики не собраны: образ не собрался или `collect` упал.\n"
+NO_METRICS = (
+    "## Summary сборки\n\nМетрики не собраны: образ не собрался или `collect` упал.\n"
+)
 
 # --- метрики -----------------------------------------------------------------
 
@@ -69,7 +72,7 @@ def _compressed_size(image: str) -> int:
     return total + len(gz.flush())
 
 
-def collect(image: str) -> dict:
+def collect(image: str) -> dict[str, Any]:
     return {
         "image": {
             "name": image,
@@ -110,13 +113,20 @@ def cell(value: object) -> str:
 # --- разделы -----------------------------------------------------------------
 
 
-def _image_section(metrics: Mapping, base: Mapping | None) -> list[str]:
+def _image_section(
+    metrics: Mapping[str, Any], base: Mapping[str, Any] | None
+) -> list[str]:
     img = metrics.get("image")
     if not isinstance(img, Mapping):
         return []
     bi = base.get("image") if isinstance(base, Mapping) else None
     bi = bi if isinstance(bi, Mapping) else {}
-    out = ["### Образ", "", "| Что | Ключ | Значение | Δ develop |", "|---|---|---|---|"]
+    out = [
+        "### Образ",
+        "",
+        "| Что | Ключ | Значение | Δ develop |",
+        "|---|---|---|---|",
+    ]
     out.append(f"| Образ | `container.image.name` | `{cell(img.get('name', ''))}` | |")
     if img.get("id"):
         out.append(f"| ID | `container.image.id` | `{cell(img['id'][:19])}` | |")
@@ -133,7 +143,9 @@ def _image_section(metrics: Mapping, base: Mapping | None) -> list[str]:
     return [*out, ""]
 
 
-def trivy_counts(report: Mapping) -> tuple[dict[str, dict[str, int]], list[str]]:
+def trivy_counts(
+    report: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, int]], list[str]]:
     """Находки trivy по severity — с исправлением и без; список HIGH и
     CRITICAL без исправления (`ID (пакет)`)."""
     counts = {s: {"fixed": 0, "unfixed": 0} for s in SEVERITIES}
@@ -146,7 +158,9 @@ def trivy_counts(report: Mapping) -> tuple[dict[str, dict[str, int]], list[str]]
             else:
                 counts[sev]["unfixed"] += 1
                 if sev in TRIVY_GATE:
-                    unfixed_gate.append(f"{v.get('VulnerabilityID')} ({v.get('PkgName')})")
+                    unfixed_gate.append(
+                        f"{v.get('VulnerabilityID')} ({v.get('PkgName')})"
+                    )
     return counts, unfixed_gate
 
 
@@ -157,7 +171,7 @@ def _listed(items: list[str]) -> list[str]:
     return out
 
 
-def _trivy_section(report: Mapping | None) -> list[str]:
+def _trivy_section(report: Mapping[str, Any] | None) -> list[str]:
     if not isinstance(report, Mapping):
         return []
     counts, unfixed_gate = trivy_counts(report)
@@ -175,12 +189,16 @@ def _trivy_section(report: Mapping | None) -> list[str]:
         gate = " — роняет job, если есть исправление" if s in TRIVY_GATE else ""
         out.append(f"| {s}{gate} | {fixed} | {unfixed} | {fixed + unfixed} |")
     if unfixed_gate:
-        out += ["", "HIGH и CRITICAL без исправления (job не роняют, `ignore-unfixed`):", ""]
+        out += [
+            "",
+            "HIGH и CRITICAL без исправления (job не роняют, `ignore-unfixed`):",
+            "",
+        ]
         out += _listed(unfixed_gate)
     return [*out, ""]
 
 
-def _hadolint_section(findings: list | None) -> list[str]:
+def _hadolint_section(findings: list[Any] | None) -> list[str]:
     if not isinstance(findings, list):
         return []
     out = ["### hadolint", ""]
@@ -225,10 +243,10 @@ def _pipeline_section(env: Mapping[str, str]) -> list[str]:
 
 
 def render(
-    metrics: Mapping,
-    base: Mapping | None = None,
-    trivy: Mapping | None = None,
-    hadolint: list | None = None,
+    metrics: Mapping[str, Any],
+    base: Mapping[str, Any] | None = None,
+    trivy: Mapping[str, Any] | None = None,
+    hadolint: list[Any] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> str:
     out = ["## Summary сборки", "", *_pipeline_section(env or {})]
@@ -239,14 +257,18 @@ def render(
         "устарел). Показаны абсолютные значения.",
         "",
     ]
-    out += [*_image_section(metrics, base), *_trivy_section(trivy), *_hadolint_section(hadolint)]
+    out += [
+        *_image_section(metrics, base),
+        *_trivy_section(trivy),
+        *_hadolint_section(hadolint),
+    ]
     return "\n".join(out)
 
 
 # --- CLI ---------------------------------------------------------------------
 
 
-def _read_json(path: str | None):
+def _read_json(path: str | None) -> Any:
     if not path:
         return None
     # Два except, а не кортеж: `ruff format` под py314 снимает скобки
@@ -260,7 +282,9 @@ def _read_json(path: str | None):
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="build_summary.py", description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        prog="build_summary.py", description=__doc__.splitlines()[0]
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     c = sub.add_parser("collect", help="метрики образа в json")
     c.add_argument("--image", required=True)
