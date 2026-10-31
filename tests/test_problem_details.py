@@ -398,25 +398,14 @@ def test_events_stream_is_in_the_exported_contract() -> None:
     stream = operation["responses"]["200"]["content"]
     assert set(stream) == {"text/event-stream"}
     row = {"$ref": "#/components/schemas/ReviewRunListItem"}
-    simulation = {"$ref": "#/components/schemas/SimulationSummary"}
     events = stream["text/event-stream"]["x-sse-events"]
     assert events == {
         "run.created": row,
         "run.status_changed": row,
         "run.finished": row,
-        "simulation.status_changed": simulation,
-        "simulation.finished": simulation,
         "ping": {"type": "object", "maxProperties": 0},
     }
-    assert components["StreamEventType"]["enum"] == [
-        "run.created",
-        "run.status_changed",
-        "run.finished",
-        "simulation.status_changed",
-        "simulation.finished",
-        "ping",
-    ]
-    assert set(components["SimulationSummary"]["required"]) == {"id", "status", "updated_at"}
+    assert components["StreamEventType"]["enum"] == ["run.created", "run.status_changed", "run.finished", "ping"]
     assert "ReviewRunsStreamEventType" not in components
     assert "StreamResource" not in components
 

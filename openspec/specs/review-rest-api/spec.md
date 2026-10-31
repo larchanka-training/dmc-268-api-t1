@@ -655,7 +655,7 @@
 #### Scenario: Сегодняшние типы
 
 - **WHEN** фронтенд читает ответ потока и `components/schemas` в `docs/openapi/openapi.json`
-- **THEN** в `x-sse-events` есть `run.created`, `run.status_changed` и `run.finished` со ссылкой на `ReviewRunListItem`, `simulation.status_changed` и `simulation.finished` со ссылкой на `SimulationSummary` и `ping` с пустым объектом, а `StreamEventType` перечисляет эти шесть имён
+- **THEN** в `x-sse-events` есть `run.created`, `run.status_changed` и `run.finished` со ссылкой на `ReviewRunListItem` и `ping` с пустым объектом, а `StreamEventType` перечисляет эти четыре имени
 
 #### Scenario: Итоговый статус
 
@@ -681,11 +681,6 @@
 
 - **WHEN** у пользователя нет роли на публичном репозитории `octo-org/public`, к которому подключено приложение, и по `octo-org/public` идёт прогон
 - **THEN** события `run.*` этого прогона пользователю не приходят: `octo-org/public` нет в ответе `GET /repositories/available`
-
-#### Scenario: Типы симуляции
-
-- **WHEN** фронтенд читает описание потока
-- **THEN** в нём сказано, что события `simulation.*` видит только автор симуляции, при переходе симуляции в итоговый статус (`completed` или `failed`) приходит только `simulation.finished` и что пока симуляция не реализована, эти события не отправляются
 
 ### Requirement: Порядок версий строки в общем потоке событий описан
 
@@ -1196,6 +1191,11 @@
 
 - **WHEN** фронтенд читает операции симуляции в `docs/openapi/openapi.json`
 - **THEN** у `POST` успех - `202` с `SimulationResponse` и есть `429` с `code = RATE_LIMITED` и заголовком `Retry-After`, у `GET` есть `404` с `code = SIMULATION_NOT_FOUND`
+
+#### Scenario: Итог - опросом
+
+- **WHEN** фронтенд читает описание `POST /api/v1/simulations`
+- **THEN** в нём сказано, что ход и итог читаются `GET /api/v1/simulations/{simulation_id}` опросом, пока статус не `completed` или `failed`, а в общий поток `GET /api/v1/events` симуляции не попадают
 
 #### Scenario: Результат симуляции в контракте
 

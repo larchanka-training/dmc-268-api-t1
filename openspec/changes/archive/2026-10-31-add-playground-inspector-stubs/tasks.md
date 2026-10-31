@@ -7,13 +7,12 @@
 ## 2. Заглушки
 
 - [x] 2.1 `POST /api/v1/rules/parse` в `app/api/playground.py`: `RulesParseRequest`, `RulesParseResponse` (`ParsedRuleResponse`, `ParsedCheckResponse`, `ParsedRejectedRuleResponse`); ответ `501`
-- [x] 2.2 `POST /api/v1/simulations` (`202`) и `GET /api/v1/simulations/{simulation_id}` в `app/api/playground.py`: `SimulationRequest` (`CodeSource` или `DiffSource` по `kind`), `SimulationResponse` (`SimulationFindingResponse`, `DiscardedFindingResponse`, `RuleMentionResponse`), `SimulationSummary`; ответ `501`
+- [x] 2.2 `POST /api/v1/simulations` (`202`) и `GET /api/v1/simulations/{simulation_id}` в `app/api/playground.py`: `SimulationRequest` (`CodeSource` или `DiffSource` по `kind`), `SimulationResponse` (`SimulationFindingResponse`, `DiscardedFindingResponse`, `RuleMentionResponse`); ответ `501`
 - [x] 2.3 `GET /api/v1/reviews/{review_run_id}/findings/{finding_id}/inspection` в `app/api/inspection.py`: `FindingInspectionResponse`; видимость прогона (`visible_run`) и принадлежность находки прогону до ответа `501`
-- [x] 2.4 `app/api/events.py`: `simulation.status_changed` и `simulation.finished` в `StreamEventType`, `x-sse-events` и описании потока; `SimulationSummary` - в `extra_models` схемы (`app/api/factory.py`)
-- [x] 2.5 Роутеры `playground` и `inspection` подключены в `create_app`
+- [x] 2.4 Роутеры `playground` и `inspection` подключены в `create_app`
 
 ## 3. Тесты, контракт и проверки
 
-- [x] 3.1 Тесты: `501` на допустимый запрос, `401` без сессии, `403 ORIGIN_FORBIDDEN` для `POST` без `Origin`, `422` на id и тело, `404` невидимого прогона и чужой находки, схемы и коды ошибок в экспортированном контракте, типы событий потока
+- [x] 3.1 Тесты: `501` на допустимый запрос, `401` без сессии, `403 ORIGIN_FORBIDDEN` для `POST` без `Origin`, `422` на id и тело, `404` невидимого прогона и чужой находки, схемы и коды ошибок в экспортированном контракте
 - [x] 3.2 Экспорт `docs/openapi/openapi.json` (`uv run python scripts/export_openapi.py`)
 - [x] 3.3 `ruff check`, `lint-imports`, `mypy`, `pytest`, `export_openapi.py --check`, `openspec validate --all --strict` проходят
