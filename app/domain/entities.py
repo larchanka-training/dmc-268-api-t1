@@ -48,6 +48,28 @@ class Repository:
     # Когда ревью включено последний раз; `None` — выключено (`DELETE /repositories/{id}`):
     # запись остаётся ради истории, вебхук `pull_request` прогона не создаёт.
     connected_at: datetime | None
+    # Глоб-паттерны веток для авторевью; пусто — все ветки. Пока не применяется.
+    branch_filter: tuple[str, ...] = ()
+    # Порог merge gate: блокирует открытая находка не ниже этой важности.
+    min_severity: FindingSeverity = FindingSeverity.CRITICAL
+
+
+@dataclass(frozen=True, slots=True)
+class RepositorySettings:
+    """Настройки ревью репозитория, которые пользователь меняет в кабинете."""
+
+    auto_review_enabled: bool
+    # Глоб-паттерны веток; пусто — все ветки.
+    branch_filter: tuple[str, ...]
+    min_severity: FindingSeverity
+
+
+# Умолчания нового репозитория — те же, что `server_default` колонок `repositories`.
+DEFAULT_REPOSITORY_SETTINGS = RepositorySettings(
+    auto_review_enabled=True,
+    branch_filter=(),
+    min_severity=FindingSeverity.CRITICAL,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,12 +466,14 @@ class RepoRules:
 
     При любом статусе, кроме `LOADED`, принятых правил нет — дефолтный фоллбэк.
     Отклонённые разделы бывают только у `LOADED` и `EMPTY`: при остальных
-    статусах файл не разбирался.
+    статусах файл не разбирался. `fetched_at` — время первого получения файла
+    от VCS (из кэша приходит сохранённое); у `UNAVAILABLE` — `None`.
     """
 
     status: RulesStatus
     rules: tuple[RepoRule, ...] = ()
     rejected: tuple[RejectedRule, ...] = ()
+    fetched_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

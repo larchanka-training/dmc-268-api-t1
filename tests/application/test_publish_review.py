@@ -26,6 +26,7 @@ from app.domain.entities import (
     Finding,
     MergeRequest,
     PublishedComment,
+    Repository,
     ReviewJob,
     ReviewRun,
     RuleRef,
@@ -36,6 +37,7 @@ from app.domain.enums import (
     FindingCategory,
     FindingSeverity,
     MergeRequestState,
+    Provider,
     ReviewRunStatus,
     TriggerSource,
 )
@@ -65,7 +67,28 @@ JOB = ReviewJob(
 )
 
 
-def _seed_previous_critical_thread(uow: FakeUnitOfWork) -> None:
+REPOSITORY = Repository(
+    id=UUID(int=9),
+    provider=Provider.GITHUB,
+    provider_id="1",
+    full_name="owner/repo",
+    default_branch="develop",
+    auto_review_enabled=True,
+    created_at=NOW,
+    updated_at=NOW,
+    connected_at=NOW,
+)
+
+
+def _seed_previous_critical_thread(
+    uow: FakeUnitOfWork,
+    severity: FindingSeverity = FindingSeverity.CRITICAL,
+    *,
+    with_repository: bool = True,
+) -> None:
+    # Репозиторий с настройками по умолчанию; уже добавленный тестом (тот же provider_id) остаётся.
+    if with_repository:
+        uow.repositories.add(REPOSITORY)
     uow.merge_requests.add(
         MergeRequest(
             id=MR_ID,
@@ -98,7 +121,7 @@ def _seed_previous_critical_thread(uow: FakeUnitOfWork) -> None:
         review_run_id=prev_run.id,
         anchor=DiffAnchor(file_path="app/x.py", side=DiffSide.NEW, new_line=10),
         category=FindingCategory.CORRECTNESS,
-        severity=FindingSeverity.CRITICAL,
+        severity=severity,
         message="критично",
         created_at=NOW,
         updated_at=NOW,
@@ -553,6 +576,7 @@ def _run_with_critical_finding(uow: FakeUnitOfWork) -> ReviewRun:
 
 
 def _seed_merge_request(uow: FakeUnitOfWork) -> None:
+    uow.repositories.add(REPOSITORY)
     uow.merge_requests.add(
         MergeRequest(
             id=MR_ID,
@@ -842,7 +866,8 @@ def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
         run_id=run.id,
-        check=build_merge_gate_check(()),
+        check=build_merge_gate_check((), FindingSeverity.CRITICAL),
+        min_severity=FindingSeverity.CRITICAL,
     )
 
     assert vcs.checks == [build_retarget_check()]
@@ -870,7 +895,8 @@ def test_settling_on_a_failed_latest_run_keeps_the_failure() -> None:
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
         run_id=run.id,
-        check=build_merge_gate_check(()),
+        check=build_merge_gate_check((), FindingSeverity.CRITICAL),
+        min_severity=FindingSeverity.CRITICAL,
     )
 
     assert vcs.checks == [build_failed_review_check()]
@@ -1000,3 +1026,92 @@ def test_orphan_failed_by_the_sweep_after_a_later_publication_is_looked_up() -> 
     _publish(uow, vcs)
 
     assert vcs.found_review_requests == [ORPHAN_RUN_ID]
+
+
+def _publish_over_open_thread(
+    thread_severity: FindingSeverity, **repository_changes: object
+) -> RecordingVcsGateway:
+    """Прогон без новых находок поверх открытого треда; репозиторий PR — с данными настройками."""
+    uow = FakeUnitOfWork()
+    uow.repositories.add(replace(REPOSITORY, **repository_changes))  # type: ignore[arg-type]
+    _seed_previous_critical_thread(uow, thread_severity)
+    uow.review_runs.add(
+        ReviewRun(
+            id=RUN_ID,
+            merge_request_id=MR_ID,
+            head_sha=JOB.head_sha,
+            status=ReviewRunStatus.PUBLISHING,
+            trigger=TriggerSource.WEBHOOK,
+            last_progress_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    vcs = RecordingVcsGateway()
+    publish_review(
+        JOB,
+        uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
+        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        uow=uow,
+        vcs=vcs,
+        now=NOW,
+        new_id=lambda: UUID(int=300),
+    )
+    return vcs
+
+
+def test_merge_gate_threshold_comes_from_the_repository() -> None:
+    """`min_severity = high`: открытый тред `high` блокирует, порог назван в check run."""
+    vcs = _publish_over_open_thread(FindingSeverity.HIGH, min_severity=FindingSeverity.HIGH)
+
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+    assert "high" in check.title and "high" in check.summary
+
+
+def test_default_threshold_keeps_high_below_the_gate() -> None:
+    """Порог по умолчанию — `critical`: открытый тред `high` мердж не блокирует."""
+    vcs = _publish_over_open_thread(FindingSeverity.HIGH)
+
+    (check,) = vcs.checks
+    assert check.conclusion == "success"
+    assert "critical" in check.summary
+
+
+def test_missing_repository_record_falls_back_to_the_default_threshold_with_a_warning(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Записи репозитория нет: ревью уже опубликовано, порог — `critical`, в лог — warning с id."""
+    monkeypatch.setattr(logging.getLogger("app.application.merge_gate_publish"), "disabled", False)
+    caplog.set_level(logging.WARNING, logger="app.application.merge_gate_publish")
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow, FindingSeverity.HIGH, with_repository=False)
+    uow.review_runs.add(
+        ReviewRun(
+            id=RUN_ID,
+            merge_request_id=MR_ID,
+            head_sha=JOB.head_sha,
+            status=ReviewRunStatus.PUBLISHING,
+            trigger=TriggerSource.WEBHOOK,
+            last_progress_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    vcs = RecordingVcsGateway()
+
+    publish_review(
+        JOB,
+        uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
+        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        uow=uow,
+        vcs=vcs,
+        now=NOW,
+        new_id=lambda: UUID(int=300),
+    )
+
+    (check,) = vcs.checks
+    assert check.conclusion == "success" and "critical" in check.summary
+    [record] = [r for r in caplog.records if r.name == "app.application.merge_gate_publish"]
+    assert record.levelno == logging.WARNING
+    assert str(UUID(int=9)) in record.getMessage() and str(MR_ID) in record.getMessage()

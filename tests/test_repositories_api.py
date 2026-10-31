@@ -4,6 +4,7 @@
 видно, что непригодный токен закрывает сессию и удаляет cookie.
 """
 
+import re
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from pydantic import SecretStr
 
 from app.api.dependencies import (
     get_app_slug,
+    get_cabinet_vcs_gateway,
     get_installation_catalog,
     get_token_provider,
     get_unit_of_work,
@@ -30,15 +32,17 @@ from app.domain.entities import (
     ProviderToken,
     Repository,
     RepositoryPermissions,
+    RepositorySettings,
     Secret,
 )
-from app.domain.enums import Provider
+from app.domain.enums import FindingSeverity, Provider
 from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
 from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.session import open_session, setup_state
 from app.domain.vcs_errors import VcsError
 
+from .fakes import FakeVcs
 from .fakes.auth import SIGNED_IN
 from .fakes.installation_catalog import FakeInstallationCatalog
 from .fakes.oauth import EXPIRING_GRANT, FakeOAuthProvider, rejecting
@@ -96,6 +100,7 @@ def _client(
     oauth: FakeOAuthProvider | None = None,
     app_slug: str | None = None,
     settings: dict[str, object] | None = None,
+    vcs: FakeVcs | None = None,
 ) -> TestClient:
     """Клиент с живой сессией в `uow` и токеном, выданным при входе только что.
 
@@ -117,6 +122,8 @@ def _client(
     app.dependency_overrides[get_token_provider] = lambda: oauth or FakeOAuthProvider()
     if app_slug is not None:
         app.dependency_overrides[get_app_slug] = lambda: lambda: app_slug
+    gateway = vcs or FakeVcs()
+    app.dependency_overrides[get_cabinet_vcs_gateway] = lambda: gateway
     client = TestClient(app, base_url=ORIGIN)
     if signed_in:
         client.cookies.set(SESSION_COOKIE, COOKIE)
@@ -867,3 +874,533 @@ def test_disconnecting_checks_origin_session_and_id() -> None:
     assert without_session.status_code == 401
     assert bad_id.status_code == 422
     assert bad_id.json()["errors"] == [{"where": "path.repository_id", "reason": "ожидается UUID"}]
+
+
+# Настройки ревью и статус `.review/rules.md` (change `repository-settings`).
+
+SETTINGS_BODY = {"auto_review_enabled": False, "branch_filter": ["main", "release/*"], "min_severity": "high"}
+DEFAULTS = {"auto_review_enabled": True, "branch_filter": [], "min_severity": "critical"}
+UTC_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
+RULES_FILE = ".review/rules.md"
+SHA = "c" * 40
+NEW_SHA = "d" * 40
+RULES_MD = """\
+## Errors
+
+- pattern: app/**/*.py
+
+1. Отказ — значение Result
+
+## Broken
+
+- pattern: app/**
+"""
+
+
+def _settings_path(repository_id: object) -> str:
+    return f"/api/v1/repositories/{repository_id}/settings"
+
+
+def _rules_path(repository_id: object) -> str:
+    return f"/api/v1/repositories/{repository_id}/rules"
+
+
+def _put_settings(
+    client: TestClient, repository_id: object, body: object, *, origin: str | None = ORIGIN
+) -> httpx2.Response:
+    headers = {"Origin": origin} if origin else {}
+    response: httpx2.Response = client.put(_settings_path(repository_id), json=body, headers=headers)
+    return response
+
+
+def _strip(body: dict[str, object]) -> dict[str, object]:
+    return {k: v for k, v in body.items() if k not in {"trace_id", "instance"}}
+
+
+def _file_calls(vcs: FakeVcs) -> list[tuple[object, ...]]:
+    return [c for c in vcs.calls if c[0] == "file"]
+
+
+def test_settings_never_saved_are_the_defaults() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+
+    response = _client(uow, FakeInstallationCatalog([API])).get(_settings_path(repository.id))
+
+    assert response.status_code == 200
+    assert response.json() == DEFAULTS
+
+
+def test_saved_settings_are_read_back() -> None:
+    uow = FakeUnitOfWork()
+    repository = replace(
+        _registered_api(uow), auto_review_enabled=False, branch_filter=("main",), min_severity=FindingSeverity.HIGH
+    )
+    uow.repositories.update_settings(
+        repository.id, RepositorySettings(False, ("main",), FindingSeverity.HIGH), NOW
+    )
+
+    response = _client(uow, FakeInstallationCatalog([API])).get(_settings_path(repository.id))
+
+    assert response.status_code == 200
+    assert response.json() == {"auto_review_enabled": False, "branch_filter": ["main"], "min_severity": "high"}
+
+
+@pytest.mark.parametrize("permissions", [ADMIN, MAINTAIN])
+def test_saving_settings_answers_them_and_reads_them_back(permissions: RepositoryPermissions) -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([replace(API, permissions=permissions)]))
+
+    response = _put_settings(client, repository.id, SETTINGS_BODY)
+
+    assert response.status_code == 200
+    assert response.json() == SETTINGS_BODY
+    assert client.get(_settings_path(repository.id)).json() == SETTINGS_BODY
+    # Та же колонка, что в репозитории, — второй копии нет.
+    assert client.get(f"/api/v1/repositories/{repository.id}").json()["auto_review_enabled"] is False
+
+
+def test_saving_replaces_the_settings_whole() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+    _put_settings(client, repository.id, {**SETTINGS_BODY, "branch_filter": ["main"]})
+
+    response = _put_settings(client, repository.id, {**SETTINGS_BODY, "branch_filter": []})
+
+    assert response.status_code == 200
+    assert client.get(_settings_path(repository.id)).json()["branch_filter"] == []
+
+
+def test_saving_the_same_body_twice_changes_nothing() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    first = _put_settings(client, repository.id, SETTINGS_BODY)
+    second = _put_settings(client, repository.id, SETTINGS_BODY)
+
+    assert (first.status_code, second.status_code) == (200, 200)
+    assert first.json() == second.json() == SETTINGS_BODY
+    assert client.get(_settings_path(repository.id)).json() == SETTINGS_BODY
+
+
+def test_changing_the_threshold_does_not_recompute_the_check() -> None:
+    """Смена порога сама проверку не пересчитывает: запросов к VCS (в том числе проверки) нет."""
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    vcs = FakeVcs()
+    client = _client(uow, FakeInstallationCatalog([API]), vcs=vcs)
+
+    response = _put_settings(client, repository.id, {**SETTINGS_BODY, "min_severity": "low"})
+
+    assert response.status_code == 200
+    assert vcs.calls == []
+    assert vcs.checks == []
+
+
+def test_auto_review_is_turned_back_on() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    off = _put_settings(client, repository.id, {**SETTINGS_BODY, "auto_review_enabled": False})
+    on = _put_settings(client, repository.id, {**SETTINGS_BODY, "auto_review_enabled": True})
+
+    assert (off.status_code, on.status_code) == (200, 200)
+    assert client.get(_settings_path(repository.id)).json()["auto_review_enabled"] is True
+    assert client.get(f"/api/v1/repositories/{repository.id}").json()["auto_review_enabled"] is True
+
+
+def test_a_pattern_is_stored_trimmed() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    response = _put_settings(client, repository.id, {**SETTINGS_BODY, "branch_filter": [" release/* "]})
+
+    assert response.json()["branch_filter"] == ["release/*"]
+    assert client.get(_settings_path(repository.id)).json()["branch_filter"] == ["release/*"]
+
+
+def test_the_largest_allowed_filter_is_saved() -> None:
+    """Ровно предельные 50 паттернов по 200 символов — допустимое тело."""
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    patterns = [f"{n:02d}" + "x" * 198 for n in range(50)]
+
+    response = _put_settings(
+        _client(uow, FakeInstallationCatalog([API])), repository.id, {**SETTINGS_BODY, "branch_filter": patterns}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["branch_filter"] == patterns
+
+
+@pytest.mark.parametrize("permissions", [WRITE, TRIAGE, READ])
+def test_saving_settings_without_manage_rights_is_403_and_keeps_them(permissions: RepositoryPermissions) -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([replace(API, permissions=permissions)]))
+
+    response = _put_settings(client, repository.id, SETTINGS_BODY)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    assert client.get(_settings_path(repository.id)).json() == DEFAULTS
+    assert uow.repositories.get(repository.id) == repository
+
+
+class _RoleRevokedCatalog(FakeInstallationCatalog):
+    """Кэш видимости отдаёт admin, а свежий `GET /repositories/{id}` — уже только write."""
+
+    def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
+        found = super().user_repository(access_token, provider_id)
+        return replace(found, permissions=WRITE) if found is not None else None
+
+
+def test_saving_settings_checks_the_role_past_the_visibility_cache() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    catalog = _RoleRevokedCatalog([API])
+    client = _client(uow, catalog)
+    assert client.get(f"/api/v1/repositories/{repository.id}").status_code == 200  # видимость — в кэше
+
+    response = _put_settings(client, repository.id, SETTINGS_BODY)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    assert "user_repository" in catalog.calls
+    assert uow.repositories.get(repository.id) == repository
+
+
+def test_saving_settings_of_a_repository_github_no_longer_shows_looks_like_a_missing_one() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, _AccessRevokedCatalog([API]))
+
+    revoked = _put_settings(client, repository.id, SETTINGS_BODY)
+    missing = _put_settings(client, new_id(), SETTINGS_BODY)
+
+    assert revoked.status_code == missing.status_code == 404
+    assert _strip(revoked.json()) == _strip(missing.json())
+    assert revoked.json()["code"] == "REPOSITORY_NOT_FOUND"
+    assert uow.repositories.get(repository.id) == repository
+
+
+def test_settings_of_a_disconnected_repository_are_saved_without_connecting_it() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+    _disconnect(client, str(repository.id))
+
+    response = _put_settings(client, repository.id, {**SETTINGS_BODY, "auto_review_enabled": True})
+
+    assert response.status_code == 200
+    stored = uow.repositories.get(repository.id)
+    assert stored is not None and stored.connected_at is None
+    (row,) = client.get("/api/v1/repositories").json()["items"]
+    assert row["connected"] is False
+
+
+def test_reconnecting_keeps_the_saved_settings() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+    saved = {"auto_review_enabled": False, "branch_filter": ["main"], "min_severity": "high"}
+    _put_settings(client, repository.id, saved)
+    _disconnect(client, str(repository.id))
+
+    reconnected = _connect(client)
+
+    assert reconnected.status_code == 201
+    assert reconnected.json()["auto_review_enabled"] is False
+    assert client.get(_settings_path(repository.id)).json() == saved
+
+
+def test_a_new_repository_is_connected_with_the_default_settings() -> None:
+    uow = FakeUnitOfWork()
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    connected = _connect(client)
+
+    assert connected.json()["auto_review_enabled"] is True
+    assert client.get(_settings_path(connected.json()["id"])).json() == DEFAULTS
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {**SETTINGS_BODY, "min_severity": "blocker"},
+        {**SETTINGS_BODY, "extra": 1},
+        {"auto_review_enabled": True, "branch_filter": []},
+        {**SETTINGS_BODY, "branch_filter": ["main", " main "]},
+    ],
+)
+def test_an_invalid_body_reaches_neither_github_nor_the_database(body: dict[str, object]) -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    catalog = FakeInstallationCatalog([API])
+
+    response = _put_settings(_client(uow, catalog), repository.id, body)
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert catalog.calls == []
+    assert uow.repositories.get(repository.id) == repository
+
+
+@pytest.mark.parametrize("origin", [None, "https://evil.example"])
+@pytest.mark.parametrize("signed_in", [True, False])
+def test_saving_settings_without_own_origin_is_403(origin: str | None, signed_in: bool) -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    catalog = FakeInstallationCatalog([API])
+
+    response = _put_settings(_client(uow, catalog, signed_in=signed_in), repository.id, SETTINGS_BODY, origin=origin)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "ORIGIN_FORBIDDEN"
+    assert catalog.calls == []
+    assert uow.repositories.get(repository.id) == repository
+
+
+@pytest.mark.parametrize("method", ["get settings", "put settings", "get rules"])
+def test_settings_and_rules_require_a_session(method: str) -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]), signed_in=False)
+
+    response = {
+        "get settings": lambda: client.get(_settings_path(repository.id)),
+        "put settings": lambda: _put_settings(client, repository.id, {**SETTINGS_BODY, "min_severity": "blocker"}),
+        "get rules": lambda: client.get(_rules_path(repository.id)),
+    }[method]()
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"
+    assert uow.repositories.get(repository.id) == repository
+
+
+@pytest.mark.parametrize("method", ["get settings", "put settings", "get rules"])
+def test_settings_and_rules_of_an_invisible_repository_look_like_a_missing_one(method: str) -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    vcs = FakeVcs(branch_shas={"main": SHA}, files={(RULES_FILE, SHA): RULES_MD})
+    client = _client(uow, FakeInstallationCatalog([WEB]), vcs=vcs)
+    call = {
+        "get settings": lambda rid: client.get(_settings_path(rid)),
+        "put settings": lambda rid: _put_settings(client, rid, SETTINGS_BODY),
+        "get rules": lambda rid: client.get(_rules_path(rid)),
+    }[method]
+
+    invisible, missing = call(repository.id), call(new_id())
+
+    assert invisible.status_code == missing.status_code == 404
+    assert invisible.json()["code"] == "REPOSITORY_NOT_FOUND"
+    assert _strip(invisible.json()) == _strip(missing.json())
+    assert vcs.calls == []
+    assert uow.repositories.get(repository.id) == repository
+
+
+@pytest.mark.parametrize("method", ["get settings", "put settings", "get rules"])
+def test_github_failure_on_visibility_of_settings_and_rules_is_502(method: str) -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog(error=VcsError("GitHub API: HTTP 503")))
+
+    response = {
+        "get settings": lambda: client.get(_settings_path(repository.id)),
+        "put settings": lambda: _put_settings(client, repository.id, SETTINGS_BODY),
+        "get rules": lambda: client.get(_rules_path(repository.id)),
+    }[method]()
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+    assert uow.repositories.get(repository.id) == repository
+
+
+class _RoleCheckFailsCatalog(FakeInstallationCatalog):
+    """Список видимых GitHub отдаёт, а прямой запрос репозитория — `5xx`."""
+
+    def user_repository(self, access_token: Secret, provider_id: str) -> InstallationRepository | None:
+        self.calls.append("user_repository")
+        raise VcsError("GitHub API: HTTP 503")
+
+
+def test_github_failure_on_the_role_check_is_502_and_keeps_the_settings() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+
+    response = _put_settings(_client(uow, _RoleCheckFailsCatalog([API])), repository.id, SETTINGS_BODY)
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+    assert uow.repositories.get(repository.id) == repository
+
+
+def test_a_settings_path_with_a_bad_id_is_422() -> None:
+    client = _client(FakeUnitOfWork(), FakeInstallationCatalog([API]))
+
+    responses = [
+        client.get(_settings_path("repo-1")),
+        _put_settings(client, "repo-1", SETTINGS_BODY),
+        client.get(_rules_path("repo-1")),
+    ]
+
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["errors"] == [{"where": "path.repository_id", "reason": "ожидается UUID"}]
+
+
+def test_rules_loaded_from_the_default_branch() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    vcs = FakeVcs(branch_shas={"main": SHA}, files={(RULES_FILE, SHA): RULES_MD})
+
+    response = _client(uow, FakeInstallationCatalog([API]), vcs=vcs).get(_rules_path(repository.id))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert UTC_Z.fullmatch(body.pop("fetched_at"))
+    assert body == {
+        "status": "loaded",
+        "branch": "main",
+        "path": RULES_FILE,
+        "rules": [
+            {
+                "name": "Errors",
+                "patterns": ["app/**/*.py"],
+                "excludes": [],
+                "checks": ["Отказ — значение Result"],
+            }
+        ],
+        "rejected": [{"name": "Broken", "reason": "нет проверок"}],
+    }
+    assert [c[0] for c in vcs.calls] == ["branch_sha", "file"]
+    assert ("file", API.full_name, RULES_FILE, SHA, 1) in vcs.calls
+
+
+def test_rules_file_without_rules_is_empty() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    vcs = FakeVcs(branch_shas={"main": SHA}, files={(RULES_FILE, SHA): "## Broken\n\n- pattern: app/**\n"})
+
+    body = _client(uow, FakeInstallationCatalog([API]), vcs=vcs).get(_rules_path(repository.id)).json()
+
+    assert UTC_Z.fullmatch(body.pop("fetched_at"))
+    assert body == {
+        "status": "empty",
+        "branch": "main",
+        "path": RULES_FILE,
+        "rejected": [{"name": "Broken", "reason": "нет проверок"}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("vcs", "settings", "status"),
+    [
+        (FakeVcs(branch_shas={"main": SHA}), None, "absent"),
+        (FakeVcs(branch_shas={"main": SHA}, files={(RULES_FILE, SHA): RULES_MD}), {"rules_max_bytes": 10}, "too_large"),
+        (FakeVcs(branch_shas={"main": SHA}, file_errors={RULES_FILE: VcsError("HTTP 503")}), None, "unavailable"),
+        (FakeVcs(), None, "unavailable"),  # ветка не разрешилась
+    ],
+    ids=["absent", "too_large", "file_failure", "branch_failure"],
+)
+def test_rules_outcomes_without_parsed_sections(
+    vcs: FakeVcs, settings: dict[str, object] | None, status: str
+) -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+
+    response = _client(uow, FakeInstallationCatalog([API]), vcs=vcs, settings=settings).get(
+        _rules_path(repository.id)
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": status, "branch": "main", "path": RULES_FILE}
+
+
+def test_rules_are_read_from_the_saved_default_branch() -> None:
+    uow = FakeUnitOfWork()
+    repository = replace(_registered_api(uow), default_branch="trunk")
+    uow.repositories.update(repository)
+    vcs = FakeVcs(branch_shas={"trunk": SHA})
+
+    response = _client(uow, FakeInstallationCatalog([API]), vcs=vcs).get(_rules_path(repository.id))
+
+    assert response.json()["branch"] == "trunk"
+    assert vcs.calls[0] == ("branch_sha", API.full_name, "trunk", 1)
+
+
+def test_rules_on_the_same_commit_are_fetched_once() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    vcs = FakeVcs(branch_shas={"main": SHA}, files={(RULES_FILE, SHA): RULES_MD})
+    client = _client(uow, FakeInstallationCatalog([API]), vcs=vcs)
+
+    first, second = client.get(_rules_path(repository.id)), client.get(_rules_path(repository.id))
+
+    assert first.json() == second.json()
+    assert len(_file_calls(vcs)) == 1
+    # Ветка разрешается на каждый запрос — иначе новый коммит не увидеть.
+    assert [c[0] for c in vcs.calls].count("branch_sha") == 2
+
+
+def test_rules_on_a_new_commit_are_fetched_again() -> None:
+    """Время второго получения — `tests/application/test_repository_rules.py::test_new_commit_is_fetched_again_with_new_time`."""
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    vcs = FakeVcs(branch_shas={"main": SHA}, files={(RULES_FILE, SHA): RULES_MD, (RULES_FILE, NEW_SHA): RULES_MD})
+    client = _client(uow, FakeInstallationCatalog([API]), vcs=vcs)
+
+    first = client.get(_rules_path(repository.id)).json()
+    vcs.branch_shas["main"] = NEW_SHA
+    second = client.get(_rules_path(repository.id)).json()
+
+    assert [c[3] for c in _file_calls(vcs)] == [SHA, NEW_SHA]
+    assert second["fetched_at"] >= first["fetched_at"]
+
+
+def test_rules_failure_is_not_cached() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    vcs = FakeVcs(
+        branch_shas={"main": SHA}, files={(RULES_FILE, SHA): RULES_MD}, file_errors={RULES_FILE: VcsError("HTTP 503")}
+    )
+    client = _client(uow, FakeInstallationCatalog([API]), vcs=vcs)
+
+    first = client.get(_rules_path(repository.id)).json()
+    vcs.file_errors.clear()
+    second = client.get(_rules_path(repository.id)).json()
+
+    assert (first["status"], second["status"]) == ("unavailable", "loaded")
+    assert len(_file_calls(vcs)) == 2
+
+
+def test_rules_of_a_repository_without_the_app_are_404_without_asking_for_the_file() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    vcs = FakeVcs(branch_shas={"main": SHA}, files={(RULES_FILE, SHA): RULES_MD})
+
+    response = _client(uow, FakeInstallationCatalog([API], not_installed={API.full_name}), vcs=vcs).get(
+        _rules_path(repository.id)
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
+    assert vcs.calls == []
+
+
+def test_rules_when_github_fails_on_the_installation_are_unavailable_not_404() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    vcs = FakeVcs(branch_shas={"main": SHA}, files={(RULES_FILE, SHA): RULES_MD})
+    catalog = FakeInstallationCatalog([API], installation_id_error=VcsError("GitHub API: HTTP 503"))
+
+    response = _client(uow, catalog, vcs=vcs).get(_rules_path(repository.id))
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "unavailable", "branch": "main", "path": RULES_FILE}
+    assert vcs.calls == []

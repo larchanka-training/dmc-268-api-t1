@@ -1,9 +1,18 @@
 import dataclasses
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
 
-from app.domain.entities import ReviewJob
+from app.domain.entities import (
+    DEFAULT_REPOSITORY_SETTINGS,
+    Repository,
+    RepositorySettings,
+    ReviewJob,
+)
+from app.domain.enums import FindingSeverity, Provider
+
+NOW = datetime(2026, 10, 31, tzinfo=UTC)
 
 
 def _job(**overrides: object) -> ReviewJob:
@@ -35,3 +44,26 @@ def test_review_job_is_frozen() -> None:
     job = _job()
     with pytest.raises(dataclasses.FrozenInstanceError):
         job.head_sha = "mutated"  # type: ignore[misc]
+
+
+def test_default_repository_settings_are_review_on_all_branches_blocking_on_critical() -> None:
+    assert DEFAULT_REPOSITORY_SETTINGS == RepositorySettings(
+        auto_review_enabled=True, branch_filter=(), min_severity=FindingSeverity.CRITICAL
+    )
+
+
+def test_repository_without_settings_fields_gets_default_filter_and_threshold() -> None:
+    repository = Repository(
+        id=UUID(int=1),
+        provider=Provider.GITHUB,
+        provider_id="987654",
+        full_name="owner/repo",
+        default_branch="main",
+        auto_review_enabled=True,
+        created_at=NOW,
+        updated_at=NOW,
+        connected_at=NOW,
+    )
+
+    assert repository.branch_filter == DEFAULT_REPOSITORY_SETTINGS.branch_filter
+    assert repository.min_severity is DEFAULT_REPOSITORY_SETTINGS.min_severity

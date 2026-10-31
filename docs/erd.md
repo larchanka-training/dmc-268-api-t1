@@ -31,7 +31,9 @@ erDiagram
         text provider_id "id на хостинге"
         text full_name
         text default_branch
-        bool auto_review_enabled "ревью на каждый push"
+        bool auto_review_enabled "ревью на каждый push, по умолчанию true"
+        text_array branch_filter "glob-паттерны веток, пусто — все"
+        finding_severity min_severity "порог merge gate, по умолчанию critical"
         timestamptz connected_at "NULL — ревью выключено"
         uuid id PK
         timestamptz created_at
@@ -165,6 +167,16 @@ erDiagram
 прогона не создаёт, а на head ставит проверку `success` «Ревью выключено в
 сервисе»; на `pull_request_review_thread` тред записывается, а на head ставится
 та же проверка.
+
+Настройки ревью — колонки той же строки, их пишет `PUT /api/v1/repositories/{id}/settings`
+целиком: `auto_review_enabled`, `branch_filter` (glob-паттерны целевых веток) и
+`min_severity` (порог merge gate: блокирует открытый тред с находкой не ниже порога).
+Умолчания заданы в базе — `true`, `{}`, `critical`: запись без настроек (старый API в
+окне деплоя, ручная вставка) получает настройки контракта. Выключение и повторное
+включение настройки не сбрасывают. `branch_filter` пока хранится, но не применяется:
+ревью идёт для всех веток. `auto_review_enabled = false` вебхук обрабатывает как
+выключенный репозиторий — прогона нет, на head ставится `success`, только с текстом
+«Авторевью выключено в настройках»; выключенный в сервисе важнее настройки.
 
 **`merge_requests`**: pull request в GitHub или merge request в GitLab. Хранит
 то, что общее для всех его ревью: номер, заголовок, ветки, автора. `head_sha`

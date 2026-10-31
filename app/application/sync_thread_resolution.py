@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from app.application.merge_gate_publish import (
-    DISABLED_REVIEW_CHECK,
+    PAUSE_CHECKS,
     build_merge_gate_check,
     collect_open_findings,
     settle_merge_gate,
@@ -16,7 +16,8 @@ from app.application.merge_gate_publish import (
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import ReviewThreadState
-from app.domain.enums import CommentKind, Provider, ReviewRunStatus
+from app.domain.enums import CommentKind, FindingSeverity, Provider, ReviewRunStatus
+from app.domain.repository_access import review_pause
 from app.domain.webhook import THREAD_ACTIONS
 
 logger = logging.getLogger(__name__)
@@ -99,10 +100,12 @@ def refresh_merge_gate_for_merge_request(
     pr_number: int,
     head_sha: str,
     installation_id: int,
+    min_severity: FindingSeverity,
     uow: UnitOfWork,
     vcs: VcsGateway,
     now: datetime,
 ) -> None:
+    """Сверить треды с GitHub и перевыставить gate по порогу `min_severity` репозитория."""
     sync_open_threads_from_host(
         merge_request_id,
         repo_full_name=repo_full_name,
@@ -135,7 +138,8 @@ def refresh_merge_gate_for_merge_request(
         head_sha=head_sha,
         installation_id=installation_id,
         run_id=head_run.id,
-        check=build_merge_gate_check(still_open),
+        check=build_merge_gate_check(still_open, min_severity),
+        min_severity=min_severity,
     )
 
 
@@ -192,9 +196,11 @@ def handle_review_thread_webhook(
 ) -> bool:
     """Обновить тред и сразу перевыставить merge gate на head PR.
 
-    У выключенного репозитория (`connected_at IS NULL`) тред записывается так же, но на head
-    ставится `DISABLED_REVIEW_CHECK`: пересчёт по тредам поставил бы `failure` на head с
-    проверкой «Ревью выключено» или `success` «Ревью пройдено» на непроверенный head.
+    Порог gate — `min_severity` из прочитанной записи репозитория: смена порога действует
+    на следующем закрытии треда. При паузе ревью (`review_pause`: репозиторий выключен или
+    `auto_review_enabled = false`) тред записывается так же, но на head ставится check run
+    паузы, без сверки тредов: пересчёт поставил бы `failure` на head с проверкой паузы или
+    `success` «Ревью пройдено» на непроверенный head.
     """
     if not apply_review_thread_webhook(payload, uow=uow, now=now):
         return False
@@ -221,13 +227,14 @@ def handle_review_thread_webhook(
         repo = uow.repositories.find_by_provider(Provider.GITHUB, str(provider_repo_id))
         if repo is None:
             return True
-        disabled = repo.connected_at is None
+        pause = review_pause(repo)
+        min_severity = repo.min_severity
         merge_request = uow.merge_requests.find_by_number(repo.id, pr_number)
         if merge_request is None:
             return True
         merge_request_id = merge_request.id
-    if disabled:
-        vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, DISABLED_REVIEW_CHECK)
+    if pause is not None:
+        vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, PAUSE_CHECKS[pause])
         return True
     refresh_merge_gate_for_merge_request(
         merge_request_id,
@@ -235,6 +242,7 @@ def handle_review_thread_webhook(
         pr_number=pr_number,
         head_sha=head_sha,
         installation_id=installation_id,
+        min_severity=min_severity,
         uow=uow,
         vcs=vcs,
         now=now(),

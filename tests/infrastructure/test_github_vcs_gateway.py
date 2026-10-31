@@ -776,3 +776,92 @@ def test_fetch_file_compressed_body_within_limit_is_decoded(rsa_key_pair: RsaKey
     )
 
     assert gateway.fetch_file("owner/repo", "a.py", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT) == "привет"
+
+
+SHA_RESPONSE = httpx.Response(
+    200, text="c" * 40, headers={"Content-Type": "application/vnd.github.sha; charset=utf-8"}
+)
+
+
+def test_resolve_branch_sha_returns_sha_from_text_body(rsa_key_pair: RsaKeyPair) -> None:
+    """Media type `vnd.github.sha` — тело ответа sha текстом (проверено вживую),
+    запрос — под installation token."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, responding([200], SHA_RESPONSE, seen), [])
+
+    assert gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID) == "c" * 40
+
+    (request,) = seen
+    assert request.method == "GET"
+    assert request.url.path == "/repos/owner/repo/commits/heads/develop"
+    assert request.headers["Accept"] == "application/vnd.github.sha"
+    assert request.headers["Authorization"] == "Bearer ghs_test"
+
+
+def test_resolve_branch_sha_escapes_branch_but_keeps_slashes(rsa_key_pair: RsaKeyPair) -> None:
+    """`/` в имени ветки GitHub принимает как есть (проверено вживую), а `#` и `%`
+    из имени ветки не превращаются во фрагмент и не ломают путь."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, responding([200], SHA_RESPONSE, seen), [])
+
+    gateway.resolve_branch_sha("owner/repo", "release/2.0#rc%1", INSTALLATION_ID)
+
+    (request,) = seen
+    assert request.url.raw_path.decode() == "/repos/owner/repo/commits/heads/release/2.0%23rc%251"
+
+
+def test_resolve_branch_sha_404_is_not_found(rsa_key_pair: RsaKeyPair) -> None:
+    """Репозитория нет или он недоступен установке — `VcsNotFoundError`, без повторов."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, responding([404], SHA_RESPONSE, seen), sleeps)
+
+    with pytest.raises(VcsNotFoundError):
+        gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID)
+
+    assert len(seen) == 1
+    assert sleeps == []
+
+
+def test_resolve_branch_sha_missing_branch_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """Ветки нет — GitHub отвечает 422 «No commit found for SHA» (проверено вживую):
+    сбой адаптера, без повторов."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, responding([422], SHA_RESPONSE, seen), [])
+
+    with pytest.raises(VcsError):
+        gateway.resolve_branch_sha("owner/repo", "gone", INSTALLATION_ID)
+
+    assert len(seen) == 1
+
+
+def test_resolve_branch_sha_5xx_is_retried_then_unavailable(rsa_key_pair: RsaKeyPair) -> None:
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, responding([503], SHA_RESPONSE, seen), sleeps)
+
+    with pytest.raises(VcsUnavailableError):
+        gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID)
+
+    assert len(seen) == 3
+    assert sleeps == [0.5, 1.0]
+
+
+def test_resolve_branch_sha_redirect_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """Переименованный репозиторий отвечает 301 — переход шлюз не делает."""
+    redirect = httpx.Response(301, headers={"Location": "https://api.github.com/repositories/1"})
+    gateway = make_gateway(rsa_key_pair, responding([301], redirect, []), [])
+
+    with pytest.raises(VcsError) as raised:
+        gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID)
+
+    assert not isinstance(raised.value, VcsNotFoundError | VcsUnavailableError)
+
+
+def test_resolve_branch_sha_non_sha_body_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """Прокси отдал HTML или GitHub проигнорировал media type — не sha, сбой адаптера."""
+    html = httpx.Response(200, text="<html>oops</html>", headers={"Content-Type": "text/html"})
+    gateway = make_gateway(rsa_key_pair, responding([200], html, []), [])
+
+    with pytest.raises(VcsError):
+        gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID)

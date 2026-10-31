@@ -417,32 +417,14 @@ SETTINGS_BODY = {"auto_review_enabled": True, "branch_filter": ["main", "release
 
 
 @pytest.mark.parametrize("path", [SETTINGS_PATH, RULES_PATH])
-def test_planned_repository_reads_answer_not_implemented(path: str) -> None:
-    """Настройки и статус rules.md описаны в схеме, а отвечают `501`."""
-    assert_problem(_signed_in_client().get(path), 501, "NOT_IMPLEMENTED", path)
-
-
-def test_planned_repository_settings_save_answers_not_implemented() -> None:
-    """Допустимое тело — в том числе пустой фильтр и ровно предельные паттерны — доходит до `501`."""
-    client = _signed_in_client()
-    for body in (
-        SETTINGS_BODY,
-        {**SETTINGS_BODY, "branch_filter": []},
-        {**SETTINGS_BODY, "branch_filter": [f"{n:02d}" + "x" * 198 for n in range(50)]},
-    ):
-        response = client.put(SETTINGS_PATH, json=body, headers={"Origin": ORIGIN})
-        assert_problem(response, 501, "NOT_IMPLEMENTED", SETTINGS_PATH)
-
-
-@pytest.mark.parametrize("path", [SETTINGS_PATH, RULES_PATH])
-def test_planned_repository_reads_check_session_and_id_first(client: TestClient, path: str) -> None:
+def test_repository_settings_and_rules_check_session_and_id_first(client: TestClient, path: str) -> None:
     assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
     bad = path.replace(REPO_ID, "not-a-uuid")
     problem = assert_problem(_signed_in_client().get(bad), 422, "VALIDATION_ERROR", bad)
     assert problem["errors"] == [{"where": "path.repository_id", "reason": "ожидается UUID"}]
 
 
-def test_planned_repository_settings_put_checks_origin_and_session_first(client: TestClient) -> None:
+def test_repository_settings_put_checks_origin_and_session_first(client: TestClient) -> None:
     """Без `Origin` — `403`, без сессии — `401`; неверное тело в обоих случаях не разбирается."""
     bad_body = {**SETTINGS_BODY, "min_severity": "unknown"}
     assert_problem(client.put(SETTINGS_PATH, json=bad_body), 403, "ORIGIN_FORBIDDEN", SETTINGS_PATH)
@@ -501,10 +483,10 @@ def test_planned_repository_settings_put_checks_origin_and_session_first(client:
         ),
     ],
 )
-def test_planned_repository_settings_save_checks_id_and_body_first(
+def test_repository_settings_save_checks_id_and_body_first(
     path: str, body: dict[str, Any], error: dict[str, str]
 ) -> None:
-    """Заглушка записи проверяет id и тело раньше, чем ответить `501`."""
+    """Запись проверяет id и тело раньше обращения к базе и к GitHub."""
     response = _signed_in_client().put(path, json=body, headers={"Origin": ORIGIN})
     problem = assert_problem(response, 422, "VALIDATION_ERROR", path)
     assert problem["errors"] == [error]
@@ -528,9 +510,26 @@ def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
     assert settings["put"]["requestBody"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/RepositorySettingsUpdate"
     }
-    assert {"401", "403", "404", "422", "501"} <= set(settings["put"]["responses"])
-    assert {"401", "404", "422", "501"} <= set(settings["get"]["responses"])
-    assert {"401", "404", "422", "501"} <= set(rules["get"]["responses"])
+    assert {"401", "403", "404", "422", "502"} <= set(settings["put"]["responses"])
+    assert {"401", "404", "422", "502"} <= set(settings["get"]["responses"])
+    assert {"401", "404", "422", "502"} <= set(rules["get"]["responses"])
+    # Ручки реализованы: `501` в схеме нет.
+    for operation in (settings["get"], settings["put"], rules["get"]):
+        assert "501" not in operation["responses"]
+
+    def problem_codes(operation: dict[str, Any], status: str) -> set[str]:
+        content = operation["responses"][status]["content"]["application/problem+json"]["schema"]
+        refs = [v["$ref"] for v in content["oneOf"]] if "oneOf" in content else [content["$ref"]]
+        return {schema["components"]["schemas"][r.rsplit("/", 1)[1]]["properties"]["code"]["const"] for r in refs}
+
+    for operation in (settings["get"], settings["put"], rules["get"]):
+        assert "REPOSITORY_NOT_FOUND" in problem_codes(operation, "404")
+        assert problem_codes(operation, "502") == {"SCM_UNAVAILABLE"}
+    assert problem_codes(rules["get"], "404") == {"REPOSITORY_NOT_FOUND", "REPOSITORY_NOT_IN_INSTALLATION"}
+    assert problem_codes(settings["put"], "403") == {"ORIGIN_FORBIDDEN", "REPOSITORY_MANAGE_REQUIRED"}
+    get_description = settings["get"]["description"]
+    for default in ("auto_review_enabled = true", "branch_filter = []", "min_severity = critical"):
+        assert default in get_description
 
     components = schema["components"]["schemas"]
     fields = {"auto_review_enabled", "branch_filter", "min_severity"}
@@ -539,6 +538,10 @@ def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
     assert set(update["required"]) == fields
     assert update["additionalProperties"] is False
     assert update["properties"]["min_severity"]["$ref"] == "#/components/schemas/FindingSeverity"
+    # Фильтр сохраняется, но ревью его пока не применяет — фронтенд должен это видеть.
+    for model in ("RepositorySettingsResponse", "RepositorySettingsUpdate"):
+        assert "Пока не применяется" in components[model]["properties"]["branch_filter"]["description"]
+    assert "RepositoryResponse" in components["RepositorySettingsResponse"]["properties"]["auto_review_enabled"]["description"]
 
     variants = {
         "loaded": "RulesLoaded",

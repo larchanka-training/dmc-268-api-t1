@@ -94,6 +94,15 @@ class FindingSeverity(StrEnum):
     CRITICAL = "critical"
 
 
+class ReviewPause(StrEnum):
+    """Почему вебхук не запускает ревью репозитория."""
+
+    # Репозиторий выключен в сервисе (`connected_at is None`), лечится подключением.
+    DISCONNECTED = "disconnected"
+    # Авторевью выключено в настройках репозитория, лечится экраном настроек.
+    AUTO_REVIEW_OFF = "auto_review_off"
+
+
 class CommentKind(StrEnum):
     """Форма комментария, публикуемого обратно на хостинг."""
 

@@ -1,5 +1,5 @@
-"""Репозитории: список видимых пользователю, чтение, подключение, выключение, настройки и
-статус `.review/rules.md` (настройки и правила — пока заглушки).
+"""Репозитории: список видимых пользователю, чтение, подключение, выключение, настройки ревью и
+статус `.review/rules.md`.
 
 Транспорт: разбор запроса, вызов порта или use case, формат ответа. Пагинация —
 `app/api/pagination.py`. Правила подключения — `app/application/use_cases/connect_repository.py`.
@@ -17,7 +17,10 @@ from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
     get_app_slug,
+    get_cabinet_vcs_gateway,
     get_installation_catalog,
+    get_rules_cache,
+    get_settings,
     get_token_provider,
     get_unit_of_work_factory,
     get_visibility_catalog,
@@ -26,10 +29,10 @@ from app.api.errors import (
     ERRORS_403_ORIGIN_OR_MANAGE,
     ERRORS_404_NOT_IN_INSTALLATION,
     ERRORS_404_REPOSITORY,
+    ERRORS_404_REPOSITORY_OR_NOT_IN_INSTALLATION,
     ERRORS_409_ALREADY_CONNECTED,
     ERRORS_413_BODY,
     ERRORS_422,
-    ERRORS_501_NOT_IMPLEMENTED,
     ERRORS_502_SCM_REPOSITORIES,
     ERRORS_502_SCM_VISIBILITY,
     ApiError,
@@ -45,12 +48,22 @@ from app.api.session import (
     current_session,
 )
 from app.application.ports import InstallationCatalog, OAuthProvider, UnitOfWork
+from app.application.ports.cache_store import CacheStore
+from app.application.ports.vcs_gateway import VcsGateway
 
 # Под своими именами: имена функций роутов — operationId в схеме, их держат типы фронтенда.
 from app.application.use_cases import connect_repository as connecting
 from app.application.use_cases.auth import SignedIn
+from app.application.use_cases.repository_rules import load_default_branch_rules
+from app.application.use_cases.run_diff import RepositoryNotInstalled
 from app.application.use_cases.user_token import SessionClosed
-from app.domain.entities import InstallationRepository, Repository
+from app.config import Settings
+from app.domain.entities import (
+    InstallationRepository,
+    RepoRules,
+    Repository,
+    RepositorySettings,
+)
 from app.domain.enums import FindingSeverity, Provider, RulesStatus
 from app.domain.ids import new_id
 from app.domain.login import OAuthProviderUnavailable
@@ -71,7 +84,9 @@ _LIST_DESCRIPTION = (
 )
 _CONNECT_DESCRIPTION = (
     "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. "
-    "Регистрирует репозиторий установки GitHub App с `auto_review_enabled = true`; `full_name` "
+    "Регистрирует репозиторий установки GitHub App; новый получает настройки по умолчанию, в том "
+    "числе `auto_review_enabled = true`, а включённый обратно после `DELETE` сохраняет свои "
+    "сохранённые настройки, в том числе `auto_review_enabled = false`. `full_name` "
     "и `default_branch` — из ответа GitHub. Два запроса к GitHub: репозиторий по id токеном "
     "пользователя (`GET /repositories/{id}`), затем установка приложения на нём "
     "(`GET /repos/{owner}/{repo}/installation`). Проверки по порядку: провайдер не `github`, "
@@ -102,35 +117,44 @@ _DISCONNECT_DESCRIPTION = (
     "пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается; GitHub не ответил или "
     "ответил ошибкой — `502 SCM_UNAVAILABLE`, ревью не выключено."
 )
-# Настройки и статус rules.md — задача #113 (бэкенд-часть dmc-268-ui-t1#28): контракт первым,
-# реализация отдельно.
 _SETTINGS_DEFAULTS = (
     "У репозитория без сохранённых настроек — значения по умолчанию: auto_review_enabled = true, "
     "branch_filter = [] (все ветки), min_severity = critical."
 )
+_VISIBILITY_REFUSALS = (
+    "404 REPOSITORY_NOT_FOUND, если репозитория нет или пользователь не видит его на GitHub (кэш "
+    "видимости, как у GET /repositories/{id}), — ответ один и тот же. Токен пользователя непригоден — "
+    "`401 UNAUTHENTICATED`, сессия закрывается; GitHub не ответил или ответил ошибкой — "
+    "`502 SCM_UNAVAILABLE`."
+)
 _GET_SETTINGS_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #113). Требует сессию; id репозитория проверяется до ответа 501. Когда ручка заработает: "
-    "настройки ревью репозитория; 404 REPOSITORY_NOT_FOUND, если репозитория нет. " + _SETTINGS_DEFAULTS
+    "Требует сессию. Настройки ревью видимого пользователю репозитория, в том числе выключенного "
+    "`DELETE`. " + _SETTINGS_DEFAULTS + " " + _VISIBILITY_REFUSALS
 )
 _SAVE_SETTINGS_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #113). Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора "
-    "тела, id репозитория и тело — до ответа 501. Тело — полный набор настроек: все поля обязательны, "
-    "запись заменяет прежние настройки целиком, повтор того же тела ничего не меняет. Когда ручка "
-    "заработает: 200 с сохранёнными настройками; 404 REPOSITORY_NOT_FOUND, если репозитория нет; "
-    "403 REPOSITORY_MANAGE_REQUIRED, если у пользователя нет роли admin или maintain на репозитории "
-    "у провайдера, — как при подключении, роль проверяется запросом к GitHub."
+    "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела, id "
+    "репозитория и тело — раньше обращения к базе и к GitHub. Тело — полный набор настроек: все поля "
+    "обязательны, запись заменяет прежние настройки целиком, повтор того же тела ничего не меняет; "
+    "паттерны веток хранятся обрезанными. Ответ — 200 с сохранёнными настройками. Проверки по "
+    "порядку: видимость — " + _VISIBILITY_REFUSALS + " Затем роль — как у POST и DELETE "
+    "/repositories, запросом к GitHub мимо кэша видимости: без admin или maintain — "
+    "`403 REPOSITORY_MANAGE_REQUIRED`, GitHub не отдал репозиторий — `404 REPOSITORY_NOT_FOUND`; "
+    "при отказе и при `502` настройки не меняются. Выключенный репозиторий настройки получает, но не "
+    "включается — включение только POST /repositories. Смена порога уже стоящую проверку merge "
+    "gate не пересчитывает: новый порог применится со следующим прогоном или вебхуком закрытия треда."
 )
 _RULES_DESCRIPTION = (
-    "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы "
-    "(задача #113). Требует сессию; id репозитория проверяется до ответа 501. Когда ручка заработает: "
-    "чем закончилась загрузка `.review/rules.md` с ветки по умолчанию репозитория — те же исходы, что "
-    "у загрузки правил для прогона: loaded — файл разобран, в ответе принятые правила и отклонённые "
-    "разделы; empty — файл разобран, но ни один раздел не стал правилом, в ответе отклонённые "
-    "разделы; absent — файла нет; too_large — файл больше лимита и не разбирался; unavailable — "
-    "провайдер не ответил. Кроме loaded, ревью идёт по стандартным критериям. 404 "
-    "REPOSITORY_NOT_FOUND, если репозитория нет."
+    "Требует сессию. Чем закончилась загрузка `.review/rules.md` с последнего коммита ветки по "
+    "умолчанию репозитория — те же лимит, разбор и исходы, что у загрузки правил для прогона: "
+    "loaded — файл разобран, в ответе принятые правила и отклонённые разделы; empty — файл "
+    "разобран, но ни один раздел не стал правилом, в ответе отклонённые разделы; absent — файла "
+    "нет; too_large — файл больше лимита и не разбирался; unavailable — GitHub не ответил на запрос "
+    "установки приложения, на разрешение ветки в коммит или на чтение файла (это ответ `200`, а не "
+    "ошибка). Кроме loaded, ревью идёт по стандартным критериям. Ветка разрешается в коммит на "
+    "каждый запрос, исход файла кэшируется по паре «репозиторий, коммит» (кэш процесса API, тот же ключ и TTL, что у прогона): "
+    "на том же коммите файл повторно не запрашивается и `fetched_at` — время первого получения; "
+    "сбой не кэшируется. " + _VISIBILITY_REFUSALS + " Приложение не установлено на репозиторий или "
+    "установка приостановлена — `404 REPOSITORY_NOT_IN_INSTALLATION`, ветка и файл не запрашиваются."
 )
 _SCM_UNAVAILABLE_DETAIL = "GitHub не ответил или ответил ошибкой."
 # Отказ use case — ответ ручки.
@@ -410,7 +434,8 @@ _AUTO_REVIEW_DESCRIPTION = (
 )
 _BRANCH_FILTER_DESCRIPTION = (
     "Glob-паттерны целевых веток запросов на изменение, которые ревьюятся; пустой список — все ветки "
-    "(так и без сохранённых настроек)."
+    "(так и без сохранённых настроек). Пока не применяется: сохраняется, но ревью идёт для всех "
+    "веток (задача #313)."
 )
 _MIN_SEVERITY_DESCRIPTION = (
     "Порог важности: нерешённое замечание с severity не ниже порога блокирует merge gate, и бот "
@@ -583,16 +608,32 @@ def disconnect_repository(
     return Response(status_code=HTTPStatus.NO_CONTENT)
 
 
+def _settings_response(settings: Repository | RepositorySettings) -> RepositorySettingsResponse:
+    """Ответ из настроек: у `Repository` и `RepositorySettings` те же три поля."""
+    return RepositorySettingsResponse(
+        auto_review_enabled=settings.auto_review_enabled,
+        branch_filter=list(settings.branch_filter),
+        min_severity=settings.min_severity,
+    )
+
+
 @router.get(
     "/{repository_id}/settings",
     response_model=RepositorySettingsResponse,
     summary="Настройки ревью репозитория",
     response_description="Настройки репозитория.",
     description=_GET_SETTINGS_DESCRIPTION,
-    responses={**ERRORS_404_REPOSITORY, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+    responses={**ERRORS_404_REPOSITORY, **ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
-def get_repository_settings(repository_id: RepositoryIdPath) -> RepositorySettingsResponse:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Настройки репозитория ещё не реализованы.")
+def get_repository_settings(
+    repository_id: RepositoryIdPath,
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> RepositorySettingsResponse:
+    # Настройки — колонки той же записи, что вернула проверка видимости: второго запроса нет.
+    return _settings_response(visible_repository(repository_id, signed_in, catalog, oauth, uow_factory))
 
 
 @router.put(
@@ -606,13 +647,39 @@ def get_repository_settings(repository_id: RepositoryIdPath) -> RepositorySettin
         **ERRORS_404_REPOSITORY,
         **ERRORS_413_BODY,
         **ERRORS_422,
-        **ERRORS_501_NOT_IMPLEMENTED,
+        **ERRORS_502_SCM_VISIBILITY,
     },
 )
 def save_repository_settings(
-    repository_id: RepositoryIdPath, body: RepositorySettingsUpdate
+    repository_id: RepositoryIdPath,
+    body: RepositorySettingsUpdate,
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositorySettingsResponse:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Настройки репозитория ещё не реализованы.")
+    repository = visible_repository(repository_id, signed_in, catalog, oauth, uow_factory)
+    settings = RepositorySettings(
+        auto_review_enabled=body.auto_review_enabled,
+        branch_filter=tuple(body.branch_filter),
+        min_severity=body.min_severity,
+    )
+    # Права — мимо кэша, как у выключения: `user_repository` кэш видимости не читает.
+    now = datetime.now(UTC)
+    refusal = _as_user(
+        signed_in,
+        oauth,
+        lambda user: connecting.save_repository_settings(catalog, uow_factory(), user, repository, settings, now),
+    )
+    if refusal is connecting.ConnectRefusal.NOT_IN_INSTALLATION:
+        raise _repository_not_found()
+    if refusal is connecting.ConnectRefusal.MANAGE_REQUIRED:
+        raise ApiError(
+            HTTPStatus.FORBIDDEN,
+            ErrorCode.REPOSITORY_MANAGE_REQUIRED,
+            "Менять настройки ревью может только пользователь с правом admin или maintain на репозиторий.",
+        )
+    return _settings_response(settings)
 
 
 @router.get(
@@ -621,7 +688,69 @@ def save_repository_settings(
     summary="Статус правил ревью репозитория",
     response_description="Исход загрузки `.review/rules.md`.",
     description=_RULES_DESCRIPTION,
-    responses={**ERRORS_404_REPOSITORY, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+    responses={**ERRORS_404_REPOSITORY_OR_NOT_IN_INSTALLATION, **ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
-def get_repository_rules(repository_id: RepositoryIdPath) -> RulesStatusResponse:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Статус правил репозитория ещё не реализован.")
+def get_repository_rules(
+    repository_id: RepositoryIdPath,
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+    vcs: VcsGateway = Depends(get_cabinet_vcs_gateway),
+    cache: CacheStore = Depends(get_rules_cache),
+    settings: Settings = Depends(get_settings),
+) -> RulesStatusResponse:
+    # Синхронная `def`: шлюз и кэш блокирующие, FastAPI уводит ручку в threadpool.
+    repository = visible_repository(repository_id, signed_in, catalog, oauth, uow_factory)
+    try:
+        rules = load_default_branch_rules(
+            repository,
+            installations=catalog,
+            vcs=vcs,
+            cache=cache,
+            max_bytes=settings.rules_max_bytes,
+            ttl_seconds=settings.rules_cache_ttl_seconds,
+            now=datetime.now(UTC),
+        )
+    except RepositoryNotInstalled:
+        raise ApiError(
+            HTTPStatus.NOT_FOUND,
+            ErrorCode.REPOSITORY_NOT_IN_INSTALLATION,
+            "Приложение не установлено на репозиторий или установка приостановлена.",
+        ) from None
+    return _rules_response(rules, repository.default_branch)
+
+
+def _rules_response(rules: RepoRules, branch: str) -> RulesStatusResponse:
+    """Вариант ответа по статусу: поля, которых у статуса нет, в ответ не идут."""
+    file = {"branch": branch, "path": RULES_PATH}
+    rejected = [RejectedRule(name=r.name, reason=r.reason) for r in rules.rejected]
+    variant: RulesLoaded | RulesEmpty | RulesAbsent | RulesTooLarge | RulesUnavailable
+    match rules.status:
+        case RulesStatus.LOADED:
+            variant = RulesLoaded(
+                status=RulesStatus.LOADED,
+                rules=[
+                    RepoRule(name=r.name, patterns=list(r.patterns), excludes=list(r.excludes), checks=list(r.checks))
+                    for r in rules.rules
+                ],
+                rejected=rejected,
+                fetched_at=_fetched_at(rules),
+                **file,
+            )
+        case RulesStatus.EMPTY:
+            variant = RulesEmpty(status=RulesStatus.EMPTY, rejected=rejected, fetched_at=_fetched_at(rules), **file)
+        case RulesStatus.ABSENT:
+            variant = RulesAbsent(status=RulesStatus.ABSENT, **file)
+        case RulesStatus.TOO_LARGE:
+            variant = RulesTooLarge(status=RulesStatus.TOO_LARGE, **file)
+        case RulesStatus.UNAVAILABLE:
+            variant = RulesUnavailable(status=RulesStatus.UNAVAILABLE, **file)
+    return RulesStatusResponse(variant)
+
+
+def _fetched_at(rules: RepoRules) -> datetime:
+    # Разобранный файл всегда получен от GitHub: `None` бывает только у `unavailable`.
+    if rules.fetched_at is None:
+        raise ValueError(f"у статуса {rules.status} нет времени получения файла")
+    return rules.fetched_at
