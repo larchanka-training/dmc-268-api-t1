@@ -110,7 +110,8 @@ def _returned_headers(
     channel: pika.adapters.blocking_connection.BlockingChannel,
 ) -> dict[str, object]:
     """Заголовки вернувшегося в очередь сообщения: `x-delivery-count` — неудачные
-    доставки, `x-acquired-count` — возвраты без траты попытки (`nack` с requeue)."""
+    доставки, `x-acquired-count` — сколько раз сообщение выдавалось и вернулось,
+    любым путём."""
     method, properties, _ = channel.basic_get(QUEUE_NAME, auto_ack=True)
     assert method is not None, "сообщение не вернулось в очередь"
     assert properties is not None
