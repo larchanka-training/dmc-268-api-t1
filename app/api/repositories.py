@@ -721,6 +721,9 @@ def get_repository_rules(
     repository_id: RepositoryIdPath,
     signed_in: SignedIn = Depends(current_session),
     catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    # Номер установки — мимо кэша видимости, как у диффа прогона: после переустановки
+    # приложения он другой.
+    installations: InstallationCatalog = Depends(get_installation_catalog),
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
     vcs: VcsGateway = Depends(get_cabinet_vcs_gateway),
@@ -735,7 +738,7 @@ def get_repository_rules(
     try:
         rules = load_default_branch_rules(
             repository,
-            installations=catalog,
+            installations=installations,
             vcs=vcs,
             cache=cache,
             max_bytes=settings.rules_max_bytes,
