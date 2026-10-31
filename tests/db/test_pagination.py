@@ -31,6 +31,7 @@ def a_repository(*, provider_id: str, created_at: dt.datetime) -> Repository:
         auto_review_enabled=True,
         created_at=created_at,
         updated_at=created_at,
+        connected_at=created_at,
     )
 
 

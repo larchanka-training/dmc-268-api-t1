@@ -24,6 +24,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    func,
     text,
 )
 from sqlalchemy import (
@@ -74,6 +75,11 @@ class RepositoryRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     full_name: Mapped[str] = mapped_column(String(512), nullable=False)
     default_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     auto_review_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Когда ревью включено последний раз; `NULL` — выключено, запись и история остаются.
+    # Умолчание `now()`: запись без колонки (старый код в окне деплоя, ручная вставка) — включённая.
+    connected_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
 
     # Их никто не читает. Они нужны потому, что unit of work упорядочивает
     # INSERT'ы по relationship, а не по внешнему ключу: без них родитель и его

@@ -432,14 +432,21 @@ def build_maintenance(
                 logger.warning("зависших прогонов переведено в failed: %d", swept)
         except Exception as exc:
             record_current_exception(exc)
-            logger.exception("проход по зависшим прогонам завершился ошибкой")
+            # Тело записи с исключением коллектор гасит: шаг различает только поле.
+            logger.exception(
+                "проход по зависшим прогонам завершился ошибкой",
+                extra={"maintenance_step": "sweep_stale_runs"},
+            )
         try:
             purged = purge_expired_sessions(uow_factory(), now=now())
             if purged:
                 logger.info("истёкших сессий удалено: %d", purged)
         except Exception as exc:
             record_current_exception(exc)
-            logger.exception("удаление истёкших сессий завершилось ошибкой")
+            logger.exception(
+                "удаление истёкших сессий завершилось ошибкой",
+                extra={"maintenance_step": "purge_expired_sessions"},
+            )
         moment = now()
         if redeliver is None or (
             last_redelivery is not None and moment - last_redelivery < redelivery_interval
@@ -452,7 +459,10 @@ def build_maintenance(
                 logger.info("упавших доставок вебхука переотправлено: %d", redelivered)
         except Exception as exc:
             record_current_exception(exc)
-            logger.exception("повтор упавших доставок вебхука завершился ошибкой")
+            logger.exception(
+                "повтор упавших доставок вебхука завершился ошибкой",
+                extra={"maintenance_step": "redeliver_webhooks"},
+            )
 
     return maintenance
 
@@ -486,7 +496,7 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
     # Заглушка модели выбирается только явно - иначе прогоны молча выходили бы
     # пустыми (change `add-llm-gateway`, требование «Выбор заглушки явный»).
     if settings.llm_backend is None:
-        raise WorkerConfigError("LLM_BACKEND не задан: выберите stub или ollama")
+        raise WorkerConfigError("LLM_BACKEND не задан: выберите stub, ollama или eurorouter")
     check_model_deadline(settings)
     check_sweep_thresholds(settings)
     # Воркеру — свои потолки VCS-клиента: дифф и ревью крупного PR дольше,

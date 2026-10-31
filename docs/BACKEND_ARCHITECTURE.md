@@ -108,8 +108,8 @@ compile-time зависимости от слоя приложения.
 | `ProviderTokenRepo` | `SqlAlchemyProviderTokenRepo` | токен пользователя у провайдера при сессии; шифрует AES-256-GCM при записи и расшифровывает при чтении (`app/infrastructure/db/token_cipher.py`), `get_for_update` — блокировка строки на время refresh, ожидание чужой — не дольше 15 секунд (`ProviderTokenBusy`). Без ключа — `ProviderTokenUnavailable` |
 | `UnitOfWork` | `SqlAlchemyUnitOfWork` | граница транзакции |
 | `StageTracer` | `OtelStageTracer`; без адаптера — `NO_STAGE_TRACING` | спан трассировки на каждый шаг прогона: `StepRecorder` открывает его вместе с шагом и закрывает с его исходом. Порт — ради границы слоя: слой приложения не знает OpenTelemetry. Телеметрия, а не данные: шаги для API — из `review_run_steps` (раздел «Наблюдаемость») |
-| `VcsGateway` | `GitHubVcsGateway` | дифф (с лимитом `max_bytes`, только в воркере), метаданные PR и содержимое файла на коммите (`fetch_file`, contents API; 404 — `None`) через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и повторы внутри адаптера — один цикл `_request`: 5xx — exponential backoff, отказ лимита (429, 403 лимита, GraphQL `RATE_LIMITED` при 200) — пауза по `retry-after` / `x-ratelimit-reset` / минута в пределах бюджета (`VcsClientLimits`: API — таймаут 5 с и без ожидания лимита, воркер — 30 с и 60 с). Создание ревью без идемпотентности: ревью несёт скрытый маркер `<!-- dmc-268-review-run:<id> -->`, и после потерянного ответа на `POST …/reviews` — пауза, поиск по маркеру среди ревью бота `<slug>[bot]` (slug — `GET /app`), новый `POST` только если ревью не нашлось. Тот же поиск по маркеру — `find_published_review`: перед публикацией прогон подбирает ревью прогонов PR, упавших на `publishing` без записей в `published_comments`, чтобы не повторить их замечания (#222). Для `fetch_file` App нужно разрешение **Contents: read** |
-| `InstallationCatalog` | `GitHubInstallationCatalog` | репозитории установок GitHub App, видимые пользователю, — по его токену (user access token): `GET /user/installations`, затем `GET /user/installations/{id}/repositories`, постранично по 100. GitHub сам отдаёт пересечение «доступно приложению» ∩ «доступно пользователю» с `permissions` на каждом репозитории; подключать можно с admin или maintain (`app/domain/repository_access.py`). Приостановленные установки, `404` и `403` (не лимит, например SAML SSO) на установке пропускаются; `403` лимита (`x-ratelimit-remaining: 0`, `retry-after`) — `VcsUnavailableError`; пагинация до `total_count`, не больше 50 страниц; `401` — `ProviderTokenRejected` (сессия закрывается), прочие сбои и неожиданное тело — `VcsError` (`502`). Токен — через `httpx.Auth` (`BearerAuth`), таймаут `httpx.Timeout(10, connect=5)`. Тела ответов разбирают приватные строгие модели pydantic адаптера (лишние поля игнорируются), ошибка разбора — `VcsError` без значений полей. Подключение список не обходит: `user_repository` — `GET /repositories/{id}` токеном пользователя, `app_installed` — `GET /repos/{owner}/{repo}/installation` с JWT приложения (свой `GitHubAppAuth`, только JWT); не виден (в том числе публичный только с `pull`, как у любого — `visible_for_connect`; приватный с ролью read виден и получает `403`), не установлено, приостановлено — один `404`. `installation_id` не хранится. Свой HTTP-клиент. Ручки видимости (`GET /reviews`, `GET /events`, прогон, зарегистрированные репозитории) берут его через `CachedInstallationCatalog`: `list_repositories` из `CacheStore` в пределах TTL; страница подключения всегда спрашивает GitHub и пишет свежий ответ в кэш, проверки подключения — без кэша |
+| `VcsGateway` | `GitHubVcsGateway` | дифф (с лимитом `max_bytes`, только в воркере), метаданные PR и содержимое файла на коммите (`fetch_file`, contents API; 404 — `None`) через GitHub REST; авторизация GitHub App installation-токенами (`GitHubAppAuth`), кэш токенов и повторы внутри адаптера — один цикл `_request`: 5xx — exponential backoff, отказ лимита (429, 403 лимита, GraphQL `RATE_LIMITED` при 200) — пауза по `retry-after` / `x-ratelimit-reset` / минута в пределах бюджета (`VcsClientLimits`: API — таймаут 5 с и без ожидания лимита, воркер — 30 с и 60 с). Создание ревью без идемпотентности: ревью несёт скрытый маркер `<!-- dmc-268-review-run:<id> -->`, и после потерянного ответа на `POST …/reviews` — пауза, поиск по маркеру среди ревью бота `<slug>[bot]` (slug — `GET /app`, один раз на процесс; тот же slug даёт `install_url` списка репозиториев, `Container.app_slug`; после сбоя `GET /app` контейнер повторяет запрос не раньше чем через 60 с), новый `POST` только если ревью не нашлось. Тот же поиск по маркеру — `find_published_review`: перед публикацией прогон подбирает ревью прогонов PR, упавших на `publishing` без записей в `published_comments`, чтобы не повторить их замечания (#222). Для `fetch_file` App нужно разрешение **Contents: read** |
+| `InstallationCatalog` | `GitHubInstallationCatalog` | репозитории установок GitHub App, видимые пользователю, — по его токену (user access token): `GET /user/installations`, затем `GET /user/installations/{id}/repositories`, постранично по 100. GitHub сам отдаёт пересечение «доступно приложению» ∩ «доступно пользователю» с `permissions` на каждом репозитории; подключать можно с admin или maintain (`app/domain/repository_access.py`). Приостановленные установки, `404` и `403` (не лимит, например SAML SSO) на установке пропускаются; `403` лимита (`x-ratelimit-remaining: 0`, `retry-after`) — `VcsUnavailableError`; пагинация до `total_count`, не больше 50 страниц; `401` — `ProviderTokenRejected` (сессия закрывается), прочие сбои и неожиданное тело — `VcsError` (`502`). Токен — через `httpx.Auth` (`BearerAuth`), таймаут `httpx.Timeout(10, connect=5)`. Тела ответов разбирают приватные строгие модели pydantic адаптера (лишние поля игнорируются), ошибка разбора — `VcsError` без значений полей. Подключение список не обходит: `user_repository` — `GET /repositories/{id}` токеном пользователя, `app_installed` — `GET /repos/{owner}/{repo}/installation` с JWT приложения (свой `GitHubAppAuth`, только JWT); не виден (в том числе публичный только с `pull`, как у любого — `visible_for_connect`; приватный с ролью read виден и получает `403`), не установлено, приостановлено — один `404`. `installation_id` не хранится. Свой HTTP-клиент. Ручки видимости (`GET /reviews`, `GET /events`, прогон, зарегистрированные репозитории) берут его через `CachedInstallationCatalog`: `list_repositories` из `CacheStore` в пределах TTL; список репозиториев читает кэш, свежий ответ пишет возврат с установки (Setup URL), проверки прав подключения и выключения — без кэша. Setup URL сверяет установку из адреса с установками пользователя (`installation_selection` — `repository_selection` из `GET /user/installations`, приостановленная — как отсутствующая) и читает её репозитории (`installation_repositories`, `403`/`404` — `VcsError`) |
 | `CacheStore` | `InMemoryCacheStore` | best-effort key/value с TTL в памяти процесса, один экземпляр на composition root; промах не ошибка. Потребители: правила `.review/rules.md` в воркере по ключу «репозиторий, base_sha»; список репозиториев, видимых пользователю на GitHub, в API (`CachedInstallationCatalog`, ключ — sha256 токена, TTL `VISIBLE_REPOSITORIES_CACHE_TTL_SECONDS`, 30 с). Кэш процесса корректен и при нескольких репликах — кэшируется только ответ GitHub, подключённые читаются из базы, — Redis нужен, когда понадобится общий кэш или общее состояние (change `visible-repositories-cache`) |
 | `DefinitionExtractor` | `TreeSitterDefinitionExtractor` | контур файла (определения с диапазонами строк, импорты) для AST-окружения изменённых строк; грамматики Python, TypeScript/TSX, JavaScript, Go. Какие определения показать модели, решает домен (`select_scopes`); tree-sitter запрещён во внутренних слоях контрактом import-linter |
 | `OAuthProvider` | `GitHubOAuthProvider` | вход через OAuth самого GitHub App: адрес авторизации, обмен `code` на профиль (`GET /user`) и токен пользователя (`OAuthLogin`), обмен refresh token (`refresh`, `grant_type=refresh_token`), отзыв токена при выходе (`revoke`, `DELETE /applications/{client_id}/token`, best-effort фоновой задачей). Токены — `Secret`, `repr` их не раскрывает. `bad_refresh_token` — `ProviderTokenRejected`, любой другой сбой — `OAuthProviderUnavailable`. Контейнер выдаёт провайдера по `{provider}` из пути, неизвестный — `404` |
@@ -147,7 +147,7 @@ compile-time зависимости от слоя приложения.
 `/auth/{provider}/callback` и `/health`. `POST /auth/logout` сессии не требует,
 только `Origin`: выход идемпотентен и всегда отвечает `204`.
 
-Ручки репозиториев (`/repositories/available`, `POST /repositories`) берут ещё и токен
+Ручки репозиториев (`GET /repositories`, `POST /repositories`) берут ещё и токен
 пользователя у провайдера, сохранённый при сессии (`call_with_user_token`,
 `app/application/use_cases/user_token.py`): истёкший — обмен по refresh token под
 блокировкой строки токена (сбой обмена при ещё действующем токене — прежний токен),
@@ -429,7 +429,8 @@ def upgrade() -> None:
   провайдера (`review_llm_call_duration{outcome}` — в `FallbackLlmGateway`; метка
   `provider` стоит всегда, `model` — модель ответа только у `ok`, в гистограмму попадают
   упавшие вызовы и таймауты), пул соединений — снимками состояния (`db.client.connection.*`);
-  стоимость — отдельное изменение (#119).
+  стоимость — отдельное изменение (#119). Какие метрики есть и откуда — таблица
+  «Какие метрики есть» в `infra/README.md`.
   «Во что обошёлся прогон» остаётся SQL по колонкам `review_runs`: метрики —
   для алертов, не для отчётов.
 - **Логи** — два транспорта из одной точки настройки. `configure_logging(service_name)`
@@ -441,23 +442,27 @@ def upgrade() -> None:
   текущего спана, запись вне спана пишется без них и не теряется. `exc_info`
   кладёт стектрейс и `exception.type` (qualname класса) в ту же запись,
   дубль uvicorn «Exception in ASGI application» отсекается: на `500` в логе
-  ровно одна запись, и её `trace_id` равен `X-Trace-ID` ответа. Необработанное
-  исключение воркера — вплоть до `WorkerConfigError` старта — пишут excepthook'и
-  той же JSON-записью: текстовый дамп интерпретатора уходит в stderr и до
+  ровно одна запись, и её `trace_id` равен `X-Trace-ID` ответа. Access-запись
+  health-check'а не пишется (`HealthCheckAccessFilter` в `app/api/log_redaction.py`).
+  Необработанное исключение воркера — вплоть до `WorkerConfigError` старта — пишут
+  excepthook'и той же JSON-записью: текстовый дамп интерпретатора уходит в stderr и до
   хранилища логов не доходит. stdout остаётся для `docker logs` и локальной
   отладки; в Loki записи уходят вторым транспортом — по OTLP из SDK при
   `OTEL_LOGS_EXPORTER=otlp` (дефолт `none` — только stdout): `configure_telemetry`
   ставит `LoggerProvider` с `BatchLogRecordProcessor` и хендлер на root, resource
   общий с трейсами, тело записи — текст сообщения, `exc_info` — атрибуты
-  `exception.*`. Коллектор принимает логи только по OTLP — каталог Docker не
-  читает, логов postgres и rabbitmq в Loki нет. От записи лога к трейсу в
-  Grafana ведёт переход по `trace_id` (derived field по structured metadata
-  OTLP-лога). На пути коллектор редактирует записи с исключениями: стектрейс,
-  текст и тело такой записи заменяются маркером `<скрыто>`, `exception.type`
-  остаётся диагнозом.
-- **Стек** — восемь контейнеров (коллектор, Loki, Tempo, Prometheus, Grafana,
-  node_exporter за сервер, cAdvisor за контейнеры и socket-proxy — доступ cAdvisor
-  к Docker API по белому списку эндпоинтов вместо маунта `docker.sock`) с
+  `exception.*`. Логи сервисов коллектор принимает только по OTLP; логи postgres,
+  его реплики и rabbitmq приносит драйвер `fluentd` демона Docker в отдельный
+  экземпляр коллектора, каталог Docker не читает ни один (`infra/README.md`,
+  «Логи контейнеров»). Между записью лога и трейсом в Grafana переход по `trace_id` в обе стороны (structured metadata OTLP-лога,
+  `observability/grafana/provisioning/datasources/datasources.yaml`). На пути
+  коллектор редактирует записи с исключениями: стектрейс, текст и тело такой
+  записи заменяются маркером `<скрыто>`, `exception.type` остаётся диагнозом.
+- **Стек** — девять контейнеров (коллектор, его второй экземпляр с receiver
+  `docker_stats` за метрики контейнеров, третий — приём логов postgres, его реплики и rabbitmq
+  от драйвера `fluentd`, Loki, Tempo, Prometheus, Grafana,
+  node_exporter за сервер и socket-proxy — доступ этого экземпляра к Docker API по
+  белому списку эндпоинтов вместо маунта `docker.sock`) с
   одними конфигами локально и на стенде: конфиги лежат в
   `infra/observability/`, локально их монтирует профиль `observability` в
   compose, на стенде те же файлы собирает `infra/` (Terraform), весь стек — за
@@ -588,6 +593,13 @@ nginx фронта (`client_max_body_size` в `location /api/`, не меньш�
 установкой. Personal access token открыл бы доступ ко всем репозиториям,
 доступным его владельцу.
 
+**Доступ к Docker API и входящий OTLP — в разных процессах.** Inspect через socket-proxy
+отдаёт Env всех контейнеров: ключи S3 бэкапа, пароли репликации, брокера и Grafana. Основной
+коллектор разбирает OTLP без аутентификации, в том числе из интернета (трейсы браузера).
+Поэтому метрики контейнеров снимает отдельный экземпляр `dmc268-otelcol-docker`: входящего OTLP
+у него нет, в сетях он только мониторинга и proxy. Подробности в `infra/README.md`, раздел
+«Метрики контейнеров».
+
 **Авторизация при регистрации.** При регистрации репозитория нужно проверять,
 что у вызывающего есть к нему доступ, иначе можно подписать чужой репозиторий
 и читать его анализ.
@@ -618,8 +630,12 @@ nginx фронта (`client_max_body_size` в `location /api/`, не меньш�
 сети убирает главный путь утечки данных, поэтому по умолчанию запрос уходит
 только локальной модели. Eurorouter - hosted-провайдер - подключается только
 явным решением (`LLM_HOSTED_FALLBACK=true`, в `infra/` - `llm_hosted_fallback`)
-и только фоллбэком после сбоя локальной модели: основным он стать не может,
-это проверяет тест сборки контейнера. Включённый фоллбэк означает, что код
+и только фоллбэком после сбоя локальной модели - или основным и единственным,
+тоже явным решением (`LLM_BACKEND=eurorouter`, change `eurorouter-primary-backend`).
+Так работает стенд (#245): Ollama там нет, и код проверяемых репозиториев уходит
+Eurorouter на каждом прогоне; какой путь выбран, называет лог старта воркера, а
+то, что без явного выбора hosted-провайдер запроса не получает, проверяет тест
+сборки контейнера. Включённый фоллбэк означает, что код
 проверяемых репозиториев может уйти провайдеру, и не только при недоступности
 Ollama: сбоем локальной модели считается любой `LlmError`, в том числе ответ
 не по схеме, обрезанный ответ и запрос, который Ollama насчитала больше окна, -

@@ -33,16 +33,21 @@ EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
     "api": frozenset({"dmc268", "backend"}),
     "worker": frozenset({"backend", "egress"}),
     # Стек наблюдаемости: цели receiver-ов и OTLP — в сети данных, остальное
-    # — в своей сети. В dmc268 (там UI) из стека не ходит никто. Grafana —
-    # ещё и в отдельной сети dmc268-grafana: порты на internal-сети Docker не
-    # публикует, поэтому порт Grafana живёт в не-internal сети.
-    "otelcol": frozenset({"backend", "observability"}),
+    # — в своей сети. В dmc268 (там UI) из стека не ходит никто: трейсы
+    # браузера коллектор принимает из отдельной internal-сети dmc268-otlp, куда
+    # подключается и интерфейс. Grafana — ещё и в отдельной сети dmc268-grafana:
+    # порты на internal-сети Docker не публикует, поэтому порт Grafana живёт в
+    # не-internal сети. В сети socket-proxy — только proxy и экземпляр
+    # коллектора с receiver docker_stats (почему — infra/README.md, «Метрики контейнеров»).
+    # Коллектор логов — в стеке и в сети публикации своего порта, как Grafana.
+    "otelcol": frozenset({"backend", "observability", "otlp"}),
+    "otelcol_docker": frozenset({"observability", "observability_docker_proxy"}),
+    "otelcol_logs": frozenset({"observability", "logs"}),
     "loki": frozenset({"observability"}),
     "tempo": frozenset({"observability"}),
     "prometheus": frozenset({"backend", "observability"}),
     "grafana": frozenset({"observability", "grafana"}),
     "node_exporter": frozenset({"observability"}),
-    "cadvisor": frozenset({"observability", "observability_docker_proxy"}),
     "docker_socket_proxy": frozenset({"observability_docker_proxy"}),
 }
 
@@ -137,6 +142,7 @@ def test_observability_network_has_no_way_out() -> None:
     не ходит никто. Сеть публикации порта Grafana dmc268-grafana — не
     internal (порты на internal-сети Docker не публикует): проверяем именно
     отсутствие internal = true — его постановка сломала бы публикацию порта.
+    То же у сети порта коллектора логов dmc268-logs.
     """
     text = read_infra_text()
     assert network_is_internal(text, "observability") is True, (
@@ -146,6 +152,16 @@ def test_observability_network_has_no_way_out() -> None:
     assert network_is_internal(text, "grafana") is False, (
         "сеть dmc268-grafana не должна быть internal: её единственное назначение — "
         "публикуемый порт Grafana, а порты на internal-сети Docker не публикует"
+    )
+    assert network_is_internal(text, "logs") is False, (
+        "сеть dmc268-logs не должна быть internal: в ней публикуется порт коллектора логов"
+    )
+
+
+def test_browser_otlp_network_has_no_way_out() -> None:
+    assert network_is_internal(read_infra_text(), "otlp") is True, (
+        "сеть dmc268-otlp должна быть internal: через неё интерфейс ходит в коллектор, "
+        "а без internal коллектор получает выход в интернет"
     )
 
 

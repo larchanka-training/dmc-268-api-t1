@@ -8,6 +8,8 @@ larchanka-training/dmc-268-ui-t1#37, change `repositories-via-user-token`).
 приватный — видимым (change `user-token-private-read`).
 """
 
+from collections.abc import Collection, Iterable
+
 from app.domain.entities import InstallationRepository, RepositoryPermissions
 
 
@@ -41,3 +43,19 @@ def can_connect(permissions: RepositoryPermissions) -> bool:
     (удаление, видимость, передача, доступы); подключение к ревью — такое действие.
     """
     return permissions.admin or permissions.maintain
+
+
+def to_connect_on_setup(
+    repositories: Iterable[InstallationRepository], registered_provider_ids: Collection[str]
+) -> list[InstallationRepository]:
+    """Что подключить на возврате с установки «Only select repositories»: репозитории с правом
+    admin или maintain, у которых ещё нет записи в сервисе.
+
+    Выключенный (запись есть) не включается: выключение — явное решение пользователя
+    (change `repositories-one-list`, design D7).
+    """
+    return [
+        repository
+        for repository in repositories
+        if can_connect(repository.permissions) and repository.provider_id not in registered_provider_ids
+    ]

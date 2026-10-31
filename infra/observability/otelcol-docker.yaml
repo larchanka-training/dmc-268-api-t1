@@ -1,0 +1,52 @@
+# Второй экземпляр коллектора (dmc268-otelcol-docker): только метрики контейнеров
+# через socket-proxy, без входящего OTLP. Почему отдельно от основного —
+# infra/README.md, «Метрики контейнеров». Конфиг один для compose и infra.
+
+receivers:
+  # Почему docker_stats, а не cAdvisor, — infra/README.md, «Метрики
+  # контейнеров». К Docker API — только через socket-proxy с белым списком
+  # путей (observability/docker-socket-proxy.cfg), docker.sock не монтируется.
+  # Предупреждение «Unauthenticated TCP connection» в логе ожидаемо: proxy — в
+  # отдельной internal-сети, TLS там не поднимается.
+  docker_stats:
+    endpoint: tcp://dockerproxy:2375
+    collection_interval: 15s
+    # id, hostname и образ меняются каждым деплоем и плодили бы новые серии
+    # в Prometheus; ряд различает container.name.
+    resource_attributes:
+      container.id: {enabled: false}
+      container.hostname: {enabled: false}
+      container.image.name: {enabled: false}
+
+processors:
+  # Потолок памяти; контейнеру задан лимит с запасом
+  # (observability_memory_mb.collector_docker).
+  memory_limiter:
+    check_interval: 1s
+    spike_limit_mib: 16
+    limit_mib: 64
+
+exporters:
+  # Prometheus скрейпит collector-docker:8889 (job docker-stats).
+  # resource_to_telemetry_conversion переносит атрибуты ресурса в лейблы:
+  # без неё не было бы container_name.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  # Свои метрики, как у основного коллектора (otelcol.yaml): job collector-docker-self.
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    metrics:
+      receivers: [docker_stats]
+      processors: [memory_limiter]
+      exporters: [prometheus]

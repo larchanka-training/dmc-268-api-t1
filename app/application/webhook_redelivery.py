@@ -30,7 +30,7 @@ from datetime import datetime
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.domain.vcs_errors import VcsError, VcsTransientError
-from app.domain.webhook import extract_github_event
+from app.domain.webhook import extract_github_event, is_trusted_author
 from app.domain.webhook_redelivery import (
     RedeliveryPolicy,
     WebhookDelivery,
@@ -105,9 +105,12 @@ def _still_current(hooks: WebhookDeliveries, vcs: VcsGateway, delivery: WebhookD
     """Коммит доставки `pull_request` — всё ещё голова PR."""
     payload = hooks.delivery_payload(delivery.id)
     event = extract_github_event(payload) if payload is not None else None
-    if event is None:
-        # Без PR в payload приём ответил бы `ignored` — переотправлять нечего.
-        logger.warning("доставка %s (%s): в payload нет pull request, не переотправляется", delivery.id, delivery.guid)
+    if event is None or not is_trusted_author(event):
+        # Действие не запускает ревью, автор PR не свой или payload не разобран —
+        # приём ответил бы `ignored`, переотправлять нечего.
+        logger.info(
+            "доставка %s (%s) не запускает ревью (действие или автор), не переотправляется", delivery.id, delivery.guid
+        )
         return False
     head = vcs.fetch_pr_metadata(event.repo_full_name, event.pr_number, event.installation_id).head_sha
     if head != event.head_sha:

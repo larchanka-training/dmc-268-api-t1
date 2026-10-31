@@ -4,8 +4,8 @@
 бы только на деплое. Тесты держат структуру: образы стека зафиксированы
 дайджестами одинаково в обоих местах, отдельного экспортёра Postgres больше
 нет (метрики базы снимает receiver postgresql коллектора, решение #89),
-сервер и контейнеры видны (node-exporter, cAdvisor — последний без
-docker.sock, через socket-proxy), у Prometheus есть потолок по размеру,
+сервер и контейнеры видны (node-exporter и receiver docker_stats отдельного
+экземпляра коллектора — без docker.sock, через socket-proxy), у Prometheus есть потолок по размеру,
 имена compose не сталкиваются с infra на общем хосте.
 Валидацию конфига самим коллектором делает класс
 TestCollectorConfigValidation в test_collector_redaction.py.
@@ -15,6 +15,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import pytest
 import yaml
@@ -39,17 +40,21 @@ DASHBOARD_JSON = DASHBOARDS_DIR / "dmc268-overview.json"
 # пар «сервис compose → local» обязан совпадать дайджестами в обоих файлах.
 STACK_SERVICES = {
     "collector": "otelcol_image",
+    "collector-docker": "otelcol_image",
+    "collector-logs": "otelcol_image",
     "loki": "loki_image",
     "tempo": "tempo_image",
     "prometheus": "prometheus_image",
     "grafana": "grafana_image",
     "node-exporter": "node_exporter_image",
-    "cadvisor": "cadvisor_image",
     "dockerproxy": "docker_socket_proxy_image",
 }
 
 # имя@sha256:… — дайджест манифест-листа (multi-arch), а не платформенный.
 _DIGEST = re.compile(r"^(?P<name>[^@\s]+)@sha256:(?P<digest>[0-9a-f]{64})$")
+
+
+COMPOSE_LOGS_FILE = OBSERVABILITY_DIR / "compose.logs.yml"
 
 
 def load_compose() -> dict[str, Any]:
@@ -117,17 +122,17 @@ def test_prometheus_has_no_postgres_job() -> None:
     assert "postgres" not in jobs
 
 
-# --- node-exporter и cAdvisor в обоих окружениях ------------------------------------
+# --- node-exporter и socket-proxy в обоих окружениях ------------------------------------
 
 
-@pytest.mark.parametrize("service", ["node-exporter", "cadvisor", "dockerproxy"])
+@pytest.mark.parametrize("service", ["node-exporter", "dockerproxy"])
 def test_host_and_container_exporters_in_compose(service: str) -> None:
     """Сервер, контейнеры и прокси Docker API — в профиле observability, без портов наружу."""
     service_config = load_compose()["services"][service]
     assert "observability" in service_config["profiles"]
 
 
-@pytest.mark.parametrize("container", ["node_exporter", "cadvisor", "docker_socket_proxy"])
+@pytest.mark.parametrize("container", ["node_exporter", "docker_socket_proxy"])
 def test_host_and_container_exporters_in_infra(container: str) -> None:
     """То же в infra: контейнер, образ из locals и потолок памяти из переменной."""
     text = OBSERVABILITY_TF.read_text(encoding="utf-8")
@@ -137,11 +142,30 @@ def test_host_and_container_exporters_in_infra(container: str) -> None:
     assert f"var.observability_memory_mb.{memory_variable}" in text
 
 
-def test_prometheus_scrapes_new_exporters_by_service_hosts() -> None:
-    """Jobs node-exporter и cadvisor по хостнеймам сервисов и их портам."""
-    jobs = {job["job_name"]: job for job in load_prometheus()["scrape_configs"]}
-    assert jobs["node-exporter"]["static_configs"][0]["targets"] == ["node-exporter:9100"]
-    assert jobs["cadvisor"]["static_configs"][0]["targets"] == ["cadvisor:8080"]
+@pytest.mark.parametrize(
+    ("job", "target"),
+    [
+        ("node-exporter", "node-exporter:9100"),
+        ("docker-stats", "collector-docker:8889"),
+        ("collector-self", "collector:8888"),
+        ("collector-docker-self", "collector-docker:8888"),
+        ("collector-logs-self", "collector-logs:8888"),
+        ("loki", "loki:3100"),
+        ("tempo", "tempo:3200"),
+    ],
+)
+def test_prometheus_scrapes_exporters_by_service_hosts(job: str, target: str) -> None:
+    """Job по хостнейму сервиса и его порту."""
+    jobs = {j["job_name"]: j for j in load_prometheus()["scrape_configs"]}
+    assert jobs[job]["static_configs"][0]["targets"] == [target]
+
+
+@pytest.mark.parametrize("config", ["otelcol.yaml", "otelcol-docker.yaml", "otelcol-logs.yaml"])
+def test_collector_serves_own_metrics_beyond_localhost(config: str) -> None:
+    """По умолчанию свои метрики коллектор отдаёт только на 127.0.0.1 — Prometheus их не видит."""
+    collector = yaml.safe_load((OBSERVABILITY_DIR / config).read_text(encoding="utf-8"))
+    (reader,) = collector["service"]["telemetry"]["metrics"]["readers"]
+    assert reader["pull"]["exporter"]["prometheus"] == {"host": "0.0.0.0", "port": 8888}
 
 
 def test_rabbitmq_job_scrapes_per_object_metrics() -> None:
@@ -176,7 +200,7 @@ def _infra_digests() -> dict[str, str]:
 
 
 def test_stack_images_are_pinned_by_digest_in_both_places() -> None:
-    """Все восемь образов стека — имя@sha256:…, одинаковые в compose и infra.
+    """Все образы стека — имя@sha256:…, одинаковые в compose и infra.
 
     Тег плавает, дайджест манифест-листа нет: рассинхрон между окружениями —
     ошибка, поэтому сравниваются именно дайджесты, а не полные ссылки.
@@ -218,7 +242,8 @@ def test_service_version_extracts_the_tag_before_the_digest(image: str, version:
 def test_stack_published_ports_match_between_compose_and_infra() -> None:
     """Публикуемые порты стека одинаковы в compose и infra.
 
-    Единственный публикуемый порт стека — Grafana (3000 на bind_ip):
+    Публикуемых портов стека два — Grafana (3000 на bind_ip) и приём fluentd
+    коллектора логов (24224 на 127.0.0.1, его адрес — в опциях драйвера):
     остальной трафик внутренний, его публикует только человек, который правит
     оба файла. Рассинхрон порта молчалив так же, как рассинхрон дайджестов
     (замечание ревью PR #130), поэтому сверяются и внутренний порт, и дефолт
@@ -241,6 +266,12 @@ def test_stack_published_ports_match_between_compose_and_infra() -> None:
     )
     assert default is not None, f"у переменной {external_var} нет дефолта"
     assert int(default.group(1)) == 3000
+
+    assert load_compose()["services"]["collector-logs"]["ports"] == ["127.0.0.1:24224:24224"]
+    assert re.search(
+        r'ports \{\s*internal = 24224\s*external = 24224\s*ip\s*= "127\.0\.0\.1"',
+        _tf_container_block("otelcol_logs"),
+    )
 
 
 # --- имена: алиасы вместо container_name, том grafana_data без name -----------------
@@ -311,50 +342,81 @@ def test_infra_preloads_pg_stat_statements_only_with_the_stack() -> None:
     assert '"-c", "shared_preload_libraries=pg_stat_statements",' in block
 
 
-# --- cAdvisor ходит к Docker только через socket-proxy -------------------------------
+# --- метрики контейнеров: docker_stats коллектора через socket-proxy -----------------
 
 
-@pytest.mark.parametrize("path", ["/", "/var/run/docker.sock", "/var/run", "/var/lib/docker"])
-def test_cadvisor_mounts_no_host_root_or_docker_paths_in_compose(path: str) -> None:
-    """Маунтов Docker и корня хоста у cAdvisor нет в compose: Docker API —
-    только через socket-proxy; рекурсивный /rootfs открывал бы unix-сокет
-    через /rootfs/run/docker.sock (root на хосте) и Env всех контейнеров
-    (замечание ревью PR #130, high). Хостовые файловые метрики —
-    node-exporter."""
-    mounts = [mount.split(":")[0] for mount in load_compose()["services"]["cadvisor"]["volumes"]]
-    assert path not in mounts
+def test_container_metrics_come_from_a_separate_collector_through_the_proxy() -> None:
+    """Метрики контейнеров снимает отдельный экземпляр коллектора с одним
+    receiver docker_stats через socket-proxy (почему не cAdvisor — #249).
+    Входящего OTLP у него нет, а у основного коллектора нет docker_stats:
+    inspect через proxy отдаёт Env всех контейнеров."""
+    docker = yaml.safe_load((OBSERVABILITY_DIR / "otelcol-docker.yaml").read_text(encoding="utf-8"))
+    assert set(docker["receivers"]) == {"docker_stats"}
+    assert docker["receivers"]["docker_stats"]["endpoint"] == "tcp://dockerproxy:2375"
+    # Опечатку в имени атрибута коллектор не отвергает: id, hostname и образ меняются каждым деплоем.
+    assert docker["receivers"]["docker_stats"]["resource_attributes"] == {
+        name: {"enabled": False} for name in ("container.id", "container.hostname", "container.image.name")
+    }
+    assert docker["service"]["pipelines"]["metrics"]["receivers"] == ["docker_stats"]
+
+    main = yaml.safe_load((OBSERVABILITY_DIR / "otelcol.yaml").read_text(encoding="utf-8"))
+    assert "docker_stats" not in main["receivers"]
+    assert "dockerproxy" not in json.dumps(main)
+
+    compose = load_compose()["services"]["collector-docker"]
+    assert "./infra/observability/otelcol-docker.yaml:/etc/otelcol-contrib/config.yaml:ro" in compose["volumes"]
+    assert 'file("${path.module}/observability/otelcol-docker.yaml")' in _tf_container_block("otelcol_docker")
 
 
-def test_cadvisor_is_not_root_and_is_hardened_in_both_places() -> None:
-    """cAdvisor — не root (nobody) и в жёсткой упаковке api: чтение /sys
-    и cgroup v2 работает и от nobody (проверено запуском образа)."""
-    compose_cadvisor = load_compose()["services"]["cadvisor"]
-    assert compose_cadvisor["user"] == "65534"
-    assert compose_cadvisor["read_only"] is True
-    assert compose_cadvisor["cap_drop"] == ["ALL"]
-    assert "no-new-privileges:true" in compose_cadvisor["security_opt"]
+# --- логи контейнеров: драйвер fluentd и коллектор логов ---------------------------
 
-    cadvisor = _tf_container_block("cadvisor")
-    assert re.search(r'user\s*=\s*"65534"', cadvisor)
-    assert re.search(r"read_only\s*=\s*true", cadvisor)
-    assert re.search(r'capabilities\s*\{\s*drop\s*=\s*\["ALL"\]\s*\}', cadvisor)
-    assert 'container_path = "/rootfs"' not in cadvisor
+
+def test_container_logs_go_through_the_logs_collector() -> None:
+    """Логи postgres, rabbitmq и реплики шлёт драйвер fluentd в коллектор логов;
+    в compose опции те же, что local.fluentd_log_opts. Почему драйвер в отдельном
+    файле — infra/README.md, «Логи контейнеров»."""
+    services = load_compose()["services"]
+    overrides = yaml.safe_load(COMPOSE_LOGS_FILE.read_text(encoding="utf-8"))["services"]
+    tf_block = re.search(r"fluentd_log_opts = \{(.*?)\n  \}", LOCALS_TF.read_text(encoding="utf-8"), re.DOTALL)
+    assert tf_block is not None
+    tf_opts = dict(re.findall(r'"([\w-]+)"\s*=\s*"([^"]*)"', tf_block.group(1)))
+    assert tf_opts.pop("tag") == "{{.Name}}"
+    for service in ("postgres", "rabbitmq"):
+        assert "logging" not in services[service], service
+        assert overrides[service]["logging"] == {
+            "driver": "fluentd",
+            # В compose нет container_name: тег — имя контейнера на стенде.
+            "options": tf_opts | {"tag": f"dmc268-{service}"},
+        }, service
+        block = _tf_container_block(service)
+        assert 'log_driver = var.observability_enabled ? "fluentd" : "json-file"' in block, service
+        assert "log_opts   = var.observability_enabled ? local.fluentd_log_opts : local.log_opts" in block, service
+
+    # Реплики в compose нет, на стенде она пишет так же.
+    replica = _tf_container_block("postgres_replica")
+    assert 'log_driver = var.observability_enabled ? "fluentd" : "json-file"' in replica
+    assert "log_opts   = var.observability_enabled ? local.fluentd_log_opts : local.log_opts" in replica
+
+    logs = yaml.safe_load((OBSERVABILITY_DIR / "otelcol-logs.yaml").read_text(encoding="utf-8"))
+    assert set(logs["receivers"]) == {"fluent_forward"}
+    assert logs["exporters"] == {"otlp_http/collector": {"endpoint": "http://collector:4318"}}
+    compose = services["collector-logs"]
+    assert "./infra/observability/otelcol-logs.yaml:/etc/otelcol-contrib/config.yaml:ro" in compose["volumes"]
+    assert 'file("${path.module}/observability/otelcol-logs.yaml")' in _tf_container_block("otelcol_logs")
 
 
 SOCKET_PROXY_TEMPLATE = OBSERVABILITY_DIR / "docker-socket-proxy.cfg"
 SOCKET_PROXY_TEMPLATE_PATH = "/usr/local/etc/haproxy/haproxy.cfg.template"
-# Единственный белый список путей proxy (замечание ревью PR #130).
-_SOCKET_PROXY_ALLOW = r"^(/v[\d\.]+)?/(containers/json|containers/[^/]+/json|info|version|_ping)$"
 
 
-def test_socket_proxy_allows_only_the_cadvisor_paths() -> None:
+def test_socket_proxy_allows_only_the_docker_stats_paths() -> None:
     """Белый список путей proxy живёт в шаблоне haproxy, а не в env образа.
 
     CONTAINERS=1 у tecnativa/docker-socket-proxy открывал ЛЮБОЙ GET под
     /containers — /containers/{id}/archive?path=… (любой файл любого
     контейнера, включая том Postgres), /export и inspect с полным Env
-    (замечание ревью PR #130). Свой шаблон разрешает только то, что cAdvisor
-    берёт через API; статистику он читает из cgroup, не через API. Шаблон один
+    (замечание ревью PR #130). Свой шаблон разрешает только то, что берёт
+    receiver docker_stats: список, inspect, статистику и события. Шаблон один
     и тот же в обоих окружениях: compose монтирует файл по пути, который
     рендерит entrypoint образа, infra заливает его upload-ом по тому же пути.
     """
@@ -374,43 +436,76 @@ def test_socket_proxy_allows_only_the_cadvisor_paths() -> None:
     assert SOCKET_PROXY_TEMPLATE.is_file(), "нет infra/observability/docker-socket-proxy.cfg"
     template = SOCKET_PROXY_TEMPLATE.read_text(encoding="utf-8")
     allow_lines = [line.strip() for line in template.splitlines() if "http-request allow" in line]
-    assert allow_lines == [
-        "http-request allow if { path,url_dec -m reg -i " + _SOCKET_PROXY_ALLOW + " }"
-    ]
+    assert len(allow_lines) == 1
     # Всё, что не в списке, — deny: и не-GET, и остальные пути.
     assert "http-request deny unless METH_GET" in template
     assert "    http-request deny\n    default_backend dockerbackend" in template
 
 
-def test_cadvisor_reaches_docker_through_the_proxy_in_compose() -> None:
-    """cAdvisor идёт к Docker по TCP-адресу proxy в отдельной сети; socket
-    смонтирован только у proxy. Из сетей приложения cAdvisor исключён."""
+def _socket_proxy_allows(url: str) -> bool:
+    """Пропустит ли proxy GET на url: регулярка allow-строки шаблона против
+    пути без query, раскодированного, как `path,url_dec` у haproxy (`-i` —
+    без учёта регистра)."""
+    template = SOCKET_PROXY_TEMPLATE.read_text(encoding="utf-8")
+    match = re.search(r"http-request allow if \{ path,url_dec -m reg -i (\S+) \}", template)
+    assert match is not None, "нет allow-строки в docker-socket-proxy.cfg"
+    return re.fullmatch(match.group(1), unquote(urlsplit(url).path), re.IGNORECASE) is not None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/containers/json",
+        "/v1.47/containers/json",
+        "/containers/abc/json",
+        "/v1.47/containers/abc/stats",
+        "/v1.47/containers/abc/stats?stream=false",
+        "/events",
+        "/v1.47/events?filters=%7B%7D",
+        "/info",
+        "/version",
+        "/_ping",
+    ],
+)
+def test_socket_proxy_lets_docker_stats_paths_through(url: str) -> None:
+    assert _socket_proxy_allows(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/containers/abc/logs",
+        "/containers/abc/archive",
+        "/containers/abc/export",
+        "/exec/abc/json",
+        "/containers/a/b/stats",
+        # Слэш, закодированный в id, раскрывается до проверки.
+        "/containers/a%2Fb/stats",
+        "/v1.47/events/x",
+        "/images/json",
+        # Процессы с командными строками, список файлов, потоки stdio контейнера.
+        "/containers/abc/top",
+        "/containers/abc/changes",
+        "/containers/abc/attach/ws",
+        "/volumes",
+        "/system/df",
+    ],
+)
+def test_socket_proxy_rejects_other_paths(url: str) -> None:
+    assert not _socket_proxy_allows(url)
+
+
+def test_docker_socket_is_mounted_only_to_the_proxy() -> None:
+    """docker.sock — только у proxy, в compose и в infra; коллектор ходит к
+    Docker по TCP-адресу proxy (сети сверяют тесты сетей ниже)."""
     services = load_compose()["services"]
-    assert services["cadvisor"]["command"] == ["--docker=tcp://dockerproxy:2375"]
-    assert set(services["cadvisor"]["networks"]) == {"observability", "docker_proxy"}
-    assert services["dockerproxy"]["networks"] == {
-        "docker_proxy": {"aliases": ["dockerproxy"]},
-    }
+    for collector in ("collector", "collector-docker", "collector-logs"):
+        assert not any("docker.sock" in volume for volume in services[collector]["volumes"])
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["dockerproxy"]["volumes"]
-
-
-def test_cadvisor_reaches_docker_through_the_proxy_in_infra() -> None:
-    """То же в infra: у cAdvisor флаг -docker и две сети стека (observability
-    для Prometheus и отдельная для proxy), сети приложения и proxy-socket —
-    только у своих."""
-    cadvisor = _tf_container_block("cadvisor")
-    proxy = _tf_container_block("docker_socket_proxy")
-    assert '"--docker=tcp://dockerproxy:2375"' in cadvisor
-    assert "/var/run/docker.sock" not in cadvisor
-    assert "/var/lib/docker" not in cadvisor
-    assert 'container_path = "/rootfs"' not in cadvisor
-    assert 'host_path      = "/"' not in cadvisor
-    assert "docker_network.dmc268" not in cadvisor
-    assert "docker_network.observability" in cadvisor
-    assert "docker_network.observability_docker_proxy" in cadvisor
-    assert "/var/run/docker.sock" in proxy
-    assert "docker_network.dmc268" not in proxy
-    assert "docker_network.observability_docker_proxy" in proxy
+    assert "/var/run/docker.sock" not in _tf_container_block("otelcol")
+    assert "/var/run/docker.sock" not in _tf_container_block("otelcol_docker")
+    assert "/var/run/docker.sock" not in _tf_container_block("otelcol_logs")
+    assert "/var/run/docker.sock" in _tf_container_block("docker_socket_proxy")
 
 
 # --- сети: стек отдельно от приложения -------------------------------------------------
@@ -427,9 +522,18 @@ def test_stack_networks_split_the_stack_from_the_app_in_compose() -> None:
     assert networks["docker_proxy"]["internal"] is True
     assert networks["observability"]["internal"] is True
     assert not (networks["grafana"] or {}).get("internal")
+    assert not (networks["logs"] or {}).get("internal")
 
     services = load_compose()["services"]
     assert set(services["collector"]["networks"]) == {"default", "observability"}
+    assert set(services["collector-docker"]["networks"]) == {"observability", "docker_proxy"}
+    assert set(services["collector-logs"]["networks"]) == {"observability", "logs"}
+    # В сети proxy — только он сам и экземпляр коллектора с docker_stats:
+    # inspect отдаёт Env всех контейнеров.
+    assert {name for name, service in services.items() if "docker_proxy" in (service.get("networks") or {})} == {
+        "dockerproxy",
+        "collector-docker",
+    }
     assert set(services["prometheus"]["networks"]) == {"default", "observability"}
     assert set(services["grafana"]["networks"]) == {"observability", "grafana"}
     for service in ("loki", "tempo", "node-exporter"):
@@ -437,7 +541,7 @@ def test_stack_networks_split_the_stack_from_the_app_in_compose() -> None:
 
 
 def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
-    """То же в infra: у loki/tempo/grafana/node-exporter/cadvisor сети
+    """То же в infra: у loki/tempo/grafana/node-exporter сети
     dmc268 нет; collector и prometheus — в данных (backend: postgres-
     receiver, скрейп rabbitmq) и сети стека; сеть стека internal, а порт
     Grafana публикуется через отдельную не-internal сеть dmc268-grafana:
@@ -457,7 +561,7 @@ def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
     )
     assert grafana_network is not None, "нет docker_network.grafana в observability.tf"
     assert not re.search(r"^\s*internal\s*=", grafana_network.group(1), re.MULTILINE)
-    for name in ("loki", "tempo", "node_exporter", "cadvisor"):
+    for name in ("loki", "tempo", "node_exporter"):
         block = _tf_container_block(name)
         assert "docker_network.dmc268" not in block, name
         assert "docker_network.observability[" in block, name
@@ -750,8 +854,8 @@ def test_dashboard_queries_cover_the_expected_signals() -> None:
         "node_cpu_seconds_total",
         "node_memory_MemAvailable_bytes",
         "node_filesystem_avail_bytes",
-        "container_cpu_usage_seconds_total",
-        "container_memory_usage_bytes",
+        "container_cpu_usage_nanoseconds_total",
+        "container_memory_usage_total_bytes",
     )
     missing = [signal for signal in expected if signal not in expressions]
     assert not missing, f"нет сигналов в выражениях дашборда: {missing}"

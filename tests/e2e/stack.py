@@ -100,7 +100,8 @@ def webhook_body(pull: PullRequest, action: str = "opened") -> bytes:
             "title": pull.title,
             "body": pull.body or None,
             "user": {"login": pull.author},
-            "head": {"sha": pull.head_sha, "ref": pull.head_ref},
+            "author_association": "MEMBER",
+            "head": {"sha": pull.head_sha, "ref": pull.head_ref, "repo": {"id": int(REPO_PROVIDER_ID)}},
             "base": {"sha": pull.base_sha, "ref": pull.base_ref},
         },
     }
@@ -169,6 +170,7 @@ class Stack:
             _run_changes=PostgresRunChanges(listen_conninfo(self.settings.database_url)),
             _llm_gateway=llm,
             _definition_extractor=TreeSitterDefinitionExtractor(),
+            _app_slug_retry_at=0.0,
         )
 
     def api(self) -> FastAPI:
@@ -254,6 +256,7 @@ class Stack:
                     auto_review_enabled=True,
                     created_at=now,
                     updated_at=now,
+                    connected_at=now,
                 )
             )
             work.commit()

@@ -37,6 +37,15 @@ def collect_open_findings(
     return tuple(t.finding for t in threads) + untracked
 
 
+# Выключенный репозиторий (`DELETE /repositories/{id}`): ревью нет, но обязательная проверка
+# в ruleset без check run держала бы каждый новый PR в «Expected — Waiting for status».
+DISABLED_REVIEW_CHECK = MergeGateCheck(
+    conclusion="success",
+    title="Ревью выключено в сервисе",
+    summary="Ревью этого репозитория выключено в сервисе: проверка мёрж не блокирует.",
+)
+
+
 def build_merge_gate_check(open_findings: tuple[Finding, ...]) -> MergeGateCheck:
     blocked = merge_blocked_by_findings(open_findings)
     conclusion = "failure" if blocked else "success"

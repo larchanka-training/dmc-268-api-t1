@@ -56,13 +56,10 @@ def test_publish_pull_request_review_fetches_inline_ids(rsa_key_pair: RsaKeyPair
         if request.method == "GET" and "/reviews/9001/comments" in request.url.path:
             return httpx.Response(
                 200,
+                # Так отвечает GitHub: line и side пустые, есть только position (#265).
                 json=[
-                    {
-                        "id": 42,
-                        "path": "a.py",
-                        "line": 3,
-                        "side": "RIGHT",
-                    }
+                    {"id": 41, "path": "a.py", "body": "другое", "line": None, "side": None, "position": 3},
+                    {"id": 42, "path": "a.py", "body": "замечание", "line": None, "side": None, "position": 3},
                 ],
             )
         return httpx.Response(404)
@@ -79,8 +76,40 @@ def test_publish_pull_request_review_fetches_inline_ids(rsa_key_pair: RsaKeyPair
     )
 
     assert publication.summary_provider_comment_id == "9001"
-    assert publication.inline_comments[0].provider_comment_id == "42"
+    (inline,) = publication.inline_comments
+    assert inline is not None
+    assert (inline.provider_comment_id, inline.side, inline.line) == ("42", DiffSide.NEW, 3)
     assert any("/pulls/7/reviews/9001/comments" in r.url.path for r in seen)
+
+
+def test_identical_inline_texts_get_ids_in_response_order(rsa_key_pair: RsaKeyPair) -> None:
+    """Два одинаковых замечания в одном файле: id раздаются в порядке ответа GitHub."""
+    first = InlineCommentDraft(file_path="a.py", side=DiffSide.NEW, line=10, body="замечание")
+    second = InlineCommentDraft(file_path="a.py", side=DiffSide.NEW, line=20, body="замечание")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        if request.method == "POST" and request.url.path.endswith("/reviews"):
+            return httpx.Response(200, json={"id": 9001})
+        if request.method == "GET" and "/reviews/9001/comments" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": 51, "path": "a.py", "body": "замечание", "line": None, "side": None, "position": 10},
+                    {"id": 52, "path": "a.py", "body": "замечание", "line": None, "side": None, "position": 20},
+                ],
+            )
+        return httpx.Response(404)
+
+    publication = make_gateway(rsa_key_pair, handler).publish_pull_request_review(
+        "o/r", 7, "c" * 40, INSTALLATION_ID, "сводка", (first, second), review_run_id=RUN_ID
+    )
+
+    assert [(c.line, c.provider_comment_id) for c in publication.inline_comments if c is not None] == [
+        (10, "51"),
+        (20, "52"),
+    ]
 
 
 def test_set_merge_gate_check_posts_check_run(rsa_key_pair: RsaKeyPair) -> None:
@@ -164,7 +193,7 @@ class _GitHub:
         self.seen: list[tuple[str, str]] = []
         self.comments_status = 200
         self.comments: list[dict[str, Any]] = [
-            {"id": 42, "path": "a.py", "line": 3, "side": "RIGHT", "body": DRAFT.body}
+            {"id": 42, "path": "a.py", "line": None, "side": None, "body": DRAFT.body}
         ]
         # Статус `GET /app` до первого и после первого `POST …/reviews`.
         self.app_status_before_post = 200
@@ -273,6 +302,27 @@ def test_timeout_on_create_review_looks_the_review_up_instead_of_repeating(
 
     assert github.posts() == 1
     assert publication.summary_provider_comment_id == "9001"
+
+
+def test_failed_bot_login_before_a_lost_post_does_not_stop_the_lookup(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    """`GET /app` упал до POST, ответ на POST потерян: поиск по маркеру спрашивает `GET /app`
+    снова и находит ревью, а не роняет прогон."""
+
+    def create(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    github = _GitHub(create)
+    github.app_status_before_post = 502
+    github.reviews = [{"id": 9001, "body": f"сводка\n\n{MARKER}", "user": BOT}]
+
+    publication = _publish(make_gateway(rsa_key_pair, github.handler))
+
+    assert github.posts() == 1
+    assert publication.summary_provider_comment_id == "9001"
+    # Суть регрессии: сбой `GET /app` не запомнен, поиск спрашивает его снова.
+    assert [path for _, path in github.seen if path == "/app"] == ["/app", "/app"]
 
 
 def _sleeping_gateway(

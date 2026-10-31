@@ -321,6 +321,29 @@ def test_redaction_sits_in_the_traces_pipeline() -> None:
     assert "transform/redact" not in pipelines["logs"]["processors"]
 
 
+def test_browser_traces_go_only_to_their_own_pipeline() -> None:
+    """Приёмник браузера — только в traces/browser, а ресурс ставит коллектор.
+
+    Тело приходит из интернета через nginx интерфейса: в метрики и логи оно
+    не попадает, а спан, подписанный как dmc-268-api, получает имя dmc-268-ui.
+    """
+    config = load_config()
+    pipelines = config["service"]["pipelines"]
+    users = [name for name, p in pipelines.items() if "otlp/browser" in p["receivers"]]
+    assert users == ["traces/browser"]
+    processors = pipelines["traces/browser"]["processors"]
+    assert processors.index("transform/browser-resource") < processors.index("transform/redact")
+    assert config["receivers"]["otlp/browser"]["protocols"] == {
+        "http": {"endpoint": "0.0.0.0:4319", "max_request_body_size": 524288}
+    }
+    resource = config["processors"]["transform/browser-resource"]["trace_statements"][0]
+    assert resource["context"] == "resource"
+    assert resource["statements"] == [
+        'keep_keys(attributes, ["telemetry.sdk.name", "telemetry.sdk.language", "telemetry.sdk.version", "service.version", "deployment.environment.name"])',
+        'set(attributes["service.name"], "dmc-268-ui")',
+    ]
+
+
 def test_private_repository_url_is_hidden(rules: list[Rule]) -> None:
     """Аудит #89: url.full httpx-спана с приватным репозиторием скрыт."""
     span = apply_rules(
@@ -572,7 +595,7 @@ def test_the_logs_pipeline_takes_otlp_and_redacts_before_grouping() -> None:
         "groupbyattrs/service",
         "batch",
     ]
-    assert pipelines["logs"]["exporters"] == ["otlphttp/loki"]
+    assert pipelines["logs"]["exporters"] == ["otlp_http/loki"]
     for processor in ("transform/redact-logs", "groupbyattrs/service"):
         assert processor not in pipelines["traces"]["processors"]
         assert processor not in pipelines["metrics"]["processors"]
@@ -642,6 +665,118 @@ def test_the_postgresql_receiver_takes_connection_from_the_environment() -> None
     assert receiver["collection_interval"] == "15s"
 
 
+# --- логи контейнеров: маскирование в коллекторе логов ------------------------------
+
+# replace_pattern(body, "регэксп", "замена"): регэкспы — общее подмножество RE2
+# и re (без обратных ссылок), поэтому re.sub даёт то же, что OTTL.
+# Строки OTTL экранируют \\ и \" (в YAML они остаются как есть).
+_REPLACE_BODY = re.compile(
+    r'^replace_pattern\(body, "(?P<pattern>(?:[^"\\]|\\.)+)", "(?P<replacement>[^"$]+)"\)$'
+)
+
+
+def _unescape_ottl(text: str) -> str:
+    return re.sub(r"\\(.)", r"\1", text)
+
+
+def mask_container_log(line: str) -> str:
+    """Тело записи после правил replace_pattern из `otelcol-logs.yaml`, в порядке конфига."""
+    config = yaml.safe_load(COLLECTOR_CONFIG.with_name("otelcol-logs.yaml").read_text(encoding="utf-8"))
+    (block,) = config["processors"]["transform/container-logs"]["log_statements"]
+    for statement in block["statements"]:
+        match = _REPLACE_BODY.match(statement)
+        # Правило в другой форме не должно тихо выпасть из эмуляции.
+        assert match is not None or not statement.startswith("replace_pattern"), statement
+        if match is not None:
+            line = re.sub(_unescape_ottl(match.group("pattern")), match.group("replacement"), line)
+    return line
+
+
+@pytest.mark.parametrize(
+    ("line", "masked"),
+    [
+        (
+            '203.0.113.7 - - [30/Oct/2026:12:00:00 +0000] "GET /api/v1/runs HTTP/1.1" 200 512 "-" "curl/8"',
+            f'{REDACTED} - - [30/Oct/2026:12:00:00 +0000] "GET /api/v1/runs HTTP/1.1" 200 512 "-" "curl/8"',
+        ),
+        (
+            "[error] 29#29: *1 connect() failed, client: 198.51.100.4, server: _",
+            f"[error] 29#29: *1 connect() failed, client: {REDACTED}, server: _",
+        ),
+        (
+            "[info] <0.1234.0> accepting AMQP connection 172.20.0.6:39654 -> 172.20.0.3:5672",
+            f"[info] <0.1234.0> accepting AMQP connection {REDACTED}:39654 -> {REDACTED}:5672",
+        ),
+        (
+            "UTC [77] STATEMENT:  ALTER ROLE dmc268_monitor password 'top''secret'",
+            f"UTC [77] STATEMENT:  ALTER ROLE dmc268_monitor PASSWORD '{REDACTED}'",
+        ),
+        (
+            "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD E'a\\b'",
+            f"UTC [77] STATEMENT:  ALTER ROLE r PASSWORD '{REDACTED}'",
+        ),
+        (
+            "UTC [77] STATEMENT:  CREATE ROLE x PASSWORD 'ab?cd'",
+            f"UTC [77] STATEMENT:  CREATE ROLE x PASSWORD '{REDACTED}'",
+        ),
+        (
+            "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD E'a\\'b'",
+            f"UTC [77] STATEMENT:  ALTER ROLE r PASSWORD '{REDACTED}'",
+        ),
+        (
+            "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD 'first-line-of",
+            f"UTC [77] STATEMENT:  ALTER ROLE r PASSWORD '{REDACTED}'",
+        ),
+        (
+            "UTC [77] STATEMENT:  ALTER ROLE r PASSWORD\t'x'",
+            f"UTC [77] STATEMENT:  ALTER ROLE r PASSWORD '{REDACTED}'",
+        ),
+        (
+            "UTC [77] DETAIL:  Key (installation_id)=(42) already exists.",
+            f"UTC [77] DETAIL:  {REDACTED}",
+        ),
+        (
+            "UTC [77] DETAIL:  Failing row contains (1, secret).",
+            f"UTC [77] DETAIL:  {REDACTED}",
+        ),
+        (
+            "UTC [77] DETAIL:  The slot \"standby\" is active for PID 5.",
+            "UTC [77] DETAIL:  The slot \"standby\" is active for PID 5.",
+        ),
+        (
+            "UTC [77] DETAIL:  Process 5 waits for ShareLock on transaction 9; blocked by process 6.",
+            "UTC [77] DETAIL:  Process 5 waits for ShareLock on transaction 9; blocked by process 6.",
+        ),
+        (
+            (
+                '203.0.113.7 - - [30/Oct/2026:12:00:00 +0000] "GET /api/v1/auth/github/callback?code=X&state=Y HTTP/1.1" '
+                '302 0 "https://github.com/login?return_to=%2Fx&client_id=Z" "curl/8"'
+            ),
+            (
+                f'{REDACTED} - - [30/Oct/2026:12:00:00 +0000] "GET /api/v1/auth/github/callback?{REDACTED} HTTP/1.1" '
+                f'302 0 "https://github.com/login?{REDACTED}" "curl/8"'
+            ),
+        ),
+        (
+            '[error] 29#29: *1 upstream timed out, client: 198.51.100.4, request: "GET /cb?code=X&state=Y HTTP/1.1", host: "h"',
+            f'[error] 29#29: *1 upstream timed out, client: {REDACTED}, request: "GET /cb?{REDACTED} HTTP/1.1", host: "h"',
+        ),
+        (
+            "UTC [77] FATAL:  could not connect: Is the server accepting TCP/IP connections?",
+            "UTC [77] FATAL:  could not connect: Is the server accepting TCP/IP connections?",
+        ),
+        (
+            'UTC [77] FATAL:  password authentication failed for user "dmc268"; PostgreSQL 18.1, RabbitMQ 4.4.0',
+            'UTC [77] FATAL:  password authentication failed for user "dmc268"; PostgreSQL 18.1, RabbitMQ 4.4.0',
+        ),
+    ],
+)
+def test_container_logs_hide_ip_addresses_and_secrets(line: str, masked: str) -> None:
+    """IP клиента nginx (в начале access-лога и в error-логе), адреса соединений,
+    пароль в тексте SQL и DETAIL postgres скрыты маркером; прочее — без изменений."""
+    assert mask_container_log(line) == masked
+
+
 class TestCollectorConfigValidation:
     """Конфиг валидируется самим коллектором.
 
@@ -652,9 +787,13 @@ class TestCollectorConfigValidation:
     """
 
     @pytest.mark.docker
-    def test_collector_accepts_the_config(self) -> None:
+    @pytest.mark.parametrize(
+        "config",
+        [COLLECTOR_CONFIG, *(COLLECTOR_CONFIG.with_name(name) for name in ("otelcol-docker.yaml", "otelcol-logs.yaml"))],
+    )
+    def test_collector_accepts_the_config(self, config: Path) -> None:
         image = compose_collector_image()
-        mount = f"{COLLECTOR_CONFIG}:/etc/otelcol-contrib/config.yaml:ro"
+        mount = f"{config}:/etc/otelcol-contrib/config.yaml:ro"
         # Реквизиты receiver postgresql конфиг берёт из окружения: при
         # валидации достаточно любых непустых значений — проверяется схема,
         # а не доступ к базе.

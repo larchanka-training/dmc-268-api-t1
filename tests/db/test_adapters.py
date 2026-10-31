@@ -1,9 +1,12 @@
 """Что адаптеры делают и что отклоняют."""
 
 import datetime as dt
+import threading
+import time
 from dataclasses import replace
 
 import pytest
+from sqlalchemy import text
 
 from app.application.ports.unit_of_work import ActiveRunConflict
 from app.application.stale_sweep import sweep_stale_runs
@@ -59,6 +62,7 @@ def a_repository() -> Repository:
         auto_review_enabled=True,
         created_at=NOW,
         updated_at=NOW,
+        connected_at=NOW,
     )
 
 
@@ -118,6 +122,73 @@ def test_adding_a_taken_repository_reports_false_instead_of_raising(uow) -> None
     with uow as work:
         stored = work.repositories.find_by_provider(Provider.GITHUB, "1")
     assert stored == first
+
+
+def test_disconnect_and_reconnect_keep_one_record_with_its_id(uow) -> None:
+    """Мягкое выключение: запись та же, `connected_at` пуст; включение возвращает прежний `id`."""
+    repo = a_repository()
+    with uow as work:
+        work.repositories.add(repo)
+        work.commit()
+    with uow as work:
+        work.repositories.disconnect(repo.id, LATER)
+        work.repositories.disconnect(repo.id, LATER)
+        work.commit()
+    with uow as work:
+        disconnected = work.repositories.get(repo.id)
+    assert disconnected == replace(repo, connected_at=None, updated_at=LATER)
+
+    later = LATER + dt.timedelta(minutes=1)
+    candidate = replace(a_repository(), full_name="acme/renamed", connected_at=later, updated_at=later)
+    with uow as work:
+        reconnected = work.repositories.reconnect(candidate)
+        # Уже включён — второе включение ничего не находит.
+        again = work.repositories.reconnect(candidate)
+        work.commit()
+    assert reconnected == replace(repo, full_name="acme/renamed", connected_at=later, updated_at=later)
+    assert again is None
+    with uow as work:
+        assert work.repositories.get(repo.id) == reconnected
+
+
+def test_reconnect_without_a_record_finds_nothing(uow) -> None:
+    with uow as work:
+        assert work.repositories.reconnect(a_repository()) is None
+
+
+def test_two_concurrent_reconnects_leave_one_record_and_one_winner(clean_db) -> None:
+    """Гонка включений выключенного: второй UPDATE ждёт строку, перечитывает её и не совпадает,
+    вставка упирается в ключ — проигравший получает «уже подключён», а не ошибку и не дубль."""
+    repo = replace(a_repository(), connected_at=None)
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        work.repositories.add(repo)
+        work.commit()
+    first = replace(a_repository(), connected_at=LATER, updated_at=LATER)
+    second = replace(a_repository(), full_name="acme/second", connected_at=LATER, updated_at=LATER)
+    locked = threading.Event()
+    results: list[tuple[Repository | None, bool]] = []
+
+    def late_connect() -> None:
+        locked.wait()
+        with SqlAlchemyUnitOfWork(clean_db) as work:
+            # Те же два шага, что у `connect_repository`.
+            reconnected = work.repositories.reconnect(second)
+            results.append((reconnected, reconnected is None and work.repositories.add(second)))
+            work.commit()
+
+    thread = threading.Thread(target=late_connect)
+    thread.start()
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        assert work.repositories.reconnect(first) is not None
+        locked.set()
+        time.sleep(0.3)
+        work.commit()
+    thread.join(timeout=10)
+
+    assert results == [(None, False)]
+    with clean_db.connect() as conn:
+        rows = conn.execute(text("SELECT id, full_name, connected_at FROM repositories")).all()
+    assert [tuple(row) for row in rows] == [(repo.id, "acme/api", LATER)]
 
 
 def test_a_failed_unit_of_work_rolls_everything_back(uow) -> None:

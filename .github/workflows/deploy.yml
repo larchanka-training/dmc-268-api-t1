@@ -350,8 +350,12 @@ jobs:
           # проверка переменной в infra/variables.tf роняет apply: стенд не
           # стартует без шифрования молча.
           TF_VAR_user_token_encryption_key: ${{ secrets.USER_TOKEN_KEY_DMC268_T1 }}
-          # Модели на стенде пока нет: заглушка выбрана явно, ревью пустые.
-          TF_VAR_llm_backend: stub
+          # Ollama на стенде нет: модель - Eurorouter основным (#245), код
+          # проверяемых репозиториев уходит ему. Адрес и ключи - те же, что у
+          # eval.yml; модель - из .github/eurorouter-model, её читают infra.sh и plan.sh.
+          TF_VAR_llm_backend: eurorouter
+          TF_VAR_eurorouter_base_url: ${{ vars.AI_DMC268_URL }}
+          TF_VAR_eurorouter_api_keys: ${{ secrets.AI_DMC268_T1 }}
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/infra.sh

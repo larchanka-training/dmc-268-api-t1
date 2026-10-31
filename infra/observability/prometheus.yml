@@ -2,7 +2,8 @@
 # приходят ручные метрики, HTTP-метрики FastAPI и метрики базы (receiver
 # postgresql коллектора, решение #89: отдельного экспортёра Postgres нет).
 # RabbitMQ — плагин rabbitmq_prometheus (включён в образе
-# rabbitmq:4.4-alpine), сервер — node-exporter, контейнеры — cAdvisor. Имена
+# rabbitmq:4.4-alpine), сервер — node-exporter, контейнеры — receiver
+# docker_stats отдельного экземпляра коллектора (job docker-stats). Имена
 # хостов совпадают локально и на стенде: в compose это имена сервисов и
 # алиасы сети, в infra — алиасы сети dmc268.
 global:
@@ -19,6 +20,33 @@ scrape_configs:
     static_configs:
       - targets: ["collector:8889"]
 
+  # Метрики контейнеров: otelcol-docker.yaml. Панели фильтруют по container_name.
+  - job_name: docker-stats
+    static_configs:
+      - targets: ["collector-docker:8889"]
+
+  # Свои метрики экземпляров коллектора (otelcol_*), Loki и Tempo: отказы
+  # приёма, сбои экспорта, объём.
+  - job_name: collector-self
+    static_configs:
+      - targets: ["collector:8888"]
+
+  - job_name: collector-docker-self
+    static_configs:
+      - targets: ["collector-docker:8888"]
+
+  - job_name: collector-logs-self
+    static_configs:
+      - targets: ["collector-logs:8888"]
+
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]
+
   - job_name: rabbitmq
     # per-object, а не агрегированный /metrics: панель очереди строится по
     # лейблу queue (rabbitmq_queue_messages{queue="review_jobs"}), возраст
@@ -34,11 +62,6 @@ scrape_configs:
   - job_name: node-exporter
     static_configs:
       - targets: ["node-exporter:9100"]
-
-  # Метрики контейнеров: CPU и память каждого контейнера, включая сам стек.
-  - job_name: cadvisor
-    static_configs:
-      - targets: ["cadvisor:8080"]
 
   - job_name: prometheus
     static_configs:

@@ -88,8 +88,9 @@ resource "docker_container" "postgres" {
   security_opts = ["no-new-privileges:true"]
   memory        = 1024
   memory_swap   = 1024
-  log_driver    = "json-file"
-  log_opts      = local.log_opts
+  # Со стеком — в Loki через коллектор логов (local.fluentd_log_opts).
+  log_driver = var.observability_enabled ? "fluentd" : "json-file"
+  log_opts   = var.observability_enabled ? local.fluentd_log_opts : local.log_opts
 
   networks_advanced {
     name = docker_network.backend.name
@@ -146,7 +147,8 @@ resource "docker_container" "postgres" {
   wait = true
 
   healthcheck {
-    test     = ["CMD-SHELL", "pg_isready -U ${var.postgres_user} -d ${var.postgres_db}"]
+    # По TCP: временный сервер инициализации на пустом томе слушает только сокет (#254).
+    test     = ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${var.postgres_user} -d ${var.postgres_db}"]
     interval = "10s"
     timeout  = "5s"
     retries  = 5
