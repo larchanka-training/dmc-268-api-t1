@@ -134,17 +134,26 @@ def _image_section(
     out.append(f"| Образ | `container.image.name` | `{cell(img.get('name', ''))}` | |")
     if img.get("id"):
         out.append(f"| ID | `container.image.id` | `{cell(img['id'][:19])}` | |")
-    out.append(
-        f"| Размер | `dmc268.build.image.size` | {human_bytes(img['size'])} "
-        f"| {delta(img['size'], bi.get('size'))} |"
-    )
-    if img.get("compressed"):
+    size = _bytes(img, "size")
+    if size is not None:
+        out.append(
+            f"| Размер | `dmc268.build.image.size` | {human_bytes(size)} "
+            f"| {delta(size, _bytes(bi, 'size'))} |"
+        )
+    compressed = _bytes(img, "compressed")
+    if compressed:
         out.append(
             "| Сжатый (`docker save` \\| gzip) | `dmc268.build.image.size.compressed` "
-            f"| {human_bytes(img['compressed'])} "
-            f"| {delta(img['compressed'], bi.get('compressed'))} |"
+            f"| {human_bytes(compressed)} "
+            f"| {delta(compressed, _bytes(bi, 'compressed'))} |"
         )
     return [*out, ""]
+
+
+def _bytes(m: Mapping[str, Any], key: str) -> int | None:
+    """Размер из чужого json: не целое (нет, null, строка) — нет значения."""
+    v = m.get(key)
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
 
 
 def trivy_counts(

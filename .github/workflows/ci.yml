@@ -183,12 +183,19 @@ jobs:
           --hadolint build-summary/hadolint.json
           >> "$GITHUB_STEP_SUMMARY"
       # Только успешный прогон develop становится базой. Ключ по sha: запись
-      # кэша неизменяема, а restore-keys берёт самую свежую.
+      # кэша неизменяема, а restore-keys берёт самую свежую. Метрик нет (упал
+      # collect) — базу не пишем: пустой кэш вытеснил бы рабочую базу.
       - name: Метрики develop для следующих прогонов
+        id: base
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/develop' }}
-        run: mkdir -p build-base && cp build-summary/metrics.json build-base/metrics.json
+        run: |
+          if [ -f build-summary/metrics.json ]; then
+            mkdir -p build-base && cp build-summary/metrics.json build-base/metrics.json
+            echo "saved=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/develop' }}
+        if: ${{ steps.base.outputs.saved == 'true' }}
+        continue-on-error: true
         with:
           path: build-base
           key: build-metrics-${{ github.sha }}

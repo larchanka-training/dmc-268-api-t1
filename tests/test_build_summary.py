@@ -353,3 +353,13 @@ def test_cli_collect_fails_without_writing_metrics(tmp_path, fake_docker, broken
     assert r.returncode == 1
     assert "Traceback" not in r.stderr
     assert not out.exists()
+
+
+@pytest.mark.parametrize("size", [None, "242 MiB", True])
+def test_render_image_without_integer_size_skips_size_row(size):
+    metrics = {"image": {"name": "dmc268-api:ci"}}
+    if size is not None:
+        metrics["image"]["size"] = size
+    md = build_summary.render(metrics, base={"image": {"size": "x"}}, env=ENV)
+    assert "`container.image.name`" in md
+    assert "dmc268.build.image.size`" not in md
