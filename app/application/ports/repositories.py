@@ -62,8 +62,13 @@ class RepositoryRepo(Protocol):
         """Выключить ревью: `connected_at = NULL`; уже выключенный или отсутствующий — без ошибки."""
         ...
 
-    def update_settings(self, repository_id: UUID, settings: RepositorySettings, now: datetime) -> None:
-        """Заменить настройки ревью целиком и `updated_at = now`; отсутствующий — без ошибки."""
+    def update_settings(
+        self, repository_id: UUID, settings: RepositorySettings, now: datetime
+    ) -> Repository | None:
+        """Заменить настройки ревью целиком и `updated_at = now`.
+
+        Вернуть записанную запись; `None` — записи нет (в том числе удалили параллельно).
+        """
         ...
 
 

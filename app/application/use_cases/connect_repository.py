@@ -49,6 +49,8 @@ class ConnectRefusal(StrEnum):
     NOT_IN_INSTALLATION = "not_in_installation"
     ALREADY_CONNECTED = "already_connected"
     MANAGE_REQUIRED = "manage_required"
+    # Записи в сервисе нет: удалили между проверкой видимости и записью.
+    NOT_FOUND = "not_found"
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,12 +205,13 @@ def save_repository_settings(
     repository: Repository,
     settings: RepositorySettings,
     now: datetime,
-) -> ConnectRefusal | None:
-    """Записать настройки ревью видимого пользователю репозитория; `None` — записано.
+) -> Repository | ConnectRefusal:
+    """Записать настройки ревью видимого пользователю репозитория и вернуть записанную запись.
 
     Права — тем же правилом и тем же запросом к провайдеру мимо кэша, что у выключения
     (design D6): не отдан — `NOT_IN_INSTALLATION`, нет admin или maintain —
-    `MANAGE_REQUIRED`; при отказе ничего не пишется. Замена полная, повтор того же тела
+    `MANAGE_REQUIRED`; при отказе ничего не пишется. Записи к моменту записи уже нет —
+    `NOT_FOUND`. Замена полная, повтор того же тела
     даёт ту же запись. Выключенный репозиторий настройки получает, но не включается:
     `connected_at` не трогаем, включение — `connect_repository`.
     """
@@ -216,9 +219,9 @@ def save_repository_settings(
     if refusal is not None:
         return refusal
     with uow:
-        uow.repositories.update_settings(repository.id, settings, now)
+        saved = uow.repositories.update_settings(repository.id, settings, now)
         uow.commit()
-    return None
+    return saved if saved is not None else ConnectRefusal.NOT_FOUND
 
 
 def connect_installation(

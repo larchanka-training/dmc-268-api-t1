@@ -6,7 +6,7 @@
 
 import re
 from collections.abc import Iterator
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -1087,6 +1087,30 @@ def test_saving_settings_of_a_repository_github_no_longer_shows_looks_like_a_mis
     assert _strip(revoked.json()) == _strip(missing.json())
     assert revoked.json()["code"] == "REPOSITORY_NOT_FOUND"
     assert uow.repositories.get(repository.id) == repository
+
+
+def test_saving_settings_answers_the_stored_record_not_the_body() -> None:
+    """Ответ — то, что вернула запись в базу; запись исчезла до записи настроек — 404."""
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+    stored = RepositorySettings(True, ("develop",), FindingSeverity.LOW)
+    uow.repositories.update_settings = lambda repository_id, settings, now: replace(  # type: ignore[method-assign]
+        repository, **asdict(stored)
+    )
+
+    assert _put_settings(client, repository.id, SETTINGS_BODY).json() == {
+        "auto_review_enabled": True,
+        "branch_filter": ["develop"],
+        "min_severity": "low",
+    }
+
+    uow.repositories.update_settings = lambda repository_id, settings, now: None  # type: ignore[method-assign]
+    deleted = _put_settings(client, repository.id, SETTINGS_BODY)
+    missing = _put_settings(client, new_id(), SETTINGS_BODY)
+
+    assert deleted.status_code == missing.status_code == 404
+    assert _strip(deleted.json()) == _strip(missing.json())
 
 
 def test_settings_of_a_disconnected_repository_are_saved_without_connecting_it() -> None:

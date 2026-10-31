@@ -302,7 +302,7 @@ def _stored(uow: FakeUnitOfWork, repository: Repository) -> Repository:
 
 def _save(
     catalog: FakeInstallationCatalog, uow: FakeUnitOfWork, repository: Repository, settings: RepositorySettings = SETTINGS
-) -> ConnectRefusal | None:
+) -> Repository | ConnectRefusal:
     return save_repository_settings(catalog, uow, _user(), repository, settings, LATER)
 
 
@@ -316,9 +316,10 @@ def test_admin_and_maintain_save_settings(permissions: RepositoryPermissions) ->
     uow = _signed_in()
     repository = _stored(uow, _registered("101"))
 
-    assert _save(FakeInstallationCatalog([_repo("101", "api", permissions)]), uow, repository) is None
+    outcome = _save(FakeInstallationCatalog([_repo("101", "api", permissions)]), uow, repository)
 
     saved = _settings_of(uow, repository)
+    assert outcome == saved
     assert saved is not None
     assert (saved.auto_review_enabled, saved.branch_filter, saved.min_severity, saved.updated_at) == (
         False,
@@ -345,6 +346,15 @@ def test_settings_of_a_repository_github_does_not_give_are_refused() -> None:
 
     assert _save(FakeInstallationCatalog([]), uow, repository) is ConnectRefusal.NOT_IN_INSTALLATION
     assert _settings_of(uow, repository) == repository
+
+
+def test_settings_of_a_record_deleted_before_the_write_are_not_found() -> None:
+    """Запись удалили между проверкой видимости и записью: не «сохранено», а отказ."""
+    uow = _signed_in()
+    repository = _registered("101")  # в базе записи нет
+
+    assert _save(FakeInstallationCatalog([API]), uow, repository) is ConnectRefusal.NOT_FOUND
+    assert _settings_of(uow, repository) is None
 
 
 def test_the_role_is_asked_from_github_directly() -> None:
@@ -396,9 +406,10 @@ def test_settings_of_a_disconnected_repository_are_saved_without_connecting_it()
     uow = _signed_in()
     repository = _stored(uow, replace(_registered("101"), connected_at=None))
 
-    assert _save(FakeInstallationCatalog([API]), uow, repository) is None
+    outcome = _save(FakeInstallationCatalog([API]), uow, repository)
 
     saved = _settings_of(uow, repository)
+    assert outcome == saved
     assert saved is not None
     assert saved.connected_at is None
     assert saved.min_severity is FindingSeverity.HIGH

@@ -180,10 +180,11 @@ def test_update_settings_writes_three_columns_and_updated_at(uow) -> None:
         work.repositories.add(repo)
         work.commit()
     with uow as work:
-        work.repositories.update_settings(repo.id, HIGH_ON_MAIN, LATER)
+        returned = work.repositories.update_settings(repo.id, HIGH_ON_MAIN, LATER)
         work.commit()
     with uow as work:
         stored = work.repositories.get(repo.id)
+    assert returned == stored
     assert stored == replace(
         repo,
         auto_review_enabled=False,
@@ -204,6 +205,12 @@ def test_update_settings_writes_three_columns_and_updated_at(uow) -> None:
         work.commit()
     with uow as work:
         assert work.repositories.get(repo.id) == replace(repo, updated_at=LATER)
+
+
+def test_update_settings_of_a_missing_record_returns_none(uow) -> None:
+    with uow as work:
+        assert work.repositories.update_settings(a_repository().id, HIGH_ON_MAIN, LATER) is None
+        work.commit()
 
 
 def test_disconnect_and_reconnect_keep_the_saved_settings(uow) -> None:

@@ -143,10 +143,12 @@ _SAVE_SETTINGS_DESCRIPTION = (
     "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела, id "
     "репозитория и тело — раньше обращения к базе и к GitHub. Тело — полный набор настроек: все поля "
     "обязательны, запись заменяет прежние настройки целиком, повтор того же тела ничего не меняет; "
-    "паттерны веток хранятся обрезанными. Ответ — 200 с сохранёнными настройками. Проверки по "
+    "паттерны веток хранятся обрезанными. Ответ — 200 с настройками, какими их записала база. "
+    "Проверки по "
     "порядку: видимость — " + _VISIBILITY_REFUSALS + " Затем роль — как у POST и DELETE "
     "/repositories, запросом к GitHub мимо кэша видимости: без admin или maintain — "
-    "`403 REPOSITORY_MANAGE_REQUIRED`, GitHub не отдал репозиторий — `404 REPOSITORY_NOT_FOUND`; "
+    "`403 REPOSITORY_MANAGE_REQUIRED`, GitHub не отдал репозиторий или запись удалили до записи "
+    "настроек — `404 REPOSITORY_NOT_FOUND`; "
     "при отказе и при `502` настройки не меняются. Выключенный репозиторий настройки получает, но не "
     "включается — включение только POST /repositories. Смена порога уже стоящую проверку merge "
     "gate не пересчитывает: новый порог применится со следующим прогоном или вебхуком закрытия треда."
@@ -693,20 +695,22 @@ def save_repository_settings(
     )
     # Права — мимо кэша, как у выключения: `user_repository` кэш видимости не читает.
     now = datetime.now(UTC)
-    refusal = _as_user(
+    outcome = _as_user(
         signed_in,
         oauth,
         lambda user: connecting.save_repository_settings(catalog, uow_factory(), user, repository, settings, now),
     )
-    if refusal is connecting.ConnectRefusal.NOT_IN_INSTALLATION:
-        raise _repository_not_found()
-    if refusal is connecting.ConnectRefusal.MANAGE_REQUIRED:
+    if outcome is connecting.ConnectRefusal.MANAGE_REQUIRED:
         raise ApiError(
             HTTPStatus.FORBIDDEN,
             ErrorCode.REPOSITORY_MANAGE_REQUIRED,
             "Менять настройки ревью может только пользователь с правом admin или maintain на репозиторий.",
         )
-    return _settings_response(settings)
+    if isinstance(outcome, connecting.ConnectRefusal):
+        # GitHub не отдал репозиторий или запись удалили до записи настроек — ответ один.
+        raise _repository_not_found()
+    # Ответ — запись, какой её сохранила база, а не тело запроса.
+    return _settings_response(outcome)
 
 
 @router.get(

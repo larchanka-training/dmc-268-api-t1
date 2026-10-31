@@ -156,8 +156,11 @@ class SqlAlchemyRepositoryRepo:
             .values(connected_at=None, updated_at=now)
         )
 
-    def update_settings(self, repository_id: UUID, settings: RepositorySettings, now: dt.datetime) -> None:
-        self._session.execute(
+    def update_settings(
+        self, repository_id: UUID, settings: RepositorySettings, now: dt.datetime
+    ) -> Repository | None:
+        # RETURNING — запись, какой её сохранила база, без второго запроса.
+        row = self._session.scalars(
             update(RepositoryRow)
             .where(RepositoryRow.id == repository_id)
             .values(
@@ -166,7 +169,9 @@ class SqlAlchemyRepositoryRepo:
                 min_severity=settings.min_severity,
                 updated_at=now,
             )
-        )
+            .returning(RepositoryRow)
+        ).one_or_none()
+        return m.repository_to_domain(row) if row else None
 
 
 class SqlAlchemyMergeRequestRepo:
