@@ -13,6 +13,7 @@ import pytest
 from app.application.merge_gate_publish import (
     SETTLE_ATTEMPTS,
     build_failed_review_check,
+    build_merge_gate_check,
     build_retarget_check,
     settle_merge_gate,
 )
@@ -194,7 +195,11 @@ def test_thread_sync_failure_still_sets_the_merge_gate_from_the_database(
     (check,) = vcs.checks
     assert check.conclusion == "failure"
     assert len(vcs.publications) == 1
-    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    (record,) = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "app.application.publish_review"
+    ]
     assert str(RUN_ID) in record.getMessage()
     assert record.exc_info is not None and record.exc_info[1] is error
 
@@ -614,7 +619,12 @@ def test_merge_gate_failure_after_publishing_does_not_fail_the_run(
         _publish_first_run(uow, _run_with_critical_finding(uow), vcs)
 
     assert len(vcs.publications) == 1
-    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(vcs.checks) == 0
+    (record,) = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "app.application.publish_review"
+    ]
     assert str(RUN_ID) in record.getMessage()
     assert record.exc_info is not None and record.exc_info[1] is error
 
@@ -832,6 +842,7 @@ def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
         run_id=run.id,
+        check=build_merge_gate_check(()),
     )
 
     assert vcs.checks == [build_retarget_check()]
@@ -859,6 +870,7 @@ def test_settling_on_a_failed_latest_run_keeps_the_failure() -> None:
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
         run_id=run.id,
+        check=build_merge_gate_check(()),
     )
 
     assert vcs.checks == [build_failed_review_check()]

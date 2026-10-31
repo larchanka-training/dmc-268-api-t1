@@ -133,12 +133,6 @@ def publish_review(
     # прогону и второму ревью. Без check run обязательная проверка не даёт мерджа
     # до следующего прогона или вебхука закрытия треда.
     try:
-        vcs.set_merge_gate_check(
-            job.repository_full_name,
-            job.head_sha,
-            job.installation_id,
-            build_merge_gate_check(still_open),
-        )
         # Ветку могли сменить после проверки статуса до публикации (#222).
         settle_merge_gate(
             uow,
@@ -148,6 +142,7 @@ def publish_review(
             head_sha=job.head_sha,
             installation_id=job.installation_id,
             run_id=run.id,
+            check=build_merge_gate_check(still_open),
         )
     except VcsError:
         logger.warning(
