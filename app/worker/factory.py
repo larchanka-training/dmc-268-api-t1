@@ -52,12 +52,10 @@ from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
     CONSUMER_ARGUMENTS,
     CONSUMER_TIMEOUT_SECONDS,
-    LEGACY_QUEUE_NAME,
     QUEUE_NAME,
     consuming_span,
     declare_topology,
     from_wire_message,
-    move_legacy_jobs,
 )
 from app.infrastructure.telemetry import (
     REVIEW_RUN_ID,
@@ -155,25 +153,20 @@ class Worker:
 
         Брокер может сам отменить потребителя (`x-consumer-timeout`): цикл тогда
         кончается, это пишется в лог, и процесс выходит под перезапуск.
-
-        На том же такте, что и `sweep`, остатки старой классической очереди
-        перекладываются в quorum-очередь (`move_legacy_jobs`, #223).
         """
         processed = 0
         last_sweep: float | None = None
         consuming = True
-        legacy_queue = True
         try:
             for method, properties, body in self.channel.consume(
                 QUEUE_NAME, inactivity_timeout=1, arguments=CONSUMER_ARGUMENTS
             ):
                 if stop is not None and stop.requested:
-                    consuming = self._stop_consuming(method)
+                    self._stop_consuming(method)
+                    consuming = False
                     break
                 if last_sweep is None or time.monotonic() - last_sweep >= sweep_interval:
                     last_sweep = time.monotonic()
-                    if legacy_queue:
-                        legacy_queue = self._move_legacy_jobs()
                     if sweep is not None:
                         try:
                             with sweep_span():
@@ -182,7 +175,8 @@ class Worker:
                             logger.exception("проход по зависшим прогонам завершился ошибкой")
                     # Сигнал мог прийти посреди прохода — сообщение этого такта не берём.
                     if stop is not None and stop.requested:
-                        consuming = self._stop_consuming(method)
+                        self._stop_consuming(method)
+                        consuming = False
                         break
                 if method is None:
                     continue
@@ -228,46 +222,22 @@ class Worker:
                 self.channel.cancel()
             self.connection.close()
 
-    def _stop_consuming(self, method: spec.Basic.Deliver | None) -> bool:
-        """Штатная остановка: снять потребителя, потом вернуть выданное, не взятое в работу.
+    def _stop_consuming(self, method: spec.Basic.Deliver | None) -> None:
+        """Штатная остановка: снять потребителя, потом вернуть в очередь выданное, не
+        взятое в работу сообщение — `nack` с requeue.
 
-        Порядок важен: пока выданное держит prefetch=1, брокер следующего не
-        пришлёт; `nack` раньше `cancel` освободил бы слот, и пришедшее следом
-        сообщение `cancel()` вернул бы `basic.reject`, потратив попытку (#223).
-        Возвращает `False` — потребитель снят.
-        """
-        self.channel.cancel()
-        self._return_unprocessed(method)
-        return False
-
-    def _return_unprocessed(self, method: spec.Basic.Deliver | None) -> None:
-        """Вернуть в очередь выданное, но не взятое в работу сообщение — `nack` с requeue.
-
-        Без него сообщение вернул бы брокер при `connection.close()` (или pika через
+        Без `nack` сообщение вернул бы брокер при `connection.close()` (или pika через
         `basic.reject` при `cancel()`), и quorum-очередь засчитала бы это неудачной
         доставкой (#223): каждый деплой тратил бы попытку из `DELIVERY_LIMIT`.
-        `basic.nack` попытку не тратит.
+        `basic.nack` попытку не тратит. Порядок важен: пока выданное держит
+        prefetch=1, брокер следующего не пришлёт; `nack` раньше `cancel` освободил бы
+        слот, и пришедшее следом сообщение `cancel()` вернул бы `basic.reject`.
         """
+        self.channel.cancel()
         if method is not None:
             assert method.delivery_tag is not None
             self.channel.basic_nack(method.delivery_tag, requeue=True)
 
-    def _move_legacy_jobs(self) -> bool:
-        """Переход на quorum-очередь (#223): остатки классической `review_jobs`.
-
-        Сбой не останавливает потребление — повторится на следующем такте.
-        `False` — старой очереди нет, дальше не спрашиваем."""
-        try:
-            moved = move_legacy_jobs(self.connection)
-        except Exception:
-            logger.exception("перенос задач из старой очереди %s завершился ошибкой", LEGACY_QUEUE_NAME)
-            return True
-        if moved is None:
-            logger.info("старой очереди %s нет: перенос задач больше не нужен", LEGACY_QUEUE_NAME)
-            return False
-        if moved:
-            logger.info("задач перенесено из старой очереди %s: %d", LEGACY_QUEUE_NAME, moved)
-        return True
 
 
 def build_worker(settings: Settings) -> Worker:
@@ -423,7 +393,8 @@ def check_consumer_timeout(settings: Settings) -> None:
         raise WorkerConfigError(
             f"прогон в худшем случае {worst:g} с (два вызова модели × LLM_TIMEOUT_SECONDS"
             f" × LLM_MAX_ATTEMPTS × провайдеры + 60) не короче таймаута подтверждения"
-            f" потребителя {CONSUMER_TIMEOUT_SECONDS} с (CONSUMER_TIMEOUT_SECONDS)"
+            f" потребителя {CONSUMER_TIMEOUT_SECONDS} с (константа CONSUMER_TIMEOUT_SECONDS"
+            f" в app/infrastructure/queue/rabbitmq.py)"
         )
 
 

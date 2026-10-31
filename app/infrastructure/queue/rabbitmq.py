@@ -29,7 +29,6 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from pika import spec
 from pika.exceptions import (
     AMQPConnectionError,
-    ChannelClosedByBroker,
     ChannelWrongStateError,
     ConnectionBlockedTimeout,
 )
@@ -59,10 +58,6 @@ DELIVERY_LIMIT = 5
 # брокер отвергает (`406 PRECONDITION_FAILED`) — и у воркера, и у API.
 CONSUMER_TIMEOUT_SECONDS = 2 * 60 * 60
 CONSUMER_ARGUMENTS = {"x-consumer-timeout": CONSUMER_TIMEOUT_SECONDS * 1000}
-# Классическая очередь до #223. Тип у объявленной очереди не меняется, поэтому
-# quorum-очередь — под новым именем, а остатки старой воркер перекладывает в неё
-# (`move_legacy_jobs`). Удаляется вместе со старой очередью, когда её на стенде нет.
-LEGACY_QUEUE_NAME = "review_jobs"
 # Приоритет должен был бы зависеть от тарифа аккаунта, но `accounts` ещё не
 # реализован (см. BACKEND_ARCHITECTURE.md, "Спроектированы, но не
 # реализованы") — фиксированный дефолт до тех пор, см. design.md
@@ -148,54 +143,6 @@ def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel)
             "x-dead-letter-exchange": DLX_NAME,
         },
     )
-
-
-def move_legacy_jobs(connection: pika.BlockingConnection) -> int | None:
-    """Переложить сообщения из классической `review_jobs` в quorum-очередь; вернуть их число.
-
-    `None` — старой очереди нет: на свежем брокере её и не будет, и вызывающий
-    больше не спрашивает (каждый `404` — строка `error` в логе брокера).
-
-    Нужен на время перехода (#223): в старой очереди на стенде лежит то, что не
-    успели обработать до деплоя, и то, что старый API положил в окне деплоя, пока
-    его не заменили. Воркер зовёт это на старте и на каждом проходе выметателя.
-    Свойства сообщения (приоритет, `traceparent`) переносятся как есть. Сначала
-    публикация с подтверждением брокера, потом `ack` в старой очереди: при сбое
-    посередине сообщение может оказаться в обеих, но не потеряется — повтор
-    прогона воркер отсеивает. Старую очередь не удаляем: старый API, ещё живой в
-    окне деплоя, публикует в неё с `mandatory`, и удаление превратило бы его
-    постановку в отказ.
-
-    Канал свой: пассивное объявление несуществующей очереди брокер отвечает
-    закрытием канала (`404`), и это не должно задеть канал потребления.
-    """
-    channel = connection.channel()
-    try:
-        try:
-            channel.queue_declare(queue=LEGACY_QUEUE_NAME, passive=True)
-        except ChannelClosedByBroker as exc:
-            if exc.reply_code == 404:
-                return None
-            raise
-        channel.confirm_delivery()
-        moved = 0
-        while True:
-            method, properties, body = channel.basic_get(LEGACY_QUEUE_NAME, auto_ack=False)
-            if method is None:
-                return moved
-            assert method.delivery_tag is not None and body is not None
-            channel.basic_publish(
-                exchange="",
-                routing_key=QUEUE_NAME,
-                body=body,
-                properties=properties,
-                mandatory=True,
-            )
-            channel.basic_ack(method.delivery_tag)
-            moved += 1
-    finally:
-        if channel.is_open:
-            channel.close()
 
 
 @contextlib.contextmanager
