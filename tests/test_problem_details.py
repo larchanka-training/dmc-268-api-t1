@@ -589,13 +589,10 @@ DIFF_SOURCE = {"kind": "diff", "diff": "--- a/app/x.py\n+++ b/app/x.py\n@@ -1 +1
 SIMULATION_BODY = {"source": CODE_SOURCE, "rules": RULES_TEXT}
 
 
-def test_planned_playground_posts_answer_not_implemented() -> None:
+def test_planned_simulation_start_answers_not_implemented() -> None:
     """Допустимое тело - в том числе пустые правила и вход ровно на пределе - доходит до `501`."""
     client = _signed_in_client()
     for path, body in (
-        (PARSE_PATH, {"rules": ""}),
-        (PARSE_PATH, {"rules": RULES_TEXT, "paths": ["app/billing.py", "tests/test_billing.py"]}),
-        (PARSE_PATH, {"rules": "x" * 32_768, "paths": [f"f{n}.py" for n in range(100)]}),
         (SIMULATIONS_PATH, SIMULATION_BODY),
         (SIMULATIONS_PATH, {"source": DIFF_SOURCE, "rules": ""}),
         (SIMULATIONS_PATH, {"source": {**CODE_SOURCE, "content": "x" * 131_072}, "rules": "x" * 32_768}),
@@ -613,7 +610,7 @@ def test_planned_simulation_read_checks_session_and_id_first(client: TestClient)
 
 
 @pytest.mark.parametrize(("path", "good_body"), [(PARSE_PATH, {"rules": RULES_TEXT}), (SIMULATIONS_PATH, SIMULATION_BODY)])
-def test_planned_playground_posts_check_origin_and_session_first(
+def test_playground_posts_check_origin_and_session_first(
     client: TestClient, path: str, good_body: dict[str, Any]
 ) -> None:
     """Без `Origin` - `403`, без сессии - `401`; неверное тело в обоих случаях не разбирается."""
@@ -679,8 +676,8 @@ def test_planned_playground_posts_check_origin_and_session_first(
         (SIMULATIONS_PATH, {"source": CODE_SOURCE}, {"where": "body.rules", "reason": "обязательный параметр не передан"}),
     ],
 )
-def test_planned_playground_posts_check_the_body_first(path: str, body: dict[str, Any], error: dict[str, str]) -> None:
-    """Заглушки песочницы проверяют тело раньше, чем ответить `501`."""
+def test_playground_posts_check_the_body(path: str, body: dict[str, Any], error: dict[str, str]) -> None:
+    """Ручки песочницы проверяют тело раньше всего остального; заглушка - раньше, чем ответить `501`."""
     response = _signed_in_client().post(path, json=body, headers={"Origin": ORIGIN})
     problem = assert_problem(response, 422, "VALIDATION_ERROR", path)
     assert problem["errors"] == [error]
@@ -700,7 +697,8 @@ def test_playground_and_inspection_are_in_the_exported_contract() -> None:
 
     parse = paths[PARSE_PATH]["post"]
     assert ok_schema(parse) == {"$ref": "#/components/schemas/RulesParseResponse"}
-    assert {"401", "403", "413", "422", "501"} <= set(parse["responses"])
+    assert {"401", "403", "413", "422"} <= set(parse["responses"])
+    assert "501" not in parse["responses"]
     rule = components["ParsedRuleResponse"]
     assert {"name", "line", "patterns", "excludes", "checks", "matched_paths"} == set(rule["required"])
     assert set(components["ParsedCheckResponse"]["required"]) == {"number", "text", "line"}

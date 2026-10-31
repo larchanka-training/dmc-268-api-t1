@@ -1132,41 +1132,6 @@
 - **WHEN** GitHub отдаёт `octo-org/web` с ролью read, triage или write
 - **THEN** у `octo-org/web` в ответе `can_connect = false`, и `POST /repositories` с его `provider_id` его не подключает: `403` с `code = REPOSITORY_MANAGE_REQUIRED`, а публичный только с правом чтения — `404`, как невидимый (такую строку GitHub в список не отдаёт: это ответ на прямой `POST`)
 
-### Requirement: Разбор правил песочницы описан заглушкой
-
-`POST /api/v1/rules/parse` SHALL быть описан в схеме с телом `RulesParseRequest` и ответом `RulesParseResponse` и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализован.
-Ручка SHALL требовать сессию и `Origin` сервиса и SHALL проверять тело раньше `501`.
-
-#### Scenario: Разбор правил
-
-- **WHEN** вызывается `POST /api/v1/rules/parse` с сессией, своим `Origin` и допустимым телом, в том числе с пустым `rules` и без `paths`
-- **THEN** ответ - `501` `application/problem+json` с `code = NOT_IMPLEMENTED`
-
-#### Scenario: Без Origin
-
-- **WHEN** вызывается `POST /api/v1/rules/parse` без `Origin` или с чужим `Origin`, с сессией или без
-- **THEN** ответ - `403` с `code = ORIGIN_FORBIDDEN`, тело не разбирается
-
-#### Scenario: Без сессии
-
-- **WHEN** вызывается `POST /api/v1/rules/parse` со своим `Origin`, без сессии и с неверным телом
-- **THEN** ответ - `401` с `code = UNAUTHENTICATED`
-
-#### Scenario: Позиции правил в контракте
-
-- **WHEN** фронтенд читает `RulesParseResponse` в `docs/openapi/openapi.json`
-- **THEN** у принятого правила есть `line`, `checks` с `number`, `text` и `line` и `matched_paths` - файлы из `paths`, к которым правило применимо, у отклонённого раздела - `line` и `reason`
-
-### Requirement: Тело разбора правил проверяется раньше 501
-
-Тело `POST /api/v1/rules/parse` SHALL содержать `rules` - текст `.review/rules.md` не длиннее 32 768 символов, пустой допустим, - и необязательный `paths` - не больше 100 путей файлов длиной от 1 до 1024 символов.
-Текст с NUL и лишние поля SHALL отклоняться.
-
-#### Scenario: Неверное тело
-
-- **WHEN** `rules` длиннее 32 768 символов или содержит NUL, в `paths` есть пустая строка, путей больше 100 или в теле есть лишнее поле
-- **THEN** ответ - `422` с `code = VALIDATION_ERROR` и ошибкой в этом поле
-
 ### Requirement: Симуляция ревью описана заглушкой
 
 `POST /api/v1/simulations` и `GET /api/v1/simulations/{simulation_id}` SHALL быть описаны в схеме с ответом `SimulationResponse` и SHALL отвечать `501` с `code = NOT_IMPLEMENTED`, пока не реализованы.
@@ -1264,3 +1229,54 @@
 
 - **WHEN** фронтенд читает операцию инспекции в `docs/openapi/openapi.json`
 - **THEN** ответ `404` допускает `REVIEW_NOT_FOUND` и `FINDING_NOT_FOUND`, а `FindingInspectionResponse` описывает итог второго прохода прогона, вердикт верификатора по находке с причиной и контекст модели по файлу находки, и `verdict` и `context` допускают `null`
+
+### Requirement: Разбор правил песочницы
+
+`POST /api/v1/rules/parse` SHALL разбирать `rules` тем же разбором, что ревью запроса на изменение применяет к `.review/rules.md`, без вызова модели, и SHALL отвечать `200` с `RulesParseResponse`.
+Строки SHALL нумероваться с 1 и делиться только по `\n`.
+Ручка SHALL требовать сессию и `Origin` сервиса.
+
+#### Scenario: Принятое правило и отклонённый раздел
+
+- **WHEN** в `rules` раздел `## Error Handling Standards` с паттерном и пунктами `1.` и `3.` и раздел `## Naming` без пунктов
+- **THEN** ответ - `200`: правило со строкой заголовка в `line` и пунктами с `number` 1 и 2 (позиция, а не число автора), текстом и строкой; `Naming` - в `rejected` с причиной «нет проверок» и строкой заголовка
+
+#### Scenario: Применимость к файлам
+
+- **WHEN** у правила `pattern: app/**/*.py` и `exclude: **/tests/**`, а `paths` - `app/billing.py`, `app/tests/test_billing.py` и `lib/x.py`
+- **THEN** `matched_paths` правила - `["app/billing.py"]`; без `paths` - пустой список
+
+#### Scenario: Тот же разбор, что у ревью
+
+- **WHEN** ревью разобрало бы тот же текст из `.review/rules.md`
+- **THEN** правила и отклонённые разделы в ответе - те же и в том же порядке, включая разделы, съеденные незакрытым блоком кода
+
+#### Scenario: Строки как в git
+
+- **WHEN** строки текста разделены `\r\n`, а внутри строки есть `\x0c`
+- **THEN** `\r\n` - одна граница строки, `\x0c` строку не делит, номера строк - как у редактора
+
+#### Scenario: Пустой текст
+
+- **WHEN** `rules` - пустая строка
+- **THEN** ответ - `200` с пустыми `rules` и `rejected`: ревью шло бы по стандартным критериям
+
+#### Scenario: Без Origin или без сессии
+
+- **WHEN** вызывается `POST /api/v1/rules/parse` без `Origin` или с чужим `Origin` - или со своим `Origin`, но без сессии
+- **THEN** ответ - `403` с `code = ORIGIN_FORBIDDEN` или `401` с `code = UNAUTHENTICATED`, тело не разбирается
+
+### Requirement: Тело разбора правил проверяется
+
+Тело `POST /api/v1/rules/parse` SHALL содержать `rules` не длиннее 32 768 символов, пустой допустим, и необязательный `paths` - не больше 100 путей файлов длиной от 1 до 1024 символов; текст с NUL и лишние поля SHALL отклоняться.
+`rules` больше лимита, с которым ревью читает `.review/rules.md` (`RULES_MAX_BYTES`, в байтах UTF-8), SHALL отклоняться: такой файл ревью не разбирает.
+
+#### Scenario: Неверное тело
+
+- **WHEN** `rules` длиннее 32 768 символов или содержит NUL, в `paths` есть пустая строка, путей больше 100 или в теле есть лишнее поле
+- **THEN** ответ - `422` с `code = VALIDATION_ERROR` и ошибкой в этом поле
+
+#### Scenario: Больше лимита ревью
+
+- **WHEN** `RULES_MAX_BYTES = 10`, а `rules` - шесть кириллических букв, 12 байт в UTF-8
+- **THEN** ответ - `422` с `errors = [{"where": "body.rules", "reason": "размер больше 10 байт в UTF-8"}]` без самого текста; пять букв, 10 байт, - `200`

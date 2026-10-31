@@ -19,11 +19,14 @@
 блоков кода (```) не разбирается вовсе: пример правила внутри него правилом
 не становится.
 
-Функции чистые: текст приходит строкой, уходят доменные записи.
+Функции чистые: текст приходит строкой, уходят доменные записи. Разбор один -
+`outline_rules_markdown`, с номерами строк для редактора песочницы правил;
+ревью берёт из него правила без позиций (`parse_rules_markdown`).
 """
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from app.domain.diff_parser import split_lines
 from app.domain.entities import RejectedRule, RepoRule
@@ -67,14 +70,33 @@ def _closes_fence(line: str, fence: str) -> bool:
     return closing[0] == fence[0] and len(closing) >= len(fence)
 
 
+@dataclass(frozen=True, slots=True)
+class RuleOutline:
+    """Принятое правило и где оно в тексте: строка заголовка и строки пунктов, с 1."""
+
+    rule: RepoRule
+    line: int
+    check_lines: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedOutline:
+    """Раздел, не ставший правилом, и строка его заголовка, с 1."""
+
+    rejected: RejectedRule
+    line: int
+
+
 class _Draft:
     """Правило в процессе разбора — до проверки, что все части на месте."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, line: int) -> None:
         self.name = name
+        self.line = line
         self.patterns: list[str] = []
         self.excludes: list[str] = []
         self.checks: list[str] = []
+        self.check_lines: list[int] = []
 
     def finish(self) -> RepoRule | RejectedRule:
         missing = [
@@ -97,24 +119,30 @@ class _Draft:
 
 def parse_rules_markdown(text: str) -> tuple[tuple[RepoRule, ...], tuple[RejectedRule, ...]]:
     """Разобрать `rules.md` на принятые и отклонённые правила, в порядке файла."""
+    accepted, rejected = outline_rules_markdown(text)
+    return tuple(o.rule for o in accepted), tuple(o.rejected for o in rejected)
+
+
+def outline_rules_markdown(text: str) -> tuple[tuple[RuleOutline, ...], tuple[RejectedOutline, ...]]:
+    """Разобрать `rules.md` с номерами строк, с 1; строки делятся только по `\\n`, как в git."""
     drafts: list[_Draft] = []
     current: _Draft | None = None
     fence: str | None = None
-    swallowed: list[str] = []
+    swallowed: list[tuple[int, str]] = []
 
-    for line in split_lines(text):
+    for number, line in enumerate(split_lines(text), start=1):
         if fence is not None:
             if _closes_fence(line, fence):
                 fence = None
                 swallowed = []
             else:
-                swallowed.append(line)
+                swallowed.append((number, line))
             continue
         if (opening := _opening_fence(line)) is not None:
             fence = opening
             continue
         if (heading := _RULE_HEADING.match(line)) is not None:
-            current = _Draft(heading.group("name"))
+            current = _Draft(heading.group("name"), number)
             drafts.append(current)
             continue
         if _ANY_HEADING.match(line):
@@ -131,27 +159,28 @@ def parse_rules_markdown(text: str) -> tuple[tuple[RepoRule, ...], tuple[Rejecte
                 target.append(value)
         elif (check := _CHECK.match(line)) is not None:
             current.checks.append(check.group("text"))
+            current.check_lines.append(number)
 
     # Имя - ключ ссылки замечания на правило: второе принятое правило с тем же
     # именем сделало бы ссылку неоднозначной. Отклонённый раздел имя не занимает.
-    accepted: list[RepoRule] = []
-    rejected: list[RejectedRule] = []
+    accepted: list[RuleOutline] = []
+    rejected: list[RejectedOutline] = []
     taken: set[str] = set()
     for draft in drafts:
         result = draft.finish()
         if isinstance(result, RejectedRule):
-            rejected.append(result)
+            rejected.append(RejectedOutline(result, draft.line))
         elif result.name in taken:
-            rejected.append(RejectedRule(name=result.name, reason="имя правила повторяется"))
+            rejected.append(RejectedOutline(RejectedRule(name=result.name, reason="имя правила повторяется"), draft.line))
         else:
             taken.add(result.name)
-            accepted.append(result)
+            accepted.append(RuleOutline(result, draft.line, tuple(draft.check_lines)))
     if fence is not None:
         # Незакрытый блок молча съел бы остаток файла: правила в нём не видны
         # ни как принятые, ни как отклонённые, и автор не узнает почему.
         rejected.extend(
-            RejectedRule(name=heading.group("name"), reason=UNCLOSED_FENCE_REASON)
-            for line in swallowed
+            RejectedOutline(RejectedRule(name=heading.group("name"), reason=UNCLOSED_FENCE_REASON), number)
+            for number, line in swallowed
             if (heading := _RULE_HEADING.match(line)) is not None
         )
     return tuple(accepted), tuple(rejected)
@@ -185,6 +214,11 @@ def _glob_matches(path: str, pattern: str) -> bool:
     return glob_full_match(path, body) or glob_full_match(path, body + "/**")
 
 
+def matching_files(rule: RepoRule, paths: Iterable[str]) -> tuple[str, ...]:
+    """Файлы из `paths`, к которым правило применимо, в их порядке."""
+    return tuple(p for p in paths if rule_applies_to(rule, p))
+
+
 def applicable_rules(
     rules: Iterable[RepoRule], paths: Iterable[str]
 ) -> tuple[tuple[RepoRule, tuple[str, ...]], ...]:
@@ -192,8 +226,7 @@ def applicable_rules(
     path_list = list(paths)
     matched: list[tuple[RepoRule, tuple[str, ...]]] = []
     for rule in rules:
-        files = tuple(p for p in path_list if rule_applies_to(rule, p))
-        if files:
+        if files := matching_files(rule, path_list):
             matched.append((rule, files))
     return tuple(matched)
 

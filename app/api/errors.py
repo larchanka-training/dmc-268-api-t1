@@ -229,13 +229,20 @@ def problem_response(
 
 
 class ApiError(Exception):
-    """Отказ ручки: статус, код из `ErrorCode` и `detail` этого случая."""
+    """Отказ ручки: статус, код из `ErrorCode` и `detail` этого случая.
 
-    def __init__(self, status_code: int, code: ErrorCode, detail: str) -> None:
+    `errors` - у `VALIDATION_ERROR`, который ручка ставит сама: проверка, которой нужна
+    конфигурация сервиса, а не только модель тела.
+    """
+
+    def __init__(
+        self, status_code: int, code: ErrorCode, detail: str, *, errors: list[dict[str, str]] | None = None
+    ) -> None:
         super().__init__(detail)
         self.status_code = status_code
         self.code = code
         self.detail = detail
+        self.errors = errors
 
     def finish(self, response: Response) -> None:
         """Дописать в ответ то, что нужно этому отказу кроме тела (например, удалить cookie)."""
@@ -244,7 +251,7 @@ class ApiError(Exception):
 def _api_error_handler(request: Request, error: Exception) -> Response:
     if not isinstance(error, ApiError):
         raise error
-    response = problem_response(request, error.status_code, error.code, error.detail)
+    response = problem_response(request, error.status_code, error.code, error.detail, errors=error.errors)
     error.finish(response)
     return response
 

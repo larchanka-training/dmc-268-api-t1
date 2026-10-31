@@ -1,17 +1,19 @@
-"""Песочница правил: разбор `.review/rules.md` и симуляция ревью на своём коде (пока заглушки).
+"""Песочница правил: разбор `.review/rules.md` и симуляция ревью на своём коде.
 
 Пользователь вставляет фрагмент кода или дифф и текст правил и видит, что скажет ревью,
-без запроса на изменение и без публикации (#287). Ручки описаны заранее, чтобы фронтенд
-генерировал типы (dmc-268-ui-t1#112); реализация - #288.
+без запроса на изменение и без публикации (#287). Разбор правил реализован; симуляция -
+заглушка, описанная заранее, чтобы фронтенд генерировал типы (dmc-268-ui-t1#112);
+реализация - #288.
 """
 
 from http import HTTPStatus
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Path
+from fastapi import APIRouter, Depends, Path
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints
 
+from app.api.dependencies import get_container
 from app.api.errors import (
     ERRORS_403_ORIGIN,
     ERRORS_404_SIMULATION,
@@ -39,10 +41,12 @@ from app.domain.enums import (
     SimulationStatus,
     VerificationOutcome,
 )
-from app.domain.repo_rules import RULES_PATH
+from app.domain.repo_rules import RULES_PATH, matching_files, outline_rules_markdown
+from app.infrastructure.container import Container
 
-# Потолки входа. Правила - не больше лимита, с которым ревью читает `.review/rules.md`
-# (`RULES_MAX_BYTES`, 32 КиБ); код и дифф - не больше пакета контекста модели
+# Потолки входа в символах - для схемы. Правила, кроме того, не больше лимита в байтах UTF-8,
+# с которым ревью читает `.review/rules.md` (`RULES_MAX_BYTES`, по умолчанию 32 КиБ), - его
+# проверяет ручка: лимит из конфигурации. Код и дифф - не больше пакета контекста модели
 # (`CONTEXT_MAX_TOKENS` × 4 байта, 128 КиБ): больше модель всё равно не увидит.
 RULES_TEXT_MAX_LENGTH = 32_768
 SOURCE_MAX_LENGTH = 131_072
@@ -51,11 +55,14 @@ PARSE_PATHS_MAX_ITEMS = 100
 
 _NOT_IMPLEMENTED = "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #288). "
 _PARSE_DESCRIPTION = (
-    _NOT_IMPLEMENTED
-    + "Требует сессию и Origin сервиса; Origin проверяется раньше сессии и разбора тела, тело - раньше "
-    "ответа 501. Когда ручка заработает: 200 с разбором текста тем же парсером, что у ревью запроса на "
-    "изменение, без вызова модели, - для подсказок в редакторе песочницы. Принятые правила - со строкой "
-    "заголовка, пунктами и файлами из paths, к которым правило применимо; отклонённые разделы - с причиной."
+    "Требует сессию и Origin сервиса; Origin проверяется раньше сессии и разбора тела. Разбирает текст "
+    "тем же парсером, что ревью запроса на изменение, без вызова модели, - для подсказок в редакторе "
+    "песочницы: что из текста станет правилами ревью. Принятые правила - по порядку в тексте, со строкой "
+    "заголовка, пунктами и файлами из paths, к которым правило применимо; отклонённые разделы - с "
+    "причиной и строкой заголовка. Строки нумеруются с 1 и делятся только по переводу строки, как в git. "
+    "Текст больше лимита, с которым ревью читает .review/rules.md (RULES_MAX_BYTES, по умолчанию 32768 "
+    "байт в UTF-8), - 422 в body.rules: такой файл ревью не разбирает вовсе. Пустой текст - 200 без "
+    "правил: ревью шло бы по стандартным критериям."
 )
 _CREATE_DESCRIPTION = (
     _NOT_IMPLEMENTED
@@ -258,10 +265,38 @@ class SimulationResponse(BaseModel):
     summary="Разобрать текст правил",
     response_description="Принятые правила и отклонённые разделы.",
     description=_PARSE_DESCRIPTION,
-    responses={**ERRORS_403_ORIGIN, **ERRORS_413_BODY, **ERRORS_422, **ERRORS_501_NOT_IMPLEMENTED},
+    responses={**ERRORS_403_ORIGIN, **ERRORS_413_BODY, **ERRORS_422},
 )
-def parse_rules(body: RulesParseRequest) -> RulesParseResponse:
-    raise ApiError(HTTPStatus.NOT_IMPLEMENTED, ErrorCode.NOT_IMPLEMENTED, "Разбор правил ещё не реализован.")
+def parse_rules(body: RulesParseRequest, container: Container = Depends(get_container)) -> RulesParseResponse:
+    limit = container.settings.rules_max_bytes
+    if len(body.rules.encode("utf-8")) > limit:
+        raise ApiError(
+            HTTPStatus.UNPROCESSABLE_CONTENT,
+            ErrorCode.VALIDATION_ERROR,
+            "Параметры запроса не прошли проверку, ошибок: 1.",
+            errors=[{"where": "body.rules", "reason": f"размер больше {limit} байт в UTF-8"}],
+        )
+    accepted, rejected = outline_rules_markdown(body.rules)
+    return RulesParseResponse(
+        rules=[
+            ParsedRuleResponse(
+                name=outline.rule.name,
+                line=outline.line,
+                patterns=list(outline.rule.patterns),
+                excludes=list(outline.rule.excludes),
+                checks=[
+                    ParsedCheckResponse(number=number, text=text, line=line)
+                    for number, (text, line) in enumerate(zip(outline.rule.checks, outline.check_lines, strict=True), start=1)
+                ],
+                matched_paths=list(matching_files(outline.rule, body.paths)),
+            )
+            for outline in accepted
+        ],
+        rejected=[
+            ParsedRejectedRuleResponse(name=outline.rejected.name, line=outline.line, reason=outline.rejected.reason)
+            for outline in rejected
+        ],
+    )
 
 
 @router.post(
