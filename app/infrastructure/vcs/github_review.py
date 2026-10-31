@@ -30,18 +30,6 @@ def _github_side(side: DiffSide) -> str:
     return "RIGHT" if side is DiffSide.NEW else "LEFT"
 
 
-def _raw_comment_line(raw: dict[str, Any]) -> int | None:
-    line = raw.get("line")
-    if line is None:
-        line = raw.get("original_line")
-    if line is None:
-        return None
-    try:
-        return int(line)
-    except (TypeError, ValueError):
-        return None
-
-
 def _thread_current_line(thread: dict[str, Any]) -> int | None:
     """Строка треда в текущем диффе PR; у устаревшего треда её нет.
 
@@ -59,33 +47,38 @@ def _map_fetched_inline_comments(
     drafts: tuple[InlineCommentDraft, ...],
     raw_comments: list[dict[str, Any]],
 ) -> tuple[PublishedInlineComment | None, ...]:
+    """Сопоставляет черновики с комментариями созданного ревью по пути и тексту.
+
+    `GET …/reviews/{id}/comments` отдаёт `line`, `side` и `original_line`
+    пустыми, есть только `position` (проверено на живом PR, #265), поэтому
+    строку и сторону берём из черновика: текст комментария сервис пишет сам.
+    Одинаковые тексты в одном файле разбираются в порядке ответа; если
+    GitHub переставит их, id поменяются у одинаковых замечаний, на merge gate
+    это не влияет.
+    """
     published: list[PublishedInlineComment | None] = []
     used_provider_ids: set[str] = set()
     for draft in drafts:
-        want_side = _github_side(draft.side)
-        want_line = draft.line
         match = next(
             (
                 raw
                 for raw in raw_comments
                 if str(raw.get("id")) not in used_provider_ids
                 and raw.get("path") == draft.file_path
-                and _raw_comment_line(raw) == want_line
-                and raw.get("side", "RIGHT") == want_side
+                and str(raw.get("body", "")).strip() == draft.body.strip()
             ),
             None,
         )
         if match is None:
             published.append(None)
             continue
-        side = DiffSide.NEW if match.get("side", "RIGHT") == "RIGHT" else DiffSide.OLD
         provider_id = str(match["id"])
         used_provider_ids.add(provider_id)
         published.append(
             PublishedInlineComment(
                 file_path=draft.file_path,
-                side=side,
-                line=want_line,
+                side=draft.side,
+                line=draft.line,
                 provider_comment_id=provider_id,
             )
         )
@@ -161,6 +154,16 @@ class GitHubReviewClient:
                 )
                 raw_comments = []
             published = _map_fetched_inline_comments(inline_comments, raw_comments)
+            unmatched = published.count(None)
+            if unmatched and raw_comments:
+                # Иначе поломка сопоставления видна только по «Опубликовано inline: 0» (#265).
+                logger.warning(
+                    "прогон %s: ревью %s, не сопоставлено inline %d из %d",
+                    review_run_id,
+                    review_id,
+                    unmatched,
+                    len(published),
+                )
         return PullRequestReviewPublication(
             summary_provider_comment_id=review_id,
             inline_comments=published,

@@ -566,7 +566,7 @@ def test_fetch_file_returns_raw_content_at_sha(rsa_key_pair: RsaKeyPair) -> None
     seen: list[httpx.Request] = []
     gateway = make_gateway(
         rsa_key_pair,
-        responding([200], httpx.Response(200, text="## Rule\n"), seen),
+        responding([200], httpx.Response(200, text="## Rule\n", headers={"Content-Type": "application/vnd.github.raw+json; charset=utf-8"}), seen),
         [],
     )
 
@@ -578,6 +578,16 @@ def test_fetch_file_returns_raw_content_at_sha(rsa_key_pair: RsaKeyPair) -> None
     assert request.url.params["ref"] == "b" * 40
     assert request.headers["Accept"] == "application/vnd.github.raw+json"
     assert request.headers["Authorization"] == "Bearer ghs_test"
+
+
+def test_fetch_file_directory_means_no_file(rsa_key_pair: RsaKeyPair) -> None:
+    """На каталог GitHub отвечает 200 с JSON-листингом (проверено вживую): файла нет."""
+    listing = httpx.Response(
+        200, json=[{"name": "rules.md", "type": "file"}], headers={"Content-Type": "application/json; charset=utf-8"}
+    )
+    gateway = make_gateway(rsa_key_pair, responding([200], listing, []), [])
+
+    assert gateway.fetch_file("owner/repo", ".review", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT) is None
 
 
 def test_fetch_file_404_means_no_file(rsa_key_pair: RsaKeyPair) -> None:
@@ -708,7 +718,7 @@ def test_fetch_file_compressed_body_within_limit_is_decoded(rsa_key_pair: RsaKey
             lambda: httpx.Response(
                 200,
                 content=packed,
-                headers={"Content-Encoding": "gzip", "Content-Type": "text/plain; charset=utf-8"},
+                headers={"Content-Encoding": "gzip", "Content-Type": "application/vnd.github.raw+json; charset=utf-8"},
             ),
             seen,
         ),
