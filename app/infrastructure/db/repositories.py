@@ -156,14 +156,6 @@ class SqlAlchemyRepositoryRepo:
             .values(connected_at=None, updated_at=now)
         )
 
-    def update(self, repository: Repository) -> None:
-        # Настройки ревью здесь не пишутся — только `update_settings`.
-        row = self._session.get(RepositoryRow, repository.id)
-        if row is None:
-            raise LookupError(f"repository {repository.id} is not stored")
-        row.full_name = repository.full_name
-        row.default_branch = repository.default_branch
-
     def update_settings(self, repository_id: UUID, settings: RepositorySettings, now: dt.datetime) -> None:
         self._session.execute(
             update(RepositoryRow)

@@ -103,15 +103,6 @@ class FakeRepositoryRepo:
         if stored is not None:
             self._by_id[repository_id] = replace(stored, connected_at=None, updated_at=now)
 
-    def update(self, repository: Repository) -> None:
-        stored = self._by_id.get(repository.id)
-        if stored is None:
-            raise LookupError(f"repository {repository.id} is not stored")
-        # Как адаптер: настройки ревью пишет только `update_settings`.
-        self._by_id[repository.id] = replace(
-            stored, full_name=repository.full_name, default_branch=repository.default_branch
-        )
-
     def update_settings(self, repository_id: UUID, settings: RepositorySettings, now: datetime) -> None:
         stored = self._by_id.get(repository_id)
         if stored is not None:

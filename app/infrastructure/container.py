@@ -127,6 +127,9 @@ class Container:
     # малым лимитом записей: в общем они вытесняли бы записи видимости (FIFO по
     # числу) и занимали бы до 1024 × размер диффа.
     _run_diff_cache: CacheStore
+    # Исходы `.review/rules.md` для кабинета (change repository-settings, D7) — тоже своё
+    # хранилище: запись на каждый новый sha ветки по умолчанию не вытесняет видимость.
+    _rules_cache: CacheStore
     # Слушатель изменений прогонов для потока событий API: соединение `LISTEN`
     # открывается при первой подписке, воркеру оно не нужно.
     _run_changes: PostgresRunChanges
@@ -257,6 +260,10 @@ class Container:
         """Кэш диффов прогонов по паре коммитов; не `cache_store()`."""
         return self._run_diff_cache
 
+    def rules_cache(self) -> CacheStore:
+        """Кэш исходов загрузки правил для кабинета; не `cache_store()`."""
+        return self._rules_cache
+
     def run_changes(self) -> RunChanges:
         return self._run_changes
 
@@ -316,6 +323,7 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
         _cache_store=InMemoryCacheStore(),
         # shortcut: 24 × RUN_DIFF_MAX_BYTES ≈ 48 МиБ; считать байты, если лимит диффа поднимут
         _run_diff_cache=InMemoryCacheStore(max_entries=24),
+        _rules_cache=InMemoryCacheStore(max_entries=256),
         _run_changes=PostgresRunChanges(listen_conninfo(settings.database_url)),
         _llm_gateway=None,
         _definition_extractor=None,

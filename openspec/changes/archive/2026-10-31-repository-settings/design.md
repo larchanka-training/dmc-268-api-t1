@@ -99,13 +99,12 @@
 
 ### D5. `auto_review_enabled = false` — тот же путь, что у выключенного, со своим текстом
 
-Решение «ревью по вебхуку не нужно» несёт причину: чистая функция
-`review_pause(repository) -> ReviewPause | None` в домене, `ReviewPause` — enum
-`DISCONNECTED` (`connected_at is None`) и `AUTO_REVIEW_OFF` (`auto_review_enabled = false`);
-`None` — ревью идёт. Выключение репозитория важнее настройки: при обоих признаках —
-`DISCONNECTED`. Два вызова (`handle_webhook`, `apply_review_thread_webhook`) выбирают check run по
-причине через словарь в `app/application/merge_gate_publish.py`: `DISCONNECTED` →
-`DISABLED_REVIEW_CHECK` («Ревью выключено в сервисе»), `AUTO_REVIEW_OFF` → новый
+Решение «ревью по вебхуку не нужно» несёт причину: функция
+`pause_check(repository) -> MergeGateCheck | None` в `app/application/merge_gate_publish.py`,
+рядом с текстами check'ов, сразу отдаёт check run для head; `None` — ревью идёт. Выключение
+репозитория важнее настройки: при обоих признаках — `DISABLED_REVIEW_CHECK`. Её зовут два места
+(`handle_webhook`, `apply_review_thread_webhook`): `connected_at is None` →
+`DISABLED_REVIEW_CHECK` («Ревью выключено в сервисе»), `auto_review_enabled = false` → новый
 `AUTO_REVIEW_OFF_CHECK` — `success`, заголовок «Авторевью выключено в настройках», текст:
 «Автоматическое ревью выключено в настройках репозитория в кабинете; проверка мёрж не блокирует.»
 `_pass_merge_gate_of_disabled` принимает check аргументом.
@@ -155,8 +154,10 @@
    `404`, `VcsNotFoundError`. Любой `VcsError`, оба случая тоже, → `unavailable`, без кэша.
 3. `load_repo_rules(full_name, sha, installation_id, …, now=now)`.
 
-Ветка — сохранённая `repository.default_branch`. Шлюз — `cabinet_vcs_gateway()` (20 с), кэш —
-`Container.cache_store()` процесса API, лимиты — те же `rules_max_bytes` и
+Ветка и имя — текущие из ответа GitHub, который уже получен для проверки видимости (как в
+`GET /repositories`), а не сохранённые при подключении: вебхука `repository` у приложения нет, и
+смену или переименование ветки по умолчанию база не видит. Шлюз — `cabinet_vcs_gateway()` (20 с),
+кэш — `Container.rules_cache()` процесса API (своё хранилище, чтобы не вытеснять видимость), лимиты — те же `rules_max_bytes` и
 `rules_cache_ttl_seconds`, что у воркера. Ответ API собирается из `RepoRules` в слое API.
 
 - Альтернатива: читать файл по имени ветки без разрешения в sha — кэш по ветке пришлось бы

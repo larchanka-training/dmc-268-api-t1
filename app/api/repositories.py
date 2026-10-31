@@ -6,13 +6,21 @@
 """
 
 from collections.abc import Callable, Collection
+from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Request, Response
-from pydantic import BaseModel, Field, RootModel, StringConstraints, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    RootModel,
+    StringConstraints,
+    field_validator,
+)
 from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
@@ -39,7 +47,7 @@ from app.api.errors import (
 )
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
-from app.api.schemas import RepositoryBase, StrictRequest, UtcDatetime
+from app.api.schemas import RepositoryBase, StrictRequest, UtcDatetime, without_nul
 from app.api.session import (
     SESSION_COOKIE,
     SESSION_REQUIRED,
@@ -151,7 +159,9 @@ _RULES_DESCRIPTION = (
     "нет; too_large — файл больше лимита и не разбирался; unavailable — GitHub не ответил на запрос "
     "установки приложения, на разрешение ветки в коммит или на чтение файла (это ответ `200`, а не "
     "ошибка). Кроме loaded, ревью идёт по стандартным критериям. Ветка разрешается в коммит на "
-    "каждый запрос, исход файла кэшируется по паре «репозиторий, коммит» (кэш процесса API, тот же ключ и TTL, что у прогона): "
+    "каждый запрос — текущая ветка по умолчанию из ответа GitHub, как в GET /repositories; исход "
+    "файла кэшируется по паре «репозиторий, коммит» (свой кэш процесса API, тот же ключ и TTL, что "
+    "у прогона): "
     "на том же коммите файл повторно не запрашивается и `fetched_at` — время первого получения; "
     "сбой не кэшируется. " + _VISIBILITY_REFUSALS + " Приложение не установлено на репозиторий или "
     "установка приостановлена — `404 REPOSITORY_NOT_IN_INSTALLATION`, ветка и файл не запрашиваются."
@@ -323,12 +333,26 @@ def visible_repository(
     время ответа выдали бы, что такой id есть. Вызывается из тела ручки, а не зависимостью:
     зависимость выполнилась бы и при `422` других параметров — запрос к GitHub впустую.
     """
-    provider_ids = visible_provider_ids(signed_in, catalog, oauth, uow_factory)
+    return _visible_with_host(repository_id, signed_in, catalog, oauth, uow_factory)[0]
+
+
+def _visible_with_host(
+    repository_id: UUID,
+    signed_in: SignedIn,
+    catalog: InstallationCatalog,
+    oauth: OAuthProvider,
+    uow_factory: Callable[[], UnitOfWork],
+) -> tuple[Repository, InstallationRepository]:
+    """`visible_repository` и его строка из ответа GitHub — со свежими `full_name` и `default_branch`.
+
+    В базе они те, что были при подключении: вебхука `repository` у приложения нет.
+    """
+    visible = {r.provider_id: r for r in user_repositories(signed_in, catalog, oauth, uow_factory)}
     with uow_factory() as uow:
         repository = uow.repositories.get(repository_id)
-    if repository is None or not is_visible(repository, provider_ids):
+    if repository is None or not is_visible(repository, visible):
         raise _repository_not_found()
-    return repository
+    return repository, visible[repository.provider_id]
 
 
 def _repository_not_found() -> ApiError:
@@ -422,9 +446,12 @@ def _list_item(item: connecting.ListedRepository) -> RepositoryListItem:
 BRANCH_PATTERN_MAX_LENGTH = 200
 BRANCH_FILTER_MAX_ITEMS = 50
 
-# Пробелы по краям отрезаются: паттерн из одних пробелов — пустой и отклоняется.
+# Пробелы по краям отрезаются: паттерн из одних пробелов — пустой и отклоняется. NUL — `422`:
+# в `text[]` PostgreSQL его не примет, и без проверки вышел бы `500`.
 BranchPattern = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=BRANCH_PATTERN_MAX_LENGTH)
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=BRANCH_PATTERN_MAX_LENGTH),
+    AfterValidator(without_nul),
 ]
 RepositoryIdPath = Annotated[UUID, Path(description="Идентификатор репозитория в сервисе.")]
 
@@ -438,8 +465,8 @@ _BRANCH_FILTER_DESCRIPTION = (
     "веток (задача #313)."
 )
 _MIN_SEVERITY_DESCRIPTION = (
-    "Порог важности: нерешённое замечание с severity не ниже порога блокирует merge gate, и бот "
-    "запрашивает изменения. Публикуются все замечания, порог их не отсекает. Без сохранённых "
+    "Порог важности: нерешённое замечание с severity не ниже порога блокирует merge gate: check "
+    "run проверки — failure. Публикуются все замечания, порог их не отсекает. Без сохранённых "
     "настроек — critical."
 )
 
@@ -701,7 +728,10 @@ def get_repository_rules(
     settings: Settings = Depends(get_settings),
 ) -> RulesStatusResponse:
     # Синхронная `def`: шлюз и кэш блокирующие, FastAPI уводит ручку в threadpool.
-    repository = visible_repository(repository_id, signed_in, catalog, oauth, uow_factory)
+    stored, host = _visible_with_host(repository_id, signed_in, catalog, oauth, uow_factory)
+    # Ветка и имя — из ответа GitHub, как в GET /repositories: ветку по умолчанию могли сменить
+    # или переименовать после подключения.
+    repository = replace(stored, full_name=host.full_name, default_branch=host.default_branch)
     try:
         rules = load_default_branch_rules(
             repository,

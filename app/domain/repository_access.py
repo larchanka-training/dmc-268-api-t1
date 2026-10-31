@@ -10,10 +10,7 @@ larchanka-training/dmc-268-ui-t1#37, change `repositories-via-user-token`).
 
 from collections.abc import Collection, Iterable
 
-from app.domain.entities import (
-    InstallationRepository,
-    RepositoryPermissions,
-)
+from app.domain.entities import InstallationRepository, RepositoryPermissions
 
 
 def has_explicit_access(permissions: RepositoryPermissions) -> bool:
@@ -62,4 +59,3 @@ def to_connect_on_setup(
         for repository in repositories
         if can_connect(repository.permissions) and repository.provider_id not in registered_provider_ids
     ]
-

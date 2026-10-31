@@ -13,7 +13,6 @@ import pytest
 from app.application.merge_gate_publish import (
     SETTLE_ATTEMPTS,
     build_failed_review_check,
-    build_merge_gate_check,
     build_retarget_check,
     settle_merge_gate,
 )
@@ -866,7 +865,6 @@ def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
         run_id=run.id,
-        check=build_merge_gate_check((), FindingSeverity.CRITICAL),
         min_severity=FindingSeverity.CRITICAL,
     )
 
@@ -895,7 +893,6 @@ def test_settling_on_a_failed_latest_run_keeps_the_failure() -> None:
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
         run_id=run.id,
-        check=build_merge_gate_check((), FindingSeverity.CRITICAL),
         min_severity=FindingSeverity.CRITICAL,
     )
 

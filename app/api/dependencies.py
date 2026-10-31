@@ -124,9 +124,9 @@ def get_run_diff_cache(container: Container = Depends(get_container)) -> CacheSt
 
 
 def get_rules_cache(container: Container = Depends(get_container)) -> CacheStore:
-    """Кэш исходов загрузки `.review/rules.md` — `cache_store()` процесса API; ключ и формат те же,
-    что у прогона, но кэш процессный: записи воркера здесь не видны (design D7, Non-Goals)."""
-    return container.cache_store()
+    """Кэш исходов загрузки `.review/rules.md` — своё хранилище процесса API, отдельное от кэша
+    видимости; ключ и формат те же, что у прогона, но записи воркера здесь не видны (design D7)."""
+    return container.rules_cache()
 
 
 def get_settings(container: Container = Depends(get_container)) -> Settings:

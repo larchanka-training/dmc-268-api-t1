@@ -171,6 +171,7 @@ class Stack:
             _oauth_providers={},
             _cache_store=InMemoryCacheStore(),
             _run_diff_cache=InMemoryCacheStore(max_entries=24),
+            _rules_cache=InMemoryCacheStore(max_entries=256),
             _run_changes=PostgresRunChanges(listen_conninfo(self.settings.database_url)),
             _llm_gateway=llm,
             _definition_extractor=TreeSitterDefinitionExtractor(),

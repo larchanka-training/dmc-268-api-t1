@@ -195,6 +195,14 @@ def test_the_run_diff_cache_is_its_own_store_kept_per_container() -> None:
     assert container.run_diff_cache() is not container.cache_store()
 
 
+def test_the_rules_cache_is_its_own_store_kept_per_container() -> None:
+    """Исходы правил кабинета не вытесняют записи видимости: своё хранилище, одно на контейнер."""
+    container = build_container(SETTINGS)
+    assert container.rules_cache() is container.rules_cache()
+    assert container.rules_cache() is not container.cache_store()
+    assert container.rules_cache() is not container.run_diff_cache()
+
+
 def test_the_run_diff_cache_keeps_24_entries() -> None:
     """Объём кэша диффов — число записей: 24 × RUN_DIFF_MAX_BYTES, старшая запись вытесняется."""
     cache = build_container(SETTINGS).run_diff_cache()

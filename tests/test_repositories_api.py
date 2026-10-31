@@ -1136,6 +1136,7 @@ def test_a_new_repository_is_connected_with_the_default_settings() -> None:
         {**SETTINGS_BODY, "extra": 1},
         {"auto_review_enabled": True, "branch_filter": []},
         {**SETTINGS_BODY, "branch_filter": ["main", " main "]},
+        {**SETTINGS_BODY, "branch_filter": ["ma\x00in"]},
     ],
 )
 def test_an_invalid_body_reaches_neither_github_nor_the_database(body: dict[str, object]) -> None:
@@ -1149,6 +1150,21 @@ def test_an_invalid_body_reaches_neither_github_nor_the_database(body: dict[str,
     assert response.json()["code"] == "VALIDATION_ERROR"
     assert catalog.calls == []
     assert uow.repositories.get(repository.id) == repository
+
+
+def test_a_pattern_with_nul_is_422_not_500() -> None:
+    """PostgreSQL не хранит NUL в `text[]`: без проверки psycopg упал бы в базе, ответом 500."""
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+
+    response = _put_settings(
+        _client(uow, FakeInstallationCatalog([API])), repository.id, {**SETTINGS_BODY, "branch_filter": ["ma\x00in"]}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["errors"] == [
+        {"where": "body.branch_filter.0", "reason": "строка не должна содержать символ NUL"}
+    ]
 
 
 @pytest.mark.parametrize("origin", [None, "https://evil.example"])
@@ -1322,16 +1338,19 @@ def test_rules_outcomes_without_parsed_sections(
     assert response.json() == {"status": status, "branch": "main", "path": RULES_FILE}
 
 
-def test_rules_are_read_from_the_saved_default_branch() -> None:
+def test_rules_are_read_from_the_current_default_branch_on_github() -> None:
+    """Ветку по умолчанию и имя сменили на GitHub после подключения: в базе прежние, вебхука
+    `repository` нет, — правила читаются с текущей ветки из ответа GitHub, как в GET /repositories."""
     uow = FakeUnitOfWork()
-    repository = replace(_registered_api(uow), default_branch="trunk")
-    uow.repositories.update(repository)
-    vcs = FakeVcs(branch_shas={"trunk": SHA})
+    repository = _registered_api(uow)
+    moved = replace(API, full_name="acme/renamed", default_branch="trunk")
+    catalog = FakeInstallationCatalog([moved])
+    vcs = FakeVcs(branch_shas={"main": "0" * 40, "trunk": SHA})
 
-    response = _client(uow, FakeInstallationCatalog([API]), vcs=vcs).get(_rules_path(repository.id))
+    response = _client(uow, catalog, vcs=vcs).get(_rules_path(repository.id))
 
     assert response.json()["branch"] == "trunk"
-    assert vcs.calls[0] == ("branch_sha", API.full_name, "trunk", 1)
+    assert vcs.calls[0] == ("branch_sha", "acme/renamed", "trunk", 1)
 
 
 def test_rules_on_the_same_commit_are_fetched_once() -> None:

@@ -226,26 +226,6 @@ def test_disconnect_and_reconnect_keep_the_saved_settings(uow) -> None:
     )
 
 
-def test_update_does_not_overwrite_the_settings(uow) -> None:
-    repo = a_repository()
-    with uow as work:
-        work.repositories.add(repo)
-        work.repositories.update_settings(repo.id, HIGH_ON_MAIN, NOW)
-        work.commit()
-    with uow as work:
-        work.repositories.update(replace(repo, full_name="acme/renamed", default_branch="trunk"))
-        work.commit()
-    with uow as work:
-        stored = work.repositories.get(repo.id)
-    assert stored is not None
-    assert (stored.full_name, stored.default_branch) == ("acme/renamed", "trunk")
-    assert (stored.auto_review_enabled, stored.branch_filter, stored.min_severity) == (
-        False,
-        ("main", "release/*"),
-        FindingSeverity.HIGH,
-    )
-
-
 def test_two_concurrent_reconnects_leave_one_record_and_one_winner(clean_db) -> None:
     """Гонка включений выключенного: второй UPDATE ждёт строку, перечитывает её и не совпадает,
     вставка упирается в ключ — проигравший получает «уже подключён», а не ошибку и не дубль."""
