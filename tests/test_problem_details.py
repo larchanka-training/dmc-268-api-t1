@@ -398,14 +398,25 @@ def test_events_stream_is_in_the_exported_contract() -> None:
     stream = operation["responses"]["200"]["content"]
     assert set(stream) == {"text/event-stream"}
     row = {"$ref": "#/components/schemas/ReviewRunListItem"}
+    simulation = {"$ref": "#/components/schemas/SimulationSummary"}
     events = stream["text/event-stream"]["x-sse-events"]
     assert events == {
         "run.created": row,
         "run.status_changed": row,
         "run.finished": row,
+        "simulation.status_changed": simulation,
+        "simulation.finished": simulation,
         "ping": {"type": "object", "maxProperties": 0},
     }
-    assert components["StreamEventType"]["enum"] == ["run.created", "run.status_changed", "run.finished", "ping"]
+    assert components["StreamEventType"]["enum"] == [
+        "run.created",
+        "run.status_changed",
+        "run.finished",
+        "simulation.status_changed",
+        "simulation.finished",
+        "ping",
+    ]
+    assert set(components["SimulationSummary"]["required"]) == {"id", "status", "updated_at"}
     assert "ReviewRunsStreamEventType" not in components
     assert "StreamResource" not in components
 
@@ -538,6 +549,7 @@ def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
     update = components["RepositorySettingsUpdate"]
     assert set(update["required"]) == fields
     assert update["additionalProperties"] is False
+
     assert update["properties"]["min_severity"]["$ref"] == "#/components/schemas/FindingSeverity"
 
     variants = {
@@ -564,6 +576,168 @@ def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
     assert set(components["RulesEmpty"]["required"]) == {"status", "branch", "path", "rejected", "fetched_at"}
     assert set(components["RepoRule"]["required"]) == {"name", "patterns", "excludes", "checks"}
     assert set(components["RejectedRule"]["required"]) == {"name", "reason"}
+
+
+# --- песочница правил и инспектор находки: заглушки (#288, #290) -------------------
+
+PARSE_PATH = "/api/v1/rules/parse"
+SIMULATIONS_PATH = "/api/v1/simulations"
+SIMULATION_PATH = f"{SIMULATIONS_PATH}/{RUN_ID}"
+RULES_TEXT = "## Error Handling Standards\n\n- pattern: `app/**/*.py`\n\n1. Отказ возвращается значением Result\n"
+CODE_SOURCE = {"kind": "code", "file_path": "app/billing.py", "content": "def charge():\n    raise ValueError\n"}
+DIFF_SOURCE = {"kind": "diff", "diff": "--- a/app/x.py\n+++ b/app/x.py\n@@ -1 +1 @@\n-a\n+b\n"}
+SIMULATION_BODY = {"source": CODE_SOURCE, "rules": RULES_TEXT}
+
+
+def test_planned_playground_posts_answer_not_implemented() -> None:
+    """Допустимое тело - в том числе пустые правила и вход ровно на пределе - доходит до `501`."""
+    client = _signed_in_client()
+    for path, body in (
+        (PARSE_PATH, {"rules": ""}),
+        (PARSE_PATH, {"rules": RULES_TEXT, "paths": ["app/billing.py", "tests/test_billing.py"]}),
+        (PARSE_PATH, {"rules": "x" * 32_768, "paths": [f"f{n}.py" for n in range(100)]}),
+        (SIMULATIONS_PATH, SIMULATION_BODY),
+        (SIMULATIONS_PATH, {"source": DIFF_SOURCE, "rules": ""}),
+        (SIMULATIONS_PATH, {"source": {**CODE_SOURCE, "content": "x" * 131_072}, "rules": "x" * 32_768}),
+    ):
+        response = client.post(path, json=body, headers={"Origin": ORIGIN})
+        assert_problem(response, 501, "NOT_IMPLEMENTED", path)
+
+
+def test_planned_simulation_read_checks_session_and_id_first(client: TestClient) -> None:
+    assert_problem(_signed_in_client().get(SIMULATION_PATH), 501, "NOT_IMPLEMENTED", SIMULATION_PATH)
+    assert_problem(client.get(SIMULATION_PATH), 401, "UNAUTHENTICATED", SIMULATION_PATH)
+    bad = f"{SIMULATIONS_PATH}/not-a-uuid"
+    problem = assert_problem(_signed_in_client().get(bad), 422, "VALIDATION_ERROR", bad)
+    assert problem["errors"] == [{"where": "path.simulation_id", "reason": "ожидается UUID"}]
+
+
+@pytest.mark.parametrize(("path", "good_body"), [(PARSE_PATH, {"rules": RULES_TEXT}), (SIMULATIONS_PATH, SIMULATION_BODY)])
+def test_planned_playground_posts_check_origin_and_session_first(
+    client: TestClient, path: str, good_body: dict[str, Any]
+) -> None:
+    """Без `Origin` - `403`, без сессии - `401`; неверное тело в обоих случаях не разбирается."""
+    bad_body = {**good_body, "rules": 1}
+    assert_problem(client.post(path, json=bad_body), 403, "ORIGIN_FORBIDDEN", path)
+    response = client.post(path, json=bad_body, headers={"Origin": "https://evil.example"})
+    assert_problem(response, 403, "ORIGIN_FORBIDDEN", path)
+    assert_problem(_signed_in_client().post(path, json=good_body), 403, "ORIGIN_FORBIDDEN", path)
+    response = client.post(path, json=bad_body, headers={"Origin": ORIGIN})
+    assert_problem(response, 401, "UNAUTHENTICATED", path)
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "error"),
+    [
+        (PARSE_PATH, {"rules": "x" * 32_769}, {"where": "body.rules", "reason": "длина строки должна быть не больше 32768"}),
+        (PARSE_PATH, {"rules": "a\x00b"}, {"where": "body.rules", "reason": "строка не должна содержать символ NUL"}),
+        (PARSE_PATH, {"rules": "", "paths": ["app/x.py", " "]}, {"where": "body.paths.1", "reason": "длина строки должна быть не меньше 1"}),
+        (PARSE_PATH, {"rules": "", "paths": ["x" * 1_025]}, {"where": "body.paths.0", "reason": "длина строки должна быть не больше 1024"}),
+        (PARSE_PATH, {"rules": "", "paths": [f"f{n}.py" for n in range(101)]}, {"where": "body.paths", "reason": "элементов должно быть не больше 100"}),
+        (PARSE_PATH, {"rules": "", "extra": 1}, {"where": "body", "reason": "лишнее поле"}),
+        (PARSE_PATH, {}, {"where": "body.rules", "reason": "обязательный параметр не передан"}),
+        (
+            SIMULATIONS_PATH,
+            {**SIMULATION_BODY, "source": {**CODE_SOURCE, "kind": "file"}},
+            {"where": "body.source", "reason": "значение не из допустимого списка"},
+        ),
+        (
+            SIMULATIONS_PATH,
+            {**SIMULATION_BODY, "source": {"file_path": "app/x.py", "content": "x"}},
+            {"where": "body.source", "reason": "не передан признак варианта"},
+        ),
+        (
+            SIMULATIONS_PATH,
+            {**SIMULATION_BODY, "source": {"kind": "code", "content": "x"}},
+            {"where": "body.source.code.file_path", "reason": "обязательный параметр не передан"},
+        ),
+        (
+            SIMULATIONS_PATH,
+            {**SIMULATION_BODY, "source": {**CODE_SOURCE, "content": "x" * 131_073}},
+            {"where": "body.source.code.content", "reason": "длина строки должна быть не больше 131072"},
+        ),
+        (
+            SIMULATIONS_PATH,
+            {**SIMULATION_BODY, "source": {**CODE_SOURCE, "content": ""}},
+            {"where": "body.source.code.content", "reason": "длина строки должна быть не меньше 1"},
+        ),
+        (
+            SIMULATIONS_PATH,
+            {**SIMULATION_BODY, "source": {**DIFF_SOURCE, "diff": "a\x00b"}},
+            {"where": "body.source.diff.diff", "reason": "строка не должна содержать символ NUL"},
+        ),
+        (
+            SIMULATIONS_PATH,
+            {**SIMULATION_BODY, "source": {**DIFF_SOURCE, "file_path": "app/x.py"}},
+            {"where": "body.source.diff", "reason": "лишнее поле"},
+        ),
+        (
+            SIMULATIONS_PATH,
+            {**SIMULATION_BODY, "rules": "a\x00b"},
+            {"where": "body.rules", "reason": "строка не должна содержать символ NUL"},
+        ),
+        (SIMULATIONS_PATH, {"source": CODE_SOURCE}, {"where": "body.rules", "reason": "обязательный параметр не передан"}),
+    ],
+)
+def test_planned_playground_posts_check_the_body_first(path: str, body: dict[str, Any], error: dict[str, str]) -> None:
+    """Заглушки песочницы проверяют тело раньше, чем ответить `501`."""
+    response = _signed_in_client().post(path, json=body, headers={"Origin": ORIGIN})
+    problem = assert_problem(response, 422, "VALIDATION_ERROR", path)
+    assert problem["errors"] == [error]
+
+
+def test_playground_and_inspection_are_in_the_exported_contract() -> None:
+    """Фронтенд берёт типы из `docs/openapi/openapi.json`: ручки, их отказы и модели там есть."""
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    paths = schema["paths"]
+    components = schema["components"]["schemas"]
+
+    def ok_schema(operation: dict[str, Any], status: str = "200") -> Any:
+        return operation["responses"][status]["content"]["application/json"]["schema"]
+
+    def problem_ref(operation: dict[str, Any], status: str) -> Any:
+        return operation["responses"][status]["content"]["application/problem+json"]["schema"]
+
+    parse = paths[PARSE_PATH]["post"]
+    assert ok_schema(parse) == {"$ref": "#/components/schemas/RulesParseResponse"}
+    assert {"401", "403", "413", "422", "501"} <= set(parse["responses"])
+    rule = components["ParsedRuleResponse"]
+    assert {"name", "line", "patterns", "excludes", "checks", "matched_paths"} == set(rule["required"])
+    assert set(components["ParsedCheckResponse"]["required"]) == {"number", "text", "line"}
+    assert set(components["ParsedRejectedRuleResponse"]["required"]) == {"name", "line", "reason"}
+
+    create = paths[SIMULATIONS_PATH]["post"]
+    assert set(create["responses"]) >= {"202", "401", "403", "413", "422", "429", "501"}
+    assert "200" not in create["responses"]
+    assert ok_schema(create, "202") == {"$ref": "#/components/schemas/SimulationResponse"}
+    assert problem_ref(create, "429") == {"$ref": "#/components/schemas/RateLimitedProblem"}
+    assert "Retry-After" in create["responses"]["429"]["headers"]
+    request = components["SimulationRequest"]
+    assert request["additionalProperties"] is False
+    assert request["properties"]["source"]["discriminator"]["propertyName"] == "kind"
+    read = paths["/api/v1/simulations/{simulation_id}"]["get"]
+    assert ok_schema(read) == {"$ref": "#/components/schemas/SimulationResponse"}
+    assert problem_ref(read, "404") == {"$ref": "#/components/schemas/SimulationNotFoundProblem"}
+    simulation = components["SimulationResponse"]
+    assert {"status", "findings", "discarded", "context", "verification", "expires_at"} <= set(simulation["required"])
+    assert components["SimulationStatus"]["enum"] == [
+        "queued", "building_context", "analysing", "verifying", "completed", "failed"
+    ]
+    assert components["DiscardStage"]["enum"] == ["screening", "verification"]
+    assert "verdict" in components["SimulationFindingResponse"]["required"]
+
+    inspection = paths["/api/v1/reviews/{review_run_id}/findings/{finding_id}/inspection"]["get"]
+    assert ok_schema(inspection) == {"$ref": "#/components/schemas/FindingInspectionResponse"}
+    assert {"401", "404", "422", "501", "502"} <= set(inspection["responses"])
+    not_found = problem_ref(inspection, "404")
+    assert {variant["$ref"] for variant in not_found["oneOf"]} == {
+        "#/components/schemas/ReviewNotFoundProblem",
+        "#/components/schemas/FindingNotFoundProblem",
+    }
+    answer = components["FindingInspectionResponse"]
+    assert set(answer["required"]) == {"finding_id", "verification", "verdict", "context"}
+    for field in ("verdict", "context"):
+        assert {"type": "null"} in answer["properties"][field]["anyOf"]
 
 
 def test_origin_is_checked_before_the_body_is_parsed(client: TestClient) -> None:
@@ -682,7 +856,8 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     """Тела, которые сервер отдаёт на деле, проходят модель своего кода (`AnyProblem`).
 
     Каждый код из `ErrorCode` здесь представлен хотя бы одним настоящим ответом — кроме
-    `REVIEW_ALREADY_ACTIVE`: его отдаст ручной запуск, а он пока отвечает `501`.
+    `REVIEW_ALREADY_ACTIVE`: его отдаст ручной запуск, а он пока отвечает `501`, - и
+    `RATE_LIMITED` и `SIMULATION_NOT_FOUND`: их отдаст симуляция ревью, она тоже пока `501`.
     """
     from app.domain.vcs_errors import VcsError
 
@@ -694,12 +869,15 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     from .test_repositories_api import _client as repositories_client
     from .test_repositories_api import _connect as connect_repository
     from .test_repositories_api import _repository as registered_repository
+    from .test_reviews_api import _add_run as add_run
     from .test_reviews_api import _client as reviews_client
 
     signed_in = repositories_client(FakeUnitOfWork())
     connected = FakeUnitOfWork()
     connected.repositories.add(registered_repository(101))
     scm_down, _ = make_client(uow=FakeUow(), vcs=FakeVcs(error=VcsError("HTTP 502")))
+    with_run = FakeUnitOfWork()
+    run = add_run(with_run)
     responses = [
         client.post("/api/v1/webhooks/bitbucket"),
         signed_in.get("/api/v1/repositories", params={"limit": "abc"}),
@@ -728,6 +906,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
             json=REVIEW_BODY,
             headers={"Origin": ORIGIN},
         ),
+        reviews_client(with_run).get(f"/api/v1/reviews/{run.id}/findings/{RUN_ID}/inspection"),
     ]
     seen = set()
     for response in responses:
@@ -738,4 +917,8 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         assert TRACE_ID.fullmatch(response.headers["X-Trace-ID"])
         assert response.headers["X-Trace-ID"] == body["trace_id"]
         seen.add(body["code"])
-    assert seen == {code.value for code in ErrorCode} - {ErrorCode.REVIEW_ALREADY_ACTIVE.value}
+    assert seen == {code.value for code in ErrorCode} - {
+        ErrorCode.REVIEW_ALREADY_ACTIVE.value,
+        ErrorCode.RATE_LIMITED.value,
+        ErrorCode.SIMULATION_NOT_FOUND.value,
+    }

@@ -252,7 +252,7 @@
 #### Scenario: Сегодняшние типы
 
 - **WHEN** фронтенд читает ответ потока и `components/schemas` в `docs/openapi/openapi.json`
-- **THEN** в `x-sse-events` есть `run.created`, `run.status_changed` и `run.finished` со ссылкой на `ReviewRunListItem` и `ping` с пустым объектом, а `StreamEventType` перечисляет эти четыре имени
+- **THEN** в `x-sse-events` есть `run.created`, `run.status_changed` и `run.finished` со ссылкой на `ReviewRunListItem`, `simulation.status_changed` и `simulation.finished` со ссылкой на `SimulationSummary` и `ping` с пустым объектом, а `StreamEventType` перечисляет эти шесть имён
 
 #### Scenario: Итоговый статус
 
@@ -278,6 +278,11 @@
 
 - **WHEN** у пользователя нет роли на публичном репозитории `octo-org/public`, к которому подключено приложение, и по `octo-org/public` идёт прогон
 - **THEN** события `run.*` этого прогона пользователю не приходят: `octo-org/public` нет в ответе `GET /repositories`
+
+#### Scenario: Типы симуляции
+
+- **WHEN** фронтенд читает описание потока
+- **THEN** в нём сказано, что события `simulation.*` видит только автор симуляции, при переходе симуляции в итоговый статус (`completed` или `failed`) приходит только `simulation.finished` и что пока симуляция не реализована, эти события не отправляются
 
 ### Requirement: Истёкший токен пользователя обновляется
 

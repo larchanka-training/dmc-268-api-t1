@@ -54,7 +54,12 @@ _STREAM_DESCRIPTION = (
     "клиент всё равно делает upsert по id); `run.finished` — прогон в итоговом статусе (completed, "
     "failed или cancelled), при переходе в итоговый статус приходит только `run.finished`, даже у "
     "прогона, созданного после подключения. Данные `run.*` — ReviewRunListItem, полная строка списка "
-    "GET /reviews. `ping` с `data: {}` — в тишине, не реже раза в 15 секунд. Клиент игнорирует "
+    "GET /reviews. `simulation.status_changed` - симуляция песочницы правил изменилась, но не в итоговом "
+    "статусе; `simulation.finished` - симуляция в итоговом статусе (completed или failed), при переходе в "
+    "него приходит только `simulation.finished`. Данные `simulation.*` - SimulationSummary, полный "
+    "результат - GET /simulations/{simulation_id}; события `simulation.*` видит только автор симуляции. "
+    "Пока симуляция не реализована (#288), `simulation.*` не отправляются. "
+    "`ping` с `data: {}` — в тишине, не реже раза в 15 секунд. Клиент игнорирует "
     "незнакомые типы событий: новые типы добавляются без правки клиентов. Фильтров у потока нет: "
     "клиент получает все видимые ему события и отбирает нужные сам. Видимость задаёт правило типа "
     "события, пользователь получает только видимые ему события. Для `run.*`: " + VISIBILITY_RULE + " "
@@ -78,16 +83,28 @@ _STREAM_DESCRIPTION = (
 )
 
 
-class StreamEventType(RootModel[Literal["run.created", "run.status_changed", "run.finished", "ping"]]):
+class StreamEventType(
+    RootModel[
+        Literal[
+            "run.created",
+            "run.status_changed",
+            "run.finished",
+            "simulation.status_changed",
+            "simulation.finished",
+            "ping",
+        ]
+    ]
+):
     """Имя события потока GET /events — значение поля `event:` в тексте SSE, `<ресурс>.<действие>`.
 
-    У `run.*` данные — ReviewRunListItem, у `ping` — `{}`. Список растёт: клиент игнорирует
-    незнакомые имена. Тело ответа — текст SSE, поэтому в схему модель попадает отдельным
-    компонентом (`app/api/openapi.py`, `extra_models`).
+    У `run.*` данные — ReviewRunListItem, у `simulation.*` - SimulationSummary, у `ping` — `{}`.
+    Список растёт: клиент игнорирует незнакомые имена. Тело ответа — текст SSE, поэтому в схему
+    модель попадает отдельным компонентом (`app/api/openapi.py`, `extra_models`).
     """
 
 
 _RUN_ROW = {"$ref": "#/components/schemas/ReviewRunListItem"}
+_SIMULATION = {"$ref": "#/components/schemas/SimulationSummary"}
 
 _STREAM_DOC: dict[int | str, dict[str, Any]] = {
     HTTPStatus.OK: {
@@ -98,7 +115,8 @@ _STREAM_DOC: dict[int | str, dict[str, Any]] = {
                     "type": "string",
                     "description": (
                         "Текст SSE: `event: <ресурс>.<действие>` с JSON модели типа в `data`; сейчас "
-                        "`run.created`, `run.status_changed` и `run.finished` с ReviewRunListItem или "
+                        "`run.created`, `run.status_changed` и `run.finished` с ReviewRunListItem, "
+                        "`simulation.status_changed` и `simulation.finished` с SimulationSummary или "
                         "`event: ping` с `data: {}`. Незнакомые типы клиент игнорирует."
                     ),
                 },
@@ -107,6 +125,8 @@ _STREAM_DOC: dict[int | str, dict[str, Any]] = {
                     "run.created": _RUN_ROW,
                     "run.status_changed": _RUN_ROW,
                     "run.finished": _RUN_ROW,
+                    "simulation.status_changed": _SIMULATION,
+                    "simulation.finished": _SIMULATION,
                     "ping": {"type": "object", "maxProperties": 0},
                 },
             }

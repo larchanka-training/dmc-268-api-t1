@@ -22,7 +22,16 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from app.domain.enums import MergeRequestState, Provider, ReviewRunStatus, TriggerSource
+from app.domain.enums import (
+    DiffSide,
+    FindingCategory,
+    FindingSeverity,
+    MergeRequestState,
+    Provider,
+    ReviewRunStatus,
+    TriggerSource,
+    VerifierVerdict,
+)
 
 # Форма времени в каждом ответе: UTC, секунды, при наличии — микросекунды, суффикс `Z`.
 UTC_DATETIME_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$"
@@ -209,3 +218,92 @@ class MergeRequestBase(BaseModel):
     source_branch: str = Field(description="Ветка с изменениями.", examples=["feat/login"])
     target_branch: str = Field(description="Ветка, в которую предлагается слить.", examples=["develop"])
     state: MergeRequestState = Field(description="Состояние у провайдера.", examples=["open"])
+
+
+class RuleRefResponse(BaseModel):
+    """Пункт правила владельца, по которому выпущена находка."""
+
+    name: str = Field(description="Имя правила из .review/rules.md.", examples=["Error Handling Standards"])
+    check: int = Field(description="Номер пункта правила, с 1.", examples=[2])
+    check_text: str = Field(description="Текст пункта на момент прогона.")
+
+
+class FindingBase(BaseModel):
+    """Поля находки, общие для прогона ревью и симуляции в песочнице правил."""
+
+    id: UUID
+    file_path: str = Field(description="Путь файла от корня репозитория.", examples=["app/main.py"])
+    side: DiffSide = Field(description="Сторона диффа, к которой привязана находка.", examples=["new"])
+    old_line: int | None = Field(description="Строка в старой версии файла, с 1; null, если находка на новой стороне.")
+    new_line: int | None = Field(description="Строка в новой версии файла, с 1; null, если находка на старой стороне.")
+    category: FindingCategory = Field(description="Ось ревью, к которой относится находка.", examples=["security"])
+    severity: FindingSeverity = Field(description="Насколько находка важна.", examples=["high"])
+    message: str = Field(description="Текст замечания.")
+    suggestion: str | None = Field(description="Предлагаемая правка; null, если её нет.")
+    confidence: float | None = Field(
+        description="Уверенность модели в находке, обычно от 0 до 1; null, если модель её не дала."
+    )
+    rule: RuleRefResponse | None = Field(
+        description="Пункт правила владельца, по которому выпущена находка; null - находка по стандартным критериям."
+    )
+
+
+class VerifierVerdictResponse(BaseModel):
+    """Решение верификатора (второго прохода модели) по одной находке."""
+
+    verdict: VerifierVerdict = Field(
+        description=(
+            "keep - верификатор подтвердил находку; drop - хотел отбросить. Находка с drop остаётся среди "
+            "находок, только если это находка безопасности важности high или critical: такую верификатор "
+            "отбросить не может."
+        ),
+        examples=["keep"],
+    )
+    reason: str = Field(description="Почему верификатор так решил - его собственными словами.")
+
+
+class ShownRuleResponse(BaseModel):
+    """Правило владельца, показанное модели для файла."""
+
+    name: str = Field(description="Имя правила из .review/rules.md.", examples=["Error Handling Standards"])
+    checks: list[str] = Field(description="Пункты правила по порядку; номер пункта - позиция в списке, с 1.")
+
+
+class ContextOmissionResponse(BaseModel):
+    """Часть контекста файла, которая модели не досталась."""
+
+    part: str = Field(
+        description=(
+            "Что не вошло: file - файл целиком, hunk - hunk диффа, scopes - охватывающие определения, "
+            "imports - импорты, ast - AST-окружение файла."
+        ),
+        examples=["hunk"],
+    )
+    reason: str = Field(
+        description=(
+            "Почему: filtered - файл отфильтрован как сгенерированный или бинарный, budget - не хватило "
+            "бюджета контекста; у ast - причина, по которой окружение не строилось."
+        ),
+        examples=["budget"],
+    )
+
+
+class FileContextResponse(BaseModel):
+    """Что модель видела по одному файлу: дифф, AST-окружение и применимые правила."""
+
+    file_path: str = Field(description="Путь файла от корня репозитория.", examples=["app/main.py"])
+    hunks: list[str] = Field(
+        description=(
+            "Hunk'и файла, вошедшие в контекст, по порядку - unified diff с заголовком @@, как их видела "
+            "модель. В сохранённом контексте прогона ревью секреты заменены меткой."
+        )
+    )
+    scopes: str | None = Field(
+        description=(
+            "Охватывающие определения из AST - строки «начало-конец сигнатура», вложенные с отступом; "
+            "null, если их не передавали."
+        )
+    )
+    imports: str | None = Field(description="Импорты файла из AST, по строке; null, если их не передавали.")
+    rules: list[ShownRuleResponse] = Field(description="Правила владельца, показанные модели для этого файла.")
+    omitted: list[ContextOmissionResponse] = Field(description="Что из контекста файла модели не досталось.")

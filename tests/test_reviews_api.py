@@ -1,4 +1,4 @@
-"""Контракт `GET /api/v1/reviews/{id}`, `/steps` и `/diff`: данные и видимость прогона. Без БД и сети."""
+"""Контракт `GET /api/v1/reviews/{id}`, `/steps`, `/diff` и инспекции находки: данные и видимость прогона. Без БД и сети."""
 
 from collections.abc import Iterator
 from dataclasses import replace
@@ -497,7 +497,8 @@ def test_list_item_is_built_from_the_run_its_merge_request_and_findings() -> Non
 
 # --- видимость прогона: то же правило, что у списка и потока (#127) ---------------
 
-RUN_PATHS = ("", "/steps", "/diff")
+# У инспекции находка проверяется после прогона: при невидимом прогоне её id ни на что не влияет.
+RUN_PATHS = ("", "/steps", "/diff", f"/findings/{new_id()}/inspection")
 
 
 @pytest.mark.parametrize("suffix", RUN_PATHS)
@@ -589,6 +590,44 @@ def test_github_failure_on_a_run_is_502(suffix: str) -> None:
 
     assert response.status_code == 502
     assert response.json()["code"] == "SCM_UNAVAILABLE"
+
+
+def test_inspection_of_a_finding_of_a_visible_run_answers_not_implemented() -> None:
+    """Инспекция описана в схеме, а отвечает `501` - после проверки прогона и находки."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    finding = _finding(run, None)
+    uow.findings.add(finding)
+
+    response = _client(uow).get(f"/api/v1/reviews/{run.id}/findings/{finding.id}/inspection")
+
+    assert response.status_code == 501
+    assert response.json()["code"] == "NOT_IMPLEMENTED"
+
+
+def test_inspection_of_a_finding_of_another_run_is_404() -> None:
+    """Находка другого прогона - как несуществующая: `404 FINDING_NOT_FOUND`, а не `501`."""
+    uow = FakeUnitOfWork()
+    run, other = _add_run(uow), _add_run(uow)
+    finding = _finding(other, None)
+    uow.findings.add(finding)
+    client = _client(uow)
+
+    foreign = client.get(f"/api/v1/reviews/{run.id}/findings/{finding.id}/inspection")
+    missing = client.get(f"/api/v1/reviews/{run.id}/findings/{new_id()}/inspection")
+
+    assert foreign.status_code == missing.status_code == 404
+    assert foreign.json()["code"] == missing.json()["code"] == "FINDING_NOT_FOUND"
+
+
+def test_inspection_checks_the_finding_id() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+
+    response = _client(uow).get(f"/api/v1/reviews/{run.id}/findings/not-a-uuid/inspection")
+
+    assert response.status_code == 422
+    assert response.json()["errors"] == [{"where": "path.finding_id", "reason": "ожидается UUID"}]
 
 
 def test_diff_of_a_visible_run_answers_not_implemented() -> None:
