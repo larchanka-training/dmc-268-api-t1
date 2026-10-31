@@ -64,7 +64,9 @@ def _compressed_size(image: str) -> int:
     gz = zlib.compressobj(6, zlib.DEFLATED, 31)
     total = 0
     with subprocess.Popen(["docker", "save", image], stdout=subprocess.PIPE) as proc:
-        assert proc.stdout is not None
+        # Не assert: под `python -O` проверка исчезла бы.
+        if proc.stdout is None:
+            raise RuntimeError("docker save не дал поток stdout")
         while chunk := proc.stdout.read(CHUNK):
             total += len(gz.compress(chunk))
     if proc.returncode != 0:
@@ -91,7 +93,9 @@ def human_bytes(n: int) -> str:
         return f"{n} B"
     if n < 1024 * 1024:
         return f"{n / 1024:.1f} KiB"
-    return f"{n / 1024 / 1024:.2f} MiB"
+    if n < 1024 * 1024 * 1024:
+        return f"{n / 1024 / 1024:.2f} MiB"
+    return f"{n / 1024 / 1024 / 1024:.2f} GiB"
 
 
 def delta(now: int, before: int | None) -> str:

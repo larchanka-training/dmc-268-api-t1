@@ -49,7 +49,13 @@ def vuln(
 
 @pytest.mark.parametrize(
     ("n", "expected"),
-    [(0, "0 B"), (512, "512 B"), (2048, "2.0 KiB"), (3 * 1024 * 1024, "3.00 MiB")],
+    [
+        (0, "0 B"),
+        (512, "512 B"),
+        (2048, "2.0 KiB"),
+        (3 * 1024 * 1024, "3.00 MiB"),
+        (2 * 1024**3, "2.00 GiB"),
+    ],
 )
 def test_human_bytes(n, expected):
     assert build_summary.human_bytes(n) == expected
