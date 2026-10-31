@@ -940,7 +940,7 @@ def test_github_failure_on_the_installation_is_502_without_the_diff() -> None:
     assert vcs.calls == []
 
 
-# --- кэш диффа и установки на уровне ручки ---
+# --- кэш диффа на уровне ручки ---
 
 
 OTHER_USER = replace(SIGNED_IN, id=new_id(), provider_user_id="777", login="hubot")
@@ -1013,24 +1013,9 @@ def test_failure_is_not_remembered() -> None:
     assert len(_diff_calls(vcs)) == 2
 
 
-def test_entry_over_the_entry_limit_is_served_but_not_kept() -> None:
-    """Сценарий «Запись больше лимита на запись»: `200`, а следующий запрос снова к GitHub."""
-    uow = FakeUnitOfWork()
-    run = _add_run(uow, base_sha=BASE_SHA)
-    vcs = FakeVcs(diff=RUN_DIFF)
-    tiny = SETTINGS.model_copy(update={"run_diff_cache_entry_max_bytes": 16})
-
-    client = _client(uow, vcs=vcs, settings=tiny)
-    first = client.get(f"/api/v1/reviews/{run.id}/diff")
-    second = client.get(f"/api/v1/reviews/{run.id}/diff")
-
-    assert first.status_code == second.status_code == 200
-    assert first.json() == second.json()
-    assert len(_diff_calls(vcs)) == 2
-
-
-def test_two_runs_of_one_repository_ask_the_installation_once() -> None:
-    """Сценарий «Два прогона одного репозитория»: номер установки — из кэша, диффы — каждый свой."""
+def test_two_runs_of_one_repository_ask_the_installation_once_each() -> None:
+    """Сценарий «Номер установки не запоминается»: два прогона одного репозитория, ни один не в
+    кэше диффов — GitHub спрашивается о номере установки на каждый прогон."""
     uow = FakeUnitOfWork()
     first_run = _add_run(uow, base_sha=BASE_SHA)
     second_run = _run(merge_request_id=first_run.merge_request_id, head_sha="def456", base_sha=BASE_SHA)
@@ -1042,8 +1027,27 @@ def test_two_runs_of_one_repository_ask_the_installation_once() -> None:
     assert client.get(f"/api/v1/reviews/{first_run.id}/diff").status_code == 200
     assert client.get(f"/api/v1/reviews/{second_run.id}/diff").status_code == 200
 
-    assert catalog.calls.count("repository_installation_id") == 1
+    assert catalog.calls.count("repository_installation_id") == 2
     assert [call[3] for call in _diff_calls(vcs)] == ["abc123", "def456"]
+
+
+def test_reinstalled_app_gives_a_new_run_its_diff_with_the_new_installation() -> None:
+    """Регресс: номер установки не кэшируется — после переустановки приложения новый прогон
+    получает дифф с новым номером, а не `502` от GitHub на старый."""
+    uow = FakeUnitOfWork()
+    first_run = _add_run(uow, base_sha=BASE_SHA)
+    second_run = _run(merge_request_id=first_run.merge_request_id, head_sha="def456", base_sha=BASE_SHA)
+    uow.review_runs.add(second_run)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([VISIBLE], installation_ids={"octo-org/api": 77})
+    client = _client(uow, catalog, vcs)
+    assert client.get(f"/api/v1/reviews/{first_run.id}/diff").status_code == 200
+
+    catalog.installation_ids["octo-org/api"] = 78
+    response = client.get(f"/api/v1/reviews/{second_run.id}/diff")
+
+    assert response.status_code == 200
+    assert [(call[3], call[4]) for call in _diff_calls(vcs)] == [("abc123", 77), ("def456", 78)]
 
 
 def test_not_installed_is_not_remembered() -> None:

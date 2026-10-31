@@ -3,8 +3,6 @@
 Без сети: каталог установок, VCS-шлюз — фейки, кэш — настоящий in-memory.
 """
 
-import json
-import logging
 from uuid import uuid4
 
 import pytest
@@ -34,7 +32,7 @@ from app.infrastructure.cache.memory import InMemoryCacheStore
 from tests.fakes.installation_catalog import FakeInstallationCatalog
 from tests.fakes.webhooks import NOW, FakeVcs, a_repository
 
-# Переименование с правкой, бинарный и не-ASCII строки: запись в кэше должна
+# Переименование с правкой, бинарный и не-ASCII строки: разбор записи из кэша должен
 # вернуть каждое поле представления как было.
 RICH_DIFF = (
     "diff --git a/app/old.py b/app/new.py\n"
@@ -53,7 +51,6 @@ RICH_DIFF = (
 BASE_SHA = "b" * 40
 HEAD_SHA = "a" * 40
 MAX_BYTES = 10_000
-TTL = 3600
 
 
 def a_run(*, base_sha: str | None = BASE_SHA) -> ReviewRun:
@@ -86,7 +83,6 @@ def load(
         vcs=vcs,
         cache=cache,
         max_bytes=max_bytes,
-        ttl_seconds=TTL,
     )
 
 
@@ -171,17 +167,18 @@ def test_hit_touches_neither_the_catalog_nor_the_gateway_and_gives_an_equal_view
     assert vcs.calls == []
 
 
-def test_cached_value_is_ascii_json() -> None:
-    """Лимит кэша считает байты UTF-8: кириллица в записи экранирована `\\uXXXX`."""
+def test_cache_keeps_the_raw_diff_for_an_hour() -> None:
+    """В кэше — сырой текст диффа, TTL — час: запись по паре коммитов не устаревает."""
     repository = a_repository()
-    cache = InMemoryCacheStore()
+    now = [0.0]
+    cache = InMemoryCacheStore(monotonic=lambda: now[0])
     load(a_run(), repository, installations=FakeInstallationCatalog(), vcs=FakeVcs(diff=RICH_DIFF), cache=cache)
 
-    value = cache.get(f"run-diff:v1:{repository.id}:{BASE_SHA}:{HEAD_SHA}")
-
-    assert value is not None
-    assert value.isascii()
-    assert "\\u043f" in value  # «п» из «привет»
+    assert cache.get(_key(repository)) == RICH_DIFF
+    now[0] = 3599.0
+    assert cache.get(_key(repository)) == RICH_DIFF
+    now[0] = 3600.0
+    assert cache.get(_key(repository)) is None
 
 
 def _key(repository: Repository) -> str:
@@ -272,67 +269,28 @@ def test_installation_lookup_failure_passes_through() -> None:
     assert vcs.calls == []
 
 
-@pytest.mark.parametrize("stored", ["not json", "[{}]", '{"files": 1}'])
-def test_broken_cache_entry_is_a_miss(stored: str) -> None:
-    repository = a_repository()
-    cache = InMemoryCacheStore()
-    cache.set(_key(repository), stored, TTL)
+class _BrokenStore:
+    """Хранилище, у которого отказывают и чтение, и запись."""
+
+    def get(self, key: str) -> str | None:
+        raise OSError("хранилище недоступно")
+
+    def set(self, key: str, value: str, ttl_seconds: int) -> None:
+        raise OSError("хранилище недоступно")
+
+
+def test_store_failure_is_a_miss_and_does_not_break_the_answer() -> None:
+    """Сбой хранилища — промах: дифф берётся у провайдера, ответ не ломается."""
     vcs = FakeVcs()
 
-    view = load(a_run(), repository, installations=FakeInstallationCatalog(), vcs=vcs, cache=cache)
+    view = load_run_diff(
+        a_run(),
+        a_repository(),
+        installations=FakeInstallationCatalog(),
+        vcs=vcs,
+        cache=_BrokenStore(),
+        max_bytes=MAX_BYTES,
+    )
 
     assert view == MAIN_PY_VIEW
     assert len(vcs.calls) == 1
-
-
-def test_entry_over_the_entry_limit_is_returned_but_not_kept() -> None:
-    repository = a_repository()
-    run = a_run()
-    cache = InMemoryCacheStore(max_bytes=10_000, max_entry_bytes=10)
-
-    view = load(run, repository, installations=FakeInstallationCatalog(), vcs=FakeVcs(), cache=cache)
-
-    assert view == MAIN_PY_VIEW
-    assert cache.get(_key(repository)) is None
-    vcs = FakeVcs()
-    load(run, repository, installations=FakeInstallationCatalog(), vcs=vcs, cache=cache)
-    assert len(vcs.calls) == 1
-
-
-def test_broken_entry_warning_does_not_echo_the_entry(caplog: pytest.LogCaptureFixture) -> None:
-    """В лог — ключ и тип ошибки: значение из записи (в нём может быть код диффа) не попадает."""
-    repository = a_repository()
-    secret = "password = 'hunter2'"
-    entry = [
-        {
-            "path": "app/main.py",
-            "previous_path": None,
-            "status": "modified",
-            "is_binary": False,
-            "language": None,
-            "additions": 1,
-            "deletions": 0,
-            "hunks": [
-                {
-                    "header": "",
-                    "old_start": 1,
-                    "old_count": 0,
-                    "new_start": 1,
-                    "new_count": 1,
-                    "lines": [{"kind": secret, "old_line": None, "new_line": 1, "content": "x"}],
-                }
-            ],
-        }
-    ]
-    cache = InMemoryCacheStore()
-    cache.set(_key(repository), json.dumps(entry), TTL)
-    vcs = FakeVcs()
-
-    with caplog.at_level(logging.WARNING):
-        view = load(a_run(), repository, installations=FakeInstallationCatalog(), vcs=vcs, cache=cache)
-
-    assert view == MAIN_PY_VIEW
-    assert len(vcs.calls) == 1
-    assert "hunter2" not in caplog.text
-    assert _key(repository) in caplog.text
-    assert "ValueError" in caplog.text

@@ -124,7 +124,7 @@ class Container:
     # контейнер: фабрика на каждый вызов теряла бы всё между прогонами.
     _cache_store: CacheStore
     # Диффы прогонов кабинета (change review-run-diff, D4) — своё хранилище с
-    # лимитом в байтах: в общем они вытесняли бы записи видимости (FIFO по
+    # малым лимитом записей: в общем они вытесняли бы записи видимости (FIFO по
     # числу) и занимали бы до 1024 × размер диффа.
     _run_diff_cache: CacheStore
     # Слушатель изменений прогонов для потока событий API: соединение `LISTEN`
@@ -243,7 +243,6 @@ class Container:
             catalog,
             self._cache_store,
             self.settings.visible_repositories_cache_ttl_seconds,
-            installation_id_ttl_seconds=self.settings.installation_id_cache_ttl_seconds,
             read=read,
         )
 
@@ -315,10 +314,8 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
             ),
         },
         _cache_store=InMemoryCacheStore(),
-        _run_diff_cache=InMemoryCacheStore(
-            max_bytes=settings.run_diff_cache_max_bytes,
-            max_entry_bytes=settings.run_diff_cache_entry_max_bytes,
-        ),
+        # shortcut: 24 × RUN_DIFF_MAX_BYTES ≈ 48 МиБ; считать байты, если лимит диффа поднимут
+        _run_diff_cache=InMemoryCacheStore(max_entries=24),
         _run_changes=PostgresRunChanges(listen_conninfo(settings.database_url)),
         _llm_gateway=None,
         _definition_extractor=None,

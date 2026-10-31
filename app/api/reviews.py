@@ -20,6 +20,7 @@ from pydantic_core import PydanticCustomError
 
 from app.api.dependencies import (
     get_cabinet_vcs_gateway,
+    get_installation_catalog,
     get_run_diff_cache,
     get_settings,
     get_token_provider,
@@ -98,10 +99,9 @@ _DIFF_DESCRIPTION = (
     "Требует сессию. Дифф пары коммитов base_sha...head_sha прогона у GitHub (задача #87): все изменённые "
     "файлы в порядке диффа, включая файлы, которые ревью отфильтровало (lock-файлы, сгенерированное). "
     "Видимость прогона — то же правило, что у GET /reviews: невидимый или несуществующий прогон — "
-    "404 REVIEW_NOT_FOUND, без запроса установки приложения и диффа к GitHub. Разобранный дифф кэшируется "
-    "в памяти API по паре коммитов на RUN_DIFF_CACHE_TTL_SECONDS (по умолчанию час), без привязки к "
-    "пользователю: видимость проверяется до чтения кэша; номер установки приложения — на "
-    "INSTALLATION_ID_CACHE_TTL_SECONDS. Отказы не кэшируются: 409 DIFF_UNAVAILABLE — у прогона нет base_sha, "
+    "404 REVIEW_NOT_FOUND, без запроса установки приложения и диффа к GitHub. Дифф кэшируется в памяти "
+    "API по паре коммитов на час, без привязки к пользователю: видимость проверяется до чтения кэша; "
+    "номер установки приложения спрашивается у GitHub на каждом промахе кэша. Отказы не кэшируются: 409 DIFF_UNAVAILABLE — у прогона нет base_sha, "
     "к GitHub не ходили; 404 REPOSITORY_NOT_IN_INSTALLATION — приложение не установлено на репозиторий или "
     "установка приостановлена; 410 COMMIT_NOT_FOUND — GitHub не знает коммит прогона; 422 DIFF_TOO_LARGE — "
     "дифф больше RUN_DIFF_MAX_BYTES (2 МиБ); 502 SCM_UNAVAILABLE — прочий сбой GitHub."
@@ -373,15 +373,12 @@ class ReviewRunListQuery(BaseModel):
         return created_to
 
 
-_RunId = Annotated[UUID, Path(description="Идентификатор прогона ревью.")]
-
-
-def _visible_run_and_repository(
-    review_run_id: UUID,
-    signed_in: SignedIn,
-    catalog: InstallationCatalog,
-    oauth: OAuthProvider,
-    uow_factory: Callable[[], UnitOfWork],
+def visible_run_with_repository(
+    review_run_id: Annotated[UUID, Path(description="Идентификатор прогона ревью.")],
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> tuple[ReviewRun, Repository]:
     """Прогон и его репозиторий, если прогон виден пользователю, — по тому же правилу, что список и поток.
 
@@ -399,25 +396,10 @@ def _visible_run_and_repository(
 
 
 def visible_run(
-    review_run_id: _RunId,
-    signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_visibility_catalog),
-    oauth: OAuthProvider = Depends(get_token_provider),
-    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+    run_and_repository: tuple[ReviewRun, Repository] = Depends(visible_run_with_repository),
 ) -> ReviewRun:
     """Прогон, если он виден пользователю; иначе `404 REVIEW_NOT_FOUND`."""
-    return _visible_run_and_repository(review_run_id, signed_in, catalog, oauth, uow_factory)[0]
-
-
-def visible_run_with_repository(
-    review_run_id: _RunId,
-    signed_in: SignedIn = Depends(current_session),
-    catalog: InstallationCatalog = Depends(get_visibility_catalog),
-    oauth: OAuthProvider = Depends(get_token_provider),
-    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
-) -> tuple[ReviewRun, Repository]:
-    """Видимый прогон вместе с репозиторием — для ручек, которым нужен репозиторий у провайдера (дифф)."""
-    return _visible_run_and_repository(review_run_id, signed_in, catalog, oauth, uow_factory)
+    return run_and_repository[0]
 
 
 def _repository_of(uow: UnitOfWork, run: ReviewRun) -> Repository:
@@ -618,7 +600,8 @@ class ReviewRunStepListResponse(BaseModel):
 )
 def get_review_diff(
     run_and_repository: tuple[ReviewRun, Repository] = Depends(visible_run_with_repository),
-    installations: InstallationCatalog = Depends(get_visibility_catalog),
+    # Без кэша видимости: номер установки меняется при переустановке приложения.
+    installations: InstallationCatalog = Depends(get_installation_catalog),
     vcs: VcsGateway = Depends(get_cabinet_vcs_gateway),
     cache: CacheStore = Depends(get_run_diff_cache),
     settings: Settings = Depends(get_settings),
@@ -633,7 +616,6 @@ def get_review_diff(
             vcs=vcs,
             cache=cache,
             max_bytes=settings.run_diff_max_bytes,
-            ttl_seconds=settings.run_diff_cache_ttl_seconds,
         )
     except RunDiffUnavailable:
         raise ApiError(
