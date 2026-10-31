@@ -4,8 +4,7 @@
 
 ## 1. Схема данных
 
-- [ ] 1.1 Миграция: `review_runs.coverage`, `coverage_reason`, таблица `review_run_files`, `repositories.installation_id`; проверка — `alembic upgrade head && alembic downgrade -1`, интеграционный тест чтения `NULL` как `complete`
-- [ ] 1.2 Приём пишет `installation_id` из payload; проверка — тест первого вебхука после миграции
+- [ ] 1.1 Миграция: `review_runs.coverage`, `coverage_reason`, таблица `review_run_files`; проверка — `alembic upgrade head && alembic downgrade -1`, интеграционный тест чтения `NULL` как `complete`
 
 ## 2. Покрытие и gate
 
@@ -14,9 +13,9 @@
 
 ## 3. Лимиты
 
-- [ ] 3.1 Чистые `plan_scope(scope, limits)` с приоритетом CI/инфраструктуры и `fits_budget(spent, estimate, budget)`; проверка — юнит-тесты сценариев спеки
+- [ ] 3.1 Чистые `plan_scope(scope, limits)` — новые hunk'и раньше перепроверяемых, внутри приоритет CI/инфраструктуры — и `fits_budget(spent, estimate, budget)`; проверка — юнит-тесты сценариев спеки, включая «предел на 3 hunk'а CI, у всех открытые находки»
 - [ ] 3.2 Бюджет токенов перед каждым вызовом модели, пропуск верификатора; проверка — тест песочницы (#229)
-- [ ] 3.3 Квота: сумма `tokens_used` по `installation_id` за 24 ч, прогон `none`/`quota`; проход добора рядом со `stale_sweep`; проверка — интеграционный тест «квота исчерпана → восстановилась»
+- [ ] 3.3 Квота: сумма `tokens_used` по репозиторию за 24 ч, прогон `none`/`quota`; проверка — интеграционный тест «квота исчерпана → новый push после восстановления»
 - [ ] 3.4 `filter_diff_files`: `.gitattributes` с `base_sha` через `CacheStore`; проверка — юнит-тесты, включая `@generated` от автора PR
 - [ ] 3.5 Настройки лимитов в `app/config.py` и `.env.example`, выключены по умолчанию; проверка — тест конфигурации
 
