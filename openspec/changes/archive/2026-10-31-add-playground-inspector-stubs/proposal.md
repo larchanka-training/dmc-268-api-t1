@@ -13,11 +13,10 @@
   В схеме - `404 SIMULATION_NOT_FOUND`.
 - `GET /api/v1/reviews/{review_run_id}/findings/{finding_id}/inspection` - заглушка данных инспектора: итог второго прохода прогона, вердикт верификатора по находке, контекст модели по файлу находки (`FindingInspectionResponse`).
   Видимость прогона и принадлежность находки прогону проверяются до `501`: `404 REVIEW_NOT_FOUND` или `404 FINDING_NOT_FOUND`.
-- Общий поток `GET /api/v1/events` описывает типы `simulation.status_changed` и `simulation.finished` с данными `SimulationSummary`; пока симуляции нет, они не отправляются.
 - Новые коды ошибок: `RATE_LIMITED` (`429`), `SIMULATION_NOT_FOUND` (`404`), `FINDING_NOT_FOUND` (`404`).
 - Поля находки, общие для прогона и симуляции, вынесены в `FindingBase`; схема `FindingResponse` не меняется.
 
-Вне этого change: сама симуляция (очередь, воркер, хранение, лимиты, отправка событий) - #288; хранение вердикта верификатора и отдача контекста прогона - #290, контекст - после редакции секретов (#28).
+Вне этого change: сама симуляция (очередь, воркер, хранение, лимиты) - #288; хранение вердикта верификатора и отдача контекста прогона - #290, контекст - после редакции секретов (#28).
 Точные значения лимитов частоты и срока хранения задаёт реализация.
 
 ## Capabilities
@@ -26,10 +25,10 @@
 
 ### Modified Capabilities
 
-- `review-rest-api`: заглушки ручек песочницы правил и инспектора замечания, типы `simulation.*` в описании общего потока событий.
+- `review-rest-api`: заглушки ручек песочницы правил и инспектора замечания.
 
 ## Impact
 
-- Код: новые `app/api/playground.py` и `app/api/inspection.py`; `app/api/schemas.py` (`FindingBase`, `RuleRefResponse`, модели вердикта и контекста), `app/api/reviews.py` (`FindingResponse` от `FindingBase`), `app/api/events.py`, `app/api/problems.py`, `app/api/errors.py`, `app/api/factory.py`; `app/domain/enums.py` (`SimulationStatus`, `DiscardStage`).
-- Контракт: `docs/openapi/openapi.json` - четыре операции, новые схемы и коды ошибок, два типа событий потока; существующие схемы не меняются.
+- Код: новые `app/api/playground.py` и `app/api/inspection.py`; `app/api/schemas.py` (`FindingBase`, `RuleRefResponse`, модели вердикта и контекста), `app/api/reviews.py` (`FindingResponse` от `FindingBase`), `app/api/problems.py`, `app/api/errors.py`, `app/api/factory.py`; `app/domain/enums.py` (`SimulationStatus`, `DiscardStage`).
+- Контракт: `docs/openapi/openapi.json` - четыре операции, новые схемы и коды ошибок; существующие схемы не меняются.
 - Тесты: `tests/test_problem_details.py`, `tests/test_reviews_api.py`.

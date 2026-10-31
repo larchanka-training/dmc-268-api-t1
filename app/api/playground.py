@@ -72,9 +72,10 @@ _CREATE_DESCRIPTION = (
     "провайдера VCS и без публикации. Фрагмент кода (source.kind = code) ревьюится как новый файл, все "
     "строки - добавленные; file_path нужен, чтобы сработали pattern правил и выбрался язык AST. Дифф "
     "(source.kind = diff) берёт файлы и пути из своих заголовков; неразборчивый дифф - 422. Пустой rules - "
-    "ревью по стандартным критериям. Ход и итог приходят событиями simulation.* потока GET /events и "
-    "читаются GET /simulations/{simulation_id}. Каждый запуск вызывает модель, поэтому частота запусков "
-    "ограничена на пользователя: 429 RATE_LIMITED с Retry-After."
+    "ревью по стандартным критериям. Ход и итог клиент читает GET /simulations/{simulation_id}, опрашивая "
+    "раз в 1-2 секунды, пока статус не completed или failed: в общий поток GET /events симуляции не "
+    "попадают. Каждый запуск вызывает модель, поэтому запуски ограничены на пользователя - одна "
+    "незавершённая симуляция и лимит за скользящий час: 429 RATE_LIMITED с Retry-After."
 )
 _GET_DESCRIPTION = (
     _NOT_IMPLEMENTED
@@ -219,14 +220,6 @@ class DiscardedFindingResponse(BaseModel):
     rule: RuleMentionResponse | None = Field(
         description="Ссылка на правило, как её дала модель; null - замечание по стандартным критериям."
     )
-
-
-class SimulationSummary(BaseModel):
-    """Симуляция в событии потока: что изменилось. Полный результат - GET /simulations/{simulation_id}."""
-
-    id: UUID
-    status: SimulationStatus = Field(description="Текущий статус симуляции.", examples=["analysing"])
-    updated_at: UtcDatetime = Field(description="Когда симуляция последний раз менялась.")
 
 
 class SimulationResponse(BaseModel):

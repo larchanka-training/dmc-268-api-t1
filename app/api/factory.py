@@ -88,10 +88,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         generate_unique_id_function=lambda route: to_camel(route.name),
     )
     from app.api.events import StreamEventType
-    from app.api.playground import SimulationSummary
 
-    # Модели, на которые ссылается только описание потока (`x-sse-events`), а не тело ответа.
-    openapi.install(app, extra_models=[StreamEventType, SimulationSummary])
+    openapi.install(app, extra_models=[StreamEventType])
     # Логи — до первого запроса и до трассировки: её предупреждения при старте
     # тоже должны выйти JSON-записями.
     configure_logging(telemetry.API_SERVICE)
