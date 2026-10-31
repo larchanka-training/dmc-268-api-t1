@@ -17,8 +17,6 @@ PR. `PurePosixPath.full_match` переводит шаблон в регуляр
 from fnmatch import fnmatchcase
 
 _GLOBSTAR = "**"
-# Шаблон кончился: с ним не совпадает ни один сегмент.
-_END = "/"
 
 
 def glob_full_match(path: str, pattern: str) -> bool:
@@ -37,11 +35,10 @@ def glob_full_match(path: str, pattern: str) -> bool:
     star_j = -1
     star_i = 0
     while i < len(names):
-        part = parts[j] if j < len(parts) else _END
-        if part == _GLOBSTAR:
+        if j < len(parts) and parts[j] == _GLOBSTAR:
             star_j, star_i = j, i
             j += 1
-        elif part is None or (part != _END and fnmatchcase(names[i], part)):
+        elif j < len(parts) and _accepts(parts[j], names[i]):
             i += 1
             j += 1
         elif star_j >= 0:
@@ -52,6 +49,11 @@ def glob_full_match(path: str, pattern: str) -> bool:
     while j < len(parts) and parts[j] == _GLOBSTAR:
         j += 1
     return j == len(parts)
+
+
+def _accepts(part: str | None, name: str) -> bool:
+    # `None` - любой один сегмент.
+    return part is None or fnmatchcase(name, part)
 
 
 def _segments(text: str) -> list[str]:
