@@ -9,6 +9,17 @@
 global:
   scrape_interval: 15s
 
+# Критические алерты (#100): правила — alerts.yml (тесты — alerts.test.yml),
+# доставка в Telegram — Alertmanager (alertmanager.yml). Путь правил один и
+# тот же: compose монтирует файл, infra заливает upload-ом.
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
 scrape_configs:
   - job_name: collector
     # honor_labels обязателен: exporter-порт коллектора отдаёт ряды с лейблом
@@ -66,3 +77,58 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ["prometheus:9090"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]
+
+  # Пробы сервисов через blackbox-exporter (blackbox.yml): то же, что видит
+  # healthcheck Docker, — у receiver docker_stats коллектора 0.158 статуса
+  # здоровья контейнера нет (container.state.health.status появился в 0.160).
+  # Модуль — у каждой цели в __param_module; цель уходит параметром target,
+  # а в instance остаётся её адрес. Метка service — в алертах и в
+  # подавлении производных (alertmanager.yml). Имена хостов — алиасы сети,
+  # одинаковые в compose и на стенде; реплики локально нет, её проба там
+  # падает всегда.
+  - job_name: blackbox-services
+    metrics_path: /probe
+    static_configs:
+      - targets: ["http://dmc268-api:8000/health"]
+        labels: {service: api, __param_module: http_health}
+      - targets: ["dmc268-postgres:5432"]
+        labels: {service: postgres, __param_module: tcp_connect}
+      - targets: ["dmc268-postgres-replica:5432"]
+        labels: {service: postgres-replica, __param_module: tcp_connect}
+      - targets: ["dmc268-rabbitmq:5672"]
+        labels: {service: rabbitmq, __param_module: tcp_connect}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      # Экземпляр проб сервисов — только в сети данных (там его и скрейпит
+      # Prometheus): в сети стека он был бы звеном цепочки до
+      # blackbox-public с выходом наружу.
+      - target_label: __address__
+        replacement: dmc268-blackbox:9115
+
+  # Публичный вход по HTTPS и срок его сертификата — отдельным экземпляром
+  # blackbox-public: /probe принимает любой URL без авторизации, и экземпляр
+  # с выходом в интернет не должен стоять в сети данных, иначе он — прокси
+  # наружу для любого её контейнера. Адрес у стенда свой, а локально
+  # публичного входа нет, поэтому цель — в файле: на стенде его рендерит
+  # infra/observability.tf из public_origin, локально compose монтирует
+  # public-targets.yml с пустым списком.
+  - job_name: blackbox-public
+    metrics_path: /probe
+    params:
+      module: [https_public]
+    file_sd_configs:
+      - files: [/etc/prometheus/targets/public.yml]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-public:9115

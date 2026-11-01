@@ -177,6 +177,7 @@ tofu apply infra.tfplan
 | `github_app_client_id` | переменная `APP_CLIENT_ID_DMC268_T1` |
 | `github_app_client_secret` | секрет `APP_CLIENT_SECRET_DMC268_T1` |
 | `public_origin` | `https://` + `VPS_DMC268_IP_T1`: интерфейс отдаётся по HTTPS на тот же адрес. Callback `<public_origin>/api/v1/auth/github/callback` регистрируется в настройках GitHub App |
+| `alert_telegram_bot_token`, `alert_telegram_chat_id` | секреты `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1` — бот, от имени которого Alertmanager шлёт алерты, и чат, куда (раздел «Алерты»). Без них алерты считаются и видны в Alertmanager, но в Telegram не уходят. Заданные проверяются на формат — токен `<id>:<ключ>`, chat id числом: битое значение роняет `plan`. В Alertmanager токен приходит файлом (`upload`), поэтому в `docker inspect` его не видно, но в state OpenTofu он лежит открытым текстом — так же, как пароли из `env` остальных контейнеров; state защищён хранилищем на петле сервера (раздел «Хранилище состояния»). Ставятся вручную: `gh secret set TELEGRAM_BOT_TOKEN_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin) и так же chat id; следующий деплой пересоздаёт Alertmanager с ними |
 
 Из этого стека наружу не смотрит ничего. API, PostgreSQL и RabbitMQ публикуются на петле сервера, воркер не публикуется вовсе; снаружи доступен только интерфейс, и API — через его `/api/`.
 
@@ -296,14 +297,17 @@ docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_n
 
 ## Стек наблюдаемости
 
-Рядом с API на стенде стоит стек телеметрии из девяти контейнеров: OTel Collector
+Рядом с API на стенде стоит стек телеметрии из двенадцати контейнеров: OTel Collector
 (`dmc268-otelcol`: трейсы, логи, метрики приложения и базы), его второй экземпляр
 `dmc268-otelcol-docker` (метрики контейнеров), третий `dmc268-otelcol-logs` (логи postgres, его
 реплики и rabbitmq, см. «Логи контейнеров»), Loki (логи), Tempo (трейсы), Prometheus
 (метрики), Grafana (интерфейс, `grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU,
 память, диски) и socket-proxy (`dmc268-docker-proxy`: Docker API для `dmc268-otelcol-docker` по
 белому списку эндпоинтов вместо маунта `docker.sock`; отдельная сеть `dmc268-docker-proxy`, где
-кроме proxy и `dmc268-otelcol-docker` никого).
+кроме proxy и `dmc268-otelcol-docker` никого), а для алертов — Alertmanager
+(`dmc268-alertmanager`, доставка в Telegram) и два экземпляра blackbox-exporter
+(`dmc268-blackbox` — пробы сервисов, `dmc268-blackbox-public` — публичного входа); подробно —
+«Алерты».
 Сеть стека `dmc268-observability` — `internal`, как и сеть данных: из неё в интернет не выйти,
 а публикуемый порт Grafana живёт в отдельной не-internal сети `dmc268-grafana` — порты на
 internal-сети Docker не публикует. Выход наружу через эту сеть есть только у Grafana, и её
@@ -429,7 +433,10 @@ OTel с её миллисекундами. Логи сервисов колле�
 | PostgreSQL (receiver `postgresql` основного коллектора) | `collector` | `postgresql_backends`, `postgresql_connection_max`, `postgresql_replication_data_delay_bytes`, `postgresql_db_size_bytes`, `postgresql_table_size_bytes` | `postgresql_database_name` | соединения базы |
 | RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
 | Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
-| Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes` | `container_name` | CPU и память контейнеров |
+| Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes`, `container_uptime_seconds`, `container_restarts_total` | `container_name` | CPU и память контейнеров |
+| Расход токенов (receiver `sqlquery/llm-tokens` основного коллектора) | `collector` | `review_llm_tokens_month` | нет | нет (алерты бюджета) |
+| Резервные копии (textfile node-exporter, пишет `backup.sh`) | `node-exporter` | `dmc268_backup_last_success_timestamp_seconds` | нет | нет (алерт `BackupStale`) |
+| Пробы (blackbox-exporter) | `blackbox-services`, `blackbox-public` | `probe_success`, `probe_ssl_earliest_cert_expiry` | `service`, `instance` | нет (алерты) |
 | Коллекторы, Loki, Tempo, Prometheus | `collector-self`, `collector-docker-self`, `collector-logs-self`, `loki`, `tempo`, `prometheus` | `otelcol_*`, `loki_*`, `tempo_*`, `prometheus_*` | `receiver`, `exporter` | нет |
 
 Документация по стандартным метрикам:
@@ -543,6 +550,95 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 же опциями. Правила IP и query рассчитаны на его access- и error-лог по умолчанию и от тега не
 зависят (задача 4.7 в `openspec/changes/observability-audit-fixes/tasks.md`).
 
+### Алерты
+
+Критические алерты (#100) считает Prometheus по правилам `observability/alerts.yml` и раз в
+15 секунд отдаёт сработавшие Alertmanager (`dmc268-alertmanager`), тот шлёт их в Telegram
+(`observability/alertmanager.yml`). Конфиги те же локально и на стенде; токен бота и chat id —
+не в конфиге, а файлами `/etc/alertmanager/secrets/telegram_{bot_token,chat_id}`: на стенде их
+заливает `upload` из секретов `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1`,
+локально — compose (`configs`) из `ALERT_TELEGRAM_BOT_TOKEN` и `ALERT_TELEGRAM_CHAT_ID`. Из
+контейнеров алертов наружу ходят только Alertmanager (api.telegram.org) и
+`dmc268-blackbox-public` (публичный вход стенда) — через свою не-internal сеть `dmc268-alerting`, портов на хосте у них нет.
+Пробы сервисов делает другой экземпляр, `dmc268-blackbox`, — только в сети данных, там же его
+скрейпит Prometheus: `/probe?target=` принимает любой URL без авторизации, и экземпляр с
+выходом наружу или с путём до `dmc268-blackbox-public` (цепочка
+`/probe?target=http://blackbox-public:9115/probe?target=…`) был бы прокси в интернет для
+любого контейнера сети данных.
+
+Поведение правил закрепляет `observability/alerts.test.yml`: на каждый алерт — синтетические
+ряды «горит / молчит», `promtool test rules` в job `observability-configs`; там же
+`amtool check-config` и проверка конфига blackbox. Связи между файлами — имена метрик и пути
+секретов — держит `tests/infrastructure/test_alerting.py`.
+
+**Бот и чат.** Бот создаётся у @BotFather (`/newbot`), его добавляют в группу или канал
+команды. Chat id — из `https://api.telegram.org/bot<токен>/getUpdates` после любого
+сообщения в чате (у групп и каналов он отрицательный, `-100…`). Оба значения —
+секретами репозитория (таблица переменных выше). Пока их нет, Alertmanager получает заглушки —
+токен `unset` и chat id `0`: правила работают, горящие алерты видны через `amtool alert query`
+(ниже), а каждая попытка доставки пишет в его лог `Notify attempt failed … 404`.
+
+**Пороги.** `critical` уходит сразу и повторяется раз в 4 часа, пока горит; `warning` — раз в
+12 часов. Критический алерт сервиса глушит его же предупреждения (`inhibit_rules`: та же
+метка `service`). Погасший алерт присылает сообщение «RESOLVED» (`send_resolved`).
+
+| Алерт | Сигнал | Порог | Уровень |
+| --- | --- | --- | --- |
+| `ContainerDown` | контейнер не запущен: нет ряда `container_uptime_seconds` у `dmc268-api`, `-worker`, `-postgres`, `-postgres-replica`, `-postgres-backup`, `-rabbitmq`, `-ui`, `-otelcol` | 2 минуты (+ до 5 минут, пока экспортёр держит ряд остановленного) | critical |
+| `ContainerMetricsMissing` | нет ни одного ряда `container_uptime_seconds` при живом скрейпе `docker-stats`: `docker_stats` не читает Docker API, `ContainerDown` слеп | 5 минут | warning |
+| `ContainerRestarting` | перезапуски контейнера `dmc268-*` | 2 и больше за 15 минут | critical |
+| `ServiceProbeFailed` | сервис не отвечает (то же, что видит его healthcheck): `/health` API, TCP базы, реплики, брокера | 2 минуты | critical |
+| `PublicEndpointDown` | HTTPS публичного входа (`public_origin`) | 3 минуты | critical |
+| `WorkerNotConsuming` | у `review_jobs.qq` нет потребителей или очереди нет совсем (при живом скрейпе брокера) | 5 минут | critical |
+| `Api5xxSpike` | доля 5xx у API за 5 минут, при трафике больше 3 запросов в минуту | > 5 % дольше 5 минут | critical |
+| `ReviewRunsFailing` | доля прогонов в `failed` за 30 минут, при 3+ прогонах | > 30 % | critical |
+| `ReviewDlqNotEmpty` | сообщения в `review_jobs.dlq` | > 0 дольше 5 минут | critical |
+| `LlmBudgetNearLimit` | токены модели с начала месяца (UTC) от бюджета `dmc268:llm_tokens_budget_month` — 50 млн | > 80 % | warning |
+| `LlmBudgetExceeded` | то же | ≥ 100 % | critical |
+| `LlmBudgetUnknown` | ряда расхода токенов нет — алерт бюджета слеп | 15 минут | warning |
+| `DiskSpaceLow` | свободно на файловой системе сервера | < 15 % дольше 5 минут | warning |
+| `DiskSpaceCritical` | то же | < 5 % дольше 2 минут | critical |
+| `DiskWillFillIn24h` | прогноз по 6 часам: место кончится за сутки, при свободных < 40 % | 30 минут | critical |
+| `ReplicaNotStreaming` | реплики нет в `pg_stat_replication` основного сервера | 5 минут | critical |
+| `ReplicaLagHigh` | отставание реплики (слот держит WAL до `max_slot_wal_keep_size` 2 ГБ) | > 512 МБ дольше 10 минут | warning |
+| `BackupStale` | последняя успешная копия (`dmc268_backup_last_success_timestamp_seconds`) | старше 26 часов | critical |
+| `BackupStatusUnknown` | отметки о копии нет совсем | 26 часов | critical |
+| `TlsCertificateExpiringSoon` | срок сертификата публичного входа (`shortlived`, 160 часов, продлевается на середине) | < 48 часов дольше 10 минут | critical |
+| `ScrapeTargetDown` | цель скрейпа Prometheus не отвечает — её алерты слепы | 5 минут | warning |
+
+Бюджет токенов — константа в `alerts.yml` (`dmc268:llm_tokens_budget_month`), а не
+переменная: конфиги стека одинаковы в обоих окружениях. Смена бюджета — правка этой строки и
+таблицы выше. Расход берётся из `review_runs.tokens_used` запросом receiver-а `sqlquery`
+основного коллектора под ролью `dmc268_monitor`; ревизия 0017 даёт ей `SELECT` только на
+`created_at` и `tokens_used`. Разбивка по типам токенов, стоимость и баланс провайдера — #119.
+
+**Чего алерты не видят.** Статуса healthcheck контейнера у receiver `docker_stats` 0.158 нет
+(`container.state.health.status` появился в 0.160), поэтому «unhealthy» ловят пробы
+blackbox-exporter по тем же проверкам, а свежесть копий — отметка от `backup.sh`. Если упал
+сам Prometheus или Alertmanager, алертов нет вовсе: внешнего «dead man's switch» у стенда пока
+нет. Локально часть алертов горит всегда: реплики, копий и интерфейса там нет, а контейнеры
+compose называются по проекту (`<проект>-api-1`), поэтому `ContainerDown` горит по всем
+именам `dmc268-*`.
+
+**Проверка доставки.** Тестовый алерт напрямую в Alertmanager стенда, минуя правила:
+
+```bash
+ssh stand 'docker exec dmc268-alertmanager amtool alert add alertname=ТестДоставки severity=critical service=test --annotation=summary=Тестовый-алерт --annotation=description=Проверка-доставки-в-Telegram --alertmanager.url=http://127.0.0.1:9093'
+```
+
+Сообщение приходит через `group_wait` (30 секунд); не пришло — ошибка доставки в логе
+Alertmanager (`Notify attempt failed`, 401 — неверный токен, 400 — неверный chat id или бот не
+в чате, 404 — заглушка вместо токена). При сетевой ошибке Alertmanager пишет в лог URL
+целиком, **с токеном бота** (`…/bot<токен>/sendMessage`): лог смотрим только с маской и сырым
+никуда не вставляем —
+
+```bash
+ssh stand 'docker logs dmc268-alertmanager 2>&1' | sed -E 's#/bot[^/]+/#/bot***/#g' | grep -i notify
+```
+ Горящие алерты и тишины —
+`docker exec dmc268-alertmanager amtool alert query --alertmanager.url=http://127.0.0.1:9093`;
+заглушить на время работ — `amtool silence add alertname=… --duration=2h …` там же.
+
 ### Память стека
 
 Потолки памяти без свопа (`memory` = `memory_swap`) задаются переменной `observability_memory_mb`,
@@ -559,17 +655,21 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | Grafana | 1024 |
 | node-exporter | 64 |
 | socket-proxy | 64 |
-| **Итого стек** | **4032 (~4 ГБ)** |
+| Alertmanager | 64 |
+| blackbox-exporter, пробы сервисов | 32 |
+| blackbox-exporter, публичный вход | 32 |
+| **Итого стек** | **4160 (~4,1 ГБ)** |
 
 Рядом — лимиты контейнеров приложения (`app.tf`, `postgres.tf`, `rabbitmq.tf`, `replica.tf`):
 `postgres` 1024, `api`, `worker`, `rabbitmq` и реплика (`postgres_replica_memory`) по 512,
 резервные копии (`dmc268-postgres-backup`) 256 — итого 3328 МБ (~3,3 ГБ) постоянно живущих.
 Миграции (`docker run` в `migrate.sh` с `--memory 256m`) и одноразовый
 `dmc268-replication-setup` (64) — шаги деплоя, в постоянный лимит стенда не входят.
-Суммарный потолок стенда — 7360 МБ (~7,4 ГБ) по постоянно живущим контейнерам.
+Суммарный потолок стенда — 7488 МБ (~7,5 ГБ) по постоянно живущим контейнерам.
 
 На VPS 7947 МБ (~7,9 ГБ) памяти и нет свопа (`free -m`, 2026-10-28): запас над потолками около
-0,6 ГБ, и из него же живут контейнеры без потолка — интерфейс (`dmc268-ui`) и хранилище состояния
+0,45 ГБ (Alertmanager и два экземпляра blackbox-exporter забрали из него 128 МБ), и из него же
+живут контейнеры без потолка — интерфейс (`dmc268-ui`) и хранилище состояния
 (`dmc268-s3`, ~220 МБ). Через 30 минут после первого выката стека занято 2,2 ГБ. Grafana
 в покое занимает 330–413 МБ, а при открытии трейса в Explore её убивал OOM при потолке 512 МБ
 (4 раза за час 2026-11-01, `dmesg`), отсюда 1024. Поднимать потолки стека — только за счёт
@@ -600,9 +700,8 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 хранения удаляются, но суммарный объём под сроком ничем не ограничен. Теоретический потолок
 Loki — скорость приёма 1 МБ/с (`ingestion_rate_mb: 1`) ≈ 86 ГБ в сутки: поток сверх лимита
 Loki отбрасывает с 429 и долг не копит, но всё принятое до отбрасывания пишет на диск.
-Алертов #100 пока нет (задача открыта), поэтому до #100 защиты от переполнения диска нет
-никакой — ни лимита, ни алерта; после #100 заполнение ловят алерты по
-`node_filesystem_avail_bytes` от node-exporter.
+Лимита нет, но заполнение ловят алерты по `node_filesystem_avail_bytes` от node-exporter:
+`DiskSpaceLow`, `DiskSpaceCritical` и прогноз `DiskWillFillIn24h` (раздел «Алерты»).
 
 Ожидаемые объёмы: под ротацию json-file попадает 13 контейнеров этого стека (4 приложения —
 api, worker, копии, replication-setup — и 9 наблюдаемости) — не больше 390 МБ, и ещё

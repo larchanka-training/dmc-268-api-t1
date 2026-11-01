@@ -236,6 +236,11 @@ variable "observability_memory_mb" {
     docker_proxy     = number
     collector_docker = number
     collector_logs   = number
+    # Алерты #100: Alertmanager держит в памяти горящие алерты и тишины,
+    # экземпляры blackbox-exporter — по несколько проб раз в 15 с.
+    alertmanager    = number
+    blackbox        = number
+    blackbox_public = number
   })
   description = "Потолки памяти контейнеров стека наблюдаемости, МБ, без свопа."
   default = {
@@ -248,6 +253,9 @@ variable "observability_memory_mb" {
     docker_proxy     = 64
     collector_docker = 96
     collector_logs   = 96
+    alertmanager     = 64
+    blackbox         = 32
+    blackbox_public  = 32
   }
 }
 
@@ -290,6 +298,35 @@ variable "postgres_monitor_password" {
   validation {
     condition     = !var.observability_enabled || var.postgres_monitor_password != "dmc268_monitor"
     error_message = "Дефолт dmc268_monitor допустим только при observability_enabled = false: задайте настоящий пароль (секрет PG_MONITOR_PASSWORD_DMC268_T1)."
+  }
+}
+
+# Доставка алертов #100 в Telegram. Необязательна: без токена и chat id
+# Alertmanager работает и держит алерты, но в Telegram ничего не уходит —
+# ошибка доставки только в его логе (infra/README.md, «Алерты»). Заданное
+# значение проверяется на формат: опечатка в секрете иначе всплыла бы только
+# на первом алерте.
+variable "alert_telegram_bot_token" {
+  type        = string
+  description = "Токен бота Telegram, от имени которого Alertmanager шлёт алерты (bot_token_file); пусто — алерты не доставляются. Не коммитить."
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.alert_telegram_bot_token == "" || can(regex("^[0-9]+:[A-Za-z0-9_-]{30,}$", var.alert_telegram_bot_token))
+    error_message = "alert_telegram_bot_token — пусто или <id>:<ключ> от @BotFather: секрет TELEGRAM_BOT_TOKEN_DMC268_T1 битый."
+  }
+}
+
+variable "alert_telegram_chat_id" {
+  type        = string
+  description = "Chat id канала или группы Telegram для алертов (chat_id_file): число, у групп и каналов отрицательное; пусто — алерты не доставляются."
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.alert_telegram_chat_id == "" || can(regex("^-?[0-9]+$", var.alert_telegram_chat_id))
+    error_message = "alert_telegram_chat_id — пусто или число: секрет TELEGRAM_CHAT_ID_DMC268_T1 битый."
   }
 }
 

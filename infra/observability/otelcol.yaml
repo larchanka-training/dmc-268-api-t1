@@ -50,6 +50,38 @@ receivers:
       insecure: true
     collection_interval: 15s
 
+  # Расход токенов модели с начала месяца — вход алертов бюджета #100
+  # (alerts.yml, LlmBudget*). Источник — tokens_used прогонов в базе: метрики
+  # токенов в SDK нет (её разбивку по типам и стоимость делает #119), а
+  # расход прогона и так пишется в базу. Роль та же, dmc268_monitor: миграция
+  # 0017 даёт ей SELECT ровно на две колонки review_runs — created_at и
+  # tokens_used, — остальные данные прогонов ей недоступны. Хост и порт —
+  # литералом: у этого receiver они раздельные, а POSTGRESQL_ENDPOINT —
+  # host:port; адрес одинаков в обоих окружениях (алиас сети dmc268-postgres).
+  # Пароль receiver сам экранирует в строке подключения. Раз в минуту: сумма
+  # по индексу created_at, а бюджету точность до секунд не нужна.
+  sqlquery/llm-tokens:
+    driver: postgres
+    host: dmc268-postgres
+    port: 5432
+    database: ${env:POSTGRESQL_DATABASE}
+    username: ${env:POSTGRESQL_USERNAME}
+    password: ${env:POSTGRESQL_PASSWORD}
+    additional_params:
+      sslmode: disable
+    collection_interval: 60s
+    queries:
+      - sql: >-
+          SELECT coalesce(sum(tokens_used), 0)::bigint AS tokens
+          FROM review_runs
+          WHERE created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+        metrics:
+          - metric_name: review_llm_tokens_month
+            value_column: tokens
+            value_type: int
+            data_type: gauge
+            description: Токены модели, потраченные прогонами с начала месяца (UTC).
+
 processors:
   # Потолок памяти коллектора; в infra контейнеру задан лимит с запасом
   # (observability_memory_mb.collector).
@@ -209,7 +241,7 @@ service:
       processors: [memory_limiter, transform/browser-resource, transform/redact, batch]
       exporters: [otlp_http/tempo]
     metrics:
-      receivers: [otlp, postgresql]
+      receivers: [otlp, postgresql, sqlquery/llm-tokens]
       # Без batch: prometheus отдаёт точки по pull, пачка их только задерживала бы.
       processors: [memory_limiter, transform/trim-metrics-resource]
       exporters: [prometheus]

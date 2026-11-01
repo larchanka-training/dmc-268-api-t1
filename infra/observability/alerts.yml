@@ -1,0 +1,327 @@
+# Критические алерты стенда (#100). Правила читает Prometheus (rule_files в
+# prometheus.yml), доставку в Telegram делает Alertmanager (alertmanager.yml).
+# Пороги и что делать по каждому алерту — infra/README.md, «Алерты»; поведение
+# правил закрепляют тесты promtool в alerts.test.yml (job observability-configs
+# в CI). Файл один и тот же локально и на стенде: локально часть алертов горит
+# всегда — там нет реплики, копий и интерфейса, — и это ожидаемо.
+#
+# Метки: severity — critical (доставляется сразу) или warning (то же, но
+# повтор реже, см. alertmanager.yml); service — к какому сервису относится
+# алерт: критический алерт глушит предупреждения того же service. Критические
+# не глушатся: у ContainerDown и ContainerRestarting метки service нет, и при
+# остановке воркера придут и ContainerDown, и WorkerNotConsuming.
+
+groups:
+  # Месячный бюджет токенов модели — константа, а не переменная окружения:
+  # конфиги стека одинаковы локально и на стенде. Смена бюджета — правка этой
+  # строки и README.
+  - name: dmc268-budget
+    rules:
+      - record: dmc268:llm_tokens_budget_month
+        expr: vector(50000000)
+
+  - name: dmc268-services
+    rules:
+      # Контейнер не запущен: receiver docker_stats видит только запущенные,
+      # поэтому остановленный, удалённый или так и не созданный контейнер — это
+      # пропавший ряд. absent() по каждому имени отдельно: так в алерте есть
+      # метка container_name. Список — сервисы, без которых стенд не работает
+      # или теряет данные, и основной коллектор: без него молчат метрики
+      # приложения, а значит, и часть алертов. Рядов нет ни у кого — значит,
+      # не работает сам сбор (лёг экземпляр docker_stats или socket-proxy):
+      # тогда горит ScrapeTargetDown или ContainerMetricsMissing, а не восемь
+      # ContainerDown разом.
+      - alert: ContainerDown
+        expr: |
+          (
+            absent(container_uptime_seconds{container_name="dmc268-api"})
+            or absent(container_uptime_seconds{container_name="dmc268-worker"})
+            or absent(container_uptime_seconds{container_name="dmc268-postgres"})
+            or absent(container_uptime_seconds{container_name="dmc268-postgres-replica"})
+            or absent(container_uptime_seconds{container_name="dmc268-postgres-backup"})
+            or absent(container_uptime_seconds{container_name="dmc268-rabbitmq"})
+            or absent(container_uptime_seconds{container_name="dmc268-ui"})
+            or absent(container_uptime_seconds{container_name="dmc268-otelcol"})
+          )
+          and on() (count(container_uptime_seconds) > 0)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Контейнер {{ $labels.container_name }} не запущен"
+          description: "Ряда container_uptime_seconds нет 2 минуты: контейнер остановлен, удалён или не создан. Проверка: docker ps -a --filter name={{ $labels.container_name }}"
+
+      # Метрик контейнеров нет ни у кого при живом скрейпе: docker_stats не
+      # читает Docker API (лёг dmc268-docker-proxy) — ContainerDown и
+      # ContainerRestarting при этом слепы.
+      - alert: ContainerMetricsMissing
+        expr: absent(container_uptime_seconds) unless on() (up{job="docker-stats"} == 0)
+        for: 5m
+        labels:
+          severity: warning
+          service: observability
+        annotations:
+          summary: "Нет метрик контейнеров"
+          description: "5 минут нет ни одного ряда container_uptime_seconds, хотя collector-docker отвечает: receiver docker_stats не читает Docker API. Проверьте dmc268-docker-proxy и логи dmc268-otelcol-docker."
+
+      # Перезапуск: restart = unless-stopped поднимает упавший процесс, и без
+      # алерта цикл падений выглядит «живым» контейнером.
+      - alert: ContainerRestarting
+        expr: increase(container_restarts_total{container_name=~"dmc268-.+"}[15m]) >= 2
+        labels:
+          severity: critical
+        annotations:
+          summary: "Контейнер {{ $labels.container_name }} перезапускается"
+          description: "{{ $value | printf \"%.0f\" }} перезапусков за 15 минут. Причина — в docker logs {{ $labels.container_name }} и в Loki."
+
+      # Сервис запущен, но не отвечает — то же, что видит его healthcheck
+      # Docker: API — /health, база, реплика и брокер — TCP-порт. Метка
+      # service приходит из цели (prometheus.yml, job blackbox-services).
+      - alert: ServiceProbeFailed
+        expr: probe_success{job="blackbox-services"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} не отвечает на проверку"
+          description: "Проба {{ $labels.instance }} падает 2 минуты подряд, хотя контейнер может быть запущен."
+
+      # Публичный вход: интерфейс по HTTPS на адресе стенда. Падение здесь при
+      # живом API — nginx интерфейса или сертификат.
+      - alert: PublicEndpointDown
+        expr: probe_success{job="blackbox-public"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          service: ui
+        annotations:
+          summary: "Публичный вход {{ $labels.instance }} недоступен"
+          description: "HTTPS-проба падает 3 минуты: пользователи не открывают кабинет."
+
+      # Воркер не забирает задачи: потребителей у очереди ревью нет. Контейнер
+      # при этом может быть запущен (завис на старте, потерял соединение).
+      # Очереди нет совсем (воркер упал раньше, чем её объявил) — тоже
+      # «никто не забирает», если сам брокер снимается.
+      - alert: WorkerNotConsuming
+        expr: |
+          rabbitmq_queue_consumers{queue="review_jobs.qq"} == 0
+          or (absent(rabbitmq_queue_consumers{queue="review_jobs.qq"}) unless on() (up{job="rabbitmq"} == 0))
+        for: 5m
+        labels:
+          severity: critical
+          service: worker
+        annotations:
+          summary: "У очереди review_jobs.qq нет потребителей"
+          description: "5 минут ни один воркер не подписан на очередь: прогоны копятся и не выполняются."
+
+      # Скрейп цели падает: метрики этой цели, а с ними и алерты по ним, молчат.
+      - alert: ScrapeTargetDown
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: observability
+        annotations:
+          summary: "Prometheus не снимает {{ $labels.job }} ({{ $labels.instance }})"
+          description: "Цель не отвечает 5 минут: алерты по её метрикам не сработают."
+
+  - name: dmc268-errors
+    rules:
+      # Всплеск 5xx у API: доля за 5 минут больше 5 %. Нижний порог трафика —
+      # одна ошибка при единичных запросах не алерт.
+      - alert: Api5xxSpike
+        expr: |
+          (
+            sum(rate(http_server_request_duration_seconds_count{job="dmc-268-api", http_response_status_code=~"5.."}[5m]))
+            / sum(rate(http_server_request_duration_seconds_count{job="dmc-268-api"}[5m]))
+          ) > 0.05
+          and sum(rate(http_server_request_duration_seconds_count{job="dmc-268-api"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: "Всплеск 5xx у API: {{ $value | humanizePercentage }} запросов"
+          description: "Доля ответов 5xx за 5 минут выше 5 % уже 5 минут. Трейсы — в Grafana по X-Trace-ID из логов API."
+
+      # Прогоны падают в воркере, и 5xx у API этого не покажет: доля failed
+      # среди завершённых за 30 минут больше 30 % при хотя бы трёх прогонах.
+      - alert: ReviewRunsFailing
+        expr: |
+          (
+            sum(increase(review_runs_total{status="failed"}[30m]))
+            / sum(increase(review_runs_total[30m]))
+          ) > 0.3
+          and sum(increase(review_runs_total[30m])) >= 3
+        labels:
+          severity: critical
+          service: worker
+        annotations:
+          summary: "Прогоны падают: {{ $value | humanizePercentage }} за 30 минут"
+          description: "Доля прогонов в failed выше 30 %. Код ошибки шага — в GET /api/v1/reviews/{id}/steps и в спанах review.<этап>."
+
+      # Сообщение в DLQ — прогон, который никто не повторит: исключение при
+      # обработке или лимит доставок.
+      - alert: ReviewDlqNotEmpty
+        expr: rabbitmq_queue_messages{queue="review_jobs.dlq"} > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: worker
+        annotations:
+          summary: "В review_jobs.dlq {{ $value }} сообщений"
+          description: "Сообщения лежат в DLQ дольше 5 минут. Разбор — rabbitmqadmin get queue=review_jobs.dlq в контейнере dmc268-rabbitmq, причина — в логах воркера."
+
+  - name: dmc268-budget-alerts
+    rules:
+      # Расход токенов модели с начала месяца по прогонам (review_runs.tokens_used)
+      # — receiver sqlquery коллектора (otelcol.yaml).
+      - alert: LlmBudgetNearLimit
+        expr: review_llm_tokens_month / on() group_left dmc268:llm_tokens_budget_month > 0.8
+        labels:
+          severity: warning
+          service: llm
+        annotations:
+          summary: "Израсходовано {{ $value | humanizePercentage }} месячного бюджета токенов"
+          description: "Расход токенов модели с начала месяца выше 80 % бюджета (dmc268:llm_tokens_budget_month в alerts.yml)."
+
+      - alert: LlmBudgetExceeded
+        expr: review_llm_tokens_month / on() group_left dmc268:llm_tokens_budget_month >= 1
+        labels:
+          severity: critical
+          service: llm
+        annotations:
+          summary: "Месячный бюджет токенов исчерпан: {{ $value | humanizePercentage }}"
+          description: "Расход токенов модели с начала месяца превысил бюджет. Провайдер может начать отклонять запросы (Eurorouter — 402)."
+
+      # Без ряда расхода алерт бюджета молчит: sqlquery не может прочитать
+      # базу (нет прав у роли мониторинга, база недоступна).
+      - alert: LlmBudgetUnknown
+        expr: absent(review_llm_tokens_month) unless on() (up{job="collector"} == 0)
+        for: 15m
+        labels:
+          severity: warning
+          service: llm
+        annotations:
+          summary: "Расход токенов модели неизвестен"
+          description: "Ряда review_llm_tokens_month нет 15 минут: коллектор не читает review_runs, алерт бюджета не работает. Смотрите логи dmc268-otelcol (receiver sqlquery)."
+
+  - name: dmc268-storage
+    rules:
+      # Свободное место на файловой системе сервера: тома базы, WAL, копий,
+      # Prometheus и Loki живут на одном диске (infra/README.md, «Диск»).
+      # Файловые системы только для чтения (образы, erofs) всегда «полные» и
+      # в них никто не пишет — они исключены по node_filesystem_readonly.
+      - alert: DiskSpaceLow
+        expr: |
+          node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
+          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
+          < 0.15
+          unless on(device, mountpoint) node_filesystem_readonly == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: host
+        annotations:
+          summary: "На {{ $labels.mountpoint }} осталось {{ $value | humanizePercentage }}"
+          description: "Свободно меньше 15 %. Кто растёт — docker system df -v на сервере."
+
+      - alert: DiskSpaceCritical
+        expr: |
+          node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
+          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
+          < 0.05
+          unless on(device, mountpoint) node_filesystem_readonly == 1
+        for: 2m
+        labels:
+          severity: critical
+          service: host
+        annotations:
+          summary: "Диск {{ $labels.mountpoint }} почти заполнен: {{ $value | humanizePercentage }} свободно"
+          description: "Меньше 5 %: следующим остановится запись базы и WAL."
+
+      # Рост томов: при текущей скорости диск кончится в ближайшие сутки.
+      # Нижняя граница по свободному месту отсекает шум на почти пустом диске.
+      - alert: DiskWillFillIn24h
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}[6h], 24 * 3600) < 0
+          and
+          node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
+          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
+          < 0.4
+          unless on(device, mountpoint) node_filesystem_readonly == 1
+        for: 30m
+        labels:
+          severity: critical
+          service: host
+        annotations:
+          summary: "{{ $labels.mountpoint }} заполнится меньше чем за сутки"
+          description: "Свободное место убывает так, что через 24 часа его не останется (прогноз по 6 часам)."
+
+  - name: dmc268-database
+    rules:
+      # Реплика не получает поток: строки в pg_stat_replication основного
+      # сервера нет — метрика задержки пропадает. Тот же признак проверяет
+      # healthcheck реплики (status walreceiver = streaming).
+      - alert: ReplicaNotStreaming
+        expr: absent(postgresql_replication_data_delay_bytes) unless on() (up{job="collector"} == 0)
+        for: 5m
+        labels:
+          severity: critical
+          service: postgres-replica
+        annotations:
+          summary: "Реплика базы не получает поток WAL"
+          description: "В pg_stat_replication основного сервера нет реплики 5 минут. Копии при этом снимаются с основного сервера (backup.sh), но горячего резерва нет."
+
+      # Отставание реплики: WAL держится слотом на диске основного сервера до
+      # max_slot_wal_keep_size (2 ГБ), дальше реплика отваливается насовсем.
+      - alert: ReplicaLagHigh
+        expr: max(postgresql_replication_data_delay_bytes) > 512 * 1024 * 1024
+        for: 10m
+        labels:
+          severity: warning
+          service: postgres-replica
+        annotations:
+          summary: "Реплика отстаёт на {{ $value | humanize1024 }}B"
+          description: "Слот держит WAL на диске основного сервера; на 2 ГБ (max_slot_wal_keep_size) реплика потеряет поток и потребует пересоздания."
+
+      # Свежей копии нет: отметку времени пишет backup.sh после успешного
+      # pg_dump (textfile node-exporter). Порог — тот же, что у healthcheck
+      # контейнера копий: сутки плюс два часа.
+      - alert: BackupStale
+        expr: time() - max(dmc268_backup_last_success_timestamp_seconds) > 26 * 3600
+        labels:
+          severity: critical
+          service: postgres-backup
+        annotations:
+          summary: "Свежей резервной копии базы нет {{ $value | humanizeDuration }}"
+          description: "Последний успешный pg_dump старше 26 часов. Причина — docker logs dmc268-postgres-backup."
+
+      # Без поправки на лежащий node-exporter: unless сбрасывал бы for: 26h
+      # при любом пропущенном скрейпе, и алерт не загорелся бы никогда. Если
+      # node-exporter лежит сутки, второй critical рядом со ScrapeTargetDown
+      # честен — отметки о копиях действительно нет.
+      - alert: BackupStatusUnknown
+        expr: absent(dmc268_backup_last_success_timestamp_seconds)
+        for: 26h
+        labels:
+          severity: critical
+          service: postgres-backup
+        annotations:
+          summary: "Нет отметки о резервной копии базы"
+          description: "26 часов node-exporter не видит dmc268_backup_last_success_timestamp_seconds: копии не снимаются или не пишут отметку."
+
+  - name: dmc268-tls
+    rules:
+      # Сертификат на IP — профиль shortlived Let's Encrypt, 160 часов;
+      # nginx интерфейса продлевает его примерно на середине срока. Меньше
+      # 48 часов — продление пропущено больше чем на сутки.
+      - alert: TlsCertificateExpiringSoon
+        expr: probe_ssl_earliest_cert_expiry{job="blackbox-public"} - time() < 48 * 3600
+        for: 10m
+        labels:
+          severity: critical
+          service: ui
+        annotations:
+          summary: "Сертификат {{ $labels.instance }} истекает через {{ $value | humanizeDuration }}"
+          description: "Продление не прошло. Лог модуля ACME: docker logs dmc268-ui 2>&1 | grep -i acme."

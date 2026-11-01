@@ -149,6 +149,12 @@ services:
 
   api:
     build: .
+    # Алиас — имя контейнера на стенде: по нему проба /health алертов
+    # (prometheus.yml, job blackbox-services) одна и та же в обоих окружениях.
+    networks:
+      default:
+        aliases:
+          - dmc268-api
     ports:
       - "127.0.0.1:8000:8000"
     environment:
@@ -456,6 +462,10 @@ services:
       - --storage.tsdb.retention.size=8GB
     volumes:
       - ./infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Правила алертов (#100) и цель пробы публичного входа: локально её нет,
+      # файл с пустым списком; на стенде его рендерит infra.
+      - ./infra/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./infra/observability/public-targets.yml:/etc/prometheus/targets/public.yml:ro
       - prometheus_data:/prometheus
 
   grafana:
@@ -507,10 +517,14 @@ services:
       - --path.rootfs=/rootfs
       - --path.procfs=/host/proc
       - --path.sysfs=/host/sys
+      # Отметка о резервной копии — на стенде её пишет dmc268-postgres-backup;
+      # локально копий нет, каталог пуст и алерт BackupStatusUnknown горит.
+      - --collector.textfile.directory=/textfile
     volumes:
       - /:/rootfs:ro
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
+      - backup_metrics:/textfile:ro
 
   # Прокси над Docker API (/var/run/docker.sock): collector-docker — единственный
   # клиент, docker.sock контейнерам больше не монтируется. Белый список путей —
@@ -536,6 +550,86 @@ services:
         aliases:
           - dockerproxy
 
+  # Доставка алертов (#100) — как dmc268-alertmanager в infra/observability.tf,
+  # тот же alertmanager.yml. Токен бота и chat id — файлами (configs ниже) из
+  # окружения: без них Alertmanager работает, но в Telegram ничего не уходит,
+  # а в его логе — ошибка доставки. Проверка доставки — infra/README.md, «Алерты».
+  alertmanager:
+    # prom/alertmanager:v0.34.2
+    image: prom/alertmanager@sha256:39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b
+    profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - alertmanager
+      # Выход в api.telegram.org: сеть стека internal.
+      alerting:
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --cluster.listen-address=
+    volumes:
+      - ./infra/observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    configs:
+      - source: telegram_bot_token
+        target: /etc/alertmanager/secrets/telegram_bot_token
+      - source: telegram_chat_id
+        target: /etc/alertmanager/secrets/telegram_chat_id
+    # Как dmc268-alertmanager на стенде. Без read_only: compose не создаёт
+    # configs с content в read-only сервисе («`file` is the sole supported
+    # option»), а на стенде read_only несовместим с upload.
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+
+  # Пробы сервисов для алертов — как dmc268-blackbox в infra/observability.tf:
+  # только в default, где цели API, базы и брокера и где его скрейпит
+  # Prometheus. В сети стека его нет — иначе через него можно дойти до
+  # blackbox-public с выходом наружу. Изоляция от интернета — только на
+  # стенде: default в compose не internal, локально экземпляр выходит наружу
+  # напрямую.
+  blackbox:
+    # prom/blackbox-exporter:v0.29.1
+    image: prom/blackbox-exporter@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
+    profiles: ["observability"]
+    networks:
+      default:
+        aliases:
+          - dmc268-blackbox
+    command: ["--config.file=/etc/blackbox_exporter/config.yml"]
+    volumes:
+      - ./infra/observability/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+
+  # Проба публичного входа — как dmc268-blackbox-public в infra: без сети
+  # приложения, наружу — через alerting. Локально целей нет (public-targets.yml).
+  blackbox-public:
+    # prom/blackbox-exporter:v0.29.1
+    image: prom/blackbox-exporter@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
+    profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - blackbox-public
+      alerting:
+    command: ["--config.file=/etc/blackbox_exporter/config.yml"]
+    volumes:
+      - ./infra/observability/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+
+# Секреты доставки алертов локально — из окружения (или .env); токен unset и
+# chat id 0 — заглушки, с ними доставка падает, а стек поднимается. Не пустая
+# строка: пустой content compose монтирует каталогом, а не файлом.
+configs:
+  telegram_bot_token:
+    content: ${ALERT_TELEGRAM_BOT_TOKEN:-unset}
+  telegram_chat_id:
+    content: ${ALERT_TELEGRAM_CHAT_ID:-0}
+
 volumes:
   postgres_data:
     # Новое имя при переходе с postgres:18-alpine (musl) на pgvector (glibc):
@@ -557,6 +651,9 @@ volumes:
   tempo_data:
   prometheus_data:
   grafana_data:
+  alertmanager_data:
+  # Отметка о резервной копии для textfile node-exporter: локально пуста.
+  backup_metrics:
 
 # Сети стека наблюдаемости. docker_proxy — для доступа к Docker API через
 # socket-proxy: в ней только dockerproxy и collector-docker, internal — наружу в
@@ -583,3 +680,6 @@ networks:
   grafana:
   # То же для порта collector-logs.
   logs:
+  # Выход наружу: Alertmanager — в api.telegram.org, blackbox-public — на
+  # публичный вход. Сеть стека internal.
+  alerting:
