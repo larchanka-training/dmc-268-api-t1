@@ -172,6 +172,17 @@ merge_request на старый коммит. Состояния нет: поп�
 считаются по самому списку. Дубль переотправки (два воркера) безвреден: приём
 отвечает существующим прогоном, в том числе завершённым не-`failed` (#75).
 
+### Симуляции песочницы правил
+
+`SimulationRepo` (адаптер `SqlAlchemySimulationRepo`) хранит симуляции - временные строки с входом пользователя и итогом анализа (change `rules-playground-simulation`).
+Запуск - сценарий `start_simulation`: тот же разбор и фильтр диффа, что у ревью, отклоняет вход без hunk'ов до записи, чистая `admit_simulation` решает по строкам таблицы (одна незавершённая, `SIMULATION_MAX_PER_HOUR` за скользящий час), вставка `ON CONFLICT DO NOTHING` закрывает гонку двух запусков, задача уходит в общую очередь с приоритетом ниже ревью.
+Порт `RateLimiter` для этого не нужен: строки, которые фича и так хранит, дают точный скользящий счёт и переживают рестарт.
+Обработчик воркера - `run_simulation` (`app/application/simulation_pipeline.py`): те же `request_review`, `screen_findings` и `verify_findings`, что у ревью, без VCS, шагов прогона и публикации; сбой - статус `failed` с кодом, сообщение подтверждается.
+Правила домена - `app/domain/simulation.py`: переходы, итог стирает вход, лимит, фрагмент как новый файл диффа.
+Адаптер сверяет переход с той же таблицей переходов, что домен, и пишет контекст результата через `redact_secrets`.
+Тот же периодический проход воркера закрывает зависшие симуляции (`sweep_stale_simulations`) и удаляет истёкшие (`purge_expired_simulations`), независимыми шагами.
+В логах и спанах (`simulation.<этап>`, атрибут `simulation_id`) нет ни кода, ни правил, ни пути из входа.
+
 ### Спроектированы, но не реализованы
 
 Порт не пишется, пока его никто не вызывает. Интерфейс, написанный на тикет
@@ -200,8 +211,10 @@ python -m app.worker      review consumer: minutes, bound by model latency
 `app/worker` — такая же тонкая точка входа, как `app/main.py`
 (`app/worker/__main__.py` + `app/worker/factory.py`, по аналогии с
 `app/api/factory.py`): собирает и запускает consume-цикл над `review_jobs.qq`,
-ack/nack и dead-letter настоящие. Обработчик сообщения — `run_review`
-(`app/application/review_pipeline.py`): разбирает `ReviewJob` из сообщения,
+ack/nack и dead-letter настоящие. Обработчик выбирается по свойству AMQP `type`
+(`build_message_handler`): задача симуляции песочницы идёт в `run_simulation`
+(раздел «Симуляции песочницы правил»), ревью и сообщение без вида - в `run_review`
+(`app/application/review_pipeline.py`): тот разбирает `ReviewJob` из сообщения,
 проводит прогон через `queued → building_context → analysing → publishing →
 completed`/`failed`: контекст собирает `build_review_context` (дифф,
 AST-окружение, правила владельца), анализ — `LlmGateway` (пока заглушка).
@@ -318,7 +331,7 @@ def upgrade() -> None:
 контекста на пределе лимита, системный промпт и резерв ответа помещаются в
 окно `LLM_CONTEXT_WINDOW_TOKENS`, и что вызов модели в худшем случае
 (`LLM_TIMEOUT_SECONDS` × `LLM_MAX_ATTEMPTS` × провайдеры) короче
-`STALE_RUN_TIMEOUT_SECONDS`, а порог ждущего в очереди прогона
+`STALE_RUN_TIMEOUT_SECONDS` и `SIMULATION_STALE_SECONDS`, а порог ждущего в очереди прогона
 `QUEUED_RUN_TIMEOUT_SECONDS` (6 ч) - больше `STALE_RUN_TIMEOUT_SECONDS`, - воркер
 при старте, до подключения к брокеру.
 Настройки `github_app_id`, `github_app_private_key`, `github_webhook_secret`,

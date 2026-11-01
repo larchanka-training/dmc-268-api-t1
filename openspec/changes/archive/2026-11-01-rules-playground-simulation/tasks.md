@@ -44,6 +44,6 @@
 
 ## 7. Документы, контракт, проверки
 
-- [ ] 7.1 `docs/SYSTEM_DESIGN.md` (воркер и виды задач в очереди), `docs/BACKEND_ARCHITECTURE.md` (симуляции), `docs/erd.md` (таблица `simulations`)
-- [ ] 7.2 Экспорт `docs/openapi/openapi.json` (`uv run python scripts/export_openapi.py`)
-- [ ] 7.3 `ruff check`, `lint-imports`, `mypy`, `PYTEST_FAIL_ON_SKIP=1 pytest` с базой и брокером, `export_openapi.py --check`, `alembic heads`, `openspec validate --all --strict` проходят
+- [x] 7.1 `docs/SYSTEM_DESIGN.md` (воркер и виды задач в очереди), `docs/BACKEND_ARCHITECTURE.md` (симуляции), `docs/erd.md` (таблица `simulations`)
+- [x] 7.2 Экспорт `docs/openapi/openapi.json` (`uv run python scripts/export_openapi.py`)
+- [x] 7.3 `ruff check`, `lint-imports`, `mypy`, `PYTEST_FAIL_ON_SKIP=1 pytest` с базой и брокером, `export_openapi.py --check`, `alembic heads`, `openspec validate --all --strict` проходят
