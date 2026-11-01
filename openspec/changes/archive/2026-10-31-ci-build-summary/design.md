@@ -7,8 +7,9 @@
 
 Метрики последнего успешного прогона develop — в кэше Actions. Прогон develop после успеха
 сохраняет `build-base/metrics.json` с ключом `build-metrics-<sha>`; любой прогон
-восстанавливает самый свежий по `restore-keys: build-metrics-`. Пул-реквест видит кэш своей
-базовой ветки. Токену ничего не нужно: кэш ходит по `ACTIONS_RUNTIME_TOKEN`, `permissions`
+восстанавливает самый свежий по `restore-keys: build-metrics-` (основной ключ
+`build-metrics-restore` не сохраняется никогда, точного совпадения нет). Пул-реквест видит
+кэш своей базовой ветки. Токену ничего не нужно: кэш ходит по `ACTIONS_RUNTIME_TOKEN`, `permissions`
 остаётся `contents: read`. Ключ по sha: запись кэша неизменяема, а «последняя» выбирается по
 времени создания. Сохранение — шаг без `always()`, то есть только после успеха job'а.
 
@@ -45,7 +46,6 @@ Python, только стандартная библиотека: скрипты
 
 ## Имена
 
-`cicd.pipeline.name`, `cicd.pipeline.run.id`, `cicd.pipeline.task.name`,
-`cicd.pipeline.task.type`, `container.image.name`, `container.image.id`,
-`vcs.ref.head.revision`. Своё — `dmc268.build.image.{size,size.compressed}`,
+По семантическим соглашениям OpenTelemetry — `container.image.name`, `container.image.id`.
+Своё — `dmc268.build.image.{size,size.compressed}`,
 `dmc268.build.scan.{severity,vulnerabilities}`, `dmc268.build.lint.{level,findings}`.

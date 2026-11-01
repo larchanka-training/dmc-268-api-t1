@@ -19,14 +19,12 @@
 
 Порт `scripts/build-summary.mjs` фронтенда (dmc-268-ui-t1) без раздела бандла:
 у бэкенда его нет. Ключи значений — по семантическим соглашениям
-OpenTelemetry (`cicd.pipeline.*`, `container.image.*`, `vcs.ref.*`), чтобы
-отправить их в коллектор без переименований; своё — в пространстве
-`dmc268.build.*`.
+OpenTelemetry (`container.image.*`), чтобы отправить их в коллектор без
+переименований; своё — в пространстве `dmc268.build.*`.
 """
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import zlib
@@ -146,22 +144,24 @@ def _image_section(
 def trivy_counts(
     report: Mapping[str, Any],
 ) -> tuple[dict[str, dict[str, int]], list[str]]:
-    """Находки trivy по severity — с исправлением и без; список HIGH и
-    CRITICAL без исправления (`ID (пакет)`)."""
+    """Находки trivy по severity — с исправлением и без; список всех HIGH и
+    CRITICAL: сначала с исправлением (они роняют job), потом без."""
     counts = {s: {"fixed": 0, "unfixed": 0} for s in SEVERITIES}
-    unfixed_gate: list[str] = []
+    gate_fixed: list[str] = []
+    gate_unfixed: list[str] = []
     for result in report.get("Results") or []:
         for v in result.get("Vulnerabilities") or []:
             sev = v.get("Severity") if v.get("Severity") in SEVERITIES else "UNKNOWN"
-            if v.get("FixedVersion"):
+            name = f"{v.get('VulnerabilityID')} ({v.get('PkgName')})"
+            if fixed := v.get("FixedVersion"):
                 counts[sev]["fixed"] += 1
+                if sev in TRIVY_GATE:
+                    gate_fixed.append(f"{name} — исправлено в {fixed}, роняет job")
             else:
                 counts[sev]["unfixed"] += 1
                 if sev in TRIVY_GATE:
-                    unfixed_gate.append(
-                        f"{v.get('VulnerabilityID')} ({v.get('PkgName')})"
-                    )
-    return counts, unfixed_gate
+                    gate_unfixed.append(f"{name} — без исправления")
+    return counts, gate_fixed + gate_unfixed
 
 
 def _listed(items: list[str]) -> list[str]:
@@ -172,9 +172,9 @@ def _listed(items: list[str]) -> list[str]:
 
 
 def _trivy_section(report: Mapping[str, Any] | None) -> list[str]:
-    if not isinstance(report, Mapping):
+    if report is None:
         return []
-    counts, unfixed_gate = trivy_counts(report)
+    counts, gate_findings = trivy_counts(report)
     out = [
         "### trivy",
         "",
@@ -188,18 +188,21 @@ def _trivy_section(report: Mapping[str, Any] | None) -> list[str]:
         fixed, unfixed = counts[s]["fixed"], counts[s]["unfixed"]
         gate = " — роняет job, если есть исправление" if s in TRIVY_GATE else ""
         out.append(f"| {s}{gate} | {fixed} | {unfixed} | {fixed + unfixed} |")
-    if unfixed_gate:
+    if gate_findings:
         out += [
             "",
-            "HIGH и CRITICAL без исправления (job не роняют, `ignore-unfixed`):",
+            (
+                "HIGH и CRITICAL: с исправлением роняют job, без исправления — нет "
+                "(`ignore-unfixed`):"
+            ),
             "",
         ]
-        out += _listed(unfixed_gate)
+        out += _listed(gate_findings)
     return [*out, ""]
 
 
 def _hadolint_section(findings: list[Any] | None) -> list[str]:
-    if not isinstance(findings, list):
+    if findings is None:
         return []
     out = ["### hadolint", ""]
     if not findings:
@@ -221,32 +224,24 @@ def _hadolint_section(findings: list[Any] | None) -> list[str]:
         ),
         "",
     ]
+    # Сначала уровни, что роняют job: иначе обрезка списка спрячет `error`
+    # за десятком `style`. Сортировка устойчивая, неизвестный уровень — в конец.
+    ordered = sorted(
+        findings,
+        key=lambda f: (
+            HADOLINT_LEVELS.index(f.get("level"))
+            if f.get("level") in HADOLINT_LEVELS
+            else len(HADOLINT_LEVELS)
+        ),
+    )
     out += _listed(
         [
             f"`{f.get('code')}` ({f.get('level')}), строка {f.get('line')}: "
             f"{cell(f.get('message', ''))}"
-            for f in findings
+            for f in ordered
         ]
     )
     return [*out, ""]
-
-
-def _pipeline_section(env: Mapping[str, str]) -> list[str]:
-    run = env.get("GITHUB_RUN_ID", "")
-    server, repo = env.get("GITHUB_SERVER_URL"), env.get("GITHUB_REPOSITORY")
-    url = f"{server}/{repo}/actions/runs/{run}" if server and repo else ""
-    return [
-        "| Что | Ключ | Значение |",
-        "|---|---|---|",
-        f"| Workflow | `cicd.pipeline.name` | {cell(env.get('GITHUB_WORKFLOW', ''))} |",
-        f"| Прогон | `cicd.pipeline.run.id` | {f'[{run}]({url})' if url else run} |",
-        (
-            f"| Job | `cicd.pipeline.task.name` | `{cell(env.get('GITHUB_JOB', ''))}` "
-            "(`cicd.pipeline.task.type`: `build`) |"
-        ),
-        f"| Коммит | `vcs.ref.head.revision` | `{env.get('GITHUB_SHA', '')[:12]}` |",
-        "",
-    ]
 
 
 def render(
@@ -254,17 +249,16 @@ def render(
     base: Mapping[str, Any] | None = None,
     trivy: Mapping[str, Any] | None = None,
     hadolint: list[Any] | None = None,
-    env: Mapping[str, str] | None = None,
 ) -> str:
-    out = ["## Summary сборки", "", *_pipeline_section(env or {})]
-    if isinstance(metrics, Mapping):
+    out = ["## Summary сборки", ""]
+    if metrics is not None:
         out += [
             "Δ — к последнему успешному прогону CI на develop."
-            if isinstance(base, Mapping)
+            if base is not None
             else "Базы для сравнения нет: в кэше нет метрик develop (первый прогон "
             "или кэш устарел). Показаны абсолютные значения.",
             "",
-            *_image_section(metrics, base if isinstance(base, Mapping) else None),
+            *_image_section(metrics, base),
         ]
     else:
         out += [NO_METRICS, ""]
@@ -320,7 +314,6 @@ def main(argv: list[str]) -> int:
         base=_read_json(args.base),
         trivy=_read_json(args.trivy),
         hadolint=_read_json(args.hadolint),
-        env=os.environ,
     )
     sys.stdout.write(md + "\n")
     return 0

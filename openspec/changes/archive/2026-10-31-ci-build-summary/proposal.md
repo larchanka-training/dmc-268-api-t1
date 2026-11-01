@@ -15,8 +15,8 @@ hadolint ниже порога.
 - Разница с develop — к метрикам последнего успешного прогона develop из кэша Actions.
 - Логика — `scripts/build_summary.py` (`collect` — размеры из docker, `render` — markdown),
   только стандартная библиотека; тест на фикстурах — `tests/test_build_summary.py`.
-- Имена значений — по семантическим соглашениям OpenTelemetry (`cicd.pipeline.*`,
-  `container.image.*`, `vcs.ref.*`), своё — `dmc268.build.*`, как во фронтенде
+- Имена значений — по семантическим соглашениям OpenTelemetry (`container.image.*`), своё —
+  `dmc268.build.*`, как во фронтенде
   ([ui#85](https://github.com/larchanka-training/dmc-268-ui-t1/issues/85)).
 - Шаги summary ничего не роняют: падает только gate (hadolint, trivy с `ignore-unfixed`), как
   раньше.

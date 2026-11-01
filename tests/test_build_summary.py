@@ -21,15 +21,6 @@ from scripts import build_summary
 FIXTURES = Path("tests/fixtures/build_summary")
 SCRIPT = Path("scripts/build_summary.py")
 
-ENV = {
-    "GITHUB_WORKFLOW": "CI",
-    "GITHUB_RUN_ID": "42",
-    "GITHUB_SERVER_URL": "https://github.com",
-    "GITHUB_REPOSITORY": "larchanka-training/dmc-268-api-t1",
-    "GITHUB_JOB": "image",
-    "GITHUB_SHA": "a" * 40,
-}
-
 
 def fixture(name: str):
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
@@ -79,7 +70,7 @@ def test_delta(now, before, expected):
 
 
 def test_trivy_counts_fixed_and_unfixed_per_severity():
-    counts, unfixed_gate = build_summary.trivy_counts(fixture("trivy.json"))
+    counts, gate_findings = build_summary.trivy_counts(fixture("trivy.json"))
     assert counts == {
         "CRITICAL": {"fixed": 1, "unfixed": 0},
         "HIGH": {"fixed": 0, "unfixed": 1},
@@ -87,7 +78,10 @@ def test_trivy_counts_fixed_and_unfixed_per_severity():
         "LOW": {"fixed": 0, "unfixed": 2},
         "UNKNOWN": {"fixed": 0, "unfixed": 0},
     }
-    assert unfixed_gate == ["CVE-2026-0002 (libc6)"]
+    assert gate_findings == [
+        "CVE-2026-0001 (libssl3) — исправлено в 3.5.4-1, роняет job",
+        "CVE-2026-0002 (libc6) — без исправления",
+    ]
 
 
 def test_trivy_unknown_severity_counts_as_unknown():
@@ -98,17 +92,19 @@ def test_trivy_unknown_severity_counts_as_unknown():
 
 
 def test_render_trivy_table_and_unfixed_list():
-    md = build_summary.render(
-        fixture("metrics.json"), trivy=fixture("trivy.json"), env=ENV
-    )
+    md = build_summary.render(fixture("metrics.json"), trivy=fixture("trivy.json"))
     assert "### trivy" in md
     assert "| CRITICAL — роняет job, если есть исправление | 1 | 0 | 1 |" in md
     assert "| HIGH — роняет job, если есть исправление | 0 | 1 | 1 |" in md
     assert "| LOW | 0 | 2 | 2 |" in md
-    assert "HIGH и CRITICAL без исправления (job не роняют, `ignore-unfixed`):" in md
-    assert "- CVE-2026-0002 (libc6)" in md
-    # с исправлением в список не попадает: его роняет сам trivy
-    assert "CVE-2026-0001" not in md
+    assert (
+        "HIGH и CRITICAL: с исправлением роняют job, без исправления — нет "
+        "(`ignore-unfixed`):\n\n"
+        "- CVE-2026-0001 (libssl3) — исправлено в 3.5.4-1, роняет job\n"
+        "- CVE-2026-0002 (libc6) — без исправления\n"
+    ) in md
+    # MEDIUM с исправлением job не роняет — в список не попадает
+    assert "CVE-2026-0003" not in md
 
 
 def test_render_trivy_truncates_unfixed_list():
@@ -121,8 +117,8 @@ def test_render_trivy_truncates_unfixed_list():
             }
         ]
     }
-    md = build_summary.render(fixture("metrics.json"), trivy=report, env=ENV)
-    assert "- CVE-2026-0010 (pkg)" in md
+    md = build_summary.render(fixture("metrics.json"), trivy=report)
+    assert "- CVE-2026-0010 (pkg) — без исправления" in md
     assert "CVE-2026-0011" not in md
     assert "- … и ещё 2" in md
 
@@ -131,9 +127,7 @@ def test_render_trivy_truncates_unfixed_list():
 
 
 def test_render_with_base_shows_image_delta():
-    md = build_summary.render(
-        fixture("metrics.json"), base=fixture("base.json"), env=ENV
-    )
+    md = build_summary.render(fixture("metrics.json"), base=fixture("base.json"))
     assert "Δ — к последнему успешному прогону CI на develop." in md
     assert "| Образ | `container.image.name` | `dmc268-api:ci` | |" in md
     assert "| ID | `container.image.id` | `sha256:0123456789ab` | |" in md
@@ -145,37 +139,24 @@ def test_render_with_base_shows_image_delta():
 
 
 def test_render_without_base_shows_absolute_values():
-    md = build_summary.render(fixture("metrics.json"), env=ENV)
+    md = build_summary.render(fixture("metrics.json"))
     assert "Базы для сравнения нет" in md
     assert "| `dmc268.build.image.size` | 242.23 MiB | — |" in md
     assert "(+" not in md
 
 
 def test_render_has_no_bundle_section():
-    md = build_summary.render(fixture("metrics.json"), env=ENV)
+    md = build_summary.render(fixture("metrics.json"))
     assert "### Бандл" not in md
     assert "bundle" not in md
 
 
-def test_render_pipeline_section():
-    md = build_summary.render(fixture("metrics.json"), env=ENV)
-    assert md.startswith("## Summary сборки\n")
-    assert "| Workflow | `cicd.pipeline.name` | CI |" in md
-    assert (
-        "| Прогон | `cicd.pipeline.run.id` | "
-        "[42](https://github.com/larchanka-training/dmc-268-api-t1/actions/runs/42) |"
-    ) in md
-    assert (
-        "`cicd.pipeline.task.name` | `image` (`cicd.pipeline.task.type`: `build`)" in md
-    )
-    assert "| Коммит | `vcs.ref.head.revision` | `aaaaaaaaaaaa` |" in md
-
-
 def test_render_escapes_pipe_in_table_cells():
     metrics = {"image": {"name": "a|b", "size": 1, "compressed": 1}}
-    md = build_summary.render(metrics, env={**ENV, "GITHUB_WORKFLOW": "C|I"})
-    assert "| `cicd.pipeline.name` | C\\|I |" in md
-    assert "`a\\|b`" in md
+    findings = [{"code": "DL1", "level": "style", "line": 1, "message": "x|y"}]
+    md = build_summary.render(metrics, hadolint=findings)
+    assert "| Образ | `container.image.name` | `a\\|b` | |" in md
+    assert "строка 1: x\\|y" in md
 
 
 # --- hadolint -------------------------------------------------------------
@@ -183,7 +164,7 @@ def test_render_escapes_pipe_in_table_cells():
 
 def test_render_hadolint_levels_and_all_findings():
     md = build_summary.render(
-        fixture("metrics.json"), hadolint=fixture("hadolint.json"), env=ENV
+        fixture("metrics.json"), hadolint=fixture("hadolint.json")
     )
     assert "| warning | 1 |" in md
     assert "| style — ниже порога job'а | 1 |" in md
@@ -199,19 +180,33 @@ def test_render_hadolint_truncates_findings():
         {"code": f"DL{i}", "level": "style", "line": i, "message": "m"}
         for i in range(12)
     ]
-    md = build_summary.render(fixture("metrics.json"), hadolint=findings, env=ENV)
+    md = build_summary.render(fixture("metrics.json"), hadolint=findings)
     assert "- `DL9` (style), строка 9: m" in md
     assert "`DL10`" not in md
     assert "- … и ещё 2" in md
 
 
+def test_render_hadolint_lists_error_before_style():
+    findings = [
+        {"code": f"DL{i}", "level": "style", "line": i, "message": "m"}
+        for i in range(10)
+    ]
+    findings.append({"code": "DL3000", "level": "error", "line": 99, "message": "e"})
+    md = build_summary.render(fixture("metrics.json"), hadolint=findings)
+    # error одиннадцатым в файле обрезка не прячет: уровни, что роняют job, — первыми
+    assert "- `DL3000` (error), строка 99: e" in md
+    assert md.index("`DL3000`") < md.index("`DL0`")
+    assert "`DL9`" not in md
+    assert "- … и ещё 1" in md
+
+
 def test_render_clean_hadolint_is_one_line():
-    md = build_summary.render(fixture("metrics.json"), hadolint=[], env=ENV)
+    md = build_summary.render(fixture("metrics.json"), hadolint=[])
     assert "### hadolint\n\nЗамечаний нет." in md
 
 
 def test_render_without_scanner_reports_omits_sections():
-    md = build_summary.render(fixture("metrics.json"), env=ENV)
+    md = build_summary.render(fixture("metrics.json"))
     assert "### trivy" not in md
     assert "### hadolint" not in md
 
@@ -226,7 +221,7 @@ def run_cli(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True,
         text=True,
-        env=env if env is not None else {**os.environ, **ENV},
+        env=env,
         check=False,
     )
 
@@ -247,7 +242,6 @@ def test_cli_render_from_fixtures():
             base=fixture("base.json"),
             trivy=fixture("trivy.json"),
             hadolint=fixture("hadolint.json"),
-            env=ENV,
         )
         + "\n"
     )
