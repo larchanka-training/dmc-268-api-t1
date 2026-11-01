@@ -10,7 +10,7 @@
 from typing import Protocol
 from uuid import UUID
 
-from app.domain.enums import ReviewRunStage
+from app.domain.enums import ReviewRunStage, SimulationStatus
 
 
 class StageSpan(Protocol):
@@ -25,6 +25,15 @@ class StageTracer(Protocol):
         ...
 
 
+class SimulationTracer(Protocol):
+    def start(self, simulation_id: UUID, stage: SimulationStatus) -> StageSpan:
+        """Открыть спан этапа симуляции песочницы; он текущий, пока его не закроют.
+
+        Атрибуты - идентификатор симуляции и этап, без кода и правил (design D9).
+        """
+        ...
+
+
 class _NoStageSpan:
     def end(self, error_code: str | None) -> None:
         return None
@@ -35,4 +44,10 @@ class _NoStageTracing:
         return _NoStageSpan()
 
 
+class _NoSimulationTracing:
+    def start(self, simulation_id: UUID, stage: SimulationStatus) -> StageSpan:
+        return _NoStageSpan()
+
+
 NO_STAGE_TRACING: StageTracer = _NoStageTracing()
+NO_SIMULATION_TRACING: SimulationTracer = _NoSimulationTracing()

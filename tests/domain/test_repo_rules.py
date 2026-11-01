@@ -5,7 +5,8 @@ from pathlib import PurePosixPath
 
 import pytest
 
-from app.domain.entities import RejectedRule, RepoRule
+from app.domain.entities import RejectedRule, RepoRule, RepoRules
+from app.domain.enums import RulesStatus
 from app.domain.repo_rules import (
     RejectedOutline,
     RuleOutline,
@@ -14,6 +15,7 @@ from app.domain.repo_rules import (
     outline_rules_markdown,
     parse_rules_markdown,
     rule_applies_to,
+    rules_from_text,
 )
 
 FULL_RULE = """\
@@ -192,6 +194,18 @@ Pattern: app/**/*.py
 
 def test_empty_text_has_no_rules() -> None:
     assert parse_rules_markdown("") == ((), ())
+
+
+def test_text_without_accepted_rules_is_empty_and_keeps_the_rejected() -> None:
+    """Одно правило статуса на ревью и песочницу: прочитанный текст без правил - `empty`."""
+    assert rules_from_text("") == RepoRules(status=RulesStatus.EMPTY)
+    no_checks = rules_from_text("## Naming\n\n- pattern: `**/*.py`\n")
+    assert no_checks.status is RulesStatus.EMPTY
+    assert [r.name for r in no_checks.rejected] == ["Naming"]
+
+
+def test_text_with_a_rule_is_loaded() -> None:
+    assert rules_from_text(FULL_RULE) == RepoRules(status=RulesStatus.LOADED, rules=(ERROR_HANDLING,))
 
 
 @pytest.mark.parametrize(

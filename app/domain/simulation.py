@@ -9,16 +9,35 @@
 """
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from types import MappingProxyType
+from typing import Any
 from uuid import UUID
 
-from app.domain.diff_parser import split_lines
-from app.domain.entities import Hunk, ParsedFile, Simulation, SimulationResult
-from app.domain.enums import SimulationSourceKind, SimulationStatus, VerificationOutcome
+from app.domain.diff_parser import filter_diff_files, parse_diff, split_lines
+from app.domain.entities import (
+    DiscardedFinding,
+    Finding,
+    Hunk,
+    LlmFinding,
+    LlmRuleRef,
+    ParsedFile,
+    Simulation,
+    SimulationFinding,
+    SimulationResult,
+    Verdict,
+)
+from app.domain.enums import (
+    DiscardStage,
+    SimulationSourceKind,
+    SimulationStatus,
+    VerificationOutcome,
+)
+from app.domain.file_context import file_contexts
 from app.domain.result import Result
+from app.domain.verification import AppliedVerdicts, RejectedFinding
 
 S = SimulationStatus
 
@@ -190,6 +209,79 @@ def admit_simulation(
         return Admitted()
     frees_at = in_window[len(in_window) - max_per_window] + window
     return Limited(max(1, math.ceil((frees_at - now).total_seconds())), active=False)
+
+
+def simulation_result(
+    *,
+    rejected: Sequence[RejectedFinding],
+    kept: Sequence[Finding],
+    verdicts: AppliedVerdicts | None,
+    context_body: Mapping[str, Any],
+) -> SimulationResult:
+    """Итог анализа для показа: замечания с вердиктами, отброшенные с причиной, контекст по файлам.
+
+    `kept` - замечания, которые сохранило бы ревью; без вердиктов (`verdicts` -
+    `None`, второй проход не дал их) они идут без вердикта. Отброшенные - сначала
+    отсевом, затем верификатором, каждые в порядке ответа модели.
+    """
+    if verdicts is None:
+        findings = tuple(_simulation_finding(finding, None) for finding in kept)
+        dropped: tuple[DiscardedFinding, ...] = ()
+    else:
+        findings = tuple(_simulation_finding(judged.finding, judged.verdict) for judged in verdicts.kept)
+        dropped = tuple(
+            DiscardedFinding(DiscardStage.VERIFICATION, judged.verdict.reason, _as_candidate(judged.finding))
+            for judged in verdicts.dropped
+        )
+    screened = tuple(DiscardedFinding(DiscardStage.SCREENING, r.reason, r.candidate) for r in rejected)
+    return SimulationResult(
+        findings=findings,
+        discarded=screened + dropped,
+        context=file_contexts(context_body),
+    )
+
+
+def _simulation_finding(finding: Finding, verdict: Verdict | None) -> SimulationFinding:
+    return SimulationFinding(
+        id=finding.id,
+        anchor=finding.anchor,
+        category=finding.category,
+        severity=finding.severity,
+        message=finding.message,
+        suggestion=finding.suggestion,
+        confidence=finding.confidence,
+        rule=finding.rule,
+        verdict=verdict,
+    )
+
+
+def _as_candidate(finding: Finding) -> LlmFinding:
+    """Замечание после отсева в форме ответа модели: ссылка на правило - именем и номером."""
+    return LlmFinding(
+        anchor=finding.anchor,
+        category=finding.category,
+        severity=finding.severity,
+        message=finding.message,
+        suggestion=finding.suggestion,
+        confidence=finding.confidence,
+        rule=None if finding.rule is None else LlmRuleRef(finding.rule.name, finding.rule.check),
+    )
+
+
+def simulation_files(
+    source_kind: SimulationSourceKind, source: str, file_path: str | None
+) -> list[ParsedFile]:
+    """Файлы входа симуляции так, как их увидел бы разбор диффа ревью, до фильтра."""
+    if source_kind is SimulationSourceKind.CODE:
+        if file_path is None:
+            raise ValueError("a code fragment needs a file path")
+        return [code_as_new_file(file_path, source)]
+    return parse_diff(source)
+
+
+def has_reviewable_hunks(files: Sequence[ParsedFile]) -> bool:
+    """Останется ли модели что ревьюить после того же фильтра, что у ревью."""
+    return any(parsed.hunks for parsed in filter_diff_files(files))
 
 
 def code_as_new_file(file_path: str, content: str) -> ParsedFile:

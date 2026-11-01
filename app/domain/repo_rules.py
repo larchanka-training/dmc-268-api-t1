@@ -29,7 +29,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.domain.diff_parser import split_lines
-from app.domain.entities import RejectedRule, RepoRule
+from app.domain.entities import RejectedRule, RepoRule, RepoRules
+from app.domain.enums import RulesStatus
 from app.domain.glob import glob_full_match
 
 RULES_PATH = ".review/rules.md"
@@ -121,6 +122,18 @@ def parse_rules_markdown(text: str) -> tuple[tuple[RepoRule, ...], tuple[Rejecte
     """Разобрать `rules.md` на принятые и отклонённые правила, в порядке файла."""
     accepted, rejected = outline_rules_markdown(text)
     return tuple(o.rule for o in accepted), tuple(o.rejected for o in rejected)
+
+
+def rules_from_text(text: str) -> RepoRules:
+    """Правила из прочитанного текста `rules.md`: без принятых - `empty`, иначе `loaded`.
+
+    Одно правило для ревью и песочницы; нет файла, он больше лимита или не
+    прочитался - статус решает вызывающий, текста у него нет.
+    """
+    rules, rejected = parse_rules_markdown(text)
+    if not rules:
+        return RepoRules(status=RulesStatus.EMPTY, rejected=rejected)
+    return RepoRules(status=RulesStatus.LOADED, rules=rules, rejected=rejected)
 
 
 def outline_rules_markdown(text: str) -> tuple[tuple[RuleOutline, ...], tuple[RejectedOutline, ...]]:

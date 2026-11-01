@@ -23,9 +23,9 @@
 
 - [x] 4.1 `assemble_context` берёт `ContextSubject` вместо `ReviewJob`; промпт пропускает пустые репозиторий и номер PR; тесты ревью не меняются
 - [x] 4.2 `verify_findings` - общая функция вместо закрытой `_verify` в `review_pipeline.py`
-- [ ] 4.3 `build_simulation_context` (`app/application/use_cases`): вход как `ParsedFile`, `filter_diff_files`, правила текста пользователя, AST фрагмента или `no_source` у диффа, пустой контекст PR
-- [ ] 4.4 `run_simulation` (`app/application/simulation_pipeline.py`): статусы, `request_review` → `screen_findings` → `verify_findings`, результат, сбой - `failed` с кодом и токенами; итоговая или удалённая симуляция - без работы; спаны `simulation.<этап>`, лог с `simulation_id` без кода
-- [ ] 4.5 Тесты на фейке модели: тот же вход - те же замечания, что у `run_review`; таймаут модели; верификатор недоступен; отброшенные отсевом и верификатором; повторная доставка
+- [x] 4.3 `build_simulation_context` (`app/application/use_cases`): вход как `ParsedFile`, `filter_diff_files`, правила текста пользователя (`rules_from_text` - общее с загрузкой правил ревью), AST фрагмента или `no_source` у диффа, пустой контекст PR
+- [x] 4.4 `run_simulation` (`app/application/simulation_pipeline.py`): статусы, `request_review` → `screen_findings` → `verify_findings`, результат (`simulation_result`), сбой - `failed` с кодом и токенами; итоговая или удалённая симуляция - без работы, застрявшая после смерти воркера - `SIMULATION_STALE`, закрытая без воркера - результат отброшен; спаны `simulation.<этап>` (порт `SimulationTracer`), в логе ни кода, ни правил, ни пути; атрибут `simulation_id` записям лога ставит обработчик воркера (5.2)
+- [x] 4.5 Тесты на фейке модели: тот же вход - те же замечания, что у `run_review`; таймаут модели; верификатор недоступен; отброшенные отсевом и верификатором; повторная доставка
 
 ## 5. Очередь, воркер, настройки
 

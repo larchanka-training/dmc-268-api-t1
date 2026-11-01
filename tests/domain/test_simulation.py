@@ -19,7 +19,9 @@ from app.domain.simulation import (
     code_as_new_file,
     complete_simulation,
     fail_simulation,
+    has_reviewable_hunks,
     new_simulation,
+    simulation_files,
 )
 
 from .conftest import NOW, uid
@@ -230,3 +232,30 @@ def test_every_line_of_a_fragment_is_added() -> None:
 
 def test_an_empty_fragment_has_nothing_to_review() -> None:
     assert code_as_new_file("app/a.py", "").hunks == ()
+
+
+RENAME_ONLY = "diff --git a/a.py b/b.py\nsimilarity index 100%\nrename from a.py\nrename to b.py\n"
+LOCK_ONLY = "diff --git a/uv.lock b/uv.lock\n--- a/uv.lock\n+++ b/uv.lock\n@@ -1 +1 @@\n-a\n+b\n"
+
+
+@pytest.mark.parametrize(
+    ("kind", "source", "path", "reviewable"),
+    [
+        (SimulationSourceKind.CODE, "x = 1\n", "app/a.py", True),
+        (SimulationSourceKind.CODE, "a\n", "uv.lock", False),
+        (SimulationSourceKind.DIFF, GIT_NEW_FILE["x = 1\ny = 2"], None, True),
+        (SimulationSourceKind.DIFF, LOCK_ONLY, None, False),
+        (SimulationSourceKind.DIFF, RENAME_ONLY, None, False),
+        (SimulationSourceKind.DIFF, "просто текст, не дифф", None, False),
+    ],
+    ids=["fragment", "lock-fragment", "diff", "lock-only", "rename-only", "not-a-diff"],
+)
+def test_input_without_reviewable_hunks_after_the_review_filter_is_detected(
+    kind: SimulationSourceKind, source: str, path: str | None, reviewable: bool
+) -> None:
+    assert has_reviewable_hunks(simulation_files(kind, source, path)) is reviewable
+
+
+def test_a_fragment_without_a_path_is_a_programming_error() -> None:
+    with pytest.raises(ValueError):
+        simulation_files(SimulationSourceKind.CODE, "x = 1\n", None)
