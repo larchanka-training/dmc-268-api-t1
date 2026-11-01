@@ -226,8 +226,21 @@ sequenceDiagram
     alt подпись неверна
         API-->>GH: 401, ни одной записи
     else событие pull_request_review_thread
-        API->>DB: тред resolved / unresolved (handle_review_thread_webhook)
-        API->>GH: merge gate check на head
+        opt в треде есть inline-комментарий бота (handle_review_thread_webhook)
+            opt состояние треда сменилось
+                API->>DB: тред resolved / unresolved
+            end
+            alt репозиторий выключен
+                API->>GH: check run «Ревью выключено» на head
+            else репозиторий подключён
+                API->>GH: состояния открытых тредов → thread_resolved в БД
+                alt последний прогон на head completed
+                    API->>GH: merge gate check на head
+                else head не проверен
+                    API->>API: gate не пересчитывается
+                end
+            end
+        end
         API-->>GH: 202 acknowledged, прогон не создаётся, сбой VCS — 502
     else не pull_request, действие не opened / synchronize / edited со сменой базы, PR из форка от автора вне команды, репозиторий не подключён или выключен
         opt репозиторий выключен
@@ -264,6 +277,9 @@ sequenceDiagram
     end
 
     MQ->>W: доставка (consumer timeout 2 ч, лимит доставок 5)
+    opt прогон уже терминальный (ретаргет отменил его ещё в queued)
+        W->>MQ: ack без работы
+    end
     Note over W,DB: каждый коммит записи прогона шлёт NOTIFY — API отдаёт событие кабинету по SSE
     W->>DB: ReviewRun building_context
     W->>GH: дифф по head_sha / base_sha (до 5 МиБ), rules.md по base_sha, файлы для AST
@@ -273,6 +289,9 @@ sequenceDiagram
             W->>MQ: ack, прогон остаётся cancelled, результат отброшен
         else сбой
             W->>DB: ReviewRun failed
+            opt на этом head уже было ревью, а упавший прогон — последний
+                W->>GH: check run failure на head (_block_head_of_failed_run)
+            end
             W->>MQ: nack без requeue → review_jobs.dlq
         end
     end
@@ -295,7 +314,7 @@ sequenceDiagram
 
     opt повторная доставка (воркер умер или остановился с сообщением)
         MQ->>W: то же сообщение
-        alt прогон терминальный (умер между completed и ack)
+        alt прогон терминальный (умер между completed и ack или отменён ретаргетом)
             W->>MQ: ack, прогон не меняется
         else прогон начат и не терминальный
             W->>DB: ReviewRun failed, брошенный шаг — REVIEW_RUN_STALE
@@ -346,8 +365,12 @@ JSON-сообщение; тело несёт только доменные да�
 забинжена очередь `review_jobs.dlq`. Воркер, обработка которого завершилась
 исключением, отвечает `nack` без `requeue`: сообщение не крутится в основной
 очереди по кругу, а ровно один раз перекладывается в `review_jobs.dlq` для
-ручного разбора. Исключение — прогон, отменённый ретаргетом посреди ревью
-(`_supersede`): сообщение подтверждается `ack`, прогон остаётся `cancelled`. Ретраев с backoff перед dead-letter пока нет — осознанное
+ручного разбора. Перед `nack` упавший прогон ставит `failure` на head, если
+он на этом head последний, а до него ревью уже было (`_block_head_of_failed_run`):
+иначе на PR остался бы `success` прежнего прогона. Исключения — прогон, отменённый ретаргетом посреди ревью
+(`_supersede`): сообщение подтверждается `ack`, прогон остаётся `cancelled`; и прогон,
+отменённый ретаргетом ещё в `queued`: воркер подтверждает сообщение `ack` при первой
+же доставке, ничего не делая. Ретраев с backoff перед dead-letter пока нет — осознанное
 упрощение, зафиксированное в `design.md` OpenSpec change'а
 `add-rabbitmq-job-queue`.
 
@@ -358,7 +381,7 @@ JSON-сообщение; тело несёт только доменные да�
 доставке, не крутится вечно. Ревью смерть воркера не повторяет. Что сделает
 повторная доставка, решает статус прогона (`run_review`,
 `app/application/review_pipeline.py`): терминальный прогон (воркер умер между
-коммитом `completed` и `ack`) подтверждается без изменений; начатый
+коммитом `completed` и `ack` или прогон отменён ретаргетом) подтверждается без изменений; начатый
 нетерминальный уходит в `failed` (`REVIEW_RUN_STALE` на брошенном шаге), а
 сообщение — в DLQ; ещё `queued` обрабатывается с начала. Запас лимита — для сообщения, роняющего процесс до записи
 в базу, и для рестартов при деплое. Штатная остановка возвращает выданное, но не
