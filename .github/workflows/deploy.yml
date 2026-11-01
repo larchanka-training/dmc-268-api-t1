@@ -338,6 +338,11 @@ jobs:
           # локальный (как у compose), валидация при observability_enabled =
           # true требует настоящего пароля — без секрета apply падает.
           TF_VAR_postgres_monitor_password: ${{ secrets.PG_MONITOR_PASSWORD_DMC268_T1 }}
+          # Доставка алертов в Telegram (#100): токен бота и chat id канала.
+          # Необязательны: без секретов алерты считаются и видны в
+          # Alertmanager, но в Telegram не уходят.
+          TF_VAR_alert_telegram_bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN_DMC268_T1 }}
+          TF_VAR_alert_telegram_chat_id: ${{ secrets.TELEGRAM_CHAT_ID_DMC268_T1 }}
           # Пароль роли replicator. Нет секрета — пустая строка, и проверка
           # переменной роняет plan, ничего не меняя на сервере.
           TF_VAR_postgres_replication_password: ${{ secrets.PG_REPLICATION_PASSWORD_DMC268_T1 }}

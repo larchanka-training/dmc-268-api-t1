@@ -49,6 +49,12 @@ EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
     "grafana": frozenset({"observability", "grafana"}),
     "node_exporter": frozenset({"observability"}),
     "docker_socket_proxy": frozenset({"observability_docker_proxy"}),
+    # Алерты (#100): наружу из стека ходят только они — Alertmanager в
+    # api.telegram.org, blackbox-exporter на публичный вход стенда — через
+    # свою не-internal сеть dmc268-alerting; blackbox ещё и в сети данных:
+    # пробы API, базы, реплики и брокера.
+    "alertmanager": frozenset({"observability", "alerting"}),
+    "blackbox": frozenset({"observability", "backend", "alerting"}),
 }
 
 
@@ -155,6 +161,10 @@ def test_observability_network_has_no_way_out() -> None:
     )
     assert network_is_internal(text, "logs") is False, (
         "сеть dmc268-logs не должна быть internal: в ней публикуется порт коллектора логов"
+    )
+    assert network_is_internal(text, "alerting") is False, (
+        "сеть dmc268-alerting не должна быть internal: через неё Alertmanager шлёт "
+        "алерты в Telegram, а blackbox-exporter проверяет публичный вход"
     )
 
 

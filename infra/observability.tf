@@ -60,6 +60,18 @@ resource "docker_image" "docker_socket_proxy" {
   keep_locally = true
 }
 
+resource "docker_image" "alertmanager" {
+  count        = var.observability_enabled ? 1 : 0
+  name         = local.alertmanager_image
+  keep_locally = true
+}
+
+resource "docker_image" "blackbox" {
+  count        = var.observability_enabled ? 1 : 0
+  name         = local.blackbox_image
+  keep_locally = true
+}
+
 resource "docker_volume" "loki" {
   name = "dmc268-loki-data"
 
@@ -94,6 +106,17 @@ resource "docker_volume" "prometheus" {
 
 resource "docker_volume" "grafana" {
   name = "dmc268-grafana-data"
+
+  # prevent_destroy и отсутствие count — как у тома Loki выше.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# Тишины (silences) и журнал отправок Alertmanager: без тома пересоздание
+# контейнера снимало бы тишины и повторяло уже отправленные алерты.
+resource "docker_volume" "alertmanager" {
+  name = "dmc268-alertmanager-data"
 
   # prevent_destroy и отсутствие count — как у тома Loki выше.
   lifecycle {
@@ -144,6 +167,15 @@ resource "docker_network" "grafana" {
 resource "docker_network" "logs" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-logs"
+}
+
+# Выход наружу для алертов (#100): Alertmanager шлёт в api.telegram.org,
+# blackbox-exporter проверяет публичный вход стенда по его адресу. Сеть стека
+# internal, поэтому им нужна своя не-internal сеть; портов в ней никто не
+# публикует, остальные контейнеры стека в неё не подключены.
+resource "docker_network" "alerting" {
+  count = var.observability_enabled ? 1 : 0
+  name  = "dmc268-alerting"
 }
 
 resource "docker_container" "otelcol" {
@@ -393,6 +425,19 @@ resource "docker_container" "prometheus" {
     file    = "/etc/prometheus/prometheus.yml"
   }
 
+  # Правила алертов #100 и цель пробы публичного входа (prometheus.yml,
+  # rule_files и job blackbox-public). Цель локально — пустой список из
+  # observability/public-targets.yml, здесь — адрес стенда.
+  upload {
+    content = file("${path.module}/observability/alerts.yml")
+    file    = "/etc/prometheus/alerts.yml"
+  }
+
+  upload {
+    content = yamlencode(local.blackbox_public_targets)
+    file    = "/etc/prometheus/targets/public.yml"
+  }
+
   command = [
     "--config.file=/etc/prometheus/prometheus.yml",
     # Хранение метрик — 30 дней (как retention логов Loki).
@@ -520,7 +565,15 @@ resource "docker_container" "node_exporter" {
     "--path.rootfs=/rootfs",
     "--path.procfs=/host/proc",
     "--path.sysfs=/host/sys",
+    # Отметка о последней резервной копии (backup.sh) — алерт BackupStale.
+    "--collector.textfile.directory=/textfile",
   ]
+
+  volumes {
+    volume_name    = docker_volume.backup_metrics.name
+    container_path = "/textfile"
+    read_only      = true
+  }
 
   volumes {
     host_path      = "/"
@@ -587,5 +640,114 @@ resource "docker_container" "docker_socket_proxy" {
   networks_advanced {
     name    = docker_network.observability_docker_proxy[0].name
     aliases = ["dockerproxy"]
+  }
+}
+
+# Доставка алертов (#100): Prometheus шлёт сработавшие правила сюда, отсюда — в
+# Telegram. Токен бота и chat id — отдельными файлами (*_file в
+# alertmanager.yml), а не в конфиге и не в env: конфиг один с локальным, а env
+# виден в docker inspect. Порта на хосте нет: горящие алерты и тишины —
+# через amtool внутри контейнера (infra/README.md, «Алерты»).
+resource "docker_container" "alertmanager" {
+  count   = var.observability_enabled ? 1 : 0
+  name    = "dmc268-alertmanager"
+  image   = docker_image.alertmanager[0].image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.alertmanager
+  memory_swap = var.observability_memory_mb.alertmanager
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  # Как у коллектора: без read_only из-за upload конфига и секретов.
+  security_opts = ["no-new-privileges:true"]
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  upload {
+    content = file("${path.module}/observability/alertmanager.yml")
+    file    = "/etc/alertmanager/alertmanager.yml"
+  }
+
+  upload {
+    content = var.alert_telegram_bot_token
+    file    = "/etc/alertmanager/secrets/telegram_bot_token"
+  }
+
+  # Без секрета — 0, как локально в compose: файл chat_id_file Alertmanager
+  # разбирает как число. Пустой токен он принимает, доставка падает с 404.
+  upload {
+    content = var.alert_telegram_chat_id == "" ? "0" : var.alert_telegram_chat_id
+    file    = "/etc/alertmanager/secrets/telegram_chat_id"
+  }
+
+  command = [
+    "--config.file=/etc/alertmanager/alertmanager.yml",
+    "--storage.path=/alertmanager",
+    # Экземпляр один: кластер HA (gossip на :9094) не нужен.
+    "--cluster.listen-address=",
+  ]
+
+  volumes {
+    volume_name    = docker_volume.alertmanager.name
+    container_path = "/alertmanager"
+  }
+
+  # Приём алертов от Prometheus и скрейп — в сети стека.
+  networks_advanced {
+    name    = docker_network.observability[0].name
+    aliases = ["alertmanager"]
+  }
+
+  # Выход в api.telegram.org.
+  networks_advanced {
+    name = docker_network.alerting[0].name
+  }
+}
+
+# Пробы сервисов для алертов (#100): /health API, порты базы, реплики и
+# брокера (job blackbox-services) и HTTPS публичного входа со сроком
+# сертификата (job blackbox-public). Сам ничего не хранит.
+resource "docker_container" "blackbox" {
+  count   = var.observability_enabled ? 1 : 0
+  name    = "dmc268-blackbox"
+  image   = docker_image.blackbox[0].image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.blackbox
+  memory_swap = var.observability_memory_mb.blackbox
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  # Только HTTP и TCP: ICMP (NET_RAW) пробам не нужен.
+  security_opts = ["no-new-privileges:true"]
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  upload {
+    content = file("${path.module}/observability/blackbox.yml")
+    file    = "/etc/blackbox_exporter/config.yml"
+  }
+
+  command = ["--config.file=/etc/blackbox_exporter/config.yml"]
+
+  # Скрейп Prometheus — blackbox:9115 в сети стека.
+  networks_advanced {
+    name    = docker_network.observability[0].name
+    aliases = ["blackbox"]
+  }
+
+  # Цели проб API, базы, реплики и брокера — в сети данных.
+  networks_advanced {
+    name = docker_network.backend.name
+  }
+
+  # Публичный вход — по внешнему адресу стенда.
+  networks_advanced {
+    name = docker_network.alerting[0].name
   }
 }

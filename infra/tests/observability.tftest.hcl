@@ -17,6 +17,10 @@ variables {
   github_webhook_secret         = "webhook-secret"
   user_token_encryption_key     = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
   llm_backend                   = "stub"
+  # Доставка алертов: значения общие для всех run; пустые и битые — в
+  # отдельных run ниже.
+  alert_telegram_bot_token = "123456789:AAEexampleexampleexampleexample_-12"
+  alert_telegram_chat_id   = "-1001234567890"
 }
 
 run "observability_stack_plans_protected" {
@@ -32,7 +36,7 @@ run "observability_stack_plans_protected" {
   }
 
   # Ресурсы стека считаются (count = 1 : 0), поэтому каждый адресуется по
-  # индексу: с включённым флагом все девять есть в плане. Список — по
+  # индексу: с включённым флагом все одиннадцать есть в плане. Список — по
   # docker_container.* из observability.tf; новый контейнер стека обязан
   # добавляться сюда.
   assert {
@@ -42,7 +46,8 @@ run "observability_stack_plans_protected" {
         docker_container.otelcol_logs[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
-        docker_container.docker_socket_proxy[0],
+        docker_container.docker_socket_proxy[0], docker_container.alertmanager[0],
+        docker_container.blackbox[0],
       ] :
       c.memory > 0 && c.memory == c.memory_swap
     ])
@@ -58,7 +63,8 @@ run "observability_stack_plans_protected" {
         docker_container.otelcol_logs[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
-        docker_container.docker_socket_proxy[0],
+        docker_container.docker_socket_proxy[0], docker_container.alertmanager[0],
+        docker_container.blackbox[0],
       ] :
       c.log_driver == "json-file" && jsonencode(c.log_opts) == jsonencode(local.log_opts)
     ])
@@ -75,7 +81,8 @@ run "observability_stack_plans_protected" {
         docker_container.otelcol_logs[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
-        docker_container.docker_socket_proxy[0],
+        docker_container.docker_socket_proxy[0], docker_container.alertmanager[0],
+        docker_container.blackbox[0],
       ] :
       contains(c.security_opts, "no-new-privileges:true")
     ])
@@ -111,6 +118,71 @@ run "observability_stack_without_secrets_rejected" {
   }
 
   expect_failures = [var.grafana_admin_password, var.postgres_monitor_password]
+}
+
+# Секреты Telegram битые: опечатка всплыла бы только на первом алерте —
+# план падает до изменений на сервере.
+run "observability_stack_with_broken_telegram_rejected" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    alert_telegram_bot_token  = "not-a-token"
+    alert_telegram_chat_id    = "@channel"
+  }
+
+  expect_failures = [var.alert_telegram_bot_token, var.alert_telegram_chat_id]
+}
+
+# Секретов Telegram нет совсем (незаданный секрет приходит пустой строкой):
+# стек поднимается, Alertmanager получает пустой токен и chat id 0 — алерты
+# считаются, но не доставляются.
+run "observability_stack_without_telegram_plans" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    alert_telegram_bot_token  = ""
+    alert_telegram_chat_id    = ""
+  }
+
+  assert {
+    condition = (
+      one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_bot_token"]) == ""
+      && one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_chat_id"]) == "0"
+    )
+    error_message = "Без секретов Telegram Alertmanager получает пустой токен и chat id 0 (как локально в compose): с пустым chat_id_file он не разобрал бы число."
+  }
+}
+
+# Секреты Telegram и цель пробы публичного входа доходят до контейнеров файлами.
+run "alerting_gets_secrets_as_files_and_the_public_target" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    public_origin             = "https://203.0.113.10"
+  }
+
+  assert {
+    condition = (
+      one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_bot_token"]) == var.alert_telegram_bot_token
+      && one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_chat_id"]) == var.alert_telegram_chat_id
+      && length(coalesce(docker_container.alertmanager[0].env, [])) == 0
+    )
+    error_message = "Токен бота и chat id попадают в Alertmanager файлами под /etc/alertmanager/secrets (bot_token_file и chat_id_file), а не через env: env виден в docker inspect."
+  }
+
+  assert {
+    condition     = yamldecode(one([for u in docker_container.prometheus[0].upload : u.content if u.file == "/etc/prometheus/targets/public.yml"])) == [{ targets = ["https://203.0.113.10/"] }]
+    error_message = "Цель пробы публичного входа — public_origin со слешем на конце (job blackbox-public, файл /etc/prometheus/targets/public.yml)."
+  }
 }
 
 # Сети и порт стека по плану (то же сверяет tests/test_infra_isolation.py по
@@ -163,6 +235,20 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
       docker_network.backend.name, docker_network.observability[0].name,
     ])
     error_message = "Prometheus должен стоять ровно в двух сетях: данных (скрейп rabbitmq) и стека (скрейп collector, collector-docker и node-exporter)."
+  }
+
+  assert {
+    condition = toset([for n in docker_container.alertmanager[0].networks_advanced : n.name]) == toset([
+      docker_network.observability[0].name, docker_network.alerting[0].name,
+    ]) && docker_network.alerting[0].internal != true && length(docker_container.alertmanager[0].ports) == 0
+    error_message = "Alertmanager стоит ровно в двух сетях: стека (приём алертов от Prometheus) и dmc268-alerting — не internal, выход в api.telegram.org. Портов на хосте у него нет."
+  }
+
+  assert {
+    condition = toset([for n in docker_container.blackbox[0].networks_advanced : n.name]) == toset([
+      docker_network.observability[0].name, docker_network.backend.name, docker_network.alerting[0].name,
+    ]) && length(docker_container.blackbox[0].ports) == 0
+    error_message = "blackbox-exporter стоит ровно в трёх сетях: стека (скрейп Prometheus), данных (пробы API, базы, реплики, брокера) и dmc268-alerting (проба публичного входа). Портов на хосте у него нет."
   }
 
   assert {

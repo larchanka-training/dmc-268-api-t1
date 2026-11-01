@@ -418,7 +418,9 @@ def volume_blocks() -> dict[str, str]:
 # воркер в них не пишут напрямую (только через коллектор, и без ответа
 # экспортёр просто теряет пачку), тома защищены сторожем томов, а WAL Loki,
 # Prometheus и Tempo доигрывают при старте. Замену приносит любая правка их
-# конфигурации — держать её за allow_stateful_replace незачем.
+# конфигурации — держать её за allow_stateful_replace незачем. Alertmanager
+# держит в томе тишины и журнал отправок, node-exporter только читает отметку
+# о копии (алерты #100): замена теряет разве что повтор уведомления.
 REPLACEABLE_ON_VOLUMES = frozenset({
     "docker_container.postgres_replica",
     "docker_container.postgres_backup",
@@ -426,6 +428,8 @@ REPLACEABLE_ON_VOLUMES = frozenset({
     "docker_container.loki",
     "docker_container.prometheus",
     "docker_container.tempo",
+    "docker_container.alertmanager",
+    "docker_container.node_exporter",
 })
 
 

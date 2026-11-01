@@ -185,6 +185,19 @@ resource "docker_container" "postgres_replica" {
   # всё равно остановится и ничего не сотрёт (infra/README.md).
 }
 
+# Отметка о последней успешной копии (textfile node-exporter): backup.sh пишет,
+# node-exporter читает только для чтения. Отдельный том, а не каталог в томе
+# копий: node-exporter не должен видеть сами дампы. Без count за флагом стека —
+# как у томов данных стека: том переживает выключение observability_enabled.
+resource "docker_volume" "backup_metrics" {
+  name = "dmc268-backup-metrics"
+
+  # Как у всех томов стенда: план, который уничтожает том, OpenTofu отклоняет.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 # Резервные копии: pg_dump раз в сутки — с реплики, а если она не получает
 # поток, с основного сервера; хранение — backup_keep_days.
 resource "docker_container" "postgres_backup" {
@@ -233,6 +246,13 @@ resource "docker_container" "postgres_backup" {
   volumes {
     volume_name    = docker_volume.postgres_backups.name
     container_path = "/backups"
+  }
+
+  # Отметка об успешной копии для node-exporter (backup.sh, METRICS_DIR) —
+  # вход алерта BackupStale (#100).
+  volumes {
+    volume_name    = docker_volume.backup_metrics.name
+    container_path = "/metrics"
   }
 
   # Живость копирования — свежая копия, а не живой процесс: цикл может крутить

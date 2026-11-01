@@ -164,6 +164,8 @@ jobs:
             echo "LOKI=$(awk -F'"' '/^  loki_image/{print $2}' infra/locals.tf)"
             echo "PROM=$(awk -F'"' '/^  prometheus_image/{print $2}' infra/locals.tf)"
             echo "TEMPO=$(awk -F'"' '/^  tempo_image/{print $2}' infra/locals.tf)"
+            echo "ALERTMANAGER=$(awk -F'"' '/^  alertmanager_image/{print $2}' infra/locals.tf)"
+            echo "BLACKBOX=$(awk -F'"' '/^  blackbox_image/{print $2}' infra/locals.tf)"
           } >> "$GITHUB_ENV"
       # Все ${env:...}, что читает otelcol.yaml, — только четыре POSTGRESQL_*:
       # validate подставляет их в конфиг и выходит, к базе не подключаясь,
@@ -187,11 +189,33 @@ jobs:
           docker run --rm \
             -v "$PWD/infra/observability/otelcol-logs.yaml:/etc/otelcol-contrib/config.yaml:ro" \
             "$OTELCOL" validate --config=/etc/otelcol-contrib/config.yaml
+      # check config проверяет и правила из rule_files, поэтому они смонтированы
+      # по тому же пути, что на стенде; цель пробы публичного входа — локальный
+      # пустой список.
       - name: Prometheus (promtool check config)
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$PWD/infra/observability/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            -v "$PWD/infra/observability/public-targets.yml:/etc/prometheus/targets/public.yml:ro" \
             "$PROM" check config /etc/prometheus/prometheus.yml
+      # Поведение алертов #100 — синтетические ряды «горит / молчит» на каждый
+      # сигнал (alerts.test.yml).
+      - name: Алерты (promtool test rules)
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/infra/observability:/rules:ro" -w /rules \
+            "$PROM" test rules alerts.test.yml
+      - name: Alertmanager (amtool check-config)
+        run: |
+          docker run --rm --entrypoint amtool \
+            -v "$PWD/infra/observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
+            "$ALERTMANAGER" check-config /etc/alertmanager/alertmanager.yml
+      - name: blackbox-exporter (--config.check)
+        run: |
+          docker run --rm \
+            -v "$PWD/infra/observability/blackbox.yml:/etc/blackbox_exporter/config.yml:ro" \
+            "$BLACKBOX" --config.file=/etc/blackbox_exporter/config.yml --config.check
       # -verify-config разбирает конфиг и выходит, не стартуя сервер.
       - name: Loki (-verify-config)
         run: |

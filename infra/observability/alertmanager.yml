@@ -1,0 +1,45 @@
+# Доставка алертов (#100): Alertmanager получает сработавшие правила от
+# Prometheus (alerts.yml) и шлёт их в Telegram. Конфиг один и тот же локально
+# и на стенде: токен бота и chat id — не в файле, а в отдельных файлах рядом
+# (*_file). На стенде их заливает infra/observability.tf из секретов
+# репозитория, локально — docker-compose.yml из переменных окружения. Без
+# реальных значений Alertmanager работает, но доставка падает с ошибкой в его
+# логе. Проверка доставки — infra/README.md, «Алерты».
+
+route:
+  receiver: telegram
+  # Один алерт на сервис и контейнер: падение одного контейнера не склеивается
+  # с соседним в одно сообщение.
+  group_by: [alertname, service, container_name, instance]
+  group_wait: 30s
+  group_interval: 5m
+  # Горящий критический алерт повторяется раз в 4 часа, предупреждение — раз
+  # в 12: забытый алерт не должен утонуть, но и не заспамить канал.
+  repeat_interval: 4h
+  routes:
+    - matchers: ['severity="warning"']
+      receiver: telegram
+      repeat_interval: 12h
+
+# Критический алерт сервиса глушит его же предупреждения: при исчерпанном
+# бюджете не нужно ещё и «80 %», при почти полном диске — «меньше 15 %».
+inhibit_rules:
+  - source_matchers: ['severity="critical"']
+    target_matchers: ['severity="warning"']
+    equal: [service]
+
+receivers:
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/secrets/telegram_bot_token
+        chat_id_file: /etc/alertmanager/secrets/telegram_chat_id
+        send_resolved: true
+        # Простой текст: аннотации содержат <, > и &, а в HTML-режиме Telegram
+        # отклоняет такое сообщение целиком.
+        parse_mode: ""
+        message: |-
+          {{ if eq .Status "firing" }}🔴 {{ .CommonLabels.severity | toUpper }}{{ else }}✅ RESOLVED{{ end }}: {{ .CommonLabels.alertname }}
+          {{ range .Alerts }}
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}

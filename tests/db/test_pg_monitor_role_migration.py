@@ -15,7 +15,7 @@ import pytest
 from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from alembic import command
 
@@ -73,6 +73,14 @@ def _extension_exists(engine) -> bool:
 
 def _drop_role(engine) -> None:
     with engine.begin() as conn:
+        # Права роли на колонки review_runs (ревизия 0016) держат её: DROP ROLE
+        # с ними падает. DROP OWNED BY отзывает их в этой базе; у отсутствующей
+        # роли он сам — ошибка, поэтому только при её наличии.
+        exists = conn.execute(
+            text("SELECT 1 FROM pg_roles WHERE rolname = :name"), {"name": ROLE}
+        ).first()
+        if exists is not None:
+            conn.execute(text(f"DROP OWNED BY {ROLE}"))
         conn.execute(text(f"DROP ROLE IF EXISTS {ROLE}"))
 
 
@@ -202,3 +210,47 @@ def test_the_role_password_never_reaches_pg_stat_statements(migrated) -> None:
             text(f"ALTER ROLE {ROLE} PASSWORD '{DEFAULT_ROLE_PASSWORD}'")
         )
         conn.execute(text("RESET pg_stat_statements.track_utility"))
+
+
+def test_the_monitor_role_reads_only_the_token_columns_of_runs(migrated) -> None:
+    """Ревизия 0016: роль мониторинга читает расход токенов, но не прогоны.
+
+    Запрос receiver-а sqlquery коллектора (infra/observability/otelcol.yaml)
+    проходит под ролью, а чтение любой другой колонки review_runs — нет.
+    """
+    with migrated.connect() as conn, conn.begin():
+        conn.execute(text(f"SET LOCAL ROLE {ROLE}"))
+        tokens = conn.execute(
+            text(
+                "SELECT coalesce(sum(tokens_used), 0)::bigint FROM review_runs"
+                " WHERE created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
+            )
+        ).scalar_one()
+    assert tokens >= 0
+
+    # Отказ прерывает транзакцию: откатываем её явно, а не коммитом на выходе.
+    with migrated.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.execute(text(f"SET LOCAL ROLE {ROLE}"))
+            with pytest.raises(ProgrammingError, match="permission denied"):
+                conn.execute(text("SELECT id FROM review_runs LIMIT 1"))
+        finally:
+            transaction.rollback()
+
+
+def test_the_token_grant_revision_downgrades_and_upgrades_cleanly(migrated) -> None:
+    config = _config()
+    try:
+        command.downgrade(config, "0015")
+        with migrated.connect() as conn:
+            granted = conn.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.column_privileges"
+                    " WHERE grantee = :name AND table_name = 'review_runs'"
+                ),
+                {"name": ROLE},
+            ).scalar_one()
+        assert granted == 0
+    finally:
+        command.upgrade(config, "head")

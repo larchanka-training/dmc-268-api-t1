@@ -13,6 +13,12 @@
 # оборванный pg_dump не должен выглядеть готовой копией ни для восстановления,
 # ни для healthcheck, который смотрит на возраст свежего *.dump.
 #
+# После успешной копии время её снятия пишется в METRICS_DIR файлом textfile
+# для node-exporter: метрика dmc268_backup_last_success_timestamp_seconds —
+# вход алерта BackupStale (#100, infra/observability/alerts.yml). Файл пишется
+# во временный и переименовывается: node-exporter не должен прочитать его
+# наполовину. Каталога нет — отметка не пишется, копии снимаются как раньше.
+#
 # Подключение — переменными libpq PGUSER, PGPASSWORD, PGDATABASE; хосты —
 # REPLICA_HOST и PRIMARY_HOST.
 set -u
@@ -20,6 +26,16 @@ set -u
 : "${BACKUP_INTERVAL_SECONDS:=86400}"
 : "${BACKUP_KEEP_DAYS:=7}"
 dir=/backups
+: "${METRICS_DIR:=/metrics}"
+
+mark_success() {
+    [ -d "$METRICS_DIR" ] || return 0
+    {
+        echo '# HELP dmc268_backup_last_success_timestamp_seconds Время последней успешной резервной копии базы (unix).'
+        echo '# TYPE dmc268_backup_last_success_timestamp_seconds gauge'
+        echo "dmc268_backup_last_success_timestamp_seconds $(date -u +%s)"
+    } > "$METRICS_DIR/backup.prom.tmp" && mv "$METRICS_DIR/backup.prom.tmp" "$METRICS_DIR/backup.prom"
+}
 
 source_host() {
     status="$(psql -h "$REPLICA_HOST" -XtA -c 'select status from pg_stat_wal_receiver' 2>/dev/null)"
@@ -40,6 +56,7 @@ while true; do
     if pg_dump -h "$host" --format=custom --file="$target.partial"; then
         mv "$target.partial" "$target"
         echo "backup: готово $(basename "$target") с $host ($(du -h "$target" | cut -f1))"
+        mark_success || echo "backup: отметку о копии в $METRICS_DIR записать не удалось" >&2
         # -mmin, а не -mtime +N: тот округляет возраст вниз до суток и хранит
         # на одну копию больше, чем обещано.
         find "$dir" -name '*.dump' -mmin +"$((BACKUP_KEEP_DAYS * 1440))" -print -delete
