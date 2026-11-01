@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
+from app.domain import vcs_errors
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
 from app.domain.vcs_errors import VcsFileTooLargeError
@@ -401,6 +402,110 @@ def test_404_raises_immediately_without_retry(rsa_key_pair: RsaKeyPair) -> None:
     assert sleeps == []
 
 
+def test_404_on_compare_raises_the_domain_not_found(rsa_key_pair: RsaKeyPair) -> None:
+    """Слой приложения ловит «не найдено» доменным классом, не зная адаптера."""
+    gateway = make_gateway(rsa_key_pair, responding([404], httpx.Response(200, json={}), []), [])
+
+    with pytest.raises(vcs_errors.VcsNotFoundError):
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+
+# Ответ GitHub на compare v6.0...v6.10 у torvalds/linux, снят 2026-10-31.
+DIFF_TOO_SLOW_BODY = {
+    "message": "The diff is taking too long to generate.",
+    "documentation_url": "https://docs.github.com/rest/commits/commits#compare-two-commits",
+    "status": "422",
+}
+
+
+def _answering(status: int, body: dict[str, Any], seen: list[httpx.Request]) -> Handler:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        seen.append(request)
+        return httpx.Response(status, json=body)
+
+    return handler
+
+
+def test_422_on_compare_is_a_too_large_diff_without_retry(rsa_key_pair: RsaKeyPair) -> None:
+    """GitHub сам не строит слишком большой дифф: это исход лимита, а не сбой VCS."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, _answering(422, DIFF_TOO_SLOW_BODY, seen), sleeps)
+
+    with pytest.raises(VcsFileTooLargeError):
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+    assert len(seen) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("status", [403, 409])
+def test_other_4xx_on_compare_stays_a_plain_vcs_error(
+    rsa_key_pair: RsaKeyPair, status: int
+) -> None:
+    gateway = make_gateway(
+        rsa_key_pair, _answering(status, {"message": "Resource not accessible"}, []), []
+    )
+
+    with pytest.raises(VcsError) as caught:
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+    assert not isinstance(caught.value, VcsFileTooLargeError)
+
+
+def test_422_outside_the_diff_stays_a_plain_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """«Слишком большой» значит 422 только у compare: у прочих ручек это просто отказ."""
+    gateway = make_gateway(rsa_key_pair, _answering(422, DIFF_TOO_SLOW_BODY, []), [])
+
+    with pytest.raises(VcsError) as caught:
+        gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
+
+    assert not isinstance(caught.value, VcsFileTooLargeError)
+
+
+def _moved(seen: list[httpx.Request]) -> Handler:
+    """Handler: репозиторий переименован — API отвечает `301` с телом-ссылкой."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        seen.append(request)
+        return httpx.Response(
+            301,
+            json={"message": "Moved Permanently", "url": "https://api.github.com/repositories/1"},
+            headers={"location": "https://api.github.com/repositories/1"},
+        )
+
+    return handler
+
+
+def test_redirect_on_compare_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """`301` на compare — ошибка, а не тело редиректа под видом диффа."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, _moved(seen), sleeps)
+
+    with pytest.raises(VcsError) as caught:
+        gateway.fetch_diff("owner/repo", "b" * 40, "a" * 40, INSTALLATION_ID, max_bytes=LIMIT)
+
+    assert not isinstance(caught.value, (VcsNotFoundError, VcsUnavailableError))
+    assert len(seen) == 1
+    assert sleeps == []
+
+
+def test_redirect_on_metadata_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """`301` на чтение PR — та же ошибка, без повторов."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, _moved(seen), [])
+
+    with pytest.raises(VcsError):
+        gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
+
+    assert len(seen) == 1
+
+
 def failing_transport(
     connect_fails: bool, seen: list[httpx.Request]
 ) -> Handler:
@@ -726,3 +831,92 @@ def test_fetch_file_compressed_body_within_limit_is_decoded(rsa_key_pair: RsaKey
     )
 
     assert gateway.fetch_file("owner/repo", "a.py", "b" * 40, INSTALLATION_ID, max_bytes=LIMIT) == "привет"
+
+
+SHA_RESPONSE = httpx.Response(
+    200, text="c" * 40, headers={"Content-Type": "application/vnd.github.sha; charset=utf-8"}
+)
+
+
+def test_resolve_branch_sha_returns_sha_from_text_body(rsa_key_pair: RsaKeyPair) -> None:
+    """Media type `vnd.github.sha` — тело ответа sha текстом (проверено вживую),
+    запрос — под installation token."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, responding([200], SHA_RESPONSE, seen), [])
+
+    assert gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID) == "c" * 40
+
+    (request,) = seen
+    assert request.method == "GET"
+    assert request.url.path == "/repos/owner/repo/commits/heads/develop"
+    assert request.headers["Accept"] == "application/vnd.github.sha"
+    assert request.headers["Authorization"] == "Bearer ghs_test"
+
+
+def test_resolve_branch_sha_escapes_branch_but_keeps_slashes(rsa_key_pair: RsaKeyPair) -> None:
+    """`/` в имени ветки GitHub принимает как есть (проверено вживую), а `#` и `%`
+    из имени ветки не превращаются во фрагмент и не ломают путь."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, responding([200], SHA_RESPONSE, seen), [])
+
+    gateway.resolve_branch_sha("owner/repo", "release/2.0#rc%1", INSTALLATION_ID)
+
+    (request,) = seen
+    assert request.url.raw_path.decode() == "/repos/owner/repo/commits/heads/release/2.0%23rc%251"
+
+
+def test_resolve_branch_sha_404_is_not_found(rsa_key_pair: RsaKeyPair) -> None:
+    """Репозитория нет или он недоступен установке — `VcsNotFoundError`, без повторов."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, responding([404], SHA_RESPONSE, seen), sleeps)
+
+    with pytest.raises(VcsNotFoundError):
+        gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID)
+
+    assert len(seen) == 1
+    assert sleeps == []
+
+
+def test_resolve_branch_sha_missing_branch_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """Ветки нет — GitHub отвечает 422 «No commit found for SHA» (проверено вживую):
+    сбой адаптера, без повторов."""
+    seen: list[httpx.Request] = []
+    gateway = make_gateway(rsa_key_pair, responding([422], SHA_RESPONSE, seen), [])
+
+    with pytest.raises(VcsError):
+        gateway.resolve_branch_sha("owner/repo", "gone", INSTALLATION_ID)
+
+    assert len(seen) == 1
+
+
+def test_resolve_branch_sha_5xx_is_retried_then_unavailable(rsa_key_pair: RsaKeyPair) -> None:
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, responding([503], SHA_RESPONSE, seen), sleeps)
+
+    with pytest.raises(VcsUnavailableError):
+        gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID)
+
+    assert len(seen) == 3
+    assert sleeps == [0.5, 1.0]
+
+
+def test_resolve_branch_sha_redirect_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """Переименованный репозиторий отвечает 301 — переход шлюз не делает."""
+    redirect = httpx.Response(301, headers={"Location": "https://api.github.com/repositories/1"})
+    gateway = make_gateway(rsa_key_pair, responding([301], redirect, []), [])
+
+    with pytest.raises(VcsError) as raised:
+        gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID)
+
+    assert not isinstance(raised.value, VcsNotFoundError | VcsUnavailableError)
+
+
+def test_resolve_branch_sha_non_sha_body_is_a_vcs_error(rsa_key_pair: RsaKeyPair) -> None:
+    """Прокси отдал HTML или GitHub проигнорировал media type — не sha, сбой адаптера."""
+    html = httpx.Response(200, text="<html>oops</html>", headers={"Content-Type": "text/html"})
+    gateway = make_gateway(rsa_key_pair, responding([200], html, []), [])
+
+    with pytest.raises(VcsError):
+        gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID)

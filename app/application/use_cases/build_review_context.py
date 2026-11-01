@@ -39,8 +39,9 @@ logger = logging.getLogger(__name__)
 def fetch_review_diff(job: ReviewJob, vcs: VcsGateway, *, max_bytes: int) -> str:
     """Unified diff запроса на изменение между `base_sha` и `head_sha` задачи.
 
-    Дифф больше `max_bytes` не дочитывается и не ревьюится по частям:
-    `DiffTooLargeError`, прогон уходит в `failed` с понятной причиной.
+    Дифф больше `max_bytes` не дочитывается и не ревьюится по частям, а слишком
+    большой для GitHub тот не строит (`422`): `DiffTooLargeError`, прогон уходит в
+    `failed` с понятной причиной — в ней названы оба случая.
     """
     try:
         return vcs.fetch_diff(
@@ -52,7 +53,7 @@ def fetch_review_diff(job: ReviewJob, vcs: VcsGateway, *, max_bytes: int) -> str
         )
     except VcsFileTooLargeError as error:
         raise DiffTooLargeError(
-            f"дифф PR больше лимита {max_bytes} байт: ревью не выполняется"
+            f"дифф PR больше лимита {max_bytes} байт или GitHub не строит такой большой дифф: ревью не выполняется"
         ) from error
 
 
@@ -78,6 +79,7 @@ def build_review_context(
         cache=cache,
         max_bytes=limits.rules_max_bytes,
         cache_ttl_seconds=limits.rules_cache_ttl_seconds,
+        now=now,
     )
     asts, skipped = _collect_asts(job, filter_diff_files(files), vcs, extractor, limits)
     return assemble_context(

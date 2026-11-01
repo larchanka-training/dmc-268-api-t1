@@ -54,7 +54,7 @@ receivers:
   # (alerts.yml, LlmBudget*). Источник — tokens_used прогонов в базе: метрики
   # токенов в SDK нет (её разбивку по типам и стоимость делает #119), а
   # расход прогона и так пишется в базу. Роль та же, dmc268_monitor: миграция
-  # 0016 даёт ей SELECT ровно на две колонки review_runs — created_at и
+  # 0017 даёт ей SELECT ровно на две колонки review_runs — created_at и
   # tokens_used, — остальные данные прогонов ей недоступны. Хост и порт —
   # литералом: у этого receiver они раздельные, а POSTGRESQL_ENDPOINT —
   # host:port; адрес одинаков в обоих окружениях (алиас сети dmc268-postgres).

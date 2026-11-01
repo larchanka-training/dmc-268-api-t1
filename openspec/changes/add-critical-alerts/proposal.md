@@ -9,7 +9,7 @@
 - blackbox-exporter двумя экземплярами: `dmc268-blackbox` (в сети данных, без выхода наружу) — пробы `/health` API и портов базы, реплики, брокера (статус healthcheck контейнера в `docker_stats` 0.158 недоступен) и `dmc268-blackbox-public` — HTTPS публичного входа со сроком сертификата. Один общий экземпляр был бы прокси в интернет для сети данных: `/probe` без авторизации.
 - Своя не-internal сеть `dmc268-alerting`: из контейнеров алертов наружу ходят только Alertmanager и `dmc268-blackbox-public`, портов на хосте у них нет.
 - Receiver `docker_stats` отдаёт `container.uptime` и `container.restarts`.
-- Расход токенов с начала месяца — receiver `sqlquery` основного коллектора по `review_runs.tokens_used`; миграция 0016 даёт роли `dmc268_monitor` `SELECT` только на `created_at` и `tokens_used`.
+- Расход токенов с начала месяца — receiver `sqlquery` основного коллектора по `review_runs.tokens_used`; миграция 0017 даёт роли `dmc268_monitor` `SELECT` только на `created_at` и `tokens_used`.
 - `backup.sh` после успешной копии пишет отметку времени для textfile node-exporter (новый том `dmc268-backup-metrics`).
 - CI: `promtool test rules`, `amtool check-config`, проверка конфига blackbox в job `observability-configs`.
 
@@ -24,7 +24,7 @@
 ## Impact
 
 - `infra/observability/` (новые `alerts.yml`, `alerts.test.yml`, `alertmanager.yml`, `blackbox.yml`, `public-targets.yml`; правки `prometheus.yml`, `otelcol.yaml`, `otelcol-docker.yaml`), `infra/observability.tf`, `infra/replica.tf`, `infra/locals.tf`, `infra/variables.tf`, `infra/postgres/backup.sh`, `infra/README.md`, `infra/tests/observability.tftest.hcl`, `docker-compose.yml`.
-- `alembic/versions/0016_grant_monitor_llm_tokens.py`.
+- `alembic/versions/0017_grant_monitor_llm_tokens.py`.
 - `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`.
 - Настройки репозитория: секреты `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1` необязательны — без них деплой проходит, а доставка включается их появлением и следующим деплоем.
 - Память на сервере: +128 МБ лимитов (Alertmanager 64, два экземпляра blackbox-exporter по 32).

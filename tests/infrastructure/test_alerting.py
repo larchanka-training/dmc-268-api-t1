@@ -93,7 +93,7 @@ def test_token_spend_comes_from_the_collector_pipeline() -> None:
     names = [m["metric_name"] for q in receiver["queries"] for m in q["metrics"]]
     assert names == ["review_llm_tokens_month"]
     assert "sqlquery/llm-tokens" in config["service"]["pipelines"]["metrics"]["receivers"]
-    # Только колонки, на которые у роли мониторинга есть SELECT (ревизия 0016).
+    # Только колонки, на которые у роли мониторинга есть SELECT (ревизия 0017).
     sql = receiver["queries"][0]["sql"]
     assert set(re.findall(r"\b(tokens_used|created_at|\w+_id|id)\b", sql)) <= {"tokens_used", "created_at"}
     assert "review_llm_tokens_month" in _alerts()["LlmBudgetNearLimit"]["expr"]

@@ -306,7 +306,7 @@ def test_a_github_failure_on_the_disabled_check_is_still_202_ignored(caplog) -> 
     assert response.json() == {"status": "ignored"}
     assert [call[0] for call in container.vcs.calls] == ["check"]
     assert container.uow.review_runs.added == []
-    assert "check run выключенного репозитория" in caplog.text
+    assert "check run паузы ревью репозитория" in caplog.text
 
 
 def test_vcs_failure_returns_502_without_records() -> None:

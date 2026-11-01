@@ -73,7 +73,7 @@ def _extension_exists(engine) -> bool:
 
 def _drop_role(engine) -> None:
     with engine.begin() as conn:
-        # Права роли на колонки review_runs (ревизия 0016) держат её: DROP ROLE
+        # Права роли на колонки review_runs (ревизия 0017) держат её: DROP ROLE
         # с ними падает. DROP OWNED BY отзывает их в этой базе; у отсутствующей
         # роли он сам — ошибка, поэтому только при её наличии.
         exists = conn.execute(
@@ -213,7 +213,7 @@ def test_the_role_password_never_reaches_pg_stat_statements(migrated) -> None:
 
 
 def test_the_monitor_role_reads_only_the_token_columns_of_runs(migrated) -> None:
-    """Ревизия 0016: роль мониторинга читает расход токенов, но не прогоны.
+    """Ревизия 0017: роль мониторинга читает расход токенов, но не прогоны.
 
     Запрос receiver-а sqlquery коллектора (infra/observability/otelcol.yaml)
     проходит под ролью, а чтение любой другой колонки review_runs — нет.
@@ -242,7 +242,7 @@ def test_the_monitor_role_reads_only_the_token_columns_of_runs(migrated) -> None
 def test_the_token_grant_revision_downgrades_and_upgrades_cleanly(migrated) -> None:
     config = _config()
     try:
-        command.downgrade(config, "0015")
+        command.downgrade(config, "0016")
         with migrated.connect() as conn:
             granted = conn.execute(
                 text(

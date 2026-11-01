@@ -1,8 +1,10 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from app.application.merge_gate_publish import (
+    AUTO_REVIEW_OFF_CHECK,
     DISABLED_REVIEW_CHECK,
     build_retarget_check,
 )
@@ -165,6 +167,7 @@ def test_merge_gate_refresh_sees_a_critical_whose_inline_id_was_lost() -> None:
         pr_number=7,
         head_sha="sha1",
         installation_id=1,
+        repository_id=_seeded_repository(uow),
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -202,6 +205,7 @@ def _refresh(uow: FakeUnitOfWork) -> RecordingVcsGateway:
         pr_number=7,
         head_sha="sha1",
         installation_id=1,
+        repository_id=_seeded_repository(uow),
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -262,6 +266,7 @@ def test_retarget_racing_a_thread_refresh_ends_in_failure() -> None:
         pr_number=7,
         head_sha="sha1",
         installation_id=1,
+        repository_id=_seeded_repository(uow),
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -381,3 +386,141 @@ def test_thread_webhook_of_a_disconnected_repository_sets_the_disabled_check() -
     row = uow.published_comments.find_by_provider_comment_id("77")
     assert row is not None and row.thread_resolved is True
     assert vcs.checks == [DISABLED_REVIEW_CHECK]
+
+
+_THREAD_PAYLOAD = {
+    "action": "resolved",
+    "thread": {"comments": [{"id": 77}]},
+    "pull_request": {"number": 7, "head": {"sha": "sha1"}},
+    "repository": {"full_name": "o/r", "id": 42},
+    "installation": {"id": 1},
+}
+
+
+def _pr_with_two_threads(
+    repository: Repository, resolved: FindingSeverity, still_open: FindingSeverity
+) -> FakeUnitOfWork:
+    """PR с прогоном на head и двумя inline-тредами: `77` закрывает вебхук, `78` остаётся."""
+    uow = FakeUnitOfWork()
+    mr_id, run_id = UUID(int=3), UUID(int=2)
+    uow.repositories.add(repository)
+    uow.merge_requests.add(
+        MergeRequest(
+            id=mr_id,
+            repository_id=repository.id,
+            number=7,
+            title="t",
+            description="",
+            author="a",
+            source_branch="feat",
+            target_branch="main",
+            head_sha="sha1",
+            state=MergeRequestState.OPEN,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    uow.review_runs.add(
+        ReviewRun(
+            id=run_id,
+            merge_request_id=mr_id,
+            head_sha="sha1",
+            status=ReviewRunStatus.COMPLETED,
+            trigger=TriggerSource.WEBHOOK,
+            last_progress_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    for index, (provider_id, severity) in enumerate((("77", resolved), ("78", still_open))):
+        finding_id = UUID(int=10 + index)
+        uow.findings.add(
+            Finding(
+                id=finding_id,
+                review_run_id=run_id,
+                anchor=DiffAnchor(file_path="a.py", side=DiffSide.NEW, new_line=index + 1),
+                category=FindingCategory.CORRECTNESS,
+                severity=severity,
+                message="замечание",
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        uow.published_comments.add(
+            PublishedComment(
+                id=UUID(int=20 + index),
+                review_run_id=run_id,
+                provider_comment_id=provider_id,
+                kind=CommentKind.INLINE,
+                published_at=NOW,
+                created_at=NOW,
+                updated_at=NOW,
+                finding_id=finding_id,
+            )
+        )
+    return uow
+
+
+def _seeded_repository(uow: FakeUnitOfWork) -> UUID:
+    """Репозиторий PR с порогом по умолчанию `critical`: gate читает порог из его записи."""
+    repository = _repository()
+    uow.repositories.add(repository)
+    return repository.id
+
+
+def _repository(**changes: object) -> Repository:
+    base = Repository(
+        id=UUID(int=1),
+        provider=Provider.GITHUB,
+        provider_id="42",
+        full_name="o/r",
+        default_branch="main",
+        auto_review_enabled=True,
+        created_at=NOW,
+        updated_at=NOW,
+        connected_at=NOW,
+    )
+    return replace(base, **changes)  # type: ignore[arg-type]
+
+
+def test_thread_webhook_with_auto_review_off_sets_the_pause_check() -> None:
+    """`auto_review_enabled = false` (design D5): тред записан, на head — «Авторевью выключено в
+    настройках», gate не пересчитывается — открытый `critical` не даёт `failure`, сверки нет."""
+    uow = _pr_with_two_threads(
+        _repository(auto_review_enabled=False), FindingSeverity.CRITICAL, FindingSeverity.CRITICAL
+    )
+    vcs = RecordingVcsGateway()
+
+    assert handle_review_thread_webhook(_THREAD_PAYLOAD, uow=uow, vcs=vcs, now=lambda: NOW)
+
+    row = uow.published_comments.find_by_provider_comment_id("77")
+    assert row is not None and row.thread_resolved is True
+    assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
+    assert vcs.thread_state_requests == []
+
+
+def test_thread_webhook_recalculates_the_gate_by_the_current_threshold() -> None:
+    """Порог сменили на `medium`: после закрытия треда открытый `medium` блокирует мердж."""
+    uow = _pr_with_two_threads(
+        _repository(min_severity=FindingSeverity.MEDIUM),
+        FindingSeverity.CRITICAL,
+        FindingSeverity.MEDIUM,
+    )
+    vcs = RecordingVcsGateway()
+
+    assert handle_review_thread_webhook(_THREAD_PAYLOAD, uow=uow, vcs=vcs, now=lambda: NOW)
+
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+    assert "medium" in check.title and "medium" in check.summary
+
+
+def test_thread_webhook_below_the_threshold_passes_the_gate() -> None:
+    """Порог по умолчанию `critical`: открытый тред `high` мердж не блокирует."""
+    uow = _pr_with_two_threads(_repository(), FindingSeverity.CRITICAL, FindingSeverity.HIGH)
+    vcs = RecordingVcsGateway()
+
+    assert handle_review_thread_webhook(_THREAD_PAYLOAD, uow=uow, vcs=vcs, now=lambda: NOW)
+
+    (check,) = vcs.checks
+    assert check.conclusion == "success"

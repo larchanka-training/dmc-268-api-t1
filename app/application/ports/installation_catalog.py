@@ -36,3 +36,8 @@ class InstallationCatalog(Protocol):
     def app_installed(self, full_name: str) -> bool:
         """Установлено ли приложение на репозиторий и не приостановлена ли установка."""
         ...
+
+    def repository_installation_id(self, full_name: str) -> int | None:
+        """Номер установки приложения на репозитории от имени приложения; не установлено
+        или установка приостановлена — `None`."""
+        ...

@@ -11,7 +11,7 @@
 
 - [x] 2.1 `docker_stats`: `container.uptime` и `container.restarts`
 - [x] 2.2 blackbox-exporter: `/health` API, TCP базы, реплики и брокера, HTTPS публичного входа со сроком сертификата
-- [x] 2.3 `sqlquery/llm-tokens` в основном коллекторе и ревизия 0016 — `SELECT (created_at, tokens_used)` для `dmc268_monitor`
+- [x] 2.3 `sqlquery/llm-tokens` в основном коллекторе и ревизия 0017 — `SELECT (created_at, tokens_used)` для `dmc268_monitor`
 - [x] 2.4 `backup.sh`: отметка об успешной копии в textfile node-exporter, том `dmc268-backup-metrics`
 
 ## 3. Развёртывание
@@ -21,7 +21,7 @@
 - [x] 3.3 `docker-compose.yml`: те же сервисы и конфиги, секреты из окружения
 - [x] 3.4 CI: `amtool check-config`, `blackbox_exporter --config.check`, `promtool check config` с правилами
 - [x] 3.5 `infra/README.md`: раздел «Алерты» с порогами, секреты, память, проверка доставки
-- [x] 3.6 Тесты: `tests/infrastructure/test_alerting.py`, `infra/tests/observability.tftest.hcl`, сети в `tests/test_infra_isolation.py`, ревизия 0016
+- [x] 3.6 Тесты: `tests/infrastructure/test_alerting.py`, `infra/tests/observability.tftest.hcl`, сети в `tests/test_infra_isolation.py`, ревизия 0017
 
 ## 4. Проверка на стенде
 

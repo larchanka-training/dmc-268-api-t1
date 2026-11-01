@@ -9,12 +9,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import (
+    get_cabinet_vcs_gateway,
     get_installation_catalog,
     get_token_provider,
     get_unit_of_work,
 )
 from app.api.factory import create_app
 from app.api.reviews import review_run_list_item
+from app.api.session import current_session
+from app.application.use_cases.auth import SignedIn
+from app.application.use_cases.run_diff import RUN_DIFF_MAX_LINES
 from app.config import Settings
 from app.domain.entities import (
     DiffAnchor,
@@ -41,14 +45,16 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.ids import new_id
-from app.domain.provider_token import ProviderTokenRejected
+from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.run_steps import finish_step, start_step
-from app.domain.vcs_errors import VcsError
+from app.domain.session import open_session
+from app.domain.vcs_errors import VcsError, VcsFileTooLargeError, VcsNotFoundError
 
-from .fakes.auth import sign_in_with_session
+from .fakes.auth import SIGNED_IN, sign_in_with_session
 from .fakes.installation_catalog import FakeInstallationCatalog
-from .fakes.oauth import FakeOAuthProvider
+from .fakes.oauth import EXPIRING_GRANT, REFRESHED_GRANT, FakeOAuthProvider
 from .fakes.unit_of_work import FakeUnitOfWork
+from .fakes.webhooks import FakeVcs
 
 SETTINGS = Settings(
     database_url="postgresql+psycopg://test:test@localhost/test",
@@ -63,8 +69,14 @@ READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=Fal
 VISIBLE = InstallationRepository("123", "octo-org/api", "main", READ)
 
 
-def _client(uow: FakeUnitOfWork, catalog: FakeInstallationCatalog | None = None) -> TestClient:
-    app = create_app(SETTINGS)
+def _client(
+    uow: FakeUnitOfWork,
+    catalog: FakeInstallationCatalog | None = None,
+    vcs: FakeVcs | None = None,
+    settings: Settings = SETTINGS,
+) -> TestClient:
+    """Клиент вошедшего пользователя; GitHub — фейки: каталог установки и шлюз кабинета (дифф прогона)."""
+    app = create_app(settings)
     cookies = sign_in_with_session(app, uow)
 
     def override_uow() -> Iterator[FakeUnitOfWork]:
@@ -73,6 +85,8 @@ def _client(uow: FakeUnitOfWork, catalog: FakeInstallationCatalog | None = None)
     app.dependency_overrides[get_unit_of_work] = override_uow
     app.dependency_overrides[get_installation_catalog] = lambda: catalog or FakeInstallationCatalog([VISIBLE])
     app.dependency_overrides[get_token_provider] = lambda: FakeOAuthProvider()
+    gateway = vcs or FakeVcs()
+    app.dependency_overrides[get_cabinet_vcs_gateway] = lambda: gateway
     return TestClient(app, cookies=cookies)
 
 
@@ -591,12 +605,494 @@ def test_github_failure_on_a_run_is_502(suffix: str) -> None:
     assert response.json()["code"] == "SCM_UNAVAILABLE"
 
 
-def test_diff_of_a_visible_run_answers_not_implemented() -> None:
-    """Дифф прогона описан в схеме, а отвечает `501` — после проверки видимости прогона."""
+
+
+# --- дифф прогона (change review-run-diff) -------------------------------------------
+
+BASE_SHA = "base000"
+
+# Дифф пары коммитов прогона: все случаи сценариев «Дифф прогона» в одном ответе GitHub.
+RUN_DIFF = """\
+diff --git a/app/main.py b/app/main.py
+index 3f7d2e1..9c4a8b2 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -10,3 +10,3 @@ def main():
+-    print("hi")
++    print("hello")
+ return 0
+diff --git a/app/new_module.py b/app/new_module.py
+new file mode 100644
+index 0000000..d95b1c2
+--- /dev/null
++++ b/app/new_module.py
+@@ -0,0 +1,2 @@
++first line
++second line
+diff --git a/docs/gone.md b/docs/gone.md
+deleted file mode 100644
+index d95b1c2..0000000
+--- a/docs/gone.md
++++ /dev/null
+@@ -1,3 +0,0 @@
+-one
+-two
+-three
+diff --git a/old.py b/new.py
+similarity index 90%
+rename from old.py
+rename to new.py
+index 1a2b3c4..4d5e6f7 100644
+--- a/old.py
++++ b/new.py
+@@ -2,3 +2,3 @@
+ context
+-old line
++new line
+ context
+diff --git a/logo.png b/logo.png
+index 3f2b1c0..8e9f0a1 100644
+Binary files a/logo.png and b/logo.png differ
+diff --git a/uv.lock b/uv.lock
+--- a/uv.lock
++++ b/uv.lock
+@@ -1 +1 @@
+-version = 1
++version = 2
+diff --git a/notes.txt b/notes.txt
+--- a/notes.txt
++++ b/notes.txt
+@@ -1,2 +1,2 @@
+ first
+-last line
+\\ No newline at end of file
++last line changed
+\\ No newline at end of file
+"""
+
+
+def _diff_files(response: Any) -> dict[str, dict[str, Any]]:
+    assert response.status_code == 200, response.json()
+    return {file["path"]: file for file in response.json()["files"]}
+
+
+def _diff_calls(vcs: FakeVcs) -> list[tuple[Any, ...]]:
+    return [call for call in vcs.calls if call[0] == "diff"]
+
+
+def test_diff_of_a_visible_run_is_200_with_files_in_diff_order() -> None:
+    """Сценарий «Дифф прогона»: `200` с `ReviewDiffResponse`, а не `501`; дифф — пары коммитов прогона."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([VISIBLE], installation_ids={"octo-org/api": 77})
+
+    response = _client(uow, catalog, vcs).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 200
+    assert [file["path"] for file in response.json()["files"]] == [
+        "app/main.py",
+        "app/new_module.py",
+        "docs/gone.md",
+        "new.py",
+        "logo.png",
+        "uv.lock",
+        "notes.txt",
+    ]
+    assert _diff_calls(vcs) == [("diff", "octo-org/api", BASE_SHA, "abc123", 77)]
+
+
+def test_modified_file_has_numbered_lines_without_prefix() -> None:
+    """Сценарий «Изменённый файл»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    main = _diff_files(_client(uow, vcs=FakeVcs(diff=RUN_DIFF)).get(f"/api/v1/reviews/{run.id}/diff"))["app/main.py"]
+
+    assert main == {
+        "path": "app/main.py",
+        "previous_path": None,
+        "status": "modified",
+        "is_binary": False,
+        "language": "python",
+        "additions": 1,
+        "deletions": 1,
+        "hunks": [
+            {
+                "header": "def main():",
+                "old_start": 10,
+                "old_count": 3,
+                "new_start": 10,
+                "new_count": 3,
+                "lines": [
+                    {"kind": "removed", "old_line": 10, "new_line": None, "content": '    print("hi")'},
+                    {"kind": "added", "old_line": None, "new_line": 10, "content": '    print("hello")'},
+                    {"kind": "context", "old_line": 11, "new_line": 11, "content": "return 0"},
+                ],
+            }
+        ],
+    }
+
+
+def test_added_and_deleted_files_get_one_sided_counters() -> None:
+    """Сценарий «Добавленный и удалённый файлы»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    files = _diff_files(_client(uow, vcs=FakeVcs(diff=RUN_DIFF)).get(f"/api/v1/reviews/{run.id}/diff"))
+
+    added, deleted = files["app/new_module.py"], files["docs/gone.md"]
+    assert (added["status"], added["additions"], added["deletions"]) == ("added", 2, 0)
+    assert (deleted["status"], deleted["additions"], deleted["deletions"]) == ("deleted", 0, 3)
+
+
+def test_renamed_file_has_previous_path_and_others_do_not() -> None:
+    """Сценарий «Переименование»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    files = _diff_files(_client(uow, vcs=FakeVcs(diff=RUN_DIFF)).get(f"/api/v1/reviews/{run.id}/diff"))
+
+    assert (files["new.py"]["previous_path"], files["new.py"]["status"]) == ("old.py", "renamed")
+    assert [path for path, file in files.items() if file["previous_path"] is not None] == ["new.py"]
+
+
+def test_binary_file_has_no_hunks() -> None:
+    """Сценарий «Бинарный файл»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    logo = _diff_files(_client(uow, vcs=FakeVcs(diff=RUN_DIFF)).get(f"/api/v1/reviews/{run.id}/diff"))["logo.png"]
+
+    assert (logo["is_binary"], logo["hunks"], logo["additions"], logo["deletions"], logo["language"]) == (
+        True,
+        [],
+        0,
+        0,
+        None,
+    )
+
+
+def test_file_filtered_out_of_review_is_still_in_the_diff() -> None:
+    """Сценарий «Отфильтрованный ревью файл»: `uv.lock` модели не отправлялся, а в диффе есть."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    lock = _diff_files(_client(uow, vcs=FakeVcs(diff=RUN_DIFF)).get(f"/api/v1/reviews/{run.id}/diff"))["uv.lock"]
+
+    assert [line["content"] for line in lock["hunks"][0]["lines"]] == ["version = 1", "version = 2"]
+
+
+def test_no_newline_marker_is_not_a_line_and_does_not_shift_numbers() -> None:
+    """Сценарий «Строка без перевода строки в конце файла»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    notes = _diff_files(_client(uow, vcs=FakeVcs(diff=RUN_DIFF)).get(f"/api/v1/reviews/{run.id}/diff"))["notes.txt"]
+
+    assert notes["hunks"][0]["lines"] == [
+        {"kind": "context", "old_line": 1, "new_line": 1, "content": "first"},
+        {"kind": "removed", "old_line": 2, "new_line": None, "content": "last line"},
+        {"kind": "added", "old_line": None, "new_line": 2, "content": "last line changed"},
+    ]
+
+
+def test_diff_without_session_is_401() -> None:
+    """Сценарий «Дифф без сессии»: ни GitHub, ни прогон не трогаются."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    client = _client(uow, vcs=vcs)
+    client.app.dependency_overrides.pop(current_session)  # type: ignore[attr-defined]
+    client.cookies.clear()
+
+    response = client.get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"
+    assert vcs.calls == []
+
+
+def test_diff_of_a_hidden_run_asks_neither_the_installation_nor_the_diff() -> None:
+    """Сценарий «Шаги и дифф чужого прогона»: `404 REVIEW_NOT_FOUND` раньше установки, диффа и кэша."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([InstallationRepository("999", "octo-org/other", "main", READ)])
+
+    response = _client(uow, catalog, vcs).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "REVIEW_NOT_FOUND"
+    assert "repository_installation_id" not in catalog.calls
+    assert vcs.calls == []
+
+
+def test_hidden_run_does_not_get_a_cached_diff() -> None:
+    """Видимость — до чтения кэша: дифф, закэшированный для видящего, невидящему не отдаётся."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    catalog = FakeInstallationCatalog(
+        [VISIBLE], repositories_by_token={OTHER_TOKEN: [InstallationRepository("999", "octo-org/other", "main", READ)]}
+    )
+    client = _client(uow, catalog, FakeVcs(diff=RUN_DIFF))
+    assert client.get(f"/api/v1/reviews/{run.id}/diff").status_code == 200
+
+    _second_user(client, uow)
+    response = client.get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert catalog.tokens[-1].reveal() == OTHER_TOKEN
+    assert response.status_code == 404
+    assert response.json()["code"] == "REVIEW_NOT_FOUND"
+
+
+# --- отказы диффа прогона ---
+
+
+def test_run_without_base_sha_is_409_without_github() -> None:
+    """Сценарий «Прогон без base_sha»."""
     uow = FakeUnitOfWork()
     run = _add_run(uow)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([VISIBLE])
 
-    response = _client(uow).get(f"/api/v1/reviews/{run.id}/diff")
+    response = _client(uow, catalog, vcs).get(f"/api/v1/reviews/{run.id}/diff")
 
-    assert response.status_code == 501
-    assert response.json()["code"] == "NOT_IMPLEMENTED"
+    assert response.status_code == 409
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "DIFF_UNAVAILABLE"
+    assert "repository_installation_id" not in catalog.calls
+    assert vcs.calls == []
+
+
+def test_app_removed_from_the_repository_is_404_without_the_diff() -> None:
+    """Сценарий «Приложение снято с репозитория»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    vcs = FakeVcs(diff=RUN_DIFF)
+
+    response = _client(uow, FakeInstallationCatalog([VISIBLE], not_installed={"octo-org/api"}), vcs).get(
+        f"/api/v1/reviews/{run.id}/diff"
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
+    assert vcs.calls == []
+
+
+def test_commit_gone_at_the_provider_is_410() -> None:
+    """Сценарий «Коммит прогона исчез у провайдера»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    response = _client(uow, vcs=FakeVcs(error=VcsNotFoundError("HTTP 404"))).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 410
+    assert response.json()["code"] == "COMMIT_NOT_FOUND"
+
+
+def test_diff_over_the_limit_is_422_and_the_limit_comes_from_settings() -> None:
+    """Сценарий «Дифф больше лимита»: лимит — `RUN_DIFF_MAX_BYTES`, шлюз дальше него не читает."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    small = SETTINGS.model_copy(update={"run_diff_max_bytes": len(RUN_DIFF.encode()) - 1})
+
+    response = _client(uow, vcs=FakeVcs(diff=RUN_DIFF), settings=small).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "DIFF_TOO_LARGE"
+
+
+def test_gateway_too_large_error_is_422() -> None:
+    """Обрыв тела на лимите в адаптере (`VcsFileTooLargeError`) — тот же `422`."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    response = _client(uow, vcs=FakeVcs(error=VcsFileTooLargeError("дифф: больше лимита"))).get(
+        f"/api/v1/reviews/{run.id}/diff"
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "DIFF_TOO_LARGE"
+
+
+def test_diff_over_the_line_limit_is_422_with_a_generic_detail() -> None:
+    """Сценарий «Дифф больше лимита строк»: короткие строки укладываются в байты, но не в `RUN_DIFF_MAX_LINES`."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    added = RUN_DIFF_MAX_LINES + 1 - 5
+    long_diff = (
+        "diff --git a/many.txt b/many.txt\nnew file mode 100644\n--- /dev/null\n+++ b/many.txt\n"
+        f"@@ -0,0 +1,{added} @@\n" + "+x\n" * added
+    )
+
+    response = _client(uow, vcs=FakeVcs(diff=long_diff)).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "DIFF_TOO_LARGE"
+    assert f"{RUN_DIFF_MAX_LINES} строк" in body["detail"]
+
+
+def test_github_failure_on_the_diff_is_502() -> None:
+    """Сценарий «GitHub недоступен при загрузке диффа»: сбой запроса диффа."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    response = _client(uow, vcs=FakeVcs(error=VcsError("HTTP 502"))).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+
+
+def test_github_failure_on_the_installation_is_502_without_the_diff() -> None:
+    """Сценарий «GitHub недоступен при загрузке диффа»: сбой запроса установки приложения."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([VISIBLE], installation_id_error=VcsError("HTTP 503"))
+
+    response = _client(uow, catalog, vcs).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+    assert vcs.calls == []
+
+
+# --- кэш диффа на уровне ручки ---
+
+
+OTHER_USER = replace(SIGNED_IN, id=new_id(), provider_user_id="777", login="hubot")
+OTHER_SESSION_ID = new_id()
+
+
+# Токен GitHub второго пользователя: по нему каталог отдаёт свой набор видимых (`repositories_by_token`).
+OTHER_TOKEN = REFRESHED_GRANT.access_token.reveal()
+
+
+def _second_user(client: TestClient, uow: FakeUnitOfWork) -> None:
+    """Дальше запросы клиента идут от второго пользователя со своей сессией и токеном `OTHER_TOKEN`."""
+    uow.users.add(OTHER_USER)
+    uow.sessions.add(open_session(OTHER_SESSION_ID, OTHER_USER.id, "other-session", datetime.now(UTC)))
+    uow.provider_tokens.save(OTHER_SESSION_ID, token_from_grant(REFRESHED_GRANT, datetime.now(UTC)))
+    client.app.dependency_overrides[current_session] = lambda: SignedIn(user=OTHER_USER, session_id=OTHER_SESSION_ID)  # type: ignore[attr-defined]
+
+
+def test_repeat_within_ttl_asks_github_once_and_answers_the_same() -> None:
+    """Сценарий «Повтор в пределах TTL»: один запрос диффа и один — установки."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([VISIBLE])
+    client = _client(uow, catalog, vcs)
+
+    first = client.get(f"/api/v1/reviews/{run.id}/diff")
+    second = client.get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert len(_diff_calls(vcs)) == 1
+    assert catalog.calls.count("repository_installation_id") == 1
+
+
+def test_another_user_who_sees_the_repository_gets_the_cached_diff() -> None:
+    """Сценарий «Другой пользователь»: видимость — его, дифф — из кэша, без запроса к GitHub."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([], repositories_by_token={
+        EXPIRING_GRANT.access_token.reveal(): [VISIBLE],
+        OTHER_TOKEN: [VISIBLE],
+    })
+    client = _client(uow, catalog, vcs)
+    first = client.get(f"/api/v1/reviews/{run.id}/diff")
+
+    _second_user(client, uow)
+    second = client.get(f"/api/v1/reviews/{run.id}/diff")
+
+    # Видимость второму посчитана по его токену, а не взята из кэша первого.
+    assert [token.reveal() for token in catalog.tokens] == [EXPIRING_GRANT.access_token.reveal(), OTHER_TOKEN]
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    assert len(_diff_calls(vcs)) == 1
+
+
+def test_failure_is_not_remembered() -> None:
+    """Сценарий «Отказ не запоминается»: после `502` следующий запрос снова идёт к GitHub."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    vcs = FakeVcs(diff=RUN_DIFF, error=VcsError("HTTP 502"))
+    client = _client(uow, vcs=vcs)
+    assert client.get(f"/api/v1/reviews/{run.id}/diff").status_code == 502
+
+    vcs.error = None
+    response = client.get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 200
+    assert len(_diff_calls(vcs)) == 2
+
+
+def test_two_runs_of_one_repository_ask_the_installation_once_each() -> None:
+    """Сценарий «Номер установки не запоминается»: два прогона одного репозитория, ни один не в
+    кэше диффов — GitHub спрашивается о номере установки на каждый прогон."""
+    uow = FakeUnitOfWork()
+    first_run = _add_run(uow, base_sha=BASE_SHA)
+    second_run = _run(merge_request_id=first_run.merge_request_id, head_sha="def456", base_sha=BASE_SHA)
+    uow.review_runs.add(second_run)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([VISIBLE])
+    client = _client(uow, catalog, vcs)
+
+    assert client.get(f"/api/v1/reviews/{first_run.id}/diff").status_code == 200
+    assert client.get(f"/api/v1/reviews/{second_run.id}/diff").status_code == 200
+
+    assert catalog.calls.count("repository_installation_id") == 2
+    assert [call[3] for call in _diff_calls(vcs)] == ["abc123", "def456"]
+
+
+def test_reinstalled_app_gives_a_new_run_its_diff_with_the_new_installation() -> None:
+    """Регресс: номер установки не кэшируется — после переустановки приложения новый прогон
+    получает дифф с новым номером, а не `502` от GitHub на старый."""
+    uow = FakeUnitOfWork()
+    first_run = _add_run(uow, base_sha=BASE_SHA)
+    second_run = _run(merge_request_id=first_run.merge_request_id, head_sha="def456", base_sha=BASE_SHA)
+    uow.review_runs.add(second_run)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([VISIBLE], installation_ids={"octo-org/api": 77})
+    client = _client(uow, catalog, vcs)
+    assert client.get(f"/api/v1/reviews/{first_run.id}/diff").status_code == 200
+
+    catalog.installation_ids["octo-org/api"] = 78
+    response = client.get(f"/api/v1/reviews/{second_run.id}/diff")
+
+    assert response.status_code == 200
+    assert [(call[3], call[4]) for call in _diff_calls(vcs)] == [("abc123", 77), ("def456", 78)]
+
+
+def test_renamed_repository_gets_its_diff_by_the_current_name() -> None:
+    """Регресс: в базе имя с момента подключения, а GitHub знает репозиторий под новым —
+    установку и дифф спрашиваем по имени из ответа GitHub, иначе `301` и `502`."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    renamed = replace(VISIBLE, full_name="octo-org/api-v2")
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([renamed], installation_ids={"octo-org/api-v2": 77})
+
+    response = _client(uow, catalog, vcs).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 200
+    assert [(call[1], call[4]) for call in _diff_calls(vcs)] == [("octo-org/api-v2", 77)]
+
+
+def test_not_installed_is_not_remembered() -> None:
+    """Сценарий «Не установлено — не запоминается»: следующий запрос снова спрашивает установку."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    catalog = FakeInstallationCatalog([VISIBLE], not_installed={"octo-org/api"})
+    client = _client(uow, catalog, FakeVcs(diff=RUN_DIFF))
+
+    first = client.get(f"/api/v1/reviews/{run.id}/diff")
+    second = client.get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert first.status_code == second.status_code == 404
+    assert catalog.calls.count("repository_installation_id") == 2
