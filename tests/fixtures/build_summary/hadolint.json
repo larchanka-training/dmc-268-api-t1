@@ -1,0 +1,16 @@
+[
+  {
+    "code": "DL3008",
+    "level": "warning",
+    "line": 12,
+    "file": "Dockerfile",
+    "message": "Pin versions in apt get install."
+  },
+  {
+    "code": "DL3059",
+    "level": "style",
+    "line": 33,
+    "file": "Dockerfile",
+    "message": "Multiple consecutive `RUN` instructions."
+  }
+]
