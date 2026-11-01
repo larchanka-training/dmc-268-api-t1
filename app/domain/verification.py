@@ -7,10 +7,12 @@
   внутри показанных hunk'ов, ссылка на правило, которое модель видела и
   которое применимо к файлу, без префикса атрибуции в тексте, без дублей.
   Отклонённое замечание отклоняется целиком: ссылка на правило, которого
-  модель не видела, - типичный след «правила», подложенного в дифф.
+  модель не видела, - типичный след «правила», подложенного в дифф. Каждое
+  отклонённое возвращается с причиной: песочница правил показывает её
+  пользователю.
 - `apply_verdicts` - вердикты верификатора. Возвращает подмножество исходных
-  объектов, поэтому изменить поле замечания верификатору нечем, а серьёзную
-  находку безопасности он отбросить не может.
+  объектов, каждый со своим вердиктом, поэтому изменить поле замечания
+  верификатору нечем, а серьёзную находку безопасности он отбросить не может.
 
 Идентификаторы и время приходят аргументами: тест сверяет точные значения.
 """
@@ -81,11 +83,19 @@ _UNDROPPABLE_SECURITY = frozenset({FindingSeverity.HIGH, FindingSeverity.CRITICA
 
 
 @dataclass(frozen=True, slots=True)
+class RejectedFinding:
+    """Замечание модели, которое отсев не пропустил, - как его вернула модель, и почему."""
+
+    candidate: LlmFinding
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class Screening:
-    """Итог отсева: принятые замечания и сколько отклонено."""
+    """Итог отсева: принятые замечания и отклонённые с причиной."""
 
     kept: tuple[Finding, ...]
-    rejected: int
+    rejected: tuple[RejectedFinding, ...]
 
 
 def screen_findings(
@@ -107,17 +117,25 @@ def screen_findings(
     }
     rules = {rule.name: rule for rule in shown_rules}
     accepted: list[Finding] = []
-    rejected = 0
+    # Дубль отклоняется уже принятой находкой, а в отклонённых нужен ответ модели.
+    sources: dict[UUID, LlmFinding] = {}
+    rejected: list[RejectedFinding] = []
     for candidate in candidates:
         path = paths.get(candidate.anchor.file_path, candidate.anchor.file_path)
         anchor = validate_anchor(replace(candidate.anchor, file_path=path), hunk_list)
         rule = _resolve(candidate.rule, path, rules)
-        message = (_without_model_prefix(candidate.message) or "").strip()
-        if not anchor.ok or not rule.ok or not message:
-            rejected += 1
-            continue
-        accepted.append(
-            Finding(
+        unprefixed = _without_model_prefix(candidate.message)
+        message = (unprefixed or "").strip()
+        if not anchor.ok:
+            rejected.append(RejectedFinding(candidate, "привязка вне показанного диффа"))
+        elif rule.error is not None:
+            rejected.append(RejectedFinding(candidate, rule.error))
+        elif unprefixed is None:
+            rejected.append(RejectedFinding(candidate, "префикс атрибуции не снимается"))
+        elif not message:
+            rejected.append(RejectedFinding(candidate, "пустой текст замечания"))
+        else:
+            finding = Finding(
                 id=new_id(),
                 review_run_id=review_run_id,
                 anchor=anchor.unwrap(),
@@ -130,9 +148,11 @@ def screen_findings(
                 confidence=candidate.confidence,
                 rule=rule.unwrap(),
             )
-        )
+            accepted.append(finding)
+            sources[finding.id] = candidate
     kept, duplicates = deduplicate(accepted)
-    return Screening(kept=tuple(kept), rejected=rejected + len(duplicates))
+    rejected += [RejectedFinding(sources[d.id], "повтор замечания") for d in duplicates]
+    return Screening(kept=tuple(kept), rejected=tuple(rejected))
 
 
 def _without_model_prefix(message: str) -> str | None:
@@ -211,32 +231,48 @@ def _closing_parenthesis(text: str) -> int | None:
 def _resolve(
     reference: LlmRuleRef | None, file_path: str, rules: Mapping[str, ShownRule]
 ) -> Result[RuleRef | None]:
-    """Сверить ссылку с показанными правилами; без ссылки - успех с `None`."""
+    """Сверить ссылку с показанными правилами; без ссылки - успех с `None`.
+
+    Текст отказа - причина отклонения для пользователя: имя правила, путь и
+    номер пункта у отклонённого замечания и так есть.
+    """
     if reference is None:
         return Result.success(None)
     rule = rules.get(reference.name.strip())
     if rule is None:
-        return Result.failure(f"правило {reference.name!r} модели не показывали")
+        return Result.failure("правило не показывали модели")
     if file_path not in rule.files:
-        return Result.failure(f"правило {rule.name!r} не применимо к {file_path}")
+        return Result.failure("правило не применимо к файлу")
     if not 1 <= reference.check <= len(rule.checks):
-        return Result.failure(f"у правила {rule.name!r} нет пункта {reference.check}")
+        return Result.failure("у правила нет такого пункта")
     return Result.success(
         RuleRef(name=rule.name, check=reference.check, check_text=rule.checks[reference.check - 1])
     )
 
 
 @dataclass(frozen=True, slots=True)
-class AppliedVerdicts:
-    """Итог вердиктов: что сохранить и что с какой причиной верификатор хотел отбросить.
+class JudgedFinding:
+    """Замечание и вердикт верификатора по нему."""
 
-    `overruled` - замечания, которые верификатор отбросить не может: они есть
-    и в `kept`, причина его `drop` нужна логу прогона.
+    finding: Finding
+    verdict: Verdict
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedVerdicts:
+    """Итог вердиктов: что сохранить и что верификатор отбросил - каждое со своим вердиктом.
+
+    В `kept` - подтверждённые и те, что верификатор отбросить не может: у
+    вторых вердикт `drop`, его причину показывают лог прогона и инспектор.
     """
 
-    kept: tuple[Finding, ...]
-    dropped: tuple[tuple[Finding, str], ...]
-    overruled: tuple[tuple[Finding, str], ...]
+    kept: tuple[JudgedFinding, ...]
+    dropped: tuple[JudgedFinding, ...]
+
+    @property
+    def overruled(self) -> tuple[JudgedFinding, ...]:
+        """Оставленные вопреки `drop`."""
+        return tuple(judged for judged in self.kept if judged.verdict.verdict is VerifierVerdict.DROP)
 
 
 def apply_verdicts(candidates: Sequence[Finding], verdicts: Mapping[str, Verdict]) -> AppliedVerdicts:
@@ -245,19 +281,15 @@ def apply_verdicts(candidates: Sequence[Finding], verdicts: Mapping[str, Verdict
     Полноту вердиктов проверяет `check_verdicts` до вызова: здесь у каждого
     кандидата вердикт есть.
     """
-    kept: list[Finding] = []
-    dropped: list[tuple[Finding, str]] = []
-    overruled: list[tuple[Finding, str]] = []
+    kept: list[JudgedFinding] = []
+    dropped: list[JudgedFinding] = []
     for candidate_id, finding in zip(candidate_ids(len(candidates)), candidates, strict=True):
-        verdict = verdicts[candidate_id]
-        if verdict.verdict is VerifierVerdict.KEEP:
-            kept.append(finding)
-        elif _droppable(finding):
-            dropped.append((finding, verdict.reason))
+        judged = JudgedFinding(finding, verdicts[candidate_id])
+        if judged.verdict.verdict is VerifierVerdict.DROP and _droppable(finding):
+            dropped.append(judged)
         else:
-            kept.append(finding)
-            overruled.append((finding, verdict.reason))
-    return AppliedVerdicts(tuple(kept), tuple(dropped), tuple(overruled))
+            kept.append(judged)
+    return AppliedVerdicts(tuple(kept), tuple(dropped))
 
 
 def _droppable(finding: Finding) -> bool:

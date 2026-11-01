@@ -8,9 +8,9 @@
 - [ ] 2.2 `advance_simulation(simulation, status, now)` в `app/domain/simulation.py`: допустимые переходы, итоговый статус не меняется, переход в итоговый стирает вход (D10)
 - [ ] 2.3 `admit_simulation(active, recent_created_at, now, max_per_window, window)` в `app/domain/simulation.py`: `Admitted` или `Limited(retry_after)`
 - [ ] 2.4 `code_as_new_file(path, content)` в `app/domain/simulation.py`: `ParsedFile` нового файла с одним hunk'ом
-- [ ] 2.5 `screen_findings` отдаёт отклонённых кандидатов с причиной (`app/domain/verification.py`); `run_review` пишет в `rejected_findings` их число
-- [ ] 2.6 `apply_verdicts` отдаёт вердикт и причину по каждому оставленному замечанию
-- [ ] 2.7 `file_contexts(body)` - контекст модели по файлам из тела пакета `context-payload/v1` (им же воспользуется инспектор замечания)
+- [x] 2.5 `screen_findings` отдаёт отклонённых кандидатов с причиной (`app/domain/verification.py`); `run_review` пишет в `rejected_findings` их число
+- [x] 2.6 `apply_verdicts` отдаёт вердикт и причину по каждому оставленному замечанию
+- [x] 2.7 `file_contexts(body)` - контекст модели по файлам из тела пакета `context-payload/v1` (им же воспользуется инспектор замечания)
 - [ ] 2.8 Тесты без базы на 2.2-2.7, в том числе граница окна лимита и `Retry-After` не меньше 1
 
 ## 3. Хранение
@@ -21,8 +21,8 @@
 
 ## 4. Конвейер
 
-- [ ] 4.1 `assemble_context` берёт `ContextSubject` вместо `ReviewJob`; промпт пропускает пустые репозиторий и номер PR; тесты ревью не меняются
-- [ ] 4.2 `verify_findings` - общая функция вместо закрытой `_verify` в `review_pipeline.py`
+- [x] 4.1 `assemble_context` берёт `ContextSubject` вместо `ReviewJob`; промпт пропускает пустые репозиторий и номер PR; тесты ревью не меняются
+- [x] 4.2 `verify_findings` - общая функция вместо закрытой `_verify` в `review_pipeline.py`
 - [ ] 4.3 `build_simulation_context` (`app/application/use_cases`): вход как `ParsedFile`, `filter_diff_files`, правила текста пользователя, AST фрагмента или `no_source` у диффа, пустой контекст PR
 - [ ] 4.4 `run_simulation` (`app/application/simulation_pipeline.py`): статусы, `request_review` → `screen_findings` → `verify_findings`, результат, сбой - `failed` с кодом и токенами; итоговая или удалённая симуляция - без работы; спаны `simulation.<этап>`, лог с `simulation_id` без кода
 - [ ] 4.5 Тесты на фейке модели: тот же вход - те же замечания, что у `run_review`; таймаут модели; верификатор недоступен; отброшенные отсевом и верификатором; повторная доставка

@@ -187,7 +187,10 @@ def _rules_message(body: Mapping[str, Any]) -> str:
 
 
 def _code_message(body: Mapping[str, Any]) -> str:
-    parts = ["## Раздел кода", f"Репозиторий: {_literal(body['repository'])}"]
+    parts = ["## Раздел кода"]
+    # У симуляции песочницы правил репозитория нет.
+    if body.get("repository") is not None:
+        parts.append(f"Репозиторий: {_literal(body['repository'])}")
     # Пакеты, сохранённые до появления контекста PR, этого поля не несут.
     if pr_context := body.get("pull_request_context"):
         parts.append("### Контекст PR")
