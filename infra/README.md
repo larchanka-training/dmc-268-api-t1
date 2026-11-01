@@ -557,9 +557,9 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 (`observability/alertmanager.yml`). Конфиги те же локально и на стенде; токен бота и chat id —
 не в конфиге, а файлами `/etc/alertmanager/secrets/telegram_{bot_token,chat_id}`: на стенде их
 заливает `upload` из секретов `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1`,
-локально — compose (`configs`) из `ALERT_TELEGRAM_BOT_TOKEN` и `ALERT_TELEGRAM_CHAT_ID`. Наружу
-из стека ходят только Alertmanager (api.telegram.org) и `dmc268-blackbox-public` (публичный
-вход стенда) — через свою не-internal сеть `dmc268-alerting`, портов на хосте у них нет.
+локально — compose (`configs`) из `ALERT_TELEGRAM_BOT_TOKEN` и `ALERT_TELEGRAM_CHAT_ID`. Из
+контейнеров алертов наружу ходят только Alertmanager (api.telegram.org) и
+`dmc268-blackbox-public` (публичный вход стенда) — через свою не-internal сеть `dmc268-alerting`, портов на хосте у них нет.
 Пробы сервисов делает другой экземпляр, `dmc268-blackbox`, — только в сети данных, там же его
 скрейпит Prometheus: `/probe?target=` принимает любой URL без авторизации, и экземпляр с
 выходом наружу или с путём до `dmc268-blackbox-public` (цепочка

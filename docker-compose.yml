@@ -585,7 +585,9 @@ services:
   # Пробы сервисов для алертов — как dmc268-blackbox в infra/observability.tf:
   # только в default, где цели API, базы и брокера и где его скрейпит
   # Prometheus. В сети стека его нет — иначе через него можно дойти до
-  # blackbox-public с выходом наружу.
+  # blackbox-public с выходом наружу. Изоляция от интернета — только на
+  # стенде: default в compose не internal, локально экземпляр выходит наружу
+  # напрямую.
   blackbox:
     # prom/blackbox-exporter:v0.29.1
     image: prom/blackbox-exporter@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
