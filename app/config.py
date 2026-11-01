@@ -253,6 +253,12 @@ class Settings(BaseSettings):
         description="Адрес OpenAI-совместимого API Eurorouter, например https://…/v1",
     )
     eurorouter_model: str = Field(default="", description="Модель Eurorouter")
+    # Не каждая модель знает параметр, а неизвестный шлюз может отвергнуть:
+    # без значения он в запрос не идёт (#267).
+    eurorouter_reasoning_effort: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description="reasoning_effort в запросе к Eurorouter; пусто - не отправлять",
+    )
     # Несколько ключей через запятую: ключ, упёршийся в лимит, сменяется
     # следующим (design D4). SecretStr - по той же причине, что ключ App.
     eurorouter_api_keys: SecretStr = Field(
@@ -305,11 +311,11 @@ class Settings(BaseSettings):
         description="Сколько секунд может идти один проход повтора доставок вебхука; остальное — в следующий",
     )
 
-    @field_validator("llm_backend", mode="before")
+    @field_validator("llm_backend", "eurorouter_reasoning_effort", mode="before")
     @classmethod
-    def _empty_backend_is_unset(cls, value: object) -> object:
+    def _empty_is_unset(cls, value: object) -> object:
         # docker compose передаёт незаданную переменную пустой строкой: это
-        # тот же невыбранный адаптер, а не ошибка формата.
+        # то же незаданное значение, а не ошибка формата.
         return None if value == "" else value
 
     @model_validator(mode="after")

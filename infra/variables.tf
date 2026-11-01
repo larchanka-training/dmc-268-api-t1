@@ -343,6 +343,19 @@ variable "eurorouter_model" {
   default     = ""
 }
 
+# Зеркало Literal в app/config.py. Пусто - параметр не уходит в запрос: не каждая
+# модель его знает (#267).
+variable "eurorouter_reasoning_effort" {
+  type        = string
+  description = "reasoning_effort в запросе к Eurorouter (EUROROUTER_REASONING_EFFORT); пусто - не отправлять."
+  default     = ""
+
+  validation {
+    condition     = contains(["", "low", "medium", "high"], var.eurorouter_reasoning_effort)
+    error_message = "eurorouter_reasoning_effort - пусто, low, medium или high."
+  }
+}
+
 variable "eurorouter_api_keys" {
   type        = string
   description = "Ключи Eurorouter через запятую (EUROROUTER_API_KEYS). Не коммитить."

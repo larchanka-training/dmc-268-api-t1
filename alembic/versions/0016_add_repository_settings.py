@@ -12,8 +12,8 @@ Change `repository-settings`, design D1–D3. Настройки — колон�
 `ADD COLUMN … NOT NULL DEFAULT <константа>` и `SET DEFAULT` в PostgreSQL ≥ 11 меняют только
 каталог, без перезаписи таблицы: блокировка короткая и укладывается в `lock_timeout`.
 
-Revision ID: 0015
-Revises: 0014
+Revision ID: 0016
+Revises: 0015
 Create Date: 2026-10-31 10:42:44.656031
 
 """
@@ -25,8 +25,8 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 # Идентификаторы ревизии, используются Alembic.
-revision: str = '0015'
-down_revision: str | Sequence[str] | None = '0014'
+revision: str = '0016'
+down_revision: str | Sequence[str] | None = '0015'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

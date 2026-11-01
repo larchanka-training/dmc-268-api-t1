@@ -1,11 +1,10 @@
 """Реализации портов хранения на SQLAlchemy.
 
 Тонкие намеренно: каждый метод переводит между строкой таблицы и доменной
-сущностью и больше ничего не делает. Два из них перед записью сверяются с
-чистой функцией — это единственные места, где появляется правило. Они отмечены.
+сущностью и больше ничего не делает. Два из них перед записью применяют
+чистую функцию — это единственные места, где появляется правило. Они отмечены.
 """
 
-import copy
 import datetime as dt
 from collections.abc import Collection, Sequence
 from typing import Any
@@ -59,6 +58,7 @@ from app.domain.lifecycle import next_status
 from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
+from app.domain.secret_redaction import redact_secrets
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
@@ -557,22 +557,13 @@ class SqlAlchemyContextPayloadRepo:
         ).all()
         return [m.context_payload_to_domain(row) for row in rows]
 
-    def find_by_digest(self, content_sha256: str) -> ContextPayload | None:
-        """Самый старый payload с таким дайджестом.
-
-        Индекс по дайджесту не уникален, а переиспользование — и есть смысл
-        этого поиска, поэтому совпасть могут несколько строк. Сортировка по
-        `id` делает ответ одинаковым на каждом вызове: id — это UUIDv7,
-        упорядоченные по времени.
-        """
-        row = self._session.scalars(
-            select(ContextPayloadRow)
-            .where(ContextPayloadRow.content_sha256 == content_sha256)
-            .order_by(ContextPayloadRow.id)
-        ).first()
-        return m.context_payload_to_domain(row) if row else None
-
     def add(self, payload: ContextPayload) -> None:
+        """Записать пакет, заменив секреты в теле меткой (#28).
+
+        Единственное правило в этом классе, и оно делегировано `redact_secrets`.
+        Модели пакет уходит из памяти, а не отсюда, — секрет она видит; фейк
+        хранит тело как есть.
+        """
         self._session.add(
             ContextPayloadRow(
                 id=payload.id,
@@ -582,8 +573,8 @@ class SqlAlchemyContextPayloadRepo:
                 file_paths=list(payload.file_paths),
                 token_count=payload.token_count,
                 content_sha256=payload.content_sha256,
-                # Копия, а не ссылка: строка не должна делить словарь с сущностью.
-                body=copy.deepcopy(payload.body),
+                # Новая структура, а не ссылка на словарь сущности; секреты в базу не идут.
+                body=redact_secrets(payload.body),
             )
         )
 

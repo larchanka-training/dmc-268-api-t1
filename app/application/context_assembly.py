@@ -54,6 +54,7 @@ from app.domain.entities import (
 )
 from app.domain.enums import Language
 from app.domain.repo_rules import RULES_PATH, applicable_rules
+from app.domain.secret_redaction import redact_secrets
 from app.domain.untrusted import fence, sanitize
 
 SCHEMA = "context-payload/v1"
@@ -236,7 +237,9 @@ def assemble_context(
             tiers=("diff", "ast") if body["ast"] else ("diff",),
             file_paths=file_paths,
             token_count=estimate_tokens(serialized),
-            content_sha256=hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+            # Дайджест лежит рядом с телом, где секреты заменены: по исходному слабый
+            # пароль подбирался бы офлайн. Токены — по тому, что уходит модели.
+            content_sha256=hashlib.sha256(serialize(redact_secrets(body)).encode("utf-8")).hexdigest(),
             body=body,
             created_at=now,
             updated_at=now,

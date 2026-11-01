@@ -382,9 +382,6 @@ class FakeContextPayloadRepo:
     def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]:
         return [p for p in self._items if p.review_run_id == review_run_id]
 
-    def find_by_digest(self, content_sha256: str) -> ContextPayload | None:
-        return next((p for p in self._items if p.content_sha256 == content_sha256), None)
-
     def add(self, payload: ContextPayload) -> None:
         self._items.append(payload)
 

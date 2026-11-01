@@ -254,17 +254,16 @@ class ReviewRunStepRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
 
 
 class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
-    """Что показали модели; хранится, чтобы прогон оставался воспроизводимым.
+    """Что показали модели, с метками вместо секретов; по нему отслеживают, откуда замечание.
 
-    В этой таблице дословно лежит чужой исходный код. Вычищать секреты нужно до
-    вставки, в сборщике контекста; именно об этой чувствительной таблице и идёт
-    речь в политике хранения.
+    В этой таблице дословно лежит чужой исходный код. Секреты из него вычищает
+    запись (`redact_secrets` в `SqlAlchemyContextPayloadRepo.add`), а не сборщик:
+    модели пакет уходит как есть, чтобы ревью увидело зашитый секрет.
     """
 
     __tablename__ = "context_payloads"
     __table_args__ = (
         UniqueConstraint("review_run_id", "chunk_index", name="uq_context_payloads_chunk"),
-        Index("ix_context_payloads_digest", "content_sha256"),
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(

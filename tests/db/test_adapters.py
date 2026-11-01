@@ -38,6 +38,7 @@ from app.domain.enums import (
 from app.domain.ids import new_id
 from app.domain.lifecycle import advance
 from app.domain.run_steps import finish_step, start_step
+from app.domain.secret_redaction import REDACTED
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 
 from ..conftest import requires_db
@@ -498,19 +499,26 @@ def test_retargeting_a_change_request_reaches_storage(uow) -> None:
     assert stored.source_branch == "feat/renamed"
 
 
-def test_find_by_digest_is_stable_across_calls(uow) -> None:
-    """Несколько прогонов могут делить один digest; поиск не должен выбирать наугад."""
+def test_a_stored_payload_has_secrets_redacted(uow) -> None:
+    """#28: в базу пакет идёт без секретов, остальной текст и структура — как есть."""
     with uow as work:
         _, _, run = seeded(work)
+    token = "ghp_" + "a" * 36
+    payload = replace(
+        a_context_payload(run.id, chunk_index=0, digest="d0"),
+        body={"diff": [{"path": "a.py", "hunk": f'+TOKEN = "{token}"\n+x = 1'}], "omitted_count": 0},
+    )
     with uow as work:
-        for index in range(3):
-            work.context_payloads.add(
-                a_context_payload(run.id, chunk_index=index, digest="same-digest")
-            )
+        work.context_payloads.add(payload)
         work.commit()
+
     with uow as work:
-        answers = {work.context_payloads.find_by_digest("same-digest").id for _ in range(5)}
-    assert len(answers) == 1
+        (stored,) = work.context_payloads.list_for_run(run.id)
+    assert stored.body == {
+        "diff": [{"path": "a.py", "hunk": f'+TOKEN = "{REDACTED}"\n+x = 1'}],
+        "omitted_count": 0,
+    }
+    assert token in payload.body["diff"][0]["hunk"]  # сущность, которая уходит модели, не тронута
 
 
 def test_a_payload_body_is_a_copy_not_a_handle_on_the_row(uow) -> None:
@@ -522,12 +530,12 @@ def test_a_payload_body_is_a_copy_not_a_handle_on_the_row(uow) -> None:
         work.commit()
 
     with uow as work:
-        loaded = work.context_payloads.find_by_digest("d1")
+        (loaded,) = work.context_payloads.list_for_run(run.id)
         loaded.body["text"] = "mutated"
         work.commit()
 
     with uow as work:
-        assert work.context_payloads.find_by_digest("d1").body == {"text": "x"}
+        assert work.context_payloads.list_for_run(run.id)[0].body == {"text": "x"}
 
 
 def test_a_payload_body_mutated_before_commit_is_stored_as_added(uow) -> None:
@@ -545,7 +553,7 @@ def test_a_payload_body_mutated_before_commit_is_stored_as_added(uow) -> None:
         work.commit()
 
     with uow as work:
-        assert work.context_payloads.find_by_digest("d2").body == {
+        assert work.context_payloads.list_for_run(payload.review_run_id)[0].body == {
             "text": "x",
             "files": [{"path": "a.py"}],
         }

@@ -44,6 +44,7 @@ class OpenAiCompatibleGateway:
         *,
         name: str,
         max_attempts: int,
+        reasoning_effort: str | None = None,
     ) -> None:
         if not keys:
             raise ValueError(f"{name}: нужен хотя бы один ключ")
@@ -52,6 +53,7 @@ class OpenAiCompatibleGateway:
         self._keys = tuple(keys)
         self._name = name
         self._max_attempts = max_attempts
+        self._reasoning_effort = reasoning_effort
         self._turns = itertools.count()
         self._lock = threading.Lock()
 
@@ -77,6 +79,9 @@ class OpenAiCompatibleGateway:
                 # Воспроизводимый ответ: eval сравнивает прогоны на одном датасете.
                 "temperature": 0,
             }
+            # Только заданный: модель без параметра шлюз может отвергнуть с 400.
+            if self._reasoning_effort is not None:
+                body["reasoning_effort"] = self._reasoning_effort
             return self._post_rotating(body, order)
 
         return complete_structured(send, request, max_attempts=self._max_attempts)

@@ -12,7 +12,7 @@
 ## 2. Миграция и хранение
 
 - [x] 2.1 Модель `RepositoryRow` (`app/infrastructure/db/models.py`): `branch_filter` — `ARRAY(Text)`, `NOT NULL`, `server_default='{}'`; `min_severity` — `_enum(FindingSeverity, "finding_severity")`, `NOT NULL`, `server_default='critical'`; `auto_review_enabled` — `server_default=true()` вместо `default=False` (D1, D2)
-- [x] 2.2 Ревизия `alembic/versions/0015_add_repository_settings.py` (`down_revision='0014'`) по скиллу `alembic-migration`: две `add_column` с `server_default`, enum через `postgresql.ENUM(name='finding_severity', create_type=False)`, `alter_column auto_review_enabled server_default=sa.true()`; `downgrade` — обратное; докстринг — зачем умолчания (окно деплоя). Тест: `tests/db/test_repository_settings_migration.py` (маркер `integration`) — upgrade на базе с репозиторием даёт `{}`/`critical`, вставка без колонок даёт `true`/`{}`/`critical`, downgrade удаляет колонки и умолчание; `tests/db/test_drift.py` зелёный; `uv run alembic heads` — одна голова `0015`
+- [x] 2.2 Ревизия `alembic/versions/0016_add_repository_settings.py` (`down_revision='0015'`) по скиллу `alembic-migration`: две `add_column` с `server_default`, enum через `postgresql.ENUM(name='finding_severity', create_type=False)`, `alter_column auto_review_enabled server_default=sa.true()`; `downgrade` — обратное; докстринг — зачем умолчания (окно деплоя). Тест: `tests/db/test_repository_settings_migration.py` (маркер `integration`) — upgrade на базе с репозиторием даёт `{}`/`critical`, вставка без колонок даёт `true`/`{}`/`critical`, downgrade удаляет колонки и умолчание; `tests/db/test_drift.py` зелёный; `uv run alembic heads` — одна голова `0016`
 - [x] 2.3 Маппер и адаптер: `repository_to_domain` читает новые поля (`app/infrastructure/db/mappers.py`), `add` пишет их, `reconnect` и `update` их не трогают; новый метод порта `RepositoryRepo.update_settings(repository_id, settings, now)` (`app/application/ports/…`, адаптер — `app/infrastructure/db/repositories.py`) — `UPDATE` трёх колонок и `updated_at`. Тест: `tests/db/test_adapters.py` (интеграционный) — запись и чтение, `text[]` ↔ tuple, повторное включение сохраняет настройки, `update` пути подключения настройки не затирает; фейк UoW (`tests/fakes/unit_of_work.py`) получает `update_settings`; `uv run mypy .` зелёный
 - [x] 2.4 `docs/erd.md`: колонки `branch_filter`, `min_severity` в диаграмме `repositories` и абзац о настройках (умолчания, `branch_filter` пока не применяется, `auto_review_enabled = false` — как выключенный для вебхука). Проверка: `uv run pytest tests/test_docs.py`
 
@@ -43,7 +43,7 @@
 ## 6. Синхронизация и проверки
 
 - [x] 6.1 Сверка дельт с кодом: каждый сценарий `specs/*/spec.md` покрыт тестом из групп 1–5; расхождение правится в дельте или в коде, не молча. Проверка: `npx @fission-ai/openspec@1.15.0 validate repository-settings --strict`
-- [x] 6.2 Статические проверки: `uv lock --check`, `uv run ruff check .`, `uv run lint-imports`, `uv run mypy .`, `uv run python scripts/export_openapi.py --check`, `uv run alembic heads` — одна голова `0015`
+- [x] 6.2 Статические проверки: `uv lock --check`, `uv run ruff check .`, `uv run lint-imports`, `uv run mypy .`, `uv run python scripts/export_openapi.py --check`, `uv run alembic heads` — одна голова `0016`
 - [x] 6.3 Полный прогон как в CI: `PYTEST_FAIL_ON_SKIP=1 uv run pytest` с `TEST_DATABASE_URL`, `TEST_RABBITMQ_URL`, `TEST_RABBITMQ_CONTAINER` — без пропусков
 - [x] 6.4 `npx @fission-ai/openspec@1.15.0 validate --all --strict` зелёный
 

@@ -28,7 +28,7 @@
 - Активный change `repositories-one-list` правит в `review-rest-api` другие требования, а в
   `webhook-intake` (`Незарегистрированный репозиторий игнорируется`) и `review-data-model`
   (`Регистрация репозитория`) — существующие. Этот change в тех двух спеках только добавляет
-  требования, пересечения по требованиям нет. Ревизия `0014` (`connected_at`) — его; наша — `0015`.
+  требования, пересечения по требованиям нет. Ревизия `0014` (`connected_at`) — его; наша — `0016`: `0015` занял `redact-context-payloads`.
 
 ## Goals / Non-Goals
 
@@ -66,7 +66,7 @@
 
 ### D2. `auto_review_enabled` получает `server_default true`
 
-Контракт обещает `true` по умолчанию, а модель держит `default=False`. В `0015`:
+Контракт обещает `true` по умолчанию, а модель держит `default=False`. В `0016`:
 `ALTER COLUMN auto_review_enabled SET DEFAULT true`; в модели — `server_default=true()` вместо
 `default=False`. Данные не трогаем: у всех записей уже `true` (оба пути подключения пишут его).
 Откат — `DROP DEFAULT`.
@@ -217,7 +217,7 @@
 
 ## Migration Plan
 
-1. Ревизия `0015` (`down_revision = '0014'`): `ADD COLUMN branch_filter`, `ADD COLUMN
+1. Ревизия `0016` (`down_revision = '0015'`): `ADD COLUMN branch_filter`, `ADD COLUMN
    min_severity`, `ALTER COLUMN auto_review_enabled SET DEFAULT true`. Откат — `DROP COLUMN` ×2 и
    `DROP DEFAULT`; сохранённые настройки при откате теряются (кроме `auto_review_enabled`).
 2. Деплой обычный: миграция до API и воркера; старые API и воркер работают на новой схеме

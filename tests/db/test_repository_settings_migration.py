@@ -1,4 +1,4 @@
-"""Ревизия 0015: настройки ревью в `repositories` — умолчания для старых записей и окна деплоя."""
+"""Ревизия 0016: настройки ревью в `repositories` — умолчания для старых записей и окна деплоя."""
 
 from typing import Any
 
@@ -45,7 +45,7 @@ def test_upgrade_gives_existing_repositories_default_settings(clean_db) -> None:
     """Записи до ревизии получают пустой фильтр и порог `critical`; `auto_review_enabled` не меняется."""
     config = _config()
     try:
-        command.downgrade(config, "0014")
+        command.downgrade(config, "0015")
         with clean_db.begin() as conn:
             conn.execute(text(_OLD_INSERT), {"provider_id": "1", "enabled": True})
             conn.execute(text(_OLD_INSERT), {"provider_id": "2", "enabled": False})
@@ -78,7 +78,7 @@ def test_downgrade_drops_the_columns_and_the_default_keeping_the_data(clean_db) 
         )
     config = _config()
     try:
-        command.downgrade(config, "0014")
+        command.downgrade(config, "0015")
         columns = _columns(clean_db)
         assert "branch_filter" not in columns
         assert "min_severity" not in columns

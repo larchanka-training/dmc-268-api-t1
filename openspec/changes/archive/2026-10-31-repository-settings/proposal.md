@@ -17,7 +17,7 @@ dmc-268-ui-t1#40), пока `GET`/`PUT /api/v1/repositories/{repository_id}/sett
 - `GET …/rules` отдаёт исход загрузки `.review/rules.md` с ветки по умолчанию: ветка
   разрешается в sha новым методом `VcsGateway`, файл грузится тем же `load_repo_rules`, что у
   прогона, с кэшем по sha; в значении кэша хранится `fetched_at`.
-- Хранение: миграция `0015` добавляет `repositories.branch_filter` (`text[]`) и
+- Хранение: миграция `0016` добавляет `repositories.branch_filter` (`text[]`) и
   `repositories.min_severity` (существующий enum `finding_severity`), обе `NOT NULL` с
   `server_default`; у `auto_review_enabled` появляется `server_default true` — как
   умолчание контракта.
@@ -60,7 +60,7 @@ dmc-268-ui-t1#40), пока `GET`/`PUT /api/v1/repositories/{repository_id}/sett
   `app/application/publish_review.py`, `app/application/sync_thread_resolution.py`,
   `app/application/use_cases/handle_webhook.py`, `app/domain/entities.py`,
   `app/infrastructure/db/{models,mappers,repositories}.py`.
-- База: ревизия Alembic `0015`, `docs/erd.md`.
+- База: ревизия Alembic `0016`, `docs/erd.md`.
 - Контракт: `docs/openapi/openapi.json` (экспорт).
 - Зависит от PR #308 (`feat/review-run-diff`): `InstallationCatalog.repository_installation_id` с
   кэшем и `Container.cabinet_vcs_gateway()`.
