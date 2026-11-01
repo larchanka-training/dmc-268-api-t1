@@ -43,7 +43,7 @@ class RunDiffUnavailable(Exception):
 
 
 class RepositoryNotInstalled(Exception):
-    """Приложение не установлено на репозиторий прогона или установка приостановлена."""
+    """Приложение не установлено на репозиторий или установка приостановлена."""
 
 
 class RunCommitNotFound(Exception):

@@ -153,6 +153,13 @@ ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION = _doc(
     "`REPOSITORY_NOT_IN_INSTALLATION` — приложение не установлено на репозиторий прогона или установка "
     "приостановлена, дифф у GitHub не запрашивался.",
 )
+ERRORS_404_REPOSITORY_OR_NOT_IN_INSTALLATION = _doc(
+    HTTPStatus.NOT_FOUND,
+    Annotated[RepositoryNotFoundProblem | RepositoryNotInInstallationProblem, Field(discriminator="code")],
+    "`REPOSITORY_NOT_FOUND` — репозитория с таким id нет или пользователь не видит его на GitHub; "
+    "`REPOSITORY_NOT_IN_INSTALLATION` — приложение не установлено на репозиторий или установка "
+    "приостановлена, ветка и файл у GitHub не запрашивались.",
+)
 ERRORS_409_DIFF_UNAVAILABLE = _doc(
     HTTPStatus.CONFLICT,
     DiffUnavailableProblem,

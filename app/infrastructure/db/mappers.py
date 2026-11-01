@@ -43,6 +43,8 @@ def repository_to_domain(row: RepositoryRow) -> Repository:
         created_at=row.created_at,
         updated_at=row.updated_at,
         connected_at=row.connected_at,
+        branch_filter=tuple(row.branch_filter),
+        min_severity=row.min_severity,
     )
 
 

@@ -54,7 +54,7 @@ from ..fakes.llm_gateway import (
 from ..fakes.run_outcome import RecordingRunOutcome
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
-from ..fakes.webhooks import FakeVcs
+from ..fakes.webhooks import FakeVcs, a_repository
 
 # Дифф фейкового VCS меняет первую строку `app/main.py`.
 CHANGED_FILE = "app/main.py"
@@ -82,6 +82,8 @@ MR_ID = UUID(int=3)
 
 
 def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.QUEUED) -> None:
+    # Запись репозитория PR: без неё merge gate не прочитает порог.
+    uow.repositories.add(replace(a_repository(), id=UUID(int=9)))
     uow.merge_requests.add(
         MergeRequest(
             id=MR_ID,

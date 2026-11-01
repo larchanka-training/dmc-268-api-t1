@@ -20,6 +20,7 @@ from app.domain.entities import (
     ProviderToken,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewRun,
     ReviewRunListEntry,
     ReviewRunStep,
@@ -61,7 +62,14 @@ class RepositoryRepo(Protocol):
         """Выключить ревью: `connected_at = NULL`; уже выключенный или отсутствующий — без ошибки."""
         ...
 
-    def update(self, repository: Repository) -> None: ...
+    def update_settings(
+        self, repository_id: UUID, settings: RepositorySettings, now: datetime
+    ) -> Repository | None:
+        """Заменить настройки ревью целиком и `updated_at = now`.
+
+        Вернуть записанную запись; `None` — записи нет (в том числе удалили параллельно).
+        """
+        ...
 
 
 class MergeRequestRepo(Protocol):
@@ -147,8 +155,6 @@ class ReviewRunStepRepo(Protocol):
 
 class ContextPayloadRepo(Protocol):
     def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]: ...
-
-    def find_by_digest(self, content_sha256: str) -> ContextPayload | None: ...
 
     def add(self, payload: ContextPayload) -> None: ...
 

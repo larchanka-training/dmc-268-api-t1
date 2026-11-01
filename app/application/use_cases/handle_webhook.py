@@ -54,14 +54,12 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from app.application.merge_gate_publish import (
-    DISABLED_REVIEW_CHECK,
-    build_retarget_check,
-)
+from app.application.merge_gate_publish import build_retarget_check, pause_check
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
+from app.application.ports.vcs_review import MergeGateCheck
 from app.domain.entities import (
     MergeRequest,
     PRMetadata,
@@ -91,9 +89,10 @@ class WebhookOutcome:
     """Результат приёма вебхука: одна из пяти веток.
 
     `ignored` — событие не запускает ревью (`reopened`, неизвестное действие,
-    PR постороннего автора, незарегистрированный или выключенный репозиторий): записей нет,
-    задачи нет. У выключенного при этом уходит VCS-вызов: check run «Ревью выключено в сервисе»
-    на head. `failure` —
+    PR постороннего автора, незарегистрированный или выключенный репозиторий, выключенное
+    авторевью): записей нет, задачи нет. У выключенного репозитория и при выключенном
+    авторевью при этом уходит VCS-вызов: check run паузы на head («Ревью выключено в сервисе»
+    или «Авторевью выключено в настройках»). `failure` —
     VCS недоступен: прогон не создан, задачи нет. `duplicate` — на этот
     коммит уже есть активный или завершённый не-failed прогон по вебхуку,
     найденный до вставки и до обновления merge_request. `conflict` — гонку отклонил уникальный индекс, проигравший
@@ -150,11 +149,13 @@ def handle_webhook_event(
         )
     if repository is None:
         return WebhookOutcome(kind="ignored")
-    # Выключенный (`DELETE /repositories/{id}`): запись осталась ради истории, а ревью не
-    # нужно. Прогона и задачи нет, но на head ставится `success`, иначе обязательная
-    # проверка в ruleset держала бы PR в «Expected — Waiting for status».
-    if repository.connected_at is None:
-        _pass_merge_gate_of_disabled(vcs, event)
+    # Выключенный (`DELETE /repositories/{id}`) или с `auto_review_enabled = false`: запись
+    # есть, а ревью не нужно. Прогона и задачи нет, но на head ставится `success` по причине
+    # паузы, иначе обязательная проверка в ruleset держала бы PR в «Expected — Waiting for
+    # status». `branch_filter` здесь пока не применяется.
+    check = pause_check(repository)
+    if check is not None:
+        _pass_merge_gate_of_paused(vcs, event, check)
         return WebhookOutcome(kind="ignored")
 
     # VCS между транзакциями: соединение пула не занято, пока GitHub отвечает.
@@ -351,19 +352,19 @@ def _supersede(work: UnitOfWork, merge_request_id: UUID, head_sha: str, now: dat
     )
 
 
-def _pass_merge_gate_of_disabled(vcs: VcsGateway, event: WebhookEvent) -> None:
-    """Check run `success` «Ревью выключено в сервисе» на head; best-effort.
+def _pass_merge_gate_of_paused(
+    vcs: VcsGateway, event: WebhookEvent, check: MergeGateCheck
+) -> None:
+    """Check run паузы ревью (`success`) на head; best-effort.
 
     Сбой GitHub не меняет ответ (`ignored`) и не даёт 502: переотправка доставки ради
-    проверки выключенного репозитория не нужна, следующий push поставит её снова.
+    проверки репозитория без ревью не нужна, следующий push поставит её снова.
     """
     try:
-        vcs.set_merge_gate_check(
-            event.repo_full_name, event.head_sha, event.installation_id, DISABLED_REVIEW_CHECK
-        )
+        vcs.set_merge_gate_check(event.repo_full_name, event.head_sha, event.installation_id, check)
     except VcsError:
         logger.warning(
-            "check run выключенного репозитория %s не поставлен", event.repo_full_name, exc_info=True
+            "check run паузы ревью репозитория %s не поставлен", event.repo_full_name, exc_info=True
         )
 
 

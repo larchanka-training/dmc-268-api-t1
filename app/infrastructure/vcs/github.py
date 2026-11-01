@@ -15,6 +15,7 @@
 HTML, GitHub сменил форму ответа).
 """
 
+import re
 import time
 from collections.abc import Callable
 from http import HTTPStatus
@@ -47,6 +48,10 @@ _DIFF_ACCEPT = "application/vnd.github.v3.diff"
 _JSON_ACCEPT = "application/vnd.github+json"
 # Содержимое файла телом ответа, без base64-обёртки JSON.
 _RAW_ACCEPT = "application/vnd.github.raw+json"
+# Только sha коммита телом ответа, текстом.
+_SHA_ACCEPT = "application/vnd.github.sha"
+# SHA-1 или SHA-256 (репозиторий в формате sha256), шестнадцатерично.
+_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 # Отказ лимита без `retry-after` и `x-ratelimit-reset`: «wait for at least one
@@ -215,6 +220,18 @@ class GitHubVcsGateway:
         if not response.headers.get("content-type", "").startswith(_RAW_ACCEPT):
             return None
         return response.text
+
+    def resolve_branch_sha(self, repo_full_name: str, branch: str, installation_id: int) -> str:
+        # Префикс `heads/` — форма ветки из документации «Get a commit»: имя ветки
+        # не спутать с тегом или sha. `/` в имени GitHub принимает как есть
+        # (проверено вживую), прочее экранируется. Ветки нет — GitHub отвечает 422
+        # «No commit found for SHA», а не 404: это обычный `VcsError`.
+        url = f"/repos/{repo_full_name}/commits/heads/{quote(branch, safe='/')}"
+        response = self._request("GET", url, installation_id, accept=_SHA_ACCEPT)
+        sha = response.text.strip()
+        if _SHA_RE.fullmatch(sha) is None:
+            raise VcsError(f"GitHub API вернул не sha на GET {url}")
+        return sha
 
     def _get_json_list(self, url: str, installation_id: int) -> list[dict[str, Any]]:
         response = self._request("GET", url, installation_id)

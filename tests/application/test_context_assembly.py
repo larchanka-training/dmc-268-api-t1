@@ -1,5 +1,6 @@
 """Сборка пакета контекста — чистая функция на литеральных диффах и контурах."""
 
+import hashlib
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -26,6 +27,7 @@ from app.domain.entities import (
     ShownRule,
 )
 from app.domain.enums import DefinitionKind, Language, RulesStatus
+from app.domain.secret_redaction import redact_secrets
 from app.domain.untrusted import boundary, fence, sanitize
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
@@ -187,6 +189,14 @@ def test_shown_hunks_are_returned_for_anchor_validation() -> None:
 def test_token_count_is_the_estimate_of_the_serialized_body() -> None:
     payload = _assemble().payload
     assert payload.token_count == estimate_tokens(serialize(payload.body))
+
+
+def test_the_digest_is_of_the_body_with_secrets_replaced() -> None:
+    """Дайджест хранится рядом с телом: по исходному слабый пароль подбирался бы офлайн."""
+    payload = _assemble(diff=DIFF.replace("insert(0, item)", "insert(0, 'postgres://app:hunter2@db')")).payload
+    expected = hashlib.sha256(serialize(redact_secrets(payload.body)).encode("utf-8")).hexdigest()
+    assert payload.content_sha256 == expected
+    assert "hunter2" in serialize(payload.body)
 
 
 def test_same_inputs_give_the_same_digest() -> None:

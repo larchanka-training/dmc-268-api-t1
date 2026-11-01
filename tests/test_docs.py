@@ -195,6 +195,19 @@ def test_every_error_code_is_in_the_discriminated_union() -> None:
         }
 
 
+def test_repository_rules_404_is_a_union_by_code() -> None:
+    """`GET …/rules`: у `404` две причины — `oneOf` двух моделей с discriminator по `code`."""
+    document = load_openapi()
+    operation = document["paths"]["/api/v1/repositories/{repository_id}/rules"]["get"]
+    schema = operation["responses"]["404"]["content"][PROBLEM_MEDIA_TYPE]["schema"]
+    assert schema["discriminator"]["propertyName"] == "code"
+    assert set(schema["discriminator"]["mapping"]) == {"REPOSITORY_NOT_FOUND", "REPOSITORY_NOT_IN_INSTALLATION"}
+    assert {ref_name(variant["$ref"]) for variant in schema["oneOf"]} == {
+        "RepositoryNotFoundProblem",
+        "RepositoryNotInInstallationProblem",
+    }
+
+
 def test_every_error_response_is_problem_json() -> None:
     """(б) Каждый ответ 4xx/5xx и `default` — только `application/problem+json` с моделью ошибки;
     у каждого ответа — заголовок `X-Trace-ID`."""
