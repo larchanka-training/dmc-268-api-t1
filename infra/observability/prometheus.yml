@@ -106,8 +106,11 @@ scrape_configs:
         target_label: __param_target
       - source_labels: [__param_target]
         target_label: instance
+      # Экземпляр проб сервисов — только в сети данных (там его и скрейпит
+      # Prometheus): в сети стека он был бы звеном цепочки до
+      # blackbox-public с выходом наружу.
       - target_label: __address__
-        replacement: blackbox:9115
+        replacement: dmc268-blackbox:9115
 
   # Публичный вход по HTTPS и срок его сертификата — отдельным экземпляром
   # blackbox-public: /probe принимает любой URL без авторизации, и экземпляр

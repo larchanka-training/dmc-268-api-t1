@@ -246,9 +246,9 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
 
   assert {
     condition = toset([for n in docker_container.blackbox[0].networks_advanced : n.name]) == toset([
-      docker_network.observability[0].name, docker_network.backend.name,
+      docker_network.backend.name,
     ]) && length(docker_container.blackbox[0].ports) == 0
-    error_message = "blackbox с пробами сервисов стоит ровно в сетях стека и данных, без выхода наружу: /probe без авторизации сделал бы его прокси в интернет для сети данных. Портов на хосте у него нет."
+    error_message = "blackbox с пробами сервисов стоит только в сети данных: /probe без авторизации сделал бы его прокси в интернет — напрямую или цепочкой через blackbox-public в сети стека. Портов на хосте у него нет."
   }
 
   assert {

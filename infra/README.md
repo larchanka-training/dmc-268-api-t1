@@ -560,9 +560,11 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 локально — compose (`configs`) из `ALERT_TELEGRAM_BOT_TOKEN` и `ALERT_TELEGRAM_CHAT_ID`. Наружу
 из стека ходят только Alertmanager (api.telegram.org) и `dmc268-blackbox-public` (публичный
 вход стенда) — через свою не-internal сеть `dmc268-alerting`, портов на хосте у них нет.
-Пробы сервисов делает другой экземпляр, `dmc268-blackbox`, — в сети данных и без выхода
-наружу: `/probe?target=` принимает любой URL без авторизации, и общий экземпляр был бы
-прокси в интернет для любого контейнера сети данных.
+Пробы сервисов делает другой экземпляр, `dmc268-blackbox`, — только в сети данных, там же его
+скрейпит Prometheus: `/probe?target=` принимает любой URL без авторизации, и экземпляр с
+выходом наружу или с путём до `dmc268-blackbox-public` (цепочка
+`/probe?target=http://blackbox-public:9115/probe?target=…`) был бы прокси в интернет для
+любого контейнера сети данных.
 
 Поведение правил закрепляет `observability/alerts.test.yml`: на каждый алерт — синтетические
 ряды «горит / молчит», `promtool test rules` в job `observability-configs`; там же

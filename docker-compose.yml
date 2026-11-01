@@ -582,17 +582,18 @@ services:
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
 
-  # Пробы сервисов для алертов — как dmc268-blackbox в infra/observability.tf.
-  # Цели API, базы и брокера — в default (там их алиасы), скрейп — в сети стека.
+  # Пробы сервисов для алертов — как dmc268-blackbox в infra/observability.tf:
+  # только в default, где цели API, базы и брокера и где его скрейпит
+  # Prometheus. В сети стека его нет — иначе через него можно дойти до
+  # blackbox-public с выходом наружу.
   blackbox:
     # prom/blackbox-exporter:v0.29.1
     image: prom/blackbox-exporter@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
     profiles: ["observability"]
     networks:
       default:
-      observability:
         aliases:
-          - blackbox
+          - dmc268-blackbox
     command: ["--config.file=/etc/blackbox_exporter/config.yml"]
     volumes:
       - ./infra/observability/blackbox.yml:/etc/blackbox_exporter/config.yml:ro

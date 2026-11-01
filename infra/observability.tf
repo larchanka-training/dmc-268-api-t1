@@ -710,10 +710,13 @@ resource "docker_container" "alertmanager" {
 }
 
 # Пробы сервисов для алертов (#100): /health API, порты базы, реплики и
-# брокера (job blackbox-services). Выхода в интернет у этого экземпляра нет:
-# /probe принимает любой URL без авторизации, и экземпляр в сети данных с
-# выходом наружу был бы прокси в интернет для любого её контейнера. Публичный
-# вход проверяет отдельный dmc268-blackbox-public ниже.
+# брокера (job blackbox-services). Стоит ТОЛЬКО в сети данных: /probe
+# принимает любой URL без авторизации, поэтому экземпляр не должен видеть
+# никого с выходом наружу — ни сам интернет, ни dmc268-blackbox-public в сети
+# стека (цепочка /probe?target=http://blackbox-public:9115/probe?target=…
+# выводила бы запрос в интернет, замечание ревью #324). Prometheus скрейпит
+# его там же, в сети данных, по имени контейнера. Публичный вход проверяет
+# отдельный dmc268-blackbox-public ниже.
 resource "docker_container" "blackbox" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-blackbox"
@@ -739,13 +742,8 @@ resource "docker_container" "blackbox" {
 
   command = ["--config.file=/etc/blackbox_exporter/config.yml"]
 
-  # Скрейп Prometheus — blackbox:9115 в сети стека.
-  networks_advanced {
-    name    = docker_network.observability[0].name
-    aliases = ["blackbox"]
-  }
-
-  # Цели проб API, базы, реплики и брокера — в сети данных.
+  # Цели проб API, базы, реплики и брокера и скрейп Prometheus
+  # (dmc268-blackbox:9115) — в сети данных.
   networks_advanced {
     name = docker_network.backend.name
   }

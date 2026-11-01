@@ -52,10 +52,11 @@ EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
     # Алерты (#100): наружу из стека ходят только Alertmanager (в
     # api.telegram.org) и blackbox-public (на публичный вход стенда) — через
     # свою не-internal сеть dmc268-alerting. blackbox с пробами API, базы,
-    # реплики и брокера стоит в сети данных и выхода наружу не имеет: /probe
-    # без авторизации сделал бы его прокси в интернет для сети данных.
+    # реплики и брокера стоит только в сети данных: /probe без авторизации
+    # сделал бы его прокси в интернет — напрямую или цепочкой через
+    # blackbox-public в сети стека (ревью #324).
     "alertmanager": frozenset({"observability", "alerting"}),
-    "blackbox": frozenset({"observability", "backend"}),
+    "blackbox": frozenset({"backend"}),
     "blackbox_public": frozenset({"observability", "alerting"}),
 }
 
