@@ -244,6 +244,13 @@ tests:
         values: "0x10"
       - series: 'node_filesystem_size_bytes{mountpoint="/run", fstype="tmpfs", device="tmpfs"}'
         values: "100x10"
+      # Read-only файловая система всегда «полная»: не алерт.
+      - series: 'node_filesystem_avail_bytes{mountpoint="/oldroot", fstype="erofs", device="/dev/vda"}'
+        values: "0x10"
+      - series: 'node_filesystem_size_bytes{mountpoint="/oldroot", fstype="erofs", device="/dev/vda"}'
+        values: "100x10"
+      - series: 'node_filesystem_readonly{mountpoint="/oldroot", fstype="erofs", device="/dev/vda"}'
+        values: "1x10"
     alert_rule_test:
       - eval_time: 6m
         alertname: DiskSpaceLow

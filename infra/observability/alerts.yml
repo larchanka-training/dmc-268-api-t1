@@ -190,11 +190,14 @@ groups:
     rules:
       # Свободное место на файловой системе сервера: тома базы, WAL, копий,
       # Prometheus и Loki живут на одном диске (infra/README.md, «Диск»).
+      # Файловые системы только для чтения (образы, erofs) всегда «полные» и
+      # в них никто не пишет — они исключены по node_filesystem_readonly.
       - alert: DiskSpaceLow
         expr: |
           node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
           / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
           < 0.15
+          unless on(device, mountpoint) node_filesystem_readonly == 1
         for: 5m
         labels:
           severity: warning
@@ -208,6 +211,7 @@ groups:
           node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
           / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
           < 0.05
+          unless on(device, mountpoint) node_filesystem_readonly == 1
         for: 2m
         labels:
           severity: critical
@@ -225,6 +229,7 @@ groups:
           node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
           / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
           < 0.4
+          unless on(device, mountpoint) node_filesystem_readonly == 1
         for: 30m
         labels:
           severity: critical
