@@ -567,7 +567,7 @@ def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
     assert set(components["RejectedRule"]["required"]) == {"name", "reason"}
 
 
-# --- песочница правил и инспектор находки: заглушки (#288, #290) -------------------
+# --- песочница правил и инспектор находки (#288) ------------------------------------
 
 PARSE_PATH = "/api/v1/rules/parse"
 SIMULATIONS_PATH = "/api/v1/simulations"
@@ -578,20 +578,8 @@ DIFF_SOURCE = {"kind": "diff", "diff": "--- a/app/x.py\n+++ b/app/x.py\n@@ -1 +1
 SIMULATION_BODY = {"source": CODE_SOURCE, "rules": RULES_TEXT}
 
 
-def test_planned_simulation_start_answers_not_implemented() -> None:
-    """Допустимое тело - в том числе пустые правила и вход ровно на пределе - доходит до `501`."""
-    client = _signed_in_client()
-    for path, body in (
-        (SIMULATIONS_PATH, SIMULATION_BODY),
-        (SIMULATIONS_PATH, {"source": DIFF_SOURCE, "rules": ""}),
-        (SIMULATIONS_PATH, {"source": {**CODE_SOURCE, "content": "x" * 131_072}, "rules": "x" * 32_768}),
-    ):
-        response = client.post(path, json=body, headers={"Origin": ORIGIN})
-        assert_problem(response, 501, "NOT_IMPLEMENTED", path)
-
-
-def test_planned_simulation_read_checks_session_and_id_first(client: TestClient) -> None:
-    assert_problem(_signed_in_client().get(SIMULATION_PATH), 501, "NOT_IMPLEMENTED", SIMULATION_PATH)
+def test_simulation_read_checks_session_and_id_first(client: TestClient) -> None:
+    """Ответы на допустимый запрос - в `tests/test_simulations_api.py`."""
     assert_problem(client.get(SIMULATION_PATH), 401, "UNAUTHENTICATED", SIMULATION_PATH)
     bad = f"{SIMULATIONS_PATH}/not-a-uuid"
     problem = assert_problem(_signed_in_client().get(bad), 422, "VALIDATION_ERROR", bad)
@@ -666,7 +654,7 @@ def test_playground_posts_check_origin_and_session_first(
     ],
 )
 def test_playground_posts_check_the_body(path: str, body: dict[str, Any], error: dict[str, str]) -> None:
-    """Ручки песочницы проверяют тело раньше всего остального; заглушка - раньше, чем ответить `501`."""
+    """Ручки песочницы проверяют тело раньше всего остального: до базы и очереди."""
     response = _signed_in_client().post(path, json=body, headers={"Origin": ORIGIN})
     problem = assert_problem(response, 422, "VALIDATION_ERROR", path)
     assert problem["errors"] == [error]
@@ -694,8 +682,8 @@ def test_playground_and_inspection_are_in_the_exported_contract() -> None:
     assert set(components["ParsedRejectedRuleResponse"]["required"]) == {"name", "line", "reason"}
 
     create = paths[SIMULATIONS_PATH]["post"]
-    assert set(create["responses"]) >= {"202", "401", "403", "413", "422", "429", "501"}
-    assert "200" not in create["responses"]
+    assert set(create["responses"]) >= {"202", "401", "403", "413", "422", "429"}
+    assert "200" not in create["responses"] and "501" not in create["responses"]
     assert ok_schema(create, "202") == {"$ref": "#/components/schemas/SimulationResponse"}
     assert problem_ref(create, "429") == {"$ref": "#/components/schemas/RateLimitedProblem"}
     assert "Retry-After" in create["responses"]["429"]["headers"]
@@ -704,6 +692,7 @@ def test_playground_and_inspection_are_in_the_exported_contract() -> None:
     assert request["properties"]["source"]["discriminator"]["propertyName"] == "kind"
     read = paths["/api/v1/simulations/{simulation_id}"]["get"]
     assert ok_schema(read) == {"$ref": "#/components/schemas/SimulationResponse"}
+    assert "501" not in read["responses"]
     assert problem_ref(read, "404") == {"$ref": "#/components/schemas/SimulationNotFoundProblem"}
     simulation = components["SimulationResponse"]
     assert {"status", "findings", "discarded", "context", "verification", "expires_at"} <= set(simulation["required"])

@@ -641,7 +641,8 @@ class FakeSimulationRepo:
         return simulation if simulation is not None and simulation.user_id == user_id else None
 
     def add(self, simulation: Simulation) -> bool:
-        if self.has_active(simulation.user_id):
+        # Уникальный индекс, а не публичное чтение: тест гонки подменяет `has_active`.
+        if self._active(simulation.user_id):
             return False
         self._by_id[simulation.id] = simulation
         return True
@@ -660,6 +661,9 @@ class FakeSimulationRepo:
         return True
 
     def has_active(self, user_id: UUID) -> bool:
+        return self._active(user_id)
+
+    def _active(self, user_id: UUID) -> bool:
         return any(
             s.user_id == user_id and s.status not in SIMULATION_TERMINAL_STATUSES
             for s in self._by_id.values()

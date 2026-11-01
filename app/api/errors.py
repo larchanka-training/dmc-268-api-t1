@@ -248,6 +248,17 @@ class ApiError(Exception):
         """Дописать в ответ то, что нужно этому отказу кроме тела (например, удалить cookie)."""
 
 
+class RateLimited(ApiError):
+    """`429 RATE_LIMITED`: повторить не раньше чем через `retry_after` секунд - заголовок `Retry-After`."""
+
+    def __init__(self, detail: str, retry_after: int) -> None:
+        super().__init__(HTTPStatus.TOO_MANY_REQUESTS, ErrorCode.RATE_LIMITED, detail)
+        self.retry_after = retry_after
+
+    def finish(self, response: Response) -> None:
+        response.headers["Retry-After"] = str(self.retry_after)
+
+
 def _api_error_handler(request: Request, error: Exception) -> Response:
     if not isinstance(error, ApiError):
         raise error

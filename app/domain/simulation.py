@@ -94,6 +94,11 @@ def new_simulation(
     )
 
 
+def is_expired(simulation: Simulation, now: datetime) -> bool:
+    """Симуляция удалена по сроку начиная с `expires_at`, даже если строку ещё не убрали."""
+    return now >= simulation.expires_at
+
+
 def advance_simulation(
     simulation: Simulation, status: SimulationStatus, now: datetime
 ) -> Result[Simulation]:
