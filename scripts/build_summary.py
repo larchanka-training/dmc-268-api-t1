@@ -66,6 +66,7 @@ def _compressed_size(image: str) -> int:
         stdout = cast(IO[bytes], proc.stdout)
         while chunk := stdout.read(CHUNK):
             total += len(gz.compress(chunk))
+    # Выход из `with Popen` уже вызвал wait(): returncode выставлен.
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, proc.args)
     return total + len(gz.flush())
