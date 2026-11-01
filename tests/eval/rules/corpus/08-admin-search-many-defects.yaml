@@ -1,0 +1,65 @@
+title: Поиск репозиториев для админки - восемь дефектов разных классов
+# Перенесено из черновика #264 (калибровка 30.10, #267): прежний промпт нашёл
+# на нём только SQL-инъекцию и off-by-one. Путь вне `app/`, чтобы правила
+# корпуса к файлу не применялись: кейс меряет стандартные критерии.
+pull_request:
+  title: "feat: поиск репозиториев для админки"
+  description: Ручка поиска подключённых репозиториев по подстроке имени, страницами, доступ по токену админки в заголовке X-Admin-Token.
+files:
+  service/admin_search.py: |
+    import os
+
+    from fastapi import APIRouter, HTTPException, Request
+    from sqlalchemy import create_engine, text
+
+    router = APIRouter(prefix="/admin")
+
+    ADMIN_TOKEN = "dmc268-admin-7f3c9a1e5b2d4f60"
+
+
+    @router.get("/repositories/search")
+    def search_repositories(request: Request, q: str, offset: int = 0, limit: int = 20) -> list[dict[str, str]]:
+        token = request.headers.get("X-Admin-Token").strip()
+        if token != ADMIN_TOKEN:
+            raise HTTPException(status_code=401)
+
+        engine = create_engine(os.environ["DATABASE_URL"])
+        connection = engine.connect()
+        rows = connection.execute(
+            text(f"SELECT id, full_name FROM repositories WHERE full_name ILIKE '%{q}%' ORDER BY full_name")
+        ).all()
+        page = rows[offset : offset + limit + 1]
+        return [{"id": str(row.id), "full_name": row.full_name} for row in page]
+expected:
+  - id: hardcoded-secret
+    path: service/admin_search.py
+    contains: 'ADMIN_TOKEN = "'
+    category: security
+  - id: none-header
+    path: service/admin_search.py
+    contains: 'request.headers.get("X-Admin-Token").strip()'
+    category: correctness
+  - id: timing-compare
+    path: service/admin_search.py
+    contains: "if token != ADMIN_TOKEN"
+    category: security
+  - id: engine-per-request
+    path: service/admin_search.py
+    contains: "engine = create_engine("
+    category: performance
+  - id: connection-leak
+    path: service/admin_search.py
+    contains: "connection = engine.connect()"
+    category: correctness
+  - id: sql-injection
+    path: service/admin_search.py
+    contains: 'text(f"SELECT id, full_name'
+    category: security
+  - id: pagination-in-python
+    path: service/admin_search.py
+    contains: ").all()"
+    category: performance
+  - id: off-by-one
+    path: service/admin_search.py
+    contains: "page = rows[offset"
+    category: correctness
