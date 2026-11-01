@@ -172,7 +172,7 @@ def test_render_pipeline_section():
 
 
 def test_render_escapes_pipe_in_table_cells():
-    metrics = {"image": {"name": "a|b", "size": 1}}
+    metrics = {"image": {"name": "a|b", "size": 1, "compressed": 1}}
     md = build_summary.render(metrics, env={**ENV, "GITHUB_WORKFLOW": "C|I"})
     assert "| `cicd.pipeline.name` | C\\|I |" in md
     assert "`a\\|b`" in md
@@ -181,24 +181,26 @@ def test_render_escapes_pipe_in_table_cells():
 # --- hadolint -------------------------------------------------------------
 
 
-def test_render_hadolint_levels_and_findings_below_gate():
+def test_render_hadolint_levels_and_all_findings():
     md = build_summary.render(
         fixture("metrics.json"), hadolint=fixture("hadolint.json"), env=ENV
     )
     assert "| warning | 1 |" in md
     assert "| style — ниже порога job'а | 1 |" in md
-    assert "- `DL3059`, строка 33: Multiple consecutive `RUN` instructions." in md
-    # warning роняет job, его hadolint и так показал — в список не попадает
-    assert "- `DL3008`" not in md
+    # в списке все замечания с уровнем — и уронившее job, и ниже порога
+    assert "- `DL3008` (warning), строка 12: Pin versions in apt get install." in md
+    assert (
+        "- `DL3059` (style), строка 33: Multiple consecutive `RUN` instructions." in md
+    )
 
 
-def test_render_hadolint_truncates_findings_below_gate():
+def test_render_hadolint_truncates_findings():
     findings = [
         {"code": f"DL{i}", "level": "style", "line": i, "message": "m"}
         for i in range(12)
     ]
     md = build_summary.render(fixture("metrics.json"), hadolint=findings, env=ENV)
-    assert "- `DL9`, строка 9: m" in md
+    assert "- `DL9` (style), строка 9: m" in md
     assert "`DL10`" not in md
     assert "- … и ещё 2" in md
 
@@ -206,17 +208,6 @@ def test_render_hadolint_truncates_findings_below_gate():
 def test_render_clean_hadolint_is_one_line():
     md = build_summary.render(fixture("metrics.json"), hadolint=[], env=ENV)
     assert "### hadolint\n\nЗамечаний нет." in md
-
-
-def test_render_hadolint_skips_items_that_are_not_objects():
-    findings = [
-        "oops",
-        1,
-        None,
-        {"code": "DL3059", "level": "style", "line": 3, "message": "m"},
-    ]
-    md = build_summary.render(fixture("metrics.json"), hadolint=findings, env=ENV)
-    assert "| style — ниже порога job'а | 1 |" in md
 
 
 def test_render_without_scanner_reports_omits_sections():
@@ -278,11 +269,20 @@ def test_cli_render_skips_missing_and_broken_optional_files(tmp_path):
 
 
 def test_cli_render_without_metrics(tmp_path):
-    r = run_cli("render", "--metrics", str(tmp_path / "нет.json"))
-    assert r.returncode == 0
-    assert r.stdout == (
-        "## Summary сборки\n\nМетрики не собраны: образ не собрался или `collect` упал.\n"
-    )
+    r = run_cli(
+        "render",
+        "--metrics", str(tmp_path / "нет.json"),
+        "--base", str(FIXTURES / "base.json"),
+        "--trivy", str(FIXTURES / "trivy.json"),
+        "--hadolint", str(FIXTURES / "hadolint.json"),
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("## Summary сборки\n")
+    assert "Метрики не собраны: образ не собрался или `collect` упал." in r.stdout
+    assert "### trivy" in r.stdout
+    assert "### hadolint" in r.stdout
+    assert "### Образ" not in r.stdout
+    assert "develop" not in r.stdout
 
 
 def test_cli_unknown_command():
@@ -324,6 +324,7 @@ def fake_docker(tmp_path):
 def test_cli_collect_writes_image_metrics(tmp_path, fake_docker):
     env, calls = fake_docker
     out = tmp_path / "build-summary" / "metrics.json"
+    out.parent.mkdir()
     r = run_cli("collect", "--image", "dmc268-api:ci", "--out", str(out), env=env)
     assert r.returncode == 0, r.stderr
     text = out.read_text(encoding="utf-8")
@@ -353,13 +354,3 @@ def test_cli_collect_fails_without_writing_metrics(tmp_path, fake_docker, broken
     assert r.returncode == 1
     assert "Traceback" not in r.stderr
     assert not out.exists()
-
-
-@pytest.mark.parametrize("size", [None, "242 MiB", True])
-def test_render_image_without_integer_size_skips_size_row(size):
-    metrics = {"image": {"name": "dmc268-api:ci"}}
-    if size is not None:
-        metrics["image"]["size"] = size
-    md = build_summary.render(metrics, base={"image": {"size": "x"}}, env=ENV)
-    assert "`container.image.name`" in md
-    assert "dmc268.build.image.size`" not in md

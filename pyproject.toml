@@ -64,6 +64,9 @@ dev = [
 
 [tool.ruff]
 target-version = "py314"
+# scripts/build_summary.py зовут системным python3 вне `uv`: под py314 `ruff format`
+# снял бы скобки с `except (A, B):` (PEP 758), а старший python3 на них падает.
+per-file-target-version = { "scripts/build_summary.py" = "py312" }
 # tests/fixtures — исходники для парсера AST: их имена нарочно не определены.
 exclude = [".venv", "venv", ".git", "tests/fixtures"]
 

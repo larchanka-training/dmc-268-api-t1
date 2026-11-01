@@ -104,10 +104,12 @@ jobs:
   # деплое (context .), но не публикуется.
   #
   # После gate — summary сборки в $GITHUB_STEP_SUMMARY: размер образа (сжатый
-  # и распакованный), все находки hadolint и trivy и разница с последним
-  # прогоном develop. Он виден и при упавшем gate: тогда и нужен. Сжатый размер
-  # считается через docker save | gzip — это десятки секунд на образ, второй
-  # запуск trivy берёт базу из кэша первого, так что 15 минут хватает с запасом.
+  # и распакованный), все находки hadolint и trivy — и те, что уронили gate, —
+  # и разница с последним прогоном develop. Он виден и при упавшем gate: тогда
+  # и нужен. Если образ не собрался или метрики не снялись, разделы сканеров
+  # всё равно выводятся. Сжатый размер считается через docker save | gzip —
+  # это десятки секунд на образ, второй запуск trivy берёт базу, скачанную
+  # первым, так что 15 минут хватает с запасом.
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -134,7 +136,6 @@ jobs:
       # gate пропускает (unfixed у trivy, style у hadolint).
       - name: Каталог summary
         if: ${{ !cancelled() }}
-        continue-on-error: true
         run: mkdir -p build-summary
       - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         if: ${{ !cancelled() }}
@@ -144,10 +145,17 @@ jobs:
           format: json
           output-file: build-summary/hadolint.json
           no-fail: true
+      # cache: false — иначе actions/cache внутри action восстановит поверх
+      # свежей базы первого запуска вчерашнюю копию по restore-keys, и trivy
+      # снова скачает базу. База первого запуска лежит в том же cache-dir
+      # (TRIVY_CACHE_DIR action ставит всегда). skip-setup-trivy — бинарь уже
+      # в PATH от первого запуска; если тот не запускался, нет и образа.
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         if: ${{ !cancelled() }}
         continue-on-error: true
         with:
+          cache: false
+          skip-setup-trivy: true
           image-ref: dmc268-api:ci
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
           exit-code: "0"

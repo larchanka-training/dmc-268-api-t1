@@ -13,7 +13,8 @@
 `collect` берёт у `docker image inspect` размер и id образа, а сжатый размер
 считает по потоку `docker save | gzip` — образ целиком в память не читается.
 `render` собирает markdown; нет файла сканера или базы — нет и раздела, а не
-падение: summary пишется и после упавшего шага. Разницу с develop считает по
+падение: summary пишется и после упавшего шага. Нет метрик — вместо раздела
+образа строка о том, что они не собраны; trivy и hadolint выводятся всё равно. Разницу с develop считает по
 `base.json` — метрикам последнего успешного прогона develop.
 
 Порт `scripts/build-summary.mjs` фронтенда (dmc-268-ui-t1) без раздела бандла:
@@ -31,7 +32,7 @@ import sys
 import zlib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import IO, Any, cast
 
 MAX_LISTED = 10
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
@@ -42,9 +43,7 @@ HADOLINT_LEVELS = ("error", "warning", "info", "style")
 HADOLINT_GATE = ("error", "warning", "info")
 
 CHUNK = 1024 * 1024
-NO_METRICS = (
-    "## Summary сборки\n\nМетрики не собраны: образ не собрался или `collect` упал.\n"
-)
+NO_METRICS = "Метрики не собраны: образ не собрался или `collect` упал."
 
 # --- метрики -----------------------------------------------------------------
 
@@ -64,10 +63,8 @@ def _compressed_size(image: str) -> int:
     gz = zlib.compressobj(6, zlib.DEFLATED, 31)
     total = 0
     with subprocess.Popen(["docker", "save", image], stdout=subprocess.PIPE) as proc:
-        # Не assert: под `python -O` проверка исчезла бы.
-        if proc.stdout is None:
-            raise RuntimeError("docker save не дал поток stdout")
-        while chunk := proc.stdout.read(CHUNK):
+        stdout = cast(IO[bytes], proc.stdout)
+        while chunk := stdout.read(CHUNK):
             total += len(gz.compress(chunk))
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, proc.args)
@@ -120,11 +117,8 @@ def cell(value: object) -> str:
 def _image_section(
     metrics: Mapping[str, Any], base: Mapping[str, Any] | None
 ) -> list[str]:
-    img = metrics.get("image")
-    if not isinstance(img, Mapping):
-        return []
-    bi = base.get("image") if isinstance(base, Mapping) else None
-    bi = bi if isinstance(bi, Mapping) else {}
+    img = metrics["image"]
+    bi = (base or {}).get("image", {})
     out = [
         "### Образ",
         "",
@@ -134,26 +128,18 @@ def _image_section(
     out.append(f"| Образ | `container.image.name` | `{cell(img.get('name', ''))}` | |")
     if img.get("id"):
         out.append(f"| ID | `container.image.id` | `{cell(img['id'][:19])}` | |")
-    size = _bytes(img, "size")
-    if size is not None:
-        out.append(
+    size, compressed = img["size"], img["compressed"]
+    out += [
+        (
             f"| Размер | `dmc268.build.image.size` | {human_bytes(size)} "
-            f"| {delta(size, _bytes(bi, 'size'))} |"
-        )
-    compressed = _bytes(img, "compressed")
-    if compressed is not None:
-        out.append(
+            f"| {delta(size, bi.get('size'))} |"
+        ),
+        (
             "| Сжатый (`docker save` \\| gzip) | `dmc268.build.image.size.compressed` "
-            f"| {human_bytes(compressed)} "
-            f"| {delta(compressed, _bytes(bi, 'compressed'))} |"
-        )
+            f"| {human_bytes(compressed)} | {delta(compressed, bi.get('compressed'))} |"
+        ),
+    ]
     return [*out, ""]
-
-
-def _bytes(m: Mapping[str, Any], key: str) -> int | None:
-    """Размер из чужого json: не целое (нет, null, строка) — нет значения."""
-    v = m.get(key)
-    return v if isinstance(v, int) and not isinstance(v, bool) else None
 
 
 def trivy_counts(
@@ -214,8 +200,6 @@ def _trivy_section(report: Mapping[str, Any] | None) -> list[str]:
 def _hadolint_section(findings: list[Any] | None) -> list[str]:
     if not isinstance(findings, list):
         return []
-    # Файл пишет внешний action: элемент не той формы пропускаем, а не падаем.
-    findings = [f for f in findings if isinstance(f, Mapping)]
     out = ["### hadolint", ""]
     if not findings:
         return [*out, "Замечаний нет.", ""]
@@ -228,12 +212,19 @@ def _hadolint_section(findings: list[Any] | None) -> list[str]:
         if n:
             below = "" if level in HADOLINT_GATE else " — ниже порога job'а"
             out.append(f"| {level}{below} | {n} |")
-    out += ["", "Порог job'а — `info`: замечания уровня `style` его не роняют.", ""]
-    below_gate = [f for f in findings if f.get("level") not in HADOLINT_GATE]
+    out += [
+        "",
+        (
+            "Порог job'а — `info`: замечания уровня `style` его не роняют. В списке — "
+            "все замечания, и те, что уронили job, и те, что ниже порога."
+        ),
+        "",
+    ]
     out += _listed(
         [
-            f"`{f.get('code')}`, строка {f.get('line')}: {cell(f.get('message', ''))}"
-            for f in below_gate
+            f"`{f.get('code')}` ({f.get('level')}), строка {f.get('line')}: "
+            f"{cell(f.get('message', ''))}"
+            for f in findings
         ]
     )
     return [*out, ""]
@@ -258,22 +249,25 @@ def _pipeline_section(env: Mapping[str, str]) -> list[str]:
 
 
 def render(
-    metrics: Mapping[str, Any],
+    metrics: Mapping[str, Any] | None,
     base: Mapping[str, Any] | None = None,
     trivy: Mapping[str, Any] | None = None,
     hadolint: list[Any] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> str:
     out = ["## Summary сборки", "", *_pipeline_section(env or {})]
+    if isinstance(metrics, Mapping):
+        out += [
+            "Δ — к последнему успешному прогону CI на develop."
+            if isinstance(base, Mapping)
+            else "Базы для сравнения нет: в кэше нет метрик develop (первый прогон "
+            "или кэш устарел). Показаны абсолютные значения.",
+            "",
+            *_image_section(metrics, base if isinstance(base, Mapping) else None),
+        ]
+    else:
+        out += [NO_METRICS, ""]
     out += [
-        "Δ — к последнему успешному прогону CI на develop."
-        if isinstance(base, Mapping)
-        else "Базы для сравнения нет: в кэше нет метрик develop (первый прогон или кэш "
-        "устарел). Показаны абсолютные значения.",
-        "",
-    ]
-    out += [
-        *_image_section(metrics, base),
         *_trivy_section(trivy),
         *_hadolint_section(hadolint),
     ]
@@ -286,13 +280,9 @@ def render(
 def _read_json(path: str | None) -> Any:
     if not path:
         return None
-    # Два except, а не кортеж: `ruff format` под py314 снимает скобки
-    # (PEP 758), а скрипт зовут системным python3 старше 3.14.
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
-    except OSError:
-        return None
-    except ValueError:
+    except (OSError, ValueError):
         return None
 
 
@@ -320,16 +310,12 @@ def main(argv: list[str]) -> int:
         except (OSError, subprocess.CalledProcessError, ValueError) as exc:
             print(f"collect: не удалось снять метрики образа: {exc}", file=sys.stderr)
             return 1
-        out = Path(args.out)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
-        return 0
-    metrics = _read_json(args.metrics)
-    if not isinstance(metrics, Mapping):
-        sys.stdout.write(NO_METRICS)
+        Path(args.out).write_text(
+            json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
+        )
         return 0
     md = render(
-        metrics,
+        _read_json(args.metrics),
         base=_read_json(args.base),
         trivy=_read_json(args.trivy),
         hadolint=_read_json(args.hadolint),
