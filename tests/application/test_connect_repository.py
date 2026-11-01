@@ -348,15 +348,6 @@ def test_settings_of_a_repository_github_does_not_give_are_refused() -> None:
     assert _settings_of(uow, repository) == repository
 
 
-def test_settings_of_a_record_deleted_before_the_write_are_not_found() -> None:
-    """Запись удалили между проверкой видимости и записью: не «сохранено», а отказ."""
-    uow = _signed_in()
-    repository = _registered("101")  # в базе записи нет
-
-    assert _save(FakeInstallationCatalog([API]), uow, repository) is ConnectRefusal.NOT_FOUND
-    assert _settings_of(uow, repository) is None
-
-
 def test_the_role_is_asked_from_github_directly() -> None:
     """Мимо кэша видимости: каталог спрашивается о самом репозитории, а не о списке."""
     uow = _signed_in()

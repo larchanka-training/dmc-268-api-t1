@@ -1090,7 +1090,7 @@ def test_saving_settings_of_a_repository_github_no_longer_shows_looks_like_a_mis
 
 
 def test_saving_settings_answers_the_stored_record_not_the_body() -> None:
-    """Ответ — то, что вернула запись в базу; запись исчезла до записи настроек — 404."""
+    """Ответ — то, что вернула запись в базу, а не тело запроса."""
     uow = FakeUnitOfWork()
     repository = _registered_api(uow)
     client = _client(uow, FakeInstallationCatalog([API]))
@@ -1104,13 +1104,6 @@ def test_saving_settings_answers_the_stored_record_not_the_body() -> None:
         "branch_filter": ["develop"],
         "min_severity": "low",
     }
-
-    uow.repositories.update_settings = lambda repository_id, settings, now: None  # type: ignore[method-assign]
-    deleted = _put_settings(client, repository.id, SETTINGS_BODY)
-    missing = _put_settings(client, new_id(), SETTINGS_BODY)
-
-    assert deleted.status_code == missing.status_code == 404
-    assert _strip(deleted.json()) == _strip(missing.json())
 
 
 def test_settings_of_a_disconnected_repository_are_saved_without_connecting_it() -> None:

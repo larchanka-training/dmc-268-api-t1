@@ -147,8 +147,7 @@ _SAVE_SETTINGS_DESCRIPTION = (
     "Проверки по "
     "порядку: видимость — " + _VISIBILITY_REFUSALS + " Затем роль — как у POST и DELETE "
     "/repositories, запросом к GitHub мимо кэша видимости: без admin или maintain — "
-    "`403 REPOSITORY_MANAGE_REQUIRED`, GitHub не отдал репозиторий или запись удалили до записи "
-    "настроек — `404 REPOSITORY_NOT_FOUND`; "
+    "`403 REPOSITORY_MANAGE_REQUIRED`, GitHub не отдал репозиторий — `404 REPOSITORY_NOT_FOUND`; "
     "при отказе и при `502` настройки не меняются. Выключенный репозиторий настройки получает, но не "
     "включается — включение только POST /repositories. Смена порога уже стоящую проверку merge "
     "gate не пересчитывает: новый порог применится со следующим прогоном или вебхуком закрытия треда."
@@ -707,7 +706,7 @@ def save_repository_settings(
             "Менять настройки ревью может только пользователь с правом admin или maintain на репозиторий.",
         )
     if isinstance(outcome, connecting.ConnectRefusal):
-        # GitHub не отдал репозиторий или запись удалили до записи настроек — ответ один.
+        # GitHub не отдал репозиторий — ответ тот же, что у невидимого.
         raise _repository_not_found()
     # Ответ — запись, какой её сохранила база, а не тело запроса.
     return _settings_response(outcome)
