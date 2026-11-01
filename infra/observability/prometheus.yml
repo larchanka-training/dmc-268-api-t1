@@ -101,7 +101,7 @@ scrape_configs:
         labels: {service: postgres-replica, __param_module: tcp_connect}
       - targets: ["dmc268-rabbitmq:5672"]
         labels: {service: rabbitmq, __param_module: tcp_connect}
-    relabel_configs: &blackbox-relabel
+    relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
       - source_labels: [__param_target]
@@ -109,14 +109,23 @@ scrape_configs:
       - target_label: __address__
         replacement: blackbox:9115
 
-  # Публичный вход по HTTPS и срок его сертификата. Адрес у стенда свой, а
-  # локально публичного входа нет, поэтому цель — в файле: на стенде его
-  # рендерит infra/observability.tf из public_origin, локально compose
-  # монтирует public-targets.yml с пустым списком.
+  # Публичный вход по HTTPS и срок его сертификата — отдельным экземпляром
+  # blackbox-public: /probe принимает любой URL без авторизации, и экземпляр
+  # с выходом в интернет не должен стоять в сети данных, иначе он — прокси
+  # наружу для любого её контейнера. Адрес у стенда свой, а локально
+  # публичного входа нет, поэтому цель — в файле: на стенде его рендерит
+  # infra/observability.tf из public_origin, локально compose монтирует
+  # public-targets.yml с пустым списком.
   - job_name: blackbox-public
     metrics_path: /probe
     params:
       module: [https_public]
     file_sd_configs:
       - files: [/etc/prometheus/targets/public.yml]
-    relabel_configs: *blackbox-relabel
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-public:9115

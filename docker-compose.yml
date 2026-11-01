@@ -576,7 +576,11 @@ services:
         target: /etc/alertmanager/secrets/telegram_bot_token
       - source: telegram_chat_id
         target: /etc/alertmanager/secrets/telegram_chat_id
+    # Как dmc268-alertmanager на стенде. Без read_only: compose не создаёт
+    # configs с content в read-only сервисе («`file` is the sole supported
+    # option»), а на стенде read_only несовместим с upload.
     cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
 
   # Пробы сервисов для алертов — как dmc268-blackbox в infra/observability.tf.
   # Цели API, базы и брокера — в default (там их алиасы), скрейп — в сети стека.
@@ -593,13 +597,33 @@ services:
     volumes:
       - ./infra/observability/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
     cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
     read_only: true
 
-# Секреты доставки алертов локально — из окружения (или .env); пустой токен и
-# chat id 0 — заглушки, с ними доставка падает, а стек поднимается.
+  # Проба публичного входа — как dmc268-blackbox-public в infra: без сети
+  # приложения, наружу — через alerting. Локально целей нет (public-targets.yml).
+  blackbox-public:
+    # prom/blackbox-exporter:v0.29.1
+    image: prom/blackbox-exporter@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
+    profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - blackbox-public
+      alerting:
+    command: ["--config.file=/etc/blackbox_exporter/config.yml"]
+    volumes:
+      - ./infra/observability/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+
+# Секреты доставки алертов локально — из окружения (или .env); токен unset и
+# chat id 0 — заглушки, с ними доставка падает, а стек поднимается. Не пустая
+# строка: пустой content compose монтирует каталогом, а не файлом.
 configs:
   telegram_bot_token:
-    content: ${ALERT_TELEGRAM_BOT_TOKEN:-}
+    content: ${ALERT_TELEGRAM_BOT_TOKEN:-unset}
   telegram_chat_id:
     content: ${ALERT_TELEGRAM_CHAT_ID:-0}
 
@@ -653,5 +677,6 @@ networks:
   grafana:
   # То же для порта collector-logs.
   logs:
-  # Выход Alertmanager в api.telegram.org: сеть стека internal.
+  # Выход наружу: Alertmanager — в api.telegram.org, blackbox-public — на
+  # публичный вход. Сеть стека internal.
   alerting:

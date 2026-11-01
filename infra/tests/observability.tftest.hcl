@@ -36,7 +36,7 @@ run "observability_stack_plans_protected" {
   }
 
   # Ресурсы стека считаются (count = 1 : 0), поэтому каждый адресуется по
-  # индексу: с включённым флагом все одиннадцать есть в плане. Список — по
+  # индексу: с включённым флагом все двенадцать есть в плане. Список — по
   # docker_container.* из observability.tf; новый контейнер стека обязан
   # добавляться сюда.
   assert {
@@ -47,7 +47,7 @@ run "observability_stack_plans_protected" {
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
         docker_container.docker_socket_proxy[0], docker_container.alertmanager[0],
-        docker_container.blackbox[0],
+        docker_container.blackbox[0], docker_container.blackbox_public[0],
       ] :
       c.memory > 0 && c.memory == c.memory_swap
     ])
@@ -64,7 +64,7 @@ run "observability_stack_plans_protected" {
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
         docker_container.docker_socket_proxy[0], docker_container.alertmanager[0],
-        docker_container.blackbox[0],
+        docker_container.blackbox[0], docker_container.blackbox_public[0],
       ] :
       c.log_driver == "json-file" && jsonencode(c.log_opts) == jsonencode(local.log_opts)
     ])
@@ -82,7 +82,7 @@ run "observability_stack_plans_protected" {
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
         docker_container.docker_socket_proxy[0], docker_container.alertmanager[0],
-        docker_container.blackbox[0],
+        docker_container.blackbox[0], docker_container.blackbox_public[0],
       ] :
       contains(c.security_opts, "no-new-privileges:true")
     ])
@@ -137,7 +137,7 @@ run "observability_stack_with_broken_telegram_rejected" {
 }
 
 # Секретов Telegram нет совсем (незаданный секрет приходит пустой строкой):
-# стек поднимается, Alertmanager получает пустой токен и chat id 0 — алерты
+# стек поднимается, Alertmanager получает заглушки unset и 0 — алерты
 # считаются, но не доставляются.
 run "observability_stack_without_telegram_plans" {
   command = plan
@@ -152,10 +152,10 @@ run "observability_stack_without_telegram_plans" {
 
   assert {
     condition = (
-      one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_bot_token"]) == ""
+      one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_bot_token"]) == "unset"
       && one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_chat_id"]) == "0"
     )
-    error_message = "Без секретов Telegram Alertmanager получает пустой токен и chat id 0 (как локально в compose): с пустым chat_id_file он не разобрал бы число."
+    error_message = "Без секретов Telegram Alertmanager получает заглушки — токен unset и chat id 0, как локально в compose: пустой chat_id_file он не разобрал бы как число."
   }
 }
 
@@ -246,9 +246,16 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
 
   assert {
     condition = toset([for n in docker_container.blackbox[0].networks_advanced : n.name]) == toset([
-      docker_network.observability[0].name, docker_network.backend.name, docker_network.alerting[0].name,
+      docker_network.observability[0].name, docker_network.backend.name,
     ]) && length(docker_container.blackbox[0].ports) == 0
-    error_message = "blackbox-exporter стоит ровно в трёх сетях: стека (скрейп Prometheus), данных (пробы API, базы, реплики, брокера) и dmc268-alerting (проба публичного входа). Портов на хосте у него нет."
+    error_message = "blackbox с пробами сервисов стоит ровно в сетях стека и данных, без выхода наружу: /probe без авторизации сделал бы его прокси в интернет для сети данных. Портов на хосте у него нет."
+  }
+
+  assert {
+    condition = toset([for n in docker_container.blackbox_public[0].networks_advanced : n.name]) == toset([
+      docker_network.observability[0].name, docker_network.alerting[0].name,
+    ]) && length(docker_container.blackbox_public[0].ports) == 0
+    error_message = "blackbox-public стоит ровно в сетях стека и dmc268-alerting (проба публичного входа), без сети данных. Портов на хосте у него нет."
   }
 
   assert {

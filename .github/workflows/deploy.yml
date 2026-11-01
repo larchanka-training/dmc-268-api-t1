@@ -440,7 +440,10 @@ jobs:
       # Применяется ровно проверенный план. Apply ждёт, пока новый API станет
       # healthy (wait у docker_container.api), и падает через 90 с, если этого
       # не случилось. Заодно apply.sh собирает события контейнера API для
-      # разбивки простоя в summary и удаляет файл плана.
+      # разбивки простоя в summary и удаляет файл плана. Секреты Telegram
+      # необязательны (#100): без них алерты считаются, но не доставляются —
+      # деплой не падает, а предупреждает аннотацией прогона, иначе зелёный
+      # деплой выглядел бы как работающая доставка.
       - name: Применить конфигурацию
         id: apply
         if: *fresh
@@ -448,6 +451,9 @@ jobs:
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/apply.sh
+          if [ -z "$TF_VAR_alert_telegram_bot_token" ] || [ -z "$TF_VAR_alert_telegram_chat_id" ]; then
+            echo "::warning title=Алерты не доставляются::Нет секретов TELEGRAM_BOT_TOKEN_DMC268_T1 или TELEGRAM_CHAT_ID_DMC268_T1: алерты видны в Alertmanager, но в Telegram не уходят (infra/README.md, «Алерты»)."
+          fi
 
       # Связь с хранилищем пропала посреди шага, который пишет состояние или
       # держит блокировку: несохранённое состояние осталось в

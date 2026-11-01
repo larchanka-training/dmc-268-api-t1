@@ -237,9 +237,10 @@ variable "observability_memory_mb" {
     collector_docker = number
     collector_logs   = number
     # Алерты #100: Alertmanager держит в памяти горящие алерты и тишины,
-    # blackbox-exporter — несколько проб раз в 15 с; обоим хватает десятков МБ.
-    alertmanager = number
-    blackbox     = number
+    # экземпляры blackbox-exporter — по несколько проб раз в 15 с.
+    alertmanager    = number
+    blackbox        = number
+    blackbox_public = number
   })
   description = "Потолки памяти контейнеров стека наблюдаемости, МБ, без свопа."
   default = {
@@ -253,7 +254,8 @@ variable "observability_memory_mb" {
     collector_docker = 96
     collector_logs   = 96
     alertmanager     = 64
-    blackbox         = 64
+    blackbox         = 32
+    blackbox_public  = 32
   }
 }
 

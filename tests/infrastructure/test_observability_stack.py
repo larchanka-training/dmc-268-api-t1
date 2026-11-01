@@ -50,6 +50,7 @@ STACK_SERVICES = {
     "dockerproxy": "docker_socket_proxy_image",
     "alertmanager": "alertmanager_image",
     "blackbox": "blackbox_image",
+    "blackbox-public": "blackbox_image",
 }
 
 # имя@sha256:… — дайджест манифест-листа (multi-arch), а не платформенный.

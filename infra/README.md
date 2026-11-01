@@ -297,7 +297,7 @@ docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_n
 
 ## Стек наблюдаемости
 
-Рядом с API на стенде стоит стек телеметрии из одиннадцати контейнеров: OTel Collector
+Рядом с API на стенде стоит стек телеметрии из двенадцати контейнеров: OTel Collector
 (`dmc268-otelcol`: трейсы, логи, метрики приложения и базы), его второй экземпляр
 `dmc268-otelcol-docker` (метрики контейнеров), третий `dmc268-otelcol-logs` (логи postgres, его
 реплики и rabbitmq, см. «Логи контейнеров»), Loki (логи), Tempo (трейсы), Prometheus
@@ -305,8 +305,9 @@ docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_n
 память, диски) и socket-proxy (`dmc268-docker-proxy`: Docker API для `dmc268-otelcol-docker` по
 белому списку эндпоинтов вместо маунта `docker.sock`; отдельная сеть `dmc268-docker-proxy`, где
 кроме proxy и `dmc268-otelcol-docker` никого), а для алертов — Alertmanager
-(`dmc268-alertmanager`, доставка в Telegram) и blackbox-exporter (`dmc268-blackbox`, пробы
-сервисов и публичного входа); подробно — «Алерты».
+(`dmc268-alertmanager`, доставка в Telegram) и два экземпляра blackbox-exporter
+(`dmc268-blackbox` — пробы сервисов, `dmc268-blackbox-public` — публичного входа); подробно —
+«Алерты».
 Сеть стека `dmc268-observability` — `internal`, как и сеть данных: из неё в интернет не выйти,
 а публикуемый порт Grafana живёт в отдельной не-internal сети `dmc268-grafana` — порты на
 internal-сети Docker не публикует. Выход наружу через эту сеть есть только у Grafana, и её
@@ -557,8 +558,11 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 не в конфиге, а файлами `/etc/alertmanager/secrets/telegram_{bot_token,chat_id}`: на стенде их
 заливает `upload` из секретов `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1`,
 локально — compose (`configs`) из `ALERT_TELEGRAM_BOT_TOKEN` и `ALERT_TELEGRAM_CHAT_ID`. Наружу
-из стека ходят только Alertmanager (api.telegram.org) и blackbox-exporter (публичный вход
-стенда) — через свою не-internal сеть `dmc268-alerting`, портов на хосте у них нет.
+из стека ходят только Alertmanager (api.telegram.org) и `dmc268-blackbox-public` (публичный
+вход стенда) — через свою не-internal сеть `dmc268-alerting`, портов на хосте у них нет.
+Пробы сервисов делает другой экземпляр, `dmc268-blackbox`, — в сети данных и без выхода
+наружу: `/probe?target=` принимает любой URL без авторизации, и общий экземпляр был бы
+прокси в интернет для любого контейнера сети данных.
 
 Поведение правил закрепляет `observability/alerts.test.yml`: на каждый алерт — синтетические
 ряды «горит / молчит», `promtool test rules` в job `observability-configs`; там же
@@ -568,8 +572,8 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 **Бот и чат.** Бот создаётся у @BotFather (`/newbot`), его добавляют в группу или канал
 команды. Chat id — из `https://api.telegram.org/bot<токен>/getUpdates` после любого
 сообщения в чате (у групп и каналов он отрицательный, `-100…`). Оба значения —
-секретами репозитория (таблица переменных выше). Пока их нет, Alertmanager получает пустой
-токен и chat id `0`: правила работают, горящие алерты видны через `amtool alert query`
+секретами репозитория (таблица переменных выше). Пока их нет, Alertmanager получает заглушки —
+токен `unset` и chat id `0`: правила работают, горящие алерты видны через `amtool alert query`
 (ниже), а каждая попытка доставки пишет в его лог `Notify attempt failed … 404`.
 
 **Пороги.** `critical` уходит сразу и повторяется раз в 4 часа, пока горит; `warning` — раз в
@@ -579,10 +583,11 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | Алерт | Сигнал | Порог | Уровень |
 | --- | --- | --- | --- |
 | `ContainerDown` | контейнер не запущен: нет ряда `container_uptime_seconds` у `dmc268-api`, `-worker`, `-postgres`, `-postgres-replica`, `-postgres-backup`, `-rabbitmq`, `-ui`, `-otelcol` | 2 минуты (+ до 5 минут, пока экспортёр держит ряд остановленного) | critical |
+| `ContainerMetricsMissing` | нет ни одного ряда `container_uptime_seconds` при живом скрейпе `docker-stats`: `docker_stats` не читает Docker API, `ContainerDown` слеп | 5 минут | warning |
 | `ContainerRestarting` | перезапуски контейнера `dmc268-*` | 2 и больше за 15 минут | critical |
 | `ServiceProbeFailed` | сервис не отвечает (то же, что видит его healthcheck): `/health` API, TCP базы, реплики, брокера | 2 минуты | critical |
 | `PublicEndpointDown` | HTTPS публичного входа (`public_origin`) | 3 минуты | critical |
-| `WorkerNotConsuming` | у `review_jobs.qq` нет потребителей | 5 минут | critical |
+| `WorkerNotConsuming` | у `review_jobs.qq` нет потребителей или очереди нет совсем (при живом скрейпе брокера) | 5 минут | critical |
 | `Api5xxSpike` | доля 5xx у API за 5 минут, при трафике больше 3 запросов в минуту | > 5 % дольше 5 минут | critical |
 | `ReviewRunsFailing` | доля прогонов в `failed` за 30 минут, при 3+ прогонах | > 30 % | critical |
 | `ReviewDlqNotEmpty` | сообщения в `review_jobs.dlq` | > 0 дольше 5 минут | critical |
@@ -619,9 +624,16 @@ compose называются по проекту (`<проект>-api-1`), по�
 ssh stand 'docker exec dmc268-alertmanager amtool alert add alertname=ТестДоставки severity=critical service=test --annotation=summary=Тестовый-алерт --annotation=description=Проверка-доставки-в-Telegram --alertmanager.url=http://127.0.0.1:9093'
 ```
 
-Сообщение приходит через `group_wait` (30 секунд); не пришло — ошибка доставки в
-`docker logs dmc268-alertmanager` (`Notify attempt failed`, 401 — неверный токен, 400 —
-неверный chat id или бот не в чате). Горящие алерты и тишины —
+Сообщение приходит через `group_wait` (30 секунд); не пришло — ошибка доставки в логе
+Alertmanager (`Notify attempt failed`, 401 — неверный токен, 400 — неверный chat id или бот не
+в чате, 404 — заглушка вместо токена). При сетевой ошибке Alertmanager пишет в лог URL
+целиком, **с токеном бота** (`…/bot<токен>/sendMessage`): лог смотрим только с маской и сырым
+никуда не вставляем —
+
+```bash
+ssh stand 'docker logs dmc268-alertmanager 2>&1' | sed -E 's#/bot[^/]+/#/bot***/#g' | grep -i notify
+```
+ Горящие алерты и тишины —
 `docker exec dmc268-alertmanager amtool alert query --alertmanager.url=http://127.0.0.1:9093`;
 заглушить на время работ — `amtool silence add alertname=… --duration=2h …` там же.
 
@@ -642,7 +654,8 @@ ssh stand 'docker exec dmc268-alertmanager amtool alert add alertname=ТестД
 | node-exporter | 64 |
 | socket-proxy | 64 |
 | Alertmanager | 64 |
-| blackbox-exporter | 64 |
+| blackbox-exporter, пробы сервисов | 32 |
+| blackbox-exporter, публичный вход | 32 |
 | **Итого стек** | **3648 (~3,6 ГБ)** |
 
 Рядом — лимиты контейнеров приложения (`app.tf`, `postgres.tf`, `rabbitmq.tf`, `replica.tf`):
@@ -653,7 +666,7 @@ ssh stand 'docker exec dmc268-alertmanager amtool alert add alertname=ТестД
 Суммарный потолок стенда — 6976 МБ (~7,0 ГБ) по постоянно живущим контейнерам.
 
 На VPS 7947 МБ (~7,9 ГБ) памяти и нет свопа (`free -m`, 2026-10-28): запас над потолками около
-1 ГБ (Alertmanager и blackbox-exporter забрали из него 128 МБ), и из него же живут контейнеры без потолка — интерфейс (`dmc268-ui`) и хранилище состояния
+1 ГБ (Alertmanager и два экземпляра blackbox-exporter забрали из него 128 МБ), и из него же живут контейнеры без потолка — интерфейс (`dmc268-ui`) и хранилище состояния
 (`dmc268-s3`, ~220 МБ). Через 30 минут после первого выката стека занято 2,2 ГБ; ближе всех к
 своему потолку Grafana — 413 из 512 МБ (`docker stats`). Поднимать потолки стека — только за счёт
 этого запаса.

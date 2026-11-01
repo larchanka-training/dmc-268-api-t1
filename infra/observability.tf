@@ -170,9 +170,9 @@ resource "docker_network" "logs" {
 }
 
 # Выход наружу для алертов (#100): Alertmanager шлёт в api.telegram.org,
-# blackbox-exporter проверяет публичный вход стенда по его адресу. Сеть стека
-# internal, поэтому им нужна своя не-internal сеть; портов в ней никто не
-# публикует, остальные контейнеры стека в неё не подключены.
+# dmc268-blackbox-public проверяет публичный вход стенда по его адресу. Сеть
+# стека internal, поэтому им нужна своя не-internal сеть; портов в ней никто
+# не публикует, остальные контейнеры стека в неё не подключены.
 resource "docker_network" "alerting" {
   count = var.observability_enabled ? 1 : 0
   name  = "dmc268-alerting"
@@ -671,13 +671,15 @@ resource "docker_container" "alertmanager" {
     file    = "/etc/alertmanager/alertmanager.yml"
   }
 
+  # Без секретов — заглушки, как локально в compose: токен unset (доставка
+  # падает с 404 Telegram), chat id 0 — chat_id_file Alertmanager разбирает
+  # как число. Пустой файл не годится: compose вместо пустого конфига
+  # монтирует каталог, и Alertmanager не читает токен вовсе.
   upload {
-    content = var.alert_telegram_bot_token
+    content = var.alert_telegram_bot_token == "" ? "unset" : var.alert_telegram_bot_token
     file    = "/etc/alertmanager/secrets/telegram_bot_token"
   }
 
-  # Без секрета — 0, как локально в compose: файл chat_id_file Alertmanager
-  # разбирает как число. Пустой токен он принимает, доставка падает с 404.
   upload {
     content = var.alert_telegram_chat_id == "" ? "0" : var.alert_telegram_chat_id
     file    = "/etc/alertmanager/secrets/telegram_chat_id"
@@ -708,8 +710,10 @@ resource "docker_container" "alertmanager" {
 }
 
 # Пробы сервисов для алертов (#100): /health API, порты базы, реплики и
-# брокера (job blackbox-services) и HTTPS публичного входа со сроком
-# сертификата (job blackbox-public). Сам ничего не хранит.
+# брокера (job blackbox-services). Выхода в интернет у этого экземпляра нет:
+# /probe принимает любой URL без авторизации, и экземпляр в сети данных с
+# выходом наружу был бы прокси в интернет для любого её контейнера. Публичный
+# вход проверяет отдельный dmc268-blackbox-public ниже.
 resource "docker_container" "blackbox" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-blackbox"
@@ -744,6 +748,39 @@ resource "docker_container" "blackbox" {
   # Цели проб API, базы, реплики и брокера — в сети данных.
   networks_advanced {
     name = docker_network.backend.name
+  }
+}
+
+# Проба публичного входа по HTTPS и срок сертификата (job blackbox-public):
+# выход наружу — через dmc268-alerting, сети данных у этого экземпляра нет.
+resource "docker_container" "blackbox_public" {
+  count   = var.observability_enabled ? 1 : 0
+  name    = "dmc268-blackbox-public"
+  image   = docker_image.blackbox[0].image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.blackbox_public
+  memory_swap = var.observability_memory_mb.blackbox_public
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  security_opts = ["no-new-privileges:true"]
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  upload {
+    content = file("${path.module}/observability/blackbox.yml")
+    file    = "/etc/blackbox_exporter/config.yml"
+  }
+
+  command = ["--config.file=/etc/blackbox_exporter/config.yml"]
+
+  # Скрейп Prometheus — blackbox-public:9115 в сети стека.
+  networks_advanced {
+    name    = docker_network.observability[0].name
+    aliases = ["blackbox-public"]
   }
 
   # Публичный вход — по внешнему адресу стенда.

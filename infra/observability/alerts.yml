@@ -25,9 +25,10 @@ groups:
       # пропавший ряд. absent() по каждому имени отдельно: так в алерте есть
       # метка container_name. Список — сервисы, без которых стенд не работает
       # или теряет данные, и основной коллектор: без него молчат метрики
-      # приложения, а значит, и часть алертов. Сам экземпляр docker_stats
-      # недоступен — рядов нет ни у кого: тогда горит ScrapeTargetDown, а не
-      # восемь ContainerDown разом.
+      # приложения, а значит, и часть алертов. Рядов нет ни у кого — значит,
+      # не работает сам сбор (лёг экземпляр docker_stats или socket-proxy):
+      # тогда горит ScrapeTargetDown или ContainerMetricsMissing, а не восемь
+      # ContainerDown разом.
       - alert: ContainerDown
         expr: |
           (
@@ -40,13 +41,26 @@ groups:
             or absent(container_uptime_seconds{container_name="dmc268-ui"})
             or absent(container_uptime_seconds{container_name="dmc268-otelcol"})
           )
-          unless on() (up{job="docker-stats"} == 0)
+          and on() (count(container_uptime_seconds) > 0)
         for: 2m
         labels:
           severity: critical
         annotations:
           summary: "Контейнер {{ $labels.container_name }} не запущен"
           description: "Ряда container_uptime_seconds нет 2 минуты: контейнер остановлен, удалён или не создан. Проверка: docker ps -a --filter name={{ $labels.container_name }}"
+
+      # Метрик контейнеров нет ни у кого при живом скрейпе: docker_stats не
+      # читает Docker API (лёг dmc268-docker-proxy) — ContainerDown и
+      # ContainerRestarting при этом слепы.
+      - alert: ContainerMetricsMissing
+        expr: absent(container_uptime_seconds) unless on() (up{job="docker-stats"} == 0)
+        for: 5m
+        labels:
+          severity: warning
+          service: observability
+        annotations:
+          summary: "Нет метрик контейнеров"
+          description: "5 минут нет ни одного ряда container_uptime_seconds, хотя collector-docker отвечает: receiver docker_stats не читает Docker API. Проверьте dmc268-docker-proxy и логи dmc268-otelcol-docker."
 
       # Перезапуск: restart = unless-stopped поднимает упавший процесс, и без
       # алерта цикл падений выглядит «живым» контейнером.
@@ -84,8 +98,12 @@ groups:
 
       # Воркер не забирает задачи: потребителей у очереди ревью нет. Контейнер
       # при этом может быть запущен (завис на старте, потерял соединение).
+      # Очереди нет совсем (воркер упал раньше, чем её объявил) — тоже
+      # «никто не забирает», если сам брокер снимается.
       - alert: WorkerNotConsuming
-        expr: rabbitmq_queue_consumers{queue="review_jobs.qq"} == 0
+        expr: |
+          rabbitmq_queue_consumers{queue="review_jobs.qq"} == 0
+          or (absent(rabbitmq_queue_consumers{queue="review_jobs.qq"}) unless on() (up{job="rabbitmq"} == 0))
         for: 5m
         labels:
           severity: critical

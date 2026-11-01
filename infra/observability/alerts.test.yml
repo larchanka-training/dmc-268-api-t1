@@ -41,6 +41,26 @@ tests:
               summary: "Контейнер dmc268-worker не запущен"
               description: "Ряда container_uptime_seconds нет 2 минуты: контейнер остановлен, удалён или не создан. Проверка: docker ps -a --filter name=dmc268-worker"
 
+  # docker_stats не читает Docker API (лёг socket-proxy): скрейп жив, рядов нет
+  # ни у кого — ContainerDown молчит, горит ContainerMetricsMissing.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="docker-stats", instance="collector-docker:8889"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ContainerDown
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: ContainerMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: observability
+            exp_annotations:
+              summary: "Нет метрик контейнеров"
+              description: "5 минут нет ни одного ряда container_uptime_seconds, хотя collector-docker отвечает: receiver docker_stats не читает Docker API. Проверьте dmc268-docker-proxy и логи dmc268-otelcol-docker."
+
   # Экземпляр docker_stats лежит: рядов нет ни у кого, но ContainerDown молчит —
   # горит ScrapeTargetDown.
   - interval: 1m
@@ -171,6 +191,23 @@ tests:
               summary: "В review_jobs.dlq 1 сообщений"
               description: "Сообщения лежат в DLQ дольше 5 минут. Разбор — rabbitmqadmin get queue=review_jobs.dlq в контейнере dmc268-rabbitmq, причина — в логах воркера."
       - eval_time: 7m
+        alertname: WorkerNotConsuming
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+              queue: review_jobs.qq
+            exp_annotations:
+              summary: "У очереди review_jobs.qq нет потребителей"
+              description: "5 минут ни один воркер не подписан на очередь: прогоны копятся и не выполняются."
+
+  # Очереди ревью нет совсем (воркер упал до объявления), брокер снимается.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="rabbitmq", instance="dmc268-rabbitmq:15692"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 6m
         alertname: WorkerNotConsuming
         exp_alerts:
           - exp_labels:
