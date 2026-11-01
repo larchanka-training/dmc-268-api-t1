@@ -221,11 +221,15 @@ sequenceDiagram
     participant W as app/worker
     participant LLM as LlmGateway / модель
 
-    GH->>API: POST вебхук pull_request (тело до 2 МиБ)
+    GH->>API: POST вебхук pull_request / pull_request_review_thread (тело до 2 МиБ)
     API->>API: HMAC по сырому телу, constant-time
     alt подпись неверна
         API-->>GH: 401, ни одной записи
-    else не pull_request и не pull_request_review_thread, действие не opened / synchronize / edited со сменой базы, PR из форка от автора вне команды, репозиторий не подключён или выключен
+    else событие pull_request_review_thread
+        API->>DB: тред resolved / unresolved (handle_review_thread_webhook)
+        API->>GH: merge gate check на head
+        API-->>GH: 202 acknowledged, прогон не создаётся, сбой VCS — 502
+    else не pull_request, действие не opened / synchronize / edited со сменой базы, PR из форка от автора вне команды, репозиторий не подключён или выключен
         opt репозиторий выключен
             API->>GH: check run success на head
         end
@@ -265,8 +269,12 @@ sequenceDiagram
     W->>GH: дифф по head_sha / base_sha (до 5 МиБ), rules.md по base_sha, файлы для AST
     Note over W,GH: сбой rules.md, контекста PR или AST не роняет прогон — пакет деградирует, пропущенное — в omitted
     break дифф больше лимита, сбой получения диффа или исключение любого шага ниже
-        W->>DB: ReviewRun failed
-        W->>MQ: nack без requeue → review_jobs.dlq
+        alt ретаргет отменил прогон посреди ревью (_supersede)
+            W->>MQ: ack, прогон остаётся cancelled, результат отброшен
+        else сбой
+            W->>DB: ReviewRun failed
+            W->>MQ: nack без requeue → review_jobs.dlq
+        end
     end
     W->>W: assemble_context: пакет до 32 000 токенов, проверка окна модели
     W->>DB: context_payloads, ReviewRun analysing
@@ -338,7 +346,8 @@ JSON-сообщение; тело несёт только доменные да�
 забинжена очередь `review_jobs.dlq`. Воркер, обработка которого завершилась
 исключением, отвечает `nack` без `requeue`: сообщение не крутится в основной
 очереди по кругу, а ровно один раз перекладывается в `review_jobs.dlq` для
-ручного разбора. Ретраев с backoff перед dead-letter пока нет — осознанное
+ручного разбора. Исключение — прогон, отменённый ретаргетом посреди ревью
+(`_supersede`): сообщение подтверждается `ack`, прогон остаётся `cancelled`. Ретраев с backoff перед dead-letter пока нет — осознанное
 упрощение, зафиксированное в `design.md` OpenSpec change'а
 `add-rabbitmq-job-queue`.
 
@@ -433,11 +442,11 @@ AST-уровень — первый кандидат на вынос из мон
 | Что | Панель | Метрика |
 |---|---|---|
 | HTTP-запросы API, кроме SSE | «Длительность HTTP-запросов, p50/p95» | `http_server_request_duration_seconds` |
-| Вызов модели, по провайдеру | «Длительность вызова модели, p50/p95 (по провайдеру)» | `review_llm_call_duration_seconds` |
+| Вызов модели, по провайдеру; только успешные вызовы (`outcome="ok"`): таймауты и обрывы — худший случай из таблицы выше — в перцентили не попадают | «Длительность вызова модели, p50/p95 (по провайдеру)» | `review_llm_call_duration_seconds` |
 | Этапы прогона | «Длительность этапов прогона, p50/p95 (по этапу)» | `review_stage_duration_seconds` |
-| Состояние очереди (число сообщений, не время) | «Глубина очереди review_jobs.qq», «Потребители и сообщения в работе» | `rabbitmq_queue_messages`, `rabbitmq_queue_messages_unacked` |
+| Состояние очереди (число сообщений и потребителей, не время) | «Глубина очереди review_jobs.qq», «Потребители и сообщения в работе review_jobs.qq» | `rabbitmq_queue_messages`, `rabbitmq_queue_consumers`, `rabbitmq_queue_messages_unacked` |
 
-Время ожидания в очереди не замеряется: панели очереди показывают число сообщений, а не задержку и не её перцентили.
+Время ожидания в очереди не замеряется: панели очереди показывают число сообщений и потребителей, а не задержку и не её перцентили.
 
 Длительность прогона хранится и в базе — `review_runs.duration_seconds`; отчёты по прогонам строятся SQL по ней, а не по телеметрии (`.agents/rules/backend.md`, «Наблюдаемость»). Колонка заполняется только в конце успешного пути (`run_review`, `app/application/review_pipeline.py`): у упавших (`_mark_failed`, компенсация приёма), отменённых и выметенных прогонов она `NULL`, поэтому агрегат по ней — статистика `completed`, а не всех исходов.
 
