@@ -1,7 +1,7 @@
 """Реализации портов хранения на SQLAlchemy.
 
 Тонкие намеренно: каждый метод переводит между строкой таблицы и доменной
-сущностью и больше ничего не делает. Два из них перед записью применяют
+сущностью и больше ничего не делает. Некоторые перед записью применяют
 чистую функцию — это единственные места, где появляется правило. Они отмечены.
 """
 
@@ -28,6 +28,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.domain.entities import (
     BotThread,
@@ -42,6 +43,7 @@ from app.domain.entities import (
     ReviewRunListEntry,
     ReviewRunStep,
     Secret,
+    Simulation,
     User,
 )
 from app.domain.entities import Session as UserSession
@@ -51,6 +53,7 @@ from app.domain.enums import (
     CommentKind,
     Provider,
     ReviewRunStatus,
+    SimulationStatus,
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
@@ -58,6 +61,11 @@ from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailabl
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
 from app.domain.secret_redaction import redact_secrets
+from app.domain.simulation import (
+    SIMULATION_STALE,
+    SIMULATION_TERMINAL_STATUSES,
+    next_simulation_status,
+)
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
@@ -69,6 +77,7 @@ from app.infrastructure.db.models import (
     ReviewRunRow,
     ReviewRunStepRow,
     SessionRow,
+    SimulationRow,
     UserRow,
 )
 from app.infrastructure.db.run_changes import REVIEW_RUNS_CHANNEL
@@ -881,3 +890,136 @@ class SqlAlchemyProviderTokenRepo:
         if self._cipher is None:
             raise ProviderTokenUnavailable("не задан USER_TOKEN_ENCRYPTION_KEY")
         return self._cipher
+
+
+_SIMULATION_ACTIVE = SimulationRow.status.not_in(SIMULATION_TERMINAL_STATUSES)
+
+
+class SqlAlchemySimulationRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get(self, simulation_id: UUID) -> Simulation | None:
+        row = self._session.get(SimulationRow, simulation_id)
+        return m.simulation_to_domain(row) if row else None
+
+    def get_for_user(self, simulation_id: UUID, user_id: UUID) -> Simulation | None:
+        row = self._session.scalars(
+            select(SimulationRow).where(
+                SimulationRow.id == simulation_id, SimulationRow.user_id == user_id
+            )
+        ).one_or_none()
+        return m.simulation_to_domain(row) if row else None
+
+    def add(self, simulation: Simulation) -> bool:
+        # `ON CONFLICT DO NOTHING` по частичному индексу: параллельный запуск
+        # ждёт коммита первого и получает 0 строк, а не `IntegrityError`.
+        inserted = self._session.execute(
+            pg_insert(SimulationRow)
+            .values(
+                id=simulation.id,
+                user_id=simulation.user_id,
+                created_at=simulation.created_at,
+                **self._columns(simulation),
+            )
+            .on_conflict_do_nothing(
+                index_elements=[SimulationRow.user_id], index_where=_SIMULATION_ACTIVE
+            )
+            .returning(SimulationRow.id)
+        ).first()
+        return inserted is not None
+
+    def update(self, simulation: Simulation) -> bool:
+        """Записать ход или итог, отклонив переход, запрещённый машиной состояний.
+
+        Правило делегировано `next_simulation_status`. Блокировка строки: перевод
+        зависших в проходе обслуживания коммитит итог параллельно воркеру.
+        """
+        row = self._session.get(
+            SimulationRow, simulation.id, with_for_update=True, populate_existing=True
+        )
+        if row is None:
+            raise LookupError(f"simulation {simulation.id} is not stored")
+        if row.status in SIMULATION_TERMINAL_STATUSES:
+            return False
+        if row.status != simulation.status:
+            verdict = next_simulation_status(row.status, simulation.status)
+            if not verdict.ok:
+                raise ValueError(verdict.error)
+        for column, value in self._columns(simulation).items():
+            setattr(row, column, value)
+        # Время перехода - из сущности, как и при вставке: зависание сверяется с часами
+        # приложения. Без пометки равное прежнему значение не попало бы в UPDATE, и
+        # `onupdate` колонки подставил бы часы базы.
+        flag_modified(row, "updated_at")
+        return True
+
+    @staticmethod
+    def _columns(simulation: Simulation) -> dict[str, Any]:
+        """Изменяемые колонки строки; контекст результата - без секретов (#28, design D10).
+
+        Второе место правила в этом классе, и оно делегировано `redact_secrets`:
+        модели вход ушёл из памяти воркера, секрет она видела; фейк хранит как есть.
+        """
+        result = None
+        if simulation.result is not None:
+            result = m.simulation_result_to_json(simulation.result)
+            result["context"] = redact_secrets(result["context"])
+        return {
+            "status": simulation.status,
+            "source_kind": simulation.source_kind,
+            "file_path": simulation.file_path,
+            "source": simulation.source,
+            "rules": simulation.rules,
+            "result": result,
+            "model": simulation.model,
+            "tokens_used": simulation.tokens_used,
+            "verification": simulation.verification,
+            "error_code": simulation.error_code,
+            "expires_at": simulation.expires_at,
+            "updated_at": simulation.updated_at,
+        }
+
+    def has_active(self, user_id: UUID) -> bool:
+        return bool(
+            self._session.scalar(
+                select(
+                    select(SimulationRow.id)
+                    .where(SimulationRow.user_id == user_id, _SIMULATION_ACTIVE)
+                    .exists()
+                )
+            )
+        )
+
+    def created_since(self, user_id: UUID, since: dt.datetime) -> list[dt.datetime]:
+        return list(
+            self._session.scalars(
+                select(SimulationRow.created_at)
+                .where(SimulationRow.user_id == user_id, SimulationRow.created_at > since)
+                .order_by(SimulationRow.created_at)
+            )
+        )
+
+    def fail_stale(self, before: dt.datetime, now: dt.datetime) -> int:
+        # Тем же `UPDATE` стирается вход: итоговую строку со входом не пропустит CHECK.
+        result = self._session.execute(
+            update(SimulationRow)
+            .where(_SIMULATION_ACTIVE, SimulationRow.updated_at < before)
+            .values(
+                status=SimulationStatus.FAILED,
+                error_code=SIMULATION_STALE,
+                source=None,
+                rules=None,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount)  # type: ignore[attr-defined]
+
+    def delete_expired(self, now: dt.datetime) -> int:
+        result = self._session.execute(
+            delete(SimulationRow)
+            .where(SimulationRow.expires_at <= now)
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount)  # type: ignore[attr-defined]

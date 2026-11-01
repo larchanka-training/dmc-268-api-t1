@@ -164,6 +164,13 @@ class SimulationStatus(StrEnum):
     FAILED = "failed"
 
 
+class SimulationSourceKind(StrEnum):
+    """Что ревьюит симуляция: фрагмент кода как новый файл или unified diff."""
+
+    CODE = "code"
+    DIFF = "diff"
+
+
 class DiscardStage(StrEnum):
     """Где отброшено замечание модели: детерминированный отсев или верификатор."""
 

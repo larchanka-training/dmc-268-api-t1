@@ -24,6 +24,7 @@ from app.domain.entities import (
     ReviewRunListEntry,
     ReviewRunStep,
     Session,
+    Simulation,
     User,
 )
 from app.domain.enums import Provider
@@ -236,4 +237,52 @@ class ProviderTokenRepo(Protocol):
 
     def save(self, session_id: UUID, token: ProviderToken) -> None:
         """Записать или заменить токен сессии."""
+        ...
+
+
+class SimulationRepo(Protocol):
+    """Симуляции песочницы правил.
+
+    Контекст в результате адаптер пишет с секретами, заменёнными меткой
+    (`redact_secrets`), как пакеты контекста ревью; фейк хранит как есть.
+    """
+
+    def get(self, simulation_id: UUID) -> Simulation | None:
+        """Для воркера: симуляция по id, чья бы ни была."""
+        ...
+
+    def get_for_user(self, simulation_id: UUID, user_id: UUID) -> Simulation | None:
+        """Для автора: чужая и несуществующая неразличимы - обе `None`."""
+        ...
+
+    def add(self, simulation: Simulation) -> bool:
+        """Записать новую симуляцию; `False` - у пользователя уже есть незавершённая.
+
+        Гонку параллельных запусков решает уникальный индекс: вторая вставка ждёт
+        коммита первой и ничего не пишет.
+        """
+        ...
+
+    def update(self, simulation: Simulation) -> bool:
+        """Записать ход или итог; `False` - симуляция уже итоговая (её закрыли без
+        вызывающего, например как зависшую), ничего не записано.
+
+        Переход, запрещённый `next_simulation_status`, - `ValueError`, удалённая
+        по сроку - `LookupError`.
+        """
+        ...
+
+    def has_active(self, user_id: UUID) -> bool: ...
+
+    def created_since(self, user_id: UUID, since: datetime) -> list[datetime]:
+        """Моменты запуска симуляций пользователя позже `since` - для лимита за окно."""
+        ...
+
+    def fail_stale(self, before: datetime, now: datetime) -> int:
+        """Незавершённые симуляции без перехода раньше `before` - в `failed` с
+        `SIMULATION_STALE` и стёртым входом; вернуть их число."""
+        ...
+
+    def delete_expired(self, now: datetime) -> int:
+        """Удалить симуляции, срок которых истёк к `now`, вместе с результатом; вернуть их число."""
         ...

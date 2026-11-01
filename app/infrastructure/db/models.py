@@ -45,13 +45,19 @@ from app.domain.enums import (
     ReviewRunStage,
     ReviewRunStatus,
     ReviewRunStepStatus,
+    SimulationSourceKind,
+    SimulationStatus,
     TriggerSource,
     VerificationOutcome,
 )
+from app.domain.simulation import SIMULATION_TERMINAL_STATUSES
 from app.infrastructure.db.base import Base, TimestampMixin, UuidPrimaryKeyMixin
 
 _TERMINAL_SQL = ", ".join(f"'{s.value}'" for s in sorted(TERMINAL_STATUSES))
 _STAGES_SQL = ", ".join(f"'{s.value}'" for s in sorted(FAILURE_STAGES))
+_SIMULATION_TERMINAL_SQL = ", ".join(
+    f"'{s.value}'" for s in sorted(SIMULATION_TERMINAL_STATUSES)
+)
 
 
 def _enum(python_enum: type, name: str) -> SAEnum:
@@ -449,3 +455,78 @@ class ProviderTokenRow(Base):
     refresh_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
     session: Mapped[SessionRow] = relationship(back_populates="provider_token")
+
+
+class SimulationRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
+    """Симуляция ревью в песочнице правил: временная, удаляется по `expires_at`.
+
+    Вход пользователя (`source`, `rules`) живёт, только пока симуляция не
+    завершена: итоговую строку со входом не запишет ни один писатель, в том
+    числе массовый перевод зависших. Результат - один JSONB: его читают
+    целиком и ни в каком запросе не разбирают.
+    """
+
+    __tablename__ = "simulations"
+    __table_args__ = (
+        # Не больше одной незавершённой симуляции на пользователя: вторую
+        # параллельную вставку отклоняет индекс, а не проверка перед ней.
+        Index(
+            "uq_simulations_one_active_per_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text(f"status NOT IN ({_SIMULATION_TERMINAL_SQL})"),
+        ),
+        # Лимит запусков за скользящий час; он же служит внешнему ключу.
+        Index("ix_simulations_user_created_at", "user_id", "created_at"),
+        # Удаление истёкших в проходе обслуживания.
+        Index("ix_simulations_expires_at", "expires_at"),
+        CheckConstraint(
+            "(source_kind = 'code') = (file_path IS NOT NULL)",
+            name="ck_simulations_file_path",
+        ),
+        CheckConstraint(
+            f"(status IN ({_SIMULATION_TERMINAL_SQL})) = (source IS NULL)",
+            name="ck_simulations_source",
+        ),
+        CheckConstraint(
+            f"(status IN ({_SIMULATION_TERMINAL_SQL})) = (rules IS NULL)",
+            name="ck_simulations_rules",
+        ),
+        CheckConstraint(
+            "(status = 'completed') = (result IS NOT NULL)",
+            name="ck_simulations_result",
+        ),
+        CheckConstraint(
+            "(status = 'failed') = (error_code IS NOT NULL)",
+            name="ck_simulations_error_code",
+        ),
+        CheckConstraint(
+            "tokens_used IS NULL OR tokens_used >= 0",
+            name="ck_simulations_tokens_non_negative",
+        ),
+    )
+
+    # Симуляция без пользователя ничего не значит: удаляется вместе с ним, как сессия.
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[SimulationStatus] = mapped_column(
+        _enum(SimulationStatus, "simulation_status"), nullable=False
+    )
+    source_kind: Mapped[SimulationSourceKind] = mapped_column(
+        _enum(SimulationSourceKind, "simulation_source_kind"), nullable=False
+    )
+    file_path: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str | None] = mapped_column(Text)
+    rules: Mapped[str | None] = mapped_column(Text)
+    # `none_as_null`: без него `None` пишется JSON-значением `null`, а не SQL `NULL`,
+    # и CHECK `ck_simulations_result` не пустил бы незавершённую симуляцию.
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    model: Mapped[str | None] = mapped_column(String(255))
+    tokens_used: Mapped[int | None] = mapped_column(BigInteger)
+    # Тот же enum-тип, что у прогона ревью: итоги второго прохода одни.
+    verification: Mapped[VerificationOutcome | None] = mapped_column(
+        _enum(VerificationOutcome, "review_verification")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

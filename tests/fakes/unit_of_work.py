@@ -27,6 +27,7 @@ from app.domain.entities import (
     ReviewRunListEntry,
     ReviewRunStep,
     Session,
+    Simulation,
     User,
 )
 from app.domain.enums import (
@@ -40,6 +41,12 @@ from app.domain.enums import (
 from app.domain.lifecycle import next_status
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
+from app.domain.simulation import (
+    SIMULATION_STALE,
+    SIMULATION_TERMINAL_STATUSES,
+    fail_simulation,
+    next_simulation_status,
+)
 
 
 class FakeRepositoryRepo:
@@ -607,6 +614,79 @@ class FakeProviderTokenRepo:
         self._by_session[session_id] = token
 
 
+class FakeSimulationRepo:
+    """Симуляции по id. Правила адаптера - те же: одна незавершённая на
+    пользователя (`add` - `False`), переход сверяется `next_simulation_status`,
+    итоговая строка не перезаписывается (`update` - `False`). Контекст результата
+    хранится как есть: редакцию секретов проверяет тест адаптера."""
+
+    def __init__(self) -> None:
+        self._by_id: dict[UUID, Simulation] = {}
+
+    @property
+    def stored(self) -> dict[UUID, Simulation]:
+        return dict(self._by_id)
+
+    def snapshot(self) -> dict[UUID, Simulation]:
+        return dict(self._by_id)
+
+    def restore(self, state: dict[UUID, Simulation]) -> None:
+        self._by_id = dict(state)
+
+    def get(self, simulation_id: UUID) -> Simulation | None:
+        return self._by_id.get(simulation_id)
+
+    def get_for_user(self, simulation_id: UUID, user_id: UUID) -> Simulation | None:
+        simulation = self._by_id.get(simulation_id)
+        return simulation if simulation is not None and simulation.user_id == user_id else None
+
+    def add(self, simulation: Simulation) -> bool:
+        if self.has_active(simulation.user_id):
+            return False
+        self._by_id[simulation.id] = simulation
+        return True
+
+    def update(self, simulation: Simulation) -> bool:
+        stored = self._by_id.get(simulation.id)
+        if stored is None:
+            raise LookupError(f"simulation {simulation.id} is not stored")
+        if stored.status in SIMULATION_TERMINAL_STATUSES:
+            return False
+        if stored.status != simulation.status:
+            verdict = next_simulation_status(stored.status, simulation.status)
+            if not verdict.ok:
+                raise ValueError(verdict.error)
+        self._by_id[simulation.id] = simulation
+        return True
+
+    def has_active(self, user_id: UUID) -> bool:
+        return any(
+            s.user_id == user_id and s.status not in SIMULATION_TERMINAL_STATUSES
+            for s in self._by_id.values()
+        )
+
+    def created_since(self, user_id: UUID, since: datetime) -> list[datetime]:
+        return sorted(
+            s.created_at for s in self._by_id.values() if s.user_id == user_id and s.created_at > since
+        )
+
+    def fail_stale(self, before: datetime, now: datetime) -> int:
+        stale = [
+            s
+            for s in self._by_id.values()
+            if s.status not in SIMULATION_TERMINAL_STATUSES and s.updated_at < before
+        ]
+        for simulation in stale:
+            self._by_id[simulation.id] = fail_simulation(simulation, SIMULATION_STALE, now).unwrap()
+        return len(stale)
+
+    def delete_expired(self, now: datetime) -> int:
+        expired = [s.id for s in self._by_id.values() if s.expires_at <= now]
+        for simulation_id in expired:
+            del self._by_id[simulation_id]
+        return len(expired)
+
+
 class FakeUnitOfWork(UnitOfWork):
     """Держит состояние между повторными входами в `with` — как настоящая база.
 
@@ -639,6 +719,7 @@ class FakeUnitOfWork(UnitOfWork):
         self.users: FakeUserRepo = self._fakes.users
         self.sessions: FakeSessionRepo = self._fakes.sessions
         self.provider_tokens: FakeProviderTokenRepo = self._fakes.provider_tokens
+        self.simulations: FakeSimulationRepo = self._fakes.simulations
         self.committed = 0
         self.rolled_back = 0
         self._committed_state: list[Any] | None = None
@@ -699,6 +780,7 @@ class _Fakes:
         self.users = FakeUserRepo()
         self.sessions = FakeSessionRepo()
         self.provider_tokens = FakeProviderTokenRepo(self.sessions)
+        self.simulations = FakeSimulationRepo()
 
     def _all(self) -> list[Any]:
         return [
@@ -712,6 +794,7 @@ class _Fakes:
             self.users,
             self.sessions,
             self.provider_tokens,
+            self.simulations,
         ]
 
     def snapshot(self) -> list[Any]:

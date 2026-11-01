@@ -27,6 +27,7 @@ TABLES = [
     "users",
     "sessions",
     "provider_tokens",
+    "simulations",
 ]
 
 
