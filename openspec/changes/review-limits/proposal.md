@@ -2,7 +2,6 @@
 
 > **Статус: предложение, не утверждено.** Кода, миграций и правок `openspec/specs/` нет.
 > Применяется после change `incremental-review`: неполное покрытие опирается на его журнал.
-> Сводный документ — [`docs/pipeline/INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](../../../docs/pipeline/INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md).
 
 ## Why
 
