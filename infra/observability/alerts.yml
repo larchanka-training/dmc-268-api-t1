@@ -297,8 +297,10 @@ groups:
           summary: "Свежей резервной копии базы нет {{ $value | humanizeDuration }}"
           description: "Последний успешный pg_dump старше 26 часов. Причина — docker logs dmc268-postgres-backup."
 
+      # Лёг сам node-exporter — отметки не видно по вине наблюдаемости, а не
+      # копий: тогда горит ScrapeTargetDown, как у соседних правил на absent().
       - alert: BackupStatusUnknown
-        expr: absent(dmc268_backup_last_success_timestamp_seconds)
+        expr: absent(dmc268_backup_last_success_timestamp_seconds) unless on() (up{job="node-exporter"} == 0)
         for: 26h
         labels:
           severity: critical
