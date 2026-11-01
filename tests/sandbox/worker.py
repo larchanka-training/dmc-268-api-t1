@@ -417,7 +417,7 @@ def run_sandbox(
     deliveries = [
         (
             _Delivery(delivery_tag=n),
-            SimpleNamespace(headers={}),
+            SimpleNamespace(headers={}, type=None),
             json.dumps(to_wire_message(job)).encode("utf-8"),
         )
         for n, job in zip(numbers, jobs, strict=True)
@@ -436,7 +436,7 @@ def run_sandbox(
     # обрабатывается, говорит канал (`current`), а не порядок вызовов.
     unexpected_by_case: dict[int, list[tuple[str, str]]] = {}
 
-    def handle(body: bytes) -> None:
+    def handle(body: bytes, kind: str | None) -> None:
         assert channel.current is not None, "обработчик вызван вне доставки"
         n = numbers[channel.current]
         before = len(github.unexpected)

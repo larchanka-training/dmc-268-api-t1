@@ -29,11 +29,11 @@
 
 ## 5. Очередь, воркер, настройки
 
-- [ ] 5.1 `JobQueue.enqueue(ReviewJob | SimulationJob)`; адаптер RabbitMQ публикует `type` и приоритет, тело симуляции - `job_id` и `simulation_id`; разбор по `type`, без `type` - ревью
-- [ ] 5.2 Воркер передаёт `type` обработчику; обработчик-диспетчер ревью и симуляции в `app/worker/factory.py`
-- [ ] 5.3 Проход обслуживания: `sweep_stale_simulations` и `purge_expired_simulations` независимыми шагами; проверка на старте: `SIMULATION_STALE_SECONDS` больше худшего прогона симуляции
-- [ ] 5.4 Настройки `SIMULATION_MAX_PER_HOUR` (60), `SIMULATION_TTL_SECONDS` (86400, не меньше 3600), `SIMULATION_STALE_SECONDS` (600); `.env.example`
-- [ ] 5.5 Тесты: формат сообщения и диспетчер, сообщение без `type`, шаги обслуживания независимы
+- [x] 5.1 `JobQueue.enqueue(ReviewJob | SimulationJob)`; адаптер RabbitMQ публикует `type` и приоритет, тело симуляции - `job_id` и `simulation_id`; разбор по `type`, без `type` - ревью
+- [x] 5.2 Воркер передаёт `type` обработчику; обработчик-диспетчер ревью и симуляции в `app/worker/factory.py` (`build_message_handler`), неизвестный вид - в DLQ; атрибут `simulation_id` записям лога (`simulation_id_scope`)
+- [x] 5.3 Проход обслуживания: `sweep_stale_simulations` и `purge_expired_simulations` независимыми шагами; проверка на старте: `SIMULATION_STALE_SECONDS` больше вызова модели в худшем случае (`check_simulation_deadline`)
+- [x] 5.4 Настройки `SIMULATION_MAX_PER_HOUR` (60), `SIMULATION_TTL_SECONDS` (86400, не меньше 3600), `SIMULATION_STALE_SECONDS` (1800, см. D8); `.env.example`
+- [x] 5.5 Тесты: формат сообщения и диспетчер, сообщение без `type`, шаги обслуживания независимы
 
 ## 6. API
 

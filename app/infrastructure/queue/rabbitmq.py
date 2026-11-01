@@ -3,9 +3,10 @@
 Тонкий: `to_wire_message`/`from_wire_message` — чистый перевод сущности в
 формат из `docs/SYSTEM_DESIGN.md` §4.2 и обратно, `RabbitMQJobQueue` —
 только транспорт и топология (декларация очереди/exchange'ей идемпотентна на
-уровне AMQP, это не бизнес-правило). `from_wire_message` использует воркер
-(`app/worker/factory.py`), чтобы разобрать сообщение, полученное из очереди,
-обратно в `ReviewJob`.
+уровне AMQP, это не бизнес-правило). `from_wire_message` и
+`simulation_from_wire_message` использует воркер (`app/worker/factory.py`),
+чтобы разобрать сообщение, полученное из очереди, обратно в `ReviewJob` или
+`SimulationJob`; какое из двух - говорит свойство AMQP `type`.
 
 Контекст трассировки (W3C `traceparent`) идёт в заголовках AMQP, а не в теле:
 тело — только доменные данные. Обе стороны — здесь: `_publish` кладёт контекст
@@ -34,8 +35,8 @@ from pika.exceptions import (
 )
 from pika.exchange_type import ExchangeType
 
-from app.domain.entities import ReviewJob
-from app.infrastructure.telemetry import REVIEW_RUN_ID, error_status_span
+from app.domain.entities import ReviewJob, SimulationJob
+from app.infrastructure.telemetry import REVIEW_RUN_ID, SIMULATION_ID, error_status_span
 
 # Quorum-очередь (#223): считает неудачные доставки, в том числе смерть
 # потребителя с неподтверждённым сообщением, и после `DELIVERY_LIMIT` уводит
@@ -68,6 +69,10 @@ DEFAULT_PRIORITY = 5
 # (`tests/queue/test_rabbitmq_job_queue.py`). Уже взятая симуляция ревью не
 # уступает: её задержка - не дольше одного прогона симуляции.
 SIMULATION_PRIORITY = 1
+# Вид задачи в свойстве AMQP `type`. Сообщение без него опубликовал API до
+# появления симуляций - это ревью.
+REVIEW_JOB_TYPE = "review"
+SIMULATION_JOB_TYPE = "simulation"
 
 # При алярме памяти или диска брокер перестаёт читать сокет издателя, и
 # подтверждение публикации не приходит, пока алярм не снят. Оба таймаута держат
@@ -93,7 +98,15 @@ _MESSAGING_ATTRIBUTES = {
 }
 
 
-def to_wire_message(job: ReviewJob) -> dict[str, Any]:
+def job_type(job: ReviewJob | SimulationJob) -> str:
+    """Вид задачи - свойство AMQP `type`: по нему воркер выбирает обработчик."""
+    return SIMULATION_JOB_TYPE if isinstance(job, SimulationJob) else REVIEW_JOB_TYPE
+
+
+def to_wire_message(job: ReviewJob | SimulationJob) -> dict[str, Any]:
+    if isinstance(job, SimulationJob):
+        # Вход пользователя лежит в строке симуляции и через брокер не идёт.
+        return {"job_id": str(job.id), "simulation_id": str(job.simulation_id)}
     return {
         "job_id": str(job.id),
         "review_run_id": str(job.review_run_id),
@@ -126,6 +139,11 @@ def from_wire_message(data: bytes) -> ReviewJob:
         head_sha=message["pull_request"]["head_sha"],
         base_sha=message["pull_request"]["base_sha"],
     )
+
+
+def simulation_from_wire_message(data: bytes) -> SimulationJob:
+    message = json.loads(data)
+    return SimulationJob(id=UUID(message["job_id"]), simulation_id=UUID(message["simulation_id"]))
 
 
 def declare_topology(channel: pika.adapters.blocking_connection.BlockingChannel) -> None:
@@ -254,7 +272,7 @@ class RabbitMQJobQueue:
         self._connection = None
         self._channel = None
 
-    def _publish(self, job: ReviewJob, headers: dict[str, str]) -> None:
+    def _publish(self, job: ReviewJob | SimulationJob, headers: dict[str, str]) -> None:
         try:
             self._basic_publish(job, headers)
         except ConnectionBlockedTimeout as exc:
@@ -267,7 +285,7 @@ class RabbitMQJobQueue:
                 "(алярм памяти или диска)"
             ) from exc
 
-    def _basic_publish(self, job: ReviewJob, headers: dict[str, str]) -> None:
+    def _basic_publish(self, job: ReviewJob | SimulationJob, headers: dict[str, str]) -> None:
         self._channel_ready().basic_publish(
             exchange="",
             routing_key=QUEUE_NAME,
@@ -275,13 +293,14 @@ class RabbitMQJobQueue:
             properties=pika.BasicProperties(
                 content_type="application/json",
                 delivery_mode=spec.PERSISTENT_DELIVERY_MODE,
-                priority=DEFAULT_PRIORITY,
+                priority=SIMULATION_PRIORITY if isinstance(job, SimulationJob) else DEFAULT_PRIORITY,
+                type=job_type(job),
                 headers=headers,
             ),
             mandatory=True,
         )
 
-    def enqueue(self, job: ReviewJob) -> None:
+    def enqueue(self, job: ReviewJob | SimulationJob) -> None:
         # `BlockingConnection` шлёт heartbeat, только пока по нему что-то идёт:
         # после простоя без вебхуков брокер закрывает соединение, а `is_closed`
         # узнаёт об этом лишь при следующей записи. GitHub доставку не
@@ -304,7 +323,12 @@ class RabbitMQJobQueue:
         finally:
             self._lock.release()
 
-    def _publish_with_retry(self, job: ReviewJob) -> None:
+    def _publish_with_retry(self, job: ReviewJob | SimulationJob) -> None:
+        owner = (
+            {SIMULATION_ID: str(job.simulation_id)}
+            if isinstance(job, SimulationJob)
+            else {REVIEW_RUN_ID: str(job.review_run_id)}
+        )
         with _tracer.start_as_current_span(
             f"publish {QUEUE_NAME}",
             kind=SpanKind.PRODUCER,
@@ -312,7 +336,7 @@ class RabbitMQJobQueue:
                 **_MESSAGING_ATTRIBUTES,
                 "messaging.operation.name": "publish",
                 "messaging.operation.type": "send",
-                REVIEW_RUN_ID: str(job.review_run_id),
+                **owner,
             },
         ):
             headers: dict[str, str] = {}

@@ -25,7 +25,7 @@ from app.infrastructure.queue.rabbitmq import (
     RabbitMQJobQueue,
     declare_topology,
 )
-from app.worker.factory import build_worker
+from app.worker.factory import build_message_handler, build_worker
 
 from ..conftest import TEST_RABBITMQ_URL, requires_broker
 
@@ -85,11 +85,11 @@ def test_a_redelivered_message_gets_a_process_span_with_redelivered_true(
     # Первая попытка: смерть без ack — `except Exception` в цикле её не ловит,
     # соединение закрывается в `finally`, и брокер возвращает сообщение в очередь.
     with pytest.raises(KeyboardInterrupt):
-        build_worker(_settings()).run(_die_without_ack)
+        build_worker(_settings()).run(build_message_handler(_die_without_ack))
 
     # Вторая попытка забирает ту же публикацию — уже с признаком повторной доставки.
     handled: list[bytes] = []
-    build_worker(_settings()).run(handled.append, limit=1)
+    build_worker(_settings()).run(build_message_handler(handled.append), limit=1)
 
     assert handled  # сообщение действительно обработано заново
     publish, first, second = [

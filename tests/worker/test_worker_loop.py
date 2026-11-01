@@ -21,7 +21,12 @@ from app.domain.llm_errors import LlmTimeoutError
 from app.infrastructure.queue.rabbitmq import CONSUMER_ARGUMENTS, to_wire_message
 from app.infrastructure.telemetry import OtelStageTracer
 from app.worker import factory
-from app.worker.factory import StopRequest, Worker, build_review_handler
+from app.worker.factory import (
+    StopRequest,
+    Worker,
+    build_message_handler,
+    build_review_handler,
+)
 
 from ..application.test_review_pipeline import _run, _seed_run
 from ..fakes.llm_gateway import ScriptedLlmGateway
@@ -48,7 +53,7 @@ def test_sweep_runs_on_idle_ticks_and_a_failing_sweep_does_not_stop_consumption(
         calls.append(1)
         raise RuntimeError("база недоступна")
 
-    _worker(channel).run(lambda body: None, limit=1, sweep=sweep, sweep_interval=0)
+    _worker(channel).run(lambda body, kind: None, limit=1, sweep=sweep, sweep_interval=0)
 
     assert calls  # проход был
     assert channel.acked == [1]  # и обработка сообщения продолжилась
@@ -60,7 +65,7 @@ def test_sweep_is_throttled_by_the_interval() -> None:
     calls: list[int] = []
 
     _worker(channel).run(
-        lambda body: None, limit=1, sweep=lambda: calls.append(1), sweep_interval=3600
+        lambda body, kind: None, limit=1, sweep=lambda: calls.append(1), sweep_interval=3600
     )
 
     assert calls == [1]  # первый проход сразу, остальные — не раньше интервала
@@ -85,7 +90,7 @@ def test_a_failed_message_closes_its_span_with_the_error(
     channel = FakeChannel([(SimpleNamespace(delivery_tag=1, redelivered=False), None, body)])
     handler = build_review_handler(_Deps(FakeUnitOfWork()), LIMITS, LLM_LIMITS, TEXTS)
 
-    _worker(channel).run(handler, limit=1)
+    _worker(channel).run(build_message_handler(handler), limit=1)
 
     assert channel.nacked == [1]
     (process,) = [s for s in spans.get_finished_spans() if s.kind is SpanKind.CONSUMER]
@@ -97,7 +102,7 @@ def test_a_failed_message_closes_its_span_with_the_error(
 def test_a_processed_message_closes_its_span_ok(spans: InMemorySpanExporter) -> None:
     channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
 
-    _worker(channel).run(lambda body: None, limit=1)
+    _worker(channel).run(lambda body, kind: None, limit=1)
 
     (process,) = [s for s in spans.get_finished_spans() if s.kind is SpanKind.CONSUMER]
     assert process.status.status_code is StatusCode.UNSET
@@ -113,7 +118,7 @@ def test_a_stage_of_a_failed_message_does_not_leak_into_the_next_spans(
     _seed_run(uow)
     gateways = iter([ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=1)])])
 
-    def handler(body: bytes) -> None:
+    def handler(body: bytes, kind: str | None) -> None:
         if body == b"fail":
             _run(uow, next(gateways), stage_tracer=OtelStageTracer())
 
@@ -146,7 +151,7 @@ def test_a_stop_request_lets_the_current_message_finish_and_takes_no_more() -> N
     connection = FakeConnection()
     stop = StopRequest()
 
-    def handler(body: bytes) -> None:
+    def handler(body: bytes, kind: str | None) -> None:
         stop.requested = True  # сигнал пришёл посреди обработки
 
     _worker(channel, connection).run(handler, stop=stop)
@@ -163,7 +168,7 @@ def test_a_message_delivered_after_a_stop_request_is_not_taken() -> None:
     connection = FakeConnection()
     handled: list[bytes] = []
 
-    _worker(channel, connection).run(handled.append, stop=StopRequest(requested=True))
+    _worker(channel, connection).run(build_message_handler(handled.append), stop=StopRequest(requested=True))
 
     assert handled == []
     # Сначала снять потребителя, потом отпустить: `nack` раньше освободил бы prefetch.
@@ -179,7 +184,7 @@ def test_a_message_after_a_stop_during_the_sweep_is_not_taken() -> None:
     def sweep() -> None:
         stop.requested = True  # сигнал пришёл посреди прохода очистки
 
-    _worker(channel).run(handled.append, sweep=sweep, sweep_interval=0, stop=stop)
+    _worker(channel).run(build_message_handler(handled.append), sweep=sweep, sweep_interval=0, stop=stop)
 
     assert handled == []
     assert channel.events == ["cancel", "requeue 1"]
@@ -206,7 +211,7 @@ def test_a_stop_request_ends_the_idle_wait_on_the_next_tick() -> None:
     sweeps: list[int] = []
 
     _worker(channel).run(
-        lambda body: None, sweep=lambda: sweeps.append(1), stop=StopRequest(requested=True)
+        lambda body, kind: None, sweep=lambda: sweeps.append(1), stop=StopRequest(requested=True)
     )
 
     assert channel.idle_ticks == 1
@@ -277,7 +282,7 @@ def test_worker_connection_has_heartbeat_disabled(monkeypatch) -> None:
 def test_a_limited_run_takes_the_consumer_off_before_the_last_ack() -> None:
     channel = FakeChannel([(SimpleNamespace(delivery_tag=tag, redelivered=False), None, b"{}") for tag in (1, 2)])
 
-    _worker(channel).run(lambda body: None, limit=1)
+    _worker(channel).run(lambda body, kind: None, limit=1)
 
     assert channel.events == ["cancel", "ack 1"]
 
@@ -288,7 +293,7 @@ def test_a_consumer_cancelled_by_the_broker_is_logged(caplog: pytest.LogCaptureF
     channel = FakeChannel([(None, None, None)])
 
     with caplog.at_level(logging.WARNING, logger="app.worker.factory"):
-        _worker(channel).run(lambda body: None)
+        _worker(channel).run(lambda body, kind: None)
 
     assert channel.events == []
     assert channel.consumer_arguments == CONSUMER_ARGUMENTS

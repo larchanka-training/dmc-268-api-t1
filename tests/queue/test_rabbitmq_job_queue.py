@@ -10,7 +10,7 @@ import pika
 import pytest
 from pika.exceptions import ChannelClosedByBroker
 
-from app.domain.entities import ReviewJob
+from app.domain.entities import ReviewJob, SimulationJob
 from app.infrastructure.queue.rabbitmq import (
     CONSUMER_ARGUMENTS,
     CONSUMER_TIMEOUT_SECONDS,
@@ -156,28 +156,30 @@ def _review(n: int) -> ReviewJob:
     return dataclasses.replace(JOB, id=UUID(int=100 + n))
 
 
-def _publish_simulation(
-    channel: pika.adapters.blocking_connection.BlockingChannel, n: int
-) -> None:
-    """Задача симуляции так, как её поставит API: приоритет ниже ревью.
+def _simulation(n: int) -> SimulationJob:
+    return SimulationJob(id=UUID(int=200 + n), simulation_id=UUID(int=n))
 
-    Отдельный канал с подтверждением публикации: к возврату сообщение уже в
-    очереди, и следующая постановка встаёт за ним."""
-    publisher = channel.connection.channel()
-    publisher.confirm_delivery()
-    publisher.basic_publish(
-        exchange="",
-        routing_key=QUEUE_NAME,
-        body=json.dumps({"job_id": str(UUID(int=200 + n)), "simulation_id": str(UUID(int=n))}),
-        properties=pika.BasicProperties(
-            content_type="application/json",
-            delivery_mode=pika.spec.PERSISTENT_DELIVERY_MODE,
-            priority=SIMULATION_PRIORITY,
-            type="simulation",
-        ),
-        mandatory=True,
+
+def test_enqueue_publishes_the_job_type_and_a_simulation_below_reviews(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+) -> None:
+    """Вид задачи - свойство AMQP `type`; тело симуляции - только идентификаторы."""
+    queue = RabbitMQJobQueue(TEST_RABBITMQ_URL or "")
+    queue.enqueue(JOB)
+    queue.enqueue(_simulation(1))
+
+    published = []
+    for _ in range(2):
+        method, properties, body = channel.basic_get(QUEUE_NAME, auto_ack=True)
+        assert method is not None and properties is not None and body is not None
+        published.append((properties.type, properties.priority, json.loads(body)))
+
+    assert published[0][:2] == ("review", DEFAULT_PRIORITY)
+    assert published[1] == (
+        "simulation",
+        SIMULATION_PRIORITY,
+        {"job_id": str(_simulation(1).id), "simulation_id": str(UUID(int=1))},
     )
-    publisher.close()
 
 
 def _consume_like_the_worker(
@@ -207,7 +209,7 @@ def test_a_review_enqueued_after_a_waiting_simulation_is_taken_first(
     busy_tag, busy_job, _ = next(deliveries)
     assert busy_job == str(_review(1).id)
 
-    _publish_simulation(channel, 1)
+    queue.enqueue(_simulation(1))
     queue.enqueue(_review(2))
     channel.basic_ack(busy_tag)
 
@@ -229,7 +231,7 @@ def test_every_waiting_review_goes_before_any_waiting_simulation(
     Если обновление образа брокера поменяет порядок, тест упадёт раньше стенда."""
     queue = RabbitMQJobQueue(TEST_RABBITMQ_URL or "")
     for n in range(3):
-        _publish_simulation(channel, n)
+        queue.enqueue(_simulation(n))
     for n in range(3):
         queue.enqueue(_review(n))
 

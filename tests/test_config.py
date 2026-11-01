@@ -80,6 +80,34 @@ def test_queued_timeout_is_read_from_environment(monkeypatch: pytest.MonkeyPatch
     assert make_settings().queued_run_timeout_seconds == 43_200
 
 
+def test_simulation_limits_default_to_the_design_values() -> None:
+    settings = make_settings()
+    assert (
+        settings.simulation_max_per_hour,
+        settings.simulation_ttl_seconds,
+        settings.simulation_stale_seconds,
+    ) == (60, 86_400, 1_800)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("simulation_max_per_hour", 0),
+        # Строки симуляций - счёт лимита за час: удалённая раньше окна занизила бы его.
+        ("simulation_ttl_seconds", 3_599),
+        ("simulation_stale_seconds", 0),
+    ],
+)
+def test_simulation_limits_out_of_range_are_rejected(field: str, value: int) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url=DATABASE_URL,
+            rabbitmq_url=RABBITMQ_URL,
+            github_webhook_secret="s",
+            **{field: value},  # type: ignore[arg-type]
+        )
+
+
 def test_queued_timeout_must_be_positive() -> None:
     with pytest.raises(ValidationError):
         Settings(
