@@ -9,7 +9,7 @@
 # повтор реже, см. alertmanager.yml); service — к какому сервису относится
 # алерт: критический алерт глушит предупреждения того же service. Критические
 # не глушатся: у ContainerDown и ContainerRestarting метки service нет, и при
-# остановке воркера придут и они, и WorkerNotConsuming.
+# остановке воркера придут и ContainerDown, и WorkerNotConsuming.
 
 groups:
   # Месячный бюджет токенов модели — константа, а не переменная окружения:
@@ -297,10 +297,12 @@ groups:
           summary: "Свежей резервной копии базы нет {{ $value | humanizeDuration }}"
           description: "Последний успешный pg_dump старше 26 часов. Причина — docker logs dmc268-postgres-backup."
 
-      # Лёг сам node-exporter — отметки не видно по вине наблюдаемости, а не
-      # копий: тогда горит ScrapeTargetDown, как у соседних правил на absent().
+      # Без поправки на лежащий node-exporter: unless сбрасывал бы for: 26h
+      # при любом пропущенном скрейпе, и алерт не загорелся бы никогда. Если
+      # node-exporter лежит сутки, второй critical рядом со ScrapeTargetDown
+      # честен — отметки о копиях действительно нет.
       - alert: BackupStatusUnknown
-        expr: absent(dmc268_backup_last_success_timestamp_seconds) unless on() (up{job="node-exporter"} == 0)
+        expr: absent(dmc268_backup_last_success_timestamp_seconds)
         for: 26h
         labels:
           severity: critical

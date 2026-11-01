@@ -74,8 +74,26 @@ def _extension_exists(engine) -> bool:
 def _drop_role(engine) -> None:
     with engine.begin() as conn:
         # Права роли на колонки review_runs (ревизия 0017) держат её: DROP ROLE
-        # с ними падает. DROP OWNED BY отзывает их в этой базе; у отсутствующей
-        # роли он сам — ошибка, поэтому только при её наличии.
+        # с ними падает. DROP OWNED BY отзывает их только в этой базе, поэтому
+        # если рядом мигрирована другая (dev-база dmc268 в make test-db), роль
+        # не снять — тест пропускается, а не падает.
+        other = conn.execute(
+            text(
+                "SELECT DISTINCT d.datname FROM pg_shdepend s"
+                " JOIN pg_roles r ON r.oid = s.refobjid"
+                " JOIN pg_database d ON d.oid = s.dbid"
+                " WHERE s.refclassid = 'pg_authid'::regclass AND r.rolname = :name"
+                " AND d.datname <> current_database()"
+            ),
+            {"name": ROLE},
+        ).scalars().all()
+        if other:
+            pytest.skip(
+                f"у роли {ROLE} права в других базах кластера ({', '.join(sorted(other))}):"
+                " DROP OWNED BY их не снимет — нужен кластер с одной тестовой базой, как в CI"
+            )
+        # У отсутствующей роли DROP OWNED BY сам — ошибка, поэтому только при
+        # её наличии.
         exists = conn.execute(
             text("SELECT 1 FROM pg_roles WHERE rolname = :name"), {"name": ROLE}
         ).first()

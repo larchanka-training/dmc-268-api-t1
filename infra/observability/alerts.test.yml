@@ -396,12 +396,12 @@ tests:
               summary: "Свежей резервной копии базы нет 1d 3h 0m 0s"
               description: "Последний успешный pg_dump старше 26 часов. Причина — docker logs dmc268-postgres-backup."
 
-  # Отметки о копии нет: при живом node-exporter — BackupStatusUnknown, при
-  # лежащем — молчит (горит ScrapeTargetDown).
+  # Отметки о копии нет — BackupStatusUnknown, даже если node-exporter
+  # пропустил скрейп: for: 26h не сбрасывается.
   - interval: 1h
     input_series:
       - series: 'up{job="node-exporter", instance="node-exporter:9100"}'
-        values: "1x30"
+        values: "1x10 0 1x19"
     alert_rule_test:
       - eval_time: 27h
         alertname: BackupStatusUnknown
@@ -412,14 +412,6 @@ tests:
             exp_annotations:
               summary: "Нет отметки о резервной копии базы"
               description: "26 часов node-exporter не видит dmc268_backup_last_success_timestamp_seconds: копии не снимаются или не пишут отметку."
-  - interval: 1h
-    input_series:
-      - series: 'up{job="node-exporter", instance="node-exporter:9100"}'
-        values: "0x30"
-    alert_rule_test:
-      - eval_time: 27h
-        alertname: BackupStatusUnknown
-        exp_alerts: []
 
   # Сертификат: 40 часов до конца срока.
   - interval: 1m
