@@ -243,7 +243,7 @@ variable "observability_memory_mb" {
     loki             = 768
     tempo            = 768
     prometheus       = 768
-    grafana          = 512
+    grafana          = 1024
     node_exporter    = 64
     docker_proxy     = 64
     collector_docker = 96
