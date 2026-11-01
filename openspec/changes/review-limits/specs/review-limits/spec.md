@@ -19,12 +19,12 @@
 
 ### Requirement: Отложенное сборкой контекста делает покрытие неполным
 
-Hunk, который сборка контекста отложила в `omitted` по `context_max_tokens`, SHALL делать свой файл `skipped_budget`, а покрытие прогона — `partial` с причиной `context_budget`. Правило SHALL действовать всегда, независимо от того, включены ли лимиты.
+Hunk, который сборка контекста отложила в `omitted` по `context_max_tokens`, SHALL делать свой файл `skipped_budget`, а покрытие прогона — `partial` с причиной `context_budget`. Для файла, часть hunk'ов которого модель проверила, check run SHALL называть число непроверенных hunk'ов, а не весь файл. Правило SHALL действовать всегда, независимо от того, включены ли лимиты.
 
 #### Scenario: Часть hunk'ов ушла в `omitted` при выключенных лимитах
 
 - **WHEN** лимиты выключены, PR укладывается в их пределы, а сборка контекста отложила 10 hunk'ов в `omitted` по `context_max_tokens`, и открытых `critical` тредов нет
-- **THEN** покрытие `partial` с причиной `context_budget`, файлы отложенных hunk'ов — `skipped_budget`, check run на head — `failure` «Ревью неполное» со списком этих файлов
+- **THEN** покрытие `partial` с причиной `context_budget`, файлы отложенных hunk'ов — `skipped_budget`, check run на head — `failure` «Ревью неполное» со списком этих файлов и числом непроверенных hunk'ов у частично проверенных
 
 ### Requirement: Неполное покрытие не проходит merge gate
 
