@@ -1,5 +1,6 @@
 """Интеграционный тест адаптера `JobQueue`. Нужен живой RabbitMQ."""
 
+import dataclasses
 import json
 import time
 from collections.abc import Iterator
@@ -9,14 +10,16 @@ import pika
 import pytest
 from pika.exceptions import ChannelClosedByBroker
 
-from app.domain.entities import ReviewJob
+from app.domain.entities import ReviewJob, SimulationJob
 from app.infrastructure.queue.rabbitmq import (
+    CONSUMER_ARGUMENTS,
     CONSUMER_TIMEOUT_SECONDS,
     DEFAULT_PRIORITY,
     DELIVERY_LIMIT,
     DLQ_NAME,
     DLX_NAME,
     QUEUE_NAME,
+    SIMULATION_PRIORITY,
     RabbitMQJobQueue,
     declare_topology,
 )
@@ -147,3 +150,99 @@ def test_the_broker_takes_a_message_from_a_consumer_past_its_timeout(
         assert time.monotonic() < deadline, "брокер не снял потребителя по таймауту"
     # Генератор кончился: брокер прислал `basic.cancel`, сообщение вернулось.
     assert channel.queue_declare(QUEUE_NAME, passive=True).method.message_count == 1
+
+
+def _review(n: int) -> ReviewJob:
+    return dataclasses.replace(JOB, id=UUID(int=100 + n))
+
+
+def _simulation(n: int) -> SimulationJob:
+    return SimulationJob(id=UUID(int=200 + n), simulation_id=UUID(int=n))
+
+
+def test_enqueue_publishes_the_job_type_and_a_simulation_below_reviews(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+) -> None:
+    """Вид задачи - свойство AMQP `type`; тело симуляции - только идентификаторы."""
+    queue = RabbitMQJobQueue(TEST_RABBITMQ_URL or "")
+    queue.enqueue(JOB)
+    queue.enqueue(_simulation(1))
+
+    published = []
+    for _ in range(2):
+        method, properties, body = channel.basic_get(QUEUE_NAME, auto_ack=True)
+        assert method is not None and properties is not None and body is not None
+        published.append((properties.type, properties.priority, json.loads(body)))
+
+    assert published[0][:2] == ("review", DEFAULT_PRIORITY)
+    assert published[1] == (
+        "simulation",
+        SIMULATION_PRIORITY,
+        {"job_id": str(_simulation(1).id), "simulation_id": str(UUID(int=1))},
+    )
+
+
+def _consume_like_the_worker(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+) -> Iterator[tuple[int, str, int | None]]:
+    """Потребитель с настройками воркера (`build_worker`): prefetch 1, аргументы потребителя.
+
+    Отдаёт тег доставки, `job_id` и приоритет сообщения; подтверждает вызывающий."""
+    channel.basic_qos(prefetch_count=1)
+    for method, properties, body in channel.consume(
+        QUEUE_NAME, inactivity_timeout=5, arguments=CONSUMER_ARGUMENTS
+    ):
+        assert method is not None, "брокер не выдал ждущее сообщение"
+        assert method.delivery_tag is not None
+        assert properties is not None
+        assert body is not None
+        yield method.delivery_tag, json.loads(body)["job_id"], properties.priority
+
+
+def test_a_review_enqueued_after_a_waiting_simulation_is_taken_first(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+) -> None:
+    """Воркер занят, в очереди ждёт симуляция, следом приходит ревью: следующим он берёт ревью (D2)."""
+    queue = RabbitMQJobQueue(TEST_RABBITMQ_URL or "")
+    queue.enqueue(_review(1))
+    deliveries = _consume_like_the_worker(channel)
+    busy_tag, busy_job, _ = next(deliveries)
+    assert busy_job == str(_review(1).id)
+
+    queue.enqueue(_simulation(1))
+    queue.enqueue(_review(2))
+    channel.basic_ack(busy_tag)
+
+    tag, job, priority = next(deliveries)
+    assert (job, priority) == (str(_review(2).id), DEFAULT_PRIORITY)
+    channel.basic_ack(tag)
+    tag, job, priority = next(deliveries)
+    assert (job, priority) == (str(UUID(int=201)), SIMULATION_PRIORITY)
+    channel.basic_ack(tag)
+    channel.cancel()
+
+
+def test_every_waiting_review_goes_before_any_waiting_simulation(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+) -> None:
+    """Приоритет строгий: симуляции не получают долю выдачи, пока ждёт хоть одно ревью.
+
+    На этом стоит оценка задержки ревью в D2; внутри одного приоритета - FIFO.
+    Если обновление образа брокера поменяет порядок, тест упадёт раньше стенда."""
+    queue = RabbitMQJobQueue(TEST_RABBITMQ_URL or "")
+    for n in range(3):
+        queue.enqueue(_simulation(n))
+    for n in range(3):
+        queue.enqueue(_review(n))
+
+    order = []
+    deliveries = _consume_like_the_worker(channel)
+    for _ in range(6):
+        tag, job, _ = next(deliveries)
+        order.append(job)
+        channel.basic_ack(tag)
+    channel.cancel()
+
+    reviews = [str(_review(n).id) for n in range(3)]
+    simulations = [str(UUID(int=200 + n)) for n in range(3)]
+    assert order == reviews + simulations

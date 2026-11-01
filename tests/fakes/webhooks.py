@@ -18,7 +18,7 @@ from app.application.ports.vcs_review import (
     PullRequestReviewPublication,
     ReviewThreadState,
 )
-from app.domain.entities import PRMetadata, Repository, ReviewJob
+from app.domain.entities import PRMetadata, Repository, ReviewJob, SimulationJob
 from app.domain.enums import MergeRequestState, Provider
 from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 
@@ -211,7 +211,19 @@ class FakeVcs:
 
 @dataclass
 class FakeQueue:
-    jobs: list[ReviewJob] = field(default_factory=list)
+    """Очередь в памяти: задачи ревью - в `jobs`, симуляций - в `simulations`.
 
-    def enqueue(self, job: ReviewJob) -> None:
-        self.jobs.append(job)
+    `error` - брокер недоступен: постановка бросает его и ничего не запоминает.
+    """
+
+    jobs: list[ReviewJob] = field(default_factory=list)
+    simulations: list[SimulationJob] = field(default_factory=list)
+    error: Exception | None = None
+
+    def enqueue(self, job: ReviewJob | SimulationJob) -> None:
+        if self.error is not None:
+            raise self.error
+        if isinstance(job, SimulationJob):
+            self.simulations.append(job)
+        else:
+            self.jobs.append(job)

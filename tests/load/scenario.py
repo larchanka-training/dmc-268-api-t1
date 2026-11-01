@@ -36,6 +36,7 @@ from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
 from app.infrastructure.queue.rabbitmq import DLQ_NAME
 from app.worker.factory import (
     Worker,
+    build_message_handler,
     build_review_handler,
     build_worker,
     context_limits,
@@ -226,8 +227,10 @@ class _Workers:
         self.errors: list[BaseException] = []
         for index in range(count):
             container = stack.container(SlowStubLlm(model_latency_seconds))
-            handler = build_review_handler(
-                container, context_limits(stack.settings), llm_limits(stack.settings), texts
+            handler = build_message_handler(
+                build_review_handler(
+                    container, context_limits(stack.settings), llm_limits(stack.settings), texts
+                )
             )
             worker = build_worker(stack.settings)
             self._workers.append(worker)

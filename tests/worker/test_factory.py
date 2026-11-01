@@ -20,7 +20,7 @@ from app.infrastructure.queue.rabbitmq import (
     RabbitMQJobQueue,
     declare_topology,
 )
-from app.worker.factory import StopRequest, build_worker
+from app.worker.factory import StopRequest, build_message_handler, build_worker
 
 from ..conftest import TEST_RABBITMQ_URL, requires_broker
 
@@ -72,7 +72,7 @@ def test_worker_acks_after_a_successful_handler(
     RabbitMQJobQueue(TEST_RABBITMQ_URL or "").enqueue(JOB)
     received: list[bytes] = []
 
-    build_worker(settings).run(received.append, limit=1)
+    build_worker(settings).run(build_message_handler(received.append), limit=1)
 
     assert len(received) == 1
     assert json.loads(received[0])["job_id"] == str(JOB.id)
@@ -88,7 +88,7 @@ def test_worker_nacks_to_dlq_when_the_handler_raises(
     def failing_handler(body: bytes) -> None:
         raise ValueError("boom")
 
-    build_worker(settings).run(failing_handler, limit=1)
+    build_worker(settings).run(build_message_handler(failing_handler), limit=1)
 
     dlq_method = None
     for _ in range(20):
@@ -124,7 +124,7 @@ def test_a_stopping_worker_returns_the_message_without_spending_a_delivery(
     RabbitMQJobQueue(TEST_RABBITMQ_URL or "").enqueue(JOB)
     handled: list[bytes] = []
 
-    build_worker(settings).run(handled.append, stop=StopRequest(requested=True))
+    build_worker(settings).run(build_message_handler(handled.append), stop=StopRequest(requested=True))
 
     assert handled == []
     headers = _returned_headers(channel)
@@ -149,7 +149,7 @@ def test_a_stop_during_processing_leaves_the_next_message_unspent(
         handled.append(body)
         stop.requested = True
 
-    build_worker(settings).run(handle_and_stop, stop=stop)
+    build_worker(settings).run(build_message_handler(handle_and_stop), stop=stop)
 
     assert len(handled) == 1
     assert _returned_headers(channel).get("x-delivery-count", 0) == 0
@@ -166,6 +166,6 @@ def test_a_dying_worker_spends_a_delivery(
         raise _ProcessDied
 
     with pytest.raises(_ProcessDied):
-        build_worker(settings).run(die)
+        build_worker(settings).run(build_message_handler(die))
 
     assert _returned_headers(channel).get("x-delivery-count") == 1

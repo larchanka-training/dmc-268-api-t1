@@ -40,6 +40,7 @@ from app.api.repositories import is_visible, user_repositories, visible_provider
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
     FailedStage,
+    FindingBase,
     MergeRequestBase,
     RepositoryBase,
     ReviewJob,
@@ -55,9 +56,6 @@ from app.application.use_cases.auth import SignedIn
 from app.domain.entities import MergeRequest, Repository, ReviewRun, ReviewRunListEntry
 from app.domain.enums import (
     CommentKind,
-    DiffSide,
-    FindingCategory,
-    FindingSeverity,
     Provider,
     ReviewRunStatus,
     TriggerSource,
@@ -145,32 +143,9 @@ class CreateReviewRequest(StrictRequest):
     trigger: TriggerSource = Field(strict=False, description="Источник запуска.", examples=["manual"])
 
 
-class RuleRefResponse(BaseModel):
-    """Пункт правила владельца, по которому выпущена находка."""
-
-    name: str = Field(description="Имя правила из .review/rules.md.", examples=["Error Handling Standards"])
-    check: int = Field(description="Номер пункта правила, с 1.", examples=[2])
-    check_text: str = Field(description="Текст пункта на момент прогона.")
-
-
-class FindingResponse(BaseModel):
+class FindingResponse(FindingBase):
     """Находка ревью, привязанная к строке диффа."""
 
-    id: UUID
-    file_path: str = Field(description="Путь файла от корня репозитория.", examples=["app/main.py"])
-    side: DiffSide = Field(description="Сторона диффа, к которой привязана находка.", examples=["new"])
-    old_line: int | None = Field(description="Строка в старой версии файла, с 1; null, если находка на новой стороне.")
-    new_line: int | None = Field(description="Строка в новой версии файла, с 1; null, если находка на старой стороне.")
-    category: FindingCategory = Field(description="Ось ревью, к которой относится находка.", examples=["security"])
-    severity: FindingSeverity = Field(description="Насколько находка важна.", examples=["high"])
-    message: str = Field(description="Текст замечания.")
-    suggestion: str | None = Field(description="Предлагаемая правка; null, если её нет.")
-    confidence: float | None = Field(
-        description="Уверенность модели в находке, обычно от 0 до 1; null, если модель её не дала."
-    )
-    rule: RuleRefResponse | None = Field(
-        description="Пункт правила владельца, по которому выпущена находка; null - находка по стандартным критериям."
-    )
     covered_by_finding_id: UUID | None = Field(
         description=(
             "Находка прошлого прогона того же запроса на изменение, чей тред бота уже говорит об этой "

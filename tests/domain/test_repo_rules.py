@@ -5,11 +5,17 @@ from pathlib import PurePosixPath
 
 import pytest
 
-from app.domain.entities import RejectedRule, RepoRule
+from app.domain.entities import RejectedRule, RepoRule, RepoRules
+from app.domain.enums import RulesStatus
 from app.domain.repo_rules import (
+    RejectedOutline,
+    RuleOutline,
     applicable_rules,
+    matching_files,
+    outline_rules_markdown,
     parse_rules_markdown,
     rule_applies_to,
+    rules_from_text,
 )
 
 FULL_RULE = """\
@@ -188,6 +194,18 @@ Pattern: app/**/*.py
 
 def test_empty_text_has_no_rules() -> None:
     assert parse_rules_markdown("") == ((), ())
+
+
+def test_text_without_accepted_rules_is_empty_and_keeps_the_rejected() -> None:
+    """Одно правило статуса на ревью и песочницу: прочитанный текст без правил - `empty`."""
+    assert rules_from_text("") == RepoRules(status=RulesStatus.EMPTY)
+    no_checks = rules_from_text("## Naming\n\n- pattern: `**/*.py`\n")
+    assert no_checks.status is RulesStatus.EMPTY
+    assert [r.name for r in no_checks.rejected] == ["Naming"]
+
+
+def test_text_with_a_rule_is_loaded() -> None:
+    assert rules_from_text(FULL_RULE) == RepoRules(status=RulesStatus.LOADED, rules=(ERROR_HANDLING,))
 
 
 @pytest.mark.parametrize(
@@ -458,3 +476,57 @@ def test_question_mark_segment_matches_a_single_character_name_only() -> None:
     rule = RepoRule(name="R", patterns=("app/?/x.py",), excludes=(), checks=("c",))
     assert rule_applies_to(rule, "app/a/x.py")
     assert not rule_applies_to(rule, "app/ab/x.py")
+
+
+# --- позиции разделов: подсказки редактора песочницы правил (#288) -----------------
+
+
+def test_outline_places_the_rule_at_its_heading_and_checks_at_their_lines() -> None:
+    accepted, rejected = outline_rules_markdown(FULL_RULE)
+    assert accepted == (RuleOutline(rule=ERROR_HANDLING, line=5, check_lines=(10, 11, 12)),)
+    assert rejected == ()
+
+
+def test_outline_places_rejected_sections_at_their_headings() -> None:
+    """Раздел без проверок и повтор имени - каждый на своей строке заголовка."""
+    text = "## Naming\n\n- pattern: app/**\n\n" + FULL_RULE + "\n## Error Handling Standards\n\n- pattern: x\n\n1. y\n"
+    accepted, rejected = outline_rules_markdown(text)
+    assert [(o.rule.name, o.line) for o in accepted] == [("Error Handling Standards", 9)]
+    assert rejected == (
+        RejectedOutline(rejected=RejectedRule(name="Naming", reason="нет проверок"), line=1),
+        RejectedOutline(
+            rejected=RejectedRule(name="Error Handling Standards", reason="имя правила повторяется"), line=18
+        ),
+    )
+
+
+def test_outline_places_rules_swallowed_by_an_unclosed_fence_at_their_headings() -> None:
+    accepted, rejected = outline_rules_markdown(f"```\n{FENCED_EXAMPLE}{RULE_AFTER_FENCE}")
+    assert accepted == ()
+    assert [(o.rejected.name, o.line) for o in rejected] == [("Example", 2), ("Real", 8)]
+
+
+def test_outline_counts_lines_by_newline_only() -> None:
+    """Строки - как у git и редактора: `\\r\\n` - одна строка, `\\x0c` строку не делит."""
+    text = "\x0c## Not a rule\r\n## R\r\n\r\n- pattern: `app/**`\r\n\r\n1. Проверка\r\n"
+    accepted, _ = outline_rules_markdown(text)
+    assert [(o.rule.name, o.line, o.check_lines) for o in accepted] == [("R", 2, (6,))]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [FULL_RULE, f"```\n{FENCED_EXAMPLE}{RULE_AFTER_FENCE}", FULL_RULE + "\n```\n" + RULE_AFTER_FENCE, ""],
+)
+def test_parse_is_the_outline_without_positions(text: str) -> None:
+    """Ревью и песочница видят одни и те же правила: разбор - это контур без позиций."""
+    accepted, rejected = outline_rules_markdown(text)
+    assert parse_rules_markdown(text) == (
+        tuple(o.rule for o in accepted),
+        tuple(o.rejected for o in rejected),
+    )
+
+
+def test_matching_files_keep_the_order_of_paths_and_may_be_empty() -> None:
+    paths = ["app/z.py", "app/tests/test_z.py", "docs/a.md", "app/a.py"]
+    assert matching_files(ERROR_HANDLING, paths) == ("app/z.py", "app/a.py")
+    assert matching_files(ERROR_HANDLING, ["docs/a.md"]) == ()

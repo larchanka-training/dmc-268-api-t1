@@ -153,6 +153,31 @@ class VerifierVerdict(StrEnum):
     DROP = "drop"
 
 
+class SimulationStatus(StrEnum):
+    """Жизненный цикл симуляции ревью в песочнице правил: тот же конвейер без публикации."""
+
+    QUEUED = "queued"
+    BUILDING_CONTEXT = "building_context"
+    ANALYSING = "analysing"
+    VERIFYING = "verifying"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class SimulationSourceKind(StrEnum):
+    """Что ревьюит симуляция: фрагмент кода как новый файл или unified diff."""
+
+    CODE = "code"
+    DIFF = "diff"
+
+
+class DiscardStage(StrEnum):
+    """Где отброшено замечание модели: детерминированный отсев или верификатор."""
+
+    SCREENING = "screening"
+    VERIFICATION = "verification"
+
+
 class PromptRole(StrEnum):
     """Роль сообщения в запросе к модели."""
 

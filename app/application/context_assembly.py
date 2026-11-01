@@ -49,7 +49,6 @@ from app.domain.entities import (
     Hunk,
     ParsedFile,
     RepoRules,
-    ReviewJob,
     ShownRule,
 )
 from app.domain.enums import Language
@@ -78,6 +77,20 @@ class ContextLimits:
     pr_context_max_tokens: int
     # Потолок unified diff прогона в байтах: больший не дочитывается, прогон - `failed`.
     diff_max_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSubject:
+    """Что ревьюится - заголовок пакета: репозиторий, номер PR и пара коммитов.
+
+    У симуляции песочницы правил ничего этого нет: все поля `None`, и промпт
+    их пропускает.
+    """
+
+    repository: str | None = None
+    pull_request: int | None = None
+    base_sha: str | None = None
+    head_sha: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +137,7 @@ class AssembledContext:
 
 
 def assemble_context(
-    job: ReviewJob,
+    subject: ContextSubject,
     files: Sequence[ParsedFile],
     rules: RepoRules,
     asts: Iterable[FileAst],
@@ -147,10 +160,10 @@ def assemble_context(
 
     body: dict[str, Any] = {
         "schema": SCHEMA,
-        "repository": sanitize(job.repository_full_name),
-        "pull_request": job.pull_request_number,
-        "base_sha": job.base_sha,
-        "head_sha": job.head_sha,
+        "repository": None if subject.repository is None else sanitize(subject.repository),
+        "pull_request": subject.pull_request,
+        "base_sha": subject.base_sha,
+        "head_sha": subject.head_sha,
         "limits": {"max_tokens": limits.max_tokens},
         "pull_request_context": [],
         "rules": {"status": rules.status.value, "source": RULES_PATH, "items": [], "rejected": []},

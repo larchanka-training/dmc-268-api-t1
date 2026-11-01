@@ -18,9 +18,9 @@
 `service.name`, `logger`) `extra` перетереть не может.
 
 Бизнес-контекст (например `review_run_id`) прикладной код передаёт через
-`extra={...}` или через `review_run_id_scope` — контекст, который фильтр
-хендлера кладёт в записи сам (обработчик воркера ставит его на всё
-сообщение). Имена — те же, что у атрибутов спанов; сам код знает только
+`extra={...}` или через `review_run_id_scope` и `simulation_id_scope` -
+контекст, который фильтр хендлера кладёт в записи сам (обработчик воркера
+ставит его на всё сообщение). Имена - те же, что у атрибутов спанов; сам код знает только
 `logging.getLogger(__name__)`, никаких обёрток.
 
 Дубль uvicorn «Exception in ASGI application» (сервер пишет его после ответа
@@ -114,6 +114,33 @@ class ReviewRunIdFilter(logging.Filter):
         value = _review_run_id.get()
         if value is not None:
             setattr(record, REVIEW_RUN_ID, value)
+        return True
+
+
+# То же для симуляции песочницы правил: атрибут записи, а не строка в тексте.
+SIMULATION_ID = "simulation_id"
+_simulation_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "simulation_id", default=None
+)
+
+
+@contextmanager
+def simulation_id_scope(simulation_id: str | None) -> Iterator[None]:
+    """Задать `simulation_id` записям лога внутри блока - как `review_run_id_scope`."""
+    token = _simulation_id.set(simulation_id)
+    try:
+        yield
+    finally:
+        _simulation_id.reset(token)
+
+
+class SimulationIdFilter(logging.Filter):
+    """Кладёт `simulation_id` из контекста в запись; вне контекста поля нет."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        value = _simulation_id.get()
+        if value is not None:
+            setattr(record, SIMULATION_ID, value)
         return True
 
 # Запись uvicorn о необработанном исключении; завершающий перевод строки —
@@ -289,6 +316,7 @@ def configure_logging(service_name: str, stream: typing.TextIO | None = None) ->
         _handler = logging.StreamHandler()
         _handler.addFilter(TraceContextFilter())
         _handler.addFilter(ReviewRunIdFilter())
+        _handler.addFilter(SimulationIdFilter())
     # Поток — на каждом вызове: без `stream` — stdout, а не поток прошлого вызова.
     _handler.setStream(sys.stdout if stream is None else stream)
     _handler.setFormatter(JsonFormatter(service_name))

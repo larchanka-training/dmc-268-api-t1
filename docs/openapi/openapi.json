@@ -2494,6 +2494,531 @@
         }
       }
     },
+    "/api/v1/reviews/{review_run_id}/findings/{finding_id}/inspection": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Инспекция находки",
+        "description": "Не реализовано: отвечает 501 NOT_IMPLEMENTED. Описана заранее, чтобы фронтенд генерировал типы (задача #290). Требует сессию. Прогон проверяется до ответа 501 по тому же правилу, что у GET /reviews/{review_run_id}: 404 REVIEW_NOT_FOUND, если его нет или он не виден пользователю; затем находка - 404 FINDING_NOT_FOUND, если у прогона её нет. Когда ручка заработает: итог второго прохода прогона, вердикт верификатора по находке и контекст, который модель видела по файлу находки. Правило и уверенность - в самой находке (FindingResponse). Контекст отдаётся с секретами, заменёнными меткой; у прогонов, чей пакет контекста не сохранён, context - null.",
+        "operationId": "getFindingInspection",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "finding_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор находки прогона.",
+              "title": "Finding Id"
+            },
+            "description": "Идентификатор находки прогона."
+          },
+          {
+            "name": "review_run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор прогона ревью.",
+              "title": "Review Run Id"
+            },
+            "description": "Идентификатор прогона ревью."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Вердикт верификатора и контекст модели по файлу находки.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindingInspectionResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "`REVIEW_NOT_FOUND` - прогона с таким id нет или он не виден пользователю; `FINDING_NOT_FOUND` - у прогона нет находки с таким id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ReviewNotFoundProblem"
+                    },
+                    {
+                      "$ref": "#/components/schemas/FindingNotFoundProblem"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "code",
+                    "mapping": {
+                      "REVIEW_NOT_FOUND": "#/components/schemas/ReviewNotFoundProblem",
+                      "FINDING_NOT_FOUND": "#/components/schemas/FindingNotFoundProblem"
+                    }
+                  },
+                  "title": "Response 404 Getfindinginspection"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "501": {
+            "description": "Ручка ещё не реализована.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "502": {
+            "description": "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmUnavailableProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/rules/parse": {
+      "post": {
+        "tags": [
+          "playground"
+        ],
+        "summary": "Разобрать текст правил",
+        "description": "Требует сессию и Origin сервиса; Origin проверяется раньше сессии и разбора тела. Разбирает текст тем же парсером, что ревью запроса на изменение, без вызова модели, - для подсказок в редакторе песочницы: что из текста станет правилами ревью. Принятые правила - по порядку в тексте, со строкой заголовка, пунктами и файлами из paths, к которым правило применимо; отклонённые разделы - с причиной и строкой заголовка. Строки нумеруются с 1 и делятся только по переводу строки, как в git. Текст больше лимита, с которым ревью читает .review/rules.md (RULES_MAX_BYTES, по умолчанию 32768 байт в UTF-8), - 422 в body.rules: такой файл ревью не разбирает вовсе. Пустой текст - 200 без правил: ревью шло бы по стандартным критериям.",
+        "operationId": "parseRules",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RulesParseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Принятые правила и отклонённые разделы.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RulesParseResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "403": {
+            "description": "`Origin` изменяющего запроса отсутствует или не совпадает с адресом сервиса.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginForbiddenProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "413": {
+            "description": "Тело больше лимита (вебхук — `WEBHOOK_BODY_MAX_BYTES`, 2 МиБ; остальные — `REQUEST_BODY_MAX_BYTES`, 1 МиБ): по `Content-Length` отказ без чтения тела, поток без него обрывается на лимите. Ни разбора тела, ни сессии, ни подписи до отказа нет; соединение закрывается.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestBodyTooLargeProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/simulations": {
+      "post": {
+        "tags": [
+          "playground"
+        ],
+        "summary": "Запустить симуляцию ревью",
+        "description": "Требует сессию и Origin сервиса; Origin проверяется раньше сессии и разбора тела. 202 с симуляцией в статусе queued. Воркер прогонит вход тем же конвейером, что ревью запроса на изменение, - сборка контекста, ревью, отсев, верификатор, - без провайдера VCS и без публикации. Фрагмент кода (source.kind = code) ревьюится как новый файл, все строки - добавленные; file_path нужен, чтобы сработали pattern правил и выбрался язык AST. Дифф (source.kind = diff) берёт файлы и пути из своих заголовков. Вход, в котором после разбора и того же фильтра, что у ревью (lock-файлы, сгенерированное, бинарное), нет ни одного hunk'а, - 422 в body.source; правила больше лимита, с которым ревью читает .review/rules.md (RULES_MAX_BYTES), - 422 в body.rules. Пустой rules - ревью по стандартным критериям. Ход и итог клиент читает GET /simulations/{simulation_id}, опрашивая раз в 1-2 секунды, пока статус не completed или failed: в общий поток GET /events симуляции не попадают. Задача не встала в очередь - всё равно 202, симуляция сразу failed с error_code QUEUE_UNAVAILABLE. Каждый запуск вызывает модель, поэтому запуски ограничены на пользователя - одна незавершённая симуляция (Retry-After: 5, каденс опроса) и SIMULATION_MAX_PER_HOUR за скользящий час (Retry-After - до выхода самого старого запуска из окна): 429 RATE_LIMITED.",
+        "operationId": "createSimulation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Симуляция создана и поставлена в очередь.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulationResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "403": {
+            "description": "`Origin` изменяющего запроса отсутствует или не совпадает с адресом сервиса.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginForbiddenProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "413": {
+            "description": "Тело больше лимита (вебхук — `WEBHOOK_BODY_MAX_BYTES`, 2 МиБ; остальные — `REQUEST_BODY_MAX_BYTES`, 1 МиБ): по `Content-Length` отказ без чтения тела, поток без него обрывается на лимите. Ни разбора тела, ни сессии, ни подписи до отказа нет; соединение закрывается.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestBodyTooLargeProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "429": {
+            "description": "Пользователь превысил лимит частоты запросов к ручке; повторить - не раньше, чем через `Retry-After`.",
+            "headers": {
+              "Retry-After": {
+                "description": "Через сколько секунд лимит позволит повторить запрос.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1.0
+                }
+              },
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitedProblem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/simulations/{simulation_id}": {
+      "get": {
+        "tags": [
+          "playground"
+        ],
+        "summary": "Симуляция ревью",
+        "description": "Требует сессию. Симуляция, которую запустил этот пользователь, - статус, замечания, отброшенные замечания и контекст модели; контекст хранится с секретами, заменёнными меткой. Код и правила запуска ответ не отдаёт: они стираются с итогом. Чужая, несуществующая и удалённая по сроку хранения (expires_at) симуляция - 404 SIMULATION_NOT_FOUND без различия.",
+        "operationId": "getSimulation",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "simulation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор симуляции.",
+              "title": "Simulation Id"
+            },
+            "description": "Идентификатор симуляции."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Симуляция с замечаниями и контекстом модели.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulationResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Симуляции с таким id нет, её срок хранения истёк или её запустил другой пользователь - без различия.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulationNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -2612,6 +3137,12 @@
             "$ref": "#/components/schemas/ReviewNotFoundProblem"
           },
           {
+            "$ref": "#/components/schemas/FindingNotFoundProblem"
+          },
+          {
+            "$ref": "#/components/schemas/SimulationNotFoundProblem"
+          },
+          {
             "$ref": "#/components/schemas/RepositoryNotFoundProblem"
           },
           {
@@ -2651,6 +3182,9 @@
             "$ref": "#/components/schemas/RequestBodyTooLargeProblem"
           },
           {
+            "$ref": "#/components/schemas/RateLimitedProblem"
+          },
+          {
             "$ref": "#/components/schemas/NotImplementedProblem"
           },
           {
@@ -2665,12 +3199,14 @@
         "discriminator": {
           "propertyName": "code",
           "mapping": {
+            "FINDING_NOT_FOUND": "#/components/schemas/FindingNotFoundProblem",
             "HTTP_ERROR": "#/components/schemas/HttpErrorProblem",
             "INTERNAL_ERROR": "#/components/schemas/InternalErrorProblem",
             "METHOD_NOT_ALLOWED": "#/components/schemas/MethodNotAllowedProblem",
             "NOT_IMPLEMENTED": "#/components/schemas/NotImplementedProblem",
             "ORIGIN_FORBIDDEN": "#/components/schemas/OriginForbiddenProblem",
             "PROVIDER_NOT_SUPPORTED": "#/components/schemas/ProviderNotSupportedProblem",
+            "RATE_LIMITED": "#/components/schemas/RateLimitedProblem",
             "REPOSITORY_ALREADY_CONNECTED": "#/components/schemas/RepositoryAlreadyConnectedProblem",
             "REPOSITORY_MANAGE_REQUIRED": "#/components/schemas/RepositoryManageRequiredProblem",
             "REPOSITORY_NOT_FOUND": "#/components/schemas/RepositoryNotFoundProblem",
@@ -2680,11 +3216,47 @@
             "REVIEW_NOT_FOUND": "#/components/schemas/ReviewNotFoundProblem",
             "ROUTE_NOT_FOUND": "#/components/schemas/RouteNotFoundProblem",
             "SCM_UNAVAILABLE": "#/components/schemas/ScmUnavailableProblem",
+            "SIMULATION_NOT_FOUND": "#/components/schemas/SimulationNotFoundProblem",
             "UNAUTHENTICATED": "#/components/schemas/UnauthenticatedProblem",
             "VALIDATION_ERROR": "#/components/schemas/ValidationProblem",
             "WEBHOOK_SIGNATURE_INVALID": "#/components/schemas/WebhookSignatureInvalidProblem"
           }
         }
+      },
+      "CodeSource": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "code",
+            "title": "Kind"
+          },
+          "file_path": {
+            "type": "string",
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "File Path",
+            "description": "Путь файла от корня репозитория: по нему сопоставляются pattern правил и выбирается язык AST.",
+            "examples": [
+              "app/billing.py"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 131072,
+            "minLength": 1,
+            "title": "Content",
+            "description": "Текст файла."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "file_path",
+          "content"
+        ],
+        "title": "CodeSource",
+        "description": "Фрагмент кода: ревьюится как новый файл, все строки - добавленные."
       },
       "CommentKind": {
         "type": "string",
@@ -2725,6 +3297,33 @@
         ],
         "title": "ConnectRepositoryRequest",
         "description": "Запрос на подключение репозитория к сервису."
+      },
+      "ContextOmissionResponse": {
+        "properties": {
+          "part": {
+            "type": "string",
+            "title": "Part",
+            "description": "Что не вошло: file - файл целиком, hunk - hunk диффа, scopes - охватывающие определения, imports - импорты, ast - AST-окружение файла.",
+            "examples": [
+              "hunk"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Почему: filtered - файл отфильтрован как сгенерированный или бинарный, budget - не хватило бюджета контекста; у ast - причина, по которой окружение не строилось.",
+            "examples": [
+              "budget"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "part",
+          "reason"
+        ],
+        "title": "ContextOmissionResponse",
+        "description": "Часть контекста файла, которая модели не досталась."
       },
       "CreateReviewRequest": {
         "properties": {
@@ -2968,6 +3567,193 @@
         "title": "DiffSide",
         "description": "К какой стороне диффа относится координата строки."
       },
+      "DiffSource": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "diff",
+            "title": "Kind"
+          },
+          "diff": {
+            "type": "string",
+            "maxLength": 131072,
+            "minLength": 1,
+            "title": "Diff",
+            "description": "Unified diff одного или нескольких файлов, как его отдаёт git diff."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "diff"
+        ],
+        "title": "DiffSource",
+        "description": "Unified diff: файлы, пути и строки - из его заголовков."
+      },
+      "DiscardStage": {
+        "type": "string",
+        "enum": [
+          "screening",
+          "verification"
+        ],
+        "title": "DiscardStage",
+        "description": "Где отброшено замечание модели: детерминированный отсев или верификатор."
+      },
+      "DiscardedFindingResponse": {
+        "properties": {
+          "stage": {
+            "$ref": "#/components/schemas/DiscardStage",
+            "description": "Где отброшено: screening - детерминированный отсев, verification - верификатор.",
+            "examples": [
+              "screening"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Почему - по-русски, для показа пользователю: причина отсева или слова верификатора.",
+            "examples": [
+              "правило «Naming Consistency» не применимо к app/billing.py"
+            ]
+          },
+          "file_path": {
+            "type": "string",
+            "title": "File Path",
+            "description": "Путь файла, как его дала модель.",
+            "examples": [
+              "app/billing.py"
+            ]
+          },
+          "side": {
+            "$ref": "#/components/schemas/DiffSide",
+            "description": "Сторона диффа, как её дала модель.",
+            "examples": [
+              "new"
+            ]
+          },
+          "line": {
+            "type": "integer",
+            "title": "Line",
+            "description": "Строка на стороне side, как её дала модель; может быть вне диффа."
+          },
+          "category": {
+            "$ref": "#/components/schemas/FindingCategory",
+            "description": "Ось ревью.",
+            "examples": [
+              "readability"
+            ]
+          },
+          "severity": {
+            "$ref": "#/components/schemas/FindingSeverity",
+            "description": "Насколько замечание важно по мнению модели.",
+            "examples": [
+              "low"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Текст замечания модели."
+          },
+          "rule": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuleMentionResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Ссылка на правило, как её дала модель; null - замечание по стандартным критериям."
+          }
+        },
+        "type": "object",
+        "required": [
+          "stage",
+          "reason",
+          "file_path",
+          "side",
+          "line",
+          "category",
+          "severity",
+          "message",
+          "rule"
+        ],
+        "title": "DiscardedFindingResponse",
+        "description": "Замечание модели, которое не дошло до результата, и почему."
+      },
+      "FileContextResponse": {
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "title": "File Path",
+            "description": "Путь файла от корня репозитория.",
+            "examples": [
+              "app/main.py"
+            ]
+          },
+          "hunks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Hunks",
+            "description": "Hunk'и файла, вошедшие в контекст, по порядку - unified diff с заголовком @@, как их видела модель. В сохранённом контексте прогона ревью секреты заменены меткой."
+          },
+          "scopes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scopes",
+            "description": "Охватывающие определения из AST - строки «начало-конец сигнатура», вложенные с отступом; null, если их не передавали."
+          },
+          "imports": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Imports",
+            "description": "Импорты файла из AST, по строке; null, если их не передавали."
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/ShownRuleResponse"
+            },
+            "type": "array",
+            "title": "Rules",
+            "description": "Правила владельца, показанные модели для этого файла."
+          },
+          "omitted": {
+            "items": {
+              "$ref": "#/components/schemas/ContextOmissionResponse"
+            },
+            "type": "array",
+            "title": "Omitted",
+            "description": "Что из контекста файла модели не досталось."
+          }
+        },
+        "type": "object",
+        "required": [
+          "file_path",
+          "hunks",
+          "scopes",
+          "imports",
+          "rules",
+          "omitted"
+        ],
+        "title": "FileContextResponse",
+        "description": "Что модель видела по одному файлу: дифф, AST-окружение и применимые правила."
+      },
       "FindingCategory": {
         "type": "string",
         "enum": [
@@ -2978,6 +3764,132 @@
         ],
         "title": "FindingCategory",
         "description": "Оси ревью, к которым может относиться замечание."
+      },
+      "FindingInspectionResponse": {
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Finding Id",
+            "description": "Находка, которую объясняет ответ."
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Итог второго прохода модели (Reflection Pass) для прогона; null, если прогон его не записал.",
+            "examples": [
+              "verified"
+            ]
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerifierVerdictResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Решение верификатора по этой находке; null, если верификатор в прогоне не отработал (verification не verified) или прогон записан до того, как вердикты стали сохраняться."
+          },
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileContextResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Что модель видела по файлу находки; null, если пакет контекста прогона не сохранён."
+          }
+        },
+        "type": "object",
+        "required": [
+          "finding_id",
+          "verification",
+          "verdict",
+          "context"
+        ],
+        "title": "FindingInspectionResponse",
+        "description": "Почему модель выпустила находку: вердикт верификатора и что она видела."
+      },
+      "FindingNotFoundProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:finding-not-found",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:finding-not-found"
+          },
+          "title": {
+            "type": "string",
+            "const": "Находка не найдена",
+            "title": "Title",
+            "default": "Находка не найдена"
+          },
+          "status": {
+            "type": "integer",
+            "const": 404,
+            "title": "Status",
+            "default": 404
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "FINDING_NOT_FOUND",
+            "title": "Code",
+            "default": "FINDING_NOT_FOUND"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "FindingNotFoundProblem",
+        "description": "`404 FINDING_NOT_FOUND`: у прогона ревью нет находки с таким id.",
+        "examples": [
+          {
+            "code": "FINDING_NOT_FOUND",
+            "detail": "У прогона ревью нет находки с таким id.",
+            "instance": "/api/v1/reviews/0b9d6c1e-6a7f-4b8e-9c3d-2e1f0a9b8c7d/findings/0192f0c4-7a1e-7b3c-9d2e-4f5a6b7c8d9e/inspection",
+            "status": 404,
+            "title": "Находка не найдена",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:finding-not-found"
+          }
+        ]
       },
       "FindingResponse": {
         "properties": {
@@ -3696,6 +4608,137 @@
           }
         ]
       },
+      "ParsedCheckResponse": {
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Number",
+            "description": "Номер пункта - его позиция среди проверок правила, с 1; по нему ссылается находка."
+          },
+          "text": {
+            "type": "string",
+            "title": "Text",
+            "description": "Текст пункта."
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Line",
+            "description": "Строка пункта в тексте правил, с 1."
+          }
+        },
+        "type": "object",
+        "required": [
+          "number",
+          "text",
+          "line"
+        ],
+        "title": "ParsedCheckResponse",
+        "description": "Пункт правила - одна проверка."
+      },
+      "ParsedRejectedRuleResponse": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Заголовок раздела."
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Line",
+            "description": "Строка заголовка раздела в тексте правил, с 1."
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Чего разделу не хватило - по-русски, для показа пользователю.",
+            "examples": [
+              "нет проверок"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "line",
+          "reason"
+        ],
+        "title": "ParsedRejectedRuleResponse",
+        "description": "Раздел, не ставший правилом."
+      },
+      "ParsedRuleResponse": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Имя правила - заголовок раздела второго уровня.",
+            "examples": [
+              "Error Handling Standards"
+            ]
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Line",
+            "description": "Строка заголовка раздела в тексте правил, с 1."
+          },
+          "patterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Patterns",
+            "description": "Glob-паттерны файлов, к которым правило применяется.",
+            "examples": [
+              [
+                "app/**/*.py"
+              ]
+            ]
+          },
+          "excludes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Excludes",
+            "description": "Glob-паттерны исключений; пустой список - не исключено ничего."
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/ParsedCheckResponse"
+            },
+            "type": "array",
+            "title": "Checks",
+            "description": "Пункты правила по порядку."
+          },
+          "matched_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Matched Paths",
+            "description": "Файлы из paths запроса, к которым правило применимо, в порядке запроса.",
+            "examples": [
+              [
+                "app/billing.py"
+              ]
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "line",
+          "patterns",
+          "excludes",
+          "checks",
+          "matched_paths"
+        ],
+        "title": "ParsedRuleResponse",
+        "description": "Раздел, принятый разбором как правило."
+      },
       "Provider": {
         "type": "string",
         "enum": [
@@ -3834,6 +4877,77 @@
         ],
         "title": "PublishedCommentResponse",
         "description": "Комментарий, который прогон опубликовал на хостинге."
+      },
+      "RateLimitedProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:rate-limited",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:rate-limited"
+          },
+          "title": {
+            "type": "string",
+            "const": "Слишком много запросов",
+            "title": "Title",
+            "default": "Слишком много запросов"
+          },
+          "status": {
+            "type": "integer",
+            "const": 429,
+            "title": "Status",
+            "default": 429
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "RATE_LIMITED",
+            "title": "Code",
+            "default": "RATE_LIMITED"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "RateLimitedProblem",
+        "description": "`429 RATE_LIMITED`: пользователь превысил лимит частоты запросов к ручке.\n\nЧерез сколько секунд повторить - в заголовке `Retry-After`.",
+        "examples": [
+          {
+            "code": "RATE_LIMITED",
+            "detail": "Лимит запусков симуляции исчерпан; повторите позже.",
+            "instance": "/api/v1/simulations",
+            "status": 429,
+            "title": "Слишком много запросов",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:rate-limited"
+          }
+        ]
       },
       "RejectedRule": {
         "properties": {
@@ -5581,6 +6695,27 @@
           }
         ]
       },
+      "RuleMentionResponse": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Имя правила, как его написала модель."
+          },
+          "check": {
+            "type": "integer",
+            "title": "Check",
+            "description": "Номер пункта, как его написала модель."
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "check"
+        ],
+        "title": "RuleMentionResponse",
+        "description": "Ссылка на пункт правила в том виде, в каком её дала модель, - до проверки."
+      },
       "RuleRefResponse": {
         "properties": {
           "name": {
@@ -5762,6 +6897,67 @@
         "title": "RulesLoaded",
         "description": "Файл правил найден и разобран."
       },
+      "RulesParseRequest": {
+        "properties": {
+          "rules": {
+            "type": "string",
+            "maxLength": 32768,
+            "title": "Rules",
+            "description": "Текст .review/rules.md; пустая строка - правил нет, ревью по стандартным критериям."
+          },
+          "paths": {
+            "items": {
+              "type": "string",
+              "maxLength": 1024,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Paths",
+            "description": "Пути файлов от корня репозитория, к которым примерить правила; пустой список - без примерки.",
+            "default": [],
+            "examples": [
+              [
+                "app/billing.py"
+              ]
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "rules"
+        ],
+        "title": "RulesParseRequest",
+        "description": "Текст правил для разбора и файлы, к которым их примерить."
+      },
+      "RulesParseResponse": {
+        "properties": {
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/ParsedRuleResponse"
+            },
+            "type": "array",
+            "title": "Rules",
+            "description": "Принятые правила по порядку в тексте."
+          },
+          "rejected": {
+            "items": {
+              "$ref": "#/components/schemas/ParsedRejectedRuleResponse"
+            },
+            "type": "array",
+            "title": "Rejected",
+            "description": "Разделы, не ставшие правилами, по порядку в тексте."
+          }
+        },
+        "type": "object",
+        "required": [
+          "rules",
+          "rejected"
+        ],
+        "title": "RulesParseResponse",
+        "description": "Разбор текста правил: что станет правилами ревью и что отброшено."
+      },
       "RulesStatusResponse": {
         "oneOf": [
           {
@@ -5929,6 +7125,424 @@
             "type": "urn:dmc-268:problem:scm-unavailable"
           }
         ]
+      },
+      "ShownRuleResponse": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Имя правила из .review/rules.md.",
+            "examples": [
+              "Error Handling Standards"
+            ]
+          },
+          "checks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Checks",
+            "description": "Пункты правила по порядку; номер пункта - позиция в списке, с 1."
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "checks"
+        ],
+        "title": "ShownRuleResponse",
+        "description": "Правило владельца, показанное модели для файла."
+      },
+      "SimulationFindingResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "file_path": {
+            "type": "string",
+            "title": "File Path",
+            "description": "Путь файла от корня репозитория.",
+            "examples": [
+              "app/main.py"
+            ]
+          },
+          "side": {
+            "$ref": "#/components/schemas/DiffSide",
+            "description": "Сторона диффа, к которой привязана находка.",
+            "examples": [
+              "new"
+            ]
+          },
+          "old_line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Line",
+            "description": "Строка в старой версии файла, с 1; null, если находка на новой стороне."
+          },
+          "new_line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Line",
+            "description": "Строка в новой версии файла, с 1; null, если находка на старой стороне."
+          },
+          "category": {
+            "$ref": "#/components/schemas/FindingCategory",
+            "description": "Ось ревью, к которой относится находка.",
+            "examples": [
+              "security"
+            ]
+          },
+          "severity": {
+            "$ref": "#/components/schemas/FindingSeverity",
+            "description": "Насколько находка важна.",
+            "examples": [
+              "high"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Текст замечания."
+          },
+          "suggestion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggestion",
+            "description": "Предлагаемая правка; null, если её нет."
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence",
+            "description": "Уверенность модели в находке, обычно от 0 до 1; null, если модель её не дала."
+          },
+          "rule": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuleRefResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Пункт правила владельца, по которому выпущена находка; null - находка по стандартным критериям."
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerifierVerdictResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Решение верификатора по замечанию; null, если верификатор не отработал (verification не verified)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "file_path",
+          "side",
+          "old_line",
+          "new_line",
+          "category",
+          "severity",
+          "message",
+          "suggestion",
+          "confidence",
+          "rule",
+          "verdict"
+        ],
+        "title": "SimulationFindingResponse",
+        "description": "Замечание симуляции: те же поля, что у находки прогона, и вердикт верификатора."
+      },
+      "SimulationNotFoundProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:simulation-not-found",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:simulation-not-found"
+          },
+          "title": {
+            "type": "string",
+            "const": "Симуляция не найдена",
+            "title": "Title",
+            "default": "Симуляция не найдена"
+          },
+          "status": {
+            "type": "integer",
+            "const": 404,
+            "title": "Status",
+            "default": 404
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "SIMULATION_NOT_FOUND",
+            "title": "Code",
+            "default": "SIMULATION_NOT_FOUND"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "SimulationNotFoundProblem",
+        "description": "`404 SIMULATION_NOT_FOUND`: симуляции с таким id нет, её срок хранения истёк или её запустил другой пользователь.",
+        "examples": [
+          {
+            "code": "SIMULATION_NOT_FOUND",
+            "detail": "Симуляции с таким id нет.",
+            "instance": "/api/v1/simulations/0192f0c4-7a1e-7b3c-9d2e-4f5a6b7c8d9e",
+            "status": 404,
+            "title": "Симуляция не найдена",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:simulation-not-found"
+          }
+        ]
+      },
+      "SimulationRequest": {
+        "properties": {
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CodeSource"
+              },
+              {
+                "$ref": "#/components/schemas/DiffSource"
+              }
+            ],
+            "title": "Source",
+            "description": "Что ревьюить: фрагмент кода (kind = code) или unified diff (kind = diff).",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "code": "#/components/schemas/CodeSource",
+                "diff": "#/components/schemas/DiffSource"
+              }
+            }
+          },
+          "rules": {
+            "type": "string",
+            "maxLength": 32768,
+            "title": "Rules",
+            "description": "Текст .review/rules.md; пустая строка - правил нет, ревью по стандартным критериям."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source",
+          "rules"
+        ],
+        "title": "SimulationRequest",
+        "description": "Что отревьюить и по каким правилам."
+      },
+      "SimulationResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SimulationStatus",
+            "description": "Текущий статус симуляции.",
+            "examples": [
+              "completed"
+            ]
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code",
+            "description": "Код сбоя; null, если симуляция не упала.",
+            "examples": [
+              "LLM_TIMEOUT"
+            ]
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model",
+            "description": "Модель LLM, которая провела ревью; null до анализа."
+          },
+          "tokens_used": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens Used",
+            "description": "Токенов LLM потрачено на оба прохода; null до анализа."
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Итог второго прохода модели (Reflection Pass); null, пока анализ не завершён.",
+            "examples": [
+              "verified"
+            ]
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/SimulationFindingResponse"
+            },
+            "type": "array",
+            "title": "Findings",
+            "description": "Замечания, прошедшие отсев и верификатор, - то, что опубликовало бы ревью, по порядку ответа модели."
+          },
+          "discarded": {
+            "items": {
+              "$ref": "#/components/schemas/DiscardedFindingResponse"
+            },
+            "type": "array",
+            "title": "Discarded",
+            "description": "Замечания модели, отброшенные отсевом или верификатором, с причиной."
+          },
+          "context": {
+            "items": {
+              "$ref": "#/components/schemas/FileContextResponse"
+            },
+            "type": "array",
+            "title": "Context",
+            "description": "Что модель видела по каждому файлу входа; пустой, пока контекст не собран."
+          },
+          "created_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "Когда симуляция запущена.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "Когда симуляция последний раз менялась.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "expires_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Expires At",
+            "description": "После этого момента симуляция и её вход удаляются, GET отвечает 404 SIMULATION_NOT_FOUND.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "error_code",
+          "model",
+          "tokens_used",
+          "verification",
+          "findings",
+          "discarded",
+          "context",
+          "created_at",
+          "updated_at",
+          "expires_at"
+        ],
+        "title": "SimulationResponse",
+        "description": "Симуляция ревью в песочнице правил: ход, замечания и что видела модель."
+      },
+      "SimulationStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "building_context",
+          "analysing",
+          "verifying",
+          "completed",
+          "failed"
+        ],
+        "title": "SimulationStatus",
+        "description": "Жизненный цикл симуляции ревью в песочнице правил: тот же конвейер без публикации."
       },
       "TriggerSource": {
         "type": "string",
@@ -6185,6 +7799,38 @@
         ],
         "title": "VerificationOutcome",
         "description": "Чем закончился второй проход модели (Reflection Pass) для прогона.\n\n`unavailable` - fail-open: верификатор упал или ответил не по схеме, и\nопубликованы замечания, прошедшие только детерминированный отсев."
+      },
+      "VerifierVerdict": {
+        "type": "string",
+        "enum": [
+          "keep",
+          "drop"
+        ],
+        "title": "VerifierVerdict",
+        "description": "Решение верификатора по одному замечанию первого прохода."
+      },
+      "VerifierVerdictResponse": {
+        "properties": {
+          "verdict": {
+            "$ref": "#/components/schemas/VerifierVerdict",
+            "description": "keep - верификатор подтвердил находку; drop - хотел отбросить. Находка с drop остаётся среди находок, только если это находка безопасности важности high или critical: такую верификатор отбросить не может.",
+            "examples": [
+              "keep"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Почему верификатор так решил - его собственными словами."
+          }
+        },
+        "type": "object",
+        "required": [
+          "verdict",
+          "reason"
+        ],
+        "title": "VerifierVerdictResponse",
+        "description": "Решение верификатора (второго прохода модели) по одной находке."
       },
       "WebhookAcknowledged": {
         "properties": {

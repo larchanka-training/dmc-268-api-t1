@@ -1,8 +1,10 @@
 """Собирает consume-цикл воркера и доменный обработчик, который в нём крутится.
 
 `Worker`/`build_worker` не знают о доменном пайплайне: принимают обработчик
-сообщением-байтами. `build_review_handler` — сборка настоящего обработчика
-(разбор сообщения + `run_review`), а `run_worker` — то, что вызывает
+сообщения - тело и вид задачи из свойства AMQP `type`. `build_review_handler` и
+`build_simulation_handler` - сборка настоящих обработчиков (разбор сообщения +
+`run_review` или `run_simulation`), `build_message_handler` выбирает между ними по
+виду задачи, а `run_worker` - то, что вызывает
 `app/worker/__main__.py`, чтобы не импортировать `app.infrastructure`/
 `app.application` напрямую (точка входа обязана оставаться тонкой).
 Ack/nack-решение — чистая `should_ack`, здесь только вызовы канала.
@@ -36,6 +38,11 @@ from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.application.review_pipeline import run_review
 from app.application.session_purge import purge_expired_sessions
+from app.application.simulation_maintenance import (
+    purge_expired_simulations,
+    sweep_stale_simulations,
+)
+from app.application.simulation_pipeline import run_simulation
 from app.application.stale_sweep import sweep_stale_runs
 from app.application.webhook_redelivery import redeliver_failed_webhooks
 from app.config import Settings
@@ -47,20 +54,26 @@ from app.infrastructure.logging import (
     configure_logging,
     install_excepthooks,
     review_run_id_scope,
+    simulation_id_scope,
 )
 from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR, load_prompt_texts
 from app.infrastructure.queue.rabbitmq import (
     CONSUMER_ARGUMENTS,
     CONSUMER_TIMEOUT_SECONDS,
     QUEUE_NAME,
+    REVIEW_JOB_TYPE,
+    SIMULATION_JOB_TYPE,
     consuming_span,
     declare_topology,
     from_wire_message,
+    simulation_from_wire_message,
 )
 from app.infrastructure.telemetry import (
     REVIEW_RUN_ID,
+    SIMULATION_ID,
     WORKER_SERVICE,
     OtelRunOutcomeRecorder,
+    OtelSimulationTracer,
     OtelStageTracer,
     configure_telemetry,
     instrument_engine,
@@ -73,7 +86,11 @@ from app.worker.handling import should_ack
 
 logger = logging.getLogger(__name__)
 
-MessageHandler = Callable[[bytes], None]
+# Обработчик задачи одного вида - разбирает тело сам.
+JobHandler = Callable[[bytes], None]
+# Обработчик сообщения очереди: тело и вид задачи (свойство AMQP `type`; `None` -
+# сообщение без вида, опубликованное до появления симуляций).
+MessageHandler = Callable[[bytes, str | None], None]
 
 # Как часто выметать зависшие прогоны. Проход дёргается на каждом такте
 # consume-цикла (простой раз в секунду или очередное сообщение) и сам
@@ -188,7 +205,7 @@ class Worker:
                 # закрыться со статусом ошибки, а не OK при nack в DLQ.
                 try:
                     with consuming_span(properties, method.delivery_tag, method.redelivered):
-                        handler(body)
+                        handler(body, properties.type if properties is not None else None)
                 except Exception as caught:  # noqa: BLE001 — любая ошибка уводит сообщение в DLQ, а не роняет процесс
                     exc = caught
                 processed += 1
@@ -288,8 +305,8 @@ def build_review_handler(
     prompt_texts: PromptTexts,
     *,
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
-) -> MessageHandler:
-    """Собрать обработчик сообщения: разбор + `run_review`.
+) -> JobHandler:
+    """Собрать обработчик задачи ревью: разбор + `run_review`.
 
     `run_outcome` — запись исходов прогонов в бизнес-метрики; в проде его
     передаёт composition root (`run_worker`) адаптером телеметрии, общим для
@@ -328,6 +345,71 @@ def build_review_handler(
                 # review_run_id, который ставит фильтр из контекста выше.
                 logger.exception("задача %s завершилась ошибкой", job.id)
                 raise
+
+    return handle
+
+
+class SimulationHandlerDeps(Protocol):
+    """Только то, что нужно обработчику симуляции: без VCS и кэша правил."""
+
+    def unit_of_work(self) -> UnitOfWork: ...
+
+    def llm_gateway(self) -> LlmGateway: ...
+
+    def definition_extractor(self) -> DefinitionExtractor: ...
+
+
+def build_simulation_handler(
+    deps: SimulationHandlerDeps,
+    limits: ContextLimits,
+    model_limits: LlmLimits,
+    prompt_texts: PromptTexts,
+) -> JobHandler:
+    """Собрать обработчик задачи симуляции: разбор + `run_simulation`.
+
+    Сбой анализа `run_simulation` переводит в статус симуляции и наружу не
+    отдаёт (design D7): сообщение подтверждается. Наружу выходит только то, что
+    случилось до неё, - неразборчивое тело уходит в DLQ.
+    """
+    tracer = OtelSimulationTracer()
+
+    def handle(body: bytes) -> None:
+        job = simulation_from_wire_message(body)
+        trace.get_current_span().set_attribute(SIMULATION_ID, str(job.simulation_id))
+        with simulation_id_scope(str(job.simulation_id)):
+            run_simulation(
+                job,
+                uow=deps.unit_of_work(),
+                llm_gateway=deps.llm_gateway(),
+                definition_extractor=deps.definition_extractor(),
+                context_limits=limits,
+                llm_limits=model_limits,
+                prompt_texts=prompt_texts,
+                now=lambda: datetime.now(UTC),
+                new_id=new_id,
+                tracer=tracer,
+            )
+
+    return handle
+
+
+class UnknownJobType(ValueError):
+    """Вид задачи, которого этот воркер не знает: сообщение уходит в DLQ для разбора."""
+
+
+def build_message_handler(review: JobHandler, simulation: JobHandler | None = None) -> MessageHandler:
+    """Выбрать обработчик по виду задачи; сообщение без вида - ревью.
+
+    Без обработчика симуляции (тесты ревью) задача симуляции - неизвестный вид.
+    """
+
+    def handle(body: bytes, kind: str | None) -> None:
+        if kind is None or kind == REVIEW_JOB_TYPE:
+            review(body)
+        elif kind == SIMULATION_JOB_TYPE and simulation is not None:
+            simulation(body)
+        else:
+            raise UnknownJobType(f"неизвестный вид задачи: {kind!r}")
 
     return handle
 
@@ -386,6 +468,22 @@ def check_consumer_timeout(settings: Settings) -> None:
             f" × LLM_MAX_ATTEMPTS × провайдеры + 60) не короче таймаута подтверждения"
             f" потребителя {CONSUMER_TIMEOUT_SECONDS} с (константа CONSUMER_TIMEOUT_SECONDS"
             f" в app/infrastructure/queue/rabbitmq.py)"
+        )
+
+
+def check_simulation_deadline(settings: Settings) -> None:
+    """Один вызов модели в худшем случае короче порога зависшей симуляции.
+
+    Как у прогона (`check_model_deadline`): между вызовами ревью и верификатора
+    симуляция меняет статус, поэтому считается один вызов. Иначе проход
+    обслуживания закрыл бы живую симуляцию, пока модель ещё отвечает.
+    """
+    worst = settings.llm_call_worst_case_seconds
+    if worst >= settings.simulation_stale_seconds:
+        raise WorkerConfigError(
+            f"вызов модели в худшем случае {worst:g} с (LLM_TIMEOUT_SECONDS × LLM_MAX_ATTEMPTS"
+            f" × провайдеры) не короче порога зависшей симуляции"
+            f" {settings.simulation_stale_seconds} с (SIMULATION_STALE_SECONDS)"
         )
 
 
@@ -454,12 +552,14 @@ def build_maintenance(
     *,
     stale_limit: timedelta,
     queued_limit: timedelta,
+    simulation_stale_limit: timedelta,
     now: Callable[[], datetime],
     redeliver: Callable[[], int] | None = None,
     redelivery_interval: timedelta = timedelta(seconds=300),
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
 ) -> Callable[[], None]:
-    """Периодический проход: зависшие прогоны, истёкшие сессии, повтор доставок.
+    """Периодический проход: зависшие прогоны, истёкшие сессии, зависшие и истёкшие
+    симуляции, повтор доставок.
 
     Шаги независимы: сбой одного логируется, отмечается ошибкой на текущем спане
     (`review.sweep`) и не мешает другому. Повтор доставок ходит в GitHub, поэтому
@@ -498,6 +598,26 @@ def build_maintenance(
             logger.exception(
                 "удаление истёкших сессий завершилось ошибкой",
                 extra={"maintenance_step": "purge_expired_sessions"},
+            )
+        try:
+            failed = sweep_stale_simulations(uow_factory(), now=now(), limit=simulation_stale_limit)
+            if failed:
+                logger.warning("зависших симуляций переведено в failed: %d", failed)
+        except Exception as exc:
+            record_current_exception(exc)
+            logger.exception(
+                "проход по зависшим симуляциям завершился ошибкой",
+                extra={"maintenance_step": "sweep_stale_simulations"},
+            )
+        try:
+            purged = purge_expired_simulations(uow_factory(), now=now())
+            if purged:
+                logger.info("истёкших симуляций удалено: %d", purged)
+        except Exception as exc:
+            record_current_exception(exc)
+            logger.exception(
+                "удаление истёкших симуляций завершилось ошибкой",
+                extra={"maintenance_step": "purge_expired_simulations"},
             )
         moment = now()
         if redeliver is None or (
@@ -550,6 +670,7 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
     if settings.llm_backend is None:
         raise WorkerConfigError("LLM_BACKEND не задан: выберите stub, ollama или eurorouter")
     check_model_deadline(settings)
+    check_simulation_deadline(settings)
     check_consumer_timeout(settings)
     check_sweep_thresholds(settings)
     # Воркеру — свои потолки VCS-клиента: дифф и ревью крупного PR дольше,
@@ -567,6 +688,7 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
         container.unit_of_work,
         stale_limit=timedelta(seconds=settings.stale_run_timeout_seconds),
         queued_limit=timedelta(seconds=settings.queued_run_timeout_seconds),
+        simulation_stale_limit=timedelta(seconds=settings.simulation_stale_seconds),
         now=lambda: datetime.now(UTC),
         redeliver=build_redelivery(
             settings,
@@ -577,12 +699,17 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
         redelivery_interval=timedelta(seconds=settings.webhook_redelivery_interval_seconds),
         run_outcome=run_outcome,
     )
-    handler = build_review_handler(
-        container,
-        context_limits(settings),
-        llm_limits(settings),
-        prompt_texts,
-        run_outcome=run_outcome,
+    handler = build_message_handler(
+        review=build_review_handler(
+            container,
+            context_limits(settings),
+            llm_limits(settings),
+            prompt_texts,
+            run_outcome=run_outcome,
+        ),
+        simulation=build_simulation_handler(
+            container, context_limits(settings), llm_limits(settings), prompt_texts
+        ),
     )
     with stop_on_signals() as stop:
         try:

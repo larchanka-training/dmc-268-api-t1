@@ -18,7 +18,7 @@ from app.application.ports.cache_store import CacheStore
 from app.application.ports.vcs_gateway import VcsGateway
 from app.domain.entities import RepoRules
 from app.domain.enums import RulesStatus
-from app.domain.repo_rules import RULES_PATH, parse_rules_markdown
+from app.domain.repo_rules import RULES_PATH, rules_from_text
 from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 
 logger = logging.getLogger(__name__)
@@ -66,25 +66,24 @@ def load_repo_rules(
     if status is not RulesStatus.LOADED:
         logger.info("правила %s@%s: %s — дефолтный фоллбэк", repo_full_name, base_sha, status)
         return RepoRules(status=status)
-    rules, rejected = parse_rules_markdown(text)
-    if not rules:
+    parsed = rules_from_text(text)
+    if parsed.status is RulesStatus.EMPTY:
         # Итог разбора, а не довыборки: в кэше лежит текст, статус выводится из него.
         logger.info(
             "правила %s@%s: ни одного принятого правила из %d разделов — дефолтный фоллбэк",
             repo_full_name,
             base_sha,
-            len(rejected),
+            len(parsed.rejected),
         )
-        return RepoRules(status=RulesStatus.EMPTY, rejected=rejected)
-    if rejected:
+    elif parsed.rejected:
         logger.info(
             "правила %s@%s: отклонено %d из %d",
             repo_full_name,
             base_sha,
-            len(rejected),
-            len(rules) + len(rejected),
+            len(parsed.rejected),
+            len(parsed.rules) + len(parsed.rejected),
         )
-    return RepoRules(status=RulesStatus.LOADED, rules=rules, rejected=rejected)
+    return parsed
 
 
 def _classify(content: str | None) -> tuple[RulesStatus, str]:

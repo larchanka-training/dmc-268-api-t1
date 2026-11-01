@@ -58,7 +58,9 @@ from app.infrastructure.queue.rabbitmq import (
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from app.worker.factory import (
+    build_message_handler,
     build_review_handler,
+    build_simulation_handler,
     build_worker,
     context_limits,
     llm_limits,
@@ -187,11 +189,14 @@ class Stack:
         дедлайном: зависание роняет тест, а не весь прогон CI.
         """
         container = self.container(llm)
-        handler = build_review_handler(
-            container,
-            context_limits(self.settings),
-            llm_limits(self.settings),
-            load_checked_prompt_texts(self.settings, DEFAULT_PROMPTS_DIR),
+        texts = load_checked_prompt_texts(self.settings, DEFAULT_PROMPTS_DIR)
+        handler = build_message_handler(
+            review=build_review_handler(
+                container, context_limits(self.settings), llm_limits(self.settings), texts
+            ),
+            simulation=build_simulation_handler(
+                container, context_limits(self.settings), llm_limits(self.settings), texts
+            ),
         )
         worker = build_worker(self.settings)
         errors: list[BaseException] = []

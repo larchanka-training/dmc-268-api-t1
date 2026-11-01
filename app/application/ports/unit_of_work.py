@@ -23,6 +23,7 @@ from app.application.ports.repositories import (
     ReviewRunRepo,
     ReviewRunStepRepo,
     SessionRepo,
+    SimulationRepo,
     UserRepo,
 )
 
@@ -44,6 +45,7 @@ class UnitOfWork(Protocol):
     users: UserRepo
     sessions: SessionRepo
     provider_tokens: ProviderTokenRepo
+    simulations: SimulationRepo
 
     def __enter__(self) -> Self: ...
 

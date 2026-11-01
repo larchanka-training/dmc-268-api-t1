@@ -18,6 +18,7 @@ from app.domain.enums import (
     CommentKind,
     DefinitionKind,
     DiffSide,
+    DiscardStage,
     FindingCategory,
     FindingSeverity,
     MergeRequestState,
@@ -27,10 +28,13 @@ from app.domain.enums import (
     ReviewRunStatus,
     ReviewRunStepStatus,
     RulesStatus,
+    SimulationSourceKind,
+    SimulationStatus,
     TriggerSource,
     VerificationOutcome,
     VerifierVerdict,
 )
+from app.domain.file_context import FileContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +332,19 @@ class ReviewJob:
 
 
 @dataclass(frozen=True, slots=True)
+class SimulationJob:
+    """Сообщение очереди, которое просит прогнать одну симуляцию песочницы правил.
+
+    Как `ReviewJob`, не хранится, и `id` - новый на каждую постановку. Вход
+    пользователя в сообщении не возится: он в строке симуляции, и через брокер
+    код не идёт.
+    """
+
+    id: UUID
+    simulation_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
 class Hunk:
     """Непрерывный диапазон, затронутый диффом, как его выдаёт парсер."""
 
@@ -509,6 +526,76 @@ class Verdict:
 
     verdict: VerifierVerdict
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationFinding:
+    """Замечание симуляции: поля находки прогона без прогона и меток времени, и вердикт.
+
+    `verdict` пуст, если второй проход вердиктов не дал (`verification` симуляции
+    не `verified`). `drop` у оставленного - находка безопасности `high` или
+    `critical`, которую верификатор отбросить не может.
+    """
+
+    id: UUID
+    anchor: DiffAnchor
+    category: FindingCategory
+    severity: FindingSeverity
+    message: str
+    suggestion: str | None = None
+    confidence: float | None = None
+    rule: RuleRef | None = None
+    verdict: Verdict | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DiscardedFinding:
+    """Замечание модели, не дошедшее до результата симуляции: где отброшено и почему.
+
+    `candidate` у отсева - ответ модели как есть; у верификатора - замечание после
+    отсева, ссылка на правило - именем и номером пункта. `reason` - причина отсева
+    или слова верификатора.
+    """
+
+    stage: DiscardStage
+    reason: str
+    candidate: LlmFinding
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationResult:
+    """Итог анализа симуляции: замечания, отброшенные и что модель видела по файлам."""
+
+    findings: tuple[SimulationFinding, ...]
+    discarded: tuple[DiscardedFinding, ...]
+    context: tuple[FileContext, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Simulation:
+    """Симуляция ревью в песочнице правил: вход пользователя, ход анализа и итог.
+
+    Хранится как `simulations`. Вход - `source` (фрагмент или дифф) и `rules` -
+    есть, только пока симуляция не завершена: итоговый переход его стирает
+    (`app/domain/simulation.py`). `file_path` - только у фрагмента кода.
+    Результат - ровно у `completed`, код сбоя - ровно у `failed`.
+    """
+
+    id: UUID
+    user_id: UUID
+    status: SimulationStatus
+    source_kind: SimulationSourceKind
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime
+    file_path: str | None = None
+    source: str | None = None
+    rules: str | None = None
+    result: SimulationResult | None = None
+    model: str | None = None
+    tokens_used: int | None = None
+    verification: VerificationOutcome | None = None
+    error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,33 +17,29 @@ Use case уровня application: знает порты (`UnitOfWork`, `LlmGate
 """
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
 from app.application.context_assembly import ContextLimits
-from app.application.llm_review import LlmLimits, request_review, request_verification
+from app.application.llm_review import LlmLimits, request_review
 from app.application.merge_gate_publish import build_failed_review_check
 from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
-from app.application.ports.llm_gateway import LlmGateway, RetryListener
+from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.stage_tracer import NO_STAGE_TRACING, StageTracer
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.publish_review import publish_review
-from app.application.review_run_steps import (
-    StepRecorder,
-    close_abandoned_steps,
-    spent_tokens,
-)
+from app.application.review_run_steps import StepRecorder, close_abandoned_steps
 from app.application.use_cases.build_review_context import (
     build_review_context,
     fetch_review_diff,
 )
+from app.application.verify_findings import Verification, verify_findings
 from app.domain.entities import (
-    ContextPayload,
     Finding,
     ReviewJob,
     ReviewRun,
@@ -53,13 +49,12 @@ from app.domain.enums import (
     TERMINAL_STATUSES,
     ReviewRunStage,
     ReviewRunStatus,
-    VerificationOutcome,
 )
 from app.domain.lifecycle import advance
-from app.domain.llm_errors import LlmError, LlmOutputError
+from app.domain.llm_errors import LlmError
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import error_code
-from app.domain.verification import apply_verdicts, screen_findings
+from app.domain.verification import screen_findings
 
 logger = logging.getLogger(__name__)
 
@@ -271,20 +266,20 @@ def run_review(
         moment = now()
         steps.start(ReviewRunStage.VERIFYING, at=moment)
         run = _record_progress(uow, run, moment)
-        verification = _verify(
+        verification = verify_findings(
             context,
             prompt_texts,
             llm_gateway,
             llm_limits,
             screening.kept,
-            run.id,
             on_retry=steps.retry,
         )
         steps.finish(
             tokens_used=verification.step_tokens, error_code=verification.error_code
         )
         unrecorded_tokens += verification.tokens_used
-        if result.findings and not verification.findings:
+        _log_verdicts(verification)
+        if result.findings and not verification.kept:
             # Сводка модели описывает замечания, которых в публикации не будет:
             # публикация возьмёт стандартную.
             result = replace(result, summary=None)
@@ -294,14 +289,14 @@ def run_review(
         run = replace(
             run,
             last_progress_at=now(),
-            rejected_findings=run.rejected_findings + screening.rejected,
+            rejected_findings=run.rejected_findings + len(screening.rejected),
             verification=verification.outcome,
-            verifier_dropped_findings=verification.dropped,
+            verifier_dropped_findings=len(verification.dropped),
             model=result.model,
             tokens_used=result.tokens_used + verification.tokens_used,
         )
         with uow:
-            for finding in verification.findings:
+            for finding in verification.kept:
                 uow.findings.add(finding)
             uow.review_runs.update(run)
             uow.commit()
@@ -352,88 +347,28 @@ def run_review(
         raise
 
 
-@dataclass(frozen=True, slots=True)
-class _Verification:
-    findings: tuple[Finding, ...]
-    outcome: VerificationOutcome
-    dropped: int
-    tokens_used: int
-    # Для шага `verifying`: токены, если модель вызывалась, и код сбоя, если
-    # второй проход не удался (прогон при этом не падает).
-    step_tokens: int | None = None
-    error_code: str | None = None
-
-
-def _verify(
-    context: ContextPayload,
-    texts: PromptTexts,
-    gateway: LlmGateway,
-    limits: LlmLimits,
-    candidates: Sequence[Finding],
-    run_id: UUID,
-    *,
-    on_retry: RetryListener | None = None,
-) -> _Verification:
-    """Второй проход: оставить замечания, которые верификатор подтвердил.
-
-    Без кандидатов модель не вызывается. Сбой вызова или ответ, не покрывающий
-    кандидатов ровно по разу, - fail-open: кандидаты публикуются как есть, а
-    итог `unavailable` виден в прогоне. Прочие исключения не гасятся.
-    """
-    if not candidates:
-        return _Verification((), VerificationOutcome.NOT_REQUIRED, 0, 0)
-    try:
-        answer = request_verification(
-            context, texts, gateway, candidates, limits=limits, on_retry=on_retry
-        )
-    except LlmError as error:
-        # Идентификатор прогона — атрибутом из контекста логов, не в тексте.
-        logger.warning(
-            "верификатор недоступен, публикуются замечания после отсева",
-            exc_info=True,
-        )
-        return _Verification(
-            tuple(candidates),
-            VerificationOutcome.UNAVAILABLE,
-            0,
-            error.tokens_used,
-            step_tokens=spent_tokens(error),
-            error_code=error.code,
-        )
-    if not answer.verdicts.ok:
-        logger.warning("ответ верификатора не принят: %s", answer.verdicts.error)
-        return _Verification(
-            tuple(candidates),
-            VerificationOutcome.UNAVAILABLE,
-            0,
-            answer.tokens_used,
-            step_tokens=answer.tokens_used,
-            error_code=LlmOutputError.code,
-        )
-    applied = apply_verdicts(candidates, answer.verdicts.unwrap())
-    for finding, reason in applied.dropped:
+def _log_verdicts(verification: Verification) -> None:
+    """Отброшенные верификатором и оставленные вопреки `drop` - в лог прогона."""
+    if verification.applied is None:
+        return
+    for judged in verification.applied.dropped:
+        finding = judged.finding
         logger.info(
             "верификатор отбросил замечание %s (%s/%s): %s",
             _where(finding),
             finding.category,
             finding.severity,
-            reason,
+            judged.verdict.reason,
         )
-    for finding, reason in applied.overruled:
+    for judged in verification.applied.overruled:
+        finding = judged.finding
         logger.warning(
             "верификатор хотел отбросить замечание %s (%s/%s), оно оставлено: %s",
             _where(finding),
             finding.category,
             finding.severity,
-            reason,
+            judged.verdict.reason,
         )
-    return _Verification(
-        applied.kept,
-        VerificationOutcome.VERIFIED,
-        len(applied.dropped),
-        answer.tokens_used,
-        step_tokens=answer.tokens_used,
-    )
 
 
 def _where(finding: Finding) -> str:

@@ -21,7 +21,7 @@ from app.infrastructure.queue.rabbitmq import (
     DLQ_NAME,
     QUEUE_NAME,
 )
-from app.worker.factory import build_worker
+from app.worker.factory import build_message_handler, build_worker
 
 from ..conftest import requires_broker, requires_db
 from ..e2e.stack import Stack
@@ -42,7 +42,7 @@ def _die_on_next_delivery(stack: Stack) -> None:
 
     def consume() -> None:
         try:
-            worker.run(die)
+            worker.run(build_message_handler(die))
         except BaseException as error:  # noqa: BLE001 — переносится в поток теста
             errors.append(error)
 

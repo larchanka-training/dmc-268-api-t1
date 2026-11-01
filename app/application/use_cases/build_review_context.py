@@ -19,6 +19,7 @@ from uuid import UUID
 from app.application.context_assembly import (
     AssembledContext,
     ContextLimits,
+    ContextSubject,
     FileAst,
     PrContext,
     SkippedAst,
@@ -81,7 +82,12 @@ def build_review_context(
     )
     asts, skipped = _collect_asts(job, filter_diff_files(files), vcs, extractor, limits)
     return assemble_context(
-        job,
+        ContextSubject(
+            repository=job.repository_full_name,
+            pull_request=job.pull_request_number,
+            base_sha=job.base_sha,
+            head_sha=job.head_sha,
+        ),
         files,
         rules,
         asts,

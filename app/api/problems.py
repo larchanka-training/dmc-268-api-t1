@@ -26,6 +26,8 @@ class ErrorCode(StrEnum):
 
     VALIDATION_ERROR = "VALIDATION_ERROR"
     REVIEW_NOT_FOUND = "REVIEW_NOT_FOUND"
+    FINDING_NOT_FOUND = "FINDING_NOT_FOUND"
+    SIMULATION_NOT_FOUND = "SIMULATION_NOT_FOUND"
     REPOSITORY_NOT_FOUND = "REPOSITORY_NOT_FOUND"
     REPOSITORY_NOT_IN_INSTALLATION = "REPOSITORY_NOT_IN_INSTALLATION"
     REPOSITORY_ALREADY_CONNECTED = "REPOSITORY_ALREADY_CONNECTED"
@@ -39,6 +41,7 @@ class ErrorCode(StrEnum):
     ROUTE_NOT_FOUND = "ROUTE_NOT_FOUND"
     METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
     REQUEST_BODY_TOO_LARGE = "REQUEST_BODY_TOO_LARGE"
+    RATE_LIMITED = "RATE_LIMITED"
     NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
     HTTP_ERROR = "HTTP_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -154,6 +157,37 @@ class ReviewNotFoundProblem(Problem):
     title: Literal["Прогон ревью не найден"] = "Прогон ревью не найден"
     status: Literal[HTTPStatus.NOT_FOUND] = HTTPStatus.NOT_FOUND
     code: Literal[ErrorCode.REVIEW_NOT_FOUND] = ErrorCode.REVIEW_NOT_FOUND
+
+
+class FindingNotFoundProblem(Problem):
+    """`404 FINDING_NOT_FOUND`: у прогона ревью нет находки с таким id."""
+
+    example = {
+        "detail": "У прогона ревью нет находки с таким id.",
+        "instance": (
+            "/api/v1/reviews/0b9d6c1e-6a7f-4b8e-9c3d-2e1f0a9b8c7d/findings/"
+            "0192f0c4-7a1e-7b3c-9d2e-4f5a6b7c8d9e/inspection"
+        ),
+    }
+
+    type: Literal["urn:dmc-268:problem:finding-not-found"] = "urn:dmc-268:problem:finding-not-found"
+    title: Literal["Находка не найдена"] = "Находка не найдена"
+    status: Literal[HTTPStatus.NOT_FOUND] = HTTPStatus.NOT_FOUND
+    code: Literal[ErrorCode.FINDING_NOT_FOUND] = ErrorCode.FINDING_NOT_FOUND
+
+
+class SimulationNotFoundProblem(Problem):
+    """`404 SIMULATION_NOT_FOUND`: симуляции с таким id нет, её срок хранения истёк или её запустил другой пользователь."""
+
+    example = {
+        "detail": "Симуляции с таким id нет.",
+        "instance": "/api/v1/simulations/0192f0c4-7a1e-7b3c-9d2e-4f5a6b7c8d9e",
+    }
+
+    type: Literal["urn:dmc-268:problem:simulation-not-found"] = "urn:dmc-268:problem:simulation-not-found"
+    title: Literal["Симуляция не найдена"] = "Симуляция не найдена"
+    status: Literal[HTTPStatus.NOT_FOUND] = HTTPStatus.NOT_FOUND
+    code: Literal[ErrorCode.SIMULATION_NOT_FOUND] = ErrorCode.SIMULATION_NOT_FOUND
 
 
 class RepositoryNotFoundProblem(Problem):
@@ -332,6 +366,23 @@ class MethodNotAllowedProblem(Problem):
     code: Literal[ErrorCode.METHOD_NOT_ALLOWED] = ErrorCode.METHOD_NOT_ALLOWED
 
 
+class RateLimitedProblem(Problem):
+    """`429 RATE_LIMITED`: пользователь превысил лимит частоты запросов к ручке.
+
+    Через сколько секунд повторить - в заголовке `Retry-After`.
+    """
+
+    example = {
+        "detail": "Лимит запусков симуляции исчерпан; повторите позже.",
+        "instance": "/api/v1/simulations",
+    }
+
+    type: Literal["urn:dmc-268:problem:rate-limited"] = "urn:dmc-268:problem:rate-limited"
+    title: Literal["Слишком много запросов"] = "Слишком много запросов"
+    status: Literal[HTTPStatus.TOO_MANY_REQUESTS] = HTTPStatus.TOO_MANY_REQUESTS
+    code: Literal[ErrorCode.RATE_LIMITED] = ErrorCode.RATE_LIMITED
+
+
 class NotImplementedProblem(Problem):
     """`501 NOT_IMPLEMENTED`: ручка описана в контракте, но ещё не реализована."""
 
@@ -407,6 +458,8 @@ class AnyProblem(
         Annotated[
             ValidationProblem
             | ReviewNotFoundProblem
+            | FindingNotFoundProblem
+            | SimulationNotFoundProblem
             | RepositoryNotFoundProblem
             | RepositoryNotInInstallationProblem
             | RepositoryAlreadyConnectedProblem
@@ -420,6 +473,7 @@ class AnyProblem(
             | RouteNotFoundProblem
             | MethodNotAllowedProblem
             | RequestBodyTooLargeProblem
+            | RateLimitedProblem
             | NotImplementedProblem
             | HttpErrorProblem
             | InternalErrorProblem,

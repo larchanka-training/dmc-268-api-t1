@@ -126,7 +126,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.api.auth import router as auth_router
     from app.api.body_limit import RequestBodyLimitMiddleware
     from app.api.events import router as events_router
+    from app.api.inspection import router as inspection_router
     from app.api.origin import OriginMiddleware
+    from app.api.playground import router as playground_router
     from app.api.pull_requests import router as pull_requests_router
     from app.api.repositories import router as repositories_router
     from app.api.reviews import router as reviews_router
@@ -153,6 +155,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(repositories_router)
     app.include_router(pull_requests_router)
     app.include_router(reviews_router)
+    app.include_router(inspection_router)
+    app.include_router(playground_router)
     app.include_router(events_router)
 
     # Служебные ручки вне `/api/v1` — не часть контракта.

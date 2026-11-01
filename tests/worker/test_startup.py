@@ -19,6 +19,7 @@ from app.worker.factory import (
     WorkerConfigError,
     check_consumer_timeout,
     check_model_deadline,
+    check_simulation_deadline,
     check_sweep_thresholds,
     load_checked_prompt_texts,
     run_worker,
@@ -228,6 +229,31 @@ def test_model_call_longer_than_the_stale_run_threshold_stops_the_worker() -> No
 
     # Брокер недоступен: проверка срабатывает раньше подключения.
     with pytest.raises(WorkerConfigError, match="2400"):
+        run_worker(_loader(settings))
+
+
+FALLBACK = {
+    "llm_backend": "ollama",
+    "ollama_model": "qwen2.5-coder:7b",
+    "llm_hosted_fallback": True,
+    "eurorouter_base_url": "https://eurorouter.example/v1",
+    "eurorouter_model": "m",
+    "eurorouter_api_keys": "sk-1",
+}
+
+
+def test_default_simulation_threshold_outlives_a_model_call_with_fallback() -> None:
+    """Порог по умолчанию больше вызова модели стенда: 300 с × 2 попытки × 2 провайдера."""
+    check_simulation_deadline(_settings(**FALLBACK))
+
+
+def test_simulation_threshold_not_above_a_model_call_stops_the_worker() -> None:
+    settings = _settings(**FALLBACK, simulation_stale_seconds=1200)
+
+    with pytest.raises(WorkerConfigError, match=r"1200 с .* 1200 с \(SIMULATION_STALE_SECONDS\)"):
+        check_simulation_deadline(settings)
+
+    with pytest.raises(WorkerConfigError, match="SIMULATION_STALE_SECONDS"):
         run_worker(_loader(settings))
 
 
