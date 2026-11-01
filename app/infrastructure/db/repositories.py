@@ -38,6 +38,7 @@ from app.domain.entities import (
     ProviderToken,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewRun,
     ReviewRunListEntry,
     ReviewRunStep,
@@ -120,6 +121,8 @@ class SqlAlchemyRepositoryRepo:
                     created_at=repository.created_at,
                     updated_at=repository.updated_at,
                     connected_at=repository.connected_at,
+                    branch_filter=list(repository.branch_filter),
+                    min_severity=repository.min_severity,
                 )
                 .on_conflict_do_nothing(constraint="uq_repositories_provider_id")
                 .returning(RepositoryRow.id)
@@ -153,13 +156,22 @@ class SqlAlchemyRepositoryRepo:
             .values(connected_at=None, updated_at=now)
         )
 
-    def update(self, repository: Repository) -> None:
-        row = self._session.get(RepositoryRow, repository.id)
-        if row is None:
-            raise LookupError(f"repository {repository.id} is not stored")
-        row.full_name = repository.full_name
-        row.default_branch = repository.default_branch
-        row.auto_review_enabled = repository.auto_review_enabled
+    def update_settings(
+        self, repository_id: UUID, settings: RepositorySettings, now: dt.datetime
+    ) -> Repository | None:
+        # RETURNING — запись, какой её сохранила база, без второго запроса.
+        row = self._session.scalars(
+            update(RepositoryRow)
+            .where(RepositoryRow.id == repository_id)
+            .values(
+                auto_review_enabled=settings.auto_review_enabled,
+                branch_filter=list(settings.branch_filter),
+                min_severity=settings.min_severity,
+                updated_at=now,
+            )
+            .returning(RepositoryRow)
+        ).one_or_none()
+        return m.repository_to_domain(row) if row else None
 
 
 class SqlAlchemyMergeRequestRepo:

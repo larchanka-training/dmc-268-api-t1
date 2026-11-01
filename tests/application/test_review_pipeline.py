@@ -54,7 +54,7 @@ from ..fakes.llm_gateway import (
 from ..fakes.run_outcome import RecordingRunOutcome
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
-from ..fakes.webhooks import FakeVcs
+from ..fakes.webhooks import FakeVcs, a_repository
 
 # Дифф фейкового VCS меняет первую строку `app/main.py`.
 CHANGED_FILE = "app/main.py"
@@ -82,6 +82,8 @@ MR_ID = UUID(int=3)
 
 
 def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.QUEUED) -> None:
+    # Запись репозитория PR: без неё merge gate не прочитает порог.
+    uow.repositories.add(replace(a_repository(), id=UUID(int=9)))
     uow.merge_requests.add(
         MergeRequest(
             id=MR_ID,
@@ -944,7 +946,7 @@ def test_a_diff_over_the_limit_fails_the_run_without_a_review() -> None:
     run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.FAILED
-    assert run.failure_reason == "дифф PR больше лимита 1000 байт: ревью не выполняется"
+    assert run.failure_reason == "дифф PR больше лимита 1000 байт или GitHub не строит такой большой дифф: ревью не выполняется"
     assert _steps(uow) == [
         (ReviewRunStage.FETCHING_DIFF, ReviewRunStepStatus.FAILED, None, "DIFF_TOO_LARGE"),
     ]

@@ -77,6 +77,9 @@ class CachedInstallationCatalog:
     def app_installed(self, full_name: str) -> bool:
         return self._catalog.app_installed(full_name)
 
+    def repository_installation_id(self, full_name: str) -> int | None:
+        return self._catalog.repository_installation_id(full_name)
+
     def _read(self, key: str) -> list[InstallationRepository] | None:
         try:
             raw = self._cache.get(key)

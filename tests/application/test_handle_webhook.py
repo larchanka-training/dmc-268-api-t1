@@ -14,12 +14,17 @@ from uuid import uuid4
 
 import pytest
 
+from app.application.merge_gate_publish import (
+    AUTO_REVIEW_OFF_CHECK,
+    DISABLED_REVIEW_CHECK,
+)
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict
 from app.application.use_cases.handle_webhook import (
     WebhookOutcome,
     handle_webhook_event,
 )
+from app.domain.entities import RepositorySettings
 from app.domain.enums import Provider, ReviewRunStatus, TriggerSource
 from app.domain.vcs_errors import VcsError
 
@@ -614,3 +619,83 @@ def test_first_review_and_redelivery_touch_no_gate() -> None:
     assert vcs.checks == []
     _, uow, vcs, queue = run_case(uow=uow, queue=queue)
     assert vcs.checks == []
+
+
+def test_retarget_of_a_repository_with_auto_review_off_sets_only_the_pause_check() -> None:
+    """Пауза ревью важнее смены ветки: прогона и блокировки «Целевая ветка сменилась» нет —
+    иначе `failure` висел бы на head, который ревьюить не будут."""
+    uow, queue, _ = reviewed_on_old_target()
+    (repository,) = uow.repositories.stored.values()
+    uow.repositories.update_settings(
+        repository.id,
+        RepositorySettings(
+            auto_review_enabled=False,
+            branch_filter=(),
+            min_severity=repository.min_severity,
+        ),
+        NOW,
+    )
+
+    outcome, uow, vcs, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "ignored"
+    assert [check for _, check in vcs.checks] == [AUTO_REVIEW_OFF_CHECK]
+    assert merge_request_of(uow).target_branch == "main"
+    assert len(queue.jobs) == 1
+
+
+def _case_with_repository(repository: Any, action: str = "opened", *, vcs_error: VcsError | None = None):
+    uow = FakeUow()
+    uow.repositories.add(repository)
+    return run_case(action, uow=uow, vcs_error=vcs_error)
+
+
+@pytest.mark.parametrize("action", ["opened", "synchronize"])
+def test_auto_review_off_skips_the_run_and_sets_its_own_check(action: str) -> None:
+    """`auto_review_enabled = false` (design D5): прогона и задачи нет, на head — своя проверка
+    `success` с указанием на настройки в кабинете, а не «Ревью выключено в сервисе»."""
+    outcome, uow, vcs, queue = _case_with_repository(
+        replace(a_repository(), auto_review_enabled=False), action
+    )
+
+    assert outcome.kind == "ignored"
+    assert (uow.merge_requests.added, uow.review_runs.added, queue.jobs) == ([], [], [])
+    head_sha = webhook_payload(action)["pull_request"]["head"]["sha"]
+    assert vcs.calls == [("check", REPO_FULL_NAME, head_sha, "success")]
+    ((check_sha, check),) = vcs.checks
+    assert check_sha == head_sha
+    assert check == AUTO_REVIEW_OFF_CHECK
+    assert check.title == "Авторевью выключено в настройках"
+    assert "настройках репозитория в кабинете" in check.summary
+
+
+@pytest.mark.parametrize("auto_review_enabled", [True, False], ids=["авторевью", "без авторевью"])
+def test_disconnected_repository_keeps_the_disabled_check(auto_review_enabled: bool) -> None:
+    """Выключение репозитория важнее настройки: при обоих признаках — «Ревью выключено в сервисе»."""
+    repository = replace(
+        a_repository(), connected_at=None, auto_review_enabled=auto_review_enabled
+    )
+    outcome, _, vcs, queue = _case_with_repository(repository)
+
+    assert outcome.kind == "ignored" and queue.jobs == []
+    assert [check for _, check in vcs.checks] == [DISABLED_REVIEW_CHECK]
+
+
+def test_auto_review_off_check_failure_still_ignores_the_delivery() -> None:
+    """GitHub не принял проверку: ответ всё равно `ignored`, доставка не переотправляется."""
+    outcome, uow, vcs, queue = _case_with_repository(
+        replace(a_repository(), auto_review_enabled=False), vcs_error=VcsError("502")
+    )
+
+    assert outcome.kind == "ignored"
+    assert (uow.review_runs.added, queue.jobs, vcs.checks) == ([], [], [])
+
+
+def test_branch_filter_does_not_stop_the_run() -> None:
+    """Фильтр веток пока не применяется: PR в `main` при `["release/*"]` ревьюится."""
+    outcome, _, _, queue = _case_with_repository(
+        replace(a_repository(), branch_filter=("release/*",))
+    )
+
+    assert outcome.kind == "success"
+    assert len(queue.jobs) == 1

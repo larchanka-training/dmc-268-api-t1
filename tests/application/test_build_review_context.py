@@ -1,5 +1,6 @@
 """Сценарий сборки контекста на фейках VCS, кэша и парсера — без сети и tree-sitter."""
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
@@ -54,13 +55,18 @@ def _file_diff(path: str) -> str:
     )
 
 
-def _build(vcs: FakeVcs, extractor: FakeExtractor | None = None, limits: ContextLimits = LIMITS) -> AssembledContext:
+def _build(
+    vcs: FakeVcs,
+    extractor: FakeExtractor | None = None,
+    limits: ContextLimits = LIMITS,
+    cache: FakeCache | None = None,
+) -> AssembledContext:
     return build_review_context(
         JOB,
         fetch_review_diff(JOB, vcs, max_bytes=limits.diff_max_bytes),
         vcs=vcs,
         extractor=extractor or FakeExtractor(outlines={SOURCE: OUTLINE}),
-        cache=FakeCache(),
+        cache=cache if cache is not None else FakeCache(),
         limits=limits,
         review_run_id=JOB.review_run_id,
         now=NOW,
@@ -80,6 +86,15 @@ def test_rules_at_base_and_sources_at_head() -> None:
     file_calls = [c for c in vcs.calls if c[0] == "file"]
     assert ("file", "owner/repo", ".review/rules.md", BASE, 77) in file_calls
     assert ("file", "owner/repo", "app/repo.py", HEAD, 77) in file_calls
+
+
+def test_rules_are_cached_with_the_run_time() -> None:
+    """Время получения правил — `now` прогона, а не часы внутри загрузки."""
+    vcs = FakeVcs(diff=_file_diff("app/repo.py"), files={("app/repo.py", HEAD): SOURCE})
+    cache = FakeCache()
+    _build(vcs, cache=cache)
+    ((_, value, _),) = cache.sets
+    assert json.loads(value)["fetched_at"] == "2026-10-11T12:00:00+00:00"
 
 
 def test_full_context_contains_ast_of_changed_file() -> None:

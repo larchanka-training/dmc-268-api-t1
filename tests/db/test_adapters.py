@@ -17,6 +17,7 @@ from app.domain.entities import (
     MergeRequest,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewRun,
     ReviewRunStep,
     RuleRef,
@@ -155,6 +156,82 @@ def test_disconnect_and_reconnect_keep_one_record_with_its_id(uow) -> None:
 def test_reconnect_without_a_record_finds_nothing(uow) -> None:
     with uow as work:
         assert work.repositories.reconnect(a_repository()) is None
+
+
+HIGH_ON_MAIN = RepositorySettings(
+    auto_review_enabled=False,
+    branch_filter=("main", "release/*"),
+    min_severity=FindingSeverity.HIGH,
+)
+
+
+def test_a_repository_is_added_and_read_with_its_settings(uow) -> None:
+    """`text[]` ↔ tuple и enum порога переживают запись и чтение."""
+    repo = replace(a_repository(), branch_filter=("main", "release/*"), min_severity=FindingSeverity.HIGH)
+    with uow as work:
+        work.repositories.add(repo)
+        work.commit()
+    with uow as work:
+        assert work.repositories.get(repo.id) == repo
+
+
+def test_update_settings_writes_three_columns_and_updated_at(uow) -> None:
+    repo = a_repository()
+    with uow as work:
+        work.repositories.add(repo)
+        work.commit()
+    with uow as work:
+        returned = work.repositories.update_settings(repo.id, HIGH_ON_MAIN, LATER)
+        work.commit()
+    with uow as work:
+        stored = work.repositories.get(repo.id)
+    assert returned == stored
+    assert stored == replace(
+        repo,
+        auto_review_enabled=False,
+        branch_filter=("main", "release/*"),
+        min_severity=FindingSeverity.HIGH,
+        updated_at=LATER,
+    )
+
+    # Полная замена: пустой список стирает паттерны.
+    with uow as work:
+        work.repositories.update_settings(
+            repo.id,
+            RepositorySettings(
+                auto_review_enabled=True, branch_filter=(), min_severity=FindingSeverity.CRITICAL
+            ),
+            LATER,
+        )
+        work.commit()
+    with uow as work:
+        assert work.repositories.get(repo.id) == replace(repo, updated_at=LATER)
+
+
+def test_update_settings_of_a_missing_record_returns_none(uow) -> None:
+    with uow as work:
+        assert work.repositories.update_settings(a_repository().id, HIGH_ON_MAIN, LATER) is None
+        work.commit()
+
+
+def test_disconnect_and_reconnect_keep_the_saved_settings(uow) -> None:
+    repo = a_repository()
+    with uow as work:
+        work.repositories.add(repo)
+        work.repositories.update_settings(repo.id, HIGH_ON_MAIN, NOW)
+        work.repositories.disconnect(repo.id, LATER)
+        work.commit()
+    # Путь подключения несёт умолчания в сущности — они не должны затереть сохранённое.
+    candidate = replace(a_repository(), connected_at=LATER, updated_at=LATER)
+    with uow as work:
+        reconnected = work.repositories.reconnect(candidate)
+        work.commit()
+    assert reconnected is not None
+    assert (reconnected.auto_review_enabled, reconnected.branch_filter, reconnected.min_severity) == (
+        False,
+        ("main", "release/*"),
+        FindingSeverity.HIGH,
+    )
 
 
 def test_two_concurrent_reconnects_leave_one_record_and_one_winner(clean_db) -> None:

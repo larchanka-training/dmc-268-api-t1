@@ -15,8 +15,10 @@
 HTML, GitHub сменил форму ответа).
 """
 
+import re
 import time
 from collections.abc import Callable
+from http import HTTPStatus
 from typing import Any
 from urllib.parse import quote
 from uuid import UUID
@@ -46,6 +48,10 @@ _DIFF_ACCEPT = "application/vnd.github.v3.diff"
 _JSON_ACCEPT = "application/vnd.github+json"
 # Содержимое файла телом ответа, без base64-обёртки JSON.
 _RAW_ACCEPT = "application/vnd.github.raw+json"
+# Только sha коммита телом ответа, текстом.
+_SHA_ACCEPT = "application/vnd.github.sha"
+# SHA-1 или SHA-256 (репозиторий в формате sha256), шестнадцатерично.
+_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 # Отказ лимита без `retry-after` и `x-ratelimit-reset`: «wait for at least one
@@ -96,6 +102,10 @@ class GitHubVcsGateway:
             installation_id,
             accept=_DIFF_ACCEPT,
             max_bytes=max_bytes,
+            # Свой лимит GitHub: слишком большой дифф compare не строит и отвечает
+            # 422 «The diff is taking too long to generate.» (снято на torvalds/linux
+            # v6.0...v6.10) — это исход лимита, а не сбой VCS.
+            too_large_statuses=frozenset({HTTPStatus.UNPROCESSABLE_CONTENT}),
         )
         return response.text
 
@@ -210,6 +220,18 @@ class GitHubVcsGateway:
         if not response.headers.get("content-type", "").startswith(_RAW_ACCEPT):
             return None
         return response.text
+
+    def resolve_branch_sha(self, repo_full_name: str, branch: str, installation_id: int) -> str:
+        # Префикс `heads/` — форма ветки из документации «Get a commit»: имя ветки
+        # не спутать с тегом или sha. `/` в имени GitHub принимает как есть
+        # (проверено вживую), прочее экранируется. Ветки нет — GitHub отвечает 422
+        # «No commit found for SHA», а не 404: это обычный `VcsError`.
+        url = f"/repos/{repo_full_name}/commits/heads/{quote(branch, safe='/')}"
+        response = self._request("GET", url, installation_id, accept=_SHA_ACCEPT)
+        sha = response.text.strip()
+        if _SHA_RE.fullmatch(sha) is None:
+            raise VcsError(f"GitHub API вернул не sha на GET {url}")
+        return sha
 
     def _get_json_list(self, url: str, installation_id: int) -> list[dict[str, Any]]:
         response = self._request("GET", url, installation_id)
@@ -333,6 +355,7 @@ class GitHubVcsGateway:
         max_bytes: int | None = None,
         graphql: bool = False,
         already_done: Callable[[], httpx.Response | None] | None = None,
+        too_large_statuses: frozenset[int] = frozenset(),
     ) -> httpx.Response:
         """Один цикл повторов на все запросы к API.
 
@@ -343,7 +366,8 @@ class GitHubVcsGateway:
           иначе минута и вдвое больше на каждый следующий отказ («Rate limits for
           the REST API»); пауза сверх бюджета - сразу `VcsUnavailableError`;
         - 5xx - экспоненциальный backoff;
-        - прочие ошибки - сразу ошибка адаптера (404 на GET - `VcsNotFoundError`).
+        - прочие ошибки и 3xx - сразу ошибка адаптера (404 на GET - `VcsNotFoundError`,
+          статус из `too_large_statuses` - `VcsFileTooLargeError`).
 
         Обрыв сети запроса без `already_done` не повторяется. С `already_done` -
         запрос без идемпотентности - на обрыв, 5xx и лимит после паузы спрашивает
@@ -372,10 +396,18 @@ class GitHubVcsGateway:
                     token = self._auth.installation_token(installation_id)
                     token_refreshed = True
                     continue
+                if 300 <= status < 400:
+                    # Переименованный репозиторий отвечает 301 — тело редиректа не
+                    # дифф и не JSON сущности, а переход шлюз не делает.
+                    raise VcsError(f"GitHub API: HTTP {status} (редирект) на {where}")
                 limited = response if is_rate_limited(response, graphql=graphql) else None
                 if not response.is_error and limited is None:
                     return response
                 if limited is None and status < 500:
+                    if status in too_large_statuses:
+                        raise VcsFileTooLargeError(
+                            f"GitHub API: HTTP {status} на {where}: GitHub не строит такой большой дифф"
+                        )
                     if status == 404 and method == "GET":
                         raise VcsNotFoundError(f"GitHub API: HTTP 404 на {where}")
                     raise VcsError(f"GitHub API: HTTP {status} на {where}")

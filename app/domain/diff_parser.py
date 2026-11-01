@@ -10,9 +10,10 @@ GitHub отдаёт дифф пул-реквеста текстом; чтобы 
 """
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 from app.domain.entities import Hunk, ParsedFile
+from app.domain.enums import DiffLineKind
 
 LOCK_FILE_NAMES: frozenset[str] = frozenset(
     {
@@ -89,6 +90,7 @@ def _parse_file(lines: list[str]) -> ParsedFile:
     rename_to: str | None = None
     is_binary = False
     is_deleted = False
+    is_added = False
     hunks: list[Hunk] = []
     header: re.Match[str] | None = None
     body: list[str] = []
@@ -105,11 +107,14 @@ def _parse_file(lines: list[str]) -> ParsedFile:
             body.append(line)
         elif line.startswith("--- "):
             minus_path = _path_after_marker(line, "--- ")
+            is_added = minus_path is None
         elif line.startswith("+++ "):
             plus_path = _path_after_marker(line, "+++ ")
             is_deleted = plus_path is None
         elif line.startswith("deleted file mode"):
             is_deleted = True
+        elif line.startswith("new file mode"):
+            is_added = True
         elif line.startswith("rename from "):
             rename_from = _unquote(line[len("rename from ") :])
         elif line.startswith("rename to "):
@@ -128,6 +133,7 @@ def _parse_file(lines: list[str]) -> ParsedFile:
         is_binary=is_binary,
         is_deleted=is_deleted,
         hunks=tuple(hunks),
+        is_added=is_added,
     )
 
 
@@ -142,21 +148,13 @@ def _build_hunk(file_path: str, header: re.Match[str], body: list[str]) -> Hunk:
     old_count = int(header.group(2) or "1")
     new_start = int(header.group(3))
     new_count = int(header.group(4) or "1")
-    old_line, new_line = old_start, new_start
     changed_old: set[int] = set()
     changed_new: set[int] = set()
-    for line in body:
-        if line.startswith("+"):
+    for kind, old_line, new_line, _ in number_lines(body, old_start, new_start):
+        if kind is DiffLineKind.ADDED and new_line is not None:
             changed_new.add(new_line)
-            new_line += 1
-        elif line.startswith("-"):
+        elif kind is DiffLineKind.REMOVED and old_line is not None:
             changed_old.add(old_line)
-            old_line += 1
-        elif line.startswith("\\"):
-            continue
-        else:
-            old_line += 1
-            new_line += 1
     return Hunk(
         file_path=file_path,
         old_start=old_start,
@@ -167,6 +165,31 @@ def _build_hunk(file_path: str, header: re.Match[str], body: list[str]) -> Hunk:
         changed_old_lines=frozenset(changed_old),
         text="\n".join([header.string, *body]),
     )
+
+
+def number_lines(
+    body: Iterable[str], old_start: int, new_start: int
+) -> Iterator[tuple[DiffLineKind, int | None, int | None, str]]:
+    """Пронумеровать строки тела hunk'а: вид, номер слева, номер справа, текст без префикса.
+
+    У добавленной строки нет старого номера, у удалённой — нового. Строка
+    `\\ No newline at end of file` — не строка файла: она пропускается и
+    номера не сдвигает. Одна нумерация на парсер и представление диффа.
+    """
+    old_line, new_line = old_start, new_start
+    for line in body:
+        if line.startswith("+"):
+            yield DiffLineKind.ADDED, None, new_line, line[1:]
+            new_line += 1
+        elif line.startswith("-"):
+            yield DiffLineKind.REMOVED, old_line, None, line[1:]
+            old_line += 1
+        elif line.startswith("\\"):
+            continue
+        else:
+            yield DiffLineKind.CONTEXT, old_line, new_line, line[1:]
+            old_line += 1
+            new_line += 1
 
 
 def _path_after_marker(line: str, marker: str) -> str | None:

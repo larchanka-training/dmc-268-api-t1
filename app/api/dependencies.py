@@ -11,9 +11,12 @@ from typing import Annotated, cast
 from fastapi import Depends, Path, Request
 
 from app.application.ports import RunChanges, UnitOfWork
+from app.application.ports.cache_store import CacheStore
 from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
+from app.application.ports.vcs_gateway import VcsGateway
+from app.config import Settings
 from app.domain.enums import Provider
 from app.infrastructure.container import Container
 
@@ -108,3 +111,24 @@ def get_run_changes(container: Container = Depends(get_container)) -> RunChanges
 def get_clock() -> Callable[[], float]:
     """Монотонные часы потока событий; тесты подменяют их ходом своего «времени»."""
     return time.monotonic
+
+
+def get_cabinet_vcs_gateway(container: Container = Depends(get_container)) -> VcsGateway:
+    """VCS-шлюз чтений кабинета (дифф прогона): свои тайм-ауты, не шлюз вебхука; тесты подменяют его фейком."""
+    return container.cabinet_vcs_gateway()
+
+
+def get_run_diff_cache(container: Container = Depends(get_container)) -> CacheStore:
+    """Кэш диффов прогонов по паре коммитов — отдельный от кэша видимости."""
+    return container.run_diff_cache()
+
+
+def get_rules_cache(container: Container = Depends(get_container)) -> CacheStore:
+    """Кэш исходов загрузки `.review/rules.md` — своё хранилище процесса API, отдельное от кэша
+    видимости; ключ и формат те же, что у прогона, но записи воркера здесь не видны (design D7)."""
+    return container.rules_cache()
+
+
+def get_settings(container: Container = Depends(get_container)) -> Settings:
+    """Настройки процесса, с которыми собран контейнер."""
+    return container.settings
