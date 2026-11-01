@@ -172,13 +172,15 @@ jobs:
           --out build-summary/metrics.json
       # База для разницы — метрики последнего успешного прогона develop из
       # кэша Actions: токену не нужен actions: read, как скачиванию артефакта
-      # чужого прогона. Кэш пул-реквеста видит кэш его базовой ветки.
+      # чужого прогона. Кэш пул-реквеста видит кэш его базовой ветки. Ключ
+      # восстановления не сохраняется никогда, поэтому всегда срабатывает
+      # restore-keys — самая свежая база, и при Re-run уже закэшированного sha.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ !cancelled() }}
         continue-on-error: true
         with:
           path: build-base
-          key: build-metrics-${{ github.sha }}
+          key: build-metrics-restore-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: build-metrics-
       - name: Summary сборки
         if: ${{ !cancelled() }}
