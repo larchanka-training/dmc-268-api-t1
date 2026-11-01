@@ -946,7 +946,7 @@ def test_a_diff_over_the_limit_fails_the_run_without_a_review() -> None:
     run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.FAILED
-    assert run.failure_reason == "дифф PR больше лимита 1000 байт: ревью не выполняется"
+    assert run.failure_reason == "дифф PR больше лимита 1000 байт или GitHub не строит такой большой дифф: ревью не выполняется"
     assert _steps(uow) == [
         (ReviewRunStage.FETCHING_DIFF, ReviewRunStepStatus.FAILED, None, "DIFF_TOO_LARGE"),
     ]

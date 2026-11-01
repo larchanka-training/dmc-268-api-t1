@@ -303,16 +303,6 @@ def user_repositories(
     return _as_user(signed_in, oauth, lambda user: connecting.list_user_repositories(catalog, uow_factory(), user, now))
 
 
-def visible_provider_ids(
-    signed_in: SignedIn,
-    catalog: InstallationCatalog,
-    oauth: OAuthProvider,
-    uow_factory: Callable[[], UnitOfWork],
-) -> set[str]:
-    """`provider_id` репозиториев, которые пользователь видит на GitHub по своему токену."""
-    return {r.provider_id for r in user_repositories(signed_in, catalog, oauth, uow_factory)}
-
-
 def is_visible(repository: Repository, provider_ids: Collection[str]) -> bool:
     """Правило видимости кабинета: репозиторий виден, если GitHub отдаёт его пользователю.
 

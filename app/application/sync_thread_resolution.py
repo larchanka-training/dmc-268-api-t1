@@ -14,7 +14,7 @@ from app.application.merge_gate_publish import (
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import ReviewThreadState
-from app.domain.enums import CommentKind, FindingSeverity, Provider, ReviewRunStatus
+from app.domain.enums import CommentKind, Provider, ReviewRunStatus
 from app.domain.webhook import THREAD_ACTIONS
 
 logger = logging.getLogger(__name__)
@@ -97,12 +97,12 @@ def refresh_merge_gate_for_merge_request(
     pr_number: int,
     head_sha: str,
     installation_id: int,
-    min_severity: FindingSeverity,
+    repository_id: UUID,
     uow: UnitOfWork,
     vcs: VcsGateway,
     now: datetime,
 ) -> None:
-    """Сверить треды с GitHub и перевыставить gate по порогу `min_severity` репозитория."""
+    """Сверить треды с GitHub и перевыставить gate по текущему порогу `min_severity` репозитория."""
     sync_open_threads_from_host(
         merge_request_id,
         repo_full_name=repo_full_name,
@@ -134,7 +134,7 @@ def refresh_merge_gate_for_merge_request(
         head_sha=head_sha,
         installation_id=installation_id,
         run_id=head_run.id,
-        min_severity=min_severity,
+        repository_id=repository_id,
     )
 
 
@@ -191,7 +191,7 @@ def handle_review_thread_webhook(
 ) -> bool:
     """Обновить тред и сразу перевыставить merge gate на head PR.
 
-    Порог gate — `min_severity` из прочитанной записи репозитория: смена порога действует
+    Порог gate — текущий `min_severity` записи репозитория: смена порога действует
     на следующем закрытии треда. При паузе ревью (`pause_check`: репозиторий выключен или
     `auto_review_enabled = false`) тред записывается так же, но на head ставится check run
     паузы, без сверки тредов: пересчёт поставил бы `failure` на head с проверкой паузы или
@@ -223,7 +223,7 @@ def handle_review_thread_webhook(
         if repo is None:
             return True
         check = pause_check(repo)
-        min_severity = repo.min_severity
+        repository_id = repo.id
         merge_request = uow.merge_requests.find_by_number(repo.id, pr_number)
         if merge_request is None:
             return True
@@ -237,7 +237,7 @@ def handle_review_thread_webhook(
         pr_number=pr_number,
         head_sha=head_sha,
         installation_id=installation_id,
-        min_severity=min_severity,
+        repository_id=repository_id,
         uow=uow,
         vcs=vcs,
         now=now(),

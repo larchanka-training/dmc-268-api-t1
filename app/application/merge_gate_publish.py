@@ -6,7 +6,7 @@ from uuid import UUID
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import MergeGateCheck
-from app.domain.entities import Finding, MergeRequest, Repository
+from app.domain.entities import Finding, Repository
 from app.domain.enums import FindingSeverity, ReviewRunStatus
 from app.domain.merge_gate import merge_blocked_by_findings, untracked_findings
 from app.domain.vcs_errors import VcsError
@@ -28,16 +28,6 @@ def collect_open_findings(
     """
     with uow:
         return _open_findings(uow, merge_request_id, head_run_id)
-
-
-def repository_min_severity(uow: UnitOfWork, merge_request: MergeRequest) -> FindingSeverity:
-    """Порог `min_severity` репозитория PR — из записи репозитория, а не из задачи: смена
-    порога после постановки действует на публикации (design D4)."""
-    with uow:
-        repository = uow.repositories.get(merge_request.repository_id)
-    if repository is None:
-        raise LookupError(f"repository {merge_request.repository_id} not found")
-    return repository.min_severity
 
 
 def _open_findings(
@@ -142,11 +132,11 @@ def settle_merge_gate(
     head_sha: str,
     installation_id: int,
     run_id: UUID,
-    min_severity: FindingSeverity,
+    repository_id: UUID,
 ) -> None:
     """Выставить gate прогона `run_id` - по его открытым находкам и порогу
-    `min_severity` репозитория - или, если тот уже не отвечает за head, gate того,
-    кто отвечает (#222).
+    `min_severity` репозитория `repository_id` - или, если тот уже не отвечает за head,
+    gate того, кто отвечает (#222).
 
     Гонка со сменой целевой ветки: приём сначала коммитит отмену старого прогона и
     новый прогон, потом выставляет блокировку. Gate собирается по последнему
@@ -154,8 +144,9 @@ def settle_merge_gate(
     закоммитил, здесь видна смена и gate переписывается; если нет - блокировка
     приёма придёт позже и перекроет `success`. Так любая перестановка кончается
     gate актуального прогона. После сбоя `SETTLE_ATTEMPTS` попыток - `VcsError`
-    вызывающему. Находки читаются здесь же, на каждой попытке: check собирается
-    внутри и по тому же порогу, что у gate завершённого чужого прогона.
+    вызывающему. Находки и порог читаются здесь же, на каждой попытке: порог могли
+    сменить, пока шёл прогон или сбой, и gate завершённого чужого прогона по старому
+    порогу снял бы его блокировку.
     """
     failures = 0
     # Прогон и статус, по которым выставлен последний check: итог зависит от статуса,
@@ -166,6 +157,9 @@ def settle_merge_gate(
         # отвечать другой прогон, и повтор прежнего check вернул бы чужой итог.
         with uow:
             latest = uow.review_runs.find_latest(merge_request_id, head_sha)
+            repository = uow.repositories.get(repository_id)
+        if repository is None:
+            raise LookupError(f"repository {repository_id} not found")
         if latest is None or (latest.id, latest.status) == settled:
             return
         if (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED) or (
@@ -175,7 +169,7 @@ def settle_merge_gate(
             # нашего POST. Gate — по открытым находкам этого прогона и порогу репозитория.
             current = build_merge_gate_check(
                 collect_open_findings(uow, merge_request_id, head_run_id=latest.id),
-                min_severity,
+                repository.min_severity,
             )
         elif latest.status is ReviewRunStatus.FAILED:
             # Новый прогон уже упал: повторного ревью не будет, head ждёт push.

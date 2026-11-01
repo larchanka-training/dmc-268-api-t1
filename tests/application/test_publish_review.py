@@ -26,6 +26,7 @@ from app.domain.entities import (
     MergeRequest,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewJob,
     ReviewRun,
     RuleRef,
@@ -865,7 +866,7 @@ def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
         run_id=run.id,
-        min_severity=FindingSeverity.CRITICAL,
+        repository_id=REPOSITORY.id,
     )
 
     assert vcs.checks == [build_retarget_check()]
@@ -893,7 +894,7 @@ def test_settling_on_a_failed_latest_run_keeps_the_failure() -> None:
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
         run_id=run.id,
-        min_severity=FindingSeverity.CRITICAL,
+        repository_id=REPOSITORY.id,
     )
 
     assert vcs.checks == [build_failed_review_check()]
@@ -1026,7 +1027,10 @@ def test_orphan_failed_by_the_sweep_after_a_later_publication_is_looked_up() -> 
 
 
 def _publish_over_open_thread(
-    thread_severity: FindingSeverity, **repository_changes: object
+    thread_severity: FindingSeverity,
+    *,
+    make_vcs: Callable[[FakeUnitOfWork], RecordingVcsGateway] = lambda _uow: RecordingVcsGateway(),
+    **repository_changes: object,
 ) -> RecordingVcsGateway:
     """Прогон без новых находок поверх открытого треда; репозиторий PR — с данными настройками."""
     uow = FakeUnitOfWork()
@@ -1044,7 +1048,7 @@ def _publish_over_open_thread(
             updated_at=NOW,
         )
     )
-    vcs = RecordingVcsGateway()
+    vcs = make_vcs(uow)
     publish_review(
         JOB,
         uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
@@ -1073,6 +1077,33 @@ def test_default_threshold_keeps_high_below_the_gate() -> None:
     (check,) = vcs.checks
     assert check.conclusion == "success"
     assert "critical" in check.summary
+
+
+class _ThresholdLoweredDuringFailureVcs(RecordingVcsGateway):
+    """Первый POST gate GitHub отвергает, а за время сбоя порог репозитория снизили до `high`."""
+
+    def __init__(self, uow: FakeUnitOfWork) -> None:
+        super().__init__()
+        self._uow = uow
+        self._failed = False
+
+    def set_merge_gate_check(self, *args: Any) -> None:
+        if not self._failed:
+            self._failed = True
+            lowered = RepositorySettings(auto_review_enabled=True, branch_filter=(), min_severity=FindingSeverity.HIGH)
+            self._uow.repositories.update_settings(REPOSITORY.id, lowered, NOW)
+            raise VcsTransientError("GitHub API: HTTP 502")
+        super().set_merge_gate_check(*args)
+
+
+def test_a_retried_gate_reads_the_current_threshold() -> None:
+    """Повтор после сбоя берёт порог заново: со старым `critical` открытый тред `high`
+    дал бы `success` поверх порога, который уже требует блокировки."""
+    vcs = _publish_over_open_thread(FindingSeverity.HIGH, make_vcs=_ThresholdLoweredDuringFailureVcs)
+
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+    assert "high" in check.summary
 
 
 def test_missing_repository_record_is_a_lookup_error() -> None:

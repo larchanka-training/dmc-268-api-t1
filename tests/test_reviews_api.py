@@ -1069,6 +1069,21 @@ def test_reinstalled_app_gives_a_new_run_its_diff_with_the_new_installation() ->
     assert [(call[3], call[4]) for call in _diff_calls(vcs)] == [("abc123", 77), ("def456", 78)]
 
 
+def test_renamed_repository_gets_its_diff_by_the_current_name() -> None:
+    """Регресс: в базе имя с момента подключения, а GitHub знает репозиторий под новым —
+    установку и дифф спрашиваем по имени из ответа GitHub, иначе `301` и `502`."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    renamed = replace(VISIBLE, full_name="octo-org/api-v2")
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([renamed], installation_ids={"octo-org/api-v2": 77})
+
+    response = _client(uow, catalog, vcs).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 200
+    assert [(call[1], call[4]) for call in _diff_calls(vcs)] == [("octo-org/api-v2", 77)]
+
+
 def test_not_installed_is_not_remembered() -> None:
     """Сценарий «Не установлено — не запоминается»: следующий запрос снова спрашивает установку."""
     uow = FakeUnitOfWork()

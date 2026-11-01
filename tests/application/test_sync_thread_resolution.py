@@ -167,7 +167,7 @@ def test_merge_gate_refresh_sees_a_critical_whose_inline_id_was_lost() -> None:
         pr_number=7,
         head_sha="sha1",
         installation_id=1,
-        min_severity=FindingSeverity.CRITICAL,
+        repository_id=_seeded_repository(uow),
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -205,7 +205,7 @@ def _refresh(uow: FakeUnitOfWork) -> RecordingVcsGateway:
         pr_number=7,
         head_sha="sha1",
         installation_id=1,
-        min_severity=FindingSeverity.CRITICAL,
+        repository_id=_seeded_repository(uow),
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -266,7 +266,7 @@ def test_retarget_racing_a_thread_refresh_ends_in_failure() -> None:
         pr_number=7,
         head_sha="sha1",
         installation_id=1,
-        min_severity=FindingSeverity.CRITICAL,
+        repository_id=_seeded_repository(uow),
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -459,6 +459,13 @@ def _pr_with_two_threads(
             )
         )
     return uow
+
+
+def _seeded_repository(uow: FakeUnitOfWork) -> UUID:
+    """Репозиторий PR с порогом по умолчанию `critical`: gate читает порог из его записи."""
+    repository = _repository()
+    uow.repositories.add(repository)
+    return repository.id
 
 
 def _repository(**changes: object) -> Repository:

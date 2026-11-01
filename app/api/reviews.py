@@ -8,7 +8,7 @@
 """
 
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from http import HTTPStatus
 from typing import Annotated, Any, Literal
@@ -45,7 +45,7 @@ from app.api.errors import (
 )
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
-from app.api.repositories import is_visible, user_repositories, visible_provider_ids
+from app.api.repositories import is_visible, user_repositories
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
     FailedStage,
@@ -386,15 +386,16 @@ def visible_run_with_repository(
 
     Невидимый прогон отвечает так же, как несуществующий, `404 REVIEW_NOT_FOUND`. GitHub
     спрашиваем до чтения прогона и при любом id: иначе `502`, `401` или задержка ответа
-    выдали бы, что такой id есть.
+    выдали бы, что такой id есть. `full_name` репозитория — из ответа GitHub: в базе он тот,
+    что был при подключении, а переименованный репозиторий по старому имени отвечает `301`.
     """
-    provider_ids = visible_provider_ids(signed_in, catalog, oauth, uow_factory)
+    visible = {r.provider_id: r for r in user_repositories(signed_in, catalog, oauth, uow_factory)}
     with uow_factory() as uow:
         run = uow.review_runs.get(review_run_id)
         repository = None if run is None else _repository_of(uow, run)
-    if run is None or repository is None or not is_visible(repository, provider_ids):
+    if run is None or repository is None or not is_visible(repository, visible):
         raise ApiError(HTTPStatus.NOT_FOUND, ErrorCode.REVIEW_NOT_FOUND, "Прогона ревью с таким id нет.")
-    return run, repository
+    return run, replace(repository, full_name=visible[repository.provider_id].full_name)
 
 
 def visible_run(

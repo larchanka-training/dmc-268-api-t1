@@ -7,7 +7,6 @@ from datetime import datetime
 from uuid import UUID
 
 from app.application.merge_gate_publish import (
-    repository_min_severity,
     settle_merge_gate,
 )
 from app.application.ports.llm_gateway import LlmReviewResult, LlmReviewSummary
@@ -127,7 +126,6 @@ def publish_review(
 
     # Треды сверены с GitHub до публикации: gate - по базе, с находками этого
     # прогона, чей id inline не получен, и по порогу из записи репозитория.
-    min_severity = repository_min_severity(uow, merge_request)
     # Best-effort: ревью уже в PR, а `failed` после публикации ведёт к новому
     # прогону и второму ревью. Без check run обязательная проверка не даёт мерджа
     # до следующего прогона или вебхука закрытия треда.
@@ -141,7 +139,7 @@ def publish_review(
             head_sha=job.head_sha,
             installation_id=job.installation_id,
             run_id=run.id,
-            min_severity=min_severity,
+            repository_id=merge_request.repository_id,
         )
     except VcsError:
         logger.warning(
