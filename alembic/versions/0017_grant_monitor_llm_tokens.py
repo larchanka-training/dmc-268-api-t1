@@ -29,13 +29,14 @@ def upgrade() -> None:
     # USAGE на схему — явно, а не через PUBLIC: в схеме, созданной заново
     # (CREATE SCHEMA — так пересобирает базу фикстура тестов), PUBLIC его не
     # получает, и роль не видела бы таблицу вовсе. Схема — текущая, та, где
-    # миграции создают таблицы.
+    # миграции создают таблицы; таблица названа в ней же явно, чтобы оба
+    # гранта гарантированно ушли в одну схему.
     op.execute(
         f"DO $$ BEGIN"
         f" EXECUTE format('GRANT USAGE ON SCHEMA %I TO {_MONITOR_ROLE}', current_schema());"
+        f" EXECUTE format('GRANT SELECT (created_at, tokens_used) ON %I.review_runs TO {_MONITOR_ROLE}', current_schema());"
         f" END $$"
     )
-    op.execute(f"GRANT SELECT (created_at, tokens_used) ON review_runs TO {_MONITOR_ROLE}")
 
 
 def downgrade() -> None:
@@ -47,7 +48,7 @@ def downgrade() -> None:
     op.execute(
         f"DO $$ BEGIN"
         f" IF EXISTS (SELECT FROM pg_roles WHERE rolname = '{_MONITOR_ROLE}')"
-        f" THEN REVOKE SELECT (created_at, tokens_used) ON review_runs FROM {_MONITOR_ROLE};"
+        f" THEN EXECUTE format('REVOKE SELECT (created_at, tokens_used) ON %I.review_runs FROM {_MONITOR_ROLE}', current_schema());"
         f" EXECUTE format('REVOKE USAGE ON SCHEMA %I FROM {_MONITOR_ROLE}', current_schema());"
         f" END IF;"
         f" END $$"
