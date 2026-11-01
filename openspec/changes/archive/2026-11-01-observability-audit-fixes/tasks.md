@@ -21,10 +21,10 @@
 
 ## 4. Стенд
 
-- [x] 4.1 Из трейса API в Grafana открываются его логи (проверен запрос, который строит переход: по `trace_id` трейса из Tempo Loki находит его строку; в интерфейсе Grafana не открывали)
+- [x] 4.1 Из трейса API в Grafana открываются его логи (проверен запрос, который строит переход: по `trace_id` трейса из Tempo Loki находит его строку; в интерфейсе Grafana не открывали, эта проверка перенесена в задачу 2.2 change `grafana-memory`, #323)
 - [x] 4.2 Цели `collector-self`, `collector-docker-self`, `collector-logs-self`, `loki`, `tempo` в Prometheus `up`; в логе коллектора нет WARN про `otlphttp`
 - [x] 4.3 В Loki нет записей `GET /health`
-- [x] 4.4 Выкат ручным запуском с `allow_stateful_replace=true`: `dmc268-postgres`, `dmc268-postgres-replica` и `dmc268-rabbitmq` пересозданы на прежних томах, `docker inspect -f '{{.HostConfig.LogConfig.Type}}'` — `fluentd`, `docker logs` у них показывает записи; повторный `tofu plan` — `No changes` (отдельно не запускали: полный план деплоя develop 2026-11-01 заменяет только `api` и `worker`)
+- [x] 4.4 Выкат ручным запуском с `allow_stateful_replace=true`: `dmc268-postgres`, `dmc268-postgres-replica` и `dmc268-rabbitmq` пересозданы на прежних томах, `docker inspect -f '{{.HostConfig.LogConfig.Type}}'` — `fluentd`, `docker logs` у них показывает записи; повторный план базу и брокер не трогает: в первом деплое после выката (run 41157831159) targeted-план postgres и rabbitmq применился с `0 added, 0 changed, 0 destroyed`, полный план заменяет только `api` и `worker`; контейнеры созданы 2026-10-30 17:36 UTC и с тех пор не пересоздавались
 - [x] 4.5 В Loki есть `{service_name="dmc268-postgres"}`, `{service_name="dmc268-postgres-replica"}` и `{service_name="dmc268-rabbitmq"}`; в записях соединений rabbitmq адреса — маркер
 - [x] 4.6 `ss -ltn` на сервере: порт 24224 слушается только на `127.0.0.1`
 - [x] 4.7 nginx интерфейса: драйвер `fluentd` у `dmc268-ui` (PR в `dmc-268-ui-t1`), в Loki есть `{service_name="dmc268-ui"}`, query и IP скрыты; change не архивируется до него
