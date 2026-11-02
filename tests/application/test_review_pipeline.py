@@ -13,17 +13,24 @@ from pydantic import BaseModel
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
-from app.application.merge_gate_publish import build_failed_review_check
+from app.application.merge_gate_publish import (
+    AUTO_REVIEW_OFF_CHECK,
+    DISABLED_REVIEW_CHECK,
+    build_failed_review_check,
+)
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
+from app.application.ports.vcs_review import MergeGateCheck
 from app.application.review_pipeline import run_review
 from app.domain.entities import (
     MergeRequest,
+    RepositorySettings,
     ReviewJob,
     ReviewRun,
     ReviewRunStep,
     RuleRef,
 )
 from app.domain.enums import (
+    FindingSeverity,
     MergeRequestState,
     ReviewRunStage,
     ReviewRunStatus,
@@ -1405,6 +1412,42 @@ def test_a_failed_review_after_an_earlier_one_blocks_the_head() -> None:
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
     assert vcs.checks == [build_failed_review_check()]
+
+
+def _turn_auto_review_off(uow: FakeUnitOfWork) -> None:
+    uow.repositories.update_settings(
+        UUID(int=9), RepositorySettings(False, (), FindingSeverity.CRITICAL), NOW
+    )
+
+
+def _disconnect(uow: FakeUnitOfWork) -> None:
+    uow.repositories.disconnect(UUID(int=9), NOW)
+
+
+@pytest.mark.parametrize(
+    ("pause_review", "earlier_review", "expected"),
+    [
+        pytest.param(_turn_auto_review_off, True, AUTO_REVIEW_OFF_CHECK, id="auto-review-off"),
+        pytest.param(_disconnect, True, DISABLED_REVIEW_CHECK, id="disconnected"),
+        pytest.param(_turn_auto_review_off, False, AUTO_REVIEW_OFF_CHECK, id="first-review"),
+    ],
+)
+def test_a_failed_review_on_a_paused_repository_sets_the_pause_check(
+    pause_review: Callable[[FakeUnitOfWork], None], earlier_review: bool, expected: MergeGateCheck
+) -> None:
+    """#325: прогон начался до паузы: его падение не блокирует PR, а первый прогон
+    не оставляет обязательную проверку без check."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    if earlier_review:
+        _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    pause_review(uow)
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks == [expected]
 
 
 def test_a_failed_review_superseded_on_the_head_leaves_the_gate_alone() -> None:

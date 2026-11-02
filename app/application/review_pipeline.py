@@ -24,7 +24,7 @@ from uuid import UUID
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits, request_review, request_verification
-from app.application.merge_gate_publish import build_failed_review_check
+from app.application.merge_gate_publish import build_failed_review_check, pause_check
 from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
@@ -133,14 +133,16 @@ def _was_cancelled(uow: UnitOfWork, run_id: UUID) -> bool:
 
 def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) -> None:
     """Выставить `failure` на head, если упавший прогон на нём последний, а до него
-    на этот head уже было ревью (ревью #225).
+    на этот head уже было ревью (ревью #225), или check паузы, если ревью на паузе.
 
     Иначе на head мог остаться `success` прежнего прогона по старому диффу: его
     поправку после смены ветки (`settle_merge_gate`) GitHub не принял. Без
     прежнего ревью check run на head нет, обязательная проверка и так не даёт
     мерджа, и упавший прогон на PR ничего не оставляет. Прогон, за которым на head
-    уже есть новый, gate не трогает - head отвечает тот. Best-effort, как
-    `_mark_failed`: сбой пишется в лог и не подменяет исходное исключение.
+    уже есть новый, gate не трогает - head отвечает тот. На паузе check паузы ставится
+    и без прежнего ревью: иначе обязательная проверка держала бы PR, который ревью не
+    ждёт. Best-effort, как `_mark_failed`: сбой пишется в лог и не подменяет исходное
+    исключение.
     """
     try:
         with uow:
@@ -149,13 +151,18 @@ def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) 
                 return
             latest = uow.review_runs.find_latest(run.merge_request_id, job.head_sha)
             earlier = uow.review_runs.find_reviewed(run.merge_request_id, job.head_sha)
-        if latest is None or latest.id != run.id or earlier is None:
+            merge_request = uow.merge_requests.get(run.merge_request_id)
+            repository = uow.repositories.get(merge_request.repository_id) if merge_request else None
+        if latest is None or latest.id != run.id or repository is None:
+            return
+        check = pause_check(repository) or (build_failed_review_check() if earlier is not None else None)
+        if check is None:
             return
         vcs.set_merge_gate_check(
             job.repository_full_name,
             job.head_sha,
             job.installation_id,
-            build_failed_review_check(),
+            check,
         )
     except Exception:
         logger.exception("прогон %s упал, а check run merge gate на %s не выставлен", job.review_run_id, job.head_sha)
