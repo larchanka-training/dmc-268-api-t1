@@ -1,0 +1,8 @@
+{
+  "image": {
+    "name": "dmc268-api:ci",
+    "id": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "size": 254000000,
+    "compressed": 81000000
+  }
+}
