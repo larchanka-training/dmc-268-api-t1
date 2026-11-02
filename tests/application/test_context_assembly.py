@@ -1,6 +1,7 @@
 """Сборка пакета контекста — чистая функция на литеральных диффах и контурах."""
 
 import hashlib
+import tracemalloc
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -213,6 +214,38 @@ def test_huge_diff_never_exceeds_the_limit(max_tokens: int) -> None:
     assert omitted_hunks
     assert omitted_hunks[0]["reason"] == "budget"
     assert payload.body["omitted_count"] >= len(payload.body["omitted"])
+
+
+def test_hunk_longer_than_the_budget_is_omitted_without_sanitizing() -> None:
+    """Ханк длиннее остатка бюджета не обезвреживается: `sanitize` раздул бы `\\x01` в 8 раз.
+
+    Одна строка из управляющих символов проходит и байтовый, и строковый лимит диффа, а её
+    обезвреженная копия выводила воркер за память контейнера (#328).
+    """
+    text = "\x01" * 1_000_000
+    files = parse_diff(f"diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1,1 @@\n+{text}\n")
+
+    tracemalloc.start()
+    try:
+        body = assemble_context(
+            JOB,
+            files,
+            RULES,
+            (),
+            (),
+            pr_context=NO_PR_CONTEXT,
+            limits=LIMITS,
+            review_run_id=RUN_ID,
+            now=NOW,
+            new_id=lambda: UUID(int=99),
+        ).payload.body
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert body["diff"] == []
+    assert {"path": "a.py", "part": "hunk", "reason": "budget", "line": 1} in body["omitted"]
+    assert peak < len(text)
 
 
 def test_omitted_count_reports_entries_that_did_not_fit_the_list() -> None:

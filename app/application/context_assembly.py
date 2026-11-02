@@ -190,6 +190,12 @@ def assemble_context(
     shown: list[Hunk] = []
     for parsed in reviewable:
         for hunk in parsed.hunks:
+            # Обезвреживание текст не укорачивает, а символ стоит в пакете не меньше байта:
+            # ханк длиннее остатка не поместится. Отбрасываем его до `sanitize`, которая
+            # раздувает управляющие символы в 8 раз и выводила воркер за память (#328).
+            if len(hunk.text) > budget.remaining:
+                omitted.append(_omission(parsed.file_path, "hunk", "budget", line=hunk.new_start))
+                continue
             item = _hunk_item(parsed, hunk)
             if budget.take(item):
                 body["diff"].append(item)

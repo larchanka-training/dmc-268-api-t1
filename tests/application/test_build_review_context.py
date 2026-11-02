@@ -106,12 +106,21 @@ def test_full_context_contains_ast_of_changed_file() -> None:
     assert result.payload.body["rules"]["status"] == "absent"
 
 
-def test_diff_over_the_line_limit_is_refused_before_parsing() -> None:
+def test_diff_over_the_line_limit_is_refused() -> None:
     """Байтовый лимит строк не ограничивает: дифф на строку длиннее `REVIEW_DIFF_MAX_LINES` — отказ."""
     vcs = FakeVcs(diff=diff_of_lines(REVIEW_DIFF_MAX_LINES + 1))
 
     with pytest.raises(DiffTooLargeError, match=f"{REVIEW_DIFF_MAX_LINES} строк"):
         fetch_review_diff(JOB, vcs, max_bytes=LIMITS.diff_max_bytes)
+
+
+def test_lines_of_files_the_filter_drops_count_towards_the_limit() -> None:
+    """Строки считаются до разбора и фильтра: lock-файл на весь предел и две строки кода — отказ."""
+    lock = diff_of_lines(REVIEW_DIFF_MAX_LINES).replace("many.txt", "package-lock.json")
+    code = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+
+    with pytest.raises(DiffTooLargeError, match=f"{REVIEW_DIFF_MAX_LINES} строк"):
+        fetch_review_diff(JOB, FakeVcs(diff=lock + code), max_bytes=LIMITS.diff_max_bytes)
 
 
 def test_diff_of_exactly_the_line_limit_is_reviewed() -> None:
