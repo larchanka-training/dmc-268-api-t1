@@ -322,7 +322,6 @@ def configure_telemetry(service_name: str) -> None:
         otel_logs.set_logger_provider(logger_provider)
         _logger_installed = logger_provider
         _install_log_handler(logger_provider)
-    prime_run_outcomes()
 
 
 # Исходы, которые пишет `record_run_finished`: пайплайн, выметатель и приём вебхука
@@ -333,10 +332,17 @@ _RECORDED_RUN_OUTCOMES = (ReviewRunStatus.COMPLETED, ReviewRunStatus.FAILED)
 def prime_run_outcomes() -> None:
     """Завести ряды `review_runs_total` по каждому исходу нулём при старте процесса.
 
+    Зовут фабрики API и воркера сразу за `configure_telemetry`, а не она сама:
+    процесс миграций прогоны не доводит, и рядов `job="dmc-268-migrate"` быть
+    не должно (ревью PR #324).
+
     Без этого ряд появляется в Prometheus сразу с 1 — первым упавшим прогоном после
     рестарта, — а `increase()` первый отсчёт нового ряда не считает: алерт
     `ReviewRunsFailing` не видел бы первые падения после деплоя (ревью PR #324).
-    `add(0)` значения не меняет, повторный вызов безопасен.
+    `add(0)` значения не меняет, повторный вызов безопасен. Нуль уходит с первым
+    периодическим экспортом (через 60 с): падения до него Prometheus увидит
+    первым сэмплом нового ряда, без нуля, и `increase()` их не посчитает. Окно
+    принято — `force_flush()` задерживал бы старт до 4 с при лежащем коллекторе.
     """
     for status in _RECORDED_RUN_OUTCOMES:
         _review_runs_total.add(0, {"status": status.value})

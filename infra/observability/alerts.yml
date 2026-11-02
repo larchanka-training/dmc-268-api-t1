@@ -216,7 +216,7 @@ groups:
       - record: dmc268:filesystem_avail:ratio
         expr: |
           node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
-          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
+          / node_filesystem_size_bytes
           unless on(device, mountpoint) node_filesystem_readonly == 1
 
       - alert: DiskSpaceLow
