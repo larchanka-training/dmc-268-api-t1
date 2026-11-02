@@ -37,11 +37,14 @@
 
 - Код: `app/application/use_cases/build_review_context.py` (константа и проверка строк),
   `app/application/context_assembly.py` (ханк длиннее остатка бюджета и сообщение коммита длиннее
-  доли — в `omitted` до `sanitize`, путь обезвреживается раз на файл).
+  доли — в `omitted` до `sanitize`, путь обезвреживается раз на файл); предел строк назван рядом
+  с байтовым в docstring `DiffTooLargeError` (`app/domain/vcs_errors.py`) и в комментарии над
+  `diff_max_bytes` (`app/config.py`).
 - Тесты: `tests/application/test_build_review_context.py` (граница),
   `tests/application/test_context_assembly.py` (память сборки на управляющих символах),
   `tests/application/test_review_pipeline.py` (прогон `failed`), помощник `diff_of_lines` — в
   `tests/fakes/webhooks.py`.
 - Без миграций, без новых настроек, контракт API не меняется.
-- Документация: `docs/BACKEND_ARCHITECTURE.md` («Исчерпание ресурсов»), комментарий над
-  `DIFF_MAX_BYTES` в `.env.example`.
+- Документация: `docs/BACKEND_ARCHITECTURE.md` («Исчерпание ресурсов»),
+  `docs/pipeline/PIPELINE_SPEC.md` (`DIFF_TOO_LARGE`), комментарий над `DIFF_MAX_BYTES` в
+  `.env.example`.
