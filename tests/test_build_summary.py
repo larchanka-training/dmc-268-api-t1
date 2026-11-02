@@ -107,28 +107,12 @@ def test_render_trivy_table_and_unfixed_list():
     assert "CVE-2026-0003" not in md
 
 
-def test_render_trivy_truncates_unfixed_list():
-    report = {
-        "Results": [
-            {
-                "Vulnerabilities": [
-                    vuln(f"CVE-2026-{i:04}", "HIGH") for i in range(1, 13)
-                ]
-            }
-        ]
-    }
-    md = build_summary.render(fixture("metrics.json"), trivy=report)
-    assert "- CVE-2026-0010 (pkg) — без исправления" in md
-    assert "CVE-2026-0011" not in md
-    assert "- … и ещё 2" in md
-
-
 # --- образ и база ---------------------------------------------------------
 
 
 def test_render_with_base_shows_image_delta():
     md = build_summary.render(fixture("metrics.json"), base=fixture("base.json"))
-    assert "Δ — к последнему успешному прогону CI на develop." in md
+    assert "Δ — к последней успешной сборке образа на develop." in md
     assert "| Образ | `container.image.name` | `dmc268-api:ci` | |" in md
     assert "| ID | `container.image.id` | `sha256:0123456789ab` | |" in md
     assert "| `dmc268.build.image.size` | 242.23 MiB | +3.81 MiB (+1.6%) |" in md
@@ -152,7 +136,7 @@ def test_render_has_no_bundle_section():
 
 
 def test_render_escapes_pipe_in_table_cells():
-    metrics = {"image": {"name": "a|b", "size": 1, "compressed": 1}}
+    metrics = {"image": {"name": "a|b", "id": "sha256:1", "size": 1, "compressed": 1}}
     findings = [{"code": "DL1", "level": "style", "line": 1, "message": "x|y"}]
     md = build_summary.render(metrics, hadolint=findings)
     assert "| Образ | `container.image.name` | `a\\|b` | |" in md
@@ -175,40 +159,15 @@ def test_render_hadolint_levels_and_all_findings():
     )
 
 
-def test_render_hadolint_truncates_findings():
-    findings = [
-        {"code": f"DL{i}", "level": "style", "line": i, "message": "m"}
-        for i in range(12)
-    ]
-    md = build_summary.render(fixture("metrics.json"), hadolint=findings)
-    assert "- `DL9` (style), строка 9: m" in md
-    assert "`DL10`" not in md
-    assert "- … и ещё 2" in md
-
-
-def test_render_hadolint_lists_error_before_style():
-    findings = [
-        {"code": f"DL{i}", "level": "style", "line": i, "message": "m"}
-        for i in range(10)
-    ]
-    findings.append({"code": "DL3000", "level": "error", "line": 99, "message": "e"})
-    md = build_summary.render(fixture("metrics.json"), hadolint=findings)
-    # error одиннадцатым в файле обрезка не прячет: уровни, что роняют job, — первыми
-    assert "- `DL3000` (error), строка 99: e" in md
-    assert md.index("`DL3000`") < md.index("`DL0`")
-    assert "`DL9`" not in md
-    assert "- … и ещё 1" in md
-
-
 def test_render_clean_hadolint_is_one_line():
     md = build_summary.render(fixture("metrics.json"), hadolint=[])
     assert "### hadolint\n\nЗамечаний нет." in md
 
 
-def test_render_without_scanner_reports_omits_sections():
+def test_render_without_scanner_reports_says_so():
     md = build_summary.render(fixture("metrics.json"))
-    assert "### trivy" not in md
-    assert "### hadolint" not in md
+    assert f"### trivy\n\n{build_summary.NO_REPORT}\n" in md
+    assert f"### hadolint\n\n{build_summary.NO_REPORT}\n" in md
 
 
 # --- CLI ------------------------------------------------------------------
@@ -258,8 +217,24 @@ def test_cli_render_skips_missing_and_broken_optional_files(tmp_path):
     )  # fmt: skip
     assert r.returncode == 0, r.stderr
     assert "Базы для сравнения нет" in r.stdout
-    assert "### trivy" not in r.stdout
+    assert f"### trivy\n\n{build_summary.NO_REPORT}\n" in r.stdout
     assert "`dmc268-api:ci`" in r.stdout
+
+
+def test_cli_render_report_of_wrong_shape_is_no_report(tmp_path):
+    hadolint = tmp_path / "hadolint.json"
+    hadolint.write_text('{"code": "DL3008"}', encoding="utf-8")
+    trivy = tmp_path / "trivy.json"
+    trivy.write_text("[]", encoding="utf-8")
+    r = run_cli(
+        "render",
+        "--metrics", str(FIXTURES / "metrics.json"),
+        "--trivy", str(trivy),
+        "--hadolint", str(hadolint),
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert f"### trivy\n\n{build_summary.NO_REPORT}\n" in r.stdout
+    assert f"### hadolint\n\n{build_summary.NO_REPORT}\n" in r.stdout
 
 
 def test_cli_render_without_metrics(tmp_path):

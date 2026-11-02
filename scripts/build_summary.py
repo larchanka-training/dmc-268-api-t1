@@ -12,10 +12,12 @@
 
 `collect` берёт у `docker image inspect` размер и id образа, а сжатый размер
 считает по потоку `docker save | gzip` — образ целиком в память не читается.
-`render` собирает markdown; нет файла сканера или базы — нет и раздела, а не
-падение: summary пишется и после упавшего шага. Нет метрик — вместо раздела
-образа строка о том, что они не собраны; trivy и hadolint выводятся всё равно. Разницу с develop считает по
-`base.json` — метрикам последнего успешного прогона develop.
+`render` собирает markdown и не падает на отсутствующих файлах: summary
+пишется и после упавшего шага. Нет или битый отчёт сканера — раздел с
+заголовком и строкой, что отчёта нет; нет метрик — вместо раздела образа
+строка о том, что они не собраны; нет базы — значения без разницы. Разницу с
+develop считает по `base.json` — метрикам последней успешной сборки образа на
+develop.
 
 Порт `scripts/build-summary.mjs` фронтенда (dmc-268-ui-t1) без раздела бандла:
 у бэкенда его нет. Ключи значений — по семантическим соглашениям
@@ -32,16 +34,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import IO, Any, cast
 
-MAX_LISTED = 10
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
 # Что роняет job: trivy — HIGH и CRITICAL с исправлением (ignore-unfixed),
-# hadolint — всё от info и выше (failure-threshold по умолчанию у action).
+# hadolint — всё, кроме style (failure-threshold info по умолчанию у action).
 TRIVY_GATE = ("CRITICAL", "HIGH")
 HADOLINT_LEVELS = ("error", "warning", "info", "style")
-HADOLINT_GATE = ("error", "warning", "info")
 
 CHUNK = 1024 * 1024
 NO_METRICS = "Метрики не собраны: образ не собрался или `collect` упал."
+NO_REPORT = "Отчёта нет: шаг сканера упал."
 
 # --- метрики -----------------------------------------------------------------
 
@@ -124,11 +125,10 @@ def _image_section(
         "| Что | Ключ | Значение | Δ develop |",
         "|---|---|---|---|",
     ]
-    out.append(f"| Образ | `container.image.name` | `{cell(img.get('name', ''))}` | |")
-    if img.get("id"):
-        out.append(f"| ID | `container.image.id` | `{cell(img['id'][:19])}` | |")
     size, compressed = img["size"], img["compressed"]
     out += [
+        f"| Образ | `container.image.name` | `{cell(img['name'])}` | |",
+        f"| ID | `container.image.id` | `{cell(img['id'][:19])}` | |",
         (
             f"| Размер | `dmc268.build.image.size` | {human_bytes(size)} "
             f"| {delta(size, bi.get('size'))} |"
@@ -164,16 +164,9 @@ def trivy_counts(
     return counts, gate_fixed + gate_unfixed
 
 
-def _listed(items: list[str]) -> list[str]:
-    out = [f"- {item}" for item in items[:MAX_LISTED]]
-    if len(items) > MAX_LISTED:
-        out.append(f"- … и ещё {len(items) - MAX_LISTED}")
-    return out
-
-
 def _trivy_section(report: Mapping[str, Any] | None) -> list[str]:
     if report is None:
-        return []
+        return ["### trivy", "", NO_REPORT, ""]
     counts, gate_findings = trivy_counts(report)
     out = [
         "### trivy",
@@ -197,14 +190,14 @@ def _trivy_section(report: Mapping[str, Any] | None) -> list[str]:
             ),
             "",
         ]
-        out += _listed(gate_findings)
+        out += [f"- {item}" for item in gate_findings]
     return [*out, ""]
 
 
 def _hadolint_section(findings: list[Any] | None) -> list[str]:
-    if findings is None:
-        return []
     out = ["### hadolint", ""]
+    if findings is None:
+        return [*out, NO_REPORT, ""]
     if not findings:
         return [*out, "Замечаний нет.", ""]
     out += [
@@ -214,7 +207,7 @@ def _hadolint_section(findings: list[Any] | None) -> list[str]:
     for level in HADOLINT_LEVELS:
         n = sum(1 for f in findings if f.get("level") == level)
         if n:
-            below = "" if level in HADOLINT_GATE else " — ниже порога job'а"
+            below = " — ниже порога job'а" if level == "style" else ""
             out.append(f"| {level}{below} | {n} |")
     out += [
         "",
@@ -224,23 +217,11 @@ def _hadolint_section(findings: list[Any] | None) -> list[str]:
         ),
         "",
     ]
-    # Сначала уровни, что роняют job: иначе обрезка списка спрячет `error`
-    # за десятком `style`. Сортировка устойчивая, неизвестный уровень — в конец.
-    ordered = sorted(
-        findings,
-        key=lambda f: (
-            HADOLINT_LEVELS.index(f.get("level"))
-            if f.get("level") in HADOLINT_LEVELS
-            else len(HADOLINT_LEVELS)
-        ),
-    )
-    out += _listed(
-        [
-            f"`{f.get('code')}` ({f.get('level')}), строка {f.get('line')}: "
-            f"{cell(f.get('message', ''))}"
-            for f in ordered
-        ]
-    )
+    out += [
+        f"- `{f.get('code')}` ({f.get('level')}), строка {f.get('line')}: "
+        f"{cell(f.get('message', ''))}"
+        for f in findings
+    ]
     return [*out, ""]
 
 
@@ -253,7 +234,7 @@ def render(
     out = ["## Summary сборки", ""]
     if metrics is not None:
         out += [
-            "Δ — к последнему успешному прогону CI на develop."
+            "Δ — к последней успешной сборке образа на develop."
             if base is not None
             else "Базы для сравнения нет: в кэше нет метрик develop (первый прогон "
             "или кэш устарел). Показаны абсолютные значения.",
@@ -309,11 +290,14 @@ def main(argv: list[str]) -> int:
             json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
         )
         return 0
+    # Отчёт не той формы — то же, что битый файл: строка «Отчёта нет», а не падение.
+    trivy = _read_json(args.trivy)
+    hadolint = _read_json(args.hadolint)
     md = render(
         _read_json(args.metrics),
         base=_read_json(args.base),
-        trivy=_read_json(args.trivy),
-        hadolint=_read_json(args.hadolint),
+        trivy=trivy if isinstance(trivy, dict) else None,
+        hadolint=hadolint if isinstance(hadolint, list) else None,
     )
     sys.stdout.write(md + "\n")
     return 0

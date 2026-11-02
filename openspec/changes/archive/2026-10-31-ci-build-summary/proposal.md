@@ -12,7 +12,7 @@ hadolint ниже порога.
 - Job `image` пишет в `$GITHUB_STEP_SUMMARY`: размер образа и сжатый размер с разницей к
   develop; находки trivy по severity с разбивкой на «с исправлением» и `unfixed`; замечания
   hadolint по уровням, включая ниже порога job'а.
-- Разница с develop — к метрикам последнего успешного прогона develop из кэша Actions.
+- Разница с develop — к метрикам последней успешной сборки образа на develop из кэша Actions.
 - Логика — `scripts/build_summary.py` (`collect` — размеры из docker, `render` — markdown),
   только стандартная библиотека; тест на фикстурах — `tests/test_build_summary.py`.
 - Имена значений — по семантическим соглашениям OpenTelemetry (`container.image.*`), своё —
