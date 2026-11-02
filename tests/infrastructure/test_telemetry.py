@@ -1484,3 +1484,31 @@ def test_a_pipeline_failing_on_a_stage_closes_its_otel_span_as_an_error(
     ]
     assert (stages[-1].attributes or {})["error.type"] == "LLM_TIMEOUT"
     assert not trace.get_current_span().get_span_context().is_valid
+
+
+def test_priming_starts_every_run_outcome_series_at_zero(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Ряды `review_runs_total` по исходам заводятся нулём: первый упавший прогон
+    после рестарта — приращение, которое `increase()` в `ReviewRunsFailing` видит."""
+    before = metric_snapshot(metric_reader)
+
+    telemetry.prime_run_outcomes()
+
+    after = metric_snapshot(metric_reader)
+    for status in ("completed", "failed"):
+        assert ("review_runs_total", (("status", status),)) in after
+        value, _ = metric_delta(metric_reader, before, "review_runs_total", status=status)
+        assert value == 0
+
+
+def test_configure_telemetry_primes_the_run_outcomes(
+    monkeypatch: pytest.MonkeyPatch, logs_gate: None
+) -> None:
+    """Ряды исходов заводит старт процесса — и API (приём вебхука), и воркер."""
+    calls: list[None] = []
+    monkeypatch.setattr(telemetry, "prime_run_outcomes", lambda: calls.append(None))
+
+    telemetry.configure_telemetry(telemetry.WORKER_SERVICE)
+
+    assert calls == [None]

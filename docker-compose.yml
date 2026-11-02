@@ -517,14 +517,12 @@ services:
       - --path.rootfs=/rootfs
       - --path.procfs=/host/proc
       - --path.sysfs=/host/sys
-      # Отметка о резервной копии — на стенде её пишет dmc268-postgres-backup;
-      # локально копий нет, каталог пуст и алерт BackupStatusUnknown горит.
-      - --collector.textfile.directory=/textfile
+      # textfile-коллектора с отметкой о резервной копии здесь нет: локально
+      # копий нет, и алерт BackupStatusUnknown горит — это ожидаемо.
     volumes:
       - /:/rootfs:ro
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
-      - backup_metrics:/textfile:ro
 
   # Прокси над Docker API (/var/run/docker.sock): collector-docker — единственный
   # клиент, docker.sock контейнерам больше не монтируется. Белый список путей —
@@ -652,8 +650,6 @@ volumes:
   prometheus_data:
   grafana_data:
   alertmanager_data:
-  # Отметка о резервной копии для textfile node-exporter: локально пуста.
-  backup_metrics:
 
 # Сети стека наблюдаемости. docker_proxy — для доступа к Docker API через
 # socket-proxy: в ней только dockerproxy и collector-docker, internal — наружу в

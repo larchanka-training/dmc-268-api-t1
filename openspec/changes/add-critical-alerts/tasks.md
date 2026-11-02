@@ -13,6 +13,7 @@
 - [x] 2.2 blackbox-exporter: `/health` API, TCP базы, реплики и брокера, HTTPS публичного входа со сроком сертификата
 - [x] 2.3 `sqlquery/llm-tokens` в основном коллекторе и ревизия 0017 — `SELECT (created_at, tokens_used)` для `dmc268_monitor`
 - [x] 2.4 `backup.sh`: отметка об успешной копии в textfile node-exporter, том `dmc268-backup-metrics`
+- [x] 2.5 `review_runs_total` по `completed` и `failed` заводится нулём при старте API и воркера: иначе `increase()` в `ReviewRunsFailing` не видит первое падение нового ряда
 
 ## 3. Развёртывание
 

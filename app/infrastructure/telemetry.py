@@ -115,7 +115,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from sqlalchemy import Engine
 from sqlalchemy.pool import QueuePool
 
-from app.domain.enums import ReviewRunStage
+from app.domain.enums import ReviewRunStage, ReviewRunStatus
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +322,24 @@ def configure_telemetry(service_name: str) -> None:
         otel_logs.set_logger_provider(logger_provider)
         _logger_installed = logger_provider
         _install_log_handler(logger_provider)
+    prime_run_outcomes()
+
+
+# Исходы, которые пишет `record_run_finished`: пайплайн, выметатель и приём вебхука
+# доводят прогон только до `completed` или `failed`.
+_RECORDED_RUN_OUTCOMES = (ReviewRunStatus.COMPLETED, ReviewRunStatus.FAILED)
+
+
+def prime_run_outcomes() -> None:
+    """Завести ряды `review_runs_total` по каждому исходу нулём при старте процесса.
+
+    Без этого ряд появляется в Prometheus сразу с 1 — первым упавшим прогоном после
+    рестарта, — а `increase()` первый отсчёт нового ряда не считает: алерт
+    `ReviewRunsFailing` не видел бы первые падения после деплоя (ревью PR #324).
+    `add(0)` значения не меняет, повторный вызов безопасен.
+    """
+    for status in _RECORDED_RUN_OUTCOMES:
+        _review_runs_total.add(0, {"status": status.value})
 
 
 def shutdown_tracing() -> None:

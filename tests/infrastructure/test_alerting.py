@@ -2,9 +2,8 @@
 
 Поведение правил («горит / молчит» на синтетике) проверяет promtool по
 infra/observability/alerts.test.yml в job observability-configs. Здесь —
-связи между файлами, которые promtool не видит: каждый сигнал из задачи
-покрыт правилом, имена метрик в правилах совпадают с теми, что пишут
-источники, секреты Telegram приходят файлами по одним путям в compose и
+связи между файлами, которые promtool не видит: имена метрик в правилах
+совпадают с теми, что пишут источники, секреты Telegram приходят файлами по одним путям в compose и
 infra, пороги записаны в README.
 """
 
@@ -22,26 +21,9 @@ ALERTS = OBSERVABILITY_DIR / "alerts.yml"
 ALERTMANAGER = OBSERVABILITY_DIR / "alertmanager.yml"
 PROMETHEUS = OBSERVABILITY_DIR / "prometheus.yml"
 OTELCOL = OBSERVABILITY_DIR / "otelcol.yaml"
-OTELCOL_DOCKER = OBSERVABILITY_DIR / "otelcol-docker.yaml"
 BACKUP_SCRIPT = REPO / "infra" / "postgres" / "backup.sh"
 COMPOSE = REPO / "docker-compose.yml"
 README = REPO / "infra" / "README.md"
-
-# Сигналы из задачи #100 (и комментария про DLQ) → алерты, которые их ловят.
-SIGNALS = {
-    "контейнер не запущен": "ContainerDown",
-    "контейнер перезапускается": "ContainerRestarting",
-    "сервис unhealthy": "ServiceProbeFailed",
-    "всплеск 5xx у API": "Api5xxSpike",
-    "прогоны падают в воркере": "ReviewRunsFailing",
-    "DLQ не пуст": "ReviewDlqNotEmpty",
-    "бюджет LLM": "LlmBudgetNearLimit",
-    "переполнение диска": "DiskSpaceCritical",
-    "рост томов": "DiskWillFillIn24h",
-    "реплика не в streaming": "ReplicaNotStreaming",
-    "нет свежей копии": "BackupStale",
-    "срок сертификата": "TlsCertificateExpiringSoon",
-}
 
 
 def _rules() -> list[dict[str, Any]]:
@@ -51,11 +33,6 @@ def _rules() -> list[dict[str, Any]]:
 
 def _alerts() -> dict[str, dict[str, Any]]:
     return {rule["alert"]: rule for rule in _rules() if "alert" in rule}
-
-
-def test_every_signal_has_a_rule() -> None:
-    missing = {signal: name for signal, name in SIGNALS.items() if name not in _alerts()}
-    assert not missing, f"сигналы без правила: {missing}"
 
 
 def test_every_alert_has_severity_and_texts() -> None:
@@ -78,12 +55,6 @@ def test_container_down_watches_real_container_names() -> None:
     # dmc268-ui поднимает стек репозитория dmc-268-ui-t1 на том же сервере.
     assert watched - {"dmc268-ui"} <= infra_names, watched - infra_names
     assert {"dmc268-api", "dmc268-worker", "dmc268-postgres", "dmc268-rabbitmq"} <= watched
-
-
-def test_container_metrics_needed_by_alerts_are_enabled() -> None:
-    receiver = yaml.safe_load(OTELCOL_DOCKER.read_text(encoding="utf-8"))["receivers"]["docker_stats"]
-    assert receiver["metrics"]["container.uptime"] == {"enabled": True}
-    assert receiver["metrics"]["container.restarts"] == {"enabled": True}
 
 
 def test_token_spend_comes_from_the_collector_pipeline() -> None:

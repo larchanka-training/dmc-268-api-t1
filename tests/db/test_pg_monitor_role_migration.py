@@ -11,8 +11,10 @@ pg_stat_statements. Отличие от табличных ревизий: ро�
 
 import os
 import uuid
+from pathlib import Path
 
 import pytest
+import yaml
 from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -29,6 +31,7 @@ EXTENSION = "pg_stat_statements"
 # Пароль роли — дефолт миграции: на стенде его задаёт окружение, тест
 # проверяет локальный путь (POSTGRES_MONITOR_PASSWORD не задан).
 DEFAULT_ROLE_PASSWORD = "dmc268_monitor"
+OTELCOL = Path(__file__).resolve().parents[2] / "infra" / "observability" / "otelcol.yaml"
 
 
 def _config() -> Config:
@@ -231,20 +234,24 @@ def test_the_role_password_never_reaches_pg_stat_statements(migrated) -> None:
         conn.execute(text("RESET pg_stat_statements.track_utility"))
 
 
+def _collector_token_query() -> str:
+    """SQL receiver-а sqlquery/llm-tokens — ровно тот, что выполняет коллектор."""
+    config = yaml.safe_load(OTELCOL.read_text(encoding="utf-8"))
+    sql: str = config["receivers"]["sqlquery/llm-tokens"]["queries"][0]["sql"]
+    return sql
+
+
 def test_the_monitor_role_reads_only_the_token_columns_of_runs(migrated) -> None:
     """Ревизия 0017: роль мониторинга читает расход токенов, но не прогоны.
 
-    Запрос receiver-а sqlquery коллектора (infra/observability/otelcol.yaml)
-    проходит под ролью, а чтение любой другой колонки review_runs — нет.
+    Запрос receiver-а sqlquery коллектора проходит под ролью, а чтение любой
+    другой колонки review_runs — нет. Запрос читается из самого
+    infra/observability/otelcol.yaml, а не из копии: колонка без гранта,
+    добавленная в конфиг, уронит этот тест.
     """
     with migrated.connect() as conn, conn.begin():
         conn.execute(text(f"SET LOCAL ROLE {ROLE}"))
-        tokens = conn.execute(
-            text(
-                "SELECT coalesce(sum(tokens_used), 0)::bigint FROM review_runs"
-                " WHERE created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
-            )
-        ).scalar_one()
+        tokens = conn.execute(text(_collector_token_query())).scalar_one()
     assert tokens >= 0
 
     # Отказ прерывает транзакцию: откатываем её явно, а не коммитом на выходе.

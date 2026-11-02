@@ -552,8 +552,9 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 
 ### Алерты
 
-Критические алерты (#100) считает Prometheus по правилам `observability/alerts.yml` и раз в
-15 секунд отдаёт сработавшие Alertmanager (`dmc268-alertmanager`), тот шлёт их в Telegram
+Критические алерты (#100) считает Prometheus по правилам `observability/alerts.yml` раз в
+минуту (`evaluation_interval` не задан, умолчание — 1m; 15 секунд — это `scrape_interval`) и
+отдаёт сработавшие Alertmanager (`dmc268-alertmanager`), тот шлёт их в Telegram
 (`observability/alertmanager.yml`). Конфиги те же локально и на стенде; токен бота и chat id —
 не в конфиге, а файлами `/etc/alertmanager/secrets/telegram_{bot_token,chat_id}`: на стенде их
 заливает `upload` из секретов `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1`,

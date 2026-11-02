@@ -208,16 +208,19 @@ groups:
 
   - name: dmc268-storage
     rules:
-      # Свободное место на файловой системе сервера: тома базы, WAL, копий,
-      # Prometheus и Loki живут на одном диске (infra/README.md, «Диск»).
+      # Доля свободного места на файловых системах сервера: тома базы, WAL,
+      # копий, Prometheus и Loki живут на одном диске (infra/README.md, «Диск»).
+      # Селектор — в одном месте, пороги алертов ниже считаются поверх записи.
       # Файловые системы только для чтения (образы, erofs) всегда «полные» и
       # в них никто не пишет — они исключены по node_filesystem_readonly.
-      - alert: DiskSpaceLow
+      - record: dmc268:filesystem_avail:ratio
         expr: |
           node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
           / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
-          < 0.15
           unless on(device, mountpoint) node_filesystem_readonly == 1
+
+      - alert: DiskSpaceLow
+        expr: dmc268:filesystem_avail:ratio < 0.15
         for: 5m
         labels:
           severity: warning
@@ -227,11 +230,7 @@ groups:
           description: "Свободно меньше 15 %. Кто растёт — docker system df -v на сервере."
 
       - alert: DiskSpaceCritical
-        expr: |
-          node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
-          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
-          < 0.05
-          unless on(device, mountpoint) node_filesystem_readonly == 1
+        expr: dmc268:filesystem_avail:ratio < 0.05
         for: 2m
         labels:
           severity: critical
@@ -241,15 +240,12 @@ groups:
           description: "Меньше 5 %: следующим остановится запись базы и WAL."
 
       # Рост томов: при текущей скорости диск кончится в ближайшие сутки.
-      # Нижняя граница по свободному месту отсекает шум на почти пустом диске.
+      # Нижняя граница по свободному месту отсекает шум на почти пустом диске;
+      # она же через запись оставляет только файловые системы из селектора.
       - alert: DiskWillFillIn24h
         expr: |
-          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}[6h], 24 * 3600) < 0
-          and
-          node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
-          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!~"/(dev|run|sys|proc)(/.*)?"}
-          < 0.4
-          unless on(device, mountpoint) node_filesystem_readonly == 1
+          predict_linear(node_filesystem_avail_bytes[6h], 24 * 3600) < 0
+          and on(instance, device, mountpoint) dmc268:filesystem_avail:ratio < 0.4
         for: 30m
         labels:
           severity: critical
