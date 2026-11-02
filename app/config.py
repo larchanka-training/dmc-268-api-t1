@@ -124,7 +124,15 @@ class Settings(BaseSettings):
         raw = self.user_token_encryption_key.get_secret_value()
         return _decode_token_key(raw) if raw.strip() else None
 
-    @field_validator("public_origin")
+    # Prometheus стека наблюдаемости — источник страницы статуса (`GET /api/v1/status`):
+    # её статус — из сработавших критических алертов. Пустой — статус `unknown`, запросов
+    # к Prometheus нет.
+    prometheus_url: str = Field(
+        default="",
+        description="Адрес Prometheus для страницы статуса, например http://dmc268-prometheus:9090; из PROMETHEUS_URL",
+    )
+
+    @field_validator("public_origin", "prometheus_url")
     @classmethod
     def _strip_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")

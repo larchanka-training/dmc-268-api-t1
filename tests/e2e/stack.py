@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from sqlalchemy import Engine
 
 from app.api.factory import create_app
 from app.application.ports.llm_gateway import LlmGateway
+from app.application.use_cases.service_status import ServiceStatusMonitor
 from app.config import Settings
 from app.domain.entities import (
     ContextPayload,
@@ -42,9 +44,14 @@ from app.domain.entities import (
 )
 from app.domain.enums import Provider
 from app.infrastructure.cache.memory import InMemoryCacheStore
-from app.infrastructure.container import WORKER_VCS_LIMITS, Container
+from app.infrastructure.container import (
+    SERVICE_STATUS_TTL_SECONDS,
+    WORKER_VCS_LIMITS,
+    Container,
+)
 from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.monitoring.prometheus import PrometheusAlertSource
 from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
 )
@@ -176,6 +183,13 @@ class Stack:
             _llm_gateway=llm,
             _definition_extractor=TreeSitterDefinitionExtractor(),
             _app_slug_retry_at=0.0,
+            # Prometheus у стенда нет: статус сервиса — unknown, запросов нет.
+            _service_status=ServiceStatusMonitor(
+                PrometheusAlertSource(None),
+                ttl_seconds=SERVICE_STATUS_TTL_SECONDS,
+                monotonic=time.monotonic,
+                now=lambda: datetime.now(UTC),
+            ),
         )
 
     def api(self) -> FastAPI:

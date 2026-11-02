@@ -120,7 +120,7 @@ uv run python scripts/export_openapi.py           # записать docs/openap
 uv run python scripts/export_openapi.py --check   # то же, что в CI: rc=1, если файл устарел
 ```
 
-Ручки `/api/v1`, кроме вебхуков и входа, требуют сессию. Для входа через GitHub
+Ручки `/api/v1`, кроме вебхуков, входа и статуса сервиса, требуют сессию. Для входа через GitHub
 нужны `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` и `PUBLIC_ORIGIN`
 (см. `.env.example`), а callback `<PUBLIC_ORIGIN>/api/v1/auth/github/callback`
 должен быть зарегистрирован в настройках GitHub App. `PUBLIC_ORIGIN` — origin, на
@@ -130,6 +130,16 @@ uv run python scripts/export_openapi.py --check   # то же, что в CI: rc=
 проксирует `/api` сюда) ставьте `http://localhost:3000`.
 Cookie сессии ставится с `Secure`: вход работает по HTTPS и на `localhost`, по
 голому HTTP на другом хосте — нет.
+
+### Статус сервиса
+
+`GET /api/v1/status` — публичная ручка страницы статуса, без сессии: сводное состояние и
+состояние API, воркера и очереди (`operational`, `degraded`, `outage`, `unknown`). Источник —
+сработавшие критические алерты Prometheus (`infra/README.md`, «Алерты»), адрес — настройка
+`PROMETHEUS_URL`. Не задана, Prometheus недоступен или ответил не по формату — всё `unknown`,
+ответ всё равно `200`. Оценка кэшируется в процессе API на 15 секунд. В docker compose адрес
+по умолчанию — `http://prometheus:9090`: статус настоящий с профилем `observability`, без него —
+`unknown`.
 
 ### Ключ шифрования токенов пользователя
 

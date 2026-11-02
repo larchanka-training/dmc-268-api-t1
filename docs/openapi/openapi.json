@@ -2659,6 +2659,49 @@
           }
         ]
       }
+    },
+    "/api/v1/status": {
+      "get": {
+        "tags": [
+          "status"
+        ],
+        "summary": "Статус сервиса",
+        "description": "Открыт без сессии. Состояние API, воркера и очереди по сработавшим критическим алертам мониторинга; оценка кэшируется на сервере на 15 секунд. Недоступный мониторинг — не ошибка: ответ 200, компоненты unknown.",
+        "operationId": "getServiceStatus",
+        "responses": {
+          "200": {
+            "description": "Сводное состояние и состояние каждого компонента.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceStatusResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": []
+      }
     }
   },
   "components": {
@@ -2838,6 +2881,31 @@
             "type": "urn:dmc-268:problem:commit-not-found"
           }
         ]
+      },
+      "ComponentStatusResponse": {
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ServiceComponent",
+            "description": "Компонент: api — HTTP API, worker — воркер ревью, queue — очередь задач (брокер).",
+            "examples": [
+              "api"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/ServiceStatus",
+            "description": "Состояние компонента. operational — работает; degraded — работает со сбоями; outage — недоступен; unknown — проверить не удалось: мониторинг не настроен или не отвечает, либо не видит сигналов, на которых держится проверка.",
+            "examples": [
+              "operational"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "status"
+        ],
+        "title": "ComponentStatusResponse",
+        "description": "Состояние одного компонента сервиса."
       },
       "ConnectRepositoryRequest": {
         "properties": {
@@ -6214,6 +6282,64 @@
             "type": "urn:dmc-268:problem:scm-unavailable"
           }
         ]
+      },
+      "ServiceComponent": {
+        "type": "string",
+        "enum": [
+          "api",
+          "worker",
+          "queue"
+        ],
+        "title": "ServiceComponent",
+        "description": "Компонент сервиса на странице статуса; порядок объявления — порядок в ответе."
+      },
+      "ServiceStatus": {
+        "type": "string",
+        "enum": [
+          "operational",
+          "degraded",
+          "outage",
+          "unknown"
+        ],
+        "title": "ServiceStatus",
+        "description": "Состояние сервиса или его компонента на странице статуса; по тяжести — outage,\ndegraded, unknown, operational."
+      },
+      "ServiceStatusResponse": {
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/ServiceStatus",
+            "description": "Сводное состояние — худшее из компонентов в порядке outage, degraded, unknown, operational. operational — работает; degraded — работает со сбоями; outage — недоступен; unknown — проверить не удалось: мониторинг не настроен или не отвечает, либо не видит сигналов, на которых держится проверка.",
+            "examples": [
+              "operational"
+            ]
+          },
+          "components": {
+            "items": {
+              "$ref": "#/components/schemas/ComponentStatusResponse"
+            },
+            "type": "array",
+            "title": "Components",
+            "description": "Все компоненты, всегда в порядке api, worker, queue."
+          },
+          "checked_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Checked At",
+            "description": "Когда сервер оценил состояние; ответ может быть из кэша не старше 15 секунд.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "components",
+          "checked_at"
+        ],
+        "title": "ServiceStatusResponse",
+        "description": "Состояние сервиса для страницы статуса."
       },
       "TriggerSource": {
         "type": "string",

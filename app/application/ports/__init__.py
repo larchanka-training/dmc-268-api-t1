@@ -1,3 +1,4 @@
+from app.application.ports.alert_source import AlertSource
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
 from app.application.ports.installation_catalog import InstallationCatalog
@@ -21,6 +22,7 @@ from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 
 __all__ = [
+    "AlertSource",
     "CacheStore",
     "ContextPayloadRepo",
     "DefinitionExtractor",
