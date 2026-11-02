@@ -95,6 +95,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(telemetry.API_SERVICE)
     # До контейнера: провайдеры трейсов и метрик нужны телеметрии FastAPI с первого запроса.
     telemetry.configure_telemetry(telemetry.API_SERVICE)
+    # Ряды исходов прогонов — нулём со старта: приём вебхука доводит прогон до
+    # `failed`, и первое падение должно быть приращением для `ReviewRunsFailing`.
+    telemetry.prime_run_outcomes()
     # Хук — за логами и до чтения окружения (замечание ревью PR #130): он
     # общий для API и воркера (`app.infrastructure.logging`), и `ValidationError`
     # pydantic из кривого окружения выходит из процесса JSON-записью с

@@ -1502,13 +1502,14 @@ def test_priming_starts_every_run_outcome_series_at_zero(
         assert value == 0
 
 
-def test_configure_telemetry_primes_the_run_outcomes(
+def test_configure_telemetry_leaves_the_run_outcomes_to_the_factories(
     monkeypatch: pytest.MonkeyPatch, logs_gate: None
 ) -> None:
-    """Ряды исходов заводит старт процесса — и API (приём вебхука), и воркер."""
+    """Ряды исходов заводят фабрики API и воркера, а не `configure_telemetry`:
+    её зовёт и процесс миграций, где рядов `dmc-268-migrate` быть не должно."""
     calls: list[None] = []
     monkeypatch.setattr(telemetry, "prime_run_outcomes", lambda: calls.append(None))
 
-    telemetry.configure_telemetry(telemetry.WORKER_SERVICE)
+    telemetry.configure_telemetry(telemetry.MIGRATE_SERVICE)
 
-    assert calls == [None]
+    assert calls == []

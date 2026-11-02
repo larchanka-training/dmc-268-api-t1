@@ -174,18 +174,6 @@ tests:
               summary: "Прогоны падают: 75% за 30 минут"
               description: "Доля прогонов в failed выше 30 %. Код ошибки шага — в GET /api/v1/reviews/{id}/steps и в спанах review.<этап>."
 
-  # Без заведения нулём ряд появляется только с первым падением и сразу с 1,
-  # а increase() первый отсчёт не считает: три падения подряд дают 2,5 прогона
-  # при пороге 3, алерта нет. Поэтому ряды заводит старт процесса.
-  - interval: 5m
-    input_series:
-      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
-        values: "_x3 1 2 3"
-    alert_rule_test:
-      - eval_time: 25m
-        alertname: ReviewRunsFailing
-        exp_alerts: []
-
   # DLQ не пуста дольше 5 минут; воркер не подписан на очередь.
   - interval: 1m
     input_series:
