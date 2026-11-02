@@ -21,6 +21,7 @@ from app.application.merge_gate_publish import (
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.ports.vcs_review import MergeGateCheck
 from app.application.review_pipeline import run_review
+from app.application.stale_sweep import sweep_stale_runs
 from app.domain.entities import (
     MergeRequest,
     RepositorySettings,
@@ -38,6 +39,7 @@ from app.domain.enums import (
     TriggerSource,
     VerificationOutcome,
 )
+from app.domain.lifecycle import advance
 from app.domain.llm_errors import (
     LlmError,
     LlmOutputError,
@@ -339,9 +341,9 @@ def test_last_progress_at_follows_the_clock_on_every_transition() -> None:
     seen: list[datetime] = []
     original = uow.review_runs.update
 
-    def recording_update(run: ReviewRun) -> None:
+    def recording_update(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         seen.append(run.last_progress_at)
-        original(run)
+        original(run, previous=previous)
 
     uow.review_runs.update = recording_update  # type: ignore[method-assign]
     gateway = ScriptedLlmGateway([review_response()])
@@ -419,9 +421,9 @@ def test_a_failure_while_marking_failed_does_not_mask_the_original_error() -> No
 
     real_update = uow.review_runs.update
 
-    def update(run: ReviewRun) -> None:
+    def update(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         broken_update(run)
-        real_update(run)
+        real_update(run, previous=previous)
 
     uow.review_runs.update = update  # type: ignore[method-assign]
 
@@ -690,8 +692,8 @@ def test_a_run_cancelled_before_its_review_is_posted_leaves_the_step_abandoned()
     _seed_run(uow)
     update = uow.review_runs.update
 
-    def retarget_on_publishing(run: ReviewRun) -> None:
-        update(run)
+    def retarget_on_publishing(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
+        update(run, previous=previous)
         if run.status is ReviewRunStatus.PUBLISHING:
             update(replace(run, status=ReviewRunStatus.CANCELLED))
 
@@ -896,9 +898,9 @@ def test_the_verifying_step_starts_at_the_progress_mark_before_the_verifier() ->
     seen: list[datetime] = []
     original = uow.review_runs.update
 
-    def recording_update(run: ReviewRun) -> None:
+    def recording_update(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         seen.append(run.last_progress_at)
-        original(run)
+        original(run, previous=previous)
 
     uow.review_runs.update = recording_update  # type: ignore[method-assign]
     gateway = ScriptedLlmGateway(
@@ -1274,23 +1276,86 @@ def test_a_screening_failure_keeps_the_review_tokens_on_the_analysing_step(
     assert _completed(uow).status is ReviewRunStatus.FAILED
 
 
-def test_a_redelivered_run_closes_the_step_the_dead_worker_left_running() -> None:
-    """Воркер умер посреди `analysing`, брокер доставил сообщение снова."""
+def test_a_redelivered_run_in_work_is_left_to_its_worker(caplog: pytest.LogCaptureFixture) -> None:
+    """Решение команды (#169): чей-то прогон в работе не трогаем, сообщение подтверждается.
+    Живой он или брошенный, отсюда не отличить: брошенный выметет очистка."""
     uow = FakeUnitOfWork()
     _seed_run(uow, status=ReviewRunStatus.ANALYSING)
-    uow.review_run_steps.add(
-        start_step(JOB.review_run_id, ReviewRunStage.ANALYSING, started_at=NOW, step_id=UUID(int=50))
-    )
+    step = start_step(JOB.review_run_id, ReviewRunStage.ANALYSING, started_at=NOW, step_id=UUID(int=50))
+    uow.review_run_steps.add(step)
+    model = ScriptedLlmGateway([review_response()])
 
-    with pytest.raises(ValueError):
-        _run(uow, ScriptedLlmGateway([review_response()]))
+    with caplog.at_level(logging.WARNING):
+        _run(uow, model)
 
-    assert _completed(uow).status is ReviewRunStatus.FAILED
-    (abandoned,) = uow.review_run_steps.list_for_run(JOB.review_run_id)
-    assert abandoned.status is ReviewRunStepStatus.FAILED
-    assert abandoned.error_code == "REVIEW_RUN_STALE"
-    # Длительность - по стенным часам до момента сбоя: часы теста идут на секунду за чтение.
-    assert abandoned.duration_seconds is not None and abandoned.duration_seconds > 0
+    assert model.requests == []
+    assert _completed(uow).status is ReviewRunStatus.ANALYSING
+    assert uow.review_run_steps.list_for_run(JOB.review_run_id) == [step]
+    assert "уже в работе" in caplog.text
+
+
+class _SweptDuringTheModelCall(ScriptedLlmGateway):
+    """Воркер жив, но вызов модели длиннее порога: очистка выметает его прогон."""
+
+    def __init__(self, uow: FakeUnitOfWork, outcome: RecordingRunOutcome) -> None:
+        super().__init__([review_response()])
+        self._uow = uow
+        self._outcome = outcome
+
+    def complete(self, request: Any) -> Any:
+        answer = super().complete(request)
+        sweep_stale_runs(
+            self._uow,
+            now=NOW + timedelta(days=1),
+            limit=timedelta(minutes=30),
+            queued_limit=timedelta(hours=6),
+            run_outcome=self._outcome,
+        )
+        return answer
+
+
+def test_a_live_worker_whose_run_was_swept_fails_like_any_failed_run() -> None:
+    """Поверх терминального статуса записи нет, поэтому условие на записях воркера не нужно.
+    Сам воркер, в отличие от очистки, выставляет gate упавшего прогона."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    vcs = RecordingVcsGateway()
+    outcome = RecordingRunOutcome()
+
+    with pytest.raises(ValueError, match="terminal"):
+        _run(uow, _SweptDuringTheModelCall(uow, outcome), vcs_gateway=vcs, run_outcome=outcome)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    assert run.failure_reason is not None and "нет прогресса" in run.failure_reason
+    assert vcs.publications == []
+    assert vcs.checks == [build_failed_review_check()]
+    assert outcome.statuses == ["failed"]
+
+
+def test_a_lost_claim_leaves_the_run_to_the_winner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Два воркера прочитали `queued`: проигравший захват не роняет прогон и не вызывает модель."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    model = ScriptedLlmGateway([review_response()])
+    read = uow.review_runs.get
+
+    def read_then_lose_the_race(run_id: UUID) -> ReviewRun | None:
+        stale = read(run_id)
+        assert stale is not None
+        monkeypatch.setattr(uow.review_runs, "get", read)
+        uow.review_runs.update(advance(stale, ReviewRunStatus.BUILDING_CONTEXT, NOW).unwrap())
+        uow.commit()
+        return stale
+
+    monkeypatch.setattr(uow.review_runs, "get", read_then_lose_the_race)
+
+    _run(uow, model)
+
+    assert model.requests == []
+    assert _completed(uow).status is ReviewRunStatus.BUILDING_CONTEXT
+    assert _steps(uow) == []
 
 
 def test_a_failed_run_closes_its_step_with_the_known_code_when_the_outcome_write_failed() -> None:
@@ -1355,10 +1420,10 @@ def test_a_failed_transition_to_analysing_fails_the_analysing_step() -> None:
     _seed_run(uow)
     real_update = uow.review_runs.update
 
-    def update(run: ReviewRun) -> None:
+    def update(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         if run.status is ReviewRunStatus.ANALYSING:
             raise ConnectionError("база недоступна")
-        real_update(run)
+        real_update(run, previous=previous)
 
     uow.review_runs.update = update  # type: ignore[method-assign]
 

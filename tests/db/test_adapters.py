@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 from sqlalchemy import text
 
-from app.application.ports.unit_of_work import ActiveRunConflict
+from app.application.ports.unit_of_work import ActiveRunConflict, RunStateConflict
 from app.application.stale_sweep import sweep_stale_runs
 from app.domain.entities import (
     ContextPayload,
@@ -376,6 +376,107 @@ def test_a_cancel_committed_during_a_worker_transition_is_not_overwritten(clean_
     with SqlAlchemyUnitOfWork(clean_db) as work:
         stored = work.review_runs.get(run.id)
     assert stored is not None and stored.status is ReviewRunStatus.CANCELLED
+
+
+def _run_in_db(clean_db, status: ReviewRunStatus = ReviewRunStatus.QUEUED) -> ReviewRun:
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        repo = a_repository()
+        work.repositories.add(repo)
+        mr = a_merge_request(repo.id)
+        work.merge_requests.add(mr)
+        run = a_run(mr.id)
+        if status is not ReviewRunStatus.QUEUED:
+            run = advance(run, ReviewRunStatus.BUILDING_CONTEXT, NOW).unwrap()
+        work.review_runs.add(run)
+        work.commit()
+    return run
+
+
+def _write(clean_db, run: ReviewRun, previous: ReviewRun | None = None) -> None:
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        work.review_runs.update(run, previous=previous)
+        work.commit()
+
+
+def test_two_workers_claiming_one_run_leave_one_winner(clean_db) -> None:
+    """Оба прочитали `queued`. Смена статуса тут ни при чём: второй пишет тот же статус."""
+    run = _run_in_db(clean_db)
+    claimed = advance(run, ReviewRunStatus.BUILDING_CONTEXT, LATER).unwrap()
+
+    _write(clean_db, claimed, previous=run)
+    with pytest.raises(RunStateConflict):
+        _write(clean_db, claimed, previous=run)
+
+
+def test_a_sweep_does_not_fail_a_run_that_progressed_after_its_read(clean_db) -> None:
+    run = _run_in_db(clean_db, ReviewRunStatus.BUILDING_CONTEXT)
+    _write(clean_db, replace(run, last_progress_at=LATER))
+
+    with pytest.raises(RunStateConflict):
+        _write(clean_db, advance(run, ReviewRunStatus.FAILED, LATER).unwrap(), previous=run)
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        stored = work.review_runs.get(run.id)
+    assert stored is not None and stored.status is ReviewRunStatus.BUILDING_CONTEXT
+
+
+def test_two_concurrent_sweeps_fail_a_run_once(clean_db) -> None:
+    """Вторая очистка ждёт блокировку первой и после её коммита видит чужую запись."""
+    run = _run_in_db(clean_db, ReviewRunStatus.BUILDING_CONTEXT)
+    failed = advance(run, ReviewRunStatus.FAILED, LATER).unwrap()
+    errors: list[Exception] = []
+    locked = threading.Event()
+
+    def second_sweep() -> None:
+        assert locked.wait(timeout=10)
+        try:
+            _write(clean_db, failed, previous=run)
+        except RunStateConflict as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=second_sweep, daemon=True)
+    thread.start()
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        work.review_runs.update(failed, previous=run)
+        locked.set()
+        time.sleep(0.3)
+        work.commit()
+    thread.join(timeout=10)
+
+    assert len(errors) == 1
+
+
+def test_updated_at_is_the_write_time_not_the_transaction_start(clean_db) -> None:
+    """Запись после ожидания блокировки не получает метку раньше коммита соседа."""
+    run = _run_in_db(clean_db, ReviewRunStatus.BUILDING_CONTEXT)
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        started = work.session.scalar(text("SELECT now()"))
+        time.sleep(0.05)
+        work.review_runs.update(replace(run, last_progress_at=LATER))
+        work.commit()
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        stored = work.review_runs.get(run.id)
+    assert stored is not None and stored.updated_at >= started + dt.timedelta(seconds=0.05)
+
+
+def test_a_step_outcome_is_written_once(clean_db) -> None:
+    """Воркер и очистка закрывают один шаг: первый исход остаётся."""
+    run = _run_in_db(clean_db, ReviewRunStatus.BUILDING_CONTEXT)
+    step = start_step(run.id, ReviewRunStage.BUILDING_CONTEXT, started_at=NOW, step_id=new_id())
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        work.review_run_steps.add(step)
+        work.commit()
+    first = finish_step(step, duration_seconds=1.0, tokens_used=None)
+    second = finish_step(step, duration_seconds=9.0, tokens_used=None, error_code="REVIEW_RUN_STALE")
+
+    for outcome in (first, second):
+        with SqlAlchemyUnitOfWork(clean_db) as work:
+            work.review_run_steps.update(outcome)
+            work.commit()
+
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        (stored,) = work.review_run_steps.list_for_run(run.id)
+    assert stored.status is ReviewRunStepStatus.COMPLETED
+    assert stored.error_code is None
 
 
 def test_a_finished_run_refuses_a_same_status_update(uow) -> None:
