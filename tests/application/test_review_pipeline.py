@@ -21,6 +21,7 @@ from app.application.merge_gate_publish import (
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.ports.vcs_review import MergeGateCheck
 from app.application.review_pipeline import run_review
+from app.application.use_cases.build_review_context import REVIEW_DIFF_MAX_LINES
 from app.domain.entities import (
     MergeRequest,
     RepositorySettings,
@@ -61,7 +62,7 @@ from ..fakes.llm_gateway import (
 from ..fakes.run_outcome import RecordingRunOutcome
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
-from ..fakes.webhooks import FakeVcs, a_repository
+from ..fakes.webhooks import FakeVcs, a_repository, diff_of_lines
 
 # Дифф фейкового VCS меняет первую строку `app/main.py`.
 CHANGED_FILE = "app/main.py"
@@ -960,6 +961,29 @@ def test_a_diff_over_the_limit_fails_the_run_without_a_review() -> None:
     assert gateway.requests == []
     assert vcs.publications == []
     assert vcs.checks == []
+    assert uow.context_payloads.list_for_run(JOB.review_run_id) == []
+
+
+def test_a_diff_over_the_line_limit_fails_the_run_without_a_review() -> None:
+    """Дифф в байтовом лимите, но длиннее `REVIEW_DIFF_MAX_LINES` строк — прогон `failed`,
+    шаг `fetching_diff` с `DIFF_TOO_LARGE`; дифф не разбирается, модель не вызывается."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway([])
+    vcs = RecordingVcsGateway(diff=diff_of_lines(REVIEW_DIFF_MAX_LINES + 1))
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, gateway, vcs_gateway=vcs)
+
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    assert run.status == ReviewRunStatus.FAILED
+    assert run.failure_reason == f"дифф PR больше лимита {REVIEW_DIFF_MAX_LINES} строк: ревью не выполняется"
+    assert _steps(uow) == [
+        (ReviewRunStage.FETCHING_DIFF, ReviewRunStepStatus.FAILED, None, "DIFF_TOO_LARGE"),
+    ]
+    assert gateway.requests == []
+    assert vcs.publications == []
     assert uow.context_payloads.list_for_run(JOB.review_run_id) == []
 
 

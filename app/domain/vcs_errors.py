@@ -54,7 +54,7 @@ class VcsFileTooLargeError(VcsError):
 
 
 class DiffTooLargeError(VcsFileTooLargeError):
-    """Дифф прогона больше `diff_max_bytes`: ревью не выполняется.
+    """Дифф прогона больше `diff_max_bytes` байт или `REVIEW_DIFF_MAX_LINES` строк: ревью не выполняется.
 
     Код свой, а не `SCM_UNAVAILABLE`: VCS ответила исправно, и повтор не
     поможет — как `PROMPT_TOO_LARGE` у модели. Прогон уходит в `failed`, шаг
