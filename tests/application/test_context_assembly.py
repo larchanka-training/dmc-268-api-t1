@@ -3,6 +3,7 @@
 import hashlib
 import tracemalloc
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -508,3 +509,80 @@ def test_package_with_pr_context_never_exceeds_the_limit() -> None:
     context = PrContext("t" * 500, "d" * 2_000, tuple("c" * 300 for _ in range(10)))
     payload = _assemble(diff=_big_diff(30), limits=limits, pr_context=context).payload
     assert payload.token_count <= 1_024
+
+
+def _peak_of_assembly(
+    diff: str, *, rules: RepoRules = RULES, pr_context: PrContext = NO_PR_CONTEXT
+) -> tuple[dict[str, Any], int]:
+    """Тело пакета и пик `tracemalloc` одной сборки; разбор диффа — вне замера."""
+    files = parse_diff(diff)
+    tracemalloc.start()
+    try:
+        body = assemble_context(
+            JOB,
+            files,
+            rules,
+            (),
+            (),
+            pr_context=pr_context,
+            limits=LIMITS,
+            review_run_id=RUN_ID,
+            now=NOW,
+            new_id=lambda: UUID(int=99),
+        ).payload.body
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return body, peak
+
+
+def test_path_is_sanitized_once_per_file_not_per_hunk() -> None:
+    """Путь из управляющих символов обезвреживается раз на файл: копия на каждый ханк
+    в `omitted` выводила воркер за память на диффе в пределах обоих лимитов (#328).
+    """
+    path = "\x01" * 4_000
+    hunks = 2_000
+    body_lines = "".join(f"@@ -0,0 +{i},1 @@\n+x\n" for i in range(1, hunks + 1))
+    diff = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{body_lines}"
+
+    body, peak = _peak_of_assembly(diff, rules=RepoRules(RulesStatus.ABSENT))
+
+    safe = sanitize(path)
+    entries = body["diff"] + [e for e in body["omitted"] if e["part"] == "hunk"]
+    assert entries and all(e["path"] == safe for e in entries)
+    assert body["omitted_count"] == hunks - len(body["diff"])
+    assert peak < len(safe) * hunks // 10
+
+
+def test_rule_files_share_the_sanitized_path() -> None:
+    """Списки файлов правил — ссылки на один обезвреженный путь, а не копия на пару
+    «правило × файл».
+    """
+    rules = RepoRules(
+        RulesStatus.LOADED,
+        tuple(RepoRule(f"R{i}", ("**",), (), ("c",)) for i in range(3)),
+    )
+    path = "a\x01.py"
+    diff = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+x\n"
+
+    body, _ = _peak_of_assembly(diff, rules=rules)
+
+    files = [item["files"][0] for item in body["rules"]["items"]]
+    assert len(files) == 3 and files[0] == sanitize(path)
+    assert all(f is body["diff"][0]["path"] for f in files)
+
+
+def test_commit_message_longer_than_the_share_is_omitted_without_sanitizing() -> None:
+    """Сообщение коммита длиннее доли контекста PR не войдёт никогда и не обезвреживается:
+    `sanitize` раздул бы `\\x01` в 8 раз, а размер сообщений GitHub не ограничивает (#328).
+    """
+    text = "\x01" * 1_000_000
+    pr_context = PrContext(title="", description="", commit_messages=("fix: коротко", text))
+
+    body, peak = _peak_of_assembly(DIFF, pr_context=pr_context)
+
+    assert body["pull_request_context"] == [
+        {"part": "commit", "index": 1, "text": fence("commit_message", "fix: коротко")}
+    ]
+    assert {"part": "commit_message", "reason": "budget", "index": 2} in body["omitted"]
+    assert peak < len(text)

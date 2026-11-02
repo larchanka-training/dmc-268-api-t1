@@ -1,5 +1,5 @@
 Каждая задача с кодом — красно-зелёный виток (скилл `backend-tdd`): сначала тест в названном
-файле падает, потом код, потом тест зелёный. Решения — `design.md` (D1–D4), поведение — дельта
+файле падает, потом код, потом тест зелёный. Решения — `design.md` (D1–D5), поведение — дельта
 `specs/webhook-intake/spec.md`.
 
 ## 1. Спека
@@ -26,3 +26,7 @@
 - [x] 5.2 `REVIEW_DIFF_MAX_LINES = 200_000` по замеру памяти воркера в контейнере 512 МБ (design D3); дельта `webhook-intake`, `.env.example`, `docs/BACKEND_ARCHITECTURE.md`. Тест: граница в `tests/application/test_build_review_context.py` (имя без «before_parsing»), строки lock-файла считаются
 - [x] 5.3 Лимит строк назван рядом с байтовым: `docs/pipeline/PIPELINE_SPEC.md` (`DIFF_TOO_LARGE`), docstring `DiffTooLargeError`, комментарий над `diff_max_bytes` в `app/config.py`
 - [x] 5.4 Проверки из 4.1 и повторный архив: `openspec archive worker-diff-line-limit`. Проверка: `npx @fission-ai/openspec@1.15.0 validate --all --strict`
+- [x] 5.5 Путь обезвреживается раз на файл (`safe_paths` в `assemble_context`): элемент ханка, его запись `omitted` и списки файлов правил ссылаются на одну строку (design D5). Тест: `tests/application/test_context_assembly.py` — путь из 4 000 `\x01` на 2 000 ханках, пик `tracemalloc` меньше десятой доли копий; файлы правил — один объект с путём элемента диффа
+- [x] 5.6 Сообщение коммита длиннее доли контекста PR — omission `commit_message`/`budget` до `fence` (`_pr_context_items`, design D5). Тест: там же — сообщение из 1 млн `\x01` уходит в `omitted`, пик меньше длины текста
+- [x] 5.7 `design.md`: Goals, D5 с замером до/после, Risks (замер на стенде и ответ коммитов — задача #333; `422` кабинета на 50 001–200 000 строк); `proposal.md`: три сценария, Impact
+- [x] 5.8 Проверки из 4.1. Проверка: `npx @fission-ai/openspec@1.15.0 validate --all --strict`
