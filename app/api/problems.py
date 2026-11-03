@@ -206,15 +206,18 @@ class RepositoryAlreadyConnectedProblem(Problem):
 
 
 class RepositoryManageRequiredProblem(Problem):
-    """`403 REPOSITORY_MANAGE_REQUIRED`: у пользователя нет прав admin или maintain на репозиторий у провайдера."""
+    """`403 REPOSITORY_MANAGE_REQUIRED`: у пользователя нет нужной роли на репозитории у провайдера.
+
+    Заголовок общий для всех действий: нужные роли у них разные, их называет `detail` отказа.
+    """
 
     example = {
-        "detail": "Подключать репозиторий может только пользователь с правом admin или maintain на него.",
+        "detail": "Недостаточно прав на репозиторий у провайдера для этого действия.",
         "instance": "/api/v1/repositories",
     }
 
     type: Literal["urn:dmc-268:problem:repository-manage-required"] = "urn:dmc-268:problem:repository-manage-required"
-    title: Literal["Нужны права admin или maintain на репозиторий"] = "Нужны права admin или maintain на репозиторий"
+    title: Literal["Недостаточно прав на репозиторий"] = "Недостаточно прав на репозиторий"
     status: Literal[HTTPStatus.FORBIDDEN] = HTTPStatus.FORBIDDEN
     code: Literal[ErrorCode.REPOSITORY_MANAGE_REQUIRED] = ErrorCode.REPOSITORY_MANAGE_REQUIRED
 
@@ -235,7 +238,8 @@ class ProviderNotSupportedProblem(Problem):
 
 
 class ReviewAlreadyActiveProblem(Problem):
-    """`409 REVIEW_ALREADY_ACTIVE`: ручной запуск, когда прогон по этому коммиту уже идёт.
+    """`409 REVIEW_ALREADY_ACTIVE`: ручной запуск (`POST /api/v1/reviews`), когда прогон по
+    head-коммиту PR уже идёт — в том числе прогон победителя гонки с вебхуком.
 
     Вебхук на тот же случай отвечает `202` с существующим прогоном.
     """
@@ -266,7 +270,8 @@ class WebhookSignatureInvalidProblem(Problem):
 
 
 class ScmUnavailableProblem(Problem):
-    """`502 SCM_UNAVAILABLE`: провайдер VCS не ответил или ответил ошибкой — при приёме вебхука или подключении репозитория."""
+    """`502 SCM_UNAVAILABLE`: провайдер VCS не ответил или ответил ошибкой — при приёме вебхука,
+    ручном запуске ревью, подключении репозитория и чтениях кабинета."""
 
     example = {
         "detail": "Провайдер VCS не ответил или ответил ошибкой; прогон не создан.",

@@ -168,7 +168,7 @@ def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) 
             repository = uow.repositories.get(merge_request.repository_id) if merge_request else None
         if latest is None or latest.id != run.id or repository is None:
             return
-        check = pause_check(repository) or (build_failed_review_check() if earlier is not None else None)
+        check = pause_check(repository, latest) or (build_failed_review_check() if earlier is not None else None)
         if check is None:
             return
         vcs.set_merge_gate_check(

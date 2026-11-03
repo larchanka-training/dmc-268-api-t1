@@ -1064,6 +1064,41 @@ def test_run_finished_after_the_pause_sets_the_pause_check(
     assert vcs.checks == [expected]
 
 
+@pytest.mark.parametrize(
+    ("pause_review", "conclusion", "title"),
+    [
+        pytest.param(
+            lambda uow: uow.repositories.update_settings(
+                REPOSITORY.id, RepositorySettings(False, (), FindingSeverity.CRITICAL), NOW
+            ),
+            "failure",
+            "Есть незакрытые замечания уровня critical и выше",
+            id="auto-review-off",
+        ),
+        pytest.param(
+            lambda uow: uow.repositories.disconnect(REPOSITORY.id, NOW),
+            "success",
+            "Ревью выключено в сервисе",
+            id="disconnected",
+        ),
+    ],
+)
+def test_manual_run_on_auto_review_pause_sets_its_own_merge_gate(
+    pause_review: Callable[[FakeUnitOfWork], Any], conclusion: str, title: str
+) -> None:
+    """D11: пауза авторевью не перекрывает gate ручного прогона, выключение репозитория — да."""
+    uow = FakeUnitOfWork()
+    run = replace(_run_with_critical_finding(uow), trigger=TriggerSource.MANUAL)
+    uow.review_runs.add(run)
+    pause_review(uow)
+    vcs = RecordingVcsGateway()
+
+    _publish_first_run(uow, run, vcs)
+
+    assert len(vcs.publications) == 1
+    assert [(c.conclusion, c.title) for c in vcs.checks] == [(conclusion, title)]
+
+
 def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
     """Последний прогон на head сам отменён: блокировка выставляется один раз, и
     цикл поправки не крутится на нём."""

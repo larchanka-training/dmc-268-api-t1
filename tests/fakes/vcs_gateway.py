@@ -75,6 +75,8 @@ class RecordingVcsGateway:
             source_branch="feat",
             target_branch="develop",
             state=MergeRequestState.OPEN,
+            from_fork=False,
+            author_association="OWNER",
         )
 
     def fetch_pr_commit_messages(

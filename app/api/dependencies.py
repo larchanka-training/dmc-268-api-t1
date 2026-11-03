@@ -15,6 +15,7 @@ from app.application.ports.cache_store import CacheStore
 from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
+from app.application.ports.run_outcome import RunOutcomeRecorder
 from app.application.ports.vcs_gateway import VcsGateway
 from app.config import Settings
 from app.domain.enums import Provider
@@ -36,6 +37,11 @@ def get_unit_of_work(request: Request) -> Iterator[UnitOfWork]:
 
 def get_job_queue(container: Container = Depends(get_container)) -> JobQueue:
     return container.job_queue()
+
+
+def get_run_outcome(container: Container = Depends(get_container)) -> RunOutcomeRecorder:
+    """Счётчик терминальных исходов прогонов: компенсация «не поставили в очередь» ручного запуска."""
+    return container.run_outcome()
 
 
 def get_installation_catalog(container: Container = Depends(get_container)) -> InstallationCatalog:

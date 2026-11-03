@@ -91,7 +91,12 @@ JOB = ReviewJob(
 MR_ID = UUID(int=3)
 
 
-def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.QUEUED) -> None:
+def _seed_run(
+    uow: FakeUnitOfWork,
+    *,
+    status: ReviewRunStatus = ReviewRunStatus.QUEUED,
+    trigger: TriggerSource = TriggerSource.WEBHOOK,
+) -> None:
     # Запись репозитория PR: без неё merge gate не прочитает порог.
     uow.repositories.add(replace(a_repository(), id=UUID(int=9)))
     uow.merge_requests.add(
@@ -116,7 +121,7 @@ def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.
             merge_request_id=MR_ID,
             head_sha=JOB.head_sha,
             status=status,
-            trigger=TriggerSource.WEBHOOK,
+            trigger=trigger,
             last_progress_at=NOW,
             created_at=NOW,
             updated_at=NOW,
@@ -1537,6 +1542,23 @@ def test_a_failed_review_on_a_paused_repository_sets_the_pause_check(
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
     assert vcs.checks == [expected]
+
+
+@pytest.mark.parametrize("earlier_review", [True, False], ids=["re-review", "first-review"])
+def test_a_failed_manual_review_on_auto_review_pause_sets_the_pause_check(earlier_review: bool) -> None:
+    """D11: упавший ручной прогон на паузе авторевью — check паузы `success`, а не
+    `failure`: PR, который авторевью не ждёт, не держится; ревью перезапускают руками."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, trigger=TriggerSource.MANUAL)
+    if earlier_review:
+        _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    _turn_auto_review_off(uow)
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
 
 
 def test_a_failed_review_superseded_on_the_head_leaves_the_gate_alone() -> None:

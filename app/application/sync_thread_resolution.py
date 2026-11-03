@@ -195,7 +195,9 @@ def handle_review_thread_webhook(
     на следующем закрытии треда. При паузе ревью (`pause_check`: репозиторий выключен или
     `auto_review_enabled = false`) тред записывается так же, но на head ставится check run
     паузы, без сверки тредов: пересчёт поставил бы `failure` на head с проверкой паузы или
-    `success` «Ревью пройдено» на непроверенный head.
+    `success` «Ревью пройдено» на непроверенный head. Исключение — ручной прогон на head при
+    `auto_review_enabled = false`, если он не упал и не отменён (D11): gate пересчитывается,
+    как без паузы; незавершённый прогон пересчёт не трогает — gate выставит он сам.
     """
     if not apply_review_thread_webhook(payload, uow=uow, now=now):
         return False
@@ -222,12 +224,13 @@ def handle_review_thread_webhook(
         repo = uow.repositories.find_by_provider(Provider.GITHUB, str(provider_repo_id))
         if repo is None:
             return True
-        check = pause_check(repo)
         repository_id = repo.id
         merge_request = uow.merge_requests.find_by_number(repo.id, pr_number)
         if merge_request is None:
             return True
         merge_request_id = merge_request.id
+        # Пауза зависит от прогона на head: ручной ставит свой gate и на паузе авторевью (D11).
+        check = pause_check(repo, uow.review_runs.find_latest(merge_request.id, head_sha))
     if check is not None:
         vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
         return True

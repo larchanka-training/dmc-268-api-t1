@@ -6,8 +6,8 @@ from uuid import UUID
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import MergeGateCheck
-from app.domain.entities import Finding, Repository
-from app.domain.enums import FindingSeverity, ReviewRunStatus
+from app.domain.entities import Finding, Repository, ReviewRun
+from app.domain.enums import FindingSeverity, ReviewRunStatus, TriggerSource
 from app.domain.merge_gate import merge_blocked_by_findings, untracked_findings
 from app.domain.vcs_errors import VcsError
 
@@ -62,18 +62,33 @@ AUTO_REVIEW_OFF_CHECK = MergeGateCheck(
     ),
 )
 
-def pause_check(repository: Repository) -> MergeGateCheck | None:
-    """Check run на head, если ревью по вебхуку не идёт; `None` — идёт.
+def pause_check(repository: Repository, head_run: ReviewRun | None) -> MergeGateCheck | None:
+    """Check run на head, если ревью на нём не идёт; `None` — идёт, gate ставит прогон.
 
-    Выключение репозитория важнее настройки: при обоих признаках — `DISABLED_REVIEW_CHECK`,
-    чтобы пользователь чинил то, что действительно мешает (сначала подключение).
+    `head_run` — последний прогон на head (`find_latest`), `None` — прогона нет.
+    Выключение репозитория важнее настройки и ручного прогона: при нём всегда
+    `DISABLED_REVIEW_CHECK`, чтобы пользователь чинил то, что действительно мешает
+    (сначала подключение), а начатый до выключения прогон не блокировал мердж.
+    Пауза `auto_review_enabled = false` — про автоматическое ревью: ручной прогон на head,
+    пока он не упал и не отменён, ставит свой gate (D11). Упавший ручной прогон — check
+    паузы: `failure` держал бы PR, который авторевью не ждёт.
     Вызывают вебхук PR, вебхук треда, `settle_merge_gate` и упавший прогон.
     """
     if repository.connected_at is None:
         return DISABLED_REVIEW_CHECK
     if not repository.auto_review_enabled:
+        if _manual_run_in_charge(head_run):
+            return None
         return AUTO_REVIEW_OFF_CHECK
     return None
+
+
+def _manual_run_in_charge(head_run: ReviewRun | None) -> bool:
+    return (
+        head_run is not None
+        and head_run.trigger is TriggerSource.MANUAL
+        and head_run.status not in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
+    )
 
 
 def build_merge_gate_check(
@@ -148,6 +163,7 @@ def settle_merge_gate(
     сменить, пока шёл прогон или сбой, и gate завершённого чужого прогона по старому
     порогу снял бы его блокировку. На паузе ревью (`pause_check`) выставляется check
     паузы: `failure` завершившегося прогона заблокировал бы PR, который ревью не ждёт.
+    Ручной прогон на паузе авторевью ставит свой gate (D11).
     """
     failures = 0
     # Последний выставленный check: пока GitHub его принимал, итог мог измениться из-за
@@ -163,7 +179,7 @@ def settle_merge_gate(
             raise LookupError(f"repository {repository_id} not found")
         if latest is None:
             return
-        pause = pause_check(repository)
+        pause = pause_check(repository, latest)
         if pause is not None:
             current = pause
         elif (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED) or (

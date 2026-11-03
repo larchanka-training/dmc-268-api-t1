@@ -306,7 +306,10 @@ def test_failed_run_on_same_commit_does_not_block_new_one() -> None:
 
 
 def test_finished_run_of_another_trigger_does_not_make_a_duplicate() -> None:
-    """Дублем делает только прогон по вебхуку: явное повторное ревью — не доставка."""
+    """Дублем делает только прогон по вебхуку: явное повторное ревью — не доставка.
+
+    Известное ограничение D4 change `manual-review-launch`: доставка на коммит, уже
+    проверенный вручную, создаёт ещё один прогон `webhook`. Сменят правило — тест покажет."""
     _, uow, _, queue = run_case()
     (finished,) = uow.review_runs.added
     object.__setattr__(finished, "status", ReviewRunStatus.COMPLETED)
@@ -315,6 +318,8 @@ def test_finished_run_of_another_trigger_does_not_make_a_duplicate() -> None:
     outcome, uow, _, queue = run_case(uow=uow, queue=queue)
     assert outcome.kind == "success"
     assert len(uow.review_runs.added) == 2
+    assert outcome.run is not None and outcome.run.trigger is TriggerSource.WEBHOOK
+    assert len(queue.jobs) == 2
 
 
 def test_lost_race_returns_conflict_with_survivor_run(monkeypatch) -> None:
@@ -642,6 +647,32 @@ def test_retarget_of_a_repository_with_auto_review_off_sets_only_the_pause_check
     assert [check for _, check in vcs.checks] == [AUTO_REVIEW_OFF_CHECK]
     assert merge_request_of(uow).target_branch == "main"
     assert len(queue.jobs) == 1
+
+
+@pytest.mark.parametrize("status", [ReviewRunStatus.COMPLETED, ReviewRunStatus.ANALYSING])
+def test_pr_event_on_the_head_of_a_manual_run_on_pause_leaves_its_gate(
+    status: ReviewRunStatus,
+) -> None:
+    """D11: на head ручной прогон, авторевью на паузе. Событие PR на тот же head не ставит
+    check паузы поверх gate ручного прогона и не запускает автоматическое ревью."""
+    _, uow, _, queue = run_case()
+    (run,) = uow.review_runs.added
+    uow.review_runs.add(replace(run, trigger=TriggerSource.MANUAL, status=status))
+    (repository,) = uow.repositories.stored.values()
+    uow.repositories.update_settings(
+        repository.id,
+        RepositorySettings(
+            auto_review_enabled=False, branch_filter=(), min_severity=repository.min_severity
+        ),
+        NOW,
+    )
+
+    # Повтор `opened` на тот же head: дублем его не признать — `find_reviewed` видит только вебхуковые.
+    outcome, uow, vcs, queue = run_case(uow=uow, queue=queue)
+
+    assert outcome.kind == "ignored"
+    assert vcs.checks == []
+    assert {r.id for r in uow.review_runs.added} == {run.id} and len(queue.jobs) == 1
 
 
 def _case_with_repository(repository: Any, action: str = "opened", *, vcs_error: VcsError | None = None):

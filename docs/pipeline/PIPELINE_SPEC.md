@@ -191,11 +191,22 @@ provider + provider_repository_id + pull_request_number + head_commit_sha
   неудавшиеся доставки не повторяет — их переотправляет проход воркера (#149), и
   переотправка с тем же `X-GitHub-Delivery` снова получила бы отказ.
 
-Перед Contract v1 команда должна отдельно решить:
+Решено (change `manual-review-launch`, #273):
 
-- допускается ли ручной повтор review для того же commit;
-- нужен ли HTTP `Idempotency-Key`;
-- как отличать retry существующей задачи от нового review.
+- ручной повтор ревью того же коммита **допускается**: ручной запуск отказывает только при
+  активном прогоне (`409`), завершённый прогон любого источника не мешает новому;
+- HTTP `Idempotency-Key` не нужен: двойное нажатие защищает тот же `409`, а повтор после
+  завершения — желаемое поведение;
+- retry существующей задачи — тот же `review_run_id` (воркер, §6); новое ревью — новый
+  `ReviewRun` с `trigger = manual`.
+
+Известное ограничение: дубль вебхука смотрит только на прогоны `trigger = webhook`, поэтому
+задержанная или переотправленная (#149) доставка на коммит, уже проверенный вручную, запустит
+ещё одно ревью. Окно узкое: на тот же коммит вебхук приходит только переотправкой.
+
+Merge gate ручного прогона действует и при `auto_review_enabled = false`: пауза авторевью не
+перекрывает итог ручного прогона на head (спека `review-pipeline`). Упавший ручной прогон на паузе
+ставит check паузы, выключенный репозиторий — «Ревью выключено в сервисе».
 
 ---
 
@@ -396,12 +407,21 @@ retryable LLM-ошибок (почти вся таблица §6) осталос
 MVP endpoints:
 
 ```text
-GET  /repositories
-GET  /repositories/{repository_id}/pull-requests
-GET  /reviews/{review_run_id}
-GET  /events                      # общий поток событий кабинета (SSE)
-POST /webhooks/{provider}
-POST /reviews                    # заглушка: схема описана, отвечает 501 NOT_IMPLEMENTED
+GET    /repositories
+POST   /repositories
+GET    /repositories/{repository_id}
+DELETE /repositories/{repository_id}
+GET    /repositories/{repository_id}/settings
+PUT    /repositories/{repository_id}/settings
+GET    /repositories/{repository_id}/rules
+GET    /repositories/{repository_id}/pull-requests
+GET    /reviews
+POST   /reviews                  # ручной запуск: 202 с ReviewJob, trigger = manual
+GET    /reviews/{review_run_id}
+GET    /reviews/{review_run_id}/diff
+GET    /reviews/{review_run_id}/steps
+GET    /events                    # общий поток событий кабинета (SSE)
+POST   /webhooks/{provider}
 GET  /auth/{provider}/login
 GET  /auth/{provider}/callback
 GET  /auth/me
@@ -409,8 +429,15 @@ POST /auth/logout
 ```
 
 Находки прогона приходят в ответе `GET /reviews/{review_run_id}`, отдельного
-`/reviews/{review_run_id}/findings` нет (спека `review-rest-api`). Списка прогонов `GET /reviews`
-тоже нет. Вход и сессия (`/auth/...`) — §9.1.
+`/reviews/{review_run_id}/findings` нет (спека `review-rest-api`). Вход и сессия (`/auth/...`) —
+§9.1.
+
+`POST /reviews` (ручной запуск) — по сессии и `Origin`. Право — роль push, triage, maintain или
+admin у GitHub, проверенная запросом мимо кэша видимости (`403 REPOSITORY_MANAGE_REQUIRED`).
+`head_sha` и `base_sha` — из свежих метаданных PR; закрытый, смёрженный PR и PR из форка от автора
+не из `OWNER`/`MEMBER`/`COLLABORATOR` — `422` с `where = body.pull_request_number`. Запуск
+работает при `auto_review_enabled = false` и не применяет `branch_filter`; `trigger` принимает
+только `manual`.
 
 `POST /webhooks/{provider}` принимает доставки от хостинга (см.
 `docs/BACKEND_ARCHITECTURE.md`, «Подлинность webhook'ов»):
@@ -461,7 +488,8 @@ POST /auth/logout
   `REVIEW_ALREADY_ACTIVE`, `WEBHOOK_SIGNATURE_INVALID`, `SCM_UNAVAILABLE`,
   `PROVIDER_NOT_SUPPORTED`, `UNAUTHENTICATED`, `ORIGIN_FORBIDDEN`, `ROUTE_NOT_FOUND` (`404`
   неизвестного пути), `METHOD_NOT_ALLOWED` (`405`, разрешённые методы — в `Allow`),
-  `NOT_IMPLEMENTED` (`501` запланированной ручки, описанной в схеме заранее),
+  `NOT_IMPLEMENTED` (`501` запланированной ручки, описанной в схеме заранее; сейчас таких
+  ручек нет, код остаётся для будущих заглушек),
   `HTTP_ERROR` (прочий `HTTPException` фреймворка или зависимости — статус и заголовки
   исключения, например `429` с `Retry-After`), `INTERNAL_ERROR` (`500`, без деталей исключения). Модель
   на каждый код — в `app/api/problems.py`, в схеме — объединение `AnyProblem` с

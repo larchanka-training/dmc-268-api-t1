@@ -86,6 +86,8 @@ def pr_metadata(
         source_branch="feat/webhook-intake-rebased",
         target_branch=target_branch,
         state=MergeRequestState.OPEN,
+        from_fork=False,
+        author_association="OWNER",
     )
 
 
