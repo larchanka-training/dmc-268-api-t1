@@ -83,6 +83,15 @@ locals {
   # путей в своём шаблоне haproxy (observability/docker-socket-proxy.cfg),
   # минимум прав там же и в комментариях у контейнера в observability.tf.
   docker_socket_proxy_image = "tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e"
+  # Алерты #100: доставка в Telegram и пробы сервисов (prom/alertmanager:v0.34.2,
+  # prom/blackbox-exporter:v0.29.1).
+  alertmanager_image = "prom/alertmanager@sha256:39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b"
+  blackbox_image     = "prom/blackbox-exporter@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13"
+
+  # Цель пробы публичного входа (job blackbox-public в prometheus.yml): адрес
+  # стенда из public_origin. Без него — пустой список, как в локальном
+  # observability/public-targets.yml.
+  blackbox_public_targets = var.public_origin == "" ? [] : [{ targets = ["${var.public_origin}/"] }]
 
   # Окружение, без которого не загрузятся общие настройки (`load_settings`):
   # его получают оба контейнера из образа приложения — api и worker — и

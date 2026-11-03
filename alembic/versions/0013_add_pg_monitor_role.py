@@ -83,4 +83,18 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Удалить расширение и роль: роль ничего не владеет."""
     op.execute("DROP EXTENSION IF EXISTS pg_stat_statements")
-    op.execute(f"DROP ROLE IF EXISTS {_MONITOR_ROLE}")
+    # Роль кластерная: в другой базе того же кластера ревизия 0017 могла
+    # выдать ей права на review_runs, и DROP ROLE упал бы на них — снять
+    # их отсюда нельзя. Тогда роль остаётся той базе; права в этой базе
+    # откат 0017 уже снял.
+    op.execute(
+        f"DO $$ BEGIN"
+        f" IF NOT EXISTS (SELECT FROM pg_shdepend s"
+        f" JOIN pg_roles r ON r.oid = s.refobjid"
+        f" JOIN pg_database d ON d.oid = s.dbid"
+        f" WHERE s.refclassid = 'pg_authid'::regclass"
+        f" AND r.rolname = '{_MONITOR_ROLE}'"
+        f" AND d.datname <> current_database())"
+        f" THEN DROP ROLE IF EXISTS {_MONITOR_ROLE}; END IF;"
+        f" END $$"
+    )
