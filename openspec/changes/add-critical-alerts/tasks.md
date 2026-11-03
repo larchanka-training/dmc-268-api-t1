@@ -17,7 +17,7 @@
 
 ## 3. Развёртывание
 
-- [x] 3.1 `infra/observability.tf`: контейнеры `dmc268-alertmanager`, `dmc268-blackbox`, сеть `dmc268-alerting`, том `dmc268-alertmanager-data`, правила и цель публичного входа в Prometheus
+- [x] 3.1 `infra/observability.tf`: контейнеры `dmc268-alertmanager`, `dmc268-blackbox`, `dmc268-blackbox-public`, сеть `dmc268-alerting`, том `dmc268-alertmanager-data`, правила и цель публичного входа в Prometheus
 - [x] 3.2 Переменные `alert_telegram_bot_token`, `alert_telegram_chat_id`: необязательные, с проверкой формата; `deploy.yml` передаёт их из секретов
 - [x] 3.3 `docker-compose.yml`: те же сервисы и конфиги, секреты из окружения
 - [x] 3.4 CI: `amtool check-config`, `blackbox_exporter --config.check`, `promtool check config` с правилами

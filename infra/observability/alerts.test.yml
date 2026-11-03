@@ -268,6 +268,24 @@ tests:
               summary: "Расход токенов модели неизвестен"
               description: "Ряда review_llm_tokens_month нет 15 минут: коллектор не читает review_runs, алерт бюджета не работает. Смотрите логи dmc268-otelcol (receiver sqlquery)."
 
+  # Один пропущенный скрейп коллектора посреди окна for не сбрасывает: глушит
+  # только цель, лежащая все 5 минут. С up == 0 вместо max_over_time алерт
+  # загорелся бы лишь на 23-й минуте.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="collector", instance="collector:8889"}'
+        values: "1x6 0 1x13"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: LlmBudgetUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm
+            exp_annotations:
+              summary: "Расход токенов модели неизвестен"
+              description: "Ряда review_llm_tokens_month нет 15 минут: коллектор не читает review_runs, алерт бюджета не работает. Смотрите логи dmc268-otelcol (receiver sqlquery)."
+
   # Диск: 10 % свободно — DiskSpaceLow, 3 % — ещё и DiskSpaceCritical.
   - interval: 1m
     input_series:

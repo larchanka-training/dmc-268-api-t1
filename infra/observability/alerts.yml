@@ -54,8 +54,13 @@ groups:
       # Метрик контейнеров нет ни у кого при живом скрейпе: docker_stats не
       # читает Docker API (лёг dmc268-docker-proxy) — ContainerDown и
       # ContainerRestarting при этом слепы.
+      #
+      # Здесь и в WorkerNotConsuming, LlmBudgetUnknown, ReplicaNotStreaming
+      # absent() глушится, только когда цель не отвечала все 5 минут — тогда
+      # горит ScrapeTargetDown. По одному up == 0 любой пропущенный скрейп
+      # сбрасывал бы for, и алерт мог не загореться никогда (ревью PR #324).
       - alert: ContainerMetricsMissing
-        expr: absent(container_uptime_seconds) unless on() (up{job="docker-stats"} == 0)
+        expr: absent(container_uptime_seconds) unless on() (max_over_time(up{job="docker-stats"}[5m]) == 0)
         for: 5m
         labels:
           severity: warning
@@ -105,7 +110,7 @@ groups:
       - alert: WorkerNotConsuming
         expr: |
           rabbitmq_queue_consumers{queue="review_jobs.qq"} == 0
-          or (absent(rabbitmq_queue_consumers{queue="review_jobs.qq"}) unless on() (up{job="rabbitmq"} == 0))
+          or (absent(rabbitmq_queue_consumers{queue="review_jobs.qq"}) unless on() (max_over_time(up{job="rabbitmq"}[5m]) == 0))
         for: 5m
         labels:
           severity: critical
@@ -197,7 +202,7 @@ groups:
       # Без ряда расхода алерт бюджета молчит: sqlquery не может прочитать
       # базу (нет прав у роли мониторинга, база недоступна).
       - alert: LlmBudgetUnknown
-        expr: absent(review_llm_tokens_month) unless on() (up{job="collector"} == 0)
+        expr: absent(review_llm_tokens_month) unless on() (max_over_time(up{job="collector"}[5m]) == 0)
         for: 15m
         labels:
           severity: warning
@@ -260,7 +265,7 @@ groups:
       # сервера нет — метрика задержки пропадает. Тот же признак проверяет
       # healthcheck реплики (status walreceiver = streaming).
       - alert: ReplicaNotStreaming
-        expr: absent(postgresql_replication_data_delay_bytes) unless on() (up{job="collector"} == 0)
+        expr: absent(postgresql_replication_data_delay_bytes) unless on() (max_over_time(up{job="collector"}[5m]) == 0)
         for: 5m
         labels:
           severity: critical
