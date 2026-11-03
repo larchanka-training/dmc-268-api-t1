@@ -374,8 +374,9 @@ retryable LLM-ошибок (почти вся таблица §6) осталос
 - `LLM_INVALID_OUTPUT`
 - `PROMPT_TOO_LARGE` (запрос вместе с резервом ответа не помещается в окно модели и не
   уходит ни одному провайдеру)
-- `DIFF_TOO_LARGE` (unified diff PR больше `DIFF_MAX_BYTES`: тело не дочитывается, ревью
-  не выполняется, повтор не поможет)
+- `DIFF_TOO_LARGE` (unified diff PR больше `DIFF_MAX_BYTES` — тело не дочитывается — или
+  длиннее `REVIEW_DIFF_MAX_LINES` строк — отказ до разбора; ревью не выполняется, повтор не
+  поможет)
 - `REVIEW_RUN_STALE` (§7.5)
 - `INTERNAL_ERROR`
 

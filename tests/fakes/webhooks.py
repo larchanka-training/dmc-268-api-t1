@@ -35,6 +35,19 @@ DIFF = (
 )
 
 
+def diff_of_lines(total: int) -> str:
+    """Корректный unified diff ровно из `total` строк: новый файл из коротких добавленных строк."""
+    header = 5
+    added = total - header
+    return (
+        "diff --git a/many.txt b/many.txt\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/many.txt\n"
+        f"@@ -0,0 +1,{added} @@\n" + "+x\n" * added
+    )
+
+
 def webhook_payload(action: str = "opened", *, base_ref: str | None = None) -> dict[str, Any]:
     """Записанный payload GitHub; для прочих действий — тело `opened` с заменой.
 

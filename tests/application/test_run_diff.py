@@ -31,7 +31,7 @@ from app.domain.vcs_errors import (
 )
 from app.infrastructure.cache.memory import InMemoryCacheStore
 from tests.fakes.installation_catalog import FakeInstallationCatalog
-from tests.fakes.webhooks import NOW, FakeVcs, a_repository
+from tests.fakes.webhooks import NOW, FakeVcs, a_repository, diff_of_lines
 
 # Переименование с правкой, бинарный и не-ASCII строки: разбор записи из кэша должен
 # вернуть каждое поле представления как было.
@@ -221,19 +221,6 @@ def test_diff_over_the_callers_limit_is_too_large() -> None:
         )
 
     assert cache.get(_key(repository)) is None
-
-
-def diff_of_lines(total: int) -> str:
-    """Корректный unified diff ровно из `total` строк: новый файл из коротких добавленных строк."""
-    header = 5
-    added = total - header
-    return (
-        "diff --git a/many.txt b/many.txt\n"
-        "new file mode 100644\n"
-        "--- /dev/null\n"
-        "+++ b/many.txt\n"
-        f"@@ -0,0 +1,{added} @@\n" + "+x\n" * added
-    )
 
 
 def test_diff_over_the_line_limit_is_too_large_and_not_cached() -> None:

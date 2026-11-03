@@ -13,7 +13,7 @@ from types import TracebackType
 from typing import Any, Self
 from uuid import UUID
 
-from app.application.ports.unit_of_work import UnitOfWork
+from app.application.ports.unit_of_work import RunStateConflict, UnitOfWork
 from app.domain.entities import (
     BotThread,
     ContextPayload,
@@ -36,6 +36,7 @@ from app.domain.enums import (
     CommentKind,
     Provider,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
@@ -329,10 +330,15 @@ class FakeReviewRunRepo:
         self.added.append(run)
         self._by_id[run.id] = run
 
-    def update(self, run: ReviewRun) -> None:
+    def update(self, run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         existing = self._by_id.get(run.id)
         if existing is None:
             raise LookupError(f"review run {run.id} is not stored")
+        if previous is not None and (existing.status, existing.last_progress_at) != (
+            previous.status,
+            previous.last_progress_at,
+        ):
+            raise RunStateConflict(f"review run {run.id} changed since it was read")
         # Как у SQL-адаптера: проверка перехода — только при смене статуса или
         # для терминальной строки.
         if existing.status in TERMINAL_STATUSES or existing.status != run.status:
@@ -364,9 +370,11 @@ class FakeReviewRunStepRepo:
         self._by_id[step.id] = step
 
     def update(self, step: ReviewRunStep) -> None:
-        if step.id not in self._by_id:
+        existing = self._by_id.get(step.id)
+        if existing is None:
             raise LookupError(f"review run step {step.id} is not stored")
-        self._by_id[step.id] = step
+        if existing.status is ReviewRunStepStatus.RUNNING:
+            self._by_id[step.id] = step
 
 
 class FakeContextPayloadRepo:

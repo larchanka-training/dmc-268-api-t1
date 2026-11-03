@@ -1,7 +1,10 @@
 """Выметание зависших прогонов — фейковый `UnitOfWork`, без БД."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
+
+import pytest
 
 from app.application.stale_sweep import sweep_stale_runs
 from app.domain.entities import ReviewRun
@@ -140,3 +143,31 @@ def test_a_queued_run_is_failed_only_after_the_queued_limit() -> None:
     assert waiting is not None and waiting.status == ReviewRunStatus.QUEUED
     assert lost is not None and lost.status == ReviewRunStatus.FAILED
     assert lost.failure_reason == "нет прогресса дольше 6:00:00"
+
+
+def test_a_run_that_moved_after_the_read_is_skipped_and_the_rest_are_swept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Прогон продвинулся между чтением и записью: живой остаётся, остальные выметаются."""
+    uow = FakeUnitOfWork()
+    moved = _run(1, ReviewRunStatus.ANALYSING, timedelta(hours=1))
+    other = _run(2, ReviewRunStatus.ANALYSING, timedelta(hours=1))
+    uow.review_runs.add(moved)
+    uow.review_runs.add(other)
+    read = uow.review_runs.list_unfinished
+
+    def read_then_progress() -> list[ReviewRun]:
+        runs = read()
+        uow.review_runs.update(replace(moved, last_progress_at=NOW))
+        uow.commit()
+        return runs
+
+    monkeypatch.setattr(uow.review_runs, "list_unfinished", read_then_progress)
+    recorder = RecordingRunOutcome()
+
+    swept = sweep_stale_runs(uow, now=NOW, limit=LIMIT, queued_limit=QUEUED_LIMIT, run_outcome=recorder)
+
+    assert swept == 1
+    assert recorder.statuses == ["failed"]
+    assert uow.review_runs.get(moved.id).status is ReviewRunStatus.ANALYSING  # type: ignore[union-attr]
+    assert uow.review_runs.get(other.id).status is ReviewRunStatus.FAILED  # type: ignore[union-attr]

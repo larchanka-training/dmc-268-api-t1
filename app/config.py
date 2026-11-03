@@ -198,6 +198,8 @@ class Settings(BaseSettings):
     )
     # Потолок диффа прогона: тело читается потоком и обрывается на лимите,
     # больший дифф не ревьюится — прогон `failed` с `DIFF_TOO_LARGE` (#144).
+    # Так же — дифф длиннее `REVIEW_DIFF_MAX_LINES` строк: это константа в коде
+    # (`app/application/use_cases/build_review_context.py`), а не настройка (#318).
     diff_max_bytes: int = Field(
         default=5_242_880,
         gt=0,
