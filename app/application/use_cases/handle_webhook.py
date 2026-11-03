@@ -57,7 +57,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from app.application.merge_gate_publish import pause_check
+from app.application.merge_gate_publish import pause_check, publish_pause_check
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import UnitOfWork
@@ -157,7 +157,7 @@ def handle_webhook_event(
     # свой gate и на паузе авторевью (D11); на новом коммите прогона нет — check паузы.
     check = pause_check(repository, head_run)
     if check is not None:
-        _pass_merge_gate_of_paused(vcs, event, check)
+        _pass_merge_gate_of_paused(uow, vcs, repository, event, check)
         return WebhookOutcome(kind="ignored")
     if not repository.auto_review_enabled:
         # Пауза, но head держит ручной прогон: gate его, а автоматического ревью нет.
@@ -229,15 +229,30 @@ def _duplicate_of(work: UnitOfWork, merge_request_id: UUID, head_sha: str) -> Re
 
 
 def _pass_merge_gate_of_paused(
-    vcs: VcsGateway, event: WebhookEvent, check: MergeGateCheck
+    uow: UnitOfWork,
+    vcs: VcsGateway,
+    repository: Repository,
+    event: WebhookEvent,
+    check: MergeGateCheck,
 ) -> None:
     """Check run паузы ревью (`success`) на head; best-effort.
 
     Сбой GitHub не меняет ответ (`ignored`) и не даёт 502: переотправка доставки ради
     проверки репозитория без ревью не нужна, следующий push поставит её снова.
+    Ручной прогон, ставший за head, пока шёл POST, получает свой gate обратно
+    (`publish_pause_check`).
     """
     try:
-        vcs.set_merge_gate_check(event.repo_full_name, event.head_sha, event.installation_id, check)
+        publish_pause_check(
+            uow,
+            vcs,
+            check,
+            repository_id=repository.id,
+            pr_number=event.pr_number,
+            repo_full_name=event.repo_full_name,
+            head_sha=event.head_sha,
+            installation_id=event.installation_id,
+        )
     except VcsError:
         logger.warning(
             "check run паузы ревью репозитория %s не поставлен", event.repo_full_name, exc_info=True

@@ -1,5 +1,6 @@
 """Записывающий `VcsGateway` для тестов публикации."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -45,6 +46,9 @@ class RecordingVcsGateway:
     inline_ids_lost: bool = False
     # Сбой самого check run merge gate.
     check_error: Exception | None = None
+    # Что случилось, пока GitHub принимал первый check run: вызывается один раз, после
+    # записи check; исключение из неё — потерянный ответ на дошедший POST.
+    during_first_check: Callable[[], None] | None = None
     # Прогоны, чьим маркером помечено каждое опубликованное ревью.
     review_run_ids: list[UUID] = field(default_factory=list)
     # Прогоны, чьё ревью с маркером уже есть на хостинге (`find_published_review`):
@@ -178,3 +182,6 @@ class RecordingVcsGateway:
         if self.check_error is not None:
             raise self.check_error
         self.checks.append(check)
+        if self.during_first_check is not None:
+            hook, self.during_first_check = self.during_first_check, None
+            hook()

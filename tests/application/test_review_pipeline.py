@@ -62,7 +62,7 @@ from ..fakes.llm_gateway import (
     verification_response,
 )
 from ..fakes.run_outcome import RecordingRunOutcome
-from ..fakes.unit_of_work import FakeUnitOfWork
+from ..fakes.unit_of_work import FakeUnitOfWork, add_manual_run_with_critical_thread
 from ..fakes.vcs_gateway import RecordingVcsGateway
 from ..fakes.webhooks import FakeVcs, a_repository, diff_of_lines
 
@@ -1559,6 +1559,31 @@ def test_a_failed_manual_review_on_auto_review_pause_sets_the_pause_check(earlie
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
     assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
+
+
+def test_a_delayed_pause_check_of_a_failed_manual_run_returns_the_gate_of_its_relaunch() -> None:
+    """Ревью #335: ручной прогон упал на паузе авторевью, check паузы задержан, а
+    перезапущенный руками прогон успел опубликовать `failure` — его gate возвращается."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, trigger=TriggerSource.MANUAL)
+    _turn_auto_review_off(uow)
+
+    def relaunch_completes() -> None:
+        add_manual_run_with_critical_thread(
+            uow,
+            merge_request_id=MR_ID,
+            head_sha=JOB.head_sha,
+            status=ReviewRunStatus.COMPLETED,
+            at=NOW + timedelta(hours=1),
+        )
+
+    vcs = RecordingVcsGateway(diff="+" * 1_001, during_first_check=relaunch_completes)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks[0] == AUTO_REVIEW_OFF_CHECK
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
 
 
 def test_a_failed_review_superseded_on_the_head_leaves_the_gate_alone() -> None:

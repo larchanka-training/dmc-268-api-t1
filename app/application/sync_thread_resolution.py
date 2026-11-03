@@ -9,6 +9,7 @@ from uuid import UUID
 
 from app.application.merge_gate_publish import (
     pause_check,
+    publish_pause_check,
     settle_merge_gate,
 )
 from app.application.ports.unit_of_work import UnitOfWork
@@ -232,7 +233,16 @@ def handle_review_thread_webhook(
         # Пауза зависит от прогона на head: ручной ставит свой gate и на паузе авторевью (D11).
         check = pause_check(repo, uow.review_runs.find_latest(merge_request.id, head_sha))
     if check is not None:
-        vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
+        publish_pause_check(
+            uow,
+            vcs,
+            check,
+            repository_id=repository_id,
+            pr_number=pr_number,
+            repo_full_name=repo_full_name,
+            head_sha=head_sha,
+            installation_id=installation_id,
+        )
         return True
     refresh_merge_gate_for_merge_request(
         merge_request_id,

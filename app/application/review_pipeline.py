@@ -24,7 +24,11 @@ from uuid import UUID
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits, request_review, request_verification
-from app.application.merge_gate_publish import build_failed_review_check, pause_check
+from app.application.merge_gate_publish import (
+    build_failed_review_check,
+    pause_check,
+    publish_pause_check,
+)
 from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
@@ -168,7 +172,21 @@ def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) 
             repository = uow.repositories.get(merge_request.repository_id) if merge_request else None
         if latest is None or latest.id != run.id or repository is None:
             return
-        check = pause_check(repository, latest) or (build_failed_review_check() if earlier is not None else None)
+        pause = pause_check(repository, latest)
+        if pause is not None and merge_request is not None:
+            # Пока идёт POST, за head мог стать новый ручной прогон и выставить свой gate.
+            publish_pause_check(
+                uow,
+                vcs,
+                pause,
+                repository_id=repository.id,
+                pr_number=merge_request.number,
+                repo_full_name=job.repository_full_name,
+                head_sha=job.head_sha,
+                installation_id=job.installation_id,
+            )
+            return
+        check = build_failed_review_check() if earlier is not None else None
         if check is None:
             return
         vcs.set_merge_gate_check(

@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -32,7 +32,7 @@ from app.domain.enums import (
     TriggerSource,
 )
 
-from ..fakes.unit_of_work import FakeUnitOfWork
+from ..fakes.unit_of_work import FakeUnitOfWork, add_manual_run_with_critical_thread
 from ..fakes.vcs_gateway import RecordingVcsGateway
 
 NOW = datetime(2026, 10, 12, tzinfo=UTC)
@@ -502,6 +502,30 @@ def test_thread_webhook_with_auto_review_off_sets_the_pause_check() -> None:
     assert row is not None and row.thread_resolved is True
     assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
     assert vcs.thread_state_requests == []
+
+
+def test_thread_webhook_pause_check_delayed_past_a_manual_run_returns_its_gate() -> None:
+    """Ревью #335: check паузы ушёл, пока ручной прогон публиковал `failure`, и пришёл позже —
+    после POST прогон перечитан, на head снова его gate, а не `success` паузы."""
+    uow = _pr_with_two_threads(
+        _repository(auto_review_enabled=False), FindingSeverity.CRITICAL, FindingSeverity.LOW
+    )
+
+    def manual_run_completes() -> None:
+        add_manual_run_with_critical_thread(
+            uow,
+            merge_request_id=UUID(int=3),
+            head_sha="sha1",
+            status=ReviewRunStatus.COMPLETED,
+            at=NOW + timedelta(minutes=1),
+        )
+
+    vcs = RecordingVcsGateway(during_first_check=manual_run_completes)
+
+    assert handle_review_thread_webhook(_THREAD_PAYLOAD, uow=uow, vcs=vcs, now=lambda: NOW)
+
+    assert vcs.checks[0] == AUTO_REVIEW_OFF_CHECK
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
 
 
 def test_thread_webhook_of_a_manual_run_on_auto_review_pause_recalculates_the_gate() -> None:

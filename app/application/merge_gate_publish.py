@@ -83,6 +83,65 @@ def pause_check(repository: Repository, head_run: ReviewRun | None) -> MergeGate
     return None
 
 
+def publish_pause_check(
+    uow: UnitOfWork,
+    vcs: VcsGateway,
+    check: MergeGateCheck,
+    *,
+    repository_id: UUID,
+    pr_number: int,
+    repo_full_name: str,
+    head_sha: str,
+    installation_id: int,
+) -> None:
+    """Выставить check паузы `check` на head и согласовать его с прогоном, ставшим за head.
+
+    Пауза решена по прогону, прочитанному до POST. Пока GitHub принимал check, ручной
+    прогон на паузе авторевью (D11) мог дойти до публикации и выставить свой gate —
+    задержанный check паузы перекрыл бы его `failure`. Поэтому после POST, и после сбоя
+    тоже (сбой не значит, что POST не дошёл), прогон и репозиторий перечитываются: если
+    пауза больше не действует, а последний прогон уже публикуется или завершён, его gate
+    выставляет `settle_merge_gate`. Прогон до публикации gate выставит сам, позже нашего
+    POST. `VcsError` POST паузы или поправки — вызывающему, после поправки.
+    """
+    error: VcsError | None = None
+    try:
+        vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
+    except VcsError as exc:
+        error = exc
+    with uow:
+        repository = uow.repositories.get(repository_id)
+        merge_request = uow.merge_requests.find_by_number(repository_id, pr_number)
+        latest = (
+            uow.review_runs.find_latest(merge_request.id, head_sha) if merge_request else None
+        )
+    if (
+        repository is not None
+        and merge_request is not None
+        and latest is not None
+        and latest.status in {ReviewRunStatus.PUBLISHING, ReviewRunStatus.COMPLETED}
+        and pause_check(repository, latest) is None
+    ):
+        logger.info(
+            "check паузы %s@%s устарел: за head отвечает прогон %s",
+            repo_full_name,
+            head_sha,
+            latest.id,
+        )
+        settle_merge_gate(
+            uow,
+            vcs,
+            merge_request_id=merge_request.id,
+            repo_full_name=repo_full_name,
+            head_sha=head_sha,
+            installation_id=installation_id,
+            run_id=latest.id,
+            repository_id=repository_id,
+        )
+    if error is not None:
+        raise error
+
+
 def _manual_run_in_charge(head_run: ReviewRun | None) -> bool:
     return (
         head_run is not None

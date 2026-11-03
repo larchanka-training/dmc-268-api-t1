@@ -17,6 +17,7 @@ from app.application.ports.unit_of_work import RunStateConflict, UnitOfWork
 from app.domain.entities import (
     BotThread,
     ContextPayload,
+    DiffAnchor,
     Finding,
     MergeRequest,
     OpenReviewThread,
@@ -34,6 +35,9 @@ from app.domain.enums import (
     REVIEWED_STATUSES,
     TERMINAL_STATUSES,
     CommentKind,
+    DiffSide,
+    FindingCategory,
+    FindingSeverity,
     Provider,
     ReviewRunStatus,
     ReviewRunStepStatus,
@@ -738,3 +742,58 @@ class _Fakes:
     def restore(self, state: list[Any]) -> None:
         for fake, snap in zip(self._all(), state, strict=True):
             fake.restore(snap)
+
+
+_MANUAL_RUN_ID = UUID(int=0xA11)
+
+
+def add_manual_run_with_critical_thread(
+    uow: FakeUnitOfWork,
+    *,
+    merge_request_id: UUID,
+    head_sha: str,
+    status: ReviewRunStatus,
+    at: datetime,
+    run_id: UUID = _MANUAL_RUN_ID,
+) -> ReviewRun:
+    """Ручной прогон на head, опубликовавший открытый тред `critical`: его gate — `failure`.
+
+    Для гонок с check паузы: прогон запущен и дошёл до `status`, пока GitHub принимал POST.
+    """
+    run = ReviewRun(
+        id=run_id,
+        merge_request_id=merge_request_id,
+        head_sha=head_sha,
+        status=status,
+        trigger=TriggerSource.MANUAL,
+        last_progress_at=at,
+        created_at=at,
+        updated_at=at,
+    )
+    uow.review_runs.add(run)
+    finding_id = UUID(int=run_id.int + 1)
+    uow.findings.add(
+        Finding(
+            id=finding_id,
+            review_run_id=run_id,
+            anchor=DiffAnchor(file_path="a.py", side=DiffSide.NEW, new_line=1),
+            category=FindingCategory.CORRECTNESS,
+            severity=FindingSeverity.CRITICAL,
+            message="замечание",
+            created_at=at,
+            updated_at=at,
+        )
+    )
+    uow.published_comments.add(
+        PublishedComment(
+            id=UUID(int=run_id.int + 2),
+            review_run_id=run_id,
+            provider_comment_id=f"manual-{run_id.int}",
+            kind=CommentKind.INLINE,
+            published_at=at,
+            created_at=at,
+            updated_at=at,
+            finding_id=finding_id,
+        )
+    )
+    return run
