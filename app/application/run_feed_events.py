@@ -71,7 +71,7 @@ async def run_feed_events(
         due = min(last_session_check + SESSION_CHECK_SECONDS, last_sent + PING_AFTER_SECONDS)
         try:
             # Прошлое чтение упёрлось в `BATCH_LIMIT` — остаток читается сразу:
-            # один сигнал на всю пачку, второго может не быть (массовый `stale_sweep`).
+            # сигналы пачки могли прийти до этого чтения, второго может не быть.
             signalled = await wait_change(0.0 if more else max(due - clock(), 0.0))
         except RunChangesLost:
             return
@@ -82,8 +82,7 @@ async def run_feed_events(
         changed, catching_up, more = signalled or more, more and not signalled, False
         if changed:
             # Дочитывание без нового сигнала — без окна перепроверки: запоздавший коммит
-            # пришлёт свой NOTIFY, а окно с одним `updated_at` на всю пачку (`stale_sweep`)
-            # перечитывалось бы целиком на каждом круге.
+            # пришлёт свой NOTIFY, а окно с записями всей пачки перечитывалось бы на каждом круге.
             read_state = replace(state, floor=state.cursor.updated_at) if catching_up else state
             batch = await read_batch(read_state)
             # Лимит — у строк за курсором; окно перепроверки под ним в счёт не идёт.

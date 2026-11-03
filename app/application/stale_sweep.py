@@ -7,15 +7,19 @@
 перевод выбранных в `failed` и закрытие их брошенных шагов.
 """
 
+import logging
 from dataclasses import replace
 from datetime import datetime, timedelta
 
 from app.application.ports import UnitOfWork
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
+from app.application.ports.unit_of_work import RunStateConflict
 from app.application.review_run_steps import close_abandoned_steps
 from app.domain.enums import ReviewRunStatus
 from app.domain.lifecycle import advance
 from app.domain.staleness import find_stale, stale_limit_for
+
+logger = logging.getLogger(__name__)
 
 
 def sweep_stale_runs(
@@ -30,23 +34,32 @@ def sweep_stale_runs(
 
     Порог — `limit`, у прогона в `queued` — `queued_limit` (`stale_limit_for`).
 
-    Шаги, которые выметенный прогон оставил `running`, закрываются следом
-    (`close_abandoned_steps`) — у каждого прогона своим коммитом. Переведённый
-    прогон — терминальный исход, его пишет `run_outcome`: счётчик считает
-    прогоны, а не обработки сообщений.
+    Запись условна и у каждого прогона в своей транзакции: прогон, который с момента
+    чтения продвинул воркер или закрыла другая очистка, пропускается, а остальные
+    выметаются. Шаги, которые выметенный прогон оставил `running`, закрываются следом
+    (`close_abandoned_steps`) своим коммитом. Переведённый прогон — терминальный исход,
+    его пишет `run_outcome`: счётчик считает прогоны, а не обработки сообщений.
     """
     with uow:
         stale = find_stale(uow.review_runs.list_unfinished(), now, limit, queued_limit=queued_limit)
-        for run in stale:
-            run_limit = stale_limit_for(run, limit, queued_limit=queued_limit)
-            uow.review_runs.update(
-                replace(
-                    advance(run, ReviewRunStatus.FAILED, now).unwrap(),
-                    failure_reason=f"нет прогресса дольше {run_limit}",
-                )
-            )
-        uow.commit()
+    swept = 0
     for run in stale:
+        run_limit = stale_limit_for(run, limit, queued_limit=queued_limit)
+        failed = replace(
+            advance(run, ReviewRunStatus.FAILED, now).unwrap(),
+            failure_reason=f"нет прогресса дольше {run_limit}",
+        )
+        try:
+            with uow:
+                uow.review_runs.update(failed, previous=run)
+                uow.commit()
+        except RunStateConflict:
+            logger.info(
+                "прогон изменился после чтения, очистка его пропускает",
+                extra={"review_run_id": str(run.id)},
+            )
+            continue
+        swept += 1
         run_outcome.run_finished(ReviewRunStatus.FAILED.value)
         close_abandoned_steps(uow, run.id, now=now)
-    return len(stale)
+    return swept

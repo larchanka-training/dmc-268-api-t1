@@ -5,19 +5,22 @@
 ловит, сообщение не подтверждено, и брокер возвращает его в очередь при
 закрытии соединения.
 
-По спеке `review-pipeline` («Повторная доставка незавершённого прогона») прогон
-захватывает ровно один воркер, поэтому повторная доставка недоведённый прогон
-не продолжает, а переводит в `failed`: шаг прошлой попытки - `REVIEW_RUN_STALE`,
-сообщение - в DLQ. Ревью в PR после этого даёт новый прогон: `failed`
-повтор вебхука не блокирует (`webhook-intake`). Сценарии проверяют всю цепочку:
-смерть → повторная доставка → новый прогон, и что в PR одно ревью на прогон без
-дублей замечаний.
+По спеке `job-queue` («Прогон захватывает один воркер») повторная доставка чужой
+прогон не трогает и подтверждается: живой он или брошенный, отсюда не отличить.
+Брошенный переводит в `failed` очистка: шаг прошлой попытки - `REVIEW_RUN_STALE`.
+Ревью в PR после этого даёт новый прогон: `failed` повтор вебхука не блокирует
+(`webhook-intake`). Сценарии проверяют всю цепочку: смерть → повторная доставка →
+очистка → новый прогон, и что в PR одно ревью на прогон без дублей замечаний.
 """
+
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.application.stale_sweep import sweep_stale_runs
 from app.domain.enums import ReviewRunStage, ReviewRunStatus, ReviewRunStepStatus
+from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.queue.rabbitmq import DLQ_NAME, QUEUE_NAME
 
 from ..conftest import requires_broker, requires_db
@@ -53,17 +56,25 @@ def _die(stack: Stack, llm: object) -> None:
 
 
 def _redeliver_to_next_worker(stack: Stack, run_id: str, stage: ReviewRunStage) -> None:
-    """Второй воркер получает то же сообщение: прогон `failed`, брошенный шаг - `STALE`, без новой работы."""
+    """Второй воркер получает то же сообщение: прогон не тронут, сообщение подтверждено.
+    Очистка затем переводит брошенный прогон в `failed`, его шаг - `STALE`."""
     model = _model()
+    in_work = stack.run(run_id).status
     stack.work(model, 1)
     assert model.requests == [], "повторная доставка снова вызвала модель"
+    assert stack.run(run_id).status is in_work
+    assert stack.queue_depth(QUEUE_NAME) == 0
+    assert stack.queue_depth(DLQ_NAME) == 0
+
+    moment = datetime.now(UTC)
+    swept = sweep_stale_runs(
+        SqlAlchemyUnitOfWork(stack.engine), now=moment, limit=timedelta(0), queued_limit=timedelta(0)
+    )
+    assert swept == 1
     assert stack.run(run_id).status is ReviewRunStatus.FAILED
     trail = step_trail(stack, run_id)
     assert (stage, ReviewRunStepStatus.FAILED, STALE) in trail
     assert ReviewRunStepStatus.RUNNING not in {status for _, status, _ in trail}
-    assert stack.queue_depth(QUEUE_NAME) == 0
-    assert stack.queue_depth(DLQ_NAME) == 1
-    stack.purge_queues()
 
 
 def _recover_with_new_delivery(stack: Stack, pull: PullRequest, failed_run: str) -> str:
