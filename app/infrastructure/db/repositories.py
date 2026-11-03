@@ -29,6 +29,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 
+from app.application.ports.unit_of_work import RunStateConflict
 from app.domain.entities import (
     BotThread,
     ContextPayload,
@@ -52,6 +53,7 @@ from app.domain.enums import (
     CommentKind,
     Provider,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
@@ -457,7 +459,7 @@ class SqlAlchemyReviewRunRepo:
         )
         self._notify(run)
 
-    def update(self, run: ReviewRun) -> None:
+    def update(self, run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         """Записать прогресс прогона, отклонив статус, запрещённый машиной состояний.
 
         Единственное правило в этом классе, и оно делегировано: таблицей
@@ -476,6 +478,11 @@ class SqlAlchemyReviewRunRepo:
         )
         if row is None:
             raise LookupError(f"review run {run.id} is not stored")
+        if previous is not None and (row.status, row.last_progress_at) != (
+            previous.status,
+            previous.last_progress_at,
+        ):
+            raise RunStateConflict(f"review run {run.id} changed since it was read")
         # Терминальная строка проходит через next_status, даже если статус не
         # изменился: одного сравнения на равенство хватило бы, чтобы повторно
         # доставленное обновление перезаписало стоимость завершённого прогона.
@@ -535,9 +542,14 @@ class SqlAlchemyReviewRunStepRepo:
         )
 
     def update(self, step: ReviewRunStep) -> None:
-        row = self._session.get(ReviewRunStepRow, step.id)
+        # Блокировка: воркер и очистка закрывают шаг параллельно, первый исход остаётся.
+        row = self._session.get(
+            ReviewRunStepRow, step.id, with_for_update=True, populate_existing=True
+        )
         if row is None:
             raise LookupError(f"review run step {step.id} is not stored")
+        if row.status is not ReviewRunStepStatus.RUNNING:
+            return
         # Прогон, этап и начало у шага не меняются: меняется только исход.
         row.status = step.status
         row.duration_seconds = step.duration_seconds

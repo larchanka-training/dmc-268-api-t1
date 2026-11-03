@@ -17,6 +17,7 @@ from app.api.dependencies import (
 from app.api.factory import create_app
 from app.api.reviews import review_run_list_item
 from app.api.session import current_session
+from app.application.stale_sweep import sweep_stale_runs
 from app.application.use_cases.auth import SignedIn
 from app.application.use_cases.run_diff import RUN_DIFF_MAX_LINES
 from app.config import Settings
@@ -406,6 +407,18 @@ def test_a_run_that_published_nothing_has_no_comments() -> None:
     body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
 
     assert body["published_comments"] == []
+
+
+def test_a_swept_run_reports_its_abandoned_step_as_failed() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, status=ReviewRunStatus.ANALYSING, last_progress_at=NOW)
+    uow.review_run_steps.add(start_step(run.id, ReviewRunStage.ANALYSING, started_at=NOW, step_id=new_id()))
+
+    sweep_stale_runs(uow, now=NOW + timedelta(hours=1), limit=timedelta(minutes=30), queued_limit=timedelta(hours=6))
+    response = _client(uow).get(f"/api/v1/reviews/{run.id}/steps")
+
+    (item,) = response.json()["items"]
+    assert (item["stage"], item["status"], item["error_code"]) == ("analysing", "failed", "REVIEW_RUN_STALE")
 
 
 def test_steps_come_in_start_order_with_their_outcome() -> None:

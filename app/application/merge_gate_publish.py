@@ -13,8 +13,8 @@ from app.domain.vcs_errors import VcsError
 
 logger = logging.getLogger(__name__)
 
-# Поправку gate отправляет только тот, кто увидел смену прогона, и второй
-# возможности у неё нет: после сбоя на head остаётся `success` по старому диффу.
+# Поправку gate отправляет только тот, кто увидел смену итога, и второй
+# возможности у неё нет: после сбоя на head остаётся устаревший итог.
 # Адаптер сам повторяет 5xx и лимит; здесь - ещё попытки после его отказа.
 SETTLE_ATTEMPTS = 3
 
@@ -67,7 +67,7 @@ def pause_check(repository: Repository) -> MergeGateCheck | None:
 
     Выключение репозитория важнее настройки: при обоих признаках — `DISABLED_REVIEW_CHECK`,
     чтобы пользователь чинил то, что действительно мешает (сначала подключение).
-    Вызывают вебхук PR и вебхук треда.
+    Вызывают вебхук PR, вебхук треда, `settle_merge_gate` и упавший прогон.
     """
     if repository.connected_at is None:
         return DISABLED_REVIEW_CHECK
@@ -146,12 +146,13 @@ def settle_merge_gate(
     gate актуального прогона. После сбоя `SETTLE_ATTEMPTS` попыток - `VcsError`
     вызывающему. Находки и порог читаются здесь же, на каждой попытке: порог могли
     сменить, пока шёл прогон или сбой, и gate завершённого чужого прогона по старому
-    порогу снял бы его блокировку.
+    порогу снял бы его блокировку. На паузе ревью (`pause_check`) выставляется check
+    паузы: `failure` завершившегося прогона заблокировал бы PR, который ревью не ждёт.
     """
     failures = 0
-    # Прогон и статус, по которым выставлен последний check: итог зависит от статуса,
-    # и завершение прогона после нашей блокировки требует выставить его gate.
-    settled: tuple[UUID, ReviewRunStatus] | None = None
+    # Последний выставленный check: пока GitHub его принимал, итог мог измениться из-за
+    # любого входа - прогона, порога, тредов, паузы (#325). Сравниваем сам check.
+    settled: MergeGateCheck | None = None
     while True:
         # Перед каждой попыткой - заново: за время сбоя за head мог начать
         # отвечать другой прогон, и повтор прежнего check вернул бы чужой итог.
@@ -160,9 +161,12 @@ def settle_merge_gate(
             repository = uow.repositories.get(repository_id)
         if repository is None:
             raise LookupError(f"repository {repository_id} not found")
-        if latest is None or (latest.id, latest.status) == settled:
+        if latest is None:
             return
-        if (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED) or (
+        pause = pause_check(repository)
+        if pause is not None:
+            current = pause
+        elif (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED) or (
             latest.status is ReviewRunStatus.COMPLETED
         ):
             # Свой прогон — или новый, успевший завершиться: его gate мог уйти раньше
@@ -176,6 +180,8 @@ def settle_merge_gate(
             current = build_failed_review_check()
         else:
             current = build_retarget_check()
+        if current == settled:
+            return
         if latest.id != run_id:
             logger.info(
                 "merge gate %s@%s переписан: прогон %s больше не отвечает за head, последний - %s",
@@ -198,5 +204,7 @@ def settle_merge_gate(
                 SETTLE_ATTEMPTS,
                 exc_info=True,
             )
+            # Сбой не значит, что POST не дошёл: что на head, неизвестно, повтор обязателен.
+            settled = None
             continue
-        settled = (latest.id, latest.status)
+        settled = current

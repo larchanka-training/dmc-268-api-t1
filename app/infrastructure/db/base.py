@@ -28,7 +28,9 @@ class TimestampMixin:
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        onupdate=func.now(),
+        # Не now(): то время начала транзакции, и запись после ожидания блокировки
+        # получила бы метку раньше коммита соседа.
+        onupdate=func.clock_timestamp(),
         nullable=False,
     )
 

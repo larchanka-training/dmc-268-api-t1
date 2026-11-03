@@ -140,7 +140,10 @@ class ReviewRunRepo(Protocol):
 
     def add(self, run: ReviewRun) -> None: ...
 
-    def update(self, run: ReviewRun) -> None: ...
+    def update(self, run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
+        """Записать прогон. С `previous` запись условна: если статус или прогресс строки уже
+        не как в `previous`, бросает `RunStateConflict`."""
+        ...
 
 
 class ReviewRunStepRepo(Protocol):
