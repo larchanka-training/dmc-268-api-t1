@@ -364,7 +364,8 @@ OTel с её миллисекундами. Логи сервисов колле�
 За флагом идёт всё разом: девять контейнеров стека и их образы, сети стека —
 `dmc268-observability`, `dmc268-grafana` и `dmc268-logs` — вместе с сетью socket-proxy
 (`count = 1 : 0` у каждого ресурса), `telemetry_env` — `OTEL_*_EXPORTER=otlp`, адрес коллектора
-и таймаут в env api, воркера и миграций, — `command` контейнера Postgres (при флаге база
+и таймаут в env api, воркера и миграций, — `status_env` — `PROMETHEUS_URL` в env api для страницы
+статуса (без флага его нет, и `GET /api/v1/status` отвечает `unknown`), — `command` контейнера Postgres (при флаге база
 стартует с `shared_preload_libraries=pg_stat_statements`, без флага — с родным `CMD` образа) и
 драйвер логов Postgres, его реплики и RabbitMQ (`fluentd` вместо `json-file`, «Логи контейнеров»). Смена
 `command` и драйвера пересоздаёт контейнеры (тома данные сохраняют), поэтому переключение флага —
@@ -571,6 +572,13 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 ряды «горит / молчит», `promtool test rules` в job `observability-configs`; там же
 `amtool check-config` и проверка конфига blackbox. Связи между файлами — имена метрик и пути
 секретов — держит `tests/infrastructure/test_alerting.py`.
+
+Те же алерты — источник публичной страницы статуса `GET /api/v1/status`: API по
+`PROMETHEUS_URL` (`http://dmc268-prometheus:9090`, сеть данных) читает
+`ALERTS{alertstate="firing"}` и сводит их к статусам api, worker и queue. Какие алерты что
+значат — таблица `ALERT_RULES` в `app/domain/service_status.py`; переименование алерта, метки
+`container_name`/`service` или job скрейпа правится и там — расхождение ловит
+`tests/domain/test_service_status.py`.
 
 **Бот и чат.** Бот создаётся у @BotFather (`/newbot`), его добавляют в группу или канал
 команды. Chat id — из `https://api.telegram.org/bot<токен>/getUpdates` после любого

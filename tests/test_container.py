@@ -40,6 +40,7 @@ class Adapter:
 
 
 PORT_TO_ADAPTER: dict[str, Adapter] = {
+    "AlertSource": Adapter("monitoring/prometheus.py", "PrometheusAlertSource"),
     "CacheStore": Adapter("cache/memory.py", "InMemoryCacheStore"),
     "DefinitionExtractor": Adapter(
         "parsing/tree_sitter_extractor.py", "TreeSitterDefinitionExtractor"
@@ -361,3 +362,16 @@ def test_the_cabinet_gets_its_own_gateway_with_twenty_seconds_and_no_rate_limit_
     assert cabinet._client.timeout == httpx.Timeout(20.0, connect=5.0)  # type: ignore[attr-defined]
     assert cabinet._rate_limit_budget_seconds == 0.0  # type: ignore[attr-defined]
     assert container.vcs_gateway()._client.timeout == httpx.Timeout(5.0)
+
+
+def test_the_service_status_monitor_is_one_per_container_and_follows_prometheus_url() -> None:
+    """Кэш оценки статуса живёт, только если монитор один; без адреса — без HTTP-клиента."""
+    container = build_container(SETTINGS)
+    assert container.service_status() is container.service_status()
+    assert container.service_status()._source._client is None  # type: ignore[attr-defined]
+
+    configured = build_container(SETTINGS.model_copy(update={"prometheus_url": "http://dmc268-prometheus:9090"}))
+    client = configured.service_status()._source._client  # type: ignore[attr-defined]
+    assert isinstance(client, httpx.Client)
+    assert str(client.base_url) == "http://dmc268-prometheus:9090"
+    assert client.timeout.read == 2.0

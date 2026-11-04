@@ -102,8 +102,9 @@ resource "docker_container" "api" {
   # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера,
   # OAuth и origin — у входа и проверки сессии, ключ токенов пользователя — у
   # входа и ручек репозиториев. Телеметрия — local.telemetry_env: со включённым
-  # стеком логи, трейсы и метрики идут по OTLP в коллектор.
-  env = concat(local.app_env, local.telemetry_env, [
+  # стеком логи, трейсы и метрики идут по OTLP в коллектор, а страница статуса
+  # читает алерты Prometheus (local.status_env).
+  env = concat(local.app_env, local.telemetry_env, local.status_env, [
     "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-api",
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
