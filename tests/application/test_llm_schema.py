@@ -25,6 +25,7 @@ from app.domain.enums import (
     FindingSeverity,
     VerifierVerdict,
 )
+from app.domain.secret_redaction import REDACTED
 
 REVIEW: dict[str, Any] = {
     "schemaVersion": "1",
@@ -234,3 +235,40 @@ def test_repeated_verdict_is_rejected() -> None:
 
     assert not result.ok
     assert "F1" in (result.error or "")
+
+
+TOKEN = "ghp_" + "a1B2" * 9
+
+
+def test_secret_quoted_by_the_review_is_replaced_before_it_leaves_the_schema() -> None:
+    """Секрет из диффа не уходит в `findings`, сводку и комментарии PR (#315)."""
+    raw = copy.deepcopy(REVIEW)
+    raw["findings"][0]["message"] = f"Зашит токен `{TOKEN}`."
+    raw["findings"][0]["suggestion"] = {"diff": f'-TOKEN = "{TOKEN}"\n+TOKEN = os.environ["TOKEN"]'}
+    raw["summary"] = {"problem": f"Токен {TOKEN} в коде.", "positives": [f"не {TOKEN}"], "effort": TOKEN}
+
+    result = to_review_result(ReviewOutput.model_validate(raw), model="m", tokens_used=1)
+
+    summary = result.summary
+    assert summary is not None
+    suggestion = result.findings[0].suggestion
+    assert suggestion is not None
+    texts = [result.findings[0].message, suggestion, summary.problem, *summary.positives, summary.effort]
+    assert all(TOKEN not in text and REDACTED in text for text in texts)
+    # Правка в строке `+` секрета не содержит и остаётся.
+    assert '+TOKEN = os.environ["TOKEN"]' in suggestion
+
+
+def test_suggestion_without_a_secret_is_kept() -> None:
+    result = to_review_result(ReviewOutput.model_validate(REVIEW), model="m", tokens_used=1)
+    assert result.findings[0].suggestion == "-    pass\n+    raise"
+
+
+def test_secret_quoted_by_the_verifier_does_not_reach_the_log() -> None:
+    raw = copy.deepcopy(VERIFICATION)
+    raw["verdicts"][0]["reason"] = f"Строка с `{TOKEN}` — настоящий токен."
+
+    verdicts = check_verdicts(VerificationOutput.model_validate(raw), ("F1", "F2")).unwrap()
+
+    assert TOKEN not in verdicts["F1"].reason
+    assert REDACTED in verdicts["F1"].reason
