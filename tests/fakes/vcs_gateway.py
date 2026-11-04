@@ -1,5 +1,6 @@
 """Записывающий `VcsGateway` для тестов публикации."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -12,7 +13,7 @@ from app.application.ports.vcs_review import (
 )
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
-from app.domain.vcs_errors import VcsFileTooLargeError
+from app.domain.vcs_errors import VcsError, VcsFileTooLargeError
 
 # Как у `FakeVcs`: первая строка `app/main.py` в диффе для сборки контекста.
 _PIPELINE_DIFF = (
@@ -45,6 +46,9 @@ class RecordingVcsGateway:
     inline_ids_lost: bool = False
     # Сбой самого check run merge gate.
     check_error: Exception | None = None
+    # Что случилось, пока GitHub принимал первый check run: вызывается один раз, после
+    # записи check; исключение из неё — потерянный ответ на дошедший POST.
+    during_first_check: Callable[[], None] | None = None
     # Прогоны, чьим маркером помечено каждое опубликованное ревью.
     review_run_ids: list[UUID] = field(default_factory=list)
     # Прогоны, чьё ревью с маркером уже есть на хостинге (`find_published_review`):
@@ -52,6 +56,8 @@ class RecordingVcsGateway:
     stored_reviews: set[UUID] = field(default_factory=set)
     found_review_requests: list[UUID] = field(default_factory=list)
     find_review_error: Exception | None = None
+    # Sha ветки по её имени; ветки нет в словаре — `VcsError`, как 422 GitHub.
+    branch_shas: dict[str, str] = field(default_factory=dict)
 
     def fetch_diff(
         self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
@@ -73,6 +79,8 @@ class RecordingVcsGateway:
             source_branch="feat",
             target_branch="develop",
             state=MergeRequestState.OPEN,
+            from_fork=False,
+            author_association="OWNER",
         )
 
     def fetch_pr_commit_messages(
@@ -84,6 +92,11 @@ class RecordingVcsGateway:
         self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int
     ) -> str | None:
         return self.files.get((path, sha))
+
+    def resolve_branch_sha(self, repo_full_name: str, branch: str, installation_id: int) -> str:
+        if branch not in self.branch_shas:
+            raise VcsError(f"ветки {branch} нет")
+        return self.branch_shas[branch]
 
     def publish_pull_request_review(
         self,
@@ -169,3 +182,6 @@ class RecordingVcsGateway:
         if self.check_error is not None:
             raise self.check_error
         self.checks.append(check)
+        if self.during_first_check is not None:
+            hook, self.during_first_check = self.during_first_check, None
+            hook()

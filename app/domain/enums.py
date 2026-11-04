@@ -1,8 +1,8 @@
-"""Ограниченные наборы значений, на которые опираются и схема, и пайплайн.
+"""Ограниченные наборы значений домена.
 
-Определены здесь один раз; модели SQLAlchemy строят из них нативные enum'ы
-PostgreSQL, поэтому значение нельзя добавить в одном месте и забыть в
-другом.
+Определены здесь один раз. Часть из них модели SQLAlchemy превращают в
+нативные enum'ы PostgreSQL — такое значение нельзя добавить в одном месте и
+забыть в другом; остальные (например, вид строки диффа) живут только в коде.
 """
 
 from enum import StrEnum
@@ -94,6 +94,20 @@ class FindingSeverity(StrEnum):
     CRITICAL = "critical"
 
 
+# Единственный ранг важности в домене: порог merge gate и покрытие тредом сравнивают по нему.
+_RANK: dict[FindingSeverity, int] = {
+    FindingSeverity.LOW: 0,
+    FindingSeverity.MEDIUM: 1,
+    FindingSeverity.HIGH: 2,
+    FindingSeverity.CRITICAL: 3,
+}
+
+
+def severity_at_least(severity: FindingSeverity, threshold: FindingSeverity) -> bool:
+    """Не ниже ли важность `severity` порога `threshold`."""
+    return _RANK[severity] >= _RANK[threshold]
+
+
 class CommentKind(StrEnum):
     """Форма комментария, публикуемого обратно на хостинг."""
 
@@ -178,6 +192,41 @@ class DefinitionKind(StrEnum):
     FUNCTION = "function"
     METHOD = "method"
 
+
+class DiffFileStatus(StrEnum):
+    """Что произошло с файлом в диффе прогона."""
+
+    ADDED = "added"
+    MODIFIED = "modified"
+    DELETED = "deleted"
+    RENAMED = "renamed"
+
+
+class DiffLineKind(StrEnum):
+    """Вид строки ханка в диффе прогона."""
+
+    ADDED = "added"
+    REMOVED = "removed"
+    CONTEXT = "context"
+
+
+
+class ServiceStatus(StrEnum):
+    """Состояние сервиса или его компонента на странице статуса; по тяжести — outage,
+    degraded, unknown, operational."""
+
+    OPERATIONAL = "operational"
+    DEGRADED = "degraded"
+    OUTAGE = "outage"
+    UNKNOWN = "unknown"
+
+
+class ServiceComponent(StrEnum):
+    """Компонент сервиса на странице статуса; порядок объявления — порядок в ответе."""
+
+    API = "api"
+    WORKER = "worker"
+    QUEUE = "queue"
 
 # Этапы обработки — то, что может стоять в `failed_stage`. `queued` сюда не
 # входит: прогон, упавший до начала работы, ни на каком этапе не был.

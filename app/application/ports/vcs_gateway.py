@@ -77,6 +77,15 @@ class VcsGateway(Protocol):
         """
         ...
 
+    def resolve_branch_sha(self, repo_full_name: str, branch: str, installation_id: int) -> str:
+        """Sha коммита, на который сейчас указывает ветка `branch`.
+
+        Кэш правил репозитория ключуется коммитом, а не веткой: так видно,
+        изменился ли файл. Репозитория нет или он недоступен установке —
+        `VcsNotFoundError`; ветки нет и прочие сбои — `VcsError`.
+        """
+        ...
+
     def publish_pull_request_review(
         self,
         repo_full_name: str,

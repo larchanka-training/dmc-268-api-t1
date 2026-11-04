@@ -9,6 +9,7 @@
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import monotonic
 
 import httpx
@@ -27,6 +28,7 @@ from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.run_outcome import RunOutcomeRecorder
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.webhook_deliveries import WebhookDeliveries
+from app.application.use_cases.service_status import ServiceStatusMonitor
 from app.config import Settings
 from app.domain.vcs_errors import VcsError
 from app.infrastructure.cache.memory import InMemoryCacheStore
@@ -37,6 +39,7 @@ from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.ollama import OllamaGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 from app.infrastructure.llm.stub import StubLlmGateway
+from app.infrastructure.monitoring.prometheus import PrometheusAlertSource
 from app.infrastructure.oauth.github import GitHubOAuthProvider
 from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
@@ -77,9 +80,21 @@ API_VCS_LIMITS = VcsClientLimits(timeout=httpx.Timeout(5.0), rate_limit_budget_s
 WORKER_VCS_LIMITS = VcsClientLimits(
     timeout=httpx.Timeout(30.0, connect=5.0), rate_limit_budget_seconds=60.0
 )
+# Чтения кабинета (дифф прогона): крупный compare дольше 5 секунд вебхука, но
+# запрос пользователя не ждёт минуту лимита — поток threadpool не спит, отказ
+# лимита уходит 502 сразу.
+CABINET_VCS_LIMITS = VcsClientLimits(
+    timeout=httpx.Timeout(20.0, connect=5.0), rate_limit_budget_seconds=0.0
+)
 # Сбой `GET /app` для `install_url` помнится минуту: страницы списка, запрошенные
 # подряд, не ждут таймаута GitHub каждая и не пишут по предупреждению на страницу.
 _APP_SLUG_RETRY_SECONDS = 60.0
+# Страница статуса (change add-status-page): Prometheus в сети данных отвечает за
+# миллисекунды, а публичная ручка не должна висеть на нём дольше пары секунд — лучше
+# `unknown`. Оценка живёт 15 с: один запрос к Prometheus на интервал скрейпа, сколько бы
+# ни открывали страницу.
+_PROMETHEUS_TIMEOUT = httpx.Timeout(2.0)
+SERVICE_STATUS_TTL_SECONDS = 15.0
 # Callback входа: путь роутера `/auth`, зарегистрированный в настройках GitHub App.
 _OAUTH_CALLBACK_PATH = "/api/v1/auth/{provider}/callback"
 
@@ -103,6 +118,9 @@ class Container:
     # кэша (design D7): поэтому шлюз создаётся один раз и запоминается
     # в frozen-контейнере через `object.__setattr__`.
     _vcs_gateway: GitHubVcsGateway | None
+    # Ленивый шлюз чтений кабинета со своими лимитами (`CABINET_VCS_LIMITS`):
+    # свой клиент и свой кэш installation tokens, бюджет вебхука не трогает.
+    _cabinet_vcs_gateway: VcsGateway | None
     # Таймаут и ожидание лимита VCS-шлюза: у API и воркера свои.
     _vcs_limits: VcsClientLimits
     # Репозитории, видимые пользователю, — запросы с его токеном; App-реквизиты
@@ -114,6 +132,13 @@ class Container:
     # In-process кэш живёт, пока жив процесс, — только если он один на
     # контейнер: фабрика на каждый вызов теряла бы всё между прогонами.
     _cache_store: CacheStore
+    # Диффы прогонов кабинета (change review-run-diff, D4) — своё хранилище с
+    # малым лимитом записей: в общем они вытесняли бы записи видимости (FIFO по
+    # числу) и занимали бы до 1024 × размер диффа.
+    _run_diff_cache: CacheStore
+    # Исходы `.review/rules.md` для кабинета (change repository-settings, D7) — тоже своё
+    # хранилище: запись на каждый новый sha ветки по умолчанию не вытесняет видимость.
+    _rules_cache: CacheStore
     # Слушатель изменений прогонов для потока событий API: соединение `LISTEN`
     # открывается при первой подписке, воркеру оно не нужно.
     _run_changes: PostgresRunChanges
@@ -125,6 +150,8 @@ class Container:
     # Время `monotonic()`, до которого `app_slug` после сбоя не спрашивает
     # GitHub; `0.0` — сбоя не было.
     _app_slug_retry_at: float
+    # Один на процесс: в нём кэш оценки статуса сервиса на SERVICE_STATUS_TTL_SECONDS.
+    _service_status: ServiceStatusMonitor
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine, self._token_cipher)
@@ -173,6 +200,18 @@ class Container:
             logger.warning("slug GitHub App не получен: install_url не отдаётся", exc_info=True)
             return None
 
+    def cabinet_vcs_gateway(self) -> VcsGateway:
+        """VCS-шлюз чтений кабинета (дифф прогона): 20 с на запрос, лимит не пережидается.
+
+        Не `vcs_gateway()`: у того 5 с — бюджет ответа на вебхук. Собирается при
+        первом обращении и живёт с контейнером; конструирование — без сети.
+        """
+        gateway = self._cabinet_vcs_gateway
+        if gateway is None:
+            gateway = self._build_vcs_gateway(CABINET_VCS_LIMITS)
+            object.__setattr__(self, "_cabinet_vcs_gateway", gateway)
+        return gateway
+
     def redelivery_vcs_gateway(self) -> VcsGateway:
         """VCS-шлюз прохода повтора доставок (#149): лимит GitHub не пережидается.
 
@@ -215,7 +254,10 @@ class Container:
         и кэш должен лечь поверх подменённого.
         """
         return CachedInstallationCatalog(
-            catalog, self._cache_store, self.settings.visible_repositories_cache_ttl_seconds, read=read
+            catalog,
+            self._cache_store,
+            self.settings.visible_repositories_cache_ttl_seconds,
+            read=read,
         )
 
     def oauth_provider(self, name: str) -> OAuthProvider | None:
@@ -225,8 +267,20 @@ class Container:
     def cache_store(self) -> CacheStore:
         return self._cache_store
 
+    def run_diff_cache(self) -> CacheStore:
+        """Кэш диффов прогонов по паре коммитов; не `cache_store()`."""
+        return self._run_diff_cache
+
+    def rules_cache(self) -> CacheStore:
+        """Кэш исходов загрузки правил для кабинета; не `cache_store()`."""
+        return self._rules_cache
+
     def run_changes(self) -> RunChanges:
         return self._run_changes
+
+    def service_status(self) -> ServiceStatusMonitor:
+        """Статус сервиса для публичной страницы — с кэшем оценки, один на процесс."""
+        return self._service_status
 
     def run_outcome(self) -> RunOutcomeRecorder:
         """Счётчик терминальных исходов прогонов — адаптер телеметрии.
@@ -270,6 +324,7 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
         _token_cipher=_token_cipher(settings),
         _job_queue=RabbitMQJobQueue(settings.rabbitmq_url),
         _vcs_gateway=None,
+        _cabinet_vcs_gateway=None,
         _vcs_limits=vcs_limits,
         _installation_catalog=_build_installation_catalog(settings),
         _oauth_providers={
@@ -281,11 +336,29 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
             ),
         },
         _cache_store=InMemoryCacheStore(),
+        # shortcut: 24 × RUN_DIFF_MAX_BYTES: ≈ 48 МиБ ASCII, ≈ 96 МиБ с кириллицей,
+        # до ≈ 192 МиБ с символом вне BMP (PEP 393); считать байты, если лимит
+        # или число записей поднимут
+        _run_diff_cache=InMemoryCacheStore(max_entries=24),
+        _rules_cache=InMemoryCacheStore(max_entries=256),
         _run_changes=PostgresRunChanges(listen_conninfo(settings.database_url)),
         _llm_gateway=None,
         _definition_extractor=None,
         _app_slug_retry_at=0.0,
+        _service_status=ServiceStatusMonitor(
+            _build_alert_source(settings),
+            ttl_seconds=SERVICE_STATUS_TTL_SECONDS,
+            monotonic=monotonic,
+            now=lambda: datetime.now(UTC),
+        ),
     )
+
+
+def _build_alert_source(settings: Settings) -> PrometheusAlertSource:
+    """Без `PROMETHEUS_URL` клиента нет: статус — `unknown`, запросов нет. Конструирование — без сети."""
+    if not settings.prometheus_url:
+        return PrometheusAlertSource(None)
+    return PrometheusAlertSource(httpx.Client(base_url=settings.prometheus_url, timeout=_PROMETHEUS_TIMEOUT))
 
 
 def _build_installation_catalog(settings: Settings) -> GitHubInstallationCatalog:
@@ -324,6 +397,7 @@ def _eurorouter(settings: Settings, timeout: httpx.Timeout) -> tuple[str, LlmGat
             settings.eurorouter_keys,
             name="Eurorouter",
             max_attempts=settings.llm_max_attempts,
+            reasoning_effort=settings.eurorouter_reasoning_effort,
         ),
     )
 
@@ -344,8 +418,9 @@ def build_llm_gateway(settings: Settings) -> LlmGateway:
     timeout = llm_http_timeout(settings)
     if settings.llm_backend == "eurorouter":
         logger.info(
-            "модель: Eurorouter (%s) основной, без фоллбэка: код проверяемых репозиториев уходит hosted-провайдеру",
+            "модель: Eurorouter (%s, reasoning_effort %s) основной, без фоллбэка: код проверяемых репозиториев уходит hosted-провайдеру",
             settings.eurorouter_model,
+            settings.eurorouter_reasoning_effort or "не задан",
         )
         return FallbackLlmGateway([_eurorouter(settings, timeout)])
     providers: list[tuple[str, LlmGateway]] = [

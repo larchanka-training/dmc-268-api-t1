@@ -1,0 +1,4 @@
+# Цели job blackbox-public (prometheus.yml) локально: публичного входа у
+# локального стека нет — список пуст. На стенде файл по тому же пути
+# рендерит infra/observability.tf из public_origin.
+[]

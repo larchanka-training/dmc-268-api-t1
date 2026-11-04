@@ -25,7 +25,7 @@ import pytest
 from app.domain.entities import InstallationRepository, RepositoryPermissions, Secret
 from app.domain.enums import RepositorySelection
 from app.domain.provider_token import ProviderTokenRejected
-from app.infrastructure.vcs.errors import VcsError, VcsUnavailableError
+from app.infrastructure.vcs.errors import VcsAuthError, VcsError, VcsUnavailableError
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from app.infrastructure.vcs.github_installations import GitHubInstallationCatalog
 from tests.infrastructure.conftest import RsaKeyPair
@@ -397,6 +397,41 @@ def test_not_installed_or_suspended_is_false(rsa_key_pair: RsaKeyPair) -> None:
 def test_app_installed_failures_are_vcs_errors(response: httpx.Response, rsa_key_pair: RsaKeyPair) -> None:
     with pytest.raises(VcsError):
         _app_catalog(response, rsa_key_pair, []).app_installed("o/r")
+
+
+def test_repository_installation_id_asks_with_the_app_jwt_not_a_user_token(rsa_key_pair: RsaKeyPair) -> None:
+    seen: list[str] = []
+    catalog = _app_catalog(httpx.Response(200, json=installation(7)), rsa_key_pair, seen)
+
+    # Обработчик декодирует заголовок как JWT приложения: токен пользователя не прошёл бы.
+    assert catalog.repository_installation_id("octo-org/api") == 7
+    assert seen == ["/repos/octo-org/api/installation"]
+
+
+def test_repository_installation_id_is_none_when_not_installed_or_suspended(rsa_key_pair: RsaKeyPair) -> None:
+    not_found = httpx.Response(404, json={"message": "Not Found"})
+    assert _app_catalog(not_found, rsa_key_pair, []).repository_installation_id("o/r") is None
+    suspended = httpx.Response(200, json=installation(7, suspended_at="2026-10-01T00:00:00Z"))
+    assert _app_catalog(suspended, rsa_key_pair, []).repository_installation_id("o/r") is None
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(500),
+        httpx.Response(503),
+        httpx.Response(429),
+        httpx.Response(403, headers={"x-ratelimit-remaining": "0"}),
+    ],
+)
+def test_repository_installation_id_outage_or_rate_limit_is_unavailable(response: httpx.Response, rsa_key_pair: RsaKeyPair) -> None:
+    with pytest.raises(VcsUnavailableError):
+        _app_catalog(response, rsa_key_pair, []).repository_installation_id("o/r")
+
+
+def test_repository_installation_id_rejected_jwt_is_an_auth_error(rsa_key_pair: RsaKeyPair) -> None:
+    with pytest.raises(VcsAuthError):
+        _app_catalog(httpx.Response(401), rsa_key_pair, []).repository_installation_id("o/r")
 
 
 def test_extra_github_fields_are_ignored() -> None:

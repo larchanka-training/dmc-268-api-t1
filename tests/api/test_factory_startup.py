@@ -59,6 +59,25 @@ def test_create_app_reads_the_environment_after_logs_and_telemetry(
     assert calls == ["logging", "telemetry"]
 
 
+
+def test_create_app_primes_the_run_outcomes_after_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ряды `review_runs_total` по исходам заводятся нулём со старта API, уже
+    на стоящем провайдере метрик: приём вебхука доводит прогоны до `failed`."""
+    calls: list[str] = []
+    monkeypatch.setattr(app_logging, "configure_logging", lambda service: None)
+    monkeypatch.setattr(telemetry, "configure_telemetry", lambda service: calls.append("telemetry"))
+    monkeypatch.setattr(telemetry, "prime_run_outcomes", lambda: calls.append("prime"))
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "")
+    for name, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValidationError):
+        create_app()
+
+    assert calls == ["telemetry", "prime"]
+
 def test_a_broken_environment_fails_with_the_json_handler_on_the_root_logger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

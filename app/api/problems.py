@@ -34,6 +34,9 @@ class ErrorCode(StrEnum):
     REVIEW_ALREADY_ACTIVE = "REVIEW_ALREADY_ACTIVE"
     WEBHOOK_SIGNATURE_INVALID = "WEBHOOK_SIGNATURE_INVALID"
     SCM_UNAVAILABLE = "SCM_UNAVAILABLE"
+    DIFF_UNAVAILABLE = "DIFF_UNAVAILABLE"
+    COMMIT_NOT_FOUND = "COMMIT_NOT_FOUND"
+    DIFF_TOO_LARGE = "DIFF_TOO_LARGE"
     UNAUTHENTICATED = "UNAUTHENTICATED"
     ORIGIN_FORBIDDEN = "ORIGIN_FORBIDDEN"
     ROUTE_NOT_FOUND = "ROUTE_NOT_FOUND"
@@ -203,15 +206,18 @@ class RepositoryAlreadyConnectedProblem(Problem):
 
 
 class RepositoryManageRequiredProblem(Problem):
-    """`403 REPOSITORY_MANAGE_REQUIRED`: у пользователя нет прав admin или maintain на репозиторий у провайдера."""
+    """`403 REPOSITORY_MANAGE_REQUIRED`: у пользователя нет нужной роли на репозитории у провайдера.
+
+    Заголовок общий для всех действий: нужные роли у них разные, их называет `detail` отказа.
+    """
 
     example = {
-        "detail": "Подключать репозиторий может только пользователь с правом admin или maintain на него.",
+        "detail": "Недостаточно прав на репозиторий у провайдера для этого действия.",
         "instance": "/api/v1/repositories",
     }
 
     type: Literal["urn:dmc-268:problem:repository-manage-required"] = "urn:dmc-268:problem:repository-manage-required"
-    title: Literal["Нужны права admin или maintain на репозиторий"] = "Нужны права admin или maintain на репозиторий"
+    title: Literal["Недостаточно прав на репозиторий"] = "Недостаточно прав на репозиторий"
     status: Literal[HTTPStatus.FORBIDDEN] = HTTPStatus.FORBIDDEN
     code: Literal[ErrorCode.REPOSITORY_MANAGE_REQUIRED] = ErrorCode.REPOSITORY_MANAGE_REQUIRED
 
@@ -232,7 +238,8 @@ class ProviderNotSupportedProblem(Problem):
 
 
 class ReviewAlreadyActiveProblem(Problem):
-    """`409 REVIEW_ALREADY_ACTIVE`: ручной запуск, когда прогон по этому коммиту уже идёт.
+    """`409 REVIEW_ALREADY_ACTIVE`: ручной запуск (`POST /api/v1/reviews`), когда прогон по
+    head-коммиту PR уже идёт — в том числе прогон победителя гонки с вебхуком.
 
     Вебхук на тот же случай отвечает `202` с существующим прогоном.
     """
@@ -263,7 +270,8 @@ class WebhookSignatureInvalidProblem(Problem):
 
 
 class ScmUnavailableProblem(Problem):
-    """`502 SCM_UNAVAILABLE`: провайдер VCS не ответил или ответил ошибкой — при приёме вебхука или подключении репозитория."""
+    """`502 SCM_UNAVAILABLE`: провайдер VCS не ответил или ответил ошибкой — при приёме вебхука,
+    ручном запуске ревью, подключении репозитория и чтениях кабинета."""
 
     example = {
         "detail": "Провайдер VCS не ответил или ответил ошибкой; прогон не создан.",
@@ -274,6 +282,55 @@ class ScmUnavailableProblem(Problem):
     title: Literal["Провайдер VCS недоступен"] = "Провайдер VCS недоступен"
     status: Literal[HTTPStatus.BAD_GATEWAY] = HTTPStatus.BAD_GATEWAY
     code: Literal[ErrorCode.SCM_UNAVAILABLE] = ErrorCode.SCM_UNAVAILABLE
+
+
+class DiffUnavailableProblem(Problem):
+    """`409 DIFF_UNAVAILABLE`: у прогона нет пары коммитов для диффа (`base_sha` не записан).
+
+    Прогон есть и виден — поэтому не `404`; запросов к GitHub не было.
+    """
+
+    example = {
+        "detail": "У прогона нет базового коммита: дифф построить не из чего.",
+        "instance": "/api/v1/reviews/01920000-0000-7000-8000-000000000001/diff",
+    }
+
+    type: Literal["urn:dmc-268:problem:diff-unavailable"] = "urn:dmc-268:problem:diff-unavailable"
+    title: Literal["Дифф прогона недоступен"] = "Дифф прогона недоступен"
+    status: Literal[HTTPStatus.CONFLICT] = HTTPStatus.CONFLICT
+    code: Literal[ErrorCode.DIFF_UNAVAILABLE] = ErrorCode.DIFF_UNAVAILABLE
+
+
+class CommitNotFoundProblem(Problem):
+    """`410 COMMIT_NOT_FOUND`: провайдер не знает коммит прогона — например, после force-push.
+
+    Установка приложения на репозиторий найдена, значит репозиторий доступен — пропал коммит.
+    """
+
+    example = {
+        "detail": "GitHub не знает коммиты прогона: дифф больше не получить.",
+        "instance": "/api/v1/reviews/01920000-0000-7000-8000-000000000001/diff",
+    }
+
+    type: Literal["urn:dmc-268:problem:commit-not-found"] = "urn:dmc-268:problem:commit-not-found"
+    title: Literal["Коммит прогона не найден у провайдера"] = "Коммит прогона не найден у провайдера"
+    status: Literal[HTTPStatus.GONE] = HTTPStatus.GONE
+    code: Literal[ErrorCode.COMMIT_NOT_FOUND] = ErrorCode.COMMIT_NOT_FOUND
+
+
+class DiffTooLargeProblem(Problem):
+    """`422 DIFF_TOO_LARGE`: дифф прогона больше `RUN_DIFF_MAX_BYTES` или 50 000 строк, либо провайдер сам
+    отказался его строить; тело ответа провайдера дальше лимита байт не читалось."""
+
+    example = {
+        "detail": "Дифф прогона больше лимита: 2097152 байт или 50000 строк, либо GitHub отказался его строить.",
+        "instance": "/api/v1/reviews/01920000-0000-7000-8000-000000000001/diff",
+    }
+
+    type: Literal["urn:dmc-268:problem:diff-too-large"] = "urn:dmc-268:problem:diff-too-large"
+    title: Literal["Дифф слишком большой"] = "Дифф слишком большой"
+    status: Literal[HTTPStatus.UNPROCESSABLE_CONTENT] = HTTPStatus.UNPROCESSABLE_CONTENT
+    code: Literal[ErrorCode.DIFF_TOO_LARGE] = ErrorCode.DIFF_TOO_LARGE
 
 
 class UnauthenticatedProblem(Problem):
@@ -415,6 +472,9 @@ class AnyProblem(
             | ReviewAlreadyActiveProblem
             | WebhookSignatureInvalidProblem
             | ScmUnavailableProblem
+            | DiffUnavailableProblem
+            | CommitNotFoundProblem
+            | DiffTooLargeProblem
             | UnauthenticatedProblem
             | OriginForbiddenProblem
             | RouteNotFoundProblem

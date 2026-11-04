@@ -21,7 +21,9 @@ repositories accessible to the user access token»). Доступ решает G
 токеном пользователя (не виден — `None`), `app_installed` —
 `GET /repos/{full_name}/installation` с JWT приложения (`404` или
 приостановленная установка — `False`). Два запроса на подключение
-(change `user-token-listing-edges`).
+(change `user-token-listing-edges`). Тот же запрос отдаёт номер установки
+(`repository_installation_id`, `None` в тех же случаях) — для диффа прогона
+в кабинете (change `review-run-diff`); `app_installed` — его обёртка.
 
 `401` — токен отозван или истёк: `ProviderTokenRejected`, сессию закрывает
 use case. Сеть, `429`, `5xx`, `403` лимита (`x-ratelimit-remaining: 0`, `retry-after`
@@ -149,17 +151,22 @@ class GitHubInstallationCatalog:
             ) from None
 
     def app_installed(self, full_name: str) -> bool:
+        """Установлено ли приложение и не приостановлена ли установка — тот же запрос,
+        что у `repository_installation_id`."""
+        return self.repository_installation_id(full_name) is not None
+
+    def repository_installation_id(self, full_name: str) -> int | None:
         """`GET /repos/{owner}/{repo}/installation` с JWT приложения («Get a repository
-        installation for the authenticated app»): `404` — не установлено,
-        `suspended_at` не `null` — установка приостановлена, тоже «нет»."""
+        installation for the authenticated app»): id установки; `404` — не установлено,
+        `suspended_at` не `null` — установка приостановлена: в обоих случаях `None`."""
         url = f"/repos/{full_name}/installation"
         try:
             installation = self._get(None, url, _Installation)
         except _Inaccessible as failure:
             if failure.status == 404:
-                return False
+                return None
             raise VcsError(f"GitHub API: HTTP {failure.status} на GET {url}") from None
-        return installation.suspended_at is None
+        return installation.id if installation.suspended_at is None else None
 
     def _installations(self, access_token: Secret) -> Iterator[_Installation]:
         url = "/user/installations"

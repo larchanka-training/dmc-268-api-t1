@@ -38,7 +38,9 @@ def _reply(content: str = VALID) -> dict[str, Any]:
     }
 
 
-def _gateway(handler: Handler, keys: tuple[str, ...] = KEYS) -> OpenAiCompatibleGateway:
+def _gateway(
+    handler: Handler, keys: tuple[str, ...] = KEYS, reasoning_effort: str | None = None
+) -> OpenAiCompatibleGateway:
     client = httpx.Client(
         base_url="https://eurorouter.example/v1", transport=httpx.MockTransport(handler)
     )
@@ -48,6 +50,7 @@ def _gateway(handler: Handler, keys: tuple[str, ...] = KEYS) -> OpenAiCompatible
         tuple(SecretStr(key) for key in keys),
         name="Eurorouter",
         max_attempts=2,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -92,6 +95,17 @@ def test_request_body_carries_schema_output_limit_and_bearer_key() -> None:
         "max_tokens": 4_096,
         "temperature": 0,
     }
+
+
+def test_reasoning_effort_goes_into_the_body_only_when_set() -> None:
+    handler, seen = _recording(httpx.Response(200, json=_reply()), httpx.Response(200, json=_reply()))
+
+    _gateway(handler, reasoning_effort="low").complete(REQUEST)
+    _gateway(handler).complete(REQUEST)
+
+    with_effort, without = (json.loads(request.content) for request in seen)
+    assert with_effort["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in without
 
 
 def test_answer_carries_the_responding_model_and_total_tokens() -> None:

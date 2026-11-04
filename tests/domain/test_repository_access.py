@@ -2,7 +2,10 @@
 
 import pytest
 
-from app.domain.entities import InstallationRepository, RepositoryPermissions
+from app.domain.entities import (
+    InstallationRepository,
+    RepositoryPermissions,
+)
 from app.domain.repository_access import (
     can_connect,
     has_explicit_access,
@@ -50,3 +53,4 @@ def test_setup_connects_only_manageable_repositories_without_a_record() -> None:
     registered = InstallationRepository("4", "o/registered", "main", _permissions("admin"))
 
     assert to_connect_on_setup([admin, maintain, write, registered], {"4"}) == [admin, maintain]
+

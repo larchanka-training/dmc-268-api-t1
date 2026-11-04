@@ -46,8 +46,8 @@ esac
 """
 
 # `run`: флаги migrations_run из migrate.sh отбрасываются, переменные из
-# --env-file экспортируются, после образа — команда alembic или `python -` со
-# скриптом на stdin (пароль роли мониторинга после миграций). `pull` и `rm` — no-op.
+# --env-file экспортируются, после образа — команда alembic или
+# `python alembic/monitor_password.py` (пароль роли мониторинга после миграций). `pull` и `rm` — no-op.
 FAKE_DOCKER = """#!/usr/bin/env bash
 case "$1" in
   run)
@@ -55,7 +55,7 @@ case "$1" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --env-file) while IFS= read -r line; do export "$line"; done < "$2"; shift 2 ;;
-        --rm|--read-only|--init|-i) shift ;;
+        --rm|--read-only|--init) shift ;;
         --*) shift 2 ;;
         *) break ;;
       esac

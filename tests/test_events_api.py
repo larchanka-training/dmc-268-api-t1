@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode, format_trace_id
-from sqlalchemy import Engine, Table, create_engine, text
+from sqlalchemy import Engine, MetaData, Table, Text, create_engine, text
 from sqlalchemy.pool import StaticPool
 from starlette.types import Message
 
@@ -60,7 +60,6 @@ from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.vcs_errors import VcsError
 from app.infrastructure import telemetry
 from app.infrastructure.db import models as db_models
-from app.infrastructure.db.base import Base
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork, UntracedUnitOfWork
 
 from .fakes.auth import SIGNED_IN_SESSION_ID, sign_in_with_session
@@ -613,7 +612,9 @@ def _feed_engine() -> Engine:
     через `run_in_threadpool`. Данных в базе нет и не нужно: пустые ответы цикла —
     то же молчание ленты; важно, что каждое чтение по сигналу ходит настоящим
     запросом. Таблицы — только те, что читает `list_changed` (у `context_payloads`
-    типы PostgreSQL).
+    типы PostgreSQL). Их копии создаются в отдельной `MetaData`: колонка-массив
+    `repositories.branch_filter` в SQLite не рендерится, в копии она `TEXT` — на пустые
+    чтения ленты тип не влияет, а модели приложения остаются нетронутыми.
     """
     engine = create_engine(
         "sqlite://",
@@ -631,7 +632,10 @@ def _feed_engine() -> Engine:
             db_models.FindingRow.__table__,
         ],
     )
-    Base.metadata.create_all(engine, tables=tables)
+    sqlite_metadata = MetaData()
+    copies = [table.to_metadata(sqlite_metadata) for table in tables]
+    sqlite_metadata.tables["repositories"].c.branch_filter.type = Text()
+    sqlite_metadata.create_all(engine, tables=copies)
     telemetry.instrument_engine(engine)
     return engine
 

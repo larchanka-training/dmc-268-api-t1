@@ -83,6 +83,7 @@ class PullRequest:
     author: str = "octocat"
     base_ref: str = "develop"
     head_ref: str = "feat/change"
+    author_association: str = "MEMBER"
     # От старого к новому, как отдаёт GitHub.
     commit_messages: tuple[str, ...] = ("feat: изменение",)
 
@@ -343,8 +344,18 @@ class FakeGitHub:
                 "title": pull.title,
                 "body": pull.body or None,
                 "user": {"login": pull.author},
-                "head": {"sha": pull.head_sha, "ref": pull.head_ref},
-                "base": {"sha": pull.base_sha, "ref": pull.base_ref},
+                "author_association": pull.author_association,
+                # Ветка в самом репозитории: `head.repo` совпадает с `base.repo` (не форк).
+                "head": {
+                    "sha": pull.head_sha,
+                    "ref": pull.head_ref,
+                    "repo": {"id": int(REPO_PROVIDER_ID)},
+                },
+                "base": {
+                    "sha": pull.base_sha,
+                    "ref": pull.base_ref,
+                    "repo": {"id": int(REPO_PROVIDER_ID)},
+                },
             },
         )
 

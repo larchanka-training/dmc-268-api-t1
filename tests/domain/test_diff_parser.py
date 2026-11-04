@@ -245,6 +245,44 @@ def test_edited_and_new_files_are_not_deleted() -> None:
     assert not parse_diff(NEW_FILE_DIFF)[0].is_deleted
 
 
+NEW_BINARY_DIFF = """\
+diff --git a/assets/new.png b/assets/new.png
+new file mode 100644
+index 0000000..8e9f0a1
+Binary files /dev/null and b/assets/new.png differ
+"""
+
+# Без `new file mode`: добавленный файл узнаётся по `--- /dev/null`.
+NEW_FILE_WITHOUT_MODE_DIFF = """\
+diff --git a/app/fresh.py b/app/fresh.py
+--- /dev/null
++++ b/app/fresh.py
+@@ -0,0 +1 @@
++only line
+"""
+
+
+def test_new_text_file_is_added() -> None:
+    assert parse_diff(NEW_FILE_DIFF)[0].is_added is True
+
+
+def test_new_binary_file_is_added() -> None:
+    parsed = parse_diff(NEW_BINARY_DIFF)[0]
+    assert parsed.is_added is True
+    assert parsed.is_binary is True
+
+
+def test_dev_null_minus_side_marks_file_added() -> None:
+    assert parse_diff(NEW_FILE_WITHOUT_MODE_DIFF)[0].is_added is True
+
+
+def test_modified_deleted_and_renamed_files_are_not_added() -> None:
+    assert parse_diff(MULTI_FILE_DIFF)[0].is_added is False
+    assert parse_diff(DELETED_FILE_DIFF)[0].is_added is False
+    assert parse_diff(RENAME_WITH_EDITS_DIFF)[0].is_added is False
+    assert parse_diff(BINARY_DIFF)[0].is_added is False
+
+
 def test_hunk_text_stops_at_the_next_hunk() -> None:
     """Текст hunk'а — его заголовок и тело, без соседнего hunk'а и шапки файла."""
     first, second = parse_diff(TWO_HUNKS_DIFF)[0].hunks

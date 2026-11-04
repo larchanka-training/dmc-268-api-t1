@@ -1,5 +1,6 @@
 """Сценарий сборки контекста на фейках VCS, кэша и парсера — без сети и tree-sitter."""
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
@@ -8,15 +9,16 @@ import pytest
 
 from app.application.context_assembly import AssembledContext, ContextLimits
 from app.application.use_cases.build_review_context import (
+    REVIEW_DIFF_MAX_LINES,
     build_review_context,
     fetch_review_diff,
 )
 from app.domain.entities import Definition, FileOutline, ReviewJob
 from app.domain.enums import DefinitionKind, Language
-from app.domain.vcs_errors import VcsError
+from app.domain.vcs_errors import DiffTooLargeError, VcsError
 
 from ..fakes.context import FakeCache, FakeExtractor
-from ..fakes.webhooks import FakeVcs, pr_metadata
+from ..fakes.webhooks import FakeVcs, diff_of_lines, pr_metadata
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 BASE, HEAD = "b" * 40, "a" * 40
@@ -54,13 +56,18 @@ def _file_diff(path: str) -> str:
     )
 
 
-def _build(vcs: FakeVcs, extractor: FakeExtractor | None = None, limits: ContextLimits = LIMITS) -> AssembledContext:
+def _build(
+    vcs: FakeVcs,
+    extractor: FakeExtractor | None = None,
+    limits: ContextLimits = LIMITS,
+    cache: FakeCache | None = None,
+) -> AssembledContext:
     return build_review_context(
         JOB,
         fetch_review_diff(JOB, vcs, max_bytes=limits.diff_max_bytes),
         vcs=vcs,
         extractor=extractor or FakeExtractor(outlines={SOURCE: OUTLINE}),
-        cache=FakeCache(),
+        cache=cache if cache is not None else FakeCache(),
         limits=limits,
         review_run_id=JOB.review_run_id,
         now=NOW,
@@ -82,12 +89,45 @@ def test_rules_at_base_and_sources_at_head() -> None:
     assert ("file", "owner/repo", "app/repo.py", HEAD, 77) in file_calls
 
 
+def test_rules_are_cached_with_the_run_time() -> None:
+    """Время получения правил — `now` прогона, а не часы внутри загрузки."""
+    vcs = FakeVcs(diff=_file_diff("app/repo.py"), files={("app/repo.py", HEAD): SOURCE})
+    cache = FakeCache()
+    _build(vcs, cache=cache)
+    ((_, value, _),) = cache.sets
+    assert json.loads(value)["fetched_at"] == "2026-10-11T12:00:00+00:00"
+
+
 def test_full_context_contains_ast_of_changed_file() -> None:
     vcs = FakeVcs(diff=_file_diff("app/repo.py"), files={("app/repo.py", HEAD): SOURCE})
     result = _build(vcs)
     assert result.payload.tiers == ("diff", "ast")
     assert "2-3 def save(self)" in result.payload.body["ast"][0]["scopes"]
     assert result.payload.body["rules"]["status"] == "absent"
+
+
+def test_diff_over_the_line_limit_is_refused() -> None:
+    """Байтовый лимит строк не ограничивает: дифф на строку длиннее `REVIEW_DIFF_MAX_LINES` — отказ."""
+    vcs = FakeVcs(diff=diff_of_lines(REVIEW_DIFF_MAX_LINES + 1))
+
+    with pytest.raises(DiffTooLargeError, match=f"{REVIEW_DIFF_MAX_LINES} строк"):
+        fetch_review_diff(JOB, vcs, max_bytes=LIMITS.diff_max_bytes)
+
+
+def test_lines_of_files_the_filter_drops_count_towards_the_limit() -> None:
+    """Строки считаются до разбора и фильтра: lock-файл на весь предел и две строки кода — отказ."""
+    lock = diff_of_lines(REVIEW_DIFF_MAX_LINES).replace("many.txt", "package-lock.json")
+    code = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+
+    with pytest.raises(DiffTooLargeError, match=f"{REVIEW_DIFF_MAX_LINES} строк"):
+        fetch_review_diff(JOB, FakeVcs(diff=lock + code), max_bytes=LIMITS.diff_max_bytes)
+
+
+def test_diff_of_exactly_the_line_limit_is_reviewed() -> None:
+    """Граница: ровно `REVIEW_DIFF_MAX_LINES` строк — дифф отдаётся как есть."""
+    diff = diff_of_lines(REVIEW_DIFF_MAX_LINES)
+
+    assert fetch_review_diff(JOB, FakeVcs(diff=diff), max_bytes=LIMITS.diff_max_bytes) == diff
 
 
 def test_diff_failure_propagates() -> None:

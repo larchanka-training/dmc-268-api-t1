@@ -33,7 +33,7 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
 | Слои, порты, миграции, модель угроз | [`docs/BACKEND_ARCHITECTURE.md`](../../docs/BACKEND_ARCHITECTURE.md) |
 | Модель данных | [`docs/erd.md`](../../docs/erd.md) |
 | Контракт HTTP API | роуты и модели `app/api` (модель одной ручки — в её модуле, общая для нескольких — в `app/api/schemas.py`, ошибки — в `app/api/problems.py`); экспорт — [`docs/openapi/openapi.json`](../../docs/openapi/openapi.json) |
-| Границы сервисов | `docs/SYSTEM_DESIGN.md` (готовится) |
+| Границы сервисов, контейнеры, NFR | [`docs/SYSTEM_DESIGN.md`](../../docs/SYSTEM_DESIGN.md) |
 | Принципы реализации (DRY, KISS, YAGNI) | `openspec/config.yaml`, `operations.apply.guidance` |
 
 ## Документация библиотек и проверка на практике
@@ -192,7 +192,9 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
   не родитель: trace id и сэмплирование остаются нашими.
 - **Граница**: телеметрия — для команды. Данные продукта (шаги, токены, длительность) — из базы,
   ответы API из телеметрии не строятся. Метрики — та же телеметрия: в Prometheus — сигналы
-  алертов, отчёты по прогонам — SQL по колонкам.
+  алертов, отчёты по прогонам — SQL по колонкам. Исключение одно — публичный статус сервиса
+  `GET /api/v1/status`: он из сработавших алертов Prometheus (порт `AlertSource`), и наружу
+  уходят только статусы компонентов.
 
 ### Логи
 

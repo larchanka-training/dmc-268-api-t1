@@ -9,12 +9,12 @@ services:
     # читает (метрики базы он снимает обычными вьюхами статистики), но
     # накладные расходы preload ничтожны, поэтому локально preload держим
     # всегда — без переключателя. На стенде та же библиотека включается
-    # вместе со стеком наблюдаемости (observability_enabled в infra/main.tf).
+    # вместе со стеком наблюдаемости (observability_enabled в infra/variables.tf).
     # track_utility=off прячет утилитные выражения (`ALTER ROLE … PASSWORD`)
     # из pg_stat_statements — их читает роль с pg_monitor.
-    # Та же команда — у контейнера postgres в infra/main.tf.
+    # Та же команда — у контейнера postgres в infra/postgres.tf.
     command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track_utility=off"]
-    # Алиас сети совпадает с именем контейнера на стенде (infra/main.tf):
+    # Алиас сети совпадает с именем контейнера на стенде (infra/*.tf):
     # одинаковые хосты в конфигах стека наблюдаемости — коллектор ходит по
     # dmc268-postgres и локально, и на стенде. Само имя контейнера не
     # фиксируется: fixed container_name сталкивался бы с infra на общем хосте
@@ -61,7 +61,7 @@ services:
 
   rabbitmq:
     image: rabbitmq:4.4-alpine
-    # Алиас сети совпадает с именем контейнера на стенде (infra/main.tf):
+    # Алиас сети совпадает с именем контейнера на стенде (infra/*.tf):
     # prometheus.yml скреит dmc268-rabbitmq в обоих окружениях. Имя контейнера
     # не фиксируется — см. комментарий у postgres.
     networks:
@@ -74,8 +74,11 @@ services:
       # наружу на петле для локальной проверки; в сети compose его скреит
       # Prometheus.
       - "127.0.0.1:15692:15692"
+    # Те же пороги, что на стенде (infra/rabbitmq/30-dmc268.conf, #150).
+    volumes:
+      - ./infra/rabbitmq/30-dmc268.conf:/etc/rabbitmq/conf.d/30-dmc268.conf:ro
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -113,42 +116,24 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # Миграции и шаг роли — одним контейнером. ALTER ROLE идемпотентен, пароль
-    # сводится с POSTGRES_MONITOR_PASSWORD на каждом запуске. Пароль —
-    # параметром запроса psycopg (не литералом команды: тот светится в /proc и
-    # docker logs), track_utility выключен той же транзакцией — иначе
-    # ALTER ROLE ... PASSWORD лёг бы в pg_stat_statements открытым текстом.
-    # Тот же шаг — у деплоя (.github/scripts/deploy/migrate.sh) и контейнера
-    # миграций в infra.
+    # Миграции и пароль роли мониторинга — одним контейнером; шаг роли тот же,
+    # что у деплоя (alembic/monitor_password.py).
     command:
       - sh
       - -c
       - |
         alembic upgrade head || exit 1
-        python - <<'PY' || exit 1
-        import os
-
-        import psycopg
-
-        # DATABASE_URL настроек — под схемой SQLAlchemy (postgresql+psycopg://);
-        # psycopg ждёт стандартную схему postgresql://. Привязка значений — на
-        # клиенте (ClientCursor): серверная не проходит по грамматике ALTER ROLE
-        # (PASSWORD принимает только литерал, не $1), а литерал руками собирать
-        # нельзя — psycopg экранирует сам.
-        dsn = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
-        with psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor) as conn:
-            with conn.transaction():
-                conn.execute("SET LOCAL pg_stat_statements.track_utility = off")
-                # Имя роли зашито — то же, что в миграции 0013 и env коллектора.
-                conn.execute(
-                    "ALTER ROLE dmc268_monitor PASSWORD %s",
-                    (os.environ["POSTGRES_MONITOR_PASSWORD"],),
-                )
-        PY
+        python alembic/monitor_password.py || exit 1
     restart: "no"
 
   api:
     build: .
+    # Алиас — имя контейнера на стенде: по нему проба /health алертов
+    # (prometheus.yml, job blackbox-services) одна и та же в обоих окружениях.
+    networks:
+      default:
+        aliases:
+          - dmc268-api
     ports:
       - "127.0.0.1:8000:8000"
     environment:
@@ -172,6 +157,11 @@ services:
       # Ключ шифрования токенов пользователя (openssl rand -base64 32): пустой —
       # вход отказывает, токен открытым не хранится никогда.
       USER_TOKEN_ENCRYPTION_KEY: ${USER_TOKEN_ENCRYPTION_KEY:-}
+      # Страница статуса (GET /api/v1/status) читает сработавшие алерты у
+      # Prometheus стека — он в той же сети default. Без профиля observability
+      # Prometheus не поднят: статус — unknown, в логе API — предупреждение.
+      # Пустое значение выключает запросы совсем.
+      PROMETHEUS_URL: ${PROMETHEUS_URL-http://prometheus:9090}
       # Спаны OpenTelemetry по умолчанию никуда не уходят; console — в stdout.
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
       # Логи — тот же переключатель, что у трейсов: none — остаются в stdout
@@ -258,6 +248,7 @@ services:
       LLM_HOSTED_FALLBACK: ${LLM_HOSTED_FALLBACK:-false}
       EUROROUTER_BASE_URL: ${EUROROUTER_BASE_URL:-}
       EUROROUTER_MODEL: ${EUROROUTER_MODEL:-}
+      EUROROUTER_REASONING_EFFORT: ${EUROROUTER_REASONING_EFFORT:-}
       EUROROUTER_API_KEYS: ${EUROROUTER_API_KEYS:-}
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
       OTEL_LOGS_EXPORTER: ${OTEL_LOGS_EXPORTER:-none}
@@ -283,7 +274,7 @@ services:
         condition: service_completed_successfully
     command: ["python", "-m", "app.worker"]
     # Драйвер логов json-file с той же ротацией, что у api выше и в
-    # infra/main.tf.
+    # infra/locals.tf.
     logging:
       driver: json-file
       options:
@@ -325,11 +316,11 @@ services:
   # ничего из этого не поднимается. Экспорт включают переменные api/worker —
   # см. комментарий у OTEL_TRACES_EXPORTER.
   #
-  # Имена сервисов и алиасы сети совпадают с алиасами в infra/main.tf,
+  # Имена сервисов и алиасы сети совпадают с алиасами в infra/*.tf,
   # поэтому одни и те же конфиги резолвят хосты в обоих окружениях.
   # Образы зафиксированы дайджестами (имя@sha256:…) — это дайджест
   # манифест-листа (multi-arch), разрешённый docker buildx imagetools
-  # inspect; тег в комментарии рядом. Одинаковый дайджест и в main.tf:
+  # inspect; тег в комментарии рядом. Одинаковый дайджест и в infra/observability.tf:
   # обновление образа — осознанная замена дайджеста в обоих местах с чтением
   # breaking changes.
   collector:
@@ -455,6 +446,10 @@ services:
       - --storage.tsdb.retention.size=8GB
     volumes:
       - ./infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Правила алертов (#100) и цель пробы публичного входа: локально её нет,
+      # файл с пустым списком; на стенде его рендерит infra.
+      - ./infra/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./infra/observability/public-targets.yml:/etc/prometheus/targets/public.yml:ro
       - prometheus_data:/prometheus
 
   grafana:
@@ -480,7 +475,7 @@ services:
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
       GF_AUTH_BASIC_ENABLED: "false"
       # Телеметрия вендора off: статистика использования и проверки обновлений
-      # Grafana и плагинов не должны уходить с машины наружу. То же в main.tf и у Loki/Tempo в
+      # Grafana и плагинов не должны уходить с машины наружу. То же в infra/observability.tf и у Loki/Tempo в
       # их конфигах (loki.yaml, tempo.yaml).
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
@@ -506,6 +501,8 @@ services:
       - --path.rootfs=/rootfs
       - --path.procfs=/host/proc
       - --path.sysfs=/host/sys
+      # textfile-коллектора с отметкой о резервной копии здесь нет: локально
+      # копий нет, и алерт BackupStatusUnknown горит — это ожидаемо.
     volumes:
       - /:/rootfs:ro
       - /proc:/host/proc:ro
@@ -535,6 +532,86 @@ services:
         aliases:
           - dockerproxy
 
+  # Доставка алертов (#100) — как dmc268-alertmanager в infra/observability.tf,
+  # тот же alertmanager.yml. Токен бота и chat id — файлами (configs ниже) из
+  # окружения: без них Alertmanager работает, но в Telegram ничего не уходит,
+  # а в его логе — ошибка доставки. Проверка доставки — infra/README.md, «Алерты».
+  alertmanager:
+    # prom/alertmanager:v0.34.2
+    image: prom/alertmanager@sha256:39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b
+    profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - alertmanager
+      # Выход в api.telegram.org: сеть стека internal.
+      alerting:
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --cluster.listen-address=
+    volumes:
+      - ./infra/observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    configs:
+      - source: telegram_bot_token
+        target: /etc/alertmanager/secrets/telegram_bot_token
+      - source: telegram_chat_id
+        target: /etc/alertmanager/secrets/telegram_chat_id
+    # Как dmc268-alertmanager на стенде. Без read_only: compose не создаёт
+    # configs с content в read-only сервисе («`file` is the sole supported
+    # option»), а на стенде read_only несовместим с upload.
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+
+  # Пробы сервисов для алертов — как dmc268-blackbox в infra/observability.tf:
+  # только в default, где цели API, базы и брокера и где его скрейпит
+  # Prometheus. В сети стека его нет — иначе через него можно дойти до
+  # blackbox-public с выходом наружу. Изоляция от интернета — только на
+  # стенде: default в compose не internal, локально экземпляр выходит наружу
+  # напрямую.
+  blackbox:
+    # prom/blackbox-exporter:v0.29.1
+    image: prom/blackbox-exporter@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
+    profiles: ["observability"]
+    networks:
+      default:
+        aliases:
+          - dmc268-blackbox
+    command: ["--config.file=/etc/blackbox_exporter/config.yml"]
+    volumes:
+      - ./infra/observability/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+
+  # Проба публичного входа — как dmc268-blackbox-public в infra: без сети
+  # приложения, наружу — через alerting. Локально целей нет (public-targets.yml).
+  blackbox-public:
+    # prom/blackbox-exporter:v0.29.1
+    image: prom/blackbox-exporter@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
+    profiles: ["observability"]
+    networks:
+      observability:
+        aliases:
+          - blackbox-public
+      alerting:
+    command: ["--config.file=/etc/blackbox_exporter/config.yml"]
+    volumes:
+      - ./infra/observability/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+
+# Секреты доставки алертов локально — из окружения (или .env); токен unset и
+# chat id 0 — заглушки, с ними доставка падает, а стек поднимается. Не пустая
+# строка: пустой content compose монтирует каталогом, а не файлом.
+configs:
+  telegram_bot_token:
+    content: ${ALERT_TELEGRAM_BOT_TOKEN:-unset}
+  telegram_chat_id:
+    content: ${ALERT_TELEGRAM_CHAT_ID:-0}
+
 volumes:
   postgres_data:
     # Новое имя при переходе с postgres:18-alpine (musl) на pgvector (glibc):
@@ -556,6 +633,7 @@ volumes:
   tempo_data:
   prometheus_data:
   grafana_data:
+  alertmanager_data:
 
 # Сети стека наблюдаемости. docker_proxy — для доступа к Docker API через
 # socket-proxy: в ней только dockerproxy и collector-docker, internal — наружу в
@@ -582,3 +660,6 @@ networks:
   grafana:
   # То же для порта collector-logs.
   logs:
+  # Выход наружу: Alertmanager — в api.telegram.org, blackbox-public — на
+  # публичный вход. Сеть стека internal.
+  alerting:

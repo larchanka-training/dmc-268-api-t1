@@ -13,17 +13,26 @@ from pydantic import BaseModel
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
-from app.application.merge_gate_publish import build_failed_review_check
+from app.application.merge_gate_publish import (
+    AUTO_REVIEW_OFF_CHECK,
+    DISABLED_REVIEW_CHECK,
+    build_failed_review_check,
+)
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
+from app.application.ports.vcs_review import MergeGateCheck
 from app.application.review_pipeline import run_review
+from app.application.stale_sweep import sweep_stale_runs
+from app.application.use_cases.build_review_context import REVIEW_DIFF_MAX_LINES
 from app.domain.entities import (
     MergeRequest,
+    RepositorySettings,
     ReviewJob,
     ReviewRun,
     ReviewRunStep,
     RuleRef,
 )
 from app.domain.enums import (
+    FindingSeverity,
     MergeRequestState,
     ReviewRunStage,
     ReviewRunStatus,
@@ -31,6 +40,7 @@ from app.domain.enums import (
     TriggerSource,
     VerificationOutcome,
 )
+from app.domain.lifecycle import advance
 from app.domain.llm_errors import (
     LlmError,
     LlmOutputError,
@@ -52,9 +62,9 @@ from ..fakes.llm_gateway import (
     verification_response,
 )
 from ..fakes.run_outcome import RecordingRunOutcome
-from ..fakes.unit_of_work import FakeUnitOfWork
+from ..fakes.unit_of_work import FakeUnitOfWork, add_manual_run_with_critical_thread
 from ..fakes.vcs_gateway import RecordingVcsGateway
-from ..fakes.webhooks import FakeVcs
+from ..fakes.webhooks import FakeVcs, a_repository, diff_of_lines
 
 # Дифф фейкового VCS меняет первую строку `app/main.py`.
 CHANGED_FILE = "app/main.py"
@@ -81,7 +91,14 @@ JOB = ReviewJob(
 MR_ID = UUID(int=3)
 
 
-def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.QUEUED) -> None:
+def _seed_run(
+    uow: FakeUnitOfWork,
+    *,
+    status: ReviewRunStatus = ReviewRunStatus.QUEUED,
+    trigger: TriggerSource = TriggerSource.WEBHOOK,
+) -> None:
+    # Запись репозитория PR: без неё merge gate не прочитает порог.
+    uow.repositories.add(replace(a_repository(), id=UUID(int=9)))
     uow.merge_requests.add(
         MergeRequest(
             id=MR_ID,
@@ -104,7 +121,7 @@ def _seed_run(uow: FakeUnitOfWork, *, status: ReviewRunStatus = ReviewRunStatus.
             merge_request_id=MR_ID,
             head_sha=JOB.head_sha,
             status=status,
-            trigger=TriggerSource.WEBHOOK,
+            trigger=trigger,
             last_progress_at=NOW,
             created_at=NOW,
             updated_at=NOW,
@@ -330,9 +347,9 @@ def test_last_progress_at_follows_the_clock_on_every_transition() -> None:
     seen: list[datetime] = []
     original = uow.review_runs.update
 
-    def recording_update(run: ReviewRun) -> None:
+    def recording_update(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         seen.append(run.last_progress_at)
-        original(run)
+        original(run, previous=previous)
 
     uow.review_runs.update = recording_update  # type: ignore[method-assign]
     gateway = ScriptedLlmGateway([review_response()])
@@ -410,9 +427,9 @@ def test_a_failure_while_marking_failed_does_not_mask_the_original_error() -> No
 
     real_update = uow.review_runs.update
 
-    def update(run: ReviewRun) -> None:
+    def update(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         broken_update(run)
-        real_update(run)
+        real_update(run, previous=previous)
 
     uow.review_runs.update = update  # type: ignore[method-assign]
 
@@ -681,8 +698,8 @@ def test_a_run_cancelled_before_its_review_is_posted_leaves_the_step_abandoned()
     _seed_run(uow)
     update = uow.review_runs.update
 
-    def retarget_on_publishing(run: ReviewRun) -> None:
-        update(run)
+    def retarget_on_publishing(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
+        update(run, previous=previous)
         if run.status is ReviewRunStatus.PUBLISHING:
             update(replace(run, status=ReviewRunStatus.CANCELLED))
 
@@ -887,9 +904,9 @@ def test_the_verifying_step_starts_at_the_progress_mark_before_the_verifier() ->
     seen: list[datetime] = []
     original = uow.review_runs.update
 
-    def recording_update(run: ReviewRun) -> None:
+    def recording_update(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         seen.append(run.last_progress_at)
-        original(run)
+        original(run, previous=previous)
 
     uow.review_runs.update = recording_update  # type: ignore[method-assign]
     gateway = ScriptedLlmGateway(
@@ -944,13 +961,36 @@ def test_a_diff_over_the_limit_fails_the_run_without_a_review() -> None:
     run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.FAILED
-    assert run.failure_reason == "дифф PR больше лимита 1000 байт: ревью не выполняется"
+    assert run.failure_reason == "дифф PR больше лимита 1000 байт или GitHub не строит такой большой дифф: ревью не выполняется"
     assert _steps(uow) == [
         (ReviewRunStage.FETCHING_DIFF, ReviewRunStepStatus.FAILED, None, "DIFF_TOO_LARGE"),
     ]
     assert gateway.requests == []
     assert vcs.publications == []
     assert vcs.checks == []
+    assert uow.context_payloads.list_for_run(JOB.review_run_id) == []
+
+
+def test_a_diff_over_the_line_limit_fails_the_run_without_a_review() -> None:
+    """Дифф в байтовом лимите, но длиннее `REVIEW_DIFF_MAX_LINES` строк — прогон `failed`,
+    шаг `fetching_diff` с `DIFF_TOO_LARGE`; дифф не разбирается, модель не вызывается."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway([])
+    vcs = RecordingVcsGateway(diff=diff_of_lines(REVIEW_DIFF_MAX_LINES + 1))
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, gateway, vcs_gateway=vcs)
+
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None
+    assert run.status == ReviewRunStatus.FAILED
+    assert run.failure_reason == f"дифф PR больше лимита {REVIEW_DIFF_MAX_LINES} строк: ревью не выполняется"
+    assert _steps(uow) == [
+        (ReviewRunStage.FETCHING_DIFF, ReviewRunStepStatus.FAILED, None, "DIFF_TOO_LARGE"),
+    ]
+    assert gateway.requests == []
+    assert vcs.publications == []
     assert uow.context_payloads.list_for_run(JOB.review_run_id) == []
 
 
@@ -1265,23 +1305,86 @@ def test_a_screening_failure_keeps_the_review_tokens_on_the_analysing_step(
     assert _completed(uow).status is ReviewRunStatus.FAILED
 
 
-def test_a_redelivered_run_closes_the_step_the_dead_worker_left_running() -> None:
-    """Воркер умер посреди `analysing`, брокер доставил сообщение снова."""
+def test_a_redelivered_run_in_work_is_left_to_its_worker(caplog: pytest.LogCaptureFixture) -> None:
+    """Решение команды (#169): чей-то прогон в работе не трогаем, сообщение подтверждается.
+    Живой он или брошенный, отсюда не отличить: брошенный выметет очистка."""
     uow = FakeUnitOfWork()
     _seed_run(uow, status=ReviewRunStatus.ANALYSING)
-    uow.review_run_steps.add(
-        start_step(JOB.review_run_id, ReviewRunStage.ANALYSING, started_at=NOW, step_id=UUID(int=50))
-    )
+    step = start_step(JOB.review_run_id, ReviewRunStage.ANALYSING, started_at=NOW, step_id=UUID(int=50))
+    uow.review_run_steps.add(step)
+    model = ScriptedLlmGateway([review_response()])
 
-    with pytest.raises(ValueError):
-        _run(uow, ScriptedLlmGateway([review_response()]))
+    with caplog.at_level(logging.WARNING):
+        _run(uow, model)
 
-    assert _completed(uow).status is ReviewRunStatus.FAILED
-    (abandoned,) = uow.review_run_steps.list_for_run(JOB.review_run_id)
-    assert abandoned.status is ReviewRunStepStatus.FAILED
-    assert abandoned.error_code == "REVIEW_RUN_STALE"
-    # Длительность - по стенным часам до момента сбоя: часы теста идут на секунду за чтение.
-    assert abandoned.duration_seconds is not None and abandoned.duration_seconds > 0
+    assert model.requests == []
+    assert _completed(uow).status is ReviewRunStatus.ANALYSING
+    assert uow.review_run_steps.list_for_run(JOB.review_run_id) == [step]
+    assert "уже в работе" in caplog.text
+
+
+class _SweptDuringTheModelCall(ScriptedLlmGateway):
+    """Воркер жив, но вызов модели длиннее порога: очистка выметает его прогон."""
+
+    def __init__(self, uow: FakeUnitOfWork, outcome: RecordingRunOutcome) -> None:
+        super().__init__([review_response()])
+        self._uow = uow
+        self._outcome = outcome
+
+    def complete(self, request: Any) -> Any:
+        answer = super().complete(request)
+        sweep_stale_runs(
+            self._uow,
+            now=NOW + timedelta(days=1),
+            limit=timedelta(minutes=30),
+            queued_limit=timedelta(hours=6),
+            run_outcome=self._outcome,
+        )
+        return answer
+
+
+def test_a_live_worker_whose_run_was_swept_fails_like_any_failed_run() -> None:
+    """Поверх терминального статуса записи нет, поэтому условие на записях воркера не нужно.
+    Сам воркер, в отличие от очистки, выставляет gate упавшего прогона."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    vcs = RecordingVcsGateway()
+    outcome = RecordingRunOutcome()
+
+    with pytest.raises(ValueError, match="terminal"):
+        _run(uow, _SweptDuringTheModelCall(uow, outcome), vcs_gateway=vcs, run_outcome=outcome)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    assert run.failure_reason is not None and "нет прогресса" in run.failure_reason
+    assert vcs.publications == []
+    assert vcs.checks == [build_failed_review_check()]
+    assert outcome.statuses == ["failed"]
+
+
+def test_a_lost_claim_leaves_the_run_to_the_winner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Два воркера прочитали `queued`: проигравший захват не роняет прогон и не вызывает модель."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    model = ScriptedLlmGateway([review_response()])
+    read = uow.review_runs.get
+
+    def read_then_lose_the_race(run_id: UUID) -> ReviewRun | None:
+        stale = read(run_id)
+        assert stale is not None
+        monkeypatch.setattr(uow.review_runs, "get", read)
+        uow.review_runs.update(advance(stale, ReviewRunStatus.BUILDING_CONTEXT, NOW).unwrap())
+        uow.commit()
+        return stale
+
+    monkeypatch.setattr(uow.review_runs, "get", read_then_lose_the_race)
+
+    _run(uow, model)
+
+    assert model.requests == []
+    assert _completed(uow).status is ReviewRunStatus.BUILDING_CONTEXT
+    assert _steps(uow) == []
 
 
 def test_a_failed_run_closes_its_step_with_the_known_code_when_the_outcome_write_failed() -> None:
@@ -1346,10 +1449,10 @@ def test_a_failed_transition_to_analysing_fails_the_analysing_step() -> None:
     _seed_run(uow)
     real_update = uow.review_runs.update
 
-    def update(run: ReviewRun) -> None:
+    def update(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         if run.status is ReviewRunStatus.ANALYSING:
             raise ConnectionError("база недоступна")
-        real_update(run)
+        real_update(run, previous=previous)
 
     uow.review_runs.update = update  # type: ignore[method-assign]
 
@@ -1403,6 +1506,122 @@ def test_a_failed_review_after_an_earlier_one_blocks_the_head() -> None:
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
     assert vcs.checks == [build_failed_review_check()]
+
+
+def _turn_auto_review_off(uow: FakeUnitOfWork) -> None:
+    uow.repositories.update_settings(
+        UUID(int=9), RepositorySettings(False, (), FindingSeverity.CRITICAL), NOW
+    )
+
+
+def _disconnect(uow: FakeUnitOfWork) -> None:
+    uow.repositories.disconnect(UUID(int=9), NOW)
+
+
+@pytest.mark.parametrize(
+    ("pause_review", "earlier_review", "expected"),
+    [
+        pytest.param(_turn_auto_review_off, True, AUTO_REVIEW_OFF_CHECK, id="auto-review-off"),
+        pytest.param(_disconnect, True, DISABLED_REVIEW_CHECK, id="disconnected"),
+        pytest.param(_turn_auto_review_off, False, AUTO_REVIEW_OFF_CHECK, id="first-review"),
+    ],
+)
+def test_a_failed_review_on_a_paused_repository_sets_the_pause_check(
+    pause_review: Callable[[FakeUnitOfWork], None], earlier_review: bool, expected: MergeGateCheck
+) -> None:
+    """#325: прогон начался до паузы: его падение не блокирует PR, а первый прогон
+    не оставляет обязательную проверку без check."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    if earlier_review:
+        _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    pause_review(uow)
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks == [expected]
+
+
+def test_a_failed_first_manual_review_on_auto_review_pause_sets_the_pause_check() -> None:
+    """D11: упавший ручной прогон на паузе авторевью без завершённого ручного до него —
+    check паузы `success`, а не `failure`: PR, который авторевью не ждёт, не держится."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, trigger=TriggerSource.MANUAL)
+    _turn_auto_review_off(uow)
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
+
+
+def test_a_failed_manual_re_review_on_auto_review_pause_keeps_the_gate_of_the_earlier_one() -> None:
+    """Ревью #335: на паузе авторевью повторный ручной прогон упал — на head gate
+    завершённого ручного прогона до него, а не check паузы."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, trigger=TriggerSource.MANUAL)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    _turn_auto_review_off(uow)
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    (check,) = vcs.checks
+    assert (check.conclusion, check.title) == ("success", "Ревью пройдено")
+
+
+def test_a_failed_manual_re_review_on_auto_review_pause_keeps_the_critical_blocking() -> None:
+    """Ревью #335: прежний ручной прогон оставил незакрытый `critical` — повтор упал, а
+    мердж по-прежнему заблокирован его `failure`."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, trigger=TriggerSource.MANUAL)
+    add_manual_run_with_critical_thread(
+        uow,
+        merge_request_id=MR_ID,
+        head_sha=JOB.head_sha,
+        status=ReviewRunStatus.COMPLETED,
+        at=NOW - timedelta(minutes=5),
+    )
+    _turn_auto_review_off(uow)
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    (check,) = vcs.checks
+    assert (check.conclusion, check.title) == (
+        "failure",
+        "Есть незакрытые замечания уровня critical и выше",
+    )
+
+
+def test_a_delayed_pause_check_of_a_failed_manual_run_returns_the_gate_of_its_relaunch() -> None:
+    """Ревью #335: ручной прогон упал на паузе авторевью, check паузы задержан, а
+    перезапущенный руками прогон успел опубликовать `failure` — его gate возвращается."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, trigger=TriggerSource.MANUAL)
+    _turn_auto_review_off(uow)
+
+    def relaunch_completes() -> None:
+        add_manual_run_with_critical_thread(
+            uow,
+            merge_request_id=MR_ID,
+            head_sha=JOB.head_sha,
+            status=ReviewRunStatus.COMPLETED,
+            at=NOW + timedelta(hours=1),
+        )
+
+    vcs = RecordingVcsGateway(diff="+" * 1_001, during_first_check=relaunch_completes)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    assert vcs.checks[0] == AUTO_REVIEW_OFF_CHECK
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
 
 
 def test_a_failed_review_superseded_on_the_head_leaves_the_gate_alone() -> None:

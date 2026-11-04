@@ -7,6 +7,7 @@
 
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import count
 from typing import Any
@@ -47,6 +48,7 @@ from ..fakes.llm_gateway import (
 )
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
+from ..fakes.webhooks import a_repository
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
@@ -97,6 +99,8 @@ def _review(
 ) -> tuple[FakeUnitOfWork, RecordingVcsGateway]:
     uow = FakeUnitOfWork()
     mr_id = MR_ID
+    # Запись репозитория PR: без неё merge gate не прочитает порог.
+    uow.repositories.add(replace(a_repository(), id=UUID(int=9)))
     uow.merge_requests.add(
         MergeRequest(
             id=mr_id,

@@ -11,21 +11,28 @@ from uuid import UUID
 import pytest
 
 from app.application.merge_gate_publish import (
+    AUTO_REVIEW_OFF_CHECK,
+    DISABLED_REVIEW_CHECK,
     SETTLE_ATTEMPTS,
     build_failed_review_check,
-    build_merge_gate_check,
     build_retarget_check,
     settle_merge_gate,
 )
 from app.application.ports.llm_gateway import LlmReviewResult
 from app.application.ports.unit_of_work import ActiveRunConflict
-from app.application.ports.vcs_review import InlineCommentDraft, ReviewThreadState
+from app.application.ports.vcs_review import (
+    InlineCommentDraft,
+    MergeGateCheck,
+    ReviewThreadState,
+)
 from app.application.publish_review import RunCancelledError, publish_review
 from app.domain.entities import (
     DiffAnchor,
     Finding,
     MergeRequest,
     PublishedComment,
+    Repository,
+    RepositorySettings,
     ReviewJob,
     ReviewRun,
     RuleRef,
@@ -36,9 +43,11 @@ from app.domain.enums import (
     FindingCategory,
     FindingSeverity,
     MergeRequestState,
+    Provider,
     ReviewRunStatus,
     TriggerSource,
 )
+from app.domain.review_coverage import ReviewCoverage
 from app.domain.vcs_errors import VcsError, VcsTransientError
 
 from ..fakes.unit_of_work import FakeUnitOfWork
@@ -49,6 +58,8 @@ MR_ID = UUID(int=3)
 RUN_ID = UUID(int=2)
 FINDING_ID = UUID(int=50)
 ROOT_COMMENT_ID = UUID(int=51)
+
+NO_COVERAGE = ReviewCoverage((), (), (), ())
 
 
 JOB = ReviewJob(
@@ -65,7 +76,28 @@ JOB = ReviewJob(
 )
 
 
-def _seed_previous_critical_thread(uow: FakeUnitOfWork) -> None:
+REPOSITORY = Repository(
+    id=UUID(int=9),
+    provider=Provider.GITHUB,
+    provider_id="1",
+    full_name="owner/repo",
+    default_branch="develop",
+    auto_review_enabled=True,
+    created_at=NOW,
+    updated_at=NOW,
+    connected_at=NOW,
+)
+
+
+def _seed_previous_critical_thread(
+    uow: FakeUnitOfWork,
+    severity: FindingSeverity = FindingSeverity.CRITICAL,
+    *,
+    with_repository: bool = True,
+) -> None:
+    # Репозиторий с настройками по умолчанию; уже добавленный тестом (тот же provider_id) остаётся.
+    if with_repository:
+        uow.repositories.add(REPOSITORY)
     uow.merge_requests.add(
         MergeRequest(
             id=MR_ID,
@@ -98,7 +130,7 @@ def _seed_previous_critical_thread(uow: FakeUnitOfWork) -> None:
         review_run_id=prev_run.id,
         anchor=DiffAnchor(file_path="app/x.py", side=DiffSide.NEW, new_line=10),
         category=FindingCategory.CORRECTNESS,
-        severity=FindingSeverity.CRITICAL,
+        severity=severity,
         message="критично",
         created_at=NOW,
         updated_at=NOW,
@@ -116,6 +148,38 @@ def _seed_previous_critical_thread(uow: FakeUnitOfWork) -> None:
             updated_at=NOW,
         )
     )
+
+
+def test_summary_lists_the_files_the_review_covered() -> None:
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    uow.review_runs.add(
+        ReviewRun(
+            id=RUN_ID,
+            merge_request_id=MR_ID,
+            head_sha=JOB.head_sha,
+            status=ReviewRunStatus.PUBLISHING,
+            trigger=TriggerSource.WEBHOOK,
+            last_progress_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    vcs = RecordingVcsGateway()
+
+    publish_review(
+        JOB,
+        uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
+        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        coverage=ReviewCoverage(reviewed=("app/a.py",), partial=(), not_reviewed=(), filtered=("uv.lock",)),
+        uow=uow,
+        vcs=vcs,
+        now=NOW,
+        new_id=lambda: UUID(int=300),
+    )
+
+    ((summary, _),) = vcs.publications
+    assert "<summary>Файлы: проверено 1, отброшено фильтром 1</summary>" in summary
 
 
 def test_merge_gate_fails_while_critical_thread_open() -> None:
@@ -140,6 +204,7 @@ def test_merge_gate_fails_while_critical_thread_open() -> None:
         JOB,
         uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
         result,
+        coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -186,6 +251,7 @@ def test_thread_sync_failure_still_sets_the_merge_gate_from_the_database(
             JOB,
             run,
             LlmReviewResult(model="m", tokens_used=0, findings=()),
+            coverage=NO_COVERAGE,
             uow=uow,
             vcs=vcs,
             now=NOW,
@@ -216,6 +282,7 @@ def test_thread_sync_programming_error_is_not_swallowed() -> None:
             JOB,
             run,
             LlmReviewResult(model="m", tokens_used=0, findings=()),
+            coverage=NO_COVERAGE,
             uow=uow,
             vcs=vcs,
             now=NOW,
@@ -256,6 +323,7 @@ def test_inline_comment_is_attributed_from_the_stored_rule_reference() -> None:
         JOB,
         run,
         LlmReviewResult(model="m", tokens_used=0, findings=()),
+        coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -326,6 +394,7 @@ def _publish(uow: FakeUnitOfWork, vcs: RecordingVcsGateway) -> None:
         JOB,
         _publishing_run(uow),
         LlmReviewResult(model="m", tokens_used=0, findings=()),
+        coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -553,6 +622,7 @@ def _run_with_critical_finding(uow: FakeUnitOfWork) -> ReviewRun:
 
 
 def _seed_merge_request(uow: FakeUnitOfWork) -> None:
+    uow.repositories.add(REPOSITORY)
     uow.merge_requests.add(
         MergeRequest(
             id=MR_ID,
@@ -576,6 +646,7 @@ def _publish_first_run(uow: FakeUnitOfWork, run: ReviewRun, vcs: RecordingVcsGat
         JOB,
         run,
         LlmReviewResult(model="m", tokens_used=0, findings=()),
+        coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -822,6 +893,253 @@ def test_a_retried_gate_correction_is_rebuilt_for_the_current_run() -> None:
     assert vcs.checks[-1] != build_retarget_check()
 
 
+def _settle_previous_run(uow: FakeUnitOfWork, vcs: RecordingVcsGateway) -> None:
+    settle_merge_gate(
+        uow,
+        vcs,
+        merge_request_id=MR_ID,
+        repo_full_name=JOB.repository_full_name,
+        head_sha="sha1",
+        installation_id=JOB.installation_id,
+        run_id=UUID(int=4),
+        repository_id=REPOSITORY.id,
+    )
+
+
+class _DelayedFirstGateVcs(RecordingVcsGateway):
+    """Первый POST задерживается: пока он идёт, срабатывает `during`, и только потом
+    задержанный check доходит до GitHub."""
+
+    def __init__(self, during: Callable[[], object]) -> None:
+        super().__init__()
+        self._during: Callable[[], object] | None = during
+
+    def set_merge_gate_check(self, *args: Any) -> None:
+        during, self._during = self._during, None
+        if during is not None:
+            during()
+        super().set_merge_gate_check(*args)
+
+
+def _set_thread_resolved(uow: FakeUnitOfWork, resolved: bool) -> None:
+    root = uow.published_comments.get(ROOT_COMMENT_ID)
+    assert root is not None
+    uow.published_comments.update(replace(root, thread_resolved=resolved))
+
+
+def test_delayed_gate_is_rewritten_after_the_threshold_changed() -> None:
+    """#325: второй `settle` ставит `failure` по новому порогу, задержанный `success`
+    приходит последним - первый `settle` замечает смену и выставляет gate заново."""
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow, FindingSeverity.HIGH)
+
+    def lower_threshold() -> None:
+        uow.repositories.update_settings(
+            REPOSITORY.id, RepositorySettings(True, (), FindingSeverity.HIGH), NOW
+        )
+        _settle_previous_run(uow, vcs)
+
+    vcs = _DelayedFirstGateVcs(lower_threshold)
+
+    _settle_previous_run(uow, vcs)
+
+    assert [c.conclusion for c in vcs.checks] == ["failure", "success", "failure"]
+
+
+def test_delayed_gate_is_rewritten_after_a_thread_reopened() -> None:
+    """#325: то же для состава тредов - тред открыли снова, пока шёл `success`."""
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow)
+    _set_thread_resolved(uow, True)
+
+    def reopen_thread() -> None:
+        _set_thread_resolved(uow, False)
+        _settle_previous_run(uow, vcs)
+
+    vcs = _DelayedFirstGateVcs(reopen_thread)
+
+    _settle_previous_run(uow, vcs)
+
+    assert [c.conclusion for c in vcs.checks] == ["failure", "success", "failure"]
+
+
+def test_delayed_failure_does_not_stay_over_the_pause() -> None:
+    """#325: авторевью выключили, пока шёл `failure`: PR не остаётся заблокированным."""
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow)
+
+    def pause_review() -> None:
+        uow.repositories.update_settings(
+            REPOSITORY.id, RepositorySettings(False, (), FindingSeverity.CRITICAL), NOW
+        )
+
+    vcs = _DelayedFirstGateVcs(pause_review)
+
+    _settle_previous_run(uow, vcs)
+
+    assert [c.conclusion for c in vcs.checks] == ["failure", "success"]
+    assert vcs.checks[-1] == AUTO_REVIEW_OFF_CHECK
+
+
+def test_pause_outranks_a_failed_run_that_took_over_the_head() -> None:
+    """#325: за head отвечает новый упавший прогон, но ревью на паузе: `failure` держал бы PR."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    uow.repositories.update_settings(
+        REPOSITORY.id, RepositorySettings(False, (), FindingSeverity.CRITICAL), NOW
+    )
+    vcs = _RetargetDuringGateVcs(uow, ReviewRunStatus.FAILED)
+
+    _publish_first_run(uow, run, vcs)
+
+    assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
+
+
+def test_gate_follows_the_unpause_during_the_post() -> None:
+    """#325: паузу сняли, пока шёл check паузы: итог прогона выставляется заново."""
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow)
+    uow.repositories.update_settings(
+        REPOSITORY.id, RepositorySettings(False, (), FindingSeverity.CRITICAL), NOW
+    )
+    vcs = _DelayedFirstGateVcs(
+        lambda: uow.repositories.update_settings(
+            REPOSITORY.id, RepositorySettings(True, (), FindingSeverity.CRITICAL), NOW
+        )
+    )
+
+    _settle_previous_run(uow, vcs)
+
+    assert vcs.checks[0] == AUTO_REVIEW_OFF_CHECK
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
+
+
+class _LostResponseVcs(RecordingVcsGateway):
+    """POST с номером `lost_at` дошёл до GitHub, но ответ потерян."""
+
+    def __init__(self, lost_at: int, after_post: Callable[[int], None]) -> None:
+        super().__init__()
+        self._lost_at = lost_at
+        self._after_post = after_post
+
+    def set_merge_gate_check(self, *args: Any) -> None:
+        super().set_merge_gate_check(*args)
+        self._after_post(len(self.checks))
+        if len(self.checks) == self._lost_at:
+            raise VcsTransientError("GitHub API: таймаут")
+
+
+def test_lost_response_does_not_leave_success_over_an_open_thread() -> None:
+    """#325: `success` дошёл, ответ потерян, тред открыли снова. Собранный `failure` равен
+    прошлому выставленному, но выйти нельзя: на head стоит `success`."""
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow)
+    vcs = _LostResponseVcs(
+        lost_at=2, after_post=lambda posted: _set_thread_resolved(uow, posted == 1)
+    )
+
+    _settle_previous_run(uow, vcs)
+
+    assert [c.conclusion for c in vcs.checks] == ["failure", "success", "failure"]
+
+
+def test_lost_response_of_a_correction_does_not_leave_a_false_block() -> None:
+    """#325: блокировка смены ветки дошла, ответ потерян, новый прогон завершился.
+    Его `success` равен прошлому выставленному, но на head стоит блокировка."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    new_run = replace(
+        run,
+        id=UUID(int=77),
+        status=ReviewRunStatus.QUEUED,
+        created_at=NOW + timedelta(minutes=1),
+        updated_at=NOW + timedelta(minutes=1),
+    )
+
+    def after_post(posted: int) -> None:
+        if posted == 1:
+            uow.review_runs.add(replace(run, status=ReviewRunStatus.CANCELLED))
+            uow.review_runs.add(new_run)
+        elif posted == 2:
+            uow.review_runs.add(replace(new_run, status=ReviewRunStatus.COMPLETED))
+
+    vcs = _LostResponseVcs(lost_at=2, after_post=after_post)
+
+    _publish_first_run(uow, run, vcs)
+
+    assert vcs.checks[1] == build_retarget_check()
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure", "success"]
+
+
+@pytest.mark.parametrize(
+    ("pause_review", "expected"),
+    [
+        pytest.param(
+            lambda uow: uow.repositories.update_settings(
+                REPOSITORY.id, RepositorySettings(False, (), FindingSeverity.CRITICAL), NOW
+            ),
+            AUTO_REVIEW_OFF_CHECK,
+            id="auto-review-off",
+        ),
+        pytest.param(
+            lambda uow: uow.repositories.disconnect(REPOSITORY.id, NOW),
+            DISABLED_REVIEW_CHECK,
+            id="disconnected",
+        ),
+    ],
+)
+def test_run_finished_after_the_pause_sets_the_pause_check(
+    pause_review: Callable[[FakeUnitOfWork], Any], expected: MergeGateCheck
+) -> None:
+    """#325: прогон начался до паузы: ревью публикуется, а gate не блокирует PR."""
+    uow = FakeUnitOfWork()
+    run = _run_with_critical_finding(uow)
+    pause_review(uow)
+    vcs = RecordingVcsGateway()
+
+    _publish_first_run(uow, run, vcs)
+
+    assert len(vcs.publications) == 1
+    assert vcs.checks == [expected]
+
+
+@pytest.mark.parametrize(
+    ("pause_review", "conclusion", "title"),
+    [
+        pytest.param(
+            lambda uow: uow.repositories.update_settings(
+                REPOSITORY.id, RepositorySettings(False, (), FindingSeverity.CRITICAL), NOW
+            ),
+            "failure",
+            "Есть незакрытые замечания уровня critical и выше",
+            id="auto-review-off",
+        ),
+        pytest.param(
+            lambda uow: uow.repositories.disconnect(REPOSITORY.id, NOW),
+            "success",
+            "Ревью выключено в сервисе",
+            id="disconnected",
+        ),
+    ],
+)
+def test_manual_run_on_auto_review_pause_sets_its_own_merge_gate(
+    pause_review: Callable[[FakeUnitOfWork], Any], conclusion: str, title: str
+) -> None:
+    """D11: пауза авторевью не перекрывает gate ручного прогона, выключение репозитория — да."""
+    uow = FakeUnitOfWork()
+    run = replace(_run_with_critical_finding(uow), trigger=TriggerSource.MANUAL)
+    uow.review_runs.add(run)
+    pause_review(uow)
+    vcs = RecordingVcsGateway()
+
+    _publish_first_run(uow, run, vcs)
+
+    assert len(vcs.publications) == 1
+    assert [(c.conclusion, c.title) for c in vcs.checks] == [(conclusion, title)]
+
+
 def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
     """Последний прогон на head сам отменён: блокировка выставляется один раз, и
     цикл поправки не крутится на нём."""
@@ -842,7 +1160,7 @@ def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
         run_id=run.id,
-        check=build_merge_gate_check(()),
+        repository_id=REPOSITORY.id,
     )
 
     assert vcs.checks == [build_retarget_check()]
@@ -870,7 +1188,7 @@ def test_settling_on_a_failed_latest_run_keeps_the_failure() -> None:
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
         run_id=run.id,
-        check=build_merge_gate_check(()),
+        repository_id=REPOSITORY.id,
     )
 
     assert vcs.checks == [build_failed_review_check()]
@@ -922,11 +1240,36 @@ def test_gate_of_a_stale_run_yields_to_a_completed_review_of_the_new_target() ->
     uow = FakeUnitOfWork()
     _seed_merge_request(uow)
     run = _publishing_run(uow)
+    new_run_id = UUID(int=77)
+    uow.findings.add(
+        Finding(
+            id=CRITICAL_FINDING_ID,
+            review_run_id=new_run_id,
+            anchor=DiffAnchor(file_path="app/x.py", side=DiffSide.NEW, new_line=10),
+            category=FindingCategory.SECURITY,
+            severity=FindingSeverity.CRITICAL,
+            message="SQL-инъекция",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    uow.published_comments.add(
+        PublishedComment(
+            id=UUID(int=88),
+            review_run_id=new_run_id,
+            finding_id=None,
+            provider_comment_id="summary",
+            kind=CommentKind.SUMMARY,
+            published_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
     vcs = _RetargetDuringGateVcs(uow, ReviewRunStatus.COMPLETED)
 
     _publish_first_run(uow, run, vcs)
 
-    assert [c.conclusion for c in vcs.checks] == ["success", "success"]
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
     assert vcs.checks[-1] != build_retarget_check()
 
 
@@ -1000,3 +1343,114 @@ def test_orphan_failed_by_the_sweep_after_a_later_publication_is_looked_up() -> 
     _publish(uow, vcs)
 
     assert vcs.found_review_requests == [ORPHAN_RUN_ID]
+
+
+def _publish_over_open_thread(
+    thread_severity: FindingSeverity,
+    *,
+    make_vcs: Callable[[FakeUnitOfWork], RecordingVcsGateway] = lambda _uow: RecordingVcsGateway(),
+    **repository_changes: object,
+) -> RecordingVcsGateway:
+    """Прогон без новых находок поверх открытого треда; репозиторий PR — с данными настройками."""
+    uow = FakeUnitOfWork()
+    uow.repositories.add(replace(REPOSITORY, **repository_changes))  # type: ignore[arg-type]
+    _seed_previous_critical_thread(uow, thread_severity)
+    uow.review_runs.add(
+        ReviewRun(
+            id=RUN_ID,
+            merge_request_id=MR_ID,
+            head_sha=JOB.head_sha,
+            status=ReviewRunStatus.PUBLISHING,
+            trigger=TriggerSource.WEBHOOK,
+            last_progress_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    vcs = make_vcs(uow)
+    publish_review(
+        JOB,
+        uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
+        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        coverage=NO_COVERAGE,
+        uow=uow,
+        vcs=vcs,
+        now=NOW,
+        new_id=lambda: UUID(int=300),
+    )
+    return vcs
+
+
+def test_merge_gate_threshold_comes_from_the_repository() -> None:
+    """`min_severity = high`: открытый тред `high` блокирует, порог назван в check run."""
+    vcs = _publish_over_open_thread(FindingSeverity.HIGH, min_severity=FindingSeverity.HIGH)
+
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+    assert "high" in check.title and "high" in check.summary
+
+
+def test_default_threshold_keeps_high_below_the_gate() -> None:
+    """Порог по умолчанию — `critical`: открытый тред `high` мердж не блокирует."""
+    vcs = _publish_over_open_thread(FindingSeverity.HIGH)
+
+    (check,) = vcs.checks
+    assert check.conclusion == "success"
+    assert "critical" in check.summary
+
+
+class _ThresholdLoweredDuringFailureVcs(RecordingVcsGateway):
+    """Первый POST gate GitHub отвергает, а за время сбоя порог репозитория снизили до `high`."""
+
+    def __init__(self, uow: FakeUnitOfWork) -> None:
+        super().__init__()
+        self._uow = uow
+        self._failed = False
+
+    def set_merge_gate_check(self, *args: Any) -> None:
+        if not self._failed:
+            self._failed = True
+            lowered = RepositorySettings(auto_review_enabled=True, branch_filter=(), min_severity=FindingSeverity.HIGH)
+            self._uow.repositories.update_settings(REPOSITORY.id, lowered, NOW)
+            raise VcsTransientError("GitHub API: HTTP 502")
+        super().set_merge_gate_check(*args)
+
+
+def test_a_retried_gate_reads_the_current_threshold() -> None:
+    """Повтор после сбоя берёт порог заново: со старым `critical` открытый тред `high`
+    дал бы `success` поверх порога, который уже требует блокировки."""
+    vcs = _publish_over_open_thread(FindingSeverity.HIGH, make_vcs=_ThresholdLoweredDuringFailureVcs)
+
+    (check,) = vcs.checks
+    assert check.conclusion == "failure"
+    assert "high" in check.summary
+
+
+def test_missing_repository_record_is_a_lookup_error() -> None:
+    """Записи репозитория нет: FK `ON DELETE RESTRICT` и записи не удаляются — это ошибка данных."""
+    uow = FakeUnitOfWork()
+    _seed_previous_critical_thread(uow, FindingSeverity.HIGH, with_repository=False)
+    uow.review_runs.add(
+        ReviewRun(
+            id=RUN_ID,
+            merge_request_id=MR_ID,
+            head_sha=JOB.head_sha,
+            status=ReviewRunStatus.PUBLISHING,
+            trigger=TriggerSource.WEBHOOK,
+            last_progress_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+    with pytest.raises(LookupError, match=str(UUID(int=9))):
+        publish_review(
+            JOB,
+            uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
+            LlmReviewResult(model="m", tokens_used=0, findings=()),
+            coverage=NO_COVERAGE,
+            uow=uow,
+            vcs=RecordingVcsGateway(),
+            now=NOW,
+            new_id=lambda: UUID(int=300),
+        )

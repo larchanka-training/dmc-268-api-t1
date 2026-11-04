@@ -13,16 +13,18 @@ from types import TracebackType
 from typing import Any, Self
 from uuid import UUID
 
-from app.application.ports.unit_of_work import UnitOfWork
+from app.application.ports.unit_of_work import RunStateConflict, UnitOfWork
 from app.domain.entities import (
     BotThread,
     ContextPayload,
+    DiffAnchor,
     Finding,
     MergeRequest,
     OpenReviewThread,
     ProviderToken,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewRun,
     ReviewRunListEntry,
     ReviewRunStep,
@@ -33,8 +35,12 @@ from app.domain.enums import (
     REVIEWED_STATUSES,
     TERMINAL_STATUSES,
     CommentKind,
+    DiffSide,
+    FindingCategory,
+    FindingSeverity,
     Provider,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
@@ -102,10 +108,19 @@ class FakeRepositoryRepo:
         if stored is not None:
             self._by_id[repository_id] = replace(stored, connected_at=None, updated_at=now)
 
-    def update(self, repository: Repository) -> None:
-        if repository.id not in self._by_id:
-            raise LookupError(f"repository {repository.id} is not stored")
-        self._by_id[repository.id] = repository
+    def update_settings(self, repository_id: UUID, settings: RepositorySettings, now: datetime) -> Repository | None:
+        stored = self._by_id.get(repository_id)
+        if stored is None:
+            return None
+        saved = replace(
+            stored,
+            auto_review_enabled=settings.auto_review_enabled,
+            branch_filter=settings.branch_filter,
+            min_severity=settings.min_severity,
+            updated_at=now,
+        )
+        self._by_id[repository_id] = saved
+        return saved
 
 
 class FakeMergeRequestRepo:
@@ -230,6 +245,17 @@ class FakeReviewRunRepo:
         ]
         return max(reviewed, key=lambda r: (r.created_at, r.id), default=None)
 
+    def find_completed_manual(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        completed = [
+            r
+            for r in self._by_id.values()
+            if r.merge_request_id == merge_request_id
+            and r.head_sha == head_sha
+            and r.trigger is TriggerSource.MANUAL
+            and r.status is ReviewRunStatus.COMPLETED
+        ]
+        return max(completed, key=lambda r: (r.created_at, r.id), default=None)
+
     def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
         runs = [
             r
@@ -319,10 +345,15 @@ class FakeReviewRunRepo:
         self.added.append(run)
         self._by_id[run.id] = run
 
-    def update(self, run: ReviewRun) -> None:
+    def update(self, run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         existing = self._by_id.get(run.id)
         if existing is None:
             raise LookupError(f"review run {run.id} is not stored")
+        if previous is not None and (existing.status, existing.last_progress_at) != (
+            previous.status,
+            previous.last_progress_at,
+        ):
+            raise RunStateConflict(f"review run {run.id} changed since it was read")
         # Как у SQL-адаптера: проверка перехода — только при смене статуса или
         # для терминальной строки.
         if existing.status in TERMINAL_STATUSES or existing.status != run.status:
@@ -354,9 +385,11 @@ class FakeReviewRunStepRepo:
         self._by_id[step.id] = step
 
     def update(self, step: ReviewRunStep) -> None:
-        if step.id not in self._by_id:
+        existing = self._by_id.get(step.id)
+        if existing is None:
             raise LookupError(f"review run step {step.id} is not stored")
-        self._by_id[step.id] = step
+        if existing.status is ReviewRunStepStatus.RUNNING:
+            self._by_id[step.id] = step
 
 
 class FakeContextPayloadRepo:
@@ -371,9 +404,6 @@ class FakeContextPayloadRepo:
 
     def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]:
         return [p for p in self._items if p.review_run_id == review_run_id]
-
-    def find_by_digest(self, content_sha256: str) -> ContextPayload | None:
-        return next((p for p in self._items if p.content_sha256 == content_sha256), None)
 
     def add(self, payload: ContextPayload) -> None:
         self._items.append(payload)
@@ -723,3 +753,58 @@ class _Fakes:
     def restore(self, state: list[Any]) -> None:
         for fake, snap in zip(self._all(), state, strict=True):
             fake.restore(snap)
+
+
+_MANUAL_RUN_ID = UUID(int=0xA11)
+
+
+def add_manual_run_with_critical_thread(
+    uow: FakeUnitOfWork,
+    *,
+    merge_request_id: UUID,
+    head_sha: str,
+    status: ReviewRunStatus,
+    at: datetime,
+    run_id: UUID = _MANUAL_RUN_ID,
+) -> ReviewRun:
+    """Ручной прогон на head, опубликовавший открытый тред `critical`: его gate — `failure`.
+
+    Для гонок с check паузы: прогон запущен и дошёл до `status`, пока GitHub принимал POST.
+    """
+    run = ReviewRun(
+        id=run_id,
+        merge_request_id=merge_request_id,
+        head_sha=head_sha,
+        status=status,
+        trigger=TriggerSource.MANUAL,
+        last_progress_at=at,
+        created_at=at,
+        updated_at=at,
+    )
+    uow.review_runs.add(run)
+    finding_id = UUID(int=run_id.int + 1)
+    uow.findings.add(
+        Finding(
+            id=finding_id,
+            review_run_id=run_id,
+            anchor=DiffAnchor(file_path="a.py", side=DiffSide.NEW, new_line=1),
+            category=FindingCategory.CORRECTNESS,
+            severity=FindingSeverity.CRITICAL,
+            message="замечание",
+            created_at=at,
+            updated_at=at,
+        )
+    )
+    uow.published_comments.add(
+        PublishedComment(
+            id=UUID(int=run_id.int + 2),
+            review_run_id=run_id,
+            provider_comment_id=f"manual-{run_id.int}",
+            kind=CommentKind.INLINE,
+            published_at=at,
+            created_at=at,
+            updated_at=at,
+            finding_id=finding_id,
+        )
+    )
+    return run

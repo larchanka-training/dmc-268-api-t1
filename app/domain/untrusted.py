@@ -87,6 +87,18 @@ def boundary(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:_BOUNDARY_HEX]
 
 
+# Блок, собранный `fence`: id в начале и в конце один и тот же.
+_FENCED = re.compile(r"<<<untrusted kind=(\w+) id=([0-9a-f]+)>>>\n(.*?)\n<<<end id=\2>>>", re.DOTALL)
+
+
+def retag(text: str) -> str:
+    """Пересчитать id блоков `fence` по их нынешнему тексту — после правки внутри блока."""
+    return _FENCED.sub(
+        lambda m: f"<<<untrusted kind={m[1]} id={boundary(m[3])}>>>\n{m[3]}\n<<<end id={boundary(m[3])}>>>",
+        text,
+    )
+
+
 def fence(kind: str, text: str) -> str:
     """Обезвредить текст и поместить в блок недоверенных данных.
 

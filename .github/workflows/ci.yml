@@ -102,6 +102,16 @@ jobs:
   # action) не даёт красному CI из-за CVE, которую нечем закрыть, — такие
   # видны в отчёте trivy, но решения от нас не ждут. Образ собирается как в
   # деплое (context .), но не публикуется.
+  #
+  # После gate — summary сборки в $GITHUB_STEP_SUMMARY: размер образа (сжатый
+  # и распакованный), все находки hadolint, все HIGH и CRITICAL trivy (сначала
+  # с исправлением — они и роняют gate, потом без), счётчики trivy остальных
+  # уровней и разница с последней успешной сборкой образа на develop. Он
+  # виден и при упавшем gate: тогда и нужен. Если образ не собрался или
+  # метрики не снялись, разделы сканеров всё равно выводятся, а упавший
+  # сканер — строкой о том, что отчёта нет. Сжатый размер считается через
+  # docker save | gzip — это десятки секунд на образ, второй запуск trivy
+  # берёт базу, скачанную первым, так что 15 минут хватает с запасом.
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -120,6 +130,90 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
+
+      # Summary сборки (change ci-build-summary): ниже шаги ничего не роняют —
+      # падает только gate выше, а summary нужен и тогда. continue-on-error —
+      # на случай несобранного образа: trivy и collect на нём упадут сами.
+      # Находки сканеров — вторым запуском с json, чтобы увидеть и то, что
+      # gate пропускает (unfixed у trivy, style у hadolint).
+      - name: Каталог summary
+        if: ${{ !cancelled() }}
+        run: mkdir -p build-summary
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        with:
+          dockerfile: Dockerfile
+          format: json
+          output-file: build-summary/hadolint.json
+          no-fail: true
+      # cache: false — иначе actions/cache внутри action восстановит поверх
+      # свежей базы первого запуска вчерашнюю копию по restore-keys, и trivy
+      # снова скачает базу. База первого запуска лежит в том же cache-dir
+      # (TRIVY_CACHE_DIR action ставит всегда). skip-setup-trivy — бинарь уже
+      # в PATH от первого запуска; если тот не запускался, нет и образа.
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        with:
+          cache: false
+          skip-setup-trivy: true
+          image-ref: dmc268-api:ci
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+          format: json
+          output: build-summary/trivy.json
+      # Системный python3 раннера, без uv и sync: скрипт только на stdlib, а
+      # окружение проекта ради него ставить незачем.
+      - name: Метрики образа
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: >-
+          python3 scripts/build_summary.py collect
+          --image dmc268-api:ci
+          --out build-summary/metrics.json
+      # База для разницы — метрики последней успешной сборки образа на
+      # develop из кэша Actions: токену не нужен actions: read, как скачиванию
+      # артефакта чужого прогона. Кэш пул-реквеста видит кэш его базовой ветки.
+      # Ключ build-metrics-restore не сохраняется никогда, поэтому точного
+      # совпадения нет и всегда срабатывает restore-keys — самая свежая база,
+      # и при Re-run уже закэшированного sha.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        with:
+          path: build-base
+          key: build-metrics-restore
+          restore-keys: build-metrics-
+      - name: Summary сборки
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: >-
+          python3 scripts/build_summary.py render
+          --metrics build-summary/metrics.json
+          --base build-base/metrics.json
+          --trivy build-summary/trivy.json
+          --hadolint build-summary/hadolint.json
+          >> "$GITHUB_STEP_SUMMARY"
+      # Базой становится только успешный job image на develop (success()
+      # подставился бы и неявно, явно — чтобы читалось). Ключ по sha: запись
+      # кэша неизменяема, а restore-keys берёт самую свежую. Метрик нет (упал
+      # collect) — базу не пишем: пустой кэш вытеснил бы рабочую базу.
+      - name: Метрики develop для следующих прогонов
+        id: base
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/develop' }}
+        continue-on-error: true
+        run: |
+          if [ -f build-summary/metrics.json ]; then
+            mkdir -p build-base && cp build-summary/metrics.json build-base/metrics.json
+            echo "saved=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ success() && steps.base.outputs.saved == 'true' }}
+        continue-on-error: true
+        with:
+          path: build-base
+          key: build-metrics-${{ github.sha }}
 
   # Конфигурация стенда без стенда: формат, валидность и логика infra/*.tf и
   # проверок переменных (`tofu test`, infra/tests/). Провайдер docker в тестах
@@ -164,6 +258,8 @@ jobs:
             echo "LOKI=$(awk -F'"' '/^  loki_image/{print $2}' infra/locals.tf)"
             echo "PROM=$(awk -F'"' '/^  prometheus_image/{print $2}' infra/locals.tf)"
             echo "TEMPO=$(awk -F'"' '/^  tempo_image/{print $2}' infra/locals.tf)"
+            echo "ALERTMANAGER=$(awk -F'"' '/^  alertmanager_image/{print $2}' infra/locals.tf)"
+            echo "BLACKBOX=$(awk -F'"' '/^  blackbox_image/{print $2}' infra/locals.tf)"
           } >> "$GITHUB_ENV"
       # Все ${env:...}, что читает otelcol.yaml, — только четыре POSTGRESQL_*:
       # validate подставляет их в конфиг и выходит, к базе не подключаясь,
@@ -187,11 +283,33 @@ jobs:
           docker run --rm \
             -v "$PWD/infra/observability/otelcol-logs.yaml:/etc/otelcol-contrib/config.yaml:ro" \
             "$OTELCOL" validate --config=/etc/otelcol-contrib/config.yaml
+      # check config проверяет и правила из rule_files, поэтому они смонтированы
+      # по тому же пути, что на стенде; цель пробы публичного входа — локальный
+      # пустой список.
       - name: Prometheus (promtool check config)
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$PWD/infra/observability/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            -v "$PWD/infra/observability/public-targets.yml:/etc/prometheus/targets/public.yml:ro" \
             "$PROM" check config /etc/prometheus/prometheus.yml
+      # Поведение алертов #100 — синтетические ряды «горит / молчит» на каждый
+      # сигнал (alerts.test.yml).
+      - name: Алерты (promtool test rules)
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/infra/observability:/rules:ro" -w /rules \
+            "$PROM" test rules alerts.test.yml
+      - name: Alertmanager (amtool check-config)
+        run: |
+          docker run --rm --entrypoint amtool \
+            -v "$PWD/infra/observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
+            "$ALERTMANAGER" check-config /etc/alertmanager/alertmanager.yml
+      - name: blackbox-exporter (--config.check)
+        run: |
+          docker run --rm \
+            -v "$PWD/infra/observability/blackbox.yml:/etc/blackbox_exporter/config.yml:ro" \
+            "$BLACKBOX" --config.file=/etc/blackbox_exporter/config.yml --config.check
       # -verify-config разбирает конфиг и выходит, не стартуя сервер.
       - name: Loki (-verify-config)
         run: |
@@ -223,8 +341,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgresql://dmc268:dmc268@localhost:5432/dmc268
-      # Тесты читают эту переменную, а не DATABASE_URL. Префикс +psycopg
+      # Тесты читают TEST_DATABASE_URL, DATABASE_URL им не нужен. Префикс +psycopg
       # обязателен: с голым postgresql:// SQLAlchemy берёт psycopg2, которого
       # нет в зависимостях.
       TEST_DATABASE_URL: postgresql+psycopg://dmc268:dmc268@localhost:5432/dmc268

@@ -17,6 +17,17 @@ receivers:
       container.id: {enabled: false}
       container.hostname: {enabled: false}
       container.image.name: {enabled: false}
+    # Входы алертов #100 (alerts.yml): uptime есть только у запущенного
+    # контейнера — пропавший ряд и есть «контейнер не запущен» (ContainerDown);
+    # restarts — RestartCount из inspect, receiver перечитывает его по событиям
+    # die/start (ContainerRestarting). Ряд остановленного контейнера экспортёр
+    # prometheus держит ещё metric_expiration (5 минут) — на столько позже
+    # срабатывает ContainerDown. Статус healthcheck
+    # (container.state.health.status) появился только в 0.160 — сервисы
+    # проверяет blackbox-exporter (prometheus.yml, job blackbox-services).
+    metrics:
+      container.uptime: {enabled: true}
+      container.restarts: {enabled: true}
 
 processors:
   # Потолок памяти; контейнеру задан лимит с запасом

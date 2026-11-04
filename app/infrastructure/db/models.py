@@ -26,6 +26,7 @@ from sqlalchemy import (
     Uuid,
     func,
     text,
+    true,
 )
 from sqlalchemy import (
     Enum as SAEnum,
@@ -74,7 +75,17 @@ class RepositoryRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     provider_id: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(512), nullable=False)
     default_branch: Mapped[str] = mapped_column(String(255), nullable=False)
-    auto_review_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Настройки ревью (change `repository-settings`, D1, D2). Умолчания — в базе: старый код в окне
+    # деплоя вставляет запись без этих колонок, и она получает настройки контракта.
+    auto_review_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=true())
+    # Глоб-паттерны веток; пусто — все ветки.
+    branch_filter: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    # Порог merge gate — тот же тип, что у важности находки.
+    min_severity: Mapped[FindingSeverity] = mapped_column(
+        _enum(FindingSeverity, "finding_severity"), nullable=False, server_default="critical"
+    )
     # Когда ревью включено последний раз; `NULL` — выключено, запись и история остаются.
     # Умолчание `now()`: запись без колонки (старый код в окне деплоя, ручная вставка) — включённая.
     connected_at: Mapped[dt.datetime | None] = mapped_column(
@@ -243,17 +254,16 @@ class ReviewRunStepRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
 
 
 class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
-    """Что показали модели; хранится, чтобы прогон оставался воспроизводимым.
+    """Что показали модели, с метками вместо секретов; по нему отслеживают, откуда замечание.
 
-    В этой таблице дословно лежит чужой исходный код. Вычищать секреты нужно до
-    вставки, в сборщике контекста; именно об этой чувствительной таблице и идёт
-    речь в политике хранения.
+    В этой таблице дословно лежит чужой исходный код. Секреты из него вычищает
+    запись (`redact_secrets` в `SqlAlchemyContextPayloadRepo.add`), а не сборщик:
+    модели пакет уходит как есть, чтобы ревью увидело зашитый секрет.
     """
 
     __tablename__ = "context_payloads"
     __table_args__ = (
         UniqueConstraint("review_run_id", "chunk_index", name="uq_context_payloads_chunk"),
-        Index("ix_context_payloads_digest", "content_sha256"),
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(

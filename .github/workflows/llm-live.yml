@@ -27,6 +27,7 @@ on:
       - ".github/actions/python-env/**"
       - "tests/strict_skips.py"
       - ".github/eurorouter-model"
+      - ".github/eurorouter-reasoning-effort"
       - "uv.lock"
   push:
     branches: [main, develop]
@@ -47,6 +48,7 @@ on:
       - ".github/actions/python-env/**"
       - "tests/strict_skips.py"
       - ".github/eurorouter-model"
+      - ".github/eurorouter-reasoning-effort"
       - "uv.lock"
   workflow_dispatch:
 
@@ -72,11 +74,11 @@ jobs:
         with:
           persist-credentials: false
       # Модель Eurorouter - в одном файле для live-тестов и eval: сменить её -
-      # правка .github/eurorouter-model. Сейчас там запасная из правила
-      # маршрутизации организации `dmc-268-models`: у основной, qwen3-coder-30b-a3b,
-      # единственный допустимый правилом провайдер (GreenPT) с 21.10 отвергает
-      # любой запрос (#93, #95).
+      # правка .github/eurorouter-model. Сейчас там glm-5.3 с reasoning_effort
+      # low из .github/eurorouter-reasoning-effort: без него она обрезает ответ
+      # пределом длины, с ним - лучшая по eval из доступных ключу (#267).
       - run: echo "EUROROUTER_MODEL=$(cat .github/eurorouter-model)" >> "$GITHUB_ENV"
+      - run: echo "EUROROUTER_REASONING_EFFORT=$(cat .github/eurorouter-reasoning-effort)" >> "$GITHUB_ENV"
       - uses: ./.github/actions/python-env
       - name: pytest -m live (пропуск теста - провал)
         env:

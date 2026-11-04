@@ -89,6 +89,7 @@ def _eurorouter(settings: Settings, keys: tuple[SecretStr, ...]) -> OpenAiCompat
         keys,
         name="Eurorouter",
         max_attempts=settings.llm_max_attempts,
+        reasoning_effort=settings.eurorouter_reasoning_effort,
     )
 
 

@@ -1,11 +1,10 @@
 """Реализации портов хранения на SQLAlchemy.
 
 Тонкие намеренно: каждый метод переводит между строкой таблицы и доменной
-сущностью и больше ничего не делает. Два из них перед записью сверяются с
-чистой функцией — это единственные места, где появляется правило. Они отмечены.
+сущностью и больше ничего не делает. Два из них перед записью применяют
+чистую функцию — это единственные места, где появляется правило. Они отмечены.
 """
 
-import copy
 import datetime as dt
 from collections.abc import Collection, Sequence
 from typing import Any
@@ -30,6 +29,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 
+from app.application.ports.unit_of_work import RunStateConflict
 from app.domain.entities import (
     BotThread,
     ContextPayload,
@@ -39,6 +39,7 @@ from app.domain.entities import (
     ProviderToken,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewRun,
     ReviewRunListEntry,
     ReviewRunStep,
@@ -52,12 +53,14 @@ from app.domain.enums import (
     CommentKind,
     Provider,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
 from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
+from app.domain.secret_redaction import redact_secrets
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
     ContextPayloadRow,
@@ -120,6 +123,8 @@ class SqlAlchemyRepositoryRepo:
                     created_at=repository.created_at,
                     updated_at=repository.updated_at,
                     connected_at=repository.connected_at,
+                    branch_filter=list(repository.branch_filter),
+                    min_severity=repository.min_severity,
                 )
                 .on_conflict_do_nothing(constraint="uq_repositories_provider_id")
                 .returning(RepositoryRow.id)
@@ -153,13 +158,22 @@ class SqlAlchemyRepositoryRepo:
             .values(connected_at=None, updated_at=now)
         )
 
-    def update(self, repository: Repository) -> None:
-        row = self._session.get(RepositoryRow, repository.id)
-        if row is None:
-            raise LookupError(f"repository {repository.id} is not stored")
-        row.full_name = repository.full_name
-        row.default_branch = repository.default_branch
-        row.auto_review_enabled = repository.auto_review_enabled
+    def update_settings(
+        self, repository_id: UUID, settings: RepositorySettings, now: dt.datetime
+    ) -> Repository | None:
+        # RETURNING — запись, какой её сохранила база, без второго запроса.
+        row = self._session.scalars(
+            update(RepositoryRow)
+            .where(RepositoryRow.id == repository_id)
+            .values(
+                auto_review_enabled=settings.auto_review_enabled,
+                branch_filter=list(settings.branch_filter),
+                min_severity=settings.min_severity,
+                updated_at=now,
+            )
+            .returning(RepositoryRow)
+        ).one_or_none()
+        return m.repository_to_domain(row) if row else None
 
 
 class SqlAlchemyMergeRequestRepo:
@@ -272,6 +286,20 @@ class SqlAlchemyReviewRunRepo:
                 ReviewRunRow.head_sha == head_sha,
                 ReviewRunRow.trigger == TriggerSource.WEBHOOK,
                 ReviewRunRow.status.in_(REVIEWED_STATUSES),
+            )
+            .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+            .limit(1)
+        ).first()
+        return m.review_run_to_domain(row) if row else None
+
+    def find_completed_manual(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        row = self._session.scalars(
+            select(ReviewRunRow)
+            .where(
+                ReviewRunRow.merge_request_id == merge_request_id,
+                ReviewRunRow.head_sha == head_sha,
+                ReviewRunRow.trigger == TriggerSource.MANUAL,
+                ReviewRunRow.status == ReviewRunStatus.COMPLETED,
             )
             .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
             .limit(1)
@@ -445,7 +473,7 @@ class SqlAlchemyReviewRunRepo:
         )
         self._notify(run)
 
-    def update(self, run: ReviewRun) -> None:
+    def update(self, run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         """Записать прогресс прогона, отклонив статус, запрещённый машиной состояний.
 
         Единственное правило в этом классе, и оно делегировано: таблицей
@@ -464,6 +492,11 @@ class SqlAlchemyReviewRunRepo:
         )
         if row is None:
             raise LookupError(f"review run {run.id} is not stored")
+        if previous is not None and (row.status, row.last_progress_at) != (
+            previous.status,
+            previous.last_progress_at,
+        ):
+            raise RunStateConflict(f"review run {run.id} changed since it was read")
         # Терминальная строка проходит через next_status, даже если статус не
         # изменился: одного сравнения на равенство хватило бы, чтобы повторно
         # доставленное обновление перезаписало стоимость завершённого прогона.
@@ -523,9 +556,14 @@ class SqlAlchemyReviewRunStepRepo:
         )
 
     def update(self, step: ReviewRunStep) -> None:
-        row = self._session.get(ReviewRunStepRow, step.id)
+        # Блокировка: воркер и очистка закрывают шаг параллельно, первый исход остаётся.
+        row = self._session.get(
+            ReviewRunStepRow, step.id, with_for_update=True, populate_existing=True
+        )
         if row is None:
             raise LookupError(f"review run step {step.id} is not stored")
+        if row.status is not ReviewRunStepStatus.RUNNING:
+            return
         # Прогон, этап и начало у шага не меняются: меняется только исход.
         row.status = step.status
         row.duration_seconds = step.duration_seconds
@@ -545,22 +583,13 @@ class SqlAlchemyContextPayloadRepo:
         ).all()
         return [m.context_payload_to_domain(row) for row in rows]
 
-    def find_by_digest(self, content_sha256: str) -> ContextPayload | None:
-        """Самый старый payload с таким дайджестом.
-
-        Индекс по дайджесту не уникален, а переиспользование — и есть смысл
-        этого поиска, поэтому совпасть могут несколько строк. Сортировка по
-        `id` делает ответ одинаковым на каждом вызове: id — это UUIDv7,
-        упорядоченные по времени.
-        """
-        row = self._session.scalars(
-            select(ContextPayloadRow)
-            .where(ContextPayloadRow.content_sha256 == content_sha256)
-            .order_by(ContextPayloadRow.id)
-        ).first()
-        return m.context_payload_to_domain(row) if row else None
-
     def add(self, payload: ContextPayload) -> None:
+        """Записать пакет, заменив секреты в теле меткой (#28).
+
+        Единственное правило в этом классе, и оно делегировано `redact_secrets`.
+        Модели пакет уходит из памяти, а не отсюда, — секрет она видит; фейк
+        хранит тело как есть.
+        """
         self._session.add(
             ContextPayloadRow(
                 id=payload.id,
@@ -570,8 +599,8 @@ class SqlAlchemyContextPayloadRepo:
                 file_paths=list(payload.file_paths),
                 token_count=payload.token_count,
                 content_sha256=payload.content_sha256,
-                # Копия, а не ссылка: строка не должна делить словарь с сущностью.
-                body=copy.deepcopy(payload.body),
+                # Новая структура, а не ссылка на словарь сущности; секреты в базу не идут.
+                body=redact_secrets(payload.body),
             )
         )
 

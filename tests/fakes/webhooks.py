@@ -7,6 +7,7 @@
 
 import datetime as dt
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,19 @@ DIFF = (
     "--- a/app/main.py\n+++ b/app/main.py\n"
     "@@ -1 +1 @@\n-old\n+new\n"
 )
+
+
+def diff_of_lines(total: int) -> str:
+    """Корректный unified diff ровно из `total` строк: новый файл из коротких добавленных строк."""
+    header = 5
+    added = total - header
+    return (
+        "diff --git a/many.txt b/many.txt\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/many.txt\n"
+        f"@@ -0,0 +1,{added} @@\n" + "+x\n" * added
+    )
 
 
 def webhook_payload(action: str = "opened", *, base_ref: str | None = None) -> dict[str, Any]:
@@ -73,6 +87,8 @@ def pr_metadata(
         source_branch="feat/webhook-intake-rebased",
         target_branch=target_branch,
         state=MergeRequestState.OPEN,
+        from_fork=False,
+        author_association="OWNER",
     )
 
 
@@ -108,7 +124,11 @@ class FakeVcs:
     # Сбой только check run merge gate; выставленные check run - (head_sha, check).
     check_error: VcsError | None = None
     checks: list[tuple[str, MergeGateCheck]] = field(default_factory=list)
+    # Что случилось, пока GitHub принимал первый check run: вызывается один раз, после записи.
+    during_first_check: Callable[[], None] | None = None
     calls: list[tuple[Any, ...]] = field(default_factory=list)
+    # Sha ветки по её имени; ветки нет в словаре — `VcsError`, как 422 GitHub.
+    branch_shas: dict[str, str] = field(default_factory=dict)
 
     def fetch_diff(
         self, repo_full_name: str, base_sha: str, head_sha: str, installation_id: int, *, max_bytes: int
@@ -149,6 +169,14 @@ class FakeVcs:
         if content is not None and len(content.encode("utf-8")) > max_bytes:
             raise VcsFileTooLargeError(f"{path}: больше {max_bytes} байт")
         return content
+
+    def resolve_branch_sha(self, repo_full_name: str, branch: str, installation_id: int) -> str:
+        self.calls.append(("branch_sha", repo_full_name, branch, installation_id))
+        if self.error is not None:
+            raise self.error
+        if branch not in self.branch_shas:
+            raise VcsError(f"ветки {branch} нет")
+        return self.branch_shas[branch]
 
     def publish_pull_request_review(
         self,
@@ -207,6 +235,9 @@ class FakeVcs:
         if self.check_error is not None:
             raise self.check_error
         self.checks.append((head_sha, check))
+        if self.during_first_check is not None:
+            hook, self.during_first_check = self.during_first_check, None
+            hook()
 
 
 @dataclass

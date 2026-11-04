@@ -488,6 +488,33 @@ run "eurorouter_primary_reaches_the_worker" {
   }
 }
 
+run "eurorouter_reasoning_effort_reaches_the_worker" {
+  command = plan
+
+  variables {
+    llm_backend                 = "eurorouter"
+    eurorouter_base_url         = "https://eurorouter.example/v1"
+    eurorouter_model            = "model"
+    eurorouter_api_keys         = "k1"
+    eurorouter_reasoning_effort = "low"
+  }
+
+  assert {
+    condition     = contains(docker_container.worker.env, "EUROROUTER_REASONING_EFFORT=low")
+    error_message = "Заданный reasoning_effort доходит до воркера окружением."
+  }
+}
+
+run "unknown_eurorouter_reasoning_effort_rejected" {
+  command = plan
+
+  variables {
+    eurorouter_reasoning_effort = "max"
+  }
+
+  expect_failures = [var.eurorouter_reasoning_effort]
+}
+
 run "api_image_without_digest_rejected" {
   command = plan
 

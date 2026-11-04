@@ -5,8 +5,8 @@
 на `head_sha` и их контуры → чистая `assemble_context`. Получение диффа —
 отдельная функция: у прогона это отдельный шаг (`fetching_diff`), и дифф
 достаётся здесь впервые — приём вебхука его не запрашивает. Сбой получения
-диффа и дифф больше `diff_max_bytes` пробрасываются: без диффа ревьюить
-нечего, прогон уходит в `failed` и DLQ.
+диффа и дифф больше `diff_max_bytes` байт или `REVIEW_DIFF_MAX_LINES` строк
+пробрасываются: без диффа ревьюить нечего, прогон уходит в `failed` и DLQ.
 Контекст PR, правила и AST — best-effort: сбой на них деградирует пакет
 (причина — в `omitted` и `rules.status`), но не прогон.
 """
@@ -35,15 +35,26 @@ from app.domain.vcs_errors import DiffTooLargeError, VcsError, VcsFileTooLargeEr
 
 logger = logging.getLogger(__name__)
 
+# Потолок строк сырого диффа: память разбора растёт с числом строк, а не с байтами, и
+# 5 МиБ односимвольных строк (~2,6 млн) дают пик ~640 МиБ при контейнере воркера 512 МБ.
+# На 200 000 строк худший замер в контейнере — ~200 МиБ (design.md change
+# `worker-diff-line-limit`, D3). Считаются строки всего диффа, вместе с файлами, которые
+# потом отбросит фильтр (lock-файлы): разбирается дифф целиком.
+# Значение — из памяти воркера, а не кабинетного `RUN_DIFF_MAX_LINES`. Константа, а не
+# настройка: она держит память процесса и от стенда не зависит.
+REVIEW_DIFF_MAX_LINES = 200_000
+
 
 def fetch_review_diff(job: ReviewJob, vcs: VcsGateway, *, max_bytes: int) -> str:
     """Unified diff запроса на изменение между `base_sha` и `head_sha` задачи.
 
-    Дифф больше `max_bytes` не дочитывается и не ревьюится по частям:
-    `DiffTooLargeError`, прогон уходит в `failed` с понятной причиной.
+    Дифф больше `max_bytes` не дочитывается и не ревьюится по частям, а слишком
+    большой для GitHub тот не строит (`422`): `DiffTooLargeError`, прогон уходит в
+    `failed` с понятной причиной — в ней названы оба случая. Дифф длиннее
+    `REVIEW_DIFF_MAX_LINES` строк отвергается так же, до разбора.
     """
     try:
-        return vcs.fetch_diff(
+        raw = vcs.fetch_diff(
             job.repository_full_name,
             job.base_sha,
             job.head_sha,
@@ -52,8 +63,12 @@ def fetch_review_diff(job: ReviewJob, vcs: VcsGateway, *, max_bytes: int) -> str
         )
     except VcsFileTooLargeError as error:
         raise DiffTooLargeError(
-            f"дифф PR больше лимита {max_bytes} байт: ревью не выполняется"
+            f"дифф PR больше лимита {max_bytes} байт или GitHub не строит такой большой дифф: ревью не выполняется"
         ) from error
+    # Считаем строки до разбора: разбор и есть то, что не помещается в память.
+    if raw.count("\n") > REVIEW_DIFF_MAX_LINES:
+        raise DiffTooLargeError(f"дифф PR больше лимита {REVIEW_DIFF_MAX_LINES} строк: ревью не выполняется")
+    return raw
 
 
 def build_review_context(
@@ -78,6 +93,7 @@ def build_review_context(
         cache=cache,
         max_bytes=limits.rules_max_bytes,
         cache_ttl_seconds=limits.rules_cache_ttl_seconds,
+        now=now,
     )
     asts, skipped = _collect_asts(job, filter_diff_files(files), vcs, extractor, limits)
     return assemble_context(

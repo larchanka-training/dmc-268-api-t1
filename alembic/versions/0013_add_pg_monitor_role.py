@@ -64,7 +64,7 @@ def upgrade() -> None:
     # SET LOCAL умирает на COMMIT. Если библиотека не загружена (shared_preload
     # выключен), SET LOCAL спокойно создаёт placeholder-параметр и ничего
     # не ломает. Тот же приём — у перегенерации пароля на деплое
-    # (infra/main.tf, docker-compose.yml).
+    # (alembic/monitor_password.py).
     op.execute("SET LOCAL pg_stat_statements.track_utility = off")
     op.execute(f"ALTER ROLE {_MONITOR_ROLE} WITH LOGIN PASSWORD '{password}'")
     # pg_monitor — предопределённая роль со статистическими вьюхами
@@ -76,11 +76,25 @@ def upgrade() -> None:
     # postgresql коллектора его не читает (метрики базы он снимает обычными
     # вьюхами статистики). Библиотека уже загружена через
     # shared_preload_libraries — её включает контейнер базы
-    # (docker-compose.yml и infra/main.tf), здесь создаётся расширение.
+    # (docker-compose.yml и infra/postgres.tf), здесь создаётся расширение.
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
 
 
 def downgrade() -> None:
     """Удалить расширение и роль: роль ничего не владеет."""
     op.execute("DROP EXTENSION IF EXISTS pg_stat_statements")
-    op.execute(f"DROP ROLE IF EXISTS {_MONITOR_ROLE}")
+    # Роль кластерная: в другой базе того же кластера ревизия 0017 могла
+    # выдать ей права на review_runs, и DROP ROLE упал бы на них — снять
+    # их отсюда нельзя. Тогда роль остаётся той базе; права в этой базе
+    # откат 0017 уже снял.
+    op.execute(
+        f"DO $$ BEGIN"
+        f" IF NOT EXISTS (SELECT FROM pg_shdepend s"
+        f" JOIN pg_roles r ON r.oid = s.refobjid"
+        f" JOIN pg_database d ON d.oid = s.dbid"
+        f" WHERE s.refclassid = 'pg_authid'::regclass"
+        f" AND r.rolname = '{_MONITOR_ROLE}'"
+        f" AND d.datname <> current_database())"
+        f" THEN DROP ROLE IF EXISTS {_MONITOR_ROLE}; END IF;"
+        f" END $$"
+    )

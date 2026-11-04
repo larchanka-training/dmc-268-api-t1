@@ -20,6 +20,7 @@ from app.domain.entities import (
     ProviderToken,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewRun,
     ReviewRunListEntry,
     ReviewRunStep,
@@ -61,7 +62,14 @@ class RepositoryRepo(Protocol):
         """Выключить ревью: `connected_at = NULL`; уже выключенный или отсутствующий — без ошибки."""
         ...
 
-    def update(self, repository: Repository) -> None: ...
+    def update_settings(
+        self, repository_id: UUID, settings: RepositorySettings, now: datetime
+    ) -> Repository | None:
+        """Заменить настройки ревью целиком и `updated_at = now`.
+
+        Вернуть записанную запись; `None` — записи нет (в том числе удалили параллельно).
+        """
+        ...
 
 
 class MergeRequestRepo(Protocol):
@@ -85,6 +93,11 @@ class ReviewRunRepo(Protocol):
 
     def find_reviewed(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
         """Самый поздний прогон по вебхуку на этот коммит в `REVIEWED_STATUSES`."""
+        ...
+
+    def find_completed_manual(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        """Самый поздний ручной прогон на этот коммит в `completed`: его gate держит head
+        на паузе авторевью, когда повторный ручной прогон упал или отменён."""
         ...
 
     def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
@@ -132,7 +145,10 @@ class ReviewRunRepo(Protocol):
 
     def add(self, run: ReviewRun) -> None: ...
 
-    def update(self, run: ReviewRun) -> None: ...
+    def update(self, run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
+        """Записать прогон. С `previous` запись условна: если статус или прогресс строки уже
+        не как в `previous`, бросает `RunStateConflict`."""
+        ...
 
 
 class ReviewRunStepRepo(Protocol):
@@ -147,8 +163,6 @@ class ReviewRunStepRepo(Protocol):
 
 class ContextPayloadRepo(Protocol):
     def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]: ...
-
-    def find_by_digest(self, content_sha256: str) -> ContextPayload | None: ...
 
     def add(self, payload: ContextPayload) -> None: ...
 

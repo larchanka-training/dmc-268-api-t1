@@ -39,6 +39,7 @@ def test_rules_eval_on_the_live_model(stack: Stack, tmp_path: Path) -> None:
         settings.eurorouter_keys,
         name="Eurorouter",
         max_attempts=settings.llm_max_attempts,
+        reasoning_effort=settings.eurorouter_reasoning_effort,
     )
     configs = [c.strip() for c in (os.environ.get("EVAL_CONFIGS") or ",".join(CONFIGS)).split(",")]
     unknown = set(configs) - set(CONFIGS)
@@ -52,6 +53,7 @@ def test_rules_eval_on_the_live_model(stack: Stack, tmp_path: Path) -> None:
 
     meta = {
         "model": settings.eurorouter_model,
+        "reasoning_effort": settings.eurorouter_reasoning_effort,
         "prompts_sha256": prompts_sha256(),
         "repetitions": repetitions,
         "cases": len(cases),

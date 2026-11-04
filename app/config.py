@@ -124,7 +124,15 @@ class Settings(BaseSettings):
         raw = self.user_token_encryption_key.get_secret_value()
         return _decode_token_key(raw) if raw.strip() else None
 
-    @field_validator("public_origin")
+    # Prometheus стека наблюдаемости — источник страницы статуса (`GET /api/v1/status`):
+    # её статус — из сработавших критических алертов. Пустой — статус `unknown`, запросов
+    # к Prometheus нет.
+    prometheus_url: str = Field(
+        default="",
+        description="Адрес Prometheus для страницы статуса, например http://dmc268-prometheus:9090; из PROMETHEUS_URL",
+    )
+
+    @field_validator("public_origin", "prometheus_url")
     @classmethod
     def _strip_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")
@@ -162,6 +170,15 @@ class Settings(BaseSettings):
             "отзыв доступа на GitHub виден с этой задержкой"
         ),
     )
+    # Дифф прогона в кабинете (change review-run-diff, D4): API читает его у
+    # GitHub на запрос и кэширует сырой текст по паре коммитов в своём хранилище,
+    # а не в общем `cache_store()`. Лимит держит память API (контейнер 512 МБ):
+    # больший дифф не дочитывается, а кэш ограничен числом записей.
+    run_diff_max_bytes: int = Field(
+        default=2_097_152,
+        gt=0,
+        description="Больший дифф прогона кабинет не дочитывает и отвечает 422 DIFF_TOO_LARGE",
+    )
     # Потолки тела HTTP-запроса API (#72): проверяются до разбора тела, сессии и подписи
     # вебхука. Ручкам с JSON-телом хватает 1 МиБ. Приёму вебхука — 2 МиБ: принимаются только
     # `pull_request` и `pull_request_review_thread`, их доставка — десятки КиБ (тело PR и
@@ -181,6 +198,8 @@ class Settings(BaseSettings):
     )
     # Потолок диффа прогона: тело читается потоком и обрывается на лимите,
     # больший дифф не ревьюится — прогон `failed` с `DIFF_TOO_LARGE` (#144).
+    # Так же — дифф длиннее `REVIEW_DIFF_MAX_LINES` строк: это константа в коде
+    # (`app/application/use_cases/build_review_context.py`), а не настройка (#318).
     diff_max_bytes: int = Field(
         default=5_242_880,
         gt=0,
@@ -244,6 +263,12 @@ class Settings(BaseSettings):
         description="Адрес OpenAI-совместимого API Eurorouter, например https://…/v1",
     )
     eurorouter_model: str = Field(default="", description="Модель Eurorouter")
+    # Не каждая модель знает параметр, а неизвестный шлюз может отвергнуть:
+    # без значения он в запрос не идёт (#267).
+    eurorouter_reasoning_effort: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description="reasoning_effort в запросе к Eurorouter; пусто - не отправлять",
+    )
     # Несколько ключей через запятую: ключ, упёршийся в лимит, сменяется
     # следующим (design D4). SecretStr - по той же причине, что ключ App.
     eurorouter_api_keys: SecretStr = Field(
@@ -296,11 +321,11 @@ class Settings(BaseSettings):
         description="Сколько секунд может идти один проход повтора доставок вебхука; остальное — в следующий",
     )
 
-    @field_validator("llm_backend", mode="before")
+    @field_validator("llm_backend", "eurorouter_reasoning_effort", mode="before")
     @classmethod
-    def _empty_backend_is_unset(cls, value: object) -> object:
+    def _empty_is_unset(cls, value: object) -> object:
         # docker compose передаёт незаданную переменную пустой строкой: это
-        # тот же невыбранный адаптер, а не ошибка формата.
+        # то же незаданное значение, а не ошибка формата.
         return None if value == "" else value
 
     @model_validator(mode="after")

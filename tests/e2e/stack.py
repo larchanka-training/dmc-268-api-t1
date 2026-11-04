@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from sqlalchemy import Engine
 
 from app.api.factory import create_app
 from app.application.ports.llm_gateway import LlmGateway
+from app.application.use_cases.service_status import ServiceStatusMonitor
 from app.config import Settings
 from app.domain.entities import (
     ContextPayload,
@@ -42,9 +44,14 @@ from app.domain.entities import (
 )
 from app.domain.enums import Provider
 from app.infrastructure.cache.memory import InMemoryCacheStore
-from app.infrastructure.container import WORKER_VCS_LIMITS, Container
+from app.infrastructure.container import (
+    SERVICE_STATUS_TTL_SECONDS,
+    WORKER_VCS_LIMITS,
+    Container,
+)
 from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.monitoring.prometheus import PrometheusAlertSource
 from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
 )
@@ -156,21 +163,33 @@ class Stack:
         auth = GitHubAppAuth(
             APP_ID, self.settings.github_app_private_key.get_secret_value(), client
         )
+        gateway = GitHubVcsGateway(auth, client, sleep=lambda _: None)
         return Container(
             engine=self.engine,
             settings=self.settings,
             # Вход и подключение репозиториев стенд не проходит: токенов пользователя нет.
             _token_cipher=None,
             _job_queue=RabbitMQJobQueue(self.rabbitmq_url),
-            _vcs_gateway=GitHubVcsGateway(auth, client, sleep=lambda _: None),
+            _vcs_gateway=gateway,
+            # Кабинет ходит в тот же поддельный GitHub: свои лимиты стенду не нужны.
+            _cabinet_vcs_gateway=gateway,
             _vcs_limits=WORKER_VCS_LIMITS,
             _installation_catalog=FakeInstallationCatalog([]),
             _oauth_providers={},
             _cache_store=InMemoryCacheStore(),
+            _run_diff_cache=InMemoryCacheStore(max_entries=24),
+            _rules_cache=InMemoryCacheStore(max_entries=256),
             _run_changes=PostgresRunChanges(listen_conninfo(self.settings.database_url)),
             _llm_gateway=llm,
             _definition_extractor=TreeSitterDefinitionExtractor(),
             _app_slug_retry_at=0.0,
+            # Prometheus у стенда нет: статус сервиса — unknown, запросов нет.
+            _service_status=ServiceStatusMonitor(
+                PrometheusAlertSource(None),
+                ttl_seconds=SERVICE_STATUS_TTL_SECONDS,
+                monotonic=time.monotonic,
+                now=lambda: datetime.now(UTC),
+            ),
         )
 
     def api(self) -> FastAPI:
