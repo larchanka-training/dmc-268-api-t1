@@ -36,51 +36,52 @@ def _statuses(*alerts: FiringAlert) -> dict[ServiceComponent, ServiceStatus]:
     return {c.component: c.status for c in report.components}
 
 
-def _only(component: ServiceComponent, status: ServiceStatus) -> dict[ServiceComponent, ServiceStatus]:
-    expected = dict.fromkeys(ServiceComponent, OPERATIONAL)
-    expected[component] = status
-    return expected
-
-
-# Каждый алерт таблицы — компонент и статус, остальные компоненты не задеты.
+# Каждый алерт таблицы — компоненты и статус, остальные компоненты не задеты.
 SIGNALS = [
-    ("ContainerDown", {"container_name": "dmc268-api"}, API, OUTAGE),
-    ("ServiceProbeFailed", {"service": "api", "instance": "http://dmc268-api:8000/health"}, API, OUTAGE),
-    ("Api5xxSpike", {"service": "api"}, API, DEGRADED),
-    ("ContainerRestarting", {"container_name": "dmc268-api"}, API, DEGRADED),
-    ("ContainerDown", {"container_name": "dmc268-worker"}, WORKER, OUTAGE),
-    ("WorkerNotConsuming", {"service": "worker", "queue": "review_jobs.qq"}, WORKER, OUTAGE),
-    ("ContainerRestarting", {"container_name": "dmc268-worker"}, WORKER, DEGRADED),
-    ("ReviewRunsFailing", {"service": "worker"}, WORKER, DEGRADED),
-    ("ReviewDlqNotEmpty", {"service": "worker", "queue": "review_jobs.dlq"}, WORKER, DEGRADED),
-    ("ContainerDown", {"container_name": "dmc268-rabbitmq"}, QUEUE, OUTAGE),
-    ("ServiceProbeFailed", {"service": "rabbitmq", "instance": "dmc268-rabbitmq:5672"}, QUEUE, OUTAGE),
-    ("ContainerRestarting", {"container_name": "dmc268-rabbitmq"}, QUEUE, DEGRADED),
+    ("ContainerDown", {"container_name": "dmc268-api"}, {API}, OUTAGE),
+    ("ServiceProbeFailed", {"service": "api", "instance": "http://dmc268-api:8000/health"}, {API}, OUTAGE),
+    ("Api5xxSpike", {"service": "api"}, {API}, DEGRADED),
+    ("ContainerRestarting", {"container_name": "dmc268-api"}, {API}, DEGRADED),
+    ("ContainerDown", {"container_name": "dmc268-worker"}, {WORKER}, OUTAGE),
+    ("WorkerNotConsuming", {"service": "worker", "queue": "review_jobs.qq"}, {WORKER}, OUTAGE),
+    ("ContainerRestarting", {"container_name": "dmc268-worker"}, {WORKER}, DEGRADED),
+    ("ReviewRunsFailing", {"service": "worker"}, {WORKER}, DEGRADED),
+    ("ContainerDown", {"container_name": "dmc268-rabbitmq"}, {QUEUE}, OUTAGE),
+    ("ServiceProbeFailed", {"service": "rabbitmq", "instance": "dmc268-rabbitmq:5672"}, {QUEUE}, OUTAGE),
+    ("ContainerRestarting", {"container_name": "dmc268-rabbitmq"}, {QUEUE}, DEGRADED),
+    # База: /health API её не проверяет, но без неё API отвечает 500, а воркер не работает.
+    ("ContainerDown", {"container_name": "dmc268-postgres"}, {API, WORKER}, OUTAGE),
+    ("ServiceProbeFailed", {"service": "postgres", "instance": "dmc268-postgres:5432"}, {API, WORKER}, OUTAGE),
 ]
 
 
-@pytest.mark.parametrize(("name", "labels", "component", "status"), SIGNALS)
-def test_each_alert_sets_its_component(
-    name: str, labels: dict[str, str], component: ServiceComponent, status: ServiceStatus
+@pytest.mark.parametrize(("name", "labels", "components", "status"), SIGNALS)
+def test_each_alert_sets_its_components(
+    name: str, labels: dict[str, str], components: set[ServiceComponent], status: ServiceStatus
 ) -> None:
-    assert _statuses(FiringAlert(name, labels)) == _only(component, status)
+    expected = {c: status if c in components else OPERATIONAL for c in ServiceComponent}
+    assert _statuses(FiringAlert(name, labels)) == expected
 
 
 def test_the_signal_list_covers_the_whole_table_except_blindness() -> None:
-    covered = {(name, component, status) for name, _, component, status in SIGNALS}
-    table = {
-        (rule.alert, component, rule.status)
-        for rule in ALERT_RULES
-        if rule.status is not UNKNOWN
-        for component in rule.components
-    }
-    assert covered == table
+    """Сверка по меткам строки, а не только по имени: два `ContainerDown` у api —
+    разные строки (контейнер API и контейнер базы)."""
+    rules = [rule for rule in ALERT_RULES if rule.status is not UNKNOWN]
+    assert len(SIGNALS) == len(rules)
+    for rule in rules:
+        assert any(
+            name == rule.alert
+            and status is rule.status
+            and components == set(rule.components)
+            and rule.labels.items() <= labels.items()
+            for name, labels, components, status in SIGNALS
+        ), rule
 
 
 BLIND = [
     ({"alertname": "ScrapeTargetDown", "job": "docker-stats"}, {API, WORKER, QUEUE}),
     ({"alertname": "ContainerMetricsMissing"}, {API, WORKER, QUEUE}),
-    ({"alertname": "ScrapeTargetDown", "job": "blackbox-services"}, {API, QUEUE}),
+    ({"alertname": "ScrapeTargetDown", "job": "blackbox-services"}, {API, WORKER, QUEUE}),
     ({"alertname": "ScrapeTargetDown", "job": "collector"}, {API, WORKER}),
     ({"alertname": "ScrapeTargetDown", "job": "rabbitmq"}, {WORKER}),
 ]
@@ -102,7 +103,7 @@ def test_the_blind_list_covers_the_table() -> None:
     [
         FiringAlert("ScrapeTargetDown", {"job": "loki"}),
         FiringAlert("ScrapeTargetDown", {"job": "node-exporter"}),
-        FiringAlert("ContainerDown", {"container_name": "dmc268-postgres"}),
+        FiringAlert("ContainerDown", {"container_name": "dmc268-postgres-replica"}),
         FiringAlert("ContainerDown", {"container_name": "dmc268-ui"}),
         FiringAlert("ContainerRestarting", {"container_name": "dmc268-grafana"}),
         FiringAlert("ServiceProbeFailed", {"service": "postgres-replica"}),
@@ -110,6 +111,9 @@ def test_the_blind_list_covers_the_table() -> None:
         FiringAlert("LlmBudgetExceeded", {"service": "llm"}),
         FiringAlert("PublicEndpointDown", {"service": "ui"}),
         FiringAlert("BackupStale", {"service": "postgres-backup"}),
+        # У DLQ нет TTL: одно сообщение держало бы degraded до ручного разбора, а падающие
+        # прогоны и так ловит ReviewRunsFailing.
+        FiringAlert("ReviewDlqNotEmpty", {"service": "worker", "queue": "review_jobs.dlq"}),
         # Метки без имени нужного правила ничего не значат.
         FiringAlert("SomethingElse", {"container_name": "dmc268-api"}),
         # Имя правила без нужной метки — тоже.

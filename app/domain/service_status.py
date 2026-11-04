@@ -7,9 +7,9 @@
 
 Каждый компонент получает тяжелейший из статусов, которые дают сработавшие по нему алерты
 (`ALERT_RULES`); ни одного — `operational`. Кроме алертов о самом компоненте, в таблице —
-алерты слепоты: Prometheus не снимает источник, на котором держатся алерты компонента, или
-метрик контейнеров нет вовсе. Тогда молчание алертов ничего не значит, и компонент —
-`unknown`, а не `operational`.
+алерты базы (без неё недоступны api и worker) и алерты слепоты: Prometheus не снимает
+источник, на котором держатся алерты компонента, или метрик контейнеров нет вовсе. Тогда
+молчание алертов ничего не значит, и компонент — `unknown`, а не `operational`.
 
 Порядок тяжести один на компонент и на сервис целиком: `outage` > `degraded` > `unknown` >
 `operational`. Сработавший алерт — подтверждённая проблема, а слепота — только отсутствие
@@ -74,28 +74,34 @@ ALERT_RULES: tuple[AlertRule, ...] = (
     AlertRule("ServiceProbeFailed", ServiceStatus.OUTAGE, (_API,), {"service": "api"}),
     AlertRule("Api5xxSpike", ServiceStatus.DEGRADED, (_API,)),
     AlertRule("ContainerRestarting", ServiceStatus.DEGRADED, (_API,), _container("dmc268-api")),
-    # Воркер: не запущен или не забирает задачи — ревью не идут; падающие прогоны,
-    # DLQ и перезапуски — идут с ошибками.
+    # Воркер: не запущен или не забирает задачи — ревью не идут; падающие прогоны и
+    # перезапуски — идут с ошибками. ReviewDlqNotEmpty здесь нет: у DLQ нет TTL, и одно
+    # ядовитое сообщение держало бы degraded, пока DLQ не разберут руками, а падающие
+    # прогоны и так ловит ReviewRunsFailing.
     AlertRule("ContainerDown", ServiceStatus.OUTAGE, (_WORKER,), _container("dmc268-worker")),
     AlertRule("WorkerNotConsuming", ServiceStatus.OUTAGE, (_WORKER,)),
     AlertRule("ContainerRestarting", ServiceStatus.DEGRADED, (_WORKER,), _container("dmc268-worker")),
     AlertRule("ReviewRunsFailing", ServiceStatus.DEGRADED, (_WORKER,)),
-    AlertRule("ReviewDlqNotEmpty", ServiceStatus.DEGRADED, (_WORKER,)),
     # Очередь: брокер не запущен или не принимает AMQP — недоступна; перезапуски — сбои.
     AlertRule("ContainerDown", ServiceStatus.OUTAGE, (_QUEUE,), _container("dmc268-rabbitmq")),
     AlertRule("ServiceProbeFailed", ServiceStatus.OUTAGE, (_QUEUE,), {"service": "rabbitmq"}),
     AlertRule("ContainerRestarting", ServiceStatus.DEGRADED, (_QUEUE,), _container("dmc268-rabbitmq")),
-    # Слепота. docker-stats — ContainerDown и ContainerRestarting всех трёх; без рядов
-    # контейнеров при живом скрейпе (ContainerMetricsMissing) — то же самое.
+    # База: отдельного компонента нет, но без неё API отвечает 500 на всё, кроме /health
+    # (он базу не проверяет), а воркер не берёт и не завершает прогоны — оба недоступны.
+    AlertRule("ContainerDown", ServiceStatus.OUTAGE, (_API, _WORKER), _container("dmc268-postgres")),
+    AlertRule("ServiceProbeFailed", ServiceStatus.OUTAGE, (_API, _WORKER), {"service": "postgres"}),
+    # Слепота. docker-stats — ContainerDown и ContainerRestarting всех трёх и базы; без
+    # рядов контейнеров при живом скрейпе (ContainerMetricsMissing) — то же самое.
     AlertRule("ScrapeTargetDown", ServiceStatus.UNKNOWN, _ALL, {"job": "docker-stats"}),
     AlertRule("ContainerMetricsMissing", ServiceStatus.UNKNOWN, _ALL),
-    # blackbox-services — пробы /health API и AMQP-порта брокера (ServiceProbeFailed).
-    AlertRule("ScrapeTargetDown", ServiceStatus.UNKNOWN, (_API, _QUEUE), {"job": "blackbox-services"}),
+    # blackbox-services — пробы /health API, порта базы и AMQP-порта брокера
+    # (ServiceProbeFailed); проба базы держит api и worker.
+    AlertRule("ScrapeTargetDown", ServiceStatus.UNKNOWN, _ALL, {"job": "blackbox-services"}),
     # collector — метрики приложения по OTLP: 5xx API (Api5xxSpike) и исходы прогонов
     # воркера (ReviewRunsFailing). Ряды приложения несут job = service.name
     # (dmc-268-api, honor_labels), но `up` — всегда job скрейпа.
     AlertRule("ScrapeTargetDown", ServiceStatus.UNKNOWN, (_API, _WORKER), {"job": "collector"}),
-    # rabbitmq — метрики очередей: потребители и DLQ (WorkerNotConsuming, ReviewDlqNotEmpty).
+    # rabbitmq — метрики очередей: потребители (WorkerNotConsuming).
     AlertRule("ScrapeTargetDown", ServiceStatus.UNKNOWN, (_WORKER,), {"job": "rabbitmq"}),
 )
 
@@ -123,8 +129,9 @@ def worst_status(statuses: Sequence[ServiceStatus]) -> ServiceStatus:
 def evaluate_service_status(alerts: Sequence[FiringAlert] | None, checked_at: datetime) -> ServiceStatusReport:
     """Статус сервиса по сработавшим алертам; `None` — алерты неизвестны, всё `unknown`.
 
-    Алерты, которых нет в `ALERT_RULES` (диск, реплика, бюджет модели, другие контейнеры),
-    на статус не влияют: странице нужны только компоненты, которые видит пользователь.
+    Алерты, которых нет в `ALERT_RULES` (диск, реплика и копии базы, бюджет модели, DLQ,
+    другие контейнеры), на статус не влияют: странице нужны только компоненты, которые видит
+    пользователь, и то, без чего они не работают.
     """
     components = tuple(
         ComponentStatus(

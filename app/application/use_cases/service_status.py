@@ -4,18 +4,30 @@
 поток запросов к странице не превращается в поток запросов к Prometheus. Чаще и не нужно —
 Prometheus сам пересчитывает правила раз в `evaluation_interval` (минута по умолчанию).
 
-Обновление идёт под замком: запросы, пришедшие, пока кэш устарел, ждут один поход в
-источник (не дольше его тайм-аута), а не идут в него каждый сам. В кэше — оценка целиком,
-вместе с `checked_at`: время в ответе — когда сервис действительно проверял, а не когда
-отдал запись из кэша. Неудача источника кэшируется так же — `unknown` на тот же срок.
+Устаревшую оценку обновляет один поток — тот, что взял замок. Остальные его не ждут и
+отдают прошлую оценку: ручка синхронная, и ожидающие занимали бы потоки общего threadpool
+на весь поход в источник (до его тайм-аута). Ждут только запросы до первой оценки — отдать
+им нечего. В кэше — оценка целиком, вместе с `checked_at`: время в ответе — когда сервис
+действительно проверял, а не когда отдал запись из кэша. Неудача источника кэшируется так же
+— `unknown` на тот же срок.
 """
 
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 
 from app.application.ports.alert_source import AlertSource
 from app.domain.service_status import ServiceStatusReport, evaluate_service_status
+
+
+@dataclass(frozen=True, slots=True)
+class _Cached:
+    """Оценка и момент `monotonic`, после которого она устарела — одной ссылкой: поток без
+    замка читает их вместе, не видя оценку от одного обновления, а срок от другого."""
+
+    report: ServiceStatusReport
+    expires_at: float
 
 
 class ServiceStatusMonitor:
@@ -32,13 +44,24 @@ class ServiceStatusMonitor:
         self._monotonic = monotonic
         self._now = now
         self._lock = threading.Lock()
-        self._report: ServiceStatusReport | None = None
-        self._expires_at = 0.0
+        self._cached: _Cached | None = None
 
     def current(self) -> ServiceStatusReport:
-        """Оценка не старше `ttl_seconds`; устарела — новая по алертам источника."""
-        with self._lock:
-            if self._report is None or self._monotonic() >= self._expires_at:
-                self._report = evaluate_service_status(self._source.firing_alerts(), self._now())
-                self._expires_at = self._monotonic() + self._ttl_seconds
-            return self._report
+        """Оценка не старше `ttl_seconds`; пока её обновляет другой поток — прошлая."""
+        cached = self._cached
+        if cached is not None and self._monotonic() < cached.expires_at:
+            return cached.report
+        if cached is None:
+            self._lock.acquire()
+        elif not self._lock.acquire(blocking=False):
+            return cached.report
+        try:
+            # Пока ждали замок или читали без него, оценку мог обновить другой поток.
+            cached = self._cached
+            if cached is None or self._monotonic() >= cached.expires_at:
+                report = evaluate_service_status(self._source.firing_alerts(), self._now())
+                cached = _Cached(report, self._monotonic() + self._ttl_seconds)
+                self._cached = cached
+            return cached.report
+        finally:
+            self._lock.release()

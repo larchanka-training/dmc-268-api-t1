@@ -27,8 +27,9 @@
 **Non-Goals:**
 
 - История инцидентов, uptime в процентах, подписка на уведомления.
-- Статус базы, реплики, интерфейса, бюджета модели: пользователю страницы важны три компонента,
-  через которые проходит его ревью.
+- Отдельные компоненты для базы, реплики, интерфейса, бюджета модели: пользователю страницы
+  важны три компонента, через которые проходит его ревью. Недоступную базу он видит как `outage`
+  у `api` и `worker` (D2) — без неё они не работают.
 - Общий для реплик кэш: у API одна реплика.
 
 ## Decisions
@@ -48,9 +49,19 @@
 
 | Компонент | outage | degraded | unknown (слепота) |
 | --- | --- | --- | --- |
-| api | `ContainerDown{container_name="dmc268-api"}`, `ServiceProbeFailed{service="api"}` | `Api5xxSpike`, `ContainerRestarting{container_name="dmc268-api"}` | `ScrapeTargetDown{job="docker-stats"\|"blackbox-services"\|"collector"}`, `ContainerMetricsMissing` |
-| worker | `ContainerDown{container_name="dmc268-worker"}`, `WorkerNotConsuming` | `ContainerRestarting{container_name="dmc268-worker"}`, `ReviewRunsFailing`, `ReviewDlqNotEmpty` | `ScrapeTargetDown{job="docker-stats"\|"collector"\|"rabbitmq"}`, `ContainerMetricsMissing` |
+| api | `ContainerDown{container_name="dmc268-api"\|"dmc268-postgres"}`, `ServiceProbeFailed{service="api"\|"postgres"}` | `Api5xxSpike`, `ContainerRestarting{container_name="dmc268-api"}` | `ScrapeTargetDown{job="docker-stats"\|"blackbox-services"\|"collector"}`, `ContainerMetricsMissing` |
+| worker | `ContainerDown{container_name="dmc268-worker"\|"dmc268-postgres"}`, `ServiceProbeFailed{service="postgres"}`, `WorkerNotConsuming` | `ContainerRestarting{container_name="dmc268-worker"}`, `ReviewRunsFailing` | `ScrapeTargetDown{job="docker-stats"\|"blackbox-services"\|"collector"\|"rabbitmq"}`, `ContainerMetricsMissing` |
 | queue | `ContainerDown{container_name="dmc268-rabbitmq"}`, `ServiceProbeFailed{service="rabbitmq"}` | `ContainerRestarting{container_name="dmc268-rabbitmq"}` | `ScrapeTargetDown{job="docker-stats"\|"blackbox-services"}`, `ContainerMetricsMissing` |
+
+База своего компонента не получает, но её алерты — в строках `api` и `worker`: `/health` API
+базу не проверяет, и без строки базы страница говорила бы «всё работает», пока API отвечает 500
+на всё остальное, а воркер падает. Поэтому и слепота `blackbox-services` (проба порта базы)
+делает `worker` `unknown`. Реплика, копии и `ContainerRestarting` базы в таблицу не входят:
+работу API и воркера они не останавливают.
+
+`ReviewDlqNotEmpty` в таблице нет: у DLQ нет срока жизни сообщений, и одно ядовитое сообщение
+держало бы `degraded` на публичной странице, пока DLQ не разберут руками. Падающие прогоны ловит
+`ReviewRunsFailing`; DLQ остаётся алертом команды.
 
 Слепота — по job скрейпа, а не по метке `service`: правило `ScrapeTargetDown` ставит
 `service: observability`, и метка правила затирает метку цели. Ряды приложения несут
@@ -79,10 +90,15 @@ HTTP-статус, без тела ответа.
 
 Кэшируется оценка целиком вместе с `checked_at`: время в ответе — когда сервис проверял.
 `CacheStore` хранит строки — понадобился бы кодек отчёта ради одной записи. Монитор — поле
-`TTL` 15 с, часы `monotonic` и `now` инъекцией, обновление под `threading.Lock`: ручка синхронная
-и идёт в threadpool, и запросы, пришедшие к устаревшему кэшу, ждут один поход в Prometheus, а не
-идут в него каждый. Неудача кэшируется так же — `unknown` на 15 с. Один монитор на процесс —
-поле контейнера; зависимость `get_service_status_monitor` тесты подменяют.
+`TTL` 15 с, часы `monotonic` и `now` инъекцией. Обновление — под `threading.Lock`, взятым без
+ожидания (`acquire(blocking=False)`): в Prometheus идёт один поток, а остальные запросы к
+устаревшему кэшу сразу отдают прошлую оценку. Ручка синхронная и идёт в общий threadpool, и
+ждущие замок занимали бы его потоки на весь поход в Prometheus — при медленном ответе это
+секунды. Прошлая оценка в это время старше TTL на время похода в Prometheus (тайм-аут адаптера —
+D4). Ждут замок только запросы до первой оценки процесса: отдать им нечего. Оценка и срок её
+годности лежат одной ссылкой — поток без замка читает их согласованно. Неудача кэшируется так
+же — `unknown` на 15 с. Один монитор на процесс — поле контейнера; зависимость
+`get_service_status_monitor` тесты подменяют.
 
 ### D6. Ручка открыта, как `/health`, но в контракте
 

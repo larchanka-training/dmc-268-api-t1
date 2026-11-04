@@ -1,9 +1,9 @@
 ## 1. Домен и порт
 
 - [x] 1.1 `ServiceStatus`, `ServiceComponent` в `app/domain/enums.py`
-- [x] 1.2 Чистая функция `evaluate_service_status` и таблица `ALERT_RULES` в `app/domain/service_status.py`; тесты на каждую строку, слепоту, посторонние алерты, порядок тяжести и сверку с `alerts.yml`/`prometheus.yml`
+- [x] 1.2 Чистая функция `evaluate_service_status` и таблица `ALERT_RULES` в `app/domain/service_status.py`; тесты на каждую строку (и база для api и worker), слепоту, посторонние алерты (и DLQ), порядок тяжести и сверку с `alerts.yml`/`prometheus.yml`
 - [x] 1.3 Порт `AlertSource` (`app/application/ports/alert_source.py`)
-- [x] 1.4 Кэш оценки `ServiceStatusMonitor` (`app/application/use_cases/service_status.py`) с часами инъекцией; тест TTL и кэша неудачи
+- [x] 1.4 Кэш оценки `ServiceStatusMonitor` (`app/application/use_cases/service_status.py`) с часами инъекцией, обновление без ожидания для остальных запросов; тесты TTL, кэша неудачи, прошлой оценки во время обновления и ожидания первой
 
 ## 2. Адаптер и проводка
 
