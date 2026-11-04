@@ -24,9 +24,13 @@ resource "docker_image" "rabbitmq" {
 }
 
 resource "docker_container" "rabbitmq" {
-  name    = "dmc268-rabbitmq"
-  image   = docker_image.rabbitmq.image_id
-  restart = "unless-stopped"
+  # Узел называется rabbit@<hostname> и хранит данные в mnesia/rabbit@<hostname>.
+  # Без hostname Docker берёт id контейнера, и каждый новый контейнер стартовал
+  # на томе пустым узлом, а очереди старого оставались сиротами (#338).
+  name     = "dmc268-rabbitmq"
+  hostname = "dmc268-rabbitmq"
+  image    = docker_image.rabbitmq.image_id
+  restart  = "unless-stopped"
 
   # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
   # принудительно (SIGKILL): база поднимается с «not properly shut down» и

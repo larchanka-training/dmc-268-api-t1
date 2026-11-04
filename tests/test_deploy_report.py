@@ -486,6 +486,13 @@ def test_every_volume_prevents_destroy() -> None:
         ), f"у {address} нет lifecycle {{ prevent_destroy = true }}"
 
 
+def test_broker_node_name_survives_container_replacement() -> None:
+    """Имя узла RabbitMQ — от hostname: без него новый контейнер — пустой узел на том же томе (#338)."""
+    body = re.search(r'^resource\s+"docker_container"\s+"rabbitmq"\s*\{\n(.*?)^\}', read_infra_text(), re.MULTILINE | re.DOTALL)
+    assert body, "docker_container.rabbitmq не найден в infra/*.tf"
+    assert re.search(r'^\s*hostname\s*=\s*"[^"]+"\s*$', body.group(1), re.MULTILINE), "у брокера нет постоянного hostname"
+
+
 # --- apply и простой API -----------------------------------------------------
 
 
