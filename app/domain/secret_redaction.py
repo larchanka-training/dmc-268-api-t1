@@ -4,13 +4,17 @@
 по ошибке закоммитил: ключи, токены. Модели пакет уходит как есть (ревью должно
 увидеть зашитый секрет и сказать о нём), в базу — с метками вместо секретов.
 
+Метка ставится на каждую строку, которую занимал секрет (многострочный ключ, имя и
+значение на соседних строках): строки диффа и окна вокруг него не сдвигаются, у строк
+диффа остаётся префикс `+`/`-`/пробел (change `context-surrounding`, design D6).
+
 Id блоков недоверенных данных в заменённой строке пересчитывается: прежний —
 префикс sha256 текста с секретом, и по нему слабый пароль подбирается офлайн.
 
 shortcut: только формы с узнаваемым префиксом, именем или рамкой — `password = "..."`
 и случайные строки без префикса не ловятся, как и середина ключа без BEGIN и END
 (хунк задел только часть его строк), а однословная строка кода прямо над END без
-пары уходит вместе с хвостом ключа; расширять, когда появится источник
+пары заменяется меткой вместе с хвостом ключа; расширять, когда появится источник
 ложных пропусков (eval или жалоба).
 """
 
@@ -70,13 +74,27 @@ _ORPHAN_END = re.compile(_END)
 def redact_secrets(value: Any) -> Any:
     """Копия JSON-значения, в строках которого секреты заменены `REDACTED`."""
     if isinstance(value, str):
-        redacted = _redact_key_tails(_SECRETS.sub(REDACTED, value))
+        redacted = _redact_key_tails(_SECRETS.sub(_label, value))
         return value if redacted == value else retag(redacted)
     if isinstance(value, dict):
         return {key: redact_secrets(item) for key, item in value.items()}
     if isinstance(value, list):
         return [redact_secrets(item) for item in value]
     return value
+
+
+def _label(match: re.Match[str]) -> str:
+    """Метка на каждую строку совпадения: номера строк диффа и вида не сдвигаются.
+
+    Префикс строки диффа (`+`, `-`, пробел) у второй и следующих строк остаётся,
+    чтобы hunk оставался hunk'ом.
+    """
+    _, *rest = match[0].split("\n")
+    return "\n".join([REDACTED, *(_line_label(line) for line in rest)])
+
+
+def _line_label(line: str) -> str:
+    return (line[0] if line[:1] in ("+", "-", " ") else "") + REDACTED
 
 
 def _redact_key_tails(text: str) -> str:
@@ -91,8 +109,11 @@ def _redact_key_tails(text: str) -> str:
     kept: list[str] = []
     for line in text.split("\n"):
         if _ORPHAN_END.search(line):
-            while kept and _KEY_LINE.fullmatch(kept[-1]):
-                kept.pop()
+            # Строки ключа - метками на своих местах, а не удаляются: номера строк не сдвигаются.
+            index = len(kept)
+            while index and _KEY_LINE.fullmatch(kept[index - 1]):
+                index -= 1
+                kept[index] = _line_label(kept[index])
             line = _ORPHAN_END.sub(REDACTED, line)
         kept.append(line)
     return "\n".join(kept)
