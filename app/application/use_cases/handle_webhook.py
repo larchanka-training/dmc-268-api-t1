@@ -40,7 +40,11 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from app.application.merge_gate_publish import pause_check, publish_pause_check
+from app.application.merge_gate_publish import (
+    head_run_in_charge,
+    pause_check,
+    publish_pause_check,
+)
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import UnitOfWork
@@ -137,7 +141,8 @@ def handle_webhook_event(
     # есть, а ревью не нужно. Прогона и задачи нет, но на head ставится `success` по причине
     # паузы, иначе обязательная проверка в ruleset держала бы PR в «Expected — Waiting for
     # status». `branch_filter` здесь пока не применяется. Ручной прогон на этом head ставит
-    # свой gate и на паузе авторевью (D11); на новом коммите прогона нет — check паузы.
+    # свой gate и на паузе авторевью (D11), в том числе завершённый, чей повтор упал; на
+    # новом коммите прогона нет — check паузы.
     check = pause_check(repository, head_run)
     if check is not None:
         _pass_merge_gate_of_paused(uow, vcs, repository, event, check)
@@ -189,11 +194,14 @@ def handle_webhook_event(
 def _latest_run_on_head(
     work: UnitOfWork, repository: Repository, event: WebhookEvent
 ) -> ReviewRun | None:
-    """Последний прогон на head события; `None` — PR ещё не записан или прогона нет."""
+    """Прогон, отвечающий за gate head события (`head_run_in_charge`); `None` — PR ещё не
+    записан или прогона нет. На паузе авторевью после упавшего повтора ручного ревью это
+    завершённый ручной прогон до него. Правило дубля смотрит на `find_latest` (`_duplicate_of`).
+    """
     merge_request = work.merge_requests.find_by_number(repository.id, event.pr_number)
     if merge_request is None:
         return None
-    return work.review_runs.find_latest(merge_request.id, event.head_sha)
+    return head_run_in_charge(work, repository, merge_request.id, event.head_sha)
 
 
 def _duplicate_of(work: UnitOfWork, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:

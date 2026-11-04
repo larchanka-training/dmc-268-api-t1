@@ -65,13 +65,14 @@ AUTO_REVIEW_OFF_CHECK = MergeGateCheck(
 def pause_check(repository: Repository, head_run: ReviewRun | None) -> MergeGateCheck | None:
     """Check run на head, если ревью на нём не идёт; `None` — идёт, gate ставит прогон.
 
-    `head_run` — последний прогон на head (`find_latest`), `None` — прогона нет.
+    `head_run` — прогон, отвечающий за head (`head_run_in_charge`), `None` — прогона нет.
     Выключение репозитория важнее настройки и ручного прогона: при нём всегда
     `DISABLED_REVIEW_CHECK`, чтобы пользователь чинил то, что действительно мешает
     (сначала подключение), а начатый до выключения прогон не блокировал мердж.
     Пауза `auto_review_enabled = false` — про автоматическое ревью: ручной прогон на head,
-    пока он не упал и не отменён, ставит свой gate (D11). Упавший ручной прогон — check
-    паузы: `failure` держал бы PR, который авторевью не ждёт.
+    пока он не упал и не отменён, ставит свой gate (D11); после упавшего повторного —
+    завершённый прежний, его подставляет `head_run_in_charge`. Упавший ручной прогон без
+    завершённого до него — check паузы: `failure` держал бы PR, который авторевью не ждёт.
     Вызывают вебхук PR, вебхук треда, `settle_merge_gate` и упавший прогон.
     """
     if repository.connected_at is None:
@@ -81,6 +82,24 @@ def pause_check(repository: Repository, head_run: ReviewRun | None) -> MergeGate
             return None
         return AUTO_REVIEW_OFF_CHECK
     return None
+
+
+def head_run_in_charge(
+    uow: UnitOfWork, repository: Repository, merge_request_id: UUID, head_sha: str
+) -> ReviewRun | None:
+    """Прогон, чей итог отвечает за gate head; зовётся внутри открытого вызывающим `with uow`.
+
+    Обычно — последний прогон на head (`find_latest`). На паузе авторевью, если последний
+    не ручной в работе или завершённый, — последний завершённый ручной прогон на head, а
+    его нет — последний: упавший или отменённый повтор ручного ревью не снимает gate
+    прежнего (change `manual-gate-after-failed-relaunch`, D1). Вытеснен ли прогон новым,
+    решает `find_latest`, а не эта функция.
+    """
+    latest = uow.review_runs.find_latest(merge_request_id, head_sha)
+    paused = repository.connected_at is not None and not repository.auto_review_enabled
+    if not paused or _manual_run_in_charge(latest):
+        return latest
+    return uow.review_runs.find_completed_manual(merge_request_id, head_sha) or latest
 
 
 def publish_pause_check(
@@ -102,7 +121,8 @@ def publish_pause_check(
     тоже (сбой не значит, что POST не дошёл), прогон и репозиторий перечитываются: если
     пауза больше не действует, а последний прогон уже публикуется или завершён, его gate
     выставляет `settle_merge_gate`. Прогон до публикации gate выставит сам, позже нашего
-    POST. `VcsError` POST паузы или поправки — вызывающему, после поправки.
+    POST. Прогон за head — `head_run_in_charge`: после упавшего повторного ручного прогона
+    это завершённый прежний. `VcsError` POST паузы или поправки — вызывающему, после поправки.
     """
     error: VcsError | None = None
     try:
@@ -113,7 +133,9 @@ def publish_pause_check(
         repository = uow.repositories.get(repository_id)
         merge_request = uow.merge_requests.find_by_number(repository_id, pr_number)
         latest = (
-            uow.review_runs.find_latest(merge_request.id, head_sha) if merge_request else None
+            head_run_in_charge(uow, repository, merge_request.id, head_sha)
+            if repository is not None and merge_request is not None
+            else None
         )
     if (
         repository is not None
@@ -222,7 +244,9 @@ def settle_merge_gate(
     сменить, пока шёл прогон или сбой, и gate завершённого чужого прогона по старому
     порогу снял бы его блокировку. На паузе ревью (`pause_check`) выставляется check
     паузы: `failure` завершившегося прогона заблокировал бы PR, который ревью не ждёт.
-    Ручной прогон на паузе авторевью ставит свой gate (D11).
+    Ручной прогон на паузе авторевью ставит свой gate (D11); прогон за head берётся через
+    `head_run_in_charge`, поэтому после упавшего повторного ручного прогона gate — по
+    находкам завершённого прежнего.
     """
     failures = 0
     # Последний выставленный check: пока GitHub его принимал, итог мог измениться из-за
@@ -232,8 +256,12 @@ def settle_merge_gate(
         # Перед каждой попыткой - заново: за время сбоя за head мог начать
         # отвечать другой прогон, и повтор прежнего check вернул бы чужой итог.
         with uow:
-            latest = uow.review_runs.find_latest(merge_request_id, head_sha)
             repository = uow.repositories.get(repository_id)
+            latest = (
+                head_run_in_charge(uow, repository, merge_request_id, head_sha)
+                if repository is not None
+                else None
+            )
         if repository is None:
             raise LookupError(f"repository {repository_id} not found")
         if latest is None:

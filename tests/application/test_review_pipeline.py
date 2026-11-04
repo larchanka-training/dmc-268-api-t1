@@ -1544,14 +1544,11 @@ def test_a_failed_review_on_a_paused_repository_sets_the_pause_check(
     assert vcs.checks == [expected]
 
 
-@pytest.mark.parametrize("earlier_review", [True, False], ids=["re-review", "first-review"])
-def test_a_failed_manual_review_on_auto_review_pause_sets_the_pause_check(earlier_review: bool) -> None:
-    """D11: упавший ручной прогон на паузе авторевью — check паузы `success`, а не
-    `failure`: PR, который авторевью не ждёт, не держится; ревью перезапускают руками."""
+def test_a_failed_first_manual_review_on_auto_review_pause_sets_the_pause_check() -> None:
+    """D11: упавший ручной прогон на паузе авторевью без завершённого ручного до него —
+    check паузы `success`, а не `failure`: PR, который авторевью не ждёт, не держится."""
     uow = FakeUnitOfWork()
     _seed_run(uow, trigger=TriggerSource.MANUAL)
-    if earlier_review:
-        _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
     _turn_auto_review_off(uow)
     vcs = RecordingVcsGateway(diff="+" * 1_001)
 
@@ -1559,6 +1556,47 @@ def test_a_failed_manual_review_on_auto_review_pause_sets_the_pause_check(earlie
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
     assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
+
+
+def test_a_failed_manual_re_review_on_auto_review_pause_keeps_the_gate_of_the_earlier_one() -> None:
+    """Ревью #335: на паузе авторевью повторный ручной прогон упал — на head gate
+    завершённого ручного прогона до него, а не check паузы."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, trigger=TriggerSource.MANUAL)
+    _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))
+    _turn_auto_review_off(uow)
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    (check,) = vcs.checks
+    assert (check.conclusion, check.title) == ("success", "Ревью пройдено")
+
+
+def test_a_failed_manual_re_review_on_auto_review_pause_keeps_the_critical_blocking() -> None:
+    """Ревью #335: прежний ручной прогон оставил незакрытый `critical` — повтор упал, а
+    мердж по-прежнему заблокирован его `failure`."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, trigger=TriggerSource.MANUAL)
+    add_manual_run_with_critical_thread(
+        uow,
+        merge_request_id=MR_ID,
+        head_sha=JOB.head_sha,
+        status=ReviewRunStatus.COMPLETED,
+        at=NOW - timedelta(minutes=5),
+    )
+    _turn_auto_review_off(uow)
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+
+    with pytest.raises(DiffTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
+
+    (check,) = vcs.checks
+    assert (check.conclusion, check.title) == (
+        "failure",
+        "Есть незакрытые замечания уровня critical и выше",
+    )
 
 
 def test_a_delayed_pause_check_of_a_failed_manual_run_returns_the_gate_of_its_relaunch() -> None:

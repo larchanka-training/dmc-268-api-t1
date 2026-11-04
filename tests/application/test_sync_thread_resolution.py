@@ -545,6 +545,35 @@ def test_thread_webhook_of_a_manual_run_on_auto_review_pause_recalculates_the_ga
     assert (check.conclusion, check.title) == ("success", "Ревью пройдено")
 
 
+def test_thread_webhook_after_a_failed_manual_re_review_on_pause_recalculates_the_earlier_gate() -> None:
+    """Ревью #335: на паузе авторевью повтор ручного ревью упал — закрытие последнего треда
+    завершённого ручного прогона до него пересчитывает его gate, а не ставит check паузы."""
+    uow = _pr_with_two_threads(
+        _repository(auto_review_enabled=False),
+        FindingSeverity.CRITICAL,
+        FindingSeverity.LOW,
+        trigger=TriggerSource.MANUAL,
+    )
+    uow.review_runs.add(
+        ReviewRun(
+            id=UUID(int=4),
+            merge_request_id=UUID(int=3),
+            head_sha="sha1",
+            status=ReviewRunStatus.FAILED,
+            trigger=TriggerSource.MANUAL,
+            last_progress_at=NOW + timedelta(minutes=1),
+            created_at=NOW + timedelta(minutes=1),
+            updated_at=NOW + timedelta(minutes=1),
+        )
+    )
+    vcs = RecordingVcsGateway()
+
+    assert handle_review_thread_webhook(_THREAD_PAYLOAD, uow=uow, vcs=vcs, now=lambda: NOW)
+
+    (check,) = vcs.checks
+    assert (check.conclusion, check.title) == ("success", "Ревью пройдено")
+
+
 def test_thread_webhook_of_a_manual_run_in_progress_on_pause_leaves_the_gate_to_the_run() -> None:
     """D11: ручной прогон на паузе ещё идёт — ни check паузы, ни пересчёта: gate выставит прогон."""
     uow = _pr_with_two_threads(

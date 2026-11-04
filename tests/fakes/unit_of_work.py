@@ -245,6 +245,17 @@ class FakeReviewRunRepo:
         ]
         return max(reviewed, key=lambda r: (r.created_at, r.id), default=None)
 
+    def find_completed_manual(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        completed = [
+            r
+            for r in self._by_id.values()
+            if r.merge_request_id == merge_request_id
+            and r.head_sha == head_sha
+            and r.trigger is TriggerSource.MANUAL
+            and r.status is ReviewRunStatus.COMPLETED
+        ]
+        return max(completed, key=lambda r: (r.created_at, r.id), default=None)
+
     def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
         runs = [
             r

@@ -8,6 +8,7 @@ import pytest
 from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
     DISABLED_REVIEW_CHECK,
+    head_run_in_charge,
     pause_check,
     publish_pause_check,
 )
@@ -209,3 +210,151 @@ def test_a_pause_check_leaves_the_gate_to_a_run_not_yet_publishing(status: Revie
     _publish_pause(uow, vcs)
 
     assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
+
+
+def _run_on_head(
+    run_id: int, trigger: TriggerSource, status: ReviewRunStatus, *, minute: int
+) -> ReviewRun:
+    at = _NOW + timedelta(minutes=minute)
+    return ReviewRun(
+        id=UUID(int=run_id),
+        merge_request_id=_MR_ID,
+        head_sha="head1",
+        status=status,
+        trigger=trigger,
+        last_progress_at=at,
+        created_at=at,
+        updated_at=at,
+    )
+
+
+@pytest.mark.parametrize(
+    ("connected", "auto_review_enabled", "runs", "in_charge", "expected"),
+    [
+        # Повторный ручной прогон упал или отменён — за head снова завершённый прежний.
+        pytest.param(
+            True,
+            False,
+            [(40, _MANUAL, _S.COMPLETED), (41, _MANUAL, _S.FAILED)],
+            40,
+            None,
+            id="failed-relaunch",
+        ),
+        pytest.param(
+            True,
+            False,
+            [(40, _MANUAL, _S.COMPLETED), (41, _MANUAL, _S.CANCELLED)],
+            40,
+            None,
+            id="cancelled-relaunch",
+        ),
+        # Из двух завершённых ручных — последний.
+        pytest.param(
+            True,
+            False,
+            [
+                (39, _MANUAL, _S.COMPLETED),
+                (40, _MANUAL, _S.COMPLETED),
+                (41, _MANUAL, _S.FAILED),
+            ],
+            40,
+            None,
+            id="latest-completed-manual",
+        ),
+        # Ручной в работе отвечает за head сам.
+        pytest.param(
+            True,
+            False,
+            [(40, _MANUAL, _S.COMPLETED), (41, _MANUAL, _S.ANALYSING)],
+            41,
+            None,
+            id="relaunch-in-progress",
+        ),
+        # Вебхуковый до паузы ручного gate не даёт — check паузы.
+        pytest.param(
+            True,
+            False,
+            [(40, _WEBHOOK, _S.COMPLETED), (41, _MANUAL, _S.FAILED)],
+            41,
+            AUTO_REVIEW_OFF_CHECK,
+            id="webhook-before-pause",
+        ),
+        pytest.param(
+            True,
+            False,
+            [(40, _WEBHOOK, _S.COMPLETED)],
+            40,
+            AUTO_REVIEW_OFF_CHECK,
+            id="only-webhook",
+        ),
+        # Выключенный репозиторий важнее завершённого ручного.
+        pytest.param(
+            False,
+            False,
+            [(40, _MANUAL, _S.COMPLETED), (41, _MANUAL, _S.FAILED)],
+            41,
+            DISABLED_REVIEW_CHECK,
+            id="disconnected",
+        ),
+        # Без паузы — последний прогон, как раньше.
+        pytest.param(
+            True,
+            True,
+            [(40, _MANUAL, _S.COMPLETED), (41, _MANUAL, _S.FAILED)],
+            41,
+            None,
+            id="auto-review-on",
+        ),
+        pytest.param(True, False, [], None, AUTO_REVIEW_OFF_CHECK, id="no-run"),
+    ],
+)
+def test_head_run_in_charge_returns_the_completed_manual_run_after_a_failed_relaunch(
+    connected: bool,
+    auto_review_enabled: bool,
+    runs: list[tuple[int, TriggerSource, ReviewRunStatus]],
+    in_charge: int | None,
+    expected: MergeGateCheck | None,
+) -> None:
+    """Ревью #335: на паузе авторевью упавший повторный ручной прогон не забирает head у
+    завершённого прежнего; вебхуковый прогон до паузы и выключенный репозиторий — как раньше."""
+    repository = _repository(
+        connected=connected, auto_review_enabled=auto_review_enabled
+    )
+    uow = FakeUnitOfWork()
+    for minute, (run_id, trigger, status) in enumerate(runs):
+        uow.review_runs.add(_run_on_head(run_id, trigger, status, minute=minute))
+
+    with uow:
+        head_run = head_run_in_charge(uow, repository, _MR_ID, "head1")
+
+    assert (head_run.id if head_run else None) == (
+        UUID(int=in_charge) if in_charge else None
+    )
+    assert pause_check(repository, head_run) is expected
+
+
+def test_a_delayed_pause_check_returns_the_gate_of_a_manual_run_after_its_relaunch_failed() -> (
+    None
+):
+    """Ревью #335: пока GitHub принимал check паузы, ручной прогон опубликовал `failure`,
+    а его повтор упал — после POST на head снова gate завершённого прогона."""
+    uow = _paused_pr()
+
+    def manual_run_completes_and_its_relaunch_fails() -> None:
+        add_manual_run_with_critical_thread(
+            uow,
+            merge_request_id=_MR_ID,
+            head_sha="head1",
+            status=ReviewRunStatus.COMPLETED,
+            at=_NOW + timedelta(minutes=1),
+        )
+        uow.review_runs.add(_run_on_head(41, _MANUAL, _S.FAILED, minute=2))
+
+    vcs = RecordingVcsGateway(
+        during_first_check=manual_run_completes_and_its_relaunch_fails
+    )
+
+    _publish_pause(uow, vcs)
+
+    assert vcs.checks[0] == AUTO_REVIEW_OFF_CHECK
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]

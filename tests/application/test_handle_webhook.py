@@ -676,6 +676,40 @@ def test_pr_event_on_the_head_of_a_manual_run_on_pause_leaves_its_gate(
     assert {r.id for r in uow.review_runs.added} == {run.id} and len(queue.jobs) == 1
 
 
+def test_pr_event_after_a_failed_manual_re_review_on_pause_leaves_the_earlier_gate() -> None:
+    """Ревью #335: на head завершённый ручной прогон, его повтор упал, авторевью на паузе.
+    Переотправка события PR на тот же head не ставит check паузы поверх gate завершённого."""
+    _, uow, _, queue = run_case()
+    (run,) = uow.review_runs.added
+    uow.review_runs.add(replace(run, trigger=TriggerSource.MANUAL, status=ReviewRunStatus.COMPLETED))
+    later = run.created_at + timedelta(minutes=1)
+    relaunch = replace(
+        run,
+        id=uuid4(),
+        trigger=TriggerSource.MANUAL,
+        status=ReviewRunStatus.FAILED,
+        last_progress_at=later,
+        created_at=later,
+        updated_at=later,
+    )
+    uow.review_runs.add(relaunch)
+    (repository,) = uow.repositories.stored.values()
+    uow.repositories.update_settings(
+        repository.id,
+        RepositorySettings(
+            auto_review_enabled=False, branch_filter=(), min_severity=repository.min_severity
+        ),
+        NOW,
+    )
+
+    # Повтор `opened` на тот же head.
+    outcome, uow, vcs, queue = run_case(uow=uow, queue=queue)
+
+    assert outcome.kind == "ignored"
+    assert vcs.checks == []
+    assert len(queue.jobs) == 1
+
+
 def _case_with_repository(repository: Any, action: str = "opened", *, vcs_error: VcsError | None = None):
     uow = FakeUow()
     uow.repositories.add(repository)

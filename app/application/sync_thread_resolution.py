@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from app.application.merge_gate_publish import (
+    head_run_in_charge,
     pause_check,
     publish_pause_check,
     settle_merge_gate,
@@ -103,7 +104,11 @@ def refresh_merge_gate_for_merge_request(
     vcs: VcsGateway,
     now: datetime,
 ) -> None:
-    """Сверить треды с GitHub и перевыставить gate по текущему порогу `min_severity` репозитория."""
+    """Сверить треды с GitHub и перевыставить gate по текущему порогу `min_severity` репозитория.
+
+    Прогон на head — `head_run_in_charge`: на паузе авторевью после упавшего повтора ручного
+    ревью это завершённый ручной прогон до него, и его gate пересчитывается.
+    """
     sync_open_threads_from_host(
         merge_request_id,
         repo_full_name=repo_full_name,
@@ -114,7 +119,12 @@ def refresh_merge_gate_for_merge_request(
         now=now,
     )
     with uow:
-        head_run = uow.review_runs.find_latest(merge_request_id, head_sha)
+        repository = uow.repositories.get(repository_id)
+        head_run = (
+            head_run_in_charge(uow, repository, merge_request_id, head_sha)
+            if repository is not None
+            else uow.review_runs.find_latest(merge_request_id, head_sha)
+        )
     if head_run is None or head_run.status is not ReviewRunStatus.COMPLETED:
         # Head не проверен: ревью идёт, упало или отменено сменой целевой ветки
         # (#222). Gate выставит прогон, который его проверит; до тех пор пересчёт
@@ -197,8 +207,9 @@ def handle_review_thread_webhook(
     `auto_review_enabled = false`) тред записывается так же, но на head ставится check run
     паузы, без сверки тредов: пересчёт поставил бы `failure` на head с проверкой паузы или
     `success` «Ревью пройдено» на непроверенный head. Исключение — ручной прогон на head при
-    `auto_review_enabled = false`, если он не упал и не отменён (D11): gate пересчитывается,
-    как без паузы; незавершённый прогон пересчёт не трогает — gate выставит он сам.
+    `auto_review_enabled = false`, если он не упал и не отменён (D11), а после упавшего
+    повтора — завершённый ручной до него (`head_run_in_charge`): gate пересчитывается, как
+    без паузы; незавершённый прогон пересчёт не трогает — gate выставит он сам.
     """
     if not apply_review_thread_webhook(payload, uow=uow, now=now):
         return False
@@ -231,7 +242,7 @@ def handle_review_thread_webhook(
             return True
         merge_request_id = merge_request.id
         # Пауза зависит от прогона на head: ручной ставит свой gate и на паузе авторевью (D11).
-        check = pause_check(repo, uow.review_runs.find_latest(merge_request.id, head_sha))
+        check = pause_check(repo, head_run_in_charge(uow, repo, merge_request.id, head_sha))
     if check is not None:
         publish_pause_check(
             uow,
