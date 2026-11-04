@@ -19,8 +19,11 @@ shortcut: только формы с узнаваемым префиксом, и
 """
 
 import re
+from fnmatch import fnmatchcase
+from posixpath import basename
 from typing import Any
 
+from app.domain.code_context import language_for_path
 from app.domain.untrusted import retag
 
 REDACTED = "<секрет скрыт>"
@@ -69,6 +72,21 @@ _PATTERNS = (
 )
 _SECRETS = re.compile("|".join(_PATTERNS), re.DOTALL)
 _ORPHAN_END = re.compile(_END)
+
+
+# Имена файлов, где секрет без узнаваемого префикса - обычное дело: `DB_PASSWORD=hunter2`,
+# голый ключ. Окно и файл целиком им не положены, модель видит только hunk'и.
+_SECRET_FILE_NAMES = (".env*", "*.pem", "*.key", "credentials*")
+
+
+def may_hold_secrets(path: str) -> bool:
+    """Не код, а файл, похожий на хранилище секретов: `.env`, ключ, credentials или `secret`
+    в пути (`k8s/secrets/db.yaml`). Код о секретах (`secret_redaction.py`) ревьюится с окном."""
+    if language_for_path(path) is not None:
+        return False
+    lowered = path.lower()
+    name = basename(lowered)
+    return "secret" in lowered or any(fnmatchcase(name, p) for p in _SECRET_FILE_NAMES)
 
 
 def redact_secrets(value: Any) -> Any:

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from app.domain.secret_redaction import REDACTED, redact_secrets
+from app.domain.secret_redaction import REDACTED, may_hold_secrets, redact_secrets
 from app.domain.untrusted import boundary, fence
 
 PEM = "-----BEGIN RSA PRIVATE KEY-----\n+MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn\n+-----END RSA PRIVATE KEY-----"
@@ -198,3 +198,23 @@ def test_a_secret_split_by_a_newline_keeps_the_line_count() -> None:
     assert "abcdef0123456789" not in redacted
     assert redacted.count("\n") == text.count("\n")
     assert redacted.endswith("\n+x = 1")
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (".env", True),
+        ("app/.env.production", True),
+        ("certs/tls.key", True),
+        ("CREDENTIALS.json", True),
+        ("config/secrets.yaml", True),
+        ("k8s/secrets/db.yaml", True),
+        ("app/domain/secret_redaction.py", False),
+        ("src/SecretService.ts", False),
+        ("app/environment.py", False),
+        ("docker-compose.yml", False),
+        ("keys/README.md", False),
+    ],
+)
+def test_file_names_that_may_hold_secrets(path: str, expected: bool) -> None:
+    assert may_hold_secrets(path) is expected

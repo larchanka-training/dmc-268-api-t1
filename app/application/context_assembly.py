@@ -63,7 +63,7 @@ from app.domain.hunk_context import (
     expand_hunks,
 )
 from app.domain.repo_rules import RULES_PATH, applicable_rules
-from app.domain.secret_redaction import redact_secrets
+from app.domain.secret_redaction import may_hold_secrets, redact_secrets
 from app.domain.untrusted import fence, sanitize
 
 SCHEMA = "context-payload/v1"
@@ -245,11 +245,13 @@ def assemble_context(
     for hunk in shown:
         shown_by_file.setdefault(hunk.file_path, []).append(hunk)
     # Второй проход - только файлы, у которых вошли все hunk'и: окну без изменения не место.
+    # Файлы с секретами по имени не расширяются: `redact_secrets` ловит не всякий секрет.
     complete = [
         (parsed, source)
         for parsed in reviewable
         if (source := sources.get(parsed.file_path)) is not None
         and parsed.hunks
+        and not may_hold_secrets(parsed.file_path)
         and len(shown_by_file.get(parsed.file_path, ())) == len(parsed.hunks)
     ]
     whole: set[str] = set()

@@ -30,12 +30,15 @@ def expand_hunks(hunks: Sequence[Hunk], source: str, radius: int) -> tuple[str, 
     """Тексты расширенных видов hunk'ов одного файла по его тексту `source` на `head_sha`.
 
     Если контекстная или добавленная строка hunk'а не совпала со строкой
-    `source` или hunk выходит за конец файла - `None`: окно из другой версии
-    файла хуже трёх строк контекста.
+    `source`, hunk выходит за конец файла или в нём нет строк `+`/`-` - `None`:
+    окно из другой версии файла хуже трёх строк контекста.
     """
     lines = split_lines(source) if source else []
     bodies = [h.text.split("\n")[1:] for h in hunks]
-    if not all(_matches(h, body, lines) for h, body in zip(hunks, bodies, strict=True)):
+    if not all(
+        _matches(h, body, lines) and any(line.startswith(("+", "-")) for line in body)
+        for h, body in zip(hunks, bodies, strict=True)
+    ):
         return None
 
     # Окно отмеряется от изменённых строк, как у git: свой контекст hunk'а снимается.

@@ -744,6 +744,20 @@ def test_window_longer_than_the_remainder_is_not_sanitized() -> None:
     assert peak < 10 * control, peak
 
 
+@pytest.mark.parametrize("path", [".env.example", "deploy/app.secrets.yaml", "certs/server.PEM"])
+def test_file_that_may_hold_secrets_is_not_expanded(path: str) -> None:
+    """`DB_PASSWORD=hunter2` без узнаваемого префикса `redact_secrets` не ловит: такие файлы
+    идут только hunk'ами, без окна и целиком."""
+    lines = [f"KEY_{n}=value{n}" for n in range(1, 31)]
+    diff = _replace_diff(path, lines, 11, "KEY_11=changed")
+
+    result = _assemble(diff=diff, asts=(), sources={path: _head(lines, 11, "KEY_11=changed")})
+
+    (hunk,) = _diff_texts(result.payload.body, path)
+    assert "KEY_1=value1\n" not in hunk
+    assert result.payload.tiers == ("diff",)
+
+
 def test_secret_in_unchanged_surrounding_line_does_not_reach_the_model() -> None:
     """Строку окна PR не менял: токен в ней - метка. Тот же токен в строке `+` модель видит."""
     token = "ghp_" + "a" * 36

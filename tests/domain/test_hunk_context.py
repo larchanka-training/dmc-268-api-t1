@@ -156,6 +156,15 @@ def test_hunk_past_the_end_of_the_file_keeps_the_original_hunks() -> None:
     assert expand_hunks(parsed.hunks, "line 1\nline 2\n", SURROUNDING_LINES) is None
 
 
+def test_hunk_without_changed_lines_keeps_the_original_hunks() -> None:
+    """GitHub такой hunk не отдаёт, но сборка контекста не должна падать на нём целиком."""
+    (parsed,) = parse_diff(
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n line 1\n line 2\n"
+    )
+
+    assert expand_hunks(parsed.hunks, "line 1\nline 2\n", SURROUNDING_LINES) is None
+
+
 TOKEN = "ghp_" + "a" * 36
 
 
