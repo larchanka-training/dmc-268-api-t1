@@ -486,6 +486,20 @@ def test_every_volume_prevents_destroy() -> None:
         ), f"у {address} нет lifecycle {{ prevent_destroy = true }}"
 
 
+def test_broker_memory_threshold_is_below_its_container_limit() -> None:
+    """Лимит cgroup брокер не видит: порог памяти — абсолютный и ниже потолка контейнера (#150)."""
+    body = re.search(r'^resource\s+"docker_container"\s+"rabbitmq"\s*\{\n(.*?)^\}', read_infra_text(), re.MULTILINE | re.DOTALL)
+    assert body, "docker_container.rabbitmq не найден в infra/*.tf"
+    limit = re.search(r"^\s*memory\s*=\s*(\d+)", body.group(1), re.MULTILINE)
+    assert limit, "у брокера нет потолка памяти"
+    limit_mb = int(limit.group(1))
+    assert re.search(r'^\s*file\s*=\s*"/etc/rabbitmq/conf\.d/30-dmc268\.conf"', body.group(1), re.MULTILINE)
+    conf = Path("infra/rabbitmq/30-dmc268.conf").read_text()
+    watermark = re.search(r"^vm_memory_high_watermark\.absolute\s*=\s*(\d+)MiB$", conf, re.MULTILINE)
+    assert watermark and int(watermark.group(1)) < limit_mb
+    assert re.search(r"^disk_free_limit\.absolute\s*=", conf, re.MULTILINE)
+
+
 def test_broker_node_name_survives_container_replacement() -> None:
     """Имя узла RabbitMQ — от hostname: без него новый контейнер — пустой узел на том же томе (#338)."""
     body = re.search(r'^resource\s+"docker_container"\s+"rabbitmq"\s*\{\n(.*?)^\}', read_infra_text(), re.MULTILINE | re.DOTALL)

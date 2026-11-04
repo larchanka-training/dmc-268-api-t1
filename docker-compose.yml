@@ -74,8 +74,11 @@ services:
       # наружу на петле для локальной проверки; в сети compose его скреит
       # Prometheus.
       - "127.0.0.1:15692:15692"
+    # Те же пороги, что на стенде (infra/rabbitmq/30-dmc268.conf, #150).
+    volumes:
+      - ./infra/rabbitmq/30-dmc268.conf:/etc/rabbitmq/conf.d/30-dmc268.conf:ro
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
       interval: 5s
       timeout: 5s
       retries: 10
