@@ -182,6 +182,13 @@ def test_filtered_file_is_reported_not_shown() -> None:
     assert {"path": "uv.lock", "part": "file", "reason": "filtered"} in payload.body["omitted"]
 
 
+def test_coverage_names_reviewed_and_filtered_files() -> None:
+    """Охват для сводки ревью — по тому, что вошло в пакет (#279)."""
+    coverage = _assemble().coverage
+    assert (coverage.reviewed, coverage.partial, coverage.not_reviewed) == (("app/repo.py",), (), ())
+    assert coverage.filtered == ("uv.lock",)
+
+
 def test_shown_hunks_are_returned_for_anchor_validation() -> None:
     result = _assemble()
     assert [h.file_path for h in result.hunks] == ["app/repo.py"]
