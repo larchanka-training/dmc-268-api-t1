@@ -237,8 +237,13 @@ def handle_review_thread_webhook(
         if merge_request is None:
             return True
         merge_request_id = merge_request.id
-        # Пауза зависит от прогона на head: ручной ставит свой gate и на паузе авторевью (D11).
-        check = pause_check(repo, head_run_in_charge(uow, repo, merge_request.id, head_sha))
+        # Пауза зависит от прогона на head: ручной ставит свой gate и на паузе авторевью (D11),
+        # и вне фильтра веток.
+        check = pause_check(
+            repo,
+            head_run_in_charge(uow, repo, merge_request.id, head_sha),
+            merge_request.target_branch,
+        )
     if check is not None:
         publish_pause_check(
             uow,

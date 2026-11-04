@@ -543,9 +543,11 @@ def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
     assert set(update["required"]) == fields
     assert update["additionalProperties"] is False
     assert update["properties"]["min_severity"]["$ref"] == "#/components/schemas/FindingSeverity"
-    # Фильтр сохраняется, но ревью его пока не применяет — фронтенд должен это видеть.
+    # Фронтенд должен видеть синтаксис фильтра и что PR вне него не ревьюится, а не ждёт проверку (#313).
     for model in ("RepositorySettingsResponse", "RepositorySettingsUpdate"):
-        assert "Пока не применяется" in components[model]["properties"]["branch_filter"]["description"]
+        description = components[model]["properties"]["branch_filter"]["description"]
+        for part in ("`**`", "регистр учитывается", "Ветка не в фильтре ревью", "Ручной запуск"):
+            assert part in description
     assert "RepositoryResponse" in components["RepositorySettingsResponse"]["properties"]["auto_review_enabled"]["description"]
 
     variants = {
