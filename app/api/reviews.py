@@ -49,7 +49,7 @@ from app.api.errors import (
 )
 from app.api.pagination import DEFAULT_LIMIT, Limit, Offset, page_size
 from app.api.problems import ErrorCode
-from app.api.repositories import _as_user, is_visible, user_repositories
+from app.api.repositories import as_user, is_visible, user_repositories
 from app.api.schemas import (
     FAILED_STAGE_DESCRIPTION,
     FailedStage,
@@ -493,7 +493,7 @@ def create_review(
         provider_repository_id=body.provider_repository_id,
         pull_request_number=body.pull_request_number,
     )
-    outcome = _as_user(
+    outcome = as_user(
         signed_in,
         oauth,
         lambda user: launch_review(
