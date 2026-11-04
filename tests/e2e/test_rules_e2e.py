@@ -9,6 +9,8 @@
 `docs/testing/RULES_E2E_REPORT.md`.
 """
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -397,5 +399,9 @@ def test_e2e_05_a_model_failure_fails_the_run_without_publishing_anything(stack:
     assert run.failure_reason == "ни один провайдер модели не ответил"
     assert stack.github.reviews_of(PR) == []
     assert stack.github.check_runs == []
+    # Через DLX брокер перекладывает отвергнутое сообщение асинхронно: ждём его, а не читаем раз.
+    deadline = time.monotonic() + 5
+    while stack.queue_depth(DLQ_NAME) == 0 and time.monotonic() < deadline:
+        time.sleep(0.05)
     assert stack.queue_depth(DLQ_NAME) == 1
 
