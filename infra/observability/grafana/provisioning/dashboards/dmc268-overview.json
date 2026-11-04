@@ -448,7 +448,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|nsfs\"}",
+          "expr": "node_filesystem_avail_bytes and on(device, mountpoint) dmc268:filesystem_avail:ratio",
           "legendFormat": "{{mountpoint}}",
           "range": true,
           "refId": "A"

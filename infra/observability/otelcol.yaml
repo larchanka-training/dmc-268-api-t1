@@ -1,8 +1,8 @@
 # Коллектор телеметрии — один конфиг для локального стека (docker compose,
-# профиль observability) и стенда (infra/main.tf): различия окружений — только
+# профиль observability) и стенда (infra/observability.tf): различия окружений — только
 # переменные запуска (реквизиты receiver postgresql) и сетевые алиасы,
 # совпадающие в обоих окружениях. Образ зафиксирован дайджестом в
-# docker-compose.yml и main.tf (тег в комментарии рядом): при обновлении
+# docker-compose.yml и infra/observability.tf (тег в комментарии рядом): при обновлении
 # образа читаются breaking changes.
 
 receivers:
@@ -36,7 +36,7 @@ receivers:
   # суффикс /dbname endpoint этого receiver не принимает. Расширение
   # pg_stat_statements receiver не читает: медленные запросы им не собираются,
   # расширение остаётся только для ручной диагностики (shared_preload_libraries
-  # включает контейнер базы — docker-compose.yml и infra/main.tf, расширение
+  # включает контейнер базы — docker-compose.yml и infra/postgres.tf, расширение
   # создаёт та же миграция 0013).
   postgresql:
     username: ${env:POSTGRESQL_USERNAME}
