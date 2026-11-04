@@ -276,8 +276,8 @@ def finish_github_setup(
     if installation_id is None:
         return _setup_done("setup_error=installation_not_found")
     # Подделанный переход с чужого сайта `state` этой сессии не знает: ничего не подключаем.
-    # Итог тот же, что «нечего подключать», а запись в логе показывает на стенде, вернул ли
-    # GitHub `state` (design D7). Значение `state` в лог не пишется. `update` ничего не
+    # Итог тот же, что «нечего подключать», а запись в логе показывает, что `state` нет
+    # или он чужой. Значение `state` в лог не пишется. `update` ничего не
     # подключает, только обновляет кэш, и `state` ему не нужен.
     if setup_action == "install" and (state is None or not setup_state_matches(token, state)):
         _log.warning("Setup URL: state не совпал (%s), ничего не подключено", "нет" if state is None else "чужой")

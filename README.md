@@ -320,9 +320,8 @@ uv run alembic heads               # должна быть ровно одна
 прежним `id`. Возврат с экрана установки — Setup URL `GET /api/v1/auth/github/setup`: после
 установки (`setup_action=install`) при «Only select repositories» подключает выбранные
 репозитории, где у пользователя admin или maintain и которых в сервисе ещё нет, только с `state`
-из `install_url` этой сессии; после изменения установки (`update`) только обновляет список. Прописываем его в настройках
-GitHub App после проверки на стенде, что GitHub возвращает `state` (design D7 change
-`repositories-one-list`). Запросы идут из лимита
+из `install_url` этой сессии; после изменения установки (`update`) только обновляет список. Прописывается в настройках
+GitHub App (см. `docs/GITHUB_APP.md`, «Настройки приложения»). Запросы идут из лимита
 пользователя, `installation_id` не хранится. Нужен ключ `USER_TOKEN_ENCRYPTION_KEY` (см. «Ключ
 шифрования токенов пользователя»); разрешений App сверх **Metadata: read** список не требует.
 Истёкший user access token сервис обновляет сам по refresh token.
