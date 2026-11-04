@@ -3,9 +3,10 @@
 # Composite action, а не reusable workflow, по механической причине: туннель
 # живёт внутри job'а и в соседний не передаётся, поэтому «поднять хранилище» и
 # «применить конфигурацию» обязаны быть одним job'ом. Вызывающий один —
-# job deploy в deploy.yml; второй, tfstate-backend.yml, удалён в audit-fixes.
-# SSH-подключение (хост `stand` в ~/.ssh/config) готовит не этот action, а
-# .github/actions/stand-ssh — его шаг должен стоять раньше.
+# job deploy в deploy.yml, поэтому имена, порт, образ и бакет — константы здесь,
+# а inputs только у секретов: composite action их сам не читает. Порт и бакет
+# те же, что в infra/backend.tf. SSH-подключение (хост `stand` в ~/.ssh/config)
+# готовит .github/actions/stand-ssh шагом раньше.
 name: S3 state backend
 description: Поднимает хранилище состояния, открывает туннель и готовит бакет. SSH к стенду готовит stand-ssh.
 
@@ -16,55 +17,19 @@ inputs:
   s3_password:
     description: Пароль хранилища
     required: true
-  container:
-    description: Имя контейнера хранилища
-    required: true
-  volume:
-    description: Имя тома хранилища
-    required: true
-  port:
-    description: Порт хранилища, он же локальный конец туннеля
-    required: true
-  image:
-    description: Образ хранилища
-    required: true
-  cred_user_var:
-    description: Имя переменной, которой образ принимает логин
-    required: true
-  cred_pass_var:
-    description: Имя переменной, которой образ принимает пароль
-    required: true
-  bucket:
-    description: Бакет под состояние
-    required: true
 
 runs:
   using: composite
   steps:
-    - name: Проверить SSH-подключение
-      shell: bash
-      run: |
-        set -euo pipefail
-        if ! grep -qx 'Host stand' ~/.ssh/config 2>/dev/null; then
-          echo "::error::нет хоста stand в ~/.ssh/config: шаг .github/actions/stand-ssh должен стоять до s3-backend"
-          exit 1
-        fi
-
     - name: Поднять S3-хранилище
       shell: bash
       env:
         S3_USER: ${{ inputs.s3_user }}
         S3_PASSWORD: ${{ inputs.s3_password }}
-        S3_CONTAINER: ${{ inputs.container }}
-        S3_VOLUME: ${{ inputs.volume }}
-        S3_PORT: ${{ inputs.port }}
-        S3_IMAGE: ${{ inputs.image }}
-        S3_CRED_USER_VAR: ${{ inputs.cred_user_var }}
-        S3_CRED_PASS_VAR: ${{ inputs.cred_pass_var }}
       run: |
         set -uo pipefail
         script_b64="$(sh "$GITHUB_ACTION_PATH/../../scripts/render-s3-script.sh" \
-          "$S3_CONTAINER" "$S3_VOLUME" "$S3_PORT" "$S3_IMAGE" | base64 -w0)"
+          dmc268-s3 dmc268-s3-data 9000 rustfs/rustfs:1.0.4 | base64 -w0)"
 
         # Скрипт идёт аргументом команды, учётные данные — на stdin, откуда он
         # кладёт их во временный env-file. Ни то, ни другое не оказывается в
@@ -72,8 +37,7 @@ runs:
         remote="umask 077; printf %s '$script_b64' | base64 -d > /tmp/dmc268-s3.sh; bash /tmp/dmc268-s3.sh; rc=\$?; rm -f /tmp/dmc268-s3.sh; exit \$rc"
 
         rc=0
-        out="$(printf '%s=%s\n%s=%s\n' \
-            "$S3_CRED_USER_VAR" "$S3_USER" "$S3_CRED_PASS_VAR" "$S3_PASSWORD" \
+        out="$(printf 'RUSTFS_ACCESS_KEY=%s\nRUSTFS_SECRET_KEY=%s\n' "$S3_USER" "$S3_PASSWORD" \
           | ssh -o ConnectTimeout=15 stand "$remote" 2>&1)" || rc=$?
 
         printf '%s\n' "$out"
@@ -95,11 +59,9 @@ runs:
 
     - name: Открыть туннель к хранилищу
       shell: bash
-      env:
-        S3_PORT: ${{ inputs.port }}
       # Туннель и его сторож — в скрипте: его же зовёт восстановление
       # состояния после обрыва (.github/scripts/deploy/recover-state.sh).
-      run: bash "$GITHUB_ACTION_PATH/../../scripts/s3-tunnel.sh" "$S3_PORT"
+      run: bash "$GITHUB_ACTION_PATH/../../scripts/s3-tunnel.sh" 9000
 
     - name: Создать бакет и включить версионирование
       shell: bash
@@ -107,11 +69,10 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.s3_user }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.s3_password }}
         AWS_DEFAULT_REGION: us-east-1
-        S3_PORT: ${{ inputs.port }}
-        STATE_BUCKET: ${{ inputs.bucket }}
+        STATE_BUCKET: dmc268-tfstate
       run: |
         set -uo pipefail
-        endpoint="http://127.0.0.1:${S3_PORT}"
+        endpoint="http://127.0.0.1:9000"
 
         rc=0
         out="$(aws --endpoint-url "$endpoint" s3api create-bucket --bucket "$STATE_BUCKET" 2>&1)" || rc=$?
