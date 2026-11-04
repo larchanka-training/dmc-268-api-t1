@@ -340,7 +340,8 @@ def test_rules_05_a_pull_request_changing_the_rules_is_reviewed_by_the_target_br
     _deliver(stack, pull)
     stack.work(llm, 1)
 
-    assert _rules_requests(stack) == [BASE]
+    # Правила - с базы; HEAD скачан как текст изменённого файла для контекста диффа.
+    assert _rules_requests(stack) == [BASE, HEAD]
     _, rules, _ = llm.requests[0].messages
     assert '### Правило "Error Handling Standards"' in rules.content
     assert "Ничего не проверять" not in rules.content
