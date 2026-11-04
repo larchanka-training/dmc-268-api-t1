@@ -32,6 +32,12 @@ resource "docker_container" "rabbitmq" {
   image    = docker_image.rabbitmq.image_id
   restart  = "unless-stopped"
 
+  # Как у postgres: на чистом сервере targeted apply возвращается, когда узел
+  # принимает AMQP (healthcheck ниже), и смене пароля в passwords.sh не нужен
+  # цикл ожидания. Две минуты, как было у цикла; живой стенд это не задевает.
+  wait         = true
+  wait_timeout = 120
+
   # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
   # принудительно (SIGKILL): база поднимается с «not properly shut down» и
   # восстановлением, брокер теряет то, что не успел сбросить на диск. С ним —
