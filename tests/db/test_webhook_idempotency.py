@@ -216,3 +216,57 @@ def test_find_reviewed_takes_the_latest_finished_webhook_run(clean_db) -> None:
 
     assert found is not None and found.id == UUID(int=102)
     assert missing is None
+
+
+def test_find_completed_manual_takes_the_latest_completed_manual_run(clean_db) -> None:
+    """Адаптер: только `manual`, только `completed`, самый поздний, чужой head не виден."""
+    repository = a_repository()
+    merge_request = MergeRequest(
+        id=UUID(int=10),
+        repository_id=repository.id,
+        number=6,
+        title="t",
+        description="",
+        author="octocat",
+        source_branch="feat",
+        target_branch="main",
+        head_sha="h" * 40,
+        state=MergeRequestState.OPEN,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    def run(n: int, status: ReviewRunStatus, trigger: TriggerSource, sha: str = "h" * 40) -> ReviewRun:
+        moment = NOW + timedelta(minutes=n)
+        return ReviewRun(
+            id=UUID(int=100 + n),
+            merge_request_id=merge_request.id,
+            head_sha=sha,
+            status=status,
+            trigger=trigger,
+            last_progress_at=moment,
+            created_at=moment,
+            updated_at=moment,
+        )
+
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        work.repositories.add(repository)
+        work.merge_requests.add(merge_request)
+        for item in (
+            run(1, ReviewRunStatus.COMPLETED, TriggerSource.MANUAL),
+            run(2, ReviewRunStatus.COMPLETED, TriggerSource.MANUAL),
+            run(3, ReviewRunStatus.COMPLETED, TriggerSource.WEBHOOK),
+            run(4, ReviewRunStatus.FAILED, TriggerSource.MANUAL),
+            run(5, ReviewRunStatus.CANCELLED, TriggerSource.MANUAL),
+            run(6, ReviewRunStatus.COMPLETED, TriggerSource.MANUAL, sha="o" * 40),
+            run(7, ReviewRunStatus.QUEUED, TriggerSource.MANUAL),
+        ):
+            work.review_runs.add(item)
+        work.commit()
+
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        found = work.review_runs.find_completed_manual(merge_request.id, "h" * 40)
+        missing = work.review_runs.find_completed_manual(merge_request.id, "x" * 40)
+
+    assert found is not None and found.id == UUID(int=102)
+    assert missing is None

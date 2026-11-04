@@ -24,8 +24,8 @@ from app.application.use_cases.handle_webhook import (
     WebhookOutcome,
     handle_webhook_event,
 )
-from app.domain.entities import RepositorySettings
-from app.domain.enums import Provider, ReviewRunStatus, TriggerSource
+from app.domain.entities import MergeRequest, RepositorySettings
+from app.domain.enums import MergeRequestState, Provider, ReviewRunStatus, TriggerSource
 from app.domain.vcs_errors import VcsError
 
 from ..fakes import (
@@ -42,6 +42,7 @@ from ..fakes import (
     webhook_payload,
 )
 from ..fakes.run_outcome import RecordingRunOutcome
+from ..fakes.unit_of_work import add_manual_run_with_critical_thread
 
 # Приём берёт только метаданные: дифф достаёт воркер с лимитом размера.
 EXPECTED_VCS_CALLS = [("metadata", REPO_FULL_NAME, 6, INSTALLATION_ID)]
@@ -306,7 +307,10 @@ def test_failed_run_on_same_commit_does_not_block_new_one() -> None:
 
 
 def test_finished_run_of_another_trigger_does_not_make_a_duplicate() -> None:
-    """Дублем делает только прогон по вебхуку: явное повторное ревью — не доставка."""
+    """Дублем делает только прогон по вебхуку: явное повторное ревью — не доставка.
+
+    Известное ограничение D4 change `manual-review-launch`: доставка на коммит, уже
+    проверенный вручную, создаёт ещё один прогон `webhook`. Сменят правило — тест покажет."""
     _, uow, _, queue = run_case()
     (finished,) = uow.review_runs.added
     object.__setattr__(finished, "status", ReviewRunStatus.COMPLETED)
@@ -315,6 +319,8 @@ def test_finished_run_of_another_trigger_does_not_make_a_duplicate() -> None:
     outcome, uow, _, queue = run_case(uow=uow, queue=queue)
     assert outcome.kind == "success"
     assert len(uow.review_runs.added) == 2
+    assert outcome.run is not None and outcome.run.trigger is TriggerSource.WEBHOOK
+    assert len(queue.jobs) == 2
 
 
 def test_lost_race_returns_conflict_with_survivor_run(monkeypatch) -> None:
@@ -644,6 +650,66 @@ def test_retarget_of_a_repository_with_auto_review_off_sets_only_the_pause_check
     assert len(queue.jobs) == 1
 
 
+@pytest.mark.parametrize("status", [ReviewRunStatus.COMPLETED, ReviewRunStatus.ANALYSING])
+def test_pr_event_on_the_head_of_a_manual_run_on_pause_leaves_its_gate(
+    status: ReviewRunStatus,
+) -> None:
+    """D11: на head ручной прогон, авторевью на паузе. Событие PR на тот же head не ставит
+    check паузы поверх gate ручного прогона и не запускает автоматическое ревью."""
+    _, uow, _, queue = run_case()
+    (run,) = uow.review_runs.added
+    uow.review_runs.add(replace(run, trigger=TriggerSource.MANUAL, status=status))
+    (repository,) = uow.repositories.stored.values()
+    uow.repositories.update_settings(
+        repository.id,
+        RepositorySettings(
+            auto_review_enabled=False, branch_filter=(), min_severity=repository.min_severity
+        ),
+        NOW,
+    )
+
+    # Повтор `opened` на тот же head: дублем его не признать — `find_reviewed` видит только вебхуковые.
+    outcome, uow, vcs, queue = run_case(uow=uow, queue=queue)
+
+    assert outcome.kind == "ignored"
+    assert vcs.checks == []
+    assert {r.id for r in uow.review_runs.added} == {run.id} and len(queue.jobs) == 1
+
+
+def test_pr_event_after_a_failed_manual_re_review_on_pause_leaves_the_earlier_gate() -> None:
+    """Ревью #335: на head завершённый ручной прогон, его повтор упал, авторевью на паузе.
+    Переотправка события PR на тот же head не ставит check паузы поверх gate завершённого."""
+    _, uow, _, queue = run_case()
+    (run,) = uow.review_runs.added
+    uow.review_runs.add(replace(run, trigger=TriggerSource.MANUAL, status=ReviewRunStatus.COMPLETED))
+    later = run.created_at + timedelta(minutes=1)
+    relaunch = replace(
+        run,
+        id=uuid4(),
+        trigger=TriggerSource.MANUAL,
+        status=ReviewRunStatus.FAILED,
+        last_progress_at=later,
+        created_at=later,
+        updated_at=later,
+    )
+    uow.review_runs.add(relaunch)
+    (repository,) = uow.repositories.stored.values()
+    uow.repositories.update_settings(
+        repository.id,
+        RepositorySettings(
+            auto_review_enabled=False, branch_filter=(), min_severity=repository.min_severity
+        ),
+        NOW,
+    )
+
+    # Повтор `opened` на тот же head.
+    outcome, uow, vcs, queue = run_case(uow=uow, queue=queue)
+
+    assert outcome.kind == "ignored"
+    assert vcs.checks == []
+    assert len(queue.jobs) == 1
+
+
 def _case_with_repository(repository: Any, action: str = "opened", *, vcs_error: VcsError | None = None):
     uow = FakeUow()
     uow.repositories.add(repository)
@@ -667,6 +733,48 @@ def test_auto_review_off_skips_the_run_and_sets_its_own_check(action: str) -> No
     assert check == AUTO_REVIEW_OFF_CHECK
     assert check.title == "Авторевью выключено в настройках"
     assert "настройках репозитория в кабинете" in check.summary
+
+
+def test_a_delayed_pause_check_returns_the_gate_of_a_manual_run_launched_meanwhile() -> None:
+    """Ревью #335: на head прогона нет — check паузы. Пока GitHub его принимал, ручной
+    запуск записал PR и прогон, и тот опубликовал `failure`: после POST gate возвращается."""
+    uow = FakeUow()
+    uow.repositories.add(replace(a_repository(), auto_review_enabled=False))
+    payload = webhook_payload("synchronize")
+    head_sha = payload["pull_request"]["head"]["sha"]
+
+    def manual_run_completes() -> None:
+        (repository,) = uow.repositories.stored.values()
+        merge_request = MergeRequest(
+            id=uuid4(),
+            repository_id=repository.id,
+            number=payload["pull_request"]["number"],
+            title="t",
+            description="",
+            author="a",
+            source_branch="feat",
+            target_branch="main",
+            head_sha=head_sha,
+            state=MergeRequestState.OPEN,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        uow.merge_requests.add(merge_request)
+        add_manual_run_with_critical_thread(
+            uow,
+            merge_request_id=merge_request.id,
+            head_sha=head_sha,
+            status=ReviewRunStatus.COMPLETED,
+            at=NOW + timedelta(minutes=1),
+        )
+
+    vcs = FakeVcs(during_first_check=manual_run_completes)
+
+    outcome = handle_webhook_event(payload, uow, vcs, FakeQueue(), now=lambda: NOW, new_id=uuid4)
+
+    assert outcome.kind == "ignored"
+    assert vcs.checks[0] == (head_sha, AUTO_REVIEW_OFF_CHECK)
+    assert [check.conclusion for _, check in vcs.checks] == ["success", "failure"]
 
 
 @pytest.mark.parametrize("auto_review_enabled", [True, False], ids=["авторевью", "без авторевью"])

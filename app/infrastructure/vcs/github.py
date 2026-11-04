@@ -127,6 +127,9 @@ class GitHubVcsGateway:
                 source_branch=data["head"]["ref"],
                 target_branch=data["base"]["ref"],
                 state=state,
+                # У head PR из удалённого форка `repo` пуст: такой PR считается форком.
+                from_fork=(data["head"].get("repo") or {}).get("id") != data["base"]["repo"]["id"],
+                author_association=data.get("author_association"),
             )
         except (ValueError, KeyError, TypeError) as error:
             raise VcsError(

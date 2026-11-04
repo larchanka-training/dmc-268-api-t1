@@ -22,7 +22,7 @@ from app.api.errors import problem_response
 from app.api.factory import create_app
 from app.api.problems import PROBLEM_MODELS, AnyProblem, ErrorCode, problem_type
 from app.config import Settings
-from app.domain.enums import RulesStatus
+from app.domain.enums import ReviewRunStatus, RulesStatus
 
 from .fakes.auth import sign_in
 from .fakes.unit_of_work import FakeUnitOfWork
@@ -85,6 +85,17 @@ def assert_problem(response, status: int, code: str, path: str) -> dict[str, Any
     assert body["trace_id"] != "0" * 32
     assert response.headers["X-Trace-ID"] == body["trace_id"]
     return body
+
+
+def test_manage_required_title_names_no_role() -> None:
+    """Код отдают и подключение (admin или maintain), и ручной запуск (push и выше): заголовок —
+    общий, нужные роли называет `detail` (D7 change `manual-review-launch`)."""
+    contract = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    schema = contract["components"]["schemas"]["RepositoryManageRequiredProblem"]
+    assert schema["properties"]["title"]["const"] == "Недостаточно прав на репозиторий"
+    assert PROBLEM_MODELS[ErrorCode.REPOSITORY_MANAGE_REQUIRED].model_fields["title"].default == (
+        "Недостаточно прав на репозиторий"
+    )
 
 
 def test_problem_type_is_kebab_case_urn() -> None:
@@ -276,14 +287,8 @@ def _signed_in_client() -> TestClient:
     return TestClient(app, base_url=ORIGIN)
 
 
-def test_planned_endpoint_answers_not_implemented() -> None:
-    """`POST /reviews` описан в схеме полностью, а отвечает `501 NOT_IMPLEMENTED`."""
-    response = _signed_in_client().post("/api/v1/reviews", json=REVIEW_BODY, headers={"Origin": ORIGIN})
-    assert_problem(response, 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
-
-
-def test_planned_endpoint_checks_origin_session_and_body_first(client: TestClient) -> None:
-    """Заглушка проверяет `Origin`, сессию и тело, как изменяющие ручки."""
+def test_review_launch_checks_origin_session_and_body_first(client: TestClient) -> None:
+    """Ручной запуск проверяет `Origin`, сессию и тело раньше похода к GitHub, как изменяющие ручки."""
     assert_problem(client.post("/api/v1/reviews", json=REVIEW_BODY), 403, "ORIGIN_FORBIDDEN", "/api/v1/reviews")
     response = client.post("/api/v1/reviews", json=REVIEW_BODY, headers={"Origin": ORIGIN})
     assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/reviews")
@@ -685,7 +690,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     """Тела, которые сервер отдаёт на деле, проходят модель своего кода (`AnyProblem`).
 
     Каждый код из `ErrorCode` здесь представлен хотя бы одним настоящим ответом — кроме
-    `REVIEW_ALREADY_ACTIVE`: его отдаст ручной запуск, а он пока отвечает `501`.
+    `NOT_IMPLEMENTED`: заглушек в контракте сейчас нет, код ждёт следующую запланированную ручку.
     """
     from app.domain.vcs_errors import VcsError, VcsNotFoundError
 
@@ -697,7 +702,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     from .test_repositories_api import _client as repositories_client
     from .test_repositories_api import _connect as connect_repository
     from .test_repositories_api import _repository as registered_repository
-    from .test_reviews_api import BASE_SHA, RUN_DIFF
+    from .test_reviews_api import BASE_SHA, RUN_DIFF, Launch, _run_on_head
     from .test_reviews_api import _add_run as add_run
     from .test_reviews_api import _client as reviews_client
 
@@ -710,6 +715,8 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     run_without_base = add_run(without_base)
     run_commit_gone = add_run(commit_gone, base_sha=BASE_SHA)
     run_too_large = add_run(too_large, base_sha=BASE_SHA)
+    already_active = Launch()
+    _run_on_head(already_active, ReviewRunStatus.ANALYSING)
     responses = [
         client.post("/api/v1/webhooks/bitbucket"),
         signed_in.get("/api/v1/repositories", params={"limit": "abc"}),
@@ -740,11 +747,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         client.post("/api/v1/webhooks/github", headers={"Content-Length": str(SETTINGS.webhook_body_max_bytes + 1)}),
         client.get("/api/v1/auth/bitbucket/login"),
         _signed_in_client().post("/api/v1/reviews", json={}, headers={"Origin": ORIGIN}),
-        _signed_in_client().post(
-            "/api/v1/reviews",
-            json=REVIEW_BODY,
-            headers={"Origin": ORIGIN},
-        ),
+        already_active.post(),
     ]
     seen = set()
     for response in responses:
@@ -755,4 +758,4 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         assert TRACE_ID.fullmatch(response.headers["X-Trace-ID"])
         assert response.headers["X-Trace-ID"] == body["trace_id"]
         seen.add(body["code"])
-    assert seen == {code.value for code in ErrorCode} - {ErrorCode.REVIEW_ALREADY_ACTIVE.value}
+    assert seen == {code.value for code in ErrorCode} - {ErrorCode.NOT_IMPLEMENTED.value}

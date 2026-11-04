@@ -388,7 +388,7 @@ class WebhookEvent:
     преобразований.
     `author_association` — связь автора с репозиторием по GitHub (`None`, если
     поля нет), `from_fork` — ветка PR не в самом репозитории; по ним
-    `is_trusted_author` отсекает PR посторонних.
+    `is_trusted_pull_request` отсекает PR посторонних.
     """
 
     action: str
@@ -426,6 +426,11 @@ class PRMetadata:
     source_branch: str
     target_branch: str
     state: MergeRequestState
+    # Ветка PR не в самом репозитории (удалённый форк — тоже форк) и связь автора с
+    # репозиторием по GitHub (`None`, если поля нет): по ним `is_trusted_pull_request`
+    # решает, свой ли PR, при ручном запуске — события вебхука там нет.
+    from_fork: bool
+    author_association: str | None
 
 
 @dataclass(frozen=True, slots=True)

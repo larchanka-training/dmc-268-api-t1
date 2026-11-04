@@ -7,6 +7,7 @@
 
 import datetime as dt
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,8 @@ def pr_metadata(
         source_branch="feat/webhook-intake-rebased",
         target_branch=target_branch,
         state=MergeRequestState.OPEN,
+        from_fork=False,
+        author_association="OWNER",
     )
 
 
@@ -121,6 +124,8 @@ class FakeVcs:
     # Сбой только check run merge gate; выставленные check run - (head_sha, check).
     check_error: VcsError | None = None
     checks: list[tuple[str, MergeGateCheck]] = field(default_factory=list)
+    # Что случилось, пока GitHub принимал первый check run: вызывается один раз, после записи.
+    during_first_check: Callable[[], None] | None = None
     calls: list[tuple[Any, ...]] = field(default_factory=list)
     # Sha ветки по её имени; ветки нет в словаре — `VcsError`, как 422 GitHub.
     branch_shas: dict[str, str] = field(default_factory=dict)
@@ -230,6 +235,9 @@ class FakeVcs:
         if self.check_error is not None:
             raise self.check_error
         self.checks.append((head_sha, check))
+        if self.during_first_check is not None:
+            hook, self.during_first_check = self.during_first_check, None
+            hook()
 
 
 @dataclass

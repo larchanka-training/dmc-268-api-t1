@@ -42,8 +42,9 @@ PR_JSON: dict[str, Any] = {
     "title": "feat: приём вебхуков и VCS-шлюз",
     "body": "Принимает вебхуки и ставит прогон в очередь.",
     "user": {"login": "ilyassakhanov"},
-    "head": {"sha": "a" * 40, "ref": "feat/webhook-intake"},
-    "base": {"sha": "b" * 40, "ref": "develop"},
+    "author_association": "OWNER",
+    "head": {"sha": "a" * 40, "ref": "feat/webhook-intake", "repo": {"id": 1001}},
+    "base": {"sha": "b" * 40, "ref": "develop", "repo": {"id": 1001}},
 }
 
 EXPECTED_METADATA = PRMetadata(
@@ -56,6 +57,8 @@ EXPECTED_METADATA = PRMetadata(
     source_branch="feat/webhook-intake",
     target_branch="develop",
     state=MergeRequestState.OPEN,
+    from_fork=False,
+    author_association="OWNER",
 )
 
 
@@ -381,6 +384,41 @@ def test_exhausted_retries_raise_vcs_unavailable(rsa_key_pair: RsaKeyPair) -> No
 
     assert len(seen) == 3
     assert sleeps == [0.5, 1.0]
+
+
+@pytest.mark.parametrize(
+    ("head_repo", "from_fork"),
+    [({"id": 1001}, False), ({"id": 2002}, True), (None, True)],
+    ids=["ветка-репозитория", "форк", "удалённый-форк"],
+)
+def test_fetch_pr_metadata_tells_a_fork_by_the_head_repository(
+    rsa_key_pair: RsaKeyPair, head_repo: dict[str, int] | None, from_fork: bool
+) -> None:
+    """Форк — `head.repo` другого репозитория; у удалённого форка `head.repo = null`."""
+    payload = {**PR_JSON, "head": {**PR_JSON["head"], "repo": head_repo}}
+    gateway = make_gateway(rsa_key_pair, responding([200], httpx.Response(200, json=payload), []), [])
+
+    assert gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID).from_fork is from_fork
+
+
+def test_fetch_pr_metadata_without_author_association_has_none(rsa_key_pair: RsaKeyPair) -> None:
+    payload = {key: value for key, value in PR_JSON.items() if key != "author_association"}
+    gateway = make_gateway(rsa_key_pair, responding([200], httpx.Response(200, json=payload), []), [])
+
+    assert gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID).author_association is None
+
+
+def test_fetch_pr_metadata_404_raises_not_found(rsa_key_pair: RsaKeyPair) -> None:
+    """PR нет — `VcsNotFoundError` сразу, без повторов."""
+    seen: list[httpx.Request] = []
+    sleeps: list[float] = []
+    gateway = make_gateway(rsa_key_pair, responding([404], httpx.Response(200, json={}), seen), sleeps)
+
+    with pytest.raises(VcsNotFoundError):
+        gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
+
+    assert len(seen) == 1
+    assert sleeps == []
 
 
 def test_404_raises_immediately_without_retry(rsa_key_pair: RsaKeyPair) -> None:

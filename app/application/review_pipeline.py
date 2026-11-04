@@ -24,7 +24,13 @@ from uuid import UUID
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits, request_review, request_verification
-from app.application.merge_gate_publish import build_failed_review_check, pause_check
+from app.application.merge_gate_publish import (
+    build_failed_review_check,
+    head_run_in_charge,
+    pause_check,
+    publish_pause_check,
+    settle_merge_gate,
+)
 from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
@@ -154,7 +160,9 @@ def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) 
     мерджа, и упавший прогон на PR ничего не оставляет. Прогон, за которым на head
     уже есть новый, gate не трогает - head отвечает тот. На паузе check паузы ставится
     и без прежнего ревью: иначе обязательная проверка держала бы PR, который ревью не
-    ждёт. Best-effort, как `_mark_failed`: сбой пишется в лог и не подменяет исходное
+    ждёт. Исключение - пауза авторевью, когда последний на head - упавший повтор ручного
+    ревью, а до него есть завершённый ручной прогон: за head снова отвечает он
+    (`head_run_in_charge`), и выставляется его gate. Best-effort, как `_mark_failed`: сбой пишется в лог и не подменяет исходное
     исключение.
     """
     try:
@@ -166,9 +174,38 @@ def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) 
             earlier = uow.review_runs.find_reviewed(run.merge_request_id, job.head_sha)
             merge_request = uow.merge_requests.get(run.merge_request_id)
             repository = uow.repositories.get(merge_request.repository_id) if merge_request else None
+            # Вытеснен ли прогон - по `latest`; чей gate на head - по `in_charge`.
+            in_charge = head_run_in_charge(uow, repository, run.merge_request_id, job.head_sha)
         if latest is None or latest.id != run.id or repository is None:
             return
-        check = pause_check(repository) or (build_failed_review_check() if earlier is not None else None)
+        pause = pause_check(repository, in_charge)
+        if pause is None and in_charge is not None and in_charge.id != run.id:
+            # Пауза авторевью, повтор ручного ревью упал: gate завершённого ручного до него.
+            settle_merge_gate(
+                uow,
+                vcs,
+                merge_request_id=run.merge_request_id,
+                repo_full_name=job.repository_full_name,
+                head_sha=job.head_sha,
+                installation_id=job.installation_id,
+                run_id=in_charge.id,
+                repository_id=repository.id,
+            )
+            return
+        if pause is not None and merge_request is not None:
+            # Пока идёт POST, за head мог стать новый ручной прогон и выставить свой gate.
+            publish_pause_check(
+                uow,
+                vcs,
+                pause,
+                repository_id=repository.id,
+                pr_number=merge_request.number,
+                repo_full_name=job.repository_full_name,
+                head_sha=job.head_sha,
+                installation_id=job.installation_id,
+            )
+            return
+        check = build_failed_review_check() if earlier is not None else None
         if check is None:
             return
         vcs.set_merge_gate_check(

@@ -95,6 +95,11 @@ class ReviewRunRepo(Protocol):
         """Самый поздний прогон по вебхуку на этот коммит в `REVIEWED_STATUSES`."""
         ...
 
+    def find_completed_manual(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        """Самый поздний ручной прогон на этот коммит в `completed`: его gate держит head
+        на паузе авторевью, когда повторный ручной прогон упал или отменён."""
+        ...
+
     def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
         """Самый поздний прогон на этот коммит в любом статусе: им решается, чьё
         ревью сейчас отвечает за merge gate head-коммита."""
