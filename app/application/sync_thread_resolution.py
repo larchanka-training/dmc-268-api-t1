@@ -120,11 +120,7 @@ def refresh_merge_gate_for_merge_request(
     )
     with uow:
         repository = uow.repositories.get(repository_id)
-        head_run = (
-            head_run_in_charge(uow, repository, merge_request_id, head_sha)
-            if repository is not None
-            else uow.review_runs.find_latest(merge_request_id, head_sha)
-        )
+        head_run = head_run_in_charge(uow, repository, merge_request_id, head_sha)
     if head_run is None or head_run.status is not ReviewRunStatus.COMPLETED:
         # Head не проверен: ревью идёт, упало или отменено сменой целевой ветки
         # (#222). Gate выставит прогон, который его проверит; до тех пор пересчёт

@@ -287,6 +287,24 @@ def _run_on_head(
             AUTO_REVIEW_OFF_CHECK,
             id="only-webhook",
         ),
+        # Ревью #335: последний — вебхуковый после ручного (например, после смены целевой
+        # ветки), — за head отвечает он, а на паузе это check паузы, не gate ручного.
+        pytest.param(
+            True,
+            False,
+            [(40, _MANUAL, _S.COMPLETED), (41, _WEBHOOK, _S.COMPLETED)],
+            41,
+            AUTO_REVIEW_OFF_CHECK,
+            id="webhook-after-manual",
+        ),
+        pytest.param(
+            True,
+            False,
+            [(40, _MANUAL, _S.COMPLETED), (41, _WEBHOOK, _S.FAILED)],
+            41,
+            AUTO_REVIEW_OFF_CHECK,
+            id="failed-webhook-after-manual",
+        ),
         # Выключенный репозиторий важнее завершённого ручного.
         pytest.param(
             False,
@@ -331,6 +349,19 @@ def test_head_run_in_charge_returns_the_completed_manual_run_after_a_failed_rela
         UUID(int=in_charge) if in_charge else None
     )
     assert pause_check(repository, head_run) is expected
+
+
+def test_head_run_in_charge_without_a_repository_is_the_latest_run() -> None:
+    """Без записи репозитория паузы нет — за head отвечает последний прогон."""
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run_on_head(40, _MANUAL, _S.COMPLETED, minute=0))
+    uow.review_runs.add(_run_on_head(41, _MANUAL, _S.FAILED, minute=1))
+
+    with uow:
+        head_run = head_run_in_charge(uow, None, _MR_ID, "head1")
+
+    assert head_run is not None
+    assert head_run.id == UUID(int=41)
 
 
 def test_a_delayed_pause_check_returns_the_gate_of_a_manual_run_after_its_relaunch_failed() -> (

@@ -70,8 +70,8 @@ def pause_check(repository: Repository, head_run: ReviewRun | None) -> MergeGate
     `DISABLED_REVIEW_CHECK`, чтобы пользователь чинил то, что действительно мешает
     (сначала подключение), а начатый до выключения прогон не блокировал мердж.
     Пауза `auto_review_enabled = false` — про автоматическое ревью: ручной прогон на head,
-    пока он не упал и не отменён, ставит свой gate (D11); после упавшего повторного —
-    завершённый прежний, его подставляет `head_run_in_charge`. Упавший ручной прогон без
+    пока он не упал и не отменён, ставит свой gate (D11); если последний — упавший или
+    отменённый ручной, — завершённый ручной до него, его подставляет `head_run_in_charge`. Упавший ручной прогон без
     завершённого до него — check паузы: `failure` держал бы PR, который авторевью не ждёт.
     Вызывают вебхук PR, вебхук треда, `settle_merge_gate` и упавший прогон.
     """
@@ -85,21 +85,32 @@ def pause_check(repository: Repository, head_run: ReviewRun | None) -> MergeGate
 
 
 def head_run_in_charge(
-    uow: UnitOfWork, repository: Repository, merge_request_id: UUID, head_sha: str
+    uow: UnitOfWork, repository: Repository | None, merge_request_id: UUID, head_sha: str
 ) -> ReviewRun | None:
     """Прогон, чей итог отвечает за gate head; зовётся внутри открытого вызывающим `with uow`.
 
-    Обычно — последний прогон на head (`find_latest`). На паузе авторевью, если последний
-    не ручной в работе или завершённый, — последний завершённый ручной прогон на head, а
-    его нет — последний: упавший или отменённый повтор ручного ревью не снимает gate
-    прежнего (change `manual-gate-after-failed-relaunch`, D1). Вытеснен ли прогон новым,
-    решает `find_latest`, а не эта функция.
+    Обычно — последний прогон на head (`find_latest`), и без записи репозитория тоже. На
+    паузе авторевью, если последний — ручной и он упал или отменён, — последний завершённый
+    ручной прогон на head, а его нет — последний: упавший или отменённый повтор ручного
+    ревью не снимает gate прежнего (change `manual-gate-after-failed-relaunch`, D1).
+    Последний вебхуковый за head отвечает сам, даже после ручного: он проверял, возможно,
+    другую базу (change `manual-gate-fallback-after-manual-only`). Вытеснен ли прогон
+    новым, решает `find_latest`, а не эта функция.
     """
     latest = uow.review_runs.find_latest(merge_request_id, head_sha)
-    paused = repository.connected_at is not None and not repository.auto_review_enabled
-    if not paused or _manual_run_in_charge(latest):
+    if repository is None or not _failed_manual_relaunch(repository, latest):
         return latest
     return uow.review_runs.find_completed_manual(merge_request_id, head_sha) or latest
+
+
+def _failed_manual_relaunch(repository: Repository, latest: ReviewRun | None) -> bool:
+    paused = repository.connected_at is not None and not repository.auto_review_enabled
+    return (
+        paused
+        and latest is not None
+        and latest.trigger is TriggerSource.MANUAL
+        and latest.status in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
+    )
 
 
 def publish_pause_check(
@@ -134,7 +145,7 @@ def publish_pause_check(
         merge_request = uow.merge_requests.find_by_number(repository_id, pr_number)
         latest = (
             head_run_in_charge(uow, repository, merge_request.id, head_sha)
-            if repository is not None and merge_request is not None
+            if merge_request is not None
             else None
         )
     if (
@@ -257,11 +268,7 @@ def settle_merge_gate(
         # отвечать другой прогон, и повтор прежнего check вернул бы чужой итог.
         with uow:
             repository = uow.repositories.get(repository_id)
-            latest = (
-                head_run_in_charge(uow, repository, merge_request_id, head_sha)
-                if repository is not None
-                else None
-            )
+            latest = head_run_in_charge(uow, repository, merge_request_id, head_sha)
         if repository is None:
             raise LookupError(f"repository {repository_id} not found")
         if latest is None:
