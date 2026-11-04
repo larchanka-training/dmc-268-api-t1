@@ -62,6 +62,12 @@ printf '%s\\n%s\\n%s\\n' "$command" "$first" "$second" > "$STATE/pg.stdin"
 [ -n "${PSQL_ALTER_NOOP:-}" ] || printf '%s' "$first" > "$STATE/pg"
 """
 
+# Подложный rabbitmq-diagnostics: BROKER_NOT_READY — узел не принимает AMQP.
+FAKE_RABBITMQ_DIAGNOSTICS = """#!/usr/bin/env bash
+printf 'rabbitmq-diagnostics %s\\n' "$*" >> "$CALLS"
+[ -z "${BROKER_NOT_READY:-}" ]
+"""
+
 # Подложный rabbitmqctl: пароль — первой строкой stdin, как у настоящего.
 FAKE_RABBITMQCTL = """#!/usr/bin/env bash
 printf 'rabbitmqctl %s\\n' "$*" >> "$CALLS"
@@ -91,6 +97,7 @@ def run(
     bin_dir.mkdir(exist_ok=True)
     for name, body in (
         ("docker", FAKE_DOCKER), ("psql", FAKE_PSQL), ("rabbitmqctl", FAKE_RABBITMQCTL),
+        ("rabbitmq-diagnostics", FAKE_RABBITMQ_DIAGNOSTICS),
     ):
         (bin_dir / name).write_text(body)
         (bin_dir / name).chmod(0o755)
@@ -213,6 +220,17 @@ def test_a_missing_container_changes_no_password(tmp_path: Path) -> None:
         assert (state / "pg").read_text() == OLD_PG, missing
         assert (state / "rabbit").read_text() == OLD_RABBIT, missing
         assert changed(tmp_path) == [], missing
+
+
+def test_a_broker_that_is_not_ready_stops_the_deploy_before_any_change(tmp_path: Path) -> None:
+    """Docker перезапускает брокер, targeted-план `No changes`, `wait` не ждёт: шаг падает
+    до первой смены, оба пароля прежние, ложной записи о смене нет."""
+    result, state = run(tmp_path, BROKER_NOT_READY="1")
+
+    assert result.returncode != 0
+    assert (state / "pg").read_text() == OLD_PG
+    assert (state / "rabbit").read_text() == OLD_RABBIT
+    assert changed(tmp_path) == []
 
 
 def test_a_password_with_whitespace_or_non_ascii_is_rejected_before_the_server(tmp_path: Path) -> None:

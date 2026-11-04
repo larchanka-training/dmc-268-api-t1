@@ -11,9 +11,10 @@
 # (`ignore_changes = [env]` в infra/postgres.tf и infra/rabbitmq.tf) и не
 # пересоздаются.
 #
-# Сначала — оба контейнера отвечают: на чистом сервере их дождался apply (`wait`),
-# здесь проходит `docker exec`. Иначе шаг упал бы между сменами, с уже
-# новым паролем базы и старым у брокера.
+# Сначала — оба контейнера на месте, и брокер принимает AMQP (`check_port_connectivity`,
+# как healthcheck): на чистом сервере их дождался apply (`wait`), а брокер,
+# перезапущенный Docker'ом посреди деплоя, проба ловит. Иначе шаг упал бы между
+# сменами, с уже новым паролем базы и старым у брокера.
 #
 # Шаг идемпотентный: сначала вход новым паролем — у postgres по сети, как
 # входят API и миграции (`samenet`, scram), у брокера — `authenticate_user`. Вошёл
@@ -129,8 +130,8 @@ set_password() { # контейнер, сервис, скрипт, пароль
   done
 }
 
-# Оба контейнера на месте до первой смены: иначе пароль базы сменится, а брокера нет.
-docker exec -i dmc268-rabbitmq true < /dev/null
+# Проверки из шапки: до первой смены пароля.
+docker exec -i dmc268-rabbitmq rabbitmq-diagnostics -q check_port_connectivity < /dev/null
 docker exec -i dmc268-postgres true < /dev/null
 set_password dmc268-postgres postgres "$postgres_sh" "$PG_PASSWORD"
 set_password dmc268-rabbitmq rabbitmq "$rabbitmq_sh" "$RABBITMQ_PASSWORD"
