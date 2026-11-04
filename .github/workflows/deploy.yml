@@ -244,13 +244,6 @@ jobs:
         with:
           s3_user: ${{ secrets.S3_USER_DMC268_T1 }}
           s3_password: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
-          container: dmc268-s3
-          volume: dmc268-s3-data
-          port: "9000"
-          image: rustfs/rustfs:1.0.3
-          cred_user_var: RUSTFS_ACCESS_KEY
-          cred_pass_var: RUSTFS_SECRET_KEY
-          bucket: dmc268-tfstate
 
       # docker CLI раннера ходит к демону стенда (DOCKER_HOST=ssh://stand) и
       # отдаёт ему учётные данные реестра вместе с запросом pull: образ лежит
