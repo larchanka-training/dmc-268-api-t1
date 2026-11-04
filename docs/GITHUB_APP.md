@@ -217,7 +217,7 @@ larchanka-training/dmc-268-api-t1    [●━━] вкл     Настройки
      обновляет список;
    - выбрали «All repositories», иначе бот сразу пошёл бы во все репозитории аккаунта;
    - приложение поставили прямо на GitHub, мимо кнопки сервиса;
-   - GitHub не вернул `state`. Возвращает ли он его, на стенде ещё не проверено.
+   - `state` не от этой сессии: ссылку установки открыли в другой сессии или переход подделан.
 
    Тогда репозиторий появляется в списке выключенным и включается переключателем.
 5. Пользователь возвращается на «Репозитории» с итогом: «подключено N», «запрос отправлен
@@ -315,7 +315,7 @@ GitHub присылает как `CONTRIBUTOR`) или из форка от ав
 | Permissions → Pull requests | Read and write | нет метаданных PR, ревью не публикуется, треды не читаются |
 | Permissions → Checks | Read and write | нет проверки `dmc-268-ai-review`, merge gate не работает |
 | Subscribe to events | Pull request; Pull request review thread | без первого нет прогонов; без второго проверка не пересчитывается при закрытии треда |
-| Setup URL, Redirect on update | `<PUBLIC_ORIGIN>/api/v1/auth/github/setup`, Redirect on update включён. Прописывать только после проверки на стенде, что GitHub возвращает `state` (задача 3.4 change `repositories-one-list`); пока не прописано, поле пустое | после установки GitHub не вернёт пользователя в сервис |
+| Setup URL, Redirect on update | `<PUBLIC_ORIGIN>/api/v1/auth/github/setup`, Redirect on update включён | после установки GitHub не вернёт пользователя в сервис |
 | Where can this GitHub App be installed | «Any account» ставит на любые аккаунты; «Only on this account» только в аккаунте владельца приложения | с «Only on this account» пользователи не поставят приложение на свои репозитории |
 
 **«Any account» и деньги.** Каждый прогон платит за модель с ключа
@@ -373,9 +373,9 @@ Private key меняется без простоя: сгенерировать �
 
 1. **Доходят ли вебхуки.** В настройках приложения → Advanced → Recent Deliveries (видит
    владелец приложения). Доставок нет: не задан Webhook URL или не включён Webhook. Доставки с
-   ошибкой: там же код ответа. Со стороны стенда смотрите шаг «Доставки вебхука и сбои воркера с
-   прошлого выката» в summary деплоя: число `POST /webhooks` по кодам и запросов GitHub-Hookshot к
-   nginx.
+   ошибкой: там же код ответа. Со стороны стенда — Grafana стенда, Explore, запрос
+   `sum by (http_response_status_code) (increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/{provider}"}[1h]))`:
+   доставки вебхука по кодам ответа.
 2. **Что ответил сервис.**
    - `401`: секрет вебхука в настройках приложения не совпадает с `WEBHOOK_SECRET_DMC268_T1`;
    - `202` `ignored`: репозиторий не подключён или выключен (у выключенного на коммите

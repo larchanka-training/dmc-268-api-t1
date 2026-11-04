@@ -62,6 +62,14 @@ locals {
     "OTEL_BLRP_MAX_QUEUE_SIZE=512",
   ] : []
 
+  # Страница статуса (GET /api/v1/status, change add-status-page) читает
+  # сработавшие алерты у Prometheus стека: он в сети данных вместе с API
+  # (observability.tf). Только API — воркеру статус не нужен. Стек выключен —
+  # переменной нет, и статус сервиса — unknown без запросов.
+  status_env = var.observability_enabled ? [
+    "PROMETHEUS_URL=http://dmc268-prometheus:9090",
+  ] : []
+
   # Общая часть OTEL_RESOURCE_ATTRIBUTES; service.instance.id каждый контейнер
   # дописывает своим стабильным именем (см. env ниже): случайный UUID на
   # процесс растил бы в Prometheus серии exported_instance — ресурс

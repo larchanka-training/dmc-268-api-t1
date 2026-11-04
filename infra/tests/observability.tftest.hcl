@@ -352,3 +352,44 @@ run "otlp_network_exists_without_the_stack" {
     error_message = "Сеть dmc268-otlp должна создаваться и с выключенным стеком: на неё по имени ссылается стек интерфейса."
   }
 }
+
+# Страница статуса (change add-status-page): API читает алерты у Prometheus
+# стека по имени контейнера — оба в сети данных. Воркеру адрес не нужен.
+run "api_reads_alerts_from_prometheus_with_the_stack" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+  }
+
+  assert {
+    condition = (
+      contains(docker_container.api.env, "PROMETHEUS_URL=http://${docker_container.prometheus[0].name}:9090")
+      && length([for e in docker_container.worker.env : e if startswith(e, "PROMETHEUS_URL=")]) == 0
+    )
+    error_message = "Со стеком API получает PROMETHEUS_URL=http://dmc268-prometheus:9090, воркер — нет."
+  }
+
+  assert {
+    condition = contains(
+      setintersection(
+        toset([for n in docker_container.api.networks_advanced : n.name]),
+        toset([for n in docker_container.prometheus[0].networks_advanced : n.name]),
+      ),
+      docker_network.backend.name,
+    )
+    error_message = "API и Prometheus должны делить сеть данных: по ней API читает алерты для страницы статуса."
+  }
+}
+
+run "api_has_no_prometheus_url_without_the_stack" {
+  command = plan
+
+  # observability_enabled по умолчанию false: Prometheus нет, статус — unknown.
+  assert {
+    condition     = length([for e in docker_container.api.env : e if startswith(e, "PROMETHEUS_URL=")]) == 0
+    error_message = "Без стека PROMETHEUS_URL у API не задаётся: Prometheus не существует."
+  }
+}

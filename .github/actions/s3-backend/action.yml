@@ -83,6 +83,10 @@ runs:
         case "$image_note" in
           "не "*) echo "::warning::образ хранилища: $image_note" ;;
         esac
+        limits_note="$(printf '%s\n' "$out" | sed -n 's/^S3_LIMITS=//p' | tail -1)"
+        case "$limits_note" in
+          "не "*) echo "::warning::лимиты хранилища: $limits_note" ;;
+        esac
 
         case "$storage" in
           "создан"|"уже запущен"|"был остановлен, запущен") ;;

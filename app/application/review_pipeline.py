@@ -341,6 +341,7 @@ def run_review(
             job,
             run,
             result,
+            coverage=assembled.coverage,
             uow=uow,
             vcs=vcs_gateway,
             now=now(),

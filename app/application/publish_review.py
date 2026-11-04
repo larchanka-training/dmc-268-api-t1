@@ -29,6 +29,7 @@ from app.domain.review_comment import (
     format_inline_finding_comment,
     format_summary_comment,
 )
+from app.domain.review_coverage import ReviewCoverage
 from app.domain.thread_coverage import thread_coverage
 from app.domain.vcs_errors import VcsError
 
@@ -65,6 +66,7 @@ def publish_review(
     run: ReviewRun,
     result: LlmReviewResult,
     *,
+    coverage: ReviewCoverage,
     uow: UnitOfWork,
     vcs: VcsGateway,
     now: datetime,
@@ -89,13 +91,15 @@ def publish_review(
     threads, current_lines = _sync_threads_with_host(job, run, threads, uow=uow, vcs=vcs, now=now)
     covered: dict[UUID, BotThread] = {}
     for finding in findings:
-        coverage = thread_coverage(finding, threads, current_lines)
-        if coverage.covered_by is not None:
-            covered[finding.id] = coverage.covered_by
+        thread_cover = thread_coverage(finding, threads, current_lines)
+        if thread_cover.covered_by is not None:
+            covered[finding.id] = thread_cover.covered_by
     to_publish = tuple(f for f in findings if f.id not in covered)
 
     summary = result.summary or _default_summary(findings)
-    summary_body = format_summary_comment(summary.problem, summary.positives, summary.effort)
+    summary_body = format_summary_comment(
+        summary.problem, summary.positives, summary.effort, findings=findings, coverage=coverage
+    )
 
     inline_drafts = _inline_drafts(to_publish)
 

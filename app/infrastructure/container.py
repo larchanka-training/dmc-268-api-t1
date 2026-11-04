@@ -9,6 +9,7 @@
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import monotonic
 
 import httpx
@@ -27,6 +28,7 @@ from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.run_outcome import RunOutcomeRecorder
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.webhook_deliveries import WebhookDeliveries
+from app.application.use_cases.service_status import ServiceStatusMonitor
 from app.config import Settings
 from app.domain.vcs_errors import VcsError
 from app.infrastructure.cache.memory import InMemoryCacheStore
@@ -37,6 +39,7 @@ from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.ollama import OllamaGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 from app.infrastructure.llm.stub import StubLlmGateway
+from app.infrastructure.monitoring.prometheus import PrometheusAlertSource
 from app.infrastructure.oauth.github import GitHubOAuthProvider
 from app.infrastructure.parsing.tree_sitter_extractor import (
     TreeSitterDefinitionExtractor,
@@ -86,6 +89,12 @@ CABINET_VCS_LIMITS = VcsClientLimits(
 # Сбой `GET /app` для `install_url` помнится минуту: страницы списка, запрошенные
 # подряд, не ждут таймаута GitHub каждая и не пишут по предупреждению на страницу.
 _APP_SLUG_RETRY_SECONDS = 60.0
+# Страница статуса (change add-status-page): Prometheus в сети данных отвечает за
+# миллисекунды, а публичная ручка не должна висеть на нём дольше пары секунд — лучше
+# `unknown`. Оценка живёт 15 с: один запрос к Prometheus на интервал скрейпа, сколько бы
+# ни открывали страницу.
+_PROMETHEUS_TIMEOUT = httpx.Timeout(2.0)
+SERVICE_STATUS_TTL_SECONDS = 15.0
 # Callback входа: путь роутера `/auth`, зарегистрированный в настройках GitHub App.
 _OAUTH_CALLBACK_PATH = "/api/v1/auth/{provider}/callback"
 
@@ -141,6 +150,8 @@ class Container:
     # Время `monotonic()`, до которого `app_slug` после сбоя не спрашивает
     # GitHub; `0.0` — сбоя не было.
     _app_slug_retry_at: float
+    # Один на процесс: в нём кэш оценки статуса сервиса на SERVICE_STATUS_TTL_SECONDS.
+    _service_status: ServiceStatusMonitor
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine, self._token_cipher)
@@ -267,6 +278,10 @@ class Container:
     def run_changes(self) -> RunChanges:
         return self._run_changes
 
+    def service_status(self) -> ServiceStatusMonitor:
+        """Статус сервиса для публичной страницы — с кэшем оценки, один на процесс."""
+        return self._service_status
+
     def run_outcome(self) -> RunOutcomeRecorder:
         """Счётчик терминальных исходов прогонов — адаптер телеметрии.
 
@@ -330,7 +345,20 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
         _llm_gateway=None,
         _definition_extractor=None,
         _app_slug_retry_at=0.0,
+        _service_status=ServiceStatusMonitor(
+            _build_alert_source(settings),
+            ttl_seconds=SERVICE_STATUS_TTL_SECONDS,
+            monotonic=monotonic,
+            now=lambda: datetime.now(UTC),
+        ),
     )
+
+
+def _build_alert_source(settings: Settings) -> PrometheusAlertSource:
+    """Без `PROMETHEUS_URL` клиента нет: статус — `unknown`, запросов нет. Конструирование — без сети."""
+    if not settings.prometheus_url:
+        return PrometheusAlertSource(None)
+    return PrometheusAlertSource(httpx.Client(base_url=settings.prometheus_url, timeout=_PROMETHEUS_TIMEOUT))
 
 
 def _build_installation_catalog(settings: Settings) -> GitHubInstallationCatalog:
