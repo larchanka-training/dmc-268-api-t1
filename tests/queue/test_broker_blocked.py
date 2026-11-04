@@ -81,7 +81,7 @@ def memory_alarm() -> Iterator[None]:
         yield
     finally:
         # Алярм глобален для брокера: не снять его — повесить соседние тесты.
-        _rabbitmqctl("rabbitmqctl", "set_vm_memory_high_watermark", "0.6")
+        _rabbitmqctl("rabbitmqctl", "set_vm_memory_high_watermark", "absolute", "300MiB")
         _wait_alarm(active=False)
 
 
@@ -129,7 +129,7 @@ def test_enqueue_recovers_after_the_alarm_clears() -> None:
             _, error = blocked.result(timeout=WEBHOOK_DEADLINE_SECONDS + 5)
             assert isinstance(error, PublisherBlockedError)
         finally:
-            _rabbitmqctl("rabbitmqctl", "set_vm_memory_high_watermark", "0.6")
+            _rabbitmqctl("rabbitmqctl", "set_vm_memory_high_watermark", "absolute", "300MiB")
             _wait_alarm(active=False)
 
         queue.enqueue(JOB)

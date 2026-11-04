@@ -120,7 +120,7 @@ uv run python scripts/export_openapi.py           # записать docs/openap
 uv run python scripts/export_openapi.py --check   # то же, что в CI: rc=1, если файл устарел
 ```
 
-Ручки `/api/v1`, кроме вебхуков и входа, требуют сессию. Для входа через GitHub
+Ручки `/api/v1`, кроме вебхуков, входа и статуса сервиса, требуют сессию. Для входа через GitHub
 нужны `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` и `PUBLIC_ORIGIN`
 (см. `.env.example`), а callback `<PUBLIC_ORIGIN>/api/v1/auth/github/callback`
 должен быть зарегистрирован в настройках GitHub App. `PUBLIC_ORIGIN` — origin, на
@@ -130,6 +130,17 @@ uv run python scripts/export_openapi.py --check   # то же, что в CI: rc=
 проксирует `/api` сюда) ставьте `http://localhost:3000`.
 Cookie сессии ставится с `Secure`: вход работает по HTTPS и на `localhost`, по
 голому HTTP на другом хосте — нет.
+
+### Статус сервиса
+
+`GET /api/v1/status` — публичная ручка страницы статуса, без сессии: сводное состояние и
+состояние API, воркера и очереди (`operational`, `degraded`, `outage`, `unknown`). Источник —
+сработавшие критические алерты Prometheus (`infra/README.md`, «Алерты»), адрес — настройка
+`PROMETHEUS_URL`. Не задана, Prometheus недоступен или ответил не по формату — всё `unknown`,
+ответ всё равно `200`. Оценка кэшируется в процессе API на 15 секунд; пока один запрос её
+обновляет, остальные получают прошлую, и `checked_at` старше на время проверки. В docker compose адрес
+по умолчанию — `http://prometheus:9090`: статус настоящий с профилем `observability`, без него —
+`unknown`.
 
 ### Ключ шифрования токенов пользователя
 
@@ -211,6 +222,12 @@ TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest   # вместе с а
 ```bash
 PYTEST_FAIL_ON_SKIP=1 TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... TEST_RABBITMQ_CONTAINER=... uv run pytest
 ```
+
+Этому правилу нужен кластер PostgreSQL без мигрированной dev-базы, как в CI. Роль `dmc268_monitor`
+кластерная, и ревизия 0017 даёт ей права в каждой мигрированной базе: если рядом с `dmc268_test`
+мигрирована `dmc268` (`make migrate`), снять роль из тестовой базы нельзя, и два теста отката
+ревизии 0013 (`tests/db/test_pg_monitor_role_migration.py`) пропускаются — `make test-all`
+красный. Остальные тесты базы проходят и так.
 
 Эта переменная намеренно не `DATABASE_URL`, и никакого отката на неё нет.
 Подготовка тестовой базы удаляет её схему, так что если направить тесты на базу,
@@ -314,9 +331,8 @@ uv run alembic heads               # должна быть ровно одна
 прежним `id`. Возврат с экрана установки — Setup URL `GET /api/v1/auth/github/setup`: после
 установки (`setup_action=install`) при «Only select repositories» подключает выбранные
 репозитории, где у пользователя admin или maintain и которых в сервисе ещё нет, только с `state`
-из `install_url` этой сессии; после изменения установки (`update`) только обновляет список. Прописываем его в настройках
-GitHub App после проверки на стенде, что GitHub возвращает `state` (design D7 change
-`repositories-one-list`). Запросы идут из лимита
+из `install_url` этой сессии; после изменения установки (`update`) только обновляет список. Прописывается в настройках
+GitHub App (см. `docs/GITHUB_APP.md`, «Настройки приложения»). Запросы идут из лимита
 пользователя, `installation_id` не хранится. Нужен ключ `USER_TOKEN_ENCRYPTION_KEY` (см. «Ключ
 шифрования токенов пользователя»); разрешений App сверх **Metadata: read** список не требует.
 Истёкший user access token сервис обновляет сам по refresh token.

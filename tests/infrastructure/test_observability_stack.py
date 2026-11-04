@@ -48,6 +48,9 @@ STACK_SERVICES = {
     "grafana": "grafana_image",
     "node-exporter": "node_exporter_image",
     "dockerproxy": "docker_socket_proxy_image",
+    "alertmanager": "alertmanager_image",
+    "blackbox": "blackbox_image",
+    "blackbox-public": "blackbox_image",
 }
 
 # имя@sha256:… — дайджест манифест-листа (multi-arch), а не платформенный.
@@ -587,13 +590,14 @@ def test_the_monitor_role_password_step_travels_with_the_migrations() -> None:
     assert "POSTGRES_MONITOR_PASSWORD" in compose_migrate["environment"]
     command = " ".join(compose_migrate["command"])
     assert "alembic upgrade head" in command
-    assert "ALTER ROLE" in command
-    assert "track_utility" in command
+    assert "python alembic/monitor_password.py" in command
+    assert "python alembic/monitor_password.py" in MIGRATE_SCRIPT.read_text(encoding="utf-8")
 
-    script = MIGRATE_SCRIPT.read_text(encoding="utf-8")
-    assert 'os.environ["POSTGRES_MONITOR_PASSWORD"]' in script
-    assert "ALTER ROLE" in script
-    assert "track_utility" in script
+    # Шаг — один файл на оба окружения; он же едет в образ вместе с alembic/.
+    step = (REPO / "alembic" / "monitor_password.py").read_text(encoding="utf-8")
+    assert 'os.environ["POSTGRES_MONITOR_PASSWORD"]' in step
+    assert "ALTER ROLE" in step
+    assert "track_utility" in step
 
     # Пароль приезжает в скрипт окружением миграций — выходом migrate_env.
     outputs = OUTPUTS_TF.read_text(encoding="utf-8")

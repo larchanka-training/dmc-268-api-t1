@@ -12,7 +12,10 @@
 ### Requirement: Список репозиториев постранично
 
 Система SHALL предоставлять `GET /api/v1/repositories`, возвращающий
-постраничный список зарегистрированных репозиториев. Запрос SHALL
+постраничный список репозиториев установок, видимых пользователю, —
+подключённых и нет (требование «Список репозиториев установок, видимых
+пользователю»), по `full_name` без учёта регистра.
+Запрос SHALL
 принимать `limit` и `offset`; при отсутствии `limit` SHALL применяться
 значение по умолчанию, а значение выше зафиксированного потолка SHALL быть
 приведено к этому потолку, а не отклонено ошибкой.
@@ -29,6 +32,11 @@
   зафиксированного потолка
 - **THEN** ответ успешен и содержит не больше репозиториев, чем позволяет
   потолок
+
+#### Scenario: Страница по имени
+
+- **WHEN** GitHub отдаёт пользователю `Octo/Alpha`, `octo/bravo` и `octo/charlie`, подключён только `octo/charlie`, и вызывается `GET /api/v1/repositories` с `limit=2` и `offset=1`
+- **THEN** ответ — `octo/bravo` и `octo/charlie` в этом порядке
 
 ### Requirement: Список запросов на изменение репозитория
 
@@ -387,14 +395,15 @@
 - **WHEN** прогон упал, а его шаг закрыт как брошенный (`error_code = REVIEW_RUN_STALE`)
 - **THEN** у шага `status = failed` и `tokens_used = null`: сколько токенов он израсходовал, неизвестно
 
-### Requirement: Список репозиториев, доступных для подключения
+### Requirement: Список репозиториев установок, видимых пользователю
 
-`GET /api/v1/repositories/available` SHALL требовать сессию и SHALL отдавать репозитории установок, которые GitHub отдаёт по токену пользователя сессии (`/user/installations…`), с `already_connected`. Не отданное GitHub SHALL NOT попадать в ответ. Приостановленная установка и установка с `403` (не лимит) или `404` SHALL пропускаться. Страниц SHALL быть не больше 50. Сбой GitHub, `403` лимита и неожиданное тело SHALL давать `502 SCM_UNAVAILABLE`.
+`GET /api/v1/repositories` SHALL требовать сессию и SHALL отдавать репозитории установок, которые GitHub отдаёт по токену пользователя, подключённые и нет: `id` записи или `null`, `connected` и `connected_at` по включённости ревью, у ответа — `install_url`. Прочее SHALL NOT попадать в ответ. Приостановленная установка и установка с `403` (не лимит) или `404` SHALL пропускаться. Страниц SHALL быть не больше 50. Сбой GitHub, `403` лимита и неожиданное тело SHALL давать `502 SCM_UNAVAILABLE`.
 
 #### Scenario: Список с отметкой подключённых
 
-- **WHEN** по токену пользователя GitHub отдаёт репозитории `octo-org/api` и `octo-org/web`, `octo-org/api` уже зарегистрирован, и вызывается `GET /api/v1/repositories/available` с сессией
-- **THEN** ответ — `200` с обоими репозиториями, у `octo-org/api` `already_connected = true`, у `octo-org/web` — `false`
+- **WHEN** по токену пользователя GitHub отдаёт репозитории `octo-org/api` и `octo-org/web`, `octo-org/api` подключён, и вызывается `GET /api/v1/repositories` с сессией
+- **THEN** ответ — `200` с обоими репозиториями, у `octo-org/api` `connected = true`, `id` и `connected_at` записи, у `octo-org/web` — `connected = false`, `id = null` и `connected_at = null`
+- **AND** `full_name` и `default_branch` строк — из ответа GitHub
 
 #### Scenario: Репозиторий только с правом чтения показывается
 
@@ -443,17 +452,37 @@
 
 #### Scenario: Список без сессии
 
-- **WHEN** вызывается `GET /api/v1/repositories/available` без сессии
-- **THEN** ответ — `401` с `code = UNAUTHENTICATED`
+- **WHEN** вызывается `GET /api/v1/repositories` без сессии
+- **THEN** ответ — `401` с `code = UNAUTHENTICATED`, к GitHub запроса нет
 
 #### Scenario: GitHub недоступен при получении списка
 
 - **WHEN** GitHub не ответил, ответил `429`, `5xx` или другой ошибкой, кроме `401`, или вернул тело без нужных полей, в том числе `null` в них
 - **THEN** ответ — `502` с `code = SCM_UNAVAILABLE`, сессия не закрывается
 
+#### Scenario: Подключённый, которого GitHub не отдаёт
+
+- **WHEN** репозиторий подключён, но GitHub не отдаёт его по токену пользователя
+- **THEN** строки этого репозитория в ответе нет
+
+#### Scenario: Адрес установки приложения
+
+- **WHEN** `GET /app` с ключом приложения отдаёт `slug = dmc-268-review`
+- **THEN** в ответе `install_url = "https://github.com/apps/dmc-268-review/installations/new?state=<state>"`, где `state` привязан к сессии, а `GET /app` запрашивается один раз на процесс — тот же ответ, что у логина бота
+
+#### Scenario: Slug не узнать
+
+- **WHEN** у API нет ключа приложения или `GET /app` не удался
+- **THEN** в ответе `install_url = null`, список отвечает `200`; после сбоя `GET /app` 60 с GitHub не спрашивается, потом спрашивается снова
+
+#### Scenario: Ручки списка доступных нет
+
+- **WHEN** вызывается `GET /api/v1/repositories/available`
+- **THEN** в схеме такого пути нет, ответ — `422` проверки `path.repository_id`, к GitHub запроса нет
+
 ### Requirement: Подключение репозитория
 
-`POST /api/v1/repositories` SHALL требовать сессию и `Origin` сервиса и SHALL регистрировать репозиторий, найденный двумя запросами к GitHub (по id токеном пользователя, затем установка приложения), без обхода списка: `auto_review_enabled = true`, `full_name` и `default_branch` — из ответа GitHub, ответ — `201`. `installation_id` SHALL NOT храниться. Сбой GitHub SHALL давать `502 SCM_UNAVAILABLE` без записи.
+`POST /api/v1/repositories` SHALL требовать сессию и `Origin` сервиса и SHALL регистрировать репозиторий, найденный двумя запросами к GitHub (по id токеном пользователя, затем установка приложения), без обхода списка: `auto_review_enabled = true`, `full_name` и `default_branch` — из ответа GitHub, ответ — `201`. Выключенный SHALL включаться обратно с прежним `id`. `installation_id` SHALL NOT храниться. Сбой GitHub SHALL давать `502 SCM_UNAVAILABLE` без записи.
 
 #### Scenario: Подключение администратором
 
@@ -466,9 +495,14 @@
 - **WHEN** подключается репозиторий, видимый пользователю, с установленным приложением
 - **THEN** к GitHub уходят ровно два запроса: репозиторий по id токеном пользователя и установка приложения на нём
 
+#### Scenario: Повторное включение выключенного
+
+- **WHEN** репозиторий выключен `DELETE /api/v1/repositories/{repository_id}`, и пользователь с admin или maintain вызывает `POST /api/v1/repositories` с его `provider_id`
+- **THEN** ответ — `201` с прежним `id`, в `GET /api/v1/repositories` у него `connected = true`, прогоны и запросы на изменение на месте
+
 ### Requirement: Отказы подключения репозитория
 
-Подключать репозиторий SHALL только пользователь с `permissions.admin` или `permissions.maintain`. Порядок: не `github`, не виден пользователю или публичный только с `pull`, приложение не установлено или приостановлено — `404 REPOSITORY_NOT_IN_INSTALLATION` (установка — после доступа); нет admin и maintain — `403 REPOSITORY_MANAGE_REQUIRED`; уже зарегистрирован — `409 REPOSITORY_ALREADY_CONNECTED`. Все `404` SHALL быть одинаковы; без прав SHALL NOT быть видно, подключён ли репозиторий.
+Подключать репозиторий SHALL только пользователь с `permissions.admin` или `permissions.maintain`. Порядок: не `github`, не виден пользователю или публичный только с `pull`, приложение не установлено или приостановлено — `404 REPOSITORY_NOT_IN_INSTALLATION` (установка — после доступа); нет admin и maintain — `403 REPOSITORY_MANAGE_REQUIRED`; уже включён — `409 REPOSITORY_ALREADY_CONNECTED`. Все `404` SHALL быть одинаковы; без прав SHALL NOT быть видно, подключён ли репозиторий.
 
 #### Scenario: Подключение с ролью maintain
 
@@ -502,8 +536,8 @@
 
 #### Scenario: Повторное подключение
 
-- **WHEN** репозиторий уже зарегистрирован, и подключает пользователь с admin или maintain
-- **THEN** ответ — `409` с `code = REPOSITORY_ALREADY_CONNECTED`
+- **WHEN** репозиторий уже подключён и не выключен, и подключает пользователь с admin или maintain, в том числе параллельно с другим
+- **THEN** ответ — `409` с `code = REPOSITORY_ALREADY_CONNECTED`, запись одна; интерфейс считает этот ответ успехом
 
 #### Scenario: Репозиторий не из установки
 
@@ -704,12 +738,12 @@
 
 ### Requirement: Один репозиторий по id
 
-`GET /api/v1/repositories/{repository_id}` SHALL требовать сессию и SHALL отдавать зарегистрированный репозиторий в той же форме `RepositoryResponse`, что строка `GET /api/v1/repositories`. Репозитория нет — `404` с `code = REPOSITORY_NOT_FOUND`; id не UUID — `422`.
+`GET /api/v1/repositories/{repository_id}` SHALL требовать сессию и SHALL отдавать зарегистрированный репозиторий в форме `RepositoryResponse`, в том числе выключенный: история остаётся. Его `id` — тот же, что у строки `GET /api/v1/repositories`. Репозитория нет — `404` с `code = REPOSITORY_NOT_FOUND`; id не UUID — `422`.
 
 #### Scenario: Репозиторий по id
 
 - **WHEN** репозиторий зарегистрирован, и вызывается `GET /api/v1/repositories/{repository_id}` с сессией
-- **THEN** ответ — `200`, тело совпадает со строкой этого репозитория в `GET /api/v1/repositories`
+- **THEN** ответ — `200`, `id` и `full_name` совпадают со строкой этого репозитория в `GET /api/v1/repositories`
 
 #### Scenario: Репозиторий за пределами первой страницы списка
 
@@ -748,7 +782,7 @@
 #### Scenario: Видимость прогонов
 
 - **WHEN** пользователь подключается к потоку
-- **THEN** набор видимых репозиториев считается один раз тем же расчётом, что ответ `GET /repositories/available`, и до переподключения не пересчитывается; события `run.*` по прогонам остальных репозиториев не приходят
+- **THEN** набор видимых репозиториев считается один раз тем же расчётом, что строки `GET /repositories`, и до переподключения не пересчитывается; события `run.*` по прогонам остальных репозиториев не приходят
 
 #### Scenario: Сбой провайдера при подключении
 
@@ -763,7 +797,7 @@
 #### Scenario: Прогоны публичного репозитория без явного права
 
 - **WHEN** у пользователя нет роли на публичном репозитории `octo-org/public`, к которому подключено приложение, и по `octo-org/public` идёт прогон
-- **THEN** события `run.*` этого прогона пользователю не приходят: `octo-org/public` нет в ответе `GET /repositories/available`
+- **THEN** события `run.*` этого прогона пользователю не приходят: `octo-org/public` нет в ответе `GET /repositories`
 
 ### Requirement: Порядок версий строки в общем потоке событий описан
 
@@ -776,11 +810,11 @@
 
 ### Requirement: Истёкший токен пользователя обновляется
 
-Ручки, обращающиеся к GitHub по токену пользователя (`GET /repositories/available`, `POST /repositories`, подключение к `GET /events`), SHALL обменивать истёкший access token по refresh token и сохранять новую пару. Сбой обмена или ожидание чужого дольше 15 секунд SHALL давать `502 SCM_UNAVAILABLE` без закрытия сессии, если до истечения access token меньше минуты; иначе запрос идёт прежним токеном. Два параллельных запроса одной сессии SHALL обменивать refresh token не больше одного раза.
+Ручки, обращающиеся к GitHub по токену пользователя (`GET /repositories`, `POST /repositories`, подключение к `GET /events`), SHALL обменивать истёкший access token по refresh token и сохранять новую пару. Сбой обмена или ожидание чужого дольше 15 секунд SHALL давать `502 SCM_UNAVAILABLE` без закрытия сессии, если до истечения access token меньше минуты; иначе запрос идёт прежним токеном. Два параллельных запроса одной сессии SHALL обменивать refresh token не больше одного раза.
 
 #### Scenario: Истёкший токен обновляется
 
-- **WHEN** access token сессии истёк, refresh token действует, и вызывается `GET /api/v1/repositories/available`
+- **WHEN** access token сессии истёк, refresh token действует, и вызывается `GET /api/v1/repositories`
 - **THEN** токен обменивается по refresh token, новая пара сохраняется, ответ — `200`
 
 #### Scenario: Токен без истечения
@@ -927,7 +961,7 @@
 
 ### Requirement: Список прогонов показывает только видимые репозитории
 
-`GET /api/v1/reviews` SHALL отдавать только прогоны репозиториев, к которым у пользователя есть доступ на GitHub, — то же правило, что у `GET /repositories/available` и потока `GET /events`. Набор видимых SHALL считаться токеном пользователя; в пределах TTL кэша SHALL браться из кэша (требование «Набор видимых репозиториев кэшируется»); сбой GitHub SHALL давать `502` с `code = SCM_UNAVAILABLE`.
+`GET /api/v1/reviews` SHALL отдавать только прогоны репозиториев, к которым у пользователя есть доступ на GitHub, — то же правило, что у `GET /repositories` и потока `GET /events`. Набор видимых SHALL считаться токеном пользователя; в пределах TTL кэша SHALL браться из кэша (требование «Набор видимых репозиториев кэшируется»); сбой GitHub SHALL давать `502` с `code = SCM_UNAVAILABLE`.
 
 #### Scenario: Прогон невидимого репозитория
 
@@ -1075,7 +1109,7 @@
 
 ### Requirement: Набор видимых репозиториев кэшируется
 
-Ответ GitHub о репозиториях, видимых пользователю, SHALL кэшироваться на `VISIBLE_REPOSITORIES_CACHE_TTL_SECONDS` (по умолчанию 30 с) для ручек видимости: `GET /reviews`, `GET /events`, ручек одного прогона и зарегистрированных репозиториев. Подключён ли репозиторий, SHALL читаться из базы на каждый запрос. `GET /repositories/available` SHALL всегда спрашивать GitHub и SHALL записывать свежий ответ в кэш; проверки подключения SHALL идти мимо кэша.
+Ответ GitHub о репозиториях, видимых пользователю, SHALL кэшироваться на `VISIBLE_REPOSITORIES_CACHE_TTL_SECONDS` (по умолчанию 30 с) для `GET /reviews`, `GET /events`, ручек прогона и репозиториев, включая список. Подключён ли репозиторий, SHALL читаться из базы на каждый запрос. Возврат с установки (Setup URL) SHALL спрашивать GitHub и записывать свежий ответ в кэш; проверки прав подключения и выключения SHALL идти мимо кэша.
 
 #### Scenario: Повтор в пределах TTL
 
@@ -1089,13 +1123,13 @@
 
 #### Scenario: Страница подключения без кэша
 
-- **WHEN** пользователь запрашивает `GET /api/v1/repositories/available` в пределах TTL после другого запроса видимости
-- **THEN** запрос к GitHub выполнен заново
+- **WHEN** пользователь возвращается с экрана установки на `GET /api/v1/auth/github/setup` в пределах TTL после другого запроса видимости
+- **THEN** список репозиториев запрошен у GitHub заново, и свежий ответ записан в кэш
 
 #### Scenario: Приложение поставлено в пределах TTL
 
-- **WHEN** кэш видимости заполнен, пользователь ставит приложение на новый репозиторий на GitHub, открывает `GET /api/v1/repositories/available` и подключает репозиторий
-- **THEN** репозиторий сразу есть в `GET /api/v1/repositories`, а `GET /api/v1/repositories/{repository_id}` отвечает `200`
+- **WHEN** кэш видимости заполнен, пользователь ставит приложение на новый репозиторий на GitHub и возвращается на Setup URL
+- **THEN** репозиторий сразу есть в `GET /api/v1/repositories`, а подключённый — отвечает `200` на `GET /api/v1/repositories/{repository_id}`
 
 ### Requirement: Кэш видимости не хранит токен и сбои
 
@@ -1196,9 +1230,9 @@
 - **WHEN** строится схема API
 - **THEN** у каждой операции с телом и у приёма вебхука ответ `413` описан моделью `RequestBodyTooLargeProblem`
 
-### Requirement: Признак права на подключение в списке доступных
+### Requirement: Признак права на подключение в списке репозиториев
 
-Каждая строка `GET /api/v1/repositories/available` SHALL нести `can_connect`: `true`, если у пользователя на репозитории роль admin или maintain, иначе `false`. Правило SHALL совпадать с проверкой прав `POST /api/v1/repositories`, права SHALL браться из того же ответа GitHub, что и список. `POST /repositories` SHALL проверять права сам, независимо от поля.
+Каждая строка `GET /api/v1/repositories` SHALL нести `can_connect`: `true`, если у пользователя на репозитории роль admin или maintain, иначе `false`. Правило SHALL совпадать с проверкой прав `POST` и `DELETE /api/v1/repositories`, права SHALL браться из того же ответа GitHub, что и список. Ручки SHALL проверять права сами, независимо от поля.
 
 #### Scenario: Роль admin или maintain
 
@@ -1548,3 +1582,101 @@
 
 - **WHEN** перечисляются все операции `docs/openapi/openapi.json` с ответом `501`
 - **THEN** находится одна — `POST /api/v1/webhooks/{provider}`, и её `501` — `PROVIDER_NOT_SUPPORTED`
+
+### Requirement: Выключение ревью репозитория
+
+`DELETE /api/v1/repositories/{repository_id}` SHALL требовать сессию и `Origin` сервиса и SHALL выключать ревью мягко: запись, прогоны и запросы на изменение остаются, ответ — `204`. Невидимый или несуществующий — `404 REPOSITORY_NOT_FOUND`; нет admin и maintain (запрос к GitHub мимо кэша) — `403 REPOSITORY_MANAGE_REQUIRED`. Уже выключен — `204`. Сбой GitHub — `502 SCM_UNAVAILABLE`, ревью не выключено.
+
+#### Scenario: Выключение администратором
+
+- **WHEN** у пользователя на подключённом репозитории роль admin или maintain, и вызывается `DELETE /api/v1/repositories/{repository_id}` со своим `Origin`
+- **THEN** ответ — `204`, в `GET /api/v1/repositories` у репозитория `connected = false`, `connected_at = null` и прежний `id`, а `GET /api/v1/repositories/{repository_id}` и его прогоны отвечают как раньше
+
+#### Scenario: Уже выключен
+
+- **WHEN** репозиторий уже выключен, в том числе параллельным запросом, и вызывается `DELETE` ещё раз
+- **THEN** ответ — `204`
+
+#### Scenario: Без прав
+
+- **WHEN** у пользователя на репозитории роль write, triage или read
+- **THEN** ответ — `403` с `code = REPOSITORY_MANAGE_REQUIRED`, ревью не выключено
+
+#### Scenario: Невидимый репозиторий
+
+- **WHEN** репозитория с таким id нет или GitHub не отдаёт его пользователю
+- **THEN** ответ — `404` с `code = REPOSITORY_NOT_FOUND`, тело одно и то же, кроме `trace_id`
+
+#### Scenario: Без Origin
+
+- **WHEN** вызывается `DELETE /api/v1/repositories/{repository_id}` без `Origin`
+- **THEN** ответ — `403` с `code = ORIGIN_FORBIDDEN`, раньше проверки сессии
+
+#### Scenario: Включение и выключение одновременно
+
+- **WHEN** `POST` и `DELETE` одного репозитория приходят одновременно
+- **THEN** запись одна, и побеждает операция, завершившаяся последней
+
+### Requirement: Возврат с установки GitHub App
+
+`GET /api/v1/auth/github/setup` SHALL требовать сессию, для `setup_action=install` — `state` из `install_url` этой сессии, и SHALL сверять `installation_id` с установками пользователя по его токену. Подключать SHALL только `setup_action=install` при «Only select repositories»: репозитории установки с admin или maintain, которых нет в сервисе; выключенные SHALL NOT включаться. `update` и «All repositories» SHALL NOT подключать ничего. Ответ SHALL быть `302` на `/app/repositories` с итогом.
+
+#### Scenario: Возврат без своего state
+
+- **WHEN** пользователь с сессией приходит на `GET /api/v1/auth/github/setup` с `setup_action=install` и без `state` или со `state` другой сессии — например, по подделанной ссылке с чужого сайта
+- **THEN** ответ — `302` на `/app/repositories?connected=0`, ничего не подключено, к GitHub запроса нет; в логе — что `state` не совпал, без его значения
+
+#### Scenario: Выключенный не включается
+
+- **WHEN** среди выбранных репозиториев установки есть выключенный, и пользователь возвращается на Setup URL со своим `state` и `setup_action=install`
+- **THEN** выключенный остаётся выключенным, ответ — `302` на `/app/repositories?connected=0`
+
+#### Scenario: Изменение установки ничего не подключает
+
+- **WHEN** в установке выбраны A, B и C, ревью включено только у A, пользователь дописал в установку D и вернулся на Setup URL с `setup_action=update` — со `state` или без него
+- **THEN** ответ — `302` на `/app/repositories?connected=0`, B, C и D не подключены, кэш видимости обновлён
+
+#### Scenario: Сбой обновления кэша не мешает подключению
+
+- **WHEN** установка найдена и выбранные репозитории GitHub отдал, а обход всех установок пользователя для кэша упал на другой установке
+- **THEN** выбранные репозитории подключены, ответ — `302` на `/app/repositories?connected=<N>`, сбой записан в лог
+
+#### Scenario: Токен пользователя непригоден
+
+- **WHEN** GitHub отверг токен пользователя, и обменять его по refresh token нельзя
+- **THEN** сессия закрыта, ответ — `302` на `/login?redirect=/app/repositories`, cookie `session` удаляется
+
+#### Scenario: Выбранные репозитории
+
+- **WHEN** пользователь установил приложение на два выбранных репозитория, на одном у него admin, на другом write, и GitHub вернул его на Setup URL с `setup_action=install`
+- **THEN** ответ — `302` на `/app/repositories?connected=1`, подключён репозиторий с admin
+
+#### Scenario: Все репозитории
+
+- **WHEN** установка с `repository_selection = all`
+- **THEN** ответ — `302` на `/app/repositories?connected=0`, ничего не подключено
+
+#### Scenario: Запрос владельцу
+
+- **WHEN** `setup_action=request` — пользователь без прав запросил установку у владельца организации
+- **THEN** ответ — `302` на `/app/repositories?requested=true`, ничего не подключено
+
+#### Scenario: Чужая установка
+
+- **WHEN** `installation_id` нет среди установок, которые GitHub отдаёт по токену пользователя, или параметра нет при `install` или `update`
+- **THEN** ответ — `302` на `/app/repositories?setup_error=installation_not_found`, ничего не подключено
+
+#### Scenario: GitHub недоступен
+
+- **WHEN** GitHub не ответил или отказал (например, `403`: SSO организации не авторизован) при сверке установки или чтении её репозиториев
+- **THEN** ответ — `302` на `/app/repositories?setup_error=provider_unavailable`, HTTP-статус GitHub записан в лог
+
+#### Scenario: Без сессии
+
+- **WHEN** вызывается `GET /api/v1/auth/github/setup` без сессии или с недействительной cookie `session`
+- **THEN** ответ — `302` на `/login?redirect=/app/repositories`, недействительная cookie удаляется, ничего не подключено
+
+#### Scenario: Неверные параметры
+
+- **WHEN** `setup_action` нет или он не `install`, `update` или `request`, либо `installation_id` не целое больше нуля
+- **THEN** ответ — `422`, к GitHub запроса нет

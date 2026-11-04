@@ -65,6 +65,7 @@ from app.infrastructure.telemetry import (
     configure_telemetry,
     instrument_engine,
     instrument_pool,
+    prime_run_outcomes,
     record_current_exception,
     shutdown_tracing,
     sweep_span,
@@ -534,6 +535,9 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
     # воркера до Loki не доходит (замечание ревью PR #130). Провайдер собирается
     # из env, настройки сервиса ему не нужны.
     configure_telemetry(WORKER_SERVICE)
+    # Ряды исходов прогонов — нулём со старта: иначе первое падение после
+    # рестарта `increase()` в `ReviewRunsFailing` не видит.
+    prime_run_outcomes()
     # Хук общий для API и воркера (живёт в `app.infrastructure.logging`):
     # необработанное исключение любого потока и ошибка старта выходят
     # JSON-записью, а не текстовым дампом в stderr, который коллектор

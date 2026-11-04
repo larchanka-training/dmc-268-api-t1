@@ -4,18 +4,21 @@
 решение #89): роль только для входа с привилегией pg_monitor и
 pg_stat_statements. Отличие от табличных ревизий: роли кластерные —
 состояние видно всем базам инстанции, поэтому тест снимает роль перед
-проверкой, чтобы upgrade начинался с чистого состояния даже там, где
-другая база уже мигрирована.
+проверкой, чтобы upgrade начинался с чистого состояния. Если другая база
+кластера мигрирована до 0017, роль держат её права там — снять её нельзя,
+и тесты отката роли пропускаются (см. README, «Тесты»).
 """
 
 import os
 import uuid
+from pathlib import Path
 
 import pytest
+import yaml
 from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from alembic import command
 
@@ -28,6 +31,7 @@ EXTENSION = "pg_stat_statements"
 # Пароль роли — дефолт миграции: на стенде его задаёт окружение, тест
 # проверяет локальный путь (POSTGRES_MONITOR_PASSWORD не задан).
 DEFAULT_ROLE_PASSWORD = "dmc268_monitor"
+OTELCOL = Path(__file__).resolve().parents[2] / "infra" / "observability" / "otelcol.yaml"
 
 
 def _config() -> Config:
@@ -73,6 +77,32 @@ def _extension_exists(engine) -> bool:
 
 def _drop_role(engine) -> None:
     with engine.begin() as conn:
+        # Права роли на колонки review_runs (ревизия 0017) держат её: DROP ROLE
+        # с ними падает. DROP OWNED BY отзывает их только в этой базе, поэтому
+        # если рядом мигрирована другая (dev-база dmc268 в make test-db), роль
+        # не снять — тест пропускается, а не падает.
+        other = conn.execute(
+            text(
+                "SELECT DISTINCT d.datname FROM pg_shdepend s"
+                " JOIN pg_roles r ON r.oid = s.refobjid"
+                " JOIN pg_database d ON d.oid = s.dbid"
+                " WHERE s.refclassid = 'pg_authid'::regclass AND r.rolname = :name"
+                " AND d.datname <> current_database()"
+            ),
+            {"name": ROLE},
+        ).scalars().all()
+        if other:
+            pytest.skip(
+                f"у роли {ROLE} права в других базах кластера ({', '.join(sorted(other))}):"
+                " DROP OWNED BY их не снимет — нужен кластер с одной тестовой базой, как в CI"
+            )
+        # У отсутствующей роли DROP OWNED BY сам — ошибка, поэтому только при
+        # её наличии.
+        exists = conn.execute(
+            text("SELECT 1 FROM pg_roles WHERE rolname = :name"), {"name": ROLE}
+        ).first()
+        if exists is not None:
+            conn.execute(text(f"DROP OWNED BY {ROLE}"))
         conn.execute(text(f"DROP ROLE IF EXISTS {ROLE}"))
 
 
@@ -96,8 +126,8 @@ def _role_accepts_password(password: str) -> bool:
 
 def test_the_monitor_role_revision_downgrades_and_upgrades_cleanly(migrated) -> None:
     config = _config()
-    # Роли кластерные: миграция другой базы инстанции могла оставить роль —
-    # иначе upgrade в тесте упал бы на «role already exists».
+    # Роли кластерные: снимаем роль, оставленную ревизией этой базы, чтобы
+    # проверить откат и upgrade с нуля; права 0017 в другой базе — пропуск.
     _drop_role(migrated)
     try:
         command.downgrade(config, "0012")
@@ -195,10 +225,58 @@ def test_the_role_password_never_reaches_pg_stat_statements(migrated) -> None:
     assert _canary_leaks(migrated, "control-", control.removeprefix("control-")) == 1
 
     # Пароль роли возвращаем к дефолту тем же приёмом, что и деплой
-    # (infra/main.tf): track_utility выключен в той же транзакции.
+    # (alembic/monitor_password.py): track_utility выключен в той же транзакции.
     with migrated.begin() as conn:
         conn.execute(text("SET pg_stat_statements.track_utility = off"))
         conn.execute(
             text(f"ALTER ROLE {ROLE} PASSWORD '{DEFAULT_ROLE_PASSWORD}'")
         )
         conn.execute(text("RESET pg_stat_statements.track_utility"))
+
+
+def _collector_token_query() -> str:
+    """SQL receiver-а sqlquery/llm-tokens — ровно тот, что выполняет коллектор."""
+    config = yaml.safe_load(OTELCOL.read_text(encoding="utf-8"))
+    sql: str = config["receivers"]["sqlquery/llm-tokens"]["queries"][0]["sql"]
+    return sql
+
+
+def test_the_monitor_role_reads_only_the_token_columns_of_runs(migrated) -> None:
+    """Ревизия 0017: роль мониторинга читает расход токенов, но не прогоны.
+
+    Запрос receiver-а sqlquery коллектора проходит под ролью, а чтение любой
+    другой колонки review_runs — нет. Запрос читается из самого
+    infra/observability/otelcol.yaml, а не из копии: колонка без гранта,
+    добавленная в конфиг, уронит этот тест.
+    """
+    with migrated.connect() as conn, conn.begin():
+        conn.execute(text(f"SET LOCAL ROLE {ROLE}"))
+        tokens = conn.execute(text(_collector_token_query())).scalar_one()
+    assert tokens >= 0
+
+    # Отказ прерывает транзакцию: откатываем её явно, а не коммитом на выходе.
+    with migrated.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.execute(text(f"SET LOCAL ROLE {ROLE}"))
+            with pytest.raises(ProgrammingError, match="permission denied"):
+                conn.execute(text("SELECT id FROM review_runs LIMIT 1"))
+        finally:
+            transaction.rollback()
+
+
+def test_the_token_grant_revision_downgrades_and_upgrades_cleanly(migrated) -> None:
+    config = _config()
+    try:
+        command.downgrade(config, "0016")
+        with migrated.connect() as conn:
+            granted = conn.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.column_privileges"
+                    " WHERE grantee = :name AND table_name = 'review_runs'"
+                ),
+                {"name": ROLE},
+            ).scalar_one()
+        assert granted == 0
+    finally:
+        command.upgrade(config, "head")

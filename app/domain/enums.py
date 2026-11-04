@@ -210,6 +210,24 @@ class DiffLineKind(StrEnum):
     CONTEXT = "context"
 
 
+
+class ServiceStatus(StrEnum):
+    """Состояние сервиса или его компонента на странице статуса; по тяжести — outage,
+    degraded, unknown, operational."""
+
+    OPERATIONAL = "operational"
+    DEGRADED = "degraded"
+    OUTAGE = "outage"
+    UNKNOWN = "unknown"
+
+
+class ServiceComponent(StrEnum):
+    """Компонент сервиса на странице статуса; порядок объявления — порядок в ответе."""
+
+    API = "api"
+    WORKER = "worker"
+    QUEUE = "queue"
+
 # Этапы обработки — то, что может стоять в `failed_stage`. `queued` сюда не
 # входит: прогон, упавший до начала работы, ни на каком этапе не был.
 FAILURE_STAGES: frozenset[ReviewRunStatus] = frozenset(

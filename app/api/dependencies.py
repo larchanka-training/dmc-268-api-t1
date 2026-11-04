@@ -17,6 +17,7 @@ from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.run_outcome import RunOutcomeRecorder
 from app.application.ports.vcs_gateway import VcsGateway
+from app.application.use_cases.service_status import ServiceStatusMonitor
 from app.config import Settings
 from app.domain.enums import Provider
 from app.infrastructure.container import Container
@@ -138,3 +139,8 @@ def get_rules_cache(container: Container = Depends(get_container)) -> CacheStore
 def get_settings(container: Container = Depends(get_container)) -> Settings:
     """Настройки процесса, с которыми собран контейнер."""
     return container.settings
+
+
+def get_service_status_monitor(container: Container = Depends(get_container)) -> ServiceStatusMonitor:
+    """Статус сервиса с кэшем оценки, один на процесс; тесты подменяют его своим источником алертов."""
+    return container.service_status()
