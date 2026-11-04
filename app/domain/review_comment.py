@@ -118,11 +118,10 @@ def _file_lines(coverage: ReviewCoverage) -> list[str]:
 
 def _code(path: str) -> str:
     """Путь в code span: его пишет автор PR, и разметку из него GitHub не исполнит."""
-    # `sanitize` оставляет переводы строк и табуляцию: в пункте списка они его разорвали бы.
-    text = re.sub(r"[\n\t]", lambda m: f"<U+{ord(m.group()):04X}>", sanitize(path))
+    # `sanitize` оставляет переводы строк и табуляцию — они разорвали бы пункт списка, а
+    # обратная кавычка закрыла бы span: все три — видимой записью, и забор всегда одинарный.
+    text = re.sub(r"[\n\t`]", lambda m: f"<U+{ord(m.group()):04X}>", sanitize(path))
     if len(text) > _MAX_PATH_CHARS:
         text = text[:_MAX_PATH_CHARS] + "…"
-    fence = "`" * (max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
-    pad = " " if len(fence) > 1 else ""
-    return f"{fence}{pad}{text}{pad}{fence}"
+    return f"`{text}`"
 

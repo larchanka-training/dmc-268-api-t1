@@ -80,7 +80,7 @@ def test_hostile_path_cannot_break_out_of_the_list() -> None:
 
     body = format_summary_comment("П.", (), "час", findings=(), coverage=coverage)
 
-    assert "- `` a`</details>`b.py ``" in body
+    assert "- `a<U+0060></details><U+0060>b.py`" in body
     assert "\ny.py" not in body
     assert body.count("</details>") == 2
 
@@ -96,13 +96,14 @@ def test_long_file_list_is_capped() -> None:
 
 
 def test_hostile_long_paths_keep_the_comment_under_the_github_limit() -> None:
-    """Имена пишет автор PR: 4 группы по 50 путей из управляющих байт не превышают 65 536 символов."""
-    paths = tuple("\x01" * 4000 + str(i) for i in range(60))
-    coverage = ReviewCoverage(reviewed=paths, partial=paths, not_reviewed=paths, filtered=paths)
+    """Имена пишет автор PR: 4 группы по 50 путей из управляющих байт или обратных кавычек не превышают 65 536 символов."""
+    for char in ("\x01", "`"):
+        paths = tuple(char * 4000 + str(i) for i in range(60))
+        coverage = ReviewCoverage(reviewed=paths, partial=paths, not_reviewed=paths, filtered=paths)
 
-    body = format_summary_comment("П.", (), "час", findings=(), coverage=coverage)
+        body = format_summary_comment("П.", (), "час", findings=(), coverage=coverage)
 
-    assert len(body) < 65_536
+        assert len(body) < 65_536, repr(char)
 
 
 def test_file_without_hunks_is_not_listed() -> None:
