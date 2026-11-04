@@ -64,7 +64,7 @@ def upgrade() -> None:
     # SET LOCAL умирает на COMMIT. Если библиотека не загружена (shared_preload
     # выключен), SET LOCAL спокойно создаёт placeholder-параметр и ничего
     # не ломает. Тот же приём — у перегенерации пароля на деплое
-    # (infra/main.tf, docker-compose.yml).
+    # (alembic/monitor_password.py).
     op.execute("SET LOCAL pg_stat_statements.track_utility = off")
     op.execute(f"ALTER ROLE {_MONITOR_ROLE} WITH LOGIN PASSWORD '{password}'")
     # pg_monitor — предопределённая роль со статистическими вьюхами
@@ -76,7 +76,7 @@ def upgrade() -> None:
     # postgresql коллектора его не читает (метрики базы он снимает обычными
     # вьюхами статистики). Библиотека уже загружена через
     # shared_preload_libraries — её включает контейнер базы
-    # (docker-compose.yml и infra/main.tf), здесь создаётся расширение.
+    # (docker-compose.yml и infra/postgres.tf), здесь создаётся расширение.
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
 
 

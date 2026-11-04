@@ -56,13 +56,6 @@ env_file="$(mktemp)"
 trap 'rm -f "$env_file"; docker rm -f dmc268-migrations >/dev/null 2>&1 || true' EXIT
 tofu -chdir=infra output -raw migrate_env > "$env_file"
 
-# Контейнер migrate из стека до #159: `removed` в infra/app.tf снял его с учёта,
-# не уничтожая, и на сервере он остался остановленным со старым кодом выхода
-# и логами прошлых миграций — их легко принять за текущие. Держит он и
-# прежний образ, который иначе убрала бы чистка образов. Нужен один раз, на
-# первом деплое после #159; дальше это no-op.
-docker rm -f dmc268-migrate >/dev/null 2>&1 || true
-
 # Остаток прошлого запуска: раннер, убивший шаг по таймауту, убивает только
 # docker CLI, а контейнер на сервере живёт дальше — и следующий деплой падал
 # на занятом имени (#213). Параллельного запуска быть не может (concurrency
@@ -143,7 +136,7 @@ done
 # Имя — то же, что у upgrade: сироту уберёт trap и следующий деплой.
 #
 # Пароль — параметром запроса psycopg, не литералом команды: литерал осел бы в
-# /proc и docker logs. Скрипт приходит на stdin (-i), пароль — из окружения.
+# /proc и docker logs. Скрипт — alembic/monitor_password.py в образе, пароль — из окружения.
 # track_utility выключается той же транзакцией (SET LOCAL живёт до COMMIT):
 # вторая линия к серверному флагу (infra/postgres.tf), иначе ALTER ROLE ...
 # PASSWORD лёг бы в pg_stat_statements открытым текстом. Тот же шаг — у
@@ -155,26 +148,7 @@ done
 # зафиксированы. Шаг при этом красный — коллектор без пароля в базу не войдёт.
 rm -f "$report_dir/migrate-monitor.error"
 monitor_code=0
-timeout 60 "${migrations_run[@]}" -i --name dmc268-migrations "$API_IMAGE" python - <<'PY' || monitor_code=$?
-import os
-
-import psycopg
-
-# DATABASE_URL настроек — под схемой SQLAlchemy (postgresql+psycopg://);
-# psycopg ждёт стандартную схему postgresql://. Привязка значений — на
-# клиенте (ClientCursor): серверная не проходит по грамматике ALTER ROLE
-# (PASSWORD принимает только литерал, не $1), а литерал руками собирать
-# нельзя — psycopg экранирует сам.
-dsn = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
-with psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor) as conn:
-    with conn.transaction():
-        conn.execute("SET LOCAL pg_stat_statements.track_utility = off")
-        # Имя роли зашито — то же, что в миграции 0013 и env коллектора.
-        conn.execute(
-            "ALTER ROLE dmc268_monitor PASSWORD %s",
-            (os.environ["POSTGRES_MONITOR_PASSWORD"],),
-        )
-PY
+timeout 60 "${migrations_run[@]}" --name dmc268-migrations "$API_IMAGE" python alembic/monitor_password.py || monitor_code=$?
 if [ "$monitor_code" -ne 0 ]; then
   echo "$monitor_code" > "$report_dir/migrate-monitor.error"
   echo "::error::миграции применены, но пароль роли мониторинга dmc268_monitor не обновлён (код $monitor_code)"

@@ -18,35 +18,6 @@ locals {
   api_image_ref = join("@", regex("^(.+?)(?::[\\w][\\w.-]{0,127})?@(sha256:[0-9a-f]{64})$", var.api_image))
 }
 
-# Ресурсы образа API жили в стеке до #203. Из состояния они уходят без
-# уничтожения: keep_locally у них и так не снимал образ с сервера, а старые
-# образы убирает шаг чистки деплоя.
-removed {
-  from = docker_image.api
-
-  lifecycle {
-    destroy = false
-  }
-}
-
-removed {
-  from = docker_image.worker
-
-  lifecycle {
-    destroy = false
-  }
-}
-
-# Контейнер миграций жил в стеке до #159. Из состояния он уходит без
-# уничтожения: остановленный контейнер на сервере убирает шаг миграций.
-removed {
-  from = docker_container.migrate
-
-  lifecycle {
-    destroy = false
-  }
-}
-
 resource "docker_container" "api" {
   name    = "dmc268-api"
   image   = local.api_image_ref
@@ -90,7 +61,7 @@ resource "docker_container" "api" {
   # API — единственный, кто стоит в обеих сетях: запросы приходят из сети
   # входа, база и брокер — в сети данных. Сеть входа не internal: через неё
   # же API ходит в GitHub (OAuth, метаданные PR), и на ней опубликован порт
-  # для проверки живости через туннель.
+  # на петле для отладки.
   networks_advanced {
     name = docker_network.dmc268.name
   }

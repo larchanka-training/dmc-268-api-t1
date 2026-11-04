@@ -55,6 +55,6 @@ limits_config:
 # Телеметрия вендора off: Loki не должен отправлять анонимную статистику
 # использования наружу. В Loki 3.x ключ живёт в секции analytics
 # (проверено -verify-config на образе 3.7.9). То же у Tempo (tempo.yaml,
-# usage_report) и Grafana (GF_ANALYTICS_* в compose и main.tf).
+# usage_report) и Grafana (GF_ANALYTICS_* в compose и infra/observability.tf).
 analytics:
   reporting_enabled: false
