@@ -30,6 +30,9 @@ NAME='${container}'
 VOLUME='${volume}'
 PORT='${port}'
 IMAGE='${image}'
+# Потолок памяти без свопа (512 МБ, в байтах — как его отдаёт docker inspect) и
+# ротация логов — как у контейнеров стека (#136).
+MEMORY=536870912
 
 ENV_FILE="\$(mktemp)"
 trap 'rm -f "\$ENV_FILE"' EXIT
@@ -49,6 +52,14 @@ if [ -n "\$CURRENT" ] && [ "\$CURRENT" != "\$IMAGE" ]; then
         echo "S3_IMAGE=обновлён: \$CURRENT -> \$IMAGE"
     else
         echo "S3_IMAGE=не удалось убрать старый контейнер, остаётся \$CURRENT: \$(printf '%s' "\$ERR" | tr '\n' ' ')"
+    fi
+elif [ -n "\$CURRENT" ] && [ "\$(docker inspect -f '{{.HostConfig.Memory}}' "\$NAME" 2>/dev/null)" != "\$MEMORY" ]; then
+    # Лимиты задаёт только docker run: контейнер, созданный до них, пересоздаётся
+    # тем же путём, что при смене образа, но без скачивания.
+    if ERR="\$({ docker stop "\$NAME" && docker rm "\$NAME"; } 2>&1 >/dev/null)"; then
+        echo "S3_LIMITS=пересоздан с лимитом памяти и ротацией логов"
+    else
+        echo "S3_LIMITS=не удалось пересоздать, лимитов нет: \$(printf '%s' "\$ERR" | tr '\n' ' ')"
     fi
 fi
 
@@ -76,6 +87,8 @@ case "\$STATE" in
         if ERR="\$(docker run -d \
             --name "\$NAME" \
             --restart unless-stopped \
+            --memory "\$MEMORY" --memory-swap "\$MEMORY" \
+            --log-opt max-size=10m --log-opt max-file=3 \
             -p 127.0.0.1:"\$PORT":9000 \
             -v "\$VOLUME":/data \
             --env-file "\$ENV_FILE" \
