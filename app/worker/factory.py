@@ -28,6 +28,7 @@ from app.application.llm_review import LlmLimits
 from app.application.ports import (
     CacheStore,
     DefinitionExtractor,
+    InstallationCatalog,
     UnitOfWork,
     VcsGateway,
 )
@@ -459,6 +460,8 @@ def build_maintenance(
     redeliver: Callable[[], int] | None = None,
     redelivery_interval: timedelta = timedelta(seconds=300),
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
+    vcs: VcsGateway | None = None,
+    installations: InstallationCatalog | None = None,
 ) -> Callable[[], None]:
     """Периодический проход: зависшие прогоны, истёкшие сессии, повтор доставок.
 
@@ -467,7 +470,7 @@ def build_maintenance(
     идёт реже прохода — не чаще `redelivery_interval`; время его попытки
     запоминается и при сбое, чтобы отказ лимита не повторялся каждую минуту.
     Выметенные прогоны — терминальные исходы, их пишет `run_outcome`, как и
-    пайплайн свои.
+    пайплайн свои; gate их head выставляется через `vcs` и `installations`.
     """
     last_redelivery: datetime | None = None
 
@@ -480,6 +483,8 @@ def build_maintenance(
                 limit=stale_limit,
                 queued_limit=queued_limit,
                 run_outcome=run_outcome,
+                vcs=vcs,
+                installations=installations,
             )
             if swept:
                 logger.warning("зависших прогонов переведено в failed: %d", swept)
@@ -580,6 +585,9 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
         ),
         redelivery_interval=timedelta(seconds=settings.webhook_redelivery_interval_seconds),
         run_outcome=run_outcome,
+        # Шлюз без ожидания лимита, как у повтора доставок: проход идёт в consume-цикле.
+        vcs=container.redelivery_vcs_gateway(),
+        installations=container.installation_catalog(),
     )
     handler = build_review_handler(
         container,
