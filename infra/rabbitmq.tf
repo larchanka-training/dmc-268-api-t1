@@ -37,8 +37,8 @@ resource "docker_container" "rabbitmq" {
   stop_timeout          = 60
   destroy_grace_seconds = 60
 
-  # Как у postgres: entrypoint сам переходит на пользователя rabbitmq. Порог
-  # памяти брокер считает от лимита cgroup, так что memory он учтёт сам.
+  # Как у postgres: entrypoint сам переходит на пользователя rabbitmq. Лимит
+  # cgroup брокер не видит: пороги памяти и диска — абсолютные, в 30-dmc268.conf.
   security_opts = ["no-new-privileges:true"]
   memory        = 512
   memory_swap   = 512
@@ -75,13 +75,20 @@ resource "docker_container" "rabbitmq" {
     }
   }
 
+  upload {
+    content = file("${path.module}/rabbitmq/30-dmc268.conf")
+    file    = "/etc/rabbitmq/conf.d/30-dmc268.conf"
+  }
+
   volumes {
     volume_name    = docker_volume.rabbitmq.name
     container_path = "/var/lib/rabbitmq"
   }
 
   healthcheck {
-    test     = ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+    # ping отвечает, когда узел поднят, но ещё до листенера AMQP: зелёный
+    # healthcheck не значит, что API и воркер подключатся.
+    test     = ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
     interval = "10s"
     timeout  = "5s"
     retries  = 5
