@@ -2,6 +2,7 @@
 
 import itertools
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -16,7 +17,9 @@ from app.application.merge_gate_publish import (
     DISABLED_REVIEW_CHECK,
     SETTLE_ATTEMPTS,
     build_failed_review_check,
+    build_merge_gate_check,
     build_retarget_check,
+    collect_open_findings,
     settle_merge_gate,
 )
 from app.application.ports.llm_gateway import LlmReviewResult
@@ -1262,6 +1265,215 @@ def test_a_review_completed_behind_the_correction_gets_its_gate_back() -> None:
 
     assert [c.conclusion for c in vcs.checks] == ["success", "failure", "success"]
     assert vcs.checks[-1] != build_retarget_check()
+
+
+NEW_RUN_ID = UUID(int=77)
+
+
+def _settle(uow: FakeUnitOfWork, vcs: RecordingVcsGateway, run_id: UUID) -> None:
+    settle_merge_gate(
+        uow,
+        vcs,
+        merge_request_id=MR_ID,
+        repo_full_name=JOB.repository_full_name,
+        head_sha=JOB.head_sha,
+        installation_id=JOB.installation_id,
+        run_id=run_id,
+        repository_id=REPOSITORY.id,
+    )
+
+
+def _record_review(uow: FakeUnitOfWork, run_id: UUID) -> None:
+    """Ревью прогона записано в `published_comments`: дальше он выставляет свой gate."""
+    uow.published_comments.add(
+        PublishedComment(
+            id=UUID(int=89),
+            review_run_id=run_id,
+            finding_id=None,
+            provider_comment_id="new-summary",
+            kind=CommentKind.SUMMARY,
+            published_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+
+def _new_run(uow: FakeUnitOfWork, run: ReviewRun, status: ReviewRunStatus) -> None:
+    """Приём смены ветки: старый прогон отменён, новый закоммичен."""
+    moment = NOW + timedelta(minutes=1)
+    uow.review_runs.add(replace(run, status=ReviewRunStatus.CANCELLED))
+    uow.review_runs.add(
+        replace(run, id=NEW_RUN_ID, status=status, created_at=moment, updated_at=moment)
+    )
+
+
+def test_a_late_retarget_block_yields_to_the_gate_of_a_review_that_finished_publishing() -> None:
+    """#330: старый прогон блокирует head, пока новый ещё `publishing`. Пока POST идёт,
+    новый записывает ревью, выставляет gate и выходит; блокировка приходит последней,
+    и старый прогон, перечитав состояние, возвращает gate нового."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    run = _publishing_run(uow)
+    _new_run(uow, run, ReviewRunStatus.PUBLISHING)
+
+    def new_run_publishes() -> None:
+        _record_review(uow, NEW_RUN_ID)
+        _settle(uow, vcs, NEW_RUN_ID)
+
+    vcs = _DelayedFirstGateVcs(new_run_publishes)
+
+    _settle(uow, vcs, run.id)
+
+    assert [c.conclusion for c in vcs.checks] == ["success", "failure", "success"]
+    assert vcs.checks[1] == build_retarget_check()
+
+
+class _Interleaving:
+    """Один порядок шагов участников-потоков: работает один, до своей точки `step`, затем
+    ход получает готовый участник с номером `choices[k]` (по умолчанию первый) в k-й
+    развилке. `branches` - сколько участников было готово в каждой развилке."""
+
+    def __init__(self, choices: list[int]) -> None:
+        self._choices = choices
+        self.branches: list[int] = []
+        self._cond = threading.Condition()
+        self._turn: str | None = None
+        self._waiting: dict[str, Callable[[], bool]] = {}
+        self._errors: list[Exception] = []
+
+    def step(self, ready: Callable[[], bool] = lambda: True) -> None:
+        name = threading.current_thread().name
+        with self._cond:
+            self._waiting[name] = ready
+            if self._turn == name:
+                self._hand_over()
+            self._cond.wait_for(lambda: self._turn == name)
+            del self._waiting[name]
+
+    def _hand_over(self) -> None:
+        options = sorted(n for n, ready in self._waiting.items() if ready())
+        self._turn = None
+        if options:
+            k = len(self.branches)
+            self.branches.append(len(options))
+            self._turn = options[self._choices[k] if k < len(self._choices) else 0]
+        self._cond.notify_all()
+
+    def run(self, actors: dict[str, Callable[[], None]]) -> None:
+        def body(actor: Callable[[], None]) -> None:
+            try:
+                self.step()
+                actor()
+            except Exception as exc:  # noqa: BLE001 - переносится в поток теста
+                self._errors.append(exc)
+            finally:
+                with self._cond:
+                    self._hand_over()
+
+        threads = [threading.Thread(target=body, args=(a,), name=n, daemon=True) for n, a in actors.items()]
+        for thread in threads:
+            thread.start()
+        with self._cond:
+            self._cond.wait_for(lambda: len(self._waiting) == len(actors))
+            self._hand_over()
+        for thread in threads:
+            thread.join(timeout=5)
+        assert not any(t.is_alive() for t in threads), "участники зависли"
+        if self._errors:
+            raise self._errors[0]
+
+
+def _all_interleavings(scenario: Callable[[_Interleaving], None]) -> int:
+    """Прогнать `scenario` во всех порядках шагов (обход в глубину по развилкам)."""
+    choices: list[int] = []
+    count = 0
+    while True:
+        interleaving = _Interleaving(choices)
+        scenario(interleaving)
+        count += 1
+        taken = choices + [0] * (len(interleaving.branches) - len(choices))
+        for k in reversed(range(len(interleaving.branches))):
+            if taken[k] + 1 < interleaving.branches[k]:
+                choices = [*taken[:k], taken[k] + 1]
+                break
+        else:
+            return count
+
+
+class _SteppedVcs(RecordingVcsGateway):
+    """POST check run доходит до GitHub не сразу: до посадки ход может уйти другому."""
+
+    def __init__(self, interleaving: _Interleaving) -> None:
+        super().__init__()
+        self._interleaving = interleaving
+
+    def set_merge_gate_check(self, *args: Any) -> None:
+        self._interleaving.step()
+        super().set_merge_gate_check(*args)
+
+
+@pytest.mark.parametrize("new_severity", [None, FindingSeverity.CRITICAL], ids=["clean", "critical"])
+def test_every_order_of_a_retarget_ends_with_the_gate_of_the_new_run(
+    new_severity: FindingSeverity | None,
+) -> None:
+    """#330: смена ветки посреди публикации старого прогона. Участники - воркер старого
+    прогона (`settle`), приём смены ветки (коммит и блокировка) и новый прогон
+    (`publishing`, запись ревью, `settle`, `completed`). В любом порядке шагов и посадки
+    POST последним на head приходит gate нового прогона."""
+    stale: list[list[str]] = []
+
+    def scenario(interleaving: _Interleaving) -> None:
+        uow = FakeUnitOfWork()
+        _seed_merge_request(uow)
+        run = _publishing_run(uow)
+        vcs = _SteppedVcs(interleaving)
+
+        enqueued: list[bool] = []
+
+        def webhook() -> None:
+            _new_run(uow, run, ReviewRunStatus.QUEUED)
+            vcs.set_merge_gate_check("owner/repo", JOB.head_sha, 1, build_retarget_check())
+            # Задача нового прогона ставится после блокировки (`start_review_run`).
+            enqueued.append(True)
+
+        def new_run() -> None:
+            interleaving.step(lambda: bool(enqueued))
+            newer = uow.review_runs.get(NEW_RUN_ID)
+            assert newer is not None
+            if new_severity is not None:
+                uow.findings.add(
+                    Finding(
+                        id=CRITICAL_FINDING_ID,
+                        review_run_id=NEW_RUN_ID,
+                        anchor=DiffAnchor(file_path="app/x.py", side=DiffSide.NEW, new_line=10),
+                        category=FindingCategory.SECURITY,
+                        severity=new_severity,
+                        message="SQL-инъекция",
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+            uow.review_runs.add(replace(newer, status=ReviewRunStatus.PUBLISHING))
+            interleaving.step()
+            _record_review(uow, NEW_RUN_ID)
+            _settle(uow, vcs, NEW_RUN_ID)
+            interleaving.step()
+            uow.review_runs.add(replace(newer, status=ReviewRunStatus.COMPLETED))
+
+        interleaving.run(
+            {"old": lambda: _settle(uow, vcs, run.id), "webhook": webhook, "new": new_run}
+        )
+        expected = build_merge_gate_check(
+            collect_open_findings(uow, MR_ID, head_run_id=NEW_RUN_ID), REPOSITORY.min_severity
+        )
+        if vcs.checks[-1] != expected:
+            stale.append([c.conclusion for c in vcs.checks])
+
+    orders = _all_interleavings(scenario)
+
+    assert orders > 100, f"перебор свёлся к {orders} порядкам"
+    assert stale == [], f"устаревший итог в {len(stale)} из {orders} порядков"
 
 
 def test_gate_correction_gives_up_after_its_attempts() -> None:

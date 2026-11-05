@@ -7,7 +7,12 @@ from app.application.ports.unit_of_work import UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import MergeGateCheck
 from app.domain.entities import Finding, Repository, ReviewRun
-from app.domain.enums import FindingSeverity, ReviewRunStatus, TriggerSource
+from app.domain.enums import (
+    CommentKind,
+    FindingSeverity,
+    ReviewRunStatus,
+    TriggerSource,
+)
 from app.domain.glob import branch_selected
 from app.domain.merge_gate import merge_blocked_by_findings, untracked_findings
 from app.domain.vcs_errors import VcsError
@@ -278,8 +283,9 @@ def settle_merge_gate(
     прогону на head и после каждого POST перечитывается: если приём уже
     закоммитил, здесь видна смена и gate переписывается; если нет - блокировка
     приёма придёт позже и перекроет `success`. Так любая перестановка кончается
-    gate актуального прогона. После сбоя `SETTLE_ATTEMPTS` попыток - `VcsError`
-    вызывающему. Находки и порог читаются здесь же, на каждой попытке: порог могли
+    gate актуального прогона. Новый прогон, записавший ревью, ещё `publishing`, но свой
+    gate мог уже выставить и выйти: здесь собирается его gate, а не блокировка (#330).
+    После сбоя `SETTLE_ATTEMPTS` попыток - `VcsError` вызывающему. Находки и порог читаются здесь же, на каждой попытке: порог могли
     сменить, пока шёл прогон или сбой, и gate завершённого чужого прогона по старому
     порогу снял бы его блокировку. На паузе ревью (`pause_check`) выставляется check
     паузы: `failure` завершившегося прогона заблокировал бы PR, который ревью не ждёт.
@@ -298,6 +304,12 @@ def settle_merge_gate(
             repository = uow.repositories.get(repository_id)
             merge_request = uow.merge_requests.get(merge_request_id)
             latest = head_run_in_charge(uow, repository, merge_request_id, head_sha)
+            # Записав ревью, прогон выставляет свой gate и может уже выйти: блокировка
+            # «идёт повторное ревью», дошедшая после, осталась бы на head (#330).
+            published = latest is not None and any(
+                c.kind is CommentKind.SUMMARY
+                for c in uow.published_comments.list_for_run(latest.id)
+            )
         if repository is None:
             raise LookupError(f"repository {repository_id} not found")
         if latest is None:
@@ -307,11 +319,13 @@ def settle_merge_gate(
         )
         if pause is not None:
             current = pause
-        elif (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED) or (
-            latest.status is ReviewRunStatus.COMPLETED
+        elif (
+            (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED)
+            or latest.status is ReviewRunStatus.COMPLETED
+            or (latest.status is ReviewRunStatus.PUBLISHING and published)
         ):
-            # Свой прогон — или новый, успевший завершиться: его gate мог уйти раньше
-            # нашего POST. Gate — по открытым находкам этого прогона и порогу репозитория.
+            # Свой прогон или новый, успевший завершиться или записать ревью: его gate мог
+            # уйти раньше нашего POST. Gate собирается по открытым находкам прогона и порогу.
             current = build_merge_gate_check(
                 collect_open_findings(uow, merge_request_id, head_run_id=latest.id),
                 repository.min_severity,
