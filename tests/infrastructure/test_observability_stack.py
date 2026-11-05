@@ -824,12 +824,16 @@ def test_dashboard_uid_and_title_are_fixed() -> None:
     assert dashboard["title"]
 
 
-def test_every_panel_and_target_uses_the_prometheus_datasource() -> None:
-    """Панели и их запросы привязаны к uid datasource из datasources.yaml."""
+def test_every_panel_and_target_uses_a_provisioned_datasource() -> None:
+    """Панели и их запросы привязаны к uid datasource из datasources.yaml.
+
+    Метрики идут из Prometheus, коды ответа входа (nginx) из Loki: в stub_status их нет.
+    """
     for panel in load_dashboard()["panels"]:
-        assert panel["datasource"]["uid"] == "prometheus", panel["title"]
+        uid = panel["datasource"]["uid"]
+        assert uid in {"prometheus", "loki"}, panel["title"]
         for target in panel["targets"]:
-            assert target["datasource"]["uid"] == "prometheus", panel["title"]
+            assert target["datasource"]["uid"] == uid, panel["title"]
 
 
 def test_dashboard_queries_cover_the_expected_signals() -> None:
@@ -861,6 +865,9 @@ def test_dashboard_queries_cover_the_expected_signals() -> None:
         "node_filesystem_avail_bytes",
         "container_cpu_usage_nanoseconds_total",
         "container_memory_usage_total_bytes",
+        "nginx_requests_total",
+        "nginx_connections_current",
+        '{service_name="dmc268-ui"}',
     )
     missing = [signal for signal in expected if signal not in expressions]
     assert not missing, f"нет сигналов в выражениях дашборда: {missing}"

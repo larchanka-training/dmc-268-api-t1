@@ -514,6 +514,102 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Вход (nginx): запросы в секунду",
+      "description": "Все запросы nginx интерфейса, публичного входа стенда (receiver nginx коллектора по stub_status). Счётчик общий на весь nginx: в нём и сам скрейп stub_status раз в 30 с, и пробы blackbox.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 48 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(rate(nginx_requests_total[5m]))",
+          "legendFormat": "запросов/с",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Вход (nginx): соединения",
+      "description": "Открытые соединения nginx интерфейса по состоянию (stub_status): active: все открытые, сумма reading, writing и waiting.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 48 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (state) (nginx_connections_current)",
+          "legendFormat": "{{state}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Вход (nginx): ответы по классу кода",
+      "description": "Доля ответов nginx интерфейса по классу кода, из access-лога в Loki (формат combined, код ответа идёт полем после строки запроса). В stub_status кодов ответа нет. Строки error-лога шаблон отбрасывает, пробы blackbox исключены: они бьют в / и всегда получают 200, а это 80 % строк лога. Доли считает Grafana (stacking percent) по числу ответов за 5 минут.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 48 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": { "mode": "percent", "group": "A" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "sum by (class) (count_over_time({service_name=\"dmc268-ui\"} != \"Blackbox-Exporter\" | pattern `<_> - <_> [<_>] \"<_>\" <status> <_>` | status=~\"[1-5][0-9][0-9]\" | label_format class=`{{ substr 0 1 .status }}xx` [5m]))",
+          "legendFormat": "{{class}}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

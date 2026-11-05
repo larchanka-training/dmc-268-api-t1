@@ -46,7 +46,7 @@ API публикуется на `bind_ip`, в деплое это `127.0.0.1`. �
 | `dmc268` | интерфейс (из `dmc-268-ui-t1`), `api` | публичный вход: nginx интерфейса проксирует `/api/` в API. Имя прежнее — интерфейс подключается к ней по имени |
 | `dmc268-backend` (`internal`) | `postgres`, `postgres-replica`, `postgres-backup`, `rabbitmq`, `replication-setup`, `api`, `worker`, миграции шага деплоя | данные. У сети нет шлюза: из неё не выйти в интернет, а интерфейса в ней нет |
 | `dmc268-egress` | `worker` | исходящие запросы воркера к GitHub API и провайдеру модели |
-| `dmc268-otlp` (`internal`) | интерфейс, `otelcol` (при `observability_enabled`) | трейсы браузера: nginx интерфейса проксирует `/otlp/v1/traces` на отдельный приёмник коллектора `dmc268-otelcol:4319`: только трейсы, `service.name` ставит коллектор (`dmc-268-ui`), кабинет шлёт их на свой же origin. Сеть создаётся и без стека: интерфейс подключается к ней по имени, и без коллектора `/otlp/v1/traces` отвечает 502, а остальное работает |
+| `dmc268-otlp` (`internal`) | интерфейс, `otelcol` (при `observability_enabled`) | трейсы браузера: nginx интерфейса проксирует `/otlp/v1/traces` на отдельный приёмник коллектора `dmc268-otelcol:4319`: только трейсы, `service.name` ставит коллектор (`dmc-268-ui`), кабинет шлёт их на свой же origin. По ней же receiver `nginx` коллектора снимает `stub_status` интерфейса (`dmc268-ui:8081`, на хост не публикуется). Сеть создаётся и без стека: интерфейс подключается к ней по имени, и без коллектора `/otlp/v1/traces` отвечает 502, а остальное работает |
 
 API — единственный, кто стоит и во входе, и в данных. С `internal`-сети Docker не публикует порты, поэтому у базы и брокера портов на хосте нет: для отладки — `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268` и `docker exec dmc268-rabbitmq rabbitmq-diagnostics status`. Изоляцию проверяют `tests/test_infra_isolation.py` (по тексту `infra/*.tf`) и `infra/tests/main.tftest.hcl` (по плану).
 
@@ -434,6 +434,7 @@ OTel с её миллисекундами. Логи сервисов колле�
 | RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
 | Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
 | Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes`, `container_uptime_seconds`, `container_restarts_total` | `container_name` | CPU и память контейнеров |
+| Вход, nginx интерфейса (receiver `nginx` основного коллектора, `stub_status`) | `collector` | `nginx_requests_total`, `nginx_connections_current`, `nginx_connections_accepted_total`, `nginx_connections_handled_total` | `state` | «Вход (nginx)»: запросы в секунду, соединения; доля ответов по классу кода считается по логам `{service_name="dmc268-ui"}` в Loki |
 | Расход токенов (receiver `sqlquery/llm-tokens` основного коллектора) | `collector` | `review_llm_tokens_month` | нет | нет (алерты бюджета) |
 | Резервные копии (textfile node-exporter, пишет `backup.sh`) | `node-exporter` | `dmc268_backup_last_success_timestamp_seconds` | нет | нет (алерт `BackupStale`) |
 | Пробы (blackbox-exporter) | `blackbox-services`, `blackbox-public` | `probe_success`, `probe_ssl_earliest_cert_expiry` | `service`, `instance` | нет (алерты) |
@@ -443,7 +444,8 @@ OTel с её миллисекундами. Логи сервисов колле�
 
 - [HTTP-метрики OTel](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/) и
   [метрики клиента БД OTel](https://opentelemetry.io/docs/specs/semconv/db/database-metrics/);
-- receiver [`postgresql`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/postgresqlreceiver/documentation.md)
+- receiver [`postgresql`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/postgresqlreceiver/documentation.md),
+  [`nginx`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/nginxreceiver/documentation.md)
   и [`docker_stats`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/dockerstatsreceiver/documentation.md);
 - [node_exporter](https://github.com/prometheus/node_exporter);
 - [плагин Prometheus в RabbitMQ](https://www.rabbitmq.com/docs/prometheus).
