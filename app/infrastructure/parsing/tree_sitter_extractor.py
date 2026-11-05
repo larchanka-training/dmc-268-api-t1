@@ -36,12 +36,21 @@ _GRAMMARS = {
 _CLASSES = frozenset({"class_definition", "class_declaration", "abstract_class_declaration"})
 _INTERFACES = frozenset({"interface_declaration"})
 # Функция становится методом, если её ближайший охватывающий — класс.
+# `function_signature` — перегрузка и `declare function` TS, без тела.
 _FUNCTIONS = frozenset(
-    {"function_definition", "function_declaration", "generator_function_declaration"}
+    {
+        "function_definition",
+        "function_declaration",
+        "generator_function_declaration",
+        "function_signature",
+    }
 )
 _METHODS = frozenset({"method_definition", "abstract_method_signature", "method_signature"})
-# Поле класса или переменная, значение которых — функция: `handle = () => {}`.
-_FUNCTION_HOLDERS = frozenset({"public_field_definition", "field_definition", "variable_declarator"})
+# Поле класса, переменная или свойство объектного литерала, значение которых —
+# функция: `handle = () => {}`, `{ list: async () => {} }`.
+_FUNCTION_HOLDERS = frozenset(
+    {"public_field_definition", "field_definition", "variable_declarator", "pair"}
+)
 _FUNCTION_VALUES = frozenset({"arrow_function", "function_expression", "function"})
 # Узлы, которые могут стоять между декораторами и определением.
 _DECORATOR_RUN = frozenset({"decorator", "comment"})
@@ -128,7 +137,11 @@ def _definition(
     else:
         return None
 
-    name_node = node.child_by_field_name("name") or node.child_by_field_name("property")
+    name_node = (
+        node.child_by_field_name("name")
+        or node.child_by_field_name("property")
+        or node.child_by_field_name("key")
+    )
     if name_node is None or name_node.type.endswith("pattern"):
         # Деструктуризация `const {a, b} = …` — не определение с именем.
         return None
@@ -209,10 +222,10 @@ def _receiver_type(data: bytes, node: tree_sitter.Node) -> str | None:
 
 
 def _signature(raw: bytes) -> str:
-    """Заголовок до тела в одну строку: без хвостового `:`/`{` и лишних пробелов."""
+    """Заголовок до тела в одну строку: без хвостового `:`/`{`/`;` и лишних пробелов."""
     text = _WHITESPACE.sub(" ", raw.decode("utf-8", errors="replace")).strip()
     text = _INNER_PAREN_SPACE.sub("", text)
-    return _clip(text.rstrip(":{").rstrip(), _MAX_SIGNATURE_CHARS)
+    return _clip(text.rstrip(":{;").rstrip(), _MAX_SIGNATURE_CHARS)
 
 
 def _text(data: bytes, node: tree_sitter.Node) -> str:
