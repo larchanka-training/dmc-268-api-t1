@@ -5,6 +5,8 @@
 """
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -215,3 +217,67 @@ def test_cli_passes_max_output_tokens_to_the_worker(
 
     assert code == 2
     assert "--max-output-tokens" in capsys.readouterr().err
+
+
+# --- doctor -------------------------------------------------------------------
+
+DOCTOR = REPO_ROOT / "scripts" / "sandbox-doctor.sh"
+# Всё, что вызывает скрипт, кроме uv и ollama: их наличие и проверяют тесты.
+DOCTOR_TOOLS = ("bash", "git", "curl", "uname", "awk", "df", "grep")
+
+
+def _doctor(
+    *, path: str | None = None, cwd: Path = REPO_ROOT
+) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    if path is not None:
+        env["PATH"] = path
+    return subprocess.run(
+        [str(DOCTOR)],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def _trimmed_path(tmp_path: Path, *tools: str) -> str:
+    """Каталог со ссылками только на эти программы: системный `/usr/bin` может
+    содержать и `uv`, и `ollama`, если их поставил пакетный менеджер."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in tools:
+        found = shutil.which(tool)
+        assert found is not None, tool
+        (bin_dir / tool).symlink_to(found)
+    return str(bin_dir)
+
+
+def test_doctor_without_uv_fails_with_hint(tmp_path: Path) -> None:
+    result = _doctor(path=_trimmed_path(tmp_path, *DOCTOR_TOOLS))
+
+    assert result.returncode == 1, result.stdout
+    assert "✗ uv не установлен" in result.stdout
+    assert "astral.sh/uv" in result.stdout
+    assert "Окружение не готово" in result.stdout
+
+
+def test_doctor_without_ollama_fails_with_hint(tmp_path: Path) -> None:
+    """`uv` есть, `ollama` нет: ✗ с подсказкой установки; к Ollama doctor не ходит."""
+    result = _doctor(path=_trimmed_path(tmp_path, *DOCTOR_TOOLS, "uv"))
+
+    assert result.returncode == 1, result.stdout
+    assert "✗ ollama не установлена" in result.stdout
+    assert "ollama.com" in result.stdout
+    assert "✓ uv " in result.stdout
+    assert "Ollama отвечает" not in result.stdout
+
+
+def test_doctor_outside_repo_root_fails_with_hint(tmp_path: Path) -> None:
+    result = _doctor(cwd=tmp_path)
+
+    assert result.returncode == 1, result.stdout
+    assert "✗ запуск не из корня репозитория" in result.stdout
+    assert "cd в корень dmc-268-api-t1" in result.stdout

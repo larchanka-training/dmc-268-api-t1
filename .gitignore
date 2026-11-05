@@ -40,8 +40,9 @@ override.tf.json
 build/
 dist/
 
-# Лог фоновой ollama serve из make ollama-up
+# Лог и PID фоновой ollama serve из make ollama-up (PID читает make sandbox-down)
 .ollama.log
+.ollama.pid
 
 # Логи и PID-файлы make run-local
 .local/
