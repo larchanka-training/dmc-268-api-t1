@@ -75,6 +75,34 @@ def test_only_method_pulls_in_type_by_parent_name(kind: DefinitionKind) -> None:
     assert select_scopes(outline, frozenset({6})) == (outer, inner)
 
 
+def test_method_does_not_pull_in_a_namesake_of_its_class() -> None:
+    """#348: тип метода уже выбран по диапазону - модульный тип с тем же именем чужой."""
+    module = Definition(DefinitionKind.CLASS, "Local", "class Local", 1, 3)
+    outer = Definition(DefinitionKind.FUNCTION, "build", "def build()", 5, 12)
+    local = Definition(DefinitionKind.CLASS, "Local", "class Local", 6, 12, "build")
+    run = Definition(DefinitionKind.METHOD, "run", "def run(self)", 7, 9, "Local")
+    outline = FileOutline(definitions=(module, outer, local, run))
+    assert select_scopes(outline, frozenset({8})) == (outer, local, run)
+
+
+def test_ts_method_does_not_pull_in_an_interface_of_the_same_name() -> None:
+    money = Definition(DefinitionKind.INTERFACE, "Money", "interface Money", 1, 3)
+    cls = Definition(DefinitionKind.CLASS, "Money", "class Money implements Money", 5, 12)
+    add = Definition(DefinitionKind.METHOD, "add", "add(other: Money): Money", 6, 8, "Money")
+    outline = FileOutline(definitions=(money, cls, add))
+    assert select_scopes(outline, frozenset({7})) == (cls, add)
+
+
+def test_go_method_keeps_its_receiver_when_a_local_namesake_is_touched() -> None:
+    """Локальный `type Repo` в другой функции метод `Repo` не охватывает - ресивер нужен."""
+    repo = Definition(DefinitionKind.CLASS, "Repo", "type Repo struct", 3, 3)
+    method = Definition(DefinitionKind.METHOD, "A", "func (r Repo) A()", 4, 6, "Repo")
+    func = Definition(DefinitionKind.FUNCTION, "f", "func f()", 7, 10)
+    local = Definition(DefinitionKind.CLASS, "Repo", "type Repo struct", 8, 8)
+    outline = FileOutline(definitions=(repo, method, func, local))
+    assert select_scopes(outline, frozenset({5, 8})) == (repo, method, func, local)
+
+
 def test_added_lines_are_touched() -> None:
     hunk = Hunk("a.py", 1, 3, 1, 4, changed_new_lines=frozenset({2, 3}))
     assert touched_lines([hunk]) == frozenset({2, 3})
