@@ -40,7 +40,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from app.application.merge_gate_publish import build_retarget_check
+from app.application.merge_gate_publish import settle_merge_gate
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
@@ -203,17 +203,19 @@ def start_review_run(
 
     if retarget:
         # Check run висит на коммите: до ревью нового диффа на нём остался бы
-        # `success` старого. Блокировка — после коммита отмены и нового прогона:
-        # воркер старого прогона и пересчёт по треду, выставив gate, перечитывают
-        # последний прогон на head (`settle_merge_gate`), так что любая
-        # перестановка с ними кончается `failure`. Задача — после блокировки:
-        # новый прогон не выставит gate раньше неё.
+        # `success` старого. Блокировка (`in_progress` нового прогона) — после коммита
+        # отмены и нового прогона: воркер старого прогона и пересчёт по треду, выставив
+        # gate, перечитывают прогон за head, так что любая перестановка с ними кончается
+        # gate нового. Задача — после блокировки: новый прогон не выставит gate раньше неё.
         try:
-            vcs.set_merge_gate_check(
-                launch.repository_full_name,
-                launch.head_sha,
-                launch.installation_id,
-                build_retarget_check(),
+            settle_merge_gate(
+                uow,
+                vcs,
+                merge_request_id=merge_request.id,
+                repo_full_name=launch.repository_full_name,
+                head_sha=launch.head_sha,
+                installation_id=launch.installation_id,
+                repository_id=repository.id,
             )
         except VcsError as exc:
             # 502 и откат: прогон — в `failed` (повтор доставки он дублем не
@@ -256,6 +258,7 @@ def start_review_run(
         # коммит от ревью навсегда. Прогон переводится в failed: терминальное
         # состояние не блокирует следующий запуск. Ошибка идёт дальше — 5xx.
         _fail_unenqueued(uow, run.id, exc, now(), run_outcome)
+        _settle_unenqueued(uow, vcs, launch, merge_request.id, repository.id)
         raise
     return RunStart(kind="success", run=run, merge_request=merge_request, repository=repository)
 
@@ -309,6 +312,31 @@ def _fail_unenqueued(
         logger.exception(
             "не удалось перевести прогон в failed после сбоя очереди",
             extra={"review_run_id": str(run_id)},
+        )
+
+
+def _settle_unenqueued(
+    uow: UnitOfWork,
+    vcs: VcsGateway,
+    launch: RunLaunch,
+    merge_request_id: UUID,
+    repository_id: UUID,
+) -> None:
+    """Gate head прогона, не ушедшего в брокер: `failure` вместо `in_progress` блокировки
+    смены ветки (#295). Best-effort: сбой пишется в лог и не подменяет ошибку очереди."""
+    try:
+        settle_merge_gate(
+            uow,
+            vcs,
+            merge_request_id=merge_request_id,
+            repo_full_name=launch.repository_full_name,
+            head_sha=launch.head_sha,
+            installation_id=launch.installation_id,
+            repository_id=repository_id,
+        )
+    except Exception:
+        logger.exception(
+            "задача не поставлена, а check run merge gate на %s не выставлен", launch.head_sha
         )
 
 

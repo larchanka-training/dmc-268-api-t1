@@ -284,18 +284,23 @@ class GitHubReviewClient:
         head_sha: str,
         installation_id: int,
         check: MergeGateCheck,
+        *,
+        run_id: UUID | None = None,
     ) -> None:
-        self._gw._post_json(
-            f"/repos/{repo_full_name}/check-runs",
-            installation_id,
-            {
-                "name": CHECK_RUN_NAME,
-                "head_sha": head_sha,
-                "status": "completed",
-                "conclusion": check.conclusion,
-                "output": {"title": check.title, "summary": check.summary},
-            },
-        )
+        payload: dict[str, Any] = {
+            "name": CHECK_RUN_NAME,
+            "head_sha": head_sha,
+            "output": {"title": check.title, "summary": check.summary},
+        }
+        if check.conclusion is None:
+            payload["status"] = "in_progress"
+        else:
+            payload["status"] = "completed"
+            payload["conclusion"] = check.conclusion
+        if run_id is not None and self._gw._public_origin:
+            # Экран прогона в кабинете; без ссылки GitHub ведёт на страницу приложения.
+            payload["details_url"] = f"{self._gw._public_origin}/reviews/{run_id}"
+        self._gw._post_json(f"/repos/{repo_full_name}/check-runs", installation_id, payload)
 
     def _load_review_threads(
         self,

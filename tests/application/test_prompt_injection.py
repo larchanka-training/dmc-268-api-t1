@@ -455,7 +455,8 @@ def _follow_up(status: str) -> dict[str, Any]:
 
 
 def _assert_thread_stays_open(uow: FakeUnitOfWork, vcs: RecordingVcsGateway) -> None:
-    """Тред не закрыт и без ответа бота, прогон завершён, merge gate - `failure`."""
+    """Тред не закрыт и без ответа бота, прогон завершён, merge gate - `failure` после
+    `in_progress` захвата."""
     root = uow.published_comments.get(THREAD_ROOT_ID)
     assert root is not None
     assert (root.thread_resolved, root.thread_resolved_by_bot) == (False, False)
@@ -465,7 +466,7 @@ def _assert_thread_stays_open(uow: FakeUnitOfWork, vcs: RecordingVcsGateway) -> 
     assert replies == []
     run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None and run.status is ReviewRunStatus.COMPLETED
-    assert [check.conclusion for check in vcs.checks] == ["failure"]
+    assert [check.conclusion for check in vcs.checks] == [None, "failure"]
 
 
 def test_diff_asking_to_supersede_a_critical_thread_does_not_open_the_merge_gate() -> None:

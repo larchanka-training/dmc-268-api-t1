@@ -29,13 +29,18 @@ BOT = {"login": "dmc-268-review[bot]", "type": "Bot"}
 DRAFT = InlineCommentDraft(file_path="a.py", side=DiffSide.NEW, line=3, body="замечание")
 
 
-def make_gateway(rsa_key_pair: RsaKeyPair, handler: Callable[[httpx.Request], httpx.Response]):
+def make_gateway(
+    rsa_key_pair: RsaKeyPair,
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    public_origin: str = "",
+):
     client = httpx.Client(
         base_url="https://api.github.com",
         transport=httpx.MockTransport(handler),
     )
     auth = GitHubAppAuth(APP_ID, rsa_key_pair.private_pem, client)
-    return GitHubVcsGateway(auth, client, sleep=lambda _: None)
+    return GitHubVcsGateway(auth, client, sleep=lambda _: None, public_origin=public_origin)
 
 
 def test_publish_pull_request_review_fetches_inline_ids(rsa_key_pair: RsaKeyPair) -> None:
@@ -134,7 +139,50 @@ def test_set_merge_gate_check_posts_check_run(rsa_key_pair: RsaKeyPair) -> None:
     )
 
     assert payloads[0]["conclusion"] == "failure"
+    assert payloads[0]["status"] == "completed"
     assert payloads[0]["name"] == "dmc-268-ai-review"
+    assert "details_url" not in payloads[0]
+
+
+def _check_run_payloads(
+    rsa_key_pair: RsaKeyPair, check: MergeGateCheck, public_origin: str, run_id: UUID | None
+) -> dict[str, Any]:
+    payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/app/installations/"):
+            return httpx.Response(200, json={"token": "ghs_test", "expires_at": FAR_FUTURE})
+        if request.url.path.endswith("/check-runs"):
+            payloads.append(json.loads(request.content.decode()))
+            return httpx.Response(201, json={"id": 1})
+        return httpx.Response(404)
+
+    gateway = make_gateway(rsa_key_pair, handler, public_origin=public_origin)
+    gateway.set_merge_gate_check("o/r", "c" * 40, INSTALLATION_ID, check, run_id=run_id)
+    return payloads[0]
+
+
+def test_check_run_of_a_running_review_is_in_progress_and_links_to_the_run(
+    rsa_key_pair: RsaKeyPair,
+) -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000042")
+    payload = _check_run_payloads(
+        rsa_key_pair,
+        MergeGateCheck(conclusion=None, title="Идёт ревью", summary="s"),
+        "https://review.example",
+        run_id,
+    )
+
+    assert payload["status"] == "in_progress"
+    assert "conclusion" not in payload
+    assert payload["details_url"] == f"https://review.example/reviews/{run_id}"
+
+
+def test_check_run_has_no_link_without_a_run_or_public_origin(rsa_key_pair: RsaKeyPair) -> None:
+    check = MergeGateCheck(conclusion="success", title="t", summary="s")
+
+    assert "details_url" not in _check_run_payloads(rsa_key_pair, check, "https://review.example", None)
+    assert "details_url" not in _check_run_payloads(rsa_key_pair, check, "", UUID(int=1))
 
 
 def test_thread_state_carries_the_current_line_and_none_for_an_outdated_thread(

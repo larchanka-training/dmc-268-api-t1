@@ -226,7 +226,12 @@ class Container:
         auth = GitHubAppAuth(
             self.settings.github_app_id, self.settings.github_app_private_key.get_secret_value(), client
         )
-        return GitHubVcsGateway(auth, client, rate_limit_budget_seconds=limits.rate_limit_budget_seconds)
+        return GitHubVcsGateway(
+            auth,
+            client,
+            rate_limit_budget_seconds=limits.rate_limit_budget_seconds,
+            public_origin=self.settings.public_origin,
+        )
 
     def webhook_deliveries(self) -> WebhookDeliveries:
         """Доставки вебхука GitHub App — для повтора упавших (#149).

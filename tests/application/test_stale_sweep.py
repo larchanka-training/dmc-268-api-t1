@@ -223,10 +223,16 @@ class _GateTargets(RecordingVcsGateway):
     targets: list[tuple[str, str, int]] = field(default_factory=list)
 
     def set_merge_gate_check(
-        self, repo_full_name: str, head_sha: str, installation_id: int, check: MergeGateCheck
+        self,
+        repo_full_name: str,
+        head_sha: str,
+        installation_id: int,
+        check: MergeGateCheck,
+        *,
+        run_id: UUID | None = None,
     ) -> None:
         self.targets.append((repo_full_name, head_sha, installation_id))
-        super().set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
+        super().set_merge_gate_check(repo_full_name, head_sha, installation_id, check, run_id=run_id)
 
 
 def _sweep(uow: FakeUnitOfWork, vcs: RecordingVcsGateway, installations: FakeInstallationCatalog) -> int:
@@ -262,7 +268,8 @@ def test_a_swept_run_on_pause_sets_the_pause_check() -> None:
     assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
 
 
-def test_a_swept_first_review_of_the_head_sets_no_check() -> None:
+def test_a_swept_first_review_of_the_head_blocks_the_head() -> None:
+    """Первое ревью коммита вымела очистка: `in_progress` захвата сменяется `failure` (#295)."""
     uow = FakeUnitOfWork()
     _seed_pull_request(uow)
     uow.review_runs.add(_run(1, ReviewRunStatus.ANALYSING, timedelta(hours=1)))
@@ -270,7 +277,7 @@ def test_a_swept_first_review_of_the_head_sets_no_check() -> None:
 
     assert _sweep(uow, vcs, FakeInstallationCatalog()) == 1
 
-    assert vcs.checks == []
+    assert vcs.checks == [build_failed_review_check()]
 
 
 def test_a_swept_run_superseded_on_its_head_sets_no_check() -> None:

@@ -228,6 +228,8 @@ class FakeVcs:
         head_sha: str,
         installation_id: int,
         check: MergeGateCheck,
+        *,
+        run_id: UUID | None = None,
     ) -> None:
         self.calls.append(("check", repo_full_name, head_sha, check.conclusion))
         if self.error is not None:

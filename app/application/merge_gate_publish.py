@@ -201,7 +201,6 @@ def publish_pause_check(
             repo_full_name=repo_full_name,
             head_sha=head_sha,
             installation_id=installation_id,
-            run_id=latest.id,
             repository_id=repository_id,
         )
     if error is not None:
@@ -237,16 +236,16 @@ def build_merge_gate_check(
     )
 
 
-def build_retarget_check() -> MergeGateCheck:
-    """Блокировка head после смены целевой ветки PR, до ревью нового диффа (#222).
+def build_in_progress_check() -> MergeGateCheck:
+    """Прогон за head ещё не записал ревью (#295), в том числе после смены целевой ветки.
 
-    `failure`, а не `in_progress`: если новое ревью упадёт, блокировка остаётся,
-    а прежний `success` по старому диффу не возвращается.
+    Для обязательной проверки `in_progress` не пройден, как и `failure`: прежний `success`
+    по старому диффу он перекрывает так же. Итог, `failure` или check паузы, его сменяет.
     """
     return MergeGateCheck(
-        conclusion="failure",
-        title="Целевая ветка сменилась — идёт повторное ревью",
-        summary="Прежнее ревью проверяло дифф против другой ветки. Мердж заблокирован до ревью нового диффа.",
+        conclusion=None,
+        title="Идёт ревью",
+        summary="Ревью этого коммита ещё идёт. Мердж заблокирован до его итога.",
     )
 
 
@@ -271,32 +270,35 @@ def settle_merge_gate(
     repo_full_name: str,
     head_sha: str,
     installation_id: int,
-    run_id: UUID,
     repository_id: UUID,
 ) -> None:
-    """Выставить gate прогона `run_id` - по его открытым находкам и порогу
-    `min_severity` репозитория `repository_id` - или, если тот уже не отвечает за head,
-    gate того, кто отвечает (#222).
+    """Выставить на head gate прогона, который за него отвечает (`head_run_in_charge`).
 
-    Гонка со сменой целевой ветки: приём сначала коммитит отмену старого прогона и
-    новый прогон, потом выставляет блокировку. Gate собирается по последнему
-    прогону на head и после каждого POST перечитывается: если приём уже
-    закоммитил, здесь видна смена и gate переписывается; если нет - блокировка
-    приёма придёт позже и перекроет `success`. Так любая перестановка кончается
-    gate актуального прогона. Новый прогон, записавший ревью, ещё `publishing`, но свой
-    gate мог уже выставить и выйти: здесь собирается его gate, а не блокировка (#330).
-    После сбоя `SETTLE_ATTEMPTS` попыток - `VcsError` вызывающему. Находки и порог читаются здесь же, на каждой попытке: порог могли
-    сменить, пока шёл прогон или сбой, и gate завершённого чужого прогона по старому
-    порогу снял бы его блокировку. На паузе ревью (`pause_check`) выставляется check
-    паузы: `failure` завершившегося прогона заблокировал бы PR, который ревью не ждёт.
-    Ручной прогон на паузе авторевью ставит свой gate (D11); прогон за head берётся через
-    `head_run_in_charge`, поэтому после упавшего повторного ручного прогона gate — по
-    находкам завершённого прежнего.
+    Одно правило для всех, кто меняет состояние head: захват прогона, запись ревью,
+    падение и очистка прогона, смена целевой ветки, закрытие треда (#295):
+
+    - пауза ревью (`pause_check`) - check паузы: `failure` завершившегося прогона
+      заблокировал бы PR, который ревью не ждёт;
+    - прогон `completed` или записавший ревью - итог по открытым находкам и порогу;
+    - прогон `failed` или `cancelled` - `failure` «Ревью не удалось»;
+    - прогон ещё без ревью - `in_progress` «Идёт ревью».
+
+    Записав ревью, прогон ещё `publishing`, но свой gate мог уже выставить и выйти:
+    `in_progress`, дошедший после, остался бы на head (#330). Поэтому «ревью записано»
+    смотрится по сводке прогона, а не по статусу.
+
+    Гонки задержанных POST: после каждого POST состояние перечитывается, и если check
+    изменился, выставляется снова. Приём смены ветки коммитит отмену и новый прогон до
+    своего POST, поэтому любая перестановка кончается gate актуального прогона. Находки и
+    порог читаются на каждой попытке: порог могли сменить, пока шёл прогон или сбой.
+    После сбоя `SETTLE_ATTEMPTS` попыток - `VcsError` вызывающему. Прогона на head нет -
+    check не выставляется. Ручной прогон на паузе авторевью ставит свой gate (D11), после
+    упавшего повторного ручного прогона gate - по находкам завершённого прежнего.
     """
     failures = 0
     # Последний выставленный check: пока GitHub его принимал, итог мог измениться из-за
     # любого входа - прогона, порога, тредов, паузы (#325). Сравниваем сам check.
-    settled: MergeGateCheck | None = None
+    settled: tuple[MergeGateCheck, UUID | None] | None = None
     while True:
         # Перед каждой попыткой - заново: за время сбоя за head мог начать
         # отвечать другой прогон, и повтор прежнего check вернул бы чужой итог.
@@ -304,8 +306,6 @@ def settle_merge_gate(
             repository = uow.repositories.get(repository_id)
             merge_request = uow.merge_requests.get(merge_request_id)
             latest = head_run_in_charge(uow, repository, merge_request_id, head_sha)
-            # Записав ревью, прогон выставляет свой gate и может уже выйти: блокировка
-            # «идёт повторное ревью», дошедшая после, осталась бы на head (#330).
             published = latest is not None and any(
                 c.kind is CommentKind.SUMMARY
                 for c in uow.published_comments.list_for_run(latest.id)
@@ -319,34 +319,26 @@ def settle_merge_gate(
         )
         if pause is not None:
             current = pause
-        elif (
-            (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED)
-            or latest.status is ReviewRunStatus.COMPLETED
-            or (latest.status is ReviewRunStatus.PUBLISHING and published)
+        elif latest.status is ReviewRunStatus.COMPLETED or (
+            latest.status is ReviewRunStatus.PUBLISHING and published
         ):
-            # Свой прогон или новый, успевший завершиться или записать ревью: его gate мог
-            # уйти раньше нашего POST. Gate собирается по открытым находкам прогона и порогу.
             current = build_merge_gate_check(
                 collect_open_findings(uow, merge_request_id, head_run_id=latest.id),
                 repository.min_severity,
             )
-        elif latest.status is ReviewRunStatus.FAILED:
-            # Новый прогон уже упал: повторного ревью не будет, head ждёт push.
+        elif latest.status in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}:
+            # Повторного ревью этим прогоном не будет: head ждёт push или ручной запуск.
             current = build_failed_review_check()
         else:
-            current = build_retarget_check()
-        if current == settled:
+            current = build_in_progress_check()
+        # Ссылка - на прогон за head; у check паузы её нет.
+        link = None if pause is not None else latest.id
+        if (current, link) == settled:
             return
-        if latest.id != run_id:
-            logger.info(
-                "merge gate %s@%s переписан: прогон %s больше не отвечает за head, последний - %s",
-                repo_full_name,
-                head_sha,
-                run_id,
-                latest.id,
-            )
         try:
-            vcs.set_merge_gate_check(repo_full_name, head_sha, installation_id, current)
+            vcs.set_merge_gate_check(
+                repo_full_name, head_sha, installation_id, current, run_id=link
+            )
         except VcsError:
             failures += 1
             if failures == SETTLE_ATTEMPTS:
@@ -362,4 +354,4 @@ def settle_merge_gate(
             # Сбой не значит, что POST не дошёл: что на head, неизвестно, повтор обязателен.
             settled = None
             continue
-        settled = current
+        settled = (current, link)

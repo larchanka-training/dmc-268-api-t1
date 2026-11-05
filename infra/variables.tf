@@ -148,7 +148,7 @@ variable "user_token_encryption_key" {
 
 variable "public_origin" {
   type        = string
-  description = "Публичный origin интерфейса без завершающего / (PUBLIC_ORIGIN): сверка Origin и callback входа. Пустой — изменяющие запросы с сессией получают 403."
+  description = "Публичный origin интерфейса без завершающего / (PUBLIC_ORIGIN): сверка Origin, callback входа и ссылка из check run на прогон. Пустой — изменяющие запросы с сессией получают 403, check run без ссылки."
   default     = ""
 }
 

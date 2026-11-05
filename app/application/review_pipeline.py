@@ -25,10 +25,6 @@ from uuid import UUID
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits, request_review, request_verification
 from app.application.merge_gate_publish import (
-    build_failed_review_check,
-    head_run_in_charge,
-    pause_check,
-    publish_pause_check,
     settle_merge_gate,
 )
 from app.application.ports import UnitOfWork
@@ -160,21 +156,17 @@ def block_head_of_failed_run(
     repository_full_name: str,
     installation_id: int,
 ) -> bool:
-    """Выставить `failure` на head, если упавший прогон на нём последний, а до него
-    на этот head уже было ревью (ревью #225), или check паузы, если ревью на паузе.
+    """Выставить gate head упавшего прогона (`settle_merge_gate`), если он там последний.
 
-    Иначе на head мог остаться `success` прежнего прогона по старому диффу: его
-    поправку после смены ветки (`settle_merge_gate`) GitHub не принял. Без
-    прежнего ревью check run на head нет, обязательная проверка и так не даёт
-    мерджа, и упавший прогон на PR ничего не оставляет. Прогон, за которым на head
-    уже есть новый, gate не трогает - head отвечает тот. На паузе check паузы ставится
-    и без прежнего ревью: иначе обязательная проверка держала бы PR, который ревью не
-    ждёт. Исключение - пауза авторевью, когда последний на head - упавший повтор ручного
-    ревью, а до него есть завершённый ручной прогон: за head снова отвечает он
-    (`head_run_in_charge`), и выставляется его gate. Зовут пайплайн и очистка
-    (`sweep_stale_runs`). Best-effort, как `_mark_failed`: сбой пишется в лог и не подменяет исходное
-    исключение. `False` - GitHub временно недоступен (`VcsTransientError`): очистке дальше в
-    проходе к нему не ходить; воркер результат не читает.
+    Обычно это `failure` «Ревью не удалось», и на первом ревью коммита тоже: иначе на head
+    остался бы `in_progress` захвата (#295) или `success` прежнего прогона по старому
+    диффу (ревью #225). На паузе - check паузы, после упавшего повтора ручного ревью на
+    паузе авторевью - gate завершённого ручного прогона. Прогон, за которым на head уже
+    есть новый, gate не трогает: head отвечает тот. Зовут пайплайн и очистка
+    (`sweep_stale_runs`). Best-effort, как `_mark_failed`: сбой пишется в лог и не
+    подменяет исходное исключение. `False` - GitHub временно недоступен
+    (`VcsTransientError`): очистке дальше в проходе к нему не ходить; воркер результат
+    не читает.
     """
     try:
         with uow:
@@ -182,43 +174,18 @@ def block_head_of_failed_run(
             if run is None or run.status is not ReviewRunStatus.FAILED:
                 return True
             latest = uow.review_runs.find_latest(run.merge_request_id, head_sha)
-            earlier = uow.review_runs.find_reviewed(run.merge_request_id, head_sha)
             merge_request = uow.merge_requests.get(run.merge_request_id)
-            repository = uow.repositories.get(merge_request.repository_id) if merge_request else None
-            # Вытеснен ли прогон - по `latest`; чей gate на head - по `in_charge`.
-            in_charge = head_run_in_charge(uow, repository, run.merge_request_id, head_sha)
-        if latest is None or latest.id != run.id or repository is None or merge_request is None:
+        if latest is None or latest.id != run.id or merge_request is None:
             return True
-        pause = pause_check(repository, in_charge, merge_request.target_branch)
-        if pause is None and in_charge is not None and in_charge.id != run.id:
-            # Пауза авторевью или фильтр, повтор ручного ревью упал: gate завершённого ручного.
-            settle_merge_gate(
-                uow,
-                vcs,
-                merge_request_id=run.merge_request_id,
-                repo_full_name=repository_full_name,
-                head_sha=head_sha,
-                installation_id=installation_id,
-                run_id=in_charge.id,
-                repository_id=repository.id,
-            )
-            return True
-        if pause is not None:
-            # Пока идёт POST, за head мог стать новый ручной прогон и выставить свой gate.
-            publish_pause_check(
-                uow,
-                vcs,
-                pause,
-                repository_id=repository.id,
-                pr_number=merge_request.number,
-                repo_full_name=repository_full_name,
-                head_sha=head_sha,
-                installation_id=installation_id,
-            )
-            return True
-        check = build_failed_review_check() if earlier is not None else None
-        if check is not None:
-            vcs.set_merge_gate_check(repository_full_name, head_sha, installation_id, check)
+        settle_merge_gate(
+            uow,
+            vcs,
+            merge_request_id=run.merge_request_id,
+            repo_full_name=repository_full_name,
+            head_sha=head_sha,
+            installation_id=installation_id,
+            repository_id=merge_request.repository_id,
+        )
     except VcsTransientError:
         logger.exception(
             "прогон упал, а check run merge gate на %s не выставлен: GitHub недоступен",
@@ -233,6 +200,29 @@ def block_head_of_failed_run(
             extra={"review_run_id": str(run_id)},
         )
     return True
+
+
+def _mark_in_progress(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob, run: ReviewRun) -> None:
+    """`in_progress` на head захваченного прогона (#295). Best-effort: без него прогон
+    идёт дальше, а итог выставит публикация или падение."""
+    try:
+        with uow:
+            merge_request = uow.merge_requests.get(run.merge_request_id)
+        if merge_request is None:
+            return
+        settle_merge_gate(
+            uow,
+            vcs,
+            merge_request_id=run.merge_request_id,
+            repo_full_name=job.repository_full_name,
+            head_sha=job.head_sha,
+            installation_id=job.installation_id,
+            repository_id=merge_request.repository_id,
+        )
+    except Exception:
+        logger.warning(
+            "check run «Идёт ревью» на %s не выставлен", job.head_sha, exc_info=True
+        )
 
 
 def run_review(
@@ -302,6 +292,7 @@ def run_review(
             logger.warning("прогон изменён другим, сообщение подтверждается")
             return
         run = claimed
+        _mark_in_progress(uow, vcs_gateway, job, run)
 
         steps.start(ReviewRunStage.FETCHING_DIFF)
         diff = fetch_review_diff(job, vcs_gateway, max_bytes=context_limits.diff_max_bytes)

@@ -18,6 +18,7 @@ from app.application.merge_gate_publish import (
     BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
     build_failed_review_check,
+    build_in_progress_check,
 )
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.ports.vcs_review import MergeGateCheck
@@ -193,6 +194,32 @@ def test_successful_run_reaches_completed_with_model_and_tokens() -> None:
     # Первое показание - начало прогона, последнее - его конец.
     assert run.duration_seconds == monotonic.readings[-1] - monotonic.readings[0]
     assert uow.context_payloads.list_for_run(JOB.review_run_id)
+
+
+def test_a_claimed_run_shows_in_progress_until_its_review_and_links_to_itself() -> None:
+    """#295: плашка проходит «Идёт ревью» → итог, обе ведут на этот прогон."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = RecordingVcsGateway()
+
+    _run(uow, ScriptedLlmGateway([review_response()]), vcs_gateway=vcs)
+
+    assert [c.conclusion for c in vcs.checks] == [None, "success"]
+    assert vcs.checks[0] == build_in_progress_check()
+    assert vcs.check_links == [JOB.review_run_id, JOB.review_run_id]
+
+
+def test_github_down_at_claim_does_not_stop_the_run(caplog: pytest.LogCaptureFixture) -> None:
+    """`in_progress` не дошёл: прогон идёт дальше, сбой - в лог."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    vcs = RecordingVcsGateway(check_error=VcsTransientError("GitHub API: HTTP 502"))
+
+    with caplog.at_level(logging.WARNING, logger="app.application.review_pipeline"):
+        _run(uow, ScriptedLlmGateway([review_response()]), vcs_gateway=vcs)
+
+    assert _completed(uow).status is ReviewRunStatus.COMPLETED
+    assert any("Идёт ревью" in r.getMessage() for r in caplog.records)
 
 
 def test_context_is_built_from_the_real_diff() -> None:
@@ -666,6 +693,14 @@ class _RetargetDuringPublication(RecordingVcsGateway):
         current = self._uow.review_runs.get(JOB.review_run_id)
         assert current is not None
         self._uow.review_runs.update(replace(current, status=ReviewRunStatus.CANCELLED))
+        self._uow.review_runs.add(
+            replace(
+                current,
+                id=UUID(int=77),
+                status=ReviewRunStatus.QUEUED,
+                created_at=current.created_at + timedelta(seconds=1),
+            )
+        )
         return super().publish_pull_request_review(*args, **kwargs)
 
 
@@ -684,7 +719,8 @@ def test_a_run_cancelled_by_a_retarget_is_acked_not_dead_lettered(
 
     run = _completed(uow)
     assert run.status is ReviewRunStatus.CANCELLED
-    assert build_failed_review_check() not in vcs.checks
+    # Head отвечает новый прогон: на head его `in_progress`, а не `failure` отменённого.
+    assert vcs.checks[-1] == build_in_progress_check()
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert all(
         step.status is not ReviewRunStepStatus.RUNNING
@@ -709,7 +745,8 @@ def test_a_run_cancelled_before_its_review_is_posted_leaves_the_step_abandoned()
     _run(uow, ScriptedLlmGateway([review_response()]), vcs_gateway=vcs)
 
     assert _completed(uow).status is ReviewRunStatus.CANCELLED
-    assert (vcs.publications, vcs.checks) == ([], [])
+    # Отменённый прогон после `in_progress` захвата gate не ставит: head отвечает новый.
+    assert (vcs.publications, vcs.checks) == ([], [build_in_progress_check()])
     (publishing,) = [
         step
         for step in uow.review_run_steps.list_for_run(JOB.review_run_id)
@@ -968,7 +1005,8 @@ def test_a_diff_over_the_limit_fails_the_run_without_a_review() -> None:
     ]
     assert gateway.requests == []
     assert vcs.publications == []
-    assert vcs.checks == []
+    # Первое ревью коммита: `in_progress` захвата сменяется `failure`, а не висит (#295).
+    assert vcs.checks == [build_in_progress_check(), build_failed_review_check()]
     assert uow.context_payloads.list_for_run(JOB.review_run_id) == []
 
 
@@ -1360,7 +1398,7 @@ def test_a_live_worker_whose_run_was_swept_fails_like_any_failed_run() -> None:
     assert run.status is ReviewRunStatus.FAILED
     assert run.failure_reason is not None and "нет прогресса" in run.failure_reason
     assert vcs.publications == []
-    assert vcs.checks == [build_failed_review_check()]
+    assert vcs.checks == [build_in_progress_check(), build_failed_review_check()]
     assert outcome.statuses == ["failed"]
 
 
@@ -1506,7 +1544,7 @@ def test_a_failed_review_after_an_earlier_one_blocks_the_head() -> None:
     with pytest.raises(DiffTooLargeError):
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
-    assert vcs.checks == [build_failed_review_check()]
+    assert vcs.checks == [build_in_progress_check(), build_failed_review_check()]
 
 
 def _turn_auto_review_off(uow: FakeUnitOfWork) -> None:
@@ -1551,7 +1589,8 @@ def test_a_failed_review_on_a_paused_repository_sets_the_pause_check(
     with pytest.raises(DiffTooLargeError):
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
-    assert vcs.checks == [expected]
+    # Захват на паузе ставит check паузы, падение - его же.
+    assert vcs.checks == [expected, expected]
 
 
 def test_a_failed_first_manual_review_on_auto_review_pause_sets_the_pause_check() -> None:
@@ -1565,7 +1604,8 @@ def test_a_failed_first_manual_review_on_auto_review_pause_sets_the_pause_check(
     with pytest.raises(DiffTooLargeError):
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
-    assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
+    # Живой ручной прогон на паузе авторевью ставит свой gate (D11), упавший - check паузы.
+    assert vcs.checks == [build_in_progress_check(), AUTO_REVIEW_OFF_CHECK]
 
 
 def test_a_failed_manual_re_review_on_auto_review_pause_keeps_the_gate_of_the_earlier_one() -> None:
@@ -1580,7 +1620,8 @@ def test_a_failed_manual_re_review_on_auto_review_pause_keeps_the_gate_of_the_ea
     with pytest.raises(DiffTooLargeError):
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
-    (check,) = vcs.checks
+    in_progress, check = vcs.checks
+    assert in_progress == build_in_progress_check()
     assert (check.conclusion, check.title) == ("success", "Ревью пройдено")
 
 
@@ -1602,7 +1643,8 @@ def test_a_failed_manual_re_review_on_auto_review_pause_keeps_the_critical_block
     with pytest.raises(DiffTooLargeError):
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
-    (check,) = vcs.checks
+    in_progress, check = vcs.checks
+    assert in_progress == build_in_progress_check()
     assert (check.conclusion, check.title) == (
         "failure",
         "Есть незакрытые замечания уровня critical и выше",
@@ -1625,13 +1667,15 @@ def test_a_delayed_pause_check_of_a_failed_manual_run_returns_the_gate_of_its_re
             at=NOW + timedelta(hours=1),
         )
 
-    vcs = RecordingVcsGateway(diff="+" * 1_001, during_first_check=relaunch_completes)
+    vcs = RecordingVcsGateway(diff="+" * 1_001)
+    # Первый check - `in_progress` захвата; перезапуск приходится на POST check паузы.
+    vcs.during_first_check = lambda: setattr(vcs, "during_first_check", relaunch_completes)
 
     with pytest.raises(DiffTooLargeError):
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
-    assert vcs.checks[0] == AUTO_REVIEW_OFF_CHECK
-    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
+    assert vcs.checks[1] == AUTO_REVIEW_OFF_CHECK
+    assert [c.conclusion for c in vcs.checks] == [None, "success", "failure"]
 
 
 def test_a_failed_review_superseded_on_the_head_leaves_the_gate_alone() -> None:
@@ -1644,7 +1688,8 @@ def test_a_failed_review_superseded_on_the_head_leaves_the_gate_alone() -> None:
     with pytest.raises(DiffTooLargeError):
         _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, context_limits=replace(LIMITS, diff_max_bytes=1_000))
 
-    assert vcs.checks == []
+    # Захват ставит gate того, кто отвечает за head; упавший старый прогон его не трогает.
+    assert [c.conclusion for c in vcs.checks] == ["success"]
 
 
 def test_a_failed_gate_of_a_failed_review_does_not_hide_the_failure() -> None:

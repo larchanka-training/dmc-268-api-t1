@@ -142,6 +142,12 @@ class VcsGateway(Protocol):
         head_sha: str,
         installation_id: int,
         check: MergeGateCheck,
+        *,
+        run_id: UUID | None = None,
     ) -> None:
-        """Check run на head коммита — блокировка мерджа при conclusion=failure."""
+        """Check run на head коммита — блокировка мерджа при conclusion=failure.
+
+        `conclusion` `None` — ревью идёт (`in_progress`). `run_id` — прогон, по которому
+        выставлен check: на его экран в кабинете ведёт ссылка из check run.
+        """
         ...

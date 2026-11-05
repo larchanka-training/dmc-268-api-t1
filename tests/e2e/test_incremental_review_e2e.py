@@ -97,7 +97,8 @@ def test_commit_that_shifts_an_unchanged_line_does_not_repeat_its_finding(stack:
     (covered,) = stack.findings(second_run)
     (original,) = stack.findings(first_run)
     assert covered.covered_by_finding_id == original.id
-    assert [c.conclusion for c in stack.github.check_runs] == ["failure", "failure"]
+    # На каждом push «Идёт ревью», затем итог.
+    assert [c.conclusion for c in stack.github.check_runs] == [None, "failure", None, "failure"]
 
 
 def test_new_problem_in_a_later_commit_is_published_alone(stack: Stack) -> None:

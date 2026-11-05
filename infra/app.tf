@@ -207,6 +207,8 @@ resource "docker_container" "worker" {
     "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-worker",
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
+    # Ссылка из check run на прогон в кабинете (#295): check run ставит в основном воркер.
+    "PUBLIC_ORIGIN=${var.public_origin}",
     "LLM_BACKEND=${var.llm_backend}",
     "OLLAMA_BASE_URL=${var.ollama_base_url}",
     "OLLAMA_MODEL=${var.ollama_model}",
