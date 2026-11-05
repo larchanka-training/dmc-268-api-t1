@@ -165,7 +165,8 @@ def test_from_file_outside_cwd_keeps_absolute_path(tmp_path: Path, monkeypatch) 
     rel = (tmp_path / "dir" / "m.py").resolve().as_posix()
     assert list(pr.head_files) == [rel]
     [file] = run_outline([pr], SandboxConfig()).prs[0].files
-    assert (file.status, file.definitions) == ("in_context", 1)
+    # Новый маленький файл - целиком в диффе пакета.
+    assert (file.status, file.definitions) == ("whole_file", 1)
 
 
 def test_from_file_rejects_missing_and_binary(tmp_path: Path) -> None:
@@ -350,7 +351,9 @@ def test_run_outline_reports_what_the_model_sees() -> None:
     )
     files = {f.path: f for f in outline.files}
     service = files["app/service.py"]
-    assert service.status == "in_context"
+    # Файл меньше порога целого файла: он в диффе пакета целиком, AST в пакет не идёт,
+    # а `scopes` - то, что выбрал бы AST.
+    assert service.status == "whole_file"
     assert service.language == "python"
     assert service.touched == (14,)
     # Метод - с декоратором (строка 11), сигнатуры - без двоеточия.
@@ -372,12 +375,9 @@ def test_run_outline_reports_what_the_model_sees() -> None:
     assert files["docs/notes.md"].status == "no_grammar"
     assert files["docs/notes.md"].language is None
     assert files["vendor/x.py"].status == "filtered"
-    assert [item["path"] for item in outline.ast] == [
-        "app/service.py",
-        "app/service.py",
-    ]
+    assert outline.ast == ()
     assert outline.omitted_count >= len(outline.omitted)
-    assert 0 < outline.ast_tokens < outline.token_count <= outline.max_tokens
+    assert 0 == outline.ast_tokens < outline.token_count <= outline.max_tokens
 
 
 def _pr(pr_id: str, base: dict[str, str], head: dict[str, str | None]) -> PrInput:
@@ -518,7 +518,7 @@ def test_run_outline_flags_empty_outline_and_too_large() -> None:
     files = {f.path: f for f in outline.files}
     script = files["script.py"]
     assert (script.status, script.empty_outline, script.definitions) == (
-        "no_scopes",
+        "whole_file",
         True,
         0,
     )
@@ -557,12 +557,13 @@ def test_example_case_selects_definitions_per_language() -> None:
 
     files = {f.path: f for f in outline.files}
     assert {path: f.status for path, f in files.items()} == {
-        "app/billing/discount.py": "in_context",
-        "app/billing/broken.py": "in_context",
-        "web/api/handler.ts": "in_context",
-        "web/ui/Badge.tsx": "in_context",
-        "web/legacy/format.js": "in_context",
-        "services/orders/repo.go": "in_context",
+        # Маленькие файлы - целиком в диффе пакета; `scopes` - выбор AST без пакета.
+        "app/billing/discount.py": "whole_file",
+        "app/billing/broken.py": "whole_file",
+        "web/api/handler.ts": "whole_file",
+        "web/ui/Badge.tsx": "whole_file",
+        "web/legacy/format.js": "whole_file",
+        "services/orders/repo.go": "whole_file",
         "docs/orders.md": "no_grammar",
     }
     # Python: правка в методе под декоратором - метод (с декоратора) и его класс, без __init__.
@@ -620,13 +621,13 @@ def test_main_default_prints_example_report(capsys) -> None:
     assert out.startswith("песочница tree-sitter: PR 1, правила: rules, лимит пакета: ")
     assert "=== [1] outline-case: Мультиязычный мок-PR" in out
     assert "app/billing/discount.py  python  изменены строки 13" in out
-    assert "  в контекст (как видит модель):" in out
+    assert "  файл целиком в диффе пакета - AST не нужен; AST выбрал бы:" in out
     assert "    5-13 class Discount\n      11-13 def apply(" in out
     assert "  импорты:\n    from decimal import Decimal" in out
     assert "docs/orders.md  без грамматики" in out
-    assert "пакет: файлов с AST: 6, ~" in out
+    assert "пакет: файлов с AST: 0, ~" in out
     assert "проблемы: -" in out
-    assert "итого: PR 1, файлов с AST 6, проблем 0" in out
+    assert "итого: PR 1, файлов с AST 0, проблем 0" in out
 
 
 def test_main_full_outline_shows_unselected_definitions(capsys) -> None:
@@ -636,10 +637,12 @@ def test_main_full_outline_shows_unselected_definitions(capsys) -> None:
     assert "  весь контур:\n    5-13 class Discount\n      8-9 def __init__(" in out
 
 
-def _module_file(tmp_path: Path) -> Path:
+def _module_file(tmp_path: Path, padding: int = 0) -> Path:
+    """Модуль; `padding` строк комментария в конце делают его больше порога целого файла."""
     path = tmp_path / "m.py"
     path.write_text(
-        "import os\n\n\ndef f() -> str:\n    return os.sep\n", encoding="utf-8"
+        "import os\n\n\ndef f() -> str:\n    return os.sep\n" + ("# " + "x" * 98 + "\n") * padding,
+        encoding="utf-8",
     )
     return path
 
@@ -664,13 +667,14 @@ def test_main_file_lines_json_has_fixed_keys(tmp_path: Path, capsys) -> None:
         "path", "language", "status", "reason", "touched", "definitions", "imports",
         "outline", "scopes", "import_text", "dropped", "empty_outline",
     }  # fmt: skip
-    assert (file["status"], file["touched"]) == ("in_context", [5])
+    assert (file["status"], file["touched"]) == ("whole_file", [5])
     assert f"результат: {out}" in capsys.readouterr().out
 
 
 def test_main_payload_prints_raw_ast_and_omitted(tmp_path: Path, capsys) -> None:
     assert (
-        main(["--file", str(_module_file(tmp_path)), "--lines", "5", "--payload"]) == 0
+        main(["--file", str(_module_file(tmp_path, padding=100)), "--lines", "5", "--payload"])
+        == 0
     )
 
     [pr] = json.loads(capsys.readouterr().out)

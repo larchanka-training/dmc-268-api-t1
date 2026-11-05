@@ -21,7 +21,8 @@ from app.domain.context_budget import estimate_tokens, serialize
 from app.domain.diff_parser import is_filterable, parse_diff
 from app.domain.entities import Definition, FileOutline, Hunk, ParsedFile
 from app.domain.enums import Language
-from app.domain.untrusted import sanitize
+from app.domain.hunk_context import WHOLE_FILE_MAX_BYTES, expand_hunks
+from app.domain.untrusted import fence, sanitize
 from app.domain.vcs_errors import DiffTooLargeError
 from app.infrastructure.container import WORKER_VCS_LIMITS
 from app.infrastructure.parsing.tree_sitter_extractor import (
@@ -50,7 +51,9 @@ from .sources import OutlinePr
 class FileOutlineReport:
     """Один файл диффа глазами этапа сборки контекста.
 
-    `status`: `in_context` - в пакет вошёл хоть один элемент AST; `budget` -
+    `status`: `in_context` - в пакет вошёл хоть один элемент AST; `whole_file` -
+    файл вошёл в дифф пакета целиком и AST ему не нужен (`scopes` и `import_text` -
+    то, что выбрал бы AST, а не текст пакета); `budget` -
     элементы AST отброшены бюджетом; `no_scopes` - разобран, но охватывающих
     определений и импортов нет; `diff_budget` - hunk'и файла не вошли, AST не
     выбирался; `skipped` - AST пропущен (`reason`, если запись осталась в
@@ -166,6 +169,7 @@ def _file_report(
     head: str | None,
     *,
     shown_hunks: Sequence[Hunk],
+    diff: Sequence[dict[str, Any]],
     ast: Sequence[dict[str, Any]],
     omitted: Sequence[dict[str, Any]],
     extractor: _RecordingExtractor,
@@ -201,6 +205,20 @@ def _file_report(
         )
     scopes = next((_unfence(i["scopes"]) for i in items if "scopes" in i), None)
     import_text = next((_unfence(i["imports"]) for i in items if "imports" in i), None)
+    whole = False
+    if (
+        head is not None
+        and len(head.encode("utf-8")) <= WHOLE_FILE_MAX_BYTES
+        and len(shown) == len(parsed.hunks) > 0
+    ):
+        views = expand_hunks(parsed.hunks, head, head.count("\n") + 1)
+        whole = views is not None and [
+            i["hunk"] for i in diff if i["path"] == clean
+        ] == [fence("diff", view) for view in views]
+    if whole and outline is not None:
+        dropped = ()
+        scopes = "\n".join(_render_outline(select_scopes(outline, touched_lines(shown)))) or None
+        import_text = "\n".join(outline.imports) or None
 
     if parsed.is_deleted:
         status = "deleted"
@@ -215,6 +233,8 @@ def _file_report(
         status = "skipped"
     elif not shown:
         status = "diff_budget"
+    elif whole:
+        status = "whole_file"
     elif items:
         status = "in_context"
     elif dropped:
@@ -322,6 +342,7 @@ def run_outline(
                 # Текст - только у загруженного этапом файла, иначе контура нет.
                 vcs.fetched.get((parsed.file_path, job.head_sha)),
                 shown_hunks=assembled.hunks,
+                diff=body["diff"],
                 ast=ast,
                 omitted=omitted,
                 extractor=extractor,
