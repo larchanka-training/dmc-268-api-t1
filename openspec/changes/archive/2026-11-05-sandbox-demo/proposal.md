@@ -14,12 +14,15 @@ Ollama, сделать `uv sync --all-extras`, поднять Ollama, скача
 
 - `make sandbox-demo` — «начать отсюда»: проверка окружения (`scripts/sandbox-doctor.sh`),
   `uv sync --all-extras`, `make ollama-up ollama-pull` и прогон воркера на мок-PR `DEMO_CASE`
-  (по умолчанию `tests/sandbox/examples/case.yaml`). Коды выхода — как у прогона песочницы:
-  `0` — прогон `completed`, сообщение `ack`; `1` — прогон не завершился или `nack`; `2` — вход
-  или окружение не подошли.
+  (по умолчанию `tests/sandbox/examples/case.yaml`). Код `0` — прогон `completed`, сообщение
+  `ack`; любой сбой — код make `2` (GNU make не передаёт код рецепта), а причину — прогон не
+  завершился или `nack`, вход или окружение не подошли — называет последняя строка. Коды
+  `0`/`1`/`2` различает прямой запуск `uv run python -m tests.sandbox`.
 - `make sandbox-doctor` и `scripts/sandbox-doctor.sh` — проверка окружения без изменений: корень
   репозитория, uv и Python 3.14, git, curl, ollama, отвечает ли Ollama на `OLLAMA_URL`, скачана ли
-  `MODEL`, не меньше 3 ГБ свободного места. `✗` — ошибка (код 1), `!` — предупреждение.
+  `MODEL`, не меньше 3 ГБ свободного места там, куда Ollama кладёт модели (`OLLAMA_MODELS`, по
+  умолчанию `~/.ollama/models`). `✗` — ошибка (скрипт — код 1, `make sandbox-doctor` — код make
+  2), `!` — предупреждение.
 - `make sandbox-down` останавливает `ollama serve`, запущенную `make ollama-up`; Ollama, запущенную
   не через make, не трогает.
 - `make ollama-up` пишет PID запущенной Ollama в `.ollama.pid`; файл — в `.gitignore`.

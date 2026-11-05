@@ -102,9 +102,16 @@ sandbox-demo: ## Начать отсюда: проверить окружени�
 sandbox-doctor: ## Проверить окружение песочницы, ничего не меняя
 	@OLLAMA_URL='$(OLLAMA_URL)' MODEL='$(MODEL)' scripts/sandbox-doctor.sh
 
+# .ollama.pid: PID и время старта процесса. Сигнал уходит, только если по PID всё ещё
+# тот же процесс `ollama serve`: после её завершения PID мог достаться другому процессу.
 sandbox-down: ## Остановить Ollama, если её запустил make ollama-up
-	@if [ -f .ollama.pid ] && ps -p "$$(cat .ollama.pid)" -o command= 2>/dev/null | grep -q ollama; then \
-		kill "$$(cat .ollama.pid)" && echo "Ollama (pid $$(cat .ollama.pid)) остановлена"; \
+	@pid=$$(sed -n 1p .ollama.pid 2>/dev/null); saved=$$(sed -n 2p .ollama.pid 2>/dev/null); \
+	started=$$(echo $$(ps -p "$${pid:-0}" -o lstart= 2>/dev/null)); \
+	if [ -n "$$pid" ] && [ -n "$$saved" ] && [ "$$started" = "$$saved" ] \
+		&& ps -p "$$pid" -o command= 2>/dev/null | grep -Eq '(^|/)ollama serve( |$$)'; then \
+		kill "$$pid" && echo "Ollama (pid $$pid) остановлена"; \
+	elif [ -n "$$pid" ]; then \
+		echo "PID $$pid из .ollama.pid - уже не Ollama, запущенная make ollama-up: процесс не трогаю"; \
 	else \
 		echo "Ollama, запущенной через make, нет - ничего не делаю"; \
 	fi; \
@@ -132,7 +139,7 @@ ollama-up: ## Поднять ollama serve в фоне, если она ещё н
 		command -v ollama >/dev/null || { echo "ollama не установлена: brew install ollama" >&2; exit 1; }; \
 		echo "Запускаю ollama serve в фоне, лог - .ollama.log"; \
 		OLLAMA_HOST='$(OLLAMA_URL)' nohup ollama serve >.ollama.log 2>&1 & \
-		echo $$! >.ollama.pid; \
+		pid=$$!; { echo $$pid; echo $$(ps -p $$pid -o lstart=); } >.ollama.pid; \
 		for i in $$(seq 1 30); do curl -sf '$(OLLAMA_URL)/api/tags' >/dev/null && exit 0; sleep 1; done; \
 		echo "Ollama не ответила за 30 с, см. .ollama.log" >&2; exit 1; \
 	fi

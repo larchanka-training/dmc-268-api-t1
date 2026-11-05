@@ -21,13 +21,17 @@ make sandbox-demo
 3. `make ollama-up ollama-pull` — Ollama и модель `MODEL`;
 4. прогон воркера на мок-PR `DEMO_CASE` (по умолчанию [`examples/case.yaml`](examples/case.yaml)).
 
-Коды выхода: `0` — прогон `completed`, сообщение `ack`; `1` — прогон не завершился или ушёл в
-`nack` (подробнее — `ARGS=-v`); `2` — вход или окружение не подошли. Другая модель или свой кейс —
-`make sandbox-demo MODEL=qwen2.5-coder:7b DEMO_CASE=my-case.yaml`.
+`make sandbox-demo` завершается с кодом `0`, если прогон `completed` и сообщение `ack`, и с кодом
+make `2` при любом сбое: GNU make не передаёт код рецепта. Что именно не так, говорит последняя
+строка: прогон не завершился или ушёл в `nack` (подробнее — `ARGS=-v`) либо вход или окружение не
+подошли. Коды `0`/`1`/`2` различает прямой запуск `uv run python -m tests.sandbox` (раздел «Коды
+выхода»). Другая модель или свой кейс — `make sandbox-demo MODEL=qwen2.5-coder:7b DEMO_CASE=my-case.yaml`.
 
 `make sandbox-doctor` только проверяет и ничего не меняет: корень репозитория, uv и Python 3.14,
 git, curl, ollama, отвечает ли Ollama на `OLLAMA_URL`, скачана ли `MODEL`, не меньше 3 ГБ свободного
-места. `✗` — ошибка (код 1), `!` — предупреждение.
+места там, куда Ollama кладёт модели (`OLLAMA_MODELS`, по умолчанию `~/.ollama/models`). `✗` —
+ошибка, `!` — предупреждение. С ошибкой `scripts/sandbox-doctor.sh` выходит с кодом `1`, а
+`make sandbox-doctor` — с кодом make `2`.
 
 То же по шагам и на кейсах корпуса:
 
@@ -193,7 +197,8 @@ make sandbox-git RANGE=develop..HEAD
 - `--json <путь>` — весь результат прогона в JSON;
 - `-v` — логи воркера.
 
-Коды выхода:
+Коды выхода `uv run python -m tests.sandbox` (через `make` любой ненулевой код становится кодом
+make `2`, причину показывает отчёт):
 
 - `0` — все PR дошли до `completed`, сообщения подтверждены;
 - `1` — сообщение какого-то PR ушло в nack или прогон не `completed`;
