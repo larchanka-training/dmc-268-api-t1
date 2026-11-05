@@ -337,7 +337,24 @@ def test_a_github_failure_does_not_stop_the_sweep(
     assert vcs.checks == []
 
 
-def test_github_down_stops_gate_lookups_for_the_rest_of_the_pass() -> None:
+@pytest.mark.parametrize(
+    ("installations", "vcs"),
+    [
+        pytest.param(
+            FakeInstallationCatalog(installation_id_error=VcsTransientError("лимит GitHub")),
+            RecordingVcsGateway(),
+            id="catalog",
+        ),
+        pytest.param(
+            FakeInstallationCatalog(),
+            RecordingVcsGateway(check_error=VcsTransientError("вторичный лимит")),
+            id="check-run",
+        ),
+    ],
+)
+def test_github_down_stops_gate_lookups_for_the_rest_of_the_pass(
+    installations: FakeInstallationCatalog, vcs: RecordingVcsGateway
+) -> None:
     """Проход идёт в consume-цикле: после временного сбоя GitHub следующие прогоны не
     ждут таймаутов, но выметаются все."""
     uow = FakeUnitOfWork()
@@ -346,8 +363,7 @@ def test_github_down_stops_gate_lookups_for_the_rest_of_the_pass() -> None:
     _reviewed_head(uow, 6, head="sha2")
     uow.review_runs.add(_run(1, ReviewRunStatus.ANALYSING, timedelta(hours=1)))
     uow.review_runs.add(_run(2, ReviewRunStatus.PUBLISHING, timedelta(hours=2)))
-    installations = FakeInstallationCatalog(installation_id_error=VcsTransientError("лимит GitHub"))
 
-    assert _sweep(uow, RecordingVcsGateway(), installations) == 2
+    assert _sweep(uow, vcs, installations) == 2
 
     assert installations.calls == ["repository_installation_id"]

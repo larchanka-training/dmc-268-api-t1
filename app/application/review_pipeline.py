@@ -66,6 +66,7 @@ from app.domain.lifecycle import advance
 from app.domain.llm_errors import LlmError, LlmOutputError
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import error_code
+from app.domain.vcs_errors import VcsTransientError
 from app.domain.verification import apply_verdicts, screen_findings
 
 logger = logging.getLogger(__name__)
@@ -158,7 +159,7 @@ def block_head_of_failed_run(
     head_sha: str,
     repository_full_name: str,
     installation_id: int,
-) -> None:
+) -> bool:
     """Выставить `failure` на head, если упавший прогон на нём последний, а до него
     на этот head уже было ревью (ревью #225), или check паузы, если ревью на паузе.
 
@@ -172,24 +173,25 @@ def block_head_of_failed_run(
     ревью, а до него есть завершённый ручной прогон: за head снова отвечает он
     (`head_run_in_charge`), и выставляется его gate. Зовут пайплайн и очистка
     (`sweep_stale_runs`). Best-effort, как `_mark_failed`: сбой пишется в лог и не подменяет исходное
-    исключение.
+    исключение. `False` - GitHub временно недоступен (`VcsTransientError`): очистке дальше в
+    проходе к нему не ходить; воркер результат не читает.
     """
     try:
         with uow:
             run = uow.review_runs.get(run_id)
             if run is None or run.status is not ReviewRunStatus.FAILED:
-                return
+                return True
             latest = uow.review_runs.find_latest(run.merge_request_id, head_sha)
             earlier = uow.review_runs.find_reviewed(run.merge_request_id, head_sha)
             merge_request = uow.merge_requests.get(run.merge_request_id)
             repository = uow.repositories.get(merge_request.repository_id) if merge_request else None
             # Вытеснен ли прогон - по `latest`; чей gate на head - по `in_charge`.
             in_charge = head_run_in_charge(uow, repository, run.merge_request_id, head_sha)
-        if latest is None or latest.id != run.id or repository is None:
-            return
-        pause = pause_check(repository, in_charge)
+        if latest is None or latest.id != run.id or repository is None or merge_request is None:
+            return True
+        pause = pause_check(repository, in_charge, merge_request.target_branch)
         if pause is None and in_charge is not None and in_charge.id != run.id:
-            # Пауза авторевью, повтор ручного ревью упал: gate завершённого ручного до него.
+            # Пауза авторевью или фильтр, повтор ручного ревью упал: gate завершённого ручного.
             settle_merge_gate(
                 uow,
                 vcs,
@@ -200,8 +202,8 @@ def block_head_of_failed_run(
                 run_id=in_charge.id,
                 repository_id=repository.id,
             )
-            return
-        if pause is not None and merge_request is not None:
+            return True
+        if pause is not None:
             # Пока идёт POST, за head мог стать новый ручной прогон и выставить свой gate.
             publish_pause_check(
                 uow,
@@ -213,18 +215,24 @@ def block_head_of_failed_run(
                 head_sha=head_sha,
                 installation_id=installation_id,
             )
-            return
+            return True
         check = build_failed_review_check() if earlier is not None else None
-        if check is None:
-            return
-        vcs.set_merge_gate_check(
-            repository_full_name,
+        if check is not None:
+            vcs.set_merge_gate_check(repository_full_name, head_sha, installation_id, check)
+    except VcsTransientError:
+        logger.exception(
+            "прогон упал, а check run merge gate на %s не выставлен: GitHub недоступен",
             head_sha,
-            installation_id,
-            check,
+            extra={"review_run_id": str(run_id)},
         )
+        return False
     except Exception:
-        logger.exception("прогон %s упал, а check run merge gate на %s не выставлен", run_id, head_sha)
+        logger.exception(
+            "прогон упал, а check run merge gate на %s не выставлен",
+            head_sha,
+            extra={"review_run_id": str(run_id)},
+        )
+    return True
 
 
 def run_review(
@@ -403,7 +411,7 @@ def run_review(
         close_abandoned_steps(uow, run.id, now=moment, known=steps.unwritten)
     except Exception as exc:
         if _was_cancelled(uow, job.review_run_id):
-            # Ретаргет отменил прогон посреди ревью (`_supersede`): переход бросил на
+            # Ретаргет отменил прогон посреди ревью (`supersede`): переход бросил на
             # терминальном статусе или публикация отказалась. Это не сбой - открытый
             # шаг брошен, сообщение уходит в ack, а не в DLQ, head отвечает новый прогон.
             steps.abandon()

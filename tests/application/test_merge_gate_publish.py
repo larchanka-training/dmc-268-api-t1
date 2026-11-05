@@ -1,5 +1,6 @@
 """Check run на head, когда ревью по вебхуку не идёт."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -7,6 +8,7 @@ import pytest
 
 from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
+    BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
     head_run_in_charge,
     pause_check,
@@ -47,7 +49,7 @@ def test_disconnection_outranks_auto_review_setting_in_pause_check(
         connected_at=connected_at,
     )
 
-    assert pause_check(repository, None) is expected
+    assert pause_check(repository, None, "main") is expected
 
 
 def _repository(*, connected: bool, auto_review_enabled: bool) -> Repository:
@@ -110,8 +112,39 @@ def test_manual_head_run_keeps_its_merge_gate_on_auto_review_pause(
 ) -> None:
     repository = _repository(connected=connected, auto_review_enabled=auto_review_enabled)
 
-    assert pause_check(repository, head_run) is expected
+    assert pause_check(repository, head_run, "main") is expected
 
+
+@pytest.mark.parametrize(
+    ("connected", "auto_review_enabled", "target_branch", "head_run", "expected"),
+    [
+        (True, True, "main", None, BRANCH_FILTERED_CHECK),
+        (True, True, "main", _head_run(_WEBHOOK, _S.COMPLETED), BRANCH_FILTERED_CHECK),
+        (True, True, "release/1.2", None, None),
+        # Вебхук PR до свежих метаданных: ветка не известна, фильтр он применит сам.
+        (True, True, None, None, None),
+        # Пауза и выключение важнее фильтра.
+        (True, False, "main", None, AUTO_REVIEW_OFF_CHECK),
+        (False, True, "main", None, DISABLED_REVIEW_CHECK),
+        # Ручной прогон перекрывает фильтр, как паузу (D11).
+        (True, True, "main", _head_run(_MANUAL, _S.COMPLETED), None),
+        (True, True, "main", _head_run(_MANUAL, _S.FAILED), BRANCH_FILTERED_CHECK),
+    ],
+)
+def test_target_branch_outside_the_branch_filter_is_a_pause(
+    connected: bool,
+    auto_review_enabled: bool,
+    target_branch: str | None,
+    head_run: ReviewRun | None,
+    expected: MergeGateCheck | None,
+) -> None:
+    """#313: ветка вне `branch_filter` даёт ещё одно состояние паузы рядом с D11."""
+    repository = replace(
+        _repository(connected=connected, auto_review_enabled=auto_review_enabled),
+        branch_filter=("release/*",),
+    )
+
+    assert pause_check(repository, head_run, target_branch) is expected
 
 
 _MR_ID = UUID(int=3)
@@ -348,7 +381,22 @@ def test_head_run_in_charge_returns_the_completed_manual_run_after_a_failed_rela
     assert (head_run.id if head_run else None) == (
         UUID(int=in_charge) if in_charge else None
     )
-    assert pause_check(repository, head_run) is expected
+    assert pause_check(repository, head_run, "main") is expected
+
+
+def test_head_run_in_charge_outside_the_branch_filter_returns_the_completed_manual_run() -> None:
+    """#313: вне фильтра упавший повтор ручного ревью не снимает gate прежнего, как на паузе."""
+    uow = _paused_pr()
+    repository = replace(
+        _repository(connected=True, auto_review_enabled=True), branch_filter=("release/*",)
+    )
+    uow.review_runs.add(_run_on_head(40, _MANUAL, _S.COMPLETED, minute=0))
+    uow.review_runs.add(_run_on_head(41, _MANUAL, _S.FAILED, minute=1))
+
+    with uow:
+        head_run = head_run_in_charge(uow, repository, _MR_ID, "head1")
+
+    assert head_run is not None and head_run.id == UUID(int=40)
 
 
 def test_head_run_in_charge_without_a_repository_is_the_latest_run() -> None:

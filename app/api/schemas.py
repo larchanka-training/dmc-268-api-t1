@@ -170,7 +170,7 @@ class ReviewJob(AllFieldsResponse):
     )
     base_commit_sha: str | None = Field(
         default=None,
-        description="Коммит, относительно которого считается дифф; null, пока воркер его не узнал.",
+        description="Коммит, относительно которого считается дифф; null только у прогонов, записанных до появления колонки.",
         examples=["fedcba0987654321fedcba0987654321fedcba09"],
     )
     status: ReviewRunStatus = Field(description="Текущий статус прогона.", examples=["queued"])

@@ -108,13 +108,12 @@ def _block_swept_head(
         return True
     if installation_id is None:
         logger.warning(
-            "выметенный прогон: приложение не установлено на %s или установка приостановлена, "
+            "выметенный прогон: приложение не установлено или установка приостановлена, "
             "gate не выставлен",
-            repository.full_name,
-            extra=extra,
+            extra={**extra, "repository_id": str(repository.id)},
         )
         return True
-    block_head_of_failed_run(
+    return block_head_of_failed_run(
         uow,
         vcs,
         run_id=run.id,
@@ -122,4 +121,3 @@ def _block_swept_head(
         repository_full_name=repository.full_name,
         installation_id=installation_id,
     )
-    return True
