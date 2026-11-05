@@ -254,8 +254,8 @@ variable "observability_memory_mb" {
     collector_docker = 96
     collector_logs   = 96
     alertmanager     = 64
-    blackbox         = 32
-    blackbox_public  = 32
+    blackbox         = 48
+    blackbox_public  = 48
   }
 }
 
