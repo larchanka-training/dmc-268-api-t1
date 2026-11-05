@@ -519,8 +519,8 @@
       "id": 16,
       "type": "timeseries",
       "title": "Вход (nginx): запросы в секунду",
-      "description": "Все запросы nginx интерфейса, публичного входа стенда (receiver nginx коллектора по stub_status). Счётчик общий на весь nginx: в нём и сам скрейп stub_status раз в 30 с, и пробы blackbox.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Запросы к nginx интерфейса, публичному входу стенда, из access-лога в Loki, с тем же фильтром, что у панели кодов: пробы blackbox исключены, иначе они дали бы 80 % счёта. Скрейп stub_status в лог не пишется. Счётчик stub_status проб не отличает, поэтому здесь не он.",
+      "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 48 },
       "fieldConfig": {
         "defaults": {
@@ -536,11 +536,11 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "sum(rate(nginx_requests_total[5m]))",
+          "expr": "sum(rate({service_name=\"dmc268-ui\"} != \"Blackbox-Exporter\" | pattern `<_> - <_> [<_>] \"<_>\" <status> <_>` | status=~\"[1-5][0-9][0-9]\" [5m])) or vector(0)",
           "legendFormat": "запросов/с",
-          "range": true,
+          "queryType": "range",
           "refId": "A"
         }
       ]

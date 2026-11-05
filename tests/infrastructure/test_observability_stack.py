@@ -865,7 +865,6 @@ def test_dashboard_queries_cover_the_expected_signals() -> None:
         "node_filesystem_avail_bytes",
         "container_cpu_usage_nanoseconds_total",
         "container_memory_usage_total_bytes",
-        "nginx_requests_total",
         "nginx_connections_current",
         '{service_name="dmc268-ui"}',
     )

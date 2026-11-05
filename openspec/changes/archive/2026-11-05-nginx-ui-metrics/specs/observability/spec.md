@@ -2,7 +2,7 @@
 
 ### Requirement: Метрики входа nginx в Prometheus и в «Обзоре»
 
-Основной коллектор SHALL снимать `stub_status` nginx интерфейса receiver-ом `nginx` по сети `dmc268-otlp`, без публикации порта на хост, и отдавать метрики в Prometheus через свой exporter-порт. Дашборд «Обзор dmc-268» SHALL показывать вход: запросы в секунду и соединения по состоянию из Prometheus, долю ответов по классу кода из логов `dmc268-ui` в Loki. Недоступный `stub_status` SHALL NOT мешать остальным метрикам коллектора.
+Основной коллектор SHALL снимать `stub_status` nginx интерфейса receiver-ом `nginx` по сети `dmc268-otlp`, без публикации порта на хост, и отдавать метрики в Prometheus через свой exporter-порт. Дашборд «Обзор dmc-268» SHALL показывать вход: соединения по состоянию из Prometheus, запросы в секунду и долю ответов по классу кода из access-лога `dmc268-ui` в Loki, без проб blackbox. Недоступный `stub_status` SHALL NOT мешать остальным метрикам коллектора.
 
 #### Scenario: Метрики nginx в Prometheus
 
