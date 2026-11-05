@@ -18,7 +18,7 @@
   10 минут; `service` из имени контейнера, чтобы предупреждение глушили только критические
   алерты того же сервиса.
 - Тесты `promtool` на каждый алерт, строки в таблице `infra/README.md`, строки `ALERT_RULES`
-  страницы статуса: `WorkerStalled` даёт `worker` `outage`, `ReviewJobStuck` даёт `degraded`.
+  страницы статуса: `WorkerStalled` и `ReviewJobStuck` дают `worker` `degraded`: медленную модель от зависания по метрикам не отличить.
   `ContainerMemoryNearLimit` (warning) страницу не трогает: статус строится по критическим алертам.
 
 ## Capabilities

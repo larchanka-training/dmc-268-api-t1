@@ -46,7 +46,7 @@ SIGNALS = [
     ("WorkerNotConsuming", {"service": "worker", "queue": "review_jobs.qq"}, {WORKER}, OUTAGE),
     ("ContainerRestarting", {"container_name": "dmc268-worker"}, {WORKER}, DEGRADED),
     ("ReviewRunsFailing", {"service": "worker"}, {WORKER}, DEGRADED),
-    ("WorkerStalled", {"service": "worker", "queue": "review_jobs.qq"}, {WORKER}, OUTAGE),
+    ("WorkerStalled", {"service": "worker", "queue": "review_jobs.qq"}, {WORKER}, DEGRADED),
     ("ReviewJobStuck", {"service": "worker", "queue": "review_jobs.qq"}, {WORKER}, DEGRADED),
     ("ContainerDown", {"container_name": "dmc268-rabbitmq"}, {QUEUE}, OUTAGE),
     ("ServiceProbeFailed", {"service": "rabbitmq", "instance": "dmc268-rabbitmq:5672"}, {QUEUE}, OUTAGE),

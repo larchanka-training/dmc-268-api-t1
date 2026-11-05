@@ -80,11 +80,12 @@ ALERT_RULES: tuple[AlertRule, ...] = (
     # прогоны и так ловит ReviewRunsFailing.
     AlertRule("ContainerDown", ServiceStatus.OUTAGE, (_WORKER,), _container("dmc268-worker")),
     AlertRule("WorkerNotConsuming", ServiceStatus.OUTAGE, (_WORKER,)),
-    # Подписан, но задачи лежат без подтверждений: для пользователя это то же, что нет потребителя.
-    AlertRule("WorkerStalled", ServiceStatus.OUTAGE, (_WORKER,)),
+    # Подписан, но задачи лежат без подтверждений. По метрикам это не отличить от медленной модели
+    # с фоллбэком, и очередь всё равно разойдётся, моделью или выметателем: degraded, а не outage.
+    AlertRule("WorkerStalled", ServiceStatus.DEGRADED, (_WORKER,)),
     AlertRule("ContainerRestarting", ServiceStatus.DEGRADED, (_WORKER,), _container("dmc268-worker")),
     AlertRule("ReviewRunsFailing", ServiceStatus.DEGRADED, (_WORKER,)),
-    # Висит одна задача без очереди за ней: ждёт один прогон, а не все (очередь даст WorkerStalled).
+    # Висит одна задача: ждёт один прогон или, с очередью за ним, все (тогда горит и WorkerStalled).
     AlertRule("ReviewJobStuck", ServiceStatus.DEGRADED, (_WORKER,)),
     # Очередь: брокер не запущен или не принимает AMQP — недоступна; перезапуски — сбои.
     AlertRule("ContainerDown", ServiceStatus.OUTAGE, (_QUEUE,), _container("dmc268-rabbitmq")),
