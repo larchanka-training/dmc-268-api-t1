@@ -15,6 +15,7 @@ from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
 from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
+    BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
     build_failed_review_check,
 )
@@ -655,7 +656,7 @@ def test_a_publication_failure_keeps_the_model_and_the_tokens() -> None:
 
 class _RetargetDuringPublication(RecordingVcsGateway):
     """Смена целевой ветки приходится на POST ревью: приём переводит прогон в
-    `cancelled`, как `_supersede` в `handle_webhook`."""
+    `cancelled`, как `supersede` в `start_review_run`."""
 
     def __init__(self, uow: FakeUnitOfWork) -> None:
         super().__init__()
@@ -1518,12 +1519,21 @@ def _disconnect(uow: FakeUnitOfWork) -> None:
     uow.repositories.disconnect(UUID(int=9), NOW)
 
 
+def _filter_out_the_target_branch(uow: FakeUnitOfWork) -> None:
+    uow.repositories.update_settings(
+        UUID(int=9), RepositorySettings(True, ("main",), FindingSeverity.CRITICAL), NOW
+    )
+
+
 @pytest.mark.parametrize(
     ("pause_review", "earlier_review", "expected"),
     [
         pytest.param(_turn_auto_review_off, True, AUTO_REVIEW_OFF_CHECK, id="auto-review-off"),
         pytest.param(_disconnect, True, DISABLED_REVIEW_CHECK, id="disconnected"),
         pytest.param(_turn_auto_review_off, False, AUTO_REVIEW_OFF_CHECK, id="first-review"),
+        pytest.param(
+            _filter_out_the_target_branch, True, BRANCH_FILTERED_CHECK, id="branch-filtered"
+        ),
     ],
 )
 def test_a_failed_review_on_a_paused_repository_sets_the_pause_check(

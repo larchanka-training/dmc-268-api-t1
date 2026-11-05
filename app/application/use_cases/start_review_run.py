@@ -145,9 +145,9 @@ def start_review_run(
             # Прогон на старой ветке ещё идёт — выставил бы gate по диффу, которого
             # в PR уже нет. Отмена — своим коммитом до вставки нового прогона:
             # частичный индекс допускает один активный прогон на коммит.
-            _supersede(work, existing_merge_request.id, launch.head_sha, now())
+            supersede(work, existing_merge_request.id, launch.head_sha, now())
 
-        merge_request = _upsert_merge_request(
+        merge_request = upsert_merge_request(
             work, repository.id, existing_merge_request, launch, metadata, now(), new_id
         )
         run = _create_review_run(work, merge_request.id, launch, metadata, now(), new_id())
@@ -177,7 +177,7 @@ def start_review_run(
             # гонки): его merge_request уже есть, а активного прогона на наш
             # head_sha нет. Запись повторяется поверх его записей: update
             # его merge_request и новый прогон на наш коммит.
-            merge_request = _upsert_merge_request(
+            merge_request = upsert_merge_request(
                 work, repository.id, survivor_mr, launch, metadata, now(), new_id
             )
             run = _create_review_run(work, merge_request.id, launch, metadata, now(), new_id())
@@ -260,7 +260,7 @@ def start_review_run(
     return RunStart(kind="success", run=run, merge_request=merge_request, repository=repository)
 
 
-def _supersede(work: UnitOfWork, merge_request_id: UUID, head_sha: str, now: datetime) -> None:
+def supersede(work: UnitOfWork, merge_request_id: UUID, head_sha: str, now: datetime) -> None:
     """Отменить активный прогон на этот коммит, если он есть: он ревьюит дифф
     против прежней целевой ветки."""
     run = work.review_runs.find_active(merge_request_id, head_sha)
@@ -341,7 +341,7 @@ def _find_survivor(
     return work.review_runs.find_active(survivor_mr.id, head_sha), survivor_mr
 
 
-def _upsert_merge_request(
+def upsert_merge_request(
     work: UnitOfWork,
     repository_id: UUID,
     existing: MergeRequest | None,

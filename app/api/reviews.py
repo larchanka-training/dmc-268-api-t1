@@ -288,7 +288,7 @@ class ReviewRunResponse(BaseModel):
         description="Коммит, который ревьюится.", examples=["a1b2c3d4e5f6789012345678abcdef0123456789"]
     )
     base_sha: str | None = Field(
-        description="Коммит, относительно которого считается дифф; null, пока воркер его не узнал.",
+        description="Коммит, относительно которого считается дифф; null только у прогонов, записанных до появления колонки.",
         examples=["fedcba0987654321fedcba0987654321fedcba09"],
     )
     status: ReviewRunStatus = Field(description="Текущий статус прогона.", examples=["completed"])

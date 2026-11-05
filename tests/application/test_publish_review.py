@@ -12,6 +12,7 @@ import pytest
 
 from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
+    BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
     SETTLE_ATTEMPTS,
     build_failed_review_check,
@@ -1088,6 +1089,13 @@ def test_lost_response_of_a_correction_does_not_leave_a_false_block() -> None:
             DISABLED_REVIEW_CHECK,
             id="disconnected",
         ),
+        pytest.param(
+            lambda uow: uow.repositories.update_settings(
+                REPOSITORY.id, RepositorySettings(True, ("main",), FindingSeverity.CRITICAL), NOW
+            ),
+            BRANCH_FILTERED_CHECK,
+            id="branch-filtered",
+        ),
     ],
 )
 def test_run_finished_after_the_pause_sets_the_pause_check(
@@ -1117,6 +1125,14 @@ def test_run_finished_after_the_pause_sets_the_pause_check(
             id="auto-review-off",
         ),
         pytest.param(
+            lambda uow: uow.repositories.update_settings(
+                REPOSITORY.id, RepositorySettings(True, ("main",), FindingSeverity.CRITICAL), NOW
+            ),
+            "failure",
+            "Есть незакрытые замечания уровня critical и выше",
+            id="branch-filtered",
+        ),
+        pytest.param(
             lambda uow: uow.repositories.disconnect(REPOSITORY.id, NOW),
             "success",
             "Ревью выключено в сервисе",
@@ -1127,7 +1143,8 @@ def test_run_finished_after_the_pause_sets_the_pause_check(
 def test_manual_run_on_auto_review_pause_sets_its_own_merge_gate(
     pause_review: Callable[[FakeUnitOfWork], Any], conclusion: str, title: str
 ) -> None:
-    """D11: пауза авторевью не перекрывает gate ручного прогона, выключение репозитория — да."""
+    """D11: пауза авторевью и фильтр веток не перекрывают gate ручного прогона, выключение
+    репозитория — да."""
     uow = FakeUnitOfWork()
     run = replace(_run_with_critical_finding(uow), trigger=TriggerSource.MANUAL)
     uow.review_runs.add(run)
@@ -1164,6 +1181,32 @@ def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
     )
 
     assert vcs.checks == [build_retarget_check()]
+
+
+def test_settling_on_a_cancelled_run_of_a_pr_outside_the_branch_filter_passes_it() -> None:
+    """#313: PR увели из фильтра, прогон отменён, и его воркер ставит не блокировку
+    «идёт повторное ревью», которого не будет, а check фильтра."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    uow.repositories.update_settings(
+        REPOSITORY.id, RepositorySettings(True, ("main",), FindingSeverity.CRITICAL), NOW
+    )
+    run = _publishing_run(uow)
+    uow.review_runs.add(replace(run, status=ReviewRunStatus.CANCELLED))
+    vcs = RecordingVcsGateway()
+
+    settle_merge_gate(
+        uow,
+        vcs,
+        merge_request_id=MR_ID,
+        repo_full_name=JOB.repository_full_name,
+        head_sha=JOB.head_sha,
+        installation_id=JOB.installation_id,
+        run_id=run.id,
+        repository_id=REPOSITORY.id,
+    )
+
+    assert vcs.checks == [BRANCH_FILTERED_CHECK]
 
 
 def test_settling_on_a_failed_latest_run_keeps_the_failure() -> None:

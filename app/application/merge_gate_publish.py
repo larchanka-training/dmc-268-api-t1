@@ -8,6 +8,7 @@ from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import MergeGateCheck
 from app.domain.entities import Finding, Repository, ReviewRun
 from app.domain.enums import FindingSeverity, ReviewRunStatus, TriggerSource
+from app.domain.glob import branch_selected
 from app.domain.merge_gate import merge_blocked_by_findings, untracked_findings
 from app.domain.vcs_errors import VcsError
 
@@ -62,7 +63,21 @@ AUTO_REVIEW_OFF_CHECK = MergeGateCheck(
     ),
 )
 
-def pause_check(repository: Repository, head_run: ReviewRun | None) -> MergeGateCheck | None:
+# Целевая ветка PR вне `branch_filter` репозитория: авторевью её не ревьюит, а обязательная
+# проверка без check run держала бы PR в ожидании (#313).
+BRANCH_FILTERED_CHECK = MergeGateCheck(
+    conclusion="success",
+    title="Ветка не в фильтре ревью",
+    summary=(
+        "Целевая ветка этого PR не подходит под фильтр веток в настройках репозитория; "
+        "ревью не идёт, проверка мёрж не блокирует."
+    ),
+)
+
+
+def pause_check(
+    repository: Repository, head_run: ReviewRun | None, target_branch: str | None
+) -> MergeGateCheck | None:
     """Check run на head, если ревью на нём не идёт; `None` — идёт, gate ставит прогон.
 
     `head_run` — прогон, отвечающий за head (`head_run_in_charge`), `None` — прогона нет.
@@ -73,15 +88,22 @@ def pause_check(repository: Repository, head_run: ReviewRun | None) -> MergeGate
     пока он не упал и не отменён, ставит свой gate (D11); если последний — упавший или
     отменённый ручной, — завершённый ручной до него, его подставляет `head_run_in_charge`. Упавший ручной прогон без
     завершённого до него — check паузы: `failure` держал бы PR, который авторевью не ждёт.
+    Целевая ветка вне `branch_filter` даёт такую же паузу с проверкой `BRANCH_FILTERED_CHECK`;
+    пауза авторевью важнее фильтра. `target_branch` берётся из записи PR; `None` передаёт
+    вебхук PR до свежих метаданных, фильтр он применяет сам.
     Вызывают вебхук PR, вебхук треда, `settle_merge_gate` и упавший прогон.
     """
     if repository.connected_at is None:
         return DISABLED_REVIEW_CHECK
     if not repository.auto_review_enabled:
-        if _manual_run_in_charge(head_run):
-            return None
-        return AUTO_REVIEW_OFF_CHECK
-    return None
+        check = AUTO_REVIEW_OFF_CHECK
+    elif target_branch is not None and not branch_selected(
+        target_branch, repository.branch_filter
+    ):
+        check = BRANCH_FILTERED_CHECK
+    else:
+        return None
+    return None if _manual_run_in_charge(head_run) else check
 
 
 def head_run_in_charge(
@@ -90,27 +112,33 @@ def head_run_in_charge(
     """Прогон, чей итог отвечает за gate head; зовётся внутри открытого вызывающим `with uow`.
 
     Обычно — последний прогон на head (`find_latest`), и без записи репозитория тоже. На
-    паузе авторевью, если последний — ручной и он упал или отменён, — последний завершённый
-    ручной прогон на head, а его нет — последний: упавший или отменённый повтор ручного
-    ревью не снимает gate прежнего (change `manual-gate-after-failed-relaunch`, D1).
+    паузе авторевью и вне фильтра веток (`pause_check`), если последний — ручной и он упал
+    или отменён, — последний завершённый ручной прогон на head, а его нет — последний:
+    упавший или отменённый повтор ручного ревью не снимает gate прежнего (change
+    `manual-gate-after-failed-relaunch`, D1).
     Последний вебхуковый за head отвечает сам, даже после ручного: он проверял, возможно,
     другую базу (change `manual-gate-fallback-after-manual-only`). Вытеснен ли прогон
     новым, решает `find_latest`, а не эта функция.
     """
     latest = uow.review_runs.find_latest(merge_request_id, head_sha)
-    if repository is None or not _failed_manual_relaunch(repository, latest):
+    if repository is None or not _failed_manual_relaunch(uow, repository, merge_request_id, latest):
         return latest
     return uow.review_runs.find_completed_manual(merge_request_id, head_sha) or latest
 
 
-def _failed_manual_relaunch(repository: Repository, latest: ReviewRun | None) -> bool:
-    paused = repository.connected_at is not None and not repository.auto_review_enabled
-    return (
-        paused
-        and latest is not None
-        and latest.trigger is TriggerSource.MANUAL
-        and latest.status in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
-    )
+def _failed_manual_relaunch(
+    uow: UnitOfWork, repository: Repository, merge_request_id: UUID, latest: ReviewRun | None
+) -> bool:
+    if (
+        repository.connected_at is None
+        or latest is None
+        or latest.trigger is not TriggerSource.MANUAL
+        or latest.status not in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
+    ):
+        return False
+    merge_request = uow.merge_requests.get(merge_request_id)
+    target_branch = merge_request.target_branch if merge_request is not None else None
+    return pause_check(repository, None, target_branch) is not None
 
 
 def publish_pause_check(
@@ -153,7 +181,7 @@ def publish_pause_check(
         and merge_request is not None
         and latest is not None
         and latest.status in {ReviewRunStatus.PUBLISHING, ReviewRunStatus.COMPLETED}
-        and pause_check(repository, latest) is None
+        and pause_check(repository, latest, merge_request.target_branch) is None
     ):
         logger.info(
             "check паузы %s@%s устарел: за head отвечает прогон %s",
@@ -268,12 +296,15 @@ def settle_merge_gate(
         # отвечать другой прогон, и повтор прежнего check вернул бы чужой итог.
         with uow:
             repository = uow.repositories.get(repository_id)
+            merge_request = uow.merge_requests.get(merge_request_id)
             latest = head_run_in_charge(uow, repository, merge_request_id, head_sha)
         if repository is None:
             raise LookupError(f"repository {repository_id} not found")
         if latest is None:
             return
-        pause = pause_check(repository, latest)
+        pause = pause_check(
+            repository, latest, merge_request.target_branch if merge_request else None
+        )
         if pause is not None:
             current = pause
         elif (latest.id == run_id and latest.status is not ReviewRunStatus.CANCELLED) or (

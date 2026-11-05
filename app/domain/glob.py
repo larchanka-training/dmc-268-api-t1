@@ -59,3 +59,8 @@ def _accepts(part: str | None, name: str) -> bool:
 def _segments(text: str) -> list[str]:
     # Как у PurePosixPath: пустые сегменты и `.` схлопываются.
     return [s for s in text.split("/") if s not in ("", ".")]
+
+
+def branch_selected(branch: str, patterns: tuple[str, ...]) -> bool:
+    """Ветка подходит под `branch_filter` репозитория; пустой фильтр пропускает все ветки (#313)."""
+    return not patterns or any(glob_full_match(branch, pattern) for pattern in patterns)
