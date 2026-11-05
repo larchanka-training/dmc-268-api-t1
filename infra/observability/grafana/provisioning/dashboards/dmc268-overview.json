@@ -579,12 +579,12 @@
       "id": 18,
       "type": "timeseries",
       "title": "Вход (nginx): ответы по классу кода",
-      "description": "Доля ответов nginx интерфейса по классу кода, из access-лога в Loki (формат combined, код ответа идёт полем после строки запроса). В stub_status кодов ответа нет. Строки error-лога шаблон отбрасывает, пробы blackbox исключены: они бьют в / и всегда получают 200, а это 80 % строк лога. Доли считает Grafana (stacking percent) по числу ответов за 5 минут.",
+      "description": "Доля ответов nginx интерфейса по классу кода, из access-лога в Loki (формат combined, код ответа идёт полем после строки запроса). В stub_status кодов ответа нет. Строки error-лога шаблон отбрасывает, пробы blackbox исключены: они бьют в / и всегда получают 200, а это 80 % строк лога. Доли считает Grafana (stacking percent) по числу ответов за 5 минут: ось в процентах, подсказка показывает число ответов.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 48 },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
+          "unit": "short",
           "min": 0,
           "custom": {
             "drawStyle": "line",
