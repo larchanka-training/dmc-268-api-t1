@@ -99,9 +99,12 @@ def test_rules_are_cached_with_the_run_time() -> None:
 
 
 def test_full_context_contains_ast_of_changed_file() -> None:
-    vcs = FakeVcs(diff=_file_diff("app/repo.py"), files={("app/repo.py", HEAD): SOURCE})
-    result = _build(vcs)
-    assert result.payload.tiers == ("diff", "ast")
+    # Файл больше порога целого файла: AST в пакете, вокруг hunk'а - окно.
+    big = SOURCE + "# комментарий\n" * 1_000
+    vcs = FakeVcs(diff=_file_diff("app/repo.py"), files={("app/repo.py", HEAD): big})
+    limits = replace(LIMITS, ast_max_file_bytes=100_000)
+    result = _build(vcs, FakeExtractor(outlines={big: OUTLINE}), limits=limits)
+    assert result.payload.tiers == ("diff", "surrounding", "ast")
     assert "2-3 def save(self)" in result.payload.body["ast"][0]["scopes"]
     assert result.payload.body["rules"]["status"] == "absent"
 
@@ -144,7 +147,7 @@ def test_file_fetch_failure_degrades_only_that_file() -> None:
     )
     body = _build(vcs).payload.body
     assert {"path": "app/a.py", "part": "ast", "reason": "unavailable"} in body["omitted"]
-    assert [item["path"] for item in body["ast"]] == ["app/b.py"]
+    assert [e for e in body["omitted"] if e.get("path") == "app/b.py"] == []
     assert {item["path"] for item in body["diff"]} == {"app/a.py", "app/b.py"}
 
 
@@ -182,12 +185,35 @@ def test_too_large_file_is_not_parsed() -> None:
     assert {"path": "app/a.py", "part": "ast", "reason": "too_large"} in body["omitted"]
 
 
-def test_unsupported_language_is_not_fetched() -> None:
-    vcs = FakeVcs(diff=_file_diff("docs/guide.rst"))
-    body = _build(vcs).payload.body
-    assert [c for c in vcs.calls if c[0] == "file" and c[3] == HEAD] == []
-    assert body["diff"]
-    assert body["ast"] == []
+def test_file_without_ast_language_is_fetched_for_context() -> None:
+    lines = [f"line {n}" for n in range(1, 51)]
+    head = "".join(f"{'changed' if n == 20 else line}\n" for n, line in enumerate(lines, start=1))
+    diff = (
+        "diff --git a/docs/guide.rst b/docs/guide.rst\n--- a/docs/guide.rst\n+++ b/docs/guide.rst\n"
+        "@@ -19,3 +19,3 @@\n line 19\n-line 20\n+changed\n line 21\n"
+    )
+    vcs = FakeVcs(diff=diff, files={("docs/guide.rst", HEAD): head})
+    extractor = FakeExtractor()
+
+    result = _build(vcs, extractor)
+
+    assert ("file", "owner/repo", "docs/guide.rst", HEAD, 77) in vcs.calls
+    assert extractor.calls == []
+    assert result.payload.body["ast"] == []
+    assert result.payload.tiers == ("diff", "whole_file")
+    assert " line 1\n" in result.payload.body["diff"][0]["hunk"]
+
+
+def test_files_with_ast_language_are_fetched_first() -> None:
+    """Файлы без AST-языка не вытесняют из лимита довыборки файлы, которым нужен AST."""
+    diff = _file_diff("docs/a.rst") + _file_diff("app/b.py")
+    vcs = FakeVcs(diff=diff, files={("app/b.py", HEAD): SOURCE})
+    limits = replace(LIMITS, ast_max_files=1)
+
+    body = _build(vcs, limits=limits).payload.body
+
+    assert [c[2] for c in vcs.calls if c[0] == "file" and c[3] == HEAD] == ["app/b.py"]
+    assert [e for e in body["omitted"] if e.get("path") == "app/b.py"] == []
 
 
 def test_parser_receives_language_from_extension() -> None:

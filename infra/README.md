@@ -46,7 +46,7 @@ API публикуется на `bind_ip`, в деплое это `127.0.0.1`. �
 | `dmc268` | интерфейс (из `dmc-268-ui-t1`), `api` | публичный вход: nginx интерфейса проксирует `/api/` в API. Имя прежнее — интерфейс подключается к ней по имени |
 | `dmc268-backend` (`internal`) | `postgres`, `postgres-replica`, `postgres-backup`, `rabbitmq`, `replication-setup`, `api`, `worker`, миграции шага деплоя | данные. У сети нет шлюза: из неё не выйти в интернет, а интерфейса в ней нет |
 | `dmc268-egress` | `worker` | исходящие запросы воркера к GitHub API и провайдеру модели |
-| `dmc268-otlp` (`internal`) | интерфейс, `otelcol` (при `observability_enabled`) | трейсы браузера: nginx интерфейса проксирует `/otlp/v1/traces` на отдельный приёмник коллектора `dmc268-otelcol:4319`: только трейсы, `service.name` ставит коллектор (`dmc-268-ui`), кабинет шлёт их на свой же origin. Сеть создаётся и без стека: интерфейс подключается к ней по имени, и без коллектора `/otlp/v1/traces` отвечает 502, а остальное работает |
+| `dmc268-otlp` (`internal`) | интерфейс, `otelcol` (при `observability_enabled`) | трейсы браузера: nginx интерфейса проксирует `/otlp/v1/traces` на отдельный приёмник коллектора `dmc268-otelcol:4319`: только трейсы, `service.name` ставит коллектор (`dmc-268-ui`), кабинет шлёт их на свой же origin. По ней же receiver `nginx` коллектора снимает `stub_status` интерфейса (`dmc268-ui:8081`, на хост не публикуется). Сеть создаётся и без стека: интерфейс подключается к ней по имени, и без коллектора `/otlp/v1/traces` отвечает 502, а остальное работает |
 
 API — единственный, кто стоит и во входе, и в данных. С `internal`-сети Docker не публикует порты, поэтому у базы и брокера портов на хосте нет: для отладки — `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268` и `docker exec dmc268-rabbitmq rabbitmq-diagnostics status`. Изоляцию проверяют `tests/test_infra_isolation.py` (по тексту `infra/*.tf`) и `infra/tests/main.tftest.hcl` (по плану).
 
@@ -132,7 +132,7 @@ tofu show -json infra.tfplan | python3 scripts/deploy_report.py plan infra
 tofu apply infra.tfplan
 ```
 
-На живом стенде это `No changes` и ожидаемое предупреждение OpenTofu о `-target`; на чистом — создание сети, томов, базы и брокера. У `postgres` `wait = true`: apply возвращается, когда healthcheck зелёный, и миграциям не нужен цикл повторов. Этот же apply обновляет в состоянии выход `migrate_env`: выход зависит от контейнеров базы и брокера (хосты в `local.app_env` — ссылки на них), а выход, не зависящий от целевых ресурсов, targeted apply не записывает. Руками ничего делать не нужно: первый деплой на пустой сервер проходит тем же путём (проверено на чистом локальном Docker 29.9.2).
+На живом стенде это `No changes` и ожидаемое предупреждение OpenTofu о `-target`; на чистом — создание сети, томов, базы и брокера. У `postgres` и `rabbitmq` `wait = true`: apply возвращается, когда их healthcheck зелёный, и миграциям и смене паролей не нужен цикл повторов. Если контейнер не стал healthy за `wait_timeout`, apply падает, а контейнер остаётся в состоянии tainted, и следующий деплой планирует его замену, которую сторож отклонит. Тогда, выяснив причину, `tofu untaint docker_container.rabbitmq` (или `postgres`), а не повторная замена с `allow_stateful_replace`: она остановит уже поднявшийся узел. Этот же apply обновляет в состоянии выход `migrate_env`: выход зависит от контейнеров базы и брокера (хосты в `local.app_env` — ссылки на них), а выход, не зависящий от целевых ресурсов, targeted apply не записывает. Руками ничего делать не нужно: первый деплой на пустой сервер проходит тем же путём (проверено на чистом локальном Docker 29.9.2).
 
 **Базу и брокер деплой не пересоздаёт.** План, который заменяет или удаляет `docker_container.postgres` или `docker_container.rabbitmq`, сторож отклоняет — и targeted, и полный: apply не запускается, контейнеры те же. Узнаёт он их и по имени контейнера на хосте (`dmc268-postgres`, `dmc268-rabbitmq` в `change.before`/`after` плана): ресурс, переименованный без `moved`, уничтожается по старому адресу, и сверка только по адресу его бы пропустила. Реплику (`docker_container.postgres_replica`) и копии (`docker_container.postgres_backup`) сторож не держит, хотя они тоже на томах данных: API и воркер в них не ходят, данные остаются в защищённых томах, а замена — обычная правка. Реплика при этом останавливается штатно (`destroy_grace_seconds` 60), копия, оборванная на полпути, остаётся `*.partial` и убирается следующим стартом. Так же не держит он и хранилища стека наблюдаемости — Loki, Tempo, Prometheus и Grafana (`observability.tf`): их тома защищены, а правка конфига — замена контейнера с окном штатной остановки 30 с (`stop_timeout`/`destroy_grace_seconds`), чтобы WAL и буферы сбрасывались, а не обрывались SIGKILL. До миграций их не поднимают: targeted-план — только сети, основной сервер и брокер. Повод к замене — правка их `command`, памяти, `log_opts`, образа или конфига брокера `rabbitmq/30-dmc268.conf`. Правку `env` план не видит (`ignore_changes = [env]`): там только переменные инициализации тома, и смена `TF_VAR_postgres_password` раньше давала `postgres must be replaced`, не меняя пароль в существующем томе, — миграции потом падали с `password authentication failed`. Пароль теперь выставляет шаг деплоя (раздел «Смена паролей»). Правку `command`, памяти или образа базы и брокера выкатывает ручной запуск с осознанным обходом сторожа: `gh workflow run deploy.yml --ref develop -f allow_stateful_replace=true`. Флаг доходит до сторожа только из `workflow_dispatch` и только у первой попытки (у автоматического деплоя выражение в env шага даёт `false`; Re-run повторил бы inputs старого запуска, поэтому повтор с флагом — новым `gh workflow run`, а не Re-run), замена тогда — `::warning::` и пометка в summary с тем, кто запустил эту попытку (`github.triggering_actor`); уничтожение или замену томов флаг не разрешает никогда. У обоих контейнеров `destroy_grace_seconds = 60`: при ручной замене провайдер ждёт штатной остановки, а не шлёт SIGKILL сразу после стоп-сигнала (было: `kill 2` → `kill 9`, код 137). У брокера задан `hostname = "dmc268-rabbitmq"`: RabbitMQ хранит данные в каталоге узла `rabbit@<hostname>`, и без постоянного имени каждый новый контейнер стартовал бы на томе пустым узлом, а очереди и DLQ старого остались бы сиротами (#338). Брокер, заведённый до этого, переходит на постоянное имя один раз: проверить, что очереди пусты (`docker exec dmc268-rabbitmq rabbitmqctl -q list_queues name messages`), выкатить ручным запуском с `allow_stateful_replace=true`, убедиться, что узел — `rabbit@dmc268-rabbitmq` (`rabbitmq-diagnostics -q status`), и удалить каталоги прежних узлов `rabbit@<id>*` в `/var/lib/rabbitmq/mnesia`. Их данные не нужны: прогоны по их сообщениям в базе уже `failed`.
 
@@ -434,6 +434,7 @@ OTel с её миллисекундами. Логи сервисов колле�
 | RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
 | Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
 | Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes`, `container_uptime_seconds`, `container_restarts_total` | `container_name` | CPU и память контейнеров |
+| Вход, nginx интерфейса (receiver `nginx` основного коллектора, `stub_status`) | `collector` | `nginx_requests_total`, `nginx_connections_current`, `nginx_connections_accepted_total`, `nginx_connections_handled_total` | `state` | «Вход (nginx)»: соединения; запросы в секунду и доля ответов по классу кода считаются по access-логу `{service_name="dmc268-ui"}` в Loki без проб blackbox: счётчик `stub_status` их не отличает |
 | Расход токенов (receiver `sqlquery/llm-tokens` основного коллектора) | `collector` | `review_llm_tokens_month` | нет | нет (алерты бюджета) |
 | Резервные копии (textfile node-exporter, пишет `backup.sh`) | `node-exporter` | `dmc268_backup_last_success_timestamp_seconds` | нет | нет (алерт `BackupStale`) |
 | Пробы (blackbox-exporter) | `blackbox-services`, `blackbox-public` | `probe_success`, `probe_ssl_earliest_cert_expiry` | `service`, `instance` | нет (алерты) |
@@ -443,7 +444,8 @@ OTel с её миллисекундами. Логи сервисов колле�
 
 - [HTTP-метрики OTel](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/) и
   [метрики клиента БД OTel](https://opentelemetry.io/docs/specs/semconv/db/database-metrics/);
-- receiver [`postgresql`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/postgresqlreceiver/documentation.md)
+- receiver [`postgresql`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/postgresqlreceiver/documentation.md),
+  [`nginx`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/nginxreceiver/documentation.md)
   и [`docker_stats`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/dockerstatsreceiver/documentation.md);
 - [node_exporter](https://github.com/prometheus/node_exporter);
 - [плагин Prometheus в RabbitMQ](https://www.rabbitmq.com/docs/prometheus).
@@ -595,9 +597,12 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `ContainerDown` | контейнер не запущен: нет ряда `container_uptime_seconds` у `dmc268-api`, `-worker`, `-postgres`, `-postgres-replica`, `-postgres-backup`, `-rabbitmq`, `-ui`, `-otelcol` | 2 минуты (+ до 5 минут, пока экспортёр держит ряд остановленного) | critical |
 | `ContainerMetricsMissing` | нет ни одного ряда `container_uptime_seconds` при живом скрейпе `docker-stats`: `docker_stats` не читает Docker API, `ContainerDown` слеп | 5 минут | warning |
 | `ContainerRestarting` | перезапуски контейнера `dmc268-*` | 2 и больше за 15 минут | critical |
+| `ContainerMemoryNearLimit` | память контейнера `dmc268-*` без кэша страниц (`container_memory_usage_total_bytes`) от его лимита; `service` из имени без `dmc268-` | > 90 % дольше 10 минут | warning |
 | `ServiceProbeFailed` | сервис не отвечает (то же, что видит его healthcheck): `/health` API, TCP базы, реплики, брокера | 2 минуты | critical |
 | `PublicEndpointDown` | HTTPS публичного входа (`public_origin`) | 3 минуты | critical |
 | `WorkerNotConsuming` | у `review_jobs.qq` нет потребителей или очереди нет совсем (при живом скрейпе брокера) | 5 минут | critical |
+| `WorkerStalled` | потребитель у `review_jobs.qq` есть, готовые задачи лежат, а подтверждений quorum-очередей (`rabbitmq_global_messages_acknowledged_total`) нет | 15 минут | critical |
+| `ReviewJobStuck` | сообщение `review_jobs.qq` выдано и не подтверждено, других подтверждений нет; прогоны на стенде идут до 1,5 минуты, выметатель срабатывает на 30 | 20 минут | critical |
 | `Api5xxSpike` | доля 5xx у API за 5 минут, при трафике больше 3 запросов в минуту | > 5 % дольше 5 минут | critical |
 | `ReviewRunsFailing` | доля прогонов в `failed` за 30 минут, при 3+ прогонах | > 30 % | critical |
 | `ReviewDlqNotEmpty` | сообщения в `review_jobs.dlq` | > 0 дольше 5 минут | critical |
@@ -669,24 +674,25 @@ ssh stand 'docker logs dmc268-alertmanager 2>&1' | sed -E 's#/bot[^/]+/#/bot***/
 | node-exporter | 64 |
 | socket-proxy | 64 |
 | Alertmanager | 64 |
-| blackbox-exporter, пробы сервисов | 32 |
-| blackbox-exporter, публичный вход | 32 |
-| **Итого стек** | **4160 (~4,1 ГБ)** |
+| blackbox-exporter, пробы сервисов | 48 |
+| blackbox-exporter, публичный вход | 48 |
+| **Итого стек** | **4192 (~4,1 ГБ)** |
 
 Рядом — лимиты контейнеров приложения (`app.tf`, `postgres.tf`, `rabbitmq.tf`, `replica.tf`):
 `postgres` 1024, `api`, `worker`, `rabbitmq` и реплика (`postgres_replica_memory`) по 512,
 резервные копии (`dmc268-postgres-backup`) 256 — итого 3328 МБ (~3,3 ГБ) постоянно живущих.
 Миграции (`docker run` в `migrate.sh` с `--memory 256m`) и одноразовый
 `dmc268-replication-setup` (64) — шаги деплоя, в постоянный лимит стенда не входят.
-Суммарный потолок стенда — 7488 МБ (~7,5 ГБ) по постоянно живущим контейнерам.
+Вне Terraform живут хранилище состояния `dmc268-s3` с потолком 512 МБ (его поднимает
+`.github/actions/s3-backend`) и интерфейс `dmc268-ui` со 128 МБ (стек `dmc-268-ui-t1`).
+Суммарный потолок стенда — 8160 МБ (~8,0 ГБ) по постоянно живущим контейнерам.
 
-На VPS 7947 МБ (~7,9 ГБ) памяти и нет свопа (`free -m`, 2026-10-28): запас над потолками около
-0,45 ГБ (Alertmanager и два экземпляра blackbox-exporter забрали из него 128 МБ), и из него же
-живут контейнеры без потолка — интерфейс (`dmc268-ui`) и хранилище состояния
-(`dmc268-s3`, ~220 МБ). Через 30 минут после первого выката стека занято 2,2 ГБ. Grafana
+На VPS 7947 МБ (~7,9 ГБ) памяти и нет свопа (`free -m`): потолки превышают память примерно на
+210 МБ, запаса под них нет. Потолок не резерв: через 30 минут после первого выката стека было
+занято 2,2 ГБ, 2026-11-05 — 2,6 ГБ, и опасен только одновременный пик всех контейнеров. Grafana
 в покое занимает 330–413 МБ, а при открытии трейса в Explore её убивал OOM при потолке 512 МБ
-(4 раза за час 2026-11-01, `dmesg`), отсюда 1024. Поднимать потолки стека — только за счёт
-этого запаса.
+(4 раза за час 2026-11-01, `dmesg`), отсюда 1024. Новый потолок в стеке поднимает риск
+одновременного пика: прежде чем поднимать, проверить реальное потребление.
 
 Память стека без нагрузки — по замерам ревью PR #130 (Grafana ~350 МБ, Tempo ~200 МБ, Loki
 ~90 МБ, коллектор ~85 МБ) и локальному прогону Docker Desktop (2026-10-24: node-exporter
@@ -784,7 +790,7 @@ cd infra && tofu init && tofu plan
 cd infra && tofu fmt -check -recursive && tofu init -backend=false && tofu validate && tofu test
 ```
 
-`tofu test` гоняет `tests/*.tftest.hcl` с `mock_provider "docker"`: ни Docker, ни сервер не нужны. Тесты проверяют адреса базы и брокера в окружении контейнеров и в `migrate_env`, какие секреты получает какой контейнер, раскладку по сетям и порты, грейс-период воркера и штатную остановку базы, реплики и брокера, образ `api` и `worker` по digest без тега, `wait` у базы, ожидание `healthy` у API и формат длительностей его healthcheck, проверки переменных. Проверки отклоняют на `plan`, пока сервер не тронут: пустые `github_webhook_secret`, `postgres_password`, `rabbitmq_password`, пустой или короткий `postgres_replication_password` (незаданный секрет CI приходит пустой строкой), `llm_backend = "ollama"` без `ollama_model`, `llm_hosted_fallback` без `ollama` и всех `eurorouter_*`, `api_image` без digest.
+`tofu test` гоняет `tests/*.tftest.hcl` с `mock_provider "docker"`: ни Docker, ни сервер не нужны. Тесты проверяют адреса базы и брокера в окружении контейнеров и в `migrate_env`, какие секреты получает какой контейнер, раскладку по сетям и порты, грейс-период воркера и штатную остановку базы, реплики и брокера, образ `api` и `worker` по digest без тега, `wait` у базы и брокера, ожидание `healthy` у API и формат длительностей его healthcheck, проверки переменных. Проверки отклоняют на `plan`, пока сервер не тронут: пустые `github_webhook_secret`, `postgres_password`, `rabbitmq_password`, пустой или короткий `postgres_replication_password` (незаданный секрет CI приходит пустой строкой), `llm_backend = "ollama"` без `ollama_model`, `llm_hosted_fallback` без `ollama` и всех `eurorouter_*`, `api_image` без digest.
 
 `tofu destroy` **падает на томах** базы, брокера, реплики и копий: у них `prevent_destroy = true`, и OpenTofu отказывается строить план, который их уничтожает. Удалить стенд осознанно — с данными — можно, только сняв защиту: заменить `prevent_destroy = true` на `false` в `postgres.tf`, `rabbitmq.tf` и `replica.tf` локально (не в коммите), затем `tofu destroy`. Без этого `tofu destroy` не тронет ничего: ошибка — до изменений. Контейнер хранилища состояния `tofu destroy` не удаляет и так — он не входит в этот стек намеренно. Полная зачистка описана выше, в разделе «Хранилище состояния».
 

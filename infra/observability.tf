@@ -223,7 +223,8 @@ resource "docker_container" "otelcol" {
   }
 
   # Трейсы браузера: nginx интерфейса проксирует на dmc268-otelcol:4319 —
-  # отдельный приёмник otlp/browser, только трейсы (otelcol.yaml).
+  # отдельный приёмник otlp/browser, только трейсы (otelcol.yaml). По этой же
+  # сети receiver nginx скрейпит stub_status интерфейса (dmc268-ui:8081).
   networks_advanced {
     name = docker_network.otlp.name
   }

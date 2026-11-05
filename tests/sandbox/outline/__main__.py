@@ -189,8 +189,11 @@ def _print_file(file: FileOutlineReport, *, full_outline: bool) -> None:
     if full_outline and file.outline:
         print("  весь контур:")
         print(_indented("\n".join(file.outline)))
+    if file.status == "whole_file":
+        print("  файл целиком в диффе пакета - AST не нужен; AST выбрал бы:")
     if file.scopes is not None:
-        print("  в контекст (как видит модель):")
+        if file.status != "whole_file":
+            print("  в контекст (как видит модель):")
         print(_indented(file.scopes))
     if file.import_text is not None:
         print("  импорты:")

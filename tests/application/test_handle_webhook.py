@@ -16,7 +16,9 @@ import pytest
 
 from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
+    BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
+    build_retarget_check,
 )
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict
@@ -799,11 +801,106 @@ def test_auto_review_off_check_failure_still_ignores_the_delivery() -> None:
     assert (uow.review_runs.added, queue.jobs, vcs.checks) == ([], [], [])
 
 
-def test_branch_filter_does_not_stop_the_run() -> None:
-    """Фильтр веток пока не применяется: PR в `main` при `["release/*"]` ревьюится."""
-    outcome, _, _, queue = _case_with_repository(
-        replace(a_repository(), branch_filter=("release/*",))
+@pytest.mark.parametrize("action", ["opened", "synchronize"])
+def test_pull_request_outside_the_branch_filter_is_not_reviewed(
+    action: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """PR в `main` при `["release/*"]`: прогона и задачи нет, на head ставится `success`, иначе
+    обязательная проверка держала бы PR в ожидании (#313). PR записан: по его ветке
+    возврат в фильтр увидит смену ветки."""
+    repository = replace(a_repository(), branch_filter=("release/*",))
+    with caplog.at_level(logging.INFO):
+        outcome, uow, vcs, queue = _case_with_repository(repository, action)
+
+    assert outcome.kind == "ignored"
+    assert (uow.review_runs.added, queue.jobs) == ([], [])
+    assert merge_request_of(uow).target_branch == "main"
+    assert [check for _, check in vcs.checks] == [BRANCH_FILTERED_CHECK]
+    (skipped,) = [r for r in caplog.records if "branch_filter" in r.getMessage()]
+    assert (skipped.__dict__["repository_id"], skipped.__dict__["pr_number"]) == (
+        str(repository.id),
+        6,
     )
+    assert "main" not in skipped.getMessage()
+
+
+def test_lost_race_outside_the_branch_filter_still_sets_the_check() -> None:
+    """Параллельная доставка записала PR раньше: отказ коммита откатывается, check фильтра
+    всё равно ставится, а не 5xx."""
+    uow = FakeUow()
+    uow.repositories.add(replace(a_repository(), branch_filter=("release/*",)))
+    uow.commit_errors = [ActiveRunConflict("проигравший гонку")]
+
+    outcome, uow, vcs, queue = run_case("opened", uow=uow)
+
+    assert outcome.kind == "ignored"
+    assert uow.rollbacks >= 1
+    assert (uow.review_runs.added, queue.jobs) == ([], [])
+    assert [check for _, check in vcs.checks] == [BRANCH_FILTERED_CHECK]
+
+
+@pytest.mark.parametrize("pattern", ["release/*", "release/**", "release/1.2"])
+def test_pull_request_inside_the_branch_filter_is_reviewed(pattern: str) -> None:
+    uow = FakeUow()
+    uow.repositories.add(replace(a_repository(), branch_filter=(pattern,)))
+
+    outcome, _, vcs, queue = run_case(uow=uow, vcs_meta=pr_metadata(OLD_BASE, "release/1.2"))
 
     assert outcome.kind == "success"
-    assert len(queue.jobs) == 1
+    assert len(queue.jobs) == 1 and vcs.checks == []
+
+
+def _filter_to_main(uow: FakeUow) -> None:
+    (repository,) = uow.repositories.stored.values()
+    uow.repositories.update_settings(
+        repository.id,
+        RepositorySettings(
+            auto_review_enabled=True, branch_filter=("main",), min_severity=repository.min_severity
+        ),
+        NOW,
+    )
+
+
+def test_retarget_out_of_the_branch_filter_cancels_the_active_run() -> None:
+    """PR увели из ветки фильтра: прогон по старой базе отменяется, на head ставится
+    `success`. Возврат обрабатывается как обычная смена ветки (#222): head блокируется, ставится новый прогон."""
+    _, uow, _, queue = run_case(vcs_meta=OLD_TARGET)
+    (active,) = uow.review_runs.added
+    _filter_to_main(uow)
+
+    outcome, uow, vcs, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "ignored"
+    cancelled = uow.review_runs.get(active.id)
+    assert cancelled is not None and cancelled.status is ReviewRunStatus.CANCELLED
+    assert [check for _, check in vcs.checks] == [BRANCH_FILTERED_CHECK]
+    assert len(uow.review_runs.added) == 1 and len(queue.jobs) == 1
+
+    outcome, uow, vcs, queue = run_case("edited", vcs_meta=OLD_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert [check for _, check in vcs.checks] == [build_retarget_check()]
+    assert len(uow.review_runs.added) == 2 and len(queue.jobs) == 2
+
+
+def test_return_into_the_branch_filter_after_a_completed_review_is_not_a_duplicate() -> None:
+    """Ревью на `main` завершено, PR увели из фильтра и вернули: без записанной смены ветки
+    повтор счёлся бы дублем завершённого прогона, и на head навсегда остался бы `success`
+    фильтра."""
+    uow, queue, _ = reviewed_on_old_target()
+    _filter_to_main(uow)
+    run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    outcome, uow, vcs, queue = run_case("edited", vcs_meta=OLD_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert [check for _, check in vcs.checks] == [build_retarget_check()]
+    assert len(queue.jobs) == 2
+
+
+def test_paused_repository_beats_the_branch_filter() -> None:
+    """Пауза важнее фильтра: пользователь сначала чинит то, что действительно мешает."""
+    repository = replace(a_repository(), auto_review_enabled=False, branch_filter=("release/*",))
+    _, _, vcs, _ = _case_with_repository(repository)
+
+    assert [check for _, check in vcs.checks] == [AUTO_REVIEW_OFF_CHECK]

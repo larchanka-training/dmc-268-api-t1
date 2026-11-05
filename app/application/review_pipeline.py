@@ -176,11 +176,11 @@ def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) 
             repository = uow.repositories.get(merge_request.repository_id) if merge_request else None
             # Вытеснен ли прогон - по `latest`; чей gate на head - по `in_charge`.
             in_charge = head_run_in_charge(uow, repository, run.merge_request_id, job.head_sha)
-        if latest is None or latest.id != run.id or repository is None:
+        if latest is None or latest.id != run.id or repository is None or merge_request is None:
             return
-        pause = pause_check(repository, in_charge)
+        pause = pause_check(repository, in_charge, merge_request.target_branch)
         if pause is None and in_charge is not None and in_charge.id != run.id:
-            # Пауза авторевью, повтор ручного ревью упал: gate завершённого ручного до него.
+            # Пауза авторевью или фильтр, повтор ручного ревью упал: gate завершённого ручного.
             settle_merge_gate(
                 uow,
                 vcs,
@@ -192,7 +192,7 @@ def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) 
                 repository_id=repository.id,
             )
             return
-        if pause is not None and merge_request is not None:
+        if pause is not None:
             # Пока идёт POST, за head мог стать новый ручной прогон и выставить свой gate.
             publish_pause_check(
                 uow,
@@ -394,7 +394,7 @@ def run_review(
         close_abandoned_steps(uow, run.id, now=moment, known=steps.unwritten)
     except Exception as exc:
         if _was_cancelled(uow, job.review_run_id):
-            # Ретаргет отменил прогон посреди ревью (`_supersede`): переход бросил на
+            # Ретаргет отменил прогон посреди ревью (`supersede`): переход бросил на
             # терминальном статусе или публикация отказалась. Это не сбой - открытый
             # шаг брошен, сообщение уходит в ack, а не в DLQ, head отвечает новый прогон.
             steps.abandon()

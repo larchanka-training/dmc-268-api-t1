@@ -5,6 +5,7 @@ from uuid import UUID
 
 from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
+    BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
     build_retarget_check,
 )
@@ -501,6 +502,20 @@ def test_thread_webhook_with_auto_review_off_sets_the_pause_check() -> None:
     row = uow.published_comments.find_by_provider_comment_id("77")
     assert row is not None and row.thread_resolved is True
     assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
+    assert vcs.thread_state_requests == []
+
+
+def test_thread_webhook_of_a_pr_outside_the_branch_filter_sets_the_filter_check() -> None:
+    """#313: PR в `main` при фильтре `release/*`: тред записан, gate не пересчитан:
+    открытый `critical` не даёт `failure` PR, который авторевью не ревьюит."""
+    uow = _pr_with_two_threads(
+        _repository(branch_filter=("release/*",)), FindingSeverity.CRITICAL, FindingSeverity.CRITICAL
+    )
+    vcs = RecordingVcsGateway()
+
+    assert handle_review_thread_webhook(_THREAD_PAYLOAD, uow=uow, vcs=vcs, now=lambda: NOW)
+
+    assert vcs.checks == [BRANCH_FILTERED_CHECK]
     assert vcs.thread_state_requests == []
 
 

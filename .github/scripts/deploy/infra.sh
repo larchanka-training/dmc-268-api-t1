@@ -15,8 +15,8 @@
 # открывает. Смена пароля базы и брокера сюда не доходит: их env план не
 # видит (ignore_changes), пароль выставляет следующий шаг — passwords.sh (#161).
 #
-# Предупреждение OpenTofu о -target здесь ожидаемое. У postgres `wait = true`
-# (infra/postgres.tf): apply возвращается, когда база отвечает. Этот же apply
+# Предупреждение OpenTofu о -target здесь ожидаемое. У postgres и rabbitmq
+# `wait = true`: apply возвращается, когда база и брокер отвечают. Этот же apply
 # обновляет в состоянии выход migrate_env — он зависит от этих контейнеров
 # (infra/locals.tf).
 #

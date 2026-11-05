@@ -47,12 +47,18 @@ from app.application.merge_gate_publish import (
 )
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
-from app.application.ports.unit_of_work import UnitOfWork
+from app.application.ports.unit_of_work import ActiveRunConflict, UnitOfWork
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.vcs_review import MergeGateCheck
-from app.application.use_cases.start_review_run import RunLaunch, start_review_run
+from app.application.use_cases.start_review_run import (
+    RunLaunch,
+    start_review_run,
+    supersede,
+    upsert_merge_request,
+)
 from app.domain.entities import (
     MergeRequest,
+    PRMetadata,
     Repository,
     ReviewRun,
     WebhookEvent,
@@ -62,6 +68,7 @@ from app.domain.enums import (
     ReviewRunStatus,
     TriggerSource,
 )
+from app.domain.glob import branch_selected
 from app.domain.vcs_errors import VcsError
 from app.domain.webhook import extract_github_event, is_trusted_pull_request
 
@@ -77,9 +84,10 @@ class WebhookOutcome:
 
     `ignored` — событие не запускает ревью (`reopened`, неизвестное действие,
     PR постороннего автора, незарегистрированный или выключенный репозиторий, выключенное
-    авторевью): записей нет, задачи нет. У выключенного репозитория и при выключенном
-    авторевью при этом уходит VCS-вызов: check run паузы на head («Ревью выключено в сервисе»
-    или «Авторевью выключено в настройках»). `failure` —
+    авторевью, целевая ветка вне `branch_filter`): прогона и задачи нет. У выключенного
+    репозитория, при выключенном авторевью и вне фильтра при этом уходит VCS-вызов: check run
+    паузы на head («Ревью выключено в сервисе», «Авторевью выключено в настройках» или «Ветка
+    не в фильтре ревью»); вне фильтра запись PR ещё и обновляется. `failure` —
     VCS недоступен: прогон не создан, задачи нет. `duplicate` — на этот
     коммит уже есть активный или завершённый не-failed прогон по вебхуку,
     найденный до вставки и до обновления merge_request. `conflict` — гонку отклонил уникальный индекс, проигравший
@@ -140,10 +148,10 @@ def handle_webhook_event(
     # Выключенный (`DELETE /repositories/{id}`) или с `auto_review_enabled = false`: запись
     # есть, а ревью не нужно. Прогона и задачи нет, но на head ставится `success` по причине
     # паузы, иначе обязательная проверка в ruleset держала бы PR в «Expected — Waiting for
-    # status». `branch_filter` здесь пока не применяется. Ручной прогон на этом head ставит
-    # свой gate и на паузе авторевью (D11), в том числе завершённый, чей повтор упал; на
-    # новом коммите прогона нет — check паузы.
-    check = pause_check(repository, head_run)
+    # status». Ручной прогон на этом head ставит свой gate и на паузе авторевью (D11), в том
+    # числе завершённый, чей повтор упал; на новом коммите прогона нет, и ставится check паузы.
+    # Фильтр веток сверяется ниже, по свежей целевой ветке из метаданных.
+    check = pause_check(repository, head_run, None)
     if check is not None:
         _pass_merge_gate_of_paused(uow, vcs, repository, event, check)
         return WebhookOutcome(kind="ignored")
@@ -163,20 +171,26 @@ def handle_webhook_event(
     except VcsError:
         return WebhookOutcome(kind="failure")
 
+    launch = RunLaunch(
+        trigger=TriggerSource.WEBHOOK,
+        action=event.action,
+        pr_number=event.pr_number,
+        head_sha=event.head_sha,
+        installation_id=event.installation_id,
+        repository_full_name=event.repo_full_name,
+        repository_provider_id=event.repo_provider_id,
+    )
+    # Свежая ветка, а не из записи PR: `edited` мог увести PR из фильтра или вернуть в него.
+    if not branch_selected(metadata.target_branch, repository.branch_filter):
+        _skip_filtered_branch(uow, vcs, repository, event, launch, metadata, now, new_id)
+        return WebhookOutcome(kind="ignored")
+
     start = start_review_run(
         uow,
         queue,
         vcs,
         repository,
-        RunLaunch(
-            trigger=TriggerSource.WEBHOOK,
-            action=event.action,
-            pr_number=event.pr_number,
-            head_sha=event.head_sha,
-            installation_id=event.installation_id,
-            repository_full_name=event.repo_full_name,
-            repository_provider_id=event.repo_provider_id,
-        ),
+        launch,
         metadata,
         find_duplicate=_duplicate_of,
         now=now,
@@ -217,6 +231,46 @@ def _duplicate_of(work: UnitOfWork, merge_request_id: UUID, head_sha: str) -> Re
     return work.review_runs.find_active(merge_request_id, head_sha) or (
         work.review_runs.find_reviewed(merge_request_id, head_sha)
     )
+
+
+def _skip_filtered_branch(
+    uow: UnitOfWork,
+    vcs: VcsGateway,
+    repository: Repository,
+    event: WebhookEvent,
+    launch: RunLaunch,
+    metadata: PRMetadata,
+    now: Callable[[], datetime],
+    new_id: Callable[[], UUID],
+) -> None:
+    """PR вне `branch_filter`: прогона нет, на head ставится check паузы (#313).
+
+    Запись PR обновляется свежими метаданными, чтобы возврат в фильтр увидел смену ветки
+    (#222): head заблокируется до нового ревью, а завершённый прогон на коммите дублем не
+    станет. Если PR увели из фильтра, активный прогон на коммите отменяется, потому что он
+    ревьюит ветку, которую ревьюить уже не нужно. Ручной прогон, отвечающий за head, ставит
+    свой gate, как на паузе авторевью (D11).
+    """
+    with uow as work:
+        existing = work.merge_requests.find_by_number(repository.id, event.pr_number)
+        merge_request = upsert_merge_request(
+            work, repository.id, existing, launch, metadata, now(), new_id
+        )
+        if existing is not None and existing.target_branch != metadata.target_branch:
+            supersede(work, existing.id, event.head_sha, now())
+        try:
+            work.commit()
+        except ActiveRunConflict:
+            # Параллельная доставка того же PR записала его раньше: её запись так же свежа.
+            work.rollback()
+        head_run = _latest_run_on_head(work, repository, event)
+    logger.info(
+        "PR не ревьюится: целевая ветка вне branch_filter",
+        extra={"repository_id": str(repository.id), "pr_number": event.pr_number},
+    )
+    check = pause_check(repository, head_run, merge_request.target_branch)
+    if check is not None:
+        _pass_merge_gate_of_paused(uow, vcs, repository, event, check)
 
 
 def _pass_merge_gate_of_paused(
