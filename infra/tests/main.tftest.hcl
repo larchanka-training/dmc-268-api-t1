@@ -336,6 +336,11 @@ run "database_ready_before_migrations" {
     condition     = docker_container.postgres.wait == true && length(docker_container.postgres.healthcheck) == 1
     error_message = "У postgres нужны wait = true и healthcheck: без них миграции стартуют против базы, которая ещё не принимает соединения."
   }
+
+  assert {
+    condition     = docker_container.rabbitmq.wait == true && length(docker_container.rabbitmq.healthcheck) == 1
+    error_message = "У rabbitmq нужны wait = true и healthcheck: без них смена пароля брокера идёт к узлу, который ещё не принимает AMQP."
+  }
 }
 
 run "public_bind_addresses_rejected" {
