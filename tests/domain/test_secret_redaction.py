@@ -1,14 +1,17 @@
 """Секреты в сохраняемом контексте прогона заменяются меткой (#28)."""
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
-from app.domain.secret_redaction import REDACTED, redact_secrets
+from app.domain.secret_redaction import REDACTED, may_hold_secrets, redact_secrets
 from app.domain.untrusted import boundary, fence
 
 PEM = "-----BEGIN RSA PRIVATE KEY-----\n+MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn\n+-----END RSA PRIVATE KEY-----"
+# Ключ из трёх строк диффа: метка на каждой строке, номера строк не сдвигаются.
+KEY_LINES = f"+{REDACTED}\n+{REDACTED}\n+{REDACTED}"
 
 
 @pytest.mark.parametrize(
@@ -73,7 +76,7 @@ def test_credentials_by_name_or_scheme_are_replaced(text: str, expected: str) ->
 
 
 def test_a_private_key_spanning_diff_lines_is_replaced_whole() -> None:
-    assert redact_secrets(f"+key = '''\n+{PEM}\n+'''\n+x = 1") == f"+key = '''\n+{REDACTED}\n+'''\n+x = 1"
+    assert redact_secrets(f"+key = '''\n+{PEM}\n+'''\n+x = 1") == f"+key = '''\n+{REDACTED}\n+{REDACTED}\n+{REDACTED}\n+'''\n+x = 1"
 
 
 @pytest.mark.parametrize(
@@ -89,27 +92,27 @@ def test_a_bare_secret_on_a_removed_diff_line_is_replaced(secret: str) -> None:
 
 
 def test_code_between_two_complete_keys_is_kept() -> None:
-    assert redact_secrets(f"+{PEM}\n+x = 1\n+{PEM}") == f"+{REDACTED}\n+x = 1\n+{REDACTED}"
+    assert redact_secrets(f"+{PEM}\n+x = 1\n+{PEM}") == f"{KEY_LINES}\n+x = 1\n{KEY_LINES}"
 
 
 def test_a_pgp_private_key_block_is_replaced_whole() -> None:
     pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\n+lQOYBF0abc\n+-----END PGP PRIVATE KEY BLOCK-----"
-    assert redact_secrets(f"+{pgp}\n+x = 1") == f"+{REDACTED}\n+x = 1"
+    assert redact_secrets(f"+{pgp}\n+x = 1") == f"{KEY_LINES}\n+x = 1"
 
 
 def test_a_key_without_end_before_a_complete_key_is_replaced_separately() -> None:
     text = f"+-----BEGIN PRIVATE KEY-----\n+AAA\n+y = 2\n+{PEM}\n+x = 1"
-    assert redact_secrets(text) == f"+{REDACTED}\n+y = 2\n+{REDACTED}\n+x = 1"
+    assert redact_secrets(text) == f"+{REDACTED}\n+{REDACTED}\n+y = 2\n{KEY_LINES}\n+x = 1"
 
 
 def test_the_tail_of_a_key_without_begin_is_replaced() -> None:
     """Хунк задел строки сразу за ключом: последние строки base64 ed25519 — это уже весь seed."""
     tail = "+QyNTUxOQAAACBbY2xhdWRlLXRlc3Qta2V5LWZvci1yZWRhY3Rpb24AAAAAAAAAAAA=\n+-----END OPENSSH PRIVATE KEY-----"
-    assert redact_secrets(f"+x = 1\n{tail}\n+y = 2") == f"+x = 1\n+{REDACTED}\n+y = 2"
+    assert redact_secrets(f"+x = 1\n{tail}\n+y = 2") == f"+x = 1\n+{REDACTED}\n+{REDACTED}\n+y = 2"
 
 
 def test_an_indented_key_cut_off_by_the_hunk_is_replaced() -> None:
-    assert redact_secrets("+key: |\n+  -----BEGIN PRIVATE KEY-----\n+  MIIEvQIBADANBg") == f"+key: |\n+  {REDACTED}"
+    assert redact_secrets("+key: |\n+  -----BEGIN PRIVATE KEY-----\n+  MIIEvQIBADANBg") == f"+key: |\n+  {REDACTED}\n+{REDACTED}"
 
 
 def test_a_redacted_fenced_block_gets_an_id_of_the_redacted_text() -> None:
@@ -121,7 +124,7 @@ def test_a_redacted_fenced_block_gets_an_id_of_the_redacted_text() -> None:
 
 
 def test_a_private_key_cut_off_by_the_hunk_is_replaced_to_the_end() -> None:
-    assert redact_secrets("+x = 1\n+-----BEGIN PRIVATE KEY-----\n+MIIEvQIBADANBg") == f"+x = 1\n+{REDACTED}"
+    assert redact_secrets("+x = 1\n+-----BEGIN PRIVATE KEY-----\n+MIIEvQIBADANBg") == f"+x = 1\n+{REDACTED}\n+{REDACTED}"
 
 
 @pytest.mark.parametrize(
@@ -185,3 +188,107 @@ def test_strings_are_redacted_at_any_depth_and_the_input_is_not_changed() -> Non
 
     assert redacted == {"diff": [{"path": "a.py", "hunk": f"+t = '{REDACTED}'"}], "omitted_count": 2, "ast": None}
     assert body["diff"][0]["hunk"] == "+t = 'AKIAIOSFODNN7EXAMPLE'"
+
+
+def test_a_secret_split_by_a_newline_keeps_the_line_count() -> None:
+    """`authorization` и значение на соседних строках: метка на каждой, строки не сдвигаются."""
+    text = "+Authorization:\n+ Bearer abcdef0123456789\n+x = 1"
+
+    redacted = redact_secrets(text)
+
+    assert "abcdef0123456789" not in redacted
+    assert redacted.count("\n") == text.count("\n")
+    assert redacted.endswith("\n+x = 1")
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (".env", True),
+        ("app/.env.production", True),
+        ("certs/tls.key", True),
+        ("CREDENTIALS.json", True),
+        ("config/secrets.yaml", True),
+        ("k8s/secrets/db.yaml", True),
+        ("app/domain/secret_redaction.py", False),
+        ("deploy/prod.env", True),
+        ("config/credentials.py", True),
+        (".netrc", True),
+        ("infra/prod.tfvars", True),
+        ("src/SecretService.ts", False),
+        ("app/environment.py", False),
+        ("docker-compose.yml", False),
+        ("keys/README.md", False),
+    ],
+)
+def test_file_names_that_may_hold_secrets(path: str, expected: bool) -> None:
+    assert may_hold_secrets(path) is expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            ' KEY = (\n "-----BEGIN PRIVATE KEY-----\\n"\n "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"\n "BKcwggSjAgEAAoIBAQC7\\n"',
+            id="python-begin-without-end",
+        ),
+        pytest.param(
+            ' const k = "-----BEGIN PRIVATE KEY-----\\n" +\n   "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n" +\n   "BKcwggSjAgEAAoIBAQC7\\n" +',
+            id="js-concat-begin-without-end",
+        ),
+        pytest.param(
+            ' x = 1\n "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n",\n "BKcwggSjAgEAAoIBAQC7\\n",\n "-----END PRIVATE KEY-----\\n",\n y = 2',
+            id="python-end-without-begin",
+        ),
+    ],
+)
+def test_a_key_in_string_literals_cut_off_by_the_window_is_replaced(text: str) -> None:
+    """Ключ фикстуры в кавычках с `\\n`: окно ±30 строк отрезало BEGIN или END, base64 не уходит."""
+    redacted = redact_secrets(text)
+    assert "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" not in redacted
+    assert "BKcwggSjAgEAAoIBAQC7" not in redacted
+    assert redacted.count("\n") == text.count("\n")
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda n: "-----BEGIN PRIVATE KEY-----" + " " * n + "X", id="spaces-after-begin"),
+        pytest.param(lambda n: "-----BEGIN PRIVATE KEY-----\n+A" + " \t" * (n // 2) + "X", id="spaces-after-key-line"),
+        pytest.param(lambda n: "+A" + " " * n + "X\n-----END PRIVATE KEY-----", id="spaces-before-end"),
+    ],
+)
+def test_a_long_run_of_spaces_around_a_key_line_is_scanned_in_linear_time(build: Callable[[int], str]) -> None:
+    """Ряд пробелов, за которым нет перевода строки: строка ключа делит его одним способом."""
+    assert _seconds(build(16_000)) < 8 * _seconds(build(4_000))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('+K = b"-----BEGIN PRIVATE KEY-----\\n"\n+  b"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"', id="bytes"),
+        pytest.param('+K = "-----BEGIN PRIVATE KEY-----\\n"\r\n+  "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"\r\n', id="crlf"),
+        pytest.param('+K = "-----BEGIN PRIVATE KEY-----\\n" \\\n+  "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n" \\', id="backslash"),
+        pytest.param('+K = rb"-----BEGIN PRIVATE KEY-----\\n"\n+  rb"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"', id="raw-bytes"),
+        pytest.param(
+            '+  "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"\n+  "8w0BAQ==\\n"\n+  "-----END OPENSSH PRIVATE KEY-----\\n"',
+            id="short-last-line-above-end",
+        ),
+    ],
+)
+def test_a_key_in_bytes_crlf_or_continued_literals_is_replaced(text: str) -> None:
+    assert "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" not in redact_secrets(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "+HEADER = '-----BEGIN PRIVATE KEY-----'\n+    x +\n+    foo,",
+        '+MARKERS = ("-----BEGIN PRIVATE KEY-----",\n+    "Hello",\n+    "World")',
+    ],
+)
+def test_short_code_lines_next_to_a_key_header_stay_visible(text: str) -> None:
+    """Код парсера PEM: короткие строки рядом с заголовком - не ключ, модель их видит."""
+    redacted = redact_secrets(text)
+    for line in text.split("\n")[1:]:
+        assert line in redacted

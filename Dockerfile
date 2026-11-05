@@ -21,8 +21,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --frozen --no-dev
 
-# Рантайм: тот же базовый образ, без uv.
-FROM python:${PYTHON_VERSION}-slim
+# Рантайм: тот же базовый образ, без uv. Пакеты базового образа обновляются при сборке:
+# python:3.14-slim пересобирают реже, чем выходят исправления Debian, и trivy ронял бы
+# сборку на CVE, исправленной в Debian после него (#361). APT_REFRESH — дата сборки из
+# деплоя: она сбрасывает кэш этого слоя раз в сутки, а не на каждой сборке, и digest
+# коммита без правок кода остаётся прежним.
+FROM python:${PYTHON_VERSION}-slim AS runtime
+ARG APT_REFRESH
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
