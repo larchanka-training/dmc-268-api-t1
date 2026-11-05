@@ -29,7 +29,7 @@ from app.domain.entities import (
     ShownRule,
 )
 from app.domain.enums import DefinitionKind, Language, RulesStatus
-from app.domain.secret_redaction import redact_secrets
+from app.domain.secret_redaction import REDACTED, redact_secrets
 from app.domain.untrusted import boundary, fence, sanitize
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
@@ -111,6 +111,7 @@ def _assemble(
     skipped: tuple[SkippedAst, ...] = (),
     limits: ContextLimits = LIMITS,
     pr_context: PrContext = NO_PR_CONTEXT,
+    sources: dict[str, str] | None = None,
 ) -> AssembledContext:
     return assemble_context(
         JOB,
@@ -118,6 +119,7 @@ def _assemble(
         rules,
         asts,
         skipped,
+        sources=sources or {},
         pr_context=pr_context,
         limits=limits,
         review_run_id=RUN_ID,
@@ -241,6 +243,7 @@ def test_hunk_longer_than_the_budget_is_omitted_without_sanitizing() -> None:
             RULES,
             (),
             (),
+            sources={},
             pr_context=NO_PR_CONTEXT,
             limits=LIMITS,
             review_run_id=RUN_ID,
@@ -531,6 +534,7 @@ def _peak_of_assembly(
             rules,
             (),
             (),
+            sources={},
             pr_context=pr_context,
             limits=LIMITS,
             review_run_id=RUN_ID,
@@ -593,3 +597,207 @@ def test_commit_message_longer_than_the_share_is_omitted_without_sanitizing() ->
     ]
     assert {"part": "commit_message", "reason": "budget", "index": 2} in body["omitted"]
     assert peak < len(text)
+
+
+# --- Окружение изменений и файл целиком (change `context-surrounding`) ---
+
+# Строка ~100 байт: файл из 120 строк больше порога целого файла (8 КБ).
+def _long_lines(path: str, count: int = 120) -> list[str]:
+    return [f"{path} line {n} " + "x" * 80 for n in range(1, count + 1)]
+
+
+def _replace_diff(path: str, lines: list[str], number: int, new: str) -> str:
+    """Дифф замены строки `number` на `new` с тремя строками контекста, как у git."""
+    first, last = max(1, number - 3), min(len(lines), number + 3)
+    body = [f" {line}" for line in lines[first - 1 : number - 1]]
+    body += [f"-{lines[number - 1]}", f"+{new}"]
+    body += [f" {line}" for line in lines[number:last]]
+    count = last - first + 1
+    return (
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        f"@@ -{first},{count} +{first},{count} @@\n" + "".join(f"{line}\n" for line in body)
+    )
+
+
+def _head(lines: list[str], number: int, new: str) -> str:
+    return "".join(f"{new if n == number else line}\n" for n, line in enumerate(lines, start=1))
+
+
+def _diff_texts(body: dict[str, Any], path: str) -> list[str]:
+    return [item["hunk"] for item in body["diff"] if item["path"] == path]
+
+
+def test_hunk_gets_thirty_lines_of_surrounding() -> None:
+    lines = _long_lines("a.txt")
+    result = _assemble(
+        diff=_replace_diff("a.txt", lines, 60, "changed"),
+        asts=(),
+        sources={"a.txt": _head(lines, 60, "changed")},
+    )
+
+    (hunk,) = _diff_texts(result.payload.body, "a.txt")
+    assert "\n@@ -30,61 +30,61 @@\n" in hunk
+    assert f" {lines[29]}\n" in hunk and f" {lines[89]}\n" in hunk
+    assert f" {lines[28]}\n" not in hunk and f" {lines[90]}\n" not in hunk
+    assert result.payload.tiers == ("diff", "surrounding")
+    # Якоря сверяются по исходному hunk'у: контекстные строки якорем не становятся.
+    assert result.hunks[0].changed_new_lines == frozenset({60})
+    assert result.payload.token_count <= LIMITS.max_tokens
+
+
+def test_small_file_goes_whole_without_ast() -> None:
+    lines = [f"# line {n}" for n in range(1, 31)]
+    lines[9:12] = ["    def save(self, item):", "        self.items.append(item)", "        return item"]
+    diff = _replace_diff("app/repo.py", lines, 11, "        self.items.insert(0, item)")
+    result = _assemble(diff=diff, sources={"app/repo.py": _head(lines, 11, "        self.items.insert(0, item)")})
+
+    (hunk,) = _diff_texts(result.payload.body, "app/repo.py")
+    assert "\n@@ -1,30 +1,30 @@\n # line 1\n" in hunk
+    assert " # line 30\n" in hunk
+    assert result.payload.body["ast"] == []
+    assert result.payload.tiers == ("diff", "whole_file")
+
+
+def test_surrounding_never_crowds_out_hunks_of_another_file() -> None:
+    first, second = _long_lines("a.txt"), _long_lines("b.txt")
+    diff = _replace_diff("a.txt", first, 60, "one") + _replace_diff("b.txt", second, 60, "two")
+    plain = _assemble(diff=diff, asts=()).payload
+    # Бюджета хватает на hunk'и обоих файлов, но не на окно первого: оно ~6 КБ.
+    limits = ContextLimits(plain.token_count + 300, 4_000, 32_768, 60, 20, 262_144, 1_000, 5_242_880)
+
+    result = _assemble(
+        diff=diff,
+        asts=(),
+        limits=limits,
+        sources={"a.txt": _head(first, 60, "one"), "b.txt": _head(second, 60, "two")},
+    )
+
+    assert result.payload.body["diff"] == plain.body["diff"]
+    assert result.payload.tiers == ("diff",)
+    assert result.payload.token_count <= limits.max_tokens
+
+
+def test_file_with_an_omitted_hunk_is_not_expanded() -> None:
+    """Hunk файла не вошёл, а к второму проходу остаток вырос: правило файла `c.txt`
+    вернуло свой резерв, когда hunk `c.txt` не вошёл. Окно файла всё равно не строится."""
+    lines = [f"b {n}" for n in range(1, 101)]
+    added = [f"added {n} " + "y" * 100 for n in range(50)]
+    head_lines = [*_head(lines, 10, "changed").splitlines()[:80], *added, *lines[80:]]
+    diff = (
+        _replace_diff("b.txt", lines, 10, "changed")
+        + "@@ -80,0 +81,50 @@\n"
+        + "".join(f"+{line}\n" for line in added)
+        + _big_diff(1, 400).replace("app/f0.py", "c.txt")
+    )
+    rule = RepoRule(name="C", patterns=("c.txt",), excludes=(), checks=("z" * 8_000,))
+    limits = ContextLimits(4_000, 4_000, 32_768, 60, 20, 262_144, 200, 5_242_880)
+
+    result = _assemble(
+        diff=diff,
+        rules=RepoRules(status=RulesStatus.LOADED, rules=(rule,)),
+        asts=(),
+        limits=limits,
+        sources={"b.txt": "".join(f"{line}\n" for line in head_lines)},
+    )
+
+    assert [h.file_path for h in result.hunks] == ["b.txt"]
+    (hunk,) = _diff_texts(result.payload.body, "b.txt")
+    assert hunk == fence("diff", result.hunks[0].text)
+    assert result.payload.tiers == ("diff",)
+
+
+def test_new_small_file_goes_whole_without_ast() -> None:
+    """Hunk нового файла уже покрывает его целиком: файл - `whole_file`, AST не дублирует текст."""
+    lines = ["import os", "", "def f():", "    return os.sep"]
+    diff = (
+        "diff --git a/app/new.py b/app/new.py\nnew file mode 100644\n--- /dev/null\n+++ b/app/new.py\n"
+        "@@ -0,0 +1,4 @@\n" + "".join(f"+{line}\n" for line in lines)
+    )
+    outline = FileOutline(definitions=(Definition(DefinitionKind.FUNCTION, "f", "def f()", 3, 4),), imports=("import os",))
+
+    result = _assemble(
+        diff=diff,
+        asts=(FileAst("app/new.py", Language.PYTHON, outline),),
+        sources={"app/new.py": "".join(f"{line}\n" for line in lines)},
+    )
+
+    assert _diff_texts(result.payload.body, "app/new.py") == [fence("diff", result.hunks[0].text)]
+    assert result.payload.body["ast"] == []
+    assert result.payload.tiers == ("diff", "whole_file")
+
+
+def test_window_longer_than_the_remainder_is_not_sanitized() -> None:
+    """Окно из управляющих символов не помещается: его текст не обезвреживается до отказа,
+    иначе `sanitize` раздул бы его в 8 раз (#328). Файл остаётся с исходным hunk'ом."""
+    lines = _long_lines("a.txt")
+    for n in range(30, 53):
+        lines[n] = "\x01" * 50_000
+    diff = _replace_diff("a.txt", lines, 60, "changed")
+    head = _head(lines, 60, "changed")
+    control = 23 * 50_000
+
+    tracemalloc.start()
+    try:
+        result = _assemble(diff=diff, asts=(), sources={"a.txt": head})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert _diff_texts(result.payload.body, "a.txt") == [fence("diff", result.hunks[0].text)]
+    assert result.payload.tiers == ("diff",)
+    assert result.payload.token_count <= LIMITS.max_tokens
+    # Строки файла, вид и редакция секретов - несколько копий текста (~5x); с `sanitize`
+    # и `fence` до проверки бюджета пик был ~66x.
+    assert peak < 10 * control, peak
+
+
+@pytest.mark.parametrize("path", [".env.example", "deploy/app.secrets.yaml", "certs/server.PEM"])
+def test_file_that_may_hold_secrets_is_not_expanded(path: str) -> None:
+    """`DB_PASSWORD=hunter2` без узнаваемого префикса `redact_secrets` не ловит: такие файлы
+    идут только hunk'ами, без окна и целиком."""
+    lines = [f"KEY_{n}=value{n}" for n in range(1, 31)]
+    diff = _replace_diff(path, lines, 11, "KEY_11=changed")
+
+    result = _assemble(diff=diff, asts=(), sources={path: _head(lines, 11, "KEY_11=changed")})
+
+    (hunk,) = _diff_texts(result.payload.body, path)
+    assert "KEY_1=value1\n" not in hunk
+    assert result.payload.tiers == ("diff",)
+
+
+def test_secret_in_unchanged_surrounding_line_does_not_reach_the_model() -> None:
+    """Строку окна PR не менял: токен в ней - метка. Тот же токен в строке `+` модель видит."""
+    token = "ghp_" + "a" * 36
+    lines = _long_lines("a.txt")
+    lines[39] = f"token = '{token}'"
+    diff = _replace_diff("a.txt", lines, 60, f"added = '{token}'")
+
+    result = _assemble(diff=diff, asts=(), sources={"a.txt": _head(lines, 60, f"added = '{token}'")})
+
+    (hunk,) = _diff_texts(result.payload.body, "a.txt")
+    assert f"\n token = '{REDACTED}'\n" in hunk
+    assert f"\n+added = '{token}'\n" in hunk
+    assert result.payload.tiers == ("diff", "surrounding")
+
+
+def test_new_large_file_gets_no_surrounding_tier() -> None:
+    """Hunk нового файла больше 8 КБ уже покрывает файл: окно ничего не добавляет, `surrounding` нет."""
+    lines = _long_lines("big.txt")
+    diff = (
+        "diff --git a/big.txt b/big.txt\nnew file mode 100644\n--- /dev/null\n+++ b/big.txt\n"
+        f"@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{line}\n" for line in lines)
+    )
+
+    result = _assemble(diff=diff, asts=(), sources={"big.txt": "".join(f"{line}\n" for line in lines)})
+
+    assert _diff_texts(result.payload.body, "big.txt") == [fence("diff", result.hunks[0].text)]
+    assert result.payload.tiers == ("diff",)
+
+
+def test_source_that_does_not_match_the_hunk_changes_nothing() -> None:
+    """Текст на head_sha не тот, что в диффе: исходный hunk, AST на месте, без новых уровней."""
+    result = _assemble(sources={"app/repo.py": "совсем другой файл\n"})
+
+    assert _diff_texts(result.payload.body, "app/repo.py") == [fence("diff", result.hunks[0].text)]
+    assert [item["path"] for item in result.payload.body["ast"]] == ["app/repo.py", "app/repo.py"]
+    assert result.payload.tiers == ("diff", "ast")
