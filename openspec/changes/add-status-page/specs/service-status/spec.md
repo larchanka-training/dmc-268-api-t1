@@ -30,8 +30,8 @@ SHALL быть значениями `operational`, `degraded`, `outage`, `unknow
 
 Статус компонента SHALL выводиться из алертов Prometheus в состоянии `firing` по правилам
 `infra/observability/alerts.yml`: `outage` — компонент недоступен (контейнер не запущен, проба
-не проходит, у очереди ревью нет потребителей), `degraded` — работает со сбоями (перезапуски,
-всплеск 5xx у API, падающие прогоны), иначе — `operational`. Алерты о сервисах, без которых
+не проходит, очередь ревью стоит), `degraded` — работает со сбоями (перезапуски, всплеск 5xx у
+API, сбои прогонов, зависшая задача), иначе — `operational`. Алерты о сервисах, без которых
 компоненты работают (реплика и копии базы, интерфейс, диск, бюджет модели), и
 `ReviewDlqNotEmpty` SHALL NOT влиять на статус.
 
@@ -44,6 +44,11 @@ SHALL быть значениями `operational`, `degraded`, `outage`, `unknow
 
 - **WHEN** горит `Api5xxSpike`
 - **THEN** `api` — `degraded`
+
+#### Scenario: Воркер подписан, но стоит
+
+- **WHEN** горит `WorkerStalled`
+- **THEN** `worker` в `outage`, а если горит только `ReviewJobStuck`, в `degraded`
 
 #### Scenario: Алерт другого сервиса
 

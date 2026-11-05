@@ -595,9 +595,12 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `ContainerDown` | контейнер не запущен: нет ряда `container_uptime_seconds` у `dmc268-api`, `-worker`, `-postgres`, `-postgres-replica`, `-postgres-backup`, `-rabbitmq`, `-ui`, `-otelcol` | 2 минуты (+ до 5 минут, пока экспортёр держит ряд остановленного) | critical |
 | `ContainerMetricsMissing` | нет ни одного ряда `container_uptime_seconds` при живом скрейпе `docker-stats`: `docker_stats` не читает Docker API, `ContainerDown` слеп | 5 минут | warning |
 | `ContainerRestarting` | перезапуски контейнера `dmc268-*` | 2 и больше за 15 минут | critical |
+| `ContainerMemoryNearLimit` | память контейнера `dmc268-*` без кэша страниц (`container_memory_usage_total_bytes`) от его лимита; `service` из имени без `dmc268-` | > 90 % дольше 10 минут | warning |
 | `ServiceProbeFailed` | сервис не отвечает (то же, что видит его healthcheck): `/health` API, TCP базы, реплики, брокера | 2 минуты | critical |
 | `PublicEndpointDown` | HTTPS публичного входа (`public_origin`) | 3 минуты | critical |
 | `WorkerNotConsuming` | у `review_jobs.qq` нет потребителей или очереди нет совсем (при живом скрейпе брокера) | 5 минут | critical |
+| `WorkerStalled` | потребитель у `review_jobs.qq` есть, готовые задачи лежат, а подтверждений quorum-очередей (`rabbitmq_global_messages_acknowledged_total`) нет | 15 минут | critical |
+| `ReviewJobStuck` | сообщение `review_jobs.qq` выдано и не подтверждено, других подтверждений нет; прогоны на стенде идут до 1,5 минуты, выметатель срабатывает на 30 | 20 минут | critical |
 | `Api5xxSpike` | доля 5xx у API за 5 минут, при трафике больше 3 запросов в минуту | > 5 % дольше 5 минут | critical |
 | `ReviewRunsFailing` | доля прогонов в `failed` за 30 минут, при 3+ прогонах | > 30 % | critical |
 | `ReviewDlqNotEmpty` | сообщения в `review_jobs.dlq` | > 0 дольше 5 минут | critical |
@@ -669,16 +672,16 @@ ssh stand 'docker logs dmc268-alertmanager 2>&1' | sed -E 's#/bot[^/]+/#/bot***/
 | node-exporter | 64 |
 | socket-proxy | 64 |
 | Alertmanager | 64 |
-| blackbox-exporter, пробы сервисов | 32 |
-| blackbox-exporter, публичный вход | 32 |
-| **Итого стек** | **4160 (~4,1 ГБ)** |
+| blackbox-exporter, пробы сервисов | 48 |
+| blackbox-exporter, публичный вход | 48 |
+| **Итого стек** | **4192 (~4,1 ГБ)** |
 
 Рядом — лимиты контейнеров приложения (`app.tf`, `postgres.tf`, `rabbitmq.tf`, `replica.tf`):
 `postgres` 1024, `api`, `worker`, `rabbitmq` и реплика (`postgres_replica_memory`) по 512,
 резервные копии (`dmc268-postgres-backup`) 256 — итого 3328 МБ (~3,3 ГБ) постоянно живущих.
 Миграции (`docker run` в `migrate.sh` с `--memory 256m`) и одноразовый
 `dmc268-replication-setup` (64) — шаги деплоя, в постоянный лимит стенда не входят.
-Суммарный потолок стенда — 7488 МБ (~7,5 ГБ) по постоянно живущим контейнерам.
+Суммарный потолок стенда — 7520 МБ (~7,5 ГБ) по постоянно живущим контейнерам.
 
 На VPS 7947 МБ (~7,9 ГБ) памяти и нет свопа (`free -m`, 2026-10-28): запас над потолками около
 0,45 ГБ (Alertmanager и два экземпляра blackbox-exporter забрали из него 128 МБ), и из него же

@@ -80,8 +80,12 @@ ALERT_RULES: tuple[AlertRule, ...] = (
     # прогоны и так ловит ReviewRunsFailing.
     AlertRule("ContainerDown", ServiceStatus.OUTAGE, (_WORKER,), _container("dmc268-worker")),
     AlertRule("WorkerNotConsuming", ServiceStatus.OUTAGE, (_WORKER,)),
+    # Подписан, но задачи лежат без подтверждений: для пользователя это то же, что нет потребителя.
+    AlertRule("WorkerStalled", ServiceStatus.OUTAGE, (_WORKER,)),
     AlertRule("ContainerRestarting", ServiceStatus.DEGRADED, (_WORKER,), _container("dmc268-worker")),
     AlertRule("ReviewRunsFailing", ServiceStatus.DEGRADED, (_WORKER,)),
+    # Висит одна задача без очереди за ней: ждёт один прогон, а не все (очередь даст WorkerStalled).
+    AlertRule("ReviewJobStuck", ServiceStatus.DEGRADED, (_WORKER,)),
     # Очередь: брокер не запущен или не принимает AMQP — недоступна; перезапуски — сбои.
     AlertRule("ContainerDown", ServiceStatus.OUTAGE, (_QUEUE,), _container("dmc268-rabbitmq")),
     AlertRule("ServiceProbeFailed", ServiceStatus.OUTAGE, (_QUEUE,), {"service": "rabbitmq"}),
@@ -92,6 +96,7 @@ ALERT_RULES: tuple[AlertRule, ...] = (
     AlertRule("ServiceProbeFailed", ServiceStatus.OUTAGE, (_API, _WORKER), {"service": "postgres"}),
     # Слепота. docker-stats — ContainerDown и ContainerRestarting всех трёх и базы; без
     # рядов контейнеров при живом скрейпе (ContainerMetricsMissing) — то же самое.
+    # ContainerMemoryNearLimit (warning) страницу не трогает: статус — по критическим алертам.
     AlertRule("ScrapeTargetDown", ServiceStatus.UNKNOWN, _ALL, {"job": "docker-stats"}),
     AlertRule("ContainerMetricsMissing", ServiceStatus.UNKNOWN, _ALL),
     # blackbox-services — пробы /health API, порта базы и AMQP-порта брокера
@@ -101,7 +106,8 @@ ALERT_RULES: tuple[AlertRule, ...] = (
     # воркера (ReviewRunsFailing). Ряды приложения несут job = service.name
     # (dmc-268-api, honor_labels), но `up` — всегда job скрейпа.
     AlertRule("ScrapeTargetDown", ServiceStatus.UNKNOWN, (_API, _WORKER), {"job": "collector"}),
-    # rabbitmq — метрики очередей: потребители (WorkerNotConsuming).
+    # rabbitmq — метрики очередей: потребители (WorkerNotConsuming), готовые, выданные и
+    # подтверждённые задачи (WorkerStalled, ReviewJobStuck).
     AlertRule("ScrapeTargetDown", ServiceStatus.UNKNOWN, (_WORKER,), {"job": "rabbitmq"}),
 )
 
