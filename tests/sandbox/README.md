@@ -11,6 +11,31 @@ PostgreSQL, RabbitMQ и GitHub. Нужна только локальная мо�
 Из корня репозитория:
 
 ```bash
+make sandbox-demo
+```
+
+`make sandbox-demo` — начать отсюда. Четыре шага:
+
+1. `scripts/sandbox-doctor.sh` — проверка окружения (то же отдельно — `make sandbox-doctor`);
+2. `uv sync --all-extras`;
+3. `make ollama-up ollama-pull` — Ollama и модель `MODEL`;
+4. прогон воркера на мок-PR `DEMO_CASE` (по умолчанию [`examples/case.yaml`](examples/case.yaml)).
+
+`make sandbox-demo` завершается с кодом `0`, если прогон `completed` и сообщение `ack`, и с кодом
+make `2` при любом сбое: GNU make не передаёт код рецепта. Что именно не так, говорит последняя
+строка: прогон не завершился или ушёл в `nack` (подробнее — `ARGS=-v`) либо вход или окружение не
+подошли. Коды `0`/`1`/`2` различает прямой запуск `uv run python -m tests.sandbox` (раздел «Коды
+выхода»). Другая модель или свой кейс — `make sandbox-demo MODEL=qwen2.5-coder:7b DEMO_CASE=my-case.yaml`.
+
+`make sandbox-doctor` только проверяет и ничего не меняет: корень репозитория, uv и Python 3.14,
+git, curl, ollama, отвечает ли Ollama на `OLLAMA_URL`, скачана ли `MODEL`, не меньше 3 ГБ свободного
+места там, куда Ollama кладёт модели (`OLLAMA_MODELS`, по умолчанию `~/.ollama/models`). `✗` —
+ошибка, `!` — предупреждение. С ошибкой `scripts/sandbox-doctor.sh` выходит с кодом `1`, а
+`make sandbox-doctor` — с кодом make `2`.
+
+То же по шагам и на кейсах корпуса:
+
+```bash
 uv sync --all-extras
 make sandbox CASE=04-users-sql-injection
 ```
@@ -18,7 +43,8 @@ make sandbox CASE=04-users-sql-injection
 `make sandbox` запускает `ollama serve` в фоне, если Ollama не отвечает на `OLLAMA_URL`, скачивает
 `MODEL`, если её ещё нет, и прогоняет воркер на кейсе корпуса (без `CASE` — на всех кейсах). То же
 по шагам: `make ollama-up ollama-pull`, затем прогон. Запущенная так Ollama остаётся работать в фоне,
-её лог — `.ollama.log`.
+её лог — `.ollama.log`, PID — `.ollama.pid`; остановить — `make sandbox-down`. Ollama, запущенную не
+через make, `make sandbox-down` не трогает.
 
 Первый запуск скачивает модель (`qwen2.5-coder:1.5b`, около 1 ГБ); повторные — секунды:
 уже работающая Ollama и скачанная модель пропускаются.
@@ -155,6 +181,7 @@ make sandbox-git RANGE=develop..HEAD
 | `MODEL` | `$OLLAMA_MODEL` или `qwen2.5-coder:1.5b` | модель Ollama |
 | `OLLAMA_URL` | `$OLLAMA_BASE_URL` или `http://localhost:11434` | адрес Ollama |
 | `CASE` | все кейсы | кейс корпуса для `sandbox`, `sandbox-stub`, `sandbox-oracle` |
+| `DEMO_CASE` | `tests/sandbox/examples/case.yaml` | мок-PR для `sandbox-demo` |
 | `CASE_FILE`, `SCRIPT` | файлы из `examples/` | кейс и сценарий для `sandbox-script` |
 | `RANGE` | `develop..HEAD` | диапазон git для `sandbox-git` |
 | `RULES` | `rules` | содержимое `.review/rules.md`: `absent`, `rules`, `empty`, `adversarial` |
@@ -170,7 +197,8 @@ make sandbox-git RANGE=develop..HEAD
 - `--json <путь>` — весь результат прогона в JSON;
 - `-v` — логи воркера.
 
-Коды выхода:
+Коды выхода `uv run python -m tests.sandbox` (через `make` любой ненулевой код становится кодом
+make `2`, причину показывает отчёт):
 
 - `0` — все PR дошли до `completed`, сообщения подтверждены;
 - `1` — сообщение какого-то PR ушло в nack или прогон не `completed`;
@@ -183,6 +211,7 @@ make sandbox-git RANGE=develop..HEAD
 
 | Симптом | Что сделать |
 |---|---|
+| непонятно, что не так с окружением | `make sandbox-doctor` — что не подошло (`✗`) и что под вопросом (`!`) |
 | `ollama не установлена` | `brew install ollama` или [ollama.com/download](https://ollama.com/download) |
 | `Ollama не ответила за 30 с` | смотрите `.ollama.log`; порт занят — другой адрес: `OLLAMA_URL=http://localhost:11500` |
 | код 2, «модель не скачана» | `make ollama-pull MODEL=...` или повторите `make sandbox` |

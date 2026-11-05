@@ -5,6 +5,8 @@
 """
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -215,3 +217,127 @@ def test_cli_passes_max_output_tokens_to_the_worker(
 
     assert code == 2
     assert "--max-output-tokens" in capsys.readouterr().err
+
+
+# --- doctor -------------------------------------------------------------------
+
+DOCTOR = REPO_ROOT / "scripts" / "sandbox-doctor.sh"
+# Всё, что вызывает скрипт, кроме uv и ollama: их наличие и проверяют тесты.
+DOCTOR_TOOLS = ("bash", "git", "curl", "uname", "awk", "df", "grep", "dirname")
+# Порт, на котором никто не слушает: curl к Ollama отказывает сразу.
+DEAD_OLLAMA_URL = "http://127.0.0.1:9"
+
+
+def _doctor(
+    *,
+    path: str | None = None,
+    cwd: Path = REPO_ROOT,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    full_env = dict(os.environ)
+    if path is not None:
+        full_env["PATH"] = path
+    full_env.update(env or {})
+    return subprocess.run(
+        [str(DOCTOR)],
+        cwd=cwd,
+        env=full_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def _trimmed_path(tmp_path: Path, *tools: str) -> str:
+    """Каталог со ссылками только на эти программы: системный `/usr/bin` может
+    содержать и `uv`, и `ollama`, если их поставил пакетный менеджер."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in tools:
+        found = shutil.which(tool)
+        assert found is not None, tool
+        (bin_dir / tool).symlink_to(found)
+    return str(bin_dir)
+
+
+def _fake_tool(path: str, name: str, script: str) -> None:
+    """Подменяет программу в урезанном PATH shell-скриптом."""
+    tool = Path(path) / name
+    tool.unlink(missing_ok=True)
+    tool.write_text(f"#!/bin/sh\n{script}\n")
+    tool.chmod(0o755)
+
+
+# Так отвечает `ollama --version`, когда сервер Ollama не запущен: обе строки в stdout.
+OLLAMA_NOT_RUNNING = (
+    'if [ "$1" = --version ]; then\n'
+    "  echo 'Warning: could not connect to a running Ollama instance'\n"
+    "  echo 'Warning: client version is 0.40.14'\n"
+    "fi"
+)
+
+
+def test_doctor_without_uv_fails_with_hint(tmp_path: Path) -> None:
+    result = _doctor(path=_trimmed_path(tmp_path, *DOCTOR_TOOLS))
+
+    assert result.returncode == 1, result.stdout
+    assert "✗ uv не установлен" in result.stdout
+    assert "astral.sh/uv" in result.stdout
+    assert "Окружение не готово" in result.stdout
+
+
+def test_doctor_without_ollama_fails_with_hint(tmp_path: Path) -> None:
+    """`uv` есть, `ollama` нет: ✗ с подсказкой установки; к Ollama doctor не ходит."""
+    result = _doctor(path=_trimmed_path(tmp_path, *DOCTOR_TOOLS, "uv"))
+
+    assert result.returncode == 1, result.stdout
+    assert "✗ ollama не установлена" in result.stdout
+    assert "ollama.com" in result.stdout
+    assert "✓ uv " in result.stdout
+    assert "Ollama отвечает" not in result.stdout
+
+
+def test_doctor_reads_ollama_version_when_the_server_is_down(tmp_path: Path) -> None:
+    """Без сервера `ollama --version` пишет два предупреждения - версия из второго."""
+    path = _trimmed_path(tmp_path, *DOCTOR_TOOLS)
+    _fake_tool(path, "ollama", OLLAMA_NOT_RUNNING)
+
+    result = _doctor(path=path, env={"OLLAMA_URL": DEAD_OLLAMA_URL})
+
+    assert "✓ ollama 0.40.14\n" in result.stdout
+    assert "instance" not in result.stdout
+
+
+def test_doctor_warns_when_free_space_is_unknown(tmp_path: Path) -> None:
+    """`df` ничего не вернул: предупреждение, а не ✓ о свободном месте."""
+    path = _trimmed_path(tmp_path, *DOCTOR_TOOLS)
+    _fake_tool(path, "df", "exit 0")
+
+    result = _doctor(path=path, env={"OLLAMA_URL": DEAD_OLLAMA_URL})
+
+    assert "не удалось проверить свободное место" in result.stdout
+    assert "достаточно" not in result.stdout
+
+
+def test_doctor_checks_space_where_ollama_keeps_models(tmp_path: Path) -> None:
+    """Каталога моделей ещё нет: место смотрим у ближайшего существующего родителя."""
+    models = tmp_path / "models" / "not" / "yet"
+    (tmp_path / "models").mkdir()
+    path = _trimmed_path(tmp_path, *DOCTOR_TOOLS)
+    # df печатает свои аргументы последней строкой - так видно, какой путь проверен.
+    _fake_tool(path, "df", 'echo header; echo "dev 1 1 999999999 1% $2"')
+
+    result = _doctor(
+        path=path, env={"OLLAMA_URL": DEAD_OLLAMA_URL, "OLLAMA_MODELS": str(models)}
+    )
+
+    assert f"✓ свободного места достаточно ({tmp_path / 'models'})" in result.stdout
+
+
+def test_doctor_outside_repo_root_fails_with_hint(tmp_path: Path) -> None:
+    result = _doctor(cwd=tmp_path)
+
+    assert result.returncode == 1, result.stdout
+    assert "✗ запуск не из корня репозитория" in result.stdout
+    assert "cd в корень dmc-268-api-t1" in result.stdout
