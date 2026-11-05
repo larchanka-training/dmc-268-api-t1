@@ -12,6 +12,7 @@ import pytest
 
 from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
+    BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
     SETTLE_ATTEMPTS,
     build_failed_review_check,
@@ -47,6 +48,7 @@ from app.domain.enums import (
     ReviewRunStatus,
     TriggerSource,
 )
+from app.domain.review_coverage import ReviewCoverage
 from app.domain.vcs_errors import VcsError, VcsTransientError
 
 from ..fakes.unit_of_work import FakeUnitOfWork
@@ -57,6 +59,8 @@ MR_ID = UUID(int=3)
 RUN_ID = UUID(int=2)
 FINDING_ID = UUID(int=50)
 ROOT_COMMENT_ID = UUID(int=51)
+
+NO_COVERAGE = ReviewCoverage((), (), (), ())
 
 
 JOB = ReviewJob(
@@ -147,6 +151,38 @@ def _seed_previous_critical_thread(
     )
 
 
+def test_summary_lists_the_files_the_review_covered() -> None:
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    uow.review_runs.add(
+        ReviewRun(
+            id=RUN_ID,
+            merge_request_id=MR_ID,
+            head_sha=JOB.head_sha,
+            status=ReviewRunStatus.PUBLISHING,
+            trigger=TriggerSource.WEBHOOK,
+            last_progress_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    vcs = RecordingVcsGateway()
+
+    publish_review(
+        JOB,
+        uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
+        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        coverage=ReviewCoverage(reviewed=("app/a.py",), partial=(), not_reviewed=(), filtered=("uv.lock",)),
+        uow=uow,
+        vcs=vcs,
+        now=NOW,
+        new_id=lambda: UUID(int=300),
+    )
+
+    ((summary, _),) = vcs.publications
+    assert "<summary>Файлы: проверено 1, отброшено фильтром 1</summary>" in summary
+
+
 def test_merge_gate_fails_while_critical_thread_open() -> None:
     uow = FakeUnitOfWork()
     _seed_previous_critical_thread(uow)
@@ -169,6 +205,7 @@ def test_merge_gate_fails_while_critical_thread_open() -> None:
         JOB,
         uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
         result,
+        coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -215,6 +252,7 @@ def test_thread_sync_failure_still_sets_the_merge_gate_from_the_database(
             JOB,
             run,
             LlmReviewResult(model="m", tokens_used=0, findings=()),
+            coverage=NO_COVERAGE,
             uow=uow,
             vcs=vcs,
             now=NOW,
@@ -245,6 +283,7 @@ def test_thread_sync_programming_error_is_not_swallowed() -> None:
             JOB,
             run,
             LlmReviewResult(model="m", tokens_used=0, findings=()),
+            coverage=NO_COVERAGE,
             uow=uow,
             vcs=vcs,
             now=NOW,
@@ -285,6 +324,7 @@ def test_inline_comment_is_attributed_from_the_stored_rule_reference() -> None:
         JOB,
         run,
         LlmReviewResult(model="m", tokens_used=0, findings=()),
+        coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -355,6 +395,7 @@ def _publish(uow: FakeUnitOfWork, vcs: RecordingVcsGateway) -> None:
         JOB,
         _publishing_run(uow),
         LlmReviewResult(model="m", tokens_used=0, findings=()),
+        coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -606,6 +647,7 @@ def _publish_first_run(uow: FakeUnitOfWork, run: ReviewRun, vcs: RecordingVcsGat
         JOB,
         run,
         LlmReviewResult(model="m", tokens_used=0, findings=()),
+        coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -1047,6 +1089,13 @@ def test_lost_response_of_a_correction_does_not_leave_a_false_block() -> None:
             DISABLED_REVIEW_CHECK,
             id="disconnected",
         ),
+        pytest.param(
+            lambda uow: uow.repositories.update_settings(
+                REPOSITORY.id, RepositorySettings(True, ("main",), FindingSeverity.CRITICAL), NOW
+            ),
+            BRANCH_FILTERED_CHECK,
+            id="branch-filtered",
+        ),
     ],
 )
 def test_run_finished_after_the_pause_sets_the_pause_check(
@@ -1062,6 +1111,50 @@ def test_run_finished_after_the_pause_sets_the_pause_check(
 
     assert len(vcs.publications) == 1
     assert vcs.checks == [expected]
+
+
+@pytest.mark.parametrize(
+    ("pause_review", "conclusion", "title"),
+    [
+        pytest.param(
+            lambda uow: uow.repositories.update_settings(
+                REPOSITORY.id, RepositorySettings(False, (), FindingSeverity.CRITICAL), NOW
+            ),
+            "failure",
+            "Есть незакрытые замечания уровня critical и выше",
+            id="auto-review-off",
+        ),
+        pytest.param(
+            lambda uow: uow.repositories.update_settings(
+                REPOSITORY.id, RepositorySettings(True, ("main",), FindingSeverity.CRITICAL), NOW
+            ),
+            "failure",
+            "Есть незакрытые замечания уровня critical и выше",
+            id="branch-filtered",
+        ),
+        pytest.param(
+            lambda uow: uow.repositories.disconnect(REPOSITORY.id, NOW),
+            "success",
+            "Ревью выключено в сервисе",
+            id="disconnected",
+        ),
+    ],
+)
+def test_manual_run_on_auto_review_pause_sets_its_own_merge_gate(
+    pause_review: Callable[[FakeUnitOfWork], Any], conclusion: str, title: str
+) -> None:
+    """D11: пауза авторевью и фильтр веток не перекрывают gate ручного прогона, выключение
+    репозитория — да."""
+    uow = FakeUnitOfWork()
+    run = replace(_run_with_critical_finding(uow), trigger=TriggerSource.MANUAL)
+    uow.review_runs.add(run)
+    pause_review(uow)
+    vcs = RecordingVcsGateway()
+
+    _publish_first_run(uow, run, vcs)
+
+    assert len(vcs.publications) == 1
+    assert [(c.conclusion, c.title) for c in vcs.checks] == [(conclusion, title)]
 
 
 def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
@@ -1088,6 +1181,32 @@ def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
     )
 
     assert vcs.checks == [build_retarget_check()]
+
+
+def test_settling_on_a_cancelled_run_of_a_pr_outside_the_branch_filter_passes_it() -> None:
+    """#313: PR увели из фильтра, прогон отменён, и его воркер ставит не блокировку
+    «идёт повторное ревью», которого не будет, а check фильтра."""
+    uow = FakeUnitOfWork()
+    _seed_merge_request(uow)
+    uow.repositories.update_settings(
+        REPOSITORY.id, RepositorySettings(True, ("main",), FindingSeverity.CRITICAL), NOW
+    )
+    run = _publishing_run(uow)
+    uow.review_runs.add(replace(run, status=ReviewRunStatus.CANCELLED))
+    vcs = RecordingVcsGateway()
+
+    settle_merge_gate(
+        uow,
+        vcs,
+        merge_request_id=MR_ID,
+        repo_full_name=JOB.repository_full_name,
+        head_sha=JOB.head_sha,
+        installation_id=JOB.installation_id,
+        run_id=run.id,
+        repository_id=REPOSITORY.id,
+    )
+
+    assert vcs.checks == [BRANCH_FILTERED_CHECK]
 
 
 def test_settling_on_a_failed_latest_run_keeps_the_failure() -> None:
@@ -1296,6 +1415,7 @@ def _publish_over_open_thread(
         JOB,
         uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
         LlmReviewResult(model="m", tokens_used=0, findings=()),
+        coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
         now=NOW,
@@ -1371,6 +1491,7 @@ def test_missing_repository_record_is_a_lookup_error() -> None:
             JOB,
             uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
             LlmReviewResult(model="m", tokens_used=0, findings=()),
+            coverage=NO_COVERAGE,
             uow=uow,
             vcs=RecordingVcsGateway(),
             now=NOW,

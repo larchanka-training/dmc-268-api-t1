@@ -143,7 +143,7 @@ ERRORS_403_ORIGIN_OR_MANAGE = _doc(
     HTTPStatus.FORBIDDEN,
     Annotated[OriginForbiddenProblem | RepositoryManageRequiredProblem, Field(discriminator="code")],
     "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; "
-    "`REPOSITORY_MANAGE_REQUIRED` — у пользователя нет прав admin или maintain на репозиторий у провайдера.",
+    "`REPOSITORY_MANAGE_REQUIRED` — нет нужной роли на репозитории у провайдера.",
 )
 # Дифф прогона: у `404` и `422` по два кода — объединения по `code`, как у `ERRORS_403_ORIGIN_OR_MANAGE`.
 ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION = _doc(
@@ -156,9 +156,10 @@ ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION = _doc(
 ERRORS_404_REPOSITORY_OR_NOT_IN_INSTALLATION = _doc(
     HTTPStatus.NOT_FOUND,
     Annotated[RepositoryNotFoundProblem | RepositoryNotInInstallationProblem, Field(discriminator="code")],
-    "`REPOSITORY_NOT_FOUND` — репозитория с таким id нет или пользователь не видит его на GitHub; "
-    "`REPOSITORY_NOT_IN_INSTALLATION` — приложение не установлено на репозиторий или установка "
-    "приостановлена, ветка и файл у GitHub не запрашивались.",
+    "`REPOSITORY_NOT_FOUND` — репозитория с таким id нет или пользователь не видит его на GitHub "
+    "(у ручного запуска — и выключенный репозиторий, и запрос на изменение, которого нет: случай называет "
+    "`detail`); `REPOSITORY_NOT_IN_INSTALLATION` — приложение не установлено на репозиторий или установка "
+    "приостановлена, дальше GitHub не спрашивался.",
 )
 ERRORS_409_DIFF_UNAVAILABLE = _doc(
     HTTPStatus.CONFLICT,
@@ -243,13 +244,21 @@ def problem_response(
 
 
 class ApiError(Exception):
-    """Отказ ручки: статус, код из `ErrorCode` и `detail` этого случая."""
+    """Отказ ручки: статус, код из `ErrorCode` и `detail` этого случая.
 
-    def __init__(self, status_code: int, code: ErrorCode, detail: str) -> None:
+    `errors` — только у `VALIDATION_ERROR`, когда отказ по значению поля находит ручка, а не
+    проверка тела: `[{"where": …, "reason": …}]` той же формы, постоянный `reason` без значения
+    из запроса (ручной запуск по закрытому PR).
+    """
+
+    def __init__(
+        self, status_code: int, code: ErrorCode, detail: str, *, errors: list[dict[str, str]] | None = None
+    ) -> None:
         super().__init__(detail)
         self.status_code = status_code
         self.code = code
         self.detail = detail
+        self.errors = errors
 
     def finish(self, response: Response) -> None:
         """Дописать в ответ то, что нужно этому отказу кроме тела (например, удалить cookie)."""
@@ -258,7 +267,7 @@ class ApiError(Exception):
 def _api_error_handler(request: Request, error: Exception) -> Response:
     if not isinstance(error, ApiError):
         raise error
-    response = problem_response(request, error.status_code, error.code, error.detail)
+    response = problem_response(request, error.status_code, error.code, error.detail, errors=error.errors)
     error.finish(response)
     return response
 
@@ -290,6 +299,8 @@ _REASONS = {
     # Свои типы `PydanticCustomError` входных параметров (`app/api/schemas.py`).
     "datetime_out_of_range": "время вне допустимого диапазона",
     "string_nul": "строка не должна содержать символ NUL",
+    # Свой тип `PydanticCustomError`: ручной запуск принимает только `trigger = manual` (`CreateReviewRequest`).
+    "trigger_not_manual": "принимается только manual",
 }
 _DEFAULT_REASON = "недопустимое значение"
 # Ошибки, у которых последний элемент `loc` — не поле схемы: имя лишнего поля (ввод клиента,

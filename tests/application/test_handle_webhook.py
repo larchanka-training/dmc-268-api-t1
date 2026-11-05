@@ -16,7 +16,9 @@ import pytest
 
 from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
+    BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
+    build_retarget_check,
 )
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict
@@ -24,8 +26,8 @@ from app.application.use_cases.handle_webhook import (
     WebhookOutcome,
     handle_webhook_event,
 )
-from app.domain.entities import RepositorySettings
-from app.domain.enums import Provider, ReviewRunStatus, TriggerSource
+from app.domain.entities import MergeRequest, RepositorySettings
+from app.domain.enums import MergeRequestState, Provider, ReviewRunStatus, TriggerSource
 from app.domain.vcs_errors import VcsError
 
 from ..fakes import (
@@ -42,6 +44,7 @@ from ..fakes import (
     webhook_payload,
 )
 from ..fakes.run_outcome import RecordingRunOutcome
+from ..fakes.unit_of_work import add_manual_run_with_critical_thread
 
 # Приём берёт только метаданные: дифф достаёт воркер с лимитом размера.
 EXPECTED_VCS_CALLS = [("metadata", REPO_FULL_NAME, 6, INSTALLATION_ID)]
@@ -306,7 +309,10 @@ def test_failed_run_on_same_commit_does_not_block_new_one() -> None:
 
 
 def test_finished_run_of_another_trigger_does_not_make_a_duplicate() -> None:
-    """Дублем делает только прогон по вебхуку: явное повторное ревью — не доставка."""
+    """Дублем делает только прогон по вебхуку: явное повторное ревью — не доставка.
+
+    Известное ограничение D4 change `manual-review-launch`: доставка на коммит, уже
+    проверенный вручную, создаёт ещё один прогон `webhook`. Сменят правило — тест покажет."""
     _, uow, _, queue = run_case()
     (finished,) = uow.review_runs.added
     object.__setattr__(finished, "status", ReviewRunStatus.COMPLETED)
@@ -315,6 +321,8 @@ def test_finished_run_of_another_trigger_does_not_make_a_duplicate() -> None:
     outcome, uow, _, queue = run_case(uow=uow, queue=queue)
     assert outcome.kind == "success"
     assert len(uow.review_runs.added) == 2
+    assert outcome.run is not None and outcome.run.trigger is TriggerSource.WEBHOOK
+    assert len(queue.jobs) == 2
 
 
 def test_lost_race_returns_conflict_with_survivor_run(monkeypatch) -> None:
@@ -644,6 +652,66 @@ def test_retarget_of_a_repository_with_auto_review_off_sets_only_the_pause_check
     assert len(queue.jobs) == 1
 
 
+@pytest.mark.parametrize("status", [ReviewRunStatus.COMPLETED, ReviewRunStatus.ANALYSING])
+def test_pr_event_on_the_head_of_a_manual_run_on_pause_leaves_its_gate(
+    status: ReviewRunStatus,
+) -> None:
+    """D11: на head ручной прогон, авторевью на паузе. Событие PR на тот же head не ставит
+    check паузы поверх gate ручного прогона и не запускает автоматическое ревью."""
+    _, uow, _, queue = run_case()
+    (run,) = uow.review_runs.added
+    uow.review_runs.add(replace(run, trigger=TriggerSource.MANUAL, status=status))
+    (repository,) = uow.repositories.stored.values()
+    uow.repositories.update_settings(
+        repository.id,
+        RepositorySettings(
+            auto_review_enabled=False, branch_filter=(), min_severity=repository.min_severity
+        ),
+        NOW,
+    )
+
+    # Повтор `opened` на тот же head: дублем его не признать — `find_reviewed` видит только вебхуковые.
+    outcome, uow, vcs, queue = run_case(uow=uow, queue=queue)
+
+    assert outcome.kind == "ignored"
+    assert vcs.checks == []
+    assert {r.id for r in uow.review_runs.added} == {run.id} and len(queue.jobs) == 1
+
+
+def test_pr_event_after_a_failed_manual_re_review_on_pause_leaves_the_earlier_gate() -> None:
+    """Ревью #335: на head завершённый ручной прогон, его повтор упал, авторевью на паузе.
+    Переотправка события PR на тот же head не ставит check паузы поверх gate завершённого."""
+    _, uow, _, queue = run_case()
+    (run,) = uow.review_runs.added
+    uow.review_runs.add(replace(run, trigger=TriggerSource.MANUAL, status=ReviewRunStatus.COMPLETED))
+    later = run.created_at + timedelta(minutes=1)
+    relaunch = replace(
+        run,
+        id=uuid4(),
+        trigger=TriggerSource.MANUAL,
+        status=ReviewRunStatus.FAILED,
+        last_progress_at=later,
+        created_at=later,
+        updated_at=later,
+    )
+    uow.review_runs.add(relaunch)
+    (repository,) = uow.repositories.stored.values()
+    uow.repositories.update_settings(
+        repository.id,
+        RepositorySettings(
+            auto_review_enabled=False, branch_filter=(), min_severity=repository.min_severity
+        ),
+        NOW,
+    )
+
+    # Повтор `opened` на тот же head.
+    outcome, uow, vcs, queue = run_case(uow=uow, queue=queue)
+
+    assert outcome.kind == "ignored"
+    assert vcs.checks == []
+    assert len(queue.jobs) == 1
+
+
 def _case_with_repository(repository: Any, action: str = "opened", *, vcs_error: VcsError | None = None):
     uow = FakeUow()
     uow.repositories.add(repository)
@@ -669,6 +737,48 @@ def test_auto_review_off_skips_the_run_and_sets_its_own_check(action: str) -> No
     assert "настройках репозитория в кабинете" in check.summary
 
 
+def test_a_delayed_pause_check_returns_the_gate_of_a_manual_run_launched_meanwhile() -> None:
+    """Ревью #335: на head прогона нет — check паузы. Пока GitHub его принимал, ручной
+    запуск записал PR и прогон, и тот опубликовал `failure`: после POST gate возвращается."""
+    uow = FakeUow()
+    uow.repositories.add(replace(a_repository(), auto_review_enabled=False))
+    payload = webhook_payload("synchronize")
+    head_sha = payload["pull_request"]["head"]["sha"]
+
+    def manual_run_completes() -> None:
+        (repository,) = uow.repositories.stored.values()
+        merge_request = MergeRequest(
+            id=uuid4(),
+            repository_id=repository.id,
+            number=payload["pull_request"]["number"],
+            title="t",
+            description="",
+            author="a",
+            source_branch="feat",
+            target_branch="main",
+            head_sha=head_sha,
+            state=MergeRequestState.OPEN,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        uow.merge_requests.add(merge_request)
+        add_manual_run_with_critical_thread(
+            uow,
+            merge_request_id=merge_request.id,
+            head_sha=head_sha,
+            status=ReviewRunStatus.COMPLETED,
+            at=NOW + timedelta(minutes=1),
+        )
+
+    vcs = FakeVcs(during_first_check=manual_run_completes)
+
+    outcome = handle_webhook_event(payload, uow, vcs, FakeQueue(), now=lambda: NOW, new_id=uuid4)
+
+    assert outcome.kind == "ignored"
+    assert vcs.checks[0] == (head_sha, AUTO_REVIEW_OFF_CHECK)
+    assert [check.conclusion for _, check in vcs.checks] == ["success", "failure"]
+
+
 @pytest.mark.parametrize("auto_review_enabled", [True, False], ids=["авторевью", "без авторевью"])
 def test_disconnected_repository_keeps_the_disabled_check(auto_review_enabled: bool) -> None:
     """Выключение репозитория важнее настройки: при обоих признаках — «Ревью выключено в сервисе»."""
@@ -691,11 +801,106 @@ def test_auto_review_off_check_failure_still_ignores_the_delivery() -> None:
     assert (uow.review_runs.added, queue.jobs, vcs.checks) == ([], [], [])
 
 
-def test_branch_filter_does_not_stop_the_run() -> None:
-    """Фильтр веток пока не применяется: PR в `main` при `["release/*"]` ревьюится."""
-    outcome, _, _, queue = _case_with_repository(
-        replace(a_repository(), branch_filter=("release/*",))
+@pytest.mark.parametrize("action", ["opened", "synchronize"])
+def test_pull_request_outside_the_branch_filter_is_not_reviewed(
+    action: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """PR в `main` при `["release/*"]`: прогона и задачи нет, на head ставится `success`, иначе
+    обязательная проверка держала бы PR в ожидании (#313). PR записан: по его ветке
+    возврат в фильтр увидит смену ветки."""
+    repository = replace(a_repository(), branch_filter=("release/*",))
+    with caplog.at_level(logging.INFO):
+        outcome, uow, vcs, queue = _case_with_repository(repository, action)
+
+    assert outcome.kind == "ignored"
+    assert (uow.review_runs.added, queue.jobs) == ([], [])
+    assert merge_request_of(uow).target_branch == "main"
+    assert [check for _, check in vcs.checks] == [BRANCH_FILTERED_CHECK]
+    (skipped,) = [r for r in caplog.records if "branch_filter" in r.getMessage()]
+    assert (skipped.__dict__["repository_id"], skipped.__dict__["pr_number"]) == (
+        str(repository.id),
+        6,
     )
+    assert "main" not in skipped.getMessage()
+
+
+def test_lost_race_outside_the_branch_filter_still_sets_the_check() -> None:
+    """Параллельная доставка записала PR раньше: отказ коммита откатывается, check фильтра
+    всё равно ставится, а не 5xx."""
+    uow = FakeUow()
+    uow.repositories.add(replace(a_repository(), branch_filter=("release/*",)))
+    uow.commit_errors = [ActiveRunConflict("проигравший гонку")]
+
+    outcome, uow, vcs, queue = run_case("opened", uow=uow)
+
+    assert outcome.kind == "ignored"
+    assert uow.rollbacks >= 1
+    assert (uow.review_runs.added, queue.jobs) == ([], [])
+    assert [check for _, check in vcs.checks] == [BRANCH_FILTERED_CHECK]
+
+
+@pytest.mark.parametrize("pattern", ["release/*", "release/**", "release/1.2"])
+def test_pull_request_inside_the_branch_filter_is_reviewed(pattern: str) -> None:
+    uow = FakeUow()
+    uow.repositories.add(replace(a_repository(), branch_filter=(pattern,)))
+
+    outcome, _, vcs, queue = run_case(uow=uow, vcs_meta=pr_metadata(OLD_BASE, "release/1.2"))
 
     assert outcome.kind == "success"
-    assert len(queue.jobs) == 1
+    assert len(queue.jobs) == 1 and vcs.checks == []
+
+
+def _filter_to_main(uow: FakeUow) -> None:
+    (repository,) = uow.repositories.stored.values()
+    uow.repositories.update_settings(
+        repository.id,
+        RepositorySettings(
+            auto_review_enabled=True, branch_filter=("main",), min_severity=repository.min_severity
+        ),
+        NOW,
+    )
+
+
+def test_retarget_out_of_the_branch_filter_cancels_the_active_run() -> None:
+    """PR увели из ветки фильтра: прогон по старой базе отменяется, на head ставится
+    `success`. Возврат обрабатывается как обычная смена ветки (#222): head блокируется, ставится новый прогон."""
+    _, uow, _, queue = run_case(vcs_meta=OLD_TARGET)
+    (active,) = uow.review_runs.added
+    _filter_to_main(uow)
+
+    outcome, uow, vcs, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "ignored"
+    cancelled = uow.review_runs.get(active.id)
+    assert cancelled is not None and cancelled.status is ReviewRunStatus.CANCELLED
+    assert [check for _, check in vcs.checks] == [BRANCH_FILTERED_CHECK]
+    assert len(uow.review_runs.added) == 1 and len(queue.jobs) == 1
+
+    outcome, uow, vcs, queue = run_case("edited", vcs_meta=OLD_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert [check for _, check in vcs.checks] == [build_retarget_check()]
+    assert len(uow.review_runs.added) == 2 and len(queue.jobs) == 2
+
+
+def test_return_into_the_branch_filter_after_a_completed_review_is_not_a_duplicate() -> None:
+    """Ревью на `main` завершено, PR увели из фильтра и вернули: без записанной смены ветки
+    повтор счёлся бы дублем завершённого прогона, и на head навсегда остался бы `success`
+    фильтра."""
+    uow, queue, _ = reviewed_on_old_target()
+    _filter_to_main(uow)
+    run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
+
+    outcome, uow, vcs, queue = run_case("edited", vcs_meta=OLD_TARGET, uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert [check for _, check in vcs.checks] == [build_retarget_check()]
+    assert len(queue.jobs) == 2
+
+
+def test_paused_repository_beats_the_branch_filter() -> None:
+    """Пауза важнее фильтра: пользователь сначала чинит то, что действительно мешает."""
+    repository = replace(a_repository(), auto_review_enabled=False, branch_filter=("release/*",))
+    _, _, vcs, _ = _case_with_repository(repository)
+
+    assert [check for _, check in vcs.checks] == [AUTO_REVIEW_OFF_CHECK]

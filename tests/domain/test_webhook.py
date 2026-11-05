@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from app.domain.entities import WebhookEvent
-from app.domain.webhook import extract_github_event, is_trusted_author
+from app.domain.webhook import extract_github_event, is_trusted_pull_request
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 
@@ -152,7 +152,7 @@ def test_a_pr_of_an_own_author_from_a_fork_starts_a_review(association: str) -> 
     payload["pull_request"]["author_association"] = association
     event = extract_github_event(payload)
     assert event is not None
-    assert is_trusted_author(event)
+    assert is_trusted_pull_request(event.from_fork, event.author_association)
 
 
 @pytest.mark.parametrize(
@@ -168,7 +168,7 @@ def test_a_pr_of_an_outside_author_is_ignored(association: str | None) -> None:
         payload["pull_request"]["author_association"] = association
     event = extract_github_event(payload)
     assert event is not None
-    assert not is_trusted_author(event)
+    assert not is_trusted_pull_request(event.from_fork, event.author_association)
 
 
 def test_a_pr_from_a_branch_of_the_repository_starts_a_review_whatever_the_association() -> None:
@@ -179,7 +179,7 @@ def test_a_pr_from_a_branch_of_the_repository_starts_a_review_whatever_the_assoc
     event = extract_github_event(payload)
     assert event is not None
     assert not event.from_fork
-    assert is_trusted_author(event)
+    assert is_trusted_pull_request(event.from_fork, event.author_association)
 
 
 def test_a_pr_whose_fork_was_deleted_counts_as_a_fork() -> None:
@@ -190,4 +190,20 @@ def test_a_pr_whose_fork_was_deleted_counts_as_a_fork() -> None:
     event = extract_github_event(payload)
     assert event is not None
     assert event.from_fork
-    assert not is_trusted_author(event)
+    assert not is_trusted_pull_request(event.from_fork, event.author_association)
+
+
+@pytest.mark.parametrize("association", ["CONTRIBUTOR", None])
+def test_a_branch_of_the_repository_is_trusted_whatever_the_association(association: str | None) -> None:
+    """Ветку в самом репозитории запушить может только тот, у кого есть право записи."""
+    assert is_trusted_pull_request(False, association)
+
+
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
+def test_a_fork_of_an_own_author_is_trusted(association: str) -> None:
+    assert is_trusted_pull_request(True, association)
+
+
+@pytest.mark.parametrize("association", ["NONE", "FIRST_TIME_CONTRIBUTOR", None])
+def test_a_fork_of_an_outside_author_is_not_trusted(association: str | None) -> None:
+    assert not is_trusted_pull_request(True, association)

@@ -272,7 +272,7 @@ class ConnectRepositoryRequest(StrictRequest):
     )
 
 
-def _as_user[T](signed_in: SignedIn, oauth: OAuthProvider, call: Callable[[connecting.UserContext], T]) -> T:
+def as_user[T](signed_in: SignedIn, oauth: OAuthProvider, call: Callable[[connecting.UserContext], T]) -> T:
     """Вызов провайдера токеном пользователя с переводом сбоев в ответы API.
 
     Токен непригоден — сессия закрыта, `401 UNAUTHENTICATED`; GitHub недоступен —
@@ -300,7 +300,7 @@ def user_repositories(
     видимости одно — поменяется здесь, поменяется у всех.
     """
     now = datetime.now(UTC)
-    return _as_user(signed_in, oauth, lambda user: connecting.list_user_repositories(catalog, uow_factory(), user, now))
+    return as_user(signed_in, oauth, lambda user: connecting.list_user_repositories(catalog, uow_factory(), user, now))
 
 
 def is_visible(repository: Repository, provider_ids: Collection[str]) -> bool:
@@ -373,7 +373,7 @@ def connect_repository(
     oauth: OAuthProvider = Depends(get_token_provider),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> RepositoryResponse:
-    outcome = _as_user(
+    outcome = as_user(
         signed_in,
         oauth,
         lambda user: connecting.connect_repository(
@@ -405,7 +405,7 @@ def list_repositories(
 ) -> RepositoryListResponse:
     # GitHub — в теле, а не зависимостью: при 422 limit или offset запроса к нему нет.
     now = datetime.now(UTC)
-    listed = _as_user(
+    listed = as_user(
         signed_in, oauth, lambda user: connecting.list_with_connections(catalog, uow_factory(), user, now)
     )
     # Строк не больше, чем отдаёт GitHub пользователю: страница — срез в памяти.
@@ -452,8 +452,10 @@ _AUTO_REVIEW_DESCRIPTION = (
 )
 _BRANCH_FILTER_DESCRIPTION = (
     "Glob-паттерны целевых веток запросов на изменение, которые ревьюятся; пустой список — все ветки "
-    "(так и без сохранённых настроек). Пока не применяется: сохраняется, но ревью идёт для всех "
-    "веток (задача #313)."
+    "(так и без сохранённых настроек). `*` совпадает внутри сегмента имени ветки (`release/*` "
+    "совпадает с release/1.2, но не с release/1.2/hotfix), `**` совпадает и через `/` "
+    "(`release/**`); регистр учитывается. PR в ветку вне фильтра вебхук не ревьюит, на head "
+    "ставится check run success «Ветка не в фильтре ревью». Ручной запуск ревью фильтр не применяет."
 )
 _MIN_SEVERITY_DESCRIPTION = (
     "Порог важности: нерешённое замечание с severity не ниже порога блокирует merge gate: check "
@@ -612,7 +614,7 @@ def disconnect_repository(
     repository = visible_repository(repository_id, signed_in, catalog, oauth, uow_factory)
     # Права — мимо кэша: `user_repository` кэш видимости не читает.
     now = datetime.now(UTC)
-    refusal = _as_user(
+    refusal = as_user(
         signed_in, oauth, lambda user: connecting.disconnect_repository(catalog, uow_factory(), user, repository, now)
     )
     if refusal is connecting.ConnectRefusal.NOT_IN_INSTALLATION:
@@ -684,7 +686,7 @@ def save_repository_settings(
     )
     # Права — мимо кэша, как у выключения: `user_repository` кэш видимости не читает.
     now = datetime.now(UTC)
-    outcome = _as_user(
+    outcome = as_user(
         signed_in,
         oauth,
         lambda user: connecting.save_repository_settings(catalog, uow_factory(), user, repository, settings, now),

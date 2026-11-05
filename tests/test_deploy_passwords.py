@@ -62,23 +62,23 @@ printf '%s\\n%s\\n%s\\n' "$command" "$first" "$second" > "$STATE/pg.stdin"
 [ -n "${PSQL_ALTER_NOOP:-}" ] || printf '%s' "$first" > "$STATE/pg"
 """
 
+# Подложный rabbitmq-diagnostics: BROKER_NOT_READY — узел не принимает AMQP.
+FAKE_RABBITMQ_DIAGNOSTICS = """#!/usr/bin/env bash
+printf 'rabbitmq-diagnostics %s\\n' "$*" >> "$CALLS"
+[ -z "${BROKER_NOT_READY:-}" ]
+"""
+
 # Подложный rabbitmqctl: пароль — первой строкой stdin, как у настоящего.
-# AWAIT_FAILS — сколько раз await_startup ответит «узел не готов».
 FAKE_RABBITMQCTL = """#!/usr/bin/env bash
 printf 'rabbitmqctl %s\\n' "$*" >> "$CALLS"
 for a in "$@"; do case "$a" in -*) ;; *) cmd="$a"; break ;; esac; done
 case "$cmd" in
-  await_startup)
-    n=$(( $(cat "$STATE/await" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STATE/await"
-    [ "$n" -gt "${AWAIT_FAILS:-0}" ] ;;
   authenticate_user) IFS= read -r pw; [ "$pw" = "$(cat "$STATE/rabbit")" ] ;;
   change_password) IFS= read -r pw; printf '%s' "$pw" > "$STATE/rabbit" ;;
   *) exit 64 ;;
 esac
 """
 
-# Без пауз: подложный await_startup отвечает сразу.
-FAKE_SLEEP = "#!/usr/bin/env bash\nexit 0\n"
 
 # Пароли со всеми классами печатного ASCII: urlencode кодирует их в %XX, и
 # SQLAlchemy и pika декодируют обратно верно (проверено end-to-end на dind).
@@ -96,7 +96,8 @@ def run(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     for name, body in (
-        ("docker", FAKE_DOCKER), ("psql", FAKE_PSQL), ("rabbitmqctl", FAKE_RABBITMQCTL), ("sleep", FAKE_SLEEP),
+        ("docker", FAKE_DOCKER), ("psql", FAKE_PSQL), ("rabbitmqctl", FAKE_RABBITMQCTL),
+        ("rabbitmq-diagnostics", FAKE_RABBITMQ_DIAGNOSTICS),
     ):
         (bin_dir / name).write_text(body)
         (bin_dir / name).chmod(0o755)
@@ -221,20 +222,15 @@ def test_a_missing_container_changes_no_password(tmp_path: Path) -> None:
         assert changed(tmp_path) == [], missing
 
 
-def test_the_broker_is_awaited_on_a_clean_server(tmp_path: Path) -> None:
-    """На чистом сервере брокер только что создан, а `wait` у его контейнера нет."""
-    result, state = run(tmp_path, AWAIT_FAILS="3")
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert (state / "rabbit").read_text() == NEW_RABBIT
-
-
-def test_a_broker_that_never_starts_stops_the_deploy(tmp_path: Path) -> None:
-    result, state = run(tmp_path, AWAIT_FAILS="1000")
+def test_a_broker_that_is_not_ready_stops_the_deploy_before_any_change(tmp_path: Path) -> None:
+    """Docker перезапускает брокер, targeted-план `No changes`, `wait` не ждёт: шаг падает
+    до первой смены, оба пароля прежние, ложной записи о смене нет."""
+    result, state = run(tmp_path, BROKER_NOT_READY="1")
 
     assert result.returncode != 0
-    assert (state / "rabbit").read_text() == OLD_RABBIT
     assert (state / "pg").read_text() == OLD_PG
+    assert (state / "rabbit").read_text() == OLD_RABBIT
+    assert changed(tmp_path) == []
 
 
 def test_a_password_with_whitespace_or_non_ascii_is_rejected_before_the_server(tmp_path: Path) -> None:
@@ -314,7 +310,7 @@ def test_passwords_are_set_after_the_checked_plan_and_before_migrations() -> Non
     assert env["DOCKER_HOST"] == "ssh://stand"
     assert env["PG_PASSWORD"] == "${{ secrets.PG_PASSWORD_DMC268_T1 }}"
     assert env["RABBITMQ_PASSWORD"] == "${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}"
-    # Брокер на чистом сервере ждём до двух минут; зависший ssh не держит job.
+    # Зависший ssh не держит job.
     assert step["timeout-minutes"] == 5
 
 

@@ -620,6 +620,9 @@ def test_connecting_without_manage_rights_is_403() -> None:
     assert response.status_code == 403
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    # Заголовок общий для всех ролей (change `manual-review-launch`, D7): роли называет `detail`.
+    assert response.json()["title"] == "Недостаточно прав на репозиторий"
+    assert "admin или maintain" in response.json()["detail"]
     assert uow.repositories.stored == {}
 
 

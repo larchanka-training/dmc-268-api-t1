@@ -29,8 +29,8 @@ SHALL пересчитываться. Если строка hunk'а не сов�
 
 #### Scenario: Файл с секретами по имени не расширяется
 
-- **WHEN** PR меняет не код, а `.env.example`, ключ `*.pem` или `*.key`, `credentials*` или файл
-  с `secret` в пути
+- **WHEN** PR меняет `.env.example`, `prod.env`, ключ `*.pem` или `*.key`, `credentials*`, `.netrc`
+  или `*.tfvars`, либо не код с `secret` в пути
 - **THEN** файл входит в пакет с исходными hunk'ами, без окна и целиком: секрет без узнаваемого
   префикса `redact_secrets` не ловит
 

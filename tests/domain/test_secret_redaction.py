@@ -1,6 +1,7 @@
 """Секреты в сохраняемом контексте прогона заменяются меткой (#28)."""
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -210,6 +211,10 @@ def test_a_secret_split_by_a_newline_keeps_the_line_count() -> None:
         ("config/secrets.yaml", True),
         ("k8s/secrets/db.yaml", True),
         ("app/domain/secret_redaction.py", False),
+        ("deploy/prod.env", True),
+        ("config/credentials.py", True),
+        (".netrc", True),
+        ("infra/prod.tfvars", True),
         ("src/SecretService.ts", False),
         ("app/environment.py", False),
         ("docker-compose.yml", False),
@@ -218,3 +223,72 @@ def test_a_secret_split_by_a_newline_keeps_the_line_count() -> None:
 )
 def test_file_names_that_may_hold_secrets(path: str, expected: bool) -> None:
     assert may_hold_secrets(path) is expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            ' KEY = (\n "-----BEGIN PRIVATE KEY-----\\n"\n "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"\n "BKcwggSjAgEAAoIBAQC7\\n"',
+            id="python-begin-without-end",
+        ),
+        pytest.param(
+            ' const k = "-----BEGIN PRIVATE KEY-----\\n" +\n   "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n" +\n   "BKcwggSjAgEAAoIBAQC7\\n" +',
+            id="js-concat-begin-without-end",
+        ),
+        pytest.param(
+            ' x = 1\n "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n",\n "BKcwggSjAgEAAoIBAQC7\\n",\n "-----END PRIVATE KEY-----\\n",\n y = 2',
+            id="python-end-without-begin",
+        ),
+    ],
+)
+def test_a_key_in_string_literals_cut_off_by_the_window_is_replaced(text: str) -> None:
+    """Ключ фикстуры в кавычках с `\\n`: окно ±30 строк отрезало BEGIN или END, base64 не уходит."""
+    redacted = redact_secrets(text)
+    assert "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" not in redacted
+    assert "BKcwggSjAgEAAoIBAQC7" not in redacted
+    assert redacted.count("\n") == text.count("\n")
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda n: "-----BEGIN PRIVATE KEY-----" + " " * n + "X", id="spaces-after-begin"),
+        pytest.param(lambda n: "-----BEGIN PRIVATE KEY-----\n+A" + " \t" * (n // 2) + "X", id="spaces-after-key-line"),
+        pytest.param(lambda n: "+A" + " " * n + "X\n-----END PRIVATE KEY-----", id="spaces-before-end"),
+    ],
+)
+def test_a_long_run_of_spaces_around_a_key_line_is_scanned_in_linear_time(build: Callable[[int], str]) -> None:
+    """Ряд пробелов, за которым нет перевода строки: строка ключа делит его одним способом."""
+    assert _seconds(build(16_000)) < 8 * _seconds(build(4_000))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('+K = b"-----BEGIN PRIVATE KEY-----\\n"\n+  b"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"', id="bytes"),
+        pytest.param('+K = "-----BEGIN PRIVATE KEY-----\\n"\r\n+  "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"\r\n', id="crlf"),
+        pytest.param('+K = "-----BEGIN PRIVATE KEY-----\\n" \\\n+  "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n" \\', id="backslash"),
+        pytest.param('+K = rb"-----BEGIN PRIVATE KEY-----\\n"\n+  rb"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"', id="raw-bytes"),
+        pytest.param(
+            '+  "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"\n+  "8w0BAQ==\\n"\n+  "-----END OPENSSH PRIVATE KEY-----\\n"',
+            id="short-last-line-above-end",
+        ),
+    ],
+)
+def test_a_key_in_bytes_crlf_or_continued_literals_is_replaced(text: str) -> None:
+    assert "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" not in redact_secrets(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "+HEADER = '-----BEGIN PRIVATE KEY-----'\n+    x +\n+    foo,",
+        '+MARKERS = ("-----BEGIN PRIVATE KEY-----",\n+    "Hello",\n+    "World")',
+    ],
+)
+def test_short_code_lines_next_to_a_key_header_stay_visible(text: str) -> None:
+    """Код парсера PEM: короткие строки рядом с заголовком - не ключ, модель их видит."""
+    redacted = redact_secrets(text)
+    for line in text.split("\n")[1:]:
+        assert line in redacted

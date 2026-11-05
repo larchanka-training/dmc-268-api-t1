@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from app.api.dependencies import (
     get_cabinet_vcs_gateway,
     get_installation_catalog,
+    get_job_queue,
+    get_run_outcome,
     get_token_provider,
     get_unit_of_work,
 )
@@ -54,8 +56,9 @@ from app.domain.vcs_errors import VcsError, VcsFileTooLargeError, VcsNotFoundErr
 from .fakes.auth import SIGNED_IN, sign_in_with_session
 from .fakes.installation_catalog import FakeInstallationCatalog
 from .fakes.oauth import EXPIRING_GRANT, REFRESHED_GRANT, FakeOAuthProvider
+from .fakes.run_outcome import RecordingRunOutcome
 from .fakes.unit_of_work import FakeUnitOfWork
-from .fakes.webhooks import FakeVcs
+from .fakes.webhooks import FakeQueue, FakeVcs
 
 SETTINGS = Settings(
     database_url="postgresql+psycopg://test:test@localhost/test",
@@ -1109,3 +1112,378 @@ def test_not_installed_is_not_remembered() -> None:
 
     assert first.status_code == second.status_code == 404
     assert catalog.calls.count("repository_installation_id") == 2
+
+
+# --- POST /api/v1/reviews: ручной запуск (change `manual-review-launch`, #273) ---
+
+ORIGIN = "https://review.example"
+REPO_ID = "923478362"
+PUSH = RepositoryPermissions(admin=False, maintain=False, push=True, triage=False)
+LAUNCHABLE = InstallationRepository(REPO_ID, "octo-org/api", "main", PUSH)
+LAUNCH_BODY = {"provider": "github", "provider_repository_id": REPO_ID, "pull_request_number": 6, "trigger": "manual"}
+LAUNCH_HEAD = "a1b2c3d4e5f6789012345678abcdef0123456789"
+
+
+def _connected(uow: FakeUnitOfWork, **changes: object) -> Repository:
+    repository = Repository(
+        id=new_id(),
+        provider=Provider.GITHUB,
+        provider_id=REPO_ID,
+        full_name="octo-org/api",
+        default_branch="main",
+        auto_review_enabled=True,
+        created_at=NOW,
+        updated_at=NOW,
+        connected_at=NOW,
+    )
+    repository = replace(repository, **changes)  # type: ignore[arg-type]
+    uow.repositories.add(repository)
+    return repository
+
+
+class Launch:
+    """Сцена ручного запуска: пользователь с ролью push, подключённый репозиторий, PR #6 открыт."""
+
+    def __init__(
+        self,
+        *,
+        uow: FakeUnitOfWork | None = None,
+        catalog: FakeInstallationCatalog | None = None,
+        vcs: FakeVcs | None = None,
+        queue: FakeQueue | None = None,
+        connect: bool = True,
+    ) -> None:
+        self.uow = uow if uow is not None else FakeUnitOfWork()
+        if connect and not self.uow.repositories.stored:
+            _connected(self.uow)
+        self.catalog = catalog or FakeInstallationCatalog([LAUNCHABLE])
+        self.vcs = vcs or FakeVcs()
+        self.queue = queue if queue is not None else FakeQueue()
+        self.outcome = RecordingRunOutcome()
+        app = create_app(SETTINGS.model_copy(update={"public_origin": ORIGIN}))
+        cookies = sign_in_with_session(app, self.uow)
+        app.dependency_overrides[get_installation_catalog] = lambda: self.catalog
+        app.dependency_overrides[get_token_provider] = lambda: FakeOAuthProvider()
+        app.dependency_overrides[get_cabinet_vcs_gateway] = lambda: self.vcs
+        app.dependency_overrides[get_job_queue] = lambda: self.queue
+        app.dependency_overrides[get_run_outcome] = lambda: self.outcome
+
+        def override_uow() -> Iterator[FakeUnitOfWork]:
+            yield self.uow
+
+        app.dependency_overrides[get_unit_of_work] = override_uow
+        self.client = TestClient(app, base_url=ORIGIN, cookies=cookies, raise_server_exceptions=False)
+
+    def post(self, body: dict[str, Any] | None = None, *, origin: str | None = ORIGIN) -> Any:
+        headers = {"Origin": origin} if origin else {}
+        return self.client.post("/api/v1/reviews", json=LAUNCH_BODY if body is None else body, headers=headers)
+
+    def assert_nothing_written(self) -> None:
+        assert self.uow.review_runs.added == []
+        assert self.uow.merge_requests.added == []
+        assert self.queue.jobs == []
+
+
+def _meta(**changes: object) -> Any:
+    from .fakes.webhooks import pr_metadata
+
+    return replace(pr_metadata(), **changes)  # type: ignore[arg-type]
+
+
+def _run_on_head(launch: Launch, status: ReviewRunStatus, trigger: TriggerSource = TriggerSource.WEBHOOK) -> ReviewRun:
+    repository = next(iter(launch.uow.repositories.stored.values()))
+    merge_request = MergeRequest(
+        id=new_id(),
+        repository_id=repository.id,
+        number=6,
+        title="t",
+        description="",
+        author="octocat",
+        source_branch="feat/x",
+        target_branch="main",
+        head_sha=LAUNCH_HEAD,
+        state=MergeRequestState.OPEN,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    launch.uow.merge_requests.add(merge_request)
+    run = _run(merge_request_id=merge_request.id, head_sha=LAUNCH_HEAD, status=status, trigger=trigger)
+    launch.uow.review_runs.add(run)
+    return run
+
+
+def _validation_errors(response: Any) -> list[dict[str, str]]:
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    errors: list[dict[str, str]] = response.json()["errors"]
+    return errors
+
+
+def test_launch_is_202_with_a_manual_job_in_the_queue() -> None:
+    launch = Launch()
+
+    response = launch.post()
+
+    assert response.status_code == 202
+    body = response.json()
+    (run,) = launch.uow.review_runs.added
+    assert body["id"] == str(run.id)
+    assert (body["trigger"], body["status"], body["head_commit_sha"]) == ("manual", "queued", LAUNCH_HEAD)
+    assert (body["provider"], body["provider_repository_id"], body["pull_request_number"]) == ("github", REPO_ID, 6)
+    (job,) = launch.queue.jobs
+    assert (job.review_run_id, job.head_sha, job.base_sha, job.action) == (
+        run.id,
+        LAUNCH_HEAD,
+        _meta().base_sha,
+        "manual",
+    )
+
+
+def test_a_reviewed_commit_is_launched_again() -> None:
+    launch = Launch()
+    previous = _run_on_head(launch, ReviewRunStatus.COMPLETED)
+
+    response = launch.post()
+
+    assert response.status_code == 202
+    assert response.json()["id"] != str(previous.id)
+    assert len(launch.queue.jobs) == 1
+
+
+def test_launch_works_with_auto_review_off() -> None:
+    uow = FakeUnitOfWork()
+    _connected(uow, auto_review_enabled=False)
+    launch = Launch(uow=uow)
+
+    assert launch.post().status_code == 202
+    assert len(launch.queue.jobs) == 1
+    assert launch.vcs.checks == []
+
+
+def test_an_active_run_on_the_head_is_409() -> None:
+    launch = Launch()
+    _run_on_head(launch, ReviewRunStatus.ANALYSING)
+
+    response = launch.post()
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "REVIEW_ALREADY_ACTIVE"
+    assert launch.queue.jobs == []
+
+
+def test_a_second_launch_while_the_first_is_queued_is_409() -> None:
+    launch = Launch()
+
+    assert launch.post().status_code == 202
+    assert launch.post().status_code == 409
+    assert len(launch.queue.jobs) == 1
+
+
+def test_a_lost_race_is_409(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.application.ports.unit_of_work import ActiveRunConflict
+
+    launch = Launch()
+    winner = _run_on_head(launch, ReviewRunStatus.QUEUED)
+    original = launch.uow.review_runs.find_active
+    seen = {"n": 0}
+
+    def racing(merge_request_id: Any, head_sha: str) -> ReviewRun | None:
+        seen["n"] += 1
+        return None if seen["n"] == 1 else original(merge_request_id, head_sha)
+
+    monkeypatch.setattr(launch.uow.review_runs, "find_active", racing)
+    launch.uow.commit_errors.append(ActiveRunConflict("проигравший гонку"))
+
+    response = launch.post()
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "REVIEW_ALREADY_ACTIVE"
+    assert launch.uow.review_runs.runs == [winner]
+    assert launch.queue.jobs == []
+
+
+def test_read_on_a_private_repository_is_403_naming_the_roles() -> None:
+    launch = Launch(catalog=FakeInstallationCatalog([replace(LAUNCHABLE, permissions=READ, private=True)]))
+
+    response = launch.post()
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    assert body["title"] == "Недостаточно прав на репозиторий"
+    assert "push, triage, maintain или admin" in body["detail"]
+    assert launch.vcs.calls == []
+    launch.assert_nothing_written()
+
+
+def test_a_role_revoked_while_the_visibility_cache_lives_is_403() -> None:
+    """Кэш видимости помнит роль push, а прямой запрос к GitHub отдаёт read: решает прямой."""
+    from app.domain.entities import Secret
+
+    revoked = replace(LAUNCHABLE, permissions=READ, private=True)
+    token = Secret("ghu_login_access").reveal()
+    catalog = FakeInstallationCatalog([revoked], repositories_by_token={token: [LAUNCHABLE]})
+    launch = Launch(catalog=catalog)
+    assert launch.client.get("/api/v1/repositories").status_code == 200  # кэш видимости с push
+
+    response = launch.post()
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    launch.assert_nothing_written()
+
+
+@pytest.mark.parametrize("scene", ["invisible", "unregistered", "disconnected"])
+def test_a_repository_out_of_reach_is_404(scene: str) -> None:
+    uow = FakeUnitOfWork()
+    if scene == "disconnected":
+        _connected(uow, connected_at=None)
+    launch = Launch(
+        uow=uow,
+        catalog=FakeInstallationCatalog([]) if scene == "invisible" else None,
+        connect=scene == "invisible",
+    )
+
+    response = launch.post()
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "REPOSITORY_NOT_FOUND"
+    assert launch.vcs.calls == []
+    launch.assert_nothing_written()
+
+
+def test_a_missing_pull_request_is_404_with_its_own_detail() -> None:
+    launch = Launch(vcs=FakeVcs(metadata_error=VcsNotFoundError("HTTP 404")))
+
+    response = launch.post({**LAUNCH_BODY, "pull_request_number": 987654})
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["code"] == "REPOSITORY_NOT_FOUND"
+    assert body["detail"] == "Запроса на изменение с таким номером в репозитории нет."
+    assert "987654" not in body["detail"]
+    launch.assert_nothing_written()
+
+
+def test_app_not_installed_is_404_without_metadata() -> None:
+    launch = Launch(catalog=FakeInstallationCatalog([LAUNCHABLE], not_installed={"octo-org/api"}))
+
+    response = launch.post()
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "REPOSITORY_NOT_IN_INSTALLATION"
+    assert launch.vcs.calls == []
+    launch.assert_nothing_written()
+
+
+@pytest.mark.parametrize(
+    ("meta", "reason"),
+    [
+        ({"state": MergeRequestState.CLOSED}, "запрос на изменение закрыт или смёржен"),
+        ({"state": MergeRequestState.MERGED}, "запрос на изменение закрыт или смёржен"),
+        (
+            {"from_fork": True, "author_association": "FIRST_TIME_CONTRIBUTOR"},
+            "запрос на изменение из форка от автора не из участников репозитория",
+        ),
+        # Удалённый форк: `head.repo = null` адаптер отдаёт как форк.
+        (
+            {"from_fork": True, "author_association": "CONTRIBUTOR"},
+            "запрос на изменение из форка от автора не из участников репозитория",
+        ),
+    ],
+)
+def test_a_pull_request_that_cannot_be_reviewed_is_422(meta: dict[str, object], reason: str) -> None:
+    launch = Launch(vcs=FakeVcs(meta=_meta(**meta)))
+
+    response = launch.post({**LAUNCH_BODY, "pull_request_number": 987654})
+
+    assert _validation_errors(response) == [{"where": "body.pull_request_number", "reason": reason}]
+    assert "987654" not in response.text
+    launch.assert_nothing_written()
+
+
+def test_a_fork_of_a_collaborator_is_launched() -> None:
+    launch = Launch(vcs=FakeVcs(meta=_meta(from_fork=True, author_association="COLLABORATOR")))
+
+    assert launch.post().status_code == 202
+
+
+@pytest.mark.parametrize("where", ["role", "metadata"])
+def test_github_failure_is_502_without_records(where: str) -> None:
+    launch = Launch(
+        catalog=FakeInstallationCatalog(error=VcsError("HTTP 503")) if where == "role" else None,
+        vcs=FakeVcs(metadata_error=VcsError("HTTP 502")) if where == "metadata" else None,
+    )
+
+    response = launch.post()
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "SCM_UNAVAILABLE"
+    if where == "role":
+        assert launch.vcs.calls == []
+    launch.assert_nothing_written()
+
+
+def test_broker_failure_is_500_and_the_run_is_failed() -> None:
+    class BrokenQueue(FakeQueue):
+        def enqueue(self, job: Any) -> None:
+            raise RuntimeError("брокер недоступен")
+
+    launch = Launch(queue=BrokenQueue())
+
+    response = launch.post()
+
+    assert response.status_code == 500
+    assert response.json()["code"] == "INTERNAL_ERROR"
+    (run,) = launch.uow.review_runs.runs
+    assert (run.status, run.trigger) == (ReviewRunStatus.FAILED, TriggerSource.MANUAL)
+    assert launch.outcome.statuses == ["failed"]
+    read = launch.client.get(f"/api/v1/reviews/{run.id}")
+    assert (read.json()["trigger"], read.json()["status"]) == ("manual", "failed")
+
+    launch.queue = FakeQueue()
+    launch.client.app.dependency_overrides[get_job_queue] = lambda: launch.queue  # type: ignore[attr-defined]
+    assert launch.post().status_code == 202
+    assert len(launch.queue.jobs) == 1
+
+
+def test_launch_without_session_is_401() -> None:
+    launch = Launch()
+    launch.client.cookies.clear()
+    launch.client.app.dependency_overrides.pop(current_session)  # type: ignore[attr-defined]
+
+    response = launch.post()
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHENTICATED"
+    assert launch.catalog.calls == []
+
+
+def test_launch_without_origin_is_403() -> None:
+    launch = Launch()
+
+    response = launch.post(origin=None)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "ORIGIN_FORBIDDEN"
+    assert launch.catalog.calls == []
+    launch.assert_nothing_written()
+
+
+@pytest.mark.parametrize("trigger", ["webhook", "mention"])
+def test_only_a_manual_trigger_is_accepted(trigger: str) -> None:
+    launch = Launch()
+
+    response = launch.post({**LAUNCH_BODY, "trigger": trigger})
+
+    assert _validation_errors(response) == [{"where": "body.trigger", "reason": "принимается только manual"}]
+    assert trigger not in response.json()["detail"]
+    assert launch.catalog.calls == []
+    launch.assert_nothing_written()
+
+
+def test_the_trigger_schema_stays_trigger_source() -> None:
+    schema = create_app(SETTINGS).openapi()["components"]["schemas"]["CreateReviewRequest"]
+    trigger = schema["properties"]["trigger"]
+    assert trigger["$ref"] == "#/components/schemas/TriggerSource"
+    assert "только manual" in trigger["description"]

@@ -48,7 +48,7 @@ from app.api.errors import (
     ApiError,
 )
 from app.api.problems import ErrorCode
-from app.api.schemas import ReviewJob
+from app.api.schemas import ReviewJob, review_job
 from app.application.sync_thread_resolution import handle_review_thread_webhook
 from app.application.use_cases.handle_webhook import (
     WebhookOutcome,
@@ -205,31 +205,8 @@ def _scm_unavailable() -> ApiError:
 
 
 def _review_job(outcome: WebhookOutcome) -> ReviewJob:
-    """Проекция прогона в публичную модель `ReviewJob` (`app/api/schemas.py`).
-
-    `findings_count` у свежего прогона всегда 0: находки появляются позже,
-    при обработке задачи воркером, и в этот эндпоинт больше не возвращаются.
-    """
+    """Проекция найденного или созданного прогона (`review_job` в `app/api/schemas.py`)."""
     run, merge_request, repository = outcome.run, outcome.merge_request, outcome.repository
     if run is None or merge_request is None or repository is None:
         raise RuntimeError(f"исход {outcome.kind!r} без записей для проекции ReviewJob")
-    return ReviewJob(
-        id=run.id,
-        provider=repository.provider,
-        provider_repository_id=repository.provider_id,
-        pull_request_number=merge_request.number,
-        trigger=run.trigger,
-        status=run.status,
-        head_commit_sha=run.head_sha,
-        base_commit_sha=run.base_sha,
-        findings_count=0,
-        rejected_findings=run.rejected_findings,
-        model=run.model,
-        tokens_used=run.tokens_used,
-        duration_seconds=run.duration_seconds,
-        created_at=run.created_at,
-        updated_at=run.updated_at,
-        last_progress_at=run.last_progress_at,
-        failed_stage=run.failed_stage,
-        error=None,
-    )
+    return review_job(run, merge_request, repository)

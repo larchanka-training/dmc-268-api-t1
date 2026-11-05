@@ -22,7 +22,7 @@
 - [x] 3.1 Порт и адаптер: установки пользователя с `repository_selection` (`GET /user/installations`) и репозитории одной установки
 - [x] 3.2 Чистая функция выбора репозиториев к подключению (selected, admin или maintain, без записи) и use case возврата с установки
 - [x] 3.3 Ручка вместо заглушки: сверка установки, свежий ответ в кэш (`read=False`), редирект с итогом; `state` в `install_url`, привязанный к сессии, и его сверка на Setup URL (design D7)
-- [ ] 3.4 Проверить на стенде, что GitHub возвращает `state` на Setup URL, и только после этого прописать Setup URL в настройках GitHub App (design D7)
+- [x] 3.4 Проверить на стенде, что GitHub возвращает `state` на Setup URL, и только после этого прописать Setup URL в настройках GitHub App (design D7)
 
 Заметка к 3.2: `connect_repository` после шага 2 включает выключенные обратно (`reconnect`), а
 Setup URL выключенные включать не должен (design D7, п. 2). Поэтому Setup URL зовёт отдельный
@@ -31,4 +31,4 @@ Setup URL выключенные включать не должен (design D7, 
 ## 4. Завершение
 
 - [x] 4.1 `docs/GITHUB_APP.md` (PR #271): «Планируется» привести к сделанному
-- [ ] 4.2 Экспорт контракта, синхронизация спек и `openspec archive repositories-one-list`
+- [x] 4.2 Экспорт контракта, синхронизация спек и `openspec archive repositories-one-list`

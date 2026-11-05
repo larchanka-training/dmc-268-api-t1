@@ -63,6 +63,7 @@ from app.domain.hunk_context import (
     expand_hunks,
 )
 from app.domain.repo_rules import RULES_PATH, applicable_rules
+from app.domain.review_coverage import ReviewCoverage, review_coverage
 from app.domain.secret_redaction import may_hold_secrets, redact_secrets
 from app.domain.untrusted import fence, sanitize
 
@@ -128,6 +129,8 @@ class AssembledContext:
     # Hunk'и, вошедшие в пакет: находка вне них указывает на то, чего модель
     # не видела.
     hunks: tuple[Hunk, ...]
+    # Какие файлы диффа модель видела: список в сводке ревью (#279).
+    coverage: ReviewCoverage
     # Правила, вошедшие в пакет, - по тому же принципу для ссылки на правило.
     rules: tuple[ShownRule, ...] = ()
 
@@ -309,6 +312,7 @@ def assemble_context(
         ),
         hunks=tuple(shown),
         rules=tuple(shown_rules),
+        coverage=review_coverage(files, shown),
     )
 
 
