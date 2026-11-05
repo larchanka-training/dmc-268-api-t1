@@ -572,6 +572,8 @@ def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
     assert "docker_network.dmc268" not in grafana
     assert "docker_network.observability[" in grafana
     assert "docker_network.grafana[0].name" in grafana
+    # Публичный вход /grafana/ — через сеть прокси с интерфейсом.
+    assert "docker_network.grafana_proxy.name" in grafana
     for name in ("otelcol", "prometheus"):
         block = _tf_container_block(name)
         assert "docker_network.backend.name" in block, name

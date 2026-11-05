@@ -9,7 +9,8 @@
 # одни и те же адреса работают в обоих окружениях (prometheus.yml, grafana
 # datasources, endpoint коллектора). Сеть стека internal; публикуемый порт
 # Grafana живёт в отдельной не-internal сети dmc268-grafana и открывается
-# SSH-туннелем. Выход в интернет через неё есть только у Grafana, и её
+# SSH-туннелем, а через публичный вход — по сети dmc268-grafana-proxy
+# (infra/network.tf). Выход в интернет через неё есть только у Grafana, и её
 # собственные походы наружу (статистика, проверки обновлений Grafana и
 # плагинов) выключены env.
 # Стек поднимается только при observability_enabled: count = 1 : 0 у образа,
@@ -468,6 +469,8 @@ resource "docker_container" "prometheus" {
 
 # Доступ к Grafana — по учётке: анонимный вход выключен, пароль админа из
 # переменной (локальный compose, наоборот, поднимает Grafana без логина).
+# Открывается через публичный вход по подпути /grafana/ (nginx интерфейса,
+# сеть dmc268-grafana-proxy) и туннелем на bind_ip — по тому же подпути.
 resource "docker_container" "grafana" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-grafana"
@@ -505,6 +508,18 @@ resource "docker_container" "grafana" {
     "GF_SECURITY_ADMIN_PASSWORD=${var.grafana_admin_password}",
     "GF_AUTH_ANONYMOUS_ENABLED=false",
     "GF_USERS_ALLOW_SIGN_UP=false",
+    # Публичный вход по подпути /grafana/: nginx интерфейса проксирует путь
+    # как есть, без rewrite, а Grafana строит ссылки и редиректы от root_url.
+    # С serve_from_sub_path Grafana отвечает только под /grafana/, корень —
+    # 301 на root_url, поэтому туннель — http://localhost:3000/grafana/.
+    # trimsuffix — на случай public_origin со слешем на конце; с пустым
+    # public_origin root_url — относительный /grafana/, Grafana с ним
+    # стартует (проверено на 13.2.4).
+    "GF_SERVER_ROOT_URL=${trimsuffix(var.public_origin, "/")}/grafana/",
+    "GF_SERVER_SERVE_FROM_SUB_PATH=true",
+    # TLS терминирует nginx интерфейса: cookie сессии — только по HTTPS.
+    # Через туннель браузеры принимают Secure-cookie от http://localhost.
+    "GF_SECURITY_COOKIE_SECURE=true",
     # Телеметрия вендора off: статистика использования и проверки обновлений
     # Grafana и плагинов не должны уходить с сервера наружу. То же в compose и у Loki/Tempo в их
     # конфигах (loki.yaml, tempo.yaml).
@@ -536,6 +551,12 @@ resource "docker_container" "grafana" {
   # Docker не публикует.
   networks_advanced {
     name = docker_network.grafana[0].name
+  }
+
+  # Публичный вход: nginx интерфейса ходит сюда по имени контейнера
+  # (dmc268-grafana:3000), алиас не нужен.
+  networks_advanced {
+    name = docker_network.grafana_proxy.name
   }
 
   depends_on = [
