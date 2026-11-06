@@ -79,7 +79,10 @@ def test_review_created_behind_a_502_is_not_published_twice(stack: Stack) -> Non
     (comment,) = review.comments
     kinds = {(p.kind, p.provider_comment_id) for p in stack.published(run_id)}
     assert kinds == {(CommentKind.SUMMARY, str(review.id)), (CommentKind.INLINE, str(comment.id))}
-    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [(HEAD, "failure")]
+    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [
+        (HEAD, None),
+        (HEAD, "failure"),
+    ]
     assert stack.queue_depth(DLQ_NAME) == 0
 
 
@@ -116,7 +119,10 @@ def test_rate_limited_create_review_is_published_after_the_pause(stack: Stack) -
     assert stack.run(run_id).status is ReviewRunStatus.COMPLETED
     assert stack.github.requests.count(CREATE_REVIEW) == 2
     (review,) = stack.github.reviews_of(PR)
-    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [(HEAD, "failure")]
+    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [
+        (HEAD, None),
+        (HEAD, "failure"),
+    ]
     assert {p.provider_comment_id for p in stack.published(run_id)} >= {str(review.id)}
     assert stack.queue_depth(DLQ_NAME) == 0
 
@@ -134,5 +140,8 @@ def test_lost_inline_ids_keep_the_summary_and_the_gate_sees_the_critical(stack: 
     assert [(p.kind, p.provider_comment_id) for p in stack.published(run_id)] == [
         (CommentKind.SUMMARY, str(review.id))
     ]
-    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [(HEAD, "failure")]
+    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [
+        (HEAD, None),
+        (HEAD, "failure"),
+    ]
     assert stack.queue_depth(DLQ_NAME) == 0

@@ -236,6 +236,8 @@ services:
       # реквизитов App каждый прогон завершится failed на fetch_diff.
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      # Ссылка из check run на прогон в кабинете; пустой — check run без ссылки.
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
       # Адаптер модели. stub - без похода к модели, ollama - локальная модель
       # (профиль ollama ниже, модель - OLLAMA_MODEL). Значения по умолчанию нет
       # намеренно: без LLM_BACKEND в .env воркер не стартует, а не публикует

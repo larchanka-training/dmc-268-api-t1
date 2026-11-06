@@ -813,4 +813,16 @@ def add_manual_run_with_critical_thread(
             finding_id=finding_id,
         )
     )
+    # Сводка пишется той же транзакцией, что и inline: по ней видно, что ревью записано.
+    uow.published_comments.add(
+        PublishedComment(
+            id=UUID(int=run_id.int + 3),
+            review_run_id=run_id,
+            provider_comment_id=f"manual-summary-{run_id.int}",
+            kind=CommentKind.SUMMARY,
+            published_at=at,
+            created_at=at,
+            updated_at=at,
+        )
+    )
     return run

@@ -140,7 +140,6 @@ def refresh_merge_gate_for_merge_request(
         repo_full_name=repo_full_name,
         head_sha=head_sha,
         installation_id=installation_id,
-        run_id=head_run.id,
         repository_id=repository_id,
     )
 

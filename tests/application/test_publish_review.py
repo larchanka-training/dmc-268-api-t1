@@ -17,8 +17,8 @@ from app.application.merge_gate_publish import (
     DISABLED_REVIEW_CHECK,
     SETTLE_ATTEMPTS,
     build_failed_review_check,
+    build_in_progress_check,
     build_merge_gate_check,
-    build_retarget_check,
     collect_open_findings,
     settle_merge_gate,
 )
@@ -813,8 +813,8 @@ class _RetargetDuringGateVcs(RecordingVcsGateway):
         self._uow = uow
         self._new_status = new_status
 
-    def set_merge_gate_check(self, *args: Any) -> None:
-        super().set_merge_gate_check(*args)
+    def set_merge_gate_check(self, *args: Any, **kwargs: Any) -> None:
+        super().set_merge_gate_check(*args, **kwargs)
         if len(self.checks) > 1:
             return
         stale = self._uow.review_runs.get(RUN_ID)
@@ -826,7 +826,7 @@ class _RetargetDuringGateVcs(RecordingVcsGateway):
         )
 
 
-def test_retarget_racing_the_gate_of_a_stale_run_ends_in_failure() -> None:
+def test_retarget_racing_the_gate_of_a_stale_run_ends_in_the_block() -> None:
     """Блокер #225: прогон прочитал статус до отмены и выставил `success` по старому
     диффу уже после блокировки приёма - он перечитывает прогон и возвращает блокировку."""
     uow = FakeUnitOfWork()
@@ -836,8 +836,8 @@ def test_retarget_racing_the_gate_of_a_stale_run_ends_in_failure() -> None:
 
     _publish_first_run(uow, run, vcs)
 
-    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
-    assert vcs.checks[-1] == build_retarget_check()
+    assert [c.conclusion for c in vcs.checks] == ["success", None]
+    assert vcs.checks[-1] == build_in_progress_check()
 
 
 class _FailingCorrectionVcs(_RetargetDuringGateVcs):
@@ -848,12 +848,12 @@ class _FailingCorrectionVcs(_RetargetDuringGateVcs):
         self._failures = failures
         self.correction_attempts = 0
 
-    def set_merge_gate_check(self, *args: Any) -> None:
+    def set_merge_gate_check(self, *args: Any, **kwargs: Any) -> None:
         if self.checks:
             self.correction_attempts += 1
             if self.correction_attempts <= self._failures:
                 raise VcsTransientError("GitHub API: HTTP 502")
-        super().set_merge_gate_check(*args)
+        super().set_merge_gate_check(*args, **kwargs)
 
 
 def test_a_failed_gate_correction_is_retried() -> None:
@@ -867,15 +867,15 @@ def test_a_failed_gate_correction_is_retried() -> None:
     _publish_first_run(uow, run, vcs)
 
     assert vcs.correction_attempts == SETTLE_ATTEMPTS
-    assert vcs.checks[-1] == build_retarget_check()
+    assert vcs.checks[-1] == build_in_progress_check()
 
 
 class _CompletedDuringFailureVcs(_FailingCorrectionVcs):
     """Пока поправка не дошла, новый прогон успел завершиться."""
 
-    def set_merge_gate_check(self, *args: Any) -> None:
+    def set_merge_gate_check(self, *args: Any, **kwargs: Any) -> None:
         try:
-            super().set_merge_gate_check(*args)
+            super().set_merge_gate_check(*args, **kwargs)
         except VcsError:
             newer = self._uow.review_runs.get(UUID(int=77))
             assert newer is not None
@@ -894,7 +894,7 @@ def test_a_retried_gate_correction_is_rebuilt_for_the_current_run() -> None:
     _publish_first_run(uow, run, vcs)
 
     assert [c.conclusion for c in vcs.checks] == ["success", "success"]
-    assert vcs.checks[-1] != build_retarget_check()
+    assert vcs.checks[-1] != build_in_progress_check()
 
 
 def _settle_previous_run(uow: FakeUnitOfWork, vcs: RecordingVcsGateway) -> None:
@@ -905,7 +905,6 @@ def _settle_previous_run(uow: FakeUnitOfWork, vcs: RecordingVcsGateway) -> None:
         repo_full_name=JOB.repository_full_name,
         head_sha="sha1",
         installation_id=JOB.installation_id,
-        run_id=UUID(int=4),
         repository_id=REPOSITORY.id,
     )
 
@@ -918,11 +917,11 @@ class _DelayedFirstGateVcs(RecordingVcsGateway):
         super().__init__()
         self._during: Callable[[], object] | None = during
 
-    def set_merge_gate_check(self, *args: Any) -> None:
+    def set_merge_gate_check(self, *args: Any, **kwargs: Any) -> None:
         during, self._during = self._during, None
         if during is not None:
             during()
-        super().set_merge_gate_check(*args)
+        super().set_merge_gate_check(*args, **kwargs)
 
 
 def _set_thread_resolved(uow: FakeUnitOfWork, resolved: bool) -> None:
@@ -1027,8 +1026,8 @@ class _LostResponseVcs(RecordingVcsGateway):
         self._lost_at = lost_at
         self._after_post = after_post
 
-    def set_merge_gate_check(self, *args: Any) -> None:
-        super().set_merge_gate_check(*args)
+    def set_merge_gate_check(self, *args: Any, **kwargs: Any) -> None:
+        super().set_merge_gate_check(*args, **kwargs)
         self._after_post(len(self.checks))
         if len(self.checks) == self._lost_at:
             raise VcsTransientError("GitHub API: таймаут")
@@ -1073,8 +1072,8 @@ def test_lost_response_of_a_correction_does_not_leave_a_false_block() -> None:
 
     _publish_first_run(uow, run, vcs)
 
-    assert vcs.checks[1] == build_retarget_check()
-    assert [c.conclusion for c in vcs.checks] == ["success", "failure", "success"]
+    assert vcs.checks[1] == build_in_progress_check()
+    assert [c.conclusion for c in vcs.checks] == ["success", None, "success"]
 
 
 @pytest.mark.parametrize(
@@ -1179,11 +1178,10 @@ def test_settling_on_a_cancelled_latest_run_posts_once() -> None:
         repo_full_name=JOB.repository_full_name,
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
-        run_id=run.id,
         repository_id=REPOSITORY.id,
     )
 
-    assert vcs.checks == [build_retarget_check()]
+    assert vcs.checks == [build_failed_review_check()]
 
 
 def test_settling_on_a_cancelled_run_of_a_pr_outside_the_branch_filter_passes_it() -> None:
@@ -1205,7 +1203,6 @@ def test_settling_on_a_cancelled_run_of_a_pr_outside_the_branch_filter_passes_it
         repo_full_name=JOB.repository_full_name,
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
-        run_id=run.id,
         repository_id=REPOSITORY.id,
     )
 
@@ -1233,7 +1230,6 @@ def test_settling_on_a_failed_latest_run_keeps_the_failure() -> None:
         repo_full_name=JOB.repository_full_name,
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
-        run_id=run.id,
         repository_id=REPOSITORY.id,
     )
 
@@ -1244,8 +1240,8 @@ class _CompletedDuringCorrectionVcs(_RetargetDuringGateVcs):
     """Поправка-блокировка дошла уже после того, как новый прогон завершился и
     выставил свой gate (ревью #225): POST блокировки обгоняет завершение."""
 
-    def set_merge_gate_check(self, *args: Any) -> None:
-        super().set_merge_gate_check(*args)
+    def set_merge_gate_check(self, *args: Any, **kwargs: Any) -> None:
+        super().set_merge_gate_check(*args, **kwargs)
         if len(self.checks) != 2:
             return
         newer = self._uow.review_runs.get(UUID(int=77))
@@ -1263,8 +1259,8 @@ def test_a_review_completed_behind_the_correction_gets_its_gate_back() -> None:
 
     _publish_first_run(uow, run, vcs)
 
-    assert [c.conclusion for c in vcs.checks] == ["success", "failure", "success"]
-    assert vcs.checks[-1] != build_retarget_check()
+    assert [c.conclusion for c in vcs.checks] == ["success", None, "success"]
+    assert vcs.checks[-1] != build_in_progress_check()
 
 
 NEW_RUN_ID = UUID(int=77)
@@ -1278,7 +1274,6 @@ def _settle(uow: FakeUnitOfWork, vcs: RecordingVcsGateway, run_id: UUID) -> None
         repo_full_name=JOB.repository_full_name,
         head_sha=JOB.head_sha,
         installation_id=JOB.installation_id,
-        run_id=run_id,
         repository_id=REPOSITORY.id,
     )
 
@@ -1325,8 +1320,8 @@ def test_a_late_retarget_block_yields_to_the_gate_of_a_review_that_finished_publ
 
     _settle(uow, vcs, run.id)
 
-    assert [c.conclusion for c in vcs.checks] == ["success", "failure", "success"]
-    assert vcs.checks[1] == build_retarget_check()
+    assert [c.conclusion for c in vcs.checks] == ["success", None, "success"]
+    assert vcs.checks[1] == build_in_progress_check()
 
 
 class _Interleaving:
@@ -1408,9 +1403,9 @@ class _SteppedVcs(RecordingVcsGateway):
         super().__init__()
         self._interleaving = interleaving
 
-    def set_merge_gate_check(self, *args: Any) -> None:
+    def set_merge_gate_check(self, *args: Any, **kwargs: Any) -> None:
         self._interleaving.step()
-        super().set_merge_gate_check(*args)
+        super().set_merge_gate_check(*args, **kwargs)
 
 
 @pytest.mark.parametrize("new_severity", [None, FindingSeverity.CRITICAL], ids=["clean", "critical"])
@@ -1421,7 +1416,7 @@ def test_every_order_of_a_retarget_ends_with_the_gate_of_the_new_run(
     прогона (`settle`), приём смены ветки (коммит и блокировка) и новый прогон
     (`publishing`, запись ревью, `settle`, `completed`). В любом порядке шагов и посадки
     POST последним на head приходит gate нового прогона."""
-    stale: list[list[str]] = []
+    stale: list[list[str | None]] = []
 
     def scenario(interleaving: _Interleaving) -> None:
         uow = FakeUnitOfWork()
@@ -1433,7 +1428,7 @@ def test_every_order_of_a_retarget_ends_with_the_gate_of_the_new_run(
 
         def webhook() -> None:
             _new_run(uow, run, ReviewRunStatus.QUEUED)
-            vcs.set_merge_gate_check("owner/repo", JOB.head_sha, 1, build_retarget_check())
+            vcs.set_merge_gate_check("owner/repo", JOB.head_sha, 1, build_in_progress_check())
             # Задача нового прогона ставится после блокировки (`start_review_run`).
             enqueued.append(True)
 
@@ -1525,7 +1520,7 @@ def test_gate_of_a_stale_run_yields_to_a_completed_review_of_the_new_target() ->
     _publish_first_run(uow, run, vcs)
 
     assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
-    assert vcs.checks[-1] != build_retarget_check()
+    assert vcs.checks[-1] != build_in_progress_check()
 
 
 def test_orphan_adopted_by_a_concurrent_run_does_not_fail_publishing() -> None:
@@ -1662,13 +1657,13 @@ class _ThresholdLoweredDuringFailureVcs(RecordingVcsGateway):
         self._uow = uow
         self._failed = False
 
-    def set_merge_gate_check(self, *args: Any) -> None:
+    def set_merge_gate_check(self, *args: Any, **kwargs: Any) -> None:
         if not self._failed:
             self._failed = True
             lowered = RepositorySettings(auto_review_enabled=True, branch_filter=(), min_severity=FindingSeverity.HIGH)
             self._uow.repositories.update_settings(REPOSITORY.id, lowered, NOW)
             raise VcsTransientError("GitHub API: HTTP 502")
-        super().set_merge_gate_check(*args)
+        super().set_merge_gate_check(*args, **kwargs)
 
 
 def test_a_retried_gate_reads_the_current_threshold() -> None:

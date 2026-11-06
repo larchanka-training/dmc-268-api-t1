@@ -259,7 +259,7 @@ sequenceDiagram
             end
             API->>DB: MergeRequest + ReviewRun queued (частичный уникальный индекс)
             opt смена целевой ветки
-                API->>GH: блокирующий check run на head
+                API->>GH: check run in_progress «Идёт ревью» на head
             end
             alt блокирующий check run не встал
                 API->>DB: ReviewRun failed, откат целевой ветки PR
@@ -268,6 +268,7 @@ sequenceDiagram
                 API->>MQ: JobQueue.enqueue, publisher confirm
                 alt брокер не подтвердил
                     API->>DB: компенсация: ReviewRun failed
+                    API->>GH: check run failure на head
                     API-->>GH: 500
                 else подтвердил
                     API-->>GH: 202, новый прогон
@@ -282,6 +283,7 @@ sequenceDiagram
     end
     Note over W,DB: каждый коммит записи прогона шлёт NOTIFY — API отдаёт событие кабинету по SSE
     W->>DB: ReviewRun building_context
+    W->>GH: check run in_progress «Идёт ревью» на head (best-effort)
     W->>GH: дифф по head_sha / base_sha (до 5 МиБ), rules.md по base_sha, файлы для AST
     Note over W,GH: сбой rules.md, контекста PR или AST не роняет прогон — пакет деградирует, пропущенное — в omitted
     break дифф больше лимита, сбой получения диффа или исключение любого шага ниже
@@ -289,7 +291,7 @@ sequenceDiagram
             W->>MQ: ack, прогон остаётся cancelled, результат отброшен
         else сбой
             W->>DB: ReviewRun failed
-            opt на этом head уже было ревью, а упавший прогон — последний
+            opt упавший прогон на этом head последний
                 W->>GH: check run failure на head (block_head_of_failed_run)
             end
             W->>MQ: nack без requeue → review_jobs.dlq
@@ -369,8 +371,8 @@ JSON-сообщение; тело несёт только доменные да�
 исключением, отвечает `nack` без `requeue`: сообщение не крутится в основной
 очереди по кругу, а ровно один раз перекладывается в `review_jobs.dlq` для
 ручного разбора. Перед `nack` упавший прогон ставит `failure` на head, если
-он на этом head последний, а до него ревью уже было (`block_head_of_failed_run`):
-иначе на PR остался бы `success` прежнего прогона. Исключения — прогон, отменённый ретаргетом посреди ревью
+он на этом head последний (`block_head_of_failed_run`): иначе на PR остался бы
+`in_progress` захвата или `success` прежнего прогона. Исключения — прогон, отменённый ретаргетом посреди ревью
 (`_supersede`): сообщение подтверждается `ack`, прогон остаётся `cancelled`; и прогон,
 отменённый ретаргетом ещё в `queued`: воркер подтверждает сообщение `ack` при первой
 же доставке, ничего не делая. Ретраев с backoff перед dead-letter пока нет — осознанное

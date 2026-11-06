@@ -107,7 +107,12 @@ def test_worker_dies_during_the_model_call(stack: Stack) -> None:
 
     assert len(stack.github.reviews_of(PR)) == 1
     assert len(_inline_comments(stack)) == 1
-    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [(HEAD, "failure")]
+    # «Идёт ревью» умершего прогона и нового, затем итог нового.
+    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [
+        (HEAD, None),
+        (HEAD, None),
+        (HEAD, "failure"),
+    ]
 
 
 def test_worker_dies_after_github_stored_the_review(stack: Stack) -> None:
@@ -136,15 +141,23 @@ def test_worker_dies_while_setting_the_merge_gate(stack: Stack) -> None:
     его не выставит; замечание не дублируется."""
     pull = open_pull(stack)
     run_id = accept(stack, pull)
-    stack.github.network_faults = [NetworkFault("POST", rf"/repos/{REPO_FULL_NAME}/check-runs", WorkerDied())]
+    # Первый check run - «Идёт ревью» захвата; смерть - на итоговом.
+    stack.github.network_faults = [
+        NetworkFault("POST", rf"/repos/{REPO_FULL_NAME}/check-runs", WorkerDied(), passes=1)
+    ]
 
     _die(stack, _model())
     assert len(stack.github.reviews_of(PR)) == 1
-    assert stack.github.check_runs == []
+    assert [c.status for c in stack.github.check_runs] == ["in_progress"]
     _redeliver_to_next_worker(stack, run_id, ReviewRunStage.PUBLISHING)
 
     _recover_with_new_delivery(stack, pull, run_id)
 
     comments = _inline_comments(stack)
     assert len(comments) == len(set(comments)), f"дубль замечания: {comments}"
-    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [(HEAD, "failure")]
+    # «Идёт ревью» умершего прогона и нового, затем итог нового.
+    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [
+        (HEAD, None),
+        (HEAD, None),
+        (HEAD, "failure"),
+    ]
