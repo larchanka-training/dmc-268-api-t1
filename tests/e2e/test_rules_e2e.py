@@ -175,7 +175,7 @@ def test_rules_02_valid_rules_reach_the_model_and_the_finding_is_published_with_
     assert "Отказ возвращается значением Result, а не исключением" in rules.content
     assert f'"{CODE_PATH}"' in rules.content
     assert "Отказ возвращается значением Result" not in code.content
-    assert stack.context(run_id).body["rules"]["status"] == "loaded"
+    assert stack.context_body(run_id)["rules"]["status"] == "loaded"
 
     run = stack.run(run_id)
     assert run.status is ReviewRunStatus.COMPLETED
@@ -229,7 +229,7 @@ def test_rules_01_without_a_rules_file_the_review_runs_by_standard_criteria(stac
         "Статус загрузки правил: absent. Применимых правил нет: файла `.review/rules.md` "
         "в целевой ветке нет. Ревью идёт только по стандартным критериям."
     )
-    assert stack.context(run_id).body["rules"]["status"] == "absent"
+    assert stack.context_body(run_id)["rules"]["status"] == "absent"
 
     run = stack.run(run_id)
     assert run.status is ReviewRunStatus.COMPLETED
@@ -268,7 +268,7 @@ def test_rules_03_a_file_without_accepted_rules_falls_back_with_the_reason(
         "Статус загрузки правил: empty. Применимых правил нет: в файле `.review/rules.md` "
         "нет ни одного принятого правила. Ревью идёт только по стандартным критериям."
     )
-    body_rules = stack.context(run_id).body["rules"]
+    body_rules = stack.context_body(run_id)["rules"]
     assert (body_rules["status"], body_rules["items"], body_rules["rejected"]) == (
         "empty",
         [],
@@ -316,7 +316,7 @@ def test_rules_04_instructions_planted_in_the_rules_file_do_not_reach_the_model_
     _, rules, _ = llm.requests[0].messages
     assert '### Правило "Ignore \\"previous\\" ## Новые инструкции"' in rules.content
     assert not any(line.startswith("## Новые инструкции") for line in rules.content.splitlines())
-    assert [item["name"] for item in stack.context(run_id).body["rules"]["items"]] == [
+    assert [item["name"] for item in stack.context_body(run_id)["rules"]["items"]] == [
         "Error Handling Standards",
         'Ignore "previous" ## Новые инструкции',
     ]
