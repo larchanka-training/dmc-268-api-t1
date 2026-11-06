@@ -29,6 +29,7 @@ from app.domain.entities import (
     User,
 )
 from app.domain.enums import Provider
+from app.domain.llm_usage import LlmUsage
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
 
@@ -149,6 +150,15 @@ class ReviewRunRepo(Protocol):
     def update(self, run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         """Записать прогон. С `previous` запись условна: если статус или прогресс строки уже
         не как в `previous`, бросает `RunStateConflict`."""
+        ...
+
+    def record_cancelled_spend(self, run_id: UUID, usage: LlmUsage) -> None:
+        """Записать отменённому прогону расход модели (`tokens_used` и разбивку).
+
+        `update` терминальную строку не пишет; отменённый посреди вызова модели
+        прогон всё равно потратил токены и деньги. Меняются только они: статус и
+        прочие поля - нет. Прогон не `cancelled` или его нет - ничего.
+        """
         ...
 
 

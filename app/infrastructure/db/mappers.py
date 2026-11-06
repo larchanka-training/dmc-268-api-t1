@@ -5,6 +5,7 @@
 """
 
 from copy import deepcopy
+from decimal import Decimal
 
 from app.domain.entities import (
     DiffAnchor,
@@ -19,6 +20,7 @@ from app.domain.entities import (
     StoredContextPayload,
     User,
 )
+from app.domain.llm_usage import LlmUsage
 from app.infrastructure.db.models import (
     ContextPayloadRow,
     FindingRow,
@@ -80,11 +82,48 @@ def review_run_to_domain(row: ReviewRunRow) -> ReviewRun:
         failed_stage=row.failed_stage,
         model=row.model,
         tokens_used=row.tokens_used,
+        usage=_usage(row),
         duration_seconds=row.duration_seconds,
         rejected_findings=row.rejected_findings,
         verification=row.verification,
         verifier_dropped_findings=row.verifier_dropped_findings,
     )
+
+
+def _usage(row: ReviewRunRow) -> LlmUsage | None:
+    # Колонки пишутся вместе (`usage_columns`): пустая одна - пусты все.
+    if row.input_tokens is None:
+        return None
+    return LlmUsage(
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens or 0,
+        cached_tokens=row.cached_tokens or 0,
+        reasoning_tokens=row.reasoning_tokens or 0,
+        total_tokens=row.tokens_used or 0,
+        cost_eur=row.cost_eur if row.cost_eur is not None else Decimal(0),
+    )
+
+
+def usage_columns(usage: LlmUsage | None) -> dict[str, int | Decimal | None]:
+    """Колонки `review_runs` расхода модели: все пусты, если расхода нет."""
+    if usage is None:
+        return dict.fromkeys(_USAGE_COLUMNS)
+    return {column: getattr(usage, column) for column in _USAGE_COLUMNS}
+
+
+def run_usage_columns(run: ReviewRun) -> dict[str, int | Decimal | None]:
+    """Колонки расхода прогона вместе с `tokens_used`.
+
+    Итог берётся из `usage`, когда он есть: `tokens_used` и `usage.total_tokens`
+    не расходятся в базе, даже если `replace(run, usage=...)` забыл `tokens_used`.
+    """
+    columns = usage_columns(run.usage)
+    columns["tokens_used"] = run.usage.total_tokens if run.usage is not None else run.tokens_used
+    return columns
+
+
+# Итог (`total_tokens`) хранится в `tokens_used`.
+_USAGE_COLUMNS = ("input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens", "cost_eur")
 
 
 def review_run_step_to_domain(row: ReviewRunStepRow) -> ReviewRunStep:

@@ -33,7 +33,7 @@ from app.infrastructure.telemetry import OtelRunOutcomeRecorder
 from app.worker.factory import build_review_handler
 
 from ..fakes.context import FakeCache, FakeExtractor
-from ..fakes.llm_gateway import ScriptedLlmGateway, review_response
+from ..fakes.llm_gateway import ScriptedLlmGateway, review_response, spent
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
 from ..fakes.webhooks import a_repository
@@ -242,7 +242,7 @@ def test_a_failed_run_grows_the_run_counter_by_status(
         build_review_handler(
             _Deps(
                 _seeded_uow(),
-                ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=1)]),
+                ScriptedLlmGateway([spent(LlmTimeoutError("таймаут"), 1)]),
             ),
             LIMITS,
             LLM_LIMITS,

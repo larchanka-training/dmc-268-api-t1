@@ -45,6 +45,7 @@ from app.domain.enums import (
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
+from app.domain.llm_usage import LlmUsage
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
 
@@ -362,6 +363,11 @@ class FakeReviewRunRepo:
             if not verdict.ok:
                 raise ValueError(verdict.error)
         self._by_id[run.id] = run
+
+    def record_cancelled_spend(self, run_id: UUID, usage: LlmUsage) -> None:
+        existing = self._by_id.get(run_id)
+        if existing is not None and existing.status is ReviewRunStatus.CANCELLED:
+            self._by_id[run_id] = replace(existing, tokens_used=usage.total_tokens, usage=usage)
 
 
 class FakeReviewRunStepRepo:

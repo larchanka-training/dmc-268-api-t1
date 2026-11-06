@@ -24,7 +24,6 @@ def test_stub_answers_with_an_empty_instance_of_the_requested_model(
     response = StubLlmGateway().complete(_request(task, model))
 
     assert response.model == "stub-llm"
-    assert response.tokens_used == 0
     assert isinstance(response.content, model)
 
 

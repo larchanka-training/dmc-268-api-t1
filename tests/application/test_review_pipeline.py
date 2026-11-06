@@ -4,12 +4,14 @@ import logging
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from itertools import count
 from typing import Any, NoReturn
 from uuid import UUID
 
+import httpx
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
@@ -49,17 +51,21 @@ from app.domain.llm_errors import (
     LlmTimeoutError,
     PromptTooLargeError,
 )
+from app.domain.llm_usage import LlmUsage
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import start_step
 from app.domain.vcs_errors import DiffTooLargeError, VcsError, VcsTransientError
 from app.infrastructure.llm.fallback import FallbackLlmGateway
+from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 from app.infrastructure.vcs.errors import VcsNotFoundError
 
 from ..fakes.context import FakeCache, FakeExtractor
 from ..fakes.llm_gateway import (
+    Scripted,
     ScriptedLlmGateway,
     finding_json,
     review_response,
+    spent,
     verification_response,
 )
 from ..fakes.run_outcome import RecordingRunOutcome
@@ -231,7 +237,7 @@ def test_a_failed_run_is_counted_once() -> None:
     with pytest.raises(LlmTimeoutError):
         _run(
             uow,
-            ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=1)]),
+            ScriptedLlmGateway([spent(LlmTimeoutError("таймаут"), 1)]),
             run_outcome=recorder,
         )
 
@@ -607,7 +613,7 @@ def test_tokens_of_a_verifier_that_never_answered_by_the_schema_are_counted() ->
     gateway = ScriptedLlmGateway(
         [
             review_response(finding_json(CHANGED_FILE, 1, "находка"), tokens=1000),
-            LlmOutputError("verdicts: Field required", tokens_used=300),
+            spent(LlmOutputError("verdicts: Field required"), 300),
         ]
     )
 
@@ -622,7 +628,7 @@ def test_tokens_of_a_verifier_that_never_answered_by_the_schema_are_counted() ->
 def test_tokens_of_a_review_that_never_answered_by_the_schema_are_counted() -> None:
     uow = FakeUnitOfWork()
     _seed_run(uow)
-    gateway = ScriptedLlmGateway([LlmOutputError("findings: Field required", tokens_used=700)])
+    gateway = ScriptedLlmGateway([spent(LlmOutputError("findings: Field required"), 700)])
 
     with pytest.raises(LlmOutputError):
         _run(uow, gateway)
@@ -630,6 +636,83 @@ def test_tokens_of_a_review_that_never_answered_by_the_schema_are_counted() -> N
     run = _completed(uow)
     assert run.status is ReviewRunStatus.FAILED
     assert run.tokens_used == 700
+
+
+def _eurorouter(*answers: tuple[str, dict[str, Any]]) -> OpenAiCompatibleGateway:
+    """Настоящий адаптер Eurorouter над записанными ответами `/chat/completions`: текст и `usage`."""
+    queue = list(answers)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        text, usage = queue.pop(0)
+        choice = {"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
+        return httpx.Response(200, json={"model": "glm-5.3", "choices": [choice], "usage": usage})
+
+    client = httpx.Client(base_url="https://eurorouter.test/v1", transport=httpx.MockTransport(handler))
+    return OpenAiCompatibleGateway(client, "glm-5.3", [SecretStr("k")], name="Eurorouter", max_attempts=2)
+
+
+def _usage(prompt: int, completion: int, cost_eur: float, *, cached: int = 0, reasoning: int = 0) -> dict[str, Any]:
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+        "prompt_tokens_details": {"cached_tokens": cached},
+        "completion_tokens_details": {"reasoning_tokens": reasoning},
+        "cost": cost_eur,
+        "cost_currency": "EUR",
+        "cost_eur": cost_eur,
+    }
+
+
+def test_a_review_retried_by_the_schema_stores_the_tokens_and_cost_of_both_answers() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    valid = review_response().answer.content.model_dump_json(by_alias=True)  # type: ignore[union-attr]
+    gateway = _eurorouter(
+        ("не json", _usage(1000, 200, 0.0003, cached=400)),
+        (valid, _usage(1100, 150, 0.00032, cached=100, reasoning=40)),
+    )
+
+    _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.COMPLETED
+    assert run.usage == LlmUsage(
+        input_tokens=2100,
+        output_tokens=350,
+        cached_tokens=500,
+        reasoning_tokens=40,
+        total_tokens=2450,
+        cost_eur=Decimal("0.00062"),
+    )
+    assert run.tokens_used == 2450
+    # Шаги делят тот же расход по попыткам.
+    assert [tokens for _, _, tokens, _ in _steps(uow)[2:4]] == [1200, 1250]
+
+
+def test_a_failed_review_stores_the_usage_spent_before_the_failure() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    usage = LlmUsage(input_tokens=600, output_tokens=100, total_tokens=700, cost_eur=Decimal("0.00025"))
+    gateway = ScriptedLlmGateway([spent(LlmOutputError("findings: Field required"), usage=usage)])
+
+    with pytest.raises(LlmOutputError):
+        _run(uow, gateway)
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.FAILED
+    assert (run.usage, run.tokens_used) == (usage, 700)
+
+
+def test_a_run_failing_before_the_model_keeps_no_usage() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    with pytest.raises(PromptTooLargeError):
+        _run(uow, ScriptedLlmGateway([]), llm_limits=LlmLimits(window_tokens=100, max_output_tokens=50))
+
+    run = _completed(uow)
+    assert (run.usage, run.tokens_used) == (None, None)
 
 
 class _FailingPublication(RecordingVcsGateway):
@@ -741,6 +824,45 @@ def test_a_run_cancelled_while_the_model_answers_is_acked() -> None:
 
     assert _completed(uow).status is ReviewRunStatus.CANCELLED
     assert vcs.publications == []
+
+
+def test_a_run_superseded_after_the_model_answered_keeps_its_spend() -> None:
+    """Отмена после ответа модели: прогон остаётся `cancelled`, но токены и деньги вызова
+    на нём - их уже списал провайдер."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    usage = LlmUsage(input_tokens=900, output_tokens=100, total_tokens=1000, cost_eur=Decimal("0.0003"))
+    scripted = ScriptedLlmGateway([review_response(finding_json(CHANGED_FILE, 1, "находка"), usage=usage)])
+
+    class RetargetedAfterAnswer:
+        def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
+            response = scripted.complete(request)
+            current = uow.review_runs.get(JOB.review_run_id)
+            assert current is not None
+            uow.review_runs.update(replace(current, status=ReviewRunStatus.CANCELLED))
+            return response
+
+    _run(uow, RetargetedAfterAnswer())
+
+    run = _completed(uow)
+    assert run.status is ReviewRunStatus.CANCELLED
+    assert (run.tokens_used, run.usage) == (1000, usage)
+
+
+def test_a_run_cancelled_before_the_model_keeps_no_usage() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    class RetargetedGateway:
+        def complete(self, request: object) -> NoReturn:
+            current = uow.review_runs.get(JOB.review_run_id)
+            assert current is not None
+            uow.review_runs.update(replace(current, status=ReviewRunStatus.CANCELLED))
+            raise LlmTimeoutError("модель не ответила")
+
+    _run(uow, RetargetedGateway())
+
+    assert (_completed(uow).tokens_used, _completed(uow).usage) == (None, None)
 
 
 DEFAULT_SUMMARY = "Критичных проблем в диффе не обнаружено."
@@ -870,8 +992,9 @@ class _RetryingOnce:
     def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
         if not self._retried:
             self._retried = True
-            assert request.on_retry is not None
-            request.on_retry(self._error, 40)
+            assert request.on_retry is not None and request.meter is not None
+            request.meter.record(LlmUsage(input_tokens=40, total_tokens=40))
+            request.on_retry(self._error)
         return self._scripted.complete(request)
 
 
@@ -1025,7 +1148,7 @@ def test_a_model_failure_fails_the_analysing_step_with_its_code_and_tokens() -> 
     _seed_run(uow)
 
     with pytest.raises(LlmTimeoutError):
-        _run(uow, ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=30)]))
+        _run(uow, ScriptedLlmGateway([spent(LlmTimeoutError("таймаут"), 30)]))
 
     assert _steps(uow)[2:] == [
         (ReviewRunStage.ANALYSING, ReviewRunStepStatus.FAILED, 30, "LLM_TIMEOUT"),
@@ -1054,9 +1177,10 @@ def test_a_review_over_the_window_fails_the_step_without_tokens() -> None:
 
 
 def test_a_retried_review_is_a_failed_step_and_a_new_step_of_the_same_stage() -> None:
+    # Расход ответа — свой у каждой попытки: 40 у повтора, 60 у ответа.
     uow = FakeUnitOfWork()
     _seed_run(uow)
-    scripted = ScriptedLlmGateway([review_response(tokens=100)])
+    scripted = ScriptedLlmGateway([review_response(tokens=60)])
 
     _run(uow, _RetryingOnce(scripted, LlmOutputError("findings.0.severity: missing")))
 
@@ -1072,7 +1196,7 @@ def test_a_retried_review_is_a_failed_step_and_a_new_step_of_the_same_stage() ->
 def test_a_retried_review_that_fails_again_records_both_attempts() -> None:
     uow = FakeUnitOfWork()
     _seed_run(uow)
-    scripted = ScriptedLlmGateway([LlmOutputError("всё ещё не по схеме", tokens_used=90)])
+    scripted = ScriptedLlmGateway([spent(LlmOutputError("всё ещё не по схеме"), 50)])
 
     with pytest.raises(LlmOutputError):
         _run(uow, _RetryingOnce(scripted, LlmOutputError("не по схеме")))
@@ -1089,7 +1213,7 @@ def test_a_failed_verifier_is_a_failed_step_but_the_run_goes_on() -> None:
     gateway = ScriptedLlmGateway(
         [
             review_response(finding_json(CHANGED_FILE, 1, "находка"), tokens=5),
-            LlmError("модель недоступна", tokens_used=3),
+            spent(LlmError("модель недоступна"), 3),
         ]
     )
 
@@ -1163,7 +1287,7 @@ def _failing_step_writes(
 
 
 def _fallback(
-    local: list[LlmResponse[Any] | Exception], hosted: list[LlmResponse[Any] | Exception]
+    local: list[Scripted | LlmResponse[Any] | Exception], hosted: list[Scripted | LlmResponse[Any] | Exception]
 ) -> FallbackLlmGateway:
     return FallbackLlmGateway(
         [("local", ScriptedLlmGateway(local)), ("hosted", ScriptedLlmGateway(hosted))]
@@ -1177,7 +1301,7 @@ def test_a_failed_retry_write_hands_the_review_to_the_next_provider() -> None:
         uow, lambda s: s.stage is ReviewRunStage.ANALYSING and s.status is ReviewRunStepStatus.FAILED
     )
     gateway = _fallback(
-        [LlmError("локальная модель недоступна", tokens_used=10)],
+        [spent(LlmError("локальная модель недоступна"), 10)],
         [review_response(tokens=5)],
     )
 
@@ -1210,7 +1334,7 @@ def test_a_failed_retry_start_write_keeps_the_review_going() -> None:
         return analysing_adds == 2
 
     _failing_step_writes(uow, second_analysing_start)
-    gateway = _fallback([LlmError("локальная модель недоступна", tokens_used=10)], [review_response(tokens=5)])
+    gateway = _fallback([spent(LlmError("локальная модель недоступна"), 10)], [review_response(tokens=5)])
 
     _run(uow, gateway)
 
@@ -1232,7 +1356,7 @@ def test_a_failed_retry_write_hands_the_verifier_to_the_next_provider() -> None:
     gateway = _fallback(
         [
             review_response(finding_json(CHANGED_FILE, 1, "находка"), tokens=5),
-            LlmError("локальная модель недоступна", tokens_used=2),
+            spent(LlmError("локальная модель недоступна"), 2),
         ],
         [verification_response(("F1", "keep"), tokens=7)],
     )

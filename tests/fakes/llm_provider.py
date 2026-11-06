@@ -15,14 +15,18 @@ import httpx
 from pydantic import BaseModel, SecretStr
 
 from app.application.ports.llm_gateway import LlmResponse
+from app.domain.llm_usage import LlmUsage
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
+
+from .llm_gateway import Scripted
 
 BASE_URL = "https://llm.test/v1"
 MODEL = "chaos-model"
 
 # Ответ сценария: исключение транспорта (или `BaseException` - смерть процесса
-# посреди вызова), HTTP-статус отказа, готовый HTTP-ответ или ответ модели.
-type Answer = BaseException | int | httpx.Response | LlmResponse[Any]
+# посреди вызова), HTTP-статус отказа, готовый HTTP-ответ или ответ модели
+# (с расходом - `Scripted`).
+type Answer = BaseException | int | httpx.Response | LlmResponse[Any] | Scripted
 
 
 @dataclass
@@ -53,14 +57,17 @@ class FakeLlmProvider:
             return httpx.Response(answer, json={"error": {"message": f"HTTP {answer}"}})
         if isinstance(answer, httpx.Response):
             return answer
-        return httpx.Response(200, json=_completion(answer.content, answer.tokens_used))
+        scripted = answer if isinstance(answer, Scripted) else Scripted(answer)
+        if not isinstance(scripted.answer, LlmResponse):
+            raise TypeError(f"сбой в сценарии провайдера - HTTP-статус или исключение: {scripted.answer!r}")
+        return httpx.Response(200, json=_completion(scripted.answer.content, scripted.usage))
 
     @property
     def calls(self) -> int:
         return len(self.keys_used)
 
 
-def _completion(content: BaseModel, tokens: int) -> dict[str, Any]:
+def _completion(content: BaseModel, usage: LlmUsage) -> dict[str, Any]:
     return {
         "model": MODEL,
         "choices": [
@@ -69,5 +76,9 @@ def _completion(content: BaseModel, tokens: int) -> dict[str, Any]:
                 "finish_reason": "stop",
             }
         ],
-        "usage": {"total_tokens": tokens},
+        "usage": {
+            "prompt_tokens": usage.input_tokens,
+            "completion_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+        },
     }

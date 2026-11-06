@@ -31,6 +31,7 @@ from app.domain.enums import (
     VerificationOutcome,
     VerifierVerdict,
 )
+from app.domain.llm_usage import LlmUsage
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +137,9 @@ class ReviewRun:
     base_sha: str | None = None
     model: str | None = None
     tokens_used: int | None = None
+    # Расход модели по видам токенов и стоимость; пуст до анализа и у прогонов,
+    # записанных до разбивки. `tokens_used` - его `total_tokens`.
+    usage: LlmUsage | None = None
     duration_seconds: float | None = None
     rejected_findings: int = 0
     # Этап, на котором прогон упал. Заполняет только `advance` при переходе в

@@ -8,6 +8,7 @@ CHECK: ограниченные наборы — часть контракта �
 
 import datetime as dt
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -20,6 +21,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -162,6 +164,18 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             "verifier_dropped_findings >= 0",
             name="ck_review_runs_verifier_dropped",
         ),
+        # Расход модели пишется целиком или не пишется: маппер по пустым
+        # input_tokens считает расход неизвестным, и cost_eur без токенов
+        # молча пропал бы из API. Неотрицательность — как у шагов прогона.
+        CheckConstraint(
+            "(input_tokens IS NULL) = (output_tokens IS NULL)"
+            " AND (input_tokens IS NULL) = (cached_tokens IS NULL)"
+            " AND (input_tokens IS NULL) = (reasoning_tokens IS NULL)"
+            " AND (input_tokens IS NULL) = (cost_eur IS NULL)"
+            " AND (input_tokens IS NULL OR (tokens_used IS NOT NULL AND input_tokens >= 0"
+            " AND output_tokens >= 0 AND cached_tokens >= 0 AND reasoning_tokens >= 0 AND cost_eur >= 0))",
+            name="ck_review_runs_usage",
+        ),
         # Курсор общего потока событий: опрос «изменённые после (updated_at, id)»
         # раз в секунду на соединение читает диапазон индекса, а не всю таблицу.
         Index("ix_review_runs_updated_at_id", "updated_at", "id"),
@@ -192,6 +206,14 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
     model: Mapped[str | None] = mapped_column(String(255))
     tokens_used: Mapped[int | None] = mapped_column(BigInteger)
+    # Разбивка `tokens_used` по видам и стоимость вызовов модели в евро
+    # (`LlmUsage`): точно, 10 знаков, как у баланса Eurorouter. Пишутся вместе;
+    # пусты до анализа и у прогонов, записанных до разбивки.
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cached_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    reasoning_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cost_eur: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
     duration_seconds: Mapped[float | None] = mapped_column(Float)
     rejected_findings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Итог второго прохода модели; пуст, пока анализ не завершён, и у прогонов,

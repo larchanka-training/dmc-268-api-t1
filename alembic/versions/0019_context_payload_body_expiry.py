@@ -20,8 +20,8 @@ check-ограничение проверяет все строки под не�
 Откат возвращает `NOT NULL`: стёртым телам ставится пустой объект `{}` — стёртое не
 восстановить.
 
-Revision ID: 0018
-Revises: 0017
+Revision ID: 0019
+Revises: 0018
 Create Date: 2026-11-06 09:00:00.000000
 
 """
@@ -34,8 +34,8 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 # Идентификаторы ревизии, используются Alembic.
-revision: str = "0018"
-down_revision: str | Sequence[str] | None = "0017"
+revision: str = "0019"
+down_revision: str | Sequence[str] | None = "0018"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -10,8 +10,8 @@
 Запрос, который вместе с резервом ответа не помещается в окно модели, порт
 не получает вовсе: `PromptTooLargeError` - подкласс `LlmError`, и пайплайн
 обрабатывает его тем же путём.
-Неполные вердикты верификатора - не исключение, а неудачный `Result`: ответ
-пришёл и израсходовал токены, их надо учесть.
+Неполные вердикты верификатора - не исключение, а неудачный `Result`.
+Расход вызовов уходит в счётчик `meter` от вызывающего, а не в результат.
 """
 
 from collections.abc import Sequence
@@ -25,6 +25,7 @@ from app.application.llm_schema import (
 )
 from app.application.ports.llm_gateway import (
     LlmGateway,
+    LlmMeter,
     LlmRequest,
     LlmReviewResult,
     LlmTask,
@@ -50,12 +51,6 @@ class LlmLimits:
     max_output_tokens: int
 
 
-@dataclass(frozen=True, slots=True)
-class VerificationAnswer:
-    verdicts: Result[dict[str, Verdict]]
-    tokens_used: int
-
-
 def request_review(
     context: ContextPayload,
     texts: PromptTexts,
@@ -63,6 +58,7 @@ def request_review(
     *,
     limits: LlmLimits,
     on_retry: RetryListener | None = None,
+    meter: LlmMeter | None = None,
 ) -> LlmReviewResult:
     request = LlmRequest(
         LlmTask.REVIEW,
@@ -70,9 +66,10 @@ def request_review(
         ReviewOutput,
         max_output_tokens=limits.max_output_tokens,
         on_retry=on_retry,
+        meter=meter,
     )
     response = gateway.complete(request)
-    return to_review_result(response.content, model=response.model, tokens_used=response.tokens_used)
+    return to_review_result(response.content, model=response.model)
 
 
 def request_verification(
@@ -83,19 +80,19 @@ def request_verification(
     *,
     limits: LlmLimits,
     on_retry: RetryListener | None = None,
-) -> VerificationAnswer:
+    meter: LlmMeter | None = None,
+) -> Result[dict[str, Verdict]]:
+    """Вердикты верификатора по кандидатам; неполный ответ - неудачный `Result`."""
     request = LlmRequest(
         LlmTask.VERIFY,
         _fitting(build_verification_prompt(texts, context.body, candidates), limits),
         VerificationOutput,
         max_output_tokens=limits.max_output_tokens,
         on_retry=on_retry,
+        meter=meter,
     )
     response = gateway.complete(request)
-    return VerificationAnswer(
-        verdicts=check_verdicts(response.content, candidate_ids(len(candidates))),
-        tokens_used=response.tokens_used,
-    )
+    return check_verdicts(response.content, candidate_ids(len(candidates)))
 
 
 def _fitting(messages: tuple[PromptMessage, ...], limits: LlmLimits) -> tuple[PromptMessage, ...]:

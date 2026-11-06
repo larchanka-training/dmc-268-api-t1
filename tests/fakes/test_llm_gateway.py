@@ -13,6 +13,7 @@ from app.domain.llm_errors import (
     LlmRateLimitedError,
     LlmTimeoutError,
 )
+from app.domain.llm_usage import LlmUsage
 
 from .llm_gateway import SUMMARY, ScriptError, load_llm_script
 
@@ -23,7 +24,12 @@ FINDING = {"filePath": "a.py", "line": 2, "message": "м"}
 def _load(tmp_path: Path, entries: Any) -> list[Any]:
     path = tmp_path / "script.json"
     path.write_text(json.dumps(entries), encoding="utf-8")
-    return load_llm_script(path).answers
+    return _answers(load_llm_script(path).answers)
+
+
+def _answers(entries: list[Any]) -> list[Any]:
+    """Ответы и сбои сценария без расхода: его сверяют отдельно."""
+    return [entry.answer for entry in entries]
 
 
 def _content(tmp_path: Path, entry: dict[str, Any]) -> Any:
@@ -33,7 +39,8 @@ def _content(tmp_path: Path, entry: dict[str, Any]) -> Any:
 
 
 def test_the_example_script_drops_f1_and_keeps_f2() -> None:
-    review, verify = load_llm_script(EXAMPLE).answers
+    script: list[Any] = load_llm_script(EXAMPLE).answers
+    review, verify = _answers(script)
 
     assert not isinstance(review, Exception) and not isinstance(verify, Exception)
     assert isinstance(review.content, ReviewOutput)
@@ -41,7 +48,7 @@ def test_the_example_script_drops_f1_and_keeps_f2() -> None:
         (3, "readability"),
         (7, "correctness"),
     ]
-    assert (review.model, review.tokens_used) == ("script", 1200)
+    assert (review.model, script[0].usage) == ("script", LlmUsage(input_tokens=1200, total_tokens=1200))
     assert isinstance(verify.content, VerificationOutput)
     assert [(v.id, v.verdict.value) for v in verify.content.verdicts] == [
         ("F1", "drop"),
@@ -105,10 +112,13 @@ def test_a_whole_pasted_model_answer_is_accepted(tmp_path: Path) -> None:
 def test_an_error_entry_is_the_matching_llm_error(
     tmp_path: Path, kind: str, error_type: type[LlmError]
 ) -> None:
-    (answer,) = _load(tmp_path, [{"error": kind, "tokens": 5}])
+    path = tmp_path / "script.json"
+    path.write_text(json.dumps([{"error": kind, "tokens": 5}]), encoding="utf-8")
+    entry: Any
+    (entry,) = load_llm_script(path).answers
 
-    assert type(answer) is error_type
-    assert isinstance(answer, LlmError) and answer.tokens_used == 5
+    assert type(entry.answer) is error_type
+    assert entry.usage == LlmUsage(input_tokens=5, total_tokens=5)
 
 
 @pytest.mark.parametrize(

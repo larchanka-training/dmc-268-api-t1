@@ -1,21 +1,25 @@
-"""Общий цикл адаптеров модели: ответ по схеме, повторы, учёт токенов."""
+"""Общий цикл адаптеров модели: ответ по схеме, повторы, учёт расхода."""
 
 import json
 from collections.abc import Sequence
 from dataclasses import replace
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
 from app.application.llm_schema import ReviewOutput
-from app.application.ports.llm_gateway import LlmRequest, LlmTask
+from app.application.ports.llm_gateway import LlmMeter, LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
 from app.domain.llm_errors import LlmError, LlmOutputError
+from app.domain.llm_usage import LlmUsage
 from app.infrastructure.llm.structured import RawReply, complete_structured
 
 MESSAGES = (PromptMessage(PromptRole.SYSTEM, "инструкции"), PromptMessage(PromptRole.USER, "код"))
 REQUEST = LlmRequest(LlmTask.REVIEW, MESSAGES, ReviewOutput, max_output_tokens=4_096)
+# Расход одного ответа `_Scripted`.
+SPENT = LlmUsage(input_tokens=80, output_tokens=20, total_tokens=100, cost_eur=Decimal("0.0000007"))
 SUMMARY = {"problem": "p", "positives": [], "effort": "e"}
 FINDING = {
     "filePath": "app/x.py",
@@ -56,7 +60,16 @@ class _Scripted:
         text = self._texts.pop(0)
         if isinstance(text, Exception):
             raise text
-        return RawReply(text=text, model=f"model-{len(self.calls)}", tokens=100)
+        return RawReply(text=text, model=f"model-{len(self.calls)}", usage=SPENT)
+
+
+def _metered() -> tuple[LlmRequest[ReviewOutput], LlmMeter]:
+    meter = LlmMeter()
+    return replace(REQUEST, meter=meter), meter
+
+
+def _tokens(total: int) -> LlmUsage:
+    return LlmUsage(input_tokens=total, total_tokens=total)
 
 
 def _retry(*violations: str) -> PromptMessage:
@@ -70,22 +83,25 @@ def _retry(*violations: str) -> PromptMessage:
 
 def test_valid_first_answer_is_returned_after_one_call() -> None:
     send = _Scripted(VALID)
+    request, meter = _metered()
 
-    response = complete_structured(send, REQUEST, max_attempts=2)
+    response = complete_structured(send, request, max_attempts=2)
 
     assert send.calls == [MESSAGES]
     assert isinstance(response.content, ReviewOutput)
     assert response.content.findings[0].message == "m"
-    assert (response.model, response.tokens_used) == ("model-1", 100)
+    assert (response.model, meter.total) == ("model-1", SPENT)
 
 
 def test_invalid_then_valid_appends_one_message_after_the_originals() -> None:
     send = _Scripted(WITHOUT_SEVERITY, VALID)
+    request, meter = _metered()
 
-    response = complete_structured(send, REQUEST, max_attempts=2)
+    response = complete_structured(send, request, max_attempts=2)
 
     assert send.calls == [MESSAGES, (*MESSAGES, _retry("findings.0.severity: missing"))]
-    assert (response.model, response.tokens_used) == ("model-2", 200)
+    # Повтор по схеме - два ответа, оба в счётчике: токены и стоимость.
+    assert (response.model, meter.total) == ("model-2", SPENT + SPENT)
 
 
 def test_every_attempt_invalid_raises_an_output_error_naming_the_violation() -> None:
@@ -129,39 +145,62 @@ def test_transport_failure_is_not_retried() -> None:
     assert len(send.calls) == 1
 
 
-def test_every_attempt_invalid_reports_the_tokens_of_all_attempts() -> None:
+def test_every_attempt_invalid_records_the_usage_of_all_attempts() -> None:
     send = _Scripted(WITHOUT_SEVERITY, WITHOUT_SEVERITY)
+    request, meter = _metered()
 
-    with pytest.raises(LlmOutputError) as error:
-        complete_structured(send, REQUEST, max_attempts=2)
+    with pytest.raises(LlmOutputError):
+        complete_structured(send, request, max_attempts=2)
 
-    assert error.value.tokens_used == 200
+    assert meter.total == SPENT + SPENT
 
 
-def test_transport_failure_after_an_invalid_answer_carries_its_tokens() -> None:
+def test_transport_failure_after_an_invalid_answer_keeps_its_usage() -> None:
     send = _Scripted(WITHOUT_SEVERITY, LlmError("таймаут"))
+    request, meter = _metered()
 
-    with pytest.raises(LlmError, match="таймаут") as error:
-        complete_structured(send, REQUEST, max_attempts=2)
+    with pytest.raises(LlmError, match="таймаут"):
+        complete_structured(send, request, max_attempts=2)
 
-    assert error.value.tokens_used == 100
+    assert meter.total == SPENT
+
+
+def test_answer_rejected_by_the_adapter_is_recorded_then_raised() -> None:
+    rejected = LlmError("запрос мог быть обрезан")
+    request, meter = _metered()
+
+    def send(messages: Sequence[PromptMessage]) -> RawReply:
+        return RawReply(text=VALID, model="m", usage=SPENT, rejected=rejected)
+
+    with pytest.raises(LlmError) as error:
+        complete_structured(send, request, max_attempts=2)
+
+    assert error.value is rejected
+    assert meter.total == SPENT
+
+
+def test_request_without_meter_is_served_as_before() -> None:
+    response = complete_structured(_Scripted(VALID), REQUEST, max_attempts=2)
+
+    assert response.model == "model-1"
 
 
 def test_truncated_answer_is_retried_with_the_length_limit_named() -> None:
     replies = [
-        RawReply(text='{"schemaVersion": "1", "find', model="m", tokens=4_200, truncated=True),
-        RawReply(text=VALID, model="m", tokens=900),
+        RawReply(text='{"schemaVersion": "1", "find', model="m", usage=_tokens(4_200), truncated=True),
+        RawReply(text=VALID, model="m", usage=_tokens(900)),
     ]
+    request, meter = _metered()
     calls: list[tuple[PromptMessage, ...]] = []
 
     def send(messages: Sequence[PromptMessage]) -> RawReply:
         calls.append(tuple(messages))
         return replies.pop(0)
 
-    response = complete_structured(send, REQUEST, max_attempts=2)
+    response = complete_structured(send, request, max_attempts=2)
 
     assert isinstance(response.content, ReviewOutput)
-    assert response.tokens_used == 5_100
+    assert meter.total.total_tokens == 5_100
     assert calls[1][-1] == PromptMessage(
         PromptRole.USER,
         "Предыдущий ответ не прошёл проверку схемы:\n"
@@ -172,33 +211,43 @@ def test_truncated_answer_is_retried_with_the_length_limit_named() -> None:
 
 def test_every_attempt_truncated_names_the_length_limit() -> None:
     def send(messages: Sequence[PromptMessage]) -> RawReply:
-        return RawReply(text='{"schemaVersion": "1", "find', model="m", tokens=4_200, truncated=True)
+        return RawReply(text='{"schemaVersion": "1", "find', model="m", usage=_tokens(4_200), truncated=True)
 
-    with pytest.raises(LlmOutputError, match="обрезан пределом длины \\(4096") as error:
-        complete_structured(send, REQUEST, max_attempts=2)
+    request, meter = _metered()
 
-    assert error.value.tokens_used == 8_400
+    with pytest.raises(LlmOutputError, match="обрезан пределом длины \\(4096"):
+        complete_structured(send, request, max_attempts=2)
+
+    assert meter.total.total_tokens == 8_400
 
 
 def test_complete_answer_marked_as_cut_by_the_provider_is_accepted() -> None:
     """Модель дописала пробелы после объекта до предела: ответ полный."""
 
     def send(messages: Sequence[PromptMessage]) -> RawReply:
-        return RawReply(text=VALID + " " * 50, model="m", tokens=1_024, truncated=True)
+        return RawReply(text=VALID + " " * 50, model="m", usage=_tokens(1_024), truncated=True)
 
-    response = complete_structured(send, REQUEST, max_attempts=2)
+    request, meter = _metered()
+
+    response = complete_structured(send, request, max_attempts=2)
 
     assert isinstance(response.content, ReviewOutput)
-    assert response.tokens_used == 1_024
+    assert meter.total.total_tokens == 1_024
 
 
 def _listening() -> tuple[LlmRequest[ReviewOutput], list[tuple[LlmError, int]]]:
+    """Запрос со слушателем, который запоминает сбой и итог счётчика в момент повтора."""
     heard: list[tuple[LlmError, int]] = []
-    request = replace(REQUEST, on_retry=lambda error, tokens: heard.append((error, tokens)))
+    meter = LlmMeter()
+    request = replace(
+        REQUEST,
+        meter=meter,
+        on_retry=lambda error: heard.append((error, meter.total.total_tokens)),
+    )
     return request, heard
 
 
-def test_each_retry_is_reported_with_the_tokens_spent_so_far() -> None:
+def test_each_retry_is_reported_after_its_usage_is_recorded() -> None:
     request, heard = _listening()
     send = _Scripted(WITHOUT_SEVERITY, WITHOUT_SEVERITY, VALID)
 

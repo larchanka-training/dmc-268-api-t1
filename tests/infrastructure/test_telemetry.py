@@ -72,7 +72,7 @@ from app.infrastructure.telemetry import (
 from app.worker import factory as worker_factory
 
 from ..application.test_review_pipeline import _run, _seed_run
-from ..fakes.llm_gateway import ScriptedLlmGateway
+from ..fakes.llm_gateway import ScriptedLlmGateway, spent
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..metrics import metric_delta, metric_histogram, metric_snapshot
 
@@ -1467,7 +1467,7 @@ def test_a_pipeline_failing_on_a_stage_closes_its_otel_span_as_an_error(
     with pytest.raises(LlmTimeoutError):
         _run(
             uow,
-            ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=30)]),
+            ScriptedLlmGateway([spent(LlmTimeoutError("таймаут"), 30)]),
             stage_tracer=OtelStageTracer(),
         )
 
