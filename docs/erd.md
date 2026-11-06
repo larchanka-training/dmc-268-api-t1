@@ -63,7 +63,12 @@ erDiagram
         text failure_reason
         review_run_status failed_stage "этап, на котором прогон упал; null, если не падал или упал из queued"
         text model
-        bigint tokens_used
+        bigint tokens_used "итог провайдера (usage.total_tokens)"
+        bigint input_tokens "входные, вместе с кэшированными; null до анализа и у прогонов до разбивки"
+        bigint output_tokens "выходные, вместе с reasoning"
+        bigint cached_tokens
+        bigint reasoning_tokens
+        numeric cost_eur "NUMERIC(20, 10): стоимость у провайдера в евро, точно, на момент вызова"
         float duration_seconds
         int rejected_findings "замечания, отброшенные отсевом: строка вне диффа, невалидная ссылка на правило, дубль"
         review_verification verification "итог второго прохода модели: verified, not_required, unavailable; null до конца анализа"
@@ -280,6 +285,7 @@ refresh под блокировкой `SELECT … FOR UPDATE`; удаляетс�
 | Ссылка на правило заполнена целиком или пуста целиком | `ck_findings_rule_ref`: `rule_name`, `rule_check`, `rule_check_text` все `NULL` либо все заполнены и `rule_check >= 1`. Префикс атрибуции строится из всех трёх частей. |
 | Шаг закрыт целиком или идёт | `ck_review_run_steps_duration`: длительности нет ровно у `running`; `ck_review_run_steps_error_code`: код ошибки есть ровно у `failed`. Длительность и токены не отрицательны. |
 | Счётчик верификатора не отрицателен | `ck_review_runs_verifier_dropped`: `verifier_dropped_findings >= 0` |
+| Расход модели пишется целиком и не отрицателен | `ck_review_runs_usage`: колонки разбивки и `cost_eur` пусты вместе; при расходе `tokens_used` задан, токены и стоимость `>= 0` |
 | Комментарий публикуется один раз за прогон | `UNIQUE NULLS NOT DISTINCT (review_run_id, finding_id)`. Именно правило для NULL распространяет это ограничение на итоговый комментарий прогона, у которого замечания нет. |
 | Id комментария у провайдера не повторяется внутри вида | `UNIQUE (provider_comment_id, kind)`: у сводки это id ревью, у `inline` и `thread_reply` — id комментария к строке, счётчики у GitHub разные и могут совпасть. Колонки `NOT NULL`, поэтому правило для NULL не нужно. Ограничение даёт и индекс для поиска комментария по id. |
 | Учётная запись провайдера — один пользователь | `UNIQUE (provider, provider_user_id)` |

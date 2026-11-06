@@ -124,11 +124,10 @@ def _anchor(file_path: str, side: DiffSide, line: int) -> DiffAnchor:
     return DiffAnchor(file_path=file_path, side=side, old_line=line)
 
 
-def to_review_result(output: ReviewOutput, *, model: str, tokens_used: int) -> LlmReviewResult:
+def to_review_result(output: ReviewOutput, *, model: str) -> LlmReviewResult:
     """Перевести проверенный ответ ревью в структуры приложения; `threadFollowUps` отбрасываются."""
     return LlmReviewResult(
         model=model,
-        tokens_used=tokens_used,
         findings=tuple(
             LlmFinding(
                 anchor=_anchor(f.file_path, f.side, f.line),

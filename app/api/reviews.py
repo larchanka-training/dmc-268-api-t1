@@ -95,6 +95,7 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.ids import new_id
+from app.domain.llm_usage import LlmUsage
 from app.domain.provider_links import merge_request_url
 from app.domain.run_list import run_list_filter
 from app.domain.vcs_errors import DiffTooLargeError, VcsError
@@ -278,6 +279,37 @@ class PublishedCommentResponse(BaseModel):
     published_at: UtcDatetime = Field(description="Когда комментарий опубликован.")
 
 
+class RunUsageResponse(BaseModel):
+    """Расход вызовов модели прогона: токены по видам и стоимость у провайдера.
+
+    Сумма по всем ответам модели прогона, включая повторы по схеме, смену ключа и фоллбэк.
+    """
+
+    input_tokens: int = Field(ge=0, description="Входные токены всех вызовов модели прогона.")
+    output_tokens: int = Field(ge=0, description="Выходные токены всех вызовов модели прогона.")
+    cost_eur: str = Field(
+        pattern=r"^\d+(\.\d+)?$",
+        description=(
+            "Стоимость у провайдера в евро — точная десятичная строка без экспоненты и хвостовых нулей "
+            "(до 10 знаков после точки, как у баланса Eurorouter); ноль — \"0\". Строкой, а не числом JSON: "
+            "число клиент прочёл бы во float. Цена на момент вызова; у локальной модели и провайдера без "
+            "стоимости в евро — 0."
+        ),
+        examples=["0.0000913"],
+    )
+
+
+def _usage_response(usage: LlmUsage | None) -> RunUsageResponse | None:
+    if usage is None:
+        return None
+    return RunUsageResponse(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        # normalize - без хвостовых нулей колонки, `f` - без экспоненты (1E+2 → 100).
+        cost_eur=f"{usage.cost_eur.normalize():f}",
+    )
+
+
 class ReviewRunResponse(BaseModel):
     """Прогон ревью вместе с его находками."""
 
@@ -295,6 +327,12 @@ class ReviewRunResponse(BaseModel):
     trigger: TriggerSource = Field(description="Что запустило прогон.", examples=["webhook"])
     model: str | None = Field(description="Модель LLM, которая провела ревью; null до анализа.")
     tokens_used: int | None = Field(description="Токенов LLM потрачено; null до анализа.")
+    usage: RunUsageResponse | None = Field(
+        description=(
+            "Входные и выходные токены и стоимость; их сумма может не совпасть с tokens_used — это итог провайдера."
+            " null до анализа и у прогонов, записанных до разбивки."
+        )
+    )
     rejected_findings: int = Field(ge=0, description="Сколько находок отброшено: привязка вне изменённых строк диффа.")
     verification: VerificationOutcome | None = Field(
         description="Итог второго прохода модели (Reflection Pass); null, пока анализ не завершён.",
@@ -614,6 +652,7 @@ def get_review(
     return ReviewRunResponse.model_validate(
         {
             **asdict(run),
+            "usage": _usage_response(run.usage),
             "merge_request": _merge_request_summary(uow, run),
             "findings": [{**asdict(f), **asdict(f.anchor)} for f in findings],
             "published_comments": [asdict(c) for c in comments],

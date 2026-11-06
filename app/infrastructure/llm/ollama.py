@@ -19,7 +19,8 @@ from pydantic import BaseModel
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse
 from app.domain.entities import PromptMessage
 from app.domain.llm_errors import LlmError, LlmTimeoutError
-from app.infrastructure.llm.structured import RawReply, complete_structured
+from app.domain.llm_usage import LlmUsage
+from app.infrastructure.llm.structured import RawReply, complete_structured, token_count
 
 
 class OllamaGateway:
@@ -68,24 +69,31 @@ class OllamaGateway:
             model: str = data["model"]
             # С Ollama 0.33.3 поле - весь вход вместе с закэшированной частью;
             # `.get` - на случай, если сервер старше и поле опустил.
-            prompt_tokens: int = data.get("prompt_eval_count", 0)
-            output_tokens: int = data["eval_count"]
+            prompt_tokens = token_count(data.get("prompt_eval_count"))
+            output_tokens = token_count(data["eval_count"])
             # `length` - ответ оборван по `num_predict`.
             truncated = data.get("done_reason") == "length"
         except (ValueError, KeyError, TypeError) as error:
             raise LlmError("Ollama вернула неожиданное тело на /api/chat") from error
+        # Стоимости у локальной модели нет.
+        usage = LlmUsage(
+            input_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            total_tokens=prompt_tokens + output_tokens,
+        )
         # Оценка запроса до отправки - средняя («байты / 4»). Если модель
         # насчитала больше, чем оставляет окно за вычетом резерва, она могла
-        # обрезать начало запроса: ответ на неполный запрос не принимаем.
+        # обрезать начало запроса: ответ на неполный запрос не принимаем, но
+        # его расход учитываем.
         prompt_limit = self._window_tokens - max_output_tokens
+        rejected = None
         if prompt_tokens > prompt_limit:
-            raise LlmError(
+            rejected = LlmError(
                 f"Ollama насчитала в запросе {prompt_tokens} токенов при пределе "
-                f"{prompt_limit}: запрос мог быть обрезан",
-                tokens_used=prompt_tokens + output_tokens,
+                f"{prompt_limit}: запрос мог быть обрезан"
             )
         return RawReply(
-            text=text, model=model, tokens=prompt_tokens + output_tokens, truncated=truncated
+            text=text, model=model, usage=usage, truncated=truncated, rejected=rejected
         )
 
 

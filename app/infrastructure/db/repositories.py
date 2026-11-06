@@ -57,6 +57,7 @@ from app.domain.enums import (
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
+from app.domain.llm_usage import LlmUsage
 from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
@@ -464,7 +465,7 @@ class SqlAlchemyReviewRunRepo:
                 failure_reason=run.failure_reason,
                 failed_stage=run.failed_stage,
                 model=run.model,
-                tokens_used=run.tokens_used,
+                **m.run_usage_columns(run),
                 duration_seconds=run.duration_seconds,
                 rejected_findings=run.rejected_findings,
                 verification=run.verification,
@@ -509,12 +510,22 @@ class SqlAlchemyReviewRunRepo:
         row.failure_reason = run.failure_reason
         row.failed_stage = run.failed_stage
         row.model = run.model
-        row.tokens_used = run.tokens_used
+        for column, value in m.run_usage_columns(run).items():
+            setattr(row, column, value)
         row.duration_seconds = run.duration_seconds
         row.rejected_findings = run.rejected_findings
         row.verification = run.verification
         row.verifier_dropped_findings = run.verifier_dropped_findings
         self._notify(run)
+
+    def record_cancelled_spend(self, run_id: UUID, usage: LlmUsage) -> None:
+        row = self._session.get(ReviewRunRow, run_id, with_for_update=True, populate_existing=True)
+        if row is None or row.status is not ReviewRunStatus.CANCELLED:
+            return
+        row.tokens_used = usage.total_tokens
+        for column, value in m.usage_columns(usage).items():
+            setattr(row, column, value)
+        self._notify(m.review_run_to_domain(row))
 
     def _notify(self, run: ReviewRun) -> None:
         """Уведомить поток событий: `pg_notify` в той же транзакции уходит только при коммите.
