@@ -514,7 +514,11 @@ def build_maintenance(
                 uow_factory(), now=now(), retention=payload_retention, batch=payload_expiry_batch
             )
             if expired:
-                logger.info("тел пакетов контекста стёрто по сроку хранения: %d", expired)
+                # Счётчик — полем, а не в тексте: по нему ищут Loki и алерты.
+                logger.info(
+                    "тела пакетов контекста стёрты по сроку хранения",
+                    extra={"maintenance_step": "expire_context_payloads", "expired_count": expired},
+                )
         except Exception as exc:
             record_current_exception(exc)
             logger.exception(

@@ -691,7 +691,7 @@ def test_expire_bodies_clears_old_bodies_and_keeps_metadata(uow) -> None:
     assert expired == 1
     with uow as work:
         old, fresh = work.context_payloads.list_for_run(run.id)
-    assert (old.body, old.body_expired_at) == ({}, now)
+    assert (old.body, old.body_expired_at) == (None, now)
     assert (old.file_paths, old.token_count, old.content_sha256) == (("app/main.py",), 10, "age0")
     assert (fresh.body, fresh.body_expired_at) == ({"text": "x"}, None)
 

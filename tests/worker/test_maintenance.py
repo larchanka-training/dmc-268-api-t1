@@ -80,7 +80,34 @@ def test_the_pass_expires_old_context_payload_bodies() -> None:
     )()
 
     (stored,) = uow.context_payloads.list_for_run(UUID(int=2))
-    assert (stored.body, stored.body_expired_at) == ({}, NOW)
+    assert (stored.body, stored.body_expired_at) == (None, NOW)
+
+
+def test_the_expiry_count_is_a_log_field_not_text(caplog, monkeypatch) -> None:
+    """Счётчик стёртых тел ищется по полю записи, как требует `.agents/rules/backend.md`."""
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(logging.getLogger("app.worker.factory"), "disabled", False)
+    uow = FakeUnitOfWork()
+    uow.context_payloads.add(
+        ContextPayload(
+            id=UUID(int=1),
+            review_run_id=UUID(int=2),
+            chunk_index=0,
+            tiers=("diff",),
+            file_paths=("a.py",),
+            token_count=1,
+            content_sha256="d",
+            body={"diff": "+x"},
+            created_at=NOW - timedelta(days=60),
+            updated_at=NOW - timedelta(days=60),
+        )
+    )
+
+    build_maintenance(lambda: uow, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
+
+    (record,) = [r for r in caplog.records if getattr(r, "maintenance_step", None) == "expire_context_payloads"]
+    assert record.expired_count == 1
+    assert record.getMessage() == "тела пакетов контекста стёрты по сроку хранения"
 
 
 def test_the_pass_sweeps_stale_runs() -> None:

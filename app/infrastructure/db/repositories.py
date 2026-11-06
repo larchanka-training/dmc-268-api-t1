@@ -45,6 +45,7 @@ from app.domain.entities import (
     ReviewRunListEntry,
     ReviewRunStep,
     Secret,
+    StoredContextPayload,
     User,
 )
 from app.domain.entities import Session as UserSession
@@ -576,7 +577,7 @@ class SqlAlchemyContextPayloadRepo:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]:
+    def list_for_run(self, review_run_id: UUID) -> list[StoredContextPayload]:
         rows = self._session.scalars(
             select(ContextPayloadRow)
             .where(ContextPayloadRow.review_run_id == review_run_id)

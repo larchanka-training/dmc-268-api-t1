@@ -10,10 +10,12 @@ Change `context-payload-retention`. В теле пакета дословно л
 - Частичный индекс `(created_at) WHERE body IS NOT NULL` — проход воркера выбирает самые старые
   живые тела, не читая уже стёртые строки.
 
-`ADD COLUMN` без умолчания и `DROP NOT NULL` меняют только каталог, без перезаписи таблицы.
-Check-ограничение добавляется `NOT VALID` и проверяется отдельно: проверка читает таблицу, но
-не держит эксклюзивную блокировку записи. Индекс строится обычным `CREATE INDEX`: миграции идут
-в транзакции, `CONCURRENTLY` в ней нельзя; таблица на стенде небольшая.
+Блокировки. Прогон миграций — одна транзакция (`alembic/env.py`), поэтому `ADD COLUMN`,
+`DROP NOT NULL` и `ADD CONSTRAINT` держат ACCESS EXCLUSIVE на `context_payloads` до коммита, а
+check-ограничение проверяет все строки под ней. Таблицу не перезаписывает ни один шаг: колонка
+без умолчания и `DROP NOT NULL` меняют только каталог. Индекс — обычный `CREATE INDEX`
+(`CONCURRENTLY` в транзакции нельзя). На стенде таблица небольшая, и всё укладывается в
+`lock_timeout`; в таблицу пишет только воркер, один раз за прогон.
 
 Откат возвращает `NOT NULL`: стёртым телам ставится пустой объект `{}` — стёртое не
 восстановить.
@@ -50,12 +52,10 @@ def upgrade() -> None:
         existing_type=postgresql.JSONB(astext_type=sa.Text()),
         nullable=True,
     )
-    op.execute(
-        "ALTER TABLE context_payloads ADD CONSTRAINT ck_context_payloads_body_expiry "
-        "CHECK ((body IS NULL) = (body_expired_at IS NOT NULL)) NOT VALID"
-    )
-    op.execute(
-        "ALTER TABLE context_payloads VALIDATE CONSTRAINT ck_context_payloads_body_expiry"
+    op.create_check_constraint(
+        "ck_context_payloads_body_expiry",
+        "context_payloads",
+        "(body IS NULL) = (body_expired_at IS NOT NULL)",
     )
     op.create_index(
         "ix_context_payloads_live_created_at",

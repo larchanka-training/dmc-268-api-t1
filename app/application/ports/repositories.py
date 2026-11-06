@@ -25,6 +25,7 @@ from app.domain.entities import (
     ReviewRunListEntry,
     ReviewRunStep,
     Session,
+    StoredContextPayload,
     User,
 )
 from app.domain.enums import Provider
@@ -162,7 +163,9 @@ class ReviewRunStepRepo(Protocol):
 
 
 class ContextPayloadRepo(Protocol):
-    def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]: ...
+    def list_for_run(self, review_run_id: UUID) -> list[StoredContextPayload]:
+        """Сохранённые пакеты прогона по порядку частей; тело стёртого — `None`."""
+        ...
 
     def add(self, payload: ContextPayload) -> None: ...
 

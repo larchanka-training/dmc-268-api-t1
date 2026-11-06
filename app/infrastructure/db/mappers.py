@@ -7,7 +7,6 @@
 from copy import deepcopy
 
 from app.domain.entities import (
-    ContextPayload,
     DiffAnchor,
     Finding,
     MergeRequest,
@@ -17,6 +16,7 @@ from app.domain.entities import (
     ReviewRunStep,
     RuleRef,
     Session,
+    StoredContextPayload,
     User,
 )
 from app.infrastructure.db.models import (
@@ -100,8 +100,8 @@ def review_run_step_to_domain(row: ReviewRunStepRow) -> ReviewRunStep:
     )
 
 
-def context_payload_to_domain(row: ContextPayloadRow) -> ContextPayload:
-    return ContextPayload(
+def context_payload_to_domain(row: ContextPayloadRow) -> StoredContextPayload:
+    return StoredContextPayload(
         id=row.id,
         review_run_id=row.review_run_id,
         chunk_index=row.chunk_index,
@@ -112,10 +112,10 @@ def context_payload_to_domain(row: ContextPayloadRow) -> ContextPayload:
         # Копия, как tiers и file_paths выше. Отдать dict строки по ссылке —
         # значит превратить frozen dataclass в живую ручку к состоянию сессии,
         # где правка payload.body уходит во flush в базу.
-        body=deepcopy(row.body) if row.body is not None else {},
+        body=deepcopy(row.body) if row.body is not None else None,
+        body_expired_at=row.body_expired_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
-        body_expired_at=row.body_expired_at,
     )
 
 

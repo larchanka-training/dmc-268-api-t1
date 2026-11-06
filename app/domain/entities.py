@@ -183,8 +183,8 @@ class ReviewRunStep:
 class ContextPayload:
     """Один кусок материала, отправленного модели для прогона.
 
-    Тело хранится ограниченный срок (change `context-payload-retention`): после него
-    `body` пуст, а `body_expired_at` — когда его стёрли. Метаданные остаются.
+    Собранный пакет, который уходит модели и записывается, — всегда с телом. Прочитанный из
+    базы — `StoredContextPayload`: его тело могли стереть по сроку хранения.
     """
 
     id: UUID
@@ -197,7 +197,29 @@ class ContextPayload:
     body: dict[str, Any]
     created_at: datetime
     updated_at: datetime
-    body_expired_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredContextPayload:
+    """Пакет контекста, прочитанный из базы.
+
+    Тело хранится ограниченный срок (change `context-payload-retention`): после него `body` —
+    `None`, а `body_expired_at` — когда его стёрли; метаданные остаются. `None`, а не `{}`:
+    стёртое тело не спутать с пустым пакетом, и тип заставляет каждого читателя сохранённого
+    пакета обработать этот случай.
+    """
+
+    id: UUID
+    review_run_id: UUID
+    chunk_index: int
+    tiers: tuple[str, ...]
+    file_paths: tuple[str, ...]
+    token_count: int
+    content_sha256: str
+    body: dict[str, Any] | None
+    body_expired_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

@@ -35,7 +35,6 @@ from app.application.ports.llm_gateway import LlmGateway
 from app.application.use_cases.service_status import ServiceStatusMonitor
 from app.config import Settings
 from app.domain.entities import (
-    ContextPayload,
     Finding,
     PublishedComment,
     Repository,
@@ -302,10 +301,12 @@ class Stack:
         with SqlAlchemyUnitOfWork(self.engine) as work:
             return work.findings.list_for_run(UUID(str(run_id)))
 
-    def context(self, run_id: str | UUID) -> ContextPayload:
+    def context_body(self, run_id: str | UUID) -> dict[str, Any]:
+        """Тело сохранённого пакета прогона; сценарий только что его записал, тело на месте."""
         with SqlAlchemyUnitOfWork(self.engine) as work:
             (payload,) = work.context_payloads.list_for_run(UUID(str(run_id)))
-        return payload
+        assert payload.body is not None
+        return payload.body
 
 
 def deliver(

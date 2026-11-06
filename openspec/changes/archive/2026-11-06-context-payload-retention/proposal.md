@@ -22,7 +22,7 @@
 - Миграция `0018`: `body` nullable, `body_expired_at`, check `(body IS NULL) = (body_expired_at
   IS NOT NULL)`, частичный индекс `(created_at) WHERE body IS NOT NULL`. Откат ставит стёртым
   телам `{}`.
-- Сущность `ContextPayload`: `body_expired_at`; у стёртого пакета `body` пустой.
+- Сущность `StoredContextPayload` — пакет, прочитанный из базы: `body: dict | None` и `body_expired_at`; у стёртого пакета `body` — `None`, и mypy заставляет каждого читателя сохранённого пакета обработать этот случай. Собранный `ContextPayload`, который уходит модели, всегда с телом.
 
 ## Capabilities
 

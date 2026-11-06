@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.application.context_payload_expiry import expire_context_payloads
-from app.domain.entities import ContextPayload
+from app.domain.entities import ContextPayload, StoredContextPayload
 
 from ..fakes.unit_of_work import FakeUnitOfWork
 
@@ -28,7 +28,7 @@ def _payload(n: int, age: timedelta) -> ContextPayload:
     )
 
 
-def _stored(uow: FakeUnitOfWork) -> dict[UUID, ContextPayload]:
+def _stored(uow: FakeUnitOfWork) -> dict[UUID, StoredContextPayload]:
     return {p.id: p for p in uow.context_payloads.list_for_run(UUID(int=100))}
 
 
@@ -41,7 +41,7 @@ def test_only_bodies_older_than_retention_are_expired() -> None:
 
     assert expired == 1
     old, fresh = _stored(uow)[UUID(int=1)], _stored(uow)[UUID(int=2)]
-    assert (old.body, old.body_expired_at) == ({}, NOW)
+    assert (old.body, old.body_expired_at) == (None, NOW)
     assert (old.file_paths, old.token_count, old.content_sha256) == (("app/main.py",), 10, "d1")
     assert (fresh.body, fresh.body_expired_at) == ({"diff": "+secret code"}, None)
 
@@ -68,7 +68,9 @@ def test_one_pass_expires_at_most_a_batch_oldest_first() -> None:
 def test_an_already_expired_body_is_not_touched_again() -> None:
     uow = FakeUnitOfWork()
     earlier = NOW - timedelta(days=5)
-    uow.context_payloads.add(replace(_payload(1, timedelta(days=60)), body={}, body_expired_at=earlier))
+    uow.context_payloads.add(_payload(1, timedelta(days=60)))
+    (stored,) = uow.context_payloads.snapshot()
+    uow.context_payloads.restore([replace(stored, body=None, body_expired_at=earlier)])
 
     assert expire_context_payloads(uow, now=NOW, retention=RETENTION, batch=10) == 0
     assert _stored(uow)[UUID(int=1)].body_expired_at == earlier
