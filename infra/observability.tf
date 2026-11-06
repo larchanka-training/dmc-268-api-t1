@@ -521,6 +521,13 @@ resource "docker_container" "grafana" {
     # Публичные дашборды в 13.x включены по умолчанию: Admin/Editor кнопкой
     # «Share externally» открыл бы панели с логами и трейсами без входа.
     "GF_PUBLIC_DASHBOARDS_ENABLED=false",
+    # Снимки по умолчанию включены и открываются без входа любым по ссылке
+    # (/api/snapshots/:key, /dashboard/snapshot/*), а внешние уходят на
+    # snapshots.raintank.io. enabled=false отвечает 403 на всё API снимков,
+    # включая созданные раньше; external — отдельная настройка, без неё
+    # интерфейс по-прежнему предлагает публикацию на raintank (13.2.4).
+    "GF_SNAPSHOTS_ENABLED=false",
+    "GF_SNAPSHOTS_EXTERNAL_ENABLED=false",
     # Публичный вход по подпути /grafana/: nginx интерфейса проксирует путь
     # как есть, без rewrite, а Grafana строит ссылки и редиректы от root_url.
     # С serve_from_sub_path Grafana отвечает только под /grafana/, корень —

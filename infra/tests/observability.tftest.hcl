@@ -347,8 +347,8 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
 # отдача из подпути и cookie только по HTTPS; анонимный вход и регистрация
 # по-прежнему выключены. /metrics и basic auth выключены: подпуть открыт
 # наружу, а basic auth обходит limit_req на /grafana/login. Версия без входа
-# скрыта, публичные дашборды выключены — иначе панели с логами и трейсами
-# открывались бы без входа.
+# скрыта, публичные дашборды и снимки выключены — иначе панели с логами и
+# трейсами открывались бы без входа.
 run "grafana_serves_public_entry_sub_path" {
   command = plan
 
@@ -371,9 +371,11 @@ run "grafana_serves_public_entry_sub_path" {
         "GF_AUTH_BASIC_ENABLED=false",
         "GF_AUTH_ANONYMOUS_HIDE_VERSION=true",
         "GF_PUBLIC_DASHBOARDS_ENABLED=false",
+        "GF_SNAPSHOTS_ENABLED=false",
+        "GF_SNAPSHOTS_EXTERNAL_ENABLED=false",
       ] : contains(docker_container.grafana[0].env, e)
     ])
-    error_message = "Grafana: GF_SERVER_ROOT_URL = public_origin без слеша + :8443/grafana/, GF_SERVER_SERVE_FROM_SUB_PATH=true, GF_SECURITY_COOKIE_SECURE=true, анонимный вход, регистрация, /metrics, basic auth и публичные дашборды выключены, версия скрыта."
+    error_message = "Grafana: GF_SERVER_ROOT_URL = public_origin без слеша + :8443/grafana/, GF_SERVER_SERVE_FROM_SUB_PATH=true, GF_SECURITY_COOKIE_SECURE=true, анонимный вход, регистрация, /metrics, basic auth, публичные дашборды и снимки выключены, версия скрыта."
   }
 }
 

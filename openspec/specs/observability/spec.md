@@ -750,7 +750,7 @@ SHALL знать свой публичный адрес (`root_url` — публ
 ### Requirement: Подпуть Grafana не открывает лишнего наружу
 
 Подпуть `/grafana/` открыт наружу целиком, поэтому Grafana стенда SHALL NOT отдавать свои метрики,
-версию и коммит без входа, SHALL NOT открывать дашборды без входа (публичные дашборды выключены) и
+версию и коммит без входа, SHALL NOT открывать дашборды без входа (публичные дашборды и снимки выключены) и
 SHALL NOT принимать basic auth: вход — только формой, на которую nginx интерфейса ставит
 ограничение частоты.
 
@@ -776,6 +776,12 @@ SHALL NOT принимать basic auth: вход — только формой,
 - **WHEN** Admin или Editor пытается открыть дашборд наружу («Share externally», `POST /grafana/api/dashboards/uid/<uid>/public-dashboards`)
 - **THEN** ответ — `404`, публичный дашборд не создаётся
 - **AND** запрос без сессии к `/grafana/api/public/dashboards/<token>` получает `401`
+
+#### Scenario: Снимки выключены
+
+- **WHEN** Admin или Editor создаёт снимок дашборда (Share → Snapshot, `POST /grafana/api/snapshots`)
+- **THEN** ответ — `403`, снимок не создаётся, ни локальный, ни на `snapshots.raintank.io`
+- **AND** запрос без сессии к `/grafana/api/snapshots/<key>` получает `403` и данных дашборда не получает, в том числе для снимка, созданного до выключения
 
 ### Requirement: Сеть прокси Grafana
 
