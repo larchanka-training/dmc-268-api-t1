@@ -201,8 +201,8 @@ def test_missing_or_null_counts_are_zero_and_the_total_falls_back_to_the_kinds(
 
 @pytest.mark.parametrize(
     "usage",
-    ['{"total_tokens": "35"}', '{"total_tokens": true}', '{"prompt_tokens": -1}', '{"total_tokens": 3.5}', "null"],
-    ids=["string", "bool", "negative", "fraction", "usage-null"],
+    ['{"total_tokens": "35"}', '{"total_tokens": true}', '{"prompt_tokens": -1}', '{"total_tokens": 3.5}'],
+    ids=["string", "bool", "negative", "fraction"],
 )
 def test_malformed_counts_are_an_unexpected_body(usage: str) -> None:
     handler, _ = _recording(_raw(usage))
@@ -247,6 +247,32 @@ def test_cost_is_kept_to_ten_places_rounding_half_to_even(cost: str, stored: str
     handler, _ = _recording(_raw(f'{{"total_tokens": 1, "cost_eur": {cost}}}'))
 
     assert _metered(handler).cost_eur == Decimal(stored)
+
+
+@pytest.mark.parametrize(
+    "usage",
+    ["null", '"сломано"', '{"prompt_tokens": 30, "completion_tokens": 5, "prompt_tokens_details": 7, "completion_tokens_details": null}'],
+    ids=["usage-null", "usage-not-object", "details-not-object"],
+)
+def test_answer_without_usable_usage_is_accepted_not_paid_twice(usage: str) -> None:
+    """Оплаченный ответ с битым `usage` принят: отказ отправил бы повтор и заплатил второй раз."""
+    handler, seen = _recording(_raw(usage))
+
+    _metered(handler)
+
+    assert len(seen) == 1
+
+
+def test_answer_without_usage_key_is_accepted_with_zero_usage(caplog: pytest.LogCaptureFixture) -> None:
+    body = {k: v for k, v in _reply().items() if k != "usage"}
+    handler, seen = _recording(httpx.Response(200, json=body))
+
+    with caplog.at_level(logging.WARNING):
+        usage = _metered(handler)
+
+    assert len(seen) == 1
+    assert usage.total_tokens == 0
+    assert any("нет счётчиков токенов" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize(

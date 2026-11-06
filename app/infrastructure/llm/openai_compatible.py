@@ -48,6 +48,11 @@ _COST_PLACES = Decimal("1E-10")
 _COST_LIMIT = Decimal(10) ** 10
 
 
+
+def _object(value: Any) -> Mapping[str, Any]:
+    """Вложенный объект `usage` или пустой: учёт расхода не отвергает оплаченный ответ."""
+    return value if isinstance(value, dict) else {}
+
 class OpenAiCompatibleGateway:
     def __init__(
         self,
@@ -144,7 +149,9 @@ class OpenAiCompatibleGateway:
             choice = data["choices"][0]
             text: str = choice["message"]["content"]
             model: str = data["model"]
-            usage = data["usage"]
+            # Без `usage` или с не-объектом ответ всё равно принят: он оплачен, а
+            # отказ отправил бы повтор или фоллбэк и заплатил второй раз.
+            usage = _object(data.get("usage"))
             if all(usage.get(field) is None for field in ("prompt_tokens", "completion_tokens", "total_tokens")):
                 # Ответ принят: он оплачен. Но без счётчиков расход учтён нулём,
                 # и квота с бюджетом (#286) его не видят - об этом должно быть видно.
@@ -155,10 +162,8 @@ class OpenAiCompatibleGateway:
             tokens = LlmUsage(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
-                cached_tokens=token_count((usage.get("prompt_tokens_details") or {}).get("cached_tokens")),
-                reasoning_tokens=token_count(
-                    (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
-                ),
+                cached_tokens=token_count(_object(usage.get("prompt_tokens_details")).get("cached_tokens")),
+                reasoning_tokens=token_count(_object(usage.get("completion_tokens_details")).get("reasoning_tokens")),
                 # Итог провайдера, как на develop; без него - сумма видов.
                 total_tokens=input_tokens + output_tokens if total is None else token_count(total),
                 cost_eur=self._cost_eur(usage),
