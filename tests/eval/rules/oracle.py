@@ -45,9 +45,7 @@ class OracleLlmGateway:
                     {"id": c, "verdict": "keep", "reason": "по разметке"} for c in candidates
                 ],
             }
-        return LlmResponse(
-            model="oracle", tokens_used=0, content=request.response_model.model_validate(body)
-        )
+        return LlmResponse(model="oracle", content=request.response_model.model_validate(body))
 
     def _findings(self, rules: str, code: str) -> list[dict[str, Any]]:
         (case,) = [c for c in self._cases if any(json.dumps(p) in code for p in c.files)]

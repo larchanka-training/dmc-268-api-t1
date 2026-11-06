@@ -4,9 +4,11 @@ import datetime as dt
 import threading
 import time
 from dataclasses import replace
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from app.application.ports.unit_of_work import ActiveRunConflict, RunStateConflict
 from app.application.stale_sweep import sweep_stale_runs
@@ -37,6 +39,7 @@ from app.domain.enums import (
 )
 from app.domain.ids import new_id
 from app.domain.lifecycle import advance
+from app.domain.llm_usage import LlmUsage
 from app.domain.run_steps import finish_step, start_step
 from app.domain.secret_redaction import REDACTED
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -510,6 +513,95 @@ def test_a_finished_run_refuses_a_same_status_update(uow) -> None:
     with uow as work:
         stored = work.review_runs.get(run.id)
         assert (stored.model, stored.tokens_used, stored.duration_seconds) == ("m1", 100, 1.5)
+
+
+def test_a_run_reads_back_its_usage_breakdown_and_cost(uow) -> None:
+    # Стоимость - со всеми 10 знаками колонки: из базы она должна прийти той же.
+    usage = LlmUsage(
+        input_tokens=2100,
+        output_tokens=350,
+        cached_tokens=500,
+        reasoning_tokens=40,
+        total_tokens=2450,
+        cost_eur=Decimal("13.0960038381"),
+    )
+    with uow as work:
+        _, _, run = seeded(work)
+    with uow as work:
+        assert work.review_runs.get(run.id).usage is None
+    building = advance(run, ReviewRunStatus.BUILDING_CONTEXT, LATER).unwrap()
+    with uow as work:
+        work.review_runs.update(replace(building, tokens_used=usage.total_tokens, usage=usage))
+        work.commit()
+
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert (stored.usage, stored.tokens_used) == (usage, 2450)
+    assert str(stored.usage.cost_eur) == "13.0960038381"
+
+
+def test_tokens_used_is_written_from_usage_so_the_two_cannot_drift(uow) -> None:
+    usage = LlmUsage(input_tokens=30, output_tokens=5, total_tokens=35, cost_eur=Decimal("0.0000913"))
+    with uow as work:
+        _, _, run = seeded(work)
+    building = advance(run, ReviewRunStatus.BUILDING_CONTEXT, LATER).unwrap()
+    with uow as work:
+        # `replace` без `tokens_used`: в базе итог всё равно из usage.
+        work.review_runs.update(replace(building, usage=usage))
+        work.commit()
+
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert (stored.tokens_used, stored.usage.total_tokens) == (35, 35)
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        "cost_eur = 0.5",
+        "input_tokens = 1, output_tokens = 1, cached_tokens = 0, reasoning_tokens = 0, cost_eur = 0, tokens_used = NULL",
+        "input_tokens = -1, output_tokens = 1, cached_tokens = 0, reasoning_tokens = 0, cost_eur = 0, tokens_used = 1",
+        "input_tokens = 1, output_tokens = 1, cached_tokens = 0, reasoning_tokens = 0, cost_eur = -0.1, tokens_used = 1",
+    ],
+    ids=["cost-without-tokens", "usage-without-total", "negative-tokens", "negative-cost"],
+)
+def test_usage_columns_are_written_whole_and_non_negative(uow, columns: str) -> None:
+    """CHECK держит инвариант маппера против любого писателя: скрипта, psql, бэкфилла."""
+    with uow as work:
+        _, _, run = seeded(work)
+    with uow as work, pytest.raises(IntegrityError, match="ck_review_runs_usage"):
+        work.session.execute(text(f"UPDATE review_runs SET {columns} WHERE id = :id"), {"id": run.id})
+        work.session.flush()
+
+
+def test_a_cancelled_run_takes_its_spend_and_keeps_its_status(uow) -> None:
+    usage = LlmUsage(input_tokens=900, output_tokens=100, total_tokens=1000, cost_eur=Decimal("0.0000913"))
+    with uow as work:
+        _, _, run = seeded(work)
+    cancelled = advance(run, ReviewRunStatus.CANCELLED, LATER).unwrap()
+    with uow as work:
+        work.review_runs.update(cancelled)
+        work.commit()
+
+    with uow as work:
+        work.review_runs.record_cancelled_spend(run.id, usage)
+        work.commit()
+
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert stored.status is ReviewRunStatus.CANCELLED
+    assert (stored.usage, stored.tokens_used) == (usage, 1000)
+
+
+def test_spend_is_not_recorded_on_a_run_that_is_not_cancelled(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+        work.review_runs.record_cancelled_spend(run.id, LlmUsage(input_tokens=1, total_tokens=1))
+        work.commit()
+
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert (stored.usage, stored.tokens_used) == (None, None)
 
 
 def a_context_payload(run_id, *, chunk_index: int, digest: str) -> ContextPayload:

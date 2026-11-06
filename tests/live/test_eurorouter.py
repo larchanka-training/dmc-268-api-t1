@@ -22,7 +22,7 @@ from pydantic import BaseModel, SecretStr
 
 from app.application.llm_review import request_review
 from app.application.llm_schema import ReviewOutput, VerificationOutput
-from app.application.ports.llm_gateway import LlmRequest, LlmTask
+from app.application.ports.llm_gateway import LlmMeter, LlmRequest, LlmTask
 from app.config import Settings
 from app.domain.entities import ContextPayload, PromptMessage
 from app.domain.enums import PromptRole
@@ -105,13 +105,16 @@ def test_eurorouter_answers_by_the_json_schema_of_the_request(
     task: LlmTask, messages: tuple[PromptMessage, ...], response_model: type[BaseModel]
 ) -> None:
     settings = _settings()
-    request = LlmRequest(task, messages, response_model, max_output_tokens=1_024)
+    meter = LlmMeter()
+    request = LlmRequest(task, messages, response_model, max_output_tokens=1_024, meter=meter)
 
     response = _eurorouter(settings, settings.eurorouter_keys).complete(request)
 
     assert isinstance(response.content, response_model)
     assert response.model
-    assert response.tokens_used > 0
+    assert meter.total.input_tokens > 0 and meter.total.output_tokens > 0
+    # Eurorouter отдаёт стоимость вызова в `usage.cost_eur` (стенд, 2026-11-06).
+    assert meter.total.cost_eur > 0
 
 
 def test_rejected_key_is_replaced_by_the_next_one(caplog: pytest.LogCaptureFixture) -> None:
@@ -175,10 +178,12 @@ def test_full_review_request_with_the_shipped_prompts_is_answered_by_the_schema(
     )
     texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
 
+    meter = LlmMeter()
+
     result = request_review(
-        context, texts, build_container(settings).llm_gateway(), limits=llm_limits(settings)
+        context, texts, build_container(settings).llm_gateway(), limits=llm_limits(settings), meter=meter
     )
 
     assert result.model
-    assert result.tokens_used > 0
+    assert meter.total.total_tokens > 0
     assert result.summary is not None

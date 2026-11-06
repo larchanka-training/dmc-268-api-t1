@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -48,6 +49,7 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.ids import new_id
+from app.domain.llm_usage import LlmUsage
 from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.run_steps import finish_step, start_step
 from app.domain.session import open_session
@@ -187,6 +189,56 @@ def test_returns_a_run_with_its_findings() -> None:
     assert body["model"] == "stub-llm"
     assert len(body["findings"]) == 1
     assert body["findings"][0]["message"] == "сообщение"
+
+
+def test_a_run_reports_its_usage_breakdown_and_cost_as_a_decimal_string() -> None:
+    uow = FakeUnitOfWork()
+    usage = LlmUsage(
+        input_tokens=30,
+        output_tokens=5,
+        cached_tokens=10,
+        reasoning_tokens=2,
+        total_tokens=35,
+        cost_eur=Decimal("0.0000913000"),
+    )
+    run = _add_run(uow, tokens_used=35, usage=usage)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["tokens_used"] == 35
+    assert body["usage"] == {
+        "input_tokens": 30,
+        "output_tokens": 5,
+        "cost_eur": "0.0000913",
+    }
+
+
+@pytest.mark.parametrize(
+    ("stored", "cost_eur"),
+    [
+        ("0E-10", "0"),
+        ("0", "0"),
+        ("13.0960038381", "13.0960038381"),
+        ("100.0000000000", "100"),
+        ("0.0000000001", "0.0000000001"),
+    ],
+)
+def test_the_cost_is_an_exact_decimal_without_padding_or_exponent(stored: str, cost_eur: str) -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, usage=LlmUsage(cost_eur=Decimal(stored)))
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["usage"]["cost_eur"] == cost_eur
+
+
+def test_a_run_without_usage_reports_null() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, status=ReviewRunStatus.QUEUED, model=None, tokens_used=None)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["usage"] is None
 
 
 def test_a_run_with_no_findings_returns_an_empty_list() -> None:
