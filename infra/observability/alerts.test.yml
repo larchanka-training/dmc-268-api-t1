@@ -618,3 +618,15 @@ tests:
             exp_annotations:
               summary: "Задача review_jobs.qq в работе дольше 20 минут"
               description: "Сообщение выдано воркеру 20 минут назад и не подтверждено. Сначала проверить, не идут ли вызовы модели в таймаут с повтором (спаны review.<этап>, шаг прогона: GET /api/v1/reviews/{id}/steps): такой прогон дойдёт сам. Через 30 минут без прогресса прогон переведёт в failed выметатель."
+
+  # Watchdog (#334): горит всегда, рядов для него не нужно.
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels: {severity: none}
+            exp_annotations:
+              summary: "Цепочка алертов работает"
+              description: "Горит всегда, пока работают Prometheus и Alertmanager. Alertmanager шлёт его на внешний heartbeat-сервис, а не в Telegram: пропавшие пинги поднимают внешний сервис (infra/README.md, «Алерты»)."

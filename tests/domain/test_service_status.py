@@ -117,6 +117,8 @@ def test_the_blind_list_covers_the_table() -> None:
         # У DLQ нет TTL: одно сообщение держало бы degraded до ручного разбора, а падающие
         # прогоны и так ловит ReviewRunsFailing.
         FiringAlert("ReviewDlqNotEmpty", {"service": "worker", "queue": "review_jobs.dlq"}),
+        # Dead man's switch горит всегда (#334): он о цепочке алертов, не о сервисе.
+        FiringAlert("Watchdog", {"severity": "none"}),
         # Метки без имени нужного правила ничего не значат.
         FiringAlert("SomethingElse", {"container_name": "dmc268-api"}),
         # Имя правила без нужной метки — тоже.

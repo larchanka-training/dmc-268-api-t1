@@ -70,3 +70,4 @@ llm_hosted_fallback = false
 # postgres_monitor_password = "CHANGE_ME_PG_MONITOR"
 # alert_telegram_bot_token  = "<id>:<ключ от @BotFather>"
 # alert_telegram_chat_id    = "-100<id чата>"
+# alert_heartbeat_url       = "https://hc-ping.com/<uuid>"
