@@ -33,7 +33,10 @@ LOCK_FILE_NAMES: frozenset[str] = frozenset(
 MINIFIED_SUFFIXES: tuple[str, ...] = (".min.js", ".min.css")
 GENERATED_MARKER = ".generated."
 PROTOBUF_SUFFIX = ".pb.go"
-VENDOR_DIRECTORIES: frozenset[str] = frozenset({"vendor", "node_modules"})
+# Собранные бандлы и source map — вывод сборщика, а не код автора (#293).
+BUNDLE_SUFFIXES: tuple[str, ...] = (".bundle.js", ".bundle.css", ".map")
+# Каталоги чужого или собранного кода на любой глубине пути.
+SKIPPED_DIRECTORIES: frozenset[str] = frozenset({"vendor", "node_modules", "dist"})
 
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
@@ -62,7 +65,7 @@ def parse_diff(raw: str) -> list[ParsedFile]:
 
 
 def is_filterable(file_path: str, is_binary: bool) -> bool:
-    """Правда, если файл — шум для ревью и модели его отправлять не стоит."""
+    """Правда, если файл — шум для ревью по пути или признаку бинарного, без учёта размера."""
     if is_binary:
         return True
     parts = file_path.split("/")
@@ -72,13 +75,44 @@ def is_filterable(file_path: str, is_binary: bool) -> bool:
         or name.endswith(MINIFIED_SUFFIXES)
         or GENERATED_MARKER in name
         or name.endswith(PROTOBUF_SUFFIX)
-        or any(part in VENDOR_DIRECTORIES for part in parts[:-1])
+        or name.endswith(BUNDLE_SUFFIXES)
+        or any(part in SKIPPED_DIRECTORIES for part in parts[:-1])
     )
 
 
-def filter_diff_files(files: Iterable[ParsedFile]) -> list[ParsedFile]:
+def change_exceeds(file: ParsedFile, max_bytes: int) -> bool:
+    """Правда, если текст hunk'ов файла в UTF-8 больше `max_bytes`.
+
+    Без копии всего текста: огромный hunk — тот самый случай, ради которого лимит, а его
+    копия в байтах выводила бы воркер за память (#328). ASCII считается длиной строки; текст
+    длиннее остатка лимита больше него и в байтах; иначе кодируется — не больше 4 × лимит.
+    """
+    total = 0
+    for hunk in file.hunks:
+        text = hunk.text
+        if text.isascii():
+            total += len(text)
+        elif len(text) > max_bytes - total:
+            return True
+        else:
+            total += len(text.encode("utf-8", "surrogatepass"))
+        if total > max_bytes:
+            return True
+    return False
+
+
+def is_filtered_out(file: ParsedFile, max_file_bytes: int) -> bool:
+    """Правда, если файл не ревьюится: шум по пути или изменение больше `max_file_bytes`.
+
+    Изменение больше лимита — снимок, дамп схемы, фикстура: целиком в пакет оно не войдёт,
+    а его первые hunk'и вытеснят остальные файлы PR. Файл ровно на лимите проходит.
+    """
+    return is_filterable(file.file_path, file.is_binary) or change_exceeds(file, max_file_bytes)
+
+
+def filter_diff_files(files: Iterable[ParsedFile], *, max_file_bytes: int) -> list[ParsedFile]:
     """Оставить файлы, подлежащие ревью, в исходном порядке."""
-    return [f for f in files if not is_filterable(f.file_path, f.is_binary)]
+    return [f for f in files if not is_filtered_out(f, max_file_bytes)]
 
 
 def _parse_file(lines: list[str]) -> ParsedFile:

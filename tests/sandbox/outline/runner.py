@@ -18,7 +18,7 @@ from app.application.use_cases.build_review_context import (
 )
 from app.domain.code_context import language_for_path, select_scopes, touched_lines
 from app.domain.context_budget import estimate_tokens, serialize
-from app.domain.diff_parser import is_filterable, parse_diff
+from app.domain.diff_parser import is_filtered_out, parse_diff
 from app.domain.entities import Definition, FileOutline, Hunk, ParsedFile
 from app.domain.enums import Language
 from app.domain.hunk_context import WHOLE_FILE_MAX_BYTES, expand_hunks
@@ -173,6 +173,7 @@ def _file_report(
     ast: Sequence[dict[str, Any]],
     omitted: Sequence[dict[str, Any]],
     extractor: _RecordingExtractor,
+    max_file_bytes: int,
 ) -> FileOutlineReport:
     path = parsed.file_path
     clean = sanitize(path)
@@ -222,7 +223,7 @@ def _file_report(
 
     if parsed.is_deleted:
         status = "deleted"
-    elif is_filterable(path, parsed.is_binary):
+    elif is_filtered_out(parsed, max_file_bytes):
         status = "filtered"
     elif language is None:
         status = "no_grammar"
@@ -346,6 +347,7 @@ def run_outline(
                 ast=ast,
                 omitted=omitted,
                 extractor=extractor,
+                max_file_bytes=limits.diff_file_max_bytes,
             )
             for parsed in parse_diff(diff)
         )

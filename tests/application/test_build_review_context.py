@@ -36,7 +36,7 @@ JOB = ReviewJob(
     base_sha=BASE,
 )
 LIMITS = ContextLimits(
-    32_000, 4_000, 32_768, 60, ast_max_files=20, ast_max_file_bytes=1_000, pr_context_max_tokens=1_000, diff_max_bytes=5_242_880
+    32_000, 4_000, 32_768, 60, ast_max_files=20, ast_max_file_bytes=1_000, pr_context_max_tokens=1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144
 )
 
 SOURCE = "class Repo:\n    def save(self):\n        return 2\n"
@@ -162,7 +162,7 @@ def test_files_beyond_limit_are_not_fetched() -> None:
     diff = "".join(_file_diff(f"app/f{i}.py") for i in range(5))
     vcs = FakeVcs(diff=diff, files={(f"app/f{i}.py", HEAD): SOURCE for i in range(5)})
     limits = ContextLimits(
-        32_000, 4_000, 32_768, 60, ast_max_files=2, ast_max_file_bytes=1_000, pr_context_max_tokens=1_000, diff_max_bytes=5_242_880
+        32_000, 4_000, 32_768, 60, ast_max_files=2, ast_max_file_bytes=1_000, pr_context_max_tokens=1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144
     )
     body = _build(vcs, limits=limits).payload.body
     fetched = [c[2] for c in vcs.calls if c[0] == "file" and c[3] == HEAD]

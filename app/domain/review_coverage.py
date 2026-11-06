@@ -8,7 +8,7 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from app.domain.diff_parser import is_filterable
+from app.domain.diff_parser import is_filtered_out
 from app.domain.entities import Hunk, ParsedFile
 
 
@@ -19,11 +19,14 @@ class ReviewCoverage:
     partial: tuple[str, ...]
     # Ни один hunk файла не вошёл в лимит контекста.
     not_reviewed: tuple[str, ...]
-    # Lock-файлы, сгенерированные, минифицированные, vendor и бинарные (`is_filterable`).
+    # Lock-файлы, сгенерированные, бандлы, vendor, бинарные и изменения больше лимита
+    # (`is_filtered_out`) — то же правило, что у `filter_diff_files`.
     filtered: tuple[str, ...]
 
 
-def review_coverage(files: Sequence[ParsedFile], shown: Iterable[Hunk]) -> ReviewCoverage:
+def review_coverage(
+    files: Sequence[ParsedFile], shown: Iterable[Hunk], *, max_file_bytes: int
+) -> ReviewCoverage:
     """Файлы диффа по группам охвата; `shown` — hunk'и, вошедшие в пакет."""
     shown_per_file = Counter(h.file_path for h in shown)
     reviewed: list[str] = []
@@ -32,7 +35,7 @@ def review_coverage(files: Sequence[ParsedFile], shown: Iterable[Hunk]) -> Revie
     filtered: list[str] = []
     for file in files:
         seen = shown_per_file[file.file_path]
-        if is_filterable(file.file_path, file.is_binary):
+        if is_filtered_out(file, max_file_bytes):
             filtered.append(file.file_path)
         elif not file.hunks:
             # Переименование без правок или смена режима: смотреть нечего, в списке его нет.

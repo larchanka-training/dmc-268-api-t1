@@ -95,7 +95,9 @@ def build_review_context(
         cache_ttl_seconds=limits.rules_cache_ttl_seconds,
         now=now,
     )
-    sources, skipped = _fetch_sources(job, filter_diff_files(files), vcs, limits)
+    sources, skipped = _fetch_sources(
+        job, filter_diff_files(files, max_file_bytes=limits.diff_file_max_bytes), vcs, limits
+    )
     asts, parse_failed = _collect_asts(job, sources, extractor)
     return assemble_context(
         job,
