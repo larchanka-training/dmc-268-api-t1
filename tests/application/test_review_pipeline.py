@@ -1346,7 +1346,7 @@ class _SweptDuringTheModelCall(ScriptedLlmGateway):
 
 def test_a_live_worker_whose_run_was_swept_fails_like_any_failed_run() -> None:
     """Поверх терминального статуса записи нет, поэтому условие на записях воркера не нужно.
-    Сам воркер, в отличие от очистки, выставляет gate упавшего прогона."""
+    Очистка здесь без шлюза: gate упавшего прогона выставляет сам воркер."""
     uow = FakeUnitOfWork()
     _seed_run(uow)
     _seed_earlier_review(uow, run_id=UUID(int=55), at=NOW - timedelta(minutes=5))

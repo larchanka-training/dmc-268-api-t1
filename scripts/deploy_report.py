@@ -677,6 +677,8 @@ def downtime_section(report_dir: Path) -> list[str]:
     if d["healthy_from"] == "health_log":
         note += " Событий нового контейнера в потоке `docker events` нет: готовность — из `State.Health.Log`."
     out.append(note)
+    out += ["", ("Простой — со стороны Docker. nginx интерфейса узнаёт новый адрес API не позже чем "
+                 "через 10 с после готовности нового (`resolver … valid=10s` в `dmc-268-ui-t1/nginx/http.conf`), до этого запросы клиентов могут получать 502.")]
     if not d["healthy_reliable"]:
         out += ["", "> [!WARNING]", ("> Готовность и простой недостоверны: журнал проверок полон, первая успешная "
                 "проверка могла из него вытесниться, и простой тогда завышен.")]

@@ -22,7 +22,9 @@ from app.worker.factory import build_maintenance, build_redelivery
 
 from ..conftest import requires_db
 from ..fakes import FakeVcs, webhook_payload
+from ..fakes.installation_catalog import FakeInstallationCatalog
 from ..fakes.unit_of_work import FakeUnitOfWork
+from ..fakes.vcs_gateway import RecordingVcsGateway
 from .test_worker_loop import _strict, _worker
 
 NOW = datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
@@ -101,6 +103,30 @@ def test_the_pass_sweeps_stale_runs() -> None:
 
     run = uow.review_runs.get(UUID(int=1))
     assert run is not None and run.status is ReviewRunStatus.FAILED
+
+
+def test_the_pass_hands_the_gateway_and_catalog_to_the_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без них выметенный прогон не выставил бы gate head (#331)."""
+    seen: dict[str, object] = {}
+
+    def sweep(uow: object, **kwargs: object) -> int:
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("app.worker.factory.sweep_stale_runs", sweep)
+    vcs, installations = RecordingVcsGateway(), FakeInstallationCatalog()
+
+    build_maintenance(
+        FakeUnitOfWork,
+        stale_limit=LIMIT,
+        queued_limit=QUEUED_LIMIT,
+        now=lambda: NOW,
+        vcs=vcs,
+        installations=installations,
+    )()
+
+    assert seen["vcs"] is vcs
+    assert seen["installations"] is installations
 
 
 def test_a_failing_step_is_logged_and_does_not_stop_the_other(caplog, monkeypatch) -> None:
