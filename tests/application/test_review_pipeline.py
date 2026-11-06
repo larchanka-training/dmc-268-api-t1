@@ -220,6 +220,8 @@ def test_github_down_at_claim_does_not_stop_the_run(caplog: pytest.LogCaptureFix
 
     assert _completed(uow).status is ReviewRunStatus.COMPLETED
     assert any("Идёт ревью" in r.getMessage() for r in caplog.records)
+    # Захват пробует один раз: повторы поверх повторов адаптера задержали бы старт.
+    assert vcs.attempted_checks.count(build_in_progress_check()) == 1
 
 
 def test_context_is_built_from_the_real_diff() -> None:

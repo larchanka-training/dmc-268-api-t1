@@ -271,6 +271,7 @@ def settle_merge_gate(
     head_sha: str,
     installation_id: int,
     repository_id: UUID,
+    attempts: int = SETTLE_ATTEMPTS,
 ) -> None:
     """Выставить на head gate прогона, который за него отвечает (`head_run_in_charge`).
 
@@ -291,7 +292,7 @@ def settle_merge_gate(
     изменился, выставляется снова. Приём смены ветки коммитит отмену и новый прогон до
     своего POST, поэтому любая перестановка кончается gate актуального прогона. Находки и
     порог читаются на каждой попытке: порог могли сменить, пока шёл прогон или сбой.
-    После сбоя `SETTLE_ATTEMPTS` попыток - `VcsError` вызывающему. Прогона на head нет -
+    После сбоя `attempts` попыток (по умолчанию `SETTLE_ATTEMPTS`) - `VcsError` вызывающему. Прогона на head нет -
     check не выставляется. Ручной прогон на паузе авторевью ставит свой gate (D11), после
     упавшего повторного ручного прогона gate - по находкам завершённого прежнего.
     """
@@ -341,7 +342,7 @@ def settle_merge_gate(
             )
         except VcsError:
             failures += 1
-            if failures == SETTLE_ATTEMPTS:
+            if failures >= attempts:
                 raise
             logger.warning(
                 "merge gate %s@%s не выставлен, попытка %d из %d",

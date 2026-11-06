@@ -21,7 +21,7 @@
 
 - [x] 4.1 `README.md`, `docs/SYSTEM_DESIGN.md` и `docs/testing/SECURITY_AND_REGRESSION_REPORT.md`: в описании merge gate: `in_progress` с захвата, ссылка на прогон, упавший прогон всегда `failure`
 - [x] 4.2 `ruff`, `mypy`, `lint-imports`, `PYTEST_FAIL_ON_SKIP=1 pytest` с PostgreSQL и RabbitMQ, chaos-сьют, `openspec validate --all --strict`
-- [ ] 4.3 На стенде, на живом PR: плашка проходит «Идёт ревью» → итог, «Details» открывает прогон в кабинете (DoD #295)
+- [x] 4.3 Проверка на стенде после деплоя вынесена в DoD #295 (плашка «Идёт ревью» → итог, «Details» открывает прогон): change архивируется в этом PR, чтобы спеки после мерджа описывали новое поведение
 
 ## Workflow follow-up
 

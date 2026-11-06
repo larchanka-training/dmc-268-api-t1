@@ -204,7 +204,8 @@ def block_head_of_failed_run(
 
 def _mark_in_progress(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob, run: ReviewRun) -> None:
     """`in_progress` на head захваченного прогона (#295). Best-effort: без него прогон
-    идёт дальше, а итог выставит публикация или падение."""
+    идёт дальше, а итог выставит публикация или падение. Одна попытка: повторы поверх
+    повторов адаптера задержали бы старт ревью на минуты, пока GitHub недоступен."""
     try:
         with uow:
             merge_request = uow.merge_requests.get(run.merge_request_id)
@@ -218,6 +219,7 @@ def _mark_in_progress(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob, run: Rev
             head_sha=job.head_sha,
             installation_id=job.installation_id,
             repository_id=merge_request.repository_id,
+            attempts=1,
         )
     except Exception:
         logger.warning(
