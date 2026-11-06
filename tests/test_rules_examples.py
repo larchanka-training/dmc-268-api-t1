@@ -46,6 +46,8 @@ SAMPLE_PATHS: dict[str, tuple[str, ...]] = {
         "app/api/users.py",
         "src/api/client.ts",
         "cmd/server/main.go",
+        "config/settings.yaml",
+        ".env.example",
         "package.json",
         "Dockerfile",
     ),
@@ -58,17 +60,30 @@ TEST_FILES: dict[str, tuple[str, str]] = {
     "go": ("internal/server/handler_test.go", "Go Tests"),
 }
 
-# Большой PR: 50 файлов стека. Каждое правило несёт в контекст список всех своих файлов,
-# поэтому цена правил растёт с числом файлов, а не только с длиной проверок.
-LARGE_PR: dict[str, list[str]] = {
-    "python-fastapi": [f"app/services/module_{i:02}.py" for i in range(40)]
-    + [f"tests/test_module_{i:02}.py" for i in range(10)],
-    "typescript-react": [f"src/features/feature_{i:02}/ui/Component.tsx" for i in range(30)]
-    + [f"src/features/feature_{i:02}/model/store.ts" for i in range(10)]
-    + [f"src/features/feature_{i:02}/ui/Component.test.tsx" for i in range(10)],
-    "go": [f"internal/service/module_{i:02}.go" for i in range(40)]
-    + [f"internal/service/module_{i:02}_test.go" for i in range(10)],
-}
+# До скольких файлов PR шаблон стека вместе с `security-baseline.md` помещается в долю правил.
+# Каждое правило несёт в контекст список всех своих файлов, поэтому цена правил растёт с числом
+# файлов, а не только с длиной проверок. Те же числа — в `docs/RULES_GUIDE.md`, «Лимиты»: пакет
+# контекста вмещает и 80–150 файлов с мелкими ханками, так что порог ниже этого надо знать.
+FITS_UP_TO: dict[str, int] = {"python-fastapi": 170, "go": 130, "typescript-react": 90}
+
+
+def _large_pr(stack: str, files: int) -> list[str]:
+    """PR стека: пятая часть — тесты, остальное — код."""
+    tests = files // 5
+    code = files - tests
+    if stack == "python-fastapi":
+        return [f"app/services/module_{i:03}.py" for i in range(code)] + [
+            f"tests/test_module_{i:03}.py" for i in range(tests)
+        ]
+    if stack == "typescript-react":
+        return (
+            [f"src/features/feature_{i:03}/ui/Component.tsx" for i in range(code - code // 4)]
+            + [f"src/features/feature_{i:03}/model/store.ts" for i in range(code // 4)]
+            + [f"src/features/feature_{i:03}/ui/Component.test.tsx" for i in range(tests)]
+        )
+    return [f"internal/service/module_{i:03}.go" for i in range(code)] + [
+        f"internal/service/module_{i:03}_test.go" for i in range(tests)
+    ]
 
 TEMPLATES = sorted(EXAMPLES.glob("*.md"))
 STACKS = sorted(p for p in TEMPLATES if p.stem != BASELINE)
@@ -87,7 +102,7 @@ def _rules(template: Path):
 
 def test_every_template_has_sample_paths() -> None:
     assert {path.stem for path in TEMPLATES} == set(SAMPLE_PATHS)
-    assert {path.stem for path in STACKS} == set(TEST_FILES) == set(LARGE_PR)
+    assert {path.stem for path in STACKS} == set(TEST_FILES) == set(FITS_UP_TO)
 
 
 @pytest.mark.parametrize("template", TEMPLATES, ids=lambda p: p.stem)
@@ -110,7 +125,7 @@ def test_a_test_file_outside_tests_gets_only_the_test_rule(template: Path) -> No
     rules, _ = _rules(template)
     baseline, _ = _rules(EXAMPLES / f"{BASELINE}.md")
     matched = [rule.name for rule, _ in applicable_rules((*baseline, *rules), [path])]
-    assert matched == ["Secrets", test_rule]
+    assert matched == [test_rule]
 
 
 @pytest.mark.parametrize("template", TEMPLATES, ids=lambda p: p.stem)
@@ -118,18 +133,22 @@ def test_template_fits_the_size_limit(template: Path) -> None:
     assert len(template.read_bytes()) <= _field_default("rules_max_bytes")
 
 
-@pytest.mark.parametrize("template", STACKS, ids=lambda p: p.stem)
-def test_stack_with_baseline_fits_the_rules_share_on_a_large_pr(template: Path) -> None:
+def _rule_tokens(rules, paths: list[str]) -> float:
     """Так, как сборка контекста считает долю правил: `_rule_items` и `Budget.cost`."""
+    loaded = RepoRules(status=RulesStatus.LOADED, rules=tuple(rules), fetched_at=dt.datetime.now(dt.UTC))
+    items = _rule_items(loaded, paths, {p: sanitize(p) for p in paths})
+    return sum(Budget.cost(item) for item, _ in items) / BYTES_PER_TOKEN
+
+
+@pytest.mark.parametrize("template", STACKS, ids=lambda p: p.stem)
+def test_stack_with_baseline_fits_the_rules_share_up_to_the_documented_size(template: Path) -> None:
     baseline, _ = _rules(EXAMPLES / f"{BASELINE}.md")
     rules, _ = _rules(template)
-    paths = LARGE_PR[template.stem]
-    loaded = RepoRules(
-        status=RulesStatus.LOADED, rules=(*baseline, *rules), fetched_at=dt.datetime.now(dt.UTC)
-    )
-    items = _rule_items(loaded, paths, {p: sanitize(p) for p in paths})
-    tokens = sum(Budget.cost(item) for item, _ in items) / BYTES_PER_TOKEN
-    assert tokens <= _field_default("rules_max_tokens")
+    files = FITS_UP_TO[template.stem]
+    assert _rule_tokens((*baseline, *rules), _large_pr(template.stem, files)) <= _field_default("rules_max_tokens")
+    # Гайд называет тот же порог: владелец PR такого размера знает, что правило стека выпадет.
+    guide = GUIDE.read_text(encoding="utf-8")
+    assert f"| `{template.name}` + `security-baseline.md` | до {files} |" in guide
 
 
 def test_stack_template_combines_with_security_baseline() -> None:
