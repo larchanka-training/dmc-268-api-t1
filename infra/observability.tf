@@ -508,6 +508,13 @@ resource "docker_container" "grafana" {
     "GF_SECURITY_ADMIN_PASSWORD=${var.grafana_admin_password}",
     "GF_AUTH_ANONYMOUS_ENABLED=false",
     "GF_USERS_ALLOW_SIGN_UP=false",
+    # Подпуть открыт наружу целиком. /metrics Grafana отдаёт без входа —
+    # версию, коммит, число пользователей; Prometheus стенда её не опрашивает.
+    "GF_METRICS_ENABLED=false",
+    # Basic auth идёт мимо limit_req nginx на /grafana/login, и пять неудачных
+    # попыток за 5 минут блокируют логин — кто угодно держал бы admin
+    # заблокированным. API-клиентов у Grafana нет, вход — только формой.
+    "GF_AUTH_BASIC_ENABLED=false",
     # Публичный вход по подпути /grafana/: nginx интерфейса проксирует путь
     # как есть, без rewrite, а Grafana строит ссылки и редиректы от root_url.
     # С serve_from_sub_path Grafana отвечает только под /grafana/, корень —

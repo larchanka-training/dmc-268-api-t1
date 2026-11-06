@@ -47,7 +47,7 @@ API публикуется на `bind_ip`, в деплое это `127.0.0.1`. �
 | `dmc268-backend` (`internal`) | `postgres`, `postgres-replica`, `postgres-backup`, `rabbitmq`, `replication-setup`, `api`, `worker`, миграции шага деплоя | данные. У сети нет шлюза: из неё не выйти в интернет, а интерфейса в ней нет |
 | `dmc268-egress` | `worker` | исходящие запросы воркера к GitHub API и провайдеру модели |
 | `dmc268-otlp` (`internal`) | интерфейс, `otelcol` (при `observability_enabled`) | трейсы браузера: nginx интерфейса проксирует `/otlp/v1/traces` на отдельный приёмник коллектора `dmc268-otelcol:4319`: только трейсы, `service.name` ставит коллектор (`dmc-268-ui`), кабинет шлёт их на свой же origin. По ней же receiver `nginx` коллектора снимает `stub_status` интерфейса (`dmc268-ui:8081`, на хост не публикуется). Сеть создаётся и без стека: интерфейс подключается к ней по имени, и без коллектора `/otlp/v1/traces` отвечает 502, а остальное работает |
-| `dmc268-grafana-proxy` (`internal`) | интерфейс, `grafana` (при `observability_enabled`) | публичный вход в Grafana: nginx интерфейса проксирует `/grafana/` на `dmc268-grafana:3000`, Grafana отдаётся из этого подпути. Из стека в сети только Grafana, шлюза нет. Создаётся и без стека, как `dmc268-otlp`: интерфейс подключается к ней по имени |
+| `dmc268-grafana-proxy` (`internal`) | интерфейс, `grafana` (при `observability_enabled`) | публичный вход в Grafana: nginx интерфейса проксирует `/grafana/` на `dmc268-grafana:3000`, Grafana отдаётся из этого подпути. Из стека в сети только Grafana, шлюза нет. Создаётся и без стека, как `dmc268-otlp`: интерфейс подключается к ней по имени. Откатывают в обратном порядке: сначала фронт (из сети уходит `dmc268-ui`), потом бэкенд — Docker не удаляет сеть с подключённым контейнером, и `tofu apply` бэкенда раньше фронта упадёт |
 
 API — единственный, кто стоит и во входе, и в данных. С `internal`-сети Docker не публикует порты, поэтому у базы и брокера портов на хосте нет: для отладки — `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268` и `docker exec dmc268-rabbitmq rabbitmq-diagnostics status`. Изоляцию проверяют `tests/test_infra_isolation.py` (по тексту `infra/*.tf`) и `infra/tests/main.tftest.hcl` (по плану).
 
@@ -321,10 +321,18 @@ internal-сети Docker не публикует. Выход наружу чер
 `dmc268-grafana-proxy`, TLS терминирует он же. Вход только по учётке: анонимный вход и
 регистрация выключены, у каждого участника — личная учётка, её заводит админ
 (Administration → Users and access → Users → New user). Пароль админа
-(`grafana_admin_password`) не раздаётся и для работы не используется. Env Grafana для этого:
+(`grafana_admin_password`) не раздаётся и для работы не используется. **До заведения учёток —
+один раз переименовать `admin`** (Administration → Users and access → Users → `admin` → Edit,
+поле Username — неочевидное имя): Grafana блокирует логин после пяти неудачных попыток за
+5 минут, и по известному имени `admin` кто угодно держит его заблокированным через форму входа.
+`GF_SECURITY_ADMIN_USER` для этого не годится — действует только при создании тома, поэтому
+после пересоздания тома `dmc268-grafana-data` шаг повторяют. Env Grafana для публичного входа:
 `GF_SERVER_ROOT_URL` — `public_origin` и `/grafana/` (слеш на конце `public_origin`
 отбрасывается), `GF_SERVER_SERVE_FROM_SUB_PATH=true`, `GF_SECURITY_COOKIE_SECURE=true` — cookie
-сессии только по HTTPS. Туннель продолжает работать: `ssh -L 3000:127.0.0.1:3000 <сервер>`, но
+сессии только по HTTPS, `GF_METRICS_ENABLED=false` — `/grafana/metrics` иначе отдаётся без входа
+(версия, коммит, число пользователей; Prometheus стенда Grafana не опрашивает),
+`GF_AUTH_BASIC_ENABLED=false` — запрос с `Authorization: Basic` идёт мимо `limit_req` на
+`/grafana/login` и засчитывается в блокировку логина; API-клиентов у Grafana нет. Туннель продолжает работать: `ssh -L 3000:127.0.0.1:3000 <сервер>`, но
 адрес теперь с подпутём — http://localhost:3000/grafana/. Корень `http://localhost:3000/`
 отвечает 301 на публичный адрес: с `serve_from_sub_path` Grafana отдаёт интерфейс только под
 `/grafana/`. Secure-cookie по `http://localhost` браузеры принимают (localhost у них — безопасный
