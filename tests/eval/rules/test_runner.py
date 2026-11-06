@@ -10,7 +10,7 @@ import pytest
 
 from ...conftest import requires_broker, requires_db
 from ...e2e.stack import Stack
-from ..report import config_metrics
+from ..report import config_metrics, config_outputs
 from .corpus import CONFIGS, load_corpus
 from .oracle import OracleLlmGateway
 from .runner import run_corpus
@@ -32,3 +32,8 @@ def test_the_oracle_scores_perfectly_in_every_rules_config(stack: Stack) -> None
     # Ссылка на пункт возможна, только когда правила показаны модели.
     attribution = {c: config_metrics(results, c)[0].attribution for c in configs}
     assert attribution == {"absent": 0.0, "rules": 1.0, "empty": 0.0, "adversarial": 1.0}
+    # Оракул отвечает по схеме с первой попытки: повторов и невалидных ответов нет.
+    for config in configs:
+        (outputs,) = config_outputs(results, config)
+        assert outputs.valid_rate == 1.0, config
+        assert (outputs.after_retry, outputs.invalid, outputs.no_answer) == (0, 0, 0), config
