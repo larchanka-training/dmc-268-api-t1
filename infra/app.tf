@@ -127,7 +127,10 @@ resource "docker_container" "api" {
 # start_interval — частота проверок в start_period: без него первая проверка
 # шла бы через interval, и wait ждал бы 30 с даже здоровый API. Длительности
 # — в формате Go, в котором провайдер читает их обратно ("2s", "30s", "1m0s"):
-# "1m" давал бы вечный diff. curl в образе нет, python есть.
+# "1m" давал бы вечный diff. curl в образе нет, python есть. start_period не
+# короче wait_timeout: всё ожидание выката идёт с проверкой раз в секунду, и
+# медленный старт не ждёт следующей проверки через interval (до 30 с простоя,
+# а у края wait_timeout — упавший apply). Здоровый API healthy через секунду.
 locals {
   api_healthcheck = {
     test = [
@@ -137,7 +140,7 @@ locals {
     interval       = "30s"
     timeout        = "5s"
     retries        = 3
-    start_period   = "10s"
+    start_period   = "1m30s"
     start_interval = "1s"
   }
 }

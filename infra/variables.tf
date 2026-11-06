@@ -254,8 +254,8 @@ variable "observability_memory_mb" {
     collector_docker = 96
     collector_logs   = 96
     alertmanager     = 64
-    blackbox         = 32
-    blackbox_public  = 32
+    blackbox         = 48
+    blackbox_public  = 48
   }
 }
 
@@ -327,6 +327,22 @@ variable "alert_telegram_chat_id" {
   validation {
     condition     = var.alert_telegram_chat_id == "" || can(regex("^-?[0-9]+$", var.alert_telegram_chat_id))
     error_message = "alert_telegram_chat_id — пусто или число: секрет TELEGRAM_CHAT_ID_DMC268_T1 битый."
+  }
+}
+
+# Dead man's switch алертов (#334): адрес внешнего heartbeat-сервиса, на который
+# Alertmanager раз в 5 минут шлёт всегда горящий Watchdog. Необязателен: без него
+# стек работает, но падение самого Prometheus или Alertmanager никто не заметит.
+# Только https: пинг идёт наружу, а адрес — секрет.
+variable "alert_heartbeat_url" {
+  type        = string
+  description = "URL пинга внешнего heartbeat-сервиса (healthchecks.io и аналоги) для Watchdog (url_file); пусто — пинги не уходят. Не коммитить: по адресу пинг может прислать кто угодно."
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.alert_heartbeat_url == "" || can(regex("^https://[^\\s/]+/\\S*$", var.alert_heartbeat_url))
+    error_message = "alert_heartbeat_url — пусто или https://<хост>/<путь> без пробелов: секрет ALERT_HEARTBEAT_URL_DMC268_T1 битый."
   }
 }
 

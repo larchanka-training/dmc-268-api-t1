@@ -194,7 +194,7 @@ make stop-local   # остановить API, воркер и туннель
 
 Короткие команды - в `Makefile`, список - `make help`: `make check` (статические проверки как в CI),
 `make test-db` (сам поднимет PostgreSQL и RabbitMQ из compose и базу `dmc268_test`), `make test-all`
-(весь набор как в CI), `make sandbox` (песочница воркера с локальной Ollama), `make run-worker` и т. д.
+(весь набор как в CI), `make sandbox-demo` (первый прогон песочницы воркера одной командой), `make sandbox` (песочница воркера с локальной Ollama), `make run-worker` и т. д.
 Флаги pytest или песочницы передаются через `ARGS`: `make test-db ARGS="-k migration -x"`.
 Тесты с брокером идут в отдельный vhost `dmc268_test` (`make test-queue-vhost`), а не в `/` стека разработки.
 `make run-api`, `make run-worker` и `make migrate` берут настройки из `.env`: процессу make передаёт только
@@ -262,7 +262,15 @@ EUROROUTER_MODEL=glm-5.3 EUROROUTER_REASONING_EFFORT=low uv run pytest -m live t
 ### Локальный прогон воркера без инфраструктуры
 
 Настоящий воркер и пайплайн ревью на мок-PR, без Docker, PostgreSQL, RabbitMQ и GitHub — нужна только
-локальная Ollama. Команда поднимет Ollama, если она не отвечает, скачает модель и прогонит кейс корпуса:
+локальная Ollama. Начать отсюда — `make sandbox-demo`: проверит окружение (`make sandbox-doctor`),
+поставит зависимости, поднимет Ollama, скачает модель и прогонит мок-PR; остановить поднятую так
+Ollama — `make sandbox-down`.
+
+```bash
+make sandbox-demo
+```
+
+Кейс корпуса — `make sandbox`: поднимет Ollama, если она не отвечает, скачает модель и прогонит кейс:
 
 ```bash
 make sandbox CASE=04-users-sql-injection

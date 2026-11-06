@@ -223,7 +223,8 @@ resource "docker_container" "otelcol" {
   }
 
   # Трейсы браузера: nginx интерфейса проксирует на dmc268-otelcol:4319 —
-  # отдельный приёмник otlp/browser, только трейсы (otelcol.yaml).
+  # отдельный приёмник otlp/browser, только трейсы (otelcol.yaml). По этой же
+  # сети receiver nginx скрейпит stub_status интерфейса (dmc268-ui:8081).
   networks_advanced {
     name = docker_network.otlp.name
   }
@@ -683,6 +684,14 @@ resource "docker_container" "alertmanager" {
   upload {
     content = var.alert_telegram_chat_id == "" ? "0" : var.alert_telegram_chat_id
     file    = "/etc/alertmanager/secrets/telegram_chat_id"
+  }
+
+  # Адрес heartbeat для Watchdog (#334, url_file receiver heartbeat). Без секрета
+  # — заглушка unset, как у токена: пинг падает с ошибкой в логе, адрес в ней
+  # Alertmanager скрывает (<redacted>).
+  upload {
+    content = var.alert_heartbeat_url == "" ? "unset" : var.alert_heartbeat_url
+    file    = "/etc/alertmanager/secrets/heartbeat_url"
   }
 
   command = [

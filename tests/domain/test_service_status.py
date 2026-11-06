@@ -46,6 +46,8 @@ SIGNALS = [
     ("WorkerNotConsuming", {"service": "worker", "queue": "review_jobs.qq"}, {WORKER}, OUTAGE),
     ("ContainerRestarting", {"container_name": "dmc268-worker"}, {WORKER}, DEGRADED),
     ("ReviewRunsFailing", {"service": "worker"}, {WORKER}, DEGRADED),
+    ("WorkerStalled", {"service": "worker", "queue": "review_jobs.qq"}, {WORKER}, DEGRADED),
+    ("ReviewJobStuck", {"service": "worker", "queue": "review_jobs.qq"}, {WORKER}, DEGRADED),
     ("ContainerDown", {"container_name": "dmc268-rabbitmq"}, {QUEUE}, OUTAGE),
     ("ServiceProbeFailed", {"service": "rabbitmq", "instance": "dmc268-rabbitmq:5672"}, {QUEUE}, OUTAGE),
     ("ContainerRestarting", {"container_name": "dmc268-rabbitmq"}, {QUEUE}, DEGRADED),
@@ -106,6 +108,7 @@ def test_the_blind_list_covers_the_table() -> None:
         FiringAlert("ContainerDown", {"container_name": "dmc268-postgres-replica"}),
         FiringAlert("ContainerDown", {"container_name": "dmc268-ui"}),
         FiringAlert("ContainerRestarting", {"container_name": "dmc268-grafana"}),
+        FiringAlert("ContainerMemoryNearLimit", {"container_name": "dmc268-blackbox", "service": "blackbox"}),
         FiringAlert("ServiceProbeFailed", {"service": "postgres-replica"}),
         FiringAlert("DiskSpaceCritical", {"mountpoint": "/"}),
         FiringAlert("LlmBudgetExceeded", {"service": "llm"}),
@@ -114,6 +117,8 @@ def test_the_blind_list_covers_the_table() -> None:
         # У DLQ нет TTL: одно сообщение держало бы degraded до ручного разбора, а падающие
         # прогоны и так ловит ReviewRunsFailing.
         FiringAlert("ReviewDlqNotEmpty", {"service": "worker", "queue": "review_jobs.dlq"}),
+        # Dead man's switch горит всегда (#334): он о цепочке алертов, не о сервисе.
+        FiringAlert("Watchdog", {"severity": "none"}),
         # Метки без имени нужного правила ничего не значат.
         FiringAlert("SomethingElse", {"container_name": "dmc268-api"}),
         # Имя правила без нужной метки — тоже.

@@ -82,6 +82,17 @@ receivers:
             data_type: gauge
             description: Токены модели, потраченные прогонами с начала месяца (UTC).
 
+  # Вход стенда, nginx интерфейса (#364): stub_status на внутреннем порту
+  # 8081 контейнера dmc268-ui (dmc-268-ui-t1, conf.d/status.conf), на хост порт
+  # не публикуется; коллектор достаёт его по сети dmc268-otlp. Коды ответа
+  # stub_status не отдаёт, их панель берёт из логов nginx в Loki. Адрес
+  # литералом: другого у интерфейса нет. В локальном compose интерфейса нет:
+  # там каждый скрейп пишет в лог коллектора ошибку соединения, на остальные
+  # receiver-ы это не влияет.
+  nginx:
+    endpoint: http://dmc268-ui:8081/stub_status
+    collection_interval: 30s
+
 processors:
   # Потолок памяти коллектора; в infra контейнеру задан лимит с запасом
   # (observability_memory_mb.collector).
@@ -241,7 +252,7 @@ service:
       processors: [memory_limiter, transform/browser-resource, transform/redact, batch]
       exporters: [otlp_http/tempo]
     metrics:
-      receivers: [otlp, postgresql, sqlquery/llm-tokens]
+      receivers: [otlp, postgresql, sqlquery/llm-tokens, nginx]
       # Без batch: prometheus отдаёт точки по pull, пачка их только задерживала бы.
       processors: [memory_limiter, transform/trim-metrics-resource]
       exporters: [prometheus]

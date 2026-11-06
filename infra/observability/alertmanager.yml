@@ -5,6 +5,11 @@
 # репозитория, локально — docker-compose.yml из переменных окружения. Без
 # реальных значений Alertmanager работает, но доставка падает с ошибкой в его
 # логе. Проверка доставки — infra/README.md, «Алерты».
+#
+# Dead man's switch (#334): Watchdog из alerts.yml горит всегда и уходит не в
+# Telegram, а на внешний heartbeat-сервис (receiver heartbeat). Адрес — тоже
+# файлом рядом, из необязательного секрета; без него — заглушка unset, и пинг
+# падает с ошибкой в логе.
 
 route:
   receiver: telegram
@@ -17,6 +22,16 @@ route:
   # в 12: забытый алерт не должен утонуть, но и не заспамить канал.
   repeat_interval: 4h
   routes:
+    # Первым: Watchdog не должен дойти до Telegram. Пинг сразу (group_wait 0) и
+    # раз в 5 минут, пока горит. Внешний сервис ждёт его с периодом 5 минут и
+    # запасом 10 (infra/README.md, «Алерты»). group_interval — шаг, на котором
+    # Alertmanager проверяет повтор: с 1m пинг уходит каждые 5–6 минут, а не
+    # раз в 10, как было бы с group_interval 5m корневого маршрута.
+    - matchers: ['alertname="Watchdog"']
+      receiver: heartbeat
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 5m
     - matchers: ['severity="warning"']
       receiver: telegram
       repeat_interval: 12h
@@ -25,9 +40,10 @@ route:
 # бюджете не нужно ещё и «80 %», при почти полном диске — «меньше 15 %».
 # Диски — по точке монтирования: полный /boot не глушит «меньше 15 %» на /
 # с томами базы. У алертов без mountpoint метки нет у обоих, Alertmanager
-# считает такие значения равными — для них правило прежнее.
+# считает такие значения равными — для них правило прежнее. ReviewDlqNotEmpty
+# горит до ручного разбора DLQ и глушил бы предупреждения воркера всё это время.
 inhibit_rules:
-  - source_matchers: ['severity="critical"']
+  - source_matchers: ['severity="critical"', 'alertname!="ReviewDlqNotEmpty"']
     target_matchers: ['severity="warning"']
     equal: [service, mountpoint]
 
@@ -46,3 +62,12 @@ receivers:
           {{ .Annotations.summary }}
           {{ .Annotations.description }}
           {{ end }}
+
+  # Пинг внешнему heartbeat-сервису: POST с телом webhook Alertmanager, healthchecks.io
+  # и аналоги принимают любой. Адрес — секрет (по нему пинг может прислать кто
+  # угодно и скрыть падение), поэтому файлом. send_resolved не нужен: Watchdog
+  # не гаснет, а пропадает вместе со стеком.
+  - name: heartbeat
+    webhook_configs:
+      - url_file: /etc/alertmanager/secrets/heartbeat_url
+        send_resolved: false

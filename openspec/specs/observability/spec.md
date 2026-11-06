@@ -656,3 +656,89 @@ Access-запись uvicorn о запросе health-check'а SHALL NOT попа
 
 - **WHEN** шаг повтора упавших доставок вебхука завершился исключением
 - **THEN** запись лога об ошибке несёт `maintenance_step = redeliver_webhooks`
+
+### Requirement: Алерты зависшего воркера и памяти контейнера
+
+Алерт SHALL гореть, когда у `review_jobs.qq` есть потребитель и готовые задачи, но 15 минут нет
+подтверждений (`WorkerStalled`); когда сообщение выдано и 20 минут не подтверждено
+(`ReviewJobStuck`), раньше выметателя зависших прогонов; когда память контейнера `dmc268-*`
+10 минут выше 90 % лимита (`ContainerMemoryNearLimit`). Поток коротких прогонов подряд и
+очередь без потребителя SHALL NOT зажигать первые два.
+
+#### Scenario: Воркер завис на задаче
+
+- **WHEN** сообщение выдано воркеру 20 минут назад, за ним копится очередь, подтверждений нет
+- **THEN** горят `ReviewJobStuck` и `WorkerStalled`, а `WorkerNotConsuming` молчит
+
+#### Scenario: Прогоны идут подряд
+
+- **WHEN** очередь не пустеет и сообщение в работе всегда, но задачи подтверждаются
+- **THEN** ни `WorkerStalled`, ни `ReviewJobStuck` не горят
+
+#### Scenario: Потребителя нет
+
+- **WHEN** у `review_jobs.qq` нет потребителя, а готовые задачи лежат
+- **THEN** горит только `WorkerNotConsuming`
+
+#### Scenario: Рестарт брокера
+
+- **WHEN** брокер перезапущен и счётчик подтверждений начался с нуля, а воркер так и не подтвердил задачу
+- **THEN** `WorkerStalled` продолжает гореть
+
+#### Scenario: Память у потолка
+
+- **WHEN** контейнер `dmc268-worker` 10 минут занимает больше 90 % лимита памяти
+- **THEN** горит предупреждение `ContainerMemoryNearLimit` с `container_name="dmc268-worker"` и `service="worker"`
+- **AND** контейнер с лимитом 0 алерт не зажигает
+
+### Requirement: Метрики входа nginx в Prometheus и в «Обзоре»
+
+Основной коллектор SHALL снимать `stub_status` nginx интерфейса receiver-ом `nginx` по сети `dmc268-otlp`, без публикации порта на хост, и отдавать метрики в Prometheus через свой exporter-порт. Дашборд «Обзор dmc-268» SHALL показывать вход: соединения по состоянию из Prometheus, запросы в секунду и долю ответов по классу кода из access-лога `dmc268-ui` в Loki, без проб blackbox. Недоступный `stub_status` SHALL NOT мешать остальным метрикам коллектора.
+
+#### Scenario: Метрики nginx в Prometheus
+
+- **WHEN** интерфейс отдаёт `stub_status`, и Prometheus скрейпит коллектор
+- **THEN** есть `nginx_requests_total` и `nginx_connections_current` с лейблом `state`
+
+#### Scenario: Интерфейса нет
+
+- **WHEN** коллектор запущен в локальном compose, где интерфейса нет
+- **THEN** скрейп `stub_status` пишет ошибку в лог коллектора, а метрики сервисов и базы идут как прежде
+
+#### Scenario: Панели входа
+
+- **WHEN** дашборд «Обзор dmc-268» открыт в Grafana
+- **THEN** панели «Вход (nginx)» показывают запросы в секунду, соединения по состоянию и долю ответов 2xx, 3xx, 4xx и 5xx
+
+### Requirement: Dead man's switch алертов
+
+Prometheus SHALL держать всегда горящий алерт `Watchdog`, а Alertmanager SHALL отправлять его не в Telegram, а на внешний heartbeat-сервис, повторяя не реже раза в 5 минут. Внешний сервис SHALL оповещать канал команды, когда пинги перестают приходить. `Watchdog` SHALL NOT менять публичный статус сервиса.
+
+#### Scenario: Стек алертов работает
+
+- **WHEN** Prometheus и Alertmanager работают
+- **THEN** внешний сервис получает пинг не реже раза в 5 минут, а в Telegram `Watchdog` не приходит
+
+#### Scenario: Упал Prometheus или Alertmanager
+
+- **WHEN** на стенде остановлен `dmc268-prometheus` или `dmc268-alertmanager`
+- **THEN** пинги прекращаются, и внешний сервис оповещает канал команды в пределах 20 минут
+
+#### Scenario: Watchdog и страница статуса
+
+- **WHEN** горит только `Watchdog`
+- **THEN** `GET /api/v1/status` отвечает `operational` по всем компонентам
+
+### Requirement: Секрет heartbeat алертов
+
+Адрес heartbeat SHALL приходить Alertmanager файлом, а не конфигом и не переменной окружения контейнера. Без него стек SHALL подниматься, а развёртывание SHALL проходить с предупреждением. Адрес не вида `https://…` SHALL останавливать развёртывание на планировании.
+
+#### Scenario: Секрета heartbeat нет
+
+- **WHEN** стенд разворачивается с `observability_enabled = true` без адреса heartbeat
+- **THEN** стек поднимается, `Watchdog` горит в Alertmanager, пинг падает с ошибкой в его логе, а прогон деплоя показывает предупреждение
+
+#### Scenario: Секрет heartbeat битый
+
+- **WHEN** адрес heartbeat не начинается с `https://` или содержит пробел
+- **THEN** развёртывание останавливается на этапе планирования, и на сервере ничего не меняется

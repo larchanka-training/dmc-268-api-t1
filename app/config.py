@@ -208,12 +208,12 @@ class Settings(BaseSettings):
     ast_max_files: int = Field(
         default=20,
         gt=0,
-        description="Сколько файлов диффа довыбирается для AST-окружения",
+        description="Сколько файлов диффа довыбирается для AST и окружения изменений",
     )
     ast_max_file_bytes: int = Field(
         default=262_144,
         gt=0,
-        description="Больший файл попадает в контекст без AST-окружения",
+        description="Больший файл попадает в контекст без AST-окружения и без окна вокруг изменений",
     )
     # Доля пакета под контекст PR - заголовок, описание, сообщения коммитов;
     # берётся первой, неистраченное уходит диффу (change add-llm-gateway, D6).

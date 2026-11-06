@@ -46,7 +46,7 @@ API публикуется на `bind_ip`, в деплое это `127.0.0.1`. �
 | `dmc268` | интерфейс (из `dmc-268-ui-t1`), `api` | публичный вход: nginx интерфейса проксирует `/api/` в API. Имя прежнее — интерфейс подключается к ней по имени |
 | `dmc268-backend` (`internal`) | `postgres`, `postgres-replica`, `postgres-backup`, `rabbitmq`, `replication-setup`, `api`, `worker`, миграции шага деплоя | данные. У сети нет шлюза: из неё не выйти в интернет, а интерфейса в ней нет |
 | `dmc268-egress` | `worker` | исходящие запросы воркера к GitHub API и провайдеру модели |
-| `dmc268-otlp` (`internal`) | интерфейс, `otelcol` (при `observability_enabled`) | трейсы браузера: nginx интерфейса проксирует `/otlp/v1/traces` на отдельный приёмник коллектора `dmc268-otelcol:4319`: только трейсы, `service.name` ставит коллектор (`dmc-268-ui`), кабинет шлёт их на свой же origin. Сеть создаётся и без стека: интерфейс подключается к ней по имени, и без коллектора `/otlp/v1/traces` отвечает 502, а остальное работает |
+| `dmc268-otlp` (`internal`) | интерфейс, `otelcol` (при `observability_enabled`) | трейсы браузера: nginx интерфейса проксирует `/otlp/v1/traces` на отдельный приёмник коллектора `dmc268-otelcol:4319`: только трейсы, `service.name` ставит коллектор (`dmc-268-ui`), кабинет шлёт их на свой же origin. По ней же receiver `nginx` коллектора снимает `stub_status` интерфейса (`dmc268-ui:8081`, на хост не публикуется). Сеть создаётся и без стека: интерфейс подключается к ней по имени, и без коллектора `/otlp/v1/traces` отвечает 502, а остальное работает |
 
 API — единственный, кто стоит и во входе, и в данных. С `internal`-сети Docker не публикует порты, поэтому у базы и брокера портов на хосте нет: для отладки — `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268` и `docker exec dmc268-rabbitmq rabbitmq-diagnostics status`. Изоляцию проверяют `tests/test_infra_isolation.py` (по тексту `infra/*.tf`) и `infra/tests/main.tftest.hcl` (по плану).
 
@@ -177,6 +177,7 @@ tofu apply infra.tfplan
 | `github_app_client_secret` | секрет `APP_CLIENT_SECRET_DMC268_T1` |
 | `public_origin` | `https://` + `VPS_DMC268_IP_T1`: интерфейс отдаётся по HTTPS на тот же адрес. Callback `<public_origin>/api/v1/auth/github/callback` регистрируется в настройках GitHub App |
 | `alert_telegram_bot_token`, `alert_telegram_chat_id` | секреты `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1` — бот, от имени которого Alertmanager шлёт алерты, и чат, куда (раздел «Алерты»). Без них алерты считаются и видны в Alertmanager, но в Telegram не уходят. Заданные проверяются на формат — токен `<id>:<ключ>`, chat id числом: битое значение роняет `plan`. В Alertmanager токен приходит файлом (`upload`), поэтому в `docker inspect` его не видно, но в state OpenTofu он лежит открытым текстом — так же, как пароли из `env` остальных контейнеров; state защищён хранилищем на петле сервера (раздел «Хранилище состояния»). Ставятся вручную: `gh secret set TELEGRAM_BOT_TOKEN_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin) и так же chat id; следующий деплой пересоздаёт Alertmanager с ними |
+| `alert_heartbeat_url` | секрет `ALERT_HEARTBEAT_URL_DMC268_T1` — адрес пинга внешнего heartbeat-сервиса для `Watchdog` (раздел «Алерты», «Dead man's switch»). Без него деплой проходит с предупреждением, а падение самого Prometheus или Alertmanager никто не заметит. Только `https://<хост>/<путь>` без пробелов: другое значение роняет `plan`. В Alertmanager приходит файлом (`upload`, `url_file`), в его логе адрес скрыт (`<redacted>`). Ставится вручную: `gh secret set ALERT_HEARTBEAT_URL_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin), следующий деплой пересоздаёт Alertmanager |
 
 Из этого стека наружу не смотрит ничего. API, PostgreSQL и RabbitMQ публикуются на петле сервера, воркер не публикуется вовсе; снаружи доступен только интерфейс, и API — через его `/api/`.
 
@@ -434,6 +435,7 @@ OTel с её миллисекундами. Логи сервисов колле�
 | RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
 | Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
 | Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes`, `container_uptime_seconds`, `container_restarts_total` | `container_name` | CPU и память контейнеров |
+| Вход, nginx интерфейса (receiver `nginx` основного коллектора, `stub_status`) | `collector` | `nginx_requests_total`, `nginx_connections_current`, `nginx_connections_accepted_total`, `nginx_connections_handled_total` | `state` | «Вход (nginx)»: соединения; запросы в секунду и доля ответов по классу кода считаются по access-логу `{service_name="dmc268-ui"}` в Loki без проб blackbox: счётчик `stub_status` их не отличает |
 | Расход токенов (receiver `sqlquery/llm-tokens` основного коллектора) | `collector` | `review_llm_tokens_month` | нет | нет (алерты бюджета) |
 | Резервные копии (textfile node-exporter, пишет `backup.sh`) | `node-exporter` | `dmc268_backup_last_success_timestamp_seconds` | нет | нет (алерт `BackupStale`) |
 | Пробы (blackbox-exporter) | `blackbox-services`, `blackbox-public` | `probe_success`, `probe_ssl_earliest_cert_expiry` | `service`, `instance` | нет (алерты) |
@@ -443,7 +445,8 @@ OTel с её миллисекундами. Логи сервисов колле�
 
 - [HTTP-метрики OTel](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/) и
   [метрики клиента БД OTel](https://opentelemetry.io/docs/specs/semconv/db/database-metrics/);
-- receiver [`postgresql`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/postgresqlreceiver/documentation.md)
+- receiver [`postgresql`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/postgresqlreceiver/documentation.md),
+  [`nginx`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/nginxreceiver/documentation.md)
   и [`docker_stats`](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.158.0/receiver/dockerstatsreceiver/documentation.md);
 - [node_exporter](https://github.com/prometheus/node_exporter);
 - [плагин Prometheus в RabbitMQ](https://www.rabbitmq.com/docs/prometheus).
@@ -558,8 +561,9 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 (`observability/alertmanager.yml`). Конфиги те же локально и на стенде; токен бота и chat id —
 не в конфиге, а файлами `/etc/alertmanager/secrets/telegram_{bot_token,chat_id}`: на стенде их
 заливает `upload` из секретов `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1`,
-локально — compose (`configs`) из `ALERT_TELEGRAM_BOT_TOKEN` и `ALERT_TELEGRAM_CHAT_ID`. Из
-контейнеров алертов наружу ходят только Alertmanager (api.telegram.org) и
+локально — compose (`configs`) из `ALERT_TELEGRAM_BOT_TOKEN` и `ALERT_TELEGRAM_CHAT_ID`. Сам
+стек алертов сторожит внешний heartbeat-сервис («Dead man's switch» ниже). Из
+контейнеров алертов наружу ходят только Alertmanager (api.telegram.org и heartbeat) и
 `dmc268-blackbox-public` (публичный вход стенда) — через свою не-internal сеть `dmc268-alerting`, портов на хосте у них нет.
 Пробы сервисов делает другой экземпляр, `dmc268-blackbox`, — только в сети данных, там же его
 скрейпит Prometheus: `/probe?target=` принимает любой URL без авторизации, и экземпляр с
@@ -595,9 +599,12 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `ContainerDown` | контейнер не запущен: нет ряда `container_uptime_seconds` у `dmc268-api`, `-worker`, `-postgres`, `-postgres-replica`, `-postgres-backup`, `-rabbitmq`, `-ui`, `-otelcol` | 2 минуты (+ до 5 минут, пока экспортёр держит ряд остановленного) | critical |
 | `ContainerMetricsMissing` | нет ни одного ряда `container_uptime_seconds` при живом скрейпе `docker-stats`: `docker_stats` не читает Docker API, `ContainerDown` слеп | 5 минут | warning |
 | `ContainerRestarting` | перезапуски контейнера `dmc268-*` | 2 и больше за 15 минут | critical |
+| `ContainerMemoryNearLimit` | память контейнера `dmc268-*` без кэша страниц (`container_memory_usage_total_bytes`) от его лимита; `service` из имени без `dmc268-` | > 90 % дольше 10 минут | warning |
 | `ServiceProbeFailed` | сервис не отвечает (то же, что видит его healthcheck): `/health` API, TCP базы, реплики, брокера | 2 минуты | critical |
 | `PublicEndpointDown` | HTTPS публичного входа (`public_origin`) | 3 минуты | critical |
 | `WorkerNotConsuming` | у `review_jobs.qq` нет потребителей или очереди нет совсем (при живом скрейпе брокера) | 5 минут | critical |
+| `WorkerStalled` | потребитель у `review_jobs.qq` есть, готовые задачи лежат, а подтверждений quorum-очередей (`rabbitmq_global_messages_acknowledged_total`) нет | 15 минут | critical |
+| `ReviewJobStuck` | сообщение `review_jobs.qq` выдано и не подтверждено, других подтверждений нет; прогоны на стенде идут до 1,5 минуты, выметатель срабатывает на 30 | 20 минут | critical |
 | `Api5xxSpike` | доля 5xx у API за 5 минут, при трафике больше 3 запросов в минуту | > 5 % дольше 5 минут | critical |
 | `ReviewRunsFailing` | доля прогонов в `failed` за 30 минут, при 3+ прогонах | > 30 % | critical |
 | `ReviewDlqNotEmpty` | сообщения в `review_jobs.dlq` | > 0 дольше 5 минут | critical |
@@ -613,6 +620,7 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `BackupStatusUnknown` | отметки о копии нет совсем | 26 часов | critical |
 | `TlsCertificateExpiringSoon` | срок сертификата публичного входа (`shortlived`, 160 часов, продлевается на середине) | < 48 часов дольше 10 минут | critical |
 | `ScrapeTargetDown` | цель скрейпа Prometheus не отвечает — её алерты слепы | 5 минут | warning |
+| `Watchdog` | горит всегда; уходит не в Telegram, а на внешний heartbeat | сразу, повтор раз в 5 минут | none |
 
 Бюджет токенов — константа в `alerts.yml` (`dmc268:llm_tokens_budget_month`), а не
 переменная: конфиги стека одинаковы в обоих окружениях. Смена бюджета — правка этой строки и
@@ -622,16 +630,52 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 
 **Чего алерты не видят.** Статуса healthcheck контейнера у receiver `docker_stats` 0.158 нет
 (`container.state.health.status` появился в 0.160), поэтому «unhealthy» ловят пробы
-blackbox-exporter по тем же проверкам, а свежесть копий — отметка от `backup.sh`. Если упал
-сам Prometheus или Alertmanager или сломалась доставка (например, токен бота отозван после
-ротации), алертов нет вовсе, и тишина в канале выглядит как спокойный день: внешнего «dead
-man's switch» — всегда горящего алерта и сервиса, который ждёт его и шумит при пропаже, — у
-стенда пока нет (#334). `ContainerDown` за `dmc268-prometheus` и `dmc268-alertmanager` не следит, а
-`ScrapeTargetDown` по Alertmanager отправлял бы сам упавший Alertmanager. Поэтому после смены
-секретов Telegram и после деплоя, пересоздавшего Alertmanager, — тестовый алерт («Проверка
-доставки» ниже). Локально часть алертов горит всегда: реплики, копий и интерфейса там нет, а контейнеры
-compose называются по проекту (`<проект>-api-1`), поэтому `ContainerDown` горит по всем
-именам `dmc268-*`.
+blackbox-exporter по тем же проверкам, а свежесть копий — отметка от `backup.sh`. Падение самого
+Prometheus или Alertmanager ловит не правило, а внешний сервис («Dead man's switch» ниже):
+`ContainerDown` за `dmc268-prometheus` и `dmc268-alertmanager` не следит, а `ScrapeTargetDown` по
+Alertmanager отправлял бы сам упавший Alertmanager. Сломанную доставку в Telegram (токен бота
+отозван после ротации, бота убрали из чата) heartbeat не видит: пинг идёт мимо Telegram. Поэтому
+после смены секретов Telegram и после деплоя, пересоздавшего Alertmanager, — тестовый алерт
+(«Проверка доставки» ниже). Локально часть алертов
+горит всегда: реплики, копий и интерфейса там нет, а контейнеры compose называются по проекту
+(`<проект>-api-1`), поэтому `ContainerDown` горит по всем именам `dmc268-*`.
+
+**Dead man's switch** (#334). `Watchdog` горит всегда, и Alertmanager отдельным первым маршрутом
+шлёт его не в Telegram, а POST-ом на адрес из секрета `ALERT_HEARTBEAT_URL_DMC268_T1` (файл
+`/etc/alertmanager/secrets/heartbeat_url`, `url_file`): сразу и раз в 5–6 минут, пока горит.
+Внешний сервис ждёт эти пинги и, когда они пропали, сам шумит в канал команды. Пинги пропадают,
+когда:
+
+- остановлен или упал `dmc268-prometheus`: Alertmanager держит его алерты ещё 4 минуты и
+  перестаёт;
+- остановлен или упал `dmc268-alertmanager`, или у него пропал выход наружу.
+
+Страницу статуса `Watchdog` не трогает: его нет в `ALERT_RULES`.
+
+Внешний сервис **необязателен**: без учётки в нём и без секрета стенд и алерты в Telegram работают
+как раньше, деплой проходит с предупреждением, а `Watchdog` горит в Alertmanager без пингов. Не
+будет только одного — сообщения о том, что лёг сам Prometheus или Alertmanager.
+
+Настройка внешнего сервиса, когда он нужен, на примере healthchecks.io (бесплатного тарифа хватает):
+
+1. Новый check: **Period** 5 минут, **Grace** 10 минут. Пинги приходят раз в 5–6 минут, так что
+   ложной тревоги нет, а оповещение — не позже чем через 20 минут после падения (4 минуты, пока
+   Alertmanager держит алерт упавшего Prometheus, и 15 — период с запасом).
+2. Integrations: оповещение в канал команды — Telegram-интеграция healthchecks.io (свой бот
+   сервиса, не наш: наш мог сломаться) или почта.
+3. Ping URL (`https://hc-ping.com/<uuid>`) — в секрет `ALERT_HEARTBEAT_URL_DMC268_T1`, затем
+   деплой. Адрес — секрет: по нему пинг может прислать кто угодно и скрыть падение.
+
+Подойдёт любой сервис, который принимает POST на HTTPS-адрес (Dead Man's Snitch, Cronitor, Better
+Stack). Пока секрета нет, Alertmanager получает заглушку `unset`: пинг раз в 5 минут падает в его
+логе (`Notify attempt failed … receiver=heartbeat … unsupported protocol scheme`), а деплой
+предупреждает аннотацией прогона. Проверка — остановить Alertmanager и дождаться сообщения
+внешнего сервиса:
+
+```bash
+ssh stand 'docker stop dmc268-alertmanager'   # не позже чем через 20 минут — сообщение в канале
+ssh stand 'docker start dmc268-alertmanager'  # следующий пинг снова делает check зелёным
+```
 
 **Проверка доставки.** Тестовый алерт напрямую в Alertmanager стенда, минуя правила:
 
@@ -669,24 +713,25 @@ ssh stand 'docker logs dmc268-alertmanager 2>&1' | sed -E 's#/bot[^/]+/#/bot***/
 | node-exporter | 64 |
 | socket-proxy | 64 |
 | Alertmanager | 64 |
-| blackbox-exporter, пробы сервисов | 32 |
-| blackbox-exporter, публичный вход | 32 |
-| **Итого стек** | **4160 (~4,1 ГБ)** |
+| blackbox-exporter, пробы сервисов | 48 |
+| blackbox-exporter, публичный вход | 48 |
+| **Итого стек** | **4192 (~4,1 ГБ)** |
 
 Рядом — лимиты контейнеров приложения (`app.tf`, `postgres.tf`, `rabbitmq.tf`, `replica.tf`):
 `postgres` 1024, `api`, `worker`, `rabbitmq` и реплика (`postgres_replica_memory`) по 512,
 резервные копии (`dmc268-postgres-backup`) 256 — итого 3328 МБ (~3,3 ГБ) постоянно живущих.
 Миграции (`docker run` в `migrate.sh` с `--memory 256m`) и одноразовый
 `dmc268-replication-setup` (64) — шаги деплоя, в постоянный лимит стенда не входят.
-Суммарный потолок стенда — 7488 МБ (~7,5 ГБ) по постоянно живущим контейнерам.
+Вне Terraform живут хранилище состояния `dmc268-s3` с потолком 512 МБ (его поднимает
+`.github/actions/s3-backend`) и интерфейс `dmc268-ui` со 128 МБ (стек `dmc-268-ui-t1`).
+Суммарный потолок стенда — 8160 МБ (~8,0 ГБ) по постоянно живущим контейнерам.
 
-На VPS 7947 МБ (~7,9 ГБ) памяти и нет свопа (`free -m`, 2026-10-28): запас над потолками около
-0,45 ГБ (Alertmanager и два экземпляра blackbox-exporter забрали из него 128 МБ), и из него же
-живут контейнеры без потолка — интерфейс (`dmc268-ui`) и хранилище состояния
-(`dmc268-s3`, ~220 МБ). Через 30 минут после первого выката стека занято 2,2 ГБ. Grafana
+На VPS 7947 МБ (~7,9 ГБ) памяти и нет свопа (`free -m`): потолки превышают память примерно на
+210 МБ, запаса под них нет. Потолок не резерв: через 30 минут после первого выката стека было
+занято 2,2 ГБ, 2026-11-05 — 2,6 ГБ, и опасен только одновременный пик всех контейнеров. Grafana
 в покое занимает 330–413 МБ, а при открытии трейса в Explore её убивал OOM при потолке 512 МБ
-(4 раза за час 2026-11-01, `dmesg`), отсюда 1024. Поднимать потолки стека — только за счёт
-этого запаса.
+(4 раза за час 2026-11-01, `dmesg`), отсюда 1024. Новый потолок в стеке поднимает риск
+одновременного пика: прежде чем поднимать, проверить реальное потребление.
 
 Память стека без нагрузки — по замерам ревью PR #130 (Grafana ~350 МБ, Tempo ~200 МБ, Loki
 ~90 МБ, коллектор ~85 МБ) и локальному прогону Docker Desktop (2026-10-24: node-exporter

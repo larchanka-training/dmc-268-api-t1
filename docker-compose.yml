@@ -560,6 +560,8 @@ services:
         target: /etc/alertmanager/secrets/telegram_bot_token
       - source: telegram_chat_id
         target: /etc/alertmanager/secrets/telegram_chat_id
+      - source: heartbeat_url
+        target: /etc/alertmanager/secrets/heartbeat_url
     # Как dmc268-alertmanager на стенде. Без read_only: compose не создаёт
     # configs с content в read-only сервисе («`file` is the sole supported
     # option»), а на стенде read_only несовместим с upload.
@@ -613,6 +615,9 @@ configs:
     content: ${ALERT_TELEGRAM_BOT_TOKEN:-unset}
   telegram_chat_id:
     content: ${ALERT_TELEGRAM_CHAT_ID:-0}
+  # Адрес heartbeat для Watchdog (#334); заглушка unset — пинг падает в логе.
+  heartbeat_url:
+    content: ${ALERT_HEARTBEAT_URL:-unset}
 
 volumes:
   postgres_data:

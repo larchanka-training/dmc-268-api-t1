@@ -63,7 +63,10 @@ def select_scopes(outline: FileOutline, touched: frozenset[int]) -> tuple[Defini
     Класс охватывает свои методы по диапазону строк, поэтому изменение в
     методе Python/TS даёт и метод, и его класс. Метод Go объявлен вне
     структуры — её тип добавляется по имени родителя (ресивера); только для
-    метода, не для вложенных функций и классов. Результат — в порядке файла.
+    метода, не для вложенных функций и классов, и только если сам метод не
+    лежит внутри выбранного типа с этим именем: иначе модульный `class Local`
+    или `interface Money` пришёл бы к методу одноимённого класса (#348).
+    Результат — в порядке файла.
     """
     lines = sorted(touched)
 
@@ -76,7 +79,14 @@ def select_scopes(outline: FileOutline, touched: frozenset[int]) -> tuple[Defini
     selected = {d for d in ordered if covers(d)}
     # По имени — только тип метода: у вложенной функции или класса `parent` —
     # охватывающее определение, и тип с тем же именем к изменению не относится.
-    parents = {d.parent for d in selected if d.kind is DefinitionKind.METHOD and d.parent}
+    types = [d for d in selected if d.kind in _TYPE_KINDS]
+    parents = {
+        d.parent
+        for d in selected
+        if d.kind is DefinitionKind.METHOD
+        and d.parent
+        and not any(t.name == d.parent and t.line <= d.line <= t.end_line for t in types)
+    }
     return tuple(
         d
         for d in ordered

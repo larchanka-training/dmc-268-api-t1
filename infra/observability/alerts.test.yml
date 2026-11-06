@@ -101,6 +101,37 @@ tests:
               summary: "Контейнер dmc268-worker перезапускается"
               description: "2 перезапусков за 15 минут. Причина — в docker logs dmc268-worker и в Loki."
 
+  # Память: воркер у потолка 10 минут, API далеко от него, у контейнера без
+  # лимита (0) деления на ноль нет.
+  - interval: 1m
+    input_series:
+      - series: 'container_memory_usage_total_bytes{container_name="dmc268-worker"}'
+        values: "500000000x15"
+      - series: 'container_memory_usage_limit_bytes{container_name="dmc268-worker"}'
+        values: "512000000x15"
+      - series: 'container_memory_usage_total_bytes{container_name="dmc268-api"}'
+        values: "100000000x15"
+      - series: 'container_memory_usage_limit_bytes{container_name="dmc268-api"}'
+        values: "512000000x15"
+      - series: 'container_memory_usage_total_bytes{container_name="dmc268-migrations"}'
+        values: "100000000x15"
+      - series: 'container_memory_usage_limit_bytes{container_name="dmc268-migrations"}'
+        values: "0x15"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ContainerMemoryNearLimit
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ContainerMemoryNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: worker
+              container_name: dmc268-worker
+            exp_annotations:
+              summary: "Контейнер dmc268-worker занял 97.66% лимита памяти"
+              description: "Больше 90 % лимита 10 минут: следующий рост убьёт процесс по OOM. Кто растёт: docker stats dmc268-worker; потолок задаёт memory в infra/*.tf или observability_memory_mb."
+
   # Сервис не отвечает на пробу (unhealthy при запущенном контейнере).
   - interval: 1m
     input_series:
@@ -210,6 +241,117 @@ tests:
         values: "1x10"
     alert_rule_test:
       - eval_time: 6m
+        alertname: WorkerNotConsuming
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+              queue: review_jobs.qq
+            exp_annotations:
+              summary: "У очереди review_jobs.qq нет потребителей"
+              description: "5 минут ни один воркер не подписан на очередь: прогоны копятся и не выполняются."
+
+  # Воркер завис на задаче: с 5-й минуты она выдана, за ней копится очередь,
+  # подтверждений нет. На 25-й минуте брокер перезапущен (счётчик в 0), и
+  # обнуление не прячет зависание. ReviewJobStuck: 20 минут сообщения в
+  # работе, раньше молчит; WorkerStalled: 15 минут готовых задач.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "0x5 2x35"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "0x4 1x36"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "80x24 0x15"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp10", queue_type="rabbit_quorum_queue"}'
+        values: "0x40"
+      - series: 'up{job="rabbitmq", instance="dmc268-rabbitmq:15692"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 23m
+        alertname: ReviewJobStuck
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: WorkerStalled
+        exp_alerts: &worker_stalled
+          - exp_labels:
+              severity: critical
+              service: worker
+              queue: review_jobs.qq
+            exp_annotations:
+              summary: "Воркер подписан на review_jobs.qq, но не берёт задачи"
+              description: "15 минут в очереди лежат готовые задачи и нет ни одного подтверждения, хотя потребитель есть. Чаще всего это медленная модель или фоллбэк на текущем прогоне (тогда горит и ReviewJobStuck): смотреть спаны review.<этап> в Grafana. Если в спанах тишина, воркер завис: стек в логах, docker restart dmc268-worker."
+      - eval_time: 25m
+        alertname: ReviewJobStuck
+        exp_alerts: &review_job_stuck
+          - exp_labels:
+              severity: critical
+              service: worker
+              queue: review_jobs.qq
+            exp_annotations:
+              summary: "Задача review_jobs.qq в работе дольше 20 минут"
+              description: "Сообщение выдано воркеру 20 минут назад и не подтверждено. Сначала проверить, не идут ли вызовы модели в таймаут с повтором (спаны review.<этап>, шаг прогона: GET /api/v1/reviews/{id}/steps): такой прогон дойдёт сам. Через 30 минут без прогресса прогон переведёт в failed выметатель."
+      - eval_time: 35m
+        alertname: WorkerStalled
+        exp_alerts: *worker_stalled
+      - eval_time: 35m
+        alertname: ReviewJobStuck
+        exp_alerts: *review_job_stuck
+      - eval_time: 35m
+        alertname: WorkerNotConsuming
+        exp_alerts: []
+
+  # Поток прогонов подряд: очередь не пустеет, сообщение в работе всегда,
+  # но задачи подтверждаются раз в 2 минуты; после рестарта брокера счётчик
+  # растёт с нуля. Ни зависания, ни застрявшей задачи.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "5x40"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "0+0.5x24 0+0.5x15"
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 24m
+        alertname: ReviewJobStuck
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: ReviewJobStuck
+        exp_alerts: []
+
+  # Потребителя нет: это WorkerNotConsuming, WorkerStalled его не дублирует.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "3x30"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "0x30"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "0x30"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "7x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ReviewJobStuck
+        exp_alerts: []
+      - eval_time: 25m
         alertname: WorkerNotConsuming
         exp_alerts:
           - exp_labels:
@@ -450,3 +592,41 @@ tests:
             exp_annotations:
               summary: "Сертификат https://203.0.113.10/ истекает через 1d 15h 45m 0s"
               description: "Продление не прошло. Лог модуля ACME: docker logs dmc268-ui 2>&1 | grep -i acme."
+
+  # Одна задача висит, очередь за ней пуста: горит только ReviewJobStuck,
+  # WorkerStalled молчит (готовых задач нет). На странице статуса это degraded.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "0x40"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "5x40"
+      - series: 'up{job="rabbitmq", instance="x"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: ReviewJobStuck
+        exp_alerts:
+          - exp_labels: {severity: critical, service: worker, queue: review_jobs.qq}
+            exp_annotations:
+              summary: "Задача review_jobs.qq в работе дольше 20 минут"
+              description: "Сообщение выдано воркеру 20 минут назад и не подтверждено. Сначала проверить, не идут ли вызовы модели в таймаут с повтором (спаны review.<этап>, шаг прогона: GET /api/v1/reviews/{id}/steps): такой прогон дойдёт сам. Через 30 минут без прогресса прогон переведёт в failed выметатель."
+
+  # Watchdog (#334): горит всегда, рядов для него не нужно.
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels: {severity: none}
+            exp_annotations:
+              summary: "Цепочка алертов работает"
+              description: "Горит всегда, пока работают Prometheus и Alertmanager. Alertmanager шлёт его на внешний heartbeat-сервис, а не в Telegram: пропавшие пинги поднимают внешний сервис (infra/README.md, «Алерты»)."
