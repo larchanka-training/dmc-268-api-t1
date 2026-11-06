@@ -205,6 +205,13 @@ uv run pytest                                       # чистые тесты, �
 TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest   # вместе с адаптерами, брокером и E2E
 ```
 
+Схемы ответа модели держат порог 100% строк и ветвей, считанный только по их собственным тестам
+(шаг CI в job `lint`, #275); новая ветвь в валидации ответа модели без теста роняет CI:
+
+```bash
+uv run pytest -q -rs tests/application/test_llm_schema.py tests/infrastructure/test_llm_structured.py --cov=app.application.llm_schema --cov=app.infrastructure.llm.structured --cov-branch --cov-report=term-missing --cov-fail-under=100
+```
+
 Маркеры `live`, `eval` и `load` исключены в `addopts` (`pyproject.toml`), поэтому
 ключ `-m` в обычном прогоне не нужен: явный `-m` перекрывает это исключение.
 

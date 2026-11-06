@@ -271,3 +271,15 @@ def test_secret_quoted_by_the_verifier_does_not_reach_the_log() -> None:
 
     assert TOKEN not in verdicts["F1"].reason
     assert REDACTED in verdicts["F1"].reason
+
+
+def test_finding_on_the_old_side_is_anchored_to_the_old_line() -> None:
+    """Сторона `old` даёт якорь со старой строкой, а не с новой."""
+    data = copy.deepcopy(REVIEW)
+    data["findings"][0].update(filePath="app/gone.py", side="old", line=7)
+
+    result = to_review_result(ReviewOutput.model_validate(data), model="m")
+
+    assert result.findings[0].anchor == DiffAnchor(
+        file_path="app/gone.py", side=DiffSide.OLD, old_line=7
+    )

@@ -1,6 +1,7 @@
 """Общий цикл адаптеров модели: ответ по схеме, повторы, учёт расхода."""
 
 import json
+import logging
 from collections.abc import Sequence
 from dataclasses import replace
 from decimal import Decimal
@@ -14,7 +15,7 @@ from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
 from app.domain.llm_errors import LlmError, LlmOutputError
 from app.domain.llm_usage import LlmUsage
-from app.infrastructure.llm.structured import RawReply, complete_structured
+from app.infrastructure.llm.structured import RawReply, complete_structured, token_count
 
 MESSAGES = (PromptMessage(PromptRole.SYSTEM, "инструкции"), PromptMessage(PromptRole.USER, "код"))
 REQUEST = LlmRequest(LlmTask.REVIEW, MESSAGES, ReviewOutput, max_output_tokens=4_096)
@@ -276,3 +277,50 @@ def test_a_valid_first_answer_reports_no_retry() -> None:
     complete_structured(_Scripted(VALID), request, max_attempts=2)
 
     assert heard == []
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, 0),
+        (0, 0),
+        (12, 12),
+        (2**63 - 1, 2**63 - 1),
+        (12.0, 12),
+        (Decimal("12.0"), 12),
+        (Decimal(2**63 - 1), 2**63 - 1),
+    ],
+)
+def test_token_count_accepts_whole_non_negative_numbers(value: object, expected: int) -> None:
+    """Нет поля - 0; целое, в том числе записанное с дробной частью, - это целое."""
+    assert token_count(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "kind"),
+    [
+        ("12", "str"),
+        (True, "bool"),
+        (-1, "int"),
+        (2**63, "int"),
+        (12.5, "float"),
+        (-1.0, "float"),
+        (float("inf"), "float"),
+        (float("nan"), "float"),
+        (2.0**63, "float"),
+        (Decimal("12.5"), "Decimal"),
+        (Decimal("NaN"), "Decimal"),
+        (Decimal(2**63), "Decimal"),
+        ([12], "list"),
+    ],
+)
+def test_token_count_turns_malformed_values_into_zero_with_a_warning(
+    value: object, kind: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Ответ уже оплачен: кривое число - 0 и предупреждение с типом, без самого значения."""
+    with caplog.at_level(logging.WARNING, logger="app.infrastructure.llm.structured"):
+        assert token_count(value) == 0
+
+    assert [record.getMessage() for record in caplog.records] == [
+        f"число токенов в ответе провайдера не разобрано ({kind}), учтено как 0"
+    ]
