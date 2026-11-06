@@ -306,7 +306,8 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
 }
 
 # Публичный вход в Grafana (change grafana-public-access): root_url из
-# public_origin с подпутём /grafana/ — и для origin со слешем на конце, —
+# public_origin на порту 8443 (свой origin, отдельно от кабинета) с подпутём
+# /grafana/ — и для origin со слешем на конце, —
 # отдача из подпути и cookie только по HTTPS; анонимный вход и регистрация
 # по-прежнему выключены. /metrics и basic auth выключены: подпуть открыт
 # наружу, а basic auth обходит limit_req на /grafana/login.
@@ -323,7 +324,7 @@ run "grafana_serves_public_entry_sub_path" {
   assert {
     condition = alltrue([
       for e in [
-        "GF_SERVER_ROOT_URL=https://203.0.113.10/grafana/",
+        "GF_SERVER_ROOT_URL=https://203.0.113.10:8443/grafana/",
         "GF_SERVER_SERVE_FROM_SUB_PATH=true",
         "GF_SECURITY_COOKIE_SECURE=true",
         "GF_AUTH_ANONYMOUS_ENABLED=false",
@@ -332,7 +333,24 @@ run "grafana_serves_public_entry_sub_path" {
         "GF_AUTH_BASIC_ENABLED=false",
       ] : contains(docker_container.grafana[0].env, e)
     ])
-    error_message = "Grafana: GF_SERVER_ROOT_URL = public_origin без слеша + /grafana/, GF_SERVER_SERVE_FROM_SUB_PATH=true, GF_SECURITY_COOKIE_SECURE=true, анонимный вход, регистрация, /metrics и basic auth выключены."
+    error_message = "Grafana: GF_SERVER_ROOT_URL = public_origin без слеша + :8443/grafana/, GF_SERVER_SERVE_FROM_SUB_PATH=true, GF_SECURITY_COOKIE_SECURE=true, анонимный вход, регистрация, /metrics и basic auth выключены."
+  }
+}
+
+# Без public_origin (локальный apply со стеком) root_url — относительный
+# /grafana/, без порта: склеивать порт не с чем, Grafana с ним стартует.
+run "grafana_root_url_is_relative_without_public_origin" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+  }
+
+  assert {
+    condition     = contains(docker_container.grafana[0].env, "GF_SERVER_ROOT_URL=/grafana/")
+    error_message = "Grafana: с пустым public_origin GF_SERVER_ROOT_URL — относительный /grafana/."
   }
 }
 

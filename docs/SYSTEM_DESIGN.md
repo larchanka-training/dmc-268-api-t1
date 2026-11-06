@@ -116,7 +116,7 @@ flowchart LR
             TEMPO[("dmc268-tempo · трейсы")]
             LOKI[("dmc268-loki · логи")]
             PROM[("dmc268-prometheus · метрики<br/>сети: dmc268-observability, dmc268-backend")]
-            GRAF["dmc268-grafana<br/>публичный вход /grafana/ по учётке, порт на 127.0.0.1 для SSH-туннеля<br/>сети: dmc268-observability, dmc268-grafana, dmc268-grafana-proxy"]
+            GRAF["dmc268-grafana<br/>публичный вход :8443/grafana/ по учётке, порт на 127.0.0.1 для SSH-туннеля<br/>сети: dmc268-observability, dmc268-grafana, dmc268-grafana-proxy"]
         end
 
         subgraph DPROXY["сеть dmc268-docker-proxy · internal"]
@@ -128,7 +128,7 @@ flowchart LR
     GH -->|"вебхук HTTPS, HMAC"| UI
     UI -->|"HTTP /api/"| API
     UI -.->|"OTLP трейсы браузера, сеть dmc268-otlp"| OTEL
-    UI -->|"HTTP /grafana/, сеть dmc268-grafana-proxy"| GRAF
+    UI -->|"HTTP /grafana/ с порта 8443, сеть dmc268-grafana-proxy"| GRAF
     API -->|"HTTPS: метаданные PR, check run, OAuth"| GH
     API -->|"SQL · LISTEN/NOTIFY"| PG
     API -->|"AMQP publish, confirms"| MQ
@@ -173,7 +173,7 @@ flowchart LR
 - **Модель на стенде** — Eurorouter основным и единственным провайдером (`TF_VAR_llm_backend: eurorouter` в `.github/workflows/deploy.yml`, #245). Ollama на стенде не развёрнута, поэтому на диаграмме её нет; на диаграмме компонентов выше она — основной провайдер по дизайну.
 - **UI** — контейнер стека `dmc-268-ui-t1`, подключается к сети `dmc268` по имени; в этом репозитории не описан и показан как внешний.
 - **Изоляция**: у `dmc268-backend` и `dmc268-observability` нет шлюза — база, брокер и хранилища наблюдаемости не видны ни из интернета, ни из публичной сети. Наружу ходят API (через `dmc268`) и воркер (через `dmc268-egress`); не-internal сети со шлюзом есть ещё у Grafana (`dmc268-grafana`) и `dmc268-otelcol-logs` (`dmc268-logs`) — ради публикации порта на 127.0.0.1: на internal-сети Docker порты не публикует. Стек наблюдаемости поднимается флагом `observability_enabled`, на стенде он включён.
-- **Служебные сети** без своих подграфов, перечислены в узлах: `dmc268-otlp` (internal, `infra/network.tf`) — приём OTLP трейсов браузера от UI коллектором; `dmc268-grafana-proxy` (internal, `infra/network.tf`) — публичный вход в Grafana: nginx UI проксирует `/grafana/` на `dmc268-grafana:3000`; `dmc268-grafana` и `dmc268-logs` (`infra/observability.tf`) — только публикация портов Grafana и fluentd на 127.0.0.1. Сеть `dmc268-docker-proxy` (internal) нарисована отдельно: в ней только socket-proxy и `dmc268-otelcol-docker`, остальным контейнерам доступ к демону Docker не нужен.
+- **Служебные сети** без своих подграфов, перечислены в узлах: `dmc268-otlp` (internal, `infra/network.tf`) — приём OTLP трейсов браузера от UI коллектором; `dmc268-grafana-proxy` (internal, `infra/network.tf`) — публичный вход в Grafana: nginx UI на порту 8443 проксирует `/grafana/` на `dmc268-grafana:3000` — тот же хост и сертификат, что у кабинета, но свой origin, чтобы XSS в Grafana не читал API кабинета; `dmc268-grafana` и `dmc268-logs` (`infra/observability.tf`) — только публикация портов Grafana и fluentd на 127.0.0.1. Сеть `dmc268-docker-proxy` (internal) нарисована отдельно: в ней только socket-proxy и `dmc268-otelcol-docker`, остальным контейнерам доступ к демону Docker не нужен.
 - **Логи контейнеров**: `dmc268-postgres`, `dmc268-postgres-replica` и `dmc268-rabbitmq` при включённом стеке пишут логи драйвером fluentd (`local.fluentd_log_opts`, `infra/locals.tf`) — dockerd отправляет их на `127.0.0.1:24224`, в `dmc268-otelcol-logs`, оттуда по OTLP в основной коллектор `dmc268-otelcol` (`otlp_http/collector`, `infra/observability/otelcol-logs.yaml`) и только из него в Loki. У остальных контейнеров, включая бэкап, — драйвер по умолчанию (`local.log_opts`); API и воркер шлют логи по OTLP.
 - **Миграции** — не контейнер стека: одноразовый `docker run --rm` того же образа в сети `dmc268-backend` до `apply` (`infra/README.md`, «Миграции»).
 

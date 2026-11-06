@@ -101,6 +101,15 @@ locals {
   # observability/public-targets.yml.
   blackbox_public_targets = var.public_origin == "" ? [] : [{ targets = ["${var.public_origin}/"] }]
 
+  # Публичный адрес Grafana (GF_SERVER_ROOT_URL): тот же хост и сертификат,
+  # что у кабинета, но свой порт 8443 — значит, свой origin, и XSS в Grafana
+  # не читает API кабинета. Порт слушает nginx интерфейса (dmc-268-ui-t1),
+  # бэкенд его не публикует — поэтому константа, а не переменная: менять его
+  # можно только вместе с фронтом. trimsuffix — на случай public_origin со
+  # слешем на конце. С пустым public_origin root_url — относительный
+  # /grafana/, Grafana с ним стартует (проверено на 13.2.4).
+  grafana_public_root_url = var.public_origin == "" ? "/grafana/" : "${trimsuffix(var.public_origin, "/")}:8443/grafana/"
+
   # Окружение, без которого не загрузятся общие настройки (`load_settings`):
   # его получают оба контейнера из образа приложения — api и worker — и
   # миграции шага деплоя (выход migrate_env). Одно описание вместо трёх копий,

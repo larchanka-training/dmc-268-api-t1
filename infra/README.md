@@ -47,7 +47,7 @@ API публикуется на `bind_ip`, в деплое это `127.0.0.1`. �
 | `dmc268-backend` (`internal`) | `postgres`, `postgres-replica`, `postgres-backup`, `rabbitmq`, `replication-setup`, `api`, `worker`, миграции шага деплоя | данные. У сети нет шлюза: из неё не выйти в интернет, а интерфейса в ней нет |
 | `dmc268-egress` | `worker` | исходящие запросы воркера к GitHub API и провайдеру модели |
 | `dmc268-otlp` (`internal`) | интерфейс, `otelcol` (при `observability_enabled`) | трейсы браузера: nginx интерфейса проксирует `/otlp/v1/traces` на отдельный приёмник коллектора `dmc268-otelcol:4319`: только трейсы, `service.name` ставит коллектор (`dmc-268-ui`), кабинет шлёт их на свой же origin. По ней же receiver `nginx` коллектора снимает `stub_status` интерфейса (`dmc268-ui:8081`, на хост не публикуется). Сеть создаётся и без стека: интерфейс подключается к ней по имени, и без коллектора `/otlp/v1/traces` отвечает 502, а остальное работает |
-| `dmc268-grafana-proxy` (`internal`) | интерфейс, `grafana` (при `observability_enabled`) | публичный вход в Grafana: nginx интерфейса проксирует `/grafana/` на `dmc268-grafana:3000`, Grafana отдаётся из этого подпути. Из стека в сети только Grafana, шлюза нет. Создаётся и без стека, как `dmc268-otlp`: интерфейс подключается к ней по имени. Откатывают в обратном порядке: сначала фронт (из сети уходит `dmc268-ui`), потом бэкенд — Docker не удаляет сеть с подключённым контейнером, и `tofu apply` бэкенда раньше фронта упадёт |
+| `dmc268-grafana-proxy` (`internal`) | интерфейс, `grafana` (при `observability_enabled`) | публичный вход в Grafana: nginx интерфейса на порту 8443 проксирует `/grafana/` на `dmc268-grafana:3000`, Grafana отдаётся из этого подпути. Из стека в сети только Grafana, шлюза нет. Создаётся и без стека, как `dmc268-otlp`: интерфейс подключается к ней по имени. Откатывают в обратном порядке: сначала фронт (из сети уходит `dmc268-ui`), потом бэкенд — Docker не удаляет сеть с подключённым контейнером, и `tofu apply` бэкенда раньше фронта упадёт |
 
 API — единственный, кто стоит и во входе, и в данных. С `internal`-сети Docker не публикует порты, поэтому у базы и брокера портов на хосте нет: для отладки — `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268` и `docker exec dmc268-rabbitmq rabbitmq-diagnostics status`. Изоляцию проверяют `tests/test_infra_isolation.py` (по тексту `infra/*.tf`) и `infra/tests/main.tftest.hcl` (по плану).
 
@@ -301,7 +301,7 @@ docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_n
 (`dmc268-otelcol`: трейсы, логи, метрики приложения и базы), его второй экземпляр
 `dmc268-otelcol-docker` (метрики контейнеров), третий `dmc268-otelcol-logs` (логи postgres, его
 реплики и rabbitmq, см. «Логи контейнеров»), Loki (логи), Tempo (трейсы), Prometheus
-(метрики), Grafana (интерфейс: публичный вход `/grafana/` и `grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU,
+(метрики), Grafana (интерфейс: публичный вход `:8443/grafana/` и `grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU,
 память, диски) и socket-proxy (`dmc268-docker-proxy`: Docker API для `dmc268-otelcol-docker` по
 белому списку эндпоинтов вместо маунта `docker.sock`; отдельная сеть `dmc268-docker-proxy`, где
 кроме proxy и `dmc268-otelcol-docker` никого), а для алертов — Alertmanager
@@ -316,9 +316,10 @@ internal-сети Docker не публикует. Выход наружу чер
 `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES`). Локальный compose повторяет раскладку: сеть
 `observability` — `internal`, порт Grafana — через отдельную сеть `grafana`.
 
-**Вход в Grafana стенда** — через публичный вход: `https://<VPS_DMC268_IP_T1>/grafana/`
-(сейчас https://62.169.24.237/grafana/). nginx интерфейса проксирует подпуть по сети
-`dmc268-grafana-proxy`, TLS терминирует он же. Вход только по учётке: анонимный вход и
+**Вход в Grafana стенда** — через публичный вход на порту 8443: `https://<VPS_DMC268_IP_T1>:8443/grafana/`
+(сейчас https://62.169.24.237:8443/grafana/). Хост и сертификат те же, что у кабинета, но
+отдельный порт — это свой origin, и XSS в Grafana не прочитает API кабинета. nginx интерфейса
+слушает 8443, проксирует подпуть по сети `dmc268-grafana-proxy`, TLS терминирует он же. Вход только по учётке: анонимный вход и
 регистрация выключены, у каждого участника — личная учётка, её заводит админ
 (Administration → Users and access → Users → New user). Пароль админа
 (`grafana_admin_password`) не раздаётся и для работы не используется. **До заведения учёток —
@@ -327,8 +328,9 @@ internal-сети Docker не публикует. Выход наружу чер
 5 минут, и по известному имени `admin` кто угодно держит его заблокированным через форму входа.
 `GF_SECURITY_ADMIN_USER` для этого не годится — действует только при создании тома, поэтому
 после пересоздания тома `dmc268-grafana-data` шаг повторяют. Env Grafana для публичного входа:
-`GF_SERVER_ROOT_URL` — `public_origin` и `/grafana/` (слеш на конце `public_origin`
-отбрасывается), `GF_SERVER_SERVE_FROM_SUB_PATH=true`, `GF_SECURITY_COOKIE_SECURE=true` — cookie
+`GF_SERVER_ROOT_URL` — `public_origin`, порт `8443` и `/grafana/` (слеш на конце `public_origin`
+отбрасывается; без `public_origin` — относительный `/grafana/`; порт — константа
+`local.grafana_public_root_url`, его слушает nginx интерфейса, меняется только вместе с фронтом), `GF_SERVER_SERVE_FROM_SUB_PATH=true`, `GF_SECURITY_COOKIE_SECURE=true` — cookie
 сессии только по HTTPS, `GF_METRICS_ENABLED=false` — `/grafana/metrics` иначе отдаётся без входа
 (версия, коммит, число пользователей; Prometheus стенда Grafana не опрашивает),
 `GF_AUTH_BASIC_ENABLED=false` — запрос с `Authorization: Basic` идёт мимо `limit_req` на
@@ -337,7 +339,7 @@ internal-сети Docker не публикует. Выход наружу чер
 отвечает 301 на публичный адрес: с `serve_from_sub_path` Grafana отдаёт интерфейс только под
 `/grafana/`. Secure-cookie по `http://localhost` браузеры принимают (localhost у них — безопасный
 контекст). Grafana сверяет `Origin` изменяющих запросов с `Host`, поэтому nginx передаёт ей
-`Host` клиента (`proxy_set_header Host $host`), а WebSocket Grafana Live (`/grafana/api/live/`)
+`Host` клиента вместе с портом (`proxy_set_header Host $http_host`), а WebSocket Grafana Live (`/grafana/api/live/`)
 проксирует с `Upgrade`/`Connection`. Локальный compose подпуть не включает: публичного входа там
 нет, Grafana — в корне без логина.
 Белый список — свой шаблон haproxy (`observability/docker-socket-proxy.cfg`), а не

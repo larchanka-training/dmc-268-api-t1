@@ -261,7 +261,7 @@ variable "observability_memory_mb" {
 
 variable "grafana_port" {
   type        = number
-  description = "Порт Grafana на bind_ip для SSH-туннеля (http://localhost:<порт>/grafana/): наружу не публикуется, публичный вход — /grafana/ через nginx интерфейса."
+  description = "Порт Grafana на bind_ip для SSH-туннеля (http://localhost:<порт>/grafana/): наружу не публикуется, публичный вход — :8443/grafana/ через nginx интерфейса."
   default     = 3000
 }
 

@@ -36,8 +36,8 @@ resource "docker_network" "otlp" {
   internal = true
 }
 
-# Сеть прокси Grafana: Grafana стека и интерфейс. nginx интерфейса
-# проксирует `location /grafana/` на dmc268-grafana:3000, и Grafana стенда
+# Сеть прокси Grafana: Grafana стека и интерфейс. nginx интерфейса на
+# порту 8443 проксирует `location /grafana/` на dmc268-grafana:3000, и Grafana стенда
 # открывается через публичный вход по учётке (change grafana-public-access).
 # Отдельная сеть, а не dmc268 и не сеть стека: интерфейс видит только
 # Grafana, а не API, Loki или Prometheus. internal — шлюза нет: выход

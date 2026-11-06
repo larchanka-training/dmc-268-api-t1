@@ -469,8 +469,8 @@ resource "docker_container" "prometheus" {
 
 # Доступ к Grafana — по учётке: анонимный вход выключен, пароль админа из
 # переменной (локальный compose, наоборот, поднимает Grafana без логина).
-# Открывается через публичный вход по подпути /grafana/ (nginx интерфейса,
-# сеть dmc268-grafana-proxy) и туннелем на bind_ip — по тому же подпути.
+# Открывается через публичный вход на порту 8443 по подпути /grafana/ (nginx
+# интерфейса, сеть dmc268-grafana-proxy) и туннелем на bind_ip — по тому же подпути.
 resource "docker_container" "grafana" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-grafana"
@@ -519,10 +519,8 @@ resource "docker_container" "grafana" {
     # как есть, без rewrite, а Grafana строит ссылки и редиректы от root_url.
     # С serve_from_sub_path Grafana отвечает только под /grafana/, корень —
     # 301 на root_url, поэтому туннель — http://localhost:3000/grafana/.
-    # trimsuffix — на случай public_origin со слешем на конце; с пустым
-    # public_origin root_url — относительный /grafana/, Grafana с ним
-    # стартует (проверено на 13.2.4).
-    "GF_SERVER_ROOT_URL=${trimsuffix(var.public_origin, "/")}/grafana/",
+    # Адрес — public_origin на порту 8443, см. local.grafana_public_root_url.
+    "GF_SERVER_ROOT_URL=${local.grafana_public_root_url}",
     "GF_SERVER_SERVE_FROM_SUB_PATH=true",
     # TLS терминирует nginx интерфейса: cookie сессии — только по HTTPS.
     # Через туннель браузеры принимают Secure-cookie от http://localhost.
