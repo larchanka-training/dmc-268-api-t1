@@ -657,10 +657,11 @@ Alertmanager отправлял бы сам упавший Alertmanager. Сло�
 счётчик неудачных отправок Alertmanager в Telegram вырос за 10 минут. Вторым маршрутом, тоже
 мимо Telegram, он уходит POST-ом на тот же check с суффиксом `/fail` (файл
 `/etc/alertmanager/secrets/heartbeat_fail_url`, адрес строит деплой из того же секрета).
-healthchecks.io по `/fail` сразу переводит check в down и оповещает своим каналом; следующий пинг
-`Watchdog` через 5–6 минут возвращает его в up. Пока доставка сломана, `/fail` повторяется раз в
-час — тревога приходит снова. Локально адрес `/fail` задаётся отдельно: `ALERT_HEARTBEAT_FAIL_URL`
-(compose не дописывает суффикс сам).
+healthchecks.io по `/fail` сразу переводит check в down и оповещает своим каналом. Пока горит
+`AlertDeliveryFailing`, пинг `Watchdog` заглушён (`inhibit_rules`), поэтому check остаётся down до
+починки доставки, а не возвращается в up через 5–6 минут. `/fail` повторяется раз в час: check,
+вручную возвращённый в up, снова уходит в down. Локально адрес `/fail` compose строит из того же
+`ALERT_HEARTBEAT_URL` — задавайте его без завершающего `/`.
 
 Страницу статуса `Watchdog` и `AlertDeliveryFailing` не трогают: их нет в `ALERT_RULES`.
 
@@ -678,8 +679,10 @@ healthchecks.io по `/fail` сразу переводит check в down и оп
 3. Ping URL (`https://hc-ping.com/<uuid>`) — в секрет `ALERT_HEARTBEAT_URL_DMC268_T1`, затем
    деплой. Адрес — секрет: по нему пинг может прислать кто угодно и скрыть падение.
 
-Подойдёт любой сервис, который принимает POST на HTTPS-адрес (Dead Man's Snitch, Cronitor, Better
-Stack). Пока секрета нет, Alertmanager получает заглушку `unset`: пинг раз в 5 минут падает в его
+Подойдёт сервис, который принимает POST на HTTPS-адрес и понимает неуспех по суффиксу `/fail`:
+healthchecks.io или Better Stack. Dead Man's Snitch и Cronitor неуспех принимают иначе (параметром,
+`?state=fail`): POST на `/fail` у них получит ошибку, а неудачи webhook `AlertDeliveryFailing` не
+считает — сломанная доставка снова пройдёт молча. Пока секрета нет, Alertmanager получает заглушку `unset`: пинг раз в 5 минут падает в его
 логе (`Notify attempt failed … receiver=heartbeat … unsupported protocol scheme`), а деплой
 предупреждает аннотацией прогона. Проверка — остановить Alertmanager и дождаться сообщения
 внешнего сервиса:

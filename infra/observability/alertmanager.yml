@@ -37,8 +37,10 @@ route:
       group_interval: 1m
       repeat_interval: 5m
     # Вторым и тоже мимо Telegram: он и не доставляет. /fail внешнего check
-    # сразу переводит его в down; следующий пинг Watchdog (5–6 минут) — снова в
-    # up. Повтор раз в час: пока доставка сломана, тревога напоминает о себе.
+    # сразу переводит его в down, а пинг Watchdog, пока горит этот алерт,
+    # заглушён (inhibit_rules ниже): check красный до починки доставки, а не
+    # мигает down/up, как сетевой сбой. Повтор раз в час: если check вернули в
+    # up руками, а доставка всё ещё сломана, он снова уйдёт в down.
     - matchers: ['alertname="AlertDeliveryFailing"']
       receiver: heartbeat-fail
       group_wait: 0s
@@ -57,6 +59,11 @@ inhibit_rules:
   - source_matchers: ['severity="critical"', 'alertname!="ReviewDlqNotEmpty"']
     target_matchers: ['severity="warning"']
     equal: [service, mountpoint]
+  # Сломанная доставка в Telegram глушит пинг Watchdog: check внешнего сервиса
+  # после /fail остаётся down, пока алерт горит, а не возвращается в up
+  # следующим пингом через 5–6 минут.
+  - source_matchers: ['alertname="AlertDeliveryFailing"']
+    target_matchers: ['alertname="Watchdog"']
 
 receivers:
   - name: telegram

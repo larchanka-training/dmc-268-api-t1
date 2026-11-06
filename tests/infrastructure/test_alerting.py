@@ -130,6 +130,18 @@ def test_failed_telegram_delivery_goes_to_the_fail_url_and_not_to_telegram() -> 
     assert not second.get("continue", False)
     assert _receivers()["heartbeat-fail"]["webhook_configs"][0]["send_resolved"] is False
 
+    # Пока доставка сломана, Watchdog не возвращает check в up: иначе после /fail он
+    # снова зелёный через 5–6 минут, и пару down/up легко принять за сетевой сбой.
+    inhibits = yaml.safe_load(ALERTMANAGER.read_text(encoding="utf-8"))["inhibit_rules"]
+    assert {
+        "source_matchers": ['alertname="AlertDeliveryFailing"'],
+        "target_matchers": ['alertname="Watchdog"'],
+    } in inhibits
+
+    # Локально /fail строится из того же адреса, что и пинг, как деплой строит его на стенде.
+    configs = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["configs"]
+    assert configs["heartbeat_fail_url"]["content"] == configs["heartbeat_url"]["content"] + "/fail"
+
     rule = _alerts()["AlertDeliveryFailing"]
     assert 'alertmanager_notifications_failed_total{integration="telegram"}' in rule["expr"]
     # Счётчик пишет сам Alertmanager: Prometheus должен его скрейпить.

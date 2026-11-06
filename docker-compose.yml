@@ -618,10 +618,11 @@ configs:
   # Адрес heartbeat для Watchdog (#334); заглушка unset — пинг падает в логе.
   heartbeat_url:
     content: ${ALERT_HEARTBEAT_URL:-unset}
-  # Тот же check с /fail для AlertDeliveryFailing: compose не дописывает суффикс
-  # сам, поэтому адрес целиком; заглушка unset — как у пинга.
+  # Тот же check с /fail для AlertDeliveryFailing — из того же адреса, как на
+  # стенде; без него unset/fail — та же заглушка. Адрес задаётся без
+  # завершающего /: обрезать его, как деплой, compose не умеет.
   heartbeat_fail_url:
-    content: ${ALERT_HEARTBEAT_FAIL_URL:-unset}
+    content: ${ALERT_HEARTBEAT_URL:-unset}/fail
 
 volumes:
   postgres_data:
