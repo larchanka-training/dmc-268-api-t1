@@ -166,6 +166,11 @@ class ContextPayloadRepo(Protocol):
 
     def add(self, payload: ContextPayload) -> None: ...
 
+    def expire_bodies(self, created_before: datetime, now: datetime, limit: int) -> int:
+        """Стереть тела самых старых пакетов, записанных раньше `created_before`, не больше
+        `limit`; метаданные остаются, `body_expired_at` = `now`. Вернуть число стёртых."""
+        ...
+
 
 class FindingRepo(Protocol):
     def list_for_run(self, review_run_id: UUID) -> list[Finding]: ...

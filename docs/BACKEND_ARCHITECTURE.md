@@ -161,6 +161,12 @@ cookie. Выход отзывает токен у GitHub после ответа
 зависшие прогоны (`purge_expired_sessions`, раз в минуту). Индекса по
 `expires_at` нет: таблица мала, а проход не лежит на пути запроса.
 
+Тот же проход стирает тела пакетов контекста старше `CONTEXT_PAYLOAD_RETENTION_DAYS`
+(30 дней; change `context-payload-retention`): `expire_context_payloads` за раз
+стирает не больше `CONTEXT_PAYLOAD_EXPIRY_BATCH` (200) самых старых тел, `SKIP LOCKED`.
+Метаданные пакета остаются; экран прогона дифф берёт у VCS, а не из пакета, поэтому
+стирание его не задевает.
+
 Тот же проход, но не чаще `WEBHOOK_REDELIVERY_INTERVAL_SECONDS`, переотправляет
 упавшие доставки вебхука (#149): GitHub сам их не повторяет. Порт
 `WebhookDeliveries` (адаптер `GitHubWebhookDeliveries`, JWT приложения) отдаёт

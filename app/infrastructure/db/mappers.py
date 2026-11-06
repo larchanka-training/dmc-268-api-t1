@@ -112,9 +112,10 @@ def context_payload_to_domain(row: ContextPayloadRow) -> ContextPayload:
         # Копия, как tiers и file_paths выше. Отдать dict строки по ссылке —
         # значит превратить frozen dataclass в живую ручку к состоянию сессии,
         # где правка payload.body уходит во flush в базу.
-        body=deepcopy(row.body),
+        body=deepcopy(row.body) if row.body is not None else {},
         created_at=row.created_at,
         updated_at=row.updated_at,
+        body_expired_at=row.body_expired_at,
     )
 
 

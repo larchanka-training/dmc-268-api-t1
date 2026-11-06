@@ -408,6 +408,18 @@ class FakeContextPayloadRepo:
     def add(self, payload: ContextPayload) -> None:
         self._items.append(payload)
 
+    def expire_bodies(self, created_before: datetime, now: datetime, limit: int) -> int:
+        live = sorted(
+            (p for p in self._items if p.body_expired_at is None and p.created_at < created_before),
+            key=lambda p: p.created_at,
+        )[:limit]
+        expired = {p.id for p in live}
+        self._items = [
+            replace(p, body={}, body_expired_at=now, updated_at=now) if p.id in expired else p
+            for p in self._items
+        ]
+        return len(expired)
+
 
 class FakeFindingRepo:
     def __init__(self, review_runs: FakeReviewRunRepo) -> None:

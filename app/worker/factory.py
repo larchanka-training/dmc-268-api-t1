@@ -24,6 +24,7 @@ from opentelemetry import trace
 from pika import spec
 
 from app.application.context_assembly import ContextLimits
+from app.application.context_payload_expiry import expire_context_payloads
 from app.application.llm_review import LlmLimits
 from app.application.ports import (
     CacheStore,
@@ -459,8 +460,11 @@ def build_maintenance(
     redeliver: Callable[[], int] | None = None,
     redelivery_interval: timedelta = timedelta(seconds=300),
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
+    payload_retention: timedelta = timedelta(days=30),
+    payload_expiry_batch: int = 200,
 ) -> Callable[[], None]:
-    """Периодический проход: зависшие прогоны, истёкшие сессии, повтор доставок.
+    """Периодический проход: зависшие прогоны, истёкшие сессии, тела пакетов контекста старше
+    срока хранения, повтор доставок.
 
     Шаги независимы: сбой одного логируется, отмечается ошибкой на текущем спане
     (`review.sweep`) и не мешает другому. Повтор доставок ходит в GitHub, поэтому
@@ -499,6 +503,18 @@ def build_maintenance(
             logger.exception(
                 "удаление истёкших сессий завершилось ошибкой",
                 extra={"maintenance_step": "purge_expired_sessions"},
+            )
+        try:
+            expired = expire_context_payloads(
+                uow_factory(), now=now(), retention=payload_retention, batch=payload_expiry_batch
+            )
+            if expired:
+                logger.info("тел пакетов контекста стёрто по сроку хранения: %d", expired)
+        except Exception as exc:
+            record_current_exception(exc)
+            logger.exception(
+                "стирание тел пакетов контекста завершилось ошибкой",
+                extra={"maintenance_step": "expire_context_payloads"},
             )
         moment = now()
         if redeliver is None or (
@@ -580,6 +596,8 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
         ),
         redelivery_interval=timedelta(seconds=settings.webhook_redelivery_interval_seconds),
         run_outcome=run_outcome,
+        payload_retention=timedelta(days=settings.context_payload_retention_days),
+        payload_expiry_batch=settings.context_payload_expiry_batch,
     )
     handler = build_review_handler(
         container,

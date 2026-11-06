@@ -264,6 +264,18 @@ class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "context_payloads"
     __table_args__ = (
         UniqueConstraint("review_run_id", "chunk_index", name="uq_context_payloads_chunk"),
+        # Тело стирается по сроку хранения (change `context-payload-retention`): тела нет ровно
+        # тогда, когда отмечено время стирания.
+        CheckConstraint(
+            "(body IS NULL) = (body_expired_at IS NOT NULL)",
+            name="ck_context_payloads_body_expiry",
+        ),
+        # Проход стирания берёт самые старые живые тела и не читает уже стёртые строки.
+        Index(
+            "ix_context_payloads_live_created_at",
+            "created_at",
+            postgresql_where=text("body IS NOT NULL"),
+        ),
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -274,7 +286,9 @@ class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     file_paths: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    body: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # NULL — тело стёрто по сроку хранения, метаданные выше остаются.
+    body: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    body_expired_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):

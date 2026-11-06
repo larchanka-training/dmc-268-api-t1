@@ -181,7 +181,11 @@ class ReviewRunStep:
 
 @dataclass(frozen=True, slots=True)
 class ContextPayload:
-    """Один кусок материала, отправленного модели для прогона."""
+    """Один кусок материала, отправленного модели для прогона.
+
+    Тело хранится ограниченный срок (change `context-payload-retention`): после него
+    `body` пуст, а `body_expired_at` — когда его стёрли. Метаданные остаются.
+    """
 
     id: UUID
     review_run_id: UUID
@@ -193,6 +197,7 @@ class ContextPayload:
     body: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+    body_expired_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
