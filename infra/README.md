@@ -334,7 +334,7 @@ internal-сети Docker не публикует. Выход наружу чер
 сессии только по HTTPS, `GF_METRICS_ENABLED=false` — `/grafana/metrics` иначе отдаётся без входа
 (версия, коммит, число пользователей; Prometheus стенда Grafana не опрашивает),
 `GF_AUTH_BASIC_ENABLED=false` — запрос с `Authorization: Basic` идёт мимо `limit_req` на
-`/grafana/login` и засчитывается в блокировку логина; API-клиентов у Grafana нет. Туннель продолжает работать: `ssh -L 3000:127.0.0.1:3000 <сервер>`, но
+`/grafana/login` и засчитывается в блокировку логина; API-клиентов у Grafana нет. `GF_AUTH_ANONYMOUS_HIDE_VERSION=true` — без входа `/grafana/api/health` и `buildInfo` страницы входа иначе отдают версию и коммит, `GF_METRICS_ENABLED=false` этого не закрывает. `GF_PUBLIC_DASHBOARDS_ENABLED=false` — публичные дашборды в 13.x включены по умолчанию, и Admin или Editor кнопкой «Share externally» открыл бы панели с логами и трейсами без входа. Туннель продолжает работать: `ssh -L 3000:127.0.0.1:3000 <сервер>`, но
 адрес теперь с подпутём — http://localhost:3000/grafana/. Корень `http://localhost:3000/`
 отвечает 301 на публичный адрес: с `serve_from_sub_path` Grafana отдаёт интерфейс только под
 `/grafana/`. Secure-cookie по `http://localhost` браузеры принимают (localhost у них — безопасный
@@ -462,7 +462,7 @@ OTel с её миллисекундами. Логи сервисов колле�
 | RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
 | Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
 | Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes`, `container_uptime_seconds`, `container_restarts_total` | `container_name` | CPU и память контейнеров |
-| Вход, nginx интерфейса (receiver `nginx` основного коллектора, `stub_status`) | `collector` | `nginx_requests_total`, `nginx_connections_current`, `nginx_connections_accepted_total`, `nginx_connections_handled_total` | `state` | «Вход (nginx)»: соединения; запросы в секунду и доля ответов по классу кода считаются по access-логу `{service_name="dmc268-ui"}` в Loki без проб blackbox: счётчик `stub_status` их не отличает |
+| Вход, nginx интерфейса (receiver `nginx` основного коллектора, `stub_status`) | `collector` | `nginx_requests_total`, `nginx_connections_current`, `nginx_connections_accepted_total`, `nginx_connections_handled_total` | `state` | «Вход (nginx)»: соединения; запросы в секунду и доля ответов по классу кода считаются по access-логу `{service_name="dmc268-ui"}` в Loki без проб blackbox и без запросов к `/grafana/` (Grafana ходит через тот же nginx, открытый «Обзор» — около 0,6 запроса в секунду с вкладки): счётчик `stub_status` их не отличает |
 | Расход токенов (receiver `sqlquery/llm-tokens` основного коллектора) | `collector` | `review_llm_tokens_month` | нет | нет (алерты бюджета) |
 | Резервные копии (textfile node-exporter, пишет `backup.sh`) | `node-exporter` | `dmc268_backup_last_success_timestamp_seconds` | нет | нет (алерт `BackupStale`) |
 | Пробы (blackbox-exporter) | `blackbox-services`, `blackbox-public` | `probe_success`, `probe_ssl_earliest_cert_expiry` | `service`, `instance` | нет (алерты) |

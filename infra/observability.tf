@@ -515,6 +515,12 @@ resource "docker_container" "grafana" {
     # попыток за 5 минут блокируют логин — кто угодно держал бы admin
     # заблокированным. API-клиентов у Grafana нет, вход — только формой.
     "GF_AUTH_BASIC_ENABLED=false",
+    # Без входа Grafana отдаёт версию и коммит в /grafana/api/health и в
+    # buildInfo страницы входа; GF_METRICS_ENABLED=false этого не закрывает.
+    "GF_AUTH_ANONYMOUS_HIDE_VERSION=true",
+    # Публичные дашборды в 13.x включены по умолчанию: Admin/Editor кнопкой
+    # «Share externally» открыл бы панели с логами и трейсами без входа.
+    "GF_PUBLIC_DASHBOARDS_ENABLED=false",
     # Публичный вход по подпути /grafana/: nginx интерфейса проксирует путь
     # как есть, без rewrite, а Grafana строит ссылки и редиректы от root_url.
     # С serve_from_sub_path Grafana отвечает только под /grafana/, корень —
