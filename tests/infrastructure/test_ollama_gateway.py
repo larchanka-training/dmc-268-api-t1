@@ -191,6 +191,30 @@ def test_failed_reply_is_a_model_failure(response: httpx.Response, reason: str) 
 
 
 @pytest.mark.parametrize(
+    "missing",
+    ["message", "model"],
+)
+def test_counted_reply_without_an_answer_records_usage_and_fails(missing: str) -> None:
+    body = {k: v for k, v in _reply().items() if k != missing}
+    handler, seen = _recording(httpx.Response(200, json=body))
+    meter = LlmMeter()
+
+    with pytest.raises(LlmError, match="неожиданное тело") as error:
+        _gateway(handler).complete(replace(REQUEST, meter=meter))
+
+    assert len(seen) == 1
+    assert isinstance(error.value.__cause__, KeyError)
+    assert meter.total == LlmUsage(input_tokens=1_200, output_tokens=300, total_tokens=1_500)
+
+
+def test_body_that_is_not_an_object_is_an_unexpected_body() -> None:
+    handler, _ = _recording(httpx.Response(200, json=[_reply()]))
+
+    with pytest.raises(LlmError, match="неожиданное тело"):
+        _gateway(handler).complete(REQUEST)
+
+
+@pytest.mark.parametrize(
     ("raised", "reason"),
     [(httpx.ReadTimeout, "таймаут"), (httpx.ConnectError, "недоступна")],
     ids=["timeout", "connection"],

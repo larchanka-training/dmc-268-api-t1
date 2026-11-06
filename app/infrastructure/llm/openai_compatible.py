@@ -142,37 +142,53 @@ class OpenAiCompatibleGateway:
             raise LlmError(f"{self._name} недоступен ({type(error).__name__})") from None
 
     def _reply(self, response: httpx.Response) -> RawReply:
+        unexpected = f"{self._name} вернул неожиданное тело на /chat/completions"
         try:
             # Из чисел тела адаптер читает только токены (целые) и стоимость:
             # дробные - `Decimal`, без float.
             data = response.json(parse_float=Decimal)
+        except ValueError as error:
+            raise LlmError(unexpected) from error
+        if not isinstance(data, dict):
+            raise LlmError(unexpected)
+        # Расход разбирается до ответа и сам не падает: оплаченный ответ без
+        # `choices` или `model` уходит сбоем уже с учтённым расходом, а не мимо
+        # счётчика, и повтор или фоллбэк не прячут, что заплатили второй раз.
+        tokens = self._usage(_object(data.get("usage")))
+        try:
             choice = data["choices"][0]
             text: str = choice["message"]["content"]
             model: str = data["model"]
-            # Без `usage` или с не-объектом ответ всё равно принят: он оплачен, а
-            # отказ отправил бы повтор или фоллбэк и заплатил второй раз.
-            usage = _object(data.get("usage"))
-            if all(usage.get(field) is None for field in ("prompt_tokens", "completion_tokens", "total_tokens")):
-                # Ответ принят: он оплачен. Но без счётчиков расход учтён нулём,
-                # и квота с бюджетом (#286) его не видят - об этом должно быть видно.
-                logger.warning("%s: в ответе нет счётчиков токенов, расход учтён как 0", self._name)
-            input_tokens = token_count(usage.get("prompt_tokens"))
-            output_tokens = token_count(usage.get("completion_tokens"))
-            total = usage.get("total_tokens")
-            tokens = LlmUsage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cached_tokens=token_count(_object(usage.get("prompt_tokens_details")).get("cached_tokens")),
-                reasoning_tokens=token_count(_object(usage.get("completion_tokens_details")).get("reasoning_tokens")),
-                # Итог провайдера, как на develop; без него - сумма видов.
-                total_tokens=input_tokens + output_tokens if total is None else token_count(total),
-                cost_eur=self._cost_eur(usage),
-            )
-        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
-            raise LlmError(f"{self._name} вернул неожиданное тело на /chat/completions") from error
-        # `length` - ответ оборван по `max_tokens`.
-        truncated = choice.get("finish_reason") == "length"
+            # `length` - ответ оборван по `max_tokens`.
+            truncated = choice.get("finish_reason") == "length"
+        except (KeyError, IndexError, TypeError, AttributeError) as error:
+            rejected = LlmError(unexpected)
+            rejected.__cause__ = error
+            return RawReply(text="", model=self._model, usage=tokens, rejected=rejected)
         return RawReply(text=text, model=model, usage=tokens, truncated=truncated)
+
+    def _usage(self, usage: Mapping[str, Any]) -> LlmUsage:
+        """Расход из `usage` ответа; кривое поле - 0 с предупреждением, а не сбой.
+
+        Без `usage` или с не-объектом ответ всё равно принят: он оплачен, а
+        отказ отправил бы повтор или фоллбэк и заплатил второй раз.
+        """
+        if all(usage.get(field) is None for field in ("prompt_tokens", "completion_tokens", "total_tokens")):
+            # Ответ принят: он оплачен. Но без счётчиков расход учтён нулём,
+            # и квота с бюджетом (#286) его не видят - об этом должно быть видно.
+            logger.warning("%s: в ответе нет счётчиков токенов, расход учтён как 0", self._name)
+        input_tokens = token_count(usage.get("prompt_tokens"))
+        output_tokens = token_count(usage.get("completion_tokens"))
+        total = usage.get("total_tokens")
+        return LlmUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=token_count(_object(usage.get("prompt_tokens_details")).get("cached_tokens")),
+            reasoning_tokens=token_count(_object(usage.get("completion_tokens_details")).get("reasoning_tokens")),
+            # Итог провайдера, как на develop; без него - сумма видов.
+            total_tokens=input_tokens + output_tokens if total is None else token_count(total),
+            cost_eur=self._cost_eur(usage),
+        )
 
     def _cost_eur(self, usage: Mapping[str, Any]) -> Decimal:
         """Стоимость вызова в евро до 10 знаков; не в евро или нет - 0.
