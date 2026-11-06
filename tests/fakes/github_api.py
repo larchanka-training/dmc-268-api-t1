@@ -21,7 +21,7 @@ import re
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote
@@ -127,12 +127,14 @@ class NetworkFault:
     целиком). `stored=False` - обрыв до GitHub: запрос не дошёл; `True` -
     GitHub запрос выполнил, а ответ до клиента не дошёл (таймаут чтения).
     `error` - исключение транспорта или `BaseException`, которым тест
-    имитирует смерть процесса посреди запроса."""
+    имитирует смерть процесса посреди запроса. `passes` - сколько подходящих
+    запросов пропустить до сбоя."""
 
     method: str
     path: str
     error: BaseException
     stored: bool = False
+    passes: int = 0
 
 
 @dataclass(frozen=True)
@@ -140,9 +142,12 @@ class CheckRun:
     id: int
     name: str
     head_sha: str
-    conclusion: str
+    # `None` у `in_progress`: итога у незавершённого check run нет.
+    conclusion: str | None
     title: str
     summary: str
+    status: str = "completed"
+    details_url: str | None = None
 
 
 @dataclass
@@ -293,6 +298,9 @@ class FakeGitHub:
         with self._lock:
             for index, fault in enumerate(self.network_faults):
                 if fault.method == method and re.fullmatch(fault.path, path):
+                    if fault.passes:
+                        self.network_faults[index] = replace(fault, passes=fault.passes - 1)
+                        return None
                     return self.network_faults.pop(index)
         return None
 
@@ -471,9 +479,11 @@ class FakeGitHub:
             id=next(self._ids),
             name=payload["name"],
             head_sha=payload["head_sha"],
-            conclusion=payload["conclusion"],
+            conclusion=payload.get("conclusion"),
             title=payload["output"]["title"],
             summary=payload["output"]["summary"],
+            status=payload["status"],
+            details_url=payload.get("details_url"),
         )
         with self._lock:
             self.check_runs.append(run)

@@ -80,9 +80,11 @@ class GitHubVcsGateway:
         max_attempts: int = 3,
         backoff_base_seconds: float = 0.5,
         rate_limit_budget_seconds: float = 60.0,
+        public_origin: str = "",
     ) -> None:
         """`rate_limit_budget_seconds` - сколько один запрос может ждать снятия лимита
-        суммарно; `clock` - стенные часы для `x-ratelimit-reset` (эпоха, секунды)."""
+        суммарно; `clock` - стенные часы для `x-ratelimit-reset` (эпоха, секунды);
+        `public_origin` - адрес кабинета для ссылки из check run, пустой - без ссылки."""
         self._auth = auth
         self._client = client
         self._sleep = sleep
@@ -90,6 +92,7 @@ class GitHubVcsGateway:
         self._max_attempts = max_attempts
         self._backoff_base_seconds = backoff_base_seconds
         self._rate_limit_budget_seconds = rate_limit_budget_seconds
+        self._public_origin = public_origin
         self._app_slug: str | None = None
         self._review = GitHubReviewClient(self)
 
@@ -206,8 +209,12 @@ class GitHubVcsGateway:
         head_sha: str,
         installation_id: int,
         check: MergeGateCheck,
+        *,
+        run_id: UUID | None = None,
     ) -> None:
-        self._review.set_merge_gate_check(repo_full_name, head_sha, installation_id, check)
+        self._review.set_merge_gate_check(
+            repo_full_name, head_sha, installation_id, check, run_id=run_id
+        )
 
     def fetch_file(
         self, repo_full_name: str, path: str, sha: str, installation_id: int, *, max_bytes: int

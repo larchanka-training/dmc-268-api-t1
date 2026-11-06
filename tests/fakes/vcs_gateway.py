@@ -29,6 +29,10 @@ class RecordingVcsGateway:
     # Содержимое файлов по (путь, sha); отсутствие ключа - файла на коммите нет.
     files: dict[tuple[str, str], str] = field(default_factory=dict)
     checks: list[MergeGateCheck] = field(default_factory=list)
+    # Каждый вызов, и неудачный тоже: сколько раз пробовали выставить check.
+    attempted_checks: list[MergeGateCheck] = field(default_factory=list)
+    # Прогон, на который ведёт ссылка каждого check из `checks`.
+    check_links: list[UUID | None] = field(default_factory=list)
     publications: list[tuple[str, tuple[InlineCommentDraft, ...]]] = field(
         default_factory=list
     )
@@ -178,10 +182,14 @@ class RecordingVcsGateway:
         head_sha: str,
         installation_id: int,
         check: MergeGateCheck,
+        *,
+        run_id: UUID | None = None,
     ) -> None:
+        self.attempted_checks.append(check)
         if self.check_error is not None:
             raise self.check_error
         self.checks.append(check)
+        self.check_links.append(run_id)
         if self.during_first_check is not None:
             hook, self.during_first_check = self.during_first_check, None
             hook()

@@ -191,7 +191,8 @@ def test_rules_02_valid_rules_reach_the_model_and_the_finding_is_published_with_
     (comment,) = review.comments
     assert (comment.path, comment.line, comment.side) == (CODE_PATH, RAISE_LINE, "RIGHT")
     assert f"{ATTRIBUTION}: Отказ бросается исключением." in comment.body
-    (check,) = stack.github.check_runs
+    in_progress, check = stack.github.check_runs
+    assert (in_progress.status, check.status) == ("in_progress", "completed")
     assert check.head_sha == HEAD
     assert stack.github.unexpected == []
 
@@ -280,7 +281,7 @@ def test_rules_03_a_file_without_accepted_rules_falls_back_with_the_reason(
     (review,) = stack.github.reviews_of(PR)
     assert review.body
     assert review.comments == ()
-    (check,) = stack.github.check_runs
+    _, check = stack.github.check_runs
     assert check.conclusion == "success"
 
 
@@ -388,7 +389,8 @@ def test_e2e_02b_a_redelivery_after_the_run_completed_creates_no_second_review(
 
 
 def test_e2e_05_a_model_failure_fails_the_run_without_publishing_anything(stack: Stack) -> None:
-    """E2E-05: модель недоступна - `failed` с причиной, в PR ничего, сообщение в DLQ."""
+    """E2E-05: модель недоступна - `failed` с причиной, ревью в PR нет, «Идёт ревью»
+    сменяется «Ревью не удалось» (#295), сообщение в DLQ."""
     pull = _open(stack, base_files={RULES_PATH: RULES_MD})
     llm = ScriptedLlmGateway([LlmError("ни один провайдер модели не ответил")])
 
@@ -399,7 +401,10 @@ def test_e2e_05_a_model_failure_fails_the_run_without_publishing_anything(stack:
     assert run.status is ReviewRunStatus.FAILED
     assert run.failure_reason == "ни один провайдер модели не ответил"
     assert stack.github.reviews_of(PR) == []
-    assert stack.github.check_runs == []
+    assert [(c.status, c.conclusion, c.title) for c in stack.github.check_runs] == [
+        ("in_progress", None, "Идёт ревью"),
+        ("completed", "failure", "Ревью не удалось"),
+    ]
     # Через DLX брокер перекладывает отвергнутое сообщение асинхронно: ждём его, а не читаем раз.
     deadline = time.monotonic() + 5
     while stack.queue_depth(DLQ_NAME) == 0 and time.monotonic() < deadline:

@@ -88,7 +88,9 @@ def test_second_push_with_the_same_finding_adds_no_inline_comment(stack: Stack) 
     assert covered.covered_by_finding_id == original.id
     # Тред с critical открыт - мердж по-прежнему заблокирован.
     assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [
+        (FIRST_HEAD, None),
         (FIRST_HEAD, "failure"),
+        (SECOND_HEAD, None),
         (SECOND_HEAD, "failure"),
     ]
 

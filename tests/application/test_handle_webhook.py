@@ -18,7 +18,8 @@ from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
     BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
-    build_retarget_check,
+    build_failed_review_check,
+    build_in_progress_check,
 )
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.unit_of_work import ActiveRunConflict
@@ -524,13 +525,14 @@ def test_edited_back_after_a_failed_review_of_the_new_target_reviews_again() -> 
     outcome, uow, _, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
     assert outcome.run is not None
     object.__setattr__(outcome.run, "status", ReviewRunStatus.FAILED)
+    object.__setattr__(outcome.run, "created_at", NOW - timedelta(seconds=30))
 
     outcome, uow, vcs, queue = run_case(
         "edited", vcs_meta=OLD_TARGET, uow=uow, queue=queue, base_ref="main"
     )
 
     assert outcome.kind == "success"
-    assert [check.conclusion for _, check in vcs.checks] == ["failure"]
+    assert [check.conclusion for _, check in vcs.checks] == [None]
     assert len(queue.jobs) == 3
 
 
@@ -576,15 +578,15 @@ def test_retarget_blocks_the_merge_gate_before_the_job_is_enqueued() -> None:
     record_check = vcs.set_merge_gate_check
     enqueue = queue.enqueue
 
-    def tracking_check(*args: Any) -> None:
+    def tracking_check(*args: Any, **kwargs: Any) -> None:
         order.append("check")
-        record_check(*args)
+        record_check(*args, **kwargs)
 
     def tracking_enqueue(job: Any) -> None:
         order.append("enqueue")
         enqueue(job)
 
-    vcs.set_merge_gate_check = tracking_check  # type: ignore[method-assign,assignment]
+    vcs.set_merge_gate_check = tracking_check  # type: ignore[method-assign]
     queue.enqueue = tracking_enqueue  # type: ignore[method-assign]
     outcome = handle_webhook_event(
         webhook_payload("edited"), uow, vcs, queue, now=lambda: NOW, new_id=uuid4
@@ -594,8 +596,30 @@ def test_retarget_blocks_the_merge_gate_before_the_job_is_enqueued() -> None:
     assert outcome.run is not None
     ((head_sha, check),) = vcs.checks
     assert head_sha == outcome.run.head_sha
-    assert check.conclusion == "failure"
+    assert check == build_in_progress_check()
     assert order == ["commit", "check", "enqueue"]
+
+
+def test_retarget_whose_job_is_not_enqueued_fails_the_head() -> None:
+    """#295: блокировка смены ветки выставлена, а задача не ушла в брокер - `in_progress`
+    сменяется `failure`, иначе он висел бы: прогон уже `failed`, воркер его не возьмёт."""
+
+    class BrokenQueue(FakeQueue):
+        def enqueue(self, job) -> None:
+            raise RuntimeError("брокер недоступен")
+
+    uow, _, _ = reviewed_on_old_target()
+    vcs = FakeVcs(diff=DIFF, meta=NEW_TARGET)
+
+    with pytest.raises(RuntimeError, match="брокер недоступен"):
+        handle_webhook_event(
+            webhook_payload("edited"), uow, vcs, BrokenQueue(), now=lambda: NOW, new_id=uuid4
+        )
+
+    assert [check for _, check in vcs.checks] == [
+        build_in_progress_check(),
+        build_failed_review_check(),
+    ]
 
 
 def test_retarget_whose_gate_cannot_be_blocked_is_rolled_back() -> None:
@@ -614,11 +638,12 @@ def test_retarget_whose_gate_cannot_be_blocked_is_rolled_back() -> None:
     failed = uow.review_runs.get(attempted.id)
     assert failed is not None and failed.status is ReviewRunStatus.FAILED
     assert merge_request_of(uow).target_branch == "main"
+    object.__setattr__(failed, "created_at", NOW - timedelta(seconds=30))
 
     outcome, uow, vcs, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
 
     assert outcome.kind == "success"
-    assert [check.conclusion for _, check in vcs.checks] == ["failure"]
+    assert [check.conclusion for _, check in vcs.checks] == [None]
     assert len(queue.jobs) == 2
 
 
@@ -866,6 +891,8 @@ def test_retarget_out_of_the_branch_filter_cancels_the_active_run() -> None:
     `success`. Возврат обрабатывается как обычная смена ветки (#222): head блокируется, ставится новый прогон."""
     _, uow, _, queue = run_case(vcs_meta=OLD_TARGET)
     (active,) = uow.review_runs.added
+    # Старше прогона, который создаст возврат в `NOW`: «последний» - по времени.
+    object.__setattr__(active, "created_at", NOW - timedelta(minutes=1))
     _filter_to_main(uow)
 
     outcome, uow, vcs, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
@@ -879,7 +906,7 @@ def test_retarget_out_of_the_branch_filter_cancels_the_active_run() -> None:
     outcome, uow, vcs, queue = run_case("edited", vcs_meta=OLD_TARGET, uow=uow, queue=queue)
 
     assert outcome.kind == "success"
-    assert [check for _, check in vcs.checks] == [build_retarget_check()]
+    assert [check for _, check in vcs.checks] == [build_in_progress_check()]
     assert len(uow.review_runs.added) == 2 and len(queue.jobs) == 2
 
 
@@ -894,7 +921,7 @@ def test_return_into_the_branch_filter_after_a_completed_review_is_not_a_duplica
     outcome, uow, vcs, queue = run_case("edited", vcs_meta=OLD_TARGET, uow=uow, queue=queue)
 
     assert outcome.kind == "success"
-    assert [check for _, check in vcs.checks] == [build_retarget_check()]
+    assert [check for _, check in vcs.checks] == [build_in_progress_check()]
     assert len(queue.jobs) == 2
 
 

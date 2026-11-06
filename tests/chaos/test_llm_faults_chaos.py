@@ -37,8 +37,11 @@ def _assert_failed_into_dlq(stack: Stack, run_id: str, code: str) -> None:
     assert stack.queue_depth(DLQ_NAME) == 1
     assert stack.github.reviews_of(PR) == []
     assert stack.published(run_id) == []
-    # Ни `success`, ни иного check run: непроверенный PR не выглядит проверенным.
-    assert stack.github.check_runs == []
+    # «Идёт ревью» сменяется «Ревью не удалось»: непроверенный PR не выглядит проверенным (#295).
+    assert [(c.status, c.conclusion) for c in stack.github.check_runs] == [
+        ("in_progress", None),
+        ("completed", "failure"),
+    ]
 
 
 def test_review_call_timeout_fails_the_run_with_llm_timeout(stack: Stack) -> None:
