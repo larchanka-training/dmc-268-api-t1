@@ -10,6 +10,10 @@
 # Telegram, а на внешний heartbeat-сервис (receiver heartbeat). Адрес — тоже
 # файлом рядом, из необязательного секрета; без него — заглушка unset, и пинг
 # падает с ошибкой в логе.
+#
+# Сломанная доставка в Telegram: AlertDeliveryFailing из alerts.yml уходит
+# на адрес /fail того же внешнего check (receiver heartbeat-fail), мимо
+# Telegram. Внешний сервис сразу поднимает тревогу своим каналом.
 
 route:
   receiver: telegram
@@ -32,6 +36,13 @@ route:
       group_wait: 0s
       group_interval: 1m
       repeat_interval: 5m
+    # Вторым и тоже мимо Telegram: он и не доставляет. /fail внешнего check
+    # сразу переводит его в down; следующий пинг Watchdog (5–6 минут) — снова в
+    # up. Повтор раз в час: пока доставка сломана, тревога напоминает о себе.
+    - matchers: ['alertname="AlertDeliveryFailing"']
+      receiver: heartbeat-fail
+      group_wait: 0s
+      repeat_interval: 1h
     - matchers: ['severity="warning"']
       receiver: telegram
       repeat_interval: 12h
@@ -70,4 +81,11 @@ receivers:
   - name: heartbeat
     webhook_configs:
       - url_file: /etc/alertmanager/secrets/heartbeat_url
+        send_resolved: false
+
+  # Тот же check с суффиксом /fail: healthchecks.io и аналоги понимают его как
+  # явный сбой. Адрес строит развёртывание из того же секрета.
+  - name: heartbeat-fail
+    webhook_configs:
+      - url_file: /etc/alertmanager/secrets/heartbeat_fail_url
         send_resolved: false

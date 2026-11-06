@@ -619,6 +619,43 @@ tests:
               summary: "Задача review_jobs.qq в работе дольше 20 минут"
               description: "Сообщение выдано воркеру 20 минут назад и не подтверждено. Сначала проверить, не идут ли вызовы модели в таймаут с повтором (спаны review.<этап>, шаг прогона: GET /api/v1/reviews/{id}/steps): такой прогон дойдёт сам. Через 30 минут без прогресса прогон переведёт в failed выметатель."
 
+  # Доставка в Telegram сломана: счётчик неудачных отправок растёт. Неудачи webhook
+  # (heartbeat без секрета — заглушка unset) алерт не зажигают: он только о Telegram.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="alertmanager", integration="telegram", reason="other"}'
+        values: '0x10 1+1x20'
+      - series: 'alertmanager_notifications_failed_total{job="alertmanager", integration="webhook", reason="other"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AlertDeliveryFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AlertDeliveryFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: alertmanager, integration: telegram}
+            exp_annotations:
+              summary: "Алерты не доходят в Telegram"
+              description: "За 10 минут Alertmanager не смог отправить в Telegram 5 уведомлений. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
+
+  # Доставка починилась: через 10 минут без новых неудач алерт гаснет.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="alertmanager", integration="telegram", reason="other"}'
+        values: '0x5 1 2 3 3x30'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: AlertDeliveryFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: alertmanager, integration: telegram}
+            exp_annotations:
+              summary: "Алерты не доходят в Telegram"
+              description: "За 10 минут Alertmanager не смог отправить в Telegram 3.333 уведомлений. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
+      - eval_time: 25m
+        alertname: AlertDeliveryFailing
+        exp_alerts: []
+
   # Watchdog (#334): горит всегда, рядов для него не нужно.
   - interval: 1m
     input_series: []
