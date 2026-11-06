@@ -3,8 +3,8 @@
 Поведение правил («горит / молчит» на синтетике) проверяет promtool по
 infra/observability/alerts.test.yml в job observability-configs. Здесь —
 связи между файлами, которые promtool не видит: имена метрик в правилах
-совпадают с теми, что пишут источники, секреты Telegram приходят файлами по одним путям в compose и
-infra, пороги записаны в README.
+совпадают с теми, что пишут источники, секреты Telegram и адрес heartbeat приходят файлами по одним
+путям в compose и infra, Watchdog уходит на heartbeat, а не в Telegram, пороги записаны в README.
 """
 
 import re
@@ -36,9 +36,11 @@ def _alerts() -> dict[str, dict[str, Any]]:
 
 
 def test_every_alert_has_severity_and_texts() -> None:
-    """severity — маршрут в alertmanager.yml, summary и description — текст сообщения."""
+    """severity — маршрут в alertmanager.yml, summary и description — текст сообщения.
+    `none` — только у Watchdog: его маршрут свой, по имени."""
     for name, rule in _alerts().items():
-        assert rule["labels"]["severity"] in {"critical", "warning"}, name
+        allowed = {"none"} if name == "Watchdog" else {"critical", "warning"}
+        assert rule["labels"]["severity"] in allowed, name
         assert rule["annotations"]["summary"], name
         assert rule["annotations"]["description"], name
 
@@ -76,11 +78,18 @@ def test_backup_mark_matches_the_rule() -> None:
     assert metric in _alerts()["BackupStale"]["expr"]
 
 
-def test_telegram_secrets_are_files_at_the_same_paths_everywhere() -> None:
-    receiver = yaml.safe_load(ALERTMANAGER.read_text(encoding="utf-8"))["receivers"][0]
-    telegram = receiver["telegram_configs"][0]
+def _receivers() -> dict[str, dict[str, Any]]:
+    config = yaml.safe_load(ALERTMANAGER.read_text(encoding="utf-8"))
+    return {r["name"]: r for r in config["receivers"]}
+
+
+def test_alert_secrets_are_files_at_the_same_paths_everywhere() -> None:
+    receivers = _receivers()
+    telegram = receivers["telegram"]["telegram_configs"][0]
     assert "bot_token" not in telegram and "chat_id" not in telegram
-    paths = {telegram["bot_token_file"], telegram["chat_id_file"]}
+    (heartbeat,) = receivers["heartbeat"]["webhook_configs"]
+    assert "url" not in heartbeat
+    paths = {telegram["bot_token_file"], telegram["chat_id_file"], heartbeat["url_file"]}
 
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     targets = {c["target"] for c in compose["services"]["alertmanager"]["configs"]}
@@ -89,6 +98,19 @@ def test_telegram_secrets_are_files_at_the_same_paths_everywhere() -> None:
     infra = read_infra_text()
     for path in paths:
         assert f'file    = "{path}"' in infra, f"infra не заливает {path}"
+
+
+def test_watchdog_goes_to_the_heartbeat_and_not_to_telegram() -> None:
+    """#334: первый маршрут ловит Watchdog по имени, иначе он ушёл бы в Telegram корневым
+    маршрутом. Повтор не реже раза в 5 минут — период проверки внешнего сервиса в README."""
+    route = yaml.safe_load(ALERTMANAGER.read_text(encoding="utf-8"))["route"]
+    first = route["routes"][0]
+    assert first["matchers"] == ['alertname="Watchdog"']
+    assert first["receiver"] == "heartbeat"
+    assert not first.get("continue", False)
+    assert first["repeat_interval"] == "5m"
+    assert _receivers()["heartbeat"]["webhook_configs"][0]["send_resolved"] is False
+    assert "Watchdog" in _alerts()
 
 
 def test_prometheus_loads_the_rules_and_sends_to_alertmanager() -> None:

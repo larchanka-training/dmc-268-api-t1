@@ -330,6 +330,22 @@ variable "alert_telegram_chat_id" {
   }
 }
 
+# Dead man's switch алертов (#334): адрес внешнего heartbeat-сервиса, на который
+# Alertmanager раз в 5 минут шлёт всегда горящий Watchdog. Необязателен: без него
+# стек работает, но падение самого Prometheus или Alertmanager никто не заметит.
+# Только https: пинг идёт наружу, а адрес — секрет.
+variable "alert_heartbeat_url" {
+  type        = string
+  description = "URL пинга внешнего heartbeat-сервиса (healthchecks.io и аналоги) для Watchdog (url_file); пусто — пинги не уходят. Не коммитить: по адресу пинг может прислать кто угодно."
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.alert_heartbeat_url == "" || can(regex("^https://[^\\s/]+/\\S*$", var.alert_heartbeat_url))
+    error_message = "alert_heartbeat_url — пусто или https://<хост>/<путь> без пробелов: секрет ALERT_HEARTBEAT_URL_DMC268_T1 битый."
+  }
+}
+
 variable "ollama_base_url" {
   type        = string
   description = "Адрес Ollama (OLLAMA_BASE_URL). Контейнер Ollama подключается к сети dmc268-backend — воркер ходит к нему оттуда; к dmc268-egress — только если Ollama сама скачивает модели."

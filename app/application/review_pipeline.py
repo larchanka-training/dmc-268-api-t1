@@ -67,6 +67,7 @@ from app.domain.llm_errors import LlmError, LlmOutputError
 from app.domain.llm_usage import NO_USAGE, LlmUsage
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import error_code
+from app.domain.vcs_errors import VcsTransientError
 from app.domain.verification import apply_verdicts, screen_findings
 
 logger = logging.getLogger(__name__)
@@ -166,7 +167,15 @@ def _was_cancelled(uow: UnitOfWork, run_id: UUID) -> bool:
     return run is not None and run.status is ReviewRunStatus.CANCELLED
 
 
-def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) -> None:
+def block_head_of_failed_run(
+    uow: UnitOfWork,
+    vcs: VcsGateway,
+    *,
+    run_id: UUID,
+    head_sha: str,
+    repository_full_name: str,
+    installation_id: int,
+) -> bool:
     """Выставить `failure` на head, если упавший прогон на нём последний, а до него
     на этот head уже было ревью (ревью #225), или check паузы, если ревью на паузе.
 
@@ -178,22 +187,24 @@ def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) 
     и без прежнего ревью: иначе обязательная проверка держала бы PR, который ревью не
     ждёт. Исключение - пауза авторевью, когда последний на head - упавший повтор ручного
     ревью, а до него есть завершённый ручной прогон: за head снова отвечает он
-    (`head_run_in_charge`), и выставляется его gate. Best-effort, как `_mark_failed`: сбой пишется в лог и не подменяет исходное
-    исключение.
+    (`head_run_in_charge`), и выставляется его gate. Зовут пайплайн и очистка
+    (`sweep_stale_runs`). Best-effort, как `_mark_failed`: сбой пишется в лог и не подменяет исходное
+    исключение. `False` - GitHub временно недоступен (`VcsTransientError`): очистке дальше в
+    проходе к нему не ходить; воркер результат не читает.
     """
     try:
         with uow:
-            run = uow.review_runs.get(job.review_run_id)
+            run = uow.review_runs.get(run_id)
             if run is None or run.status is not ReviewRunStatus.FAILED:
-                return
-            latest = uow.review_runs.find_latest(run.merge_request_id, job.head_sha)
-            earlier = uow.review_runs.find_reviewed(run.merge_request_id, job.head_sha)
+                return True
+            latest = uow.review_runs.find_latest(run.merge_request_id, head_sha)
+            earlier = uow.review_runs.find_reviewed(run.merge_request_id, head_sha)
             merge_request = uow.merge_requests.get(run.merge_request_id)
             repository = uow.repositories.get(merge_request.repository_id) if merge_request else None
             # Вытеснен ли прогон - по `latest`; чей gate на head - по `in_charge`.
-            in_charge = head_run_in_charge(uow, repository, run.merge_request_id, job.head_sha)
+            in_charge = head_run_in_charge(uow, repository, run.merge_request_id, head_sha)
         if latest is None or latest.id != run.id or repository is None or merge_request is None:
-            return
+            return True
         pause = pause_check(repository, in_charge, merge_request.target_branch)
         if pause is None and in_charge is not None and in_charge.id != run.id:
             # Пауза авторевью или фильтр, повтор ручного ревью упал: gate завершённого ручного.
@@ -201,13 +212,13 @@ def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) 
                 uow,
                 vcs,
                 merge_request_id=run.merge_request_id,
-                repo_full_name=job.repository_full_name,
-                head_sha=job.head_sha,
-                installation_id=job.installation_id,
+                repo_full_name=repository_full_name,
+                head_sha=head_sha,
+                installation_id=installation_id,
                 run_id=in_charge.id,
                 repository_id=repository.id,
             )
-            return
+            return True
         if pause is not None:
             # Пока идёт POST, за head мог стать новый ручной прогон и выставить свой gate.
             publish_pause_check(
@@ -216,22 +227,28 @@ def _block_head_of_failed_run(uow: UnitOfWork, vcs: VcsGateway, job: ReviewJob) 
                 pause,
                 repository_id=repository.id,
                 pr_number=merge_request.number,
-                repo_full_name=job.repository_full_name,
-                head_sha=job.head_sha,
-                installation_id=job.installation_id,
+                repo_full_name=repository_full_name,
+                head_sha=head_sha,
+                installation_id=installation_id,
             )
-            return
+            return True
         check = build_failed_review_check() if earlier is not None else None
-        if check is None:
-            return
-        vcs.set_merge_gate_check(
-            job.repository_full_name,
-            job.head_sha,
-            job.installation_id,
-            check,
+        if check is not None:
+            vcs.set_merge_gate_check(repository_full_name, head_sha, installation_id, check)
+    except VcsTransientError:
+        logger.exception(
+            "прогон упал, а check run merge gate на %s не выставлен: GitHub недоступен",
+            head_sha,
+            extra={"review_run_id": str(run_id)},
         )
+        return False
     except Exception:
-        logger.exception("прогон %s упал, а check run merge gate на %s не выставлен", job.review_run_id, job.head_sha)
+        logger.exception(
+            "прогон упал, а check run merge gate на %s не выставлен",
+            head_sha,
+            extra={"review_run_id": str(run_id)},
+        )
+    return True
 
 
 def run_review(
@@ -430,7 +447,14 @@ def run_review(
             usage=meter.total,
             unwritten_steps=steps.unwritten,
         )
-        _block_head_of_failed_run(uow, vcs_gateway, job)
+        block_head_of_failed_run(
+            uow,
+            vcs_gateway,
+            run_id=job.review_run_id,
+            head_sha=job.head_sha,
+            repository_full_name=job.repository_full_name,
+            installation_id=job.installation_id,
+        )
         raise
     except BaseException as exc:
         steps.interrupt(exc)
