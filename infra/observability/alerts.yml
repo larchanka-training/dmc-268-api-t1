@@ -389,3 +389,26 @@ groups:
         annotations:
           summary: "Сертификат {{ $labels.instance }} истекает через {{ $value | humanizeDuration }}"
           description: "Продление не прошло. Лог модуля ACME: docker logs dmc268-ui 2>&1 | grep -i acme."
+
+  # Dead man's switch (#334). Если упал сам Prometheus или Alertmanager, сломался
+  # их выход наружу или доставка в Telegram, алертов нет вовсе, и тишина в канале
+  # выглядит как спокойный день. Поэтому Watchdog горит всегда, а Alertmanager шлёт
+  # его не в Telegram, а раз в 5 минут на внешний heartbeat-сервис (receiver
+  # heartbeat в alertmanager.yml). Пинги пропали — внешний сервис шумит в канал.
+  # Отозванный токен бота стек не роняет, поэтому сбой доставки в Telegram за 15
+  # минут гасит Watchdog: для внешнего сервиса это то же, что упавший стек.
+  # Сбой самого пинга (integration="webhook") его не гасит, иначе он гасил бы сам
+  # себя. severity: none — не critical и не warning: inhibit_rules его не
+  # касаются, на страницу статуса он не попадает (ALERT_RULES).
+  - name: dmc268-watchdog
+    rules:
+      - alert: Watchdog
+        expr: |
+          vector(1)
+            unless on ()
+          (increase(alertmanager_notifications_failed_total{integration="telegram"}[15m]) > 0)
+        labels:
+          severity: none
+        annotations:
+          summary: "Цепочка алертов работает"
+          description: "Горит всегда, пока работают Prometheus и Alertmanager и доставка в Telegram не падала 15 минут. Alertmanager шлёт его на внешний heartbeat-сервис, а не в Telegram: пропавшие пинги поднимают внешний сервис (infra/README.md, «Алерты»)."

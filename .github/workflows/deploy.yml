@@ -316,6 +316,9 @@ jobs:
           # Alertmanager, но в Telegram не уходят.
           TF_VAR_alert_telegram_bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN_DMC268_T1 }}
           TF_VAR_alert_telegram_chat_id: ${{ secrets.TELEGRAM_CHAT_ID_DMC268_T1 }}
+          # Адрес внешнего heartbeat для Watchdog (#334). Необязателен: без него
+          # не заметят упавший Prometheus или Alertmanager.
+          TF_VAR_alert_heartbeat_url: ${{ secrets.ALERT_HEARTBEAT_URL_DMC268_T1 }}
           # Пароль роли replicator. Нет секрета — пустая строка, и проверка
           # переменной роняет plan, ничего не меняя на сервере.
           TF_VAR_postgres_replication_password: ${{ secrets.PG_REPLICATION_PASSWORD_DMC268_T1 }}
@@ -416,7 +419,8 @@ jobs:
       # разбивки простоя в summary и удаляет файл плана. Секреты Telegram
       # необязательны (#100): без них алерты считаются, но не доставляются —
       # деплой не падает, а предупреждает аннотацией прогона, иначе зелёный
-      # деплой выглядел бы как работающая доставка.
+      # деплой выглядел бы как работающая доставка. Так же и адрес heartbeat
+      # (#334): без него падение самого стека алертов никто не заметит.
       - name: Применить конфигурацию
         id: apply
         if: *fresh
@@ -426,6 +430,9 @@ jobs:
           .github/scripts/deploy/apply.sh
           if [ -z "$TF_VAR_alert_telegram_bot_token" ] || [ -z "$TF_VAR_alert_telegram_chat_id" ]; then
             echo "::warning title=Алерты не доставляются::Нет секретов TELEGRAM_BOT_TOKEN_DMC268_T1 или TELEGRAM_CHAT_ID_DMC268_T1: алерты видны в Alertmanager, но в Telegram не уходят (infra/README.md, «Алерты»)."
+          fi
+          if [ -z "$TF_VAR_alert_heartbeat_url" ]; then
+            echo "::warning title=Нет dead man's switch::Нет секрета ALERT_HEARTBEAT_URL_DMC268_T1: упавший Prometheus или Alertmanager никто не заметит (infra/README.md, «Алерты»)."
           fi
 
       # Связь с хранилищем пропала посреди шага, который пишет состояние или
