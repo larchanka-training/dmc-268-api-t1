@@ -1,6 +1,7 @@
 """`OllamaGateway` на записанных ответах `/api/chat`: протокол, токены, сбои."""
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
@@ -110,11 +111,23 @@ def test_null_token_counts_are_zero_not_a_crash() -> None:
     assert _metered(handler).total == LlmUsage()
 
 
-def test_malformed_token_count_is_an_unexpected_body() -> None:
-    handler, _ = _recording(httpx.Response(200, json=_reply(eval_count="300")))
+def test_integral_float_count_is_an_integer() -> None:
+    """Ollama разбирает JSON без `parse_float=Decimal`: `12.0` приходит float и всё равно целое."""
+    handler, _ = _recording(httpx.Response(200, json=_reply(prompt_eval_count=12.0, eval_count=3)))
 
-    with pytest.raises(LlmError, match="неожиданное тело"):
-        _gateway(handler).complete(REQUEST)
+    assert _metered(handler).total == LlmUsage(input_tokens=12, output_tokens=3, total_tokens=15)
+
+
+def test_malformed_token_count_is_zero_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """Кривой счётчик не отвергает ответ: правило одно для всех адаптеров."""
+    handler, seen = _recording(httpx.Response(200, json=_reply(eval_count="300")))
+
+    with caplog.at_level(logging.WARNING):
+        usage = _metered(handler).total
+
+    assert len(seen) == 1
+    assert usage.output_tokens == 0
+    assert any("не разобрано" in record.getMessage() for record in caplog.records)
 
 
 def test_prompt_counted_over_the_window_minus_reserve_is_treated_as_truncated() -> None:

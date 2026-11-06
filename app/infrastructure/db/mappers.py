@@ -111,7 +111,18 @@ def usage_columns(usage: LlmUsage | None) -> dict[str, int | Decimal | None]:
     return {column: getattr(usage, column) for column in _USAGE_COLUMNS}
 
 
-# Итог (`total_tokens`) хранится в `tokens_used`, его пишет вызывающий.
+def run_usage_columns(run: ReviewRun) -> dict[str, int | Decimal | None]:
+    """Колонки расхода прогона вместе с `tokens_used`.
+
+    Итог берётся из `usage`, когда он есть: `tokens_used` и `usage.total_tokens`
+    не расходятся в базе, даже если `replace(run, usage=...)` забыл `tokens_used`.
+    """
+    columns = usage_columns(run.usage)
+    columns["tokens_used"] = run.usage.total_tokens if run.usage is not None else run.tokens_used
+    return columns
+
+
+# Итог (`total_tokens`) хранится в `tokens_used`.
 _USAGE_COLUMNS = ("input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens", "cost_eur")
 
 

@@ -6,7 +6,8 @@ reasoning-токены (`bigint`) и стоимость в евро `cost_eur NU
 Колонки nullable без умолчания: пусты до
 анализа и у прогонов, записанных раньше; старый код их не читает, поэтому expand без второго
 шага. `ADD COLUMN` без умолчания меняет только каталог — таблицу не переписывает, блокировка
-короткая.
+короткая. CHECK `ck_review_runs_usage`: колонки расхода пишутся вместе и не
+отрицательны; на пустых колонках проверка мгновенная.
 
 Revision ID: 0018
 Revises: 0017
@@ -33,10 +34,21 @@ def upgrade() -> None:
     for column in _TOKEN_COLUMNS:
         op.add_column('review_runs', sa.Column(column, sa.BigInteger(), nullable=True))
     op.add_column('review_runs', sa.Column('cost_eur', sa.Numeric(20, 10), nullable=True))
+    op.create_check_constraint(
+        'ck_review_runs_usage',
+        'review_runs',
+        '(input_tokens IS NULL) = (output_tokens IS NULL)'
+        ' AND (input_tokens IS NULL) = (cached_tokens IS NULL)'
+        ' AND (input_tokens IS NULL) = (reasoning_tokens IS NULL)'
+        ' AND (input_tokens IS NULL) = (cost_eur IS NULL)'
+        ' AND (input_tokens IS NULL OR (tokens_used IS NOT NULL AND input_tokens >= 0'
+        ' AND output_tokens >= 0 AND cached_tokens >= 0 AND reasoning_tokens >= 0 AND cost_eur >= 0))',
+    )
 
 
 def downgrade() -> None:
     """Убрать колонки расхода модели."""
+    op.drop_constraint('ck_review_runs_usage', 'review_runs', type_='check')
     op.drop_column('review_runs', 'cost_eur')
     for column in reversed(_TOKEN_COLUMNS):
         op.drop_column('review_runs', column)

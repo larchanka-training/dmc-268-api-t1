@@ -48,10 +48,10 @@ _COST_PLACES = Decimal("1E-10")
 _COST_LIMIT = Decimal(10) ** 10
 
 
-
 def _object(value: Any) -> Mapping[str, Any]:
     """Вложенный объект `usage` или пустой: учёт расхода не отвергает оплаченный ответ."""
     return value if isinstance(value, dict) else {}
+
 
 class OpenAiCompatibleGateway:
     def __init__(

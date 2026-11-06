@@ -201,14 +201,35 @@ def test_missing_or_null_counts_are_zero_and_the_total_falls_back_to_the_kinds(
 
 @pytest.mark.parametrize(
     "usage",
-    ['{"total_tokens": "35"}', '{"total_tokens": true}', '{"prompt_tokens": -1}', '{"total_tokens": 3.5}'],
-    ids=["string", "bool", "negative", "fraction"],
+    [
+        '{"total_tokens": "35"}',
+        '{"total_tokens": true}',
+        '{"prompt_tokens": -1}',
+        '{"total_tokens": 3.5}',
+        '{"total_tokens": 100000000000000000000}',
+        '{"total_tokens": 1E+1000000}',
+    ],
+    ids=["string", "bool", "negative", "fraction", "over-bigint", "huge-exponent"],
 )
-def test_malformed_counts_are_an_unexpected_body(usage: str) -> None:
-    handler, _ = _recording(_raw(usage))
+def test_malformed_count_is_zero_with_a_warning_not_a_second_paid_call(
+    usage: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Кривой счётчик - как кривая стоимость: ответ оплачен и принят, счётчик - 0."""
+    handler, seen = _recording(_raw(usage))
 
-    with pytest.raises(LlmError, match="неожиданное тело"):
-        _gateway(handler).complete(REQUEST)
+    with caplog.at_level(logging.WARNING):
+        metered = _metered(handler)
+
+    assert len(seen) == 1
+    assert metered.total_tokens == 0
+    assert any("не разобрано" in record.getMessage() for record in caplog.records)
+
+
+def test_integral_count_written_with_a_fraction_is_an_integer() -> None:
+    """`12.0` с `parse_float=Decimal` приходит `Decimal`: это целое, а не кривой счётчик."""
+    handler, _ = _recording(_raw('{"prompt_tokens": 12.0, "completion_tokens": 3, "total_tokens": 15.0}'))
+
+    assert _metered(handler) == LlmUsage(input_tokens=12, output_tokens=3, total_tokens=15)
 
 
 @pytest.mark.parametrize(

@@ -465,8 +465,7 @@ class SqlAlchemyReviewRunRepo:
                 failure_reason=run.failure_reason,
                 failed_stage=run.failed_stage,
                 model=run.model,
-                tokens_used=run.tokens_used,
-                **m.usage_columns(run.usage),
+                **m.run_usage_columns(run),
                 duration_seconds=run.duration_seconds,
                 rejected_findings=run.rejected_findings,
                 verification=run.verification,
@@ -511,8 +510,7 @@ class SqlAlchemyReviewRunRepo:
         row.failure_reason = run.failure_reason
         row.failed_stage = run.failed_stage
         row.model = run.model
-        row.tokens_used = run.tokens_used
-        for column, value in m.usage_columns(run.usage).items():
+        for column, value in m.run_usage_columns(run).items():
             setattr(row, column, value)
         row.duration_seconds = run.duration_seconds
         row.rejected_findings = run.rejected_findings

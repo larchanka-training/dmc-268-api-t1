@@ -17,8 +17,11 @@
 ключа и фоллбэк учитываются ровно по разу без кода в этих местах.
 """
 
+import logging
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 
 from pydantic import BaseModel, ValidationError
 
@@ -27,6 +30,11 @@ from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
 from app.domain.llm_errors import LlmError, LlmOutputError
 from app.domain.llm_usage import LlmUsage
+
+logger = logging.getLogger(__name__)
+
+# Колонки токенов - bigint; больше не влезло бы в запись прогона уже после оплаты.
+_TOKEN_LIMIT = 2**63
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,14 +59,25 @@ type Send = Callable[[Sequence[PromptMessage]], RawReply]
 def token_count(value: object) -> int:
     """Число токенов из ответа провайдера: нет поля или `null` - 0.
 
-    Не целое от 0 (строка, `true`, дробь, минус) - `ValueError`: адаптер
-    переводит его в «неожиданное тело», как любое другое кривое поле.
+    Целое в записи с дробной частью (`12.0`: у OpenAI-совместимого адаптера
+    `Decimal`, у Ollama float) - это целое. Остальное кривое (строка, `true`,
+    дробь, минус, больше `bigint` колонки) - предупреждение и 0, как у стоимости:
+    ответ уже оплачен, а отказ отправил бы повтор или фоллбэк и заплатил второй раз.
     """
     if value is None:
         return 0
-    if type(value) is not int or value < 0:
-        raise ValueError(f"число токенов - не целое от 0: {type(value).__name__}")
-    return value
+    if type(value) is int and 0 <= value < _TOKEN_LIMIT:
+        return value
+    if (
+        isinstance(value, Decimal | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0 <= value < _TOKEN_LIMIT
+        and value == int(value)
+    ):
+        return int(value)
+    logger.warning("число токенов в ответе провайдера не разобрано (%s), учтено как 0", type(value).__name__)
+    return 0
 
 
 def complete_structured[T: BaseModel](
