@@ -643,16 +643,17 @@ tests:
   - interval: 1m
     input_series:
       - series: 'alertmanager_notifications_failed_total{job="alertmanager", integration="telegram", reason="other"}'
-        values: '0x5 1 2 3 3x30'
+        values: '0x15 1 2 3 3x30'
     alert_rule_test:
-      - eval_time: 8m
+      # Окно [10m, 20m] целиком внутри ряда: increase без экстраполяции на краю — ровно 3.
+      - eval_time: 20m
         alertname: AlertDeliveryFailing
         exp_alerts:
           - exp_labels: {severity: critical, service: alertmanager, integration: telegram}
             exp_annotations:
               summary: "Алерты не доходят в Telegram"
-              description: "За 10 минут Alertmanager не смог отправить в Telegram 3.333 уведомлений. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
-      - eval_time: 25m
+              description: "За 10 минут Alertmanager не смог отправить в Telegram 3 уведомлений. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
+      - eval_time: 35m
         alertname: AlertDeliveryFailing
         exp_alerts: []
 
