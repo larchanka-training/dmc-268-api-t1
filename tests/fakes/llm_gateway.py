@@ -14,6 +14,9 @@
    следующая запись достаётся ревью следующего PR;
 3. дальше - ревью следующего PR в порядке PR.
 
+Расход записи (`tokens`) фейк пишет в счётчик запроса (`LlmMeter`), как
+настоящий адаптер на ответ провайдера: и у ответа, и у сбоя.
+
 Повторов вне адаптера нет: повторы внутри вызова (`on_retry`) делает настоящий
 адаптер, не этот фейк, а сообщение после сбоя уходит nack без повторной
 доставки. Поэтому запись `error` расходуется ровно один раз: на ревью она
@@ -41,8 +44,22 @@ from app.domain.llm_errors import (
     LlmRateLimitedError,
     LlmTimeoutError,
 )
+from app.domain.llm_usage import NO_USAGE, LlmUsage
 
 SUMMARY = {"problem": "Есть замечания.", "positives": [], "effort": "час"}
+
+
+@dataclass(frozen=True, slots=True)
+class Scripted:
+    """Ответ или сбой сценария и расход, который фейк запишет в счётчик запроса."""
+
+    answer: LlmResponse[Any] | Exception
+    usage: LlmUsage = NO_USAGE
+
+
+def spent(answer: LlmResponse[Any] | Exception, tokens: int = 0, *, usage: LlmUsage | None = None) -> Scripted:
+    """Запись сценария с расходом: `tokens` входных токенов (они же итог) либо `usage` целиком."""
+    return Scripted(answer, LlmUsage(input_tokens=tokens, total_tokens=tokens) if usage is None else usage)
 
 
 def finding_json(
@@ -70,19 +87,20 @@ def finding_json(
 def review_response(
     *findings: dict[str, Any],
     tokens: int = 0,
+    usage: LlmUsage | None = None,
     model: str = "m",
     thread_follow_ups: tuple[dict[str, Any], ...] = (),
-) -> LlmResponse[ReviewOutput]:
+) -> Scripted:
     payload: dict[str, Any] = {"schemaVersion": "1", "findings": list(findings), "summary": SUMMARY}
     if thread_follow_ups:
         payload["threadFollowUps"] = list(thread_follow_ups)
     content = ReviewOutput.model_validate(payload)
-    return LlmResponse(model=model, tokens_used=tokens, content=content)
+    return spent(LlmResponse(model=model, content=content), tokens, usage=usage)
 
 
 def verification_response(
-    *verdicts: tuple[str, str], tokens: int = 0, model: str = "m"
-) -> LlmResponse[VerificationOutput]:
+    *verdicts: tuple[str, str], tokens: int = 0, usage: LlmUsage | None = None, model: str = "m"
+) -> Scripted:
     content = VerificationOutput.model_validate(
         {
             "schemaVersion": "1",
@@ -91,21 +109,28 @@ def verification_response(
             ],
         }
     )
-    return LlmResponse(model=model, tokens_used=tokens, content=content)
+    return spent(LlmResponse(model=model, content=content), tokens, usage=usage)
 
 
 @dataclass
 class ScriptedLlmGateway:
-    """Отвечает следующим ответом из списка; исключение в списке - бросает его."""
+    """Отвечает следующим ответом из списка; исключение в списке - бросает его.
 
-    answers: list[LlmResponse[Any] | Exception]
+    Расход записи `Scripted` уходит в счётчик запроса до ответа или сбоя.
+    """
+
+    answers: list[Scripted | LlmResponse[Any] | Exception]
     requests: list[LlmRequest[Any]] = field(default_factory=list)
 
     def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
         self.requests.append(request)
         if not self.answers:
             raise AssertionError(f"неожиданный вызов модели: {request.task}")
-        answer = self.answers.pop(0)
+        entry = self.answers.pop(0)
+        scripted = entry if isinstance(entry, Scripted) else Scripted(entry)
+        if request.meter is not None:
+            request.meter.record(scripted.usage)
+        answer = scripted.answer
         if isinstance(answer, Exception):
             raise answer
         if not isinstance(answer.content, request.response_model):
@@ -169,7 +194,7 @@ def load_llm_script(path: Path) -> ScriptedLlmGateway:
     return ScriptedLlmGateway([_script_entry(item, f"запись {i}") for i, item in enumerate(raw)])
 
 
-def _script_entry(item: object, where: str) -> LlmResponse[Any] | Exception:
+def _script_entry(item: object, where: str) -> Scripted:
     if not isinstance(item, dict):
         raise ScriptError(f"{where}: ждали объект JSON")
     kinds = [k for k in _ENTRY_KEYS if k in item]
@@ -187,12 +212,12 @@ def _script_entry(item: object, where: str) -> LlmResponse[Any] | Exception:
         error_kind = item["error"]
         if not isinstance(error_kind, str) or error_kind not in LLM_SCRIPT_ERRORS:
             raise ScriptError(f"{where}: error - один из {', '.join(LLM_SCRIPT_ERRORS)}")
-        return LLM_SCRIPT_ERRORS[error_kind](f"сценарий модели: отказ {error_kind}", tokens_used=tokens)
+        return spent(LLM_SCRIPT_ERRORS[error_kind](f"сценарий модели: отказ {error_kind}"), tokens)
     try:
         content = _review(item, where) if kind == "review" else _verification(item["verify"])
     except ValidationError as error:
         raise ScriptError(f"{where}: {kind} не прошёл схему ответа модели: {error}") from error
-    return LlmResponse(model=_SCRIPT_MODEL, tokens_used=tokens, content=content)
+    return spent(LlmResponse(model=_SCRIPT_MODEL, content=content), tokens)
 
 
 def _review(item: dict[str, Any], where: str) -> ReviewOutput:

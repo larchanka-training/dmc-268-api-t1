@@ -1,7 +1,7 @@
 """Ответ модели по схеме запроса: общий цикл всех адаптеров провайдеров.
 
 Адаптер переводит сообщения в протокол провайдера и обратно (`send`), а
-проверка ответа моделью из запроса, повторы и учёт токенов живут здесь один
+проверка ответа моделью из запроса, повторы и учёт расхода живут здесь один
 раз (change `add-llm-gateway`, design D2). Поэтому свойства порта держатся в
 любом адаптере: исходные сообщения не меняются и не удаляются, повтор лишь
 дописывает одно сообщение после них.
@@ -10,6 +10,11 @@
 него: ответ написан моделью, читавшей код автора PR, и вернулся бы в запрос
 мимо экранирования маркеров. В сообщении повтора и в тексте сбоя - только
 путь к полю и вид нарушения.
+
+Расход каждого ответа `send` пишется в счётчик запроса здесь и только здесь
+(change `run-token-cost`, D3): у каждого провайдера фоллбэка свой цикл, а ключ,
+отвергнутый без ответа модели, ответа не даёт, поэтому повтор по схеме, смена
+ключа и фоллбэк учитываются ровно по разу без кода в этих местах.
 """
 
 from collections.abc import Callable, Sequence
@@ -21,23 +26,39 @@ from app.application.ports.llm_gateway import LlmRequest, LlmResponse
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
 from app.domain.llm_errors import LlmError, LlmOutputError
+from app.domain.llm_usage import LlmUsage
 
 
 @dataclass(frozen=True, slots=True)
 class RawReply:
-    """Ответ провайдера до проверки: текст, ответившая модель, токены вызова.
+    """Ответ провайдера до проверки: текст, ответившая модель, расход вызова.
 
     `truncated` - модель оборвала ответ по пределу длины: повтор с тем же
-    пределом оборвался бы снова.
+    пределом оборвался бы снова. `rejected` - ответ получен и оплачен, но
+    адаптер его не принял: цикл записывает расход и бросает этот сбой.
     """
 
     text: str
     model: str
-    tokens: int
+    usage: LlmUsage
     truncated: bool = False
+    rejected: LlmError | None = None
 
 
 type Send = Callable[[Sequence[PromptMessage]], RawReply]
+
+
+def token_count(value: object) -> int:
+    """Число токенов из ответа провайдера: нет поля или `null` - 0.
+
+    Не целое от 0 (строка, `true`, дробь, минус) - `ValueError`: адаптер
+    переводит его в «неожиданное тело», как любое другое кривое поле.
+    """
+    if value is None:
+        return 0
+    if type(value) is not int or value < 0:
+        raise ValueError(f"число токенов - не целое от 0: {type(value).__name__}")
+    return value
 
 
 def complete_structured[T: BaseModel](
@@ -46,21 +67,18 @@ def complete_structured[T: BaseModel](
     """Получить ответ по `request.response_model` не больше чем за `max_attempts` вызовов.
 
     Сбой транспорта (`LlmError` из `send`) не повторяется: это решение
-    адаптера и составного фоллбэка, а не цикла проверки. Любой сбой несёт
-    токены, израсходованные к нему. Перед каждым повтором цикл сообщает
-    `request.on_retry`, что попытка не прошла схему, - с токенами к этому
-    моменту.
+    адаптера и составного фоллбэка, а не цикла проверки. Расход каждого
+    ответа уходит в `request.meter` до его проверки. Перед каждым повтором
+    цикл сообщает `request.on_retry`, что попытка не прошла схему.
     """
     messages: tuple[PromptMessage, ...] = request.messages
-    tokens = 0
     violations: list[str] = []
     for attempt in range(1, max_attempts + 1):
-        try:
-            reply = send(messages)
-        except LlmError as error:
-            error.tokens_used += tokens
-            raise
-        tokens += reply.tokens
+        reply = send(messages)
+        if request.meter is not None:
+            request.meter.record(reply.usage)
+        if reply.rejected is not None:
+            raise reply.rejected
         try:
             content = request.response_model.model_validate_json(reply.text)
         except ValidationError as error:
@@ -74,13 +92,12 @@ def complete_structured[T: BaseModel](
             else:
                 violations = _violations(error)
             if attempt < max_attempts and request.on_retry is not None:
-                request.on_retry(LlmOutputError("; ".join(violations)), tokens)
+                request.on_retry(LlmOutputError("; ".join(violations)))
             messages = (*request.messages, _retry_message(violations, shorter=reply.truncated))
             continue
-        return LlmResponse(model=reply.model, tokens_used=tokens, content=content)
+        return LlmResponse(model=reply.model, content=content)
     raise LlmOutputError(
-        f"ответ модели не прошёл схему (попыток: {max_attempts}): {'; '.join(violations)}",
-        tokens_used=tokens,
+        f"ответ модели не прошёл схему (попыток: {max_attempts}): {'; '.join(violations)}"
     )
 
 

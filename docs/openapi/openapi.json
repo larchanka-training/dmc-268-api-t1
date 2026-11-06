@@ -5647,6 +5647,17 @@
             "title": "Tokens Used",
             "description": "Токенов LLM потрачено; null до анализа."
           },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunUsageResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Входные и выходные токены и стоимость; их сумма может не совпасть с tokens_used — это итог провайдера. null до анализа и у прогонов, записанных до разбивки."
+          },
           "rejected_findings": {
             "type": "integer",
             "minimum": 0.0,
@@ -5772,6 +5783,7 @@
           "trigger",
           "model",
           "tokens_used",
+          "usage",
           "rejected_findings",
           "verification",
           "verifier_dropped_findings",
@@ -6256,6 +6268,39 @@
         ],
         "title": "RulesUnavailable",
         "description": "Провайдер не отдал файл правил: ревью по стандартным критериям."
+      },
+      "RunUsageResponse": {
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "description": "Входные токены всех вызовов модели прогона."
+          },
+          "output_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Output Tokens",
+            "description": "Выходные токены всех вызовов модели прогона."
+          },
+          "cost_eur": {
+            "type": "string",
+            "pattern": "^\\d+(\\.\\d+)?$",
+            "title": "Cost Eur",
+            "description": "Стоимость у провайдера в евро — точная десятичная строка без экспоненты и хвостовых нулей (до 10 знаков после точки, как у баланса Eurorouter); ноль — \"0\". Строкой, а не числом JSON: число клиент прочёл бы во float. Цена на момент вызова; у локальной модели и провайдера без стоимости в евро — 0.",
+            "examples": [
+              "0.0000913"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "input_tokens",
+          "output_tokens",
+          "cost_eur"
+        ],
+        "title": "RunUsageResponse",
+        "description": "Расход вызовов модели прогона: токены по видам и стоимость у провайдера.\n\nСумма по всем ответам модели прогона, включая повторы по схеме, смену ключа и фоллбэк."
       },
       "ScmUnavailableProblem": {
         "properties": {

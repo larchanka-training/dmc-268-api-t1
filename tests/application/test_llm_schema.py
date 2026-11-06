@@ -64,11 +64,10 @@ VERIFICATION: dict[str, Any] = {
 
 def test_valid_review_translates_into_exact_result() -> None:
     """`threadFollowUps` проходят проверку формы и в результат не попадают (#73)."""
-    result = to_review_result(ReviewOutput.model_validate(REVIEW), model="m", tokens_used=7)
+    result = to_review_result(ReviewOutput.model_validate(REVIEW), model="m")
 
     assert result == LlmReviewResult(
         model="m",
-        tokens_used=7,
         findings=(
             LlmFinding(
                 anchor=DiffAnchor(file_path="app/core.py", side=DiffSide.NEW, new_line=12),
@@ -91,7 +90,7 @@ def test_optional_fields_may_be_absent() -> None:
     del finding["suggestion"], finding["rule"]
     finding["confidence"] = None
 
-    result = to_review_result(ReviewOutput.model_validate(data), model="m", tokens_used=0)
+    result = to_review_result(ReviewOutput.model_validate(data), model="m")
 
     assert result.findings[0].rule is None
     assert result.findings[0].suggestion is None
@@ -247,7 +246,7 @@ def test_secret_quoted_by_the_review_is_replaced_before_it_leaves_the_schema() -
     raw["findings"][0]["suggestion"] = {"diff": f'-TOKEN = "{TOKEN}"\n+TOKEN = os.environ["TOKEN"]'}
     raw["summary"] = {"problem": f"Токен {TOKEN} в коде.", "positives": [f"не {TOKEN}"], "effort": TOKEN}
 
-    result = to_review_result(ReviewOutput.model_validate(raw), model="m", tokens_used=1)
+    result = to_review_result(ReviewOutput.model_validate(raw), model="m")
 
     summary = result.summary
     assert summary is not None
@@ -260,7 +259,7 @@ def test_secret_quoted_by_the_review_is_replaced_before_it_leaves_the_schema() -
 
 
 def test_suggestion_without_a_secret_is_kept() -> None:
-    result = to_review_result(ReviewOutput.model_validate(REVIEW), model="m", tokens_used=1)
+    result = to_review_result(ReviewOutput.model_validate(REVIEW), model="m")
     assert result.findings[0].suggestion == "-    pass\n+    raise"
 
 

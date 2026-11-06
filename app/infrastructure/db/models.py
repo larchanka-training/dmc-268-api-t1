@@ -8,6 +8,7 @@ CHECK: ограниченные наборы — часть контракта �
 
 import datetime as dt
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -20,6 +21,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -192,6 +194,14 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
     model: Mapped[str | None] = mapped_column(String(255))
     tokens_used: Mapped[int | None] = mapped_column(BigInteger)
+    # Разбивка `tokens_used` по видам и стоимость вызовов модели в евро
+    # (`LlmUsage`): точно, 10 знаков, как у баланса Eurorouter. Пишутся вместе;
+    # пусты до анализа и у прогонов, записанных до разбивки.
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cached_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    reasoning_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cost_eur: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
     duration_seconds: Mapped[float | None] = mapped_column(Float)
     rejected_findings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Итог второго прохода модели; пуст, пока анализ не завершён, и у прогонов,

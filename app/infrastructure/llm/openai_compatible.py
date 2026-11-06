@@ -13,12 +13,20 @@
 
 Ключи не попадают ни в текст ошибки, ни в лог: тексты строятся из кода
 ответа и номера ключа, а описание ошибки провайдера очищается от ключей.
+
+Расход - `usage` ответа целиком: входные, выходные, кэшированные и
+reasoning-токены, итог провайдера (`total_tokens`) и стоимость. Eurorouter
+отдаёт её в `usage.cost_eur` (и в `usage.cost` при `cost_currency: "EUR"`),
+проверено на стенде 2026-11-06; у провайдера без стоимости в евро она 0
+(change `run-token-cost`). Тело разбирается с `parse_float=Decimal`: число
+из JSON сразу точное, через float стоимость не проходит.
 """
 
 import itertools
 import logging
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -27,12 +35,17 @@ from pydantic import BaseModel, SecretStr
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse
 from app.domain.entities import PromptMessage
 from app.domain.llm_errors import LlmError, LlmRateLimitedError, LlmTimeoutError
-from app.infrastructure.llm.structured import RawReply, complete_structured
+from app.domain.llm_usage import LlmUsage
+from app.infrastructure.llm.structured import RawReply, complete_structured, token_count
 
 logger = logging.getLogger(__name__)
 
 # Отказ, за который отвечает ключ, а не провайдер: следующий ключ может пройти.
 _KEY_REJECTED = frozenset({401, 403, 429})
+# Стоимость хранится с 10 знаками после точки - столько отдаёт Eurorouter
+# (`/generation`, `/credits`) - и меньше 10^10 € (колонка NUMERIC(20, 10)).
+_COST_PLACES = Decimal("1E-10")
+_COST_LIMIT = Decimal(10) ** 10
 
 
 class OpenAiCompatibleGateway:
@@ -125,16 +138,61 @@ class OpenAiCompatibleGateway:
 
     def _reply(self, response: httpx.Response) -> RawReply:
         try:
-            data = response.json()
+            # Из чисел тела адаптер читает только токены (целые) и стоимость:
+            # дробные - `Decimal`, без float.
+            data = response.json(parse_float=Decimal)
             choice = data["choices"][0]
             text: str = choice["message"]["content"]
             model: str = data["model"]
-            tokens: int = data["usage"]["total_tokens"]
-        except (ValueError, KeyError, IndexError, TypeError) as error:
+            usage = data["usage"]
+            if all(usage.get(field) is None for field in ("prompt_tokens", "completion_tokens", "total_tokens")):
+                # Ответ принят: он оплачен. Но без счётчиков расход учтён нулём,
+                # и квота с бюджетом (#286) его не видят - об этом должно быть видно.
+                logger.warning("%s: в ответе нет счётчиков токенов, расход учтён как 0", self._name)
+            input_tokens = token_count(usage.get("prompt_tokens"))
+            output_tokens = token_count(usage.get("completion_tokens"))
+            total = usage.get("total_tokens")
+            tokens = LlmUsage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=token_count((usage.get("prompt_tokens_details") or {}).get("cached_tokens")),
+                reasoning_tokens=token_count(
+                    (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                ),
+                # Итог провайдера, как на develop; без него - сумма видов.
+                total_tokens=input_tokens + output_tokens if total is None else token_count(total),
+                cost_eur=self._cost_eur(usage),
+            )
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
             raise LlmError(f"{self._name} вернул неожиданное тело на /chat/completions") from error
         # `length` - ответ оборван по `max_tokens`.
         truncated = choice.get("finish_reason") == "length"
-        return RawReply(text=text, model=model, tokens=tokens, truncated=truncated)
+        return RawReply(text=text, model=model, usage=tokens, truncated=truncated)
+
+    def _cost_eur(self, usage: Mapping[str, Any]) -> Decimal:
+        """Стоимость вызова в евро до 10 знаков; не в евро или нет - 0.
+
+        Плохое значение (не число, `true`, NaN, отрицательное, не влезает в
+        колонку) - предупреждение и 0, а не сбой: ответ модели уже оплачен,
+        отвергнуть его из-за поля учёта значит заплатить повтором.
+        """
+        cost = usage.get("cost_eur")
+        if cost is None and usage.get("cost_currency") == "EUR":
+            cost = usage.get("cost")
+        if cost is None:
+            logger.warning("%s: в ответе нет стоимости в евро, учтена как 0", self._name)
+            return Decimal(0)
+        try:
+            # `str`: число из тела уже `Decimal` или int, а `true`/NaN/Infinity
+            # (их JSON отдаёт bool и float) отсюда не выходят числом. Лишние
+            # знаки - банковским округлением (ROUND_HALF_EVEN) до 10-го знака.
+            exact: Decimal | None = Decimal(str(cost)).quantize(_COST_PLACES, rounding=ROUND_HALF_EVEN)
+        except InvalidOperation:
+            exact = None
+        if exact is None or not exact.is_finite() or exact < 0 or exact >= _COST_LIMIT:
+            logger.warning("%s: стоимость вызова не разобрана, учтена как 0", self._name)
+            return Decimal(0)
+        return exact
 
     def _error_text(self, response: httpx.Response) -> str:
         """Описание ошибки провайдера без ключей: провайдер может процитировать ключ."""

@@ -30,6 +30,5 @@ class StubLlmGateway:
     def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
         return LlmResponse(
             model="stub-llm",
-            tokens_used=0,
             content=request.response_model.model_validate(_EMPTY[request.task]),
         )

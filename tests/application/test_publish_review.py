@@ -174,7 +174,7 @@ def test_summary_lists_the_files_the_review_covered() -> None:
     publish_review(
         JOB,
         uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
-        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        LlmReviewResult(model="m", findings=()),
         coverage=ReviewCoverage(reviewed=("app/a.py",), partial=(), not_reviewed=(), filtered=("uv.lock",)),
         uow=uow,
         vcs=vcs,
@@ -202,7 +202,7 @@ def test_merge_gate_fails_while_critical_thread_open() -> None:
         )
     )
     vcs = RecordingVcsGateway()
-    result = LlmReviewResult(model="m", tokens_used=0, findings=())
+    result = LlmReviewResult(model="m", findings=())
 
     publish_review(
         JOB,
@@ -254,7 +254,7 @@ def test_thread_sync_failure_still_sets_the_merge_gate_from_the_database(
         publish_review(
             JOB,
             run,
-            LlmReviewResult(model="m", tokens_used=0, findings=()),
+            LlmReviewResult(model="m", findings=()),
             coverage=NO_COVERAGE,
             uow=uow,
             vcs=vcs,
@@ -285,7 +285,7 @@ def test_thread_sync_programming_error_is_not_swallowed() -> None:
         publish_review(
             JOB,
             run,
-            LlmReviewResult(model="m", tokens_used=0, findings=()),
+            LlmReviewResult(model="m", findings=()),
             coverage=NO_COVERAGE,
             uow=uow,
             vcs=vcs,
@@ -326,7 +326,7 @@ def test_inline_comment_is_attributed_from_the_stored_rule_reference() -> None:
     publish_review(
         JOB,
         run,
-        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        LlmReviewResult(model="m", findings=()),
         coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
@@ -397,7 +397,7 @@ def _publish(uow: FakeUnitOfWork, vcs: RecordingVcsGateway) -> None:
     publish_review(
         JOB,
         _publishing_run(uow),
-        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        LlmReviewResult(model="m", findings=()),
         coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
@@ -649,7 +649,7 @@ def _publish_first_run(uow: FakeUnitOfWork, run: ReviewRun, vcs: RecordingVcsGat
     publish_review(
         JOB,
         run,
-        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        LlmReviewResult(model="m", findings=()),
         coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
@@ -1626,7 +1626,7 @@ def _publish_over_open_thread(
     publish_review(
         JOB,
         uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
-        LlmReviewResult(model="m", tokens_used=0, findings=()),
+        LlmReviewResult(model="m", findings=()),
         coverage=NO_COVERAGE,
         uow=uow,
         vcs=vcs,
@@ -1702,7 +1702,7 @@ def test_missing_repository_record_is_a_lookup_error() -> None:
         publish_review(
             JOB,
             uow.review_runs.get(RUN_ID),  # type: ignore[arg-type]
-            LlmReviewResult(model="m", tokens_used=0, findings=()),
+            LlmReviewResult(model="m", findings=()),
             coverage=NO_COVERAGE,
             uow=uow,
             vcs=RecordingVcsGateway(),

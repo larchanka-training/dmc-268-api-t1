@@ -34,7 +34,7 @@ from app.application.merge_gate_publish import (
 from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
-from app.application.ports.llm_gateway import LlmGateway, RetryListener
+from app.application.ports.llm_gateway import LlmGateway, LlmMeter, RetryListener
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.stage_tracer import NO_STAGE_TRACING, StageTracer
 from app.application.ports.unit_of_work import RunStateConflict
@@ -42,8 +42,8 @@ from app.application.ports.vcs_gateway import VcsGateway
 from app.application.publish_review import publish_review
 from app.application.review_run_steps import (
     StepRecorder,
+    called_model,
     close_abandoned_steps,
-    spent_tokens,
 )
 from app.application.use_cases.build_review_context import (
     build_review_context,
@@ -64,6 +64,7 @@ from app.domain.enums import (
 )
 from app.domain.lifecycle import advance
 from app.domain.llm_errors import LlmError, LlmOutputError
+from app.domain.llm_usage import NO_USAGE, LlmUsage
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import error_code
 from app.domain.verification import apply_verdicts, screen_findings
@@ -100,7 +101,7 @@ def _mark_failed(
     now: datetime,
     *,
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
-    unrecorded_tokens: int = 0,
+    usage: LlmUsage = NO_USAGE,
     unwritten_steps: Mapping[UUID, ReviewRunStep] | None = None,
 ) -> None:
     """Перевести прогон в failed по свежей строке из базы.
@@ -108,16 +109,15 @@ def _mark_failed(
     Копия прогона в памяти могла разойтись с базой (строка ушла вперёд), и
     переход от неё бросил бы сам. Терминальный прогон не трогаем. Сбой этой
     записи (например, база недоступна) логируется и не подменяет исходное
-    исключение - зависший прогон выметет `sweep_stale_runs`. К затратам
-    прогона добавляются токены, которые успел израсходовать сбойный вызов
-    модели, и `unrecorded_tokens` - токены ответов, ещё не записанные в прогон.
+    исключение - зависший прогон выметет `sweep_stale_runs`. Затраты прогона -
+    `usage`, итог счётчика модели к сбою: он включает и уже записанное, поэтому
+    ставится, а не прибавляется; без расхода затраты не трогаются.
     Шаги, оставшиеся `running`, закрываются следом (`close_abandoned_steps`):
     шаг из `unwritten_steps` - своим незаписанным исходом, прочие -
     `REVIEW_RUN_STALE`. Запись в счётчик исходов — только за фактический
     терминальный переход: ранний выход (прогона нет, он уже терминален) и
     сбой записи прогоном не считаются.
     """
-    spent = unrecorded_tokens + (exc.tokens_used if isinstance(exc, LlmError) else 0)
     try:
         with uow:
             run = uow.review_runs.get(run_id)
@@ -127,8 +127,8 @@ def _mark_failed(
                 advance(run, ReviewRunStatus.FAILED, now).unwrap(),
                 failure_reason=str(exc) or type(exc).__name__,
             )
-            if spent:
-                failed = replace(failed, tokens_used=(failed.tokens_used or 0) + spent)
+            if usage != NO_USAGE:
+                failed = replace(failed, tokens_used=usage.total_tokens, usage=usage)
             uow.review_runs.update(failed)
             uow.commit()
     except Exception:
@@ -136,6 +136,22 @@ def _mark_failed(
         return
     run_outcome.run_finished(ReviewRunStatus.FAILED.value)
     close_abandoned_steps(uow, run_id, now=now, known=unwritten_steps)
+
+
+def _record_cancelled_spend(uow: UnitOfWork, run_id: UUID, usage: LlmUsage) -> None:
+    """Дописать отменённому прогону расход модели: провайдер его уже списал.
+
+    Best-effort, как `_mark_failed`: сбой записи - в лог, ход отмены не меняется.
+    Ставится итог счётчика, а не прибавка: он включает и уже записанное.
+    """
+    if usage == NO_USAGE:
+        return
+    try:
+        with uow:
+            uow.review_runs.record_cancelled_spend(run_id, usage)
+            uow.commit()
+    except Exception:
+        logger.exception("не удалось записать расход отменённого прогона")
 
 
 def _was_cancelled(uow: UnitOfWork, run_id: UUID) -> bool:
@@ -272,12 +288,12 @@ def run_review(
         return
 
     started_at = monotonic()
+    # Расход всех вызовов модели прогона: адаптер пишет сюда каждый ответ
+    # провайдера, шаги берут из него свои доли, прогон - итог.
+    meter = LlmMeter()
     steps = StepRecorder(
-        uow, run.id, now=now, monotonic=monotonic, new_id=new_id, tracer=stage_tracer
+        uow, run.id, now=now, monotonic=monotonic, new_id=new_id, meter=meter, tracer=stage_tracer
     )
-    # Токены ответов модели, которые ещё не записаны в прогон: при сбое их
-    # добавляет `_mark_failed`.
-    unrecorded_tokens = 0
 
     try:
         claimed = _claim(uow, run, now())
@@ -313,12 +329,16 @@ def run_review(
         steps.start(ReviewRunStage.ANALYSING)
         run = _transition(uow, run, ReviewRunStatus.ANALYSING, now())
         result = request_review(
-            context, prompt_texts, llm_gateway, limits=llm_limits, on_retry=steps.retry
+            context,
+            prompt_texts,
+            llm_gateway,
+            limits=llm_limits,
+            on_retry=steps.retry,
+            meter=meter,
         )
-        unrecorded_tokens = result.tokens_used
         # Отсев - часть этапа `analysing`: он разбирает ответ модели. Сбой
-        # после ответа закрывает шаг с уже известными токенами - иначе их
-        # не узнать: исключение отсева токенов не несёт.
+        # после ответа закрывает шаг с его токенами: исключение отсева - не
+        # сбой модели, и `fail` счёл бы шаг не вызывавшим модель.
         try:
             screening = screen_findings(
                 result.findings,
@@ -329,9 +349,9 @@ def run_review(
                 new_id=new_id,
             )
         except Exception as exc:
-            steps.finish(tokens_used=result.tokens_used, error_code=error_code(exc))
+            steps.finish(used_model=True, error_code=error_code(exc))
             raise
-        steps.finish(tokens_used=result.tokens_used)
+        steps.finish(used_model=True)
         # Два долгих вызова модели подряд не должны выглядеть для `find_stale`
         # одним прогоном без прогресса.
         moment = now()
@@ -345,11 +365,9 @@ def run_review(
             screening.kept,
             run.id,
             on_retry=steps.retry,
+            meter=meter,
         )
-        steps.finish(
-            tokens_used=verification.step_tokens, error_code=verification.error_code
-        )
-        unrecorded_tokens += verification.tokens_used
+        steps.finish(used_model=verification.called_model, error_code=verification.error_code)
         if result.findings and not verification.findings:
             # Сводка модели описывает замечания, которых в публикации не будет:
             # публикация возьмёт стандартную.
@@ -364,14 +382,14 @@ def run_review(
             verification=verification.outcome,
             verifier_dropped_findings=verification.dropped,
             model=result.model,
-            tokens_used=result.tokens_used + verification.tokens_used,
+            tokens_used=meter.total.total_tokens,
+            usage=meter.total,
         )
         with uow:
             for finding in verification.findings:
                 uow.findings.add(finding)
             uow.review_runs.update(run)
             uow.commit()
-        unrecorded_tokens = 0
 
         run = _transition(uow, run, ReviewRunStatus.PUBLISHING, now())
         publish_review(
@@ -398,6 +416,7 @@ def run_review(
             # терминальном статусе или публикация отказалась. Это не сбой - открытый
             # шаг брошен, сообщение уходит в ack, а не в DLQ, head отвечает новый прогон.
             steps.abandon()
+            _record_cancelled_spend(uow, job.review_run_id, meter.total)
             logger.info("прогон %s отменён во время ревью, результат отброшен", job.review_run_id)
             close_abandoned_steps(uow, job.review_run_id, now=now(), known=steps.unwritten)
             return
@@ -408,7 +427,7 @@ def run_review(
             exc,
             now(),
             run_outcome=run_outcome,
-            unrecorded_tokens=unrecorded_tokens,
+            usage=meter.total,
             unwritten_steps=steps.unwritten,
         )
         _block_head_of_failed_run(uow, vcs_gateway, job)
@@ -423,10 +442,9 @@ class _Verification:
     findings: tuple[Finding, ...]
     outcome: VerificationOutcome
     dropped: int
-    tokens_used: int
-    # Для шага `verifying`: токены, если модель вызывалась, и код сбоя, если
-    # второй проход не удался (прогон при этом не падает).
-    step_tokens: int | None = None
+    # Для шага `verifying`: вызывалась ли модель и код сбоя, если второй
+    # проход не удался (прогон при этом не падает).
+    called_model: bool = False
     error_code: str | None = None
 
 
@@ -439,6 +457,7 @@ def _verify(
     run_id: UUID,
     *,
     on_retry: RetryListener | None = None,
+    meter: LlmMeter | None = None,
 ) -> _Verification:
     """Второй проход: оставить замечания, которые верификатор подтвердил.
 
@@ -447,10 +466,10 @@ def _verify(
     итог `unavailable` виден в прогоне. Прочие исключения не гасятся.
     """
     if not candidates:
-        return _Verification((), VerificationOutcome.NOT_REQUIRED, 0, 0)
+        return _Verification((), VerificationOutcome.NOT_REQUIRED, 0)
     try:
-        answer = request_verification(
-            context, texts, gateway, candidates, limits=limits, on_retry=on_retry
+        verdicts = request_verification(
+            context, texts, gateway, candidates, limits=limits, on_retry=on_retry, meter=meter
         )
     except LlmError as error:
         # Идентификатор прогона — атрибутом из контекста логов, не в тексте.
@@ -462,21 +481,19 @@ def _verify(
             tuple(candidates),
             VerificationOutcome.UNAVAILABLE,
             0,
-            error.tokens_used,
-            step_tokens=spent_tokens(error),
+            called_model=called_model(error),
             error_code=error.code,
         )
-    if not answer.verdicts.ok:
-        logger.warning("ответ верификатора не принят: %s", answer.verdicts.error)
+    if not verdicts.ok:
+        logger.warning("ответ верификатора не принят: %s", verdicts.error)
         return _Verification(
             tuple(candidates),
             VerificationOutcome.UNAVAILABLE,
             0,
-            answer.tokens_used,
-            step_tokens=answer.tokens_used,
+            called_model=True,
             error_code=LlmOutputError.code,
         )
-    applied = apply_verdicts(candidates, answer.verdicts.unwrap())
+    applied = apply_verdicts(candidates, verdicts.unwrap())
     for finding, reason in applied.dropped:
         logger.info(
             "верификатор отбросил замечание %s (%s/%s): %s",
@@ -497,8 +514,7 @@ def _verify(
         applied.kept,
         VerificationOutcome.VERIFIED,
         len(applied.dropped),
-        answer.tokens_used,
-        step_tokens=answer.tokens_used,
+        called_model=True,
     )
 
 

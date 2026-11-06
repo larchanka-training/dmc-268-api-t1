@@ -63,7 +63,12 @@ erDiagram
         text failure_reason
         review_run_status failed_stage "этап, на котором прогон упал; null, если не падал или упал из queued"
         text model
-        bigint tokens_used
+        bigint tokens_used "итог провайдера (usage.total_tokens)"
+        bigint input_tokens "входные, вместе с кэшированными; null до анализа и у прогонов до разбивки"
+        bigint output_tokens "выходные, вместе с reasoning"
+        bigint cached_tokens
+        bigint reasoning_tokens
+        numeric cost_eur "NUMERIC(20, 10): стоимость у провайдера в евро, точно, на момент вызова"
         float duration_seconds
         int rejected_findings "замечания, отброшенные отсевом: строка вне диффа, невалидная ссылка на правило, дубль"
         review_verification verification "итог второго прохода модели: verified, not_required, unavailable; null до конца анализа"

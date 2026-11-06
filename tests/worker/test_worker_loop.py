@@ -24,7 +24,7 @@ from app.worker import factory
 from app.worker.factory import StopRequest, Worker, build_review_handler
 
 from ..application.test_review_pipeline import _run, _seed_run
-from ..fakes.llm_gateway import ScriptedLlmGateway
+from ..fakes.llm_gateway import ScriptedLlmGateway, spent
 from ..fakes.queue import FakeChannel, FakeConnection
 from ..fakes.unit_of_work import FakeUnitOfWork
 from .test_review_handler import JOB, LIMITS, LLM_LIMITS, TEXTS, _Deps
@@ -111,7 +111,7 @@ def test_a_stage_of_a_failed_message_does_not_leak_into_the_next_spans(
     # следующего сообщения обязаны начать свои трейсы, а не стать детьми упавшего этапа.
     uow = FakeUnitOfWork()
     _seed_run(uow)
-    gateways = iter([ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=1)])])
+    gateways = iter([ScriptedLlmGateway([spent(LlmTimeoutError("таймаут"), 1)])])
 
     def handler(body: bytes) -> None:
         if body == b"fail":
