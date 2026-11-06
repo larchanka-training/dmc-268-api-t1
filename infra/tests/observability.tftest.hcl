@@ -21,6 +21,7 @@ variables {
   # отдельных run ниже.
   alert_telegram_bot_token = "123456789:AAEexampleexampleexampleexample_-12"
   alert_telegram_chat_id   = "-1001234567890"
+  alert_heartbeat_url      = "https://hc-ping.com/0f6c4a3e-8a8b-4a8e-9c1f-2b5d7e9a1c3d"
 }
 
 run "observability_stack_plans_protected" {
@@ -136,6 +137,34 @@ run "observability_stack_with_broken_telegram_rejected" {
   expect_failures = [var.alert_telegram_bot_token, var.alert_telegram_chat_id]
 }
 
+# Адрес heartbeat битый (#334): не https или с пробелом — план падает, иначе
+# Watchdog молча не доходил бы до внешнего сервиса, и тот шумел бы зря.
+run "observability_stack_with_plain_http_heartbeat_rejected" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    alert_heartbeat_url       = "http://hc-ping.com/0f6c4a3e"
+  }
+
+  expect_failures = [var.alert_heartbeat_url]
+}
+
+run "observability_stack_with_spaced_heartbeat_rejected" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    alert_heartbeat_url       = "https://hc-ping.com/0f6c4a3e 1"
+  }
+
+  expect_failures = [var.alert_heartbeat_url]
+}
+
 # Секретов Telegram нет совсем (незаданный секрет приходит пустой строкой):
 # стек поднимается, Alertmanager получает заглушки unset и 0 — алерты
 # считаются, но не доставляются.
@@ -148,6 +177,7 @@ run "observability_stack_without_telegram_plans" {
     postgres_monitor_password = "monitor-password"
     alert_telegram_bot_token  = ""
     alert_telegram_chat_id    = ""
+    alert_heartbeat_url       = ""
   }
 
   assert {
@@ -156,6 +186,11 @@ run "observability_stack_without_telegram_plans" {
       && one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_chat_id"]) == "0"
     )
     error_message = "Без секретов Telegram Alertmanager получает заглушки — токен unset и chat id 0, как локально в compose: пустой chat_id_file он не разобрал бы как число."
+  }
+
+  assert {
+    condition     = one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/heartbeat_url"]) == "unset"
+    error_message = "Без адреса heartbeat Alertmanager получает заглушку unset, как локально в compose: стек поднимается, пинг Watchdog падает в логе."
   }
 }
 
@@ -174,9 +209,10 @@ run "alerting_gets_secrets_as_files_and_the_public_target" {
     condition = (
       one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_bot_token"]) == var.alert_telegram_bot_token
       && one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_chat_id"]) == var.alert_telegram_chat_id
+      && one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/heartbeat_url"]) == var.alert_heartbeat_url
       && length(coalesce(docker_container.alertmanager[0].env, [])) == 0
     )
-    error_message = "Токен бота и chat id попадают в Alertmanager файлами под /etc/alertmanager/secrets (bot_token_file и chat_id_file), а не через env: env виден в docker inspect."
+    error_message = "Токен бота, chat id и адрес heartbeat попадают в Alertmanager файлами под /etc/alertmanager/secrets (bot_token_file, chat_id_file, url_file), а не через env: env виден в docker inspect."
   }
 
   assert {

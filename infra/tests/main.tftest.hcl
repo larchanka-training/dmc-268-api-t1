@@ -316,6 +316,18 @@ run "api_waits_until_healthy" {
     error_message = "Длительности healthcheck API — в формате Go, как их нормализует провайдер: \"2s\", \"30s\", \"1m0s\"."
   }
 
+  # start_period не короче wait_timeout: всё ожидание выката идёт с проверкой
+  # раз в start_interval. Короче — медленный старт у края ожидания ждал бы
+  # проверки через interval (30 с), и apply падал бы по таймауту (#214). Формат
+  # Go проверен выше: часы, минуты и секунды разбираются из одной строки.
+  assert {
+    condition = sum([
+      for part in regexall("([0-9]+)([hms])", docker_container.api.healthcheck[0].start_period) :
+      tonumber(part[0]) * lookup({ h = 3600, m = 60, s = 1 }, part[1])
+    ]) >= docker_container.api.wait_timeout
+    error_message = "start_period healthcheck API должен быть не короче wait_timeout: иначе медленный старт ждёт проверки через interval у края ожидания."
+  }
+
   # Правку healthcheck провайдер на месте не применяет: API пересоздаётся от
   # terraform_data.api_healthcheck, и описание у них обязано быть одним.
   assert {

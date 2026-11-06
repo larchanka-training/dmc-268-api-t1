@@ -291,7 +291,7 @@ sequenceDiagram
         else сбой
             W->>DB: ReviewRun failed
             opt на этом head уже было ревью, а упавший прогон — последний
-                W->>GH: check run failure на head (_block_head_of_failed_run)
+                W->>GH: check run failure на head (block_head_of_failed_run)
             end
             W->>MQ: nack без requeue → review_jobs.dlq
         end
@@ -370,7 +370,7 @@ JSON-сообщение; тело несёт только доменные да�
 исключением, отвечает `nack` без `requeue`: сообщение не крутится в основной
 очереди по кругу, а ровно один раз перекладывается в `review_jobs.dlq` для
 ручного разбора. Перед `nack` упавший прогон ставит `failure` на head, если
-он на этом head последний, а до него ревью уже было (`_block_head_of_failed_run`):
+он на этом head последний, а до него ревью уже было (`block_head_of_failed_run`):
 иначе на PR остался бы `success` прежнего прогона. Исключения — прогон, отменённый ретаргетом посреди ревью
 (`_supersede`): сообщение подтверждается `ack`, прогон остаётся `cancelled`; и прогон,
 отменённый ретаргетом ещё в `queued`: воркер подтверждает сообщение `ack` при первой
