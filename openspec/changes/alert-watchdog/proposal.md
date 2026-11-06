@@ -1,10 +1,10 @@
 ## Why
 
-Если не работают сами алерты, в Telegram ничего не приходит, и это не отличить от спокойного дня (#334, продолжение #100). Так бывает, когда упал `dmc268-prometheus` или `dmc268-alertmanager`, когда у них пропал выход наружу или когда сломалась доставка: токен бота отозван после ротации, бота убрали из чата. `ContainerDown` за Prometheus и Alertmanager не следит, а `ScrapeTargetDown` по Alertmanager пришлось бы отправлять самому упавшему Alertmanager. Сейчас это ограничение только описано в `infra/README.md` вместе с ручной проверкой.
+Если не работают сами алерты, в Telegram ничего не приходит, и это не отличить от спокойного дня (#334, продолжение #100). Так бывает, когда упал `dmc268-prometheus` или `dmc268-alertmanager` или у них пропал выход наружу. `ContainerDown` за Prometheus и Alertmanager не следит, а `ScrapeTargetDown` по Alertmanager пришлось бы отправлять самому упавшему Alertmanager. Сейчас это ограничение только описано в `infra/README.md` вместе с ручной проверкой.
 
 ## What Changes
 
-- Правило `Watchdog` в `infra/observability/alerts.yml` горит всегда (`severity: none`). Оно гаснет, только если за последние 15 минут Alertmanager не смог доставить что-то в Telegram (`alertmanager_notifications_failed_total{integration="telegram"}`). Так сломанная доставка выглядит для внешнего сервиса так же, как упавший стек.
+- Правило `Watchdog` в `infra/observability/alerts.yml`: `expr: vector(1)`, горит всегда (`severity: none`).
 - В `alertmanager.yml` первым стоит маршрут `alertname="Watchdog"` на receiver `heartbeat`. Это webhook на внешний heartbeat-сервис (healthchecks.io или аналог), он шлёт раз в 5 минут. В Telegram Watchdog не попадает.
 - Внешний сервис шумит в канал команды, когда пинги перестают приходить.
 - URL heartbeat — необязательный секрет `ALERT_HEARTBEAT_URL_DMC268_T1`, по образцу `TELEGRAM_*`:
@@ -12,6 +12,7 @@
   - без секрета деплой зелёный, получатель заглушка `unset`, пинг падает с ошибкой в логе, а прогон предупреждает аннотацией;
   - не-`https://` значение роняет `plan`.
 - Страница статуса Watchdog не учитывает: он не входит в `ALERT_RULES`.
+- **Не входит:** сломанная доставка в Telegram (отозванный токен) — пинг идёт мимо Telegram. Для неё остаётся ручная проверка тестовым алертом из `infra/README.md`.
 
 ## Capabilities
 

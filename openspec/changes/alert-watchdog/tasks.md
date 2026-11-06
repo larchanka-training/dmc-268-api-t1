@@ -2,8 +2,8 @@
 
 ## 1. Правило и маршрут
 
-- [x] 1.1 `alerts.yml`: `Watchdog` (`severity: none`) горит всегда и гаснет при сбое доставки в Telegram за 15 минут
-- [x] 1.2 `alerts.test.yml`: `Watchdog` горит, гаснет при сбое Telegram и не гаснет при сбое самого heartbeat
+- [x] 1.1 `alerts.yml`: `Watchdog` (`vector(1)`, `severity: none`) горит всегда
+- [x] 1.2 `alerts.test.yml`: `Watchdog` горит
 - [x] 1.3 `alertmanager.yml`: первый маршрут `alertname="Watchdog"` на receiver `heartbeat` (webhook с `url_file`, повтор раз в 5 минут, без `send_resolved`)
 
 ## 2. Секрет и развёртывание

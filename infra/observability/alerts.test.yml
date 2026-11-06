@@ -619,25 +619,7 @@ tests:
               summary: "Задача review_jobs.qq в работе дольше 20 минут"
               description: "Сообщение выдано воркеру 20 минут назад и не подтверждено. Сначала проверить, не идут ли вызовы модели в таймаут с повтором (спаны review.<этап>, шаг прогона: GET /api/v1/reviews/{id}/steps): такой прогон дойдёт сам. Через 30 минут без прогресса прогон переведёт в failed выметатель."
 
-  # Watchdog (#334): горит всегда, и сбой самого пинга его не гасит, иначе пинг
-  # гасил бы сам себя.
-  - interval: 1m
-    input_series:
-      - series: 'alertmanager_notifications_failed_total{integration="telegram", instance="alertmanager:9093", job="alertmanager"}'
-        values: "0x30"
-      - series: 'alertmanager_notifications_failed_total{integration="webhook", instance="alertmanager:9093", job="alertmanager"}'
-        values: "0+1x30"
-    alert_rule_test:
-      - eval_time: 20m
-        alertname: Watchdog
-        exp_alerts:
-          - exp_labels: {severity: none}
-            exp_annotations:
-              summary: "Цепочка алертов работает"
-              description: "Горит всегда, пока работают Prometheus и Alertmanager и доставка в Telegram не падала 15 минут. Alertmanager шлёт его на внешний heartbeat-сервис, а не в Telegram: пропавшие пинги поднимают внешний сервис (infra/README.md, «Алерты»)."
-
-  # Рядов Alertmanager нет (скрейп лёг): Watchdog всё равно горит, гасит его только
-  # подтверждённый сбой Telegram, а слепоту ловит ScrapeTargetDown.
+  # Watchdog (#334): горит всегда, рядов для него не нужно.
   - interval: 1m
     input_series: []
     alert_rule_test:
@@ -647,29 +629,4 @@ tests:
           - exp_labels: {severity: none}
             exp_annotations:
               summary: "Цепочка алертов работает"
-              description: "Горит всегда, пока работают Prometheus и Alertmanager и доставка в Telegram не падала 15 минут. Alertmanager шлёт его на внешний heartbeat-сервис, а не в Telegram: пропавшие пинги поднимают внешний сервис (infra/README.md, «Алерты»)."
-
-  # Доставка в Telegram упала на 10-й минуте (отозван токен): Watchdog гаснет,
-  # пинги прекращаются. Через 15 минут без новых сбоев он загорается снова.
-  - interval: 1m
-    input_series:
-      - series: 'alertmanager_notifications_failed_total{integration="telegram", instance="alertmanager:9093", job="alertmanager"}'
-        values: "0x9 1x30"
-    alert_rule_test:
-      - eval_time: 9m
-        alertname: Watchdog
-        exp_alerts:
-          - exp_labels: {severity: none}
-            exp_annotations:
-              summary: "Цепочка алертов работает"
-              description: "Горит всегда, пока работают Prometheus и Alertmanager и доставка в Telegram не падала 15 минут. Alertmanager шлёт его на внешний heartbeat-сервис, а не в Telegram: пропавшие пинги поднимают внешний сервис (infra/README.md, «Алерты»)."
-      - eval_time: 12m
-        alertname: Watchdog
-        exp_alerts: []
-      - eval_time: 30m
-        alertname: Watchdog
-        exp_alerts:
-          - exp_labels: {severity: none}
-            exp_annotations:
-              summary: "Цепочка алертов работает"
-              description: "Горит всегда, пока работают Prometheus и Alertmanager и доставка в Telegram не падала 15 минут. Alertmanager шлёт его на внешний heartbeat-сервис, а не в Telegram: пропавшие пинги поднимают внешний сервис (infra/README.md, «Алерты»)."
+              description: "Горит всегда, пока работают Prometheus и Alertmanager. Alertmanager шлёт его на внешний heartbeat-сервис, а не в Telegram: пропавшие пинги поднимают внешний сервис (infra/README.md, «Алерты»)."

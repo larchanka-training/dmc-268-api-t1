@@ -2,22 +2,17 @@
 
 ### Requirement: Dead man's switch алертов
 
-Prometheus SHALL держать всегда горящий алерт `Watchdog`, а Alertmanager SHALL отправлять его не в Telegram, а на внешний heartbeat-сервис, повторяя не реже раза в 5 минут. Внешний сервис SHALL оповещать канал команды, когда пинги перестают приходить. `Watchdog` SHALL гаснуть, если за последние 15 минут Alertmanager не смог доставить уведомление в Telegram. `Watchdog` SHALL NOT менять публичный статус сервиса.
+Prometheus SHALL держать всегда горящий алерт `Watchdog`, а Alertmanager SHALL отправлять его не в Telegram, а на внешний heartbeat-сервис, повторяя не реже раза в 5 минут. Внешний сервис SHALL оповещать канал команды, когда пинги перестают приходить. `Watchdog` SHALL NOT менять публичный статус сервиса.
 
 #### Scenario: Стек алертов работает
 
-- **WHEN** Prometheus и Alertmanager работают, а доставка в Telegram не падала
+- **WHEN** Prometheus и Alertmanager работают
 - **THEN** внешний сервис получает пинг не реже раза в 5 минут, а в Telegram `Watchdog` не приходит
 
 #### Scenario: Упал Prometheus или Alertmanager
 
 - **WHEN** на стенде остановлен `dmc268-prometheus` или `dmc268-alertmanager`
 - **THEN** пинги прекращаются, и внешний сервис оповещает канал команды в пределах 20 минут
-
-#### Scenario: Сломалась доставка в Telegram
-
-- **WHEN** Alertmanager не смог доставить алерт в Telegram, например токен бота отозван
-- **THEN** `Watchdog` гаснет на 15 минут, пинги прекращаются, и внешний сервис оповещает канал команды
 
 #### Scenario: Watchdog и страница статуса
 
