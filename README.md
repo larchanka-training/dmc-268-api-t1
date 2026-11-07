@@ -206,11 +206,10 @@ TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest   # вместе с а
 ```
 
 Схемы ответа модели держат порог 100% строк и ветвей, считанный только по их собственным тестам
-(шаг CI в job `lint`, #275); новая ветвь в валидации ответа модели без теста роняет CI:
-
-```bash
-uv run pytest -q -rs tests/application/test_llm_schema.py tests/infrastructure/test_llm_structured.py --cov=app.application.llm_schema --cov=app.infrastructure.llm.structured --cov-branch --cov-report=term-missing --cov-fail-under=100
-```
+(шаг CI в job `lint`, #275); новая ветвь в валидации ответа модели без теста роняет CI. Локально —
+`make cov-llm-schema`, он же входит в `make check`. Порог меряет ветви кода, а не ограничения
+полей (`min_length`, `ge`, `extra="forbid"` исполняются при импорте): их держит тест, который
+требует случай отказа для каждого поля схемы (`tests/application/test_llm_schema.py`).
 
 Маркеры `live`, `eval` и `load` исключены в `addopts` (`pyproject.toml`), поэтому
 ключ `-m` в обычном прогоне не нужен: явный `-m` перекрывает это исключение.

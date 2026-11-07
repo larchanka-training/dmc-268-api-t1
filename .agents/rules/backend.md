@@ -11,8 +11,7 @@ uv run uvicorn app.main:app --reload    # запуск, нужен DATABASE_URL
 uv run ruff check .                     # стиль
 uv run lint-imports                     # направление зависимостей
 uv run pytest                           # тесты без базы
-# покрытие схем ответа модели, порог 100% строк и ветвей (шаг CI в job lint)
-uv run pytest -q -rs tests/application/test_llm_schema.py tests/infrastructure/test_llm_structured.py --cov=app.application.llm_schema --cov=app.infrastructure.llm.structured --cov-branch --cov-report=term-missing --cov-fail-under=100
+make cov-llm-schema                     # порог 100% покрытия схем ответа модели (шаг CI в job lint)
 uv run alembic upgrade head             # применить миграции
 uv run alembic heads                    # должна быть ровно одна голова
 uv run python scripts/export_openapi.py # экспорт контракта API в docs/openapi/openapi.json
@@ -238,7 +237,10 @@ alembic CLI читают скрипты деплоя); OTLP-экспорт из 
 
 Схемы ответа модели (`app/application/llm_schema.py`, `app/infrastructure/llm/structured.py`)
 покрыты своими тестами на 100% строк и ветвей: новая ветвь в валидации ответа модели приходит с
-тестом, иначе CI падает на пороге покрытия (#275). Локально — команда покрытия из «Команды».
+тестом, иначе CI падает на пороге покрытия (#275). Локально — `make cov-llm-schema`, он же в
+`make check`. Ограничения полей (`min_length`, `ge`, `extra="forbid"`) порог не видит — они
+исполняются при импорте; новое поле схемы приходит со случаем отказа в `REVIEW_REJECTIONS` или
+`VERIFICATION_REJECTIONS`, иначе падает тест полноты в `tests/application/test_llm_schema.py`.
 
 ## Миграции
 

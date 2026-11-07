@@ -52,10 +52,9 @@ jobs:
       # никто не проверил напрямую. Порог — DoD спринта 2 для этих двух модулей,
       # а не для всего проекта, поэтому он в команде, а не в [tool.coverage]:
       # глобальный fail_under уронил бы любой `--cov` по всему проекту. #275.
+      # Команда — цель Makefile: одна копия на CI, `make check` и документацию.
       - name: Покрытие схем ответа модели (порог 100%)
-        env:
-          PYTEST_FAIL_ON_SKIP: "1"
-        run: uv run pytest -q -rs tests/application/test_llm_schema.py tests/infrastructure/test_llm_structured.py --cov=app.application.llm_schema --cov=app.infrastructure.llm.structured --cov-branch --cov-report=term-missing --cov-fail-under=100
+        run: make cov-llm-schema
       # Контракт API — экспорт схемы из кода; устаревший docs/openapi/openapi.json — провал.
       - run: uv run python scripts/export_openapi.py --check
 
