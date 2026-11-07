@@ -51,7 +51,7 @@ from ..fakes.vcs_gateway import RecordingVcsGateway
 from ..fakes.webhooks import a_repository
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
-LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
 LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
 TEXTS = PromptTexts(review_system="ИНСТРУКЦИИ РЕВЬЮ", verifier_system="ИНСТРУКЦИИ ВЕРИФИКАТОРА")
 JOB = ReviewJob(
