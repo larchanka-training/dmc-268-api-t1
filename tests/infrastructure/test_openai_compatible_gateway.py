@@ -412,8 +412,10 @@ def test_answer_cut_by_max_tokens_is_retried_naming_the_limit() -> None:
     [
         (httpx.Response(200, text="не json"), "неожиданное тело"),
         (httpx.Response(200, json={"model": "m", "choices": []}), "неожиданное тело"),
+        # Без проверки на объект `data.get` бросил бы `AttributeError`, а фоллбэк ловит только `LlmError`.
+        (httpx.Response(200, json=[]), "неожиданное тело"),
     ],
-    ids=["not-json", "no-choices"],
+    ids=["not-json", "no-choices", "not-an-object"],
 )
 def test_unexpected_body_is_a_model_failure(response: httpx.Response, reason: str) -> None:
     handler, _ = _recording(response)
