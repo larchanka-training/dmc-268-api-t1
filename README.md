@@ -192,7 +192,7 @@ make stop-local   # остановить API, воркер и туннель
 
 Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
-Короткие команды - в `Makefile`, список - `make help`: `make check` (статические проверки как в CI),
+Короткие команды - в `Makefile`, список - `make help`: `make check` (проверки job lint как в CI),
 `make test-db` (сам поднимет PostgreSQL и RabbitMQ из compose и базу `dmc268_test`), `make test-all`
 (весь набор как в CI), `make sandbox-demo` (первый прогон песочницы воркера одной командой), `make sandbox` (песочница воркера с локальной Ollama), `make run-worker` и т. д.
 Флаги pytest или песочницы передаются через `ARGS`: `make test-db ARGS="-k migration -x"`.

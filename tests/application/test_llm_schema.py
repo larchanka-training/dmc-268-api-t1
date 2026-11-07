@@ -3,7 +3,7 @@
 import copy
 import types
 from collections.abc import Iterator
-from typing import Annotated, Any, Union, get_args, get_origin
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -120,6 +120,9 @@ def _set(data: dict[str, Any], path: tuple[str | int, ...], value: Any) -> None:
 _DELETE = object()
 _F = ("findings", 0)
 _T = ("threadFollowUps", 0)
+# Заведомо чужой ключ для проверки `extra="forbid"`: не совпадёт с алиасом поля, и случай
+# отказа поля не закроет проверку запрета лишних ключей.
+_EXTRA = "__extra__"
 
 # Каждое поле обеих форм - хотя бы одним отвергающим случаем; ошибка указывает на это поле.
 REVIEW_REJECTIONS: list[tuple[tuple[str | int, ...], Any]] = [
@@ -129,7 +132,7 @@ REVIEW_REJECTIONS: list[tuple[tuple[str | int, ...], Any]] = [
     (("findings",), "нет"),
     (("summary",), _DELETE),
     (("threadFollowUps",), "нет"),
-    (("extra",), 1),
+    ((_EXTRA,), 1),
     ((*_F, "filePath"), ""),
     ((*_F, "filePath"), _DELETE),
     ((*_F, "side"), "both"),
@@ -146,28 +149,28 @@ REVIEW_REJECTIONS: list[tuple[tuple[str | int, ...], Any]] = [
     ((*_F, "confidence"), _DELETE),
     ((*_F, "suggestion"), "просто текст"),
     ((*_F, "suggestion", "diff"), _DELETE),
-    ((*_F, "suggestion", "extra"), 1),
+    ((*_F, "suggestion", _EXTRA), 1),
     ((*_F, "rule"), "просто текст"),
     ((*_F, "rule", "name"), ""),
     ((*_F, "rule", "check"), 0),
     ((*_F, "rule", "check"), "2"),
     ((*_F, "rule", "check"), _DELETE),
-    ((*_F, "rule", "extra"), 1),
-    ((*_F, "extra"), 1),
+    ((*_F, "rule", _EXTRA), 1),
+    ((*_F, _EXTRA), 1),
     (("summary", "problem"), ""),
     (("summary", "positives"), "всё"),
     (("summary", "effort"), _DELETE),
-    (("summary", "extra"), 1),
+    (("summary", _EXTRA), 1),
     ((*_T, "anchor"), _DELETE),
     ((*_T, "anchor", "filePath"), ""),
     ((*_T, "anchor", "side"), "both"),
     ((*_T, "anchor", "line"), 0),
     ((*_T, "anchor", "category"), "style"),
-    ((*_T, "anchor", "extra"), 1),
+    ((*_T, "anchor", _EXTRA), 1),
     ((*_T, "status"), "ignored"),
     ((*_T, "reply"), ""),
     ((*_T, "resolveThread"), "true"),
-    ((*_T, "extra"), 1),
+    ((*_T, _EXTRA), 1),
 ]
 
 
@@ -186,11 +189,11 @@ def test_review_rejects_each_malformed_field(path: tuple[str | int, ...], value:
 VERIFICATION_REJECTIONS: list[tuple[tuple[str | int, ...], Any]] = [
     (("schemaVersion",), "2"),
     (("verdicts",), _DELETE),
-    (("extra",), 1),
+    ((_EXTRA,), 1),
     (("verdicts", 0, "id"), ""),
     (("verdicts", 0, "verdict"), "maybe"),
     (("verdicts", 0, "reason"), ""),
-    (("verdicts", 0, "extra"), 1),
+    (("verdicts", 0, _EXTRA), 1),
 ]
 
 
@@ -215,7 +218,8 @@ def _unwrap(annotation: Any) -> Any:
         if origin is Annotated:
             annotation = get_args(annotation)[0]
         elif origin in (Union, types.UnionType):
-            annotation = next(arg for arg in get_args(annotation) if arg is not type(None))
+            # Ровно один тип кроме None: объединение моделей иначе молча потеряло бы поля.
+            (annotation,) = (arg for arg in get_args(annotation) if arg is not type(None))
         else:
             return annotation
 
@@ -223,8 +227,8 @@ def _unwrap(annotation: Any) -> Any:
 def _field_paths(
     model: type[BaseModel], prefix: tuple[str | int, ...] = ()
 ) -> Iterator[tuple[str | int, ...]]:
-    """Пути всех полей формы в ключах JSON, как в списках отказов; `extra` - у каждой модели."""
-    yield (*prefix, "extra")
+    """Пути всех полей формы в ключах JSON, как в списках отказов; `_EXTRA` - у каждой модели."""
+    yield (*prefix, _EXTRA)
     for name, info in model.model_fields.items():
         path = (*prefix, info.alias or to_camel(name))
         yield path
@@ -232,6 +236,7 @@ def _field_paths(
         if get_origin(inner) in (tuple, list):
             inner = _unwrap(get_args(inner)[0])
             path = (*path, 0)
+        assert get_origin(inner) in (None, Literal), f"{path}: неизвестный тип {inner}"
         if isinstance(inner, type) and issubclass(inner, BaseModel):
             yield from _field_paths(inner, path)
 

@@ -69,7 +69,7 @@ help: ## Список целей
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-check: ## Статические проверки как в CI: lock, ruff, lint-imports, mypy, контракт API, openspec, порог покрытия схем
+check: ## Проверки job lint как в CI: lock, ruff, lint-imports, mypy, контракт API, openspec, порог покрытия схем
 	uv lock --check
 	uv run ruff check .
 	uv run lint-imports
