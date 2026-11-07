@@ -157,9 +157,8 @@ def test_worker_dies_while_setting_the_merge_gate(stack: Stack) -> None:
 
     comments = _inline_comments(stack)
     assert len(comments) == len(set(comments)), f"дубль замечания: {comments}"
-    # «Идёт ревью» умершего прогона и нового, затем итог нового.
-    # Блокировка приёма новой доставки (на head уже был прогон, #309) идёт между «Идёт ревью»
-    # умершего прогона и захватом нового.
+    # «Идёт ревью» умершего прогона, блокировка приёма новой доставки (последний прогон на
+    # head выметен в `failed`, #309), «Идёт ревью» захвата нового, затем итог нового.
     assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [
         (HEAD, None),
         (HEAD, None),

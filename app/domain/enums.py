@@ -250,3 +250,9 @@ TERMINAL_STATUSES: frozenset[ReviewRunStatus] = frozenset(
 # доставки вебхука на него — дубль (#75, #149). `failed` сюда не входит —
 # повтор после сбоя должен дать ревью.
 REVIEWED_STATUSES: frozenset[ReviewRunStatus] = TERMINAL_STATUSES - {ReviewRunStatus.FAILED}
+
+# Последний прогон на коммит в этих статусах повтор доставки вебхука не блокирует: head не
+# проверен, повтор даёт новый прогон и блокирует head до задачи (#222, #309).
+RETRYABLE_STATUSES: frozenset[ReviewRunStatus] = frozenset(
+    {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
+)
