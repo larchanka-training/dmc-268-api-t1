@@ -4,7 +4,8 @@
 infra/observability/alerts.test.yml в job observability-configs. Здесь —
 связи между файлами, которые promtool не видит: имена метрик в правилах
 совпадают с теми, что пишут источники, секреты Telegram и адрес heartbeat приходят файлами по одним
-путям в compose и infra, Watchdog уходит на heartbeat, а не в Telegram, пороги записаны в README.
+путям в compose и infra, Watchdog уходит на heartbeat, а не в Telegram, сломанная доставка в
+Telegram — на /fail того же check, пороги записаны в README.
 """
 
 import re
@@ -88,8 +89,14 @@ def test_alert_secrets_are_files_at_the_same_paths_everywhere() -> None:
     telegram = receivers["telegram"]["telegram_configs"][0]
     assert "bot_token" not in telegram and "chat_id" not in telegram
     (heartbeat,) = receivers["heartbeat"]["webhook_configs"]
-    assert "url" not in heartbeat
-    paths = {telegram["bot_token_file"], telegram["chat_id_file"], heartbeat["url_file"]}
+    (heartbeat_fail,) = receivers["heartbeat-fail"]["webhook_configs"]
+    assert "url" not in heartbeat and "url" not in heartbeat_fail
+    paths = {
+        telegram["bot_token_file"],
+        telegram["chat_id_file"],
+        heartbeat["url_file"],
+        heartbeat_fail["url_file"],
+    }
 
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     targets = {c["target"] for c in compose["services"]["alertmanager"]["configs"]}
@@ -102,7 +109,7 @@ def test_alert_secrets_are_files_at_the_same_paths_everywhere() -> None:
 
 def test_watchdog_goes_to_the_heartbeat_and_not_to_telegram() -> None:
     """#334: первый маршрут ловит Watchdog по имени, иначе он ушёл бы в Telegram корневым
-    маршрутом. Повтор не реже раза в 5 минут — период проверки внешнего сервиса в README."""
+    маршрутом. Повтор раз в 5–6 минут — под период проверки внешнего сервиса в README."""
     route = yaml.safe_load(ALERTMANAGER.read_text(encoding="utf-8"))["route"]
     first = route["routes"][0]
     assert first["matchers"] == ['alertname="Watchdog"']
@@ -111,6 +118,36 @@ def test_watchdog_goes_to_the_heartbeat_and_not_to_telegram() -> None:
     assert first["repeat_interval"] == "5m"
     assert _receivers()["heartbeat"]["webhook_configs"][0]["send_resolved"] is False
     assert "Watchdog" in _alerts()
+
+
+def test_failed_telegram_delivery_goes_to_the_fail_url_and_not_to_telegram() -> None:
+    """Сломанную доставку в Telegram heartbeat не видит: пинг идёт мимо Telegram. Алерт о ней
+    ловит второй маршрут по имени и шлёт на /fail того же check, а не в сам Telegram."""
+    route = yaml.safe_load(ALERTMANAGER.read_text(encoding="utf-8"))["route"]
+    second = route["routes"][1]
+    assert second["matchers"] == ['alertname="AlertDeliveryFailing"']
+    assert second["receiver"] == "heartbeat-fail"
+    assert not second.get("continue", False)
+    assert _receivers()["heartbeat-fail"]["webhook_configs"][0]["send_resolved"] is False
+
+    # Пока доставка сломана, Watchdog не возвращает check в up: иначе после /fail он
+    # снова зелёный через 5–6 минут, и пару down/up легко принять за сетевой сбой.
+    inhibits = yaml.safe_load(ALERTMANAGER.read_text(encoding="utf-8"))["inhibit_rules"]
+    assert {
+        "source_matchers": ['alertname="AlertDeliveryFailing"'],
+        "target_matchers": ['alertname="Watchdog"'],
+    } in inhibits
+
+    # Локально /fail строится из того же адреса, что и пинг, как деплой строит его на стенде.
+    configs = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["configs"]
+    assert configs["heartbeat_fail_url"]["content"] == configs["heartbeat_url"]["content"] + "/fail"
+
+    rule = _alerts()["AlertDeliveryFailing"]
+    assert 'alertmanager_notifications_failed_total{integration="telegram"}' in rule["expr"]
+    # Счётчик пишет сам Alertmanager: Prometheus должен его скрейпить.
+    jobs = yaml.safe_load(PROMETHEUS.read_text(encoding="utf-8"))["scrape_configs"]
+    alertmanager = next(job for job in jobs if job["job_name"] == "alertmanager")
+    assert alertmanager["static_configs"][0]["targets"] == ["alertmanager:9093"]
 
 
 def test_prometheus_loads_the_rules_and_sends_to_alertmanager() -> None:

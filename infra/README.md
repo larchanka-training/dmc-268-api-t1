@@ -178,7 +178,7 @@ tofu apply infra.tfplan
 | `github_app_client_secret` | секрет `APP_CLIENT_SECRET_DMC268_T1` |
 | `public_origin` | `https://` + `VPS_DMC268_IP_T1`: интерфейс отдаётся по HTTPS на тот же адрес. Callback `<public_origin>/api/v1/auth/github/callback` регистрируется в настройках GitHub App |
 | `alert_telegram_bot_token`, `alert_telegram_chat_id` | секреты `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1` — бот, от имени которого Alertmanager шлёт алерты, и чат, куда (раздел «Алерты»). Без них алерты считаются и видны в Alertmanager, но в Telegram не уходят. Заданные проверяются на формат — токен `<id>:<ключ>`, chat id числом: битое значение роняет `plan`. В Alertmanager токен приходит файлом (`upload`), поэтому в `docker inspect` его не видно, но в state OpenTofu он лежит открытым текстом — так же, как пароли из `env` остальных контейнеров; state защищён хранилищем на петле сервера (раздел «Хранилище состояния»). Ставятся вручную: `gh secret set TELEGRAM_BOT_TOKEN_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin) и так же chat id; следующий деплой пересоздаёт Alertmanager с ними |
-| `alert_heartbeat_url` | секрет `ALERT_HEARTBEAT_URL_DMC268_T1` — адрес пинга внешнего heartbeat-сервиса для `Watchdog` (раздел «Алерты», «Dead man's switch»). Без него деплой проходит с предупреждением, а падение самого Prometheus или Alertmanager никто не заметит. Только `https://<хост>/<путь>` без пробелов: другое значение роняет `plan`. В Alertmanager приходит файлом (`upload`, `url_file`), в его логе адрес скрыт (`<redacted>`). Ставится вручную: `gh secret set ALERT_HEARTBEAT_URL_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin), следующий деплой пересоздаёт Alertmanager |
+| `alert_heartbeat_url` | секрет `ALERT_HEARTBEAT_URL_DMC268_T1` — адрес пинга внешнего heartbeat-сервиса для `Watchdog` (раздел «Алерты», «Dead man's switch»). Без него деплой проходит с предупреждением, а падение самого Prometheus или Alertmanager никто не заметит. Только `https://<хост>/<путь>` без пробелов: другое значение роняет `plan`. В Alertmanager приходит файлом (`upload`, `url_file`), в его логе адрес скрыт (`<redacted>`); из него же деплой строит адрес `/fail` для `AlertDeliveryFailing`. Ставится вручную: `gh secret set ALERT_HEARTBEAT_URL_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin), следующий деплой пересоздаёт Alertmanager |
 
 Из этого стека наружу не смотрит ничего. API, PostgreSQL и RabbitMQ публикуются на петле сервера, воркер не публикуется вовсе; снаружи доступен только интерфейс, и API — через его `/api/`.
 
@@ -648,7 +648,8 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `BackupStatusUnknown` | отметки о копии нет совсем | 26 часов | critical |
 | `TlsCertificateExpiringSoon` | срок сертификата публичного входа (`shortlived`, 160 часов, продлевается на середине) | < 48 часов дольше 10 минут | critical |
 | `ScrapeTargetDown` | цель скрейпа Prometheus не отвечает — её алерты слепы | 5 минут | warning |
-| `Watchdog` | горит всегда; уходит не в Telegram, а на внешний heartbeat | сразу, повтор раз в 5 минут | none |
+| `AlertDeliveryFailing` | неудачные отправки Alertmanager в Telegram (`alertmanager_notifications_failed_total{integration="telegram"}`); уходит не в Telegram, а на `/fail` внешнего check | хотя бы одна за 10 минут, повтор раз в час | critical |
+| `Watchdog` | горит всегда; уходит не в Telegram, а на внешний heartbeat | сразу, повтор раз в 5–6 минут | none |
 
 Бюджет токенов — константа в `alerts.yml` (`dmc268:llm_tokens_budget_month`), а не
 переменная: конфиги стека одинаковы в обоих окружениях. Смена бюджета — правка этой строки и
@@ -662,9 +663,10 @@ blackbox-exporter по тем же проверкам, а свежесть ко�
 Prometheus или Alertmanager ловит не правило, а внешний сервис («Dead man's switch» ниже):
 `ContainerDown` за `dmc268-prometheus` и `dmc268-alertmanager` не следит, а `ScrapeTargetDown` по
 Alertmanager отправлял бы сам упавший Alertmanager. Сломанную доставку в Telegram (токен бота
-отозван после ротации, бота убрали из чата) heartbeat не видит: пинг идёт мимо Telegram. Поэтому
-после смены секретов Telegram и после деплоя, пересоздавшего Alertmanager, — тестовый алерт
-(«Проверка доставки» ниже). Локально часть алертов
+отозван после ротации, бота убрали из чата) heartbeat не видит: пинг идёт мимо Telegram. Её ловит
+`AlertDeliveryFailing` и шлёт тоже мимо Telegram — на `/fail` внешнего check («Dead man's switch»
+ниже). Без секрета heartbeat этот путь молчит, и после смены секретов Telegram и после деплоя,
+пересоздавшего Alertmanager, остаётся тестовый алерт («Проверка доставки» ниже). Локально часть алертов
 горит всегда: реплики, копий и интерфейса там нет, а контейнеры compose называются по проекту
 (`<проект>-api-1`), поэтому `ContainerDown` горит по всем именам `dmc268-*`.
 
@@ -678,7 +680,18 @@ Alertmanager отправлял бы сам упавший Alertmanager. Сло�
   перестаёт;
 - остановлен или упал `dmc268-alertmanager`, или у него пропал выход наружу.
 
-Страницу статуса `Watchdog` не трогает: его нет в `ALERT_RULES`.
+**Сломанная доставка в Telegram.** Пинг `Watchdog` идёт мимо Telegram, поэтому отозванный
+токен бота или бот, удалённый из канала, heartbeat не видит. Это ловит `AlertDeliveryFailing`:
+счётчик неудачных отправок Alertmanager в Telegram вырос за 10 минут. Вторым маршрутом, тоже
+мимо Telegram, он уходит POST-ом на тот же check с суффиксом `/fail` (файл
+`/etc/alertmanager/secrets/heartbeat_fail_url`, адрес строит деплой из того же секрета).
+healthchecks.io по `/fail` сразу переводит check в down и оповещает своим каналом. Пока горит
+`AlertDeliveryFailing`, пинг `Watchdog` заглушён (`inhibit_rules`), поэтому check остаётся down до
+починки доставки, а не возвращается в up через 5–6 минут. `/fail` повторяется раз в час: check,
+вручную возвращённый в up, снова уходит в down. Локально адрес `/fail` compose строит из того же
+`ALERT_HEARTBEAT_URL` — задавайте его без завершающего `/`.
+
+Страницу статуса `Watchdog` и `AlertDeliveryFailing` не трогают: их нет в `ALERT_RULES`.
 
 Внешний сервис **необязателен**: без учётки в нём и без секрета стенд и алерты в Telegram работают
 как раньше, деплой проходит с предупреждением, а `Watchdog` горит в Alertmanager без пингов. Не
@@ -694,8 +707,10 @@ Alertmanager отправлял бы сам упавший Alertmanager. Сло�
 3. Ping URL (`https://hc-ping.com/<uuid>`) — в секрет `ALERT_HEARTBEAT_URL_DMC268_T1`, затем
    деплой. Адрес — секрет: по нему пинг может прислать кто угодно и скрыть падение.
 
-Подойдёт любой сервис, который принимает POST на HTTPS-адрес (Dead Man's Snitch, Cronitor, Better
-Stack). Пока секрета нет, Alertmanager получает заглушку `unset`: пинг раз в 5 минут падает в его
+Подойдёт сервис, который принимает POST на HTTPS-адрес и понимает неуспех по суффиксу `/fail`:
+healthchecks.io или Better Stack. Dead Man's Snitch и Cronitor неуспех принимают иначе (параметром,
+`?state=fail`): POST на `/fail` у них получит ошибку, а неудачи webhook `AlertDeliveryFailing` не
+считает — сломанная доставка снова пройдёт молча. Пока секрета нет, Alertmanager получает заглушку `unset`: пинг раз в 5 минут падает в его
 логе (`Notify attempt failed … receiver=heartbeat … unsupported protocol scheme`), а деплой
 предупреждает аннотацией прогона. Проверка — остановить Alertmanager и дождаться сообщения
 внешнего сервиса:
