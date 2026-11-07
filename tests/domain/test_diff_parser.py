@@ -458,6 +458,8 @@ def test_vendor_directories_are_filterable(path: str) -> None:
         "app/dist_utils.py",
         "docs/sitemap.md",
         "app/bundle.py",
+        "nginx/redirects.map",
+        "conf/geo.map",
     ],
 )
 def test_regular_sources_pass_the_filter(path: str) -> None:

@@ -174,6 +174,26 @@ def test_files_beyond_limit_are_not_fetched() -> None:
     ]
 
 
+def test_change_over_the_file_limit_is_not_fetched_and_keeps_no_ast_slot() -> None:
+    """#293: файл, отброшенный лимитом изменения, не занимает место из `ast_max_files`."""
+    huge = (
+        "diff --git a/app/generated_dump.py b/app/generated_dump.py\n"
+        "--- a/app/generated_dump.py\n+++ b/app/generated_dump.py\n"
+        "@@ -1,1 +1,1 @@\n-x = 1\n+x = '" + "y" * 500 + "'\n"
+    )
+    vcs = FakeVcs(
+        diff=huge + _file_diff("app/repo.py"),
+        files={("app/generated_dump.py", HEAD): SOURCE, ("app/repo.py", HEAD): SOURCE},
+    )
+    limits = replace(LIMITS, ast_max_files=1, diff_file_max_bytes=300)
+
+    body = _build(vcs, limits=limits).payload.body
+
+    # Единственное место довыборки досталось настоящему файлу, а не дампу.
+    assert [c[2] for c in vcs.calls if c[0] == "file" and c[3] == HEAD] == ["app/repo.py"]
+    assert {"path": "app/generated_dump.py", "part": "file", "reason": "filtered"} in body["omitted"]
+
+
 def test_too_large_file_is_not_parsed() -> None:
     big = "x = 1\n" * 500
     vcs = FakeVcs(diff=_file_diff("app/a.py"), files={("app/a.py", HEAD): big})

@@ -34,7 +34,9 @@ MINIFIED_SUFFIXES: tuple[str, ...] = (".min.js", ".min.css")
 GENERATED_MARKER = ".generated."
 PROTOBUF_SUFFIX = ".pb.go"
 # Собранные бандлы и source map — вывод сборщика, а не код автора (#293).
-BUNDLE_SUFFIXES: tuple[str, ...] = (".bundle.js", ".bundle.css", ".map")
+# Только source map сборщика: `*.map` целиком задел бы и написанные руками файлы
+# (`redirects.map` для nginx).
+BUNDLE_SUFFIXES: tuple[str, ...] = (".bundle.js", ".bundle.css", ".js.map", ".css.map")
 # Каталоги чужого или собранного кода на любой глубине пути.
 SKIPPED_DIRECTORIES: frozenset[str] = frozenset({"vendor", "node_modules", "dist"})
 

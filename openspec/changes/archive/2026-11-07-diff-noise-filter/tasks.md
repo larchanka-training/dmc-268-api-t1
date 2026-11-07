@@ -1,6 +1,6 @@
 ## 1. Фильтр
 
-- [x] 1.1 Бандлы в `app/domain/diff_parser.py`: каталог `dist/`, `*.bundle.js`, `*.bundle.css`, `*.map`
+- [x] 1.1 Бандлы в `app/domain/diff_parser.py`: каталог `dist/`, `*.bundle.js`, `*.bundle.css`, `*.js.map`, `*.css.map`
 - [x] 1.2 `is_filtered_out(file, max_file_bytes)`: шаблоны и лимит размера изменения файла; `filter_diff_files` по нему
 - [x] 1.3 Настройка `DIFF_FILE_MAX_BYTES` и поле `ContextLimits.diff_file_max_bytes`
 

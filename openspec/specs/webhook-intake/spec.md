@@ -123,8 +123,8 @@
 
 #### Scenario: Собранные бандлы отфильтрованы
 
-- **WHEN** дифф содержит файл внутри каталога `dist/` на любой глубине, `*.bundle.js`, `*.bundle.css` или source map `*.map`
-- **THEN** эти файлы исключаются из результата фильтрации, а `src/distance.py` и `app/dist_utils.py` остаются
+- **WHEN** дифф содержит файл внутри каталога `dist/` на любой глубине, `*.bundle.js`, `*.bundle.css` или source map `*.js.map`, `*.css.map`
+- **THEN** эти файлы исключаются из результата фильтрации, а `src/distance.py`, `app/dist_utils.py` и `nginx/redirects.map` остаются
 
 #### Scenario: Бинарные и вендорные пути отфильтрованы
 
