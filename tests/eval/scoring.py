@@ -18,6 +18,10 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from statistics import mean, pstdev
 
+from app.domain.entities import ReviewRunStep
+from app.domain.enums import ReviewRunStage
+from app.domain.llm_errors import LlmOutputError
+
 # Часть контракта метрик (LLM_EVAL §2): смена окна делает прошлые цифры несравнимыми.
 LINE_WINDOW = 3
 
@@ -174,3 +178,62 @@ def spread(values: Iterable[float | None]) -> tuple[float, float] | None:
     if not present:
         return None
     return mean(present), pstdev(present)
+
+
+# Этапы, на которых прогон вызывает модель: ревью и верификатор.
+_MODEL_STAGES = (ReviewRunStage.ANALYSING, ReviewRunStage.VERIFYING)
+
+
+@dataclass(frozen=True, slots=True)
+class OutputCounts:
+    """Вызовы модели по исходу формата ответа (LLM_EVAL §3, Valid-output rate).
+
+    Вызов - этап `analysing` или `verifying` одного прогона; каждая попытка
+    внутри него - отдельный шаг (`review_run_steps`), не прошедшая схему - с
+    кодом `LLM_INVALID_OUTPUT`. `no_answer` - вызов кончился сбоем без ответа
+    модели (таймаут, лимит, сбой отсева) и без более раннего невалидного
+    ответа: формат тут не измерить.
+    """
+
+    first_try: int = 0
+    after_retry: int = 0
+    invalid: int = 0
+    no_answer: int = 0
+
+    def __add__(self, other: OutputCounts) -> OutputCounts:
+        return OutputCounts(
+            self.first_try + other.first_try,
+            self.after_retry + other.after_retry,
+            self.invalid + other.invalid,
+            self.no_answer + other.no_answer,
+        )
+
+    @property
+    def valid_rate(self) -> float | None:
+        """Доля ответов, прошедших схему с первой попытки: повтор её не спасает."""
+        return _ratio(self.first_try, self.first_try + self.after_retry + self.invalid)
+
+
+def classify_calls(steps: Sequence[ReviewRunStep]) -> OutputCounts:
+    """Исход каждого вызова модели прогона по его шагам; шаги - в порядке начала.
+
+    Этап без вызова модели (верификация без кандидатов, `PROMPT_TOO_LARGE`) не
+    считается. Исход вызова - код последнего шага этапа; сбой повтора после
+    `LLM_INVALID_OUTPUT` - тоже невалиден: первый ответ схему уже не прошёл. Ответ,
+    отвергнутый по смыслу (верификатор не покрыл кандидатов) или обрезанный
+    пределом длины, тоже пишется `LLM_INVALID_OUTPUT` и считается невалидным.
+    """
+    counts = OutputCounts()
+    for stage in _MODEL_STAGES:
+        attempts = [s for s in steps if s.stage is stage]
+        if not any(s.tokens_used is not None for s in attempts):
+            continue
+        last = attempts[-1].error_code
+        retried = any(s.error_code == LlmOutputError.code for s in attempts[:-1])
+        if last is None:
+            counts += OutputCounts(after_retry=1) if retried else OutputCounts(first_try=1)
+        elif last == LlmOutputError.code or retried:
+            counts += OutputCounts(invalid=1)
+        else:
+            counts += OutputCounts(no_answer=1)
+    return counts

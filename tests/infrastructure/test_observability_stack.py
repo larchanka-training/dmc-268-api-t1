@@ -572,6 +572,8 @@ def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
     assert "docker_network.dmc268" not in grafana
     assert "docker_network.observability[" in grafana
     assert "docker_network.grafana[0].name" in grafana
+    # Публичный вход /grafana/ — через сеть прокси с интерфейсом.
+    assert "docker_network.grafana_proxy.name" in grafana
     for name in ("otelcol", "prometheus"):
         block = _tf_container_block(name)
         assert "docker_network.backend.name" in block, name
@@ -870,3 +872,25 @@ def test_dashboard_queries_cover_the_expected_signals() -> None:
     )
     missing = [signal for signal in expected if signal not in expressions]
     assert not missing, f"нет сигналов в выражениях дашборда: {missing}"
+
+
+def test_entry_traffic_excludes_probes_and_grafana_requests() -> None:
+    """Панели входа (nginx) считают только трафик интерфейса и API.
+
+    Grafana открывается через тот же nginx интерфейса по подпути /grafana/, и её
+    запросы попадают в access-лог dmc268-ui. Как и пробы Blackbox, они не вход:
+    каждое выражение по этому логу отсекает и то и другое фильтром строк.
+    """
+    selector = '{service_name="dmc268-ui"}'
+    required_filters = ('!= "Blackbox-Exporter"', '!~ "\\"[A-Z]+ /grafana/"')
+    expressions = [
+        target["expr"]
+        for panel in load_dashboard()["panels"]
+        for target in panel["targets"]
+        if selector in target["expr"]
+    ]
+    assert expressions, f"нет выражений по {selector}"
+    # Фильтры строк стоят сразу за селектором, до парсера pattern.
+    prefix = f"{selector} {' '.join(required_filters)} | pattern "
+    for expr in expressions:
+        assert prefix in expr, f"нет фильтров {required_filters}: {expr}"

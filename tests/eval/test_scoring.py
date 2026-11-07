@@ -1,13 +1,22 @@
 """Сопоставление и метрики eval - без модели, базы и сети."""
 
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
+
 import pytest
+
+from app.domain.entities import ReviewRunStep
+from app.domain.enums import ReviewRunStage, ReviewRunStepStatus
+from app.domain.llm_errors import LlmOutputError
 
 from .scoring import (
     LINE_WINDOW,
     CaseScore,
     ExpectedIssue,
+    OutputCounts,
     Reported,
     aggregate,
+    classify_calls,
     match,
     score_case,
     spread,
@@ -122,3 +131,60 @@ def test_expected_issue_needs_exactly_one_label() -> None:
 def test_spread_skips_repetitions_without_a_value() -> None:
     assert spread([0.5, None, 1.0]) == (0.75, 0.25)
     assert spread([None]) is None
+
+
+RUN_ID = UUID(int=1)
+START = datetime(2026, 11, 6, 10, 0, tzinfo=UTC)
+INVALID = LlmOutputError.code
+
+
+def _step(
+    stage: ReviewRunStage, error_code: str | None = None, *, tokens: int | None = 10
+) -> ReviewRunStep:
+    return ReviewRunStep(
+        id=uuid4(),
+        review_run_id=RUN_ID,
+        stage=stage,
+        status=ReviewRunStepStatus.FAILED if error_code else ReviewRunStepStatus.COMPLETED,
+        started_at=START,
+        tokens_used=tokens,
+        error_code=error_code,
+    )
+
+
+ANALYSING = ReviewRunStage.ANALYSING
+VERIFYING = ReviewRunStage.VERIFYING
+
+
+@pytest.mark.parametrize(
+    ("steps", "expected"),
+    [
+        ([_step(ANALYSING), _step(VERIFYING)], OutputCounts(first_try=2)),
+        (
+            [_step(ANALYSING, INVALID), _step(ANALYSING), _step(VERIFYING)],
+            OutputCounts(first_try=1, after_retry=1),
+        ),
+        ([_step(ANALYSING, INVALID), _step(ANALYSING, INVALID)], OutputCounts(invalid=1)),
+        # Верификатор ответил по схеме, но не покрыл кандидатов: невалиден.
+        ([_step(ANALYSING), _step(VERIFYING, INVALID)], OutputCounts(first_try=1, invalid=1)),
+        # Таймаут перед ответом - не повтор по схеме.
+        ([_step(ANALYSING, "LLM_TIMEOUT"), _step(ANALYSING)], OutputCounts(first_try=1)),
+        ([_step(ANALYSING, "LLM_TIMEOUT")], OutputCounts(no_answer=1)),
+        # Первый ответ не прошёл схему, повтор упал на таймауте: вызов невалиден.
+        ([_step(ANALYSING, INVALID), _step(ANALYSING, "LLM_TIMEOUT")], OutputCounts(invalid=1)),
+        # Без кандидатов верификатор модель не зовёт.
+        ([_step(ANALYSING), _step(VERIFYING, tokens=None)], OutputCounts(first_try=1)),
+        ([_step(ReviewRunStage.FETCHING_DIFF, "VCS_UNAVAILABLE", tokens=None)], OutputCounts()),
+    ],
+)
+def test_each_model_call_is_classified_by_its_last_step(
+    steps: list[ReviewRunStep], expected: OutputCounts
+) -> None:
+    assert classify_calls(steps) == expected
+
+
+def test_valid_rate_counts_only_first_try_and_ignores_calls_without_answer() -> None:
+    counts = OutputCounts(first_try=6, after_retry=1, invalid=1, no_answer=5)
+    assert counts.valid_rate == 0.75
+    assert OutputCounts(no_answer=2).valid_rate is None
+    assert counts + OutputCounts(invalid=2) == OutputCounts(6, 1, 3, 5)
