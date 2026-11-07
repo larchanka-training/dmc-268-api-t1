@@ -18,6 +18,7 @@ from sqlalchemy import (
     delete,
     func,
     literal,
+    null,
     or_,
     select,
     text,
@@ -44,6 +45,7 @@ from app.domain.entities import (
     ReviewRunListEntry,
     ReviewRunStep,
     Secret,
+    StoredContextPayload,
     User,
 )
 from app.domain.entities import Session as UserSession
@@ -586,7 +588,7 @@ class SqlAlchemyContextPayloadRepo:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]:
+    def list_for_run(self, review_run_id: UUID) -> list[StoredContextPayload]:
         rows = self._session.scalars(
             select(ContextPayloadRow)
             .where(ContextPayloadRow.review_run_id == review_run_id)
@@ -614,6 +616,30 @@ class SqlAlchemyContextPayloadRepo:
                 body=redact_secrets(payload.body),
             )
         )
+
+    def expire_bodies(self, created_before: dt.datetime, now: dt.datetime, limit: int) -> int:
+        """Стереть тела самых старых пакетов, записанных раньше `created_before`, не больше `limit`.
+
+        Выбор идёт по частичному индексу `(created_at) WHERE body IS NOT NULL`: уже стёртые
+        строки проход не читает. `SKIP LOCKED` — два воркера в одном проходе не ждут друг друга
+        и не стирают одну строку дважды.
+        """
+        picked = (
+            select(ContextPayloadRow.id)
+            .where(ContextPayloadRow.body.is_not(None), ContextPayloadRow.created_at < created_before)
+            .order_by(ContextPayloadRow.created_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+            .scalar_subquery()
+        )
+        result = self._session.execute(
+            update(ContextPayloadRow)
+            .where(ContextPayloadRow.id.in_(picked))
+            # `null()`, а не `None`: JSONB записал бы `None` JSON-значением null, а не SQL NULL.
+            .values(body=null(), body_expired_at=now, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount)  # type: ignore[attr-defined]
 
 
 class SqlAlchemyFindingRepo:

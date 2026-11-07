@@ -29,6 +29,7 @@ from app.domain.entities import (
     ReviewRunListEntry,
     ReviewRunStep,
     Session,
+    StoredContextPayload,
     User,
 )
 from app.domain.enums import (
@@ -400,19 +401,45 @@ class FakeReviewRunStepRepo:
 
 class FakeContextPayloadRepo:
     def __init__(self) -> None:
-        self._items: list[ContextPayload] = []
+        self._items: list[StoredContextPayload] = []
 
-    def snapshot(self) -> list[ContextPayload]:
+    def snapshot(self) -> list[StoredContextPayload]:
         return list(self._items)
 
-    def restore(self, state: list[ContextPayload]) -> None:
+    def restore(self, state: list[StoredContextPayload]) -> None:
         self._items = list(state)
 
-    def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]:
+    def list_for_run(self, review_run_id: UUID) -> list[StoredContextPayload]:
         return [p for p in self._items if p.review_run_id == review_run_id]
 
     def add(self, payload: ContextPayload) -> None:
-        self._items.append(payload)
+        self._items.append(
+            StoredContextPayload(
+                id=payload.id,
+                review_run_id=payload.review_run_id,
+                chunk_index=payload.chunk_index,
+                tiers=payload.tiers,
+                file_paths=payload.file_paths,
+                token_count=payload.token_count,
+                content_sha256=payload.content_sha256,
+                body=payload.body,
+                body_expired_at=None,
+                created_at=payload.created_at,
+                updated_at=payload.updated_at,
+            )
+        )
+
+    def expire_bodies(self, created_before: datetime, now: datetime, limit: int) -> int:
+        live = sorted(
+            (p for p in self._items if p.body_expired_at is None and p.created_at < created_before),
+            key=lambda p: p.created_at,
+        )[:limit]
+        expired = {p.id for p in live}
+        self._items = [
+            replace(p, body=None, body_expired_at=now, updated_at=now) if p.id in expired else p
+            for p in self._items
+        ]
+        return len(expired)
 
 
 class FakeFindingRepo:

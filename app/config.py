@@ -157,6 +157,18 @@ class Settings(BaseSettings):
         gt=0,
         description="Больший .review/rules.md не разбирается — дефолтный фоллбэк",
     )
+    # Тело пакета контекста — чужой исходный код; после срока его стирает воркер,
+    # метаданные остаются (change `context-payload-retention`).
+    context_payload_retention_days: int = Field(
+        default=30,
+        gt=0,
+        description="Сколько дней хранится тело пакета контекста прогона; потом воркер его стирает",
+    )
+    context_payload_expiry_batch: int = Field(
+        default=200,
+        gt=0,
+        description="Сколько тел пакетов контекста стирает один проход уборки воркера",
+    )
     rules_cache_ttl_seconds: int = Field(
         default=3_600,
         gt=0,

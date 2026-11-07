@@ -238,6 +238,7 @@ def test_context_is_built_from_the_real_diff() -> None:
 
     (payload,) = uow.context_payloads.list_for_run(JOB.review_run_id)
     assert payload.file_paths == (CHANGED_FILE,)
+    assert payload.body is not None
     assert payload.body["schema"] == "context-payload/v1"
     assert "+new" in payload.body["diff"][0]["hunk"]
 
@@ -333,6 +334,7 @@ def test_rules_failure_does_not_fail_the_run() -> None:
     assert run is not None
     assert run.status == ReviewRunStatus.COMPLETED
     (payload,) = uow.context_payloads.list_for_run(JOB.review_run_id)
+    assert payload.body is not None
     assert payload.body["rules"]["status"] == "unavailable"
 
 
