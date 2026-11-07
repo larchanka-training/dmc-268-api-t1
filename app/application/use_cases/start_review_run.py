@@ -16,8 +16,10 @@ merge_request и прогона, коммит, разбор гонки и пос
 удалась и компенсация, прогон выметет sweep обработки (`list_unfinished`, #36).
 
 Смена целевой ветки (`edited` с другой веткой, чем записана у PR, #222) даёт новый
-прогон: активный на старой ветке отменяется, а head блокируется после коммита, до
-постановки задачи. Это бывает только у вебхука: у ручного запуска `action = manual`.
+прогон: активный на старой ветке отменяется. Head блокируется после коммита, до постановки
+задачи, при смене ветки и при любом вебхуке на head, где уже был прогон (#309): так повтор
+после отказа блокировки блокирует снова без отката ветки. Это бывает только у вебхука:
+ручной запуск ставит gate при захвате прогона (#368).
 
 Гонку параллельных запусков страхуют частичные уникальные индексы — отказ любого из них
 адаптер хранилища переводит в `ActiveRunConflict`. Проигравший после отката
@@ -89,8 +91,8 @@ class RunStart:
     `duplicate` — на коммит уже есть прогон по правилу вызывающего, найденный до вставки и до
     обновления merge_request. `conflict` — гонку отклонил уникальный индекс, проигравший
     откатился и нашёл активный прогон победителя. `success` — прогон записан, задача поставлена.
-    `failure` — только смена целевой ветки у вебхука: head не удалось заблокировать, прогон
-    переведён в `failed`. Кроме `failure`, заполнены `run`, `merge_request` и `repository` —
+    `failure` — только у вебхука: head не удалось заблокировать (смена целевой ветки или повтор
+    на head, где уже был прогон), прогон переведён в `failed`. Кроме `failure`, заполнены `run`, `merge_request` и `repository` —
     из них HTTP-слой собирает проекцию `ReviewJob`.
     """
 
@@ -115,10 +117,12 @@ def start_review_run(
 ) -> RunStart:
     """Записать прогон на `launch.head_sha` и поставить задачу.
 
-    `vcs` нужен только смене целевой ветки: блокировка head до постановки задачи.
-    Сбой постановки — прогон в `failed` (`run_outcome` пишет переход), исключение наверх.
+    `vcs` нужен блокировке head до постановки задачи — у вебхука при смене целевой ветки и при
+    повторе на head, где уже был прогон. Сбой постановки — прогон в `failed` (`run_outcome`
+    пишет переход), исключение наверх.
     """
     retarget = False
+    lock_head = False
     with uow as work:
         existing_merge_request = work.merge_requests.find_by_number(repository.id, launch.pr_number)
         if existing_merge_request is not None:
@@ -131,6 +135,16 @@ def start_review_run(
             )
             duplicate_of = None if retarget else find_duplicate(
                 work, existing_merge_request.id, launch.head_sha
+            )
+            # На head уже был прогон — его check описывает чужой дифф (смена ветки) или
+            # упавшее ревью: до нового ревью head блокируется (#309). Признак — до вставки
+            # нового прогона, поэтому повтор после отказа блокировки видит упавший прогон и
+            # блокирует снова, даже когда целевая ветка уже записана новой. Ручной запуск
+            # gate ставит при захвате прогона (#368), а `failure` приёма не обрабатывает.
+            lock_head = launch.trigger is TriggerSource.WEBHOOK and (
+                retarget
+                or work.review_runs.find_latest(existing_merge_request.id, launch.head_sha)
+                is not None
             )
             if duplicate_of is not None:
                 return RunStart(
@@ -201,12 +215,13 @@ def start_review_run(
                     repository=repository,
                 )
 
-    if retarget:
+    if lock_head:
         # Check run висит на коммите: до ревью нового диффа на нём остался бы
-        # `success` старого. Блокировка (`in_progress` нового прогона) — после коммита
-        # отмены и нового прогона: воркер старого прогона и пересчёт по треду, выставив
-        # gate, перечитывают прогон за head, так что любая перестановка с ними кончается
-        # gate нового. Задача — после блокировки: новый прогон не выставит gate раньше неё.
+        # `success` старого прогона или `failure` упавшего. Блокировка (`in_progress` нового
+        # прогона) — после коммита отмены и нового прогона: воркер старого прогона и пересчёт
+        # по треду, выставив gate, перечитывают прогон за head, так что любая перестановка с
+        # ними кончается gate нового. Задача — после блокировки: новый прогон не выставит
+        # gate раньше неё.
         try:
             settle_merge_gate(
                 uow,
@@ -218,20 +233,16 @@ def start_review_run(
                 repository_id=repository.id,
             )
         except VcsError as exc:
-            # 502 и откат: прогон — в `failed` (повтор доставки он дублем не
-            # делает), PR — на прежнюю ветку, чтобы повтор (#149) снова увидел
-            # смену и заблокировал head.
+            # 502: прогон — в `failed`, задачи нет. Повтор доставки (#149) дублем его не
+            # считает, видит прогон на head и блокирует head снова — ветку откатывать не
+            # нужно, и второй записи, которая могла бы не пройти, нет (#309).
             logger.warning(
-                "merge gate %s@%s не заблокирован после смены целевой ветки",
+                "merge gate %s@%s не заблокирован до повторного ревью",
                 launch.repository_full_name,
                 launch.head_sha,
                 exc_info=True,
             )
             _fail_unenqueued(uow, run.id, exc, now(), run_outcome)
-            if existing_merge_request is not None:
-                _restore_target_branch(
-                    uow, merge_request.id, existing_merge_request.target_branch, now()
-                )
             return RunStart(kind="failure")
 
     # Задача — после коммита: воркер #36 ожидает, что прогон уже виден в базе,
@@ -338,24 +349,6 @@ def _settle_unenqueued(
         logger.exception(
             "задача не поставлена, а check run merge gate на %s не выставлен", launch.head_sha
         )
-
-
-def _restore_target_branch(
-    uow: UnitOfWork, merge_request_id: UUID, target_branch: str, now: datetime
-) -> None:
-    """Вернуть PR прежнюю целевую ветку, когда смену не удалось довести до блокировки.
-
-    Сбой (база недоступна) пишется в лог: повтор доставки тогда сочтёт смену
-    уже записанной и создаст прогон без блокировки — head закроет его gate."""
-    try:
-        with uow as work:
-            current = work.merge_requests.get(merge_request_id)
-            if current is None:
-                return
-            work.merge_requests.update(replace(current, target_branch=target_branch, updated_at=now))
-            work.commit()
-    except Exception:
-        logger.exception("не удалось вернуть PR %s прежнюю целевую ветку", merge_request_id)
 
 
 def _find_survivor(

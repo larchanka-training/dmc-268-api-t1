@@ -622,10 +622,11 @@ def test_retarget_whose_job_is_not_enqueued_fails_the_head() -> None:
     ]
 
 
-def test_retarget_whose_gate_cannot_be_blocked_is_rolled_back() -> None:
-    """GitHub недоступен на блокировке gate: 502, задачи нет, новый прогон - в
-    `failed`, PR - на прежней ветке. Повтор доставки (#149) снова видит смену
-    ветки и блокирует head, а не ревьюит под прежним `success`."""
+def test_retarget_whose_gate_cannot_be_blocked_fails_and_the_redelivery_blocks_again() -> None:
+    """#309: GitHub недоступен на блокировке gate — 502, задачи нет, новый прогон в `failed`,
+    а ветка PR остаётся новой: отката, который мог бы не записаться, больше нет. Повтор
+    доставки (#149) смены ветки уже не видит, но видит упавший прогон на head — блокирует
+    head снова и только потом ставит задачу, а не ревьюит под прежним `success`."""
     uow, queue, _ = reviewed_on_old_target()
 
     outcome, uow, _, queue = run_case(
@@ -637,14 +638,49 @@ def test_retarget_whose_gate_cannot_be_blocked_is_rolled_back() -> None:
     (_, attempted) = uow.review_runs.added
     failed = uow.review_runs.get(attempted.id)
     assert failed is not None and failed.status is ReviewRunStatus.FAILED
-    assert merge_request_of(uow).target_branch == "main"
+    assert merge_request_of(uow).target_branch == "develop"
     object.__setattr__(failed, "created_at", NOW - timedelta(seconds=30))
 
     outcome, uow, vcs, queue = run_case("edited", vcs_meta=NEW_TARGET, uow=uow, queue=queue)
 
     assert outcome.kind == "success"
-    assert [check.conclusion for _, check in vcs.checks] == [None]
+    assert [check for _, check in vcs.checks] == [build_in_progress_check()]
     assert len(queue.jobs) == 2
+    assert queue.jobs[-1].base_sha == NEW_BASE
+
+
+def test_redelivery_after_a_failed_run_blocks_the_head_before_the_job() -> None:
+    """#309: на head последний прогон упал — на нём `failure` «Ревью не удалось». Повтор
+    `synchronize` того же head ставит `in_progress` до задачи, а не ждёт захвата воркером."""
+    _, uow, _, queue = run_case("synchronize")
+    (first,) = uow.review_runs.added
+    object.__setattr__(first, "status", ReviewRunStatus.FAILED)
+    object.__setattr__(first, "created_at", NOW - timedelta(minutes=1))
+
+    outcome, uow, vcs, queue = run_case("synchronize", uow=uow, queue=queue)
+
+    assert outcome.kind == "success"
+    assert [check for _, check in vcs.checks] == [build_in_progress_check()]
+    assert len(queue.jobs) == 2
+
+
+def test_redelivery_after_a_failed_run_whose_gate_cannot_be_blocked_is_a_failure() -> None:
+    """Отказ блокировки на повторе после упавшего прогона — тот же исход, что у смены ветки:
+    502, задачи нет, прогон `failed`, следующий повтор снова блокирует head."""
+    _, uow, _, queue = run_case("synchronize")
+    (first,) = uow.review_runs.added
+    object.__setattr__(first, "status", ReviewRunStatus.FAILED)
+    object.__setattr__(first, "created_at", NOW - timedelta(minutes=1))
+
+    outcome, uow, _, queue = run_case(
+        "synchronize", uow=uow, queue=queue, check_error=VcsError("502")
+    )
+
+    assert outcome.kind == "failure"
+    assert len(queue.jobs) == 1
+    (_, attempted) = uow.review_runs.added
+    retried = uow.review_runs.get(attempted.id)
+    assert retried is not None and retried.status is ReviewRunStatus.FAILED
 
 
 def test_first_review_and_redelivery_touch_no_gate() -> None:
