@@ -70,7 +70,6 @@ def token_count(value: object) -> int:
         return value
     if (
         isinstance(value, Decimal | float)
-        and not isinstance(value, bool)
         and math.isfinite(value)
         and 0 <= value < _TOKEN_LIMIT
         and value == int(value)

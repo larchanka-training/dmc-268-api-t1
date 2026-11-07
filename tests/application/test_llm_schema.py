@@ -1,10 +1,13 @@
 """Форма ответов модели: что принимается, что отвергается и во что переводится."""
 
 import copy
-from typing import Any
+import types
+from collections.abc import Iterator
+from typing import Annotated, Any, Union, get_args, get_origin
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
+from pydantic.alias_generators import to_camel
 
 from app.application.llm_schema import (
     ReviewOutput,
@@ -125,7 +128,8 @@ REVIEW_REJECTIONS: list[tuple[tuple[str | int, ...], Any]] = [
     (("findings",), _DELETE),
     (("findings",), "нет"),
     (("summary",), _DELETE),
-    (("unexpected",), 1),
+    (("threadFollowUps",), "нет"),
+    (("extra",), 1),
     ((*_F, "filePath"), ""),
     ((*_F, "filePath"), _DELETE),
     ((*_F, "side"), "both"),
@@ -143,6 +147,7 @@ REVIEW_REJECTIONS: list[tuple[tuple[str | int, ...], Any]] = [
     ((*_F, "suggestion"), "просто текст"),
     ((*_F, "suggestion", "diff"), _DELETE),
     ((*_F, "suggestion", "extra"), 1),
+    ((*_F, "rule"), "просто текст"),
     ((*_F, "rule", "name"), ""),
     ((*_F, "rule", "check"), 0),
     ((*_F, "rule", "check"), "2"),
@@ -153,6 +158,7 @@ REVIEW_REJECTIONS: list[tuple[tuple[str | int, ...], Any]] = [
     (("summary", "positives"), "всё"),
     (("summary", "effort"), _DELETE),
     (("summary", "extra"), 1),
+    ((*_T, "anchor"), _DELETE),
     ((*_T, "anchor", "filePath"), ""),
     ((*_T, "anchor", "side"), "both"),
     ((*_T, "anchor", "line"), 0),
@@ -180,7 +186,7 @@ def test_review_rejects_each_malformed_field(path: tuple[str | int, ...], value:
 VERIFICATION_REJECTIONS: list[tuple[tuple[str | int, ...], Any]] = [
     (("schemaVersion",), "2"),
     (("verdicts",), _DELETE),
-    (("unexpected",), 1),
+    (("extra",), 1),
     (("verdicts", 0, "id"), ""),
     (("verdicts", 0, "verdict"), "maybe"),
     (("verdicts", 0, "reason"), ""),
@@ -200,6 +206,51 @@ def test_verification_rejects_each_malformed_field(
 
     locations = [error["loc"] for error in caught.value.errors()]
     assert any(loc[: len(path)] == path for loc in locations), locations
+
+
+def _unwrap(annotation: Any) -> Any:
+    """Снять `Annotated` и `X | None`, оставив сам тип поля."""
+    while True:
+        origin = get_origin(annotation)
+        if origin is Annotated:
+            annotation = get_args(annotation)[0]
+        elif origin in (Union, types.UnionType):
+            annotation = next(arg for arg in get_args(annotation) if arg is not type(None))
+        else:
+            return annotation
+
+
+def _field_paths(
+    model: type[BaseModel], prefix: tuple[str | int, ...] = ()
+) -> Iterator[tuple[str | int, ...]]:
+    """Пути всех полей формы в ключах JSON, как в списках отказов; `extra` - у каждой модели."""
+    yield (*prefix, "extra")
+    for name, info in model.model_fields.items():
+        path = (*prefix, info.alias or to_camel(name))
+        yield path
+        inner = _unwrap(info.annotation)
+        if get_origin(inner) in (tuple, list):
+            inner = _unwrap(get_args(inner)[0])
+            path = (*path, 0)
+        if isinstance(inner, type) and issubclass(inner, BaseModel):
+            yield from _field_paths(inner, path)
+
+
+# Порог покрытия ограничений полей не видит: `Field(min_length=…)`, `strict`,
+# enum и `extra="forbid"` исполняются при импорте модуля, и строка считается
+# покрытой без единого теста отказа. Поэтому полноту списков отказов сверяем
+# с самой формой: новое поле без отвергающего случая роняет тесты.
+@pytest.mark.parametrize(
+    ("model", "rejections"),
+    [(ReviewOutput, REVIEW_REJECTIONS), (VerificationOutput, VERIFICATION_REJECTIONS)],
+    ids=["review", "verification"],
+)
+def test_every_field_has_a_rejection_case(
+    model: type[BaseModel], rejections: list[tuple[tuple[str | int, ...], Any]]
+) -> None:
+    missing = set(_field_paths(model)) - {path for path, _ in rejections}
+
+    assert not missing, f"поля без отвергающего случая: {sorted(missing, key=str)}"
 
 
 def test_verdicts_covering_every_candidate_once_are_accepted() -> None:
@@ -271,3 +322,15 @@ def test_secret_quoted_by_the_verifier_does_not_reach_the_log() -> None:
 
     assert TOKEN not in verdicts["F1"].reason
     assert REDACTED in verdicts["F1"].reason
+
+
+def test_finding_on_the_old_side_is_anchored_to_the_old_line() -> None:
+    """Сторона `old` даёт якорь со старой строкой, а не с новой."""
+    data = copy.deepcopy(REVIEW)
+    data["findings"][0].update(filePath="app/gone.py", side="old", line=7)
+
+    result = to_review_result(ReviewOutput.model_validate(data), model="m")
+
+    assert result.findings[0].anchor == DiffAnchor(
+        file_path="app/gone.py", side=DiffSide.OLD, old_line=7
+    )
