@@ -2,7 +2,8 @@
 
 Модель передаётся снаружи: живая в `test_rules_eval.py`, оракул разметки в
 `test_runner.py`. Метрики считаются по тому, что дошло до PR: замечания
-прогона из базы, сверенные с inline-комментариями в GitHub.
+прогона из базы, сверенные с inline-комментариями в GitHub. Доля валидных
+ответов модели - по шагам прогона из базы: каждая попытка вызова - свой шаг.
 """
 
 import hashlib
@@ -18,7 +19,7 @@ from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
 
 from ...e2e.stack import Stack, deliver
 from ..report import RunResult
-from ..scoring import Reported, score_case
+from ..scoring import Reported, classify_calls, score_case
 from .corpus import CONFIGS, Case
 
 
@@ -88,9 +89,10 @@ def _result(
     stack: Stack, config: str, case: Case, repetition: int, number: int, run_id: str
 ) -> RunResult:
     run = stack.run(run_id)
+    outputs = classify_calls(stack.steps(run_id))
     if run.status is not ReviewRunStatus.COMPLETED:
         return RunResult(
-            config, case.id, repetition, run.status.value, run.failure_reason, (), None
+            config, case.id, repetition, run.status.value, run.failure_reason, (), None, outputs
         )
     reported = tuple(_reported(f) for f in stack.findings(run_id))
     published = sum(len(r.comments) for r in stack.github.reviews_of(number))
@@ -106,4 +108,5 @@ def _result(
         None,
         reported,
         score_case(case.expected, reported),
+        outputs,
     )
