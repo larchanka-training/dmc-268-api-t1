@@ -7,6 +7,7 @@
 
 import datetime as dt
 from collections.abc import Collection, Sequence
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -31,7 +32,9 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 
 from app.application.ports.unit_of_work import RunStateConflict
+from app.domain.billing import eur_per_token
 from app.domain.entities import (
+    BalanceCredit,
     BotThread,
     ContextPayload,
     Finding,
@@ -66,6 +69,7 @@ from app.domain.run_list import RunListFilter, RunListPage
 from app.domain.secret_redaction import redact_secrets
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
+    BalanceCreditRow,
     ContextPayloadRow,
     FindingRow,
     MergeRequestRow,
@@ -128,6 +132,7 @@ class SqlAlchemyRepositoryRepo:
                     connected_at=repository.connected_at,
                     branch_filter=list(repository.branch_filter),
                     min_severity=repository.min_severity,
+                    payer_user_id=repository.payer_user_id,
                 )
                 .on_conflict_do_nothing(constraint="uq_repositories_provider_id")
                 .returning(RepositoryRow.id)
@@ -149,6 +154,8 @@ class SqlAlchemyRepositoryRepo:
                 full_name=repository.full_name,
                 default_branch=repository.default_branch,
                 updated_at=repository.updated_at,
+                # Назначенного плательщика включение не меняет (`review-billing`).
+                payer_user_id=func.coalesce(RepositoryRow.payer_user_id, repository.payer_user_id),
             )
             .returning(RepositoryRow)
         ).one_or_none()
@@ -174,6 +181,15 @@ class SqlAlchemyRepositoryRepo:
                 min_severity=settings.min_severity,
                 updated_at=now,
             )
+            .returning(RepositoryRow)
+        ).one_or_none()
+        return m.repository_to_domain(row) if row else None
+
+    def set_payer(self, repository_id: UUID, user_id: UUID, now: dt.datetime) -> Repository | None:
+        row = self._session.scalars(
+            update(RepositoryRow)
+            .where(RepositoryRow.id == repository_id)
+            .values(payer_user_id=user_id, updated_at=now)
             .returning(RepositoryRow)
         ).one_or_none()
         return m.repository_to_domain(row) if row else None
@@ -303,6 +319,8 @@ class SqlAlchemyReviewRunRepo:
                 ReviewRunRow.head_sha == head_sha,
                 ReviewRunRow.trigger == TriggerSource.MANUAL,
                 ReviewRunRow.status == ReviewRunStatus.COMPLETED,
+                # Прогон без денег ревью не делал: держать gate вместо упавшего повтора ему нечем.
+                ReviewRunRow.coverage_reason.is_(None),
             )
             .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
             .limit(1)
@@ -472,6 +490,9 @@ class SqlAlchemyReviewRunRepo:
                 rejected_findings=run.rejected_findings,
                 verification=run.verification,
                 verifier_dropped_findings=run.verifier_dropped_findings,
+                payer_user_id=run.payer_user_id,
+                estimated_cost_eur=run.estimated_cost_eur,
+                coverage_reason=run.coverage_reason,
             )
         )
         self._notify(run)
@@ -518,6 +539,12 @@ class SqlAlchemyReviewRunRepo:
         row.rejected_findings = run.rejected_findings
         row.verification = run.verification
         row.verifier_dropped_findings = run.verifier_dropped_findings
+        # Плательщик, резерв и причина покрытия пишутся один раз: копия прогона, прочитанная
+        # до проверки баланса (отмена `supersede`), их не стирает — иначе резерв пропал бы
+        # из баланса плательщика.
+        for column in _BILLING_COLUMNS:
+            if (value := getattr(run, column)) is not None:
+                setattr(row, column, value)
         self._notify(run)
 
     def record_cancelled_spend(self, run_id: UUID, usage: LlmUsage) -> None:
@@ -539,6 +566,9 @@ class SqlAlchemyReviewRunRepo:
             text("SELECT pg_notify(:channel, :run_id)"),
             {"channel": REVIEW_RUNS_CHANNEL, "run_id": str(run.id)},
         )
+
+
+_BILLING_COLUMNS = ("payer_user_id", "estimated_cost_eur", "coverage_reason")
 
 
 class SqlAlchemyReviewRunStepRepo:
@@ -819,6 +849,15 @@ class SqlAlchemyUserRepo:
         ).one_or_none()
         return m.user_to_domain(row) if row else None
 
+    def find_by_login(self, provider: Provider, login: str) -> User | None:
+        row = self._session.scalars(
+            select(UserRow)
+            .where(UserRow.provider == provider, func.lower(UserRow.login) == login.lower())
+            .order_by(UserRow.updated_at.desc(), UserRow.id.desc())
+            .limit(1)
+        ).one_or_none()
+        return m.user_to_domain(row) if row else None
+
     def add(self, user: User) -> bool:
         # `ON CONFLICT DO NOTHING`: при параллельной вставке той же пары
         # вторая транзакция ждёт коммита первой и получает 0 строк, а не
@@ -886,6 +925,67 @@ _ACCESS = "access_token"
 # Предел ожидания чужой блокировки токена при refresh; дальше — `ProviderTokenBusy`.
 _LOCK_TIMEOUT = "15s"
 _REFRESH = "refresh_token"
+
+
+# Сколько последних оплаченных прогонов берёт цена токена (design D4). Модель не фильтруется:
+# в `model` — id апстрима, который выбрал роутер, а не настроенная модель.
+_PRICE_HISTORY_RUNS = 50
+
+
+class SqlAlchemyBillingRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def lock_payer(self, user_id: UUID) -> None:
+        # Ключ — хэш id: совпадение хэшей двух плательщиков лишь выстроит их в одну очередь.
+        self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:user_id, 0))"),
+            {"user_id": str(user_id)},
+        )
+
+    def balance(self, user_id: UUID) -> Decimal:
+        credits = (
+            select(func.coalesce(func.sum(BalanceCreditRow.amount_eur), 0))
+            .where(BalanceCreditRow.user_id == user_id)
+            .scalar_subquery()
+        )
+        spent = (
+            select(
+                func.coalesce(
+                    func.sum(func.coalesce(ReviewRunRow.cost_eur, ReviewRunRow.estimated_cost_eur, 0)), 0
+                )
+            )
+            .where(ReviewRunRow.payer_user_id == user_id)
+            .scalar_subquery()
+        )
+        return Decimal(self._session.execute(select(credits - spent)).scalar_one())
+
+    def eur_per_token(self) -> Decimal:
+        recent = (
+            select(ReviewRunRow.cost_eur, ReviewRunRow.tokens_used)
+            .where(ReviewRunRow.cost_eur > 0)
+            .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+            .limit(_PRICE_HISTORY_RUNS)
+            .subquery()
+        )
+        cost, tokens = self._session.execute(
+            select(func.coalesce(func.sum(recent.c.cost_eur), 0), func.coalesce(func.sum(recent.c.tokens_used), 0))
+        ).one()
+        # Правило «без истории — ноль» — в домене.
+        return eur_per_token(Decimal(cost), int(tokens))
+
+    def add_credit(self, credit: BalanceCredit) -> None:
+        self._session.add(
+            BalanceCreditRow(
+                id=credit.id,
+                user_id=credit.user_id,
+                amount_eur=credit.amount_eur,
+                note=credit.note,
+                credited_by=credit.credited_by,
+                created_at=credit.created_at,
+                updated_at=credit.created_at,
+            )
+        )
 
 
 class SqlAlchemyProviderTokenRepo:

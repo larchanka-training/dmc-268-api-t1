@@ -10,13 +10,23 @@ from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
     BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
+    build_merge_gate_check,
+    build_unpaid_check,
     head_run_in_charge,
     pause_check,
     publish_pause_check,
+    settle_merge_gate,
 )
 from app.application.ports.vcs_review import MergeGateCheck
 from app.domain.entities import MergeRequest, Repository, ReviewRun
-from app.domain.enums import MergeRequestState, Provider, ReviewRunStatus, TriggerSource
+from app.domain.enums import (
+    CoverageReason,
+    FindingSeverity,
+    MergeRequestState,
+    Provider,
+    ReviewRunStatus,
+    TriggerSource,
+)
 from app.domain.vcs_errors import VcsTransientError
 
 from ..fakes.unit_of_work import FakeUnitOfWork, add_manual_run_with_critical_thread
@@ -437,3 +447,76 @@ def test_a_delayed_pause_check_returns_the_gate_of_a_manual_run_after_its_relaun
 
     assert vcs.checks[0] == AUTO_REVIEW_OFF_CHECK
     assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
+
+
+def _settle(uow: FakeUnitOfWork) -> RecordingVcsGateway:
+    vcs = RecordingVcsGateway()
+    settle_merge_gate(
+        uow,
+        vcs,
+        merge_request_id=_MR_ID,
+        repo_full_name="owner/repo",
+        head_sha="head1",
+        installation_id=1,
+        repository_id=UUID(int=1),
+    )
+    return vcs
+
+
+def _unpaid_pr(*, payer: UUID | None, auto_review_enabled: bool = True) -> FakeUnitOfWork:
+    """PR, чей прогон на head завершён без денег (`review-billing`)."""
+    uow = _paused_pr()
+    repository = replace(
+        _repository(connected=True, auto_review_enabled=auto_review_enabled), payer_user_id=payer
+    )
+    uow.repositories.restore({repository.id: repository})
+    uow.review_runs.add(
+        replace(
+            _run_on_head(50, TriggerSource.WEBHOOK, ReviewRunStatus.COMPLETED, minute=1),
+            coverage_reason=CoverageReason.BALANCE,
+        )
+    )
+    return uow
+
+
+@pytest.mark.parametrize("payer", [UUID(int=0xFA1), None])
+def test_a_run_without_money_fails_the_gate(payer: UUID | None) -> None:
+    vcs = _settle(_unpaid_pr(payer=payer))
+
+    check = build_unpaid_check(has_payer=payer is not None)
+    assert vcs.checks == [check]
+    assert (check.conclusion, check.title) == ("failure", "Недостаточно средств, ревью не было")
+    assert ("назначьте" in check.summary) is (payer is None)
+    assert ("Пополните" in check.summary) is (payer is not None)
+
+
+def test_a_pause_outranks_the_run_without_money() -> None:
+    vcs = _settle(_unpaid_pr(payer=None, auto_review_enabled=False))
+
+    assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
+
+
+def test_a_paid_run_after_the_top_up_sets_the_gate_by_its_findings() -> None:
+    """После пополнения ручной прогон того же коммита отвечает за head своим итогом."""
+    uow = _unpaid_pr(payer=UUID(int=0xFA1))
+    uow.review_runs.add(_run_on_head(51, TriggerSource.MANUAL, ReviewRunStatus.COMPLETED, minute=2))
+
+    vcs = _settle(uow)
+
+    assert vcs.checks == [build_merge_gate_check((), FindingSeverity.CRITICAL)]
+
+
+def test_a_refused_manual_run_does_not_stand_in_for_a_failed_relaunch_on_pause() -> None:
+    """Пауза, ручной M1 без денег, ручной M2 упал: ревью на head не было — check паузы."""
+    uow = _paused_pr()
+    uow.review_runs.add(
+        replace(
+            _run_on_head(60, TriggerSource.MANUAL, ReviewRunStatus.COMPLETED, minute=1),
+            coverage_reason=CoverageReason.BALANCE,
+        )
+    )
+    uow.review_runs.add(_run_on_head(61, TriggerSource.MANUAL, ReviewRunStatus.FAILED, minute=2))
+
+    vcs = _settle(uow)
+
+    assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]

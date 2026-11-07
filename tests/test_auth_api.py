@@ -3,6 +3,7 @@
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -23,12 +24,20 @@ from app.api.factory import create_app
 from app.application.use_cases.auth import logout
 from app.config import Settings
 from app.domain.entities import (
+    BalanceCredit,
     InstallationRepository,
     Repository,
     RepositoryPermissions,
+    ReviewRun,
 )
-from app.domain.enums import Provider, RepositorySelection
+from app.domain.enums import (
+    Provider,
+    RepositorySelection,
+    ReviewRunStatus,
+    TriggerSource,
+)
 from app.domain.ids import new_id
+from app.domain.llm_usage import LlmUsage
 from app.domain.login import OAuthProviderUnavailable
 from app.domain.provider_token import ProviderTokenRejected
 from app.domain.session import setup_state
@@ -126,7 +135,34 @@ def test_callback_sets_the_session_and_returns_to_the_deep_link(stand) -> None:
         "login": "octocat",
         "name": "The Octocat",
         "avatar_url": "https://avatars.githubusercontent.com/u/583231",
+        "balance_eur": "0",
     }
+
+
+def test_me_shows_the_balance_after_credits_and_spend(stand) -> None:
+    """`review-billing`: 5 € зачислено, прогоны стоили 0.25 € — баланс 4.75."""
+    client = stand.client()
+    sign_in(client)
+    [session] = stand.uow.sessions.stored
+    stand.uow.billing.add_credit(
+        BalanceCredit(new_id(), session.user_id, Decimal(5), "тест", "admin", datetime(2026, 10, 1, tzinfo=UTC))
+    )
+    stand.uow.review_runs.add(
+        ReviewRun(
+            id=new_id(),
+            merge_request_id=new_id(),
+            head_sha="abc",
+            status=ReviewRunStatus.COMPLETED,
+            trigger=TriggerSource.WEBHOOK,
+            last_progress_at=datetime(2026, 10, 1, tzinfo=UTC),
+            created_at=datetime(2026, 10, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 10, 1, tzinfo=UTC),
+            usage=LlmUsage(input_tokens=1, total_tokens=1, cost_eur=Decimal("0.2500000000")),
+            payer_user_id=session.user_id,
+        )
+    )
+
+    assert client.get("/api/v1/auth/me").json()["balance_eur"] == "4.75"
 
 
 @pytest.mark.parametrize("redirect", [None, "https://evil.example/", "//evil.example/app/"])

@@ -47,6 +47,7 @@ def repository_to_domain(row: RepositoryRow) -> Repository:
         connected_at=row.connected_at,
         branch_filter=tuple(row.branch_filter),
         min_severity=row.min_severity,
+        payer_user_id=row.payer_user_id,
     )
 
 
@@ -87,6 +88,9 @@ def review_run_to_domain(row: ReviewRunRow) -> ReviewRun:
         rejected_findings=row.rejected_findings,
         verification=row.verification,
         verifier_dropped_findings=row.verifier_dropped_findings,
+        payer_user_id=row.payer_user_id,
+        estimated_cost_eur=row.estimated_cost_eur,
+        coverage_reason=row.coverage_reason,
     )
 
 

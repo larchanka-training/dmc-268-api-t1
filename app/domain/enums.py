@@ -54,6 +54,15 @@ class ReviewRunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class CoverageReason(StrEnum):
+    """Почему прогон покрыл дифф не полностью.
+
+    `balance` — у плательщика не хватило денег, модель не вызывалась (`review-billing`).
+    """
+
+    BALANCE = "balance"
+
+
 class ReviewRunStage(StrEnum):
     """Этап работы воркера над прогоном — то, что показывает «ход прогона».
 

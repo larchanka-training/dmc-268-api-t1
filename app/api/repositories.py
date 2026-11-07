@@ -1,5 +1,5 @@
-"""Репозитории: список видимых пользователю, чтение, подключение, выключение, настройки ревью и
-статус `.review/rules.md`.
+"""Репозитории: список видимых пользователю, чтение, подключение, выключение, настройки ревью,
+плательщик и статус `.review/rules.md`.
 
 Транспорт: разбор запроса, вызов порта или use case, формат ответа. Пагинация —
 `app/api/pagination.py`. Правила подключения — `app/application/use_cases/connect_repository.py`.
@@ -94,7 +94,9 @@ _CONNECT_DESCRIPTION = (
     "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. "
     "Регистрирует репозиторий установки GitHub App; новый получает настройки по умолчанию, в том "
     "числе `auto_review_enabled = true`, а включённый обратно после `DELETE` сохраняет свои "
-    "сохранённые настройки, в том числе `auto_review_enabled = false`. `full_name` "
+    "сохранённые настройки, в том числе `auto_review_enabled = false`. Вызывающий становится "
+    "плательщиком репозитория, только если плательщика у него нет: повторное подключение и включение "
+    "назначенного не меняют, перевод оплаты — POST /repositories/{id}/payer. `full_name` "
     "и `default_branch` — из ответа GitHub. Два запроса к GitHub: репозиторий по id токеном "
     "пользователя (`GET /repositories/{id}`), затем установка приложения на нём "
     "(`GET /repos/{owner}/{repo}/installation`). Проверки по порядку: провайдер не `github`, "
@@ -167,6 +169,20 @@ _RULES_DESCRIPTION = (
     "сбой не кэшируется. " + _VISIBILITY_REFUSALS + " Приложение не установлено на репозиторий или "
     "установка приостановлена — `404 REPOSITORY_NOT_IN_INSTALLATION`, ветка и файл не запрашиваются."
 )
+_PAYER_DESCRIPTION = (
+    "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии. Делает вызывающего "
+    "плательщиком репозитория: прогоны, которые начнут проверку баланса после ответа, идут с его "
+    "баланса; прогоны, уже зарезервировавшие оценку, остаются за прежним плательщиком. Подключение, "
+    "повторное включение и настройки плательщика не меняют — только эта ручка. Ответ — 200 с "
+    "логином нового плательщика. Проверки по порядку: видимость — " + _VISIBILITY_REFUSALS + " Затем "
+    "роль — как у PUT /repositories/{id}/settings, запросом к GitHub мимо кэша видимости: без admin или "
+    "maintain — `403 REPOSITORY_MANAGE_REQUIRED`, GitHub не отдал репозиторий — "
+    "`404 REPOSITORY_NOT_FOUND`; при отказе и при `502` плательщик не меняется."
+)
+_PAYER_LOGIN_DESCRIPTION = (
+    "Логин GitHub плательщика: аккаунт сервиса, с баланса которого идут прогоны репозитория, кто бы их "
+    "ни запустил."
+)
 _SCM_UNAVAILABLE_DETAIL = "GitHub не ответил или ответил ошибкой."
 # Отказ use case — ответ ручки.
 _REFUSALS: dict[connecting.ConnectRefusal, tuple[HTTPStatus, ErrorCode, str]] = {
@@ -237,6 +253,10 @@ class RepositoryListItem(BaseModel):
     connected_at: UtcDatetime | None = Field(
         description="Когда ревью включено последний раз; `null`, если ревью не включено."
     )
+    payer_login: str | None = Field(
+        description=_PAYER_LOGIN_DESCRIPTION + " `null`, если плательщика нет или репозиторий не подключали.",
+        examples=["octocat"],
+    )
 
 
 class RepositoryListResponse(BaseModel):
@@ -278,7 +298,7 @@ def as_user[T](signed_in: SignedIn, oauth: OAuthProvider, call: Callable[[connec
     Токен непригоден — сессия закрыта, `401 UNAUTHENTICATED`; GitHub недоступен —
     `502 SCM_UNAVAILABLE`.
     """
-    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
+    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id, user_id=signed_in.user.id)
     try:
         return call(user)
     except SessionClosed:
@@ -430,6 +450,7 @@ def _list_item(item: connecting.ListedRepository) -> RepositoryListItem:
         id=record.id if record is not None else None,
         can_connect=item.can_connect,
         connected_at=connected_at,
+        payer_login=item.payer_login,
     )
 
 
@@ -702,6 +723,50 @@ def save_repository_settings(
         raise _repository_not_found()
     # Ответ — запись, какой её сохранила база, а не тело запроса.
     return _settings_response(outcome)
+
+
+class RepositoryPayerResponse(BaseModel):
+    """Плательщик репозитория."""
+
+    payer_login: str = Field(description=_PAYER_LOGIN_DESCRIPTION, examples=["octocat"])
+
+
+@router.post(
+    "/{repository_id}/payer",
+    response_model=RepositoryPayerResponse,
+    summary="Платить за репозиторий",
+    response_description="Вызывающий стал плательщиком.",
+    description=_PAYER_DESCRIPTION,
+    responses={
+        **ERRORS_403_ORIGIN_OR_MANAGE,
+        **ERRORS_404_REPOSITORY,
+        **ERRORS_422,
+        **ERRORS_502_SCM_VISIBILITY,
+    },
+)
+def take_over_payment(
+    repository_id: RepositoryIdPath,
+    signed_in: SignedIn = Depends(current_session),
+    catalog: InstallationCatalog = Depends(get_visibility_catalog),
+    oauth: OAuthProvider = Depends(get_token_provider),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> RepositoryPayerResponse:
+    repository = visible_repository(repository_id, signed_in, catalog, oauth, uow_factory)
+    # Права — мимо кэша, как у настроек: `user_repository` кэш видимости не читает.
+    now = datetime.now(UTC)
+    outcome = as_user(
+        signed_in, oauth, lambda user: connecting.take_over_payment(catalog, uow_factory(), user, repository, now)
+    )
+    if outcome is connecting.ConnectRefusal.MANAGE_REQUIRED:
+        raise ApiError(
+            HTTPStatus.FORBIDDEN,
+            ErrorCode.REPOSITORY_MANAGE_REQUIRED,
+            "Платить за репозиторий может только пользователь с правом admin или maintain на него.",
+        )
+    if isinstance(outcome, connecting.ConnectRefusal):
+        # GitHub не отдал репозиторий — ответ тот же, что у невидимого.
+        raise _repository_not_found()
+    return RepositoryPayerResponse(payer_login=signed_in.user.login)
 
 
 @router.get(

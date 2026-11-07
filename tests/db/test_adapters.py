@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from app.application.ports.unit_of_work import ActiveRunConflict, RunStateConflict
 from app.application.stale_sweep import sweep_stale_runs
 from app.domain.entities import (
+    BalanceCredit,
     ContextPayload,
     DiffAnchor,
     Finding,
@@ -23,9 +24,11 @@ from app.domain.entities import (
     ReviewRun,
     ReviewRunStep,
     RuleRef,
+    User,
 )
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -39,7 +42,7 @@ from app.domain.enums import (
 )
 from app.domain.ids import new_id
 from app.domain.lifecycle import advance
-from app.domain.llm_usage import LlmUsage
+from app.domain.llm_usage import NO_USAGE, LlmUsage
 from app.domain.run_steps import finish_step, start_step
 from app.domain.secret_redaction import REDACTED
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -1253,3 +1256,210 @@ def test_latest_run_on_a_head_is_the_newest_in_any_status(uow) -> None:
 
     assert latest is not None and latest.id == failed.id
     assert nothing is None
+
+
+# --- биллинг (`review-billing`) ---------------------------------------------------
+
+
+def a_user(login: str = "alice") -> User:
+    return User(
+        id=new_id(),
+        provider=Provider.GITHUB,
+        provider_user_id=login,
+        login=login,
+        name=None,
+        avatar_url=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def a_credit(user_id, amount: str) -> BalanceCredit:
+    return BalanceCredit(
+        id=new_id(), user_id=user_id, amount_eur=Decimal(amount), note="тест", credited_by="admin", created_at=NOW
+    )
+
+
+def spent(cost: str, tokens: int = 1000) -> LlmUsage:
+    return LlmUsage(input_tokens=tokens, total_tokens=tokens, cost_eur=Decimal(cost))
+
+
+def billed_runs(work, *runs: ReviewRun) -> None:
+    """Прогоны на одном запросе на изменения: репозиторий и PR — свои на каждый вызов."""
+    repo = replace(a_repository(), id=new_id(), provider_id=str(new_id().int))
+    work.repositories.add(repo)
+    mr = a_merge_request(repo.id)
+    work.merge_requests.add(mr)
+    for run in runs:
+        work.review_runs.add(replace(run, merge_request_id=mr.id))
+
+
+def finished(**fields) -> ReviewRun:
+    return replace(a_run(None), status=ReviewRunStatus.COMPLETED, **fields)
+
+
+def test_balance_is_credits_minus_cost_or_reserve_of_paid_runs(uow) -> None:
+    alice, bob = a_user("alice"), a_user("bob")
+    with uow as work:
+        work.users.add(alice)
+        work.users.add(bob)
+        work.billing.add_credit(a_credit(alice.id, "5"))
+        work.billing.add_credit(a_credit(alice.id, "-0.5"))
+        billed_runs(
+            work,
+            # Факт важнее резерва.
+            finished(payer_user_id=alice.id, estimated_cost_eur=Decimal("0.40"), usage=spent("0.30")),
+            # Резерв, пока факта нет.
+            replace(a_run(None), status=ReviewRunStatus.BUILDING_CONTEXT, payer_user_id=alice.id,
+                    estimated_cost_eur=Decimal("0.20")),
+            # Прогон без денег: нулевой расход.
+            finished(payer_user_id=alice.id, usage=NO_USAGE, coverage_reason=CoverageReason.BALANCE),
+            # Чужие и без плательщика не в счёт.
+            finished(payer_user_id=bob.id, usage=spent("1")),
+            finished(usage=spent("1")),
+        )
+        work.commit()
+
+    with uow as work:
+        assert work.billing.balance(alice.id) == Decimal("4.00")
+        assert work.billing.balance(bob.id) == Decimal(-1)
+        assert work.billing.balance(new_id()) == Decimal(0)
+
+
+def test_a_run_keeps_its_payer_reserve_and_coverage_reason(uow) -> None:
+    alice = a_user()
+    run = finished(payer_user_id=alice.id, estimated_cost_eur=Decimal("0.0000913"),
+                   coverage_reason=CoverageReason.BALANCE)
+    with uow as work:
+        work.users.add(alice)
+        billed_runs(work, run)
+        work.commit()
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert (stored.payer_user_id, stored.estimated_cost_eur, stored.coverage_reason) == (
+        alice.id, Decimal("0.0000913"), CoverageReason.BALANCE
+    )
+
+
+def test_a_stale_copy_does_not_erase_the_reserve(uow) -> None:
+    """Отмена (`supersede`) по копии, прочитанной до резерва, резерв не стирает."""
+    alice = a_user()
+    queued = replace(a_run(None), status=ReviewRunStatus.BUILDING_CONTEXT)
+    with uow as work:
+        work.users.add(alice)
+        billed_runs(work, queued)
+        work.commit()
+    with uow as work:
+        stale = work.review_runs.get(queued.id)
+        work.review_runs.update(replace(stale, payer_user_id=alice.id, estimated_cost_eur=Decimal("0.05")))
+        work.commit()
+    with uow as work:
+        work.review_runs.update(advance(stale, ReviewRunStatus.CANCELLED, LATER).unwrap())
+        work.commit()
+    with uow as work:
+        stored = work.review_runs.get(queued.id)
+    assert (stored.status, stored.payer_user_id, stored.estimated_cost_eur) == (
+        ReviewRunStatus.CANCELLED, alice.id, Decimal("0.05")
+    )
+
+
+def test_cancelled_spend_can_be_zero(uow) -> None:
+    """Резерв отменённого до `analysing` прогона закрывается нулевым расходом (design D2)."""
+    alice = a_user()
+    run = replace(a_run(None), status=ReviewRunStatus.CANCELLED, payer_user_id=alice.id,
+                  estimated_cost_eur=Decimal("0.05"))
+    with uow as work:
+        work.users.add(alice)
+        work.billing.add_credit(a_credit(alice.id, "1"))
+        billed_runs(work, run)
+        work.commit()
+    with uow as work:
+        work.review_runs.record_cancelled_spend(run.id, NO_USAGE)
+        work.commit()
+    with uow as work:
+        assert work.billing.balance(alice.id) == Decimal(1)
+
+
+def test_price_is_taken_from_the_last_fifty_paid_runs_of_any_model(uow) -> None:
+    """В `model` — id апстрима роутера (`tensorix/glm-5.3`), поэтому модель не фильтруется (D4)."""
+    with uow as work:
+        assert work.billing.eur_per_token() == Decimal(0)
+    old = NOW - dt.timedelta(days=1)
+    with uow as work:
+        billed_runs(
+            work,
+            # 51-й с конца: дорогой, в цену не попадает.
+            finished(model="tensorix/glm-5.3", usage=spent("9", 1000), created_at=old, updated_at=old),
+            *(
+                finished(model=("tensorix/glm-5.3", "scaleway/glm-5.3")[n % 2], usage=spent("0.0001", 100))
+                for n in range(50)
+            ),
+            # Без стоимости (Ollama) — мимо.
+            finished(model="qwen", usage=spent("0", 1_000_000)),
+        )
+        work.commit()
+
+    with uow as work:
+        assert work.billing.eur_per_token() == Decimal("0.000001")
+
+
+def test_a_second_transaction_waits_for_the_payer_lock(clean_db) -> None:
+    """Проверка баланса одного плательщика идёт по одной: вторая ждёт коммита первой (D3)."""
+    payer = new_id()
+    locked = threading.Event()
+    order: list[str] = []
+
+    def second() -> None:
+        locked.wait()
+        with SqlAlchemyUnitOfWork(clean_db) as work:
+            work.billing.lock_payer(payer)
+            order.append("second")
+            work.commit()
+
+    thread = threading.Thread(target=second)
+    thread.start()
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        work.billing.lock_payer(payer)
+        locked.set()
+        time.sleep(0.3)
+        order.append("first")
+        work.commit()
+    thread.join(timeout=10)
+
+    assert order == ["first", "second"]
+
+
+def test_another_payer_does_not_wait(clean_db) -> None:
+    with SqlAlchemyUnitOfWork(clean_db) as first, SqlAlchemyUnitOfWork(clean_db) as second:
+        first.billing.lock_payer(new_id())
+        second.session.execute(text("SET LOCAL lock_timeout = '1s'"))
+        second.billing.lock_payer(new_id())
+
+
+def test_reconnect_keeps_an_assigned_payer_and_fills_an_empty_one(uow) -> None:
+    alice, bob = a_user("alice"), a_user("bob")
+    kept = replace(a_repository(), connected_at=None, payer_user_id=alice.id)
+    empty = replace(a_repository(), id=new_id(), provider_id="2", connected_at=None)
+    with uow as work:
+        work.users.add(alice)
+        work.users.add(bob)
+        work.repositories.add(kept)
+        work.repositories.add(empty)
+        work.commit()
+    with uow as work:
+        first = work.repositories.reconnect(replace(kept, connected_at=LATER, payer_user_id=bob.id))
+        second = work.repositories.reconnect(replace(empty, connected_at=LATER, payer_user_id=bob.id))
+        work.commit()
+    assert (first.payer_user_id, second.payer_user_id) == (alice.id, bob.id)
+
+
+def test_a_user_is_found_by_login_ignoring_case_newest_first(uow) -> None:
+    renamed = replace(a_user("alice"), provider_user_id="old")
+    current = replace(a_user("Alice"), updated_at=LATER)
+    with uow as work:
+        work.users.add(renamed)
+        work.users.add(current)
+        work.commit()
+    with uow as work:
+        assert work.users.find_by_login(Provider.GITHUB, "ALICE") == current
+        assert work.users.find_by_login(Provider.GITHUB, "bob") is None

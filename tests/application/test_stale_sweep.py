@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -12,7 +13,12 @@ from app.application.merge_gate_publish import (
 )
 from app.application.ports.vcs_review import MergeGateCheck
 from app.application.stale_sweep import sweep_stale_runs
-from app.domain.entities import MergeRequest, RepositorySettings, ReviewRun
+from app.domain.entities import (
+    BalanceCredit,
+    MergeRequest,
+    RepositorySettings,
+    ReviewRun,
+)
 from app.domain.enums import (
     FindingSeverity,
     MergeRequestState,
@@ -21,6 +27,7 @@ from app.domain.enums import (
     ReviewRunStepStatus,
     TriggerSource,
 )
+from app.domain.llm_usage import NO_USAGE, LlmUsage
 from app.domain.run_steps import finish_step, start_step
 from app.domain.vcs_errors import VcsError, VcsTransientError
 
@@ -72,6 +79,41 @@ def test_a_swept_run_keeps_the_stage_it_stalled_in() -> None:
     run = uow.review_runs.get(UUID(int=1))
     assert run is not None
     assert run.failed_stage is ReviewRunStatus.PUBLISHING
+
+
+@pytest.mark.parametrize(
+    ("status", "usage"),
+    [
+        # До `analysing` модель не вызывалась: резерв снимается нулевым расходом.
+        (ReviewRunStatus.BUILDING_CONTEXT, NO_USAGE),
+        # Позже ответ провайдеру мог быть: оценка остаётся списанной.
+        (ReviewRunStatus.ANALYSING, None),
+        (ReviewRunStatus.PUBLISHING, None),
+    ],
+)
+def test_a_swept_reserve_is_freed_only_before_the_model(status: ReviewRunStatus, usage: LlmUsage | None) -> None:
+    uow = FakeUnitOfWork()
+    payer = UUID(int=0xFA1)
+    uow.billing.add_credit(BalanceCredit(UUID(int=0xC), payer, Decimal(1), "тест", "admin", NOW))
+    uow.review_runs.add(
+        replace(_run(1, status, timedelta(hours=1)), payer_user_id=payer, estimated_cost_eur=Decimal("0.05"))
+    )
+
+    sweep_stale_runs(uow, now=NOW, limit=LIMIT, queued_limit=QUEUED_LIMIT)
+
+    run = uow.review_runs.get(UUID(int=1))
+    assert run is not None and (run.status, run.usage) == (ReviewRunStatus.FAILED, usage)
+    assert uow.billing.balance(payer) == (Decimal(1) if usage is not None else Decimal("0.95"))
+
+
+def test_a_swept_run_without_a_reserve_keeps_no_usage() -> None:
+    uow = FakeUnitOfWork()
+    uow.review_runs.add(_run(1, ReviewRunStatus.BUILDING_CONTEXT, timedelta(hours=1)))
+
+    sweep_stale_runs(uow, now=NOW, limit=LIMIT, queued_limit=QUEUED_LIMIT)
+
+    run = uow.review_runs.get(UUID(int=1))
+    assert run is not None and (run.usage, run.tokens_used) == (None, None)
 
 
 def test_a_run_within_the_limit_and_a_terminal_run_are_left_alone() -> None:

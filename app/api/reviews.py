@@ -59,6 +59,7 @@ from app.api.schemas import (
     StrictRequest,
     UtcDatetime,
     UtcDatetimeParam,
+    euro_string,
     review_job,
     without_nul,
 )
@@ -86,6 +87,7 @@ from app.config import Settings
 from app.domain.entities import MergeRequest, Repository, ReviewRun, ReviewRunListEntry
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -305,8 +307,7 @@ def _usage_response(usage: LlmUsage | None) -> RunUsageResponse | None:
     return RunUsageResponse(
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
-        # normalize - без хвостовых нулей колонки, `f` - без экспоненты (1E+2 → 100).
-        cost_eur=f"{usage.cost_eur.normalize():f}",
+        cost_eur=euro_string(usage.cost_eur),
     )
 
 
@@ -339,6 +340,14 @@ class ReviewRunResponse(BaseModel):
         examples=["verified"],
     )
     verifier_dropped_findings: int = Field(ge=0, description="Сколько находок отбросил верификатор.")
+    coverage_reason: CoverageReason | None = Field(
+        description=(
+            "Почему ревью покрыло дифф не полностью: balance — у плательщика репозитория не хватило денег, "
+            "прогон завершён без вызова модели, находок нет, на head check run failure «Недостаточно средств»; "
+            "null — ревью прошло как обычно."
+        ),
+        examples=["balance"],
+    )
     duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
     failure_reason: str | None = Field(description="Почему прогон упал; null, если не падал.")
     failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)

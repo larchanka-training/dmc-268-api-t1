@@ -9,6 +9,7 @@ from app.application.ports.vcs_review import MergeGateCheck
 from app.domain.entities import Finding, Repository, ReviewRun
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     FindingSeverity,
     ReviewRunStatus,
     TriggerSource,
@@ -262,6 +263,21 @@ def build_failed_review_check() -> MergeGateCheck:
     )
 
 
+def build_unpaid_check(*, has_payer: bool) -> MergeGateCheck:
+    """Прогон за head завершён без модели: у плательщика не хватило денег или его нет
+    (`review-billing`). Ревью не было — мердж держится, пока ревью не пройдёт после пополнения."""
+    fix = (
+        "Пополните баланс плательщика репозитория или возьмите оплату на себя в кабинете"
+        if has_payer
+        else "У репозитория нет плательщика: назначьте его в кабинете («Платить за этот репозиторий»)"
+    )
+    return MergeGateCheck(
+        conclusion="failure",
+        title="Недостаточно средств, ревью не было",
+        summary=f"{fix}, затем запустите ревью вручную или сделайте push. Мердж заблокирован до ревью.",
+    )
+
+
 def settle_merge_gate(
     uow: UnitOfWork,
     vcs: VcsGateway,
@@ -280,6 +296,8 @@ def settle_merge_gate(
 
     - пауза ревью (`pause_check`) - check паузы: `failure` завершившегося прогона
       заблокировал бы PR, который ревью не ждёт;
+    - прогон `completed` без денег (`coverage_reason = balance`) - `failure` «Недостаточно
+      средств»;
     - прогон `completed` или записавший ревью - итог по открытым находкам и порогу;
     - прогон `failed` или `cancelled` - `failure` «Ревью не удалось»;
     - прогон ещё без ревью - `in_progress` «Идёт ревью».
@@ -320,6 +338,8 @@ def settle_merge_gate(
         )
         if pause is not None:
             current = pause
+        elif latest.coverage_reason is CoverageReason.BALANCE:
+            current = build_unpaid_check(has_payer=repository.payer_user_id is not None)
         elif latest.status is ReviewRunStatus.COMPLETED or (
             latest.status is ReviewRunStatus.PUBLISHING and published
         ):

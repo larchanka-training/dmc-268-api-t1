@@ -5,6 +5,7 @@
 """
 
 import datetime as dt
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import text
@@ -24,6 +25,7 @@ from app.domain.enums import (
 )
 from app.domain.ids import new_id
 from app.infrastructure.db.models import (
+    BalanceCreditRow,
     ContextPayloadRow,
     FindingRow,
     MergeRequestRow,
@@ -31,6 +33,7 @@ from app.infrastructure.db.models import (
     RepositoryRow,
     ReviewRunRow,
     ReviewRunStepRow,
+    UserRow,
 )
 
 from ..conftest import requires_db
@@ -616,3 +619,43 @@ def test_deleting_a_finding_that_covers_a_repeat_is_refused(session) -> None:
     repeat.covered_by_finding_id = original.id
     session.flush()
     delete_is_refused(session, original)
+
+
+def make_user(session, *, login="alice"):
+    row = UserRow(id=new_id(), provider=Provider.GITHUB, provider_user_id=login, login=login)
+    session.add(row)
+    session.flush()
+    return row
+
+
+def test_an_estimate_without_a_payer_is_refused(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    run.estimated_cost_eur = Decimal("0.05")
+    with pytest.raises(IntegrityError, match="ck_review_runs_estimate"):
+        session.flush()
+
+
+def test_an_estimate_keeps_every_digit(session) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    run.payer_user_id = make_user(session).id
+    run.estimated_cost_eur = Decimal("0.0000913")
+    session.flush()
+    session.expire(run)
+    assert run.estimated_cost_eur == Decimal("0.0000913")
+
+
+def test_deleting_an_account_with_credits_is_refused(session) -> None:
+    user = make_user(session)
+    session.add(
+        BalanceCreditRow(id=new_id(), user_id=user.id, amount_eur=Decimal("0.0000913"), note="тест", credited_by="admin")
+    )
+    session.flush()
+    delete_is_refused(session, user)
+
+
+def test_deleting_a_repository_payer_is_refused(session) -> None:
+    user = make_user(session)
+    repo = make_repo(session)
+    repo.payer_user_id = user.id
+    session.flush()
+    delete_is_refused(session, user)

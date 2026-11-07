@@ -292,8 +292,11 @@ def build_review_handler(
     prompt_texts: PromptTexts,
     *,
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
+    billing_enabled: bool = False,
 ) -> MessageHandler:
     """Собрать обработчик сообщения: разбор + `run_review`.
+
+    `billing_enabled` — проверять баланс плательщика перед вызовом модели (`BILLING_ENABLED`).
 
     `run_outcome` — запись исходов прогонов в бизнес-метрики; в проде его
     передаёт composition root (`run_worker`) адаптером телеметрии, общим для
@@ -325,6 +328,7 @@ def build_review_handler(
                     new_id=new_id,
                     stage_tracer=stage_tracer,
                     run_outcome=run_outcome,
+                    billing_enabled=billing_enabled,
                 )
             except Exception:
                 # job.id остаётся в тексте: это идентификатор задачи очереди, у
@@ -618,6 +622,7 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
         llm_limits(settings),
         prompt_texts,
         run_outcome=run_outcome,
+        billing_enabled=settings.billing_enabled,
     )
     with stop_on_signals() as stop:
         try:

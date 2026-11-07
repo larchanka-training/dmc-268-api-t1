@@ -6,6 +6,7 @@ from app.application.ports.job_queue import JobQueue
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.repositories import (
+    BillingRepo,
     ContextPayloadRepo,
     FindingRepo,
     MergeRequestRepo,
@@ -23,6 +24,7 @@ from app.application.ports.vcs_gateway import VcsGateway
 
 __all__ = [
     "AlertSource",
+    "BillingRepo",
     "CacheStore",
     "ContextPayloadRepo",
     "DefinitionExtractor",

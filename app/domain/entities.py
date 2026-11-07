@@ -11,11 +11,13 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     DefinitionKind,
     DiffSide,
     FindingCategory,
@@ -53,6 +55,8 @@ class Repository:
     branch_filter: tuple[str, ...] = ()
     # Порог merge gate: блокирует открытая находка не ниже этой важности.
     min_severity: FindingSeverity = FindingSeverity.CRITICAL
+    # Аккаунт сервиса, с баланса которого идут прогоны; `None` — не назначен (`review-billing`).
+    payer_user_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +152,11 @@ class ReviewRun:
     # Итог второго прохода модели; пуст, пока анализ не завершён.
     verification: VerificationOutcome | None = None
     verifier_dropped_findings: int = 0
+    # Биллинг (`review-billing`): плательщик и оценка, зарезервированная перед вызовом модели,
+    # и причина неполного покрытия. Пусты, пока баланс не проверялся или биллинг выключен.
+    payer_user_id: UUID | None = None
+    estimated_cost_eur: Decimal | None = None
+    coverage_reason: CoverageReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -577,6 +586,19 @@ class User:
     avatar_url: str | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class BalanceCredit:
+    """Зачисление на баланс аккаунта; отрицательная сумма — возврат или корректировка."""
+
+    id: UUID
+    user_id: UUID
+    amount_eur: Decimal
+    note: str
+    # Кто зачислил: пока пополнения через платёжную систему нет — администратор.
+    credited_by: str
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

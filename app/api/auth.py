@@ -35,6 +35,7 @@ from app.api.errors import (
     ApiError,
 )
 from app.api.problems import ErrorCode
+from app.api.schemas import euro_string
 from app.api.session import (
     SESSION_COOKIE,
     SESSION_RESPONSES,
@@ -85,6 +86,16 @@ class UserResponse(BaseModel):
         description="Адрес аватара у провайдера; null, если его нет.",
         json_schema_extra={"format": "uri"},
         examples=["https://avatars.githubusercontent.com/u/1"],
+    )
+    balance_eur: str = Field(
+        pattern=r"^-?\d+(\.\d+)?$",
+        description=(
+            "Баланс аккаунта в евро: зачисления минус расход прогонов, где пользователь — плательщик "
+            "(прогон в работе — его оценкой до вызова модели). Точная десятичная строка без экспоненты "
+            "и хвостовых нулей, как стоимость прогона; без зачислений и расходов — \"0\". Может быть "
+            "отрицательным: оценка ошибается не больше чем на один прогон."
+        ),
+        examples=["4.75"],
     )
 
 
@@ -282,7 +293,7 @@ def finish_github_setup(
     if setup_action == "install" and (state is None or not setup_state_matches(token, state)):
         _log.warning("Setup URL: state не совпал (%s), ничего не подключено", "нет" if state is None else "чужой")
         return _setup_done("connected=0")
-    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
+    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id, user_id=signed_in.user.id)
     try:
         connected = connecting.connect_installation(
             catalog, uow_factory(), user, installation_id, new_id, now, connect_selected=setup_action == "install"
@@ -315,12 +326,26 @@ def _setup_done(outcome: str) -> Response:
     "/me",
     response_model=UserResponse,
     summary="Пользователь текущей сессии",
-    description="Требует сессию. По ответу кабинет решает, показывать ли страницу входа.",
+    description=(
+        "Требует сессию. По ответу кабинет решает, показывать ли страницу входа. Баланс читается из "
+        "базы на каждый запрос."
+    ),
     response_description="Профиль пользователя.",
     responses=SESSION_RESPONSES,
 )
-def me(user: User = Depends(current_user)) -> UserResponse:
-    return UserResponse.model_validate(user, from_attributes=True)
+def me(
+    user: User = Depends(current_user),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> UserResponse:
+    with uow_factory() as uow:
+        balance = uow.billing.balance(user.id)
+    return UserResponse(
+        provider=user.provider,
+        login=user.login,
+        name=user.name,
+        avatar_url=user.avatar_url,
+        balance_eur=euro_string(balance),
+    )
 
 
 @router.post(

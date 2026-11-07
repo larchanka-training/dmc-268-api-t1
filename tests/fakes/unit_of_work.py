@@ -9,12 +9,15 @@
 from collections.abc import Collection
 from dataclasses import replace
 from datetime import datetime
+from decimal import Decimal
 from types import TracebackType
 from typing import Any, Self
 from uuid import UUID
 
 from app.application.ports.unit_of_work import RunStateConflict, UnitOfWork
+from app.domain.billing import eur_per_token
 from app.domain.entities import (
+    BalanceCredit,
     BotThread,
     ContextPayload,
     DiffAnchor,
@@ -101,6 +104,7 @@ class FakeRepositoryRepo:
             full_name=repository.full_name,
             default_branch=repository.default_branch,
             updated_at=repository.updated_at,
+            payer_user_id=stored.payer_user_id or repository.payer_user_id,
         )
         self._by_id[stored.id] = reconnected
         return reconnected
@@ -123,6 +127,13 @@ class FakeRepositoryRepo:
         )
         self._by_id[repository_id] = saved
         return saved
+
+    def set_payer(self, repository_id: UUID, user_id: UUID, now: datetime) -> Repository | None:
+        stored = self._by_id.get(repository_id)
+        if stored is None:
+            return None
+        self._by_id[repository_id] = replace(stored, payer_user_id=user_id, updated_at=now)
+        return self._by_id[repository_id]
 
 
 class FakeMergeRequestRepo:
@@ -255,6 +266,7 @@ class FakeReviewRunRepo:
             and r.head_sha == head_sha
             and r.trigger is TriggerSource.MANUAL
             and r.status is ReviewRunStatus.COMPLETED
+            and r.coverage_reason is None
         ]
         return max(completed, key=lambda r: (r.created_at, r.id), default=None)
 
@@ -362,7 +374,15 @@ class FakeReviewRunRepo:
             verdict = next_status(existing.status, run.status)
             if not verdict.ok:
                 raise ValueError(verdict.error)
-        self._by_id[run.id] = run
+        # Как у SQL-адаптера: поля биллинга пишутся один раз, устаревшая копия их не стирает.
+        self._by_id[run.id] = replace(
+            run,
+            payer_user_id=run.payer_user_id or existing.payer_user_id,
+            estimated_cost_eur=existing.estimated_cost_eur
+            if run.estimated_cost_eur is None
+            else run.estimated_cost_eur,
+            coverage_reason=run.coverage_reason or existing.coverage_reason,
+        )
 
     def record_cancelled_spend(self, run_id: UUID, usage: LlmUsage) -> None:
         existing = self._by_id.get(run_id)
@@ -590,6 +610,10 @@ class FakeUserRepo:
             None,
         )
 
+    def find_by_login(self, provider: Provider, login: str) -> User | None:
+        found = [u for u in self._by_id.values() if u.provider is provider and u.login.lower() == login.lower()]
+        return max(found, key=lambda u: (u.updated_at, u.id), default=None)
+
     def add(self, user: User) -> bool:
         if self.find_by_provider(user.provider, user.provider_user_id) is not None:
             return False
@@ -673,6 +697,50 @@ class FakeProviderTokenRepo:
         self._by_session[session_id] = token
 
 
+class FakeBillingRepo:
+    """Баланс по зачислениям и прогонам фейка `review_runs` — та же формула, что у SQL (D1)."""
+
+    def __init__(self, review_runs: FakeReviewRunRepo) -> None:
+        self._review_runs = review_runs
+        self.credits: list[BalanceCredit] = []
+        # Кого блокировали, по порядку: тесту видно, что проверка шла под блокировкой.
+        self.locked: list[UUID] = []
+
+    def snapshot(self) -> list[BalanceCredit]:
+        return list(self.credits)
+
+    def restore(self, state: list[BalanceCredit]) -> None:
+        self.credits = list(state)
+
+    def lock_payer(self, user_id: UUID) -> None:
+        self.locked.append(user_id)
+
+    def balance(self, user_id: UUID) -> Decimal:
+        credited = sum((c.amount_eur for c in self.credits if c.user_id == user_id), Decimal(0))
+        spent = sum((_run_spend(r) for r in self._review_runs.runs if r.payer_user_id == user_id), Decimal(0))
+        return credited - spent
+
+    def eur_per_token(self) -> Decimal:
+        paid = sorted(
+            (r.created_at, r.id, r.usage)
+            for r in self._review_runs.runs
+            if r.usage is not None and r.usage.cost_eur > 0
+        )[-50:]
+        return eur_per_token(
+            sum((usage.cost_eur for _, _, usage in paid), Decimal(0)),
+            sum(usage.total_tokens for _, _, usage in paid),
+        )
+
+    def add_credit(self, credit: BalanceCredit) -> None:
+        self.credits.append(credit)
+
+
+def _run_spend(run: ReviewRun) -> Decimal:
+    if run.usage is not None:
+        return run.usage.cost_eur
+    return run.estimated_cost_eur or Decimal(0)
+
+
 class FakeUnitOfWork(UnitOfWork):
     """Держит состояние между повторными входами в `with` — как настоящая база.
 
@@ -705,6 +773,7 @@ class FakeUnitOfWork(UnitOfWork):
         self.users: FakeUserRepo = self._fakes.users
         self.sessions: FakeSessionRepo = self._fakes.sessions
         self.provider_tokens: FakeProviderTokenRepo = self._fakes.provider_tokens
+        self.billing: FakeBillingRepo = self._fakes.billing
         self.committed = 0
         self.rolled_back = 0
         self._committed_state: list[Any] | None = None
@@ -765,6 +834,7 @@ class _Fakes:
         self.users = FakeUserRepo()
         self.sessions = FakeSessionRepo()
         self.provider_tokens = FakeProviderTokenRepo(self.sessions)
+        self.billing = FakeBillingRepo(self.review_runs)
 
     def _all(self) -> list[Any]:
         return [
@@ -778,6 +848,7 @@ class _Fakes:
             self.users,
             self.sessions,
             self.provider_tokens,
+            self.billing,
         ]
 
     def snapshot(self) -> list[Any]:

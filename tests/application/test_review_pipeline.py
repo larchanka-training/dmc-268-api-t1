@@ -21,6 +21,7 @@ from app.application.merge_gate_publish import (
     DISABLED_REVIEW_CHECK,
     build_failed_review_check,
     build_in_progress_check,
+    build_unpaid_check,
 )
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.ports.vcs_review import MergeGateCheck
@@ -28,6 +29,7 @@ from app.application.review_pipeline import run_review
 from app.application.stale_sweep import sweep_stale_runs
 from app.application.use_cases.build_review_context import REVIEW_DIFF_MAX_LINES
 from app.domain.entities import (
+    BalanceCredit,
     MergeRequest,
     RepositorySettings,
     ReviewJob,
@@ -36,6 +38,7 @@ from app.domain.entities import (
     RuleRef,
 )
 from app.domain.enums import (
+    CoverageReason,
     FindingSeverity,
     MergeRequestState,
     ReviewRunStage,
@@ -52,7 +55,7 @@ from app.domain.llm_errors import (
     LlmTimeoutError,
     PromptTooLargeError,
 )
-from app.domain.llm_usage import LlmUsage
+from app.domain.llm_usage import NO_USAGE, LlmUsage
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import start_step
 from app.domain.vcs_errors import DiffTooLargeError, VcsError, VcsTransientError
@@ -104,9 +107,10 @@ def _seed_run(
     *,
     status: ReviewRunStatus = ReviewRunStatus.QUEUED,
     trigger: TriggerSource = TriggerSource.WEBHOOK,
+    payer: UUID | None = None,
 ) -> None:
     # Запись репозитория PR: без неё merge gate не прочитает порог.
-    uow.repositories.add(replace(a_repository(), id=UUID(int=9)))
+    uow.repositories.add(replace(a_repository(), id=UUID(int=9), payer_user_id=payer))
     uow.merge_requests.add(
         MergeRequest(
             id=MR_ID,
@@ -1834,3 +1838,243 @@ def test_a_failed_gate_of_a_failed_review_does_not_hide_the_failure() -> None:
     run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None
     assert run.status == ReviewRunStatus.FAILED
+
+
+# --- биллинг (`review-billing`) ---------------------------------------------------
+
+PAYER = UUID(int=0xFA1)
+# Дорогая модель: оценка любого прогона — тысячи евро.
+EXPENSIVE = LlmUsage(input_tokens=1, total_tokens=1, cost_eur=Decimal(1))
+# Дешёвая: 0.000001 € за токен, оценка прогона — центы.
+CHEAP = LlmUsage(input_tokens=1_000_000, total_tokens=1_000_000, cost_eur=Decimal(1))
+
+
+def _billed(uow: FakeUnitOfWork, *, credit: str, price: LlmUsage | None = CHEAP, payer: UUID | None = PAYER) -> None:
+    """Прогон в очереди на репозитории с плательщиком `payer`, у которого `credit` €; цена
+    токена — из прошлого оплаченного прогона с расходом `price`."""
+    _seed_run(uow, payer=payer)
+    if payer is not None:
+        uow.billing.add_credit(BalanceCredit(UUID(int=0xC), payer, Decimal(credit), "тест", "admin", NOW))
+    if price is not None:
+        uow.review_runs.add(
+            ReviewRun(
+                id=UUID(int=0x51),
+                merge_request_id=MR_ID,
+                head_sha="old",
+                status=ReviewRunStatus.COMPLETED,
+                trigger=TriggerSource.WEBHOOK,
+                last_progress_at=NOW,
+                created_at=NOW - timedelta(days=1),
+                updated_at=NOW,
+                model="m",
+                usage=price,
+                tokens_used=price.total_tokens,
+            )
+        )
+
+
+def _stages(uow: FakeUnitOfWork) -> list[ReviewRunStage]:
+    return [step.stage for step in uow.review_run_steps.list_for_run(JOB.review_run_id)]
+
+
+def test_a_payer_with_enough_money_reserves_the_estimate_and_gets_a_review() -> None:
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="1")
+    usage = LlmUsage(input_tokens=900, output_tokens=100, total_tokens=1000, cost_eur=Decimal("0.0003"))
+    reserved: list[ReviewRun] = []
+
+    class Gateway:
+        def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
+            reserved.append(_completed(uow))
+            return ScriptedLlmGateway([review_response(usage=usage)]).complete(request)
+
+    _run(uow, Gateway(), billing_enabled=True)
+
+    [before_model] = reserved
+    assert before_model.payer_user_id == PAYER
+    assert before_model.estimated_cost_eur is not None and Decimal(0) < before_model.estimated_cost_eur < Decimal(1)
+    assert uow.billing.locked == [PAYER]
+    run = _completed(uow)
+    assert (run.status, run.coverage_reason, run.usage) == (ReviewRunStatus.COMPLETED, None, usage)
+    # Записан факт: в балансе он, а не оценка.
+    assert uow.billing.balance(PAYER) == Decimal("0.9997")
+
+
+def test_a_payer_without_enough_money_gets_no_model_call() -> None:
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="0.01", price=EXPENSIVE)
+    gateway = ScriptedLlmGateway([])
+    vcs = RecordingVcsGateway()
+    outcome = RecordingRunOutcome()
+
+    _run(uow, gateway, vcs_gateway=vcs, billing_enabled=True, run_outcome=outcome)
+
+    run = _completed(uow)
+    assert (run.status, run.coverage_reason, run.payer_user_id, run.estimated_cost_eur) == (
+        ReviewRunStatus.COMPLETED,
+        CoverageReason.BALANCE,
+        PAYER,
+        None,
+    )
+    assert (run.model, run.tokens_used, run.usage) == (None, 0, NO_USAGE)
+    assert run.duration_seconds is not None
+    assert gateway.requests == []
+    assert ReviewRunStage.ANALYSING not in _stages(uow)
+    assert uow.findings.list_for_run(run.id) == [] and vcs.publications == []
+    assert vcs.checks[-1] == build_unpaid_check(has_payer=True)
+    assert outcome.statuses == [ReviewRunStatus.COMPLETED.value]
+    assert uow.billing.balance(PAYER) == Decimal("0.01")
+    assert all(step.status is ReviewRunStepStatus.COMPLETED for step in uow.review_run_steps.list_for_run(run.id))
+
+
+def test_a_repository_without_a_payer_gets_no_model_call() -> None:
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="0", payer=None)
+    vcs = RecordingVcsGateway()
+
+    _run(uow, ScriptedLlmGateway([]), vcs_gateway=vcs, billing_enabled=True)
+
+    run = _completed(uow)
+    assert (run.status, run.coverage_reason, run.payer_user_id) == (
+        ReviewRunStatus.COMPLETED,
+        CoverageReason.BALANCE,
+        None,
+    )
+    assert uow.billing.locked == []
+    assert vcs.checks[-1] == build_unpaid_check(has_payer=False)
+
+
+def test_without_price_history_a_positive_balance_is_enough() -> None:
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="0.01", price=None)
+
+    _run(uow, ScriptedLlmGateway([review_response()]), billing_enabled=True)
+
+    run = _completed(uow)
+    assert (run.coverage_reason, run.estimated_cost_eur, run.model) == (None, Decimal(0), "m")
+
+
+def test_without_price_history_an_empty_balance_is_refused() -> None:
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="0", price=None)
+
+    _run(uow, ScriptedLlmGateway([]), billing_enabled=True)
+
+    assert _completed(uow).coverage_reason is CoverageReason.BALANCE
+
+
+def test_with_billing_off_nothing_is_checked_or_reserved() -> None:
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="0", payer=None)
+
+    _run(uow, ScriptedLlmGateway([review_response()]))
+
+    run = _completed(uow)
+    assert (run.status, run.payer_user_id, run.estimated_cost_eur, run.coverage_reason) == (
+        ReviewRunStatus.COMPLETED,
+        None,
+        None,
+        None,
+    )
+    assert uow.billing.locked == []
+
+
+def test_a_run_failing_after_the_reserve_before_analysing_frees_the_estimate() -> None:
+    """D2: до перехода в `analysing` модель не вызывалась — нулевой расход снимает оценку."""
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="1")
+    update = uow.review_runs.update
+
+    def database_down_on_analysing(run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
+        if run.status is ReviewRunStatus.ANALYSING:
+            raise RuntimeError("база недоступна")
+        update(run, previous=previous)
+
+    uow.review_runs.update = database_down_on_analysing  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        _run(uow, ScriptedLlmGateway([]), billing_enabled=True)
+
+    run = _completed(uow)
+    assert (run.status, run.usage, run.tokens_used) == (ReviewRunStatus.FAILED, NO_USAGE, 0)
+    assert run.estimated_cost_eur is not None and run.estimated_cost_eur > 0
+    assert uow.billing.balance(PAYER) == Decimal(1)
+
+
+def test_a_run_timing_out_in_analysing_keeps_the_estimate() -> None:
+    """Пустой счётчик после таймаута не значит, что провайдер не списал: оценка остаётся."""
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="1")
+
+    with pytest.raises(LlmTimeoutError):
+        _run(uow, ScriptedLlmGateway([LlmTimeoutError("модель не ответила")]), billing_enabled=True)
+
+    run = _completed(uow)
+    assert (run.status, run.usage) == (ReviewRunStatus.FAILED, None)
+    assert run.estimated_cost_eur is not None
+    assert uow.billing.balance(PAYER) == Decimal(1) - run.estimated_cost_eur
+
+
+def test_a_run_cancelled_after_the_reserve_before_analysing_frees_the_estimate() -> None:
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="1")
+    add_step = uow.review_run_steps.add
+
+    def retarget_when_analysing_starts(step: ReviewRunStep) -> None:
+        add_step(step)
+        if step.stage is ReviewRunStage.ANALYSING:
+            current = uow.review_runs.get(JOB.review_run_id)
+            assert current is not None
+            uow.review_runs.update(replace(current, status=ReviewRunStatus.CANCELLED))
+
+    uow.review_run_steps.add = retarget_when_analysing_starts  # type: ignore[method-assign]
+    gateway = ScriptedLlmGateway([])
+    _run(uow, gateway, billing_enabled=True)
+
+    run = _completed(uow)
+    assert (run.status, run.usage) == (ReviewRunStatus.CANCELLED, NO_USAGE)
+    assert gateway.requests == []
+    assert uow.billing.balance(PAYER) == Decimal(1)
+
+
+def test_a_run_cancelled_during_analysing_without_an_answer_keeps_the_estimate() -> None:
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="1")
+
+    class RetargetedGateway:
+        def complete(self, request: object) -> NoReturn:
+            current = uow.review_runs.get(JOB.review_run_id)
+            assert current is not None
+            uow.review_runs.update(replace(current, status=ReviewRunStatus.CANCELLED))
+            raise LlmTimeoutError("модель не ответила")
+
+    _run(uow, RetargetedGateway(), billing_enabled=True)
+
+    run = _completed(uow)
+    assert (run.status, run.usage) == (ReviewRunStatus.CANCELLED, None)
+    assert run.estimated_cost_eur is not None
+    assert uow.billing.balance(PAYER) == Decimal(1) - run.estimated_cost_eur
+
+
+def test_a_run_superseded_before_the_balance_check_reserves_nothing() -> None:
+    """Смена целевой ветки отменила прогон после захвата, до проверки баланса: оценка не
+    пишется, сообщение уходит в ack, gate отвечает новый прогон."""
+    uow = FakeUnitOfWork()
+    _billed(uow, credit="1")
+
+    class RetargetDuringDiff(RecordingVcsGateway):
+        def fetch_diff(self, *args: Any, **kwargs: Any) -> Any:
+            current = uow.review_runs.get(JOB.review_run_id)
+            assert current is not None
+            uow.review_runs.update(replace(current, status=ReviewRunStatus.CANCELLED))
+            return super().fetch_diff(*args, **kwargs)
+
+    vcs = RetargetDuringDiff()
+    gateway = ScriptedLlmGateway([])
+    _run(uow, gateway, vcs_gateway=vcs, billing_enabled=True)
+
+    run = _completed(uow)
+    assert (run.status, run.estimated_cost_eur, run.coverage_reason) == (ReviewRunStatus.CANCELLED, None, None)
+    assert gateway.requests == []
+    assert vcs.checks == [build_in_progress_check()]
+    assert uow.billing.balance(PAYER) == Decimal(1)

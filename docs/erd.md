@@ -6,7 +6,8 @@
 верификации — `0006_add_rule_ref_and_verification.py`, шаги прогона —
 `0007_add_review_run_steps.py`, индекс `review_runs (updated_at, id)` под курсор
 общего потока событий — `0008_add_review_runs_updated_at_index.py`, токен пользователя у
-провайдера при сессии — `0009_add_provider_tokens.py`; отдельный тест следит, чтобы таблицы
+провайдера при сессии — `0009_add_provider_tokens.py`, баланс аккаунта (зачисления,
+плательщик репозитория и прогона, резерв) — `0020_add_account_balance.py`; отдельный тест следит, чтобы таблицы
 на этой диаграмме и модели не расходились.
 
 `ReviewRun` в тикете называется `ReviewJob`. Имя поменяли, потому что «job»
@@ -24,6 +25,9 @@ erDiagram
     findings ||--o| published_comments : "стало"
     findings |o--o{ findings : "покрывает повтор"
     users ||--o{ sessions : "вошёл в"
+    users ||--o{ balance_credits : "получил зачисление"
+    users |o--o{ repositories : "платит за"
+    users |o--o{ review_runs : "оплатил"
     sessions ||--o| provider_tokens : "токен провайдера"
 
     repositories {
@@ -35,6 +39,7 @@ erDiagram
         text_array branch_filter "glob-паттерны веток, пусто — все"
         finding_severity min_severity "порог merge gate, по умолчанию critical"
         timestamptz connected_at "NULL — ревью выключено"
+        uuid payer_user_id FK "плательщик прогонов; NULL — не назначен"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
@@ -73,6 +78,9 @@ erDiagram
         int rejected_findings "замечания, отброшенные отсевом: строка вне диффа, невалидная ссылка на правило, дубль"
         review_verification verification "итог второго прохода модели: verified, not_required, unavailable; null до конца анализа"
         int verifier_dropped_findings "замечания, отброшенные верификатором"
+        uuid payer_user_id FK "с чьего баланса прогон; NULL — баланс не проверялся или плательщика не было"
+        numeric estimated_cost_eur "NUMERIC(20, 10): резерв до вызова модели; NULL — без резерва"
+        review_coverage_reason coverage_reason "balance — денег не хватило, модель не вызывалась; NULL — ревью как обычно"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
@@ -153,6 +161,15 @@ erDiagram
         timestamptz expires_at "вход + 30 дней"
         uuid id PK
     }
+    balance_credits {
+        uuid user_id FK
+        numeric amount_eur "NUMERIC(20, 10); отрицательная — возврат или корректировка"
+        text note
+        text credited_by "кто зачислил"
+        uuid id PK
+        timestamptz created_at
+        timestamptz updated_at
+    }
     provider_tokens {
         uuid session_id PK "и FK на sessions"
         bytea access_token_encrypted "AES-256-GCM"
@@ -185,6 +202,10 @@ erDiagram
 выключенный репозиторий — прогона нет, на head ставится `success`, только с текстом
 «Авторевью выключено в настройках»; выключенный в сервисе важнее настройки.
 
+`payer_user_id` — плательщик: аккаунт сервиса, с баланса которого идут все прогоны
+репозитория. Пишется при подключении, повторном включении и подключении через установку
+приложения, только если он пуст; меняет его только `POST /api/v1/repositories/{id}/payer`.
+
 **`merge_requests`**: pull request в GitHub или merge request в GitLab. Хранит
 то, что общее для всех его ревью: номер, заголовок, ветки, автора. `head_sha`
 здесь означает последний коммит, замеченный на хостинге, и сдвигается с каждым
@@ -208,6 +229,14 @@ push. Новый прогон сверяется с ним, чтобы поня�
 `verification` - итог второго прохода модели (Reflection Pass): `verified`, если верификатор ответил и его вердикты применены; `not_required`, если после отсева не осталось замечаний и второго вызова не было; `unavailable`, если верификатор упал или ответил не по форме и опубликованы замечания, прошедшие только отсев.
 У прогонов, записанных до появления верификации, итог пуст.
 `verifier_dropped_findings` - сколько замечаний отбросил верификатор; `rejected_findings` - сколько отбросил детерминированный отсев до него.
+Биллинг (`BILLING_ENABLED`): после сборки контекста воркер под блокировкой плательщика
+(`pg_advisory_xact_lock`) сверяет оценку прогона с балансом и пишет её в `estimated_cost_eur`
+вместе с `payer_user_id` — это резерв. Пока прогон не записал стоимость, в балансе стоит
+оценка, потом — `cost_eur`; прогон с резервом, упавший, отменённый или выметенный очисткой до
+перехода в `analysing`, пишет нулевой расход (позже запрос мог уйти, и оценка остаётся). Не хватило денег или плательщика нет — прогон `completed` с
+`coverage_reason = balance`, нулевым расходом и без оценки. Плательщик и оценка пишутся один
+раз: копия прогона, прочитанная до резерва, их не стирает. Частичный индекс
+`(payer_user_id) WHERE payer_user_id IS NOT NULL` — сумма расхода плательщика.
 Имя намеренно не
 совпадает с названием из очереди. Очередь живёт в RabbitMQ, и сообщение в ней
 называется `ReviewJob`; строка живёт дольше своего сообщения в очереди на всё
@@ -264,6 +293,12 @@ merge gate. `feedback_positive` / `feedback_negative` — оценки
 хранится не здесь, а при сессии (`provider_tokens`): ревью работает через GitHub App,
 токен пользователя нужен только списку и подключению репозиториев.
 
+**`balance_credits`**: журнал зачислений на баланс аккаунта. Баланс — сумма зачислений
+минус `SUM(COALESCE(cost_eur, estimated_cost_eur, 0))` прогонов, где аккаунт плательщик:
+расход хранится только на прогоне, второй копии нет. Строки не меняются и не удаляются;
+возврат или корректировка — строка с отрицательной суммой. Пока пополнения через платёжную
+систему нет, строки пишет администратор (`python -m app.worker.credit_balance`).
+
 **`sessions`**: сессия входа. Значения cookie в базе нет, только SHA-256 от
 него, поэтому утечка таблицы не даёт действующих cookie. Срок — 30 дней от
 входа, без продления и без `updated_at`. Выход удаляет строку.
@@ -290,6 +325,8 @@ refresh под блокировкой `SELECT … FOR UPDATE`; удаляетс�
 | Ссылка на правило заполнена целиком или пуста целиком | `ck_findings_rule_ref`: `rule_name`, `rule_check`, `rule_check_text` все `NULL` либо все заполнены и `rule_check >= 1`. Префикс атрибуции строится из всех трёх частей. |
 | Шаг закрыт целиком или идёт | `ck_review_run_steps_duration`: длительности нет ровно у `running`; `ck_review_run_steps_error_code`: код ошибки есть ровно у `failed`. Длительность и токены не отрицательны. |
 | Счётчик верификатора не отрицателен | `ck_review_runs_verifier_dropped`: `verifier_dropped_findings >= 0` |
+| Резерв — только с плательщиком | `ck_review_runs_estimate`: `estimated_cost_eur IS NULL OR (payer_user_id IS NOT NULL AND estimated_cost_eur >= 0)` |
+| Деньги аккаунта не пропадают с ним | `ON DELETE RESTRICT` на `balance_credits.user_id`, `repositories.payer_user_id` и `review_runs.payer_user_id`: аккаунт с зачислениями или оплаченными прогонами не удалить. |
 | Расход модели пишется целиком и не отрицателен | `ck_review_runs_usage`: колонки разбивки и `cost_eur` пусты вместе; при расходе `tokens_used` задан, токены и стоимость `>= 0` |
 | Комментарий публикуется один раз за прогон | `UNIQUE NULLS NOT DISTINCT (review_run_id, finding_id)`. Именно правило для NULL распространяет это ограничение на итоговый комментарий прогона, у которого замечания нет. |
 | Id комментария у провайдера не повторяется внутри вида | `UNIQUE (provider_comment_id, kind)`: у сводки это id ревью, у `inline` и `thread_reply` — id комментария к строке, счётчики у GitHub разные и могут совпасть. Колонки `NOT NULL`, поэтому правило для NULL не нужно. Ограничение даёт и индекс для поиска комментария по id. |

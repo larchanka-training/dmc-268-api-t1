@@ -8,10 +8,12 @@ SQLAlchemy.
 
 from collections.abc import Collection
 from datetime import datetime
+from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
 
 from app.domain.entities import (
+    BalanceCredit,
     BotThread,
     ContextPayload,
     Finding,
@@ -73,6 +75,10 @@ class RepositoryRepo(Protocol):
         """
         ...
 
+    def set_payer(self, repository_id: UUID, user_id: UUID, now: datetime) -> Repository | None:
+        """Сделать плательщиком `user_id` и `updated_at = now`; `None` — записи нет."""
+        ...
+
 
 class MergeRequestRepo(Protocol):
     def get(self, merge_request_id: UUID) -> MergeRequest | None: ...
@@ -98,8 +104,9 @@ class ReviewRunRepo(Protocol):
         ...
 
     def find_completed_manual(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
-        """Самый поздний ручной прогон на этот коммит в `completed`: его gate держит head
-        на паузе авторевью, когда повторный ручной прогон упал или отменён."""
+        """Самый поздний ручной прогон на этот коммит в `completed`, сделавший ревью (без
+        `coverage_reason`): его gate держит head на паузе авторевью, когда повторный ручной
+        прогон упал или отменён."""
         ...
 
     def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
@@ -222,6 +229,11 @@ class UserRepo(Protocol):
 
     def find_by_provider(self, provider: Provider, provider_user_id: str) -> User | None: ...
 
+    def find_by_login(self, provider: Provider, login: str) -> User | None:
+        """Пользователь по логину без учёта регистра, как его сравнивает GitHub; логин сменили —
+        у прежней записи он остаётся до входа, и берётся запись, обновлённая последней."""
+        ...
+
     def add(self, user: User) -> bool:
         """Вставить пользователя; `False` — пара провайдер + аккаунт уже занята.
 
@@ -245,6 +257,25 @@ class SessionRepo(Protocol):
     def delete_expired(self, now: datetime) -> int:
         """Удалить сессии, срок которых истёк к `now`; вернуть их число."""
         ...
+
+
+class BillingRepo(Protocol):
+    """Баланс аккаунтов (`review-billing`): зачисления и расход их прогонов."""
+
+    def lock_payer(self, user_id: UUID) -> None:
+        """Держать плательщика до конца транзакции: проверка баланса и резерв одного
+        плательщика идут по одной (design D3)."""
+        ...
+
+    def balance(self, user_id: UUID) -> Decimal:
+        """Зачисления аккаунта минус расход его прогонов: стоимость, а пока её нет, — резерв."""
+        ...
+
+    def eur_per_token(self) -> Decimal:
+        """Цена токена по последним прогонам с ненулевой стоимостью, любой модели; без них — ноль."""
+        ...
+
+    def add_credit(self, credit: BalanceCredit) -> None: ...
 
 
 class ProviderTokenRepo(Protocol):

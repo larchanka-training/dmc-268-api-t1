@@ -58,14 +58,18 @@ class ListedRepository:
     record: Repository | None
     # Подсказка интерфейсу, а не защита: `connect_repository` проверяет права сам (ui#45).
     can_connect: bool
+    # Логин плательщика записи; `None` — записи или плательщика нет (`review-billing`).
+    payer_login: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class UserContext:
-    """Чьими правами спрашиваем провайдера: сессия, к которой привязан токен."""
+    """Чьими правами спрашиваем провайдера: сессия, к которой привязан токен, и её пользователь."""
 
     oauth: OAuthProvider
     session_id: UUID
+    # Пользователь сессии: подключивший репозиторий становится его плательщиком (`review-billing`).
+    user_id: UUID
 
 
 def list_with_connections(
@@ -81,10 +85,21 @@ def list_with_connections(
     with uow:
         provider_ids = [repository.provider_id for repository in repositories]
         records = {r.provider_id: r for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
-    listed = [
-        ListedRepository(r, record=records.get(r.provider_id), can_connect=can_connect(r.permissions))
-        for r in repositories
-    ]
+        # Плательщиков на странице единицы: чтение на каждого, а не на репозиторий.
+        payers = {r.payer_user_id for r in records.values() if r.payer_user_id is not None}
+        logins = {payer: found.login for payer in payers if (found := uow.users.get(payer)) is not None}
+    listed = []
+    for r in repositories:
+        record = records.get(r.provider_id)
+        payer = record.payer_user_id if record is not None else None
+        listed.append(
+            ListedRepository(
+                r,
+                record=record,
+                can_connect=can_connect(r.permissions),
+                payer_login=logins.get(payer) if payer is not None else None,
+            )
+        )
     return sorted(listed, key=lambda item: item.repository.full_name.casefold())
 
 
@@ -117,7 +132,8 @@ def connect_repository(
     `NOT_IN_INSTALLATION`, один отказ без различия; нет права admin или
     maintain — `MANAGE_REQUIRED`; уже подключён и включён — `ALREADY_CONNECTED`. Права проверяются раньше
     «уже подключён»: пользователь без прав не узнаёт, подключён ли репозиторий. Выключенный включается
-    обратно: ответ — его прежняя запись.
+    обратно: ответ — его прежняя запись. Плательщиком становится пользователь, только если у записи
+    его нет (design D6 change `account-balance`).
     """
     if provider is not Provider.GITHUB:
         return ConnectRefusal.NOT_IN_INSTALLATION
@@ -146,6 +162,7 @@ def connect_repository(
         created_at=now,
         updated_at=now,
         connected_at=now,
+        payer_user_id=user.user_id,
     )
     # Сначала включаем выключенную запись — прежний `id` и история остаются; её нет —
     # вставка. Обе операции сами разбирают гонку (design D4): проигравший параллельный
@@ -224,6 +241,27 @@ def save_repository_settings(
     return saved
 
 
+def take_over_payment(
+    catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, repository: Repository, now: datetime
+) -> Repository | ConnectRefusal:
+    """Сделать пользователя плательщиком видимого ему репозитория (design D6 change `account-balance`).
+
+    Права — тем же правилом и запросом к провайдеру мимо кэша, что у записи настроек: не отдан —
+    `NOT_IN_INSTALLATION`, нет admin или maintain — `MANAGE_REQUIRED`; при отказе ничего не
+    пишется. Прогоны, уже зарезервировавшие оценку, остаются за прежним плательщиком: он записан
+    на них. Пропавшая запись — `LookupError`, как у настроек.
+    """
+    refusal = _manage_refusal(catalog, uow, user, repository, now)
+    if refusal is not None:
+        return refusal
+    with uow:
+        saved = uow.repositories.set_payer(repository.id, user.user_id, now)
+        uow.commit()
+    if saved is None:
+        raise LookupError(f"repository {repository.id} not found")
+    return saved
+
+
 def connect_installation(
     catalog: InstallationCatalog,
     uow: UnitOfWork,
@@ -276,6 +314,7 @@ def connect_installation(
                 created_at=now,
                 updated_at=now,
                 connected_at=now,
+                payer_user_id=user.user_id,
             )
             # Параллельный POST /repositories мог успеть: вставка его не перетирает.
             if uow.repositories.add(repository):

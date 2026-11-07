@@ -6,8 +6,8 @@
 ## Why
 
 Расход модели ничем не ограничен: `context_max_tokens` молча отбрасывает не поместившееся в
-`omitted`, а прогон всё равно `completed` и gate получает `success`. Квоты расхода нет.
-Нужны покрытие и квота, при которых непроверенный код никогда не проходит merge gate.
+`omitted`, а прогон всё равно `completed` и gate получает `success`. Нужно покрытие, при
+котором непроверенный код никогда не проходит merge gate.
 
 ## What Changes
 
@@ -32,13 +32,12 @@
   итоговый комментарий не публикует.
 - **Новые hunk'и раньше перепроверяемых**: в этом порядке сборка контекста набирает пакет.
 - **Пауза важнее покрытия**: на паузе авторевью и вне `branch_filter` check — паузы, как сегодня.
-- **Суточная квота токенов репозитория.** Исчерпана — прогон без модели с причиной `quota` и
-  `failure`; остаток проверяет следующий push или повтор доставки. Токены отменённых прогонов
-  в расход входят.
+- **Квоты нет.** Суточную квоту токенов репозитория заменил баланс аккаунта (change
+  `account-balance`, #286). Он же вводит колонку `coverage_reason` с причиной `balance`; этот
+  change добавляет к ней `context_budget`. Токены отменённого прогона пишет #375.
 - **Неполный прогон не дубль**: повтор доставки на коммит, чей последний прогон с неполным
-  покрытием, создаёт новый прогон.
-
-Квота выключена по умолчанию и включается настройками стенда.
+  покрытием по бюджету контекста, создаёт новый прогон. Прогон без денег (`balance`) — дубль,
+  как требует `account-balance`.
 
 Бюджет токенов прогона, предел числа файлов и строк с приоритетом CI и шум по `.gitattributes`
 из этого change вынесены — proposal `incremental-review`, «Не входит».
@@ -47,8 +46,7 @@
 
 ### New Capabilities
 
-- `review-limits`: покрытие, отложенное сборкой контекста, gate при неполном покрытии, квота
-  репозитория.
+- `review-limits`: покрытие, отложенное сборкой контекста, gate при неполном покрытии.
 
 ### Modified Capabilities
 
@@ -59,11 +57,11 @@
 ## Impact
 
 - Код: `context_assembly.py` — порядок hunk'ов и перечни непроверенного; `build_merge_gate_check`
-  (#225) учитывает покрытие; `_duplicate_of` (#225); `review_pipeline.py` — `tokens_used` при
-  отмене и добор; `publish_review.py` — gate с пометкой добора, добор без комментария;
-  `app/config.py` — квота и `COVERAGE_FOLLOWUP_MAX_RUNS`.
-- БД: `review_runs.coverage_reason`, `unreviewed_paths`, `oversized_paths`, `rules_budget_paths`,
-  `followup_planned`,
-  `followup_depth` — миграцией на этапе реализации.
+  (#225) учитывает покрытие; `_duplicate_of` (#225); `review_pipeline.py` — добор;
+  `publish_review.py` — gate с пометкой добора, добор без комментария;
+  `app/config.py` — `COVERAGE_FOLLOWUP_MAX_RUNS`.
+- БД: значение `context_budget` в `review_coverage_reason` (колонку `review_runs.coverage_reason`
+  вводит `account-balance`), `unreviewed_paths`, `oversized_paths`, `rules_budget_paths`,
+  `followup_planned`, `followup_depth` — миграцией на этапе реализации.
 - API: `coverage_reason`, `unreviewed_paths`, `oversized_paths`, `rules_budget_paths` в
   `ReviewJob` — аддитивно.
