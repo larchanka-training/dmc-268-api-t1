@@ -59,7 +59,7 @@ WORKER_ENV = $(SERVICE_ENV) $(call pass,LLM_BACKEND) \
 OPENSPEC := npx --yes @fission-ai/openspec@1.15.0
 
 .DEFAULT_GOAL := help
-.PHONY: help check \
+.PHONY: help check cov-llm-schema \
 	sandbox-demo sandbox-doctor sandbox-down sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
 	test-db test-queue test-e2e test-all \
 	infra-up infra-down test-db-create test-queue-vhost migrate run-api run-worker \
@@ -69,7 +69,7 @@ help: ## Список целей
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-check: ## Статические проверки как в CI: lock, ruff, lint-imports, mypy, контракт API, openspec
+check: ## Проверки job lint как в CI: lock, ruff, lint-imports, mypy, контракт API, openspec, порог покрытия схем
 	uv lock --check
 	uv run ruff check .
 	uv run lint-imports
@@ -77,6 +77,16 @@ check: ## Статические проверки как в CI: lock, ruff, lint
 	uv run python scripts/export_openapi.py --check
 	$(OPENSPEC) validate --all --strict
 	set -o pipefail; $(OPENSPEC) list --json | python3 scripts/check_openspec_archived.py
+	$(MAKE) cov-llm-schema
+
+# Порог 100% строк и ветвей схем ответа модели, считанный только их собственными
+# тестами (#275). Тот же шаг идёт в CI, job lint. CoverageWarning - ошибка: модуль,
+# переехавший мимо --cov, иначе молча выпал бы из порога (module-not-imported).
+cov-llm-schema: ## Порог 100% покрытия схем ответа модели, как в CI
+	PYTEST_FAIL_ON_SKIP=1 uv run pytest -q -rs -W error::coverage.exceptions.CoverageWarning \
+		tests/application/test_llm_schema.py tests/infrastructure/test_llm_structured.py \
+		--cov=app.application.llm_schema --cov=app.infrastructure.llm.structured \
+		--cov-branch --cov-report=term-missing --cov-fail-under=100
 
 # --- песочница воркера: всё подменено, кроме модели ------------------------------
 
