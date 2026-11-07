@@ -4,6 +4,7 @@
 ack/nack. Без брокера.
 """
 
+import time
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -26,6 +27,8 @@ class FakeChannel:
         self._allow_nack = allow_nack
         self.acked: list[int] = []
         self.nacked: list[int] = []
+        # Возвращённые на повтор (`basic_reject` с requeue): попытка доставки тратится.
+        self.rejected: list[int] = []
         self.cancelled = False
         # Номер доставки, которую цикл сейчас обрабатывает; `None` - ещё ни одной.
         self.current: int | None = None
@@ -57,6 +60,11 @@ class FakeChannel:
             raise AssertionError("не ожидался nack в DLQ")
         self.nacked.append(tag)
 
+    def basic_reject(self, tag: int, requeue: bool) -> None:
+        assert requeue, "reject без requeue воркер не шлёт: в DLQ уводит nack"
+        self.rejected.append(tag)
+        self.events.append(f"reject {tag}")
+
     def cancel(self) -> None:
         assert not self.cancelled, "потребитель снят дважды"
         self.cancelled = True
@@ -68,6 +76,17 @@ class FakeConnection:
 
     def __init__(self) -> None:
         self.closed = False
+        # Сколько раз цикл соединения крутился, пока шла обработка: это и ответ на heartbeat.
+        self.polls = 0
+        # Шаги паузы циклом соединения (`connection.sleep`) — перед возвратом сообщения.
+        self.slept: list[float] = []
+
+    def process_data_events(self, time_limit: float = 0) -> None:
+        self.polls += 1
+        time.sleep(min(time_limit, 0.01))
+
+    def sleep(self, duration: float) -> None:
+        self.slept.append(duration)
 
     def close(self) -> None:
         self.closed = True
