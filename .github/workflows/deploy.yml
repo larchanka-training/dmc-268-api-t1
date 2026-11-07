@@ -331,6 +331,9 @@ jobs:
           # проверка переменной в infra/variables.tf роняет apply: стенд не
           # стартует без шифрования молча.
           TF_VAR_user_token_encryption_key: ${{ secrets.USER_TOKEN_KEY_DMC268_T1 }}
+          # Фраза шифрования состояния и плана (infra/encryption.tf, #147). Нужна
+          # уже `tofu init`: без неё init падает до изменений на сервере.
+          TF_VAR_state_passphrase: ${{ secrets.STATE_PASSPHRASE_DMC268_T1 }}
           # Ollama на стенде нет: модель - Eurorouter основным (#245), код
           # проверяемых репозиториев уходит ему. Адрес и ключи - те же, что у
           # eval.yml; модель и reasoning_effort - из .github/eurorouter-model и
@@ -409,6 +412,9 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
           API_IMAGE: ${{ needs.image.outputs.image }}
           DOCKER_HOST: ssh://stand
+          # `tofu output` читает зашифрованное состояние (infra/encryption.tf):
+          # без фразы migrate.sh не получит адреса базы. Других TF_VAR ему не нужно.
+          TF_VAR_state_passphrase: ${{ secrets.STATE_PASSPHRASE_DMC268_T1 }}
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/migrate.sh
@@ -470,6 +476,9 @@ jobs:
           # Ключ зашифрованной копии errored.tfstate (recover-state.sh) —
           # отдельный и случайный: артефакт публичного репо доступен всем.
           STATE_BACKUP_KEY: ${{ secrets.STATE_BACKUP_KEY_DMC268_T1 }}
+          # errored.tfstate зашифрован (infra/encryption.tf), а `state push` его
+          # не читает: recover-state.sh сначала расшифровывает его этой фразой.
+          TF_VAR_state_passphrase: ${{ secrets.STATE_PASSPHRASE_DMC268_T1 }}
           INTERRUPTED: >-
             ${{ steps.infra.outcome == 'cancelled' || steps.plan.outcome == 'cancelled' ||
             steps.apply.outcome == 'cancelled' }}

@@ -158,6 +158,7 @@ tofu apply infra.tfplan
 | `grafana_admin_password` | секрет `GRAFANA_ADMIN_PASSWORD_DMC268_T1` — пароль админа Grafana (`GF_SECURITY_ADMIN_PASSWORD` контейнера `dmc268-grafana`). Дефолт переменной пустой, и при `observability_enabled = true` валидация требует непустого значения: без секрета `apply` падает на проверке. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 \| gh secret set GRAFANA_ADMIN_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` — или своим паролем; локальному стеку он не нужен, Grafana там без логина. **`GF_SECURITY_ADMIN_PASSWORD` действует только при первом старте Grafana** (создание `grafana.db` в томе): смена секрета пароль уже работающей Grafana **не** меняет — коллектор и алерты от этого не зависят, но вход по старому паролю сохранится. Ротация — на сервере, командой внутри контейнера, пароль — через stdin: `read -rs P && printf '%s' "$P" \| docker exec -i dmc268-grafana grafana cli admin reset-admin-password --password-from-stdin`. Не аргументом: командная строка `docker exec` видна в `/events` клиенту socket-proxy (`dmc268-otelcol-docker`) |
 | `postgres_monitor_password` | секрет `PG_MONITOR_PASSWORD_DMC268_T1` — пароль роли `dmc268_monitor` (`pg_monitor`), которую создаёт миграция 0013 и под которой коллектор снимает метрики базы (`POSTGRESQL_PASSWORD` его env). Дефолт переменной — локальный `dmc268_monitor`, а при `observability_enabled = true` валидация требует настоящего пароля: без секрета `apply` падает на проверке. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 \| gh secret set PG_MONITOR_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` |
 | `postgres_replication_password` | секрет `PG_REPLICATION_PASSWORD_DMC268_T1`, не короче 16 символов |
+| `state_passphrase` | секрет `STATE_PASSPHRASE_DMC268_T1` (environment `stand`), не короче 16 символов — фраза шифрования состояния и плана (`encryption.tf`). Нужна уже `tofu init` с бэкендом; копия — вне GitHub (раздел «Шифрование состояния») |
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `user_token_encryption_key` | секрет `USER_TOKEN_KEY_DMC268_T1` — 32 байта в base64 (`openssl rand -base64 32`). Без него или с битым значением `apply` падает на проверке переменной: стенд не стартует без шифрования токенов пользователя. Генерация и установка — `README.md`, «Ключ шифрования токенов пользователя» |
 | `docker_host` | `ssh://stand`: хост `stand` в `~/.ssh/config` собирает `.github/actions/stand-ssh` из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
@@ -817,6 +818,41 @@ cd infra && tofu force-unlock <ID из ошибки>
 
 У контейнера хранилища, как у контейнеров стека, потолок памяти 512 МБ без свопа и ротация логов (три файла по 10 МБ); задаёт их `docker run` в `.github/scripts/render-s3-script.sh`. Контейнер без лимита (созданный до них) action пересоздаёт на том же томе тем же путём, что при смене образа: штатный `stop`, `rm` и новый `run`, состояние в томе переживает замену.
 
+### Шифрование состояния
+
+Состояние и сохранённый план OpenTofu шифрует сам (`infra/encryption.tf`, #147): ключ выводит `key_provider "pbkdf2"` из фразы, шифр — `method "aes_gcm"`. В состоянии лежат значения всех секретов стека — пароли базы, брокера и реплики, ключ GitHub App, секрет вебхука, ключ шифрования токенов, — и без шифрования доступ к бакету открывал бы их все. Теперь в бакете лежит конверт `{encrypted_data, encryption_version, lineage, meta, serial}`: serial и lineage читаются, ресурсы и значения — только с фразой. Зашифрован и `infra/errored.tfstate`, который остаётся на раннере после упавшей записи.
+
+Сейчас идёт шаг 1 из двух: у `state` и `plan` есть `fallback` на `method "unencrypted"`, чтобы первый деплой прочитал прежнее открытое состояние. Любой `apply` (и `apply -refresh-only`) переписывает его зашифрованным, даже без изменений; `plan` — нет. Шаг 2 — `enforced = true` без `fallback` и удаление старых открытых версий объекта в бакете (задачи — `openspec/changes/tfstate-encryption/tasks.md`).
+
+**Где фраза.** Секрет `STATE_PASSPHRASE_DMC268_T1` в environment `stand`; деплой передаёт его как `TF_VAR_state_passphrase` всем шагам `tofu` и восстановлению. Не короче 16 символов (проверка переменной; `openssl rand -base64 48`). Копия фразы **обязательно** хранится вне GitHub — секрет GitHub обратно не прочитать, а без фразы состояние не открыть.
+
+**Локально.** Фраза нужна уже `tofu init` с настоящим бэкендом — без неё он падает: «depends on var.state_passphrase which is not available»:
+
+```bash
+export TF_VAR_state_passphrase=<фраза>
+cd infra && tofu init && tofu plan
+```
+
+Проверке конфигурации без состояния (`tofu init -backend=false`, `tofu validate`) фраза не нужна, `tofu test` берёт фиктивную из `tests/*.tftest.hcl`. Неверная фраза роняет команду с ошибкой расшифровки, состояние при этом не меняется.
+
+**Проверить, что объект в бакете зашифрован** (туннель и учётные данные — как в разделе «Развёртывание и удаление»):
+
+```bash
+aws s3 cp s3://dmc268-tfstate/api/terraform.tfstate - --endpoint-url http://127.0.0.1:9000 | jq 'keys'
+```
+
+Зашифрованное — в ключах есть `encrypted_data`, а `resources` нет. Видно `resources` — состояние открыто: после шага 1 так бывает только до первого деплоя.
+
+**Ротация фразы.** Существующие `key_provider` и `method` не переименовывать: документация OpenTofu предупреждает, что переименованный провайдер или метод не откроет уже зашифрованное состояние.
+
+1. Добавить в `encryption.tf` новый `key_provider "pbkdf2"` с новым именем и новой переменной фразы и новый `method "aes_gcm"` на нём; у `state` и `plan` основным поставить новый метод, прежний `aes_gcm` — в `fallback` (вместе с `unencrypted`, пока идёт шаг 1).
+2. Завести новый секрет, передать его в `deploy.yml`, выкатить: `apply` перешифрует состояние новым ключом.
+3. Проверить объект в бакете (выше) и следующим пул-реквестом убрать прежние провайдер, метод, переменную и секрет. Копию новой фразы — вне GitHub, как и прежней.
+
+**Если фраза потеряна,** состояние не восстановить: ключ из него не достать. Остаётся резервная копия, снятая раньше (`tofu state pull > backup` с фразой; файл открытый — хранить вне репозитория и как секрет), либо пересборка состояния: пустое состояние под новой фразой и `tofu import` каждого ресурса стека (`docker_container.*`, `docker_volume.*`, `docker_network.*`, `docker_image.*`). Тома на сервере при этом не трогаются, но это долгая ручная работа — поэтому копия фразы вне GitHub обязательна.
+
+**Восстановление после обрыва.** `errored.tfstate` теперь зашифрован, а `tofu state push` зашифрованный файл не читает («This state file is encrypted and can not be read without an encryption configuration»; `TF_ENCRYPTION` не помогает). Поэтому `recover-state.sh` сначала расшифровывает его во временном каталоге — копия `encryption.tf` и файл как локальный `terraform.tfstate`, `tofu init`, `tofu state pull` — в открытый временный файл (`umask 077`, удаляется на выходе), сверяет с хранилищем и записывает его. Push шифрует, в бакет открытое не попадает. Руками — шаг 3 следующего раздела.
+
 ### Если деплой упал посреди apply
 
 Самый дорогой сбой деплоя — пропавшая связь с хранилищем, пока OpenTofu пишет состояние. Что делает OpenTofu 1.13.2 (проверено на `docker:29-dind` с RustFS 1.0.3): промежуточная запись состояния падает, и apply останавливается, не трогая оставшиеся ресурсы; несохранённое состояние ложится в `infra/errored.tfstate` на раннере и исчезает вместе с ним; блокировка не снимается — объект `api/terraform.tfstate.tflock` остаётся в бакете, а её ID в выводе apply нет, он есть только в самом объекте. Следующий деплой упирается в блокировку, а после `force-unlock` — в старое состояние: план создаёт заново контейнеры, которые apply уже создал, и падает на `Conflict. The container name "/dmc268-api" is already in use`.
@@ -833,7 +869,15 @@ cd infra && tofu force-unlock <ID из ошибки>
 
 1. Туннель и учётные данные — как в разделе «Развёртывание и удаление».
 2. Посмотреть блокировку: `aws --endpoint-url http://127.0.0.1:9000 s3 cp s3://dmc268-tfstate/api/terraform.tfstate.tflock -` — `ID`, кто (`Who`) и когда (`Created`) её взял.
-3. Если `errored.tfstate` есть — артефакт `errored-tfstate` прогона (сутки): `gh run download <id прогона> -n errored-tfstate`, затем `STATE_BACKUP_KEY=… openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass env:STATE_BACKUP_KEY -in errored.tfstate.enc -out infra/errored.tfstate`. Сверить с хранилищем: `tofu state pull | jq '.lineage, .serial'` — линия та же, serial меньше, чем в файле, иначе в хранилище запись после нашей, и файл не нужен. Записать: `cd infra && tofu state push -lock=false errored.tfstate`, пока блокировка висит; не перетирать `-force`. Файл после записи удалить.
+3. Если `errored.tfstate` есть — артефакт `errored-tfstate` прогона (сутки): `gh run download <id прогона> -n errored-tfstate`, затем `STATE_BACKUP_KEY=… openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass env:STATE_BACKUP_KEY -in errored.tfstate.enc -out infra/errored.tfstate`. Сверить с хранилищем: `tofu state pull | jq '.lineage, .serial'` — линия та же, serial меньше, чем в файле (`jq '.lineage, .serial' infra/errored.tfstate`: в зашифрованном конверте оба поля открыты), иначе в хранилище запись после нашей, и файл не нужен. Файл зашифрован OpenTofu, и `tofu state push` его не прочитает — сначала расшифровать во временном каталоге (нужна фраза, раздел «Шифрование состояния»):
+
+   ```bash
+   export TF_VAR_state_passphrase=<фраза>
+   tmp="$(mktemp -d)" && cp infra/encryption.tf "$tmp/" && cp infra/errored.tfstate "$tmp/terraform.tfstate"
+   (umask 077 && tofu -chdir="$tmp" init && tofu -chdir="$tmp" state pull > "$tmp/plain.tfstate")
+   ```
+
+   Записать открытый файл, пока блокировка висит; не перетирать `-force`: `cd infra && tofu state push -lock=false "$tmp/plain.tfstate"` — push шифрует, в бакет ляжет зашифрованное. После записи удалить и `errored.tfstate`, и временный каталог с открытым файлом: `rm -rf "$tmp" infra/errored.tfstate`.
 4. Если файла нет, состояние в хранилище старше стенда. `tofu plan` покажет, что он хочет создать заново: контейнеры, которые на сервере уже есть, либо удалить с сервера (`ssh <сервер> docker rm -f dmc268-api dmc268-worker` — следующий деплой создаст их, это короткий простой стенда), либо взять в состояние: `tofu state rm docker_container.api` и `tofu import docker_container.api <id контейнера>`. Тома (`docker_volume.postgres`, `docker_volume.rabbitmq`) не трогать: их защищает `prevent_destroy`, и план с их заменой не пройдёт.
 5. Снять блокировку: `tofu force-unlock <ID>` и перезапустить деплой.
 
@@ -846,6 +890,7 @@ cd infra && tofu force-unlock <ID из ошибки>
 ```bash
 ssh -i <ключ> -o ExitOnForwardFailure=yes -f -N -L 9000:127.0.0.1:9000 <user>@<server>
 export AWS_ACCESS_KEY_ID=<логин хранилища> AWS_SECRET_ACCESS_KEY=<пароль> AWS_DEFAULT_REGION=us-east-1
+export TF_VAR_state_passphrase=<фраза шифрования состояния>
 cd infra && tofu init && tofu plan
 ```
 
