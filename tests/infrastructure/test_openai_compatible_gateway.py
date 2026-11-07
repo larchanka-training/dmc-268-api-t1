@@ -17,6 +17,7 @@ from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
 from app.domain.llm_errors import LlmError, LlmRateLimitedError, LlmTimeoutError
 from app.domain.llm_usage import LlmUsage
+from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -411,14 +412,60 @@ def test_answer_cut_by_max_tokens_is_retried_naming_the_limit() -> None:
     [
         (httpx.Response(200, text="не json"), "неожиданное тело"),
         (httpx.Response(200, json={"model": "m", "choices": []}), "неожиданное тело"),
+        # Без проверки на объект `data.get` бросил бы `AttributeError`, а фоллбэк ловит только `LlmError`.
+        (httpx.Response(200, json=[]), "неожиданное тело"),
     ],
-    ids=["not-json", "no-choices"],
+    ids=["not-json", "no-choices", "not-an-object"],
 )
 def test_unexpected_body_is_a_model_failure(response: httpx.Response, reason: str) -> None:
     handler, _ = _recording(response)
 
     with pytest.raises(LlmError, match=reason):
         _gateway(handler).complete(REQUEST)
+
+
+def _paid_without(*fields: str, choice: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Ответ 200 с `usage`, но без полей ответа модели: оплачен, а принять нечего."""
+    body = {k: v for k, v in _reply().items() if k not in fields}
+    if choice is not None:
+        body["choices"] = [choice]
+    return body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _paid_without("choices"),
+        {**_reply(), "choices": []},
+        _paid_without("model"),
+        _paid_without(choice={"index": 0}),
+        {**_reply(), "choices": None},
+    ],
+    ids=["no-choices", "empty-choices", "no-model", "no-message", "null-choices"],
+)
+def test_paid_reply_without_an_answer_records_usage_and_fails(body: dict[str, Any]) -> None:
+    handler, seen = _recording(httpx.Response(200, json=body))
+    meter = LlmMeter()
+
+    with pytest.raises(LlmError, match="неожиданное тело") as error:
+        _gateway(handler).complete(replace(REQUEST, meter=meter))
+
+    # Сбой адаптера, а не схемы: повтора с подсказкой нет, вызов один.
+    assert len(seen) == 1
+    assert isinstance(error.value.__cause__, KeyError | IndexError | TypeError)
+    assert meter.total == LlmUsage(input_tokens=1_200, output_tokens=300, total_tokens=1_500)
+
+
+def test_fallback_after_a_paid_reply_without_choices_keeps_both_usages() -> None:
+    first, _ = _recording(httpx.Response(200, json=_paid_without("choices")))
+    second, _ = _recording(httpx.Response(200, json=_reply()))
+    gateway = FallbackLlmGateway([("first", _gateway(first)), ("second", _gateway(second))])
+    meter = LlmMeter()
+
+    response = gateway.complete(replace(REQUEST, meter=meter))
+
+    assert isinstance(response.content, ReviewOutput)
+    assert meter.total == LlmUsage(input_tokens=2_400, output_tokens=600, total_tokens=3_000)
 
 
 def test_timeout_is_a_model_failure() -> None:
