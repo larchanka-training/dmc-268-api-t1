@@ -79,6 +79,15 @@ def _transition(
     return new_run
 
 
+class ReviewNotStarted(Exception):
+    """Сбой до захвата прогона: прочитать или захватить его не удалось, прогон остался `queued`.
+
+    Сообщение стоит повторить, а не отправлять в DLQ: прогон не тронут, а сбой здесь —
+    база или соединение (#157). Причина — в `__cause__`. Прогона нет вовсе — не этот случай,
+    а `LookupError`: повтор его не найдёт.
+    """
+
+
 def _claim(uow: UnitOfWork, run: ReviewRun, now: datetime) -> ReviewRun | None:
     """Захватить прогон из `queued`; `None` — его уже изменил кто-то другой."""
     claimed = advance(run, ReviewRunStatus.BUILDING_CONTEXT, now).unwrap()
@@ -273,13 +282,18 @@ def run_review(
     результат которой прогон тоже не влияет.
 
     Сбой любого шага переводит прогон в `failed` и **пробрасывается**: воркер
-    отклоняет сообщение, и оно попадает в DLQ для разбора (`job-queue`).
+    отклоняет сообщение, и оно попадает в DLQ для разбора (`job-queue`). Сбой до
+    захвата — чтения или самого захвата — прогон не трогает и бросается
+    `ReviewNotStarted`: воркер вернёт сообщение в очередь на повтор (#157).
     Сбои правил и AST-окружения шагом не считаются — их гасит сборка
     контекста, деградируя пакет (`context-assembly`). Сбой верификатора -
     тоже: публикуются замечания, прошедшие отсев, итог - `unavailable`.
     """
-    with uow:
-        run = uow.review_runs.get(job.review_run_id)
+    try:
+        with uow:
+            run = uow.review_runs.get(job.review_run_id)
+    except Exception as exc:
+        raise ReviewNotStarted(f"прогон {job.review_run_id} не прочитан") from exc
 
     if run is None:
         # Прогон коммитится до постановки задачи, поэтому сообщение без
@@ -306,10 +320,16 @@ def run_review(
 
     try:
         claimed = _claim(uow, run, now())
-        if claimed is None:
-            logger.warning("прогон изменён другим, сообщение подтверждается")
-            return
-        run = claimed
+    except Exception as exc:
+        # Захват не записан — прогон `queued`. Пометить его `failed` значило бы потерять ревью:
+        # повтор увидел бы терминальный прогон и подтвердил сообщение.
+        raise ReviewNotStarted(f"прогон {job.review_run_id} не захвачен") from exc
+    if claimed is None:
+        logger.warning("прогон изменён другим, сообщение подтверждается")
+        return
+    run = claimed
+
+    try:
         _mark_in_progress(uow, vcs_gateway, job, run)
 
         steps.start(ReviewRunStage.FETCHING_DIFF)

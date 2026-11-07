@@ -24,7 +24,7 @@ from app.application.merge_gate_publish import (
 )
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.ports.vcs_review import MergeGateCheck
-from app.application.review_pipeline import run_review
+from app.application.review_pipeline import ReviewNotStarted, run_review
 from app.application.stale_sweep import sweep_stale_runs
 from app.application.use_cases.build_review_context import REVIEW_DIFF_MAX_LINES
 from app.domain.entities import (
@@ -278,13 +278,54 @@ def test_a_failed_translation_is_not_counted() -> None:
     """Сбой записи перевода в failed — записи в счётчике нет: прогон ещё не терминален."""
     uow = FakeUnitOfWork()
     _seed_run(uow)
-    uow.commit_error = RuntimeError("база недоступна")
+    commit = uow.commit
+
+    def fail_after_the_claim() -> None:
+        # Захват записан, дальше база отказывает — и шагам, и переводу в failed.
+        commit()
+        uow.commit_error = RuntimeError("база недоступна")
+
+    uow.commit = fail_after_the_claim  # type: ignore[method-assign]
     recorder = RecordingRunOutcome()
 
     with pytest.raises(RuntimeError, match="база недоступна"):
         _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
 
     assert recorder.statuses == []
+
+
+def test_a_failed_claim_leaves_the_run_queued_for_a_retry() -> None:
+    """#157: захват не записан — прогон `queued`, а не `failed`: сбой — `ReviewNotStarted`,
+    воркер вернёт сообщение в очередь, и повтор доведёт прогон до конца."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    uow.commit_errors = [RuntimeError("база недоступна")]
+    recorder = RecordingRunOutcome()
+
+    with pytest.raises(ReviewNotStarted) as error:
+        _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
+
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert uow.review_runs.get(JOB.review_run_id).status is ReviewRunStatus.QUEUED  # type: ignore[union-attr]
+    assert recorder.statuses == []
+
+    _run(uow, ScriptedLlmGateway([review_response()]), run_outcome=recorder)
+
+    assert uow.review_runs.get(JOB.review_run_id).status is ReviewRunStatus.COMPLETED  # type: ignore[union-attr]
+
+
+def test_a_run_that_cannot_be_read_is_not_started() -> None:
+    """#157: база недоступна уже на чтении прогона — `ReviewNotStarted`, а не DLQ."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+
+    def unavailable(run_id: Any) -> None:
+        raise RuntimeError("база недоступна")
+
+    uow.review_runs.get = unavailable  # type: ignore[method-assign]
+
+    with pytest.raises(ReviewNotStarted):
+        _run(uow, ScriptedLlmGateway([review_response()]))
 
 
 def test_a_redelivered_terminal_run_is_not_counted() -> None:
