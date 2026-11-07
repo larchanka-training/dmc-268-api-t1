@@ -321,6 +321,95 @@ def test_a_run_not_started_returns_the_message_to_the_queue() -> None:
     assert channel.events == ["cancel", "reject 1"]
 
 
+def test_a_run_not_started_waits_before_returning_to_the_queue() -> None:
+    """Повтор приходит сразу: без паузы все попытки доставки сгорели бы за секунды. Пауза —
+    циклом соединения (`connection.sleep` отвечает на heartbeat), reject — после неё."""
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+
+    class LoggedConnection(FakeConnection):
+        def sleep(self, duration: float) -> None:
+            super().sleep(duration)
+            channel.events.append(f"sleep {duration}")
+
+    connection = LoggedConnection()
+
+    def handler(body: bytes) -> None:
+        raise ReviewNotStarted("база недоступна")
+
+    _worker(channel, connection).run(handler, limit=1)
+
+    assert sum(connection.slept) == factory.RETRY_DELAY_SECONDS
+    assert all(step <= 1 for step in connection.slept)  # шаги не дольше такта цикла
+    assert channel.events[-1] == "reject 1"
+    assert channel.events[:-1] == ["cancel"] + [f"sleep {step}" for step in connection.slept]
+
+
+def test_a_stop_request_cuts_the_retry_pause_short() -> None:
+    """SIGTERM посреди паузы: сообщение возвращается сразу, а не после всей паузы."""
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+    stop = StopRequest()
+
+    class StoppedConnection(FakeConnection):
+        def sleep(self, duration: float) -> None:
+            super().sleep(duration)
+            stop.requested = True
+
+    connection = StoppedConnection()
+
+    def handler(body: bytes) -> None:
+        raise ReviewNotStarted("база недоступна")
+
+    _worker(channel, connection).run(handler, stop=stop, retry_delay=10)
+
+    assert connection.slept == [1]
+    assert channel.rejected == [1]
+
+
+def test_the_connection_loop_turns_while_the_sweep_works() -> None:
+    """Проход очистки ходит в базу и GitHub: он тоже в своём потоке, а главный крутит цикл
+    соединения и отвечает на heartbeat."""
+    started = threading.Event()
+    release = threading.Event()
+    connection = FakeConnection()
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+    sweep_threads: list[threading.Thread] = []
+
+    def sweep() -> None:
+        sweep_threads.append(threading.current_thread())
+        started.set()
+        assert release.wait(timeout=5)
+
+    runner = threading.Thread(
+        target=lambda: _worker(channel, connection).run(
+            lambda body: None, limit=1, sweep=sweep, sweep_interval=0
+        )
+    )
+    runner.start()
+    assert started.wait(timeout=5)
+    while connection.polls < 3:
+        time.sleep(0.01)
+    assert channel.acked == []  # сообщение этого такта ждёт конца прохода
+    release.set()
+    runner.join(timeout=5)
+
+    assert not runner.is_alive()
+    assert sweep_threads[0] is not runner
+    assert channel.acked == [1]
+
+
+def test_a_sweep_killed_by_a_base_exception_stops_the_worker() -> None:
+    """`KeyboardInterrupt` из потока очистки — в главный поток, как без потока."""
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+
+    def sweep() -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _worker(channel).run(lambda body: None, limit=1, sweep=sweep, sweep_interval=0)
+
+    assert channel.acked == []
+
+
 def test_a_lost_connection_lets_the_handler_finish_before_the_worker_exits() -> None:
     """Соединение оборвалось посреди обработки: прогон доводится до конца, а не обрывается
     выходом процесса; сообщение без подтверждения брокер вернёт."""

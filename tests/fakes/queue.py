@@ -78,10 +78,15 @@ class FakeConnection:
         self.closed = False
         # Сколько раз цикл соединения крутился, пока шла обработка: это и ответ на heartbeat.
         self.polls = 0
+        # Шаги паузы циклом соединения (`connection.sleep`) — перед возвратом сообщения.
+        self.slept: list[float] = []
 
     def process_data_events(self, time_limit: float = 0) -> None:
         self.polls += 1
         time.sleep(min(time_limit, 0.01))
+
+    def sleep(self, duration: float) -> None:
+        self.slept.append(duration)
 
     def close(self) -> None:
         self.closed = True
