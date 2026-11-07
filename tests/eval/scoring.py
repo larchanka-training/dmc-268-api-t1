@@ -191,7 +191,8 @@ class OutputCounts:
     Вызов - этап `analysing` или `verifying` одного прогона; каждая попытка
     внутри него - отдельный шаг (`review_run_steps`), не прошедшая схему - с
     кодом `LLM_INVALID_OUTPUT`. `no_answer` - вызов кончился сбоем без ответа
-    модели (таймаут, лимит, запрос больше окна): формат тут не измерить.
+    модели (таймаут, лимит, сбой отсева) и без более раннего невалидного
+    ответа: формат тут не измерить.
     """
 
     first_try: int = 0
@@ -216,10 +217,11 @@ class OutputCounts:
 def classify_calls(steps: Sequence[ReviewRunStep]) -> OutputCounts:
     """Исход каждого вызова модели прогона по его шагам; шаги - в порядке начала.
 
-    Этап без вызова модели (верификация без кандидатов) не считается. Исход
-    вызова - код последнего шага этапа; ответ, отвергнутый по смыслу
-    (верификатор не покрыл кандидатов) или обрезанный пределом длины, тоже
-    пишется `LLM_INVALID_OUTPUT` и считается невалидным.
+    Этап без вызова модели (верификация без кандидатов, `PROMPT_TOO_LARGE`) не
+    считается. Исход вызова - код последнего шага этапа; сбой повтора после
+    `LLM_INVALID_OUTPUT` - тоже невалиден: первый ответ схему уже не прошёл. Ответ,
+    отвергнутый по смыслу (верификатор не покрыл кандидатов) или обрезанный
+    пределом длины, тоже пишется `LLM_INVALID_OUTPUT` и считается невалидным.
     """
     counts = OutputCounts()
     for stage in _MODEL_STAGES:
@@ -230,7 +232,7 @@ def classify_calls(steps: Sequence[ReviewRunStep]) -> OutputCounts:
         retried = any(s.error_code == LlmOutputError.code for s in attempts[:-1])
         if last is None:
             counts += OutputCounts(after_retry=1) if retried else OutputCounts(first_try=1)
-        elif last == LlmOutputError.code:
+        elif last == LlmOutputError.code or retried:
             counts += OutputCounts(invalid=1)
         else:
             counts += OutputCounts(no_answer=1)

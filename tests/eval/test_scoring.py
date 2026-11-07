@@ -170,6 +170,8 @@ VERIFYING = ReviewRunStage.VERIFYING
         # Таймаут перед ответом - не повтор по схеме.
         ([_step(ANALYSING, "LLM_TIMEOUT"), _step(ANALYSING)], OutputCounts(first_try=1)),
         ([_step(ANALYSING, "LLM_TIMEOUT")], OutputCounts(no_answer=1)),
+        # Первый ответ не прошёл схему, повтор упал на таймауте: вызов невалиден.
+        ([_step(ANALYSING, INVALID), _step(ANALYSING, "LLM_TIMEOUT")], OutputCounts(invalid=1)),
         # Без кандидатов верификатор модель не зовёт.
         ([_step(ANALYSING), _step(VERIFYING, tokens=None)], OutputCounts(first_try=1)),
         ([_step(ReviewRunStage.FETCHING_DIFF, "VCS_UNAVAILABLE", tokens=None)], OutputCounts()),
