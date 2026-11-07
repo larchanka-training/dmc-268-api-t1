@@ -416,4 +416,4 @@ groups:
           service: alertmanager
         annotations:
           summary: "Алерты не доходят в Telegram"
-          description: "За 10 минут Alertmanager не смог отправить в Telegram {{ $value | humanize }} уведомлений. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
+          description: "Неудачных отправок в Telegram за 10 минут: {{ $value | humanize }}. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."

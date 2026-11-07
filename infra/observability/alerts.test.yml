@@ -637,7 +637,7 @@ tests:
           - exp_labels: {severity: critical, service: alertmanager, integration: telegram}
             exp_annotations:
               summary: "Алерты не доходят в Telegram"
-              description: "За 10 минут Alertmanager не смог отправить в Telegram 5 уведомлений. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
+              description: "Неудачных отправок в Telegram за 10 минут: 5. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
 
   # Доставка починилась: через 10 минут без новых неудач алерт гаснет.
   - interval: 1m
@@ -652,7 +652,7 @@ tests:
           - exp_labels: {severity: critical, service: alertmanager, integration: telegram}
             exp_annotations:
               summary: "Алерты не доходят в Telegram"
-              description: "За 10 минут Alertmanager не смог отправить в Telegram 3 уведомлений. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
+              description: "Неудачных отправок в Telegram за 10 минут: 3. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
       - eval_time: 35m
         alertname: AlertDeliveryFailing
         exp_alerts: []
