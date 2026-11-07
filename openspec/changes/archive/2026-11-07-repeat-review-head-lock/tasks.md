@@ -16,3 +16,5 @@
 - [x] 3.3 Тест: ручной запуск на head с упавшим прогоном check run не выставляет
 - [x] 3.4 Переименовать требование через `RENAMED`
 - [x] 3.5 `openspec validate --all --strict` и повторный `openspec archive repeat-review-head-lock`
+- [x] 3.6 Переблокировка по любому `queued` дублю вебхука, без условия о завершённом ревью на head
+- [x] 3.7 Тесты: двойной сбой после `success` фильтра веток; повтор при `queued` ставит `in_progress`

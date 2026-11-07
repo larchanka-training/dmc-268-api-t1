@@ -128,13 +128,13 @@ def start_review_run(
 
     `vcs` нужен блокировке head до постановки задачи — у вебхука при смене целевой ветки и при
     повторе на head, где последний прогон `failed` или `cancelled`, — и переблокировке head
-    повтором, получившим дублем застрявший `queued` прогон. Сбой постановки — прогон в
+    повтором вебхука, получившим дублем `queued` прогон. Сбой постановки — прогон в
     `failed` (`run_outcome` пишет переход), исключение наверх.
     """
     retarget = False
     lock_head = False
     duplicate: RunStart | None = None
-    # PR, чей head повтор доставки переблокирует по застрявшему `queued` прогону.
+    # PR, чей head повтор доставки переблокирует по `queued` прогону.
     relock_merge_request_id: UUID | None = None
     with uow as work:
         existing_merge_request = work.merge_requests.find_by_number(repository.id, launch.pr_number)
@@ -163,11 +163,12 @@ def start_review_run(
             if duplicate_of is not None:
                 # Двойной сбой: блокировка не встала и перевод в `failed` не записался —
                 # прогон остался `queued` без задачи до sweep, а на head мог остаться
-                # `success` прежнего ревью. Повтор доставки переставляет gate по этому прогону.
+                # `success` прежнего ревью, фильтра веток или паузы. Отличить такой прогон
+                # от ждущего воркера приём не может, поэтому повтор доставки по любому
+                # `queued` переставляет gate по нему: `in_progress`, как при захвате.
                 if (
                     launch.trigger is TriggerSource.WEBHOOK
                     and duplicate_of.status is ReviewRunStatus.QUEUED
-                    and _earlier_review_on_head(work, existing_merge_request.id, launch.head_sha)
                 ):
                     relock_merge_request_id = existing_merge_request.id
                 duplicate = RunStart(
@@ -302,14 +303,6 @@ def start_review_run(
     return RunStart(kind="success", run=run, merge_request=merge_request, repository=repository)
 
 
-def _earlier_review_on_head(work: UnitOfWork, merge_request_id: UUID, head_sha: str) -> bool:
-    """На head есть завершённое ревью — его `success` мог остаться на коммите."""
-    return (
-        work.review_runs.find_reviewed(merge_request_id, head_sha) is not None
-        or work.review_runs.find_completed_manual(merge_request_id, head_sha) is not None
-    )
-
-
 def _relock_head(
     uow: UnitOfWork,
     vcs: VcsGateway,
@@ -317,7 +310,7 @@ def _relock_head(
     merge_request_id: UUID,
     repository_id: UUID,
 ) -> None:
-    """Best-effort: выставить gate по застрявшему `queued` прогону — `in_progress`.
+    """Best-effort: выставить gate по `queued` прогону — `in_progress`.
 
     Сбой GitHub ответ не меняет: повтор остаётся дублем, прогон выметет sweep."""
     try:
