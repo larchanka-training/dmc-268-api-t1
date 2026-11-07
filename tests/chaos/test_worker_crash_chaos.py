@@ -107,8 +107,10 @@ def test_worker_dies_during_the_model_call(stack: Stack) -> None:
 
     assert len(stack.github.reviews_of(PR)) == 1
     assert len(_inline_comments(stack)) == 1
-    # «Идёт ревью» умершего прогона и нового, затем итог нового.
+    # «Идёт ревью» умершего прогона, блокировка приёма новой доставки (на head уже был
+    # прогон, #309) и захват нового прогона воркером, затем итог нового.
     assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [
+        (HEAD, None),
         (HEAD, None),
         (HEAD, None),
         (HEAD, "failure"),
@@ -156,7 +158,10 @@ def test_worker_dies_while_setting_the_merge_gate(stack: Stack) -> None:
     comments = _inline_comments(stack)
     assert len(comments) == len(set(comments)), f"дубль замечания: {comments}"
     # «Идёт ревью» умершего прогона и нового, затем итог нового.
+    # Блокировка приёма новой доставки (на head уже был прогон, #309) идёт между «Идёт ревью»
+    # умершего прогона и захватом нового.
     assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs] == [
+        (HEAD, None),
         (HEAD, None),
         (HEAD, None),
         (HEAD, "failure"),
