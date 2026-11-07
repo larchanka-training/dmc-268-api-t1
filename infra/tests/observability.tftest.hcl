@@ -301,9 +301,29 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
 
   assert {
     condition = toset([for n in docker_container.grafana[0].networks_advanced : n.name]) == toset([
-      docker_network.observability[0].name, docker_network.grafana[0].name,
+      docker_network.observability[0].name, docker_network.grafana[0].name, docker_network.grafana_proxy.name,
     ])
-    error_message = "Grafana должна стоять в сети стека (datasources loki/tempo/prometheus) и в отдельной сети dmc268-grafana, где публикуется её порт."
+    error_message = "Grafana должна стоять в сети стека (datasources loki/tempo/prometheus), в отдельной сети dmc268-grafana, где публикуется её порт, и в dmc268-grafana-proxy (публичный вход через nginx интерфейса)."
+  }
+
+  # Из стека бэкенда в сети прокси — только Grafana: интерфейс в ней видит
+  # её одну. Сеть internal — выхода наружу через неё нет.
+  assert {
+    condition = (
+      docker_network.grafana_proxy.internal == true
+      && length([
+        for c in [
+          docker_container.api, docker_container.worker,
+          docker_container.otelcol[0], docker_container.otelcol_docker[0],
+          docker_container.otelcol_logs[0], docker_container.loki[0],
+          docker_container.tempo[0], docker_container.prometheus[0],
+          docker_container.node_exporter[0], docker_container.docker_socket_proxy[0],
+          docker_container.alertmanager[0], docker_container.blackbox[0],
+          docker_container.blackbox_public[0],
+        ] : c if contains([for n in c.networks_advanced : n.name], docker_network.grafana_proxy.name)
+      ]) == 0
+    )
+    error_message = "Сеть dmc268-grafana-proxy — internal, и из стека бэкенда в ней только Grafana."
   }
 
   assert {
@@ -318,6 +338,72 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
       && docker_container.grafana[0].ports[0].internal == 3000
     )
     error_message = "Grafana публикует ровно один порт: 3000 из контейнера на grafana_port и bind_ip (петля; снаружи — SSH-туннель)."
+  }
+}
+
+# Публичный вход в Grafana (change grafana-public-access): root_url из
+# public_origin на порту 8443 (свой origin, отдельно от кабинета) с подпутём
+# /grafana/ — и для origin со слешем на конце, —
+# отдача из подпути и cookie только по HTTPS; анонимный вход и регистрация
+# по-прежнему выключены. /metrics и basic auth выключены: подпуть открыт
+# наружу, а basic auth обходит limit_req на /grafana/login. Версия без входа
+# скрыта, публичные дашборды и снимки выключены — иначе панели с логами и
+# трейсами открывались бы без входа.
+run "grafana_serves_public_entry_sub_path" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    public_origin             = "https://203.0.113.10/"
+  }
+
+  assert {
+    condition = alltrue([
+      for e in [
+        "GF_SERVER_ROOT_URL=https://203.0.113.10:8443/grafana/",
+        "GF_SERVER_SERVE_FROM_SUB_PATH=true",
+        "GF_SECURITY_COOKIE_SECURE=true",
+        "GF_AUTH_ANONYMOUS_ENABLED=false",
+        "GF_USERS_ALLOW_SIGN_UP=false",
+        "GF_METRICS_ENABLED=false",
+        "GF_AUTH_BASIC_ENABLED=false",
+        "GF_AUTH_ANONYMOUS_HIDE_VERSION=true",
+        "GF_PUBLIC_DASHBOARDS_ENABLED=false",
+        "GF_SNAPSHOTS_ENABLED=false",
+        "GF_SNAPSHOTS_EXTERNAL_ENABLED=false",
+      ] : contains(docker_container.grafana[0].env, e)
+    ])
+    error_message = "Grafana: GF_SERVER_ROOT_URL = public_origin без слеша + :8443/grafana/, GF_SERVER_SERVE_FROM_SUB_PATH=true, GF_SECURITY_COOKIE_SECURE=true, анонимный вход, регистрация, /metrics, basic auth, публичные дашборды и снимки выключены, версия скрыта."
+  }
+}
+
+# Без public_origin (локальный apply со стеком) root_url — относительный
+# /grafana/, без порта: склеивать порт не с чем, Grafana с ним стартует.
+run "grafana_root_url_is_relative_without_public_origin" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+  }
+
+  assert {
+    condition     = contains(docker_container.grafana[0].env, "GF_SERVER_ROOT_URL=/grafana/")
+    error_message = "Grafana: с пустым public_origin GF_SERVER_ROOT_URL — относительный /grafana/."
+  }
+}
+
+run "grafana_proxy_network_exists_without_the_stack" {
+  command = plan
+
+  # observability_enabled по умолчанию false. К dmc268-grafana-proxy по имени
+  # подключается стек dmc-268-ui-t1, как к dmc268-otlp.
+  assert {
+    condition     = docker_network.grafana_proxy.name == "dmc268-grafana-proxy" && docker_network.grafana_proxy.internal == true
+    error_message = "Сеть dmc268-grafana-proxy (internal) должна создаваться и с выключенным стеком: на неё по имени ссылается стек интерфейса."
   }
 }
 

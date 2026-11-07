@@ -9,7 +9,8 @@
 # одни и те же адреса работают в обоих окружениях (prometheus.yml, grafana
 # datasources, endpoint коллектора). Сеть стека internal; публикуемый порт
 # Grafana живёт в отдельной не-internal сети dmc268-grafana и открывается
-# SSH-туннелем. Выход в интернет через неё есть только у Grafana, и её
+# SSH-туннелем, а через публичный вход — по сети dmc268-grafana-proxy
+# (infra/network.tf). Выход в интернет через неё есть только у Grafana, и её
 # собственные походы наружу (статистика, проверки обновлений Grafana и
 # плагинов) выключены env.
 # Стек поднимается только при observability_enabled: count = 1 : 0 у образа,
@@ -468,6 +469,8 @@ resource "docker_container" "prometheus" {
 
 # Доступ к Grafana — по учётке: анонимный вход выключен, пароль админа из
 # переменной (локальный compose, наоборот, поднимает Grafana без логина).
+# Открывается через публичный вход на порту 8443 по подпути /grafana/ (nginx
+# интерфейса, сеть dmc268-grafana-proxy) и туннелем на bind_ip — по тому же подпути.
 resource "docker_container" "grafana" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-grafana"
@@ -505,6 +508,36 @@ resource "docker_container" "grafana" {
     "GF_SECURITY_ADMIN_PASSWORD=${var.grafana_admin_password}",
     "GF_AUTH_ANONYMOUS_ENABLED=false",
     "GF_USERS_ALLOW_SIGN_UP=false",
+    # Подпуть открыт наружу целиком. /metrics Grafana отдаёт без входа —
+    # версию, коммит, число пользователей; Prometheus стенда её не опрашивает.
+    "GF_METRICS_ENABLED=false",
+    # Basic auth идёт мимо limit_req nginx на /grafana/login, и пять неудачных
+    # попыток за 5 минут блокируют логин — кто угодно держал бы admin
+    # заблокированным. API-клиентов у Grafana нет, вход — только формой.
+    "GF_AUTH_BASIC_ENABLED=false",
+    # Без входа Grafana отдаёт версию и коммит в /grafana/api/health и в
+    # buildInfo страницы входа; GF_METRICS_ENABLED=false этого не закрывает.
+    "GF_AUTH_ANONYMOUS_HIDE_VERSION=true",
+    # Публичные дашборды в 13.x включены по умолчанию: Admin/Editor кнопкой
+    # «Share externally» открыл бы панели с логами и трейсами без входа.
+    "GF_PUBLIC_DASHBOARDS_ENABLED=false",
+    # Снимки по умолчанию включены и открываются без входа любым по ссылке
+    # (/api/snapshots/:key, /dashboard/snapshot/*), а внешние уходят на
+    # snapshots.raintank.io. enabled=false отвечает 403 на всё API снимков,
+    # включая созданные раньше; external — отдельная настройка, без неё
+    # интерфейс по-прежнему предлагает публикацию на raintank (13.2.4).
+    "GF_SNAPSHOTS_ENABLED=false",
+    "GF_SNAPSHOTS_EXTERNAL_ENABLED=false",
+    # Публичный вход по подпути /grafana/: nginx интерфейса проксирует путь
+    # как есть, без rewrite, а Grafana строит ссылки и редиректы от root_url.
+    # С serve_from_sub_path Grafana отвечает только под /grafana/, корень —
+    # 301 на root_url, поэтому туннель — http://localhost:3000/grafana/.
+    # Адрес — public_origin на порту 8443, см. local.grafana_public_root_url.
+    "GF_SERVER_ROOT_URL=${local.grafana_public_root_url}",
+    "GF_SERVER_SERVE_FROM_SUB_PATH=true",
+    # TLS терминирует nginx интерфейса: cookie сессии — только по HTTPS.
+    # Через туннель браузеры принимают Secure-cookie от http://localhost.
+    "GF_SECURITY_COOKIE_SECURE=true",
     # Телеметрия вендора off: статистика использования и проверки обновлений
     # Grafana и плагинов не должны уходить с сервера наружу. То же в compose и у Loki/Tempo в их
     # конфигах (loki.yaml, tempo.yaml).
@@ -536,6 +569,12 @@ resource "docker_container" "grafana" {
   # Docker не публикует.
   networks_advanced {
     name = docker_network.grafana[0].name
+  }
+
+  # Публичный вход: nginx интерфейса ходит сюда по имени контейнера
+  # (dmc268-grafana:3000), алиас не нужен.
+  networks_advanced {
+    name = docker_network.grafana_proxy.name
   }
 
   depends_on = [

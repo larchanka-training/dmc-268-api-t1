@@ -538,7 +538,7 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "sum(rate({service_name=\"dmc268-ui\"} != \"Blackbox-Exporter\" | pattern `<_> - <_> [<_>] \"<_>\" <status> <_>` | status=~\"[1-5][0-9][0-9]\" [5m])) or vector(0)",
+          "expr": "sum(rate({service_name=\"dmc268-ui\"} != \"Blackbox-Exporter\" !~ \"\\\"[A-Z]+ /grafana/\" | pattern `<_> - <_> [<_>] \"<_>\" <status> <_>` | status=~\"[1-5][0-9][0-9]\" [5m])) or vector(0)",
           "legendFormat": "запросов/с",
           "queryType": "range",
           "refId": "A"
@@ -604,7 +604,7 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "sum by (class) (count_over_time({service_name=\"dmc268-ui\"} != \"Blackbox-Exporter\" | pattern `<_> - <_> [<_>] \"<_>\" <status> <_>` | status=~\"[1-5][0-9][0-9]\" | label_format class=`{{ substr 0 1 .status }}xx` [5m]))",
+          "expr": "sum by (class) (count_over_time({service_name=\"dmc268-ui\"} != \"Blackbox-Exporter\" !~ \"\\\"[A-Z]+ /grafana/\" | pattern `<_> - <_> [<_>] \"<_>\" <status> <_>` | status=~\"[1-5][0-9][0-9]\" | label_format class=`{{ substr 0 1 .status }}xx` [5m]))",
           "legendFormat": "{{class}}",
           "queryType": "range",
           "refId": "A"

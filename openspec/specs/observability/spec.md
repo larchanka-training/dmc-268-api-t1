@@ -693,7 +693,7 @@ Access-запись uvicorn о запросе health-check'а SHALL NOT попа
 
 ### Requirement: Метрики входа nginx в Prometheus и в «Обзоре»
 
-Основной коллектор SHALL снимать `stub_status` nginx интерфейса receiver-ом `nginx` по сети `dmc268-otlp`, без публикации порта на хост, и отдавать метрики в Prometheus через свой exporter-порт. Дашборд «Обзор dmc-268» SHALL показывать вход: соединения по состоянию из Prometheus, запросы в секунду и долю ответов по классу кода из access-лога `dmc268-ui` в Loki, без проб blackbox. Недоступный `stub_status` SHALL NOT мешать остальным метрикам коллектора.
+Основной коллектор SHALL снимать `stub_status` nginx интерфейса receiver-ом `nginx` по сети `dmc268-otlp`, без публикации порта на хост, и отдавать метрики в Prometheus через свой exporter-порт. Дашборд «Обзор dmc-268» SHALL показывать вход: соединения по состоянию из Prometheus, запросы в секунду и долю ответов по классу кода из access-лога `dmc268-ui` в Loki, без проб blackbox и запросов к `/grafana/`. Недоступный `stub_status` SHALL NOT мешать остальным метрикам коллектора.
 
 #### Scenario: Метрики nginx в Prometheus
 
@@ -709,6 +709,96 @@ Access-запись uvicorn о запросе health-check'а SHALL NOT попа
 
 - **WHEN** дашборд «Обзор dmc-268» открыт в Grafana
 - **THEN** панели «Вход (nginx)» показывают запросы в секунду, соединения по состоянию и долю ответов 2xx, 3xx, 4xx и 5xx
+
+#### Scenario: Запросы Grafana не считаются входом
+
+- **WHEN** в access-логе `dmc268-ui` есть строки с запросами к `/grafana/`: Grafana ходит через тот же nginx, в том числе сам открытый «Обзор»
+- **THEN** панели «Вход (nginx)» из Loki их не считают, как и пробы blackbox
+
+### Requirement: Grafana стенда — через публичный вход по учётке
+
+Grafana стенда SHALL открываться через публичный вход на порту `8443` по подпути `/grafana/` и
+SHALL знать свой публичный адрес (`root_url` — публичный origin с портом `8443` и `/grafana/`).
+Вход SHALL быть только по учётке:
+анонимный вход и регистрация SHALL быть выключены. Cookie сессии SHALL выдаваться с атрибутом
+`Secure`. Туннель на петле (`grafana_port` на `bind_ip`) SHALL продолжать работать по тому же
+подпути.
+
+#### Scenario: Вход через публичный адрес
+
+- **WHEN** участник команды открывает `https://<публичный адрес>:8443/grafana/`
+- **THEN** Grafana показывает форму входа, и после входа личной учёткой открывается дашборд «Обзор dmc-268»
+- **AND** cookie сессии `grafana_session` выдана с `Secure` и `HttpOnly` и путём `/grafana`
+
+#### Scenario: Свой origin, отдельный от кабинета
+
+- **WHEN** скрипт выполняется на странице Grafana `https://<публичный адрес>:8443/grafana/`
+- **THEN** его origin отличается от origin кабинета `https://<публичный адрес>` портом: хост и сертификат те же
+- **AND** прочитать ответы API кабинета он не может — их закрывает same-origin policy браузера
+
+#### Scenario: Без учётки не пускает
+
+- **WHEN** запрос к API Grafana под `/grafana/` приходит без сессии
+- **THEN** ответ — `401`, данные дашбордов и datasource не отдаются
+- **AND** зарегистрировать нового пользователя нельзя
+
+#### Scenario: Туннель на петле
+
+- **WHEN** участник с SSH-доступом открывает туннель на `grafana_port` и заходит на `http://localhost:3000/grafana/`
+- **THEN** Grafana отвечает формой входа так же, как через публичный вход
+
+### Requirement: Подпуть Grafana не открывает лишнего наружу
+
+Подпуть `/grafana/` открыт наружу целиком, поэтому Grafana стенда SHALL NOT отдавать свои метрики,
+версию и коммит без входа, SHALL NOT открывать дашборды без входа (публичные дашборды и снимки выключены) и
+SHALL NOT принимать basic auth: вход — только формой, на которую nginx интерфейса ставит
+ограничение частоты.
+
+#### Scenario: Метрики Grafana не отдаются наружу
+
+- **WHEN** запрос без сессии приходит на `/grafana/metrics`
+- **THEN** Grafana уводит на форму входа, `grafana_build_info` и счётчики пользователей не отдаются
+
+#### Scenario: Basic auth не принимается
+
+- **WHEN** запрос к API Grafana под `/grafana/` приходит с заголовком `Authorization: Basic`, даже с верным паролем
+- **THEN** ответ — `401`, попытка не засчитывается в блокировку логина
+- **AND** после таких запросов вход формой с верным паролем проходит
+
+#### Scenario: Версия Grafana не отдаётся без входа
+
+- **WHEN** запрос без сессии приходит на `/grafana/api/health` или на страницу `/grafana/login`
+- **THEN** в ответе `/grafana/api/health` нет полей `version` и `commit`
+- **AND** в `buildInfo` страницы входа нет версии и коммита
+
+#### Scenario: Публичные дашборды выключены
+
+- **WHEN** Admin или Editor пытается открыть дашборд наружу («Share externally», `POST /grafana/api/dashboards/uid/<uid>/public-dashboards`)
+- **THEN** ответ — `404`, публичный дашборд не создаётся
+- **AND** запрос без сессии к `/grafana/api/public/dashboards/<token>` получает `401`
+
+#### Scenario: Снимки выключены
+
+- **WHEN** Admin или Editor создаёт снимок дашборда (Share → Snapshot, `POST /grafana/api/snapshots`)
+- **THEN** ответ — `403`, снимок не создаётся, ни локальный, ни на `snapshots.raintank.io`
+- **AND** запрос без сессии к `/grafana/api/snapshots/<key>` получает `403` и данных дашборда не получает, в том числе для снимка, созданного до выключения
+
+### Requirement: Сеть прокси Grafana
+
+nginx интерфейса SHALL ходить в Grafana по отдельной `internal`-сети `dmc268-grafana-proxy`
+(`dmc268-grafana:3000`), где SHALL стоять только Grafana и интерфейс. Сеть SHALL создаваться и при
+выключенном стеке: стек интерфейса подключается к ней по имени.
+
+#### Scenario: Стек включён
+
+- **WHEN** стенд развёрнут с `observability_enabled = true`
+- **THEN** в `dmc268-grafana-proxy` из стека бэкенда стоит только `dmc268-grafana`
+- **AND** у `dmc268-grafana-proxy` нет шлюза: из неё не выйти в интернет
+
+#### Scenario: Стек выключен
+
+- **WHEN** стенд развёрнут с `observability_enabled = false`
+- **THEN** сеть `dmc268-grafana-proxy` есть, Grafana нет, и стек интерфейса разворачивается без ошибок
 
 ### Requirement: Dead man's switch алертов
 
