@@ -13,7 +13,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 from sqlalchemy import create_engine
 
 from app.config import Settings
-from app.domain.entities import ReviewRun, Session
+from app.domain.entities import ContextPayload, ReviewRun, Session
 from app.domain.enums import ReviewRunStatus, TriggerSource
 from app.domain.webhook_redelivery import REDELIVERY_WINDOW, WebhookDelivery
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -52,6 +52,62 @@ def test_the_pass_purges_expired_sessions() -> None:
 
 LIMIT = timedelta(minutes=30)
 QUEUED_LIMIT = timedelta(hours=6)
+
+
+def test_the_pass_expires_old_context_payload_bodies() -> None:
+    """Change context-payload-retention: уборка стирает тела старше срока, метаданные остаются."""
+    uow = FakeUnitOfWork()
+    old = ContextPayload(
+        id=UUID(int=1),
+        review_run_id=UUID(int=2),
+        chunk_index=0,
+        tiers=("diff",),
+        file_paths=("a.py",),
+        token_count=1,
+        content_sha256="d",
+        body={"diff": "+x"},
+        created_at=NOW - timedelta(days=8),
+        updated_at=NOW - timedelta(days=8),
+    )
+    uow.context_payloads.add(old)
+
+    build_maintenance(
+        lambda: uow,
+        stale_limit=LIMIT,
+        queued_limit=QUEUED_LIMIT,
+        now=lambda: NOW,
+        payload_retention=timedelta(days=7),
+    )()
+
+    (stored,) = uow.context_payloads.list_for_run(UUID(int=2))
+    assert (stored.body, stored.body_expired_at) == (None, NOW)
+
+
+def test_the_expiry_count_is_a_log_field_not_text(caplog, monkeypatch) -> None:
+    """Счётчик стёртых тел ищется по полю записи, как требует `.agents/rules/backend.md`."""
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(logging.getLogger("app.worker.factory"), "disabled", False)
+    uow = FakeUnitOfWork()
+    uow.context_payloads.add(
+        ContextPayload(
+            id=UUID(int=1),
+            review_run_id=UUID(int=2),
+            chunk_index=0,
+            tiers=("diff",),
+            file_paths=("a.py",),
+            token_count=1,
+            content_sha256="d",
+            body={"diff": "+x"},
+            created_at=NOW - timedelta(days=60),
+            updated_at=NOW - timedelta(days=60),
+        )
+    )
+
+    build_maintenance(lambda: uow, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
+
+    (record,) = [r for r in caplog.records if getattr(r, "maintenance_step", None) == "expire_context_payloads"]
+    assert record.expired_count == 1
+    assert record.getMessage() == "тела пакетов контекста стёрты по сроку хранения"
 
 
 def test_the_pass_sweeps_stale_runs() -> None:
@@ -119,7 +175,8 @@ def test_a_failing_step_is_logged_and_does_not_stop_the_other(caplog, monkeypatc
 
     build_maintenance(uow_factory, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
 
-    assert calls == 2
+    # Свой UnitOfWork у каждого шага: зависшие прогоны, сессии, тела пакетов контекста.
+    assert calls == 3
     assert uow.sessions.stored == []
     (record,) = caplog.records
     assert record.getMessage() == "проход по зависшим прогонам завершился ошибкой"

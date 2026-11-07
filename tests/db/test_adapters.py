@@ -752,6 +752,77 @@ def test_a_payload_body_mutated_before_commit_is_stored_as_added(uow) -> None:
         }
 
 
+def _payloads_aged(uow, run_id, ages: list[dt.timedelta]) -> list[ContextPayload]:
+    """Пакеты прогона с `created_at` = сейчас минус возраст: время записи ставит база."""
+    payloads = [a_context_payload(run_id, chunk_index=i, digest=f"age{i}") for i in range(len(ages))]
+    with uow as work:
+        for payload in payloads:
+            work.context_payloads.add(payload)
+        work.commit()
+    with uow as work:
+        for payload, age in zip(payloads, ages, strict=True):
+            work.session.execute(
+                text("UPDATE context_payloads SET created_at = now() - :age WHERE id = :id"),
+                {"age": age, "id": payload.id},
+            )
+        work.commit()
+    return payloads
+
+
+def test_expire_bodies_clears_old_bodies_and_keeps_metadata(uow) -> None:
+    """Change context-payload-retention: тело старше срока стирается, метаданные остаются."""
+    with uow as work:
+        _, _, run = seeded(work)
+    _payloads_aged(uow, run.id, [dt.timedelta(days=40), dt.timedelta(days=1)])
+    now = dt.datetime.now(dt.UTC)
+
+    with uow as work:
+        expired = work.context_payloads.expire_bodies(now - dt.timedelta(days=30), now, 10)
+        work.commit()
+
+    assert expired == 1
+    with uow as work:
+        old, fresh = work.context_payloads.list_for_run(run.id)
+    assert (old.body, old.body_expired_at) == (None, now)
+    assert (old.file_paths, old.token_count, old.content_sha256) == (("app/main.py",), 10, "age0")
+    assert (fresh.body, fresh.body_expired_at) == ({"text": "x"}, None)
+
+
+def test_expire_bodies_takes_the_oldest_first_and_stops_at_the_limit(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+    payloads = _payloads_aged(
+        uow, run.id, [dt.timedelta(days=31), dt.timedelta(days=60), dt.timedelta(days=45)]
+    )
+    now = dt.datetime.now(dt.UTC)
+    cutoff = now - dt.timedelta(days=30)
+
+    with uow as work:
+        assert work.context_payloads.expire_bodies(cutoff, now, 2) == 2
+        work.commit()
+    with uow as work:
+        expired = {p.id for p in work.context_payloads.list_for_run(run.id) if p.body_expired_at}
+    assert expired == {payloads[1].id, payloads[2].id}
+
+    # Стёртое второй раз не трогается: проход берёт только живые тела.
+    with uow as work:
+        assert work.context_payloads.expire_bodies(cutoff, now, 10) == 1
+        assert work.context_payloads.expire_bodies(cutoff, now, 10) == 0
+        work.commit()
+
+
+def test_a_payload_cannot_lose_its_body_without_the_expiry_mark(uow) -> None:
+    """Check-ограничение: тела нет ровно тогда, когда отмечено время стирания."""
+    with uow as work:
+        _, _, run = seeded(work)
+    (payload,) = _payloads_aged(uow, run.id, [dt.timedelta(days=1)])
+    with pytest.raises(Exception, match="ck_context_payloads_body_expiry"), uow as work:
+        work.session.execute(
+            text("UPDATE context_payloads SET body = NULL WHERE id = :id"), {"id": payload.id}
+        )
+        work.commit()
+
+
 def test_a_failed_run_keeps_the_stage_it_failed_in(uow) -> None:
     with uow as work:
         repo = a_repository()
