@@ -341,6 +341,9 @@ jobs:
           TF_VAR_llm_backend: eurorouter
           TF_VAR_eurorouter_base_url: ${{ vars.AI_DMC268_URL }}
           TF_VAR_eurorouter_api_keys: ${{ secrets.AI_DMC268_T1 }}
+          # Ревью за деньги плательщика (#286, #405): плательщики и стартовые балансы
+          # на стенде назначены до включения.
+          TF_VAR_billing_enabled: "true"
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/infra.sh

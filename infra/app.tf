@@ -221,5 +221,7 @@ resource "docker_container" "worker" {
     "EUROROUTER_API_KEYS=${var.eurorouter_api_keys}",
     # Пусто - Settings читает как «не задано».
     "EUROROUTER_REASONING_EFFORT=${var.eurorouter_reasoning_effort}",
+    # Баланс сверяет только воркер, API показывает его и без флага.
+    "BILLING_ENABLED=${var.billing_enabled}",
   ])
 }
