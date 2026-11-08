@@ -30,15 +30,19 @@ LOCK_ID = "7313173c-96ec-0c6e-cb77-92fab8b342c6"
 
 # Подложный tofu: вызовы — в журнал, `state push` падает, если велит тест;
 # `state pull` отдаёт состояние хранилища из файла PULL. Вне infra/ — каталог
-# расшифровки errored.tfstate: `init` требует копию encryption.tf (DECRYPT_EXIT
-# — фраза не та), `state pull` отдаёт DECRYPTED или сам файл — так OpenTofu
-# расшифровывает его local-бэкендом.
+# расшифровки errored.tfstate: `init` требует копии encryption.tf и
+# .terraform.lock.hcl (без lock-файла настоящий init пошёл бы в реестр;
+# DECRYPT_EXIT — фраза не та), `state pull` отдаёт DECRYPTED или сам файл —
+# так OpenTofu расшифровывает его local-бэкендом.
 FAKE_TOFU = """#!/usr/bin/env bash
 echo "tofu $*" >> "$CALLS"
 if [ "$1" != -chdir=infra ]; then
   d="${1#-chdir=}"
   case "$*" in
-    *" init "*) [ -e "$d/encryption.tf" ] || exit 1; exit "${DECRYPT_EXIT:-0}" ;;
+    *" init "*)
+      [ -e "$d/encryption.tf" ] && [ -e "$d/.terraform.lock.hcl" ] || exit 1
+      cp "$d/.terraform.lock.hcl" "$CALLS.lock"
+      exit "${DECRYPT_EXIT:-0}" ;;
     *"state pull"*) cat "${DECRYPTED:-$d/terraform.tfstate}"; exit 0 ;;
   esac
   exit 1
@@ -112,6 +116,7 @@ def recover(
     *,
     errored: bool = True,
     init: bool = True,
+    lock_file: bool = True,
     endpoint: str = "http://127.0.0.1:9000",
     **env: str,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, str], Path]:
@@ -133,8 +138,10 @@ def recover(
         }}}
         (root / "infra" / ".terraform" / "terraform.tfstate").write_text(json.dumps(backend))
     (root / "infra" / "encryption.tf").write_text(Path("infra/encryption.tf").read_text())
+    if lock_file:
+        (root / "infra" / ".terraform.lock.hcl").write_text(Path("infra/.terraform.lock.hcl").read_text())
     if errored:
-        (root / "infra" / "errored.tfstate").write_text(env.pop("ERRORED_TEXT", None) or (FIXTURES / "errored-tfstate.json").read_text())
+        (root / "infra" / "errored.tfstate").write_text(env.pop("ERRORED_TEXT", "") or (FIXTURES / "errored-tfstate.json").read_text())
     tmp = tmp_path / "tmp"
     tmp.mkdir(exist_ok=True)
     bin_dir = write_bin(tmp_path, tofu=FAKE_TOFU, aws=FAKE_AWS, timeout=FAKE_TIMEOUT)
@@ -352,10 +359,15 @@ def test_recovery_decrypts_the_errored_state_before_pushing_it(tmp_path: Path) -
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    # Провайдер — из infra/ раннера, а не из реестра: медленный реестр не
+    # должен ронять восстановление под видом неверной фразы.
+    providers = root.resolve() / "infra" / ".terraform" / "providers"
     assert decrypt_calls(tmp_path) == [
-        "tofu -chdir=<расшифровка> init -input=false -no-color",
+        f"tofu -chdir=<расшифровка> init -input=false -plugin-dir={providers} -no-color",
         "tofu -chdir=<расшифровка> state pull",
     ]
+    # Версия и хеши провайдера — из lock-файла infra/.
+    assert (tmp_path / "calls.lock").read_text() == Path("infra/.terraform.lock.hcl").read_text()
     assert tofu_calls(tmp_path)[1] == f"tofu -chdir=infra state push -no-color -lock=false {PLAIN}"
     assert pairs["result"] == "restored"
     assert not (root / "infra" / "errored.tfstate").exists()
@@ -389,6 +401,19 @@ def test_recovery_without_the_passphrase_keeps_the_lock_and_the_copy(tmp_path: P
     assert "TF_VAR_state_passphrase" in pairs["reason"]
     assert (root / "infra" / "errored.tfstate").exists()
     assert (tmp_path / "report" / "errored.tfstate.enc").exists()
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_recovery_without_the_provider_lock_file_does_not_go_to_the_registry(tmp_path: Path) -> None:
+    """Без lock-файла init расшифровки пошёл бы в реестр: не скопировать — не восстанавливать."""
+    result, pairs, root = recover(
+        tmp_path, LOCK_JSON=str(own_lock(tmp_path)), ERRORED_TEXT=ENVELOPE, lock_file=False
+    )
+
+    assert result.returncode == 1
+    assert decrypt_calls(tmp_path) == []
+    assert "не скопировать для расшифровки" in pairs["reason"]
+    assert (root / "infra" / "errored.tfstate").exists()
     assert list((tmp_path / "tmp").iterdir()) == []
 
 
@@ -778,8 +803,8 @@ def test_recovery_runs_after_every_step_that_locks_the_state() -> None:
 
 
 def test_recovery_step_has_a_timeout() -> None:
-    """Сумма ожиданий в recover-state.sh — около 7,7 мин; без потолка шаг съел бы остаток job'а."""
-    assert step("recover")["timeout-minutes"] == 10
+    """Сумма ожиданий в recover-state.sh — 9,5 мин; без потолка шаг съел бы остаток job'а."""
+    assert step("recover")["timeout-minutes"] == 12
 
 
 def test_unsaved_state_leaves_the_runner_only_encrypted_and_briefly() -> None:

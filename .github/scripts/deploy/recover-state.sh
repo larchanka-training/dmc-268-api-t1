@@ -180,14 +180,24 @@ if [ -e "$errored" ]; then
   # хранилище получает его снова зашифрованным. Открытый файл — с правами
   # 600 и удаляется на выходе; открытый errored.tfstate (fallback) проходит
   # так же. Фраза — TF_VAR_state_passphrase.
+  #
+  # Ресурсы состояния требуют провайдера (kreuzwerker/docker), и `init` без
+  # него пошёл бы в реестр: медленный реестр уронил бы восстановление, а
+  # виноватой выглядела бы фраза. Провайдер берём из infra/.terraform/providers
+  # (его поставил `tofu init` шага infra — errored.tfstate без него не
+  # появляется), версию и хеши — из копии infra/.terraform.lock.hcl. Путь —
+  # абсолютный: `-chdir` меняет каталог, а скрипт идёт из корня репозитория.
+  # Без сети расшифровка проверена на OpenTofu 1.13.8.
   plain="$work/errored.tfstate"
-  mkdir "$work/decrypt" && cp infra/encryption.tf "$work/decrypt/" \
-    && cp "$errored" "$work/decrypt/terraform.tfstate" \
-    || fail "$errored не скопировать для расшифровки"
+  if ! { mkdir "$work/decrypt" && cp infra/encryption.tf infra/.terraform.lock.hcl "$work/decrypt/" \
+      && cp "$errored" "$work/decrypt/terraform.tfstate"; }; then
+    fail "$errored не скопировать для расшифровки"
+  fi
   (umask 077
-    timeout 60 tofu -chdir="$work/decrypt" init -input=false -no-color >/dev/null \
+    timeout 60 tofu -chdir="$work/decrypt" init -input=false \
+      -plugin-dir="$PWD/infra/.terraform/providers" -no-color >/dev/null \
       && timeout 60 tofu -chdir="$work/decrypt" state pull > "$plain") \
-    || fail "$errored не расшифровать (фраза TF_VAR_state_passphrase не задана или не та)"
+    || fail "$errored не расшифровать или не инициализировать (фраза TF_VAR_state_passphrase не задана или не та, либо нет провайдера в infra/.terraform/providers)"
   serial="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["serial"])' "$plain" 2>/dev/null)" \
     || fail "$errored не читается"
   note serial "$serial"

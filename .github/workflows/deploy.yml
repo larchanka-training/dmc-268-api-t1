@@ -458,9 +458,10 @@ jobs:
       # не записаться. Сколько времени GitHub даёт шагам после отмены, не
       # документировано: не успел — блокировку снимет следующий деплой.
       #
-      # Потолок шага — сумма ожиданий recover-state.sh: порт до 15 с, ssh до
-      # 15 с, хранилище до 120 с, блокировка, pull, push и unlock до 60, 60,
-      # 120 и 60 с — ≈ 7,7 мин.
+      # Потолок шага — сумма ожиданий recover-state.sh с запасом: порт до
+      # 15 с, ssh до 15 с, хранилище до 120 с; дальше под `timeout` —
+      # блокировка 60 с, расшифровка errored.tfstate (init и state pull) по
+      # 60 с, pull 60 с, push 120 с и unlock 60 с — 570 с, 9,5 мин.
       - name: Восстановить состояние OpenTofu
         id: recover
         if: >-
@@ -468,7 +469,7 @@ jobs:
           steps.infra.outcome == 'failure' || steps.infra.outcome == 'cancelled' ||
           steps.plan.outcome == 'failure' || steps.plan.outcome == 'cancelled' ||
           steps.apply.outcome == 'failure' || steps.apply.outcome == 'cancelled')
-        timeout-minutes: 10
+        timeout-minutes: 12
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
