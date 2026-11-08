@@ -7,7 +7,9 @@
 
 Кейс узнаётся по пути файла в сообщении с кодом. На пункт правила оракул
 ссылается, только если правило показано в сообщении с правилами, - как честная
-модель: без `rules.md` ей не на что сослаться.
+модель: без `rules.md` ей не на что сослаться. Категория нарушения правила -
+первая из допустимых в разметке (`categories`): без ссылки на пункт замечание
+засчитывается только по ней.
 """
 
 import json
@@ -54,7 +56,7 @@ class OracleLlmGateway:
                 "filePath": issue.path,
                 "side": "new",
                 "line": issue.line,
-                "category": issue.category or "readability",
+                "category": issue.category or issue.categories[0],
                 "severity": "medium",
                 "message": f"Нарушение {issue.id}.",
                 "confidence": None,

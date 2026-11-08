@@ -6,6 +6,7 @@ import pytest
 
 from app.domain.repo_rules import applicable_rules, parse_rules_markdown
 
+from ..scoring import MAX_EXPECTED_PER_CASE
 from .corpus import CONFIGS, load_case, load_corpus
 
 CORPUS = load_corpus()
@@ -66,3 +67,53 @@ def test_a_case_without_expected_is_rejected_unless_optional(tmp_path: Path) -> 
     with pytest.raises(KeyError, match="expected"):
         load_case(path)
     assert load_case(path, expected_required=False).expected == ()
+
+
+_RULE_CASE = """\
+title: т
+pull_request: {title: т, description: о}
+files: {a.py: "print(1)"}
+expected:
+  - id: print
+    path: a.py
+    contains: "print(1)"
+    rule: [Logging, 1]
+"""
+
+
+def test_a_rule_item_carries_its_allowed_categories(tmp_path: Path) -> None:
+    path = tmp_path / "rule.yaml"
+    path.write_text(_RULE_CASE + "    categories: [readability, correctness]\n", encoding="utf-8")
+
+    (issue,) = load_case(path).expected
+
+    assert issue.categories == ("readability", "correctness")
+
+
+def test_a_rule_item_without_categories_is_rejected(tmp_path: Path) -> None:
+    # Без списка любое замечание в окне засчиталось бы за нарушение пункта.
+    path = tmp_path / "rule.yaml"
+    path.write_text(_RULE_CASE, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="categories"):
+        load_case(path)
+
+
+def test_a_case_with_too_many_expected_is_rejected_at_load(tmp_path: Path) -> None:
+    # Перебор пар в match() экспоненциален: лишний кейс ловим при загрузке,
+    # до платного вызова модели, а не после.
+    n = MAX_EXPECTED_PER_CASE + 1
+    code = "\\n".join(f"x{i} = {i}" for i in range(n))
+    items = "".join(
+        f"  - {{id: e{i}, path: a.py, contains: 'x{i} = ', category: correctness}}\n"
+        for i in range(n)
+    )
+    path = tmp_path / "big.yaml"
+    path.write_text(
+        f'title: т\npull_request: {{title: т, description: о}}\nfiles: {{a.py: "{code}"}}\n'
+        f"expected:\n{items}",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=f"не больше {MAX_EXPECTED_PER_CASE}"):
+        load_case(path)

@@ -1,6 +1,6 @@
 """Метрики нагрузочного прогона - чистые функции, без стенда."""
 
-import threading
+import multiprocessing
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -99,10 +99,83 @@ def test_report_keeps_the_throughput_line_otherwise() -> None:
 
 
 def test_leaving_workers_that_never_started_does_not_replace_the_original_error() -> None:
-    # Отправка вебхуков упала до `__enter__`: `join` незапущенного потока дал бы RuntimeError.
+    # Запуск упал на середине `__enter__`: `join` незапущенного процесса дал бы AssertionError.
+    context = multiprocessing.get_context("spawn")
     workers = _Workers.__new__(_Workers)
-    workers._started = False
-    workers._threads = [threading.Thread(target=lambda: None)]
-    workers._workers = []
+    workers._processes = [context.Process(target=int)]
+    workers._stop = context.Event()
+    workers._events = context.Queue()
+    workers.errors = []
 
     workers.__exit__()
+
+    assert workers.errors == []
+
+
+def _second_run(*deliveries: Delivery, runs: tuple[RunTiming, ...]) -> dict[str, Any]:
+    """Сводка по PR 1 с двумя прогонами: исходный и повтор доставки."""
+    return summarize(
+        _result(
+            profile=LoadProfile(pull_requests=1, redeliveries=1),
+            deliveries=deliveries,
+            runs=runs,
+            reviews_per_pr={1: 2},
+        )
+    )
+
+
+def test_a_redelivery_sent_first_makes_the_later_first_delivery_an_extra_run_after_completion() -> None:
+    # План доставок перемешан: повтор ушёл раньше исходной доставки, его прогон
+    # успел завершиться, и исходная доставка законно создала второй прогон.
+    summary = _second_run(
+        Delivery(1, True, 202, 0.010, "run-a"),
+        Delivery(1, False, 202, 0.010, "run-b"),
+        runs=(
+            RunTiming(1, "completed", T0, T0 + timedelta(seconds=1), 0.5, "run-a"),
+            RunTiming(
+                1, "completed", T0 + timedelta(seconds=2), T0 + timedelta(seconds=3), 0.5, "run-b"
+            ),
+        ),
+    )
+
+    assert summary["pull_requests_with_extra_runs"] == []
+    assert summary["extra_runs_after_completion"] == [1]
+    assert summary["pull_requests_without_one_review_per_run"] == []
+
+
+def test_a_redelivery_after_completion_of_the_first_run_is_not_a_violation() -> None:
+    summary = _second_run(
+        Delivery(1, False, 202, 0.010, "run-a"),
+        Delivery(1, True, 202, 0.010, "run-b"),
+        runs=(
+            RunTiming(1, "completed", T0, T0 + timedelta(seconds=1), 0.5, "run-a"),
+            RunTiming(
+                1, "completed", T0 + timedelta(seconds=2), T0 + timedelta(seconds=3), 0.5, "run-b"
+            ),
+        ),
+    )
+
+    assert summary["pull_requests_with_extra_runs"] == []
+    assert summary["extra_runs_after_completion"] == [1]
+
+
+@pytest.mark.parametrize("redelivery_first", [False, True])
+def test_a_second_run_created_before_the_first_finished_is_a_violation(
+    redelivery_first: bool,
+) -> None:
+    deliveries = (
+        Delivery(1, False, 202, 0.010, "run-a"),
+        Delivery(1, True, 202, 0.010, "run-b"),
+    )
+    summary = _second_run(
+        *(reversed(deliveries) if redelivery_first else deliveries),
+        runs=(
+            RunTiming(1, "completed", T0, T0 + timedelta(seconds=3), 0.5, "run-a"),
+            RunTiming(
+                1, "completed", T0 + timedelta(seconds=1), T0 + timedelta(seconds=4), 0.5, "run-b"
+            ),
+        ),
+    )
+
+    assert summary["pull_requests_with_extra_runs"] == [1]
+    assert summary["extra_runs_after_completion"] == []

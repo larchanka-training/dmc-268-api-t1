@@ -13,7 +13,7 @@ def assert_consistent(summary: dict[str, Any], *, strict: bool = False) -> None:
     assert summary["pull_requests_with_extra_runs"] == []
     assert summary["pull_requests_without_one_review_per_run"] == []
     if strict:
-        assert summary["redeliveries_after_completion"] == []
+        assert summary["extra_runs_after_completion"] == []
     assert summary["unfinished_runs"] == 0
     assert set(summary["runs_by_status"]) == {"completed"}, summary["runs_by_status"]
     assert (summary["queue_left"], summary["dlq_left"]) == (0, 0)

@@ -9,7 +9,9 @@
 заглушка с задержкой в нагрузочном прогоне).
 
 API и воркер получают каждый свой контейнер, как два процесса в проде: общие у
-них только база, брокер и «GitHub».
+них только база, брокер и «GitHub». Нагрузочный прогон запускает воркеры
+настоящими процессами: они собирают контейнер `process_container` с клиентом к
+тому же `FakeGitHub`, поднятому по HTTP на loopback.
 """
 
 import hashlib
@@ -24,6 +26,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+import httpx
 import httpx2
 import pika
 from fastapi import FastAPI
@@ -158,37 +161,8 @@ class Stack:
 
     def container(self, llm: LlmGateway | None = None) -> Container:
         """Контейнер одного процесса: свои HTTP-клиент GitHub, соединение с брокером и кэш."""
-        client = self.github.client()
-        auth = GitHubAppAuth(
-            APP_ID, self.settings.github_app_private_key.get_secret_value(), client
-        )
-        gateway = GitHubVcsGateway(auth, client, sleep=lambda _: None)
-        return Container(
-            engine=self.engine,
-            settings=self.settings,
-            # Вход и подключение репозиториев стенд не проходит: токенов пользователя нет.
-            _token_cipher=None,
-            _job_queue=RabbitMQJobQueue(self.rabbitmq_url),
-            _vcs_gateway=gateway,
-            # Кабинет ходит в тот же поддельный GitHub: свои лимиты стенду не нужны.
-            _cabinet_vcs_gateway=gateway,
-            _vcs_limits=WORKER_VCS_LIMITS,
-            _installation_catalog=FakeInstallationCatalog([]),
-            _oauth_providers={},
-            _cache_store=InMemoryCacheStore(),
-            _run_diff_cache=InMemoryCacheStore(max_entries=24),
-            _rules_cache=InMemoryCacheStore(max_entries=256),
-            _run_changes=PostgresRunChanges(listen_conninfo(self.settings.database_url)),
-            _llm_gateway=llm,
-            _definition_extractor=TreeSitterDefinitionExtractor(),
-            _app_slug_retry_at=0.0,
-            # Prometheus у стенда нет: статус сервиса — unknown, запросов нет.
-            _service_status=ServiceStatusMonitor(
-                PrometheusAlertSource(None),
-                ttl_seconds=SERVICE_STATUS_TTL_SECONDS,
-                monotonic=time.monotonic,
-                now=lambda: datetime.now(UTC),
-            ),
+        return process_container(
+            self.settings, self.engine, self.rabbitmq_url, self.github.client(), llm
         )
 
     def api(self) -> FastAPI:
@@ -307,6 +281,49 @@ class Stack:
             (payload,) = work.context_payloads.list_for_run(UUID(str(run_id)))
         assert payload.body is not None
         return payload.body
+
+
+def process_container(
+    settings: Settings,
+    engine: Engine,
+    rabbitmq_url: str,
+    github: httpx.Client,
+    llm: LlmGateway | None = None,
+) -> Container:
+    """Контейнер процесса стенда; `github` - клиент с `base_url` поддельного GitHub.
+
+    В процессе стенда это `FakeGitHub.client()`, в отдельном процессе воркера
+    нагрузочного прогона - клиент к тому же фейку по HTTP на loopback.
+    """
+    auth = GitHubAppAuth(APP_ID, settings.github_app_private_key.get_secret_value(), github)
+    gateway = GitHubVcsGateway(auth, github, sleep=lambda _: None)
+    return Container(
+        engine=engine,
+        settings=settings,
+        # Вход и подключение репозиториев стенд не проходит: токенов пользователя нет.
+        _token_cipher=None,
+        _job_queue=RabbitMQJobQueue(rabbitmq_url),
+        _vcs_gateway=gateway,
+        # Кабинет ходит в тот же поддельный GitHub: свои лимиты стенду не нужны.
+        _cabinet_vcs_gateway=gateway,
+        _vcs_limits=WORKER_VCS_LIMITS,
+        _installation_catalog=FakeInstallationCatalog([]),
+        _oauth_providers={},
+        _cache_store=InMemoryCacheStore(),
+        _run_diff_cache=InMemoryCacheStore(max_entries=24),
+        _rules_cache=InMemoryCacheStore(max_entries=256),
+        _run_changes=PostgresRunChanges(listen_conninfo(settings.database_url)),
+        _llm_gateway=llm,
+        _definition_extractor=TreeSitterDefinitionExtractor(),
+        _app_slug_retry_at=0.0,
+        # Prometheus у стенда нет: статус сервиса — unknown, запросов нет.
+        _service_status=ServiceStatusMonitor(
+            PrometheusAlertSource(None),
+            ttl_seconds=SERVICE_STATUS_TTL_SECONDS,
+            monotonic=time.monotonic,
+            now=lambda: datetime.now(UTC),
+        ),
+    )
 
 
 def deliver(
