@@ -4,9 +4,12 @@
 # `stand`, её копия хранится вне GitHub: без фразы состояние не восстановить
 # (infra/README.md, «Шифрование состояния»).
 #
-# Шаг 1: fallback на открытое состояние — первый apply читает старый открытый
-# объект и пишет его уже зашифрованным (plan не переписывает). Шаг 2 — убрать
-# fallback и включить `enforced = true`.
+# Шаг 1: у `state` fallback на открытое состояние — первый apply читает старый
+# открытый объект и пишет его уже зашифрованным (plan не переписывает). У `plan`
+# fallback нет: план создаётся и применяется в одном job'е, старых открытых
+# планов не бывает. Шаг 2 — убрать fallback у `state` и включить
+# `enforced = true`. Откат — не revert, а `state` наоборот (infra/README.md,
+# «Шифрование состояния», «Откат»): иначе зашифрованное состояние не прочитать.
 #
 # Фраза нужна уже `tofu init` с бэкендом; `init -backend=false` и `validate`
 # идут без неё (CI). Переменная — здесь, а не в variables.tf: файл
@@ -50,9 +53,6 @@ terraform {
     # `tofu show -json` с фразой его читает (plan.sh, infra.sh).
     plan {
       method = method.aes_gcm.main
-      fallback {
-        method = method.unencrypted.legacy
-      }
     }
   }
 }
