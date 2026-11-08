@@ -16,6 +16,7 @@ variables {
   postgres_replication_password = "repl:ication@pass-16"
   github_webhook_secret         = "webhook-secret"
   user_token_encryption_key     = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  state_passphrase              = "test-state-passphrase-16+"
   llm_backend                   = "stub"
   # Доставка алертов: значения общие для всех run; пустые и битые — в
   # отдельных run ниже.

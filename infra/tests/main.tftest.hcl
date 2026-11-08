@@ -14,6 +14,7 @@ variables {
   postgres_replication_password = "repl:ication@pass-16"
   github_webhook_secret         = "webhook-secret"
   user_token_encryption_key     = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  state_passphrase              = "test-state-passphrase-16+"
   llm_backend                   = "stub"
 }
 
@@ -377,6 +378,30 @@ run "empty_secrets_rejected" {
   }
 
   expect_failures = [var.github_webhook_secret, var.postgres_password, var.rabbitmq_password, var.postgres_replication_password]
+}
+
+# Фраза шифрования состояния: пустая (секрет не задан) или короче минимума
+# pbkdf2 отклоняется до изменений на сервере.
+run "short_state_passphrase_rejected" {
+  command = plan
+
+  variables {
+    state_passphrase = "short"
+  }
+
+  expect_failures = [var.state_passphrase]
+}
+
+# Плейсхолдер из terraform.tfvars.example проходит проверку длины, а tfvars
+# перекрывает TF_VAR_state_passphrase — отклоняется отдельно.
+run "placeholder_state_passphrase_rejected" {
+  command = plan
+
+  variables {
+    state_passphrase = "CHANGE_ME_STATE_PASSPHRASE_16_PLUS"
+  }
+
+  expect_failures = [var.state_passphrase]
 }
 
 run "ollama_without_model_rejected" {
