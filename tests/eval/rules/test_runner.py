@@ -12,7 +12,12 @@ import time
 import pytest
 from pydantic import BaseModel
 
-from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
+from app.application.ports.llm_gateway import (
+    LlmGateway,
+    LlmRequest,
+    LlmResponse,
+    LlmTask,
+)
 
 from ...conftest import requires_broker, requires_db
 from ...e2e.stack import Stack
@@ -87,4 +92,29 @@ def test_a_failed_run_is_recorded_and_the_eval_goes_on(stack: Stack) -> None:
     assert all(r.status == "completed" for r in passed)
     assert all(r.score is not None for r in passed)
     (metrics,) = config_metrics(passed, "rules")
+    assert (metrics.precision, metrics.recall) == (1.0, 1.0)
+
+
+def test_a_message_left_by_a_failed_run_is_purged_before_the_next_case(
+    stack: Stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = stack.work
+    calls = 0
+
+    def fails_once_without_consuming(llm: LlmGateway, messages: int, *, timeout: float) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise AssertionError(f"воркер не обработал {messages} сообщений за {timeout:g} с")
+        work(llm, messages, timeout=timeout)
+
+    monkeypatch.setattr(stack, "work", fails_once_without_consuming)
+
+    results = run_corpus(stack, OracleLlmGateway(CORPUS), CORPUS[:2], ["rules"], 1, timeout=60)
+
+    failed, following = results
+    assert failed.status == "error"
+    # Без очистки воркер следующего кейса забрал бы сообщение упавшего прогона.
+    assert following.status == "completed", following.failure
+    (metrics,) = config_metrics([following], "rules")
     assert (metrics.precision, metrics.recall) == (1.0, 1.0)
