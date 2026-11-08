@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from ..scoring import ExpectedIssue
+from ..scoring import MAX_EXPECTED_PER_CASE, ExpectedIssue
 
 ROOT = Path(__file__).parent
 CORPUS_DIR = ROOT / "corpus"
@@ -77,13 +77,21 @@ def load_case(path: Path, *, expected_required: bool = True) -> Case:
     if expected_required and "expected" not in raw:
         raise KeyError(f"{path.name}: нет раздела expected (чистый PR - expected: [])")
     files = {str(p): str(content) for p, content in raw["files"].items()}
+    expected = tuple(_expected(files, item, path.stem) for item in raw.get("expected") or [])
+    # Сопоставление перебирает пары экспоненциально: перебор ловим здесь, до
+    # платного вызова модели, а не в match() после него.
+    if len(expected) > MAX_EXPECTED_PER_CASE:
+        raise ValueError(
+            f"{path.stem}: {len(expected)} эталонных нарушений, допустимо не больше "
+            f"{MAX_EXPECTED_PER_CASE}"
+        )
     return Case(
         id=path.stem,
         title=raw["title"],
         pr_title=raw["pull_request"]["title"],
         pr_description=raw["pull_request"]["description"],
         files=files,
-        expected=tuple(_expected(files, item, path.stem) for item in raw.get("expected") or []),
+        expected=expected,
     )
 
 

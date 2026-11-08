@@ -6,6 +6,7 @@ import pytest
 
 from app.domain.repo_rules import applicable_rules, parse_rules_markdown
 
+from ..scoring import MAX_EXPECTED_PER_CASE
 from .corpus import CONFIGS, load_case, load_corpus
 
 CORPUS = load_corpus()
@@ -95,4 +96,24 @@ def test_a_rule_item_without_categories_is_rejected(tmp_path: Path) -> None:
     path.write_text(_RULE_CASE, encoding="utf-8")
 
     with pytest.raises(ValueError, match="categories"):
+        load_case(path)
+
+
+def test_a_case_with_too_many_expected_is_rejected_at_load(tmp_path: Path) -> None:
+    # Перебор пар в match() экспоненциален: лишний кейс ловим при загрузке,
+    # до платного вызова модели, а не после.
+    n = MAX_EXPECTED_PER_CASE + 1
+    code = "\\n".join(f"x{i} = {i}" for i in range(n))
+    items = "".join(
+        f"  - {{id: e{i}, path: a.py, contains: 'x{i} = ', category: correctness}}\n"
+        for i in range(n)
+    )
+    path = tmp_path / "big.yaml"
+    path.write_text(
+        f'title: т\npull_request: {{title: т, description: о}}\nfiles: {{a.py: "{code}"}}\n'
+        f"expected:\n{items}",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=f"не больше {MAX_EXPECTED_PER_CASE}"):
         load_case(path)
