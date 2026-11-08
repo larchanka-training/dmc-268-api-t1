@@ -25,6 +25,7 @@ from app.application.use_cases.auth import SignedIn
 from app.application.use_cases.run_diff import RUN_DIFF_MAX_LINES
 from app.config import Settings
 from app.domain.entities import (
+    ContextPayload,
     DiffAnchor,
     Finding,
     InstallationRepository,
@@ -300,6 +301,62 @@ def test_a_failed_run_reports_the_stage_it_failed_in() -> None:
 
     assert body["failed_stage"] == "analysing"
     assert body["failure_reason"] == "модель недоступна"
+
+
+def _add_payloads(uow: FakeUnitOfWork, run: ReviewRun, count: int) -> None:
+    """Пакеты контекста прогона; i-й записан на i дней раньше `NOW`."""
+    for i in range(count):
+        written = NOW - timedelta(days=i)
+        uow.context_payloads.add(
+            ContextPayload(
+                id=new_id(),
+                review_run_id=run.id,
+                chunk_index=i,
+                tiers=("diff",),
+                file_paths=("app/main.py",),
+                token_count=10,
+                content_sha256=f"chunk{i}",
+                body={"text": "x"},
+                created_at=written,
+                updated_at=written,
+            )
+        )
+
+
+def test_a_run_with_live_bodies_has_no_diff_expiry() -> None:
+    """Change diff-retention-visibility: стёрто не всё — дифф не удалён."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    _add_payloads(uow, run, 2)
+    uow.context_payloads.expire_bodies(NOW, NOW + timedelta(days=30), 10)  # старший пакет из двух
+    client = _client(uow)
+
+    body = client.get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["diff_expired_at"] is None
+
+
+def test_a_run_with_all_bodies_erased_reports_the_last_expiry_in_utc() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    _add_payloads(uow, run, 2)
+    uow.context_payloads.expire_bodies(NOW, NOW + timedelta(days=30), 10)
+    uow.context_payloads.expire_bodies(NOW + timedelta(days=1), NOW + timedelta(days=31, hours=3), 10)
+    client = _client(uow)
+
+    body = client.get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["diff_expired_at"] == "2026-10-30T03:00:00Z"
+
+
+def test_a_run_without_context_payloads_has_no_diff_expiry() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, status=ReviewRunStatus.FAILED, failed_stage=ReviewRunStatus.BUILDING_CONTEXT)
+    client = _client(uow)
+
+    body = client.get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["diff_expired_at"] is None
 
 
 def _finding(run: ReviewRun, rule: RuleRef | None) -> Finding:
@@ -950,6 +1007,65 @@ def test_run_without_base_sha_is_409_without_github() -> None:
     assert response.json()["code"] == "DIFF_UNAVAILABLE"
     assert "repository_installation_id" not in catalog.calls
     assert vcs.calls == []
+
+
+def _erase_all_bodies(uow: FakeUnitOfWork, run: ReviewRun) -> None:
+    _add_payloads(uow, run, 2)
+    uow.context_payloads.expire_bodies(NOW + timedelta(days=1), NOW + timedelta(days=30), 10)
+
+
+@pytest.mark.parametrize("base_sha", [BASE_SHA, None], ids=["with-base-sha", "without-base-sha"])
+def test_expired_diff_is_410_without_github(base_sha: str | None) -> None:
+    """Change diff-retention-visibility: «Дифф удалён по сроку хранения» и стёртый прогон без base_sha —
+    `410 DIFF_EXPIRED`, а не `409 DIFF_UNAVAILABLE`; к GitHub не ходили."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=base_sha)
+    _erase_all_bodies(uow, run)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([VISIBLE], installation_ids={"octo-org/api": 77})
+
+    response = _client(uow, catalog, vcs).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 410
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["code"] == "DIFF_EXPIRED"
+    assert body["trace_id"] == response.headers["X-Trace-ID"]
+    assert "repository_installation_id" not in catalog.calls
+    assert vcs.calls == []
+
+
+def test_partially_erased_run_still_gets_its_diff() -> None:
+    """Сценарий «Тела стёрты не у всех пакетов»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    _add_payloads(uow, run, 2)
+    uow.context_payloads.expire_bodies(NOW, NOW + timedelta(days=30), 10)  # старший из двух
+
+    files = _diff_files(_client(uow, vcs=FakeVcs(diff=RUN_DIFF)).get(f"/api/v1/reviews/{run.id}/diff"))
+
+    assert "app/main.py" in files
+
+
+def test_run_without_context_payloads_gets_its_diff() -> None:
+    """Сценарий «Прогон без пакетов контекста отдаёт дифф»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA, status=ReviewRunStatus.FAILED, failed_stage=ReviewRunStatus.BUILDING_CONTEXT)
+
+    files = _diff_files(_client(uow, vcs=FakeVcs(diff=RUN_DIFF)).get(f"/api/v1/reviews/{run.id}/diff"))
+
+    assert "app/main.py" in files
+
+
+def test_pair_without_changes_is_200_with_no_files() -> None:
+    """Сценарий «Изменений нет — пустой дифф, а не отказ»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    response = _client(uow, vcs=FakeVcs(diff="")).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 200
+    assert response.json() == {"files": []}
 
 
 def test_app_removed_from_the_repository_is_404_without_the_diff() -> None:

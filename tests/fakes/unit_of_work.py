@@ -49,6 +49,7 @@ from app.domain.enums import (
 )
 from app.domain.lifecycle import next_status
 from app.domain.llm_usage import LlmUsage
+from app.domain.payload_retention import BodyExpiryStats
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
 
@@ -471,6 +472,15 @@ class FakeContextPayloadRepo:
             for p in self._items
         ]
         return len(expired)
+
+    def body_expiry_stats_for_run(self, review_run_id: UUID) -> BodyExpiryStats:
+        expiries = [p.body_expired_at for p in self.list_for_run(review_run_id)]
+        erased = [at for at in expiries if at is not None]
+        return BodyExpiryStats(
+            payload_count=len(expiries),
+            erased_count=len(erased),
+            last_expired_at=max(erased, default=None),
+        )
 
 
 class FakeFindingRepo:

@@ -38,7 +38,7 @@ from app.api.errors import (
     ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION,
     ERRORS_409_DIFF_UNAVAILABLE,
     ERRORS_409_REVIEW_ACTIVE,
-    ERRORS_410_COMMIT_NOT_FOUND,
+    ERRORS_410_COMMIT_NOT_FOUND_OR_DIFF_EXPIRED,
     ERRORS_413_BODY,
     ERRORS_422,
     ERRORS_422_OR_DIFF_TOO_LARGE,
@@ -80,6 +80,7 @@ from app.application.use_cases.run_diff import (
     RUN_DIFF_MAX_LINES,
     RepositoryNotInstalled,
     RunCommitNotFound,
+    RunDiffExpired,
     RunDiffUnavailable,
     load_run_diff,
 )
@@ -98,6 +99,7 @@ from app.domain.enums import (
 )
 from app.domain.ids import new_id
 from app.domain.llm_usage import LlmUsage
+from app.domain.payload_retention import diff_expired_at
 from app.domain.provider_links import merge_request_url
 from app.domain.run_list import run_list_filter
 from app.domain.vcs_errors import DiffTooLargeError, VcsError
@@ -138,7 +140,9 @@ _DIFF_DESCRIPTION = (
     "Требует сессию. Дифф пары коммитов base_sha...head_sha прогона у GitHub (задача #87): все изменённые "
     "файлы в порядке диффа, включая файлы, которые ревью отфильтровало (lock-файлы, сгенерированное). "
     "Видимость прогона — то же правило, что у GET /reviews: невидимый или несуществующий прогон — "
-    "404 REVIEW_NOT_FOUND, без запроса установки приложения и диффа к GitHub. Дифф кэшируется в памяти "
+    "404 REVIEW_NOT_FOUND, без запроса установки приложения и диффа к GitHub. Пара коммитов без изменений — "
+    "200 с пустым files. 410 DIFF_EXPIRED — дифф прогона удалён по сроку хранения (diff_expired_at прогона "
+    "не null): проверяется первым, раньше base_sha, кэша и GitHub. Дифф кэшируется в памяти "
     "API по паре коммитов на час, без привязки к пользователю: видимость проверяется до чтения кэша; "
     "номер установки приложения спрашивается у GitHub на каждом промахе кэша. Отказы не кэшируются: 409 DIFF_UNAVAILABLE — у прогона нет base_sha, "
     "к GitHub не ходили; 404 REPOSITORY_NOT_IN_INSTALLATION — приложение не установлено на репозиторий или "
@@ -354,6 +358,14 @@ class ReviewRunResponse(BaseModel):
     failure_reason: str | None = Field(description="Почему прогон упал; null, если не падал.")
     failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
     last_progress_at: UtcDatetime = Field(description="Время последнего перехода состояния.")
+    diff_expired_at: UtcDatetime | None = Field(
+        description=(
+            "Когда дифф прогона удалён по сроку хранения (CONTEXT_PAYLOAD_RETENTION_DAYS): время стирания "
+            "последнего из его пакетов контекста. null, пока стёрты не все тела пакетов, и у прогона без "
+            "пакетов (упал до сборки контекста). Не null — GET /reviews/{review_run_id}/diff отвечает "
+            "410 DIFF_EXPIRED."
+        )
+    )
     created_at: UtcDatetime = Field(description="Когда прогон создан.")
     updated_at: UtcDatetime = Field(description="Когда запись последний раз менялась.")
     findings: list[FindingResponse] = Field(description="Находки прогона: по времени создания, затем по id.")
@@ -651,7 +663,8 @@ def list_reviews(
         "Требует сессию. 404 REVIEW_NOT_FOUND, если прогона нет или он не виден пользователю. Находки — в "
         "стабильном порядке: по времени создания, затем по id. Прогон без находок — 200 с пустым findings. "
         "Опубликованные комментарии — по времени публикации, затем по id; пока прогон ничего не опубликовал — "
-        "пустой published_comments."
+        "пустой published_comments. diff_expired_at — когда дифф прогона удалён по сроку хранения: "
+        "заполнено, когда стёрты тела всех пакетов контекста прогона; иначе и у прогона без пакетов — null."
     ),
     responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
@@ -666,6 +679,7 @@ def get_review(
             **asdict(run),
             "usage": _usage_response(run.usage),
             "merge_request": _merge_request_summary(uow, run),
+            "diff_expired_at": diff_expired_at(uow.context_payloads.body_expiry_stats_for_run(run.id)),
             "findings": [{**asdict(f), **asdict(f.anchor)} for f in findings],
             "published_comments": [asdict(c) for c in comments],
         }
@@ -771,7 +785,7 @@ class ReviewRunStepListResponse(BaseModel):
     responses={
         **ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION,
         **ERRORS_409_DIFF_UNAVAILABLE,
-        **ERRORS_410_COMMIT_NOT_FOUND,
+        **ERRORS_410_COMMIT_NOT_FOUND_OR_DIFF_EXPIRED,
         **ERRORS_422_OR_DIFF_TOO_LARGE,
         **ERRORS_502_SCM_DIFF,
     },
@@ -783,9 +797,13 @@ def get_review_diff(
     vcs: VcsGateway = Depends(get_cabinet_vcs_gateway),
     cache: CacheStore = Depends(get_run_diff_cache),
     settings: Settings = Depends(get_settings),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> ReviewDiffResponse:
     # Синхронная `def`: шлюз и кэш блокирующие, FastAPI уводит ручку в threadpool.
     run, repository = run_and_repository
+    # Короткая транзакция: соединение с базой не держится, пока идёт запрос к GitHub.
+    with uow_factory() as uow:
+        expired_at = diff_expired_at(uow.context_payloads.body_expiry_stats_for_run(run.id))
     try:
         view = load_run_diff(
             run,
@@ -794,7 +812,10 @@ def get_review_diff(
             vcs=vcs,
             cache=cache,
             max_bytes=settings.run_diff_max_bytes,
+            diff_expired_at=expired_at,
         )
+    except RunDiffExpired:
+        raise ApiError(HTTPStatus.GONE, ErrorCode.DIFF_EXPIRED, "Дифф прогона удалён по сроку хранения.") from None
     except RunDiffUnavailable:
         raise ApiError(
             HTTPStatus.CONFLICT, ErrorCode.DIFF_UNAVAILABLE, "У прогона нет базового коммита: дифф построить не из чего."

@@ -707,6 +707,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     from .test_reviews_api import BASE_SHA, RUN_DIFF, Launch, _run_on_head
     from .test_reviews_api import _add_run as add_run
     from .test_reviews_api import _client as reviews_client
+    from .test_reviews_api import _erase_all_bodies as erase_all_bodies
 
     signed_in = repositories_client(FakeUnitOfWork())
     connected = FakeUnitOfWork()
@@ -714,6 +715,9 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     scm_down, _ = make_client(uow=FakeUow(), vcs=FakeVcs(error=VcsError("HTTP 502")))
     # Дифф прогона: свой unit of work на клиента — фейк откатывает незакоммиченное по выходу.
     without_base, commit_gone, too_large = FakeUnitOfWork(), FakeUnitOfWork(), FakeUnitOfWork()
+    expired = FakeUnitOfWork()
+    run_expired = add_run(expired, base_sha=BASE_SHA)
+    erase_all_bodies(expired, run_expired)
     run_without_base = add_run(without_base)
     run_commit_gone = add_run(commit_gone, base_sha=BASE_SHA)
     run_too_large = add_run(too_large, base_sha=BASE_SHA)
@@ -724,6 +728,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         signed_in.get("/api/v1/repositories", params={"limit": "abc"}),
         reviews_client(FakeUnitOfWork()).get("/api/v1/reviews/00000000-0000-0000-0000-000000000001"),
         reviews_client(without_base).get(f"/api/v1/reviews/{run_without_base.id}/diff"),
+        reviews_client(expired).get(f"/api/v1/reviews/{run_expired.id}/diff"),
         reviews_client(commit_gone, vcs=FakeVcs(error=VcsNotFoundError("HTTP 404"))).get(
             f"/api/v1/reviews/{run_commit_gone.id}/diff"
         ),
