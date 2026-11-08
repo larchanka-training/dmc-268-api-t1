@@ -17,7 +17,8 @@
 # errored.tfstate копией одного этого файла.
 #
 # Имена key_provider и method не менять: они записаны в метаданные
-# зашифрованного объекта. Смена фразы — новой парой с прежней в fallback.
+# зашифрованного объекта. Смена фразы — новой парой с прежней в fallback
+# (`unencrypted` на шаге 1 — во вложенном fallback: infra/README.md, «Ротация фразы»).
 
 variable "state_passphrase" {
   description = "Фраза шифрования состояния и плана OpenTofu (секрет STATE_PASSPHRASE_DMC268_T1)."
@@ -27,6 +28,14 @@ variable "state_passphrase" {
   validation {
     condition     = length(var.state_passphrase) >= 16
     error_message = "state_passphrase - не короче 16 символов (требование pbkdf2; openssl rand -base64 48); секрет STATE_PASSPHRASE_DMC268_T1 не задан или короткий."
+  }
+
+  # Плейсхолдер из terraform.tfvars.example длиннее 16 символов, а tfvars
+  # перекрывает TF_VAR_state_passphrase: без этой проверки состояние молча
+  # шифровалось бы плейсхолдером.
+  validation {
+    condition     = !startswith(var.state_passphrase, "CHANGE_ME")
+    error_message = "state_passphrase - плейсхолдер из terraform.tfvars.example; фраза задаётся через TF_VAR_state_passphrase, строку в terraform.tfvars удалите."
   }
 }
 

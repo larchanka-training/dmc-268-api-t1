@@ -392,6 +392,18 @@ run "short_state_passphrase_rejected" {
   expect_failures = [var.state_passphrase]
 }
 
+# Плейсхолдер из terraform.tfvars.example проходит проверку длины, а tfvars
+# перекрывает TF_VAR_state_passphrase — отклоняется отдельно.
+run "placeholder_state_passphrase_rejected" {
+  command = plan
+
+  variables {
+    state_passphrase = "CHANGE_ME_STATE_PASSPHRASE_16_PLUS"
+  }
+
+  expect_failures = [var.state_passphrase]
+}
+
 run "ollama_without_model_rejected" {
   command = plan
 

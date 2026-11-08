@@ -22,10 +22,12 @@ postgres_replication_password = "CHANGE_ME_REPLICATION_PASSWORD"
 github_webhook_secret = "CHANGE_ME_WEBHOOK"
 # Ключ шифрования токенов пользователя: `openssl rand -base64 32`.
 user_token_encryption_key = "CHANGE_ME_openssl_rand_base64_32_xxxxxxxxx="
-# Фраза шифрования состояния (infra/encryption.tf), не короче 16 символов. Для
-# хранилища стенда — та же, что в секрете STATE_PASSPHRASE_DMC268_T1, иначе
-# состояние не прочитать (README.md, «Шифрование состояния»).
-state_passphrase = "CHANGE_ME_STATE_PASSPHRASE_16_PLUS"
+# Фраза шифрования состояния (infra/encryption.tf) задаётся через
+# `export TF_VAR_state_passphrase=…`, а не здесь: terraform.tfvars перекрывает
+# переменную окружения, и забытая строка молча победила бы фразу из README.
+# Для хранилища стенда — та же, что в секрете STATE_PASSPHRASE_DMC268_T1
+# (README.md, «Шифрование состояния»). Плейсхолдер `CHANGE_ME…` отклоняется.
+# state_passphrase = "CHANGE_ME_STATE_PASSPHRASE_16_PLUS"
 # Адаптер модели воркера, значения по умолчанию нет: stub - без похода к
 # модели, ollama - локальная модель (тогда обязателен ollama_model).
 llm_backend = "stub"
