@@ -14,7 +14,7 @@
 - [ ] 2.1 Создать фразу `P=$(openssl rand -base64 48)`, сохранить `P` вне GitHub, затем `printf %s "$P" | gh secret set STATE_PASSPHRASE_DMC268_T1 --env stand`
 - [ ] 2.2 До мёржа: `tofu state pull > backup` локально, копию хранить вне репозитория
 - [ ] 2.3 После первого деплоя: объект `api/terraform.tfstate` в бакете — конверт с `encrypted_data`, а не JSON состояния (`jq 'keys'`)
-- [ ] 2.4 После 2.3: проверить копию фразы вне GitHub — `TF_VAR_state_passphrase=<копия> tofu init && tofu state pull | jq .serial`. До первого деплоя проверка ничего не значит: состояние открыто, и `fallback` читает его с любой фразой
+- [ ] 2.4 После 2.3: проверить копию фразы вне GitHub — `export TF_VAR_state_passphrase=<копия>` отдельной строкой (префикс перед `init && …` до `state pull` не доходит, и тот взял бы прежний `export`), затем `cd infra && tofu init && tofu state pull | jq .serial`. До первого деплоя проверка ничего не значит: состояние открыто, и `fallback` читает его с любой фразой
 
 ## 3. Шаг 2: обязательное шифрование (отдельный пул-реквест)
 
