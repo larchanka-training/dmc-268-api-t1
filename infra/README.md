@@ -822,9 +822,16 @@ cd infra && tofu force-unlock <ID из ошибки>
 
 Состояние и сохранённый план OpenTofu шифрует сам (`infra/encryption.tf`, #147): ключ выводит `key_provider "pbkdf2"` из фразы, шифр — `method "aes_gcm"`. В состоянии лежат значения всех секретов стека — пароли базы, брокера и реплики, ключ GitHub App, секрет вебхука, ключ шифрования токенов, — и без шифрования доступ к бакету открывал бы их все. Теперь в бакете лежит конверт `{encrypted_data, encryption_version, lineage, meta, serial}`: serial и lineage читаются, ресурсы и значения — только с фразой. Зашифрован и `infra/errored.tfstate`, который остаётся на раннере после упавшей записи.
 
-Сейчас идёт шаг 1 из двух: у `state` и `plan` есть `fallback` на `method "unencrypted"`, чтобы первый деплой прочитал прежнее открытое состояние. Любой `apply` (и `apply -refresh-only`) переписывает его зашифрованным, даже без изменений; `plan` — нет. Шаг 2 — `enforced = true` без `fallback` и удаление старых открытых версий объекта в бакете (задачи — `openspec/changes/tfstate-encryption/tasks.md`).
+Сейчас идёт шаг 1 из двух: у `state` есть `fallback` на `method "unencrypted"`, чтобы первый деплой прочитал прежнее открытое состояние. Любой `apply` (и `apply -refresh-only`) переписывает его зашифрованным, даже без изменений; `plan` — нет. У `plan` `fallback` нет: план создаётся и применяется в одном job'е, старых открытых планов не бывает. Шаг 2 — `enforced = true` без `fallback` у `state` и удаление старых открытых версий объекта в бакете (задачи — `openspec/changes/tfstate-encryption/tasks.md`).
 
-**Где фраза.** Секрет `STATE_PASSPHRASE_DMC268_T1` в environment `stand`; деплой передаёт его как `TF_VAR_state_passphrase` всем шагам `tofu` и восстановлению. Не короче 16 символов (проверка переменной; `openssl rand -base64 48`). Копия фразы **обязательно** хранится вне GitHub — секрет GitHub обратно не прочитать, а без фразы состояние не открыть.
+**Где фраза.** Секрет `STATE_PASSPHRASE_DMC268_T1` в environment `stand`; деплой передаёт его как `TF_VAR_state_passphrase` всем шагам `tofu` и восстановлению. Не короче 16 символов (проверка переменной). Копия фразы **обязательно** хранится вне GitHub — секрет GitHub обратно не прочитать, а без фразы состояние не открыть. Поэтому фраза сначала сохраняется вне GitHub, а секрет ставится из той же переменной:
+
+```bash
+P=$(openssl rand -base64 48)     # сохранить P вне GitHub, потом:
+printf %s "$P" | gh secret set STATE_PASSPHRASE_DMC268_T1 --env stand
+```
+
+Копию проверить после первого деплоя с шифрованием (или ротации), когда объект в бакете уже зашифрован: `TF_VAR_state_passphrase=<копия> tofu init && tofu state pull | jq .serial`. Раньше проверка ничего не значит — открытое состояние `fallback` читает с любой фразой. Резервную копию состояния (`tofu state pull > backup`) удалять только после этой проверки.
 
 **Локально.** Фраза нужна уже `tofu init` с настоящим бэкендом — без неё он падает: «depends on var.state_passphrase which is not available»:
 
@@ -845,13 +852,35 @@ aws s3 cp s3://dmc268-tfstate/api/terraform.tfstate - --endpoint-url http://127.
 
 **Ротация фразы.** Существующие `key_provider` и `method` не переименовывать: документация OpenTofu предупреждает, что переименованный провайдер или метод не откроет уже зашифрованное состояние.
 
-1. Добавить в `encryption.tf` новый `key_provider "pbkdf2"` с новым именем и новой переменной фразы и новый `method "aes_gcm"` на нём; у `state` и `plan` основным поставить новый метод, прежний `aes_gcm` — в `fallback` (вместе с `unencrypted`, пока идёт шаг 1).
+1. Добавить в `encryption.tf` новый `key_provider "pbkdf2"` с новым именем и новой переменной фразы и новый `method "aes_gcm"` на нём; у `state` и `plan` основным поставить новый метод, прежний `aes_gcm` — в `fallback` (у `state` — вместе с `unencrypted`, пока идёт шаг 1; у `plan` — только прежний `aes_gcm`).
 2. Завести новый секрет, передать его в `deploy.yml`, выкатить: `apply` перешифрует состояние новым ключом.
 3. Проверить объект в бакете (выше) и следующим пул-реквестом убрать прежние провайдер, метод, переменную и секрет. Копию новой фразы — вне GitHub, как и прежней.
 
+**Откат.** Revert пул-реквеста с шифрованием ломает каждый деплой: состояние в бакете уже зашифровано, и без блока `encryption` `tofu init` и `plan` падают с «This state file is encrypted and can not be read without an encryption configuration». Откатывать — в обратную сторону, с той же фразой в секрете:
+
+1. Пул-реквест, где в `encryption.tf` `state` пишет открыто и читает зашифрованное, а `plan` — открытый:
+
+   ```hcl
+   state {
+     method = method.unencrypted.legacy
+     fallback {
+       method = method.aes_gcm.main
+     }
+   }
+   plan {
+     method = method.unencrypted.legacy
+   }
+   ```
+
+   Выкатить: `apply` (и `apply -refresh-only`) переписывает состояние открытым, даже без изменений.
+2. Проверить объект в бакете (выше): в `jq 'keys'` есть `resources`, `encrypted_data` нет.
+3. Только после этого следующим пул-реквестом удалить `encryption.tf` и `TF_VAR_state_passphrase` из `deploy.yml`, затем секрет.
+
+Проверено на OpenTofu 1.13.8 с локальным бэкендом: зашифрованное состояние после такого `apply` — открытый JSON с `resources`, и `plan` без блока `encryption` проходит.
+
 **Если фраза потеряна,** состояние не восстановить: ключ из него не достать. Остаётся резервная копия, снятая раньше (`tofu state pull > backup` с фразой; файл открытый — хранить вне репозитория и как секрет), либо пересборка состояния: пустое состояние под новой фразой и `tofu import` каждого ресурса стека (`docker_container.*`, `docker_volume.*`, `docker_network.*`, `docker_image.*`). Тома на сервере при этом не трогаются, но это долгая ручная работа — поэтому копия фразы вне GitHub обязательна.
 
-**Восстановление после обрыва.** `errored.tfstate` теперь зашифрован, а `tofu state push` зашифрованный файл не читает («This state file is encrypted and can not be read without an encryption configuration»; `TF_ENCRYPTION` не помогает). Поэтому `recover-state.sh` сначала расшифровывает его во временном каталоге — копия `encryption.tf` и файл как локальный `terraform.tfstate`, `tofu init`, `tofu state pull` — в открытый временный файл (`umask 077`, удаляется на выходе), сверяет с хранилищем и записывает его. Push шифрует, в бакет открытое не попадает. Руками — шаг 3 следующего раздела.
+**Восстановление после обрыва.** `errored.tfstate` теперь зашифрован, а `tofu state push` зашифрованный файл не читает («This state file is encrypted and can not be read without an encryption configuration»; `TF_ENCRYPTION` не помогает). Поэтому `recover-state.sh` сначала расшифровывает его во временном каталоге — копии `encryption.tf` и `.terraform.lock.hcl`, файл как локальный `terraform.tfstate`, `tofu init -plugin-dir` с провайдерами из `infra/.terraform/providers` (без скачивания из реестра), `tofu state pull` — в открытый временный файл (`umask 077`, удаляется на выходе), сверяет с хранилищем и записывает его. Push шифрует, в бакет открытое не попадает. Руками — шаг 3 следующего раздела.
 
 ### Если деплой упал посреди apply
 
@@ -873,8 +902,9 @@ aws s3 cp s3://dmc268-tfstate/api/terraform.tfstate - --endpoint-url http://127.
 
    ```bash
    export TF_VAR_state_passphrase=<фраза>
-   tmp="$(mktemp -d)" && cp infra/encryption.tf "$tmp/" && cp infra/errored.tfstate "$tmp/terraform.tfstate"
-   (umask 077 && tofu -chdir="$tmp" init && tofu -chdir="$tmp" state pull > "$tmp/plain.tfstate")
+   (cd infra && tofu init)   # провайдеры — в infra/.terraform/providers
+   tmp="$(mktemp -d)" && cp infra/encryption.tf infra/.terraform.lock.hcl "$tmp/" && cp infra/errored.tfstate "$tmp/terraform.tfstate"
+   (umask 077 && tofu -chdir="$tmp" init -plugin-dir="$PWD/infra/.terraform/providers" && tofu -chdir="$tmp" state pull > "$tmp/plain.tfstate")
    ```
 
    Записать открытый файл, пока блокировка висит; не перетирать `-force`: `cd infra && tofu state push -lock=false "$tmp/plain.tfstate"` — push шифрует, в бакет ляжет зашифрованное. После записи удалить и `errored.tfstate`, и временный каталог с открытым файлом: `rm -rf "$tmp" infra/errored.tfstate`.
