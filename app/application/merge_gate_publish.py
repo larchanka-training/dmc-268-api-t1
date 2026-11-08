@@ -9,6 +9,7 @@ from app.application.ports.vcs_review import MergeGateCheck
 from app.domain.entities import Finding, Repository, ReviewRun
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     FindingSeverity,
     ReviewRunStatus,
     TriggerSource,
@@ -90,9 +91,10 @@ def pause_check(
     `DISABLED_REVIEW_CHECK`, чтобы пользователь чинил то, что действительно мешает
     (сначала подключение), а начатый до выключения прогон не блокировал мердж.
     Пауза `auto_review_enabled = false` — про автоматическое ревью: ручной прогон на head,
-    пока он не упал и не отменён, ставит свой gate (D11); если последний — упавший или
-    отменённый ручной, — завершённый ручной до него, его подставляет `head_run_in_charge`. Упавший ручной прогон без
-    завершённого до него — check паузы: `failure` держал бы PR, который авторевью не ждёт.
+    пока он не упал, не отменён и не завершён без денег, ставит свой gate (D11). Если последний
+    ручной прогон ревью не дал, gate ставит завершённый ручной до него, его подставляет
+    `head_run_in_charge`. Ручной прогон без ревью и без завершённого до него — check паузы: `failure`
+    держал бы PR, который авторевью не ждёт.
     Целевая ветка вне `branch_filter` даёт такую же паузу с проверкой `BRANCH_FILTERED_CHECK`;
     пауза авторевью важнее фильтра. `target_branch` берётся из записи PR; `None` передаёт
     вебхук PR до свежих метаданных, фильтр он применяет сам.
@@ -117,28 +119,28 @@ def head_run_in_charge(
     """Прогон, чей итог отвечает за gate head; зовётся внутри открытого вызывающим `with uow`.
 
     Обычно — последний прогон на head (`find_latest`), и без записи репозитория тоже. На
-    паузе авторевью и вне фильтра веток (`pause_check`), если последний — ручной и он упал
-    или отменён, — последний завершённый ручной прогон на head, а его нет — последний:
-    упавший или отменённый повтор ручного ревью не снимает gate прежнего (change
+    паузе авторевью и вне фильтра веток (`pause_check`), если последний — ручной и он упал,
+    отменён или завершён без денег, — последний завершённый ручной прогон на head, а его нет — последний:
+    повторный ручной прогон без ревью не снимает gate прежнего (change
     `manual-gate-after-failed-relaunch`, D1).
     Последний вебхуковый за head отвечает сам, даже после ручного: он проверял, возможно,
     другую базу (change `manual-gate-fallback-after-manual-only`). Вытеснен ли прогон
     новым, решает `find_latest`, а не эта функция.
     """
     latest = uow.review_runs.find_latest(merge_request_id, head_sha)
-    if repository is None or not _failed_manual_relaunch(uow, repository, merge_request_id, latest):
+    if repository is None or not _manual_relaunch_without_review(uow, repository, merge_request_id, latest):
         return latest
     return uow.review_runs.find_completed_manual(merge_request_id, head_sha) or latest
 
 
-def _failed_manual_relaunch(
+def _manual_relaunch_without_review(
     uow: UnitOfWork, repository: Repository, merge_request_id: UUID, latest: ReviewRun | None
 ) -> bool:
     if (
         repository.connected_at is None
         or latest is None
         or latest.trigger is not TriggerSource.MANUAL
-        or latest.status not in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
+        or not _no_review(latest)
     ):
         return False
     merge_request = uow.merge_requests.get(merge_request_id)
@@ -165,8 +167,8 @@ def publish_pause_check(
     тоже (сбой не значит, что POST не дошёл), прогон и репозиторий перечитываются: если
     пауза больше не действует, а последний прогон уже публикуется или завершён, его gate
     выставляет `settle_merge_gate`. Прогон до публикации gate выставит сам, позже нашего
-    POST. Прогон за head — `head_run_in_charge`: после упавшего повторного ручного прогона
-    это завершённый прежний. `VcsError` POST паузы или поправки — вызывающему, после поправки.
+    POST. Прогон за head — `head_run_in_charge`: после повторного ручного прогона
+    без ревью это завершённый прежний. `VcsError` POST паузы или поправки — вызывающему, после поправки.
     """
     error: VcsError | None = None
     try:
@@ -208,10 +210,14 @@ def publish_pause_check(
 
 
 def _manual_run_in_charge(head_run: ReviewRun | None) -> bool:
+    return head_run is not None and head_run.trigger is TriggerSource.MANUAL and not _no_review(head_run)
+
+
+def _no_review(run: ReviewRun) -> bool:
+    """Ревью прогон не дал: упал, отменён или завершён без денег — для gate на паузе всё равно."""
     return (
-        head_run is not None
-        and head_run.trigger is TriggerSource.MANUAL
-        and head_run.status not in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
+        run.status in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
+        or run.coverage_reason is CoverageReason.BALANCE
     )
 
 
@@ -262,6 +268,21 @@ def build_failed_review_check() -> MergeGateCheck:
     )
 
 
+def build_unpaid_check(*, has_payer: bool) -> MergeGateCheck:
+    """Прогон за head завершён без модели: у плательщика не хватило денег или его нет
+    (`review-billing`). Ревью не было — мердж держится, пока ревью не пройдёт после пополнения."""
+    fix = (
+        "Пополните баланс плательщика репозитория или возьмите оплату на себя в кабинете"
+        if has_payer
+        else "У репозитория нет плательщика: назначьте его в кабинете («Платить за этот репозиторий»)"
+    )
+    return MergeGateCheck(
+        conclusion="failure",
+        title="Недостаточно средств, ревью не было",
+        summary=f"{fix}, затем запустите ревью вручную или сделайте push. Мердж заблокирован до ревью.",
+    )
+
+
 def settle_merge_gate(
     uow: UnitOfWork,
     vcs: VcsGateway,
@@ -280,6 +301,8 @@ def settle_merge_gate(
 
     - пауза ревью (`pause_check`) - check паузы: `failure` завершившегося прогона
       заблокировал бы PR, который ревью не ждёт;
+    - прогон `completed` без денег (`coverage_reason = balance`) - `failure` «Недостаточно
+      средств»;
     - прогон `completed` или записавший ревью - итог по открытым находкам и порогу;
     - прогон `failed` или `cancelled` - `failure` «Ревью не удалось»;
     - прогон ещё без ревью - `in_progress` «Идёт ревью».
@@ -294,7 +317,7 @@ def settle_merge_gate(
     порог читаются на каждой попытке: порог могли сменить, пока шёл прогон или сбой.
     После сбоя `attempts` попыток (по умолчанию `SETTLE_ATTEMPTS`) - `VcsError` вызывающему. Прогона на head нет -
     check не выставляется. Ручной прогон на паузе авторевью ставит свой gate (D11), после
-    упавшего повторного ручного прогона gate - по находкам завершённого прежнего.
+    повторного ручного прогона без ревью gate - по находкам завершённого прежнего.
     """
     failures = 0
     # Последний выставленный check: пока GitHub его принимал, итог мог измениться из-за
@@ -320,6 +343,8 @@ def settle_merge_gate(
         )
         if pause is not None:
             current = pause
+        elif latest.coverage_reason is CoverageReason.BALANCE:
+            current = build_unpaid_check(has_payer=repository.payer_user_id is not None)
         elif latest.status is ReviewRunStatus.COMPLETED or (
             latest.status is ReviewRunStatus.PUBLISHING and published
         ):

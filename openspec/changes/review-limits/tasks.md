@@ -1,11 +1,12 @@
 # Tasks
 
-> После `incremental-review`. Каждая группа — отдельный PR. Квота по умолчанию выключена.
+> После `incremental-review`. Каждая группа — отдельный PR. Квоты нет: её заменил change
+> `account-balance`, он же вводит колонку `coverage_reason`.
 > Сводка с непроверенными файлами уже сделана в #344 (`ReviewCoverage`), отдельной задачи нет.
 
 ## 1. Схема данных
 
-- [ ] 1.1 Миграция: `review_runs.coverage_reason`, `unreviewed_paths`, `oversized_paths`, `rules_budget_paths`, `followup_planned`, `followup_depth`; проверка — `alembic upgrade head && alembic downgrade -1`, интеграционный тест чтения `NULL` как полного покрытия без добора
+- [ ] 1.1 Миграция: значение `context_budget` в `review_coverage_reason`, `unreviewed_paths`, `oversized_paths`, `rules_budget_paths`, `followup_planned`, `followup_depth`; проверка — `alembic upgrade head && alembic downgrade -1`, интеграционный тест чтения `NULL` как полного покрытия без добора
 
 ## 2. Покрытие и gate
 
@@ -14,13 +15,12 @@
 - [ ] 2.3 `_duplicate_of`: неполный последний прогон не дубль; проверка — тест повтора доставки после неполного прогона
 - [ ] 2.4 Добор: решение после сборки контекста, до публикации (`followup_planned`; прогресс — показан неосвобождённый hunk области; `followup_depth` < `COVERAGE_FOLLOWUP_MAX_RUNS`; не `webhook` на паузе и вне `branch_filter`), gate прогона в `publishing` с пометкой «добор идёт», у `completed` родителя — «добор не завершён», прогон добора — в транзакции `completed`, `head_run_in_charge` без изменений; добор без находок не публикует итоговый комментарий; проверка — тест песочницы: остаток добирается без push и добор, покрывший остаток, снимает `failure`; без прогресса и на пределе цепочки добор не ставится; коммит, только удаляющий hunk в большом файле, — добор ставится; PR вне фильтра — добор не ставится; ручной добор на паузе или вне фильтра упал — gate родителя без «добор идёт», вебхуковый добор упал — «Ревью не удалось»; push вытесняет прогон добора; правило `api/**` не влезло рядом с `web/**` — добор вмещает его и снимает `failure`
 
-## 3. Квота
+## 3. Отмена и настройки
 
-- [ ] 3.1 Отменённый прогон дописывает `tokens_used`; проверка — тест: прогон, вытесненный после ответа модели, хранит израсходованные токены
-- [ ] 3.2 Квота: сумма `tokens_used` по репозиторию за 24 ч, прогон с причиной `quota`; проверка — интеграционный тест «квота исчерпана → новый push после восстановления»
-- [ ] 3.3 Настройки квоты (выключена по умолчанию) и `COVERAGE_FOLLOWUP_MAX_RUNS` в `app/config.py` и `.env.example`; проверка — тест конфигурации
+- [x] 3.1 Отменённый прогон дописывает `tokens_used`; проверка — тест: прогон, вытесненный после ответа модели, хранит израсходованные токены (сделано #375: `record_cancelled_spend`, тест `test_a_run_superseded_after_the_model_answered_keeps_its_spend`)
+- [ ] 3.2 `COVERAGE_FOLLOWUP_MAX_RUNS` в `app/config.py` и `.env.example`; проверка — тест конфигурации
 
 ## 4. Контракт и документация
 
 - [ ] 4.1 `coverage_reason`, `unreviewed_paths`, `oversized_paths`, `rules_budget_paths` в `ReviewJob`, `export_openapi`; проверка — контрактный тест
-- [ ] 4.2 `docs/pipeline/PIPELINE_SPEC.md` (покрытие, квота и коды причин); проверка — документ не противоречит дельтам
+- [ ] 4.2 `docs/pipeline/PIPELINE_SPEC.md` (покрытие и коды причин); проверка — документ не противоречит дельтам

@@ -630,6 +630,8 @@ def _feed_engine() -> Engine:
             db_models.MergeRequestRow.__table__,
             db_models.ReviewRunRow.__table__,
             db_models.FindingRow.__table__,
+            # Цель внешних ключей плательщика (`payer_user_id`): без неё копии не создать.
+            db_models.UserRow.__table__,
         ],
     )
     sqlite_metadata = MetaData()

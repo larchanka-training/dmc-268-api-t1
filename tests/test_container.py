@@ -41,6 +41,7 @@ class Adapter:
 
 PORT_TO_ADAPTER: dict[str, Adapter] = {
     "AlertSource": Adapter("monitoring/prometheus.py", "PrometheusAlertSource"),
+    "BillingRepo": Adapter("db/repositories.py", "SqlAlchemyBillingRepo"),
     "CacheStore": Adapter("cache/memory.py", "InMemoryCacheStore"),
     "DefinitionExtractor": Adapter(
         "parsing/tree_sitter_extractor.py", "TreeSitterDefinitionExtractor"

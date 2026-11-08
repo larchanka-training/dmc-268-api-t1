@@ -40,6 +40,7 @@ from app.domain.enums import (
     FAILURE_STAGES,
     TERMINAL_STATUSES,
     CommentKind,
+    CoverageReason,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -71,6 +72,12 @@ class RepositoryRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "repositories"
     __table_args__ = (
         UniqueConstraint("provider", "provider_id", name="uq_repositories_provider_id"),
+        # Репозитории, за которые платит пользователь: `GET /auth/me` на каждый вход в кабинет.
+        Index(
+            "ix_repositories_payer_user_id",
+            "payer_user_id",
+            postgresql_where=text("payer_user_id IS NOT NULL"),
+        ),
     )
 
     provider: Mapped[Provider] = mapped_column(_enum(Provider, "provider"), nullable=False)
@@ -92,6 +99,11 @@ class RepositoryRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     # Умолчание `now()`: запись без колонки (старый код в окне деплоя, ручная вставка) — включённая.
     connected_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    # Плательщик прогонов (`review-billing`); `NULL` — не назначен. Пользователя с ролью
+    # плательщика не удалить: RESTRICT.
+    payer_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT")
     )
 
     # Их никто не читает. Они нужны потому, что unit of work упорядочивает
@@ -176,6 +188,17 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             " AND output_tokens >= 0 AND cached_tokens >= 0 AND reasoning_tokens >= 0 AND cost_eur >= 0))",
             name="ck_review_runs_usage",
         ),
+        # Резерв без плательщика не списался бы ни с чьего баланса.
+        CheckConstraint(
+            "estimated_cost_eur IS NULL OR (payer_user_id IS NOT NULL AND estimated_cost_eur >= 0)",
+            name="ck_review_runs_estimate",
+        ),
+        # Баланс плательщика суммирует его прогоны на каждой проверке.
+        Index(
+            "ix_review_runs_payer_user_id",
+            "payer_user_id",
+            postgresql_where=text("payer_user_id IS NOT NULL"),
+        ),
         # Курсор общего потока событий: опрос «изменённые после (updated_at, id)»
         # раз в секунду на соединение читает диапазон индекса, а не всю таблицу.
         Index("ix_review_runs_updated_at_id", "updated_at", "id"),
@@ -223,6 +246,16 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
     verifier_dropped_findings: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
+    )
+    # Биллинг (`review-billing`): плательщик и оценка, зарезервированная перед вызовом модели,
+    # тем же точным типом, что `cost_eur`; причина неполного покрытия. Пусты, пока баланс не
+    # проверялся.
+    payer_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    estimated_cost_eur: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    coverage_reason: Mapped[CoverageReason | None] = mapped_column(
+        _enum(CoverageReason, "review_coverage_reason")
     )
 
     merge_request: Mapped[MergeRequestRow] = relationship(back_populates="review_runs")
@@ -439,6 +472,25 @@ class UserRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     sessions: Mapped[list[SessionRow]] = relationship(
         back_populates="user", passive_deletes="all"
     )
+
+
+class BalanceCreditRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
+    """Зачисление на баланс аккаунта (`review-billing`): журнал, строки не меняются.
+
+    Возврат и корректировка — строка с отрицательной суммой. Расход — не здесь, а в
+    `review_runs` (design D1).
+    """
+
+    __tablename__ = "balance_credits"
+
+    # RESTRICT: зачисления — история денег, аккаунт с ними не удалить.
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    amount_eur: Mapped[Decimal] = mapped_column(Numeric(20, 10), nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    # Кто зачислил: пока Stripe нет — администратор (`credit_balance --by`).
+    credited_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class SessionRow(Base, UuidPrimaryKeyMixin):

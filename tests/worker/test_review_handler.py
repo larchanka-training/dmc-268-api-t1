@@ -15,6 +15,7 @@ from app.application.llm_review import LlmLimits
 from app.application.ports.llm_gateway import LlmGateway
 from app.domain.entities import MergeRequest, ReviewJob, ReviewRun
 from app.domain.enums import (
+    CoverageReason,
     MergeRequestState,
     ReviewRunStatus,
     TriggerSource,
@@ -140,6 +141,19 @@ def test_handler_passes_the_output_limit_to_the_model() -> None:
 
     (request,) = gateway.requests
     assert request.max_output_tokens == 4_096
+
+
+def test_handler_passes_the_billing_flag_to_the_run() -> None:
+    """Биллинг включён: у репозитория нет плательщика — модель не вызывается."""
+    gateway = ScriptedLlmGateway([])
+    uow = _seeded_uow()
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+
+    build_review_handler(_Deps(uow, gateway), LIMITS, LLM_LIMITS, TEXTS, billing_enabled=True)(body)
+
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None and run.coverage_reason is CoverageReason.BALANCE
+    assert gateway.requests == []
 
 
 def test_handler_logs_both_ids_when_the_run_fails(caplog: pytest.LogCaptureFixture) -> None:

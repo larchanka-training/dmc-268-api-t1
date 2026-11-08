@@ -101,7 +101,7 @@ class Case:
             vcs=self.vcs,
             uow=self.uow,
             queue=self.queue,
-            user=UserContext(oauth=FakeOAuthProvider(), session_id=SESSION_ID),
+            user=UserContext(oauth=FakeOAuthProvider(), session_id=SESSION_ID, user_id=UUID(int=1)),
             now=lambda: NOW,
             new_id=uuid4,
             run_outcome=self.outcome,

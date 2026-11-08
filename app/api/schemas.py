@@ -7,6 +7,7 @@
 
 import re
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -72,6 +73,13 @@ def _param_to_utc(moment: datetime) -> datetime:
 # Время во входных параметрах: строка ISO 8601 с любой зоной, приводится к UTC. В схеме —
 # `date-time` без `pattern` ответа: на вход годится и `+03:00`, `Z` обязателен только в ответах.
 UtcDatetimeParam = Annotated[AwareDatetime, BeforeValidator(_iso_8601_only), AfterValidator(_param_to_utc)]
+
+
+def euro_string(amount: Decimal) -> str:
+    """Сумма в евро точной десятичной строкой: без хвостовых нулей колонки (normalize) и без
+    экспоненты (`f`, 1E+2 → 100); ноль — "0". Строкой, а не числом JSON: число клиент прочёл бы
+    во float."""
+    return f"{amount.normalize():f}"
 
 
 def without_nul(value: str) -> str:

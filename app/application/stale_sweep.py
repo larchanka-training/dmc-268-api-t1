@@ -20,6 +20,7 @@ from app.application.review_run_steps import close_abandoned_steps
 from app.domain.entities import ReviewRun
 from app.domain.enums import ReviewRunStatus
 from app.domain.lifecycle import advance
+from app.domain.llm_usage import NO_USAGE
 from app.domain.staleness import find_stale, stale_limit_for
 from app.domain.vcs_errors import VcsTransientError
 
@@ -61,6 +62,11 @@ def sweep_stale_runs(
             advance(run, ReviewRunStatus.FAILED, now).unwrap(),
             failure_reason=f"нет прогресса дольше {run_limit}",
         )
+        # Резерв прогона, застрявшего до `analysing`, снимается нулевым расходом: переход в
+        # `analysing` коммитится до вызова модели, значит модель точно не вызывалась. Позже —
+        # оценка остаётся списанной: ответ провайдеру мог и быть (design D2 `account-balance`).
+        if run.status is ReviewRunStatus.BUILDING_CONTEXT and run.estimated_cost_eur is not None:
+            failed = replace(failed, tokens_used=0, usage=NO_USAGE)
         try:
             with uow:
                 uow.review_runs.update(failed, previous=run)

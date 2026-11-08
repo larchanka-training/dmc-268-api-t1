@@ -62,7 +62,7 @@ OPENSPEC := npx --yes @fission-ai/openspec@1.15.0
 .PHONY: help check cov-llm-schema \
 	sandbox-demo sandbox-doctor sandbox-down sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
 	test-db test-queue test-e2e test-all \
-	infra-up infra-down test-db-create test-queue-vhost migrate run-api run-worker \
+	infra-up infra-down test-db-create test-queue-vhost migrate credit-balance run-api run-worker \
 	run-local stop-local
 
 help: ## Список целей
@@ -230,6 +230,12 @@ test-queue-vhost: ## Создать vhost dmc268_test брокера для те
 
 migrate: infra-up ## Применить миграции к локальной базе (настройки - из .env и явных переменных)
 	$(SERVICE_ENV) uv run alembic upgrade head
+
+# Пока пополнения через платёжную систему нет; на стенде - та же команда в контейнере воркера.
+# Значения - из окружения рецепта (переменные командной строки make туда попадают), а не
+# подстановкой в текст команды: апостроф в заметке не ломает кавычки.
+credit-balance: ## Зачислить деньги на баланс аккаунта: GITHUB_ID (gh api users/<логин> --jq .id), AMOUNT (евро, минус - возврат), NOTE, BY - кто зачислил
+	$(SERVICE_ENV) uv run python -m app.worker.credit_balance "$$GITHUB_ID" "$$AMOUNT" --note "$$NOTE" $${BY:+--by "$$BY"}
 
 run-api: migrate ## API на хосте с автоперезагрузкой (порт 8000)
 	$(SERVICE_ENV) uv run uvicorn app.main:app --reload

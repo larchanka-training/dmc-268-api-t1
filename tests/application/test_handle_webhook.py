@@ -28,7 +28,13 @@ from app.application.use_cases.handle_webhook import (
     handle_webhook_event,
 )
 from app.domain.entities import MergeRequest, RepositorySettings
-from app.domain.enums import MergeRequestState, Provider, ReviewRunStatus, TriggerSource
+from app.domain.enums import (
+    CoverageReason,
+    MergeRequestState,
+    Provider,
+    ReviewRunStatus,
+    TriggerSource,
+)
 from app.domain.vcs_errors import VcsError
 
 from ..fakes import (
@@ -289,6 +295,21 @@ def test_redelivery_after_a_finished_run_is_a_duplicate() -> None:
     assert outcome.run is finished
     assert outcome.merge_request is original_mr
     assert uow.merge_requests.updated == []
+    assert len(uow.review_runs.added) == 1
+    assert len(queue.jobs) == 1
+
+
+def test_redelivery_after_a_run_without_money_is_a_duplicate() -> None:
+    """`review-billing`: прогон без денег — `completed`, повтор доставки нового не создаёт;
+    после пополнения ревью запускают push или ручной запуск."""
+    _, uow, _, queue = run_case()
+    (refused,) = uow.review_runs.added
+    object.__setattr__(refused, "status", ReviewRunStatus.COMPLETED)
+    object.__setattr__(refused, "coverage_reason", CoverageReason.BALANCE)
+
+    outcome, uow, _, queue = run_case(uow=uow, queue=queue)
+    assert outcome.kind == "duplicate"
+    assert outcome.run is refused
     assert len(uow.review_runs.added) == 1
     assert len(queue.jobs) == 1
 

@@ -88,14 +88,15 @@ failed — если ошибка невосстановима, retry исчер�
 | Текущее состояние | Следующее состояние |
 |---|---|
 | `queued` | `building_context`, `failed`, `cancelled` |
-| `building_context` | `analysing`, `failed`, `cancelled` |
+| `building_context` | `analysing`, `completed`, `failed`, `cancelled` |
 | `analysing` | `publishing`, `failed`, `cancelled` |
 | `publishing` | `completed`, `failed`, `cancelled` |
 | `completed` | terminal |
 | `failed` | terminal |
 | `cancelled` | terminal |
 
-Worker не должен пропускать состояния. Изменение состояния должно сохраняться, чтобы Backend мог отдать актуальный статус Frontend.
+Worker не должен пропускать состояния. Исключение одно — прогон без денег (`review-billing`):
+`building_context → completed` без анализа и публикации. Изменение состояния должно сохраняться, чтобы Backend мог отдать актуальный статус Frontend.
 
 ---
 
@@ -118,7 +119,10 @@ Worker и Context Engine в рамках одного состояния:
 - разбирают изменённые файлы;
 - собирают необходимый контекст;
 - ограничивают размер контекста;
-- формируют нормализованный input для LLM.
+- формируют нормализованный input для LLM;
+- при `BILLING_ENABLED` сверяют оценку прогона с балансом плательщика репозитория: хватает —
+  резервируют оценку, не хватает или плательщика нет — прогон `completed` с
+  `coverage_reason = balance`, модель не вызывается (`review-billing`).
 
 Отдельного состояния для «только получить diff» нет — фиксируется прогресс внутри
 `building_context`, а не два разных статуса.

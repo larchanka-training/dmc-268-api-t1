@@ -482,7 +482,7 @@
           "auth"
         ],
         "summary": "Пользователь текущей сессии",
-        "description": "Требует сессию. По ответу кабинет решает, показывать ли страницу входа.",
+        "description": "Требует сессию. По ответу кабинет решает, показывать ли страницу входа. Баланс и оплачиваемые репозитории читаются из базы на каждый запрос.",
         "operationId": "me",
         "responses": {
           "200": {
@@ -595,7 +595,7 @@
           "repositories"
         ],
         "summary": "Подключить репозиторий",
-        "description": "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. Регистрирует репозиторий установки GitHub App; новый получает настройки по умолчанию, в том числе `auto_review_enabled = true`, а включённый обратно после `DELETE` сохраняет свои сохранённые настройки, в том числе `auto_review_enabled = false`. `full_name` и `default_branch` — из ответа GitHub. Два запроса к GitHub: репозиторий по id токеном пользователя (`GET /repositories/{id}`), затем установка приложения на нём (`GET /repos/{owner}/{repo}/installation`). Проверки по порядку: провайдер не `github`, репозиторий не виден пользователю или публичный виден только с правом чтения (так GitHub отдаёт любой публичный репозиторий), приложение на нём не установлено или установка приостановлена — `404 REPOSITORY_NOT_IN_INSTALLATION`, один ответ без различия; у пользователя нет права admin или maintain на репозиторий в GitHub, в том числе роль read на приватном — `403 REPOSITORY_MANAGE_REQUIRED`; репозиторий уже подключён и включён — `409 REPOSITORY_ALREADY_CONNECTED`; интерфейс считает его успехом: ревью уже включено, в том числе параллельным запросом. Выключенный `DELETE` репозиторий включается обратно — `201` с прежним `id`, история прогонов сохраняется. После повторного включения head, запушенный в выключенный период, остаётся с проверкой «Ревью выключено» до следующего push. Пользователь без прав получает `403` и не узнаёт, подключён ли репозиторий. Токен пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, репозиторий не записан.",
+        "description": "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. Регистрирует репозиторий установки GitHub App; новый получает настройки по умолчанию, в том числе `auto_review_enabled = true`, а включённый обратно после `DELETE` сохраняет свои сохранённые настройки, в том числе `auto_review_enabled = false`. Вызывающий становится плательщиком репозитория, только если плательщика у него нет: повторное подключение и включение назначенного не меняют, перевод оплаты — POST /repositories/{id}/payer. `full_name` и `default_branch` — из ответа GitHub. Два запроса к GitHub: репозиторий по id токеном пользователя (`GET /repositories/{id}`), затем установка приложения на нём (`GET /repos/{owner}/{repo}/installation`). Проверки по порядку: провайдер не `github`, репозиторий не виден пользователю или публичный виден только с правом чтения (так GitHub отдаёт любой публичный репозиторий), приложение на нём не установлено или установка приостановлена — `404 REPOSITORY_NOT_IN_INSTALLATION`, один ответ без различия; у пользователя нет права admin или maintain на репозиторий в GitHub, в том числе роль read на приватном — `403 REPOSITORY_MANAGE_REQUIRED`; репозиторий уже подключён и включён — `409 REPOSITORY_ALREADY_CONNECTED`; интерфейс считает его успехом: ревью уже включено, в том числе параллельным запросом. Выключенный `DELETE` репозиторий включается обратно — `201` с прежним `id`, история прогонов сохраняется. После повторного включения head, запушенный в выключенный период, остаётся с проверкой «Ревью выключено» до следующего push. Пользователь без прав получает `403` и не узнаёт, подключён ли репозиторий. Токен пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается. Если GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`, репозиторий не записан.",
         "operationId": "connectRepository",
         "security": [
           {
@@ -1431,6 +1431,269 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/ScmUnavailableProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/{repository_id}/payer": {
+      "post": {
+        "tags": [
+          "repositories"
+        ],
+        "summary": "Платить за репозиторий",
+        "description": "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии. Делает вызывающего плательщиком репозитория: прогоны, которые начнут проверку баланса после ответа, идут с его баланса; прогоны, уже зарезервировавшие оценку, остаются за прежним плательщиком. Подключение, повторное включение и настройки плательщика не меняют — только эта ручка. Ответ — 200 с логином нового плательщика. Проверки по порядку: видимость — 404 REPOSITORY_NOT_FOUND, если репозитория нет или пользователь не видит его на GitHub (кэш видимости, как у GET /repositories/{id}), — ответ один и тот же. Токен пользователя непригоден — `401 UNAUTHENTICATED`, сессия закрывается; GitHub не ответил или ответил ошибкой — `502 SCM_UNAVAILABLE`. Затем роль — как у PUT /repositories/{id}/settings, запросом к GitHub мимо кэша видимости: без admin или maintain — `403 REPOSITORY_MANAGE_REQUIRED`, GitHub не отдал репозиторий — `404 REPOSITORY_NOT_FOUND`; при отказе и при `502` плательщик не меняется.",
+        "operationId": "takeOverPayment",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repository_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор репозитория в сервисе.",
+              "title": "Repository Id"
+            },
+            "description": "Идентификатор репозитория в сервисе."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Вызывающий стал плательщиком.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryPayerResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "403": {
+            "description": "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; `REPOSITORY_MANAGE_REQUIRED` — нет нужной роли на репозитории у провайдера.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/OriginForbiddenProblem"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RepositoryManageRequiredProblem"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "code",
+                    "mapping": {
+                      "ORIGIN_FORBIDDEN": "#/components/schemas/OriginForbiddenProblem",
+                      "REPOSITORY_MANAGE_REQUIRED": "#/components/schemas/RepositoryManageRequiredProblem"
+                    }
+                  },
+                  "title": "Response 403 Takeoverpayment"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Репозитория с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "502": {
+            "description": "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmUnavailableProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "repositories"
+        ],
+        "summary": "Перестать платить за репозиторий",
+        "description": "Требует сессию и `Origin` сервиса. Снимает плательщика, если это вызывающий; доступ к репозиторию на GitHub не проверяется, чтобы отказаться мог и ушедший из организации (список его репозиториев — `paid_repositories` в GET /auth/me). Ответ — 204. Репозиторий, за который платит не вызывающий, и несуществующий дают один и тот же `404 REPOSITORY_NOT_FOUND` без изменений. Прогоны, уже зарезервировавшие оценку, остаются за ним; следующие без плательщика завершаются без вызова модели, пока admin или maintain не возьмёт оплату (POST /repositories/{id}/payer).",
+        "operationId": "stopPayment",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repository_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Идентификатор репозитория в сервисе.",
+              "title": "Repository Id"
+            },
+            "description": "Идентификатор репозитория в сервисе."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Плательщик снят.",
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "403": {
+            "description": "`Origin` изменяющего запроса отсутствует или не совпадает с адресом сервиса.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginForbiddenProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Репозитория с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
                 }
               }
             },
@@ -2982,6 +3245,14 @@
         "title": "ConnectRepositoryRequest",
         "description": "Запрос на подключение репозитория к сервису."
       },
+      "CoverageReason": {
+        "type": "string",
+        "enum": [
+          "balance"
+        ],
+        "title": "CoverageReason",
+        "description": "Почему прогон покрыл дифф не полностью.\n\n`balance` — у плательщика не хватило денег, модель не вызывалась (`review-billing`)."
+      },
       "CreateReviewRequest": {
         "properties": {
           "provider": {
@@ -4094,6 +4365,30 @@
           }
         ]
       },
+      "PaidRepository": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "full_name": {
+            "type": "string",
+            "title": "Full Name",
+            "description": "Полное имя репозитория на GitHub.",
+            "examples": [
+              "octo-org/api"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "full_name"
+        ],
+        "title": "PaidRepository",
+        "description": "Репозиторий, за который платит пользователь."
+      },
       "Provider": {
         "type": "string",
         "enum": [
@@ -4457,6 +4752,21 @@
             ],
             "title": "Connected At",
             "description": "Когда ревью включено последний раз; `null`, если ревью не включено."
+          },
+          "payer_login": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payer Login",
+            "description": "Логин GitHub плательщика: аккаунт сервиса, с баланса которого идут прогоны репозитория, кто бы их ни запустил. `null`, если плательщика нет или репозиторий не подключали.",
+            "examples": [
+              "octocat"
+            ]
           }
         },
         "type": "object",
@@ -4468,7 +4778,8 @@
           "connected",
           "id",
           "can_connect",
-          "connected_at"
+          "connected_at",
+          "payer_login"
         ],
         "title": "RepositoryListItem",
         "description": "Репозиторий установки GitHub App, видимый пользователю: подключённый или нет.\n\nПодключённый — ревью включено, его запросы на изменение ревьюятся; неподключённый можно\nподключить, если `can_connect`."
@@ -4720,6 +5031,24 @@
             "type": "urn:dmc-268:problem:repository-not-in-installation"
           }
         ]
+      },
+      "RepositoryPayerResponse": {
+        "properties": {
+          "payer_login": {
+            "type": "string",
+            "title": "Payer Login",
+            "description": "Логин GitHub плательщика: аккаунт сервиса, с баланса которого идут прогоны репозитория, кто бы их ни запустил.",
+            "examples": [
+              "octocat"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "payer_login"
+        ],
+        "title": "RepositoryPayerResponse",
+        "description": "Плательщик репозитория."
       },
       "RepositoryResponse": {
         "properties": {
@@ -5516,6 +5845,20 @@
             "title": "Failed Stage",
             "description": "Этап, на котором прогон упал; null, если прогон не падал."
           },
+          "coverage_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoverageReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Почему ревью покрыло дифф не полностью: balance — у плательщика репозитория не хватило денег, прогон завершён без вызова модели, находок нет, на head check run failure «Недостаточно средств»; null — ревью прошло как обычно.",
+            "examples": [
+              "balance"
+            ]
+          },
           "findings_count": {
             "type": "integer",
             "minimum": 0.0,
@@ -5538,6 +5881,7 @@
           "last_progress_at",
           "duration_seconds",
           "failed_stage",
+          "coverage_reason",
           "findings_count",
           "merge_request"
         ],
@@ -5633,7 +5977,7 @@
               }
             ],
             "title": "Model",
-            "description": "Модель LLM, которая провела ревью; null до анализа."
+            "description": "Модель LLM, которая провела ревью; null до анализа и у прогона без денег."
           },
           "tokens_used": {
             "anyOf": [
@@ -5645,7 +5989,7 @@
               }
             ],
             "title": "Tokens Used",
-            "description": "Токенов LLM потрачено; null до анализа."
+            "description": "Токенов LLM потрачено; null до анализа, 0 у прогона биллинга без вызова модели: без денег (coverage_reason = balance) или с резервом, снятым при сбое или отмене до анализа."
           },
           "usage": {
             "anyOf": [
@@ -5656,7 +6000,7 @@
                 "type": "null"
               }
             ],
-            "description": "Входные и выходные токены и стоимость; их сумма может не совпасть с tokens_used — это итог провайдера. null до анализа и у прогонов, записанных до разбивки."
+            "description": "Входные и выходные токены и стоимость; их сумма может не совпасть с tokens_used — это итог провайдера. null до анализа и у прогонов, записанных до разбивки; у прогона биллинга без вызова модели (без денег или с резервом, снятым до анализа) нулевой: 0 токенов и \"0\" €."
           },
           "rejected_findings": {
             "type": "integer",
@@ -5683,6 +6027,20 @@
             "minimum": 0.0,
             "title": "Verifier Dropped Findings",
             "description": "Сколько находок отбросил верификатор."
+          },
+          "coverage_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoverageReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Почему ревью покрыло дифф не полностью: balance — у плательщика репозитория не хватило денег, прогон завершён без вызова модели, находок нет, на head check run failure «Недостаточно средств»; null — ревью прошло как обычно.",
+            "examples": [
+              "balance"
+            ]
           },
           "duration_seconds": {
             "anyOf": [
@@ -5787,6 +6145,7 @@
           "rejected_findings",
           "verification",
           "verifier_dropped_findings",
+          "coverage_reason",
           "duration_seconds",
           "failure_reason",
           "failed_stage",
@@ -6556,6 +6915,23 @@
             "examples": [
               "https://avatars.githubusercontent.com/u/1"
             ]
+          },
+          "balance_eur": {
+            "type": "string",
+            "pattern": "^-?\\d+(\\.\\d+)?$",
+            "title": "Balance Eur",
+            "description": "Баланс аккаунта в евро: зачисления минус расход прогонов, где пользователь — плательщик (прогон в работе — его оценкой до вызова модели). Точная десятичная строка без экспоненты и хвостовых нулей, как стоимость прогона; без зачислений и расходов — \"0\". Может быть отрицательным: оценка ошибается не больше чем на один прогон.",
+            "examples": [
+              "4.75"
+            ]
+          },
+          "paid_repositories": {
+            "items": {
+              "$ref": "#/components/schemas/PaidRepository"
+            },
+            "type": "array",
+            "title": "Paid Repositories",
+            "description": "Репозитории, где пользователь записан плательщиком, по `full_name`. Не зависит от доступа на GitHub: ушедший из организации плательщик видит здесь, от чего отказаться (DELETE /repositories/{id}/payer)."
           }
         },
         "type": "object",
@@ -6563,7 +6939,9 @@
           "provider",
           "login",
           "name",
-          "avatar_url"
+          "avatar_url",
+          "balance_eur",
+          "paid_repositories"
         ],
         "title": "UserResponse",
         "description": "Пользователь кабинета — учётная запись у провайдера входа."

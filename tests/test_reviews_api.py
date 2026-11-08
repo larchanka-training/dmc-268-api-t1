@@ -38,6 +38,7 @@ from app.domain.entities import (
 )
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -49,7 +50,7 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.ids import new_id
-from app.domain.llm_usage import LlmUsage
+from app.domain.llm_usage import NO_USAGE, LlmUsage
 from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.run_steps import finish_step, start_step
 from app.domain.session import open_session
@@ -369,6 +370,24 @@ def test_a_run_reports_its_verification_outcome() -> None:
 
     assert body["verification"] == "unavailable"
     assert body["verifier_dropped_findings"] == 0
+
+
+def test_a_run_without_money_reports_its_coverage_reason() -> None:
+    uow = FakeUnitOfWork()
+    # Как прогон пишет `reserve_or_refuse`: нулевой расход, а не пустая разбивка.
+    run = _add_run(uow, model=None, tokens_used=0, usage=NO_USAGE, coverage_reason=CoverageReason.BALANCE)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert (body["status"], body["coverage_reason"], body["findings"]) == ("completed", "balance", [])
+    assert (body["tokens_used"], body["usage"]) == (0, {"input_tokens": 0, "output_tokens": 0, "cost_eur": "0"})
+
+
+def test_a_reviewed_run_has_no_coverage_reason() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+
+    assert _client(uow).get(f"/api/v1/reviews/{run.id}").json()["coverage_reason"] is None
 
 
 def test_a_run_before_analysis_has_no_verification_outcome() -> None:

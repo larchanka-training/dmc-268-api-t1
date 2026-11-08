@@ -354,6 +354,7 @@ def test_the_list_holds_connected_and_unconnected_repositories_together() -> Non
                 "id": str(registered.id),
                 "can_connect": True,
                 "connected_at": "2026-09-29T00:00:00Z",
+                "payer_login": None,
             },
             {
                 "provider": "github",
@@ -364,6 +365,7 @@ def test_the_list_holds_connected_and_unconnected_repositories_together() -> Non
                 "id": None,
                 "can_connect": False,
                 "connected_at": None,
+                "payer_login": None,
             },
         ],
         "install_url": f"https://github.com/apps/dmc-268-review/installations/new?state={setup_state(COOKIE)}",
@@ -1443,3 +1445,173 @@ def test_rules_when_github_fails_on_the_installation_are_unavailable_not_404() -
     assert response.status_code == 200
     assert response.json() == {"status": "unavailable", "branch": "main", "path": RULES_FILE}
     assert vcs.calls == []
+
+
+# --- плательщик (`review-billing`) --------------------------------------------------
+
+ALICE = replace(SIGNED_IN, id=UUID(int=0xA11CE), provider_user_id="1", login="alice")
+
+
+def _paid_by_alice(uow: FakeUnitOfWork) -> Repository:
+    """`octo-org/api` подключён, платит `alice`; у пользователя сессии на нём admin."""
+    uow.users.add(ALICE)
+    repository = replace(_repository(101), full_name=API.full_name, payer_user_id=ALICE.id)
+    uow.repositories.add(repository)
+    return repository
+
+
+def _payer_of(uow: FakeUnitOfWork, repository: Repository) -> UUID | None:
+    stored = uow.repositories.get(repository.id)
+    assert stored is not None
+    return stored.payer_user_id
+
+
+def _payer_path(repository_id: object) -> str:
+    return f"/api/v1/repositories/{repository_id}/payer"
+
+
+def _take_over(client: TestClient, repository_id: object, *, origin: str | None = ORIGIN) -> httpx2.Response:
+    headers = {"Origin": origin} if origin else {}
+    response: httpx2.Response = client.post(_payer_path(repository_id), headers=headers)
+    return response
+
+
+def test_the_list_shows_the_payer_login() -> None:
+    uow = FakeUnitOfWork()
+    _paid_by_alice(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    [item] = client.get("/api/v1/repositories").json()["items"]
+
+    assert item["payer_login"] == "alice"
+
+
+def test_connecting_makes_the_caller_the_payer() -> None:
+    uow = FakeUnitOfWork()
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    assert _connect(client).status_code == 201
+
+    [item] = client.get("/api/v1/repositories").json()["items"]
+    assert item["payer_login"] == SIGNED_IN.login
+
+
+@pytest.mark.parametrize("permissions", [ADMIN, MAINTAIN])
+def test_a_manager_takes_over_payment(permissions: RepositoryPermissions) -> None:
+    uow = FakeUnitOfWork()
+    repository = _paid_by_alice(uow)
+    client = _client(uow, FakeInstallationCatalog([replace(API, permissions=permissions)]))
+
+    response = _take_over(client, repository.id)
+
+    assert response.status_code == 200
+    assert response.json() == {"payer_login": SIGNED_IN.login}
+    assert _payer_of(uow, repository) == SIGNED_IN.id
+
+
+@pytest.mark.parametrize("permissions", [WRITE, TRIAGE, READ])
+def test_taking_over_payment_without_manage_rights_is_403(permissions: RepositoryPermissions) -> None:
+    uow = FakeUnitOfWork()
+    repository = _paid_by_alice(uow)
+    client = _client(uow, FakeInstallationCatalog([replace(API, permissions=permissions)]))
+
+    response = _take_over(client, repository.id)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "REPOSITORY_MANAGE_REQUIRED"
+    assert _payer_of(uow, repository) == ALICE.id
+
+
+def test_taking_over_payment_checks_the_role_past_the_visibility_cache() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    catalog = _RoleRevokedCatalog([API])
+    client = _client(uow, catalog)
+
+    assert _take_over(client, repository.id).status_code == 403
+    assert "user_repository" in catalog.calls
+
+
+def test_taking_over_payment_of_an_invisible_repository_looks_like_a_missing_one() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([]))
+
+    hidden = _take_over(client, repository.id)
+    missing = _take_over(client, new_id())
+
+    assert hidden.status_code == missing.status_code == 404
+    assert _strip(hidden.json()) == _strip(missing.json())
+    assert hidden.json()["code"] == "REPOSITORY_NOT_FOUND"
+    assert _payer_of(uow, repository) is None
+
+
+def test_taking_over_payment_of_a_repository_github_no_longer_shows_is_404() -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, _AccessRevokedCatalog([API]))
+
+    response = _take_over(client, repository.id)
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "REPOSITORY_NOT_FOUND"
+
+
+@pytest.mark.parametrize("origin", [None, "https://evil.example"])
+def test_taking_over_payment_without_own_origin_is_403(origin: str | None) -> None:
+    uow = FakeUnitOfWork()
+    repository = _registered_api(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    response = _take_over(client, repository.id, origin=origin)
+
+    assert response.status_code == 403
+    assert _payer_of(uow, repository) is None
+
+
+def _paid_by_me(uow: FakeUnitOfWork) -> Repository:
+    repository = replace(_repository(101), full_name=API.full_name, payer_user_id=SIGNED_IN.id)
+    uow.repositories.add(repository)
+    return repository
+
+
+def _stop_paying(client: TestClient, repository_id: object, *, origin: str | None = ORIGIN) -> httpx2.Response:
+    headers = {"Origin": origin} if origin else {}
+    response: httpx2.Response = client.delete(_payer_path(repository_id), headers=headers)
+    return response
+
+
+def test_the_payer_stops_paying_without_access_on_github() -> None:
+    """Плательщик ушёл из организации: репозитория не видит, но отказаться от оплаты может."""
+    uow = FakeUnitOfWork()
+    repository = _paid_by_me(uow)
+    client = _client(uow, FakeInstallationCatalog([]))
+
+    response = _stop_paying(client, repository.id)
+
+    assert response.status_code == 204
+    assert _payer_of(uow, repository) is None
+
+
+def test_stopping_payment_for_someone_else_looks_like_a_missing_repository() -> None:
+    uow = FakeUnitOfWork()
+    repository = _paid_by_alice(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    foreign = _stop_paying(client, repository.id)
+    missing = _stop_paying(client, new_id())
+
+    assert foreign.status_code == missing.status_code == 404
+    assert _strip(foreign.json()) == _strip(missing.json())
+    assert foreign.json()["code"] == "REPOSITORY_NOT_FOUND"
+    assert _payer_of(uow, repository) == ALICE.id
+
+
+@pytest.mark.parametrize("origin", [None, "https://evil.example"])
+def test_stopping_payment_without_own_origin_is_403(origin: str | None) -> None:
+    uow = FakeUnitOfWork()
+    repository = _paid_by_me(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    assert _stop_paying(client, repository.id, origin=origin).status_code == 403
+    assert _payer_of(uow, repository) == SIGNED_IN.id
