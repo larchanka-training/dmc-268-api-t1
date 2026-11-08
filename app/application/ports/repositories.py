@@ -32,6 +32,7 @@ from app.domain.entities import (
 )
 from app.domain.enums import Provider
 from app.domain.llm_usage import LlmUsage
+from app.domain.payload_retention import BodyExpiryStats
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
 
@@ -197,6 +198,10 @@ class ContextPayloadRepo(Protocol):
     def expire_bodies(self, created_before: datetime, now: datetime, limit: int) -> int:
         """Стереть тела самых старых пакетов, записанных раньше `created_before`, не больше
         `limit`; метаданные остаются, `body_expired_at` = `now`. Вернуть число стёртых."""
+        ...
+
+    def body_expiry_stats_for_run(self, review_run_id: UUID) -> BodyExpiryStats:
+        """Число пакетов прогона, число стёртых тел и самое позднее время стирания; тела не читаются."""
         ...
 
 

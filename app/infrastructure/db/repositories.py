@@ -63,6 +63,7 @@ from app.domain.enums import (
 )
 from app.domain.lifecycle import next_status
 from app.domain.llm_usage import LlmUsage
+from app.domain.payload_retention import BodyExpiryStats
 from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
@@ -688,6 +689,21 @@ class SqlAlchemyContextPayloadRepo:
             .execution_options(synchronize_session=False)
         )
         return int(result.rowcount)  # type: ignore[attr-defined]
+
+    def body_expiry_stats_for_run(self, review_run_id: UUID) -> BodyExpiryStats:
+        """Один агрегат по индексу `review_run_id`, без чтения тел: они весят до 128 КБ."""
+        payload_count, erased_count, last_expired_at = self._session.execute(
+            select(
+                func.count(),
+                func.count(ContextPayloadRow.body_expired_at),
+                func.max(ContextPayloadRow.body_expired_at),
+            ).where(ContextPayloadRow.review_run_id == review_run_id)
+        ).one()
+        return BodyExpiryStats(
+            payload_count=payload_count,
+            erased_count=erased_count,
+            last_expired_at=last_expired_at,
+        )
 
 
 class SqlAlchemyFindingRepo:

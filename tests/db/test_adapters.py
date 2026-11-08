@@ -43,6 +43,7 @@ from app.domain.enums import (
 from app.domain.ids import new_id
 from app.domain.lifecycle import advance
 from app.domain.llm_usage import NO_USAGE, LlmUsage
+from app.domain.payload_retention import BodyExpiryStats
 from app.domain.run_steps import finish_step, start_step
 from app.domain.secret_redaction import REDACTED
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -812,6 +813,48 @@ def test_expire_bodies_takes_the_oldest_first_and_stops_at_the_limit(uow) -> Non
         assert work.context_payloads.expire_bodies(cutoff, now, 10) == 1
         assert work.context_payloads.expire_bodies(cutoff, now, 10) == 0
         work.commit()
+
+
+def test_body_expiry_stats_counts_erased_bodies_and_takes_the_last_expiry(uow) -> None:
+    """Change diff-retention-visibility: агрегат по прогону, стёрты все тела."""
+    with uow as work:
+        _, _, run = seeded(work)
+    _payloads_aged(uow, run.id, [dt.timedelta(days=60), dt.timedelta(days=40)])
+    first = dt.datetime(2026, 11, 1, 3, 0, tzinfo=dt.UTC)
+    last = dt.datetime(2026, 11, 2, 3, 0, tzinfo=dt.UTC)
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=30)
+    with uow as work:
+        assert work.context_payloads.expire_bodies(cutoff, first, 1) == 1
+        assert work.context_payloads.expire_bodies(cutoff, last, 1) == 1
+        work.commit()
+
+    with uow as work:
+        stats = work.context_payloads.body_expiry_stats_for_run(run.id)
+
+    assert stats == BodyExpiryStats(payload_count=2, erased_count=2, last_expired_at=last)
+
+
+def test_body_expiry_stats_counts_live_bodies(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+    _payloads_aged(uow, run.id, [dt.timedelta(days=40), dt.timedelta(days=1)])
+    now = dt.datetime(2026, 11, 2, 3, 0, tzinfo=dt.UTC)
+    with uow as work:
+        work.context_payloads.expire_bodies(dt.datetime.now(dt.UTC) - dt.timedelta(days=30), now, 10)
+        work.commit()
+
+    with uow as work:
+        stats = work.context_payloads.body_expiry_stats_for_run(run.id)
+
+    assert stats == BodyExpiryStats(payload_count=2, erased_count=1, last_expired_at=now)
+
+
+def test_body_expiry_stats_of_a_run_without_payloads_is_empty(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+        stats = work.context_payloads.body_expiry_stats_for_run(run.id)
+
+    assert stats == BodyExpiryStats(payload_count=0, erased_count=0, last_expired_at=None)
 
 
 def test_a_payload_cannot_lose_its_body_without_the_expiry_mark(uow) -> None:
