@@ -246,6 +246,19 @@ run "worker_grace_covers_hosted_fallback" {
   }
 }
 
+run "billing_flag_reaches_worker" {
+  command = plan
+
+  variables {
+    billing_enabled = true
+  }
+
+  assert {
+    condition     = contains(docker_container.worker.env, "BILLING_ENABLED=true")
+    error_message = "billing_enabled доходит до воркера окружением."
+  }
+}
+
 # Контейнеры ссылаются на образ по digest без тега: атрибут image провайдер
 # сравнивает строкой, и тег commit sha в ссылке пересоздавал бы api и worker
 # на каждом коммите даже при том же digest (#203).
