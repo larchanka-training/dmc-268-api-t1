@@ -159,7 +159,7 @@ def summarize(result: LoadResult) -> dict[str, Any]:
     for d in deliveries:
         if d.run_id is not None:
             runs_per_pr.setdefault(d.pr, set()).add(d.run_id)
-    after_completion: set[int] = set()
+    extra_after_completion: set[int] = set()
     violations: set[int] = set()
     for pr, run_ids in runs_per_pr.items():
         # Исходный прогон - самый ранний по `created_at`, а не прогон исходной доставки:
@@ -174,7 +174,7 @@ def summarize(result: LoadResult) -> dict[str, Any]:
         # Спека разрешает новый прогон, только если прежний уже был терминальным.
         for previous, later in pairwise(timed):
             if later.created_at >= previous.finished_at:
-                after_completion.add(pr)
+                extra_after_completion.add(pr)
             else:
                 violations.add(pr)
     return {
@@ -193,7 +193,7 @@ def summarize(result: LoadResult) -> dict[str, Any]:
         "pull_requests_with_extra_runs": sorted(violations),
         # Лишний прогон после завершения прежнего - новый прогон и второе ревью (пробел R-4
         # TEST_PLAN). Его может создать и исходная доставка, если повтор ушёл раньше неё.
-        "redeliveries_after_completion": sorted(after_completion),
+        "extra_runs_after_completion": sorted(extra_after_completion),
         "pull_requests_without_one_review_per_run": sorted(
             pr
             for pr in range(1, result.profile.pull_requests + 1)
@@ -581,7 +581,7 @@ def report_markdown(result: LoadResult) -> str:
         f"- PR с лишним прогоном при незавершённом прежнем: {summary['pull_requests_with_extra_runs'] or 'нет'}.",
         (
             "- Лишние прогоны после завершения прежнего (новый прогон и второе ревью, R-4): "
-            f"{summary['redeliveries_after_completion'] or 'нет'}."
+            f"{summary['extra_runs_after_completion'] or 'нет'}."
         ),
         f"- PR, где ревью не по одному на прогон: {summary['pull_requests_without_one_review_per_run'] or 'нет'}.",
         f"- Осталось в очереди: {summary['queue_left']}, в DLQ: {summary['dlq_left']}.",

@@ -124,7 +124,7 @@ def _second_run(*deliveries: Delivery, runs: tuple[RunTiming, ...]) -> dict[str,
     )
 
 
-def test_a_redelivery_sent_first_makes_the_later_first_delivery_a_run_after_completion() -> None:
+def test_a_redelivery_sent_first_makes_the_later_first_delivery_an_extra_run_after_completion() -> None:
     # План доставок перемешан: повтор ушёл раньше исходной доставки, его прогон
     # успел завершиться, и исходная доставка законно создала второй прогон.
     summary = _second_run(
@@ -139,7 +139,7 @@ def test_a_redelivery_sent_first_makes_the_later_first_delivery_a_run_after_comp
     )
 
     assert summary["pull_requests_with_extra_runs"] == []
-    assert summary["redeliveries_after_completion"] == [1]
+    assert summary["extra_runs_after_completion"] == [1]
     assert summary["pull_requests_without_one_review_per_run"] == []
 
 
@@ -156,7 +156,7 @@ def test_a_redelivery_after_completion_of_the_first_run_is_not_a_violation() -> 
     )
 
     assert summary["pull_requests_with_extra_runs"] == []
-    assert summary["redeliveries_after_completion"] == [1]
+    assert summary["extra_runs_after_completion"] == [1]
 
 
 @pytest.mark.parametrize("redelivery_first", [False, True])
@@ -178,4 +178,4 @@ def test_a_second_run_created_before_the_first_finished_is_a_violation(
     )
 
     assert summary["pull_requests_with_extra_runs"] == [1]
-    assert summary["redeliveries_after_completion"] == []
+    assert summary["extra_runs_after_completion"] == []
