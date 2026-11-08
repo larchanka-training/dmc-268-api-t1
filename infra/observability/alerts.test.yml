@@ -205,6 +205,77 @@ tests:
               summary: "Прогоны падают: 75% за 30 минут"
               description: "Доля прогонов в failed выше 30 %. Код ошибки шага — в GET /api/v1/reviews/{id}/steps и в спанах review.<этап>."
 
+  # Отказы по балансу не разбавляют долю упавших: три failed и один completed
+  # на десять refused — всё равно 75 %, а не 3 из 14.
+  - interval: 5m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
+        values: "0 0 0 1 2 3"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 1"
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 2 4 6 8 10"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewRunsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+            exp_annotations:
+              summary: "Прогоны падают: 75% за 30 минут"
+              description: "Доля прогонов в failed выше 30 %. Код ошибки шага — в GET /api/v1/reviews/{id}/steps и в спанах review.<этап>."
+
+  # Порог «хотя бы три прогона» тоже без отказов: одно падение на три отказа —
+  # не 100 % упавших.
+  - interval: 5m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
+        values: "0 0 0 0 0 1"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 0"
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 1 1 2 2 3"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewRunsFailing
+        exp_alerts: []
+
+  # Отказывают все прогоны: ревью нет, ReviewRunsFailing молчит, горит отказ.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 1 2 3 4 5 6"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 0 0"
+      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
+        values: "0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: worker
+            exp_annotations:
+              summary: "Прогоны отказаны по балансу: 100% за час"
+              description: "Больше половины прогонов за час завершены без денег (coverage_reason = balance). Проверьте балансы и плательщиков репозиториев и оценку стоимости прогона."
+      - eval_time: 60m
+        alertname: ReviewRunsFailing
+        exp_alerts: []
+
+  # Одиночные отказы — норма: два refused на двенадцать completed за час.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 0 1 1 2 2 2"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 2 4 6 8 10 12"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts: []
+
   # DLQ не пуста дольше 5 минут; воркер не подписан на очередь.
   - interval: 1m
     input_series:

@@ -1496,7 +1496,7 @@ def test_priming_starts_every_run_outcome_series_at_zero(
     telemetry.prime_run_outcomes()
 
     after = metric_snapshot(metric_reader)
-    for status in ("completed", "failed"):
+    for status in ("completed", "failed", "refused"):
         assert ("review_runs_total", (("status", status),)) in after
         value, _ = metric_delta(metric_reader, before, "review_runs_total", status=status)
         assert value == 0
