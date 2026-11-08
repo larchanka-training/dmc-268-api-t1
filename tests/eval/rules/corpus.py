@@ -5,6 +5,11 @@
 не номером: кейс не ломается при правке файла, а в коде не нужна подсказка
 для модели. Подстрока обязана встречаться в файле ровно на одной строке.
 
+Нарушение пункта правила (`rule`) обязано перечислить `categories` -
+категории, под которыми честное ревью назвало бы это нарушение, не сославшись
+на пункт. Замечание без верной ссылки засчитывается, только если его категория
+среди них. Общий дефект задаёт одну `category` и `categories` не имеет.
+
 Конфигурации - что лежит в `.review/rules.md` целевой ветки: `absent` - файла
 нет, `rules` - корректные правила, `empty` - пустой файл, `adversarial` - те же
 правила плюс инструкции для модели в прозе, в тексте пункта и отдельным
@@ -61,6 +66,7 @@ def _expected(files: dict[str, str], raw: dict[str, Any], case_id: str) -> Expec
         line=_line_of(files, raw["path"], raw["contains"], case_id),
         rule=(str(rule[0]), int(rule[1])) if rule else None,
         category=raw.get("category"),
+        categories=tuple(str(c) for c in raw.get("categories") or ()),
     )
 
 

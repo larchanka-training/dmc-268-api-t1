@@ -73,11 +73,15 @@ def config_outputs(results: Sequence[RunResult], config: str) -> list[OutputCoun
 
 
 def _cell(values: Sequence[float | None]) -> str:
+    """Среднее ± отклонение по повторам; если не у всех повторов есть значение -
+    ещё и их число: «1.00 (2/3)» - среднее по двум повторам из трёх, а не по трём."""
     summary = spread(values)
     if summary is None:
         return "—"
     avg, deviation = summary
-    return f"{avg:.2f}" if len(values) == 1 else f"{avg:.2f} ± {deviation:.2f}"
+    text = f"{avg:.2f}" if len(values) == 1 else f"{avg:.2f} ± {deviation:.2f}"
+    present = sum(1 for v in values if v is not None)
+    return text if present == len(values) else f"{text} ({present}/{len(values)})"
 
 
 def to_json(

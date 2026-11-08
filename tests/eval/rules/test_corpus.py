@@ -66,3 +66,33 @@ def test_a_case_without_expected_is_rejected_unless_optional(tmp_path: Path) -> 
     with pytest.raises(KeyError, match="expected"):
         load_case(path)
     assert load_case(path, expected_required=False).expected == ()
+
+
+_RULE_CASE = """\
+title: т
+pull_request: {title: т, description: о}
+files: {a.py: "print(1)"}
+expected:
+  - id: print
+    path: a.py
+    contains: "print(1)"
+    rule: [Logging, 1]
+"""
+
+
+def test_a_rule_item_carries_its_allowed_categories(tmp_path: Path) -> None:
+    path = tmp_path / "rule.yaml"
+    path.write_text(_RULE_CASE + "    categories: [readability, correctness]\n", encoding="utf-8")
+
+    (issue,) = load_case(path).expected
+
+    assert issue.categories == ("readability", "correctness")
+
+
+def test_a_rule_item_without_categories_is_rejected(tmp_path: Path) -> None:
+    # Без списка любое замечание в окне засчиталось бы за нарушение пункта.
+    path = tmp_path / "rule.yaml"
+    path.write_text(_RULE_CASE, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="categories"):
+        load_case(path)

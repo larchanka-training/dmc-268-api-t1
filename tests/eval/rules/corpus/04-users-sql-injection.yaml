@@ -1,4 +1,6 @@
 title: Поиск пользователя - SQL-инъекция и print
+# categories у print: readability или correctness, как в кейсе 02, и ещё
+# security - печатается строка пользователя с email, это утечка данных в stdout.
 pull_request:
   title: "feat: поиск пользователя по имени"
   description: Репозиторий пользователей получает поиск по имени для экрана поддержки.
@@ -26,3 +28,4 @@ expected:
     path: app/repositories/users.py
     contains: "print(\"найден пользователь\""
     rule: [Logging, 1]
+    categories: [readability, correctness, security]

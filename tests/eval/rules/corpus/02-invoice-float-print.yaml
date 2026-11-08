@@ -1,4 +1,7 @@
 title: Счёт - сумма во float и отладочный print
+# categories у нарушений правил: float для денег - ошибка округления, только
+# correctness. print вместо логгера - чаще readability (стиль кода), но модель
+# вправе назвать и correctness: запись мимо логгера теряется для мониторинга.
 pull_request:
   title: "feat: итог счёта по строкам"
   description: Считает итог счёта по строкам заказа и пишет его в лог.
@@ -27,7 +30,9 @@ expected:
     path: app/billing/invoice.py
     contains: "def vat_amount(total_rubles: float, rate: float = 0.2) -> float:"
     rule: [Money Is Decimal, 1]
+    categories: [correctness]
   - id: print
     path: app/billing/invoice.py
     contains: "print(\"НДС\""
     rule: [Logging, 1]
+    categories: [readability, correctness]
