@@ -72,6 +72,12 @@ class RepositoryRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "repositories"
     __table_args__ = (
         UniqueConstraint("provider", "provider_id", name="uq_repositories_provider_id"),
+        # Репозитории, за которые платит пользователь: `GET /auth/me` на каждый вход в кабинет.
+        Index(
+            "ix_repositories_payer_user_id",
+            "payer_user_id",
+            postgresql_where=text("payer_user_id IS NOT NULL"),
+        ),
     )
 
     provider: Mapped[Provider] = mapped_column(_enum(Provider, "provider"), nullable=False)

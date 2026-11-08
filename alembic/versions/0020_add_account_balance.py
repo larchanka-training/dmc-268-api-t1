@@ -6,7 +6,8 @@ Change `account-balance`. Баланс аккаунта — сумма его з
 
 - `balance_credits`: аккаунт, сумма `NUMERIC(20, 10)` (как `cost_eur`), заметка, кто зачислил,
   `created_at`/`updated_at`, как у всех таблиц; внешний ключ на `users` с RESTRICT, индекс по аккаунту.
-- `repositories.payer_user_id` — плательщик репозитория.
+- `repositories.payer_user_id` — плательщик репозитория; частичный индекс по нему —
+  репозитории, за которые платит пользователь (`GET /auth/me`).
 - `review_runs.payer_user_id`, `estimated_cost_eur` (резерв, design D2) и `coverage_reason`
   (нативный enum `review_coverage_reason`, сейчас одно значение `balance`); CHECK
   `ck_review_runs_estimate`: оценка только с плательщиком и не отрицательна; частичный индекс
@@ -14,7 +15,7 @@ Change `account-balance`. Баланс аккаунта — сумма его з
 
 Все колонки nullable без умолчания: меняется только каталог, таблицы не переписываются, старый
 код их не читает. `ADD CONSTRAINT … CHECK` проверяет `review_runs` под ACCESS EXCLUSIVE, а
-`CREATE INDEX` без `CONCURRENTLY` держит SHARE: на стенде таблица маленькая, это миллисекунды
+`CREATE INDEX` без `CONCURRENTLY` держит SHARE: на стенде таблицы маленькие, это миллисекунды
 в пределах `lock_timeout`.
 
 Откат удаляет таблицу, колонки и тип; расход прогонов остаётся, зачисления теряются.
@@ -70,6 +71,12 @@ def upgrade() -> None:
         ["id"],
         ondelete="RESTRICT",
     )
+    op.create_index(
+        "ix_repositories_payer_user_id",
+        "repositories",
+        ["payer_user_id"],
+        postgresql_where=sa.text("payer_user_id IS NOT NULL"),
+    )
 
     _COVERAGE_REASON.create(op.get_bind())
     op.add_column("review_runs", sa.Column("payer_user_id", sa.Uuid(), nullable=True))
@@ -111,6 +118,11 @@ def downgrade() -> None:
     # autogenerate тип не удаляет: следующий upgrade упал бы на создании существующего.
     _COVERAGE_REASON.drop(op.get_bind())
 
+    op.drop_index(
+        "ix_repositories_payer_user_id",
+        table_name="repositories",
+        postgresql_where=sa.text("payer_user_id IS NOT NULL"),
+    )
     op.drop_constraint("repositories_payer_user_id_fkey", "repositories", type_="foreignkey")
     op.drop_column("repositories", "payer_user_id")
 

@@ -209,7 +209,7 @@ def _latest_run_on_head(
     work: UnitOfWork, repository: Repository, event: WebhookEvent
 ) -> ReviewRun | None:
     """Прогон, отвечающий за gate head события (`head_run_in_charge`); `None` — PR ещё не
-    записан или прогона нет. На паузе авторевью после упавшего повтора ручного ревью это
+    записан или прогона нет. На паузе авторевью после повторного ручного прогона без ревью это
     завершённый ручной прогон до него. Правило дубля смотрит на `find_latest` (`_duplicate_of`).
     """
     merge_request = work.merge_requests.find_by_number(repository.id, event.pr_number)

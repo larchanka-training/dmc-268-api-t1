@@ -114,7 +114,7 @@ class ReviewRunRepo(Protocol):
     def find_completed_manual(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
         """Самый поздний ручной прогон на этот коммит в `completed`, сделавший ревью (без
         `coverage_reason`): его gate держит head на паузе авторевью, когда повторный ручной
-        прогон упал или отменён."""
+        прогон ревью не дал: упал, отменён или завершён без денег."""
         ...
 
     def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:

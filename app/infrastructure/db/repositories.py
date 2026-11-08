@@ -337,7 +337,7 @@ class SqlAlchemyReviewRunRepo:
                 ReviewRunRow.head_sha == head_sha,
                 ReviewRunRow.trigger == TriggerSource.MANUAL,
                 ReviewRunRow.status == ReviewRunStatus.COMPLETED,
-                # Прогон без денег ревью не делал: держать gate вместо упавшего повтора ему нечем.
+                # Прогон без денег ревью не делал: держать gate вместо повтора без ревью ему нечем.
                 ReviewRunRow.coverage_reason.is_(None),
             )
             .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())

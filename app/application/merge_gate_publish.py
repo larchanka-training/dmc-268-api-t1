@@ -91,9 +91,10 @@ def pause_check(
     `DISABLED_REVIEW_CHECK`, чтобы пользователь чинил то, что действительно мешает
     (сначала подключение), а начатый до выключения прогон не блокировал мердж.
     Пауза `auto_review_enabled = false` — про автоматическое ревью: ручной прогон на head,
-    пока он не упал, не отменён и не завершён без денег, ставит свой gate (D11); если последний — упавший или
-    отменённый ручной, — завершённый ручной до него, его подставляет `head_run_in_charge`. Упавший ручной прогон без
-    завершённого до него — check паузы: `failure` держал бы PR, который авторевью не ждёт.
+    пока он не упал, не отменён и не завершён без денег, ставит свой gate (D11). Если последний
+    ручной прогон ревью не дал, gate ставит завершённый ручной до него, его подставляет
+    `head_run_in_charge`. Ручной прогон без ревью и без завершённого до него — check паузы: `failure`
+    держал бы PR, который авторевью не ждёт.
     Целевая ветка вне `branch_filter` даёт такую же паузу с проверкой `BRANCH_FILTERED_CHECK`;
     пауза авторевью важнее фильтра. `target_branch` берётся из записи PR; `None` передаёт
     вебхук PR до свежих метаданных, фильтр он применяет сам.
@@ -120,19 +121,19 @@ def head_run_in_charge(
     Обычно — последний прогон на head (`find_latest`), и без записи репозитория тоже. На
     паузе авторевью и вне фильтра веток (`pause_check`), если последний — ручной и он упал,
     отменён или завершён без денег, — последний завершённый ручной прогон на head, а его нет — последний:
-    упавший или отменённый повтор ручного ревью не снимает gate прежнего (change
+    повторный ручной прогон без ревью не снимает gate прежнего (change
     `manual-gate-after-failed-relaunch`, D1).
     Последний вебхуковый за head отвечает сам, даже после ручного: он проверял, возможно,
     другую базу (change `manual-gate-fallback-after-manual-only`). Вытеснен ли прогон
     новым, решает `find_latest`, а не эта функция.
     """
     latest = uow.review_runs.find_latest(merge_request_id, head_sha)
-    if repository is None or not _failed_manual_relaunch(uow, repository, merge_request_id, latest):
+    if repository is None or not _manual_relaunch_without_review(uow, repository, merge_request_id, latest):
         return latest
     return uow.review_runs.find_completed_manual(merge_request_id, head_sha) or latest
 
 
-def _failed_manual_relaunch(
+def _manual_relaunch_without_review(
     uow: UnitOfWork, repository: Repository, merge_request_id: UUID, latest: ReviewRun | None
 ) -> bool:
     if (
@@ -166,8 +167,8 @@ def publish_pause_check(
     тоже (сбой не значит, что POST не дошёл), прогон и репозиторий перечитываются: если
     пауза больше не действует, а последний прогон уже публикуется или завершён, его gate
     выставляет `settle_merge_gate`. Прогон до публикации gate выставит сам, позже нашего
-    POST. Прогон за head — `head_run_in_charge`: после упавшего повторного ручного прогона
-    это завершённый прежний. `VcsError` POST паузы или поправки — вызывающему, после поправки.
+    POST. Прогон за head — `head_run_in_charge`: после повторного ручного прогона
+    без ревью это завершённый прежний. `VcsError` POST паузы или поправки — вызывающему, после поправки.
     """
     error: VcsError | None = None
     try:
@@ -316,7 +317,7 @@ def settle_merge_gate(
     порог читаются на каждой попытке: порог могли сменить, пока шёл прогон или сбой.
     После сбоя `attempts` попыток (по умолчанию `SETTLE_ATTEMPTS`) - `VcsError` вызывающему. Прогона на head нет -
     check не выставляется. Ручной прогон на паузе авторевью ставит свой gate (D11), после
-    упавшего повторного ручного прогона gate - по находкам завершённого прежнего.
+    повторного ручного прогона без ревью gate - по находкам завершённого прежнего.
     """
     failures = 0
     # Последний выставленный check: пока GitHub его принимал, итог мог измениться из-за
