@@ -48,6 +48,7 @@ from .fakes.installation_catalog import FakeInstallationCatalog
 from .fakes.oauth import FakeOAuthProvider
 from .fakes.run_changes import FakeRunChanges, every_step
 from .fakes.unit_of_work import FakeUnitOfWork
+from .fakes.webhooks import a_repository
 
 ORIGIN = "https://review.example"
 SETTINGS = Settings(
@@ -136,6 +137,7 @@ def test_callback_sets_the_session_and_returns_to_the_deep_link(stand) -> None:
         "name": "The Octocat",
         "avatar_url": "https://avatars.githubusercontent.com/u/583231",
         "balance_eur": "0",
+        "paid_repositories": [],
     }
 
 
@@ -733,3 +735,21 @@ def test_logout_closes_an_open_event_stream_and_reconnecting_is_401(stand) -> No
     assert response.text == "retry: 3000\n\n"
     assert sum(slept) <= 5
     assert client.get("/api/v1/events").status_code == 401
+
+
+def test_me_lists_the_repositories_the_user_pays_for(stand) -> None:
+    """`user-auth`: по `full_name`, без проверки доступа на GitHub; чужие не попадают."""
+    client = stand.client()
+    sign_in(client)
+    [session] = stand.uow.sessions.stored
+    paid = replace(a_repository(), payer_user_id=session.user_id)
+    mine_b = replace(paid, id=new_id(), full_name="octo/b", provider_id="2")
+    mine_a = replace(paid, id=new_id(), full_name="octo/a", provider_id="1")
+    foreign = replace(paid, id=new_id(), full_name="octo/c", provider_id="3", payer_user_id=new_id())
+    for repository in (mine_b, mine_a, foreign):
+        stand.uow.repositories.add(repository)
+
+    assert client.get("/api/v1/auth/me").json()["paid_repositories"] == [
+        {"id": str(mine_a.id), "full_name": "octo/a"},
+        {"id": str(mine_b.id), "full_name": "octo/b"},
+    ]

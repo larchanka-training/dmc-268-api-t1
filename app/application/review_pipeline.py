@@ -430,8 +430,8 @@ def run_review(
             )
         steps.finish()
         if run.coverage_reason is CoverageReason.BALANCE:
+            # В `review_runs_total` не пишется: отказ не ревью, в доле упавших он прятал бы сбои.
             logger.info("денег или плательщика нет, прогон завершён без модели")
-            run_outcome.run_finished(ReviewRunStatus.COMPLETED.value)
             close_abandoned_steps(uow, run.id, now=now(), known=steps.unwritten)
             block_head_of_failed_run(
                 uow,

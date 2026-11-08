@@ -1567,3 +1567,51 @@ def test_taking_over_payment_without_own_origin_is_403(origin: str | None) -> No
 
     assert response.status_code == 403
     assert _payer_of(uow, repository) is None
+
+
+def _paid_by_me(uow: FakeUnitOfWork) -> Repository:
+    repository = replace(_repository(101), full_name=API.full_name, payer_user_id=SIGNED_IN.id)
+    uow.repositories.add(repository)
+    return repository
+
+
+def _stop_paying(client: TestClient, repository_id: object, *, origin: str | None = ORIGIN) -> httpx2.Response:
+    headers = {"Origin": origin} if origin else {}
+    response: httpx2.Response = client.delete(_payer_path(repository_id), headers=headers)
+    return response
+
+
+def test_the_payer_stops_paying_without_access_on_github() -> None:
+    """Плательщик ушёл из организации: репозитория не видит, но отказаться от оплаты может."""
+    uow = FakeUnitOfWork()
+    repository = _paid_by_me(uow)
+    client = _client(uow, FakeInstallationCatalog([]))
+
+    response = _stop_paying(client, repository.id)
+
+    assert response.status_code == 204
+    assert _payer_of(uow, repository) is None
+
+
+def test_stopping_payment_for_someone_else_looks_like_a_missing_repository() -> None:
+    uow = FakeUnitOfWork()
+    repository = _paid_by_alice(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    foreign = _stop_paying(client, repository.id)
+    missing = _stop_paying(client, new_id())
+
+    assert foreign.status_code == missing.status_code == 404
+    assert _strip(foreign.json()) == _strip(missing.json())
+    assert foreign.json()["code"] == "REPOSITORY_NOT_FOUND"
+    assert _payer_of(uow, repository) == ALICE.id
+
+
+@pytest.mark.parametrize("origin", [None, "https://evil.example"])
+def test_stopping_payment_without_own_origin_is_403(origin: str | None) -> None:
+    uow = FakeUnitOfWork()
+    repository = _paid_by_me(uow)
+    client = _client(uow, FakeInstallationCatalog([API]))
+
+    assert _stop_paying(client, repository.id, origin=origin).status_code == 403
+    assert _payer_of(uow, repository) == SIGNED_IN.id

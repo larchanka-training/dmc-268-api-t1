@@ -79,6 +79,14 @@ class RepositoryRepo(Protocol):
         """Сделать плательщиком `user_id` и `updated_at = now`; `None` — записи нет."""
         ...
 
+    def drop_payer(self, repository_id: UUID, user_id: UUID, now: datetime) -> bool:
+        """Снять плательщика, если это `user_id`; `False` — записи нет или платит другой."""
+        ...
+
+    def list_paid_by(self, user_id: UUID) -> list[Repository]:
+        """Репозитории, где `user_id` — плательщик, по `full_name`."""
+        ...
+
 
 class MergeRequestRepo(Protocol):
     def get(self, merge_request_id: UUID) -> MergeRequest | None: ...
@@ -228,11 +236,6 @@ class UserRepo(Protocol):
     def get(self, user_id: UUID) -> User | None: ...
 
     def find_by_provider(self, provider: Provider, provider_user_id: str) -> User | None: ...
-
-    def find_by_login(self, provider: Provider, login: str) -> User | None:
-        """Пользователь по логину без учёта регистра, как его сравнивает GitHub; логин сменили —
-        у прежней записи он остаётся до входа, и берётся запись, обновлённая последней."""
-        ...
 
     def add(self, user: User) -> bool:
         """Вставить пользователя; `False` — пара провайдер + аккаунт уже занята.

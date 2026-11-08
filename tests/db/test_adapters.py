@@ -1453,13 +1453,21 @@ def test_reconnect_keeps_an_assigned_payer_and_fills_an_empty_one(uow) -> None:
     assert (first.payer_user_id, second.payer_user_id) == (alice.id, bob.id)
 
 
-def test_a_user_is_found_by_login_ignoring_case_newest_first(uow) -> None:
-    renamed = replace(a_user("alice"), provider_user_id="old")
-    current = replace(a_user("Alice"), updated_at=LATER)
+def test_only_the_payer_drops_payment_and_lists_what_they_pay_for(uow) -> None:
+    alice, bob = a_user("alice"), a_user("bob")
+    paid_b = replace(a_repository(), full_name="octo/b", payer_user_id=alice.id)
+    paid_a = replace(a_repository(), id=new_id(), provider_id="2", full_name="octo/a", payer_user_id=alice.id)
     with uow as work:
-        work.users.add(renamed)
-        work.users.add(current)
+        work.users.add(alice)
+        work.users.add(bob)
+        work.repositories.add(paid_b)
+        work.repositories.add(paid_a)
         work.commit()
     with uow as work:
-        assert work.users.find_by_login(Provider.GITHUB, "ALICE") == current
-        assert work.users.find_by_login(Provider.GITHUB, "bob") is None
+        assert [r.id for r in work.repositories.list_paid_by(alice.id)] == [paid_a.id, paid_b.id]
+        assert work.repositories.drop_payer(paid_a.id, bob.id, LATER) is False
+        assert work.repositories.drop_payer(paid_a.id, alice.id, LATER) is True
+        work.commit()
+    with uow as work:
+        assert [r.id for r in work.repositories.list_paid_by(alice.id)] == [paid_b.id]
+        assert work.repositories.get(paid_a.id).payer_user_id is None

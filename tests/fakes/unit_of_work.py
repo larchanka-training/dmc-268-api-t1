@@ -135,6 +135,17 @@ class FakeRepositoryRepo:
         self._by_id[repository_id] = replace(stored, payer_user_id=user_id, updated_at=now)
         return self._by_id[repository_id]
 
+    def drop_payer(self, repository_id: UUID, user_id: UUID, now: datetime) -> bool:
+        stored = self._by_id.get(repository_id)
+        if stored is None or stored.payer_user_id != user_id:
+            return False
+        self._by_id[repository_id] = replace(stored, payer_user_id=None, updated_at=now)
+        return True
+
+    def list_paid_by(self, user_id: UUID) -> list[Repository]:
+        paid = [r for r in self._by_id.values() if r.payer_user_id == user_id]
+        return sorted(paid, key=lambda r: r.full_name)
+
 
 class FakeMergeRequestRepo:
     def __init__(self) -> None:
@@ -609,10 +620,6 @@ class FakeUserRepo:
             ),
             None,
         )
-
-    def find_by_login(self, provider: Provider, login: str) -> User | None:
-        found = [u for u in self._by_id.values() if u.provider is provider and u.login.lower() == login.lower()]
-        return max(found, key=lambda u: (u.updated_at, u.id), default=None)
 
     def add(self, user: User) -> bool:
         if self.find_by_provider(user.provider, user.provider_user_id) is not None:

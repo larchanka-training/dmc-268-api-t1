@@ -27,10 +27,19 @@
 
 - [x] 5.1 `balance_eur` в `GET /api/v1/auth/me` (`app/api/auth.py`). Тест: `tests/test_auth_api.py`
 - [x] 5.2 `coverage_reason` в `GET /api/v1/reviews/{review_run_id}` (`app/api/reviews.py`). Тест: `tests/test_reviews_api.py`
-- [x] 5.3 Use case `credit_balance` и команда `python -m app.worker.credit_balance`, make-цель `credit-balance` (`app/application/use_cases/billing.py`, `app/worker/credit_balance.py`, `Makefile`). Тест: `tests/application/test_billing.py` — зачисление, неизвестный логин, не число
+- [x] 5.3 Use case `credit_balance` и команда `python -m app.worker.credit_balance`, make-цель `credit-balance` (`app/application/use_cases/billing.py`, `app/worker/credit_balance.py`, `Makefile`). Тест: `tests/application/test_billing.py` — зачисление по id GitHub, логин сменил владельца, неизвестный id, не число
 - [x] 5.4 `uv run python scripts/export_openapi.py`; `docs/erd.md`
 
-## 6. `review-limits` и проверки
+## 6. Правки по ревью #396
 
-- [x] 6.1 Убрать квоту из change `review-limits`: proposal, design D5, требование «Суточная квота токенов репозитория», `quota` в причинах покрытия → `balance` из `account-balance`; задачи 1.1 (без `coverage_reason`) и 3.x; отметить 3.1 сделанной #375
-- [x] 6.2 `uv run ruff check .`, `uv run lint-imports`, `uv run mypy .`, `uv run alembic heads`, `PYTEST_FAIL_ON_SKIP=1 uv run pytest`, `npx @fission-ai/openspec@1.15.0 validate --all --strict`
+- [x] 6.1 Ручной прогон без денег на паузе и вне фильтра веток ведёт gate как упавший ручной (`_no_review`, `merge_gate_publish.py`). Тест: `tests/application/test_merge_gate_publish.py` — пауза без оплаченного, пауза после оплаченного M1
+- [x] 6.2 Нулевой расход прогона без денег в спеках `review-data-model` и `review-rest-api` и в описаниях `tokens_used`, `usage` (`app/api/reviews.py`). Тест: `tests/test_reviews_api.py` — прогон в том виде, как его пишет `reserve_or_refuse`
+- [x] 6.3 `coverage_reason` в `ReviewRunListItem` и событиях `run.*` (`app/api/reviews.py`). Тест: `tests/test_review_list_api.py`
+- [x] 6.4 Зачисление по id GitHub вместо логина, `find_by_login` удалён (`billing.py`, `credit_balance.py`, `Makefile`). Тест: `tests/application/test_billing.py`, `tests/worker/test_credit_balance.py`
+- [x] 6.5 Отказ без денег не пишется в `review_runs_total` (`review_pipeline.py`). Тест: `tests/application/test_review_pipeline.py`
+- [x] 6.6 `DELETE /api/v1/repositories/{repository_id}/payer` только для текущего плательщика, `paid_repositories` в `GET /api/v1/auth/me` (`drop_payer`, `list_paid_by`, `app/api/repositories.py`, `app/api/auth.py`). Тест: `tests/test_repositories_api.py`, `tests/test_auth_api.py`, `tests/db/test_adapters.py`
+
+## 7. `review-limits` и проверки
+
+- [x] 7.1 Убрать квоту из change `review-limits`: proposal, design D5, требование «Суточная квота токенов репозитория», `quota` в причинах покрытия → `balance` из `account-balance`; задачи 1.1 (без `coverage_reason`) и 3.x; отметить 3.1 сделанной #375
+- [x] 7.2 `uv run ruff check .`, `uv run lint-imports`, `uv run mypy .`, `uv run alembic heads`, `PYTEST_FAIL_ON_SKIP=1 uv run pytest`, `npx @fission-ai/openspec@1.15.0 validate --all --strict`

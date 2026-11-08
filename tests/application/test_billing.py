@@ -1,12 +1,13 @@
 """Ручное зачисление на баланс (`review-billing`, design D8)."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
 
-from app.application.use_cases.billing import CreditRefusal, credit_balance
+from app.application.use_cases.billing import Credited, CreditRefusal, credit_balance
 from app.domain.entities import BalanceCredit, User
 from app.domain.enums import Provider
 
@@ -23,26 +24,25 @@ def _uow() -> FakeUnitOfWork:
     return uow
 
 
-def _credit(uow: FakeUnitOfWork, login: str = "alice", amount: str = "5") -> Decimal | CreditRefusal:
-    return credit_balance(uow, login, amount, note="тест", credited_by="admin", now=NOW, new_id=lambda: CREDIT_ID)
+def _credit(uow: FakeUnitOfWork, github_id: str = "1", amount: str = "5") -> Credited | CreditRefusal:
+    return credit_balance(uow, github_id, amount, note="тест", credited_by="admin", now=NOW, new_id=lambda: CREDIT_ID)
 
 
 def test_a_credit_is_journaled_and_the_new_balance_returned() -> None:
     uow = _uow()
 
-    assert _credit(uow) == Decimal(5)
-    assert _credit(uow, amount="-0.5000000001") == Decimal("4.4999999999")
+    assert _credit(uow) == Credited("alice", Decimal(5))
+    assert _credit(uow, amount="-0.5000000001") == Credited("alice", Decimal("4.4999999999"))
     assert uow.billing.credits[0] == BalanceCredit(CREDIT_ID, ALICE.id, Decimal(5), "тест", "admin", NOW)
 
 
-def test_the_login_is_matched_ignoring_case() -> None:
-    assert _credit(_uow(), login="Alice") == Decimal(5)
+def test_a_login_that_changed_hands_does_not_route_the_money() -> None:
+    """Ревью #396: у нас записан `bob` (id 1), сменивший логин; `bob` теперь у id 2, он у нас не входил."""
+    uow = FakeUnitOfWork()
+    uow.users.add(replace(ALICE, login="bob"))
 
-
-def test_an_unknown_login_writes_nothing() -> None:
-    uow = _uow()
-
-    assert _credit(uow, login="bob") is CreditRefusal.UNKNOWN_LOGIN
+    assert _credit(uow, github_id="2") is CreditRefusal.UNKNOWN_ACCOUNT
+    assert _credit(uow, github_id="bob") is CreditRefusal.UNKNOWN_ACCOUNT
     assert uow.billing.credits == []
 
 

@@ -103,6 +103,11 @@ from app.domain.run_list import run_list_filter
 from app.domain.vcs_errors import DiffTooLargeError, VcsError
 
 # Задача #273, change `manual-review-launch`.
+COVERAGE_REASON_DESCRIPTION = (
+    "Почему ревью покрыло дифф не полностью: balance — у плательщика репозитория не хватило денег, "
+    "прогон завершён без вызова модели, находок нет, на head check run failure «Недостаточно средств»; "
+    "null — ревью прошло как обычно."
+)
 _CREATE_REVIEW_DESCRIPTION = (
     "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. Запускает "
     "ревью текущего head-коммита запроса на изменение (задача #273): прогон с `trigger = manual` "
@@ -326,12 +331,16 @@ class ReviewRunResponse(BaseModel):
     )
     status: ReviewRunStatus = Field(description="Текущий статус прогона.", examples=["completed"])
     trigger: TriggerSource = Field(description="Что запустило прогон.", examples=["webhook"])
-    model: str | None = Field(description="Модель LLM, которая провела ревью; null до анализа.")
-    tokens_used: int | None = Field(description="Токенов LLM потрачено; null до анализа.")
+    model: str | None = Field(description="Модель LLM, которая провела ревью; null до анализа и у прогона без денег.")
+    tokens_used: int | None = Field(
+        description="Токенов LLM потрачено; null до анализа, 0 у прогона биллинга без вызова модели: без денег "
+        "(coverage_reason = balance) или с резервом, снятым при сбое или отмене до анализа."
+    )
     usage: RunUsageResponse | None = Field(
         description=(
             "Входные и выходные токены и стоимость; их сумма может не совпасть с tokens_used — это итог провайдера."
-            " null до анализа и у прогонов, записанных до разбивки."
+            " null до анализа и у прогонов, записанных до разбивки; у прогона биллинга без вызова модели (без денег"
+            " или с резервом, снятым до анализа) нулевой: 0 токенов и \"0\" €."
         )
     )
     rejected_findings: int = Field(ge=0, description="Сколько находок отброшено: привязка вне изменённых строк диффа.")
@@ -340,14 +349,7 @@ class ReviewRunResponse(BaseModel):
         examples=["verified"],
     )
     verifier_dropped_findings: int = Field(ge=0, description="Сколько находок отбросил верификатор.")
-    coverage_reason: CoverageReason | None = Field(
-        description=(
-            "Почему ревью покрыло дифф не полностью: balance — у плательщика репозитория не хватило денег, "
-            "прогон завершён без вызова модели, находок нет, на head check run failure «Недостаточно средств»; "
-            "null — ревью прошло как обычно."
-        ),
-        examples=["balance"],
-    )
+    coverage_reason: CoverageReason | None = Field(description=COVERAGE_REASON_DESCRIPTION, examples=["balance"])
     duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
     failure_reason: str | None = Field(description="Почему прогон упал; null, если не падал.")
     failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
@@ -382,6 +384,7 @@ class ReviewRunListItem(BaseModel):
     last_progress_at: UtcDatetime = Field(description="Время последнего перехода состояния.")
     duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
     failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
+    coverage_reason: CoverageReason | None = Field(description=COVERAGE_REASON_DESCRIPTION, examples=["balance"])
     findings_count: int = Field(
         ge=0,
         description=(

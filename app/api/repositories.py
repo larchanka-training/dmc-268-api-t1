@@ -34,6 +34,7 @@ from app.api.dependencies import (
     get_visibility_catalog,
 )
 from app.api.errors import (
+    ERRORS_403_ORIGIN,
     ERRORS_403_ORIGIN_OR_MANAGE,
     ERRORS_404_NOT_IN_INSTALLATION,
     ERRORS_404_REPOSITORY,
@@ -178,6 +179,14 @@ _PAYER_DESCRIPTION = (
     "роль — как у PUT /repositories/{id}/settings, запросом к GitHub мимо кэша видимости: без admin или "
     "maintain — `403 REPOSITORY_MANAGE_REQUIRED`, GitHub не отдал репозиторий — "
     "`404 REPOSITORY_NOT_FOUND`; при отказе и при `502` плательщик не меняется."
+)
+_STOP_PAYING_DESCRIPTION = (
+    "Требует сессию и `Origin` сервиса. Снимает плательщика, если это вызывающий; доступ к репозиторию "
+    "на GitHub не проверяется, чтобы отказаться мог и ушедший из организации (список его репозиториев — "
+    "`paid_repositories` в GET /auth/me). Ответ — 204. Репозиторий, за который платит не вызывающий, "
+    "и несуществующий дают один и тот же `404 REPOSITORY_NOT_FOUND` без изменений. Прогоны, уже "
+    "зарезервировавшие оценку, остаются за ним; следующие без плательщика завершаются без вызова "
+    "модели, пока admin или maintain не возьмёт оплату (POST /repositories/{id}/payer)."
 )
 _PAYER_LOGIN_DESCRIPTION = (
     "Логин GitHub плательщика: аккаунт сервиса, с баланса которого идут прогоны репозитория, кто бы их "
@@ -767,6 +776,33 @@ def take_over_payment(
         # GitHub не отдал репозиторий — ответ тот же, что у невидимого.
         raise _repository_not_found()
     return RepositoryPayerResponse(payer_login=signed_in.user.login)
+
+
+@router.delete(
+    "/{repository_id}/payer",
+    status_code=HTTPStatus.NO_CONTENT,
+    response_class=Response,
+    summary="Перестать платить за репозиторий",
+    description=_STOP_PAYING_DESCRIPTION,
+    responses={
+        HTTPStatus.NO_CONTENT: {"description": "Плательщик снят."},
+        **ERRORS_403_ORIGIN,
+        **ERRORS_404_REPOSITORY,
+        **ERRORS_422,
+    },
+)
+def stop_payment(
+    repository_id: RepositoryIdPath,
+    signed_in: SignedIn = Depends(current_session),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> Response:
+    # Доступ на GitHub не проверяется: ушедший из организации плательщик репозитория не видит.
+    with uow_factory() as uow:
+        dropped = uow.repositories.drop_payer(repository_id, signed_in.user.id, datetime.now(UTC))
+        uow.commit()
+    if not dropped:
+        raise _repository_not_found()
+    return Response(status_code=HTTPStatus.NO_CONTENT)
 
 
 @router.get(

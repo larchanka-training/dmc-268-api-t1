@@ -91,7 +91,7 @@ def pause_check(
     `DISABLED_REVIEW_CHECK`, чтобы пользователь чинил то, что действительно мешает
     (сначала подключение), а начатый до выключения прогон не блокировал мердж.
     Пауза `auto_review_enabled = false` — про автоматическое ревью: ручной прогон на head,
-    пока он не упал и не отменён, ставит свой gate (D11); если последний — упавший или
+    пока он не упал, не отменён и не завершён без денег, ставит свой gate (D11); если последний — упавший или
     отменённый ручной, — завершённый ручной до него, его подставляет `head_run_in_charge`. Упавший ручной прогон без
     завершённого до него — check паузы: `failure` держал бы PR, который авторевью не ждёт.
     Целевая ветка вне `branch_filter` даёт такую же паузу с проверкой `BRANCH_FILTERED_CHECK`;
@@ -118,8 +118,8 @@ def head_run_in_charge(
     """Прогон, чей итог отвечает за gate head; зовётся внутри открытого вызывающим `with uow`.
 
     Обычно — последний прогон на head (`find_latest`), и без записи репозитория тоже. На
-    паузе авторевью и вне фильтра веток (`pause_check`), если последний — ручной и он упал
-    или отменён, — последний завершённый ручной прогон на head, а его нет — последний:
+    паузе авторевью и вне фильтра веток (`pause_check`), если последний — ручной и он упал,
+    отменён или завершён без денег, — последний завершённый ручной прогон на head, а его нет — последний:
     упавший или отменённый повтор ручного ревью не снимает gate прежнего (change
     `manual-gate-after-failed-relaunch`, D1).
     Последний вебхуковый за head отвечает сам, даже после ручного: он проверял, возможно,
@@ -139,7 +139,7 @@ def _failed_manual_relaunch(
         repository.connected_at is None
         or latest is None
         or latest.trigger is not TriggerSource.MANUAL
-        or latest.status not in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
+        or not _no_review(latest)
     ):
         return False
     merge_request = uow.merge_requests.get(merge_request_id)
@@ -209,10 +209,14 @@ def publish_pause_check(
 
 
 def _manual_run_in_charge(head_run: ReviewRun | None) -> bool:
+    return head_run is not None and head_run.trigger is TriggerSource.MANUAL and not _no_review(head_run)
+
+
+def _no_review(run: ReviewRun) -> bool:
+    """Ревью прогон не дал: упал, отменён или завершён без денег — для gate на паузе всё равно."""
     return (
-        head_run is not None
-        and head_run.trigger is TriggerSource.MANUAL
-        and head_run.status not in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
+        run.status in {ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED}
+        or run.coverage_reason is CoverageReason.BALANCE
     )
 
 

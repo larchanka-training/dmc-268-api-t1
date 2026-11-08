@@ -520,3 +520,30 @@ def test_a_refused_manual_run_does_not_stand_in_for_a_failed_relaunch_on_pause()
     vcs = _settle(uow)
 
     assert vcs.checks == [AUTO_REVIEW_OFF_CHECK]
+
+
+def test_a_refused_manual_run_on_pause_gets_the_pause_check() -> None:
+    """Ревью #396: ручной прогон без денег на паузе ведёт gate как упавший ручной."""
+    uow = _paused_pr()
+    uow.review_runs.add(
+        replace(
+            _run_on_head(70, TriggerSource.MANUAL, ReviewRunStatus.COMPLETED, minute=1),
+            coverage_reason=CoverageReason.BALANCE,
+        )
+    )
+
+    assert _settle(uow).checks == [AUTO_REVIEW_OFF_CHECK]
+
+
+def test_a_refused_manual_relaunch_on_pause_keeps_the_gate_of_the_paid_one() -> None:
+    """Ревью #396: оплаченный ручной M1 с `success`, повтор M2 без денег — gate остаётся за M1."""
+    uow = _paused_pr()
+    uow.review_runs.add(_run_on_head(71, TriggerSource.MANUAL, ReviewRunStatus.COMPLETED, minute=1))
+    uow.review_runs.add(
+        replace(
+            _run_on_head(72, TriggerSource.MANUAL, ReviewRunStatus.COMPLETED, minute=2),
+            coverage_reason=CoverageReason.BALANCE,
+        )
+    )
+
+    assert _settle(uow).checks == [build_merge_gate_check((), FindingSeverity.CRITICAL)]

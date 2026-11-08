@@ -194,6 +194,24 @@ class SqlAlchemyRepositoryRepo:
         ).one_or_none()
         return m.repository_to_domain(row) if row else None
 
+    def drop_payer(self, repository_id: UUID, user_id: UUID, now: dt.datetime) -> bool:
+        # Условие в UPDATE: перевод оплаты между чтением и записью не снимет нового плательщика.
+        dropped = self._session.scalars(
+            update(RepositoryRow)
+            .where(RepositoryRow.id == repository_id, RepositoryRow.payer_user_id == user_id)
+            .values(payer_user_id=None, updated_at=now)
+            .returning(RepositoryRow.id)
+        ).one_or_none()
+        return dropped is not None
+
+    def list_paid_by(self, user_id: UUID) -> list[Repository]:
+        rows = self._session.scalars(
+            select(RepositoryRow)
+            .where(RepositoryRow.payer_user_id == user_id)
+            .order_by(RepositoryRow.full_name)
+        )
+        return [m.repository_to_domain(row) for row in rows]
+
 
 class SqlAlchemyMergeRequestRepo:
     def __init__(self, session: Session) -> None:
@@ -846,15 +864,6 @@ class SqlAlchemyUserRepo:
                 UserRow.provider == provider,
                 UserRow.provider_user_id == provider_user_id,
             )
-        ).one_or_none()
-        return m.user_to_domain(row) if row else None
-
-    def find_by_login(self, provider: Provider, login: str) -> User | None:
-        row = self._session.scalars(
-            select(UserRow)
-            .where(UserRow.provider == provider, func.lower(UserRow.login) == login.lower())
-            .order_by(UserRow.updated_at.desc(), UserRow.id.desc())
-            .limit(1)
         ).one_or_none()
         return m.user_to_domain(row) if row else None
 

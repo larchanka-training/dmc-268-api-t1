@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Any, Literal
 from urllib.parse import quote, unquote
+from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from fastapi.responses import RedirectResponse
@@ -76,6 +77,13 @@ _PUBLIC: dict[str, Any] = {"security": []}
 _LOCATION = {"Location": {"description": "Куда перенаправлен браузер.", "schema": {"type": "string"}}}
 
 
+class PaidRepository(BaseModel):
+    """Репозиторий, за который платит пользователь."""
+
+    id: UUID
+    full_name: str = Field(description="Полное имя репозитория на GitHub.", examples=["octo-org/api"])
+
+
 class UserResponse(BaseModel):
     """Пользователь кабинета — учётная запись у провайдера входа."""
 
@@ -96,6 +104,13 @@ class UserResponse(BaseModel):
             "отрицательным: оценка ошибается не больше чем на один прогон."
         ),
         examples=["4.75"],
+    )
+    paid_repositories: list[PaidRepository] = Field(
+        description=(
+            "Репозитории, где пользователь записан плательщиком, по `full_name`. Не зависит от доступа на "
+            "GitHub: ушедший из организации плательщик видит здесь, от чего отказаться "
+            "(DELETE /repositories/{id}/payer)."
+        )
     )
 
 
@@ -327,8 +342,8 @@ def _setup_done(outcome: str) -> Response:
     response_model=UserResponse,
     summary="Пользователь текущей сессии",
     description=(
-        "Требует сессию. По ответу кабинет решает, показывать ли страницу входа. Баланс читается из "
-        "базы на каждый запрос."
+        "Требует сессию. По ответу кабинет решает, показывать ли страницу входа. Баланс и оплачиваемые "
+        "репозитории читаются из базы на каждый запрос."
     ),
     response_description="Профиль пользователя.",
     responses=SESSION_RESPONSES,
@@ -339,12 +354,14 @@ def me(
 ) -> UserResponse:
     with uow_factory() as uow:
         balance = uow.billing.balance(user.id)
+        paid = uow.repositories.list_paid_by(user.id)
     return UserResponse(
         provider=user.provider,
         login=user.login,
         name=user.name,
         avatar_url=user.avatar_url,
         balance_eur=euro_string(balance),
+        paid_repositories=[PaidRepository(id=r.id, full_name=r.full_name) for r in paid],
     )
 
 

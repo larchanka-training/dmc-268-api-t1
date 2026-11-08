@@ -234,8 +234,8 @@ migrate: infra-up ## Применить миграции к локальной �
 # Пока пополнения через платёжную систему нет; на стенде - та же команда в контейнере воркера.
 # Значения - из окружения рецепта (переменные командной строки make туда попадают), а не
 # подстановкой в текст команды: апостроф в заметке не ломает кавычки.
-credit-balance: ## Зачислить деньги на баланс аккаунта: LOGIN, AMOUNT (евро, минус - возврат), NOTE, BY - кто зачислил
-	$(SERVICE_ENV) uv run python -m app.worker.credit_balance "$$LOGIN" "$$AMOUNT" --note "$$NOTE" $${BY:+--by "$$BY"}
+credit-balance: ## Зачислить деньги на баланс аккаунта: GITHUB_ID (gh api users/<логин> --jq .id), AMOUNT (евро, минус - возврат), NOTE, BY - кто зачислил
+	$(SERVICE_ENV) uv run python -m app.worker.credit_balance "$$GITHUB_ID" "$$AMOUNT" --note "$$NOTE" $${BY:+--by "$$BY"}
 
 run-api: migrate ## API на хосте с автоперезагрузкой (порт 8000)
 	$(SERVICE_ENV) uv run uvicorn app.main:app --reload
