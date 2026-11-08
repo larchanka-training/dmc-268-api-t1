@@ -5,12 +5,13 @@
 (разбор сообщения + `run_review`), а `run_worker` — то, что вызывает
 `app/worker/__main__.py`, чтобы не импортировать `app.infrastructure`/
 `app.application` напрямую (точка входа обязана оставаться тонкой).
-Ack/nack-решение — чистая `should_ack`, здесь только вызовы канала.
+Решение по сообщению — чистая `decide` (ACK / RETRY / DEAD_LETTER), здесь только вызовы канала.
 """
 
 import contextlib
 import logging
 import signal
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -72,7 +73,7 @@ from app.infrastructure.telemetry import (
     shutdown_tracing,
     sweep_span,
 )
-from app.worker.handling import should_ack
+from app.worker.handling import Decision, decide
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,21 @@ MessageHandler = Callable[[bytes], None]
 # consume-цикла (простой раз в секунду или очередное сообщение) и сам
 # ограничивается этим интервалом.
 SWEEP_INTERVAL_SECONDS = 60.0
+
+# Heartbeat AMQP воркера (#157): обработчик идёт в своём потоке, а цикл соединения крутится
+# и отвечает брокеру, так что мёртвое соединение брокер замечает за два интервала, а живое
+# не рвёт и на прогоне в минуты.
+WORKER_HEARTBEAT_SECONDS = 30
+
+# Как часто цикл соединения проверяет, закончил ли обработчик или проход очистки: заодно шаг
+# ответа на heartbeat.
+_HANDLER_POLL_SECONDS = 1
+
+# Пауза перед возвратом не начатого прогона в очередь (#157). Брокер отдаёт возвращённое
+# сообщение сразу, и без паузы все `DELIVERY_LIMIT` повторов сгорают за секунды — база,
+# моргнувшая на секунду, отправила бы прогон в DLQ. С паузой у сбоя есть около минуты.
+# Пауза идёт циклом соединения (`connection.sleep`): heartbeat она не прерывает.
+RETRY_DELAY_SECONDS = 15
 
 # Сигналы штатной остановки: SIGTERM шлёт `docker stop`, SIGINT — Ctrl+C.
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
@@ -133,6 +149,7 @@ class Worker:
         sweep: Callable[[], object] | None = None,
         sweep_interval: float = SWEEP_INTERVAL_SECONDS,
         stop: StopRequest | None = None,
+        retry_delay: float = RETRY_DELAY_SECONDS,
     ) -> None:
         """Потреблять очередь задач ревью (`QUEUE_NAME`).
 
@@ -144,7 +161,11 @@ class Worker:
         Python-цикл их уже не читает.
 
         `sweep` — периодический проход по зависшим прогонам; его сбой
-        логируется и не останавливает потребление.
+        логируется и не останавливает потребление. Он ходит в базу и GitHub, поэтому
+        идёт, как обработчик, в своём потоке: цикл соединения отвечает на heartbeat.
+
+        `retry_delay` — пауза перед возвратом не начатого прогона в очередь
+        (`RETRY_DELAY_SECONDS`); просьба остановиться её прерывает.
 
         `stop` — просьба остановиться (`stop_on_signals`). Сообщение в работе
         дорабатывает и подтверждается, следующее не берётся, даже если брокер
@@ -170,11 +191,7 @@ class Worker:
                     last_sweep is None or time.monotonic() - last_sweep >= sweep_interval
                 ):
                     last_sweep = time.monotonic()
-                    try:
-                        with sweep_span():
-                            sweep()
-                    except Exception:
-                        logger.exception("проход по зависшим прогонам завершился ошибкой")
+                    self._sweep(sweep)
                     # Сигнал мог прийти посреди прохода — сообщение этого такта не берём.
                     if stop is not None and stop.requested:
                         self._stop_consuming(method)
@@ -186,14 +203,7 @@ class Worker:
                 # проверка `method` не сужает `body`/`delivery_tag`.
                 assert body is not None
                 assert method.delivery_tag is not None
-                exc: BaseException | None = None
-                # Исключение ловится снаружи спана: он успевает записать его и
-                # закрыться со статусом ошибки, а не OK при nack в DLQ.
-                try:
-                    with consuming_span(properties, method.delivery_tag, method.redelivered):
-                        handler(body)
-                except Exception as caught:  # noqa: BLE001 — любая ошибка уводит сообщение в DLQ, а не роняет процесс
-                    exc = caught
+                exc = self._handle(handler, body, properties, method)
                 processed += 1
                 last = (limit is not None and processed >= limit) or (
                     stop is not None and stop.requested
@@ -202,8 +212,16 @@ class Worker:
                     # До ack, как в `_stop_consuming`.
                     self.channel.cancel()
                     consuming = False
-                if should_ack(exc):
+                decision = decide(exc)
+                if decision is Decision.ACK:
                     self.channel.basic_ack(method.delivery_tag)
+                elif decision is Decision.RETRY:
+                    # `basic.reject` с requeue засчитывается попыткой доставки: после
+                    # `DELIVERY_LIMIT` брокер уведёт сообщение в DLQ, а не крутит его вечно.
+                    # `nack(requeue=True)` попытку не тратит — он для штатной остановки.
+                    logger.warning("прогон не начат из-за временного сбоя, сообщение вернётся в очередь")
+                    self._pause_before_retry(retry_delay, stop)
+                    self.channel.basic_reject(method.delivery_tag, requeue=True)
                 else:
                     self.channel.basic_nack(method.delivery_tag, requeue=False)
                 if last:
@@ -222,6 +240,87 @@ class Worker:
                 self.channel.cancel()
             self.connection.close()
 
+    def _handle(
+        self,
+        handler: MessageHandler,
+        body: bytes,
+        properties: spec.BasicProperties | None,
+        method: spec.Basic.Deliver,
+    ) -> Exception | None:
+        """Обработать сообщение в отдельном потоке, пока главный крутит цикл соединения.
+
+        Спан — внутри потока: контекст трассировки обработчика его. Исключение ловится снаружи
+        спана: он успевает записать его и закрыться со статусом ошибки, а не OK при nack в DLQ.
+        """
+        delivery_tag = method.delivery_tag
+        assert delivery_tag is not None
+
+        def work() -> None:
+            with consuming_span(properties, delivery_tag, method.redelivered):
+                handler(body)
+
+        return self._beside_connection(work, name="review-handler")
+
+    def _sweep(self, sweep: Callable[[], object]) -> None:
+        """Проход очистки в отдельном потоке: он ходит в базу и GitHub и может идти дольше двух
+        интервалов heartbeat. Сбой логируется и не останавливает потребление."""
+
+        def work() -> None:
+            with sweep_span():
+                sweep()
+
+        failure = self._beside_connection(work, name="review-sweep")
+        if failure is not None:
+            logger.error("проход по зависшим прогонам завершился ошибкой", exc_info=failure)
+
+    def _beside_connection(self, work: Callable[[], None], *, name: str) -> Exception | None:
+        """Выполнить `work` в отдельном потоке, пока главный крутит цикл соединения.
+
+        `BlockingConnection` отвечает брокеру на heartbeat только внутри своего цикла: при
+        работе в главном потоке он стоит минутами, и брокер рвёт соединение. Канал pika не
+        потокобезопасен, поэтому `work` к нему не прикасается — ack и reject делает главный
+        поток потом. Исключение `work` возвращается; `KeyboardInterrupt` и `SystemExit`
+        пробрасываются в главный поток.
+        """
+        failure: list[BaseException] = []
+
+        def target() -> None:
+            try:
+                work()
+            # BaseException тоже: в потоке он молча убил бы поток, а сообщение ушло бы в ack.
+            except BaseException as caught:  # noqa: BLE001 — исход решает вызывающий или главный поток
+                failure.append(caught)
+
+        thread = threading.Thread(target=target, name=name, daemon=True)
+        thread.start()
+        while thread.is_alive():
+            try:
+                self.connection.process_data_events(time_limit=_HANDLER_POLL_SECONDS)
+            except Exception:
+                # Соединение потеряно посреди работы: она доводится до конца, а не обрывается
+                # выходом процесса. Сообщение без подтверждения брокер вернёт, и повтор
+                # подтвердит уже завершённый прогон (`run_review` его пропускает).
+                thread.join()
+                raise
+            thread.join(timeout=0)
+        if not failure:
+            return None
+        caught = failure[0]
+        if not isinstance(caught, Exception):
+            # `KeyboardInterrupt`, `SystemExit` — как без потока: процесс выходит без
+            # подтверждения, и брокер вернёт сообщение с тратой попытки доставки.
+            raise caught
+        return caught
+
+    def _pause_before_retry(self, delay: float, stop: StopRequest | None) -> None:
+        """Подождать `delay` секунд циклом соединения — он отвечает на heartbeat. Просьба
+        остановиться паузу прерывает: сообщение возвращается сразу."""
+        remaining = delay
+        while remaining > 0 and not (stop is not None and stop.requested):
+            step = min(remaining, _HANDLER_POLL_SECONDS)
+            self.connection.sleep(step)
+            remaining -= step
+
     def _stop_consuming(self, method: spec.Basic.Deliver | None) -> None:
         """Штатная остановка: снять потребителя, потом вернуть выданное сообщение `nack`
         с requeue — он попытку доставки не тратит, а `basic.reject` от `cancel()` и
@@ -234,13 +333,12 @@ class Worker:
             self.channel.basic_nack(method.delivery_tag, requeue=True)
 
 
-def build_worker(settings: Settings) -> Worker:
+def build_worker(settings: Settings, *, heartbeat: int = WORKER_HEARTBEAT_SECONDS) -> Worker:
     parameters = pika.URLParameters(settings.rabbitmq_url)
-    # Обработчик вызывается синхронно и ходит минутами (запрос к модели), а
-    # пока он работает, цикл событий `BlockingConnection` не крутится и
-    # heartbeat не отправляется: брокер по умолчанию рвёт такое соединение, и
-    # `basic_ack` падает `StreamLostError`. Без heartbeat обрыв не случается.
-    parameters.heartbeat = 0
+    # Обработчик ходит минутами (запрос к модели), но в своём потоке (`Worker._handle`),
+    # а цикл `BlockingConnection` всё это время отвечает на heartbeat: мёртвое соединение
+    # брокер видит, а живое не рвёт (#157).
+    parameters.heartbeat = heartbeat
     connection = pika.BlockingConnection(parameters)
     channel = connection.channel()
     declare_topology(channel)

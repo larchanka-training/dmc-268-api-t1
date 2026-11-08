@@ -192,7 +192,7 @@ make stop-local   # остановить API, воркер и туннель
 
 Всё, что ниже адаптеров, чистое, так что большей части тестов ничего не нужно.
 
-Короткие команды - в `Makefile`, список - `make help`: `make check` (статические проверки как в CI),
+Короткие команды - в `Makefile`, список - `make help`: `make check` (проверки job lint как в CI),
 `make test-db` (сам поднимет PostgreSQL и RabbitMQ из compose и базу `dmc268_test`), `make test-all`
 (весь набор как в CI), `make sandbox-demo` (первый прогон песочницы воркера одной командой), `make sandbox` (песочница воркера с локальной Ollama), `make run-worker` и т. д.
 Флаги pytest или песочницы передаются через `ARGS`: `make test-db ARGS="-k migration -x"`.
@@ -204,6 +204,12 @@ make stop-local   # остановить API, воркер и туннель
 uv run pytest                                       # чистые тесты, база не нужна
 TEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest   # вместе с адаптерами, брокером и E2E
 ```
+
+Схемы ответа модели держат порог 100% строк и ветвей, считанный только по их собственным тестам
+(шаг CI в job `lint`, #275); новая ветвь в валидации ответа модели без теста роняет CI. Локально —
+`make cov-llm-schema`, он же входит в `make check`. Порог меряет ветви кода, а не ограничения
+полей (`min_length`, `ge`, `extra="forbid"` исполняются при импорте): их держит тест, который
+требует случай отказа для каждого поля схемы (`tests/application/test_llm_schema.py`).
 
 Маркеры `live`, `eval` и `load` исключены в `addopts` (`pyproject.toml`), поэтому
 ключ `-m` в обычном прогоне не нужен: явный `-m` перекрывает это исключение.
