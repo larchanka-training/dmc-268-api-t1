@@ -6,12 +6,18 @@
 разметкой, и метрики обязаны выйти идеальными.
 """
 
+import json
+import time
+
 import pytest
+from pydantic import BaseModel
+
+from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 
 from ...conftest import requires_broker, requires_db
 from ...e2e.stack import Stack
 from ..report import config_metrics, config_outputs
-from .corpus import CONFIGS, load_corpus
+from .corpus import CONFIGS, Case, load_corpus
 from .oracle import OracleLlmGateway
 from .runner import run_corpus
 
@@ -37,3 +43,48 @@ def test_the_oracle_scores_perfectly_in_every_rules_config(stack: Stack) -> None
         (outputs,) = config_outputs(results, config)
         assert outputs.valid_rate == 1.0, config
         assert (outputs.after_retry, outputs.invalid, outputs.no_answer) == (0, 0, 0), config
+
+
+class _StalledOnce:
+    """Оракул, который на ревью одного кейса один раз отвечает дольше таймаута воркера.
+
+    `stack.work` падает по таймауту, а прогон доходит до конца во время ожидания
+    отмены консьюмера: сообщение подтверждено, в очереди не остаётся ничего, что
+    забрал бы следующий кейс.
+    """
+
+    def __init__(self, oracle: OracleLlmGateway, case: Case, delay: float) -> None:
+        self._oracle = oracle
+        self._paths = [json.dumps(path) for path in case.files]
+        self._delay = delay
+        self._stalled = False
+
+    def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
+        code = request.messages[2].content
+        if (
+            not self._stalled
+            and request.task is LlmTask.REVIEW
+            and any(p in code for p in self._paths)
+        ):
+            self._stalled = True
+            time.sleep(self._delay)
+        return self._oracle.complete(request)
+
+
+def test_a_failed_run_is_recorded_and_the_eval_goes_on(stack: Stack) -> None:
+    stalled = CORPUS[0]
+    timeout = 5.0
+    model = _StalledOnce(OracleLlmGateway(CORPUS), stalled, delay=timeout + 1)
+
+    results = run_corpus(stack, model, CORPUS, ["rules"], 1, timeout=timeout)
+
+    assert [r.case for r in results] == [c.id for c in CORPUS]
+    failed, *passed = results
+    assert failed.status == "error"
+    assert failed.score is None
+    assert failed.failure is not None
+    assert failed.failure.startswith("AssertionError: воркер не обработал")
+    assert all(r.status == "completed" for r in passed)
+    assert all(r.score is not None for r in passed)
+    (metrics,) = config_metrics(passed, "rules")
+    assert (metrics.precision, metrics.recall) == (1.0, 1.0)
