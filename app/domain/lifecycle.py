@@ -19,7 +19,8 @@ S = ReviewRunStatus
 _ALLOWED: MappingProxyType[ReviewRunStatus, frozenset[ReviewRunStatus]] = MappingProxyType(
     {
         S.QUEUED: frozenset({S.BUILDING_CONTEXT, S.FAILED, S.CANCELLED}),
-        S.BUILDING_CONTEXT: frozenset({S.ANALYSING, S.FAILED, S.CANCELLED}),
+        # `completed` — прогон без денег, без анализа и публикации (`review-billing`).
+        S.BUILDING_CONTEXT: frozenset({S.ANALYSING, S.COMPLETED, S.FAILED, S.CANCELLED}),
         S.ANALYSING: frozenset({S.PUBLISHING, S.FAILED, S.CANCELLED}),
         S.PUBLISHING: frozenset({S.COMPLETED, S.FAILED, S.CANCELLED}),
         S.COMPLETED: frozenset(),

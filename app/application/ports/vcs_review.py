@@ -30,7 +30,9 @@ class PullRequestReviewPublication:
 
 @dataclass(frozen=True, slots=True)
 class MergeGateCheck:
-    conclusion: str
+    """Check run merge gate; `conclusion` `None` - ревью идёт (`in_progress`)."""
+
+    conclusion: str | None
     title: str
     summary: str
 

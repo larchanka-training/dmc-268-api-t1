@@ -116,7 +116,7 @@ flowchart LR
             TEMPO[("dmc268-tempo · трейсы")]
             LOKI[("dmc268-loki · логи")]
             PROM[("dmc268-prometheus · метрики<br/>сети: dmc268-observability, dmc268-backend")]
-            GRAF["dmc268-grafana<br/>порт на 127.0.0.1, вход по SSH-туннелю<br/>сети: dmc268-observability, dmc268-grafana"]
+            GRAF["dmc268-grafana<br/>публичный вход :8443/grafana/ по учётке, порт на 127.0.0.1 для SSH-туннеля<br/>сети: dmc268-observability, dmc268-grafana, dmc268-grafana-proxy"]
         end
 
         subgraph DPROXY["сеть dmc268-docker-proxy · internal"]
@@ -128,6 +128,7 @@ flowchart LR
     GH -->|"вебхук HTTPS, HMAC"| UI
     UI -->|"HTTP /api/"| API
     UI -.->|"OTLP трейсы браузера, сеть dmc268-otlp"| OTEL
+    UI -->|"HTTP /grafana/ с порта 8443, сеть dmc268-grafana-proxy"| GRAF
     API -->|"HTTPS: метаданные PR, check run, OAuth"| GH
     API -->|"SQL · LISTEN/NOTIFY"| PG
     API -->|"AMQP publish, confirms"| MQ
@@ -172,7 +173,7 @@ flowchart LR
 - **Модель на стенде** — Eurorouter основным и единственным провайдером (`TF_VAR_llm_backend: eurorouter` в `.github/workflows/deploy.yml`, #245). Ollama на стенде не развёрнута, поэтому на диаграмме её нет; на диаграмме компонентов выше она — основной провайдер по дизайну.
 - **UI** — контейнер стека `dmc-268-ui-t1`, подключается к сети `dmc268` по имени; в этом репозитории не описан и показан как внешний.
 - **Изоляция**: у `dmc268-backend` и `dmc268-observability` нет шлюза — база, брокер и хранилища наблюдаемости не видны ни из интернета, ни из публичной сети. Наружу ходят API (через `dmc268`) и воркер (через `dmc268-egress`); не-internal сети со шлюзом есть ещё у Grafana (`dmc268-grafana`) и `dmc268-otelcol-logs` (`dmc268-logs`) — ради публикации порта на 127.0.0.1: на internal-сети Docker порты не публикует. Стек наблюдаемости поднимается флагом `observability_enabled`, на стенде он включён.
-- **Служебные сети** без своих подграфов, перечислены в узлах: `dmc268-otlp` (internal, `infra/network.tf`) — приём OTLP трейсов браузера от UI коллектором; `dmc268-grafana` и `dmc268-logs` (`infra/observability.tf`) — только публикация портов Grafana и fluentd на 127.0.0.1. Сеть `dmc268-docker-proxy` (internal) нарисована отдельно: в ней только socket-proxy и `dmc268-otelcol-docker`, остальным контейнерам доступ к демону Docker не нужен.
+- **Служебные сети** без своих подграфов, перечислены в узлах: `dmc268-otlp` (internal, `infra/network.tf`) — приём OTLP трейсов браузера от UI коллектором; `dmc268-grafana-proxy` (internal, `infra/network.tf`) — публичный вход в Grafana: nginx UI на порту 8443 проксирует `/grafana/` на `dmc268-grafana:3000` — тот же хост и сертификат, что у кабинета, но свой origin, чтобы XSS в Grafana не читал API кабинета; `dmc268-grafana` и `dmc268-logs` (`infra/observability.tf`) — только публикация портов Grafana и fluentd на 127.0.0.1. Сеть `dmc268-docker-proxy` (internal) нарисована отдельно: в ней только socket-proxy и `dmc268-otelcol-docker`, остальным контейнерам доступ к демону Docker не нужен.
 - **Логи контейнеров**: `dmc268-postgres`, `dmc268-postgres-replica` и `dmc268-rabbitmq` при включённом стеке пишут логи драйвером fluentd (`local.fluentd_log_opts`, `infra/locals.tf`) — dockerd отправляет их на `127.0.0.1:24224`, в `dmc268-otelcol-logs`, оттуда по OTLP в основной коллектор `dmc268-otelcol` (`otlp_http/collector`, `infra/observability/otelcol-logs.yaml`) и только из него в Loki. У остальных контейнеров, включая бэкап, — драйвер по умолчанию (`local.log_opts`); API и воркер шлют логи по OTLP.
 - **Миграции** — не контейнер стека: одноразовый `docker run --rm` того же образа в сети `dmc268-backend` до `apply` (`infra/README.md`, «Миграции»).
 
@@ -191,7 +192,7 @@ flowchart LR
 - **Оркестрация - use cases слоя `application`**: сценарий ревью - сборка контекста и запроса (чистые функции), вызов ревью через `LlmGateway`, детерминированный отсев (`validate_anchor`, ссылка на правило, `deduplicate`), вызов верификатора, который может только отбросить замечание, публикация через `VcsGateway`; жизненный цикл прогона - `next_status`. Ретраи с exponential backoff живут в адаптерах. **Модель не получает инструментов и никогда не выбирает действий** - структурная защита от prompt injection (threat model в BACKEND_ARCHITECTURE.md).
 - **`VcsGateway` (порт; первый адаптер — GitHub REST)**: диффы (unified diff; hunk несёт 3 строки контекста, которые отдаёт GitHub, окно ±30 строк уровня `surrounding` сборка достраивает сама из текста файла), метаданные, комментарии, статусы; аутентификация GitHub App с краткосрочными installation-токенами; содержимое файла на коммите — метод порта `fetch_file` (файлы диффа для уровней `surrounding`, `whole_file` и `ast` — по `head_sha`, `.review/rules.md` — по `base_sha`; лимиты применяет вызывающий). Payload'ы, синтаксис комментариев, auth и backoff — детали адаптера.
 - **`LlmGateway` (порт)**: транспорт к модели. Провайдеры - локальная модель в Ollama (основная) и Eurorouter по OpenAI-совместимому протоколу (фоллбэком при `LLM_HOSTED_FALLBACK=true` или основным и единственным при `LLM_BACKEND=eurorouter` — так работает стенд, #245); порядок не выбирается, а собирается composition root из конфигурации, заглушка - только явным `LLM_BACKEND=stub`. Ответ проверяется Pydantic-моделью из запроса с повторами, ключи Eurorouter ротируются. Сборка промпта и проверка окна модели - чистые функции; адаптер только транспортирует. Включение hosted-фоллбэка - решение по безопасности (крупнейший путь эксфильтрации), не только операционное; детали - в BACKEND_ARCHITECTURE.md.
-- **Данные и телеметрия**: не отдельный сервис. Стоимость прогона — колонки `model`, `tokens_used`, `duration_seconds`, `failure_reason` в `review_runs`; per-call аудит (вызовы LLM и инструментов) — будущий шов, его первый заказчик — биллинг по токенам.
+- **Данные и телеметрия**: не отдельный сервис. Стоимость прогона — колонки `model`, `tokens_used` (с разбивкой по видам), `cost_eur` (`NUMERIC(20, 10)`), `duration_seconds`, `failure_reason` в `review_runs`; per-call аудит (вызовы LLM и инструментов) — будущий шов, его первый заказчик — биллинг по токенам.
 - **Payments / accounts**: сегодня спроектирована только таблица `accounts` — она придёт вместе со своим портом (регистрация репозитория с проверкой прав на него); тарифы, подписки, Stripe — запланированный шов. Приоритет платных тарифов — требование к обслуживанию очереди (раздел 4.2), код порта оно не затрагивает.
 - **Контекст без клона (принцип)**: репозиторий никогда не клонируется целиком и не хранится — Repository Indexer, Vector DB и Repository Storage исключены из дизайна. Весь контекст строится из данных PR через `VcsGateway`: дифф с окнами ±30 строк вокруг изменений (`surrounding`), небольшие изменённые файлы целиком (`whole_file`), AST-окружение изменённых строк (уровень `ast`) и правила владельца из целевой ветки; запланированы сигнатуры из файлов, на которые ссылаются импорты. Анализ кода (tree-sitter за портом `DefinitionExtractor`) идёт над файлами, полученными через `VcsGateway`, и используется кодом оркестратора, а не моделью.
 
@@ -259,7 +260,7 @@ sequenceDiagram
             end
             API->>DB: MergeRequest + ReviewRun queued (частичный уникальный индекс)
             opt смена целевой ветки
-                API->>GH: блокирующий check run на head
+                API->>GH: check run in_progress «Идёт ревью» на head
             end
             alt блокирующий check run не встал
                 API->>DB: ReviewRun failed, откат целевой ветки PR
@@ -268,6 +269,7 @@ sequenceDiagram
                 API->>MQ: JobQueue.enqueue, publisher confirm
                 alt брокер не подтвердил
                     API->>DB: компенсация: ReviewRun failed
+                    API->>GH: check run failure на head
                     API-->>GH: 500
                 else подтвердил
                     API-->>GH: 202, новый прогон
@@ -282,6 +284,7 @@ sequenceDiagram
     end
     Note over W,DB: каждый коммит записи прогона шлёт NOTIFY — API отдаёт событие кабинету по SSE
     W->>DB: ReviewRun building_context
+    W->>GH: check run in_progress «Идёт ревью» на head (best-effort)
     W->>GH: дифф по head_sha / base_sha (до 5 МиБ), rules.md по base_sha, файлы для AST
     Note over W,GH: сбой rules.md, контекста PR или AST не роняет прогон — пакет деградирует, пропущенное — в omitted
     break дифф больше лимита, сбой получения диффа или исключение любого шага ниже
@@ -289,8 +292,8 @@ sequenceDiagram
             W->>MQ: ack, прогон остаётся cancelled, результат отброшен
         else сбой
             W->>DB: ReviewRun failed
-            opt на этом head уже было ревью, а упавший прогон — последний
-                W->>GH: check run failure на head (_block_head_of_failed_run)
+            opt упавший прогон на этом head последний
+                W->>GH: check run failure на head (block_head_of_failed_run)
             end
             W->>MQ: nack без requeue → review_jobs.dlq
         end
@@ -369,8 +372,8 @@ JSON-сообщение; тело несёт только доменные да�
 исключением, отвечает `nack` без `requeue`: сообщение не крутится в основной
 очереди по кругу, а ровно один раз перекладывается в `review_jobs.dlq` для
 ручного разбора. Перед `nack` упавший прогон ставит `failure` на head, если
-он на этом head последний, а до него ревью уже было (`_block_head_of_failed_run`):
-иначе на PR остался бы `success` прежнего прогона. Исключения — прогон, отменённый ретаргетом посреди ревью
+он на этом head последний (`block_head_of_failed_run`): иначе на PR остался бы
+`in_progress` захвата или `success` прежнего прогона. Исключения — прогон, отменённый ретаргетом посреди ревью
 (`_supersede`): сообщение подтверждается `ack`, прогон остаётся `cancelled`; и прогон,
 отменённый ретаргетом ещё в `queued`: воркер подтверждает сообщение `ack` при первой
 же доставке, ничего не делая. Ретраев с backoff перед dead-letter пока нет — осознанное

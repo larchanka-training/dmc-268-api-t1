@@ -20,6 +20,7 @@ from app.domain.entities import (
     ReviewRun,
 )
 from app.domain.enums import (
+    CoverageReason,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -185,6 +186,18 @@ def test_list_row_carries_merge_request_repository_and_findings_count() -> None:
     assert item["merge_request"]["url"] == "https://github.com/octo-org/api/pull/42"
     assert item["merge_request"]["repository"]["full_name"] == "octo-org/api"
     assert "findings" not in item
+
+
+def test_list_row_tells_a_run_without_money_from_a_clean_review() -> None:
+    """`review-rest-api`: прогон без денег в списке не выглядит чистым ревью с нулём находок."""
+    world = World()
+    clean = world.run(world.merge_request(world.api, 1), S.COMPLETED)
+    refused = world.run(world.merge_request(world.api, 2), S.COMPLETED, minutes=1)
+    world.uow.review_runs._by_id[refused.id] = replace(refused, coverage_reason=CoverageReason.BALANCE)
+
+    reasons = {item["id"]: item["coverage_reason"] for item in _list(world)["items"]}
+
+    assert reasons == {str(clean.id): None, str(refused.id): "balance"}
 
 
 def test_list_is_newest_first_then_by_id_and_paged_with_full_total() -> None:

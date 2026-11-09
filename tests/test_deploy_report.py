@@ -1238,6 +1238,7 @@ def test_summary_of_a_successful_deploy(tmp_path: Path) -> None:
     assert text.startswith("## Деплой: успешно\n")
     assert "| **Простой: SIGTERM старому → первая успешная проверка нового** | `dmc268.deploy.api.downtime` | **5.1** |" in text
     assert "`StartedAt` → `health_status: healthy`" in text
+    assert "nginx интерфейса узнаёт новый адрес API не позже чем через 10 с" in text
     assert "[!WARNING]" not in text
     assert "| `docker_container` |  |  |  | 2 |  |" in text
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 1 |" in text

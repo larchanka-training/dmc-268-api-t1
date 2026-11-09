@@ -1,4 +1,8 @@
 title: Купон в доменном коде - исключение вместо Result и часы внутри домена
+# categories у нарушений правил: часы внутри домена ломают детерминизм и тесты,
+# исключение вместо Result - контракт ошибок домена; оба - correctness.
+# readability нарочно не допускается: файл короткий, и любое замечание о стиле
+# попало бы в окно всех трёх нарушений.
 pull_request:
   title: "feat: применение купона к цене"
   description: Добавляет доменную функцию, которая применяет процентный купон к цене заказа.
@@ -27,11 +31,14 @@ expected:
     path: app/domain/coupons.py
     contains: "if coupon.expires_at < datetime.now():"
     rule: [Clock Is Injected, 1]
+    categories: [correctness]
   - id: raise-expired
     path: app/domain/coupons.py
     contains: "raise ValueError(f\"купон {coupon.code} истёк"
     rule: [Error Handling Standards, 1]
+    categories: [correctness]
   - id: raise-percent
     path: app/domain/coupons.py
     contains: "raise ValueError(f\"купон {coupon.code}: процент"
     rule: [Error Handling Standards, 1]
+    categories: [correctness]

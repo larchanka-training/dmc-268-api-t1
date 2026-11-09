@@ -347,3 +347,12 @@ def test_the_token_key_is_read_from_the_environment(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("USER_TOKEN_ENCRYPTION_KEY", TOKEN_KEY)
     settings = Settings(database_url=DATABASE_URL, rabbitmq_url=RABBITMQ_URL, github_webhook_secret=WEBHOOK_SECRET)
     assert settings.user_token_key is not None
+
+
+def test_billing_is_off_by_default() -> None:
+    assert make_settings().billing_enabled is False
+
+
+def test_billing_is_turned_on_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BILLING_ENABLED", "true")
+    assert make_settings().billing_enabled is True

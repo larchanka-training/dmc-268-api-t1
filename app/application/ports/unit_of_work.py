@@ -14,6 +14,7 @@ from types import TracebackType
 from typing import Protocol, Self
 
 from app.application.ports.repositories import (
+    BillingRepo,
     ContextPayloadRepo,
     FindingRepo,
     MergeRequestRepo,
@@ -49,6 +50,7 @@ class UnitOfWork(Protocol):
     users: UserRepo
     sessions: SessionRepo
     provider_tokens: ProviderTokenRepo
+    billing: BillingRepo
 
     def __enter__(self) -> Self: ...
 

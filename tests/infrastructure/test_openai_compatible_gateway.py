@@ -3,6 +3,8 @@
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import replace
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -10,10 +12,12 @@ import pytest
 from pydantic import SecretStr
 
 from app.application.llm_schema import ReviewOutput
-from app.application.ports.llm_gateway import LlmRequest, LlmTask
+from app.application.ports.llm_gateway import LlmMeter, LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
 from app.domain.llm_errors import LlmError, LlmRateLimitedError, LlmTimeoutError
+from app.domain.llm_usage import LlmUsage
+from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -36,6 +40,36 @@ def _reply(content: str = VALID) -> dict[str, Any]:
         "choices": [{"index": 0, "message": {"role": "assistant", "content": content}}],
         "usage": {"prompt_tokens": 1_200, "completion_tokens": 300, "total_tokens": 1_500},
     }
+
+
+# `usage` ответа Eurorouter, снятый со стенда 2026-11-06 (glm-5.3), с разбивкой, - текстом
+# JSON, как он пришёл: стоимость в нём не должна пройти через float.
+EUROROUTER_USAGE = """{
+    "prompt_tokens": 30,
+    "completion_tokens": 5,
+    "total_tokens": 35,
+    "prompt_tokens_details": {"cached_tokens": 10},
+    "completion_tokens_details": {"reasoning_tokens": 2},
+    "cost": 0.0000913,
+    "cost_currency": "EUR",
+    "cost_eur": 0.0000913,
+    "cost_details": {"upstream_inference_prompt_cost": 0.00006, "upstream_inference_completions_cost": 0.0000313}
+}"""
+
+
+def _raw(usage: str) -> httpx.Response:
+    """Ответ с `usage`, вставленным в тело JSON дословно."""
+    body = json.dumps({k: v for k, v in _reply().items() if k != "usage"})
+    return httpx.Response(
+        200, content=f'{body[:-1]}, "usage": {usage}}}', headers={"content-type": "application/json"}
+    )
+
+
+def _metered(handler: Handler) -> LlmUsage:
+    """Расход, который адаптер записал в счётчик запроса."""
+    meter = LlmMeter()
+    _gateway(handler).complete(replace(REQUEST, meter=meter))
+    return meter.total
 
 
 def _gateway(
@@ -108,13 +142,183 @@ def test_reasoning_effort_goes_into_the_body_only_when_set() -> None:
     assert "reasoning_effort" not in without
 
 
-def test_answer_carries_the_responding_model_and_total_tokens() -> None:
+def test_answer_carries_the_responding_model_and_records_tokens() -> None:
     handler, _ = _recording(httpx.Response(200, json=_reply()))
+    meter = LlmMeter()
 
-    response = _gateway(handler).complete(REQUEST)
+    response = _gateway(handler).complete(replace(REQUEST, meter=meter))
 
     assert isinstance(response.content, ReviewOutput)
-    assert (response.model, response.tokens_used) == ("mistral-large-2411", 1_500)
+    assert response.model == "mistral-large-2411"
+    assert meter.total == LlmUsage(input_tokens=1_200, output_tokens=300, total_tokens=1_500)
+
+
+def test_usage_is_parsed_by_kind_with_the_exact_cost() -> None:
+    handler, _ = _recording(_raw(EUROROUTER_USAGE))
+
+    usage = _metered(handler)
+
+    assert usage == LlmUsage(
+        input_tokens=30,
+        output_tokens=5,
+        cached_tokens=10,
+        reasoning_tokens=2,
+        total_tokens=35,
+        cost_eur=Decimal("0.0000913"),
+    )
+    assert str(usage.cost_eur.normalize()) == "0.0000913"
+
+
+def test_total_is_the_provider_total_even_when_kinds_disagree() -> None:
+    # Как на develop: `tokens_used` - `usage.total_tokens` провайдера, а не сумма видов.
+    handler, _ = _recording(_raw('{"prompt_tokens": 30, "completion_tokens": 5, "total_tokens": 40}'))
+
+    assert _metered(handler).total_tokens == 40
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        ('{"prompt_tokens": 30, "completion_tokens": 5}', LlmUsage(input_tokens=30, output_tokens=5, total_tokens=35)),
+        ('{"total_tokens": 35}', LlmUsage(total_tokens=35)),
+        (
+            (
+                '{"prompt_tokens": 30, "completion_tokens": null, "total_tokens": null,'
+                ' "prompt_tokens_details": null, "completion_tokens_details": {"reasoning_tokens": null}}'
+            ),
+            LlmUsage(input_tokens=30, total_tokens=30),
+        ),
+        ("{}", LlmUsage()),
+    ],
+    ids=["no-total", "total-only", "nulls", "empty"],
+)
+def test_missing_or_null_counts_are_zero_and_the_total_falls_back_to_the_kinds(
+    usage: str, expected: LlmUsage
+) -> None:
+    handler, _ = _recording(_raw(usage))
+
+    assert _metered(handler) == expected
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        '{"total_tokens": "35"}',
+        '{"total_tokens": true}',
+        '{"prompt_tokens": -1}',
+        '{"total_tokens": 3.5}',
+        '{"total_tokens": 100000000000000000000}',
+        '{"total_tokens": 1E+1000000}',
+    ],
+    ids=["string", "bool", "negative", "fraction", "over-bigint", "huge-exponent"],
+)
+def test_malformed_count_is_zero_with_a_warning_not_a_second_paid_call(
+    usage: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Кривой счётчик - как кривая стоимость: ответ оплачен и принят, счётчик - 0."""
+    handler, seen = _recording(_raw(usage))
+
+    with caplog.at_level(logging.WARNING):
+        metered = _metered(handler)
+
+    assert len(seen) == 1
+    assert metered.total_tokens == 0
+    assert any("не разобрано" in record.getMessage() for record in caplog.records)
+
+
+def test_integral_count_written_with_a_fraction_is_an_integer() -> None:
+    """`12.0` с `parse_float=Decimal` приходит `Decimal`: это целое, а не кривой счётчик."""
+    handler, _ = _recording(_raw('{"prompt_tokens": 12.0, "completion_tokens": 3, "total_tokens": 15.0}'))
+
+    assert _metered(handler) == LlmUsage(input_tokens=12, output_tokens=3, total_tokens=15)
+
+
+@pytest.mark.parametrize(
+    ("cost", "cost_eur"),
+    [
+        ('"cost": 0.0012345, "cost_currency": "EUR"', Decimal("0.0012345")),
+        ('"cost_eur": 0', Decimal(0)),
+        ('"cost": 0.5, "cost_currency": "USD"', Decimal(0)),
+        ('"cost_eur": null, "cost": 0.5, "cost_currency": "USD"', Decimal(0)),
+        ('"cost_eur": "не число"', Decimal(0)),
+        ('"cost_eur": -1.0', Decimal(0)),
+        ('"cost_eur": true', Decimal(0)),
+        ('"cost_eur": 1e30', Decimal(0)),
+        ('"cost_eur": NaN', Decimal(0)),
+    ],
+    ids=["cost-in-eur", "zero", "cost-in-usd", "null", "not-a-number", "negative", "bool", "huge", "nan"],
+)
+def test_cost_falls_back_to_eur_cost_or_zero(cost: str, cost_eur: Decimal) -> None:
+    handler, _ = _recording(_raw(f'{{"prompt_tokens": 30, "completion_tokens": 5, "total_tokens": 35, {cost}}}'))
+
+    assert _metered(handler) == LlmUsage(input_tokens=30, output_tokens=5, total_tokens=35, cost_eur=cost_eur)
+
+
+@pytest.mark.parametrize(
+    ("cost", "stored"),
+    [
+        ("0.00000000004", "0E-10"),
+        ("0.00000000005", "0E-10"),
+        ("0.00000000015", "2E-10"),
+        ("0.00000000025", "2E-10"),
+        ("0.000000000251", "3E-10"),
+        ("13.0960038381", "13.0960038381"),
+    ],
+)
+def test_cost_is_kept_to_ten_places_rounding_half_to_even(cost: str, stored: str) -> None:
+    handler, _ = _recording(_raw(f'{{"total_tokens": 1, "cost_eur": {cost}}}'))
+
+    assert _metered(handler).cost_eur == Decimal(stored)
+
+
+@pytest.mark.parametrize(
+    "usage",
+    ["null", '"сломано"', '{"prompt_tokens": 30, "completion_tokens": 5, "prompt_tokens_details": 7, "completion_tokens_details": null}'],
+    ids=["usage-null", "usage-not-object", "details-not-object"],
+)
+def test_answer_without_usable_usage_is_accepted_not_paid_twice(usage: str) -> None:
+    """Оплаченный ответ с битым `usage` принят: отказ отправил бы повтор и заплатил второй раз."""
+    handler, seen = _recording(_raw(usage))
+
+    _metered(handler)
+
+    assert len(seen) == 1
+
+
+def test_answer_without_usage_key_is_accepted_with_zero_usage(caplog: pytest.LogCaptureFixture) -> None:
+    body = {k: v for k, v in _reply().items() if k != "usage"}
+    handler, seen = _recording(httpx.Response(200, json=body))
+
+    with caplog.at_level(logging.WARNING):
+        usage = _metered(handler)
+
+    assert len(seen) == 1
+    assert usage.total_tokens == 0
+    assert any("нет счётчиков токенов" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("usage", "warning"),
+    [
+        ("{}", "нет счётчиков токенов"),
+        ('{"prompt_tokens": 30, "completion_tokens": 5}', "нет стоимости в евро"),
+    ],
+    ids=["no-counters", "no-cost"],
+)
+def test_usage_counted_as_zero_is_logged(usage: str, warning: str, caplog: pytest.LogCaptureFixture) -> None:
+    """Ответ оплачен и принят, но ноль в учёте не молчаливый: его не увидят квота и бюджет."""
+    handler, _ = _recording(_raw(usage))
+
+    with caplog.at_level(logging.WARNING):
+        _metered(handler)
+
+    assert any(warning in record.getMessage() for record in caplog.records)
+
+
+def test_rejected_key_adds_no_usage_and_the_answering_key_adds_its_own() -> None:
+    handler, _ = _recording(httpx.Response(429), _raw(EUROROUTER_USAGE))
+
+    assert _metered(handler).cost_eur == Decimal("0.0000913")
 
 
 def test_rate_limited_key_is_replaced_by_the_next_one_in_the_same_call() -> None:
@@ -180,25 +384,27 @@ def test_answer_off_the_schema_is_retried_through_the_shared_loop() -> None:
     handler, seen = _recording(
         httpx.Response(200, json=_reply("не json")), httpx.Response(200, json=_reply())
     )
+    meter = LlmMeter()
 
-    response = _gateway(handler).complete(REQUEST)
+    _gateway(handler).complete(replace(REQUEST, meter=meter))
 
     assert len(json.loads(seen[1].content)["messages"]) == 3
-    assert response.tokens_used == 3_000
+    assert meter.total.total_tokens == 3_000
 
 
 def test_answer_cut_by_max_tokens_is_retried_naming_the_limit() -> None:
     cut = _reply('{"schemaVersion": "1", "fin')
     cut["choices"][0]["finish_reason"] = "length"
     handler, seen = _recording(httpx.Response(200, json=cut), httpx.Response(200, json=_reply()))
+    meter = LlmMeter()
 
-    response = _gateway(handler).complete(REQUEST)
+    _gateway(handler).complete(replace(REQUEST, meter=meter))
 
     assert len(seen) == 2
     retry = json.loads(seen[1].content)["messages"][-1]["content"]
     assert "обрезан пределом длины (4096 токенов)" in retry
     assert "не JSON" not in retry
-    assert response.tokens_used == 3_000
+    assert meter.total.total_tokens == 3_000
 
 
 @pytest.mark.parametrize(
@@ -206,14 +412,60 @@ def test_answer_cut_by_max_tokens_is_retried_naming_the_limit() -> None:
     [
         (httpx.Response(200, text="не json"), "неожиданное тело"),
         (httpx.Response(200, json={"model": "m", "choices": []}), "неожиданное тело"),
+        # Без проверки на объект `data.get` бросил бы `AttributeError`, а фоллбэк ловит только `LlmError`.
+        (httpx.Response(200, json=[]), "неожиданное тело"),
     ],
-    ids=["not-json", "no-choices"],
+    ids=["not-json", "no-choices", "not-an-object"],
 )
 def test_unexpected_body_is_a_model_failure(response: httpx.Response, reason: str) -> None:
     handler, _ = _recording(response)
 
     with pytest.raises(LlmError, match=reason):
         _gateway(handler).complete(REQUEST)
+
+
+def _paid_without(*fields: str, choice: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Ответ 200 с `usage`, но без полей ответа модели: оплачен, а принять нечего."""
+    body = {k: v for k, v in _reply().items() if k not in fields}
+    if choice is not None:
+        body["choices"] = [choice]
+    return body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _paid_without("choices"),
+        {**_reply(), "choices": []},
+        _paid_without("model"),
+        _paid_without(choice={"index": 0}),
+        {**_reply(), "choices": None},
+    ],
+    ids=["no-choices", "empty-choices", "no-model", "no-message", "null-choices"],
+)
+def test_paid_reply_without_an_answer_records_usage_and_fails(body: dict[str, Any]) -> None:
+    handler, seen = _recording(httpx.Response(200, json=body))
+    meter = LlmMeter()
+
+    with pytest.raises(LlmError, match="неожиданное тело") as error:
+        _gateway(handler).complete(replace(REQUEST, meter=meter))
+
+    # Сбой адаптера, а не схемы: повтора с подсказкой нет, вызов один.
+    assert len(seen) == 1
+    assert isinstance(error.value.__cause__, KeyError | IndexError | TypeError)
+    assert meter.total == LlmUsage(input_tokens=1_200, output_tokens=300, total_tokens=1_500)
+
+
+def test_fallback_after_a_paid_reply_without_choices_keeps_both_usages() -> None:
+    first, _ = _recording(httpx.Response(200, json=_paid_without("choices")))
+    second, _ = _recording(httpx.Response(200, json=_reply()))
+    gateway = FallbackLlmGateway([("first", _gateway(first)), ("second", _gateway(second))])
+    meter = LlmMeter()
+
+    response = gateway.complete(replace(REQUEST, meter=meter))
+
+    assert isinstance(response.content, ReviewOutput)
+    assert meter.total == LlmUsage(input_tokens=2_400, output_tokens=600, total_tokens=3_000)
 
 
 def test_timeout_is_a_model_failure() -> None:

@@ -40,6 +40,7 @@ from app.api.problems import (
     PROBLEM_MODELS,
     AnyProblem,
     CommitNotFoundProblem,
+    DiffExpiredProblem,
     DiffTooLargeProblem,
     DiffUnavailableProblem,
     ErrorCode,
@@ -145,7 +146,7 @@ ERRORS_403_ORIGIN_OR_MANAGE = _doc(
     "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; "
     "`REPOSITORY_MANAGE_REQUIRED` — нет нужной роли на репозитории у провайдера.",
 )
-# Дифф прогона: у `404` и `422` по два кода — объединения по `code`, как у `ERRORS_403_ORIGIN_OR_MANAGE`.
+# Дифф прогона: у `404`, `410` и `422` по два кода — объединения по `code`, как у `ERRORS_403_ORIGIN_OR_MANAGE`.
 ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION = _doc(
     HTTPStatus.NOT_FOUND,
     Annotated[ReviewNotFoundProblem | RepositoryNotInInstallationProblem, Field(discriminator="code")],
@@ -166,10 +167,12 @@ ERRORS_409_DIFF_UNAVAILABLE = _doc(
     DiffUnavailableProblem,
     "У прогона не записан base_sha — пары коммитов для диффа нет; запросов к GitHub не было.",
 )
-ERRORS_410_COMMIT_NOT_FOUND = _doc(
+ERRORS_410_COMMIT_NOT_FOUND_OR_DIFF_EXPIRED = _doc(
     HTTPStatus.GONE,
-    CommitNotFoundProblem,
-    "GitHub ответил 404 на сравнение base_sha...head_sha прогона: коммита больше нет (например, после force-push).",
+    Annotated[CommitNotFoundProblem | DiffExpiredProblem, Field(discriminator="code")],
+    "`COMMIT_NOT_FOUND` — GitHub ответил 404 на сравнение base_sha...head_sha прогона: коммита больше нет "
+    "(например, после force-push); `DIFF_EXPIRED` — дифф прогона удалён по сроку хранения "
+    "(`diff_expired_at` прогона не null), ни кэш, ни GitHub не спрашивались.",
 )
 ERRORS_422_OR_DIFF_TOO_LARGE = _doc(
     HTTPStatus.UNPROCESSABLE_CONTENT,

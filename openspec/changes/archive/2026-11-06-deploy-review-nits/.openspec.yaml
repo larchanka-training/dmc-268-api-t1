@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-11-06
+# Требования не меняются: healthcheck и отчёт о простое описаны в
+# backend-delivery без чисел, которые здесь правятся.
+skip_specs: true

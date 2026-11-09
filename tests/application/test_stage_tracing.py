@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.application.ports.llm_gateway import LlmMeter
 from app.application.ports.stage_tracer import StageSpan
 from app.application.review_run_steps import StepRecorder
 from app.domain.entities import ReviewRunStep
@@ -19,7 +20,7 @@ from app.domain.enums import ReviewRunStage, ReviewRunStepStatus
 from app.domain.llm_errors import LlmOutputError, LlmTimeoutError
 from app.domain.vcs_errors import VcsError
 
-from ..fakes.llm_gateway import ScriptedLlmGateway, review_response
+from ..fakes.llm_gateway import ScriptedLlmGateway, review_response, spent
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.webhooks import FakeVcs
 from .test_review_pipeline import JOB, STAGES, _RetryingOnce, _run, _seed_run, _steps
@@ -113,7 +114,7 @@ def test_a_model_failure_leaves_no_span_open() -> None:
     with pytest.raises(LlmTimeoutError):
         _run(
             uow,
-            ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=30)]),
+            ScriptedLlmGateway([spent(LlmTimeoutError("таймаут"), 30)]),
             stage_tracer=tracer,
         )
 
@@ -160,6 +161,7 @@ def test_a_new_stage_closes_the_span_left_open_by_the_previous_one() -> None:
         now=lambda: datetime(2026, 10, 21, tzinfo=UTC),
         monotonic=lambda: 0.0,
         new_id=uuid4,
+        meter=LlmMeter(),
         tracer=tracer,
     )
 
@@ -183,6 +185,7 @@ def _recorder(uow: FakeUnitOfWork, tracer: _RecordingTracer) -> StepRecorder:
         now=lambda: datetime(2026, 10, 21, tzinfo=UTC),
         monotonic=lambda: 0.0,
         new_id=uuid4,
+        meter=LlmMeter(),
         tracer=tracer,
     )
 

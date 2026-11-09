@@ -1,6 +1,7 @@
 """Дифф прогона для кабинета (change `review-run-diff`, D5).
 
-Порядок — от дешёвого к дорогому, и попадание в кэш не ходит в сеть: нет
+Порядок — от дешёвого к дорогому, и попадание в кэш не ходит в сеть: дифф удалён по
+сроку хранения — отказ сразу (change `diff-retention-visibility`, D2); нет
 `base_sha` — отказ сразу; затем кэш по паре коммитов; затем номер установки
 приложения и дифф у провайдера. Видимость прогона проверяет вызывающий до
 вызова, поэтому пользователя в ключе кэша нет.
@@ -16,6 +17,7 @@
 """
 
 import logging
+from datetime import datetime
 
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.installation_catalog import InstallationCatalog
@@ -36,6 +38,10 @@ _CACHE_TTL_SECONDS = 3600
 # Потолок строк сырого диффа: байтовый лимит строк не ограничивает (2 МиБ однобайтовых
 # строк — около миллиона строк, и разбор с представлением не помещаются в память контейнера).
 RUN_DIFF_MAX_LINES = 50_000
+
+
+class RunDiffExpired(Exception):
+    """Дифф прогона удалён по сроку хранения: тела всех пакетов контекста стёрты."""
 
 
 class RunDiffUnavailable(Exception):
@@ -66,14 +72,21 @@ def load_run_diff(
     vcs: VcsGateway,
     cache: CacheStore,
     max_bytes: int,
+    diff_expired_at: datetime | None,
 ) -> tuple[DiffFileView, ...]:
     """Представление диффа `base_sha...head_sha` прогона.
 
-    Отказы не кэшируются: `RunDiffUnavailable`, `RepositoryNotInstalled`,
+    `diff_expired_at` — время удаления диффа по сроку хранения (`diff_expired_at` домена);
+    не `None` — `RunDiffExpired` раньше всех проверок: удалённый код не отдаётся ни из
+    кэша, ни от провайдера.
+
+    Отказы не кэшируются: `RunDiffExpired`, `RunDiffUnavailable`, `RepositoryNotInstalled`,
     `DiffTooLargeError` (больше `max_bytes` байт, больше `RUN_DIFF_MAX_LINES` строк
     или провайдер отказался строить дифф), `RunCommitNotFound`; прочий `VcsError` — наружу как есть.
     Сбой кэша — промах.
     """
+    if diff_expired_at is not None:
+        raise RunDiffExpired(f"дифф прогона {run.id} удалён по сроку хранения")
     if run.base_sha is None:
         raise RunDiffUnavailable(f"у прогона {run.id} нет base_sha")
     key = run_diff_cache_key(repository, run.base_sha, run.head_sha)

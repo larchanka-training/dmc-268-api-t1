@@ -88,6 +88,8 @@ class ContextLimits:
     pr_context_max_tokens: int
     # Потолок unified diff прогона в байтах: больший не дочитывается, прогон - `failed`.
     diff_max_bytes: int
+    # Потолок изменения одного файла: больший отфильтровывается (`filter_diff_files`).
+    diff_file_max_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,7 +151,7 @@ def assemble_context(
     now: datetime,
     new_id: Callable[[], UUID],
 ) -> AssembledContext:
-    reviewable = filter_diff_files(files)
+    reviewable = filter_diff_files(files, max_file_bytes=limits.diff_file_max_bytes)
     reviewable_paths = {f.file_path for f in reviewable}
     omitted: list[dict[str, Any]] = [
         _omission(f.file_path, "file", "filtered")
@@ -312,7 +314,7 @@ def assemble_context(
         ),
         hunks=tuple(shown),
         rules=tuple(shown_rules),
-        coverage=review_coverage(files, shown),
+        coverage=review_coverage(files, shown, max_file_bytes=limits.diff_file_max_bytes),
     )
 
 

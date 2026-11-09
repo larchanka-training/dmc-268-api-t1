@@ -5,9 +5,9 @@
 """
 
 from copy import deepcopy
+from decimal import Decimal
 
 from app.domain.entities import (
-    ContextPayload,
     DiffAnchor,
     Finding,
     MergeRequest,
@@ -17,8 +17,10 @@ from app.domain.entities import (
     ReviewRunStep,
     RuleRef,
     Session,
+    StoredContextPayload,
     User,
 )
+from app.domain.llm_usage import LlmUsage
 from app.infrastructure.db.models import (
     ContextPayloadRow,
     FindingRow,
@@ -45,6 +47,7 @@ def repository_to_domain(row: RepositoryRow) -> Repository:
         connected_at=row.connected_at,
         branch_filter=tuple(row.branch_filter),
         min_severity=row.min_severity,
+        payer_user_id=row.payer_user_id,
     )
 
 
@@ -80,11 +83,51 @@ def review_run_to_domain(row: ReviewRunRow) -> ReviewRun:
         failed_stage=row.failed_stage,
         model=row.model,
         tokens_used=row.tokens_used,
+        usage=_usage(row),
         duration_seconds=row.duration_seconds,
         rejected_findings=row.rejected_findings,
         verification=row.verification,
         verifier_dropped_findings=row.verifier_dropped_findings,
+        payer_user_id=row.payer_user_id,
+        estimated_cost_eur=row.estimated_cost_eur,
+        coverage_reason=row.coverage_reason,
     )
+
+
+def _usage(row: ReviewRunRow) -> LlmUsage | None:
+    # Колонки пишутся вместе (`usage_columns`): пустая одна - пусты все.
+    if row.input_tokens is None:
+        return None
+    return LlmUsage(
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens or 0,
+        cached_tokens=row.cached_tokens or 0,
+        reasoning_tokens=row.reasoning_tokens or 0,
+        total_tokens=row.tokens_used or 0,
+        cost_eur=row.cost_eur if row.cost_eur is not None else Decimal(0),
+    )
+
+
+def usage_columns(usage: LlmUsage | None) -> dict[str, int | Decimal | None]:
+    """Колонки `review_runs` расхода модели: все пусты, если расхода нет."""
+    if usage is None:
+        return dict.fromkeys(_USAGE_COLUMNS)
+    return {column: getattr(usage, column) for column in _USAGE_COLUMNS}
+
+
+def run_usage_columns(run: ReviewRun) -> dict[str, int | Decimal | None]:
+    """Колонки расхода прогона вместе с `tokens_used`.
+
+    Итог берётся из `usage`, когда он есть: `tokens_used` и `usage.total_tokens`
+    не расходятся в базе, даже если `replace(run, usage=...)` забыл `tokens_used`.
+    """
+    columns = usage_columns(run.usage)
+    columns["tokens_used"] = run.usage.total_tokens if run.usage is not None else run.tokens_used
+    return columns
+
+
+# Итог (`total_tokens`) хранится в `tokens_used`.
+_USAGE_COLUMNS = ("input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens", "cost_eur")
 
 
 def review_run_step_to_domain(row: ReviewRunStepRow) -> ReviewRunStep:
@@ -100,8 +143,8 @@ def review_run_step_to_domain(row: ReviewRunStepRow) -> ReviewRunStep:
     )
 
 
-def context_payload_to_domain(row: ContextPayloadRow) -> ContextPayload:
-    return ContextPayload(
+def context_payload_to_domain(row: ContextPayloadRow) -> StoredContextPayload:
+    return StoredContextPayload(
         id=row.id,
         review_run_id=row.review_run_id,
         chunk_index=row.chunk_index,
@@ -112,7 +155,8 @@ def context_payload_to_domain(row: ContextPayloadRow) -> ContextPayload:
         # Копия, как tiers и file_paths выше. Отдать dict строки по ссылке —
         # значит превратить frozen dataclass в живую ручку к состоянию сессии,
         # где правка payload.body уходит во flush в базу.
-        body=deepcopy(row.body),
+        body=deepcopy(row.body) if row.body is not None else None,
+        body_expired_at=row.body_expired_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

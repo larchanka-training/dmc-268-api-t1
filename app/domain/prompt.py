@@ -94,6 +94,11 @@ def candidate_ids(count: int) -> tuple[str, ...]:
     return tuple(f"F{n}" for n in range(1, count + 1))
 
 
+def prompt_tokens(messages: Sequence[PromptMessage]) -> int:
+    """Оценка запроса в токенах: байты / 4, как бюджет пакета, и разметка на каждое сообщение."""
+    return estimate_tokens("".join(m.content for m in messages)) + MESSAGE_OVERHEAD_TOKENS * len(messages)
+
+
 def check_window(
     messages: Sequence[PromptMessage], *, window_tokens: int, max_output_tokens: int
 ) -> Result[int]:
@@ -104,9 +109,7 @@ def check_window(
     адаптер локальной модели дополнительно сверяет число токенов, которое
     насчитала сама модель (change `add-llm-gateway`, design D5).
     """
-    estimate = estimate_tokens("".join(m.content for m in messages)) + (
-        MESSAGE_OVERHEAD_TOKENS * len(messages)
-    )
+    estimate = prompt_tokens(messages)
     if estimate + max_output_tokens > window_tokens:
         return Result.failure(
             f"запрос к модели не помещается в окно: оценка {estimate} токенов и резерв ответа "

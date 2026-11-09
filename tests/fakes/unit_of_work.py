@@ -9,12 +9,15 @@
 from collections.abc import Collection
 from dataclasses import replace
 from datetime import datetime
+from decimal import Decimal
 from types import TracebackType
 from typing import Any, Self
 from uuid import UUID
 
 from app.application.ports.unit_of_work import RunStateConflict, UnitOfWork
+from app.domain.billing import eur_per_token
 from app.domain.entities import (
+    BalanceCredit,
     BotThread,
     ContextPayload,
     DiffAnchor,
@@ -29,6 +32,7 @@ from app.domain.entities import (
     ReviewRunListEntry,
     ReviewRunStep,
     Session,
+    StoredContextPayload,
     User,
 )
 from app.domain.enums import (
@@ -44,6 +48,8 @@ from app.domain.enums import (
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
+from app.domain.llm_usage import LlmUsage
+from app.domain.payload_retention import BodyExpiryStats
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
 
@@ -99,6 +105,7 @@ class FakeRepositoryRepo:
             full_name=repository.full_name,
             default_branch=repository.default_branch,
             updated_at=repository.updated_at,
+            payer_user_id=stored.payer_user_id or repository.payer_user_id,
         )
         self._by_id[stored.id] = reconnected
         return reconnected
@@ -121,6 +128,24 @@ class FakeRepositoryRepo:
         )
         self._by_id[repository_id] = saved
         return saved
+
+    def set_payer(self, repository_id: UUID, user_id: UUID, now: datetime) -> Repository | None:
+        stored = self._by_id.get(repository_id)
+        if stored is None:
+            return None
+        self._by_id[repository_id] = replace(stored, payer_user_id=user_id, updated_at=now)
+        return self._by_id[repository_id]
+
+    def drop_payer(self, repository_id: UUID, user_id: UUID, now: datetime) -> bool:
+        stored = self._by_id.get(repository_id)
+        if stored is None or stored.payer_user_id != user_id:
+            return False
+        self._by_id[repository_id] = replace(stored, payer_user_id=None, updated_at=now)
+        return True
+
+    def list_paid_by(self, user_id: UUID) -> list[Repository]:
+        paid = [r for r in self._by_id.values() if r.payer_user_id == user_id]
+        return sorted(paid, key=lambda r: r.full_name)
 
 
 class FakeMergeRequestRepo:
@@ -253,6 +278,7 @@ class FakeReviewRunRepo:
             and r.head_sha == head_sha
             and r.trigger is TriggerSource.MANUAL
             and r.status is ReviewRunStatus.COMPLETED
+            and r.coverage_reason is None
         ]
         return max(completed, key=lambda r: (r.created_at, r.id), default=None)
 
@@ -360,7 +386,20 @@ class FakeReviewRunRepo:
             verdict = next_status(existing.status, run.status)
             if not verdict.ok:
                 raise ValueError(verdict.error)
-        self._by_id[run.id] = run
+        # Как у SQL-адаптера: поля биллинга пишутся один раз, устаревшая копия их не стирает.
+        self._by_id[run.id] = replace(
+            run,
+            payer_user_id=run.payer_user_id or existing.payer_user_id,
+            estimated_cost_eur=existing.estimated_cost_eur
+            if run.estimated_cost_eur is None
+            else run.estimated_cost_eur,
+            coverage_reason=run.coverage_reason or existing.coverage_reason,
+        )
+
+    def record_cancelled_spend(self, run_id: UUID, usage: LlmUsage) -> None:
+        existing = self._by_id.get(run_id)
+        if existing is not None and existing.status is ReviewRunStatus.CANCELLED:
+            self._by_id[run_id] = replace(existing, tokens_used=usage.total_tokens, usage=usage)
 
 
 class FakeReviewRunStepRepo:
@@ -394,19 +433,54 @@ class FakeReviewRunStepRepo:
 
 class FakeContextPayloadRepo:
     def __init__(self) -> None:
-        self._items: list[ContextPayload] = []
+        self._items: list[StoredContextPayload] = []
 
-    def snapshot(self) -> list[ContextPayload]:
+    def snapshot(self) -> list[StoredContextPayload]:
         return list(self._items)
 
-    def restore(self, state: list[ContextPayload]) -> None:
+    def restore(self, state: list[StoredContextPayload]) -> None:
         self._items = list(state)
 
-    def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]:
+    def list_for_run(self, review_run_id: UUID) -> list[StoredContextPayload]:
         return [p for p in self._items if p.review_run_id == review_run_id]
 
     def add(self, payload: ContextPayload) -> None:
-        self._items.append(payload)
+        self._items.append(
+            StoredContextPayload(
+                id=payload.id,
+                review_run_id=payload.review_run_id,
+                chunk_index=payload.chunk_index,
+                tiers=payload.tiers,
+                file_paths=payload.file_paths,
+                token_count=payload.token_count,
+                content_sha256=payload.content_sha256,
+                body=payload.body,
+                body_expired_at=None,
+                created_at=payload.created_at,
+                updated_at=payload.updated_at,
+            )
+        )
+
+    def expire_bodies(self, created_before: datetime, now: datetime, limit: int) -> int:
+        live = sorted(
+            (p for p in self._items if p.body_expired_at is None and p.created_at < created_before),
+            key=lambda p: p.created_at,
+        )[:limit]
+        expired = {p.id for p in live}
+        self._items = [
+            replace(p, body=None, body_expired_at=now, updated_at=now) if p.id in expired else p
+            for p in self._items
+        ]
+        return len(expired)
+
+    def body_expiry_stats_for_run(self, review_run_id: UUID) -> BodyExpiryStats:
+        expiries = [p.body_expired_at for p in self.list_for_run(review_run_id)]
+        erased = [at for at in expiries if at is not None]
+        return BodyExpiryStats(
+            payload_count=len(expiries),
+            erased_count=len(erased),
+            last_expired_at=max(erased, default=None),
+        )
 
 
 class FakeFindingRepo:
@@ -640,6 +714,50 @@ class FakeProviderTokenRepo:
         self._by_session[session_id] = token
 
 
+class FakeBillingRepo:
+    """Баланс по зачислениям и прогонам фейка `review_runs` — та же формула, что у SQL (D1)."""
+
+    def __init__(self, review_runs: FakeReviewRunRepo) -> None:
+        self._review_runs = review_runs
+        self.credits: list[BalanceCredit] = []
+        # Кого блокировали, по порядку: тесту видно, что проверка шла под блокировкой.
+        self.locked: list[UUID] = []
+
+    def snapshot(self) -> list[BalanceCredit]:
+        return list(self.credits)
+
+    def restore(self, state: list[BalanceCredit]) -> None:
+        self.credits = list(state)
+
+    def lock_payer(self, user_id: UUID) -> None:
+        self.locked.append(user_id)
+
+    def balance(self, user_id: UUID) -> Decimal:
+        credited = sum((c.amount_eur for c in self.credits if c.user_id == user_id), Decimal(0))
+        spent = sum((_run_spend(r) for r in self._review_runs.runs if r.payer_user_id == user_id), Decimal(0))
+        return credited - spent
+
+    def eur_per_token(self) -> Decimal:
+        paid = sorted(
+            (r.created_at, r.id, r.usage)
+            for r in self._review_runs.runs
+            if r.usage is not None and r.usage.cost_eur > 0
+        )[-50:]
+        return eur_per_token(
+            sum((usage.cost_eur for _, _, usage in paid), Decimal(0)),
+            sum(usage.total_tokens for _, _, usage in paid),
+        )
+
+    def add_credit(self, credit: BalanceCredit) -> None:
+        self.credits.append(credit)
+
+
+def _run_spend(run: ReviewRun) -> Decimal:
+    if run.usage is not None:
+        return run.usage.cost_eur
+    return run.estimated_cost_eur or Decimal(0)
+
+
 class FakeUnitOfWork(UnitOfWork):
     """Держит состояние между повторными входами в `with` — как настоящая база.
 
@@ -672,6 +790,7 @@ class FakeUnitOfWork(UnitOfWork):
         self.users: FakeUserRepo = self._fakes.users
         self.sessions: FakeSessionRepo = self._fakes.sessions
         self.provider_tokens: FakeProviderTokenRepo = self._fakes.provider_tokens
+        self.billing: FakeBillingRepo = self._fakes.billing
         self.committed = 0
         self.rolled_back = 0
         self._committed_state: list[Any] | None = None
@@ -732,6 +851,7 @@ class _Fakes:
         self.users = FakeUserRepo()
         self.sessions = FakeSessionRepo()
         self.provider_tokens = FakeProviderTokenRepo(self.sessions)
+        self.billing = FakeBillingRepo(self.review_runs)
 
     def _all(self) -> list[Any]:
         return [
@@ -745,6 +865,7 @@ class _Fakes:
             self.users,
             self.sessions,
             self.provider_tokens,
+            self.billing,
         ]
 
     def snapshot(self) -> list[Any]:
@@ -805,6 +926,18 @@ def add_manual_run_with_critical_thread(
             created_at=at,
             updated_at=at,
             finding_id=finding_id,
+        )
+    )
+    # Сводка пишется той же транзакцией, что и inline: по ней видно, что ревью записано.
+    uow.published_comments.add(
+        PublishedComment(
+            id=UUID(int=run_id.int + 3),
+            review_run_id=run_id,
+            provider_comment_id=f"manual-summary-{run_id.int}",
+            kind=CommentKind.SUMMARY,
+            published_at=at,
+            created_at=at,
+            updated_at=at,
         )
     )
     return run

@@ -36,6 +36,7 @@ class ErrorCode(StrEnum):
     SCM_UNAVAILABLE = "SCM_UNAVAILABLE"
     DIFF_UNAVAILABLE = "DIFF_UNAVAILABLE"
     COMMIT_NOT_FOUND = "COMMIT_NOT_FOUND"
+    DIFF_EXPIRED = "DIFF_EXPIRED"
     DIFF_TOO_LARGE = "DIFF_TOO_LARGE"
     UNAUTHENTICATED = "UNAUTHENTICATED"
     ORIGIN_FORBIDDEN = "ORIGIN_FORBIDDEN"
@@ -318,6 +319,23 @@ class CommitNotFoundProblem(Problem):
     code: Literal[ErrorCode.COMMIT_NOT_FOUND] = ErrorCode.COMMIT_NOT_FOUND
 
 
+class DiffExpiredProblem(Problem):
+    """`410 DIFF_EXPIRED`: дифф прогона удалён по сроку хранения — стёрты тела всех его пакетов контекста.
+
+    Ни кэш диффов, ни GitHub не спрашивались. Время удаления — `diff_expired_at` прогона.
+    """
+
+    example = {
+        "detail": "Дифф прогона удалён по сроку хранения.",
+        "instance": "/api/v1/reviews/01920000-0000-7000-8000-000000000001/diff",
+    }
+
+    type: Literal["urn:dmc-268:problem:diff-expired"] = "urn:dmc-268:problem:diff-expired"
+    title: Literal["Дифф прогона удалён по сроку хранения"] = "Дифф прогона удалён по сроку хранения"
+    status: Literal[HTTPStatus.GONE] = HTTPStatus.GONE
+    code: Literal[ErrorCode.DIFF_EXPIRED] = ErrorCode.DIFF_EXPIRED
+
+
 class DiffTooLargeProblem(Problem):
     """`422 DIFF_TOO_LARGE`: дифф прогона больше `RUN_DIFF_MAX_BYTES` или 50 000 строк, либо провайдер сам
     отказался его строить; тело ответа провайдера дальше лимита байт не читалось."""
@@ -474,6 +492,7 @@ class AnyProblem(
             | ScmUnavailableProblem
             | DiffUnavailableProblem
             | CommitNotFoundProblem
+            | DiffExpiredProblem
             | DiffTooLargeProblem
             | UnauthenticatedProblem
             | OriginForbiddenProblem

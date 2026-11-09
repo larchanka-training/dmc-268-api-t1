@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Any, Literal
 from urllib.parse import quote, unquote
+from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from fastapi.responses import RedirectResponse
@@ -35,6 +36,7 @@ from app.api.errors import (
     ApiError,
 )
 from app.api.problems import ErrorCode
+from app.api.schemas import euro_string
 from app.api.session import (
     SESSION_COOKIE,
     SESSION_RESPONSES,
@@ -75,6 +77,13 @@ _PUBLIC: dict[str, Any] = {"security": []}
 _LOCATION = {"Location": {"description": "Куда перенаправлен браузер.", "schema": {"type": "string"}}}
 
 
+class PaidRepository(BaseModel):
+    """Репозиторий, за который платит пользователь."""
+
+    id: UUID
+    full_name: str = Field(description="Полное имя репозитория на GitHub.", examples=["octo-org/api"])
+
+
 class UserResponse(BaseModel):
     """Пользователь кабинета — учётная запись у провайдера входа."""
 
@@ -85,6 +94,23 @@ class UserResponse(BaseModel):
         description="Адрес аватара у провайдера; null, если его нет.",
         json_schema_extra={"format": "uri"},
         examples=["https://avatars.githubusercontent.com/u/1"],
+    )
+    balance_eur: str = Field(
+        pattern=r"^-?\d+(\.\d+)?$",
+        description=(
+            "Баланс аккаунта в евро: зачисления минус расход прогонов, где пользователь — плательщик "
+            "(прогон в работе — его оценкой до вызова модели). Точная десятичная строка без экспоненты "
+            "и хвостовых нулей, как стоимость прогона; без зачислений и расходов — \"0\". Может быть "
+            "отрицательным: оценка ошибается не больше чем на один прогон."
+        ),
+        examples=["4.75"],
+    )
+    paid_repositories: list[PaidRepository] = Field(
+        description=(
+            "Репозитории, где пользователь записан плательщиком, по `full_name`. Не зависит от доступа на "
+            "GitHub: ушедший из организации плательщик видит здесь, от чего отказаться "
+            "(DELETE /repositories/{id}/payer)."
+        )
     )
 
 
@@ -282,7 +308,7 @@ def finish_github_setup(
     if setup_action == "install" and (state is None or not setup_state_matches(token, state)):
         _log.warning("Setup URL: state не совпал (%s), ничего не подключено", "нет" if state is None else "чужой")
         return _setup_done("connected=0")
-    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id)
+    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id, user_id=signed_in.user.id)
     try:
         connected = connecting.connect_installation(
             catalog, uow_factory(), user, installation_id, new_id, now, connect_selected=setup_action == "install"
@@ -315,12 +341,28 @@ def _setup_done(outcome: str) -> Response:
     "/me",
     response_model=UserResponse,
     summary="Пользователь текущей сессии",
-    description="Требует сессию. По ответу кабинет решает, показывать ли страницу входа.",
+    description=(
+        "Требует сессию. По ответу кабинет решает, показывать ли страницу входа. Баланс и оплачиваемые "
+        "репозитории читаются из базы на каждый запрос."
+    ),
     response_description="Профиль пользователя.",
     responses=SESSION_RESPONSES,
 )
-def me(user: User = Depends(current_user)) -> UserResponse:
-    return UserResponse.model_validate(user, from_attributes=True)
+def me(
+    user: User = Depends(current_user),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+) -> UserResponse:
+    with uow_factory() as uow:
+        balance = uow.billing.balance(user.id)
+        paid = uow.repositories.list_paid_by(user.id)
+    return UserResponse(
+        provider=user.provider,
+        login=user.login,
+        name=user.name,
+        avatar_url=user.avatar_url,
+        balance_eur=euro_string(balance),
+        paid_repositories=[PaidRepository(id=r.id, full_name=r.full_name) for r in paid],
+    )
 
 
 @router.post(

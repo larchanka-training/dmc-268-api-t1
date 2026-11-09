@@ -142,7 +142,6 @@ def publish_review(
             repo_full_name=job.repository_full_name,
             head_sha=job.head_sha,
             installation_id=job.installation_id,
-            run_id=run.id,
             repository_id=merge_request.repository_id,
         )
     except VcsError:

@@ -8,6 +8,7 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage*
 .idea/
 .DS_Store
 CLAUDE.md

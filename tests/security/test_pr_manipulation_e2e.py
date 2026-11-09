@@ -74,7 +74,7 @@ def test_retargeting_a_reviewed_pull_request_onto_another_branch_reviews_the_new
     first = _accept(stack, staging)
     stack.work(ScriptedLlmGateway([review_response()]), 1)
     assert stack.run(first).status is ReviewRunStatus.COMPLETED
-    assert [c.conclusion for c in stack.github.check_runs] == ["success"]
+    assert [c.conclusion for c in stack.github.check_runs] == [None, "success"]
 
     # Автор меняет целевую ветку: тот же head, дифф теперь с бэкдором.
     retargeted = stack.github.open_pull(
@@ -86,8 +86,8 @@ def test_retargeting_a_reviewed_pull_request_onto_another_branch_reviews_the_new
         base_ref="develop",
     )
     _retarget(stack, retargeted, old_ref="evil-staging", old_sha=staging.base_sha)
-    # Пока новый дифф не проверен, прежний `success` уже снят: окна для мерджа нет.
-    assert [(c.head_sha, c.conclusion) for c in stack.github.check_runs][-1] == (head, "failure")
+    # Пока новый дифф не проверен, прежний `success` уже снят «Идёт ревью»: окна для мерджа нет.
+    assert [(c.head_sha, c.status) for c in stack.github.check_runs][-1] == (head, "in_progress")
     backdoor = finding_json(
         CODE_PATH, BACKDOOR_LINE, "Вход без проверки пароля.", category="security", severity="critical"
     )

@@ -11,11 +11,13 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     DefinitionKind,
     DiffSide,
     FindingCategory,
@@ -31,6 +33,7 @@ from app.domain.enums import (
     VerificationOutcome,
     VerifierVerdict,
 )
+from app.domain.llm_usage import LlmUsage
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +55,8 @@ class Repository:
     branch_filter: tuple[str, ...] = ()
     # Порог merge gate: блокирует открытая находка не ниже этой важности.
     min_severity: FindingSeverity = FindingSeverity.CRITICAL
+    # Аккаунт сервиса, с баланса которого идут прогоны; `None` — не назначен (`review-billing`).
+    payer_user_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +141,9 @@ class ReviewRun:
     base_sha: str | None = None
     model: str | None = None
     tokens_used: int | None = None
+    # Расход модели по видам токенов и стоимость; пуст до анализа и у прогонов,
+    # записанных до разбивки. `tokens_used` - его `total_tokens`.
+    usage: LlmUsage | None = None
     duration_seconds: float | None = None
     rejected_findings: int = 0
     # Этап, на котором прогон упал. Заполняет только `advance` при переходе в
@@ -144,6 +152,11 @@ class ReviewRun:
     # Итог второго прохода модели; пуст, пока анализ не завершён.
     verification: VerificationOutcome | None = None
     verifier_dropped_findings: int = 0
+    # Биллинг (`review-billing`): плательщик и оценка, зарезервированная перед вызовом модели,
+    # и причина неполного покрытия. Пусты, пока баланс не проверялся или биллинг выключен.
+    payer_user_id: UUID | None = None
+    estimated_cost_eur: Decimal | None = None
+    coverage_reason: CoverageReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +194,11 @@ class ReviewRunStep:
 
 @dataclass(frozen=True, slots=True)
 class ContextPayload:
-    """Один кусок материала, отправленного модели для прогона."""
+    """Один кусок материала, отправленного модели для прогона.
+
+    Собранный пакет, который уходит модели и записывается, — всегда с телом. Прочитанный из
+    базы — `StoredContextPayload`: его тело могли стереть по сроку хранения.
+    """
 
     id: UUID
     review_run_id: UUID
@@ -191,6 +208,29 @@ class ContextPayload:
     token_count: int
     content_sha256: str
     body: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StoredContextPayload:
+    """Пакет контекста, прочитанный из базы.
+
+    Тело хранится ограниченный срок (change `context-payload-retention`): после него `body` —
+    `None`, а `body_expired_at` — когда его стёрли; метаданные остаются. `None`, а не `{}`:
+    стёртое тело не спутать с пустым пакетом, и тип заставляет каждого читателя сохранённого
+    пакета обработать этот случай.
+    """
+
+    id: UUID
+    review_run_id: UUID
+    chunk_index: int
+    tiers: tuple[str, ...]
+    file_paths: tuple[str, ...]
+    token_count: int
+    content_sha256: str
+    body: dict[str, Any] | None
+    body_expired_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -546,6 +586,19 @@ class User:
     avatar_url: str | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class BalanceCredit:
+    """Зачисление на баланс аккаунта; отрицательная сумма — возврат или корректировка."""
+
+    id: UUID
+    user_id: UUID
+    amount_eur: Decimal
+    note: str
+    # Кто зачислил: пока пополнения через платёжную систему нет — администратор.
+    credited_by: str
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

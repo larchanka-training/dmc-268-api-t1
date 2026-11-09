@@ -15,6 +15,7 @@ from app.application.llm_review import LlmLimits
 from app.application.ports.llm_gateway import LlmGateway
 from app.domain.entities import MergeRequest, ReviewJob, ReviewRun
 from app.domain.enums import (
+    CoverageReason,
     MergeRequestState,
     ReviewRunStatus,
     TriggerSource,
@@ -33,13 +34,13 @@ from app.infrastructure.telemetry import OtelRunOutcomeRecorder
 from app.worker.factory import build_review_handler
 
 from ..fakes.context import FakeCache, FakeExtractor
-from ..fakes.llm_gateway import ScriptedLlmGateway, review_response
+from ..fakes.llm_gateway import ScriptedLlmGateway, review_response, spent
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
 from ..fakes.webhooks import a_repository
 from ..metrics import metric_delta, metric_snapshot
 
-LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
 LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
 TEXTS = PromptTexts(review_system="ревью", verifier_system="верификация")
 
@@ -142,6 +143,19 @@ def test_handler_passes_the_output_limit_to_the_model() -> None:
     assert request.max_output_tokens == 4_096
 
 
+def test_handler_passes_the_billing_flag_to_the_run() -> None:
+    """Биллинг включён: у репозитория нет плательщика — модель не вызывается."""
+    gateway = ScriptedLlmGateway([])
+    uow = _seeded_uow()
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+
+    build_review_handler(_Deps(uow, gateway), LIMITS, LLM_LIMITS, TEXTS, billing_enabled=True)(body)
+
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None and run.coverage_reason is CoverageReason.BALANCE
+    assert gateway.requests == []
+
+
 def test_handler_logs_both_ids_when_the_run_fails(caplog: pytest.LogCaptureFixture) -> None:
     """Лог упавшей задачи: `job.id` — в тексте, `review_run_id` — атрибут записи.
 
@@ -242,7 +256,7 @@ def test_a_failed_run_grows_the_run_counter_by_status(
         build_review_handler(
             _Deps(
                 _seeded_uow(),
-                ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=1)]),
+                ScriptedLlmGateway([spent(LlmTimeoutError("таймаут"), 1)]),
             ),
             LIMITS,
             LLM_LIMITS,

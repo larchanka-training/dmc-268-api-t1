@@ -157,6 +157,18 @@ class Settings(BaseSettings):
         gt=0,
         description="Больший .review/rules.md не разбирается — дефолтный фоллбэк",
     )
+    # Тело пакета контекста — чужой исходный код; после срока его стирает воркер,
+    # метаданные остаются (change `context-payload-retention`).
+    context_payload_retention_days: int = Field(
+        default=30,
+        gt=0,
+        description="Сколько дней хранится тело пакета контекста прогона; потом воркер его стирает",
+    )
+    context_payload_expiry_batch: int = Field(
+        default=200,
+        gt=0,
+        description="Сколько тел пакетов контекста стирает один проход уборки воркера",
+    )
     rules_cache_ttl_seconds: int = Field(
         default=3_600,
         gt=0,
@@ -204,6 +216,15 @@ class Settings(BaseSettings):
         default=5_242_880,
         gt=0,
         description="Больший unified diff PR не дочитывается и не ревьюится",
+    )
+    # Потолок изменения одного файла (#293): снимок, дамп схемы, фикстура. Такой файл
+    # больше пакета контекста (32 000 токенов ≈ 128 КиБ) в восемь раз: целиком не войдёт
+    # никогда, а его первые hunk'и вытеснили бы остальные файлы PR. Больше AST_MAX_FILE_BYTES:
+    # файл между ними ревьюится, как раньше, только без AST.
+    diff_file_max_bytes: int = Field(
+        default=1_048_576,
+        gt=0,
+        description="Файл, текст hunk'ов которого больше, отфильтровывается из ревью целиком",
     )
     ast_max_files: int = Field(
         default=20,
@@ -284,6 +305,14 @@ class Settings(BaseSettings):
         default=300,
         gt=0,
         description="Таймаут одного HTTP-запроса к модели, секунды",
+    )
+
+    # Баланс аккаунта (change `account-balance`, D7): воркер сверяет оценку прогона с балансом
+    # плательщика до вызова модели. Выключен - баланс не проверяется; плательщик репозитория
+    # пишется и так, чтобы включение не требовало переподключения.
+    billing_enabled: bool = Field(
+        default=False,
+        description="Проверять баланс плательщика репозитория перед вызовом модели",
     )
 
     # Повтор упавших доставок вебхука (#149): GitHub сам их не повторяет. Без

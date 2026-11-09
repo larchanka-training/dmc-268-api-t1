@@ -38,7 +38,7 @@ from app.api.errors import (
     ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION,
     ERRORS_409_DIFF_UNAVAILABLE,
     ERRORS_409_REVIEW_ACTIVE,
-    ERRORS_410_COMMIT_NOT_FOUND,
+    ERRORS_410_COMMIT_NOT_FOUND_OR_DIFF_EXPIRED,
     ERRORS_413_BODY,
     ERRORS_422,
     ERRORS_422_OR_DIFF_TOO_LARGE,
@@ -59,6 +59,7 @@ from app.api.schemas import (
     StrictRequest,
     UtcDatetime,
     UtcDatetimeParam,
+    euro_string,
     review_job,
     without_nul,
 )
@@ -79,6 +80,7 @@ from app.application.use_cases.run_diff import (
     RUN_DIFF_MAX_LINES,
     RepositoryNotInstalled,
     RunCommitNotFound,
+    RunDiffExpired,
     RunDiffUnavailable,
     load_run_diff,
 )
@@ -86,6 +88,7 @@ from app.config import Settings
 from app.domain.entities import MergeRequest, Repository, ReviewRun, ReviewRunListEntry
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -95,11 +98,18 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.ids import new_id
+from app.domain.llm_usage import LlmUsage
+from app.domain.payload_retention import diff_expired_at
 from app.domain.provider_links import merge_request_url
 from app.domain.run_list import run_list_filter
 from app.domain.vcs_errors import DiffTooLargeError, VcsError
 
 # Задача #273, change `manual-review-launch`.
+COVERAGE_REASON_DESCRIPTION = (
+    "Почему ревью покрыло дифф не полностью: balance — у плательщика репозитория не хватило денег, "
+    "прогон завершён без вызова модели, находок нет, на head check run failure «Недостаточно средств»; "
+    "null — ревью прошло как обычно."
+)
 _CREATE_REVIEW_DESCRIPTION = (
     "Требует сессию и `Origin` сервиса; `Origin` проверяется раньше сессии и разбора тела. Запускает "
     "ревью текущего head-коммита запроса на изменение (задача #273): прогон с `trigger = manual` "
@@ -130,7 +140,9 @@ _DIFF_DESCRIPTION = (
     "Требует сессию. Дифф пары коммитов base_sha...head_sha прогона у GitHub (задача #87): все изменённые "
     "файлы в порядке диффа, включая файлы, которые ревью отфильтровало (lock-файлы, сгенерированное). "
     "Видимость прогона — то же правило, что у GET /reviews: невидимый или несуществующий прогон — "
-    "404 REVIEW_NOT_FOUND, без запроса установки приложения и диффа к GitHub. Дифф кэшируется в памяти "
+    "404 REVIEW_NOT_FOUND, без запроса установки приложения и диффа к GitHub. Пара коммитов без изменений — "
+    "200 с пустым files. 410 DIFF_EXPIRED — дифф прогона удалён по сроку хранения (diff_expired_at прогона "
+    "не null): проверяется первым, раньше base_sha, кэша и GitHub. Дифф кэшируется в памяти "
     "API по паре коммитов на час, без привязки к пользователю: видимость проверяется до чтения кэша; "
     "номер установки приложения спрашивается у GitHub на каждом промахе кэша. Отказы не кэшируются: 409 DIFF_UNAVAILABLE — у прогона нет base_sha, "
     "к GitHub не ходили; 404 REPOSITORY_NOT_IN_INSTALLATION — приложение не установлено на репозиторий или "
@@ -278,6 +290,36 @@ class PublishedCommentResponse(BaseModel):
     published_at: UtcDatetime = Field(description="Когда комментарий опубликован.")
 
 
+class RunUsageResponse(BaseModel):
+    """Расход вызовов модели прогона: токены по видам и стоимость у провайдера.
+
+    Сумма по всем ответам модели прогона, включая повторы по схеме, смену ключа и фоллбэк.
+    """
+
+    input_tokens: int = Field(ge=0, description="Входные токены всех вызовов модели прогона.")
+    output_tokens: int = Field(ge=0, description="Выходные токены всех вызовов модели прогона.")
+    cost_eur: str = Field(
+        pattern=r"^\d+(\.\d+)?$",
+        description=(
+            "Стоимость у провайдера в евро — точная десятичная строка без экспоненты и хвостовых нулей "
+            "(до 10 знаков после точки, как у баланса Eurorouter); ноль — \"0\". Строкой, а не числом JSON: "
+            "число клиент прочёл бы во float. Цена на момент вызова; у локальной модели и провайдера без "
+            "стоимости в евро — 0."
+        ),
+        examples=["0.0000913"],
+    )
+
+
+def _usage_response(usage: LlmUsage | None) -> RunUsageResponse | None:
+    if usage is None:
+        return None
+    return RunUsageResponse(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cost_eur=euro_string(usage.cost_eur),
+    )
+
+
 class ReviewRunResponse(BaseModel):
     """Прогон ревью вместе с его находками."""
 
@@ -293,18 +335,37 @@ class ReviewRunResponse(BaseModel):
     )
     status: ReviewRunStatus = Field(description="Текущий статус прогона.", examples=["completed"])
     trigger: TriggerSource = Field(description="Что запустило прогон.", examples=["webhook"])
-    model: str | None = Field(description="Модель LLM, которая провела ревью; null до анализа.")
-    tokens_used: int | None = Field(description="Токенов LLM потрачено; null до анализа.")
+    model: str | None = Field(description="Модель LLM, которая провела ревью; null до анализа и у прогона без денег.")
+    tokens_used: int | None = Field(
+        description="Токенов LLM потрачено; null до анализа, 0 у прогона биллинга без вызова модели: без денег "
+        "(coverage_reason = balance) или с резервом, снятым при сбое или отмене до анализа."
+    )
+    usage: RunUsageResponse | None = Field(
+        description=(
+            "Входные и выходные токены и стоимость; их сумма может не совпасть с tokens_used — это итог провайдера."
+            " null до анализа и у прогонов, записанных до разбивки; у прогона биллинга без вызова модели (без денег"
+            " или с резервом, снятым до анализа) нулевой: 0 токенов и \"0\" €."
+        )
+    )
     rejected_findings: int = Field(ge=0, description="Сколько находок отброшено: привязка вне изменённых строк диффа.")
     verification: VerificationOutcome | None = Field(
         description="Итог второго прохода модели (Reflection Pass); null, пока анализ не завершён.",
         examples=["verified"],
     )
     verifier_dropped_findings: int = Field(ge=0, description="Сколько находок отбросил верификатор.")
+    coverage_reason: CoverageReason | None = Field(description=COVERAGE_REASON_DESCRIPTION, examples=["balance"])
     duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
     failure_reason: str | None = Field(description="Почему прогон упал; null, если не падал.")
     failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
     last_progress_at: UtcDatetime = Field(description="Время последнего перехода состояния.")
+    diff_expired_at: UtcDatetime | None = Field(
+        description=(
+            "Когда дифф прогона удалён по сроку хранения (CONTEXT_PAYLOAD_RETENTION_DAYS): время стирания "
+            "последнего из его пакетов контекста. null, пока стёрты не все тела пакетов, и у прогона без "
+            "пакетов (упал до сборки контекста). Не null — GET /reviews/{review_run_id}/diff отвечает "
+            "410 DIFF_EXPIRED."
+        )
+    )
     created_at: UtcDatetime = Field(description="Когда прогон создан.")
     updated_at: UtcDatetime = Field(description="Когда запись последний раз менялась.")
     findings: list[FindingResponse] = Field(description="Находки прогона: по времени создания, затем по id.")
@@ -335,6 +396,7 @@ class ReviewRunListItem(BaseModel):
     last_progress_at: UtcDatetime = Field(description="Время последнего перехода состояния.")
     duration_seconds: float | None = Field(description="Длительность прогона в секундах; null, пока не завершён.")
     failed_stage: FailedStage | None = Field(description=FAILED_STAGE_DESCRIPTION)
+    coverage_reason: CoverageReason | None = Field(description=COVERAGE_REASON_DESCRIPTION, examples=["balance"])
     findings_count: int = Field(
         ge=0,
         description=(
@@ -601,7 +663,8 @@ def list_reviews(
         "Требует сессию. 404 REVIEW_NOT_FOUND, если прогона нет или он не виден пользователю. Находки — в "
         "стабильном порядке: по времени создания, затем по id. Прогон без находок — 200 с пустым findings. "
         "Опубликованные комментарии — по времени публикации, затем по id; пока прогон ничего не опубликовал — "
-        "пустой published_comments."
+        "пустой published_comments. diff_expired_at — когда дифф прогона удалён по сроку хранения: "
+        "заполнено, когда стёрты тела всех пакетов контекста прогона; иначе и у прогона без пакетов — null."
     ),
     responses={**ERRORS_404_REVIEW, **ERRORS_422, **ERRORS_502_SCM_VISIBILITY},
 )
@@ -614,7 +677,9 @@ def get_review(
     return ReviewRunResponse.model_validate(
         {
             **asdict(run),
+            "usage": _usage_response(run.usage),
             "merge_request": _merge_request_summary(uow, run),
+            "diff_expired_at": diff_expired_at(uow.context_payloads.body_expiry_stats_for_run(run.id)),
             "findings": [{**asdict(f), **asdict(f.anchor)} for f in findings],
             "published_comments": [asdict(c) for c in comments],
         }
@@ -720,7 +785,7 @@ class ReviewRunStepListResponse(BaseModel):
     responses={
         **ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION,
         **ERRORS_409_DIFF_UNAVAILABLE,
-        **ERRORS_410_COMMIT_NOT_FOUND,
+        **ERRORS_410_COMMIT_NOT_FOUND_OR_DIFF_EXPIRED,
         **ERRORS_422_OR_DIFF_TOO_LARGE,
         **ERRORS_502_SCM_DIFF,
     },
@@ -732,9 +797,13 @@ def get_review_diff(
     vcs: VcsGateway = Depends(get_cabinet_vcs_gateway),
     cache: CacheStore = Depends(get_run_diff_cache),
     settings: Settings = Depends(get_settings),
+    uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
 ) -> ReviewDiffResponse:
     # Синхронная `def`: шлюз и кэш блокирующие, FastAPI уводит ручку в threadpool.
     run, repository = run_and_repository
+    # Короткая транзакция: соединение с базой не держится, пока идёт запрос к GitHub.
+    with uow_factory() as uow:
+        expired_at = diff_expired_at(uow.context_payloads.body_expiry_stats_for_run(run.id))
     try:
         view = load_run_diff(
             run,
@@ -743,7 +812,10 @@ def get_review_diff(
             vcs=vcs,
             cache=cache,
             max_bytes=settings.run_diff_max_bytes,
+            diff_expired_at=expired_at,
         )
+    except RunDiffExpired:
+        raise ApiError(HTTPStatus.GONE, ErrorCode.DIFF_EXPIRED, "Дифф прогона удалён по сроку хранения.") from None
     except RunDiffUnavailable:
         raise ApiError(
             HTTPStatus.CONFLICT, ErrorCode.DIFF_UNAVAILABLE, "У прогона нет базового коммита: дифф построить не из чего."

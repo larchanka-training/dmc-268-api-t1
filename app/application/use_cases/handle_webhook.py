@@ -64,8 +64,8 @@ from app.domain.entities import (
     WebhookEvent,
 )
 from app.domain.enums import (
+    RETRYABLE_STATUSES,
     Provider,
-    ReviewRunStatus,
     TriggerSource,
 )
 from app.domain.glob import branch_selected
@@ -73,9 +73,6 @@ from app.domain.vcs_errors import VcsError
 from app.domain.webhook import extract_github_event, is_trusted_pull_request
 
 logger = logging.getLogger(__name__)
-
-# Последний прогон на коммит в этих статусах повтор доставки не блокирует.
-_RETRYABLE_STATUSES = frozenset({ReviewRunStatus.FAILED, ReviewRunStatus.CANCELLED})
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +206,7 @@ def _latest_run_on_head(
     work: UnitOfWork, repository: Repository, event: WebhookEvent
 ) -> ReviewRun | None:
     """Прогон, отвечающий за gate head события (`head_run_in_charge`); `None` — PR ещё не
-    записан или прогона нет. На паузе авторевью после упавшего повтора ручного ревью это
+    записан или прогона нет. На паузе авторевью после повторного ручного прогона без ревью это
     завершённый ручной прогон до него. Правило дубля смотрит на `find_latest` (`_duplicate_of`).
     """
     merge_request = work.merge_requests.find_by_number(repository.id, event.pr_number)
@@ -226,7 +223,7 @@ def _duplicate_of(work: UnitOfWork, merge_request_id: UUID, head_sha: str) -> Re
     ветки упал или отменён — head не проверен, и повтор доставки даёт новый
     прогон, а не дубль более старого (#222)."""
     latest = work.review_runs.find_latest(merge_request_id, head_sha)
-    if latest is None or latest.status in _RETRYABLE_STATUSES:
+    if latest is None or latest.status in RETRYABLE_STATUSES:
         return None
     return work.review_runs.find_active(merge_request_id, head_sha) or (
         work.review_runs.find_reviewed(merge_request_id, head_sha)

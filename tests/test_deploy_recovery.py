@@ -29,9 +29,24 @@ DEPLOY_WORKFLOW = Path(".github/workflows/deploy.yml")
 LOCK_ID = "7313173c-96ec-0c6e-cb77-92fab8b342c6"
 
 # Подложный tofu: вызовы — в журнал, `state push` падает, если велит тест;
-# `state pull` отдаёт состояние хранилища из файла PULL.
+# `state pull` отдаёт состояние хранилища из файла PULL. Вне infra/ — каталог
+# расшифровки errored.tfstate: `init` требует копии encryption.tf и
+# .terraform.lock.hcl (без lock-файла настоящий init пошёл бы в реестр;
+# DECRYPT_EXIT — фраза не та), `state pull` отдаёт DECRYPTED или сам файл —
+# так OpenTofu расшифровывает его local-бэкендом.
 FAKE_TOFU = """#!/usr/bin/env bash
 echo "tofu $*" >> "$CALLS"
+if [ "$1" != -chdir=infra ]; then
+  d="${1#-chdir=}"
+  case "$*" in
+    *" init "*)
+      [ -e "$d/encryption.tf" ] && [ -e "$d/.terraform.lock.hcl" ] || exit 1
+      cp "$d/.terraform.lock.hcl" "$CALLS.lock"
+      exit "${DECRYPT_EXIT:-0}" ;;
+    *"state pull"*) cat "${DECRYPTED:-$d/terraform.tfstate}"; exit 0 ;;
+  esac
+  exit 1
+fi
 case "$*" in
   *"state pull"*) cat "$PULL"; exit "${PULL_EXIT:-0}" ;;
   *"state push"*) exit "${PUSH_EXIT:-0}" ;;
@@ -101,6 +116,7 @@ def recover(
     *,
     errored: bool = True,
     init: bool = True,
+    lock_file: bool = True,
     endpoint: str = "http://127.0.0.1:9000",
     **env: str,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, str], Path]:
@@ -121,8 +137,13 @@ def recover(
             "endpoints": {"s3": endpoint},
         }}}
         (root / "infra" / ".terraform" / "terraform.tfstate").write_text(json.dumps(backend))
+    (root / "infra" / "encryption.tf").write_text(Path("infra/encryption.tf").read_text())
+    if lock_file:
+        (root / "infra" / ".terraform.lock.hcl").write_text(Path("infra/.terraform.lock.hcl").read_text())
     if errored:
-        (root / "infra" / "errored.tfstate").write_text((FIXTURES / "errored-tfstate.json").read_text())
+        (root / "infra" / "errored.tfstate").write_text(env.pop("ERRORED_TEXT", "") or (FIXTURES / "errored-tfstate.json").read_text())
+    tmp = tmp_path / "tmp"
+    tmp.mkdir(exist_ok=True)
     bin_dir = write_bin(tmp_path, tofu=FAKE_TOFU, aws=FAKE_AWS, timeout=FAKE_TIMEOUT)
     tunnel = write_bin(tmp_path, tunnel=FAKE_TUNNEL) / "tunnel"
     report = tmp_path / "report"
@@ -137,6 +158,8 @@ def recover(
             "REPORT_DIR": str(report),
             "CALLS": str(tmp_path / "calls"),
             "S3_TUNNEL": str(tunnel),
+            # Временные файлы скрипта — здесь: тест проверяет, что открытое состояние не осталось.
+            "TMPDIR": str(tmp),
             **env,
         },
     )
@@ -149,8 +172,25 @@ def calls(tmp_path: Path) -> list[str]:
     return path.read_text().splitlines() if path.exists() else []
 
 
+PLAIN = "<открытое errored.tfstate>"
+
+
 def tofu_calls(tmp_path: Path) -> list[str]:
-    return [c for c in calls(tmp_path) if c.startswith("tofu ")]
+    """Вызовы tofu в infra/; путь расшифрованного файла — временный, вместо него PLAIN."""
+    return [
+        re.sub(r"\S+/errored\.tfstate$", PLAIN, c)
+        for c in calls(tmp_path)
+        if c.startswith("tofu -chdir=infra ")
+    ]
+
+
+def decrypt_calls(tmp_path: Path) -> list[str]:
+    """Вызовы tofu в каталоге расшифровки, без самого временного пути."""
+    return [
+        re.sub(r"-chdir=\S+", "-chdir=<расшифровка>", c)
+        for c in calls(tmp_path)
+        if c.startswith("tofu ") and not c.startswith("tofu -chdir=infra ")
+    ]
 
 
 # --- восстановление состояния -----------------------------------------------
@@ -162,7 +202,7 @@ def test_recovery_pushes_the_errored_state_under_its_lock_then_unlocks(tmp_path:
     assert result.returncode == 0, result.stdout + result.stderr
     assert tofu_calls(tmp_path) == [
         "tofu -chdir=infra state pull",
-        "tofu -chdir=infra state push -no-color -lock=false errored.tfstate",
+        f"tofu -chdir=infra state push -no-color -lock=false {PLAIN}",
         f"tofu -chdir=infra force-unlock -no-color -force {LOCK_ID}",
     ]
     assert pairs == {"lock": LOCK_ID, "serial": "4", "result": "restored"}
@@ -187,7 +227,7 @@ def test_recovery_without_a_lock_takes_one_for_the_push(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert tofu_calls(tmp_path) == [
         "tofu -chdir=infra state pull",
-        "tofu -chdir=infra state push -no-color -lock-timeout=2m errored.tfstate",
+        f"tofu -chdir=infra state push -no-color -lock-timeout=2m {PLAIN}",
     ]
     assert pairs == {"serial": "4", "result": "restored"}
 
@@ -297,6 +337,94 @@ def test_recovery_does_not_push_when_the_storage_state_is_unreadable(tmp_path: P
     assert pairs["result"] == "failed"
 
 
+# --- зашифрованное состояние (infra/encryption.tf, #147) ----------------------
+
+# Так OpenTofu 1.13 пишет зашифрованное состояние: serial и lineage открыты,
+# ресурсов в файле нет — сверять и писать можно только расшифрованное.
+ENVELOPE = json.dumps({
+    "serial": ERRORED["serial"],
+    "lineage": ERRORED["lineage"],
+    "meta": {"key_provider.pbkdf2.main": "e30="},
+    "encrypted_data": "AAAA",
+    "encryption_version": "v0",
+})
+
+
+def test_recovery_decrypts_the_errored_state_before_pushing_it(tmp_path: Path) -> None:
+    """`state push` зашифрованный файл не читает: пишется расшифрованный, хранилище шифрует его снова."""
+    decrypted = tmp_path / "decrypted.json"
+    decrypted.write_text((FIXTURES / "errored-tfstate.json").read_text())
+    result, pairs, root = recover(
+        tmp_path, LOCK_JSON=str(own_lock(tmp_path)), ERRORED_TEXT=ENVELOPE, DECRYPTED=str(decrypted)
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    # Провайдер — из infra/ раннера, а не из реестра: медленный реестр не
+    # должен ронять восстановление под видом неверной фразы.
+    providers = root.resolve() / "infra" / ".terraform" / "providers"
+    assert decrypt_calls(tmp_path) == [
+        f"tofu -chdir=<расшифровка> init -input=false -plugin-dir={providers} -no-color",
+        "tofu -chdir=<расшифровка> state pull",
+    ]
+    # Версия и хеши провайдера — из lock-файла infra/.
+    assert (tmp_path / "calls.lock").read_text() == Path("infra/.terraform.lock.hcl").read_text()
+    assert tofu_calls(tmp_path)[1] == f"tofu -chdir=infra state push -no-color -lock=false {PLAIN}"
+    assert pairs["result"] == "restored"
+    assert not (root / "infra" / "errored.tfstate").exists()
+    assert list((tmp_path / "tmp").iterdir()) == [], "открытое состояние с паролями не остаётся на раннере"
+
+
+def test_recovery_compares_the_decrypted_state_with_the_storage(tmp_path: Path) -> None:
+    """У зашифрованного файла нет ресурсов: «запись дошла» видно только по расшифрованному."""
+    decrypted = tmp_path / "decrypted.json"
+    decrypted.write_text((FIXTURES / "errored-tfstate.json").read_text())
+    remote = remote_state(tmp_path, ERRORED["serial"])
+    result, pairs, _ = recover(
+        tmp_path, LOCK_JSON=str(own_lock(tmp_path)), PULL=str(remote),
+        ERRORED_TEXT=ENVELOPE, DECRYPTED=str(decrypted),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not any("state push" in c for c in tofu_calls(tmp_path))
+    assert pairs["result"] == "restored"
+
+
+def test_recovery_without_the_passphrase_keeps_the_lock_and_the_copy(tmp_path: Path) -> None:
+    """Не расшифровать — не писать: блокировка остаётся, копия для артефакта — тоже."""
+    result, pairs, root = recover(
+        tmp_path, LOCK_JSON=str(own_lock(tmp_path)), ERRORED_TEXT=ENVELOPE, DECRYPT_EXIT="1"
+    )
+
+    assert result.returncode == 1
+    assert tofu_calls(tmp_path) == []
+    assert pairs["result"] == "failed"
+    assert "TF_VAR_state_passphrase" in pairs["reason"]
+    assert (root / "infra" / "errored.tfstate").exists()
+    assert (tmp_path / "report" / "errored.tfstate.enc").exists()
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_recovery_without_the_provider_lock_file_does_not_go_to_the_registry(tmp_path: Path) -> None:
+    """Без lock-файла init расшифровки пошёл бы в реестр: не скопировать — не восстанавливать."""
+    result, pairs, root = recover(
+        tmp_path, LOCK_JSON=str(own_lock(tmp_path)), ERRORED_TEXT=ENVELOPE, lock_file=False
+    )
+
+    assert result.returncode == 1
+    assert decrypt_calls(tmp_path) == []
+    assert "не скопировать для расшифровки" in pairs["reason"]
+    assert (root / "infra" / "errored.tfstate").exists()
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_recovery_step_gets_the_state_passphrase() -> None:
+    """Расшифровке нужна фраза: шаг восстановления не берёт её из общего якоря переменных."""
+    workflow = yaml.safe_load(DEPLOY_WORKFLOW.read_text())
+    steps = {s.get("id"): s for s in workflow["jobs"]["deploy"]["steps"]}
+    for step in ("recover", "migrate", "infra", "plan", "apply"):
+        assert steps[step]["env"]["TF_VAR_state_passphrase"] == "${{ secrets.STATE_PASSPHRASE_DMC268_T1 }}", step
+
+
 def decrypt(path: Path, key: str) -> str:
     return subprocess.run(
         ["openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter", "600000", "-pass", "env:KEY", "-in", str(path)],
@@ -399,7 +527,8 @@ def test_recovery_runs_store_commands_under_a_timeout(tmp_path: Path) -> None:
     recover(tmp_path, LOCK_JSON=str(own_lock(tmp_path)))
 
     timeouts = [c for c in calls(tmp_path) if c.startswith("timeout ")]
-    assert len(timeouts) == 4, calls(tmp_path)
+    # init и pull расшифровки, pull и push хранилища, unlock, get-object блокировки.
+    assert len(timeouts) == 6, calls(tmp_path)
 
 
 def test_manual_recovery_instruction_exists() -> None:
@@ -674,8 +803,8 @@ def test_recovery_runs_after_every_step_that_locks_the_state() -> None:
 
 
 def test_recovery_step_has_a_timeout() -> None:
-    """Сумма ожиданий в recover-state.sh — около 7,7 мин; без потолка шаг съел бы остаток job'а."""
-    assert step("recover")["timeout-minutes"] == 10
+    """Сумма ожиданий в recover-state.sh — 9,5 мин; без потолка шаг съел бы остаток job'а."""
+    assert step("recover")["timeout-minutes"] == 12
 
 
 def test_unsaved_state_leaves_the_runner_only_encrypted_and_briefly() -> None:

@@ -7,6 +7,8 @@
 import json
 import logging
 import signal
+import threading
+import time
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +18,7 @@ import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
 
+from app.application.review_pipeline import ReviewNotStarted
 from app.config import Settings
 from app.domain.llm_errors import LlmTimeoutError
 from app.infrastructure.queue.rabbitmq import CONSUMER_ARGUMENTS, to_wire_message
@@ -24,7 +27,7 @@ from app.worker import factory
 from app.worker.factory import StopRequest, Worker, build_review_handler
 
 from ..application.test_review_pipeline import _run, _seed_run
-from ..fakes.llm_gateway import ScriptedLlmGateway
+from ..fakes.llm_gateway import ScriptedLlmGateway, spent
 from ..fakes.queue import FakeChannel, FakeConnection
 from ..fakes.unit_of_work import FakeUnitOfWork
 from .test_review_handler import JOB, LIMITS, LLM_LIMITS, TEXTS, _Deps
@@ -111,7 +114,7 @@ def test_a_stage_of_a_failed_message_does_not_leak_into_the_next_spans(
     # следующего сообщения обязаны начать свои трейсы, а не стать детьми упавшего этапа.
     uow = FakeUnitOfWork()
     _seed_run(uow)
-    gateways = iter([ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=1)])])
+    gateways = iter([ScriptedLlmGateway([spent(LlmTimeoutError("таймаут"), 1)])])
 
     def handler(body: bytes) -> None:
         if body == b"fail":
@@ -246,7 +249,9 @@ def test_a_stop_signal_stops_the_worker_and_flushes_the_traces(
     assert signal.getsignal(signum) == before
 
 
-def test_worker_connection_has_heartbeat_disabled(monkeypatch) -> None:
+def test_worker_connection_has_heartbeat_enabled(monkeypatch) -> None:
+    """#157: heartbeat включён — мёртвое соединение брокер видит; живое не рвётся, потому что
+    обработчик идёт в своём потоке, а цикл соединения отвечает брокеру."""
     captured: dict[str, Any] = {}
 
     class FakeBlockingConnection:
@@ -271,7 +276,175 @@ def test_worker_connection_has_heartbeat_disabled(monkeypatch) -> None:
         )
     )
 
-    assert captured["heartbeat"] == 0
+    assert captured["heartbeat"] == factory.WORKER_HEARTBEAT_SECONDS > 0
+
+
+def test_the_connection_loop_turns_while_the_handler_works() -> None:
+    """Обработчик — в своём потоке, главный крутит цикл соединения: ответ на heartbeat идёт
+    и посреди долгой обработки, а ack — из главного потока, когда обработчик закончил."""
+    started = threading.Event()
+    release = threading.Event()
+    connection = FakeConnection()
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+
+    def handler(body: bytes) -> None:
+        started.set()
+        handler_threads.append(threading.current_thread())
+        assert release.wait(timeout=5)
+
+    handler_threads: list[threading.Thread] = []
+    runner = threading.Thread(target=lambda: _worker(channel, connection).run(handler, limit=1))
+    runner.start()
+    assert started.wait(timeout=5)
+    while connection.polls < 3:
+        time.sleep(0.01)
+    release.set()
+    runner.join(timeout=5)
+
+    assert not runner.is_alive()
+    assert handler_threads[0] is not runner
+    assert channel.acked == [1]
+
+
+def test_a_run_not_started_returns_the_message_to_the_queue() -> None:
+    """#157: временный сбой до захвата прогона — повтор, а не DLQ; попытка доставки
+    тратится, так что после лимита сообщение всё равно уйдёт в DLQ."""
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+
+    def handler(body: bytes) -> None:
+        raise ReviewNotStarted("база недоступна")
+
+    _worker(channel).run(handler, limit=1)
+
+    assert channel.rejected == [1]
+    assert channel.acked == []
+    assert channel.events == ["cancel", "reject 1"]
+
+
+def test_a_run_not_started_waits_before_returning_to_the_queue() -> None:
+    """Повтор приходит сразу: без паузы все попытки доставки сгорели бы за секунды. Пауза —
+    циклом соединения (`connection.sleep` отвечает на heartbeat), reject — после неё."""
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+
+    class LoggedConnection(FakeConnection):
+        def sleep(self, duration: float) -> None:
+            super().sleep(duration)
+            channel.events.append(f"sleep {duration}")
+
+    connection = LoggedConnection()
+
+    def handler(body: bytes) -> None:
+        raise ReviewNotStarted("база недоступна")
+
+    _worker(channel, connection).run(handler, limit=1)
+
+    assert sum(connection.slept) == factory.RETRY_DELAY_SECONDS
+    assert all(step <= 1 for step in connection.slept)  # шаги не дольше такта цикла
+    assert channel.events[-1] == "reject 1"
+    assert channel.events[:-1] == ["cancel"] + [f"sleep {step}" for step in connection.slept]
+
+
+def test_a_stop_request_cuts_the_retry_pause_short() -> None:
+    """SIGTERM посреди паузы: сообщение возвращается сразу, а не после всей паузы."""
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+    stop = StopRequest()
+
+    class StoppedConnection(FakeConnection):
+        def sleep(self, duration: float) -> None:
+            super().sleep(duration)
+            stop.requested = True
+
+    connection = StoppedConnection()
+
+    def handler(body: bytes) -> None:
+        raise ReviewNotStarted("база недоступна")
+
+    _worker(channel, connection).run(handler, stop=stop, retry_delay=10)
+
+    assert connection.slept == [1]
+    assert channel.rejected == [1]
+
+
+def test_the_connection_loop_turns_while_the_sweep_works() -> None:
+    """Проход очистки ходит в базу и GitHub: он тоже в своём потоке, а главный крутит цикл
+    соединения и отвечает на heartbeat."""
+    started = threading.Event()
+    release = threading.Event()
+    connection = FakeConnection()
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+    sweep_threads: list[threading.Thread] = []
+
+    def sweep() -> None:
+        sweep_threads.append(threading.current_thread())
+        started.set()
+        assert release.wait(timeout=5)
+
+    runner = threading.Thread(
+        target=lambda: _worker(channel, connection).run(
+            lambda body: None, limit=1, sweep=sweep, sweep_interval=0
+        )
+    )
+    runner.start()
+    assert started.wait(timeout=5)
+    while connection.polls < 3:
+        time.sleep(0.01)
+    assert channel.acked == []  # сообщение этого такта ждёт конца прохода
+    release.set()
+    runner.join(timeout=5)
+
+    assert not runner.is_alive()
+    assert sweep_threads[0] is not runner
+    assert channel.acked == [1]
+
+
+def test_a_sweep_killed_by_a_base_exception_stops_the_worker() -> None:
+    """`KeyboardInterrupt` из потока очистки — в главный поток, как без потока."""
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+
+    def sweep() -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _worker(channel).run(lambda body: None, limit=1, sweep=sweep, sweep_interval=0)
+
+    assert channel.acked == []
+
+
+def test_a_lost_connection_lets_the_handler_finish_before_the_worker_exits() -> None:
+    """Соединение оборвалось посреди обработки: прогон доводится до конца, а не обрывается
+    выходом процесса; сообщение без подтверждения брокер вернёт."""
+    finished: list[bool] = []
+
+    class LostConnection(FakeConnection):
+        def process_data_events(self, time_limit: float = 0) -> None:
+            raise pika.exceptions.StreamLostError("соединение потеряно")
+
+    def handler(body: bytes) -> None:
+        time.sleep(0.05)
+        finished.append(True)
+
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+    with pytest.raises(pika.exceptions.StreamLostError):
+        _worker(channel, LostConnection()).run(handler, limit=1)
+
+    assert finished == [True]
+    assert channel.acked == []
+
+
+def test_a_handler_killed_by_a_base_exception_leaves_the_message_unacked() -> None:
+    """`KeyboardInterrupt` в потоке обработчика — как раньше в главном: процесс выходит без
+    подтверждения, а не подтверждает сообщение молча убитого потока."""
+    channel = FakeChannel([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+
+    def die(body: bytes) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _worker(channel).run(die, limit=1)
+
+    assert channel.acked == []
+    assert channel.nacked == []
+    assert channel.rejected == []
 
 
 def test_a_limited_run_takes_the_consumer_off_before_the_last_ack() -> None:

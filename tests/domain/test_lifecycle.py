@@ -67,3 +67,14 @@ def test_failing_before_work_started_has_no_stage(run) -> None:
 def test_other_transitions_leave_the_failed_stage_empty(run, current: S, requested: S) -> None:
     moved = advance(replace(run, status=current), requested, NOW).unwrap()
     assert moved.failed_stage is None
+
+
+def test_run_without_money_completes_from_building_context(run) -> None:
+    # Прогон без денег (`review-billing`) завершается без анализа и публикации.
+    moved = advance(replace(run, status=S.BUILDING_CONTEXT), S.COMPLETED, NOW).unwrap()
+    assert moved.status is S.COMPLETED
+    assert moved.failed_stage is None
+
+
+def test_analysing_still_cannot_skip_publishing() -> None:
+    assert not next_status(S.ANALYSING, S.COMPLETED).ok

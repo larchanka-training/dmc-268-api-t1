@@ -101,7 +101,7 @@ class Case:
             vcs=self.vcs,
             uow=self.uow,
             queue=self.queue,
-            user=UserContext(oauth=FakeOAuthProvider(), session_id=SESSION_ID),
+            user=UserContext(oauth=FakeOAuthProvider(), session_id=SESSION_ID, user_id=UUID(int=1)),
             now=lambda: NOW,
             new_id=uuid4,
             run_outcome=self.outcome,
@@ -368,6 +368,20 @@ def test_a_reviewed_commit_is_reviewed_again(trigger: TriggerSource) -> None:
     assert start.run.trigger is TriggerSource.MANUAL
     assert len(case.queue.jobs) == 1
     assert case.uow.review_runs.get(previous.id) == previous
+
+
+def test_a_launch_after_a_failed_run_on_the_head_sets_no_gate() -> None:
+    """Блокировка head на приёме (#309) — только у вебхука: ручной запуск ставит gate при
+    захвате прогона (#368), а `failure` приёма `launch_review` не обрабатывает."""
+    case = Case()
+    _existing_run(case, ReviewRunStatus.FAILED, TriggerSource.WEBHOOK)
+
+    start = case.launch()
+
+    assert isinstance(start, RunStart)
+    assert start.kind == "success"
+    assert case.vcs.checks == []
+    assert len(case.queue.jobs) == 1
 
 
 @pytest.mark.parametrize("trigger", [TriggerSource.WEBHOOK, TriggerSource.MANUAL])

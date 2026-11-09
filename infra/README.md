@@ -24,7 +24,7 @@
 
 ## Почему OpenTofu, а не Terraform
 
-Terraform с версии 1.6 распространяется под Business Source License (BUSL) — она не open source, и условия дополнительного разрешения HashiCorp на использование размыты. OpenTofu — форк последней открытой версии под Mozilla Public License 2.0, проект Linux Foundation. Провайдеры у него те же, что у Terraform (своих OpenTofu не пишет), а берутся из собственного реестра `registry.opentofu.org`: `kreuzwerker/docker` работает без изменений. Сверх Terraform OpenTofu умеет шифровать состояние и план на диске и в бэкенде (с 1.7); у нас шифрование пока не включено — состояние лежит в хранилище на петле сервера, доступном только через SSH-туннель.
+Terraform с версии 1.6 распространяется под Business Source License (BUSL) — она не open source, и условия дополнительного разрешения HashiCorp на использование размыты. OpenTofu — форк последней открытой версии под Mozilla Public License 2.0, проект Linux Foundation. Провайдеры у него те же, что у Terraform (своих OpenTofu не пишет), а берутся из собственного реестра `registry.opentofu.org`: `kreuzwerker/docker` работает без изменений. Сверх Terraform OpenTofu умеет шифровать состояние и план на диске и в бэкенде (с 1.7); у нас оно включено (`encryption.tf`, раздел «Шифрование состояния»), а само хранилище лежит на петле сервера и доступно только через SSH-туннель.
 
 ## Локальный или удалённый Docker
 
@@ -47,6 +47,7 @@ API публикуется на `bind_ip`, в деплое это `127.0.0.1`. �
 | `dmc268-backend` (`internal`) | `postgres`, `postgres-replica`, `postgres-backup`, `rabbitmq`, `replication-setup`, `api`, `worker`, миграции шага деплоя | данные. У сети нет шлюза: из неё не выйти в интернет, а интерфейса в ней нет |
 | `dmc268-egress` | `worker` | исходящие запросы воркера к GitHub API и провайдеру модели |
 | `dmc268-otlp` (`internal`) | интерфейс, `otelcol` (при `observability_enabled`) | трейсы браузера: nginx интерфейса проксирует `/otlp/v1/traces` на отдельный приёмник коллектора `dmc268-otelcol:4319`: только трейсы, `service.name` ставит коллектор (`dmc-268-ui`), кабинет шлёт их на свой же origin. По ней же receiver `nginx` коллектора снимает `stub_status` интерфейса (`dmc268-ui:8081`, на хост не публикуется). Сеть создаётся и без стека: интерфейс подключается к ней по имени, и без коллектора `/otlp/v1/traces` отвечает 502, а остальное работает |
+| `dmc268-grafana-proxy` (`internal`) | интерфейс, `grafana` (при `observability_enabled`) | публичный вход в Grafana: nginx интерфейса на порту 8443 проксирует `/grafana/` на `dmc268-grafana:3000`, Grafana отдаётся из этого подпути. Из стека в сети только Grafana, шлюза нет. Создаётся и без стека, как `dmc268-otlp`: интерфейс подключается к ней по имени. Откатывают в обратном порядке: сначала фронт (из сети уходит `dmc268-ui`), потом бэкенд — Docker не удаляет сеть с подключённым контейнером, и `tofu apply` бэкенда раньше фронта упадёт |
 
 API — единственный, кто стоит и во входе, и в данных. С `internal`-сети Docker не публикует порты, поэтому у базы и брокера портов на хосте нет: для отладки — `docker exec -it dmc268-postgres psql -U dmc268 -d dmc268` и `docker exec dmc268-rabbitmq rabbitmq-diagnostics status`. Изоляцию проверяют `tests/test_infra_isolation.py` (по тексту `infra/*.tf`) и `infra/tests/main.tftest.hcl` (по плану).
 
@@ -112,7 +113,7 @@ cd infra && tofu init -backend=false -upgrade && tofu providers lock \
 
 **Снаружи API адресуется через интерфейс, с исходным путём.** Публичный вход — `nginx` в контейнере фронтенда на **https://62.169.24.237** (сертификат Let's Encrypt на IP, HTTP перенаправляется на HTTPS; устройство — в `infra/README.md` репозитория `dmc-268-ui-t1`). Префикс он не трогает: браузерный `GET /api/v1/reviews` приходит сюда как `GET /api/v1/reviews`, поэтому роутеры монтируются на `/api/v1`, как требует контракт API. `/health` через этот вход не публикуется — проверка живости ходит мимо него.
 
-**Тома данных деплой не уничтожает.** У каждого тома (`docker_volume.postgres`, `docker_volume.rabbitmq`, `docker_volume.postgres_replica`, `docker_volume.postgres_backups`) — `lifecycle { prevent_destroy = true }`: план, который уничтожает или заменяет том, OpenTofu отклоняет до изменений на сервере с `Error: Resource instance cannot be destroyed`. Это действует и на targeted apply шага «Поднять базу и брокер» — `-target=docker_container.postgres` тянет том зависимостью; тот же сторож `scripts/deploy_report.py` смотрит и его план (`infra.sh`). Полный выкат идёт планом в файл: `plan.sh` строит `tofu plan -out=tfplan` сразу после targeted apply, и `scripts/deploy_report.py` по `tofu show -json` дублирует проверку для summary — падает, если план уничтожает или заменяет любой `docker_volume`, и apply не запускается. Списка адресов у сторожа нет: ресурс, переименованный без блока `moved`, уничтожается по старому адресу, и `prevent_destroy` у него уже нет — по списку его бы не поймать. Миграции идут между планом и apply: состояние они не трогают, план не устаревает. Применяется ровно проверенный план (`apply.sh`); если до него не дошло, файл плана удаляет `summary.sh`. Сменить том, как при смене сборки PostgreSQL или версии RabbitMQ, — новым ресурсом с новым адресом (с `prevent_destroy` — его наличие у каждого тома сверяет тест), а прежний снять с учёта блоком `removed { lifecycle { destroy = false } }`: план выйдет `forget` и `create`, старый том с данными останется на сервере до ручного `docker volume rm`. В плане и его JSON пароли лежат открытым текстом: JSON идёт только трубой, файл плана удаляется после apply и артефактом не загружается, обёртка `setup-opentofu`, копирующая stdout tofu в выходы шага, выключена.
+**Тома данных деплой не уничтожает.** У каждого тома (`docker_volume.postgres`, `docker_volume.rabbitmq`, `docker_volume.postgres_replica`, `docker_volume.postgres_backups`) — `lifecycle { prevent_destroy = true }`: план, который уничтожает или заменяет том, OpenTofu отклоняет до изменений на сервере с `Error: Resource instance cannot be destroyed`. Это действует и на targeted apply шага «Поднять базу и брокер» — `-target=docker_container.postgres` тянет том зависимостью; тот же сторож `scripts/deploy_report.py` смотрит и его план (`infra.sh`). Полный выкат идёт планом в файл: `plan.sh` строит `tofu plan -out=tfplan` сразу после targeted apply, и `scripts/deploy_report.py` по `tofu show -json` дублирует проверку для summary — падает, если план уничтожает или заменяет любой `docker_volume`, и apply не запускается. Списка адресов у сторожа нет: ресурс, переименованный без блока `moved`, уничтожается по старому адресу, и `prevent_destroy` у него уже нет — по списку его бы не поймать. Миграции идут между планом и apply: состояние они не трогают, план не устаревает. Применяется ровно проверенный план (`apply.sh`); если до него не дошло, файл плана удаляет `summary.sh`. Сменить том, как при смене сборки PostgreSQL или версии RabbitMQ, — новым ресурсом с новым адресом (с `prevent_destroy` — его наличие у каждого тома сверяет тест), а прежний снять с учёта блоком `removed { lifecycle { destroy = false } }`: план выйдет `forget` и `create`, старый том с данными останется на сервере до ручного `docker volume rm`. Файл плана зашифрован фразой состояния (раздел «Шифрование состояния»), а в JSON `tofu show -json` пароли открытым текстом: JSON идёт только трубой, файл плана удаляется после apply и артефактом не загружается, обёртка `setup-opentofu`, копирующая stdout tofu в выходы шага, выключена.
 
 **Summary деплоя** пишет `summary.sh` на любом исходе: шаг падения, простой API с разбивкой (SIGTERM старому → выход → `Created` нового → `State.StartedAt` → событие `health_status: healthy` нового; всё, кроме `Created` и `StartedAt`, — из событий Docker, которые `apply.sh` читает потоком всё время apply. `State.Health.Log` — запасной путь, если событий нового контейнера нет: журнал держит пять последних проверок, и после долгого apply первой успешной в нём уже нет — summary тогда помечает простой как недостоверный), оба плана по типам ресурсов (targeted базы и брокера и полный), применённые миграции — а если шаг миграций упал, ревизия, на которой он упал, и ревизия базы по `alembic current`, который `migrate.sh` запускает после сбоя тем же образом под `timeout 60` (по логу alembic не сказать, что откатилось: `autocommit_block` фиксирует всё до себя, а при оборванном ssh код выхода теряется; не ответила база — summary пишет «ревизия базы неизвестна», без «откатено»); упал шаг до alembic (`tofu output`) — так и сказано, свободное место на `/` и в каталоге Docker после уборки и длительность шагов — по засечкам `mark.sh`, без `actions: read` у токена. Подписи значений — ключи OpenTelemetry (`cicd.pipeline.*`, `container.image.*`, `system.filesystem.*`), свои — в `dmc268.deploy.*`.
 
@@ -157,6 +158,7 @@ tofu apply infra.tfplan
 | `grafana_admin_password` | секрет `GRAFANA_ADMIN_PASSWORD_DMC268_T1` — пароль админа Grafana (`GF_SECURITY_ADMIN_PASSWORD` контейнера `dmc268-grafana`). Дефолт переменной пустой, и при `observability_enabled = true` валидация требует непустого значения: без секрета `apply` падает на проверке. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 \| gh secret set GRAFANA_ADMIN_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` — или своим паролем; локальному стеку он не нужен, Grafana там без логина. **`GF_SECURITY_ADMIN_PASSWORD` действует только при первом старте Grafana** (создание `grafana.db` в томе): смена секрета пароль уже работающей Grafana **не** меняет — коллектор и алерты от этого не зависят, но вход по старому паролю сохранится. Ротация — на сервере, командой внутри контейнера, пароль — через stdin: `read -rs P && printf '%s' "$P" \| docker exec -i dmc268-grafana grafana cli admin reset-admin-password --password-from-stdin`. Не аргументом: командная строка `docker exec` видна в `/events` клиенту socket-proxy (`dmc268-otelcol-docker`) |
 | `postgres_monitor_password` | секрет `PG_MONITOR_PASSWORD_DMC268_T1` — пароль роли `dmc268_monitor` (`pg_monitor`), которую создаёт миграция 0013 и под которой коллектор снимает метрики базы (`POSTGRESQL_PASSWORD` его env). Дефолт переменной — локальный `dmc268_monitor`, а при `observability_enabled = true` валидация требует настоящего пароля: без секрета `apply` падает на проверке. Ставится в GitHub вручную, отдельным шагом (не код): `openssl rand -base64 24 \| gh secret set PG_MONITOR_PASSWORD_DMC268_T1 -R larchanka-training/dmc-268-api-t1` |
 | `postgres_replication_password` | секрет `PG_REPLICATION_PASSWORD_DMC268_T1`, не короче 16 символов |
+| `state_passphrase` | секрет `STATE_PASSPHRASE_DMC268_T1` (environment `stand`), не короче 16 символов — фраза шифрования состояния и плана (`encryption.tf`). Нужна уже `tofu init` с бэкендом; копия — вне GitHub (раздел «Шифрование состояния») |
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `user_token_encryption_key` | секрет `USER_TOKEN_KEY_DMC268_T1` — 32 байта в base64 (`openssl rand -base64 32`). Без него или с битым значением `apply` падает на проверке переменной: стенд не стартует без шифрования токенов пользователя. Генерация и установка — `README.md`, «Ключ шифрования токенов пользователя» |
 | `docker_host` | `ssh://stand`: хост `stand` в `~/.ssh/config` собирает `.github/actions/stand-ssh` из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
@@ -176,7 +178,7 @@ tofu apply infra.tfplan
 | `github_app_client_id` | переменная `APP_CLIENT_ID_DMC268_T1` |
 | `github_app_client_secret` | секрет `APP_CLIENT_SECRET_DMC268_T1` |
 | `public_origin` | `https://` + `VPS_DMC268_IP_T1`: интерфейс отдаётся по HTTPS на тот же адрес. Callback `<public_origin>/api/v1/auth/github/callback` регистрируется в настройках GitHub App |
-| `alert_telegram_bot_token`, `alert_telegram_chat_id` | секреты `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1` — бот, от имени которого Alertmanager шлёт алерты, и чат, куда (раздел «Алерты»). Без них алерты считаются и видны в Alertmanager, но в Telegram не уходят. Заданные проверяются на формат — токен `<id>:<ключ>`, chat id числом: битое значение роняет `plan`. В Alertmanager токен приходит файлом (`upload`), поэтому в `docker inspect` его не видно, но в state OpenTofu он лежит открытым текстом — так же, как пароли из `env` остальных контейнеров; state защищён хранилищем на петле сервера (раздел «Хранилище состояния»). Ставятся вручную: `gh secret set TELEGRAM_BOT_TOKEN_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin) и так же chat id; следующий деплой пересоздаёт Alertmanager с ними |
+| `alert_telegram_bot_token`, `alert_telegram_chat_id` | секреты `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1` — бот, от имени которого Alertmanager шлёт алерты, и чат, куда (раздел «Алерты»). Без них алерты считаются и видны в Alertmanager, но в Telegram не уходят. Заданные проверяются на формат — токен `<id>:<ключ>`, chat id числом: битое значение роняет `plan`. В Alertmanager токен приходит файлом (`upload`), поэтому в `docker inspect` его не видно, но в state OpenTofu он есть — так же, как пароли из `env` остальных контейнеров; state зашифрован фразой (раздел «Шифрование состояния») и лежит в хранилище на петле сервера (раздел «Хранилище состояния»). Ставятся вручную: `gh secret set TELEGRAM_BOT_TOKEN_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin) и так же chat id; следующий деплой пересоздаёт Alertmanager с ними |
 | `alert_heartbeat_url` | секрет `ALERT_HEARTBEAT_URL_DMC268_T1` — адрес пинга внешнего heartbeat-сервиса для `Watchdog` (раздел «Алерты», «Dead man's switch»). Без него деплой проходит с предупреждением, а падение самого Prometheus или Alertmanager никто не заметит. Только `https://<хост>/<путь>` без пробелов: другое значение роняет `plan`. В Alertmanager приходит файлом (`upload`, `url_file`), в его логе адрес скрыт (`<redacted>`); из него же деплой строит адрес `/fail` для `AlertDeliveryFailing`. Ставится вручную: `gh secret set ALERT_HEARTBEAT_URL_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin), следующий деплой пересоздаёт Alertmanager |
 
 Из этого стека наружу не смотрит ничего. API, PostgreSQL и RabbitMQ публикуются на петле сервера, воркер не публикуется вовсе; снаружи доступен только интерфейс, и API — через его `/api/`.
@@ -301,7 +303,7 @@ docker exec dmc268-postgres psql -U dmc268 -d dmc268 -XtAc "select application_n
 (`dmc268-otelcol`: трейсы, логи, метрики приложения и базы), его второй экземпляр
 `dmc268-otelcol-docker` (метрики контейнеров), третий `dmc268-otelcol-logs` (логи postgres, его
 реплики и rabbitmq, см. «Логи контейнеров»), Loki (логи), Tempo (трейсы), Prometheus
-(метрики), Grafana (интерфейс, `grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU,
+(метрики), Grafana (интерфейс: публичный вход `:8443/grafana/` и `grafana_port` на `bind_ip`), `node-exporter` (сервер: CPU,
 память, диски) и socket-proxy (`dmc268-docker-proxy`: Docker API для `dmc268-otelcol-docker` по
 белому списку эндпоинтов вместо маунта `docker.sock`; отдельная сеть `dmc268-docker-proxy`, где
 кроме proxy и `dmc268-otelcol-docker` никого), а для алертов — Alertmanager
@@ -315,6 +317,33 @@ internal-сети Docker не публикует. Выход наружу чер
 проверки обновлений Grafana и плагинов (`GF_ANALYTICS_CHECK_FOR_UPDATES`,
 `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES`). Локальный compose повторяет раскладку: сеть
 `observability` — `internal`, порт Grafana — через отдельную сеть `grafana`.
+
+**Вход в Grafana стенда** — через публичный вход на порту 8443: `https://<VPS_DMC268_IP_T1>:8443/grafana/`
+(сейчас https://62.169.24.237:8443/grafana/). Хост и сертификат те же, что у кабинета, но
+отдельный порт — это свой origin, и XSS в Grafana не прочитает API кабинета. nginx интерфейса
+слушает 8443, проксирует подпуть по сети `dmc268-grafana-proxy`, TLS терминирует он же. Вход только по учётке: анонимный вход и
+регистрация выключены, у каждого участника — личная учётка, её заводит админ
+(Administration → Users and access → Users → New user). Пароль админа
+(`grafana_admin_password`) не раздаётся и для работы не используется. **До заведения учёток —
+один раз переименовать `admin`** (Administration → Users and access → Users → `admin` → Edit,
+поле Username — неочевидное имя): Grafana блокирует логин после пяти неудачных попыток за
+5 минут, и по известному имени `admin` кто угодно держит его заблокированным через форму входа.
+`GF_SECURITY_ADMIN_USER` для этого не годится — действует только при создании тома, поэтому
+после пересоздания тома `dmc268-grafana-data` шаг повторяют. Env Grafana для публичного входа:
+`GF_SERVER_ROOT_URL` — `public_origin`, порт `8443` и `/grafana/` (слеш на конце `public_origin`
+отбрасывается; без `public_origin` — относительный `/grafana/`; порт — константа
+`local.grafana_public_root_url`, его слушает nginx интерфейса, меняется только вместе с фронтом), `GF_SERVER_SERVE_FROM_SUB_PATH=true`, `GF_SECURITY_COOKIE_SECURE=true` — cookie
+сессии только по HTTPS, `GF_METRICS_ENABLED=false` — `/grafana/metrics` иначе отдаётся без входа
+(версия, коммит, число пользователей; Prometheus стенда Grafana не опрашивает),
+`GF_AUTH_BASIC_ENABLED=false` — запрос с `Authorization: Basic` идёт мимо `limit_req` на
+`/grafana/login` и засчитывается в блокировку логина; API-клиентов у Grafana нет. `GF_AUTH_ANONYMOUS_HIDE_VERSION=true` — без входа `/grafana/api/health` и `buildInfo` страницы входа иначе отдают версию и коммит, `GF_METRICS_ENABLED=false` этого не закрывает. `GF_PUBLIC_DASHBOARDS_ENABLED=false` — публичные дашборды в 13.x включены по умолчанию, и Admin или Editor кнопкой «Share externally» открыл бы панели с логами и трейсами без входа. `GF_SNAPSHOTS_ENABLED=false` — снимки (Share → Snapshot) по умолчанию включены, открываются без входа любым по ссылке, а внешние уходят на `snapshots.raintank.io`; `GF_SNAPSHOTS_EXTERNAL_ENABLED=false` — отдельная настройка, без неё кнопка публикации на raintank остаётся. Туннель продолжает работать: `ssh -L 3000:127.0.0.1:3000 <сервер>`, но
+адрес теперь с подпутём — http://localhost:3000/grafana/. Корень `http://localhost:3000/`
+отвечает 301 на публичный адрес: с `serve_from_sub_path` Grafana отдаёт интерфейс только под
+`/grafana/`. Secure-cookie по `http://localhost` браузеры принимают (localhost у них — безопасный
+контекст). Grafana сверяет `Origin` изменяющих запросов с `Host`, поэтому nginx передаёт ей
+`Host` клиента вместе с портом (`proxy_set_header Host $http_host`), а WebSocket Grafana Live (`/grafana/api/live/`)
+проксирует с `Upgrade`/`Connection`. Локальный compose подпуть не включает: публичного входа там
+нет, Grafana — в корне без логина.
 Белый список — свой шаблон haproxy (`observability/docker-socket-proxy.cfg`), а не
 env-переменные образа: `CONTAINERS=1` открывал любой GET под `/containers`, вплоть до чтения
 файлов контейнеров через `/archive` (замечание ревью PR #130); в compose шаблон монтируется
@@ -363,7 +392,7 @@ OTel с её миллисекундами. Логи сервисов колле�
 
 За флагом идёт всё разом: девять контейнеров стека и их образы, сети стека —
 `dmc268-observability`, `dmc268-grafana` и `dmc268-logs` — вместе с сетью socket-proxy
-(`count = 1 : 0` у каждого ресурса), `telemetry_env` — `OTEL_*_EXPORTER=otlp`, адрес коллектора
+(`count = 1 : 0` у каждого ресурса; `dmc268-grafana-proxy`, как и `dmc268-otlp`, — без флага), `telemetry_env` — `OTEL_*_EXPORTER=otlp`, адрес коллектора
 и таймаут в env api, воркера и миграций, — `status_env` — `PROMETHEUS_URL` в env api для страницы
 статуса (без флага его нет, и `GET /api/v1/status` отвечает `unknown`), — `command` контейнера Postgres (при флаге база
 стартует с `shared_preload_libraries=pg_stat_statements`, без флага — с родным `CMD` образа) и
@@ -435,7 +464,7 @@ OTel с её миллисекундами. Логи сервисов колле�
 | RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
 | Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
 | Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes`, `container_uptime_seconds`, `container_restarts_total` | `container_name` | CPU и память контейнеров |
-| Вход, nginx интерфейса (receiver `nginx` основного коллектора, `stub_status`) | `collector` | `nginx_requests_total`, `nginx_connections_current`, `nginx_connections_accepted_total`, `nginx_connections_handled_total` | `state` | «Вход (nginx)»: соединения; запросы в секунду и доля ответов по классу кода считаются по access-логу `{service_name="dmc268-ui"}` в Loki без проб blackbox: счётчик `stub_status` их не отличает |
+| Вход, nginx интерфейса (receiver `nginx` основного коллектора, `stub_status`) | `collector` | `nginx_requests_total`, `nginx_connections_current`, `nginx_connections_accepted_total`, `nginx_connections_handled_total` | `state` | «Вход (nginx)»: соединения; запросы в секунду и доля ответов по классу кода считаются по access-логу `{service_name="dmc268-ui"}` в Loki без проб blackbox и без запросов к `/grafana/` (Grafana ходит через тот же nginx, открытый «Обзор» — около 0,6 запроса в секунду с вкладки): счётчик `stub_status` их не отличает |
 | Расход токенов (receiver `sqlquery/llm-tokens` основного коллектора) | `collector` | `review_llm_tokens_month` | нет | нет (алерты бюджета) |
 | Резервные копии (textfile node-exporter, пишет `backup.sh`) | `node-exporter` | `dmc268_backup_last_success_timestamp_seconds` | нет | нет (алерт `BackupStale`) |
 | Пробы (blackbox-exporter) | `blackbox-services`, `blackbox-public` | `probe_success`, `probe_ssl_earliest_cert_expiry` | `service`, `instance` | нет (алерты) |
@@ -806,6 +835,97 @@ cd infra && tofu force-unlock <ID из ошибки>
 
 У контейнера хранилища, как у контейнеров стека, потолок памяти 512 МБ без свопа и ротация логов (три файла по 10 МБ); задаёт их `docker run` в `.github/scripts/render-s3-script.sh`. Контейнер без лимита (созданный до них) action пересоздаёт на том же томе тем же путём, что при смене образа: штатный `stop`, `rm` и новый `run`, состояние в томе переживает замену.
 
+### Шифрование состояния
+
+Состояние и сохранённый план OpenTofu шифрует сам (`infra/encryption.tf`, #147): ключ выводит `key_provider "pbkdf2"` из фразы, шифр — `method "aes_gcm"`. В состоянии лежат значения всех секретов стека — пароли базы, брокера и реплики, ключ GitHub App, секрет вебхука, ключ шифрования токенов, — и без шифрования доступ к бакету открывал бы их все. Теперь в бакете лежит конверт `{encrypted_data, encryption_version, lineage, meta, serial}`: serial и lineage читаются, ресурсы и значения — только с фразой. Зашифрован и `infra/errored.tfstate`, который остаётся на раннере после упавшей записи.
+
+Сейчас идёт шаг 1 из двух: у `state` есть `fallback` на `method "unencrypted"`, чтобы первый деплой прочитал прежнее открытое состояние. Любой `apply` (и `apply -refresh-only`) переписывает его зашифрованным, даже без изменений; `plan` — нет. У `plan` `fallback` нет: план создаётся и применяется в одном job'е, старых открытых планов не бывает. Шаг 2 — `enforced = true` без `fallback` у `state` и удаление старых открытых версий объекта в бакете (задачи — `openspec/changes/tfstate-encryption/tasks.md`).
+
+**Где фраза.** Секрет `STATE_PASSPHRASE_DMC268_T1` в environment `stand`; деплой передаёт его как `TF_VAR_state_passphrase` всем шагам `tofu` и восстановлению. Не короче 16 символов (проверка переменной). Копия фразы **обязательно** хранится вне GitHub — секрет GitHub обратно не прочитать, а без фразы состояние не открыть. Поэтому фраза сначала сохраняется вне GitHub, а секрет ставится из той же переменной:
+
+```bash
+P=$(openssl rand -base64 48)     # сохранить P вне GitHub, потом:
+printf %s "$P" | gh secret set STATE_PASSPHRASE_DMC268_T1 --env stand
+```
+
+Копию проверить после первого деплоя с шифрованием (или ротации), когда объект в бакете уже зашифрован. Фразу — отдельным `export`: префикс `VAR=… cmd1 && cmd2` доходит только до первой команды, и `state pull` взял бы фразу, экспортированную раньше в той же оболочке (раздел «Локально»), — проверка прошла бы на неверной копии:
+
+```bash
+export TF_VAR_state_passphrase=<копия>
+cd infra && tofu init && tofu state pull | jq .serial
+```
+
+Раньше проверка ничего не значит — открытое состояние `fallback` читает с любой фразой. Резервную копию состояния (`tofu state pull > backup`) удалять только после этой проверки.
+
+**Локально.** Фраза нужна уже `tofu init` с настоящим бэкендом — без неё он падает: «depends on var.state_passphrase which is not available»:
+
+```bash
+export TF_VAR_state_passphrase=<фраза>
+cd infra && tofu init && tofu plan
+```
+
+Проверке конфигурации без состояния (`tofu init -backend=false`, `tofu validate`) фраза не нужна, `tofu test` берёт фиктивную из `tests/*.tftest.hcl`. Неверная фраза роняет команду с ошибкой расшифровки, состояние при этом не меняется.
+
+**Проверить, что объект в бакете зашифрован** (туннель и учётные данные — как в разделе «Развёртывание и удаление»):
+
+```bash
+aws s3 cp s3://dmc268-tfstate/api/terraform.tfstate - --endpoint-url http://127.0.0.1:9000 | jq 'keys'
+```
+
+Зашифрованное — в ключах есть `encrypted_data`, а `resources` нет. Видно `resources` — состояние открыто: после шага 1 так бывает только до первого деплоя.
+
+**Ротация фразы.** Существующие `key_provider` и `method` не переименовывать: документация OpenTofu предупреждает, что переименованный провайдер или метод не откроет уже зашифрованное состояние.
+
+1. Добавить в `encryption.tf` новый `key_provider "pbkdf2"` с новым именем и новой переменной фразы и новый `method "aes_gcm"` на нём; у `state` и `plan` основным поставить новый метод, прежний `aes_gcm` — в `fallback`. `fallback` в блоке один и метод в нём один (второй блок — «Duplicate fallback block», список — «Invalid expression»), поэтому, пока идёт шаг 1, `unencrypted` у `state` уходит во вложенный `fallback`; у `plan` — только прежний `aes_gcm`:
+
+   ```hcl
+   state {
+     method = method.aes_gcm.next
+     fallback {
+       method = method.aes_gcm.main
+       fallback {
+         method = method.unencrypted.legacy # только пока идёт шаг 1
+       }
+     }
+   }
+   plan {
+     method = method.aes_gcm.next
+     fallback {
+       method = method.aes_gcm.main
+     }
+   }
+   ```
+
+   Проверено на OpenTofu 1.13.8 с локальным бэкендом: состояние, зашифрованное прежней фразой, и открытое — оба читаются, `apply` переписывает их новой; без вложенного `fallback` открытое не читается («encountered unencrypted payload without unencrypted method configured»).
+2. Завести новый секрет, передать его в `deploy.yml`, выкатить: `apply` перешифрует состояние новым ключом. Фразу в `deploy.yml` читают три `env`: якорь `&tofu-env`, шаг миграций (`migrate.sh` — `tofu output`) и шаг «Восстановить состояние OpenTofu»; два последних якорем не пользуются. Новая переменная — во все три, иначе миграции и расшифровка при восстановлении упадут на «not available».
+3. Проверить объект в бакете (выше) и следующим пул-реквестом убрать прежние провайдер, метод, переменную (из всех трёх `env` `deploy.yml`) и секрет. Копию новой фразы — вне GitHub, как и прежней.
+
+**Откат.** Revert пул-реквеста с шифрованием ломает каждый деплой: состояние в бакете уже зашифровано, и без блока `encryption` `tofu init` и `plan` падают с «This state file is encrypted and can not be read without an encryption configuration». Откатывать — в обратную сторону, с той же фразой в секрете:
+
+1. Пул-реквест, где в `encryption.tf` `state` пишет открыто и читает зашифрованное, а `plan` — открытый:
+
+   ```hcl
+   state {
+     method = method.unencrypted.legacy
+     fallback {
+       method = method.aes_gcm.main
+     }
+   }
+   plan {
+     method = method.unencrypted.legacy
+   }
+   ```
+
+   Выкатить: `apply` (и `apply -refresh-only`) переписывает состояние открытым, даже без изменений.
+2. Проверить объект в бакете (выше): в `jq 'keys'` есть `resources`, `encrypted_data` нет.
+3. Только после этого следующим пул-реквестом удалить `encryption.tf` и `TF_VAR_state_passphrase` из всех трёх `env` `deploy.yml` (якорь `&tofu-env`, шаг миграций, шаг «Восстановить состояние OpenTofu»), затем секрет. Тем же пул-реквестом убрать расшифровку в `.github/scripts/deploy/recover-state.sh` — она безусловно копирует `infra/encryption.tf`, и без файла любой обрыв apply кончится «не скопировать для расшифровки»: вернуть прямой `tofu state push` с `errored.tfstate`, убрать её тесты в `tests/test_deploy_recovery.py` и шаг расшифровки из ручного восстановления ниже.
+
+Проверено на OpenTofu 1.13.8 с локальным бэкендом: зашифрованное состояние после такого `apply` — открытый JSON с `resources`, и `plan` без блока `encryption` проходит.
+
+**Если фраза потеряна,** состояние не восстановить: ключ из него не достать. Остаётся резервная копия, снятая раньше (`tofu state pull > backup` с фразой; файл открытый — хранить вне репозитория и как секрет), либо пересборка состояния: пустое состояние под новой фразой и `tofu import` каждого ресурса стека (`docker_container.*`, `docker_volume.*`, `docker_network.*`, `docker_image.*`). Тома на сервере при этом не трогаются, но это долгая ручная работа — поэтому копия фразы вне GitHub обязательна.
+
+**Восстановление после обрыва.** `errored.tfstate` теперь зашифрован, а `tofu state push` зашифрованный файл не читает («This state file is encrypted and can not be read without an encryption configuration»; `TF_ENCRYPTION` не помогает). Поэтому `recover-state.sh` сначала расшифровывает его во временном каталоге — копии `encryption.tf` и `.terraform.lock.hcl`, файл как локальный `terraform.tfstate`, `tofu init -plugin-dir` с провайдерами из `infra/.terraform/providers` (без скачивания из реестра), `tofu state pull` — в открытый временный файл (`umask 077`, удаляется на выходе), сверяет с хранилищем и записывает его. Push шифрует, в бакет открытое не попадает. Руками — шаг 3 следующего раздела.
+
 ### Если деплой упал посреди apply
 
 Самый дорогой сбой деплоя — пропавшая связь с хранилищем, пока OpenTofu пишет состояние. Что делает OpenTofu 1.13.2 (проверено на `docker:29-dind` с RustFS 1.0.3): промежуточная запись состояния падает, и apply останавливается, не трогая оставшиеся ресурсы; несохранённое состояние ложится в `infra/errored.tfstate` на раннере и исчезает вместе с ним; блокировка не снимается — объект `api/terraform.tfstate.tflock` остаётся в бакете, а её ID в выводе apply нет, он есть только в самом объекте. Следующий деплой упирается в блокировку, а после `force-unlock` — в старое состояние: план создаёт заново контейнеры, которые apply уже создал, и падает на `Conflict. The container name "/dmc268-api" is already in use`.
@@ -822,7 +942,16 @@ cd infra && tofu force-unlock <ID из ошибки>
 
 1. Туннель и учётные данные — как в разделе «Развёртывание и удаление».
 2. Посмотреть блокировку: `aws --endpoint-url http://127.0.0.1:9000 s3 cp s3://dmc268-tfstate/api/terraform.tfstate.tflock -` — `ID`, кто (`Who`) и когда (`Created`) её взял.
-3. Если `errored.tfstate` есть — артефакт `errored-tfstate` прогона (сутки): `gh run download <id прогона> -n errored-tfstate`, затем `STATE_BACKUP_KEY=… openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass env:STATE_BACKUP_KEY -in errored.tfstate.enc -out infra/errored.tfstate`. Сверить с хранилищем: `tofu state pull | jq '.lineage, .serial'` — линия та же, serial меньше, чем в файле, иначе в хранилище запись после нашей, и файл не нужен. Записать: `cd infra && tofu state push -lock=false errored.tfstate`, пока блокировка висит; не перетирать `-force`. Файл после записи удалить.
+3. Если `errored.tfstate` есть — артефакт `errored-tfstate` прогона (сутки): `gh run download <id прогона> -n errored-tfstate`, затем `STATE_BACKUP_KEY=… openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass env:STATE_BACKUP_KEY -in errored.tfstate.enc -out infra/errored.tfstate`. Сверить с хранилищем: `tofu state pull | jq '.lineage, .serial'` — линия та же, serial меньше, чем в файле (`jq '.lineage, .serial' infra/errored.tfstate`: в зашифрованном конверте оба поля открыты), иначе в хранилище запись после нашей, и файл не нужен. Файл зашифрован OpenTofu, и `tofu state push` его не прочитает — сначала расшифровать во временном каталоге (нужна фраза, раздел «Шифрование состояния»):
+
+   ```bash
+   export TF_VAR_state_passphrase=<фраза>
+   (cd infra && tofu init)   # провайдеры — в infra/.terraform/providers
+   tmp="$(mktemp -d)" && cp infra/encryption.tf infra/.terraform.lock.hcl "$tmp/" && cp infra/errored.tfstate "$tmp/terraform.tfstate"
+   (umask 077 && tofu -chdir="$tmp" init -plugin-dir="$PWD/infra/.terraform/providers" && tofu -chdir="$tmp" state pull > "$tmp/plain.tfstate")
+   ```
+
+   Записать открытый файл, пока блокировка висит; не перетирать `-force`: `cd infra && tofu state push -lock=false "$tmp/plain.tfstate"` — push шифрует, в бакет ляжет зашифрованное. После записи удалить и `errored.tfstate`, и временный каталог с открытым файлом: `rm -rf "$tmp" infra/errored.tfstate`.
 4. Если файла нет, состояние в хранилище старше стенда. `tofu plan` покажет, что он хочет создать заново: контейнеры, которые на сервере уже есть, либо удалить с сервера (`ssh <сервер> docker rm -f dmc268-api dmc268-worker` — следующий деплой создаст их, это короткий простой стенда), либо взять в состояние: `tofu state rm docker_container.api` и `tofu import docker_container.api <id контейнера>`. Тома (`docker_volume.postgres`, `docker_volume.rabbitmq`) не трогать: их защищает `prevent_destroy`, и план с их заменой не пройдёт.
 5. Снять блокировку: `tofu force-unlock <ID>` и перезапустить деплой.
 
@@ -835,6 +964,7 @@ cd infra && tofu force-unlock <ID из ошибки>
 ```bash
 ssh -i <ключ> -o ExitOnForwardFailure=yes -f -N -L 9000:127.0.0.1:9000 <user>@<server>
 export AWS_ACCESS_KEY_ID=<логин хранилища> AWS_SECRET_ACCESS_KEY=<пароль> AWS_DEFAULT_REGION=us-east-1
+export TF_VAR_state_passphrase=<фраза шифрования состояния>
 cd infra && tofu init && tofu plan
 ```
 

@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -24,6 +25,7 @@ from app.application.use_cases.auth import SignedIn
 from app.application.use_cases.run_diff import RUN_DIFF_MAX_LINES
 from app.config import Settings
 from app.domain.entities import (
+    ContextPayload,
     DiffAnchor,
     Finding,
     InstallationRepository,
@@ -37,6 +39,7 @@ from app.domain.entities import (
 )
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -48,6 +51,7 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.ids import new_id
+from app.domain.llm_usage import NO_USAGE, LlmUsage
 from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.run_steps import finish_step, start_step
 from app.domain.session import open_session
@@ -189,6 +193,56 @@ def test_returns_a_run_with_its_findings() -> None:
     assert body["findings"][0]["message"] == "сообщение"
 
 
+def test_a_run_reports_its_usage_breakdown_and_cost_as_a_decimal_string() -> None:
+    uow = FakeUnitOfWork()
+    usage = LlmUsage(
+        input_tokens=30,
+        output_tokens=5,
+        cached_tokens=10,
+        reasoning_tokens=2,
+        total_tokens=35,
+        cost_eur=Decimal("0.0000913000"),
+    )
+    run = _add_run(uow, tokens_used=35, usage=usage)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["tokens_used"] == 35
+    assert body["usage"] == {
+        "input_tokens": 30,
+        "output_tokens": 5,
+        "cost_eur": "0.0000913",
+    }
+
+
+@pytest.mark.parametrize(
+    ("stored", "cost_eur"),
+    [
+        ("0E-10", "0"),
+        ("0", "0"),
+        ("13.0960038381", "13.0960038381"),
+        ("100.0000000000", "100"),
+        ("0.0000000001", "0.0000000001"),
+    ],
+)
+def test_the_cost_is_an_exact_decimal_without_padding_or_exponent(stored: str, cost_eur: str) -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, usage=LlmUsage(cost_eur=Decimal(stored)))
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["usage"]["cost_eur"] == cost_eur
+
+
+def test_a_run_without_usage_reports_null() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, status=ReviewRunStatus.QUEUED, model=None, tokens_used=None)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["usage"] is None
+
+
 def test_a_run_with_no_findings_returns_an_empty_list() -> None:
     uow = FakeUnitOfWork()
     run = _add_run(uow)
@@ -247,6 +301,62 @@ def test_a_failed_run_reports_the_stage_it_failed_in() -> None:
 
     assert body["failed_stage"] == "analysing"
     assert body["failure_reason"] == "модель недоступна"
+
+
+def _add_payloads(uow: FakeUnitOfWork, run: ReviewRun, count: int) -> None:
+    """Пакеты контекста прогона; i-й записан на i дней раньше `NOW`."""
+    for i in range(count):
+        written = NOW - timedelta(days=i)
+        uow.context_payloads.add(
+            ContextPayload(
+                id=new_id(),
+                review_run_id=run.id,
+                chunk_index=i,
+                tiers=("diff",),
+                file_paths=("app/main.py",),
+                token_count=10,
+                content_sha256=f"chunk{i}",
+                body={"text": "x"},
+                created_at=written,
+                updated_at=written,
+            )
+        )
+
+
+def test_a_run_with_live_bodies_has_no_diff_expiry() -> None:
+    """Change diff-retention-visibility: стёрто не всё — дифф не удалён."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    _add_payloads(uow, run, 2)
+    uow.context_payloads.expire_bodies(NOW, NOW + timedelta(days=30), 10)  # старший пакет из двух
+    client = _client(uow)
+
+    body = client.get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["diff_expired_at"] is None
+
+
+def test_a_run_with_all_bodies_erased_reports_the_last_expiry_in_utc() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+    _add_payloads(uow, run, 2)
+    uow.context_payloads.expire_bodies(NOW, NOW + timedelta(days=30), 10)
+    uow.context_payloads.expire_bodies(NOW + timedelta(days=1), NOW + timedelta(days=31, hours=3), 10)
+    client = _client(uow)
+
+    body = client.get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["diff_expired_at"] == "2026-10-30T03:00:00Z"
+
+
+def test_a_run_without_context_payloads_has_no_diff_expiry() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, status=ReviewRunStatus.FAILED, failed_stage=ReviewRunStatus.BUILDING_CONTEXT)
+    client = _client(uow)
+
+    body = client.get(f"/api/v1/reviews/{run.id}").json()
+
+    assert body["diff_expired_at"] is None
 
 
 def _finding(run: ReviewRun, rule: RuleRef | None) -> Finding:
@@ -317,6 +427,24 @@ def test_a_run_reports_its_verification_outcome() -> None:
 
     assert body["verification"] == "unavailable"
     assert body["verifier_dropped_findings"] == 0
+
+
+def test_a_run_without_money_reports_its_coverage_reason() -> None:
+    uow = FakeUnitOfWork()
+    # Как прогон пишет `reserve_or_refuse`: нулевой расход, а не пустая разбивка.
+    run = _add_run(uow, model=None, tokens_used=0, usage=NO_USAGE, coverage_reason=CoverageReason.BALANCE)
+
+    body = _client(uow).get(f"/api/v1/reviews/{run.id}").json()
+
+    assert (body["status"], body["coverage_reason"], body["findings"]) == ("completed", "balance", [])
+    assert (body["tokens_used"], body["usage"]) == (0, {"input_tokens": 0, "output_tokens": 0, "cost_eur": "0"})
+
+
+def test_a_reviewed_run_has_no_coverage_reason() -> None:
+    uow = FakeUnitOfWork()
+    run = _add_run(uow)
+
+    assert _client(uow).get(f"/api/v1/reviews/{run.id}").json()["coverage_reason"] is None
 
 
 def test_a_run_before_analysis_has_no_verification_outcome() -> None:
@@ -879,6 +1007,65 @@ def test_run_without_base_sha_is_409_without_github() -> None:
     assert response.json()["code"] == "DIFF_UNAVAILABLE"
     assert "repository_installation_id" not in catalog.calls
     assert vcs.calls == []
+
+
+def _erase_all_bodies(uow: FakeUnitOfWork, run: ReviewRun) -> None:
+    _add_payloads(uow, run, 2)
+    uow.context_payloads.expire_bodies(NOW + timedelta(days=1), NOW + timedelta(days=30), 10)
+
+
+@pytest.mark.parametrize("base_sha", [BASE_SHA, None], ids=["with-base-sha", "without-base-sha"])
+def test_expired_diff_is_410_without_github(base_sha: str | None) -> None:
+    """Change diff-retention-visibility: «Дифф удалён по сроку хранения» и стёртый прогон без base_sha —
+    `410 DIFF_EXPIRED`, а не `409 DIFF_UNAVAILABLE`; к GitHub не ходили."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=base_sha)
+    _erase_all_bodies(uow, run)
+    vcs = FakeVcs(diff=RUN_DIFF)
+    catalog = FakeInstallationCatalog([VISIBLE], installation_ids={"octo-org/api": 77})
+
+    response = _client(uow, catalog, vcs).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 410
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["code"] == "DIFF_EXPIRED"
+    assert body["trace_id"] == response.headers["X-Trace-ID"]
+    assert "repository_installation_id" not in catalog.calls
+    assert vcs.calls == []
+
+
+def test_partially_erased_run_still_gets_its_diff() -> None:
+    """Сценарий «Тела стёрты не у всех пакетов»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+    _add_payloads(uow, run, 2)
+    uow.context_payloads.expire_bodies(NOW, NOW + timedelta(days=30), 10)  # старший из двух
+
+    files = _diff_files(_client(uow, vcs=FakeVcs(diff=RUN_DIFF)).get(f"/api/v1/reviews/{run.id}/diff"))
+
+    assert "app/main.py" in files
+
+
+def test_run_without_context_payloads_gets_its_diff() -> None:
+    """Сценарий «Прогон без пакетов контекста отдаёт дифф»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA, status=ReviewRunStatus.FAILED, failed_stage=ReviewRunStatus.BUILDING_CONTEXT)
+
+    files = _diff_files(_client(uow, vcs=FakeVcs(diff=RUN_DIFF)).get(f"/api/v1/reviews/{run.id}/diff"))
+
+    assert "app/main.py" in files
+
+
+def test_pair_without_changes_is_200_with_no_files() -> None:
+    """Сценарий «Изменений нет — пустой дифф, а не отказ»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, base_sha=BASE_SHA)
+
+    response = _client(uow, vcs=FakeVcs(diff="")).get(f"/api/v1/reviews/{run.id}/diff")
+
+    assert response.status_code == 200
+    assert response.json() == {"files": []}
 
 
 def test_app_removed_from_the_repository_is_404_without_the_diff() -> None:

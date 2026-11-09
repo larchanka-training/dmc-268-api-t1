@@ -7,7 +7,7 @@ from app.application.merge_gate_publish import (
     AUTO_REVIEW_OFF_CHECK,
     BRANCH_FILTERED_CHECK,
     DISABLED_REVIEW_CHECK,
-    build_retarget_check,
+    build_in_progress_check,
 )
 from app.application.sync_thread_resolution import (
     apply_review_thread_webhook,
@@ -249,13 +249,13 @@ class _RetargetDuringGateVcs(RecordingVcsGateway):
         super().__init__()
         self._uow = uow
 
-    def set_merge_gate_check(self, *args: Any) -> None:
-        super().set_merge_gate_check(*args)
+    def set_merge_gate_check(self, *args: Any, **kwargs: Any) -> None:
+        super().set_merge_gate_check(*args, **kwargs)
         if len(self.checks) == 1:
             self._uow.review_runs.add(_run(2, ReviewRunStatus.QUEUED, at=2, base="new"))
 
 
-def test_retarget_racing_a_thread_refresh_ends_in_failure() -> None:
+def test_retarget_racing_a_thread_refresh_ends_in_the_block() -> None:
     """Пересчёт прочитал `completed` на старой ветке до коммита приёма и выставил
     `success` после его блокировки - перечитав последний прогон, он её возвращает."""
     uow = FakeUnitOfWork()
@@ -273,8 +273,8 @@ def test_retarget_racing_a_thread_refresh_ends_in_failure() -> None:
         now=NOW,
     )
 
-    assert [c.conclusion for c in vcs.checks] == ["success", "failure"]
-    assert vcs.checks[-1] == build_retarget_check()
+    assert [c.conclusion for c in vcs.checks] == ["success", None]
+    assert vcs.checks[-1] == build_in_progress_check()
 
 
 def test_thread_webhook_of_a_disconnected_repository_sets_the_disabled_check() -> None:

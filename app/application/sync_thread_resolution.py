@@ -106,8 +106,8 @@ def refresh_merge_gate_for_merge_request(
 ) -> None:
     """Сверить треды с GitHub и перевыставить gate по текущему порогу `min_severity` репозитория.
 
-    Прогон на head — `head_run_in_charge`: на паузе авторевью после упавшего повтора ручного
-    ревью это завершённый ручной прогон до него, и его gate пересчитывается.
+    Прогон на head — `head_run_in_charge`: на паузе авторевью после повторного ручного
+    прогона без ревью это завершённый ручной прогон до него, и его gate пересчитывается.
     """
     sync_open_threads_from_host(
         merge_request_id,
@@ -140,7 +140,6 @@ def refresh_merge_gate_for_merge_request(
         repo_full_name=repo_full_name,
         head_sha=head_sha,
         installation_id=installation_id,
-        run_id=head_run.id,
         repository_id=repository_id,
     )
 

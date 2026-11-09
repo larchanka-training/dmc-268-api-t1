@@ -8,10 +8,12 @@ SQLAlchemy.
 
 from collections.abc import Collection
 from datetime import datetime
+from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
 
 from app.domain.entities import (
+    BalanceCredit,
     BotThread,
     ContextPayload,
     Finding,
@@ -25,9 +27,12 @@ from app.domain.entities import (
     ReviewRunListEntry,
     ReviewRunStep,
     Session,
+    StoredContextPayload,
     User,
 )
 from app.domain.enums import Provider
+from app.domain.llm_usage import LlmUsage
+from app.domain.payload_retention import BodyExpiryStats
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
 
@@ -71,6 +76,18 @@ class RepositoryRepo(Protocol):
         """
         ...
 
+    def set_payer(self, repository_id: UUID, user_id: UUID, now: datetime) -> Repository | None:
+        """Сделать плательщиком `user_id` и `updated_at = now`; `None` — записи нет."""
+        ...
+
+    def drop_payer(self, repository_id: UUID, user_id: UUID, now: datetime) -> bool:
+        """Снять плательщика, если это `user_id`; `False` — записи нет или платит другой."""
+        ...
+
+    def list_paid_by(self, user_id: UUID) -> list[Repository]:
+        """Репозитории, где `user_id` — плательщик, по `full_name`."""
+        ...
+
 
 class MergeRequestRepo(Protocol):
     def get(self, merge_request_id: UUID) -> MergeRequest | None: ...
@@ -96,8 +113,9 @@ class ReviewRunRepo(Protocol):
         ...
 
     def find_completed_manual(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
-        """Самый поздний ручной прогон на этот коммит в `completed`: его gate держит head
-        на паузе авторевью, когда повторный ручной прогон упал или отменён."""
+        """Самый поздний ручной прогон на этот коммит в `completed`, сделавший ревью (без
+        `coverage_reason`): его gate держит head на паузе авторевью, когда повторный ручной
+        прогон ревью не дал: упал, отменён или завершён без денег."""
         ...
 
     def find_latest(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
@@ -150,6 +168,15 @@ class ReviewRunRepo(Protocol):
         не как в `previous`, бросает `RunStateConflict`."""
         ...
 
+    def record_cancelled_spend(self, run_id: UUID, usage: LlmUsage) -> None:
+        """Записать отменённому прогону расход модели (`tokens_used` и разбивку).
+
+        `update` терминальную строку не пишет; отменённый посреди вызова модели
+        прогон всё равно потратил токены и деньги. Меняются только они: статус и
+        прочие поля - нет. Прогон не `cancelled` или его нет - ничего.
+        """
+        ...
+
 
 class ReviewRunStepRepo(Protocol):
     def list_for_run(self, review_run_id: UUID) -> list[ReviewRunStep]:
@@ -162,9 +189,20 @@ class ReviewRunStepRepo(Protocol):
 
 
 class ContextPayloadRepo(Protocol):
-    def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]: ...
+    def list_for_run(self, review_run_id: UUID) -> list[StoredContextPayload]:
+        """Сохранённые пакеты прогона по порядку частей; тело стёртого — `None`."""
+        ...
 
     def add(self, payload: ContextPayload) -> None: ...
+
+    def expire_bodies(self, created_before: datetime, now: datetime, limit: int) -> int:
+        """Стереть тела самых старых пакетов, записанных раньше `created_before`, не больше
+        `limit`; метаданные остаются, `body_expired_at` = `now`. Вернуть число стёртых."""
+        ...
+
+    def body_expiry_stats_for_run(self, review_run_id: UUID) -> BodyExpiryStats:
+        """Число пакетов прогона, число стёртых тел и самое позднее время стирания; тела не читаются."""
+        ...
 
 
 class FindingRepo(Protocol):
@@ -227,6 +265,25 @@ class SessionRepo(Protocol):
     def delete_expired(self, now: datetime) -> int:
         """Удалить сессии, срок которых истёк к `now`; вернуть их число."""
         ...
+
+
+class BillingRepo(Protocol):
+    """Баланс аккаунтов (`review-billing`): зачисления и расход их прогонов."""
+
+    def lock_payer(self, user_id: UUID) -> None:
+        """Держать плательщика до конца транзакции: проверка баланса и резерв одного
+        плательщика идут по одной (design D3)."""
+        ...
+
+    def balance(self, user_id: UUID) -> Decimal:
+        """Зачисления аккаунта минус расход его прогонов: стоимость, а пока её нет, — резерв."""
+        ...
+
+    def eur_per_token(self) -> Decimal:
+        """Цена токена по последним прогонам с ненулевой стоимостью, любой модели; без них — ноль."""
+        ...
+
+    def add_credit(self, credit: BalanceCredit) -> None: ...
 
 
 class ProviderTokenRepo(Protocol):

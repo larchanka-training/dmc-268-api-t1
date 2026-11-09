@@ -5,6 +5,11 @@
 не номером: кейс не ломается при правке файла, а в коде не нужна подсказка
 для модели. Подстрока обязана встречаться в файле ровно на одной строке.
 
+Нарушение пункта правила (`rule`) обязано перечислить `categories` -
+категории, под которыми честное ревью назвало бы это нарушение, не сославшись
+на пункт. Замечание без верной ссылки засчитывается, только если его категория
+среди них. Общий дефект задаёт одну `category` и `categories` не имеет.
+
 Конфигурации - что лежит в `.review/rules.md` целевой ветки: `absent` - файла
 нет, `rules` - корректные правила, `empty` - пустой файл, `adversarial` - те же
 правила плюс инструкции для модели в прозе, в тексте пункта и отдельным
@@ -17,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from ..scoring import ExpectedIssue
+from ..scoring import MAX_EXPECTED_PER_CASE, ExpectedIssue
 
 ROOT = Path(__file__).parent
 CORPUS_DIR = ROOT / "corpus"
@@ -61,6 +66,7 @@ def _expected(files: dict[str, str], raw: dict[str, Any], case_id: str) -> Expec
         line=_line_of(files, raw["path"], raw["contains"], case_id),
         rule=(str(rule[0]), int(rule[1])) if rule else None,
         category=raw.get("category"),
+        categories=tuple(str(c) for c in raw.get("categories") or ()),
     )
 
 
@@ -71,13 +77,21 @@ def load_case(path: Path, *, expected_required: bool = True) -> Case:
     if expected_required and "expected" not in raw:
         raise KeyError(f"{path.name}: нет раздела expected (чистый PR - expected: [])")
     files = {str(p): str(content) for p, content in raw["files"].items()}
+    expected = tuple(_expected(files, item, path.stem) for item in raw.get("expected") or [])
+    # Сопоставление перебирает пары экспоненциально: перебор ловим здесь, до
+    # платного вызова модели, а не в match() после него.
+    if len(expected) > MAX_EXPECTED_PER_CASE:
+        raise ValueError(
+            f"{path.stem}: {len(expected)} эталонных нарушений, допустимо не больше "
+            f"{MAX_EXPECTED_PER_CASE}"
+        )
     return Case(
         id=path.stem,
         title=raw["title"],
         pr_title=raw["pull_request"]["title"],
         pr_description=raw["pull_request"]["description"],
         files=files,
-        expected=tuple(_expected(files, item, path.stem) for item in raw.get("expected") or []),
+        expected=expected,
     )
 
 

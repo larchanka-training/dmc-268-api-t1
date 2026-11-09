@@ -38,7 +38,7 @@ def test_coverage_splits_files_by_what_the_model_saw() -> None:
         ParsedFile(file_path="logo.png", is_binary=True),
     )
 
-    coverage = review_coverage(files, shown=(*whole, half[0]))
+    coverage = review_coverage(files, shown=(*whole, half[0]), max_file_bytes=262_144)
 
     assert coverage == ReviewCoverage(
         reviewed=("app/a.py",),
@@ -46,6 +46,24 @@ def test_coverage_splits_files_by_what_the_model_saw() -> None:
         not_reviewed=("app/c.py",),
         filtered=("uv.lock", "logo.png"),
     )
+
+
+def test_coverage_counts_bundles_and_oversized_changes_as_filtered() -> None:
+    """#293: охват относит к «отброшенным фильтром» те же файлы, что `filter_diff_files`."""
+    big = Hunk(file_path="tests/snapshots/page.json", new_start=1, new_count=1, text="+" + "x" * 2_000)
+    files = (
+        ParsedFile(file_path="app/a.py", hunks=(hunk("app/a.py", 1),)),
+        ParsedFile(file_path="dist/app.js", hunks=(hunk("dist/app.js", 1),)),
+        ParsedFile(file_path="static/app.js.map", hunks=(hunk("static/app.js.map", 1),)),
+        ParsedFile(file_path="tests/snapshots/page.json", hunks=(big,)),
+    )
+
+    coverage = review_coverage(files, shown=files[0].hunks, max_file_bytes=1_000)
+
+    assert coverage.reviewed == ("app/a.py",)
+    assert coverage.filtered == ("dist/app.js", "static/app.js.map", "tests/snapshots/page.json")
+    body = format_summary_comment("Проблема.", (), "час", findings=(), coverage=coverage)
+    assert "Отброшены фильтром: lock-файлы, сгенерированные, бандлы, vendor, бинарные и слишком большие изменения" in body
 
 
 def test_summary_lists_risks_and_files_under_details() -> None:
@@ -107,5 +125,5 @@ def test_hostile_long_paths_keep_the_comment_under_the_github_limit() -> None:
 
 
 def test_file_without_hunks_is_not_listed() -> None:
-    coverage = review_coverage((ParsedFile(file_path="new_name.py", old_path="old_name.py"),), shown=())
+    coverage = review_coverage((ParsedFile(file_path="new_name.py", old_path="old_name.py"),), shown=(), max_file_bytes=262_144)
     assert coverage == ReviewCoverage((), (), (), ())

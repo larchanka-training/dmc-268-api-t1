@@ -3,6 +3,7 @@
 Без сети: каталог установок, VCS-шлюз — фейки, кэш — настоящий in-memory.
 """
 
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -11,6 +12,7 @@ from app.application.use_cases.run_diff import (
     RUN_DIFF_MAX_LINES,
     RepositoryNotInstalled,
     RunCommitNotFound,
+    RunDiffExpired,
     RunDiffUnavailable,
     load_run_diff,
 )
@@ -76,6 +78,7 @@ def load(
     vcs: FakeVcs,
     cache: InMemoryCacheStore,
     max_bytes: int = MAX_BYTES,
+    diff_expired_at: datetime | None = None,
 ) -> tuple[DiffFileView, ...]:
     return load_run_diff(
         run,
@@ -84,7 +87,33 @@ def load(
         vcs=vcs,
         cache=cache,
         max_bytes=max_bytes,
+        diff_expired_at=diff_expired_at,
     )
+
+
+EXPIRED_AT = NOW + timedelta(days=30)
+
+
+@pytest.mark.parametrize("base_sha", [BASE_SHA, None], ids=["with-base-sha", "without-base-sha"])
+def test_expired_diff_is_refused_before_any_lookup(base_sha: str | None) -> None:
+    """Change diff-retention-visibility: удалённый по сроку дифф не берётся ни из кэша, ни у GitHub.
+
+    Проверка — первая: стёртый прогон без `base_sha` — тоже «удалён», а не «пары коммитов нет».
+    """
+    repository = a_repository()
+    run = a_run(base_sha=base_sha)
+    installations = FakeInstallationCatalog(installation_ids={repository.full_name: 77})
+    vcs = FakeVcs()
+    cache = InMemoryCacheStore()
+    reads: list[str] = []
+    cache.get = lambda key: reads.append(key)  # type: ignore[method-assign]
+
+    with pytest.raises(RunDiffExpired):
+        load(run, repository, installations=installations, vcs=vcs, cache=cache, diff_expired_at=EXPIRED_AT)
+
+    assert installations.calls == []
+    assert vcs.calls == []
+    assert reads == []
 
 
 def test_run_without_base_sha_is_unavailable_without_any_lookups() -> None:
@@ -315,6 +344,7 @@ def test_store_failure_is_a_miss_and_does_not_break_the_answer() -> None:
         vcs=vcs,
         cache=_BrokenStore(),
         max_bytes=MAX_BYTES,
+        diff_expired_at=None,
     )
 
     assert view == MAIN_PY_VIEW

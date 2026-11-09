@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.application.ports.repositories import (
+    BillingRepo,
     ContextPayloadRepo,
     FindingRepo,
     MergeRequestRepo,
@@ -23,6 +24,7 @@ from app.application.ports.repositories import (
 from app.application.ports.unit_of_work import ActiveRunConflict
 from app.infrastructure import telemetry
 from app.infrastructure.db.repositories import (
+    SqlAlchemyBillingRepo,
     SqlAlchemyContextPayloadRepo,
     SqlAlchemyFindingRepo,
     SqlAlchemyMergeRequestRepo,
@@ -79,6 +81,7 @@ class SqlAlchemyUnitOfWork:
         self.users: UserRepo = SqlAlchemyUserRepo(session)
         self.sessions: SessionRepo = SqlAlchemySessionRepo(session)
         self.provider_tokens: ProviderTokenRepo = SqlAlchemyProviderTokenRepo(session, self._cipher)
+        self.billing: BillingRepo = SqlAlchemyBillingRepo(session)
         return self
 
     def __exit__(

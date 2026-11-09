@@ -13,7 +13,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 from sqlalchemy import create_engine
 
 from app.config import Settings
-from app.domain.entities import ReviewRun, Session
+from app.domain.entities import ContextPayload, ReviewRun, Session
 from app.domain.enums import ReviewRunStatus, TriggerSource
 from app.domain.webhook_redelivery import REDELIVERY_WINDOW, WebhookDelivery
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -22,7 +22,9 @@ from app.worker.factory import build_maintenance, build_redelivery
 
 from ..conftest import requires_db
 from ..fakes import FakeVcs, webhook_payload
+from ..fakes.installation_catalog import FakeInstallationCatalog
 from ..fakes.unit_of_work import FakeUnitOfWork
+from ..fakes.vcs_gateway import RecordingVcsGateway
 from .test_worker_loop import _strict, _worker
 
 NOW = datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
@@ -52,6 +54,62 @@ LIMIT = timedelta(minutes=30)
 QUEUED_LIMIT = timedelta(hours=6)
 
 
+def test_the_pass_expires_old_context_payload_bodies() -> None:
+    """Change context-payload-retention: уборка стирает тела старше срока, метаданные остаются."""
+    uow = FakeUnitOfWork()
+    old = ContextPayload(
+        id=UUID(int=1),
+        review_run_id=UUID(int=2),
+        chunk_index=0,
+        tiers=("diff",),
+        file_paths=("a.py",),
+        token_count=1,
+        content_sha256="d",
+        body={"diff": "+x"},
+        created_at=NOW - timedelta(days=8),
+        updated_at=NOW - timedelta(days=8),
+    )
+    uow.context_payloads.add(old)
+
+    build_maintenance(
+        lambda: uow,
+        stale_limit=LIMIT,
+        queued_limit=QUEUED_LIMIT,
+        now=lambda: NOW,
+        payload_retention=timedelta(days=7),
+    )()
+
+    (stored,) = uow.context_payloads.list_for_run(UUID(int=2))
+    assert (stored.body, stored.body_expired_at) == (None, NOW)
+
+
+def test_the_expiry_count_is_a_log_field_not_text(caplog, monkeypatch) -> None:
+    """Счётчик стёртых тел ищется по полю записи, как требует `.agents/rules/backend.md`."""
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(logging.getLogger("app.worker.factory"), "disabled", False)
+    uow = FakeUnitOfWork()
+    uow.context_payloads.add(
+        ContextPayload(
+            id=UUID(int=1),
+            review_run_id=UUID(int=2),
+            chunk_index=0,
+            tiers=("diff",),
+            file_paths=("a.py",),
+            token_count=1,
+            content_sha256="d",
+            body={"diff": "+x"},
+            created_at=NOW - timedelta(days=60),
+            updated_at=NOW - timedelta(days=60),
+        )
+    )
+
+    build_maintenance(lambda: uow, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
+
+    (record,) = [r for r in caplog.records if getattr(r, "maintenance_step", None) == "expire_context_payloads"]
+    assert record.expired_count == 1
+    assert record.getMessage() == "тела пакетов контекста стёрты по сроку хранения"
+
+
 def test_the_pass_sweeps_stale_runs() -> None:
     uow = FakeUnitOfWork()
     moment = NOW - timedelta(hours=1)
@@ -74,6 +132,30 @@ def test_the_pass_sweeps_stale_runs() -> None:
     assert run is not None and run.status is ReviewRunStatus.FAILED
 
 
+def test_the_pass_hands_the_gateway_and_catalog_to_the_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без них выметенный прогон не выставил бы gate head (#331)."""
+    seen: dict[str, object] = {}
+
+    def sweep(uow: object, **kwargs: object) -> int:
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("app.worker.factory.sweep_stale_runs", sweep)
+    vcs, installations = RecordingVcsGateway(), FakeInstallationCatalog()
+
+    build_maintenance(
+        FakeUnitOfWork,
+        stale_limit=LIMIT,
+        queued_limit=QUEUED_LIMIT,
+        now=lambda: NOW,
+        vcs=vcs,
+        installations=installations,
+    )()
+
+    assert seen["vcs"] is vcs
+    assert seen["installations"] is installations
+
+
 def test_a_failing_step_is_logged_and_does_not_stop_the_other(caplog, monkeypatch) -> None:
     caplog.set_level(logging.ERROR)
     # `fileConfig` в тестах Alembic отключает уже созданные логгеры.
@@ -93,7 +175,8 @@ def test_a_failing_step_is_logged_and_does_not_stop_the_other(caplog, monkeypatc
 
     build_maintenance(uow_factory, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
 
-    assert calls == 2
+    # Свой UnitOfWork у каждого шага: зависшие прогоны, сессии, тела пакетов контекста.
+    assert calls == 3
     assert uow.sessions.stored == []
     (record,) = caplog.records
     assert record.getMessage() == "проход по зависшим прогонам завершился ошибкой"

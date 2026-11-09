@@ -4,13 +4,16 @@ import datetime as dt
 import threading
 import time
 from dataclasses import replace
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from app.application.ports.unit_of_work import ActiveRunConflict, RunStateConflict
 from app.application.stale_sweep import sweep_stale_runs
 from app.domain.entities import (
+    BalanceCredit,
     ContextPayload,
     DiffAnchor,
     Finding,
@@ -21,9 +24,11 @@ from app.domain.entities import (
     ReviewRun,
     ReviewRunStep,
     RuleRef,
+    User,
 )
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -37,6 +42,8 @@ from app.domain.enums import (
 )
 from app.domain.ids import new_id
 from app.domain.lifecycle import advance
+from app.domain.llm_usage import NO_USAGE, LlmUsage
+from app.domain.payload_retention import BodyExpiryStats
 from app.domain.run_steps import finish_step, start_step
 from app.domain.secret_redaction import REDACTED
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -512,6 +519,95 @@ def test_a_finished_run_refuses_a_same_status_update(uow) -> None:
         assert (stored.model, stored.tokens_used, stored.duration_seconds) == ("m1", 100, 1.5)
 
 
+def test_a_run_reads_back_its_usage_breakdown_and_cost(uow) -> None:
+    # Стоимость - со всеми 10 знаками колонки: из базы она должна прийти той же.
+    usage = LlmUsage(
+        input_tokens=2100,
+        output_tokens=350,
+        cached_tokens=500,
+        reasoning_tokens=40,
+        total_tokens=2450,
+        cost_eur=Decimal("13.0960038381"),
+    )
+    with uow as work:
+        _, _, run = seeded(work)
+    with uow as work:
+        assert work.review_runs.get(run.id).usage is None
+    building = advance(run, ReviewRunStatus.BUILDING_CONTEXT, LATER).unwrap()
+    with uow as work:
+        work.review_runs.update(replace(building, tokens_used=usage.total_tokens, usage=usage))
+        work.commit()
+
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert (stored.usage, stored.tokens_used) == (usage, 2450)
+    assert str(stored.usage.cost_eur) == "13.0960038381"
+
+
+def test_tokens_used_is_written_from_usage_so_the_two_cannot_drift(uow) -> None:
+    usage = LlmUsage(input_tokens=30, output_tokens=5, total_tokens=35, cost_eur=Decimal("0.0000913"))
+    with uow as work:
+        _, _, run = seeded(work)
+    building = advance(run, ReviewRunStatus.BUILDING_CONTEXT, LATER).unwrap()
+    with uow as work:
+        # `replace` без `tokens_used`: в базе итог всё равно из usage.
+        work.review_runs.update(replace(building, usage=usage))
+        work.commit()
+
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert (stored.tokens_used, stored.usage.total_tokens) == (35, 35)
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        "cost_eur = 0.5",
+        "input_tokens = 1, output_tokens = 1, cached_tokens = 0, reasoning_tokens = 0, cost_eur = 0, tokens_used = NULL",
+        "input_tokens = -1, output_tokens = 1, cached_tokens = 0, reasoning_tokens = 0, cost_eur = 0, tokens_used = 1",
+        "input_tokens = 1, output_tokens = 1, cached_tokens = 0, reasoning_tokens = 0, cost_eur = -0.1, tokens_used = 1",
+    ],
+    ids=["cost-without-tokens", "usage-without-total", "negative-tokens", "negative-cost"],
+)
+def test_usage_columns_are_written_whole_and_non_negative(uow, columns: str) -> None:
+    """CHECK держит инвариант маппера против любого писателя: скрипта, psql, бэкфилла."""
+    with uow as work:
+        _, _, run = seeded(work)
+    with uow as work, pytest.raises(IntegrityError, match="ck_review_runs_usage"):
+        work.session.execute(text(f"UPDATE review_runs SET {columns} WHERE id = :id"), {"id": run.id})
+        work.session.flush()
+
+
+def test_a_cancelled_run_takes_its_spend_and_keeps_its_status(uow) -> None:
+    usage = LlmUsage(input_tokens=900, output_tokens=100, total_tokens=1000, cost_eur=Decimal("0.0000913"))
+    with uow as work:
+        _, _, run = seeded(work)
+    cancelled = advance(run, ReviewRunStatus.CANCELLED, LATER).unwrap()
+    with uow as work:
+        work.review_runs.update(cancelled)
+        work.commit()
+
+    with uow as work:
+        work.review_runs.record_cancelled_spend(run.id, usage)
+        work.commit()
+
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert stored.status is ReviewRunStatus.CANCELLED
+    assert (stored.usage, stored.tokens_used) == (usage, 1000)
+
+
+def test_spend_is_not_recorded_on_a_run_that_is_not_cancelled(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+        work.review_runs.record_cancelled_spend(run.id, LlmUsage(input_tokens=1, total_tokens=1))
+        work.commit()
+
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert (stored.usage, stored.tokens_used) == (None, None)
+
+
 def a_context_payload(run_id, *, chunk_index: int, digest: str) -> ContextPayload:
     return ContextPayload(
         id=new_id(),
@@ -658,6 +754,119 @@ def test_a_payload_body_mutated_before_commit_is_stored_as_added(uow) -> None:
             "text": "x",
             "files": [{"path": "a.py"}],
         }
+
+
+def _payloads_aged(uow, run_id, ages: list[dt.timedelta]) -> list[ContextPayload]:
+    """Пакеты прогона с `created_at` = сейчас минус возраст: время записи ставит база."""
+    payloads = [a_context_payload(run_id, chunk_index=i, digest=f"age{i}") for i in range(len(ages))]
+    with uow as work:
+        for payload in payloads:
+            work.context_payloads.add(payload)
+        work.commit()
+    with uow as work:
+        for payload, age in zip(payloads, ages, strict=True):
+            work.session.execute(
+                text("UPDATE context_payloads SET created_at = now() - :age WHERE id = :id"),
+                {"age": age, "id": payload.id},
+            )
+        work.commit()
+    return payloads
+
+
+def test_expire_bodies_clears_old_bodies_and_keeps_metadata(uow) -> None:
+    """Change context-payload-retention: тело старше срока стирается, метаданные остаются."""
+    with uow as work:
+        _, _, run = seeded(work)
+    _payloads_aged(uow, run.id, [dt.timedelta(days=40), dt.timedelta(days=1)])
+    now = dt.datetime.now(dt.UTC)
+
+    with uow as work:
+        expired = work.context_payloads.expire_bodies(now - dt.timedelta(days=30), now, 10)
+        work.commit()
+
+    assert expired == 1
+    with uow as work:
+        old, fresh = work.context_payloads.list_for_run(run.id)
+    assert (old.body, old.body_expired_at) == (None, now)
+    assert (old.file_paths, old.token_count, old.content_sha256) == (("app/main.py",), 10, "age0")
+    assert (fresh.body, fresh.body_expired_at) == ({"text": "x"}, None)
+
+
+def test_expire_bodies_takes_the_oldest_first_and_stops_at_the_limit(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+    payloads = _payloads_aged(
+        uow, run.id, [dt.timedelta(days=31), dt.timedelta(days=60), dt.timedelta(days=45)]
+    )
+    now = dt.datetime.now(dt.UTC)
+    cutoff = now - dt.timedelta(days=30)
+
+    with uow as work:
+        assert work.context_payloads.expire_bodies(cutoff, now, 2) == 2
+        work.commit()
+    with uow as work:
+        expired = {p.id for p in work.context_payloads.list_for_run(run.id) if p.body_expired_at}
+    assert expired == {payloads[1].id, payloads[2].id}
+
+    # Стёртое второй раз не трогается: проход берёт только живые тела.
+    with uow as work:
+        assert work.context_payloads.expire_bodies(cutoff, now, 10) == 1
+        assert work.context_payloads.expire_bodies(cutoff, now, 10) == 0
+        work.commit()
+
+
+def test_body_expiry_stats_counts_erased_bodies_and_takes_the_last_expiry(uow) -> None:
+    """Change diff-retention-visibility: агрегат по прогону, стёрты все тела."""
+    with uow as work:
+        _, _, run = seeded(work)
+    _payloads_aged(uow, run.id, [dt.timedelta(days=60), dt.timedelta(days=40)])
+    first = dt.datetime(2026, 11, 1, 3, 0, tzinfo=dt.UTC)
+    last = dt.datetime(2026, 11, 2, 3, 0, tzinfo=dt.UTC)
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=30)
+    with uow as work:
+        assert work.context_payloads.expire_bodies(cutoff, first, 1) == 1
+        assert work.context_payloads.expire_bodies(cutoff, last, 1) == 1
+        work.commit()
+
+    with uow as work:
+        stats = work.context_payloads.body_expiry_stats_for_run(run.id)
+
+    assert stats == BodyExpiryStats(payload_count=2, erased_count=2, last_expired_at=last)
+
+
+def test_body_expiry_stats_counts_live_bodies(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+    _payloads_aged(uow, run.id, [dt.timedelta(days=40), dt.timedelta(days=1)])
+    now = dt.datetime(2026, 11, 2, 3, 0, tzinfo=dt.UTC)
+    with uow as work:
+        work.context_payloads.expire_bodies(dt.datetime.now(dt.UTC) - dt.timedelta(days=30), now, 10)
+        work.commit()
+
+    with uow as work:
+        stats = work.context_payloads.body_expiry_stats_for_run(run.id)
+
+    assert stats == BodyExpiryStats(payload_count=2, erased_count=1, last_expired_at=now)
+
+
+def test_body_expiry_stats_of_a_run_without_payloads_is_empty(uow) -> None:
+    with uow as work:
+        _, _, run = seeded(work)
+        stats = work.context_payloads.body_expiry_stats_for_run(run.id)
+
+    assert stats == BodyExpiryStats(payload_count=0, erased_count=0, last_expired_at=None)
+
+
+def test_a_payload_cannot_lose_its_body_without_the_expiry_mark(uow) -> None:
+    """Check-ограничение: тела нет ровно тогда, когда отмечено время стирания."""
+    with uow as work:
+        _, _, run = seeded(work)
+    (payload,) = _payloads_aged(uow, run.id, [dt.timedelta(days=1)])
+    with pytest.raises(Exception, match="ck_context_payloads_body_expiry"), uow as work:
+        work.session.execute(
+            text("UPDATE context_payloads SET body = NULL WHERE id = :id"), {"id": payload.id}
+        )
+        work.commit()
 
 
 def test_a_failed_run_keeps_the_stage_it_failed_in(uow) -> None:
@@ -1090,3 +1299,218 @@ def test_latest_run_on_a_head_is_the_newest_in_any_status(uow) -> None:
 
     assert latest is not None and latest.id == failed.id
     assert nothing is None
+
+
+# --- биллинг (`review-billing`) ---------------------------------------------------
+
+
+def a_user(login: str = "alice") -> User:
+    return User(
+        id=new_id(),
+        provider=Provider.GITHUB,
+        provider_user_id=login,
+        login=login,
+        name=None,
+        avatar_url=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def a_credit(user_id, amount: str) -> BalanceCredit:
+    return BalanceCredit(
+        id=new_id(), user_id=user_id, amount_eur=Decimal(amount), note="тест", credited_by="admin", created_at=NOW
+    )
+
+
+def spent(cost: str, tokens: int = 1000) -> LlmUsage:
+    return LlmUsage(input_tokens=tokens, total_tokens=tokens, cost_eur=Decimal(cost))
+
+
+def billed_runs(work, *runs: ReviewRun) -> None:
+    """Прогоны на одном запросе на изменения: репозиторий и PR — свои на каждый вызов."""
+    repo = replace(a_repository(), id=new_id(), provider_id=str(new_id().int))
+    work.repositories.add(repo)
+    mr = a_merge_request(repo.id)
+    work.merge_requests.add(mr)
+    for run in runs:
+        work.review_runs.add(replace(run, merge_request_id=mr.id))
+
+
+def finished(**fields) -> ReviewRun:
+    return replace(a_run(None), status=ReviewRunStatus.COMPLETED, **fields)
+
+
+def test_balance_is_credits_minus_cost_or_reserve_of_paid_runs(uow) -> None:
+    alice, bob = a_user("alice"), a_user("bob")
+    with uow as work:
+        work.users.add(alice)
+        work.users.add(bob)
+        work.billing.add_credit(a_credit(alice.id, "5"))
+        work.billing.add_credit(a_credit(alice.id, "-0.5"))
+        billed_runs(
+            work,
+            # Факт важнее резерва.
+            finished(payer_user_id=alice.id, estimated_cost_eur=Decimal("0.40"), usage=spent("0.30")),
+            # Резерв, пока факта нет.
+            replace(a_run(None), status=ReviewRunStatus.BUILDING_CONTEXT, payer_user_id=alice.id,
+                    estimated_cost_eur=Decimal("0.20")),
+            # Прогон без денег: нулевой расход.
+            finished(payer_user_id=alice.id, usage=NO_USAGE, coverage_reason=CoverageReason.BALANCE),
+            # Чужие и без плательщика не в счёт.
+            finished(payer_user_id=bob.id, usage=spent("1")),
+            finished(usage=spent("1")),
+        )
+        work.commit()
+
+    with uow as work:
+        assert work.billing.balance(alice.id) == Decimal("4.00")
+        assert work.billing.balance(bob.id) == Decimal(-1)
+        assert work.billing.balance(new_id()) == Decimal(0)
+
+
+def test_a_run_keeps_its_payer_reserve_and_coverage_reason(uow) -> None:
+    alice = a_user()
+    run = finished(payer_user_id=alice.id, estimated_cost_eur=Decimal("0.0000913"),
+                   coverage_reason=CoverageReason.BALANCE)
+    with uow as work:
+        work.users.add(alice)
+        billed_runs(work, run)
+        work.commit()
+    with uow as work:
+        stored = work.review_runs.get(run.id)
+    assert (stored.payer_user_id, stored.estimated_cost_eur, stored.coverage_reason) == (
+        alice.id, Decimal("0.0000913"), CoverageReason.BALANCE
+    )
+
+
+def test_a_stale_copy_does_not_erase_the_reserve(uow) -> None:
+    """Отмена (`supersede`) по копии, прочитанной до резерва, резерв не стирает."""
+    alice = a_user()
+    queued = replace(a_run(None), status=ReviewRunStatus.BUILDING_CONTEXT)
+    with uow as work:
+        work.users.add(alice)
+        billed_runs(work, queued)
+        work.commit()
+    with uow as work:
+        stale = work.review_runs.get(queued.id)
+        work.review_runs.update(replace(stale, payer_user_id=alice.id, estimated_cost_eur=Decimal("0.05")))
+        work.commit()
+    with uow as work:
+        work.review_runs.update(advance(stale, ReviewRunStatus.CANCELLED, LATER).unwrap())
+        work.commit()
+    with uow as work:
+        stored = work.review_runs.get(queued.id)
+    assert (stored.status, stored.payer_user_id, stored.estimated_cost_eur) == (
+        ReviewRunStatus.CANCELLED, alice.id, Decimal("0.05")
+    )
+
+
+def test_cancelled_spend_can_be_zero(uow) -> None:
+    """Резерв отменённого до `analysing` прогона закрывается нулевым расходом (design D2)."""
+    alice = a_user()
+    run = replace(a_run(None), status=ReviewRunStatus.CANCELLED, payer_user_id=alice.id,
+                  estimated_cost_eur=Decimal("0.05"))
+    with uow as work:
+        work.users.add(alice)
+        work.billing.add_credit(a_credit(alice.id, "1"))
+        billed_runs(work, run)
+        work.commit()
+    with uow as work:
+        work.review_runs.record_cancelled_spend(run.id, NO_USAGE)
+        work.commit()
+    with uow as work:
+        assert work.billing.balance(alice.id) == Decimal(1)
+
+
+def test_price_is_taken_from_the_last_fifty_paid_runs_of_any_model(uow) -> None:
+    """В `model` — id апстрима роутера (`tensorix/glm-5.3`), поэтому модель не фильтруется (D4)."""
+    with uow as work:
+        assert work.billing.eur_per_token() == Decimal(0)
+    old = NOW - dt.timedelta(days=1)
+    with uow as work:
+        billed_runs(
+            work,
+            # 51-й с конца: дорогой, в цену не попадает.
+            finished(model="tensorix/glm-5.3", usage=spent("9", 1000), created_at=old, updated_at=old),
+            *(
+                finished(model=("tensorix/glm-5.3", "scaleway/glm-5.3")[n % 2], usage=spent("0.0001", 100))
+                for n in range(50)
+            ),
+            # Без стоимости (Ollama) — мимо.
+            finished(model="qwen", usage=spent("0", 1_000_000)),
+        )
+        work.commit()
+
+    with uow as work:
+        assert work.billing.eur_per_token() == Decimal("0.000001")
+
+
+def test_a_second_transaction_waits_for_the_payer_lock(clean_db) -> None:
+    """Проверка баланса одного плательщика идёт по одной: вторая ждёт коммита первой (D3)."""
+    payer = new_id()
+    locked = threading.Event()
+    order: list[str] = []
+
+    def second() -> None:
+        locked.wait()
+        with SqlAlchemyUnitOfWork(clean_db) as work:
+            work.billing.lock_payer(payer)
+            order.append("second")
+            work.commit()
+
+    thread = threading.Thread(target=second)
+    thread.start()
+    with SqlAlchemyUnitOfWork(clean_db) as work:
+        work.billing.lock_payer(payer)
+        locked.set()
+        time.sleep(0.3)
+        order.append("first")
+        work.commit()
+    thread.join(timeout=10)
+
+    assert order == ["first", "second"]
+
+
+def test_another_payer_does_not_wait(clean_db) -> None:
+    with SqlAlchemyUnitOfWork(clean_db) as first, SqlAlchemyUnitOfWork(clean_db) as second:
+        first.billing.lock_payer(new_id())
+        second.session.execute(text("SET LOCAL lock_timeout = '1s'"))
+        second.billing.lock_payer(new_id())
+
+
+def test_reconnect_keeps_an_assigned_payer_and_fills_an_empty_one(uow) -> None:
+    alice, bob = a_user("alice"), a_user("bob")
+    kept = replace(a_repository(), connected_at=None, payer_user_id=alice.id)
+    empty = replace(a_repository(), id=new_id(), provider_id="2", connected_at=None)
+    with uow as work:
+        work.users.add(alice)
+        work.users.add(bob)
+        work.repositories.add(kept)
+        work.repositories.add(empty)
+        work.commit()
+    with uow as work:
+        first = work.repositories.reconnect(replace(kept, connected_at=LATER, payer_user_id=bob.id))
+        second = work.repositories.reconnect(replace(empty, connected_at=LATER, payer_user_id=bob.id))
+        work.commit()
+    assert (first.payer_user_id, second.payer_user_id) == (alice.id, bob.id)
+
+
+def test_only_the_payer_drops_payment_and_lists_what_they_pay_for(uow) -> None:
+    alice, bob = a_user("alice"), a_user("bob")
+    paid_b = replace(a_repository(), full_name="octo/b", payer_user_id=alice.id)
+    paid_a = replace(a_repository(), id=new_id(), provider_id="2", full_name="octo/a", payer_user_id=alice.id)
+    with uow as work:
+        work.users.add(alice)
+        work.users.add(bob)
+        work.repositories.add(paid_b)
+        work.repositories.add(paid_a)
+        work.commit()
+    with uow as work:
+        assert [r.id for r in work.repositories.list_paid_by(alice.id)] == [paid_a.id, paid_b.id]
+        assert work.repositories.drop_payer(paid_a.id, bob.id, LATER) is False
+        assert work.repositories.drop_payer(paid_a.id, alice.id, LATER) is True
+        work.commit()
+    with uow as work:
+        assert [r.id for r in work.repositories.list_paid_by(alice.id)] == [paid_b.id]
+        assert work.repositories.get(paid_a.id).payer_user_id is None

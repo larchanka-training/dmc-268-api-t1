@@ -8,23 +8,21 @@
 Сбой модели любого класса (`LlmError`, включая `LlmOutputError`) передаёт тот
 же запрос следующему провайдеру; после последнего пробрасывается его сбой.
 Прочие исключения - ошибки программы - не гасятся и дальше не передаются.
-Токены, которые сожгли сбойные провайдеры, прибавляются к ответу или к
-последнему сбою: прогон учитывает весь расход вызова. Переход к следующему
-провайдеру - повтор вызова: о нём узнаёт `request.on_retry`, а повторы внутри
-провайдера доходят до слушателя с токенами от начала всего вызова.
+Расход сбойных провайдеров уже в счётчике запроса: каждый провайдер пишет
+туда свои ответы сам, и здесь его не суммируют. Переход к следующему
+провайдеру - повтор вызова: о нём узнаёт `request.on_retry`.
 
 Каждый фактический вызов провайдера пишется в гистограмму
 `review_llm_call_duration` с исходом (`ok`/`error`) и моделью вызова:
 у ответа - модель ответа, у сбоя - имя провайдера. Метрика времени каждого
 вызова модели (аудит #89) видит и таймаут Ollama, и ответ Eurorouter двумя
-записями. Токены метрикой не собираются: учёт по каждому вызову провайдера,
-с типами и стоимостью, переделает #119.
+записями. Токены метрикой не собираются: метрики по каждому вызову
+провайдера - #119.
 """
 
 import logging
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import replace
 
 from pydantic import BaseModel
 
@@ -49,18 +47,16 @@ class FallbackLlmGateway:
 
     def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
         *heads, (_, last) = self._providers
-        spent = 0
         for (name, provider), (next_name, _) in zip(heads, self._providers[1:], strict=True):
             started = self._clock()
             try:
-                response = provider.complete(_shifted(request, spent))
+                response = provider.complete(request)
             except LlmError as error:
                 record_llm_call_duration(
                     request.task.value, name, self._clock() - started, outcome="error"
                 )
-                spent += error.tokens_used
                 if request.on_retry is not None:
-                    request.on_retry(error, spent)
+                    request.on_retry(error)
                 logger.warning(
                     "модель %s не ответила на %s (%s, код %s), запрос уходит %s",
                     name,
@@ -77,16 +73,15 @@ class FallbackLlmGateway:
                     outcome="ok",
                     model=response.model,
                 )
-                return _plus(response, spent)
+                return response
         (last_name, _) = self._providers[-1]
         started = self._clock()
         try:
-            response = last.complete(_shifted(request, spent))
-        except LlmError as error:
+            response = last.complete(request)
+        except LlmError:
             record_llm_call_duration(
                 request.task.value, last_name, self._clock() - started, outcome="error"
             )
-            error.tokens_used += spent
             raise
         record_llm_call_duration(
             request.task.value,
@@ -95,16 +90,4 @@ class FallbackLlmGateway:
             outcome="ok",
             model=response.model,
         )
-        return _plus(response, spent)
-
-
-def _plus[T: BaseModel](response: LlmResponse[T], spent: int) -> LlmResponse[T]:
-    return replace(response, tokens_used=response.tokens_used + spent) if spent else response
-
-
-def _shifted[T: BaseModel](request: LlmRequest[T], spent: int) -> LlmRequest[T]:
-    """Запрос, чей слушатель повтора считает токены от начала всего вызова."""
-    listener = request.on_retry
-    if listener is None or not spent:
-        return request
-    return replace(request, on_retry=lambda error, tokens: listener(error, spent + tokens))
+        return response
