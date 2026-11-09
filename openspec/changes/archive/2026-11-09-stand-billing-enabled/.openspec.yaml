@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-11-09
+# Требования не меняются: review-billing уже описывает поведение с BILLING_ENABLED и без него.
+# Флаг только пробрасывается в деплой стенда и включается.
+skip_specs: true

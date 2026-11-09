@@ -239,6 +239,24 @@ run "worker_grace_covers_hosted_fallback" {
     condition     = contains(docker_container.worker.env, "LLM_HOSTED_FALLBACK=true") && contains(docker_container.worker.env, "OLLAMA_MODEL=qwen3-coder:30b")
     error_message = "Выбор модели доходит до воркера окружением."
   }
+
+  assert {
+    condition     = contains(docker_container.worker.env, "BILLING_ENABLED=false")
+    error_message = "Без billing_enabled баланс не проверяется."
+  }
+}
+
+run "billing_flag_reaches_worker" {
+  command = plan
+
+  variables {
+    billing_enabled = true
+  }
+
+  assert {
+    condition     = contains(docker_container.worker.env, "BILLING_ENABLED=true")
+    error_message = "billing_enabled доходит до воркера окружением."
+  }
 }
 
 # Контейнеры ссылаются на образ по digest без тега: атрибут image провайдер

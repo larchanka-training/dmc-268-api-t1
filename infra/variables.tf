@@ -396,6 +396,14 @@ variable "eurorouter_model" {
   default     = ""
 }
 
+# Баланс плательщика перед вызовом модели (review-billing). Без плательщика у
+# репозитория прогон получает failure, поэтому включать после назначения плательщиков.
+variable "billing_enabled" {
+  type        = bool
+  description = "Проверять баланс плательщика репозитория перед вызовом модели (BILLING_ENABLED)."
+  default     = false
+}
+
 # Зеркало Literal в app/config.py. Пусто - параметр не уходит в запрос: не каждая
 # модель его знает (#267).
 variable "eurorouter_reasoning_effort" {

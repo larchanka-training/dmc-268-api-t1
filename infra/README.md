@@ -164,6 +164,7 @@ tofu apply infra.tfplan
 | `docker_host` | `ssh://stand`: хост `stand` в `~/.ssh/config` собирает `.github/actions/stand-ssh` из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
 | `bind_ip` | `127.0.0.1`: API снаружи не публикуется, к нему ходит интерфейс изнутри docker-сети |
 | `llm_backend` | `eurorouter` прямо в `deploy.yml` (#245) |
+| `billing_enabled` | `true` прямо в `deploy.yml` (#286): воркер сверяет баланс плательщика до вызова модели |
 | `eurorouter_base_url` | переменная `AI_DMC268_URL`, та же, что у `eval.yml` |
 | `eurorouter_model` | файл `.github/eurorouter-model`, читают `.github/scripts/deploy/infra.sh` и `plan.sh` |
 | `eurorouter_reasoning_effort` | файл `.github/eurorouter-reasoning-effort` (`low`, `medium`, `high` или пусто), читают те же скрипты. Файл обязателен, пустой — параметр не уходит в запрос (#267) |
