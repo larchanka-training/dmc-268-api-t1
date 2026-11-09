@@ -276,6 +276,30 @@ tests:
         alertname: ReviewRunsRefused
         exp_alerts: []
 
+  # Порог `>= 3` пройден, но отказов меньше половины: четыре refused на двенадцать completed.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 0 1 2 3 3 4"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 2 4 6 8 10 12"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts: []
+
+  # Доля 100 %, но в тихий час отказов два, меньше порога `>= 3`.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 0 0 0 0 1 2"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts: []
+
   # DLQ не пуста дольше 5 минут; воркер не подписан на очередь.
   - interval: 1m
     input_series:
