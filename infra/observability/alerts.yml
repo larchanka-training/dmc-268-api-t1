@@ -214,19 +214,39 @@ groups:
 
       # Прогоны падают в воркере, и 5xx у API этого не покажет: доля failed
       # среди завершённых за 30 минут больше 30 % при хотя бы трёх прогонах.
+      # Отказы по балансу (refused) не ревью и в долю не входят: иначе
+      # разбавили бы её и спрятали сбои.
       - alert: ReviewRunsFailing
         expr: |
           (
             sum(increase(review_runs_total{status="failed"}[30m]))
-            / sum(increase(review_runs_total[30m]))
+            / sum(increase(review_runs_total{status=~"completed|failed"}[30m]))
           ) > 0.3
-          and sum(increase(review_runs_total[30m])) >= 3
+          and sum(increase(review_runs_total{status=~"completed|failed"}[30m])) >= 3
         labels:
           severity: critical
           service: worker
         annotations:
           summary: "Прогоны падают: {{ $value | humanizePercentage }} за 30 минут"
           description: "Доля прогонов в failed выше 30 %. Код ошибки шага — в GET /api/v1/reviews/{id}/steps и в спанах review.<этап>."
+
+      # Массовый отказ по балансу: больше половины исходов за час — отказы, и их
+      # хотя бы три. Одиночный отказ — норма (у плательщика кончились деньги),
+      # массовый — ошибка оценки стоимости или снятый плательщик популярного
+      # репозитория. Без этого алерта счётчик ревью просто падал бы к нулю.
+      - alert: ReviewRunsRefused
+        expr: |
+          (
+            sum(increase(review_runs_total{status="refused"}[1h]))
+            / sum(increase(review_runs_total[1h]))
+          ) > 0.5
+          and sum(increase(review_runs_total{status="refused"}[1h])) >= 3
+        labels:
+          severity: warning
+          service: worker
+        annotations:
+          summary: "Прогоны отказаны по балансу: {{ $value | humanizePercentage }} за час"
+          description: "Больше половины прогонов за час завершены без денег (coverage_reason = balance). Проверьте балансы и плательщиков репозиториев и оценку стоимости прогона."
 
       # Сообщение в DLQ — прогон, который никто не повторит: исключение при
       # обработке или лимит доставок.

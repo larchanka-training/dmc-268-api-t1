@@ -115,6 +115,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from sqlalchemy import Engine
 from sqlalchemy.pool import QueuePool
 
+from app.application.ports.run_outcome import RUN_REFUSED
 from app.domain.enums import ReviewRunStage, ReviewRunStatus
 
 logger = logging.getLogger(__name__)
@@ -181,7 +182,7 @@ _review_runs_total = _meter.create_counter(
     # Прогоны, доведённые до терминального статуса тем, кто этот переход
     # сделал (пайплайн или выметатель), — не обработки сообщений: повторная
     # доставка терминального прогона и сообщение без прогона не пишутся.
-    description="Прогоны по терминальному статусу.",
+    description="Прогоны по терминальному исходу: completed, failed, refused.",
 )
 _review_stage_duration = _meter.create_histogram(
     "review_stage_duration", unit="s", description="Длительность этапов прогона."
@@ -325,8 +326,8 @@ def configure_telemetry(service_name: str) -> None:
 
 
 # Исходы, которые пишет `record_run_finished`: пайплайн, выметатель и приём вебхука
-# доводят прогон только до `completed` или `failed`.
-_RECORDED_RUN_OUTCOMES = (ReviewRunStatus.COMPLETED, ReviewRunStatus.FAILED)
+# доводят прогон до `completed` или `failed`, пайплайн ещё отказывает по балансу.
+_RECORDED_RUN_OUTCOMES = (ReviewRunStatus.COMPLETED.value, ReviewRunStatus.FAILED.value, RUN_REFUSED)
 
 
 def prime_run_outcomes() -> None:
@@ -345,7 +346,7 @@ def prime_run_outcomes() -> None:
     принято — `force_flush()` задерживал бы старт до 4 с при лежащем коллекторе.
     """
     for status in _RECORDED_RUN_OUTCOMES:
-        _review_runs_total.add(0, {"status": status.value})
+        _review_runs_total.add(0, {"status": status})
 
 
 def shutdown_tracing() -> None:

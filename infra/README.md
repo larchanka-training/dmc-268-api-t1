@@ -636,7 +636,8 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `WorkerStalled` | потребитель у `review_jobs.qq` есть, готовые задачи лежат, а подтверждений quorum-очередей (`rabbitmq_global_messages_acknowledged_total`) нет | 15 минут | critical |
 | `ReviewJobStuck` | сообщение `review_jobs.qq` выдано и не подтверждено, других подтверждений нет; прогоны на стенде идут до 1,5 минуты, выметатель срабатывает на 30 | 20 минут | critical |
 | `Api5xxSpike` | доля 5xx у API за 5 минут, при трафике больше 3 запросов в минуту | > 5 % дольше 5 минут | critical |
-| `ReviewRunsFailing` | доля прогонов в `failed` за 30 минут, при 3+ прогонах | > 30 % | critical |
+| `ReviewRunsFailing` | доля прогонов в `failed` среди `completed` и `failed` за 30 минут, при 3+ прогонах; отказы по балансу не считаются | > 30 % | critical |
+| `ReviewRunsRefused` | доля отказов по балансу (`refused`) среди исходов прогонов за час, при 3+ отказах | > 50 % | warning |
 | `ReviewDlqNotEmpty` | сообщения в `review_jobs.dlq` | > 0 дольше 5 минут | critical |
 | `LlmBudgetNearLimit` | токены модели с начала месяца (UTC) от бюджета `dmc268:llm_tokens_budget_month` — 50 млн | > 80 % | warning |
 | `LlmBudgetExceeded` | то же | ≥ 100 % | critical |
