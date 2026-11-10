@@ -1,0 +1,20 @@
+{
+  "case_id": "TC-13-generated-files",
+  "kind": "robustness",
+  "expected_findings": [
+    {
+      "id": "signature-timing",
+      "file_path": "app/webhooks/verify.py",
+      "side": "new",
+      "line": 14,
+      "category": "security",
+      "severity": "medium",
+      "must_find": true
+    }
+  ],
+  "forbidden_categories": [
+    "readability"
+  ],
+  "max_findings": 2,
+  "injection": null
+}

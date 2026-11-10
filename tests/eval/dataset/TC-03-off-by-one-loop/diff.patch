@@ -1,0 +1,20 @@
+diff --git a/app/domain/pagination.py b/app/domain/pagination.py
+index 564e49f..a32932c 100644
+--- a/app/domain/pagination.py
++++ b/app/domain/pagination.py
+@@ -10,3 +10,15 @@
+ 
+ def total_items(pages_count: int, page_size: int, last_page_size: int) -> int:
+     return (pages_count - 1) * page_size + last_page_size
++
++
++def paginate(items: list[str], page_size: int) -> list[Page]:
++    """Разбить список на страницы по `page_size`, нумерация страниц с 1."""
++    if page_size < 1:
++        raise ValueError("page_size must be positive")
++    total_pages = (len(items) + page_size - 1) // page_size
++    pages = []
++    for number in range(1, total_pages):
++        start = (number - 1) * page_size
++        pages.append(Page(items[start : start + page_size], number, total_pages))
++    return pages

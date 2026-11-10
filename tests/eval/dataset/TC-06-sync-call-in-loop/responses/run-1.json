@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/infrastructure/publisher.py",
+      "side": "new",
+      "line": 16,
+      "category": "performance",
+      "severity": "high",
+      "message": "Синхронный `requests.post` внутри `async def` и в цикле: каждый запрос блокирует event loop, а находки публикуются строго по одной. На 50 находках это 50 последовательных круговых задержек, и всё это время воркер не обслуживает ничего другого. Используйте асинхронный клиент (`httpx.AsyncClient`) и одно ревью с пачкой комментариев (`POST …/pulls/{number}/reviews` с `comments`).",
+      "confidence": 0.85,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Публикация блокирует event loop и шлёт по запросу на находку вместо одного ревью с пачкой комментариев.",
+    "positives": [
+      "Комментарии привязаны к коммиту и стороне диффа"
+    ],
+    "effort": "средние"
+  }
+}

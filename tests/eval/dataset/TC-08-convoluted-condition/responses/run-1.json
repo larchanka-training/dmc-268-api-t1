@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/domain/review_policy.py",
+      "side": "new",
+      "line": 10,
+      "category": "readability",
+      "severity": "medium",
+      "message": "Условие из трёх отрицаний, смешанных `and`/`or` без скобок и сравнения с `False` не читается: чтобы понять, когда возвращается `True`, его приходится раскрывать по законам де Моргана. Разбейте на ранние возвраты: `if event.action not in REVIEWED_ACTIONS: return False`, `if event.draft and \"review-draft\" not in event.labels: return False`, отдельно проверка бота.",
+      "confidence": 0.85,
+      "suggestion": null,
+      "rule": null
+    },
+    {
+      "filePath": "app/domain/review_policy.py",
+      "side": "new",
+      "line": 12,
+      "category": "correctness",
+      "severity": "high",
+      "message": "Проверка бота перевёрнута: `not (X) == False` равно `X`, и третья ветка `or` срабатывает для любого человека и разрешённого бота — их события не ревьюятся, а ревьюятся только боты не из списка. По описанию нужно наоборот: исключить ботов вне `allowed_bots`.",
+      "confidence": 0.6,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Условие `should_review` трудно читать, и из-за двойного отрицания проверка ботов работает наоборот.",
+    "positives": [
+      "Логика осталась чистой функцией над событием"
+    ],
+    "effort": "низкие"
+  }
+}

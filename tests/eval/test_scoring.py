@@ -13,11 +13,14 @@ from .scoring import (
     LINE_WINDOW,
     MAX_EXPECTED_PER_CASE,
     CaseScore,
+    CategoryCounts,
     ExpectedIssue,
     OutputCounts,
     Reported,
     aggregate,
+    category_counts,
     classify_calls,
+    duplicates,
     match,
     score_case,
     spread,
@@ -289,3 +292,62 @@ def test_valid_rate_counts_only_first_try_and_ignores_calls_without_answer() -> 
     assert counts.valid_rate == 0.75
     assert OutputCounts(no_answer=2).valid_rate is None
     assert counts + OutputCounts(invalid=2) == OutputCounts(6, 1, 3, 5)
+
+
+# --- золотой датасет: сторона, must_find, запрещённые категории, дубли, срез ---
+
+REMOVED = ExpectedIssue("removed", "app/users.py", 7, category="correctness", side="old")
+NICE = ExpectedIssue("nice", "app/users.py", 30, category="readability", must_find=False)
+
+
+def test_old_side_issue_matches_only_an_old_side_finding() -> None:
+    assert match([REMOVED], [Reported("app/users.py", "new", 7, "correctness")]) == []
+    old = Reported("app/users.py", "old", 8, "correctness")
+    assert match([REMOVED], [old]) == [(REMOVED, old)]
+
+
+def test_missed_nice_to_have_is_not_a_false_negative_but_found_one_is_a_true_positive() -> None:
+    silent = score_case([SQL, NICE], [Reported("app/users.py", "new", 2, "security")])
+    assert (silent.tp, silent.fp, silent.fn, silent.missed) == (1, 0, 0, ())
+
+    found = score_case([NICE], [Reported("app/users.py", "new", 31, "readability")])
+    assert (found.tp, found.fp, found.fn) == (1, 0, 0)
+
+
+def test_finding_of_a_forbidden_category_is_a_false_positive_even_on_the_expected_line() -> None:
+    rule_issue = ExpectedIssue("r", PATH, 14, rule=RULE, categories=("readability",))
+    noise = Reported(PATH, "new", 14, "readability")
+
+    score = score_case([rule_issue], [noise], forbidden_categories=("readability",))
+
+    assert (score.tp, score.fp, score.fn) == (0, 1, 1)
+
+
+def test_duplicates_collapse_by_anchor_and_category_or_by_rule_check() -> None:
+    first = Reported(PATH, "new", 14, "correctness", RULE)
+    reported = [
+        first,
+        Reported(PATH, "new", 14, "correctness"),  # та же привязка и категория
+        Reported(PATH, "new", 14, "readability", RULE),  # тот же пункт правила
+        Reported(PATH, "old", 14, "correctness"),  # другая сторона - не дубль
+        Reported(PATH, "new", 15, "correctness"),  # другая строка - не дубль
+    ]
+    assert duplicates(reported) == 2
+    assert duplicates([]) == 0
+
+
+def test_category_counts_split_true_false_positives_and_misses_by_category() -> None:
+    reported = [
+        Reported("app/users.py", "new", 2, "security"),
+        Reported("app/users.py", "new", 50, "performance"),
+        Reported("app/users.py", "new", 30, "correctness"),
+    ]
+
+    counts = category_counts([SQL, REMOVED, NICE], reported, forbidden_categories=())
+
+    assert counts == {
+        "security": CategoryCounts(tp=1),
+        "correctness": CategoryCounts(fp=1, fn=1),
+        "performance": CategoryCounts(fp=1),
+    }
+    assert CategoryCounts(tp=1, fp=1) + CategoryCounts(fn=2) == CategoryCounts(1, 1, 2)

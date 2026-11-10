@@ -1,0 +1,14 @@
+diff --git a/app/api/reports.py b/app/api/reports.py
+index b38e087..c7a3369 100644
+--- a/app/api/reports.py
++++ b/app/api/reports.py
+@@ -6,3 +6,9 @@
+ from app.settings import settings
+ 
+ router = APIRouter(prefix="/api/v1/reports")
++
++
++@router.get("/{name}")
++def download_report(name: str) -> FileResponse:
++    path = Path(settings.reports_dir) / name
++    return FileResponse(path, media_type="text/csv", filename=path.name)

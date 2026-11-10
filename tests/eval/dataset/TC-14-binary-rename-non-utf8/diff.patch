@@ -1,0 +1,65 @@
+diff --git a/app/legacy/text_utils.py b/app/common/text_utils.py
+similarity index 100%
+rename from app/legacy/text_utils.py
+rename to app/common/text_utils.py
+diff --git a/app/i18n/legacy_fr.py b/app/i18n/legacy_fr.py
+index e40b8a7..d33cab6 100644
+--- a/app/i18n/legacy_fr.py
++++ b/app/i18n/legacy_fr.py
+@@ -1,5 +1,5 @@
+ # -*- coding: latin-1 -*-
+ """Legacy UI strings."""
+ 
+-GREETING = "Bonjour"
+-FAREWELL = "Au revoir"
++GREETING = "Bonjour, caf� cr�me"
++FAREWELL = "� bient�t, d�j� parti"
+diff --git a/app/reports/csv_export.py b/app/reports/export_csv.py
+similarity index 68%
+rename from app/reports/csv_export.py
+rename to app/reports/export_csv.py
+index e60ed39..d709746 100644
+--- a/app/reports/csv_export.py
++++ b/app/reports/export_csv.py
+@@ -2,15 +2,18 @@
+ 
+ import csv
+ import io
++from collections.abc import Sequence
++
++from app.reports.models import PaymentRow
+ 
+ HEADER = ("id", "name", "amount")
+ 
+ 
+-def export_rows(rows):
++def export_rows(rows: Sequence[PaymentRow]) -> str:
+     buffer = io.StringIO()
+     writer = csv.writer(buffer)
+     writer.writerow(HEADER)
+-    for row in rows:
++    for row in rows[1:]:
+         writer.writerow((row.id, row.name, row.amount))
+     return buffer.getvalue()
+ 
+diff --git a/docs/img/logo.png b/docs/img/logo.png
+index 9b5d694..53b175a 100644
+Binary files a/docs/img/logo.png and b/docs/img/logo.png differ
+diff --git "a/docs/\321\200\321\203\320\272\320\276\320\262\320\276\320\264\321\201\321\202\320\262\320\276.md" "b/docs/\321\200\321\203\320\272\320\276\320\262\320\276\320\264\321\201\321\202\320\262\320\276.md"
+index 3b1d8ba..50dea97 100644
+--- "a/docs/\321\200\321\203\320\272\320\276\320\262\320\276\320\264\321\201\321\202\320\262\320\276.md"
++++ "b/docs/\321\200\321\203\320\272\320\276\320\262\320\276\320\264\321\201\321\202\320\262\320\276.md"
+@@ -1,3 +1,9 @@
+ # Руководство
+ 
+ Запуск: `make run`.
++
++## Отчёты 📊
++
++Выгрузка — раз в сутки,в 03:00 UTC.
++Строка с разделителем строк Unicode.
++Пробел неразрывный и ё, Ё, ß.
+\ No newline at end of file
+diff --git a/scripts/reports.sh b/scripts/reports.sh
+old mode 100644
+new mode 100755

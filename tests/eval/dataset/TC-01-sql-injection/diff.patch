@@ -1,0 +1,27 @@
+diff --git a/app/api/users.py b/app/api/users.py
+index 3478c67..2cb3d5c 100644
+--- a/app/api/users.py
++++ b/app/api/users.py
+@@ -1,5 +1,5 @@
+-from fastapi import APIRouter, Depends
+-from sqlalchemy import select
++from fastapi import APIRouter, Depends, Query
++from sqlalchemy import select, text
+ from sqlalchemy.orm import Session
+ 
+ from app.db import get_session
+@@ -13,3 +13,14 @@
+ def get_user(user_id: int, session: Session = Depends(get_session)) -> UserOut:
+     user = session.scalars(select(User).where(User.id == user_id)).one()
+     return UserOut.model_validate(user)
++
++
++@router.get("", response_model=list[UserOut])
++def search_users(
++    name: str = Query(min_length=1, max_length=100),
++    session: Session = Depends(get_session),
++) -> list[UserOut]:
++    rows = session.execute(
++        text(f"SELECT id, login, name FROM users WHERE name ILIKE '%{name}%' ORDER BY login LIMIT 50")
++    ).mappings()
++    return [UserOut.model_validate(row) for row in rows]

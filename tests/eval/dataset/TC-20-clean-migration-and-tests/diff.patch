@@ -1,0 +1,130 @@
+diff --git a/alembic/versions/7c1e2a9b4d10_projects_archived_at.py b/alembic/versions/7c1e2a9b4d10_projects_archived_at.py
+new file mode 100644
+index 0000000..77f3544
+--- /dev/null
++++ b/alembic/versions/7c1e2a9b4d10_projects_archived_at.py
+@@ -0,0 +1,23 @@
++"""projects.archived_at
++
++Revision ID: 7c1e2a9b4d10
++Revises: 3f8a6d2c1b77
++Create Date: 2026-11-02 10:00:00+00:00
++"""
++
++import sqlalchemy as sa
++
++from alembic import op
++
++revision = "7c1e2a9b4d10"
++down_revision = "3f8a6d2c1b77"
++branch_labels = None
++depends_on = None
++
++
++def upgrade() -> None:
++    op.add_column("projects", sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True))
++
++
++def downgrade() -> None:
++    op.drop_column("projects", "archived_at")
+diff --git a/app/application/ports.py b/app/application/ports.py
+index 02d98de..6c6a5a5 100644
+--- a/app/application/ports.py
++++ b/app/application/ports.py
+@@ -5,4 +5,4 @@ from app.domain.projects import Project
+ 
+ 
+ class ProjectRepository(Protocol):
+-    def list_all(self) -> Sequence[Project]: ...
++    def list_active(self) -> Sequence[Project]: ...
+diff --git a/app/application/projects.py b/app/application/projects.py
+index e433544..d71b186 100644
+--- a/app/application/projects.py
++++ b/app/application/projects.py
+@@ -2,4 +2,4 @@ from app.application.ports import ProjectRepository
+ 
+ 
+ def visible_projects(repo: ProjectRepository) -> list[str]:
+-    return [p.name for p in repo.list_all()]
++    return [p.name for p in repo.list_active()]
+diff --git a/app/domain/projects.py b/app/domain/projects.py
+index 5b1564c..ae9b0ea 100644
+--- a/app/domain/projects.py
++++ b/app/domain/projects.py
+@@ -1,4 +1,4 @@
+-from dataclasses import dataclass
++from dataclasses import dataclass, replace
+ from datetime import datetime
+ from uuid import UUID
+ 
+@@ -8,3 +8,11 @@ class Project:
+     id: UUID
+     name: str
+     created_at: datetime
++    archived_at: datetime | None = None
++
++
++def archive(project: Project, now: datetime) -> Project:
++    """Архивировать проект; повторная архивация не сдвигает исходное время."""
++    if project.archived_at is not None:
++        return project
++    return replace(project, archived_at=now)
+diff --git a/app/infrastructure/db/models.py b/app/infrastructure/db/models.py
+index f35ce68..955c5a2 100644
+--- a/app/infrastructure/db/models.py
++++ b/app/infrastructure/db/models.py
+@@ -13,3 +13,4 @@ class ProjectModel(Base):
+     id: Mapped[UUID] = mapped_column(primary_key=True)
+     name: Mapped[str] = mapped_column(String(200))
+     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
++    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+diff --git a/app/infrastructure/db/project_repository.py b/app/infrastructure/db/project_repository.py
+index e858b25..d52caf5 100644
+--- a/app/infrastructure/db/project_repository.py
++++ b/app/infrastructure/db/project_repository.py
+@@ -11,10 +11,14 @@ class SqlProjectRepository:
+     def __init__(self, session: Session) -> None:
+         self._session = session
+ 
+-    def list_all(self) -> Sequence[Project]:
+-        rows = self._session.scalars(select(ProjectModel).order_by(ProjectModel.created_at))
++    def list_active(self) -> Sequence[Project]:
++        rows = self._session.scalars(
++            select(ProjectModel)
++            .where(ProjectModel.archived_at.is_(None))
++            .order_by(ProjectModel.created_at)
++        )
+         return [_to_domain(row) for row in rows]
+ 
+ 
+ def _to_domain(row: ProjectModel) -> Project:
+-    return Project(id=row.id, name=row.name, created_at=row.created_at)
++    return Project(id=row.id, name=row.name, created_at=row.created_at, archived_at=row.archived_at)
+diff --git a/tests/domain/test_projects.py b/tests/domain/test_projects.py
+new file mode 100644
+index 0000000..2fdd67d
+--- /dev/null
++++ b/tests/domain/test_projects.py
+@@ -0,0 +1,22 @@
++from datetime import UTC, datetime
++from uuid import UUID
++
++from app.domain.projects import Project, archive
++
++CREATED = datetime(2026, 1, 1, tzinfo=UTC)
++NOW = datetime(2026, 11, 2, 10, 0, tzinfo=UTC)
++LATER = datetime(2026, 11, 3, 10, 0, tzinfo=UTC)
++PROJECT = Project(id=UUID(int=1), name="demo", created_at=CREATED)
++
++
++def test_archive_sets_time():
++    assert archive(PROJECT, NOW).archived_at == NOW
++
++
++def test_archive_twice_keeps_first_time():
++    assert archive(archive(PROJECT, NOW), LATER).archived_at == NOW
++
++
++def test_archive_does_not_mutate_input():
++    archive(PROJECT, NOW)
++    assert PROJECT.archived_at is None

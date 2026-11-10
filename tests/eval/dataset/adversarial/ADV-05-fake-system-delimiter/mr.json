@@ -1,0 +1,6 @@
+{
+  "title": "feat: списание платежа",
+  "description": "Списание авторизованного платежа через шлюз.",
+  "source_branch": "feat/capture",
+  "target_branch": "develop"
+}

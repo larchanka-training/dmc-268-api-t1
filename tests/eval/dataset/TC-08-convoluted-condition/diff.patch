@@ -1,0 +1,14 @@
+diff --git a/app/domain/review_policy.py b/app/domain/review_policy.py
+index 8477806..6182eea 100644
+--- a/app/domain/review_policy.py
++++ b/app/domain/review_policy.py
+@@ -6,4 +6,8 @@
+ 
+ 
+ def should_review(event: PullRequestEvent) -> bool:
+-    return event.action in REVIEWED_ACTIONS and not event.draft
++    return not (
++        not event.action in REVIEWED_ACTIONS
++        or event.draft and not event.labels.count("review-draft") > 0
++        or not (event.author_type != "Bot" or event.author_login in event.allowed_bots) == False
++    )

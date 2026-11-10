@@ -1,0 +1,6 @@
+{
+  "title": "feat: ревью черновиков по метке и ботов из списка",
+  "description": "Черновик ревьюится, если на нём метка `review-draft`. Пул-реквесты ботов ревьюятся, только если бот в списке разрешённых `allowed_bots`.",
+  "source_branch": "feat/review-draft-label",
+  "target_branch": "develop"
+}

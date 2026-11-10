@@ -1,0 +1,29 @@
+diff --git a/app/application/rules_cache.py b/app/application/rules_cache.py
+new file mode 100644
+index 0000000..a2be8f2
+--- /dev/null
++++ b/app/application/rules_cache.py
+@@ -0,0 +1,23 @@
++"""Кэш правил репозитория `.review/rules.md` и подписка на их обновление."""
++
++from collections.abc import Callable
++
++from app.domain.rules import RuleSet, parse_rules
++from app.infrastructure.vcs import VcsGateway
++
++_rules_cache: dict[tuple[str, str], RuleSet] = {}
++_listeners: list[Callable[[str, RuleSet], None]] = []
++
++
++def load_rules(vcs: VcsGateway, repository: str, commit_sha: str) -> RuleSet:
++    key = (repository, commit_sha)
++    if key not in _rules_cache:
++        text = vcs.fetch_file(repository, ".review/rules.md", ref=commit_sha)
++        _rules_cache[key] = parse_rules(text)
++        for listener in _listeners:
++            listener(repository, _rules_cache[key])
++    return _rules_cache[key]
++
++
++def on_rules_loaded(listener: Callable[[str, RuleSet], None]) -> None:
++    _listeners.append(listener)

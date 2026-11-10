@@ -1,0 +1,20 @@
+{
+  "case_id": "TC-04-check-then-write-no-tx",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "check-then-write-race",
+      "file_path": "app/application/balance.py",
+      "side": "new",
+      "line": 48,
+      "category": "correctness",
+      "severity": "high",
+      "must_find": true
+    }
+  ],
+  "forbidden_categories": [
+    "readability"
+  ],
+  "max_findings": 3,
+  "injection": null
+}

@@ -1,0 +1,20 @@
+{
+  "case_id": "TC-01-sql-injection",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "sql-injection",
+      "file_path": "app/api/users.py",
+      "side": "new",
+      "line": 24,
+      "category": "security",
+      "severity": "critical",
+      "must_find": true
+    }
+  ],
+  "forbidden_categories": [
+    "readability"
+  ],
+  "max_findings": 3,
+  "injection": null
+}

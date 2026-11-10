@@ -16,14 +16,23 @@
 (ссылка на тот же пункт или та же категория); затем - меньше суммарное
 расстояние до строк. Жадный выбор от ближайшей пары занижал TP: находка,
 ближайшая к одному нарушению, могла быть единственной парой для соседнего.
+
+Для золотого датасета (`tests/eval/dataset/`) разметка шире: сторона диффа
+(`side`, по умолчанию `new` - как у корпуса правил), `must_find` (пропуск
+необязательного нарушения - не FN, найденное - TP) и запрещённые категории
+кейса (замечание такой категории - FP при любой позиции, в пары не идёт).
+По умолчанию поведение то же, что у корпуса правил.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from statistics import mean, pstdev
+from uuid import UUID
 
-from app.domain.entities import ReviewRunStep
-from app.domain.enums import FindingCategory, ReviewRunStage
+from app.domain.dedup import deduplicate
+from app.domain.entities import DiffAnchor, Finding, ReviewRunStep, RuleRef
+from app.domain.enums import DiffSide, FindingCategory, FindingSeverity, ReviewRunStage
 from app.domain.llm_errors import LlmOutputError
 
 # Часть контракта метрик (LLM_EVAL §2): смена окна делает прошлые цифры несравнимыми.
@@ -35,6 +44,7 @@ LINE_WINDOW = 3
 MAX_EXPECTED_PER_CASE = 16
 
 _CATEGORIES = frozenset(FindingCategory)
+_SIDES = frozenset(DiffSide)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +58,10 @@ class ExpectedIssue:
     category: str | None = None
     # Категории, под которыми замечание без ссылки на пункт засчитывается за нарушение правила.
     categories: tuple[str, ...] = ()
+    # Сторона диффа, к которой относится `line`.
+    side: str = "new"
+    # Обязательное нарушение: пропуск - FN. Необязательное найдено - TP, пропущено - не в счёт.
+    must_find: bool = True
 
     def __post_init__(self) -> None:
         if (self.rule is None) == (self.category is None):
@@ -59,6 +73,8 @@ class ExpectedIssue:
         unknown = [c for c in (self.category, *self.categories) if c and c not in _CATEGORIES]
         if unknown:
             raise ValueError(f"{self.id}: категорий {unknown} нет в FindingCategory")
+        if self.side not in _SIDES:
+            raise ValueError(f"{self.id}: стороны {self.side!r} нет в DiffSide")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +118,7 @@ class Metrics:
 
 
 def _matches(expected: ExpectedIssue, reported: Reported) -> bool:
-    if (reported.path, reported.side) != (expected.path, "new"):
+    if (reported.path, reported.side) != (expected.path, expected.side):
         return False
     if abs(reported.line - expected.line) > LINE_WINDOW:
         return False
@@ -161,24 +177,123 @@ def match(
     return [(expected[ei], reported[ri]) for ei, ri in sorted(pairs)]
 
 
-def score_case(expected: Sequence[ExpectedIssue], reported: Sequence[Reported]) -> CaseScore:
-    pairs = match(expected, reported)
+def _allowed_pairs(
+    expected: Sequence[ExpectedIssue],
+    reported: Sequence[Reported],
+    forbidden_categories: Collection[str],
+) -> list[tuple[ExpectedIssue, Reported]]:
+    """Пары без замечаний запрещённых категорий: такое замечание - FP, а не кандидат в TP."""
+    allowed = [r for r in reported if r.category not in forbidden_categories]
+    return match(expected, allowed)
+
+
+def score_case(
+    expected: Sequence[ExpectedIssue],
+    reported: Sequence[Reported],
+    *,
+    forbidden_categories: Collection[str] = (),
+) -> CaseScore:
+    pairs = _allowed_pairs(expected, reported, forbidden_categories)
     found = {e.id for e, _ in pairs}
+    # Необязательное нарушение в FN и в пропуски не идёт: в знаменателе Recall - только must_find.
+    required = [e for e in expected if e.must_find]
     rule_issues = [e for e in expected if e.rule is not None]
     generic_issues = [e for e in expected if e.rule is None]
     rule_tp = sum(1 for e in rule_issues if e.id in found)
     generic_tp = sum(1 for e in generic_issues if e.id in found)
+    rule_missed = sum(1 for e in rule_issues if e.must_find and e.id not in found)
+    generic_missed = sum(1 for e in generic_issues if e.must_find and e.id not in found)
     return CaseScore(
         tp=len(pairs),
         fp=len(reported) - len(pairs),
-        fn=len(expected) - len(pairs),
+        fn=sum(1 for e in required if e.id not in found),
         rule_tp=rule_tp,
-        rule_fn=len(rule_issues) - rule_tp,
+        rule_fn=rule_missed,
         generic_tp=generic_tp,
-        generic_fn=len(generic_issues) - generic_tp,
+        generic_fn=generic_missed,
         attributed=sum(1 for e, r in pairs if e.rule is not None and r.rule == e.rule),
-        missed=tuple(e.id for e in expected if e.id not in found),
+        missed=tuple(e.id for e in required if e.id not in found),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class CategoryCounts:
+    """TP/FP/FN одной категории `FindingCategory` - для среза метрик по категориям."""
+
+    tp: int = 0
+    fp: int = 0
+    fn: int = 0
+
+    def __add__(self, other: CategoryCounts) -> CategoryCounts:
+        return CategoryCounts(self.tp + other.tp, self.fp + other.fp, self.fn + other.fn)
+
+
+def category_counts(
+    expected: Sequence[ExpectedIssue],
+    reported: Sequence[Reported],
+    *,
+    forbidden_categories: Collection[str] = (),
+) -> dict[str, CategoryCounts]:
+    """Срез `score_case` по категориям, на тех же парах.
+
+    TP и FN относятся к категории эталонного нарушения (у нарушения пункта
+    правила своей категории нет - TP идёт в категорию замечания, пропуск в
+    срез не входит), FP - к категории замечания. Ключи - только категории,
+    где есть хоть один счётчик.
+    """
+    pairs = _allowed_pairs(expected, reported, forbidden_categories)
+    found = {e.id for e, _ in pairs}
+    paired = {id(r) for _, r in pairs}
+    counts: dict[str, CategoryCounts] = {}
+
+    def add(category: str, delta: CategoryCounts) -> None:
+        counts[category] = counts.get(category, CategoryCounts()) + delta
+
+    for e, r in pairs:
+        add(e.category or r.category, CategoryCounts(tp=1))
+    for e in expected:
+        if e.must_find and e.id not in found and e.category is not None:
+            add(e.category, CategoryCounts(fn=1))
+    for r in reported:
+        if id(r) not in paired:
+            add(r.category, CategoryCounts(fp=1))
+    return counts
+
+
+# Поля `Finding`, которых дедупликация не читает: в отчёт и метрики они не попадают.
+_ID = UUID(int=0)
+_AT = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _as_finding(r: Reported) -> Finding:
+    side = DiffSide(r.side)
+    return Finding(
+        id=_ID,
+        review_run_id=_ID,
+        anchor=DiffAnchor(
+            r.path,
+            side,
+            old_line=r.line if side is DiffSide.OLD else None,
+            new_line=r.line if side is DiffSide.NEW else None,
+        ),
+        category=FindingCategory(r.category),
+        severity=FindingSeverity.LOW,
+        message="-",
+        created_at=_AT,
+        updated_at=_AT,
+        rule=RuleRef(r.rule[0], r.rule[1], "") if r.rule else None,
+    )
+
+
+def duplicates(reported: Sequence[Reported]) -> int:
+    """Сколько замечаний отбросила бы `deduplicate` домена (LLM_EVAL §3, Duplicate rate).
+
+    Вызывается сама `deduplicate`, а не её копия: «одна и та же находка» в
+    eval и в проде определяется одинаково - привязка плюс категория или плюс
+    пункт правила.
+    """
+    _, dropped = deduplicate(_as_finding(r) for r in reported)
+    return len(dropped)
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:

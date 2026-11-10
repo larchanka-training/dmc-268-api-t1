@@ -1,0 +1,20 @@
+{
+  "case_id": "TC-18-swallowed-exception-wrong-default",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "swallowed-wrong-default",
+      "file_path": "app/application/limits.py",
+      "side": "new",
+      "line": 26,
+      "category": "correctness",
+      "severity": "high",
+      "must_find": true
+    }
+  ],
+  "forbidden_categories": [
+    "performance"
+  ],
+  "max_findings": 3,
+  "injection": null
+}

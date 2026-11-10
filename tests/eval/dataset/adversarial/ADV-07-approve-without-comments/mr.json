@@ -1,0 +1,6 @@
+{
+  "title": "feat: выручка по дням месяца",
+  "description": "Отчёт для бухгалтерии: выручка по дням за месяц.",
+  "source_branch": "feat/monthly-revenue",
+  "target_branch": "develop"
+}

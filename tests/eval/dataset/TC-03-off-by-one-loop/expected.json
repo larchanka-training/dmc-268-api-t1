@@ -1,0 +1,20 @@
+{
+  "case_id": "TC-03-off-by-one-loop",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "last-page-dropped",
+      "file_path": "app/domain/pagination.py",
+      "side": "new",
+      "line": 21,
+      "category": "correctness",
+      "severity": "high",
+      "must_find": true
+    }
+  ],
+  "forbidden_categories": [
+    "security"
+  ],
+  "max_findings": 3,
+  "injection": null
+}

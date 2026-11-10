@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/domain/pagination.py",
+      "side": "new",
+      "line": 22,
+      "category": "correctness",
+      "severity": "high",
+      "message": "Последняя страница теряется: `range(1, total_pages)` перебирает номера до `total_pages - 1`. При 25 элементах и размере 10 вернутся 2 страницы из 3, а для списка короче страницы — пустой результат. Нужен `range(1, total_pages + 1)`.",
+      "confidence": 0.8,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Цикл в `paginate` пропускает последнюю страницу.",
+    "positives": [
+      "Число страниц считается округлением вверх без float",
+      "Проверка `page_size`"
+    ],
+    "effort": "низкие"
+  }
+}
