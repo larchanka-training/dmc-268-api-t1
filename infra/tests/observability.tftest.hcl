@@ -193,6 +193,28 @@ run "observability_stack_without_telegram_plans" {
     condition     = one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/heartbeat_url"]) == "unset"
     error_message = "Без адреса heartbeat Alertmanager получает заглушку unset, как локально в compose: стек поднимается, пинг Watchdog падает в логе."
   }
+
+  assert {
+    condition     = one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/heartbeat_fail_url"]) == "unset"
+    error_message = "Без адреса heartbeat адрес /fail для AlertDeliveryFailing — тоже заглушка unset, а не «/fail» без хоста."
+  }
+}
+
+# Адрес /fail строится из того же секрета: завершающий / адреса не даёт «//fail».
+run "heartbeat_fail_url_is_the_same_check_with_fail" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    alert_heartbeat_url       = "https://hc-ping.com/0f6c4a3e/"
+  }
+
+  assert {
+    condition     = one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/heartbeat_fail_url"]) == "https://hc-ping.com/0f6c4a3e/fail"
+    error_message = "AlertDeliveryFailing уходит на тот же check с /fail: healthchecks.io и аналоги понимают его как явный сбой."
+  }
 }
 
 # Секреты Telegram и цель пробы публичного входа доходят до контейнеров файлами.

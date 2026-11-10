@@ -10,6 +10,10 @@
 # Telegram, а на внешний heartbeat-сервис (receiver heartbeat). Адрес — тоже
 # файлом рядом, из необязательного секрета; без него — заглушка unset, и пинг
 # падает с ошибкой в логе.
+#
+# Сломанная доставка в Telegram: AlertDeliveryFailing из alerts.yml уходит
+# на адрес /fail того же внешнего check (receiver heartbeat-fail), мимо
+# Telegram. Внешний сервис сразу поднимает тревогу своим каналом.
 
 route:
   receiver: telegram
@@ -32,6 +36,15 @@ route:
       group_wait: 0s
       group_interval: 1m
       repeat_interval: 5m
+    # Вторым и тоже мимо Telegram: он и не доставляет. /fail внешнего check
+    # сразу переводит его в down, а пинг Watchdog, пока горит этот алерт,
+    # заглушён (inhibit_rules ниже): check красный до починки доставки, а не
+    # мигает down/up, как сетевой сбой. Повтор раз в час: если check вернули в
+    # up руками, а доставка всё ещё сломана, он снова уйдёт в down.
+    - matchers: ['alertname="AlertDeliveryFailing"']
+      receiver: heartbeat-fail
+      group_wait: 0s
+      repeat_interval: 1h
     - matchers: ['severity="warning"']
       receiver: telegram
       repeat_interval: 12h
@@ -46,6 +59,11 @@ inhibit_rules:
   - source_matchers: ['severity="critical"', 'alertname!="ReviewDlqNotEmpty"']
     target_matchers: ['severity="warning"']
     equal: [service, mountpoint]
+  # Сломанная доставка в Telegram глушит пинг Watchdog: check внешнего сервиса
+  # после /fail остаётся down, пока алерт горит, а не возвращается в up
+  # следующим пингом через 5–6 минут.
+  - source_matchers: ['alertname="AlertDeliveryFailing"']
+    target_matchers: ['alertname="Watchdog"']
 
 receivers:
   - name: telegram
@@ -70,4 +88,11 @@ receivers:
   - name: heartbeat
     webhook_configs:
       - url_file: /etc/alertmanager/secrets/heartbeat_url
+        send_resolved: false
+
+  # Тот же check с суффиксом /fail: healthchecks.io и аналоги понимают его как
+  # явный сбой. Адрес строит развёртывание из того же секрета.
+  - name: heartbeat-fail
+    webhook_configs:
+      - url_file: /etc/alertmanager/secrets/heartbeat_fail_url
         send_resolved: false
