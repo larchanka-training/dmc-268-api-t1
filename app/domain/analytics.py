@@ -48,8 +48,8 @@ class RepositoryAnalytics:
     repository_id: UUID
     full_name: str
     runs_count: int
-    # Строка есть только при runs_count ≥ 1, а у завершённого прогона длительность есть всегда
-    # (CHECK `(status = 'running') = (duration_seconds IS NULL)` на review_runs).
+    # Строка есть только при runs_count ≥ 1, а прогоны без длительности в выборку не попадают
+    # (адаптер), поэтому средняя и p95 всегда есть.
     average_duration_seconds: float
     p95_duration_seconds: float
     findings_count: int

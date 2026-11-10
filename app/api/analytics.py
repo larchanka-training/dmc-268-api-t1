@@ -84,7 +84,10 @@ class AnalyticsQuery(BaseModel):
     @model_validator(mode="after")
     def _period(self) -> Self:
         end = self.created_to or datetime.now(UTC)
-        start = self.created_from or end - DEFAULT_PERIOD
+        try:
+            start = self.created_from or end - DEFAULT_PERIOD
+        except OverflowError:  # created_to у самого начала календаря: раньше начала нет.
+            start = datetime.min.replace(tzinfo=UTC)
         if start > end:
             # Без created_to конец — сейчас: виновато начало в будущем.
             bound, code = ("created_to" if self.created_to else "created_from"), "range_reversed"

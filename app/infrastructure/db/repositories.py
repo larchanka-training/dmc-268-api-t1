@@ -477,6 +477,9 @@ class SqlAlchemyReviewRunRepo:
                 MergeRequestRow.repository_id.in_(analytics_filter.repository_ids),
                 ReviewRunRow.status == ReviewRunStatus.COMPLETED,
                 ReviewRunRow.coverage_reason.is_distinct_from(CoverageReason.BALANCE),
+                # Воркер пишет длительность при каждом переходе в completed, но база этого не
+                # требует: без неё средняя и p95 репозитория стали бы NULL в обязательном поле.
+                ReviewRunRow.duration_seconds.is_not(None),
                 ReviewRunRow.created_at >= analytics_filter.created_from,
                 ReviewRunRow.created_at < analytics_filter.created_to,
             )

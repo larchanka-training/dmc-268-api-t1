@@ -162,6 +162,43 @@ def test_aggregates_by_utc_day_category_severity_and_repository(uow) -> None:
     assert web.p95_duration_seconds == pytest.approx(50.0)
 
 
+def test_order_is_day_then_enum_order_and_repositories_by_full_name(uow) -> None:
+    """Порядок перечислений, а не алфавит: low раньше high, security раньше readability."""
+    world = World()
+    # Подключён последним, id больше, но по full_name — первый.
+    first = _repository("a")
+    world.mrs[first.id] = _merge_request(first)
+    world.rows += [first, world.mrs[first.id]]
+    day = FROM + dt.timedelta(days=2)
+    world.run(world.web, day, 1.0, (READ, LOW))
+    world.run(world.api, day, 1.0, (SEC, HIGH), (READ, LOW), (SEC, LOW))
+    world.run(first, day - dt.timedelta(days=1), 1.0, (READ, HIGH))
+    world.store(uow)
+
+    result = _analytics(uow, world.api, world.web, first)
+
+    assert result.findings_by_day == (
+        FindingsDayCount(dt.date(2026, 10, 2), READ, HIGH, 1),
+        FindingsDayCount(dt.date(2026, 10, 3), SEC, LOW, 1),
+        FindingsDayCount(dt.date(2026, 10, 3), SEC, HIGH, 1),
+        FindingsDayCount(dt.date(2026, 10, 3), READ, LOW, 2),
+    )
+    assert [r.full_name for r in result.by_repository] == ["acme/a", "acme/api", "acme/web"]
+
+
+def test_completed_run_without_duration_is_not_counted(uow) -> None:
+    """База не требует длительности у completed: такой прогон не даёт NULL в средней репозитория."""
+    world = World()
+    world.run(world.api, FROM + dt.timedelta(days=1), None, (SEC, HIGH))
+    world.run(world.api, FROM + dt.timedelta(days=1), 3.0)
+    world.store(uow)
+
+    result = _analytics(uow, world.api)
+
+    assert (result.runs.count, result.findings_by_day) == (1, ())
+    assert result.by_repository[0].average_duration_seconds == 3.0
+
+
 def test_day_is_utc_whatever_the_session_time_zone(clean_db) -> None:
     """В Токио 20:30Z 3 октября — уже 4 октября; группировка от зоны сессии не зависит."""
     world = World()
@@ -218,8 +255,9 @@ def test_repeat_of_a_bot_thread_in_a_later_run_is_not_counted(uow) -> None:
 
 
 def test_no_runs_give_empty_aggregates_and_no_visibility_gives_no_query(uow, clean_db) -> None:
-    World().store(uow)
-    assert _analytics(uow, World().api) == EMPTY_ANALYTICS
+    world = World()
+    world.store(uow)
+    assert _analytics(uow, world.api) == EMPTY_ANALYTICS
 
     statements: list[str] = []
 
