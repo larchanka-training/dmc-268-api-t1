@@ -23,6 +23,7 @@ ALERTMANAGER = OBSERVABILITY_DIR / "alertmanager.yml"
 PROMETHEUS = OBSERVABILITY_DIR / "prometheus.yml"
 OTELCOL = OBSERVABILITY_DIR / "otelcol.yaml"
 BACKUP_SCRIPT = REPO / "infra" / "postgres" / "backup.sh"
+OFFSITE_WORKFLOW = REPO / ".github" / "workflows" / "db-backup.yml"
 COMPOSE = REPO / "docker-compose.yml"
 README = REPO / "infra" / "README.md"
 
@@ -88,6 +89,13 @@ def test_backup_mark_matches_the_rule() -> None:
     metric = "dmc268_backup_last_success_timestamp_seconds"
     assert metric in BACKUP_SCRIPT.read_text(encoding="utf-8")
     assert metric in _alerts()["BackupStale"]["expr"]
+
+
+def test_offsite_backup_mark_matches_the_rule() -> None:
+    """Отметку о вынесенной копии пишет db-backup.yml в тот же том, что backup.sh."""
+    metric = "dmc268_offsite_backup_last_success_timestamp_seconds"
+    assert f"{metric} $(date -u +%s)" in OFFSITE_WORKFLOW.read_text(encoding="utf-8")
+    assert _alerts()["OffsiteBackupStale"]["expr"].count(metric) == 2
 
 
 def _receivers() -> dict[str, dict[str, Any]]:

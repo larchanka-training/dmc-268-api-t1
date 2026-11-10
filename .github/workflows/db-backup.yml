@@ -1,0 +1,152 @@
+# Копия базы стенда вне сервера (#280,
+# openspec/changes/archive/2026-11-10-db-backup-off-server).
+# Контейнер dmc268-postgres-backup снимает pg_dump раз в сутки на тот же диск;
+# здесь самая свежая копия уезжает с сервера зашифрованной и сразу
+# проверяется восстановлением в чистую базу.
+#
+# Хранилище — артефакты GitHub Actions, 90 суток (потолок публичного репо).
+# Про хранилище знают ровно два шага: «Сохранить копию» и «Взять копию».
+# Остальное — скрипты .github/scripts/db-backup/, они работают с файлом
+# <имя>.dump.enc и от хранилища не зависят. Переезд на S3-совместимое
+# хранилище — замена этих двух шагов (infra/README.md, «Копии вне сервера»).
+#
+# Письмо о красном плановом прогоне GitHub шлёт одному человеку — тому, кто
+# последним менял строку `cron` (или включил workflow снова), а если расписание
+# не запустилось (нагрузка, автоотключение через 60 дней тишины в репозитории),
+# нет ни прогона, ни письма. Поэтому после проверки восстановления job
+# `mark-success` пишет на стенде отметку для node-exporter, и команду в Telegram
+# зовёт алерт OffsiteBackupStale: отметки нет дольше 28 часов.
+name: DB backup
+
+on:
+  # После суточной копии на сервере (сейчас около 20:01 UTC; после пересоздания
+  # контейнера копий время сдвигается, поэтому берётся любая копия моложе 26 ч).
+  schedule:
+    - cron: "17 21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Два выноса сразу не нужны, и обрывать идущий тоже незачем.
+concurrency:
+  group: db-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Environment `stand` пускает только develop: ручной запуск с другой ветки
+    # отклоняется до первого шага. Секретов отсюда в нём нет: ключ копии и
+    # SSH-ключ — секреты репозитория, пользователь и адрес — организации.
+    # deployment: false — без записи о деплое, иначе последним «деплоем» стенда
+    # каждую ночь становился бы этот вынос.
+    environment:
+      name: stand
+      deployment: false
+    outputs:
+      name: ${{ steps.pull.outputs.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/stand-ssh
+        with:
+          ssh_key: ${{ secrets.VPS_DMC268_KEY_T1 }}
+          ssh_user: ${{ secrets.VPS_DMC268_U }}
+          host: ${{ vars.VPS_DMC268_IP_T1 }}
+
+      # Без ключа скрипт падает до чтения копии: открытой она не загружается.
+      - name: Взять свежую копию со стенда и зашифровать
+        id: pull
+        env:
+          # Тот же ключ, что у аварийной копии состояния OpenTofu в deploy.yml.
+          STATE_BACKUP_KEY: ${{ secrets.STATE_BACKUP_KEY_DMC268_T1 }}
+        run: .github/scripts/db-backup/pull.sh "$RUNNER_TEMP/db-backup"
+
+      # Шаг хранилища: при переезде заменяется загрузкой в бакет.
+      - name: Сохранить копию
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.pull.outputs.name }}
+          path: ${{ steps.pull.outputs.file }}
+          retention-days: 90
+          if-no-files-found: error
+
+  restore-check:
+    needs: backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Образ стенда (pgvector/pgvector:pg18 в infra/postgres.tf), закреплённый
+    # digest: та же мажорная версия, и копия с расширением vector, если его
+    # создаст миграция, тоже восстановится.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47
+        env:
+          POSTGRES_USER: dmc268
+          POSTGRES_PASSWORD: dmc268
+          POSTGRES_DB: dmc268
+        options: >-
+          --health-cmd "pg_isready -U dmc268 -d dmc268"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Шаг хранилища: при переезде заменяется скачиванием из бакета.
+      - name: Взять копию
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.backup.outputs.name }}
+          path: ${{ runner.temp }}/db-backup
+
+      - name: Восстановить копию в чистую базу и проверить
+        env:
+          STATE_BACKUP_KEY: ${{ secrets.STATE_BACKUP_KEY_DMC268_T1 }}
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          PGUSER: dmc268
+          PGDATABASE: dmc268
+          NAME: ${{ needs.backup.outputs.name }}
+        run: .github/scripts/db-backup/verify.sh "$RUNNER_TEMP/db-backup/$NAME.dump.enc"
+
+  # Отметка для алерта OffsiteBackupStale — только после проверки
+  # восстановления: невосстановимая копия свежей не считается. Пишет её
+  # контейнер копий в свой том /metrics, который node-exporter читает как
+  # textfile (рядом с backup.prom от backup.sh): у хоста прав на том может не
+  # быть, у контейнера они есть. Время — часов сервера, файл — через .tmp и mv,
+  # чтобы node-exporter не прочитал его наполовину.
+  mark-success:
+    needs: restore-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: stand
+      deployment: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/stand-ssh
+        with:
+          ssh_key: ${{ secrets.VPS_DMC268_KEY_T1 }}
+          ssh_user: ${{ secrets.VPS_DMC268_U }}
+          host: ${{ vars.VPS_DMC268_IP_T1 }}
+
+      - name: Записать отметку о вынесенной копии на стенде
+        run: |
+          ssh stand 'docker exec -i dmc268-postgres-backup sh -eu' <<'SH'
+          f=/metrics/offsite-backup.prom
+          {
+            echo '# HELP dmc268_offsite_backup_last_success_timestamp_seconds Время последней вынесенной и проверенной восстановлением копии базы (unix).'
+            echo '# TYPE dmc268_offsite_backup_last_success_timestamp_seconds gauge'
+            echo "dmc268_offsite_backup_last_success_timestamp_seconds $(date -u +%s)"
+          } > "$f.tmp"
+          mv "$f.tmp" "$f"
+          SH
