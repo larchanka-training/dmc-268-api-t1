@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-11-11
+# Поведение сервиса не меняется: CI проверяет, что стек из docker-compose.yml
+# поднимается с чистого клона.
+skip_specs: true

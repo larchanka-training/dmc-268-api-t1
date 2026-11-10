@@ -70,6 +70,7 @@ uv run pre-commit install   # перед каждым коммитом гоня�
 ### Самый короткий путь: Docker Compose
 
 ```bash
+cp .env.example .env
 docker compose up
 ```
 

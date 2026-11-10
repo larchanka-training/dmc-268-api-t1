@@ -223,6 +223,26 @@ jobs:
           path: build-base
           key: build-metrics-${{ github.sha }}
 
+  # Новичок с чистой машины (#386): `cp .env.example .env && docker compose up`
+  # поднимает базу, брокер, миграции, API и воркер, и API отвечает /health.
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cp .env.example .env
+      - run: docker compose up -d --wait --wait-timeout 300
+      - run: curl -fsS --retry 5 --retry-all-errors http://127.0.0.1:8000/health
+      # У воркера нет healthcheck: --wait ждал только «running», а упавший на старте воркер это проскочил бы.
+      - run: test -n "$(docker compose ps -q --status running worker)"
+      - name: Состояние и логи при сбое
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail 200
+
   # Конфигурация стенда без стенда: формат, валидность и логика infra/*.tf и
   # проверок переменных (`tofu test`, infra/tests/). Провайдер docker в тестах
   # подменён mock_provider: ни docker.sock, ни сервера job не трогает.
