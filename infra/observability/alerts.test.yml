@@ -205,6 +205,101 @@ tests:
               summary: "Прогоны падают: 75% за 30 минут"
               description: "Доля прогонов в failed выше 30 %. Код ошибки шага — в GET /api/v1/reviews/{id}/steps и в спанах review.<этап>."
 
+  # Отказы по балансу не разбавляют долю упавших: три failed и один completed
+  # на десять refused — всё равно 75 %, а не 3 из 14.
+  - interval: 5m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
+        values: "0 0 0 1 2 3"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 1"
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 2 4 6 8 10"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewRunsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+            exp_annotations:
+              summary: "Прогоны падают: 75% за 30 минут"
+              description: "Доля прогонов в failed выше 30 %. Код ошибки шага — в GET /api/v1/reviews/{id}/steps и в спанах review.<этап>."
+
+  # Порог «хотя бы три прогона» тоже без отказов: одно падение на три отказа —
+  # не 100 % упавших.
+  - interval: 5m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
+        values: "0 0 0 0 0 1"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 0"
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 1 1 2 2 3"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewRunsFailing
+        exp_alerts: []
+
+  # Отказывают все прогоны: ревью нет, ReviewRunsFailing молчит, горит отказ.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 1 2 3 4 5 6"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 0 0"
+      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
+        values: "0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: worker
+            exp_annotations:
+              summary: "Прогоны отказаны по балансу: 100% за час"
+              description: "Больше половины прогонов за час завершены без денег (coverage_reason = balance). Проверьте балансы и плательщиков репозиториев и оценку стоимости прогона."
+      - eval_time: 60m
+        alertname: ReviewRunsFailing
+        exp_alerts: []
+
+  # Одиночные отказы — норма: два refused на двенадцать completed за час.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 0 1 1 2 2 2"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 2 4 6 8 10 12"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts: []
+
+  # Порог `>= 3` пройден, но отказов меньше половины: четыре refused на двенадцать completed.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 0 1 2 3 3 4"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 2 4 6 8 10 12"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts: []
+
+  # Доля 100 %, но в тихий час отказов два, меньше порога `>= 3`.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 0 0 0 0 1 2"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts: []
+
   # DLQ не пуста дольше 5 минут; воркер не подписан на очередь.
   - interval: 1m
     input_series:
@@ -427,6 +522,74 @@ tests:
             exp_annotations:
               summary: "Расход токенов модели неизвестен"
               description: "Ряда review_llm_tokens_month нет 15 минут: коллектор не читает review_runs, алерт бюджета не работает. Смотрите логи dmc268-otelcol (receiver sqlquery)."
+
+  # Бюджет в евро: 16 € — молчит (ровно 80 %), 17 € — предупреждение, 20 € — критический.
+  # Первая проверка — с 1m: на 0m правило записи бюджета ещё не вычислено, и молчание пустое.
+  - interval: 1m
+    input_series:
+      - series: 'review_llm_cost_eur_month{job="collector"}'
+        values: "16 16 17 20"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: LlmCostBudgetNearLimit
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: LlmCostBudgetNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm
+              job: collector
+            exp_annotations:
+              summary: "Израсходовано 85% месячного бюджета модели в евро"
+              description: "Стоимость вызовов модели с начала месяца выше 80 % бюджета (dmc268:llm_cost_budget_eur_month в alerts.yml)."
+      - eval_time: 2m
+        alertname: LlmCostBudgetExceeded
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: LlmCostBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: llm
+              job: collector
+            exp_annotations:
+              summary: "Месячный бюджет модели в евро исчерпан: 100%"
+              description: "Стоимость вызовов модели с начала месяца превысила бюджет (dmc268:llm_cost_budget_eur_month в alerts.yml)."
+
+  # Баланс Eurorouter: 5 € — молчит, 4,99 € — предупреждение, 1 € — ещё не критический,
+  # 0,99 € — критический.
+  - interval: 1m
+    input_series:
+      - series: 'review_llm_provider_balance_eur{job="dmc-268-worker"}'
+        values: "5 4.99 1 0.99"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: LlmProviderBalanceLow
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: LlmProviderBalanceLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm-provider
+              job: dmc-268-worker
+            exp_annotations:
+              summary: "Баланс Eurorouter 4.99 €"
+              description: "Остаток на счёте Eurorouter ниже 5 €: пополните баланс, пока провайдер не начал отвечать 402."
+      - eval_time: 2m
+        alertname: LlmProviderBalanceCritical
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: LlmProviderBalanceCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: llm-provider
+              job: dmc-268-worker
+            exp_annotations:
+              summary: "Баланс Eurorouter 0.99 €"
+              description: "Остаток на счёте Eurorouter ниже 1 €: ниже 0,10 € провайдер отвечает 402, и прогоны падают. Пополните баланс."
 
   # Диск: 10 % свободно — DiskSpaceLow, 3 % — ещё и DiskSpaceCritical.
   - interval: 1m

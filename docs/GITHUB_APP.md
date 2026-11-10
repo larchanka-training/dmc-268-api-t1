@@ -290,7 +290,8 @@ larchanka-training/dmc-268-api-t1    [●━━] вкл     Настройки
 | `eurorouter` | hosted-провайдер Eurorouter основным и единственным, код проверяемых репозиториев уходит ему на каждом прогоне | стенд (`deploy.yml`: `TF_VAR_llm_backend: eurorouter`; Ollama там нет) |
 
 За каждый прогон на стенде платит ключ `AI_DMC268_T1`, тот же, что у `eval.yml`; модель задаёт
-файл `.github/eurorouter-model`, а уровень рассуждений задаёт `.github/eurorouter-reasoning-effort`. Лимитов и баланса нет: сколько прогонов, столько и трат.
+файл `.github/eurorouter-model`, а уровень рассуждений задаёт `.github/eurorouter-reasoning-effort`. Воркер сверяет баланс плательщика репозитория до вызова модели (`BILLING_ENABLED`, спека
+`review-billing`): прогон без денег до модели не доходит и получает check run `failure`.
 Ревьюятся только свои PR (`app/domain/webhook.py`): из ветки самого репозитория (запушить её
 может только тот, у кого есть право записи; членство в организации тут не проверяется, скрытое
 GitHub присылает как `CONTRIBUTOR`) или из форка от автора с `author_association` `OWNER`,

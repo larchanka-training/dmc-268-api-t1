@@ -61,16 +61,27 @@ def test_container_down_watches_real_container_names() -> None:
 
 
 def test_token_spend_comes_from_the_collector_pipeline() -> None:
-    """Ряд, по которому считается бюджет, собирает sqlquery основного коллектора."""
+    """Ряды, по которым считаются бюджеты токенов и евро, собирает sqlquery основного коллектора."""
     config = yaml.safe_load(OTELCOL.read_text(encoding="utf-8"))
     receiver = config["receivers"]["sqlquery/llm-tokens"]
     names = [m["metric_name"] for q in receiver["queries"] for m in q["metrics"]]
-    assert names == ["review_llm_tokens_month"]
+    assert names == ["review_llm_tokens_month", "review_llm_cost_eur_month"]
     assert "sqlquery/llm-tokens" in config["service"]["pipelines"]["metrics"]["receivers"]
-    # Только колонки, на которые у роли мониторинга есть SELECT (ревизия 0017).
+    # Только колонки, на которые у роли мониторинга есть SELECT (ревизии 0017 и 0021).
     sql = receiver["queries"][0]["sql"]
-    assert set(re.findall(r"\b(tokens_used|created_at|\w+_id|id)\b", sql)) <= {"tokens_used", "created_at"}
+    columns = set(re.findall(r"\b(tokens_used|cost_eur|created_at|\w+_id|id)\b", sql))
+    assert columns <= {"tokens_used", "cost_eur", "created_at"}
     assert "review_llm_tokens_month" in _alerts()["LlmBudgetNearLimit"]["expr"]
+    assert "review_llm_cost_eur_month" in _alerts()["LlmCostBudgetNearLimit"]["expr"]
+
+
+def test_provider_balance_rules_read_the_worker_gauge() -> None:
+    metric = "review_llm_provider_balance_eur"
+    assert f'"{metric}"' in (REPO / "app" / "infrastructure" / "telemetry.py").read_text(encoding="utf-8")
+    for name in ("LlmProviderBalanceLow", "LlmProviderBalanceCritical"):
+        assert metric in _alerts()[name]["expr"]
+        # Общий service с бюджетом дал бы inhibit_rules глушить низкий баланс весь месяц.
+        assert _alerts()[name]["labels"]["service"] != _alerts()["LlmBudgetExceeded"]["labels"]["service"]
 
 
 def test_backup_mark_matches_the_rule() -> None:

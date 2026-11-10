@@ -242,7 +242,7 @@ def _collector_token_query() -> str:
 
 
 def test_the_monitor_role_reads_only_the_token_columns_of_runs(migrated) -> None:
-    """Ревизия 0017: роль мониторинга читает расход токенов, но не прогоны.
+    """Ревизии 0017 и 0021: роль мониторинга читает расход токенов и стоимость, но не прогоны.
 
     Запрос receiver-а sqlquery коллектора проходит под ролью, а чтение любой
     другой колонки review_runs — нет. Запрос читается из самого
@@ -251,8 +251,9 @@ def test_the_monitor_role_reads_only_the_token_columns_of_runs(migrated) -> None
     """
     with migrated.connect() as conn, conn.begin():
         conn.execute(text(f"SET LOCAL ROLE {ROLE}"))
-        tokens = conn.execute(text(_collector_token_query())).scalar_one()
+        tokens, cost_eur = conn.execute(text(_collector_token_query())).one()
     assert tokens >= 0
+    assert cost_eur >= 0
 
     # Отказ прерывает транзакцию: откатываем её явно, а не коммитом на выходе.
     with migrated.connect() as conn:

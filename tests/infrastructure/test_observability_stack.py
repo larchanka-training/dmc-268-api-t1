@@ -869,6 +869,9 @@ def test_dashboard_queries_cover_the_expected_signals() -> None:
         "container_memory_usage_total_bytes",
         "nginx_connections_current",
         '{service_name="dmc268-ui"}',
+        "review_llm_cost_eur_month",
+        "dmc268:llm_cost_budget_eur_month",
+        "review_llm_provider_balance_eur",
     )
     missing = [signal for signal in expected if signal not in expressions]
     assert not missing, f"нет сигналов в выражениях дашборда: {missing}"

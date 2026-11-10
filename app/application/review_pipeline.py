@@ -31,7 +31,11 @@ from app.application.ports import UnitOfWork
 from app.application.ports.cache_store import CacheStore
 from app.application.ports.definition_extractor import DefinitionExtractor
 from app.application.ports.llm_gateway import LlmGateway, LlmMeter, RetryListener
-from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
+from app.application.ports.run_outcome import (
+    NO_RUN_OUTCOME,
+    RUN_REFUSED,
+    RunOutcomeRecorder,
+)
 from app.application.ports.stage_tracer import NO_STAGE_TRACING, StageTracer
 from app.application.ports.unit_of_work import RunStateConflict
 from app.application.ports.vcs_gateway import VcsGateway
@@ -430,8 +434,9 @@ def run_review(
             )
         steps.finish()
         if run.coverage_reason is CoverageReason.BALANCE:
-            # В `review_runs_total` не пишется: отказ не ревью, в доле упавших он прятал бы сбои.
             logger.info("денег или плательщика нет, прогон завершён без модели")
+            # Свой исход, не `completed`: в доле упавших отказ прятал бы настоящие сбои.
+            run_outcome.run_finished(RUN_REFUSED)
             close_abandoned_steps(uow, run.id, now=now(), known=steps.unwritten)
             block_head_of_failed_run(
                 uow,

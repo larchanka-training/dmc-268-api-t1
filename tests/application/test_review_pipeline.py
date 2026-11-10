@@ -1963,8 +1963,8 @@ def test_a_payer_without_enough_money_gets_no_model_call() -> None:
     assert ReviewRunStage.ANALYSING not in _stages(uow)
     assert uow.findings.list_for_run(run.id) == [] and vcs.publications == []
     assert vcs.checks[-1] == build_unpaid_check(has_payer=True)
-    # Отказ не ревью: в доле упавших `review_runs_total` он прятал бы настоящие сбои.
-    assert outcome.statuses == []
+    # Отдельный исход: в доле упавших отказ прятал бы сбои, без ряда не виден массовый отказ.
+    assert outcome.statuses == ["refused"]
     assert uow.billing.balance(PAYER) == Decimal("0.01")
     assert all(step.status is ReviewRunStepStatus.COMPLETED for step in uow.review_run_steps.list_for_run(run.id))
 

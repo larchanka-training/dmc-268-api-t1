@@ -1138,6 +1138,15 @@ def test_pool_instruments_are_counted_in_connections(
     assert units[CONNECTION_MAX] == "{connection}"
 
 
+def test_the_provider_balance_gauge_skips_an_unknown_balance(pool_reader: InMemoryMetricReader) -> None:
+    """Остаток есть — точка ряда; `None` (опрос не удался) — точки нет."""
+    balances: list[float | None] = [12.5, None]
+    telemetry.instrument_llm_balance(lambda: balances.pop(0))
+
+    assert metric_snapshot(pool_reader)[("review_llm_provider_balance_eur", ())] == (12.5, None)
+    assert ("review_llm_provider_balance_eur", ()) not in metric_snapshot(pool_reader)
+
+
 def test_a_non_queuepool_engine_gets_no_pool_metrics(
     pool_reader: InMemoryMetricReader,
 ) -> None:
@@ -1386,6 +1395,7 @@ def test_sql_spans_carry_only_the_stable_attribute_names(
 class _Ok(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.send_response(200)
+        self.send_header("x-request-id", "req-1")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -1418,6 +1428,8 @@ def test_httpx_spans_carry_the_stable_attribute_names(
     assert attributes["http.request.method"] == "GET"
     assert attributes["url.full"] == f"{http_server}/ping"
     assert attributes["http.response.status_code"] == 200
+    # `x-request-id` ответа — на спане: по нему поддержка провайдера модели ищет запрос.
+    assert attributes["review.llm.request_id"] == "req-1"
     assert "http.method" not in attributes
     assert "http.url" not in attributes
 
@@ -1496,7 +1508,7 @@ def test_priming_starts_every_run_outcome_series_at_zero(
     telemetry.prime_run_outcomes()
 
     after = metric_snapshot(metric_reader)
-    for status in ("completed", "failed"):
+    for status in ("completed", "failed", "refused"):
         assert ("review_runs_total", (("status", status),)) in after
         value, _ = metric_delta(metric_reader, before, "review_runs_total", status=status)
         assert value == 0

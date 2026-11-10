@@ -610,6 +610,74 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Расход модели за месяц, €",
+      "description": "Стоимость вызовов модели прогонов с начала месяца (UTC) по review_runs.cost_eur и месячный бюджет из alerts.yml: выше 80 % — LlmCostBudgetNearLimit, 100 % — LlmCostBudgetExceeded.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "review_llm_cost_eur_month",
+          "legendFormat": "расход",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "dmc268:llm_cost_budget_eur_month",
+          "legendFormat": "бюджет",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Баланс Eurorouter, €",
+      "description": "Остаток на счёте Eurorouter (/credits, опрос воркером раз в 5 минут): ниже 5 € — LlmProviderBalanceLow, ниже 1 € — LlmProviderBalanceCritical, ниже 0,10 € провайдер отвечает 402. Разрыв линии — опросы не удаются дольше 5 минут.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "max(review_llm_provider_balance_eur)",
+          "legendFormat": "остаток",
+          "range": true,
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

@@ -380,6 +380,36 @@ def test_server_error_fails_at_once_without_trying_other_keys() -> None:
     assert len(seen) == 1
 
 
+def test_provider_error_is_logged_with_its_request_id_and_without_the_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    body = {"error": {"message": "текст ответа провайдера"}}
+    handler, _ = _recording(
+        httpx.Response(429, headers={"x-request-id": "req-429"}),
+        httpx.Response(402, json=body, headers={"x-request-id": "req-402"}),
+    )
+
+    with caplog.at_level(logging.WARNING), pytest.raises(LlmError):
+        _gateway(handler).complete(REQUEST)
+
+    records = [(r.getMessage(), getattr(r, "review.llm.request_id")) for r in caplog.records]
+    assert records == [
+        ("Eurorouter: ключ 1 из 2 отвергнут (HTTP 429)", "req-429"),
+        ("Eurorouter: HTTP 402", "req-402"),
+    ]
+
+
+def test_provider_error_without_a_request_id_is_still_logged(caplog: pytest.LogCaptureFixture) -> None:
+    handler, _ = _recording(httpx.Response(503))
+
+    with caplog.at_level(logging.WARNING), pytest.raises(LlmError):
+        _gateway(handler).complete(REQUEST)
+
+    (record,) = caplog.records
+    assert record.getMessage() == "Eurorouter: HTTP 503"
+    assert not hasattr(record, "review.llm.request_id")
+
+
 def test_answer_off_the_schema_is_retried_through_the_shared_loop() -> None:
     handler, seen = _recording(
         httpx.Response(200, json=_reply("не json")), httpx.Response(200, json=_reply())
