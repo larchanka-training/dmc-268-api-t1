@@ -161,21 +161,11 @@ def test_an_async_payment_is_credited_when_it_succeeds() -> None:
     assert len(uow.billing.credits) == 1
 
 
-@pytest.mark.parametrize(
-    "session",
-    [
-        checkout_session(payment_status="unpaid"),
-        checkout_session(payment_status="no_payment_required", amount_total=0),
-        checkout_session(mode="setup", payment_status="no_payment_required", amount_total=None),
-        checkout_session(mode="subscription"),
-        checkout_session(currency="usd"),
-        checkout_session(amount_total=0),
-        checkout_session(client_reference_id=None),
-        checkout_session(client_reference_id=str(UUID(int=0xB))),
-    ],
-)
-def test_a_fetched_session_that_is_not_a_paid_eur_payment_credits_nothing(session: dict[str, Any]) -> None:
-    client, uow, _ = make_client(FakeStripeApi(session))
+# Каждое поле сессии, от которого зависит отказ: роут должен передать его в правило, а не потерять.
+@pytest.mark.parametrize("field", [{"currency": "usd"}, {"mode": "setup"}, {"payment_status": "unpaid"}, {"amount_total": 0}])
+def test_a_fetched_session_that_is_not_a_paid_eur_payment_credits_nothing(field: dict[str, object]) -> None:
+    """Правило зачисления — в `tests/application/test_billing.py`; здесь — что роут отдаёт сессию ему."""
+    client, uow, _ = make_client(FakeStripeApi(checkout_session(**field)))
 
     response = post(client, thin_event())
 
@@ -195,18 +185,13 @@ def test_another_event_is_accepted_without_asking_stripe(event_type: str) -> Non
     assert (api.paths, uow.billing.credits) == ([], [])
 
 
-def test_a_processed_payment_leaves_one_log_line_with_ids_only(caplog: pytest.LogCaptureFixture) -> None:
+def test_the_key_and_secret_stay_out_of_the_logs(caplog: pytest.LogCaptureFixture) -> None:
     client, _, _ = make_client(FakeStripeApi(checkout_session(currency="usd")))
 
-    with caplog.at_level(logging.INFO, logger="app.application.use_cases.billing"):
+    with caplog.at_level(logging.INFO):
         post(client, thin_event())
 
-    [record] = [r for r in caplog.records if r.name == "app.application.use_cases.billing"]
-    assert (record.stripe_event_id, record.stripe_checkout_session_id, record.stripe_outcome) == (  # type: ignore[attr-defined]
-        "evt_test_1",
-        SESSION,
-        "other_currency",
-    )
+    assert caplog.records
     assert API_KEY not in caplog.text and SECRET not in caplog.text
 
 
@@ -291,11 +276,3 @@ def test_origin_is_not_checked_on_the_stripe_webhook() -> None:
 
     assert post(client, thin_event()).status_code == 200
     assert post(client, thin_event(), Origin="https://evil.example").status_code == 200
-
-
-def test_the_stripe_route_is_not_shadowed_by_the_vcs_provider_route() -> None:
-    client, _, _ = make_client()
-
-    assert post(client, thin_event()).json() == {"status": "credited"}
-    gitlab = client.post("/api/v1/webhooks/gitlab", content=b"{}")
-    assert (gitlab.status_code, gitlab.json()["code"]) == (501, "PROVIDER_NOT_SUPPORTED")

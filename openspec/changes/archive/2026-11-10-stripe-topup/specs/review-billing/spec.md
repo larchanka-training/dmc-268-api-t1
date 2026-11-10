@@ -21,12 +21,12 @@
 
 ### Requirement: Зачисление оплаты Stripe
 
-По `v1.checkout.session.completed` или `v1.checkout.session.async_payment_succeeded` сервис SHALL запросить сессию Checkout у Stripe и при `mode = payment`, `payment_status = paid` и `currency = eur` SHALL зачислить `amount_total / 100` € аккаунту из `client_reference_id` с `credited_by = stripe`. Иначе SHALL быть `200` без зачисления и строка лога с id; прочие события — `200` без запроса. Сбой запроса SHALL давать `502 PAYMENT_PROVIDER_UNAVAILABLE`, сбой базы — `5xx`.
+По `v1.checkout.session.completed` или `v1.checkout.session.async_payment_succeeded` сервис SHALL запросить сессию Checkout у Stripe и при `mode = payment`, `payment_status = paid` и `currency = eur` SHALL зачислить `amount_total / 100` € аккаунту из `client_reference_id` с `credited_by = stripe`. Ответ `200` SHALL нести `status`: `credited`, `duplicate` или `ignored`. Оплаченную сессию без зачисления SHALL писать в лог предупреждением с id события и сессии.
 
 #### Scenario: Оплата картой
 
 - **WHEN** приходит `v1.checkout.session.completed`, а сессия у Stripe — `mode = payment`, `payment_status = paid`, `currency = eur`, `amount_total = 1000`, `client_reference_id` пользователя `alice`
-- **THEN** ответ `200`, `alice` зачислено 10 € с `credited_by = stripe`
+- **THEN** ответ `200` с `status = credited`, `alice` зачислено 10 € с `credited_by = stripe`
 
 #### Scenario: Асинхронная оплата
 
@@ -35,28 +35,33 @@
 
 #### Scenario: Сессия без оплаты
 
-- **WHEN** сессия события — `mode = setup` с `payment_status = no_payment_required`, или `amount_total = 0`
-- **THEN** ответ `200`, зачисления нет
+- **WHEN** сессия события — `mode = setup` с `payment_status = no_payment_required` или `payment_status = unpaid`
+- **THEN** ответ `200` с `status = ignored`, зачисления нет, в логе строка без предупреждения
 
-#### Scenario: Другая валюта
+#### Scenario: Подписка, другая валюта или нулевая сумма
 
-- **WHEN** оплаченная сессия в `usd`
-- **THEN** ответ `200`, зачисления нет, в логе строка с id события и сессии
+- **WHEN** оплаченная сессия с `mode = subscription`, в `usd` или с `amount_total = 0`
+- **THEN** ответ `200` с `status = ignored`, зачисления нет, в логе предупреждение с id события и сессии
 
 #### Scenario: Неизвестный пользователь
 
 - **WHEN** `client_reference_id` сессии пуст или не id пользователя сервиса
-- **THEN** ответ `200`, зачисления нет, в логе строка с id события и сессии
+- **THEN** ответ `200` с `status = ignored`, зачисления нет, в логе предупреждение с id события и сессии
 
 #### Scenario: Прочее событие
 
 - **WHEN** приходит подписанное thin-событие `v1.checkout.session.expired`
-- **THEN** ответ `200`, запроса к Stripe нет, журнал не меняется
+- **THEN** ответ `200` с `status = ignored`, запроса к Stripe нет, журнал не меняется
 
 #### Scenario: Stripe не отдал сессию
 
 - **WHEN** запрос сессии упал по тайм-ауту или Stripe ответил ошибкой
 - **THEN** ответ `502` с `code = PAYMENT_PROVIDER_UNAVAILABLE`, журнал не меняется, Stripe повторит доставку
+
+#### Scenario: Сбой базы
+
+- **WHEN** при зачислении недоступна база
+- **THEN** ответ `5xx`, Stripe повторит доставку
 
 ### Requirement: Одно зачисление на сессию оплаты Stripe
 
@@ -65,12 +70,12 @@
 #### Scenario: Повтор доставки
 
 - **WHEN** одно и то же событие оплаты доставлено дважды
-- **THEN** оба ответа `200`, зачисление одно
+- **THEN** оба ответа `200`, второй — с `status = duplicate`, зачисление одно
 
 #### Scenario: Два события одной сессии
 
 - **WHEN** после зачисления по `v1.checkout.session.completed` приходит `v1.checkout.session.async_payment_succeeded` той же сессии
-- **THEN** ответ `200`, второго зачисления нет
+- **THEN** ответ `200` с `status = duplicate`, второго зачисления нет
 
 #### Scenario: Одновременные доставки
 
@@ -79,7 +84,7 @@
 
 ### Requirement: Алерт на отказы вебхука Stripe
 
-Алерт `StripeWebhookFailing` SHALL гореть, когда за 6 часов больше половины ответов `POST /api/v1/webhooks/stripe` — 4xx или 5xx и таких ответов хотя бы два. Ответы других ручек SHALL NOT в него входить.
+Алерт `StripeWebhookFailing` SHALL гореть, когда за 6 часов больше половины ответов `POST /api/v1/webhooks/stripe` — 4xx или 5xx. Первый ответ с каждым кодом после старта API метрика не видит: ряд появляется сразу с единицей. Поэтому отказ с кодом, которого после старта ещё не было, алерт не зажигает: нужен хотя бы второй такой же. Ответы других ручек SHALL NOT в него входить.
 
 #### Scenario: Секрет не того назначения
 

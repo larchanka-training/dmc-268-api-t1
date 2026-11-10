@@ -103,7 +103,7 @@ MIIE...
 
 ## 4. Пополнение через Stripe
 
-Баланс пользователь пополняет кнопкой Stripe Buy Button в кабинете; сервис получает от Stripe
+Баланс пользователь пополняет по ссылке Stripe Payment Link из кабинета (`https://buy.stripe.com/…?client_reference_id=<id>`); сервис получает от Stripe
 thin-событие, запрашивает по нему сессию Checkout и зачисляет `amount_total / 100` € на баланс
 пользователя из `client_reference_id` — не больше одного раза на сессию (change `stripe-topup`).
 Зачисление не зависит от возврата браузера на `/app/?topup=success`. Возвраты и споры баланс не
@@ -140,8 +140,9 @@ stripe trigger checkout.session.completed
 `?client_reference_id=<id из GET /api/v1/auth/me>`.
 
 Ответ `5xx` (база, тайм-аут запроса сессии) Stripe повторяет сам, но в sandbox — только 3 раза
-за несколько часов. Не дошедшее событие отправляется заново из Workbench: Events → событие →
-Resend; повтор зачисленной сессии ничего не добавит. Падения вебхука видит алерт
+за несколько часов. Не дошедшее событие отправляется заново в течение 15 дней:
+Workbench → назначение событий → Event deliveries → доставка → Retry now, или Dashboard → событие
+→ Resend; повтор зачисленной сессии ничего не добавит. Падения вебхука видит алерт
 `StripeWebhookFailing` (`infra/README.md`, «Алерты»): Stripe о них сам не сообщает.
 
 ## Если не работает
@@ -158,6 +159,6 @@ Resend; повтор зачисленной сессии ничего не до�
 | Нет check run | у App нет Checks: write | права App |
 | Stripe: `503 PAYMENTS_DISABLED` | не задан `STRIPE_WEBHOOK_SECRET` или `STRIPE_API_KEY` | шаг 4, `make stop-local && make run-local` |
 | Stripe: `400 WEBHOOK_SIGNATURE_INVALID` | секрет не того назначения (у `stripe listen` свой) или назначение в формате snapshot | шаг 4: формат Thin и его `whsec_…` |
-| Оплатил, а баланс не вырос; в логе API warning «оплата Stripe обработана» с `stripe_outcome` `unknown_account`, `other_currency` или `malformed` | ссылка без `client_reference_id`, валюта не EUR или сумма не та | сессию найти по `stripe_checkout_session_id` в Workbench, зачислить руками: `make credit-balance` с заметкой `Stripe <cs_…>` |
+| Оплатил, а баланс не вырос; в логе API warning «оплата Stripe обработана» с `stripe_outcome` `unknown_account`, `other_currency`, `malformed` или `not_one_off` | ссылка без `client_reference_id`, валюта не EUR, сумма не та или оформлена подписка | сессию найти по `stripe_checkout_session_id` в Workbench, зачислить руками: `make credit-balance` с заметкой `Stripe <cs_…>` |
 | Stripe: `502 PAYMENT_PROVIDER_UNAVAILABLE` | ключ не restricted с Checkout Sessions: Read, ключ другого аккаунта или режима | тип ошибки — в `tail -F .local/api.log` (`error_type`) |
 | «порт 8000 уже занят» | работает `docker compose up` или прошлый `run-local` | `docker compose stop api worker` или `make stop-local` |

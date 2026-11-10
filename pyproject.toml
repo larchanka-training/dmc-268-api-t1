@@ -39,8 +39,8 @@ dependencies = [
     # OTLP/HTTP-экспортёры трейсов (затем и метрик) — ядро OTel, версия идёт
     # в одной серии с SDK: обновляется вместе с ней.
     "opentelemetry-exporter-otlp-proto-http>=1.45.1",
-    # Проверка подписи вебхука Stripe (`app/api/stripe_webhook.py`). Минорные релизы SDK меняют
-    # типы под новую версию API Stripe, поэтому серия зафиксирована.
+    # Проверка подписи вебхука Stripe (`app/api/stripe_webhook.py`). Мажорный релиз меняет
+    # версию API Stripe — серия 16.x зафиксирована, точную версию держит uv.lock.
     "stripe~=16.1",
 ]
 

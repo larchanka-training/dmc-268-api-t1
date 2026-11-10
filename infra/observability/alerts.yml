@@ -219,22 +219,24 @@ groups:
       # нашего эндпоинта не сообщает, а в sandbox повторяет доставку всего 3 раза
       # за несколько часов — потом оплата так и останется незачисленной. Считаются
       # и 4xx: 400 — секрет не того назначения, 503 — приём выключен на стенде.
-      # Событий мало (одно-два на пополнение), поэтому окно 6 часов и порог в два
-      # отказа: одиночный сбой, за которым пошли 200, не алерт.
+      # Событий мало (одно-два на пополнение), поэтому окно 6 часов; одиночный
+      # сбой, за которым пошли 200, не алерт. Порога по числу отказов нет: ряд
+      # кода появляется сразу с 1, и `increase()` первый отказ с новым кодом не
+      # видит (как у prime_run_outcomes, #324) — доля выше нуля уже значит хотя
+      # бы два отказа с одним кодом.
       - alert: StripeWebhookFailing
         expr: |
           (
             sum(increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code=~"[45].."}[6h]))
             / sum(increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe"}[6h]))
           ) > 0.5
-          and sum(increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code=~"[45].."}[6h])) >= 2
         labels:
           severity: warning
           # Свой service: критические алерты api (Api5xxSpike) иначе глушили бы его через inhibit_rules.
           service: stripe
         annotations:
           summary: "Вебхук Stripe отказывает: {{ $value | humanizePercentage }} доставок за 6 часов"
-          description: "Больше половины доставок Stripe за 6 часов получили 4xx или 5xx — оплаты не зачисляются. Код ответа — в логах API по url.path /api/v1/webhooks/stripe: 400 — секрет назначения, 502 — ключ или API Stripe, 503 — секреты не заданы. Не дошедшие события отправить заново из Workbench (docs/LOCAL_RUN.md, «Пополнение через Stripe»)."
+          description: "Больше половины доставок Stripe за 6 часов получили 4xx или 5xx — оплаты не зачисляются. Код ответа — в логах API по url.path /api/v1/webhooks/stripe: 400 — секрет назначения, 502 — ключ или API Stripe, 503 — секреты не заданы. Одни 400 и ни одного 200 бывают и от сканера, а не от Stripe: сверить с Event deliveries назначения в Workbench. Не дошедшие события отправить заново из Workbench (docs/LOCAL_RUN.md, «Пополнение через Stripe»)."
 
       # Прогоны падают в воркере, и 5xx у API этого не покажет: доля failed
       # среди завершённых за 30 минут больше 30 % при хотя бы трёх прогонах.

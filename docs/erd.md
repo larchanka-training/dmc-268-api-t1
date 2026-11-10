@@ -166,6 +166,7 @@ erDiagram
         numeric amount_eur "NUMERIC(20, 10); отрицательная — возврат или корректировка"
         text note
         text credited_by "кто зачислил"
+        text stripe_checkout_session_id "сессия Checkout у зачислений Stripe"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
@@ -337,6 +338,7 @@ refresh под блокировкой `SELECT … FOR UPDATE`; удаляетс�
 | Шаг закрыт целиком или идёт | `ck_review_run_steps_duration`: длительности нет ровно у `running`; `ck_review_run_steps_error_code`: код ошибки есть ровно у `failed`. Длительность и токены не отрицательны. |
 | Счётчик верификатора не отрицателен | `ck_review_runs_verifier_dropped`: `verifier_dropped_findings >= 0` |
 | Резерв — только с плательщиком | `ck_review_runs_estimate`: `estimated_cost_eur IS NULL OR (payer_user_id IS NOT NULL AND estimated_cost_eur >= 0)` |
+| Сессия Stripe зачисляется один раз | Частичный `UNIQUE (stripe_checkout_session_id) WHERE stripe_checkout_session_id IS NOT NULL` (`uq_balance_credits_stripe_checkout_session_id`): повтор события или второе событие той же сессии второго зачисления не дают. У ручных зачислений колонка `NULL`. |
 | Деньги аккаунта не пропадают с ним | `ON DELETE RESTRICT` на `balance_credits.user_id`, `repositories.payer_user_id` и `review_runs.payer_user_id`: аккаунт с зачислениями или оплаченными прогонами не удалить. |
 | Расход модели пишется целиком и не отрицателен | `ck_review_runs_usage`: колонки разбивки и `cost_eur` пусты вместе; при расходе `tokens_used` задан, токены и стоимость `>= 0` |
 | Комментарий публикуется один раз за прогон | `UNIQUE NULLS NOT DISTINCT (review_run_id, finding_id)`. Именно правило для NULL распространяет это ограничение на итоговый комментарий прогона, у которого замечания нет. |

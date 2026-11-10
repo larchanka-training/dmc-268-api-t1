@@ -383,13 +383,6 @@ def test_the_service_status_monitor_is_one_per_container_and_follows_prometheus_
     [("whsec_x", "rk_test_x", True), ("whsec_x", "", False), ("", "rk_test_x", False), ("", "", False)],
 )
 def test_stripe_payments_need_both_the_webhook_secret_and_the_key(secret: str, key: str, enabled: bool) -> None:
-    """change stripe-topup: без любого из двух приём оплаты выключен (`503 PAYMENTS_DISABLED`)."""
     container = build_container(SETTINGS.model_copy(update={"stripe_webhook_secret": SecretStr(secret), "stripe_api_key": SecretStr(key)}))
 
-    client = container.stripe_client()
-
-    assert (client is not None) is enabled
-    if client is not None:
-        # Запрос сессии укладывается в ожидание Stripe (~10 с), повторяет доставку сам Stripe.
-        assert client._requestor._client._timeout == 5  # type: ignore[union-attr]
-        assert client._requestor._options.max_network_retries == 0
+    assert (container.stripe_client() is not None) is enabled

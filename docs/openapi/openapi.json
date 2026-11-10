@@ -7258,7 +7258,7 @@
             "type": "string",
             "format": "uuid",
             "title": "Id",
-            "description": "Id пользователя сервиса. Кнопка оплаты Stripe передаёт его в `client-reference-id`: по нему вебхук находит, чей баланс пополнить."
+            "description": "Id пользователя сервиса. Ссылка оплаты Stripe (Payment Link) передаёт его в параметре `client_reference_id`: по нему вебхук находит, чей баланс пополнить."
           },
           "provider": {
             "$ref": "#/components/schemas/Provider",

@@ -1,15 +1,9 @@
 """Приём thin-событий Stripe: зачисление оплаты Checkout на баланс (change `stripe-topup`).
 
-Путь `/api/v1/webhooks/stripe` лежит под префиксом вебхуков: `Origin` не проверяется, тело
+Адаптер SDK `stripe` на краю: подпись и запрос сессии — здесь, правило зачисления —
+`credit_stripe_checkout`. Путь лежит под префиксом вебхуков: `Origin` не проверяется, тело
 читается с лимитом вебхука (`origin.py`, `body_limit.py`). Роутер подключается раньше
 `/webhooks/{provider}` (`factory.py`), иначе `stripe` ушёл бы в параметр провайдера VCS.
-
-Порядок: без клиента Stripe (`STRIPE_WEBHOOK_SECRET` или `STRIPE_API_KEY` пуст) — `503
-PAYMENTS_DISABLED`, тело не читается; подпись `Stripe-Signature` проверяет SDK по сырому телу с
-допуском 300 с — неверная, устаревшая или тело не thin-событие — `400 WEBHOOK_SIGNATURE_INVALID`;
-событие не об оплате Checkout — `200` без запросов; иначе сессия запрашивается у Stripe (сбой —
-`502 PAYMENT_PROVIDER_UNAVAILABLE`) и обычным словарём уходит в `credit_stripe_checkout`. Сбой
-базы — `500`. На 5xx Stripe повторяет доставку.
 """
 
 import logging
@@ -35,7 +29,11 @@ from app.api.errors import (
     ApiError,
 )
 from app.api.problems import ErrorCode
-from app.application.use_cases.billing import StripeOutcome, credit_stripe_checkout
+from app.application.use_cases.billing import (
+    CheckoutSession,
+    StripeOutcome,
+    credit_stripe_checkout,
+)
 from app.domain.ids import new_id
 
 router = APIRouter(prefix="/api/v1")
@@ -108,8 +106,8 @@ async def receive_stripe_webhook(request: Request) -> StripeWebhookReceived:
     if not isinstance(notification, _PAYMENT_EVENTS):
         return StripeWebhookReceived(status="ignored")
     try:
-        # SDK синхронный: запрос — в threadpool. `to_dict`: с 15-й версии `StripeObject` не словарь.
-        session = (await run_in_threadpool(notification.fetch_related_object)).to_dict()
+        # SDK синхронный: запрос — в threadpool.
+        fetched = await run_in_threadpool(notification.fetch_related_object)
     except stripe.StripeError as error:
         # Только тип и HTTP-статус: в тексте ошибки Stripe бывает маска ключа.
         _log.warning(
@@ -121,6 +119,14 @@ async def receive_stripe_webhook(request: Request) -> StripeWebhookReceived:
             ErrorCode.PAYMENT_PROVIDER_UNAVAILABLE,
             "Stripe не отдал сессию оплаты: ничего не зачислено, Stripe повторит доставку.",
         ) from None
+    session = CheckoutSession(
+        id=fetched.id,
+        mode=fetched.mode,
+        payment_status=fetched.payment_status,
+        currency=fetched.currency,
+        amount_total=fetched.amount_total,
+        client_reference_id=fetched.client_reference_id,
+    )
     outcome = await run_in_threadpool(
         credit_stripe_checkout,
         container.unit_of_work(),

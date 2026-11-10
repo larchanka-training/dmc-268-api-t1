@@ -89,7 +89,7 @@ class UserResponse(BaseModel):
 
     id: UUID = Field(
         description=(
-            "Id пользователя сервиса. Кнопка оплаты Stripe передаёт его в `client-reference-id`: "
+            "Id пользователя сервиса. Ссылка оплаты Stripe (Payment Link) передаёт его в параметре `client_reference_id`: "
             "по нему вебхук находит, чей баланс пополнить."
         )
     )

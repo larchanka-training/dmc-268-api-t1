@@ -6,7 +6,11 @@ from decimal import Decimal
 
 import pytest
 
-from app.application.use_cases.billing import StripeOutcome, credit_stripe_checkout
+from app.application.use_cases.billing import (
+    CheckoutSession,
+    StripeOutcome,
+    credit_stripe_checkout,
+)
 from app.domain.entities import BalanceCredit, User
 from app.domain.enums import Provider
 from app.domain.ids import new_id
@@ -32,15 +36,8 @@ def _stripe_credit(user: User, session_id: str | None = SESSION) -> BalanceCredi
     return BalanceCredit(new_id(), user.id, Decimal(5), "Stripe", "stripe", NOW, session_id)
 
 
-def _paid_session(user: User) -> dict[str, object]:
-    return {
-        "id": SESSION,
-        "mode": "payment",
-        "payment_status": "paid",
-        "currency": "eur",
-        "amount_total": 500,
-        "client_reference_id": str(user.id),
-    }
+def _paid_session(user: User) -> CheckoutSession:
+    return CheckoutSession(SESSION, "payment", "paid", "eur", 500, str(user.id))
 
 
 def _balance(engine, user: User) -> Decimal:

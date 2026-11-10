@@ -154,7 +154,7 @@ class Container:
     _app_slug_retry_at: float
     # Один на процесс: в нём кэш оценки статуса сервиса на SERVICE_STATUS_TTL_SECONDS.
     _service_status: ServiceStatusMonitor
-    # Клиент Stripe для приёма оплаты; `None` — секрет вебхука или ключ не задан, приём выключен.
+    # Клиент Stripe для приёма оплаты; `None` — приём выключен (`app/config.py`).
     _stripe_client: stripe.StripeClient | None
 
     def unit_of_work(self) -> UnitOfWork:

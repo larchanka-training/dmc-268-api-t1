@@ -11,7 +11,7 @@ flowchart TB
     %% External
     GH[GitHub<br/>PR / Push Events]
     GHR[GitHub<br/>Review Comments / Status]
-    PP[Payment Provider<br/>Stripe / etc.]
+    PP[Stripe<br/>Payment Link · Checkout]
     OLLAMA[Ollama · local model<br/>in our network · primary]
     EURO[Eurorouter · hosted LLM API<br/>opt-in fallback only]
     FE[Frontend<br/>PR History · Settings · Usage/Billing · Admin]
@@ -30,11 +30,6 @@ flowchart TB
         VCS["VcsGateway port · GitHub REST adapter<br/>diffs · metadata · file contents · comments · statuses<br/>GitHub App auth · backoff inside the adapter"]
         LGW["LlmGateway port · fallback adapter<br/>Ollama first · Eurorouter only by flag<br/>answer checked against the response model"]
         REPOS["Repository ports + UnitOfWork<br/>SQLAlchemy adapters"]
-    end
-
-    %% Planned seams
-    subgraph PLANNED["Planned seams (designed, not built)"]
-        PAY["Payments / accounts<br/>plans · subscriptions · billing"]
     end
 
     %% Event flow
@@ -60,25 +55,24 @@ flowchart TB
     ORCH -->|runs · findings · context · comments · telemetry| REPOS
     REPOS --> DB
 
-    %% Planned seams
-    API -.-> PAY
-    PAY -.->|subscription / payment| PP
+    %% Payments: the API never creates sessions, it reads the paid one
+    FE -->|Payment Link, browser| PP
+    PP -->|thin event webhook, HTTPS, Stripe-Signature| API
+    API -->|fetch Checkout Session, HTTPS| PP
 
     %% Styling
     classDef external fill:#f5f5f5,stroke:#555,color:#111;
     classDef core fill:#e8f4ff,stroke:#2878c8,color:#111;
-    classDef planned fill:#eef8ef,stroke:#368a4a,color:#111;
     classDef infra fill:#fff6e8,stroke:#c88719,color:#111;
     classDef db fill:#f7eefc,stroke:#8a4db8,color:#111;
 
     class GH,GHR,PP,OLLAMA,EURO,FE external;
     class API,WORKER,ORCH,VCS,LGW,REPOS,PARSE,CACHE core;
-    class PAY planned;
     class MQ infra;
     class DB db;
 ```
 
-Сплошные узлы и связи — построено. Пунктир — запланированные швы (таблица «Designed, not built» в BACKEND_ARCHITECTURE.md): порт не пишется раньше первого вызова, шов описывается заранее и бесплатно.
+Сплошные узлы и связи — построено, пунктир — необязательный путь (фоллбэк Eurorouter). Запланированные швы — таблица «Спроектированы, но не реализованы» в BACKEND_ARCHITECTURE.md: порт не пишется раньше первого вызова, шов описывается заранее и бесплатно.
 
 ### 1.1 Диаграмма контейнеров (C4, уровень Container)
 
@@ -90,6 +84,7 @@ flowchart LR
     DEV["Разработчик<br/>браузер"]
     GH["GitHub<br/>вебхуки · REST API · GitHub App"]
     EURO["Eurorouter<br/>hosted LLM API · OpenAI-совместимый"]
+    STRIPE["Stripe<br/>Payment Link · Checkout · API"]
 
     subgraph HOST["Сервер стенда · Docker · OpenTofu infra/"]
         subgraph PUBLIC["сеть dmc268 · публичный вход"]
@@ -126,10 +121,13 @@ flowchart LR
 
     DEV -->|HTTPS| UI
     GH -->|"вебхук HTTPS, HMAC"| UI
+    DEV -->|"HTTPS: оплата по Payment Link"| STRIPE
+    STRIPE -->|"thin-событие HTTPS, Stripe-Signature"| UI
     UI -->|"HTTP /api/"| API
     UI -.->|"OTLP трейсы браузера, сеть dmc268-otlp"| OTEL
     UI -->|"HTTP /grafana/ с порта 8443, сеть dmc268-grafana-proxy"| GRAF
     API -->|"HTTPS: метаданные PR, check run, OAuth"| GH
+    API -->|"HTTPS: сессия Checkout"| STRIPE
     API -->|"SQL · LISTEN/NOTIFY"| PG
     API -->|"AMQP publish, confirms"| MQ
     MQ -->|"AMQP consume"| WORKER
@@ -163,7 +161,7 @@ flowchart LR
     classDef db fill:#f7eefc,stroke:#8a4db8,color:#111;
     classDef obs fill:#eef8ef,stroke:#368a4a,color:#111;
 
-    class DEV,GH,EURO,UI external;
+    class DEV,GH,EURO,STRIPE,UI external;
     class API,WORKER core;
     class MQ infra;
     class PG,PGR,PGB db;
@@ -193,7 +191,7 @@ flowchart LR
 - **`VcsGateway` (порт; первый адаптер — GitHub REST)**: диффы (unified diff; hunk несёт 3 строки контекста, которые отдаёт GitHub, окно ±30 строк уровня `surrounding` сборка достраивает сама из текста файла), метаданные, комментарии, статусы; аутентификация GitHub App с краткосрочными installation-токенами; содержимое файла на коммите — метод порта `fetch_file` (файлы диффа для уровней `surrounding`, `whole_file` и `ast` — по `head_sha`, `.review/rules.md` — по `base_sha`; лимиты применяет вызывающий). Payload'ы, синтаксис комментариев, auth и backoff — детали адаптера.
 - **`LlmGateway` (порт)**: транспорт к модели. Провайдеры - локальная модель в Ollama (основная) и Eurorouter по OpenAI-совместимому протоколу (фоллбэком при `LLM_HOSTED_FALLBACK=true` или основным и единственным при `LLM_BACKEND=eurorouter` — так работает стенд, #245); порядок не выбирается, а собирается composition root из конфигурации, заглушка - только явным `LLM_BACKEND=stub`. Ответ проверяется Pydantic-моделью из запроса с повторами, ключи Eurorouter ротируются. Сборка промпта и проверка окна модели - чистые функции; адаптер только транспортирует. Включение hosted-фоллбэка - решение по безопасности (крупнейший путь эксфильтрации), не только операционное; детали - в BACKEND_ARCHITECTURE.md.
 - **Данные и телеметрия**: не отдельный сервис. Стоимость прогона — колонки `model`, `tokens_used` (с разбивкой по видам), `cost_eur` (`NUMERIC(20, 10)`), `duration_seconds`, `failure_reason` в `review_runs`; per-call аудит (вызовы LLM и инструментов) — будущий шов, его первый заказчик — биллинг по токенам.
-- **Payments / accounts**: сегодня спроектирована только таблица `accounts` — она придёт вместе со своим портом (регистрация репозитория с проверкой прав на него); тарифы, подписки, Stripe — запланированный шов. Приоритет платных тарифов — требование к обслуживанию очереди (раздел 4.2), код порта оно не затрагивает.
+- **Payments / accounts**: пополнение баланса построено — пользователь платит по Stripe Payment Link, Stripe шлёт thin-событие на `POST /api/v1/webhooks/stripe`, API читает сессию Checkout у Stripe и зачисляет оплату (раздел 4.1, спека `review-billing`). Таблица `accounts` спроектирована и придёт вместе со своим портом (регистрация репозитория с проверкой прав на него); тарифы и подписки — запланированный шов. Приоритет платных тарифов — требование к обслуживанию очереди (раздел 4.2), код порта оно не затрагивает.
 - **Контекст без клона (принцип)**: репозиторий никогда не клонируется целиком и не хранится — Repository Indexer, Vector DB и Repository Storage исключены из дизайна. Весь контекст строится из данных PR через `VcsGateway`: дифф с окнами ±30 строк вокруг изменений (`surrounding`), небольшие изменённые файлы целиком (`whole_file`), AST-окружение изменённых строк (уровень `ast`) и правила владельца из целевой ветки; запланированы сигнатуры из файлов, на которые ссылаются импорты. Анализ кода (tree-sitter за портом `DefinitionExtractor`) идёт над файлами, полученными через `VcsGateway`, и используется кодом оркестратора, а не моделью.
 
 ## 3. Потоки данных
@@ -335,7 +333,7 @@ sequenceDiagram
 - **Аутентификация**: GitHub Apps — краткосрочные installation access токены; утечка ограничена одной инсталляцией, а не всеми репозиториями владельца токена.
 - **Rate Limits & Fallbacks**: повторы — внутри адаптера `VcsGateway`, одним циклом: 5xx — exponential backoff; 429 и 403 лимита (у GraphQL — ещё `RATE_LIMITED` при 200) — пауза по `retry-after`, `x-ratelimit-reset` или минута, в пределах бюджета ожидания (воркер — 60 с на запрос, API — 0: отказ уходит 5xx, доставку переотправит воркер; дифф прогона в кабинете — тоже 0: отказ уходит `502`). Идемпотентности у создания ревью нет: оно повторяется, только если после паузы ревью бота со скрытым маркером прогона в теле не нашлось. Таймаут клиента GitHub — 5 с в API (вебхук), 20 с (подключение — 5 с) у чтений кабинета (дифф прогона, свой шлюз `Container.cabinet_vcs_gateway`) и 30 с в воркере. Ответ `3xx` (переименованный репозиторий) — ошибка шлюза, редирект не выполняется.
 - **Подлинность вебхуков**: GitHub подписывает доставки HMAC по телу; без проверки любой, кто узнал endpoint, может заставить систему ревьюить что угодно и тратить бюджет модели.
-- **Пополнение через Stripe**: `POST /api/v1/webhooks/stripe` принимает thin-события Stripe с подписью `Stripe-Signature` (допуск 300 с) и по событию оплаты читает сессию Checkout restricted-ключом только на чтение сессий; без подписи деньги не зачисляются, повтор события сессию дважды не зачисляет (уникальный индекс по id сессии). Подмена `client_reference_id` пополняет чужой баланс деньгами плательщика — не угроза. Детали — change `stripe-topup` и спека `review-billing`.
+- **Пополнение через Stripe**: `POST /api/v1/webhooks/stripe` принимает подписанные thin-события Stripe и зачисляет оплату сессии Checkout не больше одного раза; угрозы и защита — [`BACKEND_ARCHITECTURE.md`, «Модель угроз»](BACKEND_ARCHITECTURE.md#модель-угроз).
 - **Вход пользователей**: OAuth того же GitHub App выполняет бэкенд (`/api/v1/auth/{provider}/login` и `/callback`, порт `OAuthProvider`). Токен пользователя хранится зашифрованным: по нему GitHub отдаёт репозитории установок, доступные пользователю; ревью по-прежнему ходит installation-токенами. Как приложение, установка и подключение репозитория связаны — [`GITHUB_APP.md`](GITHUB_APP.md). Сессия — случайное значение в httpOnly cookie на общем origin интерфейса и API, в базе только его хэш, выход действует сразу. Изменяющие запросы с сессией сверяют `Origin`. Детали — `openspec/changes/archive/2026-10-17-auth-session/design.md` и спека `user-auth`.
 
 ### 4.2 Формат очереди задач (RabbitMQ) 

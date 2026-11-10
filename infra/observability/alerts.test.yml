@@ -185,13 +185,15 @@ tests:
         alertname: Api5xxSpike
         exp_alerts: []
 
-  # Вебхук Stripe с секретом не того назначения: все доставки за 2 часа — 400.
+  # Ряды вебхука Stripe, как в жизни, появляются с первым запросом (`_` — ряда
+  # ещё нет) сразу с 1, и `increase()` этот первый отсчёт не видит.
+  # Секрет не того назначения: два отказа 400 и ни одной принятой доставки.
   - interval: 30m
     input_series:
       - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="400"}'
-        values: "0 1 2 3 3"
+        values: "_ 1 2"
     alert_rule_test:
-      - eval_time: 2h
+      - eval_time: 1h
         alertname: StripeWebhookFailing
         exp_alerts:
           - exp_labels:
@@ -199,37 +201,35 @@ tests:
               service: stripe
             exp_annotations:
               summary: "Вебхук Stripe отказывает: 100% доставок за 6 часов"
-              description: "Больше половины доставок Stripe за 6 часов получили 4xx или 5xx — оплаты не зачисляются. Код ответа — в логах API по url.path /api/v1/webhooks/stripe: 400 — секрет назначения, 502 — ключ или API Stripe, 503 — секреты не заданы. Не дошедшие события отправить заново из Workbench (docs/LOCAL_RUN.md, «Пополнение через Stripe»)."
+              description: "Больше половины доставок Stripe за 6 часов получили 4xx или 5xx — оплаты не зачисляются. Код ответа — в логах API по url.path /api/v1/webhooks/stripe: 400 — секрет назначения, 502 — ключ или API Stripe, 503 — секреты не заданы. Одни 400 и ни одного 200 бывают и от сканера, а не от Stripe: сверить с Event deliveries назначения в Workbench. Не дошедшие события отправить заново из Workbench (docs/LOCAL_RUN.md, «Пополнение через Stripe»)."
 
-  # Два сбоя 502, но принятых доставок больше: доля 33 %, не алерт.
-  - interval: 30m
-    input_series:
-      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="502"}'
-        values: "0 1 1 2 2"
-      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="200"}'
-        values: "0 1 2 3 4"
-    alert_rule_test:
-      - eval_time: 2h
-        alertname: StripeWebhookFailing
-        exp_alerts: []
-
-  # Единственный сбой — доля 100 %, но меньше порога в два отказа.
+  # Единственный отказ: ряд 503 так и стоит на 1.
   - interval: 30m
     input_series:
       - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="503"}'
-        values: "0 0 1 1 1"
+        values: "_ 1 1 1 1"
     alert_rule_test:
       - eval_time: 2h
         alertname: StripeWebhookFailing
         exp_alerts: []
 
-  # Отказы других ручек и принятые события Stripe вебхук Stripe не роняют.
+  # Три отказа 502 среди двадцати принятых доставок: доля далеко ниже половины.
+  - interval: 30m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="502"}'
+        values: "_ 1 2 3"
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="200"}'
+        values: "_ 1 8 20"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: StripeWebhookFailing
+        exp_alerts: []
+
+  # Отказы других ручек не в счёт.
   - interval: 30m
     input_series:
       - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/{provider}", http_response_status_code="401"}'
-        values: "0 1 2 3 4"
-      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="200"}'
-        values: "0 1 2 3 4"
+        values: "_ 1 2 3 4"
     alert_rule_test:
       - eval_time: 2h
         alertname: StripeWebhookFailing

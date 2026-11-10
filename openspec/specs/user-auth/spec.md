@@ -126,7 +126,7 @@
 #### Scenario: Id для оплаты
 
 - **WHEN** вошедший пользователь открывает кабинет
-- **THEN** ответ `GET /api/v1/auth/me` содержит `id` — тот же, что кнопка оплаты передаёт Stripe в `client-reference-id`
+- **THEN** ответ `GET /api/v1/auth/me` содержит `id` — тот же, что ссылка оплаты Stripe (Payment Link) передаёт в параметре `client_reference_id`
 
 ### Requirement: Выход
 
