@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
 
+from app.domain.analytics import Analytics, AnalyticsFilter
 from app.domain.entities import (
     BalanceCredit,
     BotThread,
@@ -149,6 +150,15 @@ class ReviewRunRepo(Protocol):
         окна перепроверки — `updated_at` позже `recheck_from`, но не новее `after` (окно
         ограничено временем, а не числом строк). Порядок — по `(updated_at, id)`. Пустой
         `repository_ids` — пустой ответ.
+        """
+        ...
+
+    def analytics(self, analytics_filter: AnalyticsFilter) -> Analytics:
+        """Агрегаты дашборда по прогонам `completed`, кроме `coverage_reason = balance`, под фильтром.
+
+        Новые находки (без `covered_by_finding_id`) по UTC-дню прогона, категории и важности; число, средняя и p95 длительности
+        прогонов; разбивка по репозиториям с учтёнными прогонами, по `full_name`. Число запросов
+        не зависит от объёма данных; пустой `repository_ids` — `EMPTY_ANALYTICS`.
         """
         ...
 

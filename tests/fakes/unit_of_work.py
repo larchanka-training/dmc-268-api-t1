@@ -6,15 +6,24 @@
 тест на реальной базе видели одно и то же поведение.
 """
 
+from collections import Counter
 from collections.abc import Collection
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import TracebackType
 from typing import Any, Self
 from uuid import UUID
 
 from app.application.ports.unit_of_work import RunStateConflict, UnitOfWork
+from app.domain.analytics import (
+    EMPTY_ANALYTICS,
+    Analytics,
+    AnalyticsFilter,
+    FindingsDayCount,
+    RepositoryAnalytics,
+    RunDurations,
+)
 from app.domain.billing import eur_per_token
 from app.domain.entities import (
     BalanceCredit,
@@ -39,6 +48,7 @@ from app.domain.enums import (
     REVIEWED_STATUSES,
     TERMINAL_STATUSES,
     CommentKind,
+    CoverageReason,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -205,6 +215,19 @@ class FakeMergeRequestRepo:
         self._by_id[merge_request.id] = merge_request
 
 
+def _average(durations: list[float]) -> float:
+    return sum(durations) / len(durations)
+
+
+def _p95(durations: list[float]) -> float:
+    """`percentile_cont(0.95)` Postgres: линейная интерполяция между соседними значениями."""
+    values = sorted(durations)
+    position = 0.95 * (len(values) - 1)
+    low = int(position)
+    high = min(low + 1, len(values) - 1)
+    return values[low] + (values[high] - values[low]) * (position - low)
+
+
 def _matches(entry: ReviewRunListEntry, run_filter: RunListFilter) -> bool:
     run, merge_request = entry.run, entry.merge_request
     if merge_request.repository_id not in run_filter.repository_ids:
@@ -356,6 +379,51 @@ class FakeReviewRunRepo:
         entries = [entry for entry in self._entries() if _matches(entry, run_filter)]
         entries.sort(key=lambda e: (e.run.created_at, e.run.id), reverse=True)
         return RunListPage(entries=entries[offset : offset + limit], total=len(entries))
+
+    def analytics(self, analytics_filter: AnalyticsFilter) -> Analytics:
+        # Как SQL-адаптер: completed не без денег, только новые замечания (повтор треда не считается),
+        # день — UTC-дата created_at прогона, p95 — percentile_cont (линейная интерполяция).
+        if not analytics_filter.repository_ids:
+            return EMPTY_ANALYTICS
+        f = analytics_filter
+        counted = [
+            e
+            for e in self._entries()
+            if e.merge_request.repository_id in f.repository_ids
+            and e.run.status is ReviewRunStatus.COMPLETED
+            and e.run.coverage_reason != CoverageReason.BALANCE
+            and f.created_from <= e.run.created_at < f.created_to
+        ]
+        new_findings = {
+            e.run.id: [x for x in self._findings.list_for_run(e.run.id) if x.covered_by_finding_id is None] for e in counted
+        }
+        by_day: Counter[tuple[date, FindingCategory, FindingSeverity]] = Counter()
+        for e in counted:
+            for finding in new_findings[e.run.id]:
+                by_day[(e.run.created_at.astimezone(UTC).date(), finding.category, finding.severity)] += 1
+        order = {value: index for enum in (FindingCategory, FindingSeverity) for index, value in enumerate(enum)}
+        days = sorted(by_day.items(), key=lambda item: (item[0][0], order[item[0][1]], order[item[0][2]]))
+        # Как CHECK в базе: у завершённого прогона длительность есть всегда.
+        def duration(e: ReviewRunListEntry) -> float:
+            assert e.run.duration_seconds is not None
+            return e.run.duration_seconds
+
+        durations = [duration(e) for e in counted]
+        repositories: dict[UUID, list[ReviewRunListEntry]] = {}
+        for e in counted:
+            repositories.setdefault(e.repository.id, []).append(e)
+        return Analytics(
+            findings_by_day=tuple(FindingsDayCount(day, category, severity, count) for (day, category, severity), count in days),
+            runs=RunDurations(len(counted), _average(durations) if durations else None, _p95(durations) if durations else None),
+            by_repository=tuple(
+                RepositoryAnalytics(
+                    entries[0].repository.id, entries[0].repository.full_name, len(entries),
+                    _average([duration(e) for e in entries]), _p95([duration(e) for e in entries]),
+                    sum(len(new_findings[e.run.id]) for e in entries),
+                )
+                for entries in sorted(repositories.values(), key=lambda es: (es[0].repository.full_name, es[0].repository.id))
+            ),
+        )
 
     def _entries(self) -> list[ReviewRunListEntry]:
         entries: list[ReviewRunListEntry] = []

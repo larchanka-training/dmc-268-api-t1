@@ -15,7 +15,9 @@ from psycopg.errors import LockNotAvailable
 from sqlalchemy import (
     CTE,
     ColumnElement,
+    Date,
     Row,
+    cast,
     delete,
     func,
     literal,
@@ -32,6 +34,14 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 
 from app.application.ports.unit_of_work import RunStateConflict
+from app.domain.analytics import (
+    EMPTY_ANALYTICS,
+    Analytics,
+    AnalyticsFilter,
+    FindingsDayCount,
+    RepositoryAnalytics,
+    RunDurations,
+)
 from app.domain.billing import eur_per_token
 from app.domain.entities import (
     BalanceCredit,
@@ -56,6 +66,7 @@ from app.domain.enums import (
     REVIEWED_STATUSES,
     TERMINAL_STATUSES,
     CommentKind,
+    CoverageReason,
     Provider,
     ReviewRunStatus,
     ReviewRunStepStatus,
@@ -442,6 +453,79 @@ class SqlAlchemyReviewRunRepo:
         newest_first = (ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
         page = matching.order_by(*newest_first).limit(limit).offset(offset).cte("page")
         return RunListPage(entries=self._entries(page, *newest_first), total=total or 0)
+
+    def analytics(self, analytics_filter: AnalyticsFilter) -> Analytics:
+        """Три агрегата по CTE учтённых прогонов в снимке REPEATABLE READ, как у `list_page`.
+
+        CTE описана один раз, но база вычисляет её заново в каждом из трёх SELECT.
+
+        Период идёт по индексу `(created_at, id)`, находки — по индексу `review_run_id`.
+        День — `created_at` прогона в UTC: зона сессии базы на группировку не влияет.
+        Замечания — только новые: повтор бот-треда (`covered_by_finding_id`) не считается.
+        """
+        if not analytics_filter.repository_ids:
+            return EMPTY_ANALYTICS
+        counted = (
+            select(
+                ReviewRunRow.id,
+                ReviewRunRow.duration_seconds,
+                MergeRequestRow.repository_id,
+                cast(func.timezone("UTC", ReviewRunRow.created_at), Date).label("day"),
+            )
+            .join(MergeRequestRow, MergeRequestRow.id == ReviewRunRow.merge_request_id)
+            .where(
+                MergeRequestRow.repository_id.in_(analytics_filter.repository_ids),
+                ReviewRunRow.status == ReviewRunStatus.COMPLETED,
+                ReviewRunRow.coverage_reason.is_distinct_from(CoverageReason.BALANCE),
+                ReviewRunRow.created_at >= analytics_filter.created_from,
+                ReviewRunRow.created_at < analytics_filter.created_to,
+            )
+            .cte("counted")
+        )
+        self._session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        by_day = self._session.execute(
+            select(counted.c.day, FindingRow.category, FindingRow.severity, func.count())
+            .join(counted, counted.c.id == FindingRow.review_run_id)
+            .where(FindingRow.covered_by_finding_id.is_(None))
+            .group_by(counted.c.day, FindingRow.category, FindingRow.severity)
+            .order_by(counted.c.day, FindingRow.category, FindingRow.severity)
+        ).all()
+        count, average, p95 = self._session.execute(
+            select(
+                func.count(),
+                func.avg(counted.c.duration_seconds),
+                func.percentile_cont(0.95).within_group(counted.c.duration_seconds),
+            ).select_from(counted)
+        ).one()
+        findings_per_run = (
+            select(FindingRow.review_run_id, func.count().label("findings"))
+            .where(FindingRow.review_run_id.in_(select(counted.c.id)), FindingRow.covered_by_finding_id.is_(None))
+            .group_by(FindingRow.review_run_id)
+            .subquery("findings_per_run")
+        )
+        by_repository = self._session.execute(
+            select(
+                RepositoryRow.id,
+                RepositoryRow.full_name,
+                func.count(),
+                func.avg(counted.c.duration_seconds),
+                func.percentile_cont(0.95).within_group(counted.c.duration_seconds),
+                func.coalesce(func.sum(findings_per_run.c.findings), 0),
+            )
+            .select_from(counted)
+            .join(RepositoryRow, RepositoryRow.id == counted.c.repository_id)
+            .outerjoin(findings_per_run, findings_per_run.c.review_run_id == counted.c.id)
+            .group_by(RepositoryRow.id, RepositoryRow.full_name)
+            .order_by(RepositoryRow.full_name, RepositoryRow.id)
+        ).all()
+        return Analytics(
+            findings_by_day=tuple(FindingsDayCount(day, category, severity, n) for day, category, severity, n in by_day),
+            runs=RunDurations(count, average, p95),
+            by_repository=tuple(
+                RepositoryAnalytics(repository_id, full_name, runs, avg, p95, int(findings))
+                for repository_id, full_name, runs, avg, p95, findings in by_repository
+            ),
+        )
 
     def _entries(self, picked: CTE, *order_by: ColumnElement[Any] | InstrumentedAttribute[Any]) -> list[ReviewRunListEntry]:
         """Прогоны из `picked` строками списка: запрос на изменение, репозиторий и число находок.
