@@ -53,7 +53,9 @@ _DESCRIPTION = (
     "created_to. Замечание относится к UTC-дню своего прогона. Крайние дни периода неполные, дней без "
     "замечаний в findings_by_day нет: нули по периоду достраивает фронтенд. created_from позже "
     "created_to — 422 VALIDATION_ERROR в query.created_to, а без created_to — в query.created_from; "
-    f"период длиннее {MAX_PERIOD.days} дней — 422 VALIDATION_ERROR в query.created_from. repository_id — только этот репозиторий; невидимый "
+    f"период длиннее {MAX_PERIOD.days} дней — 422 VALIDATION_ERROR в query.created_from; без created_to "
+    f"конец берётся по часам сервера, поэтому для периода ровно в {MAX_PERIOD.days} дней передавайте обе границы. "
+    "repository_id — только этот репозиторий; невидимый "
     "или несуществующий — 404 REPOSITORY_NOT_FOUND, как у GET /repositories/{repository_id}. В "
     "by_repository — только репозитории, у которых в периоде есть учтённые прогоны, по full_name."
 )
