@@ -1,0 +1,104 @@
+# Копия базы стенда вне сервера (#280,
+# openspec/changes/archive/2026-11-10-db-backup-off-server).
+# Контейнер dmc268-postgres-backup снимает pg_dump раз в сутки на тот же диск;
+# здесь самая свежая копия уезжает с сервера зашифрованной и сразу
+# проверяется восстановлением в чистую базу.
+#
+# Хранилище — артефакты GitHub Actions, 90 суток (потолок публичного репо).
+# Про хранилище знают ровно два шага: «Сохранить копию» и «Взять копию».
+# Остальное — скрипты .github/scripts/db-backup/, они работают с файлом
+# <имя>.dump.enc и от хранилища не зависят. Переезд на S3-совместимое
+# хранилище — замена этих двух шагов (infra/README.md, «Копии вне сервера»).
+#
+# Падение — обычное письмо GitHub о красном прогоне, отдельного алерта нет.
+name: DB backup
+
+on:
+  # После суточной копии на сервере (сейчас около 20:01 UTC; после пересоздания
+  # контейнера копий время сдвигается, поэтому берётся любая копия моложе 26 ч).
+  schedule:
+    - cron: "17 21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Два выноса сразу не нужны, и обрывать идущий тоже незачем.
+concurrency:
+  group: db-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Ключ и адрес стенда — секреты и переменная environment `stand`, как у деплоя.
+    environment: stand
+    outputs:
+      name: ${{ steps.pull.outputs.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/stand-ssh
+        with:
+          ssh_key: ${{ secrets.VPS_DMC268_KEY_T1 }}
+          ssh_user: ${{ secrets.VPS_DMC268_U }}
+          host: ${{ vars.VPS_DMC268_IP_T1 }}
+
+      # Без ключа скрипт падает до чтения копии: открытой она не загружается.
+      - name: Взять свежую копию со стенда и зашифровать
+        id: pull
+        env:
+          # Тот же ключ, что у аварийной копии состояния OpenTofu в deploy.yml.
+          STATE_BACKUP_KEY: ${{ secrets.STATE_BACKUP_KEY_DMC268_T1 }}
+        run: .github/scripts/db-backup/pull.sh "$RUNNER_TEMP/db-backup"
+
+      # Шаг хранилища: при переезде заменяется загрузкой в бакет.
+      - name: Сохранить копию
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.pull.outputs.name }}
+          path: ${{ steps.pull.outputs.file }}
+          retention-days: 90
+          if-no-files-found: error
+
+  restore-check:
+    needs: backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Та же мажорная версия, что на стенде (pgvector/pgvector:pg18 в
+    # infra/postgres.tf): pg_restore старшей версии дамп читает, младшей — нет.
+    services:
+      postgres:
+        image: postgres:18@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+        env:
+          POSTGRES_USER: dmc268
+          POSTGRES_PASSWORD: dmc268
+          POSTGRES_DB: dmc268
+        options: >-
+          --health-cmd "pg_isready -U dmc268 -d dmc268"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Шаг хранилища: при переезде заменяется скачиванием из бакета.
+      - name: Взять копию
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.backup.outputs.name }}
+          path: ${{ runner.temp }}/db-backup
+
+      - name: Восстановить копию в чистую базу и проверить
+        env:
+          STATE_BACKUP_KEY: ${{ secrets.STATE_BACKUP_KEY_DMC268_T1 }}
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          PGUSER: dmc268
+          PGDATABASE: dmc268
+          NAME: ${{ needs.backup.outputs.name }}
+        run: .github/scripts/db-backup/verify.sh "$RUNNER_TEMP/db-backup/$NAME.dump.enc"

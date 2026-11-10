@@ -17,9 +17,9 @@ resource "docker_volume" "postgres_replica" {
 }
 
 # Резервные копии лежат на том же диске сервера: от сбоя диска или сервера
-# они не спасают, только от ошибочного удаления данных и испорченной базы.
-# Вынос копий за пределы сервера — отдельная задача. prevent_destroy — как у
-# тома postgres: копии существуют только здесь.
+# спасает их зашифрованный вынос (.github/workflows/db-backup.yml, раз в сутки,
+# 90 суток). prevent_destroy — как у тома postgres: вынесенная копия может
+# отставать на сутки, свежее неё — только здесь.
 resource "docker_volume" "postgres_backups" {
   name = "dmc268-postgres-backups"
 
