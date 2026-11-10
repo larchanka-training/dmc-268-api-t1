@@ -21,6 +21,7 @@ import pytest
 import stripe
 from fastapi.testclient import TestClient
 from httpx2 import Response
+from sqlalchemy.exc import OperationalError
 
 from app.api.factory import create_app
 from app.config import Settings
@@ -90,7 +91,9 @@ class StubContainer:
         return self.client
 
 
-def make_client(api: FakeStripeApi | None = None, *, enabled: bool = True) -> tuple[TestClient, FakeUnitOfWork, FakeStripeApi]:
+def make_client(
+    api: FakeStripeApi | None = None, *, enabled: bool = True, limit: Decimal = Decimal(20)
+) -> tuple[TestClient, FakeUnitOfWork, FakeStripeApi]:
     api = api if api is not None else FakeStripeApi()
     settings = Settings(
         database_url="postgresql+psycopg://test:test@localhost/test",
@@ -99,6 +102,7 @@ def make_client(api: FakeStripeApi | None = None, *, enabled: bool = True) -> tu
         stripe_webhook_secret=SECRET if enabled else "",
         stripe_api_key=API_KEY if enabled else "",
         public_origin="https://review.example",
+        stripe_topup_limit_eur=limit,
     )
     uow = FakeUnitOfWork()
     uow.users.add(ALICE)
@@ -185,6 +189,15 @@ def test_another_event_is_accepted_without_asking_stripe(event_type: str) -> Non
     assert (api.paths, uow.billing.credits) == ([], [])
 
 
+def test_a_payment_over_the_configured_limit_is_ignored() -> None:
+    client, uow, _ = make_client(limit=Decimal(10))
+
+    response = post(client, thin_event())
+
+    assert (response.status_code, response.json()) == (200, {"status": "ignored"})
+    assert uow.billing.credits == []
+
+
 def test_the_key_and_secret_stay_out_of_the_logs(caplog: pytest.LogCaptureFixture) -> None:
     client, _, _ = make_client(FakeStripeApi(checkout_session(currency="usd")))
 
@@ -215,6 +228,20 @@ def test_when_stripe_does_not_return_the_session_the_delivery_fails_for_a_retry(
     assert response.json()["code"] == "PAYMENT_PROVIDER_UNAVAILABLE"
     assert uow.billing.credits == []
     assert API_KEY not in caplog.text
+    [record] = [r for r in caplog.records if r.getMessage() == "Stripe не отдал сессию оплаты"]
+    # Имена атрибутов — semconv, как у спанов.
+    assert record.__dict__["error.type"].endswith("Error")
+    assert record.__dict__["http.response.status_code"] == (None if api.error else api.status)
+
+
+def test_when_the_database_fails_while_crediting_nothing_is_credited_and_the_delivery_fails_for_a_retry() -> None:
+    client, uow, _ = make_client()
+    uow.commit_error = OperationalError("INSERT INTO balance_credits", {}, ConnectionRefusedError())
+
+    response = post(TestClient(client.app, raise_server_exceptions=False), thin_event())
+
+    assert response.status_code == 500
+    assert uow.billing.credits == []
 
 
 @pytest.mark.parametrize(

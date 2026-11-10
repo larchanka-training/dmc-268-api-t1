@@ -287,6 +287,10 @@ class BillingRepo(Protocol):
         """Записать зачисление; `False` — зачисление этой сессии Stripe уже есть, ничего не записано."""
         ...
 
+    def stripe_total(self, user_id: UUID) -> Decimal:
+        """Сколько всего зачислено аккаунту через Stripe; ручные зачисления не в счёт."""
+        ...
+
 
 class ProviderTokenRepo(Protocol):
     """Токен пользователя у провайдера при сессии входа.

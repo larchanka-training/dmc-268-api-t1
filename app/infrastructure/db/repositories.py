@@ -1020,6 +1020,12 @@ class SqlAlchemyBillingRepo:
         ).first()
         return inserted is not None
 
+    def stripe_total(self, user_id: UUID) -> Decimal:
+        total = select(func.coalesce(func.sum(BalanceCreditRow.amount_eur), 0)).where(
+            BalanceCreditRow.user_id == user_id, BalanceCreditRow.stripe_checkout_session_id.is_not(None)
+        )
+        return Decimal(self._session.execute(total).scalar_one())
+
 
 class SqlAlchemyProviderTokenRepo:
     """Токен пользователя при сессии; шифрует при записи и расшифровывает при чтении.

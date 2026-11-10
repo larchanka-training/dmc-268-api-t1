@@ -8,6 +8,7 @@
 
 - [x] 2.1 Входной тип `CheckoutSession` (`app/application/use_cases/billing.py`): стабильные поля сессии Checkout; тесты правила без базы
 - [x] 2.2 Use case `credit_stripe_checkout`: поиск пользователя по id сервиса, идемпотентная запись, строка лога; тесты с фейковым `UnitOfWork`
+- [x] 2.3 Потолок `STRIPE_TOPUP_LIMIT_EUR` под блокировкой плательщика, `BillingRepo.stripe_total`; тесты потолка, повтора после него и гонки двух сессий на базе
 
 ## 3. HTTP
 

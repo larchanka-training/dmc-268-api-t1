@@ -369,7 +369,7 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
 
 # Запрос сессии идёт внутри доставки, а Stripe ждёт её ответа около 10 с; повтор — дело Stripe
 # (доставка с 5xx повторяется), поэтому своих повторов нет (change stripe-topup, D3).
-STRIPE_TIMEOUT_SECONDS = 5
+_STRIPE_TIMEOUT_SECONDS = 5
 
 
 def _build_stripe_client(settings: Settings) -> stripe.StripeClient | None:
@@ -377,7 +377,7 @@ def _build_stripe_client(settings: Settings) -> stripe.StripeClient | None:
     if not key or not settings.stripe_webhook_secret.get_secret_value():
         return None
     return stripe.StripeClient(
-        key, http_client=stripe.RequestsClient(timeout=STRIPE_TIMEOUT_SECONDS), max_network_retries=0
+        key, http_client=stripe.RequestsClient(timeout=_STRIPE_TIMEOUT_SECONDS), max_network_retries=0
     )
 
 

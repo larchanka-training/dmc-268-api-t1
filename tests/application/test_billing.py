@@ -68,8 +68,8 @@ SESSION = "cs_test_a1"
 PAID = CheckoutSession(SESSION, "payment", "paid", "eur", 1000, str(ALICE.id))
 
 
-def _stripe(uow: FakeUnitOfWork, session: CheckoutSession) -> StripeOutcome:
-    return credit_stripe_checkout(uow, session, event_id="evt_1", now=NOW, new_id=lambda: CREDIT_ID)
+def _stripe(uow: FakeUnitOfWork, session: CheckoutSession, limit: Decimal = Decimal(20)) -> StripeOutcome:
+    return credit_stripe_checkout(uow, session, limit=limit, event_id="evt_1", now=NOW, new_id=lambda: CREDIT_ID)
 
 
 def test_a_paid_checkout_session_is_credited_in_euros() -> None:
@@ -135,3 +135,41 @@ def test_a_paid_session_left_without_credit_is_a_warning_with_the_ids(
     [record] = [r for r in caplog.records if r.getMessage() == "оплата Stripe обработана"]
     assert record.levelno == level
     assert (record.stripe_event_id, record.stripe_checkout_session_id) == ("evt_1", SESSION)  # type: ignore[attr-defined]
+
+
+def test_stripe_credits_up_to_the_limit_inclusive_under_the_payer_lock() -> None:
+    uow = _uow()
+
+    assert _stripe(uow, PAID) is StripeOutcome.CREDITED
+    assert _stripe(uow, replace(PAID, id="cs_test_a2")) is StripeOutcome.CREDITED
+    assert uow.billing.stripe_total(ALICE.id) == Decimal(20)
+    assert uow.billing.locked == [ALICE.id, ALICE.id]
+
+
+def test_a_payment_over_the_limit_is_not_credited_and_is_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    uow = _uow()
+    _stripe(uow, PAID)
+    caplog.set_level(logging.INFO, logger="app.application.use_cases.billing")
+    caplog.clear()
+
+    assert _stripe(uow, replace(PAID, id="cs_test_a2", amount_total=1001)) is StripeOutcome.OVER_LIMIT
+    assert uow.billing.stripe_total(ALICE.id) == Decimal(10)
+    [record] = [r for r in caplog.records if r.getMessage() == "оплата Stripe обработана"]
+    assert (record.levelno, record.stripe_outcome) == (logging.WARNING, "over_limit")  # type: ignore[attr-defined]
+    assert record.stripe_checkout_session_id == "cs_test_a2"  # type: ignore[attr-defined]
+
+
+def test_a_repeated_session_after_the_limit_is_reached_is_a_duplicate() -> None:
+    uow = _uow()
+    _stripe(uow, PAID)
+    _stripe(uow, replace(PAID, id="cs_test_a2"))
+
+    assert _stripe(uow, PAID) is StripeOutcome.DUPLICATE
+    assert len(uow.billing.credits) == 2
+
+
+def test_manual_credits_do_not_count_toward_the_stripe_limit() -> None:
+    uow = _uow()
+    _credit(uow, amount="100")
+
+    assert _stripe(uow, PAID) is StripeOutcome.CREDITED

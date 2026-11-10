@@ -755,6 +755,12 @@ class FakeBillingRepo:
         self.credits.append(credit)
         return True
 
+    def stripe_total(self, user_id: UUID) -> Decimal:
+        return sum(
+            (c.amount_eur for c in self.credits if c.user_id == user_id and c.stripe_checkout_session_id is not None),
+            Decimal(0),
+        )
+
 
 def _run_spend(run: ReviewRun) -> Decimal:
     if run.usage is not None:

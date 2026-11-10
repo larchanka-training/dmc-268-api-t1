@@ -105,7 +105,8 @@ MIIE...
 
 Баланс пользователь пополняет по ссылке Stripe Payment Link из кабинета (`https://buy.stripe.com/…?client_reference_id=<id>`); сервис получает от Stripe
 thin-событие, запрашивает по нему сессию Checkout и зачисляет `amount_total / 100` € на баланс
-пользователя из `client_reference_id` — не больше одного раза на сессию (change `stripe-topup`).
+пользователя из `client_reference_id` — не больше одного раза на сессию и не больше `STRIPE_TOPUP_LIMIT_EUR` (20 €)
+на пользователя за всё время (change `stripe-topup`).
 Зачисление не зависит от возврата браузера на `/app/?topup=success`. Возвраты и споры баланс не
 списывают: корректировка — `make credit-balance` с отрицательной суммой. Всё — в sandbox Stripe.
 
@@ -160,5 +161,6 @@ Workbench → назначение событий → Event deliveries → до�
 | Stripe: `503 PAYMENTS_DISABLED` | не задан `STRIPE_WEBHOOK_SECRET` или `STRIPE_API_KEY` | шаг 4, `make stop-local && make run-local` |
 | Stripe: `400 WEBHOOK_SIGNATURE_INVALID` | секрет не того назначения (у `stripe listen` свой) или назначение в формате snapshot | шаг 4: формат Thin и его `whsec_…` |
 | Оплатил, а баланс не вырос; в логе API warning «оплата Stripe обработана» с `stripe_outcome` `unknown_account`, `other_currency`, `malformed` или `not_one_off` | ссылка без `client_reference_id`, валюта не EUR, сумма не та или оформлена подписка | сессию найти по `stripe_checkout_session_id` в Workbench, зачислить руками: `make credit-balance` с заметкой `Stripe <cs_…>` |
-| Stripe: `502 PAYMENT_PROVIDER_UNAVAILABLE` | ключ не restricted с Checkout Sessions: Read, ключ другого аккаунта или режима | тип ошибки — в `tail -F .local/api.log` (`error_type`) |
+| Оплатил, а баланс не вырос; в логе warning «оплата Stripe обработана» с `stripe_outcome` `over_limit` | через Stripe этому пользователю уже зачислено `STRIPE_TOPUP_LIMIT_EUR` (20 €) | так задумано: тестовая карта платит бесплатно, а токены настоящие; при нужде — `make credit-balance` с заметкой `Stripe <cs_…>`. Локально можно поднять `STRIPE_TOPUP_LIMIT_EUR` и переотправить событие из Workbench (на `over_limit` Stripe получил `200` и сам не повторит); на стенде потолок всегда 20 € из кода |
+| Stripe: `502 PAYMENT_PROVIDER_UNAVAILABLE` | ключ не restricted с Checkout Sessions: Read, ключ другого аккаунта или режима | тип ошибки — в `tail -F .local/api.log` (`error.type`) |
 | «порт 8000 уже занят» | работает `docker compose up` или прошлый `run-local` | `docker compose stop api worker` или `make stop-local` |

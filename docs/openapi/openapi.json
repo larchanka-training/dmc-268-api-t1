@@ -12,7 +12,7 @@
           "webhooks"
         ],
         "summary": "Принять thin-событие Stripe и зачислить оплату на баланс",
-        "description": "Без сессии и без проверки Origin: доставку подтверждает подпись `Stripe-Signature`. По `v1.checkout.session.completed` и `v1.checkout.session.async_payment_succeeded` сервис запрашивает сессию Checkout у Stripe и, если у неё `mode = payment`, `payment_status = paid` и валюта `eur`, зачисляет `amount_total / 100` € пользователю из `client_reference_id` — не больше одного раза на сессию. Остальное — `200` без зачисления.",
+        "description": "Без сессии и без проверки Origin: доставку подтверждает подпись `Stripe-Signature`. По `v1.checkout.session.completed` и `v1.checkout.session.async_payment_succeeded` сервис запрашивает сессию Checkout у Stripe и, если у неё `mode = payment`, `payment_status = paid` и валюта `eur`, зачисляет `amount_total / 100` € пользователю из `client_reference_id` — не больше одного раза на сессию и не сверх потолка `STRIPE_TOPUP_LIMIT_EUR` на пользователя. Остальное — `200` без зачисления.",
         "operationId": "receiveStripeWebhook",
         "responses": {
           "200": {
@@ -7161,7 +7161,7 @@
               "ignored"
             ],
             "title": "Status",
-            "description": "`credited` — оплата зачислена; `duplicate` — эта сессия оплаты уже зачислена; `ignored` — событие ничего не зачисляет: другое событие, не разовая оплата, неоплаченная сессия, не евро, неизвестный пользователь в `client_reference_id`."
+            "description": "`credited` — оплата зачислена; `duplicate` — эта сессия оплаты уже зачислена; `ignored` — событие ничего не зачисляет: другое событие, не разовая оплата, неоплаченная сессия, не евро, неизвестный пользователь в `client_reference_id`, превышен потолок пополнений через Stripe."
           }
         },
         "type": "object",

@@ -638,7 +638,7 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `ReviewJobStuck` | сообщение `review_jobs.qq` выдано и не подтверждено, других подтверждений нет; прогоны на стенде идут до 1,5 минуты, выметатель срабатывает на 30 | 20 минут | critical |
 | `Api5xxSpike` | доля 5xx у API за 5 минут, при трафике больше 3 запросов в минуту | > 5 % дольше 5 минут | critical |
 | `ReviewRunsFailing` | доля прогонов в `failed` среди `completed` и `failed` за 30 минут, при 3+ прогонах; отказы по балансу не считаются | > 30 % | critical |
-| `StripeWebhookFailing` | доля ответов 4xx и 5xx вебхука Stripe (`/api/v1/webhooks/stripe`) за 6 часов; первый отказ с новым кодом `increase()` не видит, поэтому горит от двух отказов с одним кодом | > 50 % | warning |
+| `StripeWebhookFailing` | доля 4xx и 5xx среди ответов `POST /api/v1/webhooks/stripe` за 6 часов; первый отказ с кодом, ряда которого в окне ещё не было, `increase()` не видит, а отказ с уже бывшим кодом виден сразу: один такой без принятых доставок зажигает алерт | > 50 % | warning |
 | `ReviewRunsRefused` | доля отказов по балансу (`refused`) среди исходов прогонов за час, при 3+ отказах | > 50 % | warning |
 | `ReviewDlqNotEmpty` | сообщения в `review_jobs.dlq` | > 0 дольше 5 минут | critical |
 | `LlmBudgetNearLimit` | токены модели с начала месяца (UTC) от бюджета `dmc268:llm_tokens_budget_month` — 50 млн | > 80 % | warning |

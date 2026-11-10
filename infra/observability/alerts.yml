@@ -219,16 +219,19 @@ groups:
       # нашего эндпоинта не сообщает, а в sandbox повторяет доставку всего 3 раза
       # за несколько часов — потом оплата так и останется незачисленной. Считаются
       # и 4xx: 400 — секрет не того назначения, 503 — приём выключен на стенде.
-      # Событий мало (одно-два на пополнение), поэтому окно 6 часов; одиночный
-      # сбой, за которым пошли 200, не алерт. Порога по числу отказов нет: ряд
-      # кода появляется сразу с 1, и `increase()` первый отказ с новым кодом не
-      # видит (как у prime_run_outcomes, #324) — доля выше нуля уже значит хотя
-      # бы два отказа с одним кодом.
+      # Только POST: GET на ту же ручку получает 405 с тем же http_route.
+      # Событий мало (одно-два на пополнение), поэтому окно 6 часов. Ряд кода
+      # появляется сразу с 1, и `increase()` первый отказ с кодом, ряда которого
+      # в окне ещё не было, не видит (как у prime_run_outcomes, #324): горит со второго.
+      # Отказ с кодом, ряд которого уже есть, виден сразу, и один такой без
+      # принятых доставок зажигает алерт. Это допустимо: оплата не зачислена,
+      # Stripe повторит, а следующий 200 (ряд 200 уже есть) опустит долю до
+      # половины и погасит его.
       - alert: StripeWebhookFailing
         expr: |
           (
-            sum(increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code=~"[45].."}[6h]))
-            / sum(increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe"}[6h]))
+            sum(increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_request_method="POST", http_response_status_code=~"[45].."}[6h]))
+            / sum(increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_request_method="POST"}[6h]))
           ) > 0.5
         labels:
           severity: warning

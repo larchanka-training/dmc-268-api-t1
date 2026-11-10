@@ -7,6 +7,7 @@
 проверки подписи.
 """
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -88,6 +89,21 @@ def test_queued_timeout_must_be_positive() -> None:
             github_webhook_secret="s",
             queued_run_timeout_seconds=0,
         )
+
+
+def test_stripe_topup_limit_defaults_to_twenty_euros_and_is_read_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert make_settings().stripe_topup_limit_eur == Decimal(20)
+    monkeypatch.setenv("STRIPE_TOPUP_LIMIT_EUR", "7.5")
+    assert make_settings().stripe_topup_limit_eur == Decimal("7.5")
+
+
+@pytest.mark.parametrize("limit", ["0", "-1", "много"])
+def test_stripe_topup_limit_must_be_a_positive_number(monkeypatch: pytest.MonkeyPatch, limit: str) -> None:
+    monkeypatch.setenv("STRIPE_TOPUP_LIMIT_EUR", limit)
+    with pytest.raises(ValidationError, match="stripe_topup_limit_eur"):
+        make_settings()
 
 
 def test_the_client_secret_is_readable_and_the_origin_has_no_trailing_slash() -> None:

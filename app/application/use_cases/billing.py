@@ -29,6 +29,7 @@ _LIMIT = Decimal("1e10")
 
 _log = logging.getLogger(__name__)
 
+
 class CreditRefusal(StrEnum):
     """Почему зачисление не записано."""
 
@@ -107,23 +108,38 @@ class StripeOutcome(StrEnum):
     UNKNOWN_ACCOUNT = "unknown_account"
     # Суммы нет или она не положительна.
     MALFORMED = "malformed"
+    # Зачисленное через Stripe вместе с этой оплатой превысило бы потолок на пользователя.
+    OVER_LIMIT = "over_limit"
 
 
 # Исходы после проверки `payment_status == "paid"`: деньги списаны, зачисления нет.
 _PAID_NOT_CREDITED = frozenset(
-    {StripeOutcome.NOT_ONE_OFF, StripeOutcome.OTHER_CURRENCY, StripeOutcome.UNKNOWN_ACCOUNT, StripeOutcome.MALFORMED}
+    {
+        StripeOutcome.NOT_ONE_OFF,
+        StripeOutcome.OTHER_CURRENCY,
+        StripeOutcome.UNKNOWN_ACCOUNT,
+        StripeOutcome.MALFORMED,
+        StripeOutcome.OVER_LIMIT,
+    }
 )
 
 
 def credit_stripe_checkout(
-    uow: UnitOfWork, session: CheckoutSession, *, event_id: str, now: datetime, new_id: Callable[[], UUID]
+    uow: UnitOfWork,
+    session: CheckoutSession,
+    *,
+    limit: Decimal,
+    event_id: str,
+    now: datetime,
+    new_id: Callable[[], UUID],
 ) -> StripeOutcome:
-    """Зачислить оплату сессии Checkout не больше одного раза на сессию.
+    """Зачислить оплату сессии Checkout не больше одного раза на сессию и не сверх `limit`.
 
     Повтор сессии — `DUPLICATE`: событие пришло снова или это второе событие той же сессии.
+    `OVER_LIMIT` — всё зачисленное аккаунту через Stripe вместе с этой оплатой больше `limit` €.
     Исход пишется строкой лога с id события и сессии — без суммы и пользователя.
     """
-    outcome = _credit_once(uow, session, now, new_id)
+    outcome = _credit_once(uow, session, limit, now, new_id)
     # Сессия уже оплачена, а на баланс не попала: зачислять руками (`make credit-balance`).
     level = logging.WARNING if outcome in _PAID_NOT_CREDITED else logging.INFO
     _log.log(
@@ -134,7 +150,9 @@ def credit_stripe_checkout(
     return outcome
 
 
-def _credit_once(uow: UnitOfWork, session: CheckoutSession, now: datetime, new_id: Callable[[], UUID]) -> StripeOutcome:
+def _credit_once(
+    uow: UnitOfWork, session: CheckoutSession, limit: Decimal, now: datetime, new_id: Callable[[], UUID]
+) -> StripeOutcome:
     # Не `status`: у `complete` оплата может ещё идти, деньги получены только при `paid`.
     if session.payment_status != "paid":
         return StripeOutcome.NOT_PAID
@@ -151,9 +169,14 @@ def _credit_once(uow: UnitOfWork, session: CheckoutSession, now: datetime, new_i
     with uow:
         if uow.users.get(user_id) is None:
             return StripeOutcome.UNKNOWN_ACCOUNT
+        # Две сессии одного пользователя по одной: иначе каждая видит сумму без другой.
+        uow.billing.lock_payer(user_id)
         amount = Decimal(session.amount_total) / 100
         credit = BalanceCredit(new_id(), user_id, amount, f"Stripe {session.id}", "stripe", now, session.id)
         if not uow.billing.add_credit(credit):
             return StripeOutcome.DUPLICATE
+        # Сумма — после вставки: повтор уже зачисленной сессии выше остался `DUPLICATE`.
+        if uow.billing.stripe_total(user_id) > limit:
+            return StripeOutcome.OVER_LIMIT
         uow.commit()
     return StripeOutcome.CREDITED

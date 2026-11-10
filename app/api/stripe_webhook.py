@@ -53,7 +53,7 @@ class StripeWebhookReceived(BaseModel):
         description=(
             "`credited` — оплата зачислена; `duplicate` — эта сессия оплаты уже зачислена; `ignored` — "
             "событие ничего не зачисляет: другое событие, не разовая оплата, неоплаченная сессия, не "
-            "евро, неизвестный пользователь в `client_reference_id`."
+            "евро, неизвестный пользователь в `client_reference_id`, превышен потолок пополнений через Stripe."
         )
     )
 
@@ -73,7 +73,7 @@ _STATUS: dict[StripeOutcome, ReceivedStatus] = {StripeOutcome.CREDITED: "credite
         "`v1.checkout.session.completed` и `v1.checkout.session.async_payment_succeeded` сервис запрашивает "
         "сессию Checkout у Stripe и, если у неё `mode = payment`, `payment_status = paid` и валюта `eur`, "
         "зачисляет `amount_total / 100` € пользователю из `client_reference_id` — не больше одного раза на "
-        "сессию. Остальное — `200` без зачисления."
+        "сессию и не сверх потолка `STRIPE_TOPUP_LIMIT_EUR` на пользователя. Остальное — `200` без зачисления."
     ),
     response_description="Событие принято; в `status` — зачислено ли.",
     responses={
@@ -112,7 +112,11 @@ async def receive_stripe_webhook(request: Request) -> StripeWebhookReceived:
         # Только тип и HTTP-статус: в тексте ошибки Stripe бывает маска ключа.
         _log.warning(
             "Stripe не отдал сессию оплаты",
-            extra={"stripe_event_id": notification.id, "error_type": type(error).__name__, "http_status": error.http_status},
+            extra={
+                "stripe_event_id": notification.id,
+                "error.type": type(error).__name__,
+                "http.response.status_code": error.http_status,
+            },
         )
         raise ApiError(
             HTTPStatus.BAD_GATEWAY,
@@ -131,6 +135,7 @@ async def receive_stripe_webhook(request: Request) -> StripeWebhookReceived:
         credit_stripe_checkout,
         container.unit_of_work(),
         session,
+        limit=container.settings.stripe_topup_limit_eur,
         event_id=notification.id,
         now=datetime.now(UTC),
         new_id=new_id,

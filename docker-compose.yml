@@ -160,6 +160,7 @@ services:
       # Пополнение через Stripe: оба пустые — вебхук Stripe отвечает 503.
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       STRIPE_API_KEY: ${STRIPE_API_KEY:-}
+      STRIPE_TOPUP_LIMIT_EUR: ${STRIPE_TOPUP_LIMIT_EUR:-20}
       # Страница статуса (GET /api/v1/status) читает сработавшие алерты у
       # Prometheus стека — он в той же сети default. Без профиля observability
       # Prometheus не поднят: статус — unknown, в логе API — предупреждение.
