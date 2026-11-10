@@ -92,6 +92,7 @@
 | Ветки, задачи, пул-реквесты, треды | [`.agents/rules/git-and-pr.md`](.agents/rules/git-and-pr.md) |
 | Скиллы и шаблоны | [`.agents/skills/`](.agents/skills/), [`.agents/templates/backend/`](.agents/templates/backend/) |
 | Промпты ревью-агента (продукт) | [`prompts/review/README.md`](prompts/review/README.md) |
+| Гайд владельцу по `.review/rules.md` и шаблоны под стеки | [`docs/RULES_GUIDE.md`](docs/RULES_GUIDE.md), [`examples/rules/`](examples/rules/) |
 
 Задачи — доска [`dmc-268-t1`](https://github.com/orgs/larchanka-training/projects/7).
 Бэкендовые тикеты в этом репозитории, фронтовые — в
