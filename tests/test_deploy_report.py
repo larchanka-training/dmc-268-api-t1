@@ -58,7 +58,7 @@ esac
 # upgrade head` печатает вывод alembic из MIGRATE_LOG и выходит с
 # MIGRATE_EXIT; у N-й попытки — MIGRATE_LOG_N и MIGRATE_EXIT_N, если заданы.
 # `run … alembic current` печатает CURRENT (с CURRENT_FAIL — код 255, как при
-# оборванном ssh), `run … python alembic/monitor_password.py` (пароль роли мониторинга) с MONITOR_FAIL
+# оборванном ssh), `run … python alembic/role_passwords.py` (пароли ролей) с ROLES_FAIL
 # выходит с этим кодом, `rm` контейнера, которого нет, — код 1.
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "docker $*" >> "$CALLS"
@@ -66,7 +66,7 @@ case "$1" in
   run)
     case "$*" in
       *"alembic current"*) [ -z "${CURRENT_FAIL:-}" ] || exit 255; printf '%s\\n' "${CURRENT:-}" ;;
-      *" python alembic/monitor_password.py") exit "${MONITOR_FAIL:-0}" ;;
+      *" python alembic/role_passwords.py") exit "${ROLES_FAIL:-0}" ;;
       *)
         n=$(( $(cat "$CALLS.upgrades" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$CALLS.upgrades"
         log="MIGRATE_LOG_$n" code="MIGRATE_EXIT_$n"
@@ -933,8 +933,8 @@ def test_every_migrations_run_takes_the_shared_arguments() -> None:
     assert len([line for line in lines if '"${migrations_run[@]}"' in line]) == 3, lines
 
 
-def test_migrate_sets_the_monitor_password_after_a_success(tmp_path: Path) -> None:
-    """Шаг пароля роли мониторинга — один раз, после удачного upgrade, тем же
+def test_migrate_sets_the_role_passwords_after_a_success(tmp_path: Path) -> None:
+    """Шаг паролей ролей — один раз, после удачного upgrade, тем же
     образом; вывод alembic в migrate.log он не перезаписывает."""
     (tmp_path / "alembic.log").write_text(APPLIED_LOG)
     result, report, _ = run_script(
@@ -946,25 +946,25 @@ def test_migrate_sets_the_monitor_password_after_a_success(tmp_path: Path) -> No
     assert result.returncode == 0, result.stdout + result.stderr
     runs = [c for c in (tmp_path / "calls").read_text().splitlines() if c.startswith("docker run ")]
     assert "alembic upgrade head" in runs[0], runs
-    assert runs[-1].endswith('ghcr.io/o/r:t@sha256:' + "0" * 64 + " python alembic/monitor_password.py"), runs
+    assert runs[-1].endswith('ghcr.io/o/r:t@sha256:' + "0" * 64 + " python alembic/role_passwords.py"), runs
     assert len(runs) == 2, runs
     assert (report / "migrate.log").read_text() == APPLIED_LOG
 
 
-def test_a_failed_monitor_password_step_is_not_a_failed_migration(tmp_path: Path) -> None:
-    """Ревью #130: миграции зафиксированы, упал отдельный шаг пароля — summary
-    не пишет «упала на ревизии», а пишет, что пароль не обновлён; шаг под timeout."""
+def test_a_failed_role_passwords_step_is_not_a_failed_migration(tmp_path: Path) -> None:
+    """Ревью #130: миграции зафиксированы, упал отдельный шаг паролей — summary
+    не пишет «упала на ревизии», а пишет, что пароли не обновлены; шаг под timeout."""
     (tmp_path / "alembic.log").write_text(APPLIED_LOG)
     result, report, _ = run_script(
         tmp_path, "migrate.sh",
         API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
-        MIGRATE_LOG=str(tmp_path / "alembic.log"), MONITOR_FAIL="2",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"), ROLES_FAIL="2",
     )
 
     assert result.returncode == 2
     calls = (tmp_path / "calls").read_text().splitlines()
-    assert any(c.startswith("timeout 60 docker run ") and c.endswith(" python alembic/monitor_password.py") for c in calls), calls
-    assert (report / "migrate-monitor.error").read_text().strip() == "2"
+    assert any(c.startswith("timeout 60 docker run ") and c.endswith(" python alembic/role_passwords.py") for c in calls), calls
+    assert (report / "migrate-roles.error").read_text().strip() == "2"
     assert (report / "migrate.log").read_text() == APPLIED_LOG
 
     results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
@@ -972,10 +972,11 @@ def test_a_failed_monitor_password_step_is_not_a_failed_migration(tmp_path: Path
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 2 |" in text
     assert "| Ревизия после | `dmc268.deploy.migrations.revision.to` | `0014_d` |" in text
     assert "Упала на ревизии" not in text
-    assert "пароль роли мониторинга `dmc268_monitor` не обновлён (код 2)" in text
+    assert "пароли ролей `dmc268_monitor` и `dmc268_app` не обновлены (код 2)" in text
+    assert "apply не запускался" in text
 
 
-def test_a_successful_monitor_password_step_leaves_no_marker(tmp_path: Path) -> None:
+def test_a_successful_role_passwords_step_leaves_no_marker(tmp_path: Path) -> None:
     (tmp_path / "alembic.log").write_text(APPLIED_LOG)
     result, report, _ = run_script(
         tmp_path, "migrate.sh",
@@ -984,10 +985,10 @@ def test_a_successful_monitor_password_step_leaves_no_marker(tmp_path: Path) -> 
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert not (report / "migrate-monitor.error").exists()
+    assert not (report / "migrate-roles.error").exists()
 
 
-def test_migrate_does_not_set_the_monitor_password_after_a_failure(tmp_path: Path) -> None:
+def test_migrate_does_not_set_the_role_passwords_after_a_failure(tmp_path: Path) -> None:
     (tmp_path / "alembic.log").write_text(FAILED_MIGRATION_LOG)
     result, _, _ = run_script(
         tmp_path, "migrate.sh",
@@ -996,7 +997,7 @@ def test_migrate_does_not_set_the_monitor_password_after_a_failure(tmp_path: Pat
     )
 
     assert result.returncode == 1
-    assert "monitor_password.py" not in (tmp_path / "calls").read_text()
+    assert "role_passwords.py" not in (tmp_path / "calls").read_text()
 
 
 def test_migrate_keeps_the_alembic_exit_code(tmp_path: Path) -> None:

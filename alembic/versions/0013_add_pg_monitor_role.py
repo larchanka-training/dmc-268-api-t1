@@ -64,7 +64,7 @@ def upgrade() -> None:
     # SET LOCAL умирает на COMMIT. Если библиотека не загружена (shared_preload
     # выключен), SET LOCAL спокойно создаёт placeholder-параметр и ничего
     # не ломает. Тот же приём — у перегенерации пароля на деплое
-    # (alembic/monitor_password.py).
+    # (alembic/role_passwords.py).
     op.execute("SET LOCAL pg_stat_statements.track_utility = off")
     op.execute(f"ALTER ROLE {_MONITOR_ROLE} WITH LOGIN PASSWORD '{password}'")
     # pg_monitor — предопределённая роль со статистическими вьюхами

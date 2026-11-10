@@ -31,8 +31,8 @@ infra` — targeted-план шага «Поднять базу и брокер�
 - `migrate.log` — вывод `alembic upgrade head` (`migrate.sh`), после сбоя —
   `migrate-current.log` с выводом `alembic current` (`.error` рядом — база не
   ответила), `migrate-attempts` — номер последней попытки;
-  `migrate-monitor.error` — миграции прошли, а пароль роли мониторинга не
-  обновлён (код выхода); исход шага миграций — из `STEP_RESULTS`;
+  `migrate-roles.error` — миграции прошли, а пароли ролей `dmc268_monitor` и
+  `dmc268_app` не обновлены (код выхода); исход шага миграций — из `STEP_RESULTS`;
 - `passwords-changed` — у каких сервисов (`postgres`, `rabbitmq`) шаг паролей
   дошёл до смены (`passwords.sh`);
 - `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`);
@@ -794,13 +794,14 @@ def migrations_section(report_dir: Path, marks: dict[str, float], outcome: str) 
         # миграции могли и дойти до конца, и откатиться (trap в migrate.sh).
         return [*out, ("Шаг миграций прерван: применились ли ревизии, по логу не сказать. "
                 "Ревизию базы покажет `alembic current` или следующий деплой.")]
-    # Упал шаг пароля роли мониторинга после удачного upgrade (migrate.sh):
-    # ревизии зафиксированы, и про миграции summary пишет как про успех.
-    monitor_error = read(report_dir / "migrate-monitor.error").strip()
-    if outcome == "failure" and monitor_error:
+    # Упал шаг паролей ролей после удачного upgrade (migrate.sh): ревизии
+    # зафиксированы, и про миграции summary пишет как про успех.
+    roles_error = read(report_dir / "migrate-roles.error").strip()
+    if outcome == "failure" and roles_error:
         return [*migrations_section(report_dir, marks, "success"), "", "> [!CAUTION]",
-                (f"> Миграции применены, но пароль роли мониторинга `dmc268_monitor` не обновлён "
-                 f"(код {monitor_error}): коллектор не войдёт в базу с паролем из секрета. Повторите деплой.")]
+                (f"> Миграции применены, но пароли ролей `dmc268_monitor` и `dmc268_app` не обновлены "
+                 f"(код {roles_error}): коллектор, API и воркер не войдут в базу с паролями из секретов, "
+                 f"apply не запускался. Повторите деплой.")]
     # Ответ `alembic current` после сбоя (migrate.sh); нет файла или рядом
     # `.error` — база не ответила, ревизия неизвестна.
     answered = (report_dir / "migrate-current.log").exists() and not (report_dir / "migrate-current.error").exists()

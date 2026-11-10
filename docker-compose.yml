@@ -98,6 +98,9 @@ services:
       # выше (как и POSTGRES_PASSWORD, допустим только локально); на стенде
       # переменную задаёт infra из секрета.
       POSTGRES_MONITOR_PASSWORD: ${POSTGRES_MONITOR_PASSWORD:-dmc268_monitor}
+      # Пароль роли приложения dmc268_app (ревизия 0023): тот же, что в
+      # DATABASE_URL api и worker ниже; допустим только локально.
+      POSTGRES_APP_PASSWORD: dmc268_app
       # Телеметрия — тот же переключатель, что у api и воркера: с профилем
       # observability миграции пишут трейс деплоя (спека observability,
       # «Деплой с миграциями»). service.instance.id — по имени сервиса.
@@ -116,14 +119,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # Миграции и пароль роли мониторинга — одним контейнером; шаг роли тот же,
-    # что у деплоя (alembic/monitor_password.py).
+    # Миграции и пароли ролей — одним контейнером; шаг паролей тот же,
+    # что у деплоя (alembic/role_passwords.py). Миграции — владельцем базы,
+    # api и worker — ролью dmc268_app.
     command:
       - sh
       - -c
       - |
         alembic upgrade head || exit 1
-        python alembic/monitor_password.py || exit 1
+        python alembic/role_passwords.py || exit 1
     restart: "no"
 
   api:
@@ -137,7 +141,9 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     environment:
-      DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
+      # Роль приложения без прав на схему (миграция 0023): локально те же права,
+      # что на стенде. Пароль — локальный, пара к POSTGRES_APP_PASSWORD у migrate.
+      DATABASE_URL: postgresql+psycopg://dmc268_app:dmc268_app@postgres:5432/dmc268
       # %2F — закодированный дефолтный vhost "/"; pika разбирает буквальный
       # "//" как пустой vhost, а не как "/" (см. tasks.md задачи 2.5).
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
@@ -233,7 +239,9 @@ services:
   worker:
     build: .
     environment:
-      DATABASE_URL: postgresql+psycopg://dmc268:dmc268@postgres:5432/dmc268
+      # Роль приложения без прав на схему (миграция 0023): локально те же права,
+      # что на стенде. Пароль — локальный, пара к POSTGRES_APP_PASSWORD у migrate.
+      DATABASE_URL: postgresql+psycopg://dmc268_app:dmc268_app@postgres:5432/dmc268
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
       GITHUB_WEBHOOK_SECRET: local-dev-secret
       # Воркер сам достаёт дифф, правила и файлы через VCS-шлюз: без

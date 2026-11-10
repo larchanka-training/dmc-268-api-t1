@@ -47,6 +47,21 @@ variable "postgres_password" {
   }
 }
 
+# Пароль роли приложения dmc268_app (миграция 0023): под ней api и worker
+# входят в базу, миграции — владельцем (postgres_user). Едет в URL
+# подключения, поэтому печатный ASCII без пробела (см. infra/README.md, «Смена
+# паролей»); дефолта нет — стенд не стартует с локальным паролем.
+variable "postgres_app_password" {
+  type        = string
+  description = "Пароль роли приложения dmc268_app. Реальные значения не коммитить."
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[!-~]{16,}$", var.postgres_app_password))
+    error_message = "postgres_app_password пуст, короче 16 символов или с пробелом либо не-ASCII: задайте секрет PG_APP_PASSWORD_DMC268_T1 (openssl rand -hex 24)."
+  }
+}
+
 variable "postgres_db" {
   type        = string
   description = "Имя базы PostgreSQL."
