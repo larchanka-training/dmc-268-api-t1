@@ -19,6 +19,9 @@ groups:
     rules:
       - record: dmc268:llm_tokens_budget_month
         expr: vector(50000000)
+      # Бюджет расхода модели в евро (#119): 20 € в месяц.
+      - record: dmc268:llm_cost_budget_eur_month
+        expr: vector(20)
 
   - name: dmc268-services
     rules:
@@ -293,6 +296,47 @@ groups:
         annotations:
           summary: "Расход токенов модели неизвестен"
           description: "Ряда review_llm_tokens_month нет 15 минут: коллектор не читает review_runs, алерт бюджета не работает. Смотрите логи dmc268-otelcol (receiver sqlquery)."
+
+      # Стоимость вызовов модели с начала месяца по прогонам (review_runs.cost_eur) —
+      # тот же receiver sqlquery; без ряда молчит вместе с токенами, и горит LlmBudgetUnknown.
+      - alert: LlmCostBudgetNearLimit
+        expr: review_llm_cost_eur_month / on() group_left dmc268:llm_cost_budget_eur_month > 0.8
+        labels:
+          severity: warning
+          service: llm
+        annotations:
+          summary: "Израсходовано {{ $value | humanizePercentage }} месячного бюджета модели в евро"
+          description: "Стоимость вызовов модели с начала месяца выше 80 % бюджета (dmc268:llm_cost_budget_eur_month в alerts.yml)."
+
+      - alert: LlmCostBudgetExceeded
+        expr: review_llm_cost_eur_month / on() group_left dmc268:llm_cost_budget_eur_month >= 1
+        labels:
+          severity: critical
+          service: llm
+        annotations:
+          summary: "Месячный бюджет модели в евро исчерпан: {{ $value | humanizePercentage }}"
+          description: "Стоимость вызовов модели с начала месяца превысила бюджет (dmc268:llm_cost_budget_eur_month в alerts.yml)."
+
+      # Остаток на счёте Eurorouter — gauge воркера, опрос /credits раз в 5 минут.
+      # Ниже 0,10 € провайдер отвечает 402, и прогоны падают. Нет ряда (опрос не
+      # удался, Eurorouter не используется) — алерты молчат.
+      - alert: LlmProviderBalanceLow
+        expr: review_llm_provider_balance_eur < 5
+        labels:
+          severity: warning
+          service: llm
+        annotations:
+          summary: "Баланс Eurorouter {{ $value | printf \"%.2f\" }} €"
+          description: "Остаток на счёте Eurorouter ниже 5 €: пополните баланс, пока провайдер не начал отвечать 402."
+
+      - alert: LlmProviderBalanceCritical
+        expr: review_llm_provider_balance_eur < 1
+        labels:
+          severity: critical
+          service: llm
+        annotations:
+          summary: "Баланс Eurorouter {{ $value | printf \"%.2f\" }} €"
+          description: "Остаток на счёте Eurorouter ниже 1 €: ниже 0,10 € провайдер отвечает 402, и прогоны падают. Пополните баланс."
 
   - name: dmc268-storage
     rules:

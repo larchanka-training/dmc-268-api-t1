@@ -460,13 +460,13 @@ OTel с её миллисекундами. Логи сервисов колле�
 | Источник | `job` | Главные метрики | Ключевые лейблы | Панели «Обзора» |
 | --- | --- | --- | --- | --- |
 | API (OTel SDK) | `dmc-268-api` | `http_server_request_duration_seconds_*`, `http_server_active_requests`, `http_client_request_duration_seconds_*`, `db_client_connection_count`, `db_client_connection_max` | `http_route`, `http_request_method`, `http_response_status_code`, `db_client_connection_state` | RPS API; доля ошибок 5xx; длительность HTTP-запросов; соединения приложения с базой |
-| Воркер (OTel SDK) | `dmc-268-worker` | `review_runs_total`, `review_stage_duration_seconds_*`, `review_llm_call_duration_seconds_*`, `http_client_request_duration_seconds_*`, `db_client_connection_*` | `status`, `stage`, `provider`, `model`, `outcome` | прогоны по статусам; длительность этапов; длительность вызова модели; соединения приложения с базой |
+| Воркер (OTel SDK) | `dmc-268-worker` | `review_runs_total`, `review_stage_duration_seconds_*`, `review_llm_call_duration_seconds_*`, `review_llm_provider_balance_eur` (остаток Eurorouter, опрос `/credits` раз в 5 минут; только при Eurorouter основным или фоллбэком), `http_client_request_duration_seconds_*`, `db_client_connection_*` | `status`, `stage`, `provider`, `model`, `outcome` | прогоны по статусам; длительность этапов; длительность вызова модели; соединения приложения с базой; баланс Eurorouter |
 | PostgreSQL (receiver `postgresql` основного коллектора) | `collector` | `postgresql_backends`, `postgresql_connection_max`, `postgresql_replication_data_delay_bytes`, `postgresql_db_size_bytes`, `postgresql_table_size_bytes` | `postgresql_database_name` | соединения базы |
 | RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
 | Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
 | Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes`, `container_uptime_seconds`, `container_restarts_total` | `container_name` | CPU и память контейнеров |
 | Вход, nginx интерфейса (receiver `nginx` основного коллектора, `stub_status`) | `collector` | `nginx_requests_total`, `nginx_connections_current`, `nginx_connections_accepted_total`, `nginx_connections_handled_total` | `state` | «Вход (nginx)»: соединения; запросы в секунду и доля ответов по классу кода считаются по access-логу `{service_name="dmc268-ui"}` в Loki без проб blackbox и без запросов к `/grafana/` (Grafana ходит через тот же nginx, открытый «Обзор» — около 0,6 запроса в секунду с вкладки): счётчик `stub_status` их не отличает |
-| Расход токенов (receiver `sqlquery/llm-tokens` основного коллектора) | `collector` | `review_llm_tokens_month` | нет | нет (алерты бюджета) |
+| Расход модели (receiver `sqlquery/llm-tokens` основного коллектора) | `collector` | `review_llm_tokens_month`, `review_llm_cost_eur_month` | нет | расход модели за месяц, € (и алерты бюджета) |
 | Резервные копии (textfile node-exporter, пишет `backup.sh`) | `node-exporter` | `dmc268_backup_last_success_timestamp_seconds` | нет | нет (алерт `BackupStale`) |
 | Пробы (blackbox-exporter) | `blackbox-services`, `blackbox-public` | `probe_success`, `probe_ssl_earliest_cert_expiry` | `service`, `instance` | нет (алерты) |
 | Коллекторы, Loki, Tempo, Prometheus | `collector-self`, `collector-docker-self`, `collector-logs-self`, `loki`, `tempo`, `prometheus` | `otelcol_*`, `loki_*`, `tempo_*`, `prometheus_*` | `receiver`, `exporter` | нет |
@@ -642,6 +642,10 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `LlmBudgetNearLimit` | токены модели с начала месяца (UTC) от бюджета `dmc268:llm_tokens_budget_month` — 50 млн | > 80 % | warning |
 | `LlmBudgetExceeded` | то же | ≥ 100 % | critical |
 | `LlmBudgetUnknown` | ряда расхода токенов нет — алерт бюджета слеп | 15 минут | warning |
+| `LlmCostBudgetNearLimit` | стоимость вызовов модели с начала месяца (UTC) от бюджета `dmc268:llm_cost_budget_eur_month` — 20 € | > 80 % | warning |
+| `LlmCostBudgetExceeded` | то же | ≥ 100 % | critical |
+| `LlmProviderBalanceLow` | остаток на счёте Eurorouter (`review_llm_provider_balance_eur`); ниже 0,10 € провайдер отвечает 402 | < 5 € | warning |
+| `LlmProviderBalanceCritical` | то же | < 1 € | critical |
 | `DiskSpaceLow` | свободно на файловой системе сервера | < 15 % дольше 5 минут | warning |
 | `DiskSpaceCritical` | то же | < 5 % дольше 2 минут | critical |
 | `DiskWillFillIn24h` | прогноз по 6 часам: место кончится за сутки, при свободных < 40 % | 30 минут | critical |
@@ -653,11 +657,19 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `ScrapeTargetDown` | цель скрейпа Prometheus не отвечает — её алерты слепы | 5 минут | warning |
 | `Watchdog` | горит всегда; уходит не в Telegram, а на внешний heartbeat | сразу, повтор раз в 5 минут | none |
 
-Бюджет токенов — константа в `alerts.yml` (`dmc268:llm_tokens_budget_month`), а не
-переменная: конфиги стека одинаковы в обоих окружениях. Смена бюджета — правка этой строки и
-таблицы выше. Расход берётся из `review_runs.tokens_used` запросом receiver-а `sqlquery`
-основного коллектора под ролью `dmc268_monitor`; ревизия 0017 даёт ей `SELECT` только на
-`created_at` и `tokens_used`. Разбивка по типам токенов, стоимость и баланс провайдера — #119.
+Бюджеты токенов и евро — константы в `alerts.yml` (`dmc268:llm_tokens_budget_month`,
+`dmc268:llm_cost_budget_eur_month`), а не переменные: конфиги стека одинаковы в обоих
+окружениях. Смена бюджета — правка этой строки и таблицы выше. Расход берётся из
+`review_runs.tokens_used` и `review_runs.cost_eur` запросом receiver-а `sqlquery` основного
+коллектора под ролью `dmc268_monitor`; ревизии 0017 и 0021 дают ей `SELECT` только на
+`created_at`, `tokens_used` и `cost_eur`. Ряда стоимости нет — значит, нет и ряда токенов, и
+горит `LlmBudgetUnknown`.
+
+Баланс Eurorouter снимает воркер: `GET /credits` первым ключом не чаще раза в 5 минут, остаток —
+`data.total_credits − data.total_usage`. Опрос не удался — в лог одно предупреждение, и до
+следующего опроса воркер точку не отдаёт. Коллектор держит последнее значение 5 минут, так что
+ряд в Prometheus пропадает, только если опросы не удаются дольше; алерты баланса при этом молчат. Без Eurorouter (`LLM_BACKEND` не
+`eurorouter` и фоллбэк выключен) ряда нет совсем.
 
 **Чего алерты не видят.** Статуса healthcheck контейнера у receiver `docker_stats` 0.158 нет
 (`container.state.health.status` появился в 0.160), поэтому «unhealthy» ловят пробы

@@ -136,8 +136,8 @@ Alertmanager SHALL доставлять их в чат Telegram команды �
 
 Расход токенов модели для алерта бюджета SHALL считаться по `review_runs.tokens_used` прогонов с
 начала календарного месяца (UTC) и попадать в Prometheus через коллектор, под ролью мониторинга
-базы. Роль мониторинга SHALL читать в `review_runs` только `created_at` и `tokens_used`; остальные
-данные прогонов ей SHALL NOT быть доступны.
+базы. Роль мониторинга SHALL читать в `review_runs` только `created_at`, `tokens_used` и `cost_eur`
+(бюджет в евро); остальные данные прогонов ей SHALL NOT быть доступны.
 
 #### Scenario: Запрос коллектора
 
