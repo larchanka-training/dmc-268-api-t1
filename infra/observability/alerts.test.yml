@@ -523,6 +523,74 @@ tests:
               summary: "Расход токенов модели неизвестен"
               description: "Ряда review_llm_tokens_month нет 15 минут: коллектор не читает review_runs, алерт бюджета не работает. Смотрите логи dmc268-otelcol (receiver sqlquery)."
 
+  # Бюджет в евро: 16 € — молчит (ровно 80 %), 17 € — предупреждение, 20 € — критический.
+  # Первая проверка — с 1m: на 0m правило записи бюджета ещё не вычислено, и молчание пустое.
+  - interval: 1m
+    input_series:
+      - series: 'review_llm_cost_eur_month{job="collector"}'
+        values: "16 16 17 20"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: LlmCostBudgetNearLimit
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: LlmCostBudgetNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm
+              job: collector
+            exp_annotations:
+              summary: "Израсходовано 85% месячного бюджета модели в евро"
+              description: "Стоимость вызовов модели с начала месяца выше 80 % бюджета (dmc268:llm_cost_budget_eur_month в alerts.yml)."
+      - eval_time: 2m
+        alertname: LlmCostBudgetExceeded
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: LlmCostBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: llm
+              job: collector
+            exp_annotations:
+              summary: "Месячный бюджет модели в евро исчерпан: 100%"
+              description: "Стоимость вызовов модели с начала месяца превысила бюджет (dmc268:llm_cost_budget_eur_month в alerts.yml)."
+
+  # Баланс Eurorouter: 5 € — молчит, 4,99 € — предупреждение, 1 € — ещё не критический,
+  # 0,99 € — критический.
+  - interval: 1m
+    input_series:
+      - series: 'review_llm_provider_balance_eur{job="dmc-268-worker"}'
+        values: "5 4.99 1 0.99"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: LlmProviderBalanceLow
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: LlmProviderBalanceLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm-provider
+              job: dmc-268-worker
+            exp_annotations:
+              summary: "Баланс Eurorouter 4.99 €"
+              description: "Остаток на счёте Eurorouter ниже 5 €: пополните баланс, пока провайдер не начал отвечать 402."
+      - eval_time: 2m
+        alertname: LlmProviderBalanceCritical
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: LlmProviderBalanceCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: llm-provider
+              job: dmc-268-worker
+            exp_annotations:
+              summary: "Баланс Eurorouter 0.99 €"
+              description: "Остаток на счёте Eurorouter ниже 1 €: ниже 0,10 € провайдер отвечает 402, и прогоны падают. Пополните баланс."
+
   # Диск: 10 % свободно — DiskSpaceLow, 3 % — ещё и DiskSpaceCritical.
   - interval: 1m
     input_series:

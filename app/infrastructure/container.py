@@ -35,6 +35,7 @@ from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
 from app.infrastructure.db.token_cipher import TokenCipher
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork, UntracedUnitOfWork
+from app.infrastructure.llm.eurorouter_balance import EurorouterBalance
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.ollama import OllamaGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
@@ -404,6 +405,21 @@ def _eurorouter(settings: Settings, timeout: httpx.Timeout) -> tuple[str, LlmGat
             max_attempts=settings.llm_max_attempts,
             reasoning_effort=settings.eurorouter_reasoning_effort,
         ),
+    )
+
+
+# Опрос баланса Eurorouter (#119): не чаще раза в 5 минут, таймаут каждой фазы запроса - 5 с.
+_LLM_BALANCE_TTL_SECONDS = 300.0
+_LLM_BALANCE_TIMEOUT_SECONDS = 5.0
+
+
+def build_llm_balance(settings: Settings) -> EurorouterBalance:
+    """Остаток баланса Eurorouter по первому ключу. Конструирование - без сети."""
+    return EurorouterBalance(
+        httpx.Client(base_url=settings.eurorouter_base_url, timeout=_LLM_BALANCE_TIMEOUT_SECONDS),
+        settings.eurorouter_keys[0],
+        ttl_seconds=_LLM_BALANCE_TTL_SECONDS,
+        monotonic=monotonic,
     )
 
 

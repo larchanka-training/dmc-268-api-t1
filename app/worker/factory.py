@@ -45,7 +45,11 @@ from app.config import Settings
 from app.domain.ids import new_id
 from app.domain.prompt import PromptTexts, check_window_config
 from app.domain.webhook_redelivery import RedeliveryPolicy
-from app.infrastructure.container import WORKER_VCS_LIMITS, build_container
+from app.infrastructure.container import (
+    WORKER_VCS_LIMITS,
+    build_container,
+    build_llm_balance,
+)
 from app.infrastructure.logging import (
     configure_logging,
     install_excepthooks,
@@ -67,6 +71,7 @@ from app.infrastructure.telemetry import (
     OtelStageTracer,
     configure_telemetry,
     instrument_engine,
+    instrument_llm_balance,
     instrument_pool,
     prime_run_outcomes,
     record_current_exception,
@@ -692,6 +697,9 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
     # Собрать адаптер модели сразу: порядок провайдеров уходит в лог при старте.
     container.llm_gateway()
+    # Баланс провайдера - там, где код может уйти Eurorouter: основным или фоллбэком.
+    if settings.llm_backend == "eurorouter" or settings.llm_hosted_fallback:
+        instrument_llm_balance(build_llm_balance(settings))
     # Один адаптер на оба потребителя: запись исходов — общая бизнес-метрика
     # пайплайна и прохода очистки.
     run_outcome = OtelRunOutcomeRecorder()
