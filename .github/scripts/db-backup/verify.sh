@@ -23,9 +23,11 @@ fi
 
 # --no-owner и --no-acl: ролей стенда (dmc268_monitor) в чистом кластере нет,
 # а данные проверке нужны без них. --exit-on-error — любая ошибка роняет шаг.
+# DETAIL и CONTEXT ошибки libpq цитируют строки данных, а лог прогона публичный.
 openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass env:STATE_BACKUP_KEY -in "$file" \
   | docker exec -i "$PG_CONTAINER" pg_restore -U "$PGUSER" -d "$PGDATABASE" \
-      --no-owner --no-acl --exit-on-error
+      --no-owner --no-acl --exit-on-error \
+      2> >(sed -E 's/^(DETAIL|CONTEXT):.*/\1: <скрыто>/' >&2)
 
 # Это наша база, а не пустая: одна ревизия Alembic, основные таблицы на месте,
 # подключённые репозитории есть (на стенде они есть всегда; пустая таблица —
