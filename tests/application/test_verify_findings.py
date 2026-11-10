@@ -1,5 +1,6 @@
 """Второй проход анализа - общий у ревью и симуляции песочницы."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -95,7 +96,11 @@ def test_every_kept_finding_carries_its_verdict() -> None:
     (request,) = gateway.requests
     assert request.task is LlmTask.VERIFY
     assert verification.outcome is VerificationOutcome.VERIFIED
-    assert verification.kept == (first, serious)
+    # Оставленные несут свой вердикт: так он попадает в запись замечания.
+    assert verification.kept == (
+        replace(first, verdict=Verdict(VerifierVerdict.KEEP, "причина F1")),
+        replace(serious, verdict=Verdict(VerifierVerdict.DROP, "причина F3")),
+    )
     assert verification.applied is not None
     assert verification.applied.kept == (
         JudgedFinding(first, Verdict(VerifierVerdict.KEEP, "причина F1")),

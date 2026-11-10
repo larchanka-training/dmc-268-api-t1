@@ -36,6 +36,7 @@ from app.domain.entities import (
     ReviewRun,
     ReviewRunListEntry,
     RuleRef,
+    Verdict,
 )
 from app.domain.enums import (
     CommentKind,
@@ -49,12 +50,15 @@ from app.domain.enums import (
     ReviewRunStatus,
     TriggerSource,
     VerificationOutcome,
+    VerifierVerdict,
 )
 from app.domain.ids import new_id
 from app.domain.llm_usage import NO_USAGE, LlmUsage
 from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.run_steps import finish_step, start_step
+from app.domain.secret_redaction import REDACTED
 from app.domain.session import open_session
+from app.domain.untrusted import fence
 from app.domain.vcs_errors import VcsError, VcsFileTooLargeError, VcsNotFoundError
 
 from .fakes.auth import SIGNED_IN, sign_in_with_session
@@ -750,17 +754,144 @@ def test_github_failure_on_a_run_is_502(suffix: str) -> None:
     assert response.json()["code"] == "SCM_UNAVAILABLE"
 
 
-def test_inspection_of_a_finding_of_a_visible_run_answers_not_implemented() -> None:
-    """Инспекция описана в схеме, а отвечает `501` - после проверки прогона и находки."""
+def _inspection_body(path: str = "a.py", hunk: str = "@@ -1 +1 @@\n-x\n+y") -> dict[str, Any]:
+    """Тело пакета контекста с одним файлом: то, что `file_contexts` читает по файлам."""
+    return {
+        "diff": [{"path": path, "hunk": fence("diff", hunk)}],
+        "ast": [{"path": path, "scopes": fence("scopes", "1-9 def f()"), "imports": fence("imports", "import os")}],
+        "omitted": [],
+        "rules": {"items": [{"name": "Errors", "files": [path], "checks": [fence("rule_check", "Отказ - Result")]}]},
+    }
+
+
+def _add_body(uow: FakeUnitOfWork, run: ReviewRun, body: dict[str, Any]) -> None:
+    uow.context_payloads.add(
+        ContextPayload(
+            id=new_id(),
+            review_run_id=run.id,
+            chunk_index=0,
+            tiers=("diff",),
+            file_paths=("a.py",),
+            token_count=10,
+            content_sha256="chunk0",
+            body=body,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+
+def _inspect(uow: FakeUnitOfWork, run: ReviewRun, finding: Finding) -> Any:
+    return _client(uow).get(f"/api/v1/reviews/{run.id}/findings/{finding.id}/inspection")
+
+
+def test_inspection_returns_the_verdict_and_the_context_of_the_findings_file() -> None:
+    """Сценарий «Находка видимого прогона»: `200` с вердиктом, итогом верификации и контекстом файла."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, verification=VerificationOutcome.VERIFIED)
+    finding = replace(_finding(run, None), verdict=Verdict(VerifierVerdict.KEEP, "Ошибка воспроизводима"))
+    uow.findings.add(finding)
+    _add_body(uow, run, _inspection_body())
+
+    response = _inspect(uow, run, finding)
+
+    assert response.status_code == 200, response.json()
+    assert response.json() == {
+        "finding_id": str(finding.id),
+        "verification": "verified",
+        "verdict": {"verdict": "keep", "reason": "Ошибка воспроизводима"},
+        "context": {
+            "file_path": "a.py",
+            "hunks": ["@@ -1 +1 @@\n-x\n+y"],
+            "scopes": "1-9 def f()",
+            "imports": "import os",
+            "rules": [{"name": "Errors", "checks": ["Отказ - Result"]}],
+            "omitted": [],
+        },
+    }
+
+
+def test_inspection_reports_a_drop_verdict_of_a_finding_the_verifier_may_not_discard() -> None:
+    """Сценарий «Вердикт drop у находки безопасности»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, verification=VerificationOutcome.VERIFIED)
+    finding = replace(
+        _finding(run, None),
+        category=FindingCategory.SECURITY,
+        severity=FindingSeverity.CRITICAL,
+        verdict=Verdict(VerifierVerdict.DROP, "Не воспроизводится"),
+    )
+    uow.findings.add(finding)
+
+    body = _inspect(uow, run, finding).json()
+
+    assert body["verdict"] == {"verdict": "drop", "reason": "Не воспроизводится"}
+
+
+@pytest.mark.parametrize("outcome", [VerificationOutcome.UNAVAILABLE, VerificationOutcome.NOT_REQUIRED, None])
+def test_inspection_has_no_verdict_when_the_verifier_did_not_decide(outcome: VerificationOutcome | None) -> None:
+    """Сценарий «Верификатор не отрабатывал»: `verdict` - `null`, итог прогона назван."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, verification=outcome)
+    finding = _finding(run, None)
+    uow.findings.add(finding)
+
+    body = _inspect(uow, run, finding).json()
+
+    assert body["verdict"] is None
+    assert body["verification"] == (outcome.value if outcome else None)
+
+
+def test_inspection_has_no_context_when_the_body_is_erased_but_keeps_the_verdict() -> None:
+    """Сценарий «Тело контекста стёрто по сроку»."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, verification=VerificationOutcome.VERIFIED)
+    finding = replace(_finding(run, None), verdict=Verdict(VerifierVerdict.KEEP, "Подтверждено"))
+    uow.findings.add(finding)
+    _add_body(uow, run, _inspection_body())
+    uow.context_payloads.expire_bodies(NOW + timedelta(days=1), NOW + timedelta(days=30), 10)
+
+    body = _inspect(uow, run, finding).json()
+
+    assert body["context"] is None
+    assert body["verdict"] == {"verdict": "keep", "reason": "Подтверждено"}
+
+
+def test_inspection_has_no_context_for_a_run_without_a_stored_package() -> None:
     uow = FakeUnitOfWork()
     run = _add_run(uow)
     finding = _finding(run, None)
     uow.findings.add(finding)
 
-    response = _client(uow).get(f"/api/v1/reviews/{run.id}/findings/{finding.id}/inspection")
+    assert _inspect(uow, run, finding).json()["context"] is None
 
-    assert response.status_code == 501
-    assert response.json()["code"] == "NOT_IMPLEMENTED"
+
+def test_inspection_shows_the_label_the_package_stored_instead_of_a_secret() -> None:
+    """Сценарий «Секрет в контексте»: ручка отдаёт сохранённый текст, не восстанавливая секрет."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, verification=VerificationOutcome.VERIFIED)
+    finding = _finding(run, None)
+    uow.findings.add(finding)
+    _add_body(uow, run, _inspection_body(hunk=f'@@ -1 +1 @@\n+TOKEN = "{REDACTED}"'))
+
+    body = _inspect(uow, run, finding).json()
+
+    assert body["context"]["hunks"] == [f'@@ -1 +1 @@\n+TOKEN = "{REDACTED}"']
+
+
+def test_inspection_asks_github_only_for_the_run_visibility() -> None:
+    """Контекст читается из базы: GitHub нужен только для видимости прогона."""
+    uow = FakeUnitOfWork()
+    run = _add_run(uow, verification=VerificationOutcome.VERIFIED)
+    finding = _finding(run, None)
+    uow.findings.add(finding)
+    _add_body(uow, run, _inspection_body())
+    vcs = FakeVcs()
+
+    response = _client(uow, vcs=vcs).get(f"/api/v1/reviews/{run.id}/findings/{finding.id}/inspection")
+
+    assert response.status_code == 200
+    assert vcs.calls == []
 
 
 def test_inspection_of_a_finding_of_another_run_is_404() -> None:

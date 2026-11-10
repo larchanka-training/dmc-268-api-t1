@@ -8,7 +8,8 @@
 общего потока событий — `0008_add_review_runs_updated_at_index.py`, токен пользователя у
 провайдера при сессии - `0009_add_provider_tokens.py`, симуляции песочницы правил -
 `0022_add_simulations.py`, баланс аккаунта (зачисления, плательщик репозитория и прогона,
-резерв) - `0020_add_account_balance.py`; отдельный тест следит, чтобы таблицы
+резерв) - `0020_add_account_balance.py`, вердикт верификатора у замечания -
+`0023_add_finding_verifier_verdict.py`; отдельный тест следит, чтобы таблицы
 на этой диаграмме и модели не расходились.
 
 `ReviewRun` в тикете называется `ReviewJob`. Имя поменяли, потому что «job»
@@ -127,6 +128,8 @@ erDiagram
         int rule_check "номер пункта правила, с единицы"
         text rule_check_text "текст пункта на момент прогона"
         uuid covered_by_finding_id FK "находка, чей тред бота уже говорит об этом; null - опубликована сама"
+        verifier_verdict verifier_verdict "решение верификатора: keep или drop; null - он по находке не решал"
+        text verifier_reason "причина верификатора; заполнена вместе с вердиктом"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
@@ -359,6 +362,7 @@ refresh под блокировкой `SELECT … FOR UPDATE`; удаляетс�
 | Чанки контекста сохраняют порядок | `UNIQUE (review_run_id, chunk_index)` |
 | Замечание не может повториться в одном прогоне | `UNIQUE NULLS NOT DISTINCT (review_run_id, file_path, side, old_line, new_line, category)`. Привязка заполняет только номер строки своей стороны, поэтому в ключе есть оба номера, а NULL считаются равными. Без любой из этих двух частей ограничение никогда не сработает на старой стороне, где `new_line` всегда NULL. |
 | Ссылка на правило заполнена целиком или пуста целиком | `ck_findings_rule_ref`: `rule_name`, `rule_check`, `rule_check_text` все `NULL` либо все заполнены и `rule_check >= 1`. Префикс атрибуции строится из всех трёх частей. |
+| Вердикт верификатора и причина заполнены вместе или пусты вместе | `ck_findings_verifier_verdict`: `verifier_verdict` и `verifier_reason` оба `NULL` либо оба заполнены. У находок прогонов до миграции `0023` оба пусты. |
 | Шаг закрыт целиком или идёт | `ck_review_run_steps_duration`: длительности нет ровно у `running`; `ck_review_run_steps_error_code`: код ошибки есть ровно у `failed`. Длительность и токены не отрицательны. |
 | Счётчик верификатора не отрицателен | `ck_review_runs_verifier_dropped`: `verifier_dropped_findings >= 0` |
 | Резерв — только с плательщиком | `ck_review_runs_estimate`: `estimated_cost_eur IS NULL OR (payer_user_id IS NOT NULL AND estimated_cost_eur >= 0)` |

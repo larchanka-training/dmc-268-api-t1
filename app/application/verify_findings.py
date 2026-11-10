@@ -9,7 +9,7 @@
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.application.llm_review import LlmLimits, request_verification
 from app.application.ports.llm_gateway import LlmGateway, LlmMeter, RetryListener
@@ -37,10 +37,10 @@ class Verification:
 
     @property
     def kept(self) -> tuple[Finding, ...]:
-        """Что сохранить: без вердиктов - все кандидаты."""
+        """Что сохранить, с вердиктом у каждого; без вердиктов - все кандидаты как есть."""
         if self.applied is None:
             return self.candidates
-        return tuple(judged.finding for judged in self.applied.kept)
+        return tuple(replace(judged.finding, verdict=judged.verdict) for judged in self.applied.kept)
 
     @property
     def dropped(self) -> tuple[JudgedFinding, ...]:

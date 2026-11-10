@@ -7,11 +7,11 @@
 пути - как в пакете, после `sanitize`.
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from app.domain.untrusted import unfence
+from app.domain.untrusted import sanitize, unfence
 
 # Записи `omitted` о файле, а не о правилах и не о контексте PR.
 _FILE_PARTS = frozenset({"file", "hunk", "scopes", "imports", "ast"})
@@ -57,6 +57,23 @@ def file_contexts(body: Mapping[str, Any]) -> tuple[FileContext, ...]:
             omitted.setdefault(entry["path"], []).append(ContextOmission(entry["part"], entry["reason"]))
     paths = dict.fromkeys([item["path"] for item in body["diff"]] + list(omitted))
     return tuple(_file_context(body, path, omitted.get(path, ())) for path in paths)
+
+
+def file_context_of(bodies: Iterable[Mapping[str, Any] | None], file_path: str) -> FileContext | None:
+    """Контекст файла из первого тела пакета прогона, где этот файл есть.
+
+    Тела - по порядку частей пакета; `None` - тело стёрто по сроку хранения. Результат
+    `None`: тел нет или файла в них нет. Путь в пакете прошёл `sanitize`, поэтому
+    ищем по нему же.
+    """
+    wanted = sanitize(file_path)
+    for body in bodies:
+        if body is None:
+            continue
+        for context in file_contexts(body):
+            if context.file_path == wanted:
+                return context
+    return None
 
 
 def _file_context(body: Mapping[str, Any], path: str, omitted: Sequence[ContextOmission]) -> FileContext:

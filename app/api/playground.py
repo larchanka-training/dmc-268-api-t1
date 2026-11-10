@@ -26,14 +26,14 @@ from app.api.errors import (
 )
 from app.api.problems import ErrorCode
 from app.api.schemas import (
-    ContextOmissionResponse,
     FileContextResponse,
     FindingBase,
     RuleRefResponse,
-    ShownRuleResponse,
     StrictRequest,
     UtcDatetime,
     VerifierVerdictResponse,
+    file_context_response,
+    verifier_verdict_response,
     without_nul,
 )
 from app.api.session import SESSION_REQUIRED, SESSION_RESPONSES, current_user
@@ -55,7 +55,6 @@ from app.domain.enums import (
     SimulationStatus,
     VerificationOutcome,
 )
-from app.domain.file_context import FileContext
 from app.domain.ids import new_id
 from app.domain.repo_rules import RULES_PATH, matching_files, outline_rules_markdown
 from app.domain.simulation import Limited, is_expired
@@ -409,7 +408,7 @@ def _simulation_response(simulation: Simulation) -> SimulationResponse:
         verification=simulation.verification,
         findings=[_finding_response(f) for f in result.findings] if result else [],
         discarded=[_discarded_response(d) for d in result.discarded] if result else [],
-        context=[_context_response(c) for c in result.context] if result else [],
+        context=[file_context_response(c) for c in result.context] if result else [],
         created_at=simulation.created_at,
         updated_at=simulation.updated_at,
         expires_at=simulation.expires_at,
@@ -431,7 +430,7 @@ def _finding_response(finding: SimulationFinding) -> SimulationFindingResponse:
         suggestion=finding.suggestion,
         confidence=finding.confidence,
         rule=None if rule is None else RuleRefResponse(name=rule.name, check=rule.check, check_text=rule.check_text),
-        verdict=None if verdict is None else VerifierVerdictResponse(verdict=verdict.verdict, reason=verdict.reason),
+        verdict=verifier_verdict_response(verdict),
     )
 
 
@@ -449,15 +448,4 @@ def _discarded_response(discarded: DiscardedFinding) -> DiscardedFindingResponse
         severity=candidate.severity,
         message=candidate.message,
         rule=None if rule is None else RuleMentionResponse(name=rule.name, check=rule.check),
-    )
-
-
-def _context_response(context: FileContext) -> FileContextResponse:
-    return FileContextResponse(
-        file_path=context.file_path,
-        hunks=list(context.hunks),
-        scopes=context.scopes,
-        imports=context.imports,
-        rules=[ShownRuleResponse(name=rule.name, checks=list(rule.checks)) for rule in context.rules],
-        omitted=[ContextOmissionResponse(part=o.part, reason=o.reason) for o in context.omitted],
     )

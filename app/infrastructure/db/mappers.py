@@ -199,7 +199,15 @@ def finding_to_domain(row: FindingRow) -> Finding:
         confidence=row.confidence,
         rule=_rule_ref(row),
         covered_by_finding_id=row.covered_by_finding_id,
+        verdict=_verdict(row),
     )
+
+
+def _verdict(row: FindingRow) -> Verdict | None:
+    # Ограничение ck_findings_verifier_verdict держит обе колонки вместе.
+    if row.verifier_verdict is None or row.verifier_reason is None:
+        return None
+    return Verdict(row.verifier_verdict, row.verifier_reason)
 
 
 def _rule_ref(row: FindingRow) -> RuleRef | None:

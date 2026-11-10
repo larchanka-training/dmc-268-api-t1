@@ -22,6 +22,7 @@ from app.domain.enums import (
     ReviewRunStatus,
     ReviewRunStepStatus,
     TriggerSource,
+    VerifierVerdict,
 )
 from app.domain.ids import new_id
 from app.infrastructure.db.models import (
@@ -606,6 +607,21 @@ def test_a_finding_cannot_be_covered_by_itself(session) -> None:
     finding = add_finding(session, run)
     session.flush()
     finding.covered_by_finding_id = finding.id
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+@pytest.mark.parametrize(
+    ("verdict", "reason"),
+    [(VerifierVerdict.KEEP, None), (None, "причина без вердикта")],
+    ids=["verdict-without-reason", "reason-without-verdict"],
+)
+def test_a_finding_verdict_and_reason_come_together(session, verdict, reason) -> None:
+    run = make_run(session, make_mr(session, make_repo(session)))
+    finding = add_finding(session, run)
+    session.flush()
+    finding.verifier_verdict = verdict
+    finding.verifier_reason = reason
     with pytest.raises(IntegrityError):
         session.flush()
 

@@ -747,6 +747,8 @@ class SqlAlchemyFindingRepo:
                 rule_check=finding.rule.check if finding.rule else None,
                 rule_check_text=finding.rule.check_text if finding.rule else None,
                 covered_by_finding_id=finding.covered_by_finding_id,
+                verifier_verdict=finding.verdict.verdict if finding.verdict else None,
+                verifier_reason=finding.verdict.reason if finding.verdict else None,
             )
         )
 

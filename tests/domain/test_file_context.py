@@ -7,10 +7,11 @@ from app.domain.file_context import (
     ContextOmission,
     ContextRule,
     FileContext,
+    file_context_of,
     file_contexts,
 )
 from app.domain.secret_redaction import REDACTED, redact_secrets
-from app.domain.untrusted import fence
+from app.domain.untrusted import fence, sanitize
 
 HUNK_X1 = "@@ -1,2 +1,2 @@\n-a = 1\n+a = 2"
 HUNK_X2 = "@@ -20 +20 @@\n-b = 1\n+b = 2"
@@ -109,3 +110,26 @@ def test_empty_package_has_no_files() -> None:
     body = copy.deepcopy(BODY)
     body.update(diff=[], ast=[], omitted=[], omitted_count=0)
     assert file_contexts(body) == ()
+
+
+def test_file_context_of_takes_the_first_body_with_the_file() -> None:
+    other = copy.deepcopy(BODY)
+    other.update(diff=[{"path": "app/z.py", "hunk": fence("diff", HUNK_Y)}], ast=[], omitted=[])
+
+    context = file_context_of([None, other, BODY], "app/x.py")
+
+    assert context == file_contexts(BODY)[0]
+    assert file_context_of([other], "app/z.py") == file_contexts(other)[0]
+
+
+def test_file_context_of_is_none_without_bodies_or_without_the_file() -> None:
+    assert file_context_of([], "app/x.py") is None
+    assert file_context_of([None], "app/x.py") is None
+    assert file_context_of([BODY], "app/missing.py") is None
+
+
+def test_file_context_of_finds_a_path_the_package_has_sanitized() -> None:
+    body = copy.deepcopy(BODY)
+    body["diff"] = [{"path": sanitize("a\x01.py"), "hunk": fence("diff", HUNK_Y)}]
+
+    assert file_context_of([body], "a\x01.py") is not None

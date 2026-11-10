@@ -23,7 +23,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from app.domain.entities import MergeRequest, Repository, ReviewRun
+from app.domain.entities import MergeRequest, Repository, ReviewRun, Verdict
 from app.domain.enums import (
     DiffSide,
     FindingCategory,
@@ -34,6 +34,7 @@ from app.domain.enums import (
     TriggerSource,
     VerifierVerdict,
 )
+from app.domain.file_context import FileContext
 
 # Форма времени в каждом ответе: UTC, секунды, при наличии — микросекунды, суффикс `Z`.
 UTC_DATETIME_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$"
@@ -344,3 +345,18 @@ class FileContextResponse(BaseModel):
     imports: str | None = Field(description="Импорты файла из AST, по строке; null, если их не передавали.")
     rules: list[ShownRuleResponse] = Field(description="Правила владельца, показанные модели для этого файла.")
     omitted: list[ContextOmissionResponse] = Field(description="Что из контекста файла модели не досталось.")
+
+
+def verifier_verdict_response(verdict: Verdict | None) -> VerifierVerdictResponse | None:
+    return None if verdict is None else VerifierVerdictResponse(verdict=verdict.verdict, reason=verdict.reason)
+
+
+def file_context_response(context: FileContext) -> FileContextResponse:
+    return FileContextResponse(
+        file_path=context.file_path,
+        hunks=list(context.hunks),
+        scopes=context.scopes,
+        imports=context.imports,
+        rules=[ShownRuleResponse(name=rule.name, checks=list(rule.checks)) for rule in context.rules],
+        omitted=[ContextOmissionResponse(part=o.part, reason=o.reason) for o in context.omitted],
+    )

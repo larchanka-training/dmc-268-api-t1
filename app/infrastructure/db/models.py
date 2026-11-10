@@ -53,6 +53,7 @@ from app.domain.enums import (
     SimulationStatus,
     TriggerSource,
     VerificationOutcome,
+    VerifierVerdict,
 )
 from app.domain.simulation import SIMULATION_TERMINAL_STATUSES
 from app.infrastructure.db.base import Base, TimestampMixin, UuidPrimaryKeyMixin
@@ -386,6 +387,10 @@ class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             "covered_by_finding_id IS NULL OR covered_by_finding_id <> id",
             name="ck_findings_covered_by_other",
         ),
+        CheckConstraint(
+            "(verifier_verdict IS NULL) = (verifier_reason IS NULL)",
+            name="ck_findings_verifier_verdict",
+        ),
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -414,6 +419,12 @@ class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     covered_by_finding_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("findings.id", ondelete="RESTRICT")
     )
+    # Решение верификатора по находке и его причина: оба или ни одного. Пусто, если он по
+    # ней не решал и у находок прогонов до сохранения вердиктов.
+    verifier_verdict: Mapped[VerifierVerdict | None] = mapped_column(
+        _enum(VerifierVerdict, "verifier_verdict")
+    )
+    verifier_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class PublishedCommentRow(Base, UuidPrimaryKeyMixin, TimestampMixin):

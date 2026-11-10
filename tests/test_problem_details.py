@@ -714,7 +714,8 @@ def test_playground_and_inspection_are_in_the_exported_contract() -> None:
 
     inspection = paths["/api/v1/reviews/{review_run_id}/findings/{finding_id}/inspection"]["get"]
     assert ok_schema(inspection) == {"$ref": "#/components/schemas/FindingInspectionResponse"}
-    assert {"401", "404", "422", "501", "502"} <= set(inspection["responses"])
+    assert {"401", "404", "422", "502"} <= set(inspection["responses"])
+    assert "501" not in inspection["responses"]
     not_found = problem_ref(inspection, "404")
     assert {variant["$ref"] for variant in not_found["oneOf"]} == {
         "#/components/schemas/ReviewNotFoundProblem",
@@ -842,7 +843,8 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     """Тела, которые сервер отдаёт на деле, проходят модель своего кода (`AnyProblem`).
 
     Каждый код из `ErrorCode` здесь представлен хотя бы одним настоящим ответом — кроме
-    `RATE_LIMITED` и `SIMULATION_NOT_FOUND`: их отдаст симуляция ревью, она пока `501`.
+    `RATE_LIMITED` и `SIMULATION_NOT_FOUND`: их отдаёт симуляция, которую этот тест не вызывает.
+    `NOT_IMPLEMENTED`: заглушек в контракте сейчас нет, код ждёт следующую запланированную ручку.
     """
     from app.domain.vcs_errors import VcsError, VcsNotFoundError
 
@@ -858,7 +860,6 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     from .test_reviews_api import _add_run as add_run
     from .test_reviews_api import _client as reviews_client
     from .test_reviews_api import _erase_all_bodies as erase_all_bodies
-    from .test_reviews_api import _finding as add_finding
 
     signed_in = repositories_client(FakeUnitOfWork())
     connected = FakeUnitOfWork()
@@ -876,8 +877,6 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     _run_on_head(already_active, ReviewRunStatus.ANALYSING)
     with_run = FakeUnitOfWork()
     run = add_run(with_run)
-    finding = add_finding(run, None)
-    with_run.findings.add(finding)
     responses = [
         client.post("/api/v1/webhooks/bitbucket"),
         signed_in.get("/api/v1/repositories", params={"limit": "abc"}),
@@ -910,7 +909,6 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         client.get("/api/v1/auth/bitbucket/login"),
         _signed_in_client().post("/api/v1/reviews", json={}, headers={"Origin": ORIGIN}),
         already_active.post(),
-        reviews_client(with_run).get(f"/api/v1/reviews/{run.id}/findings/{finding.id}/inspection"),
         reviews_client(with_run).get(f"/api/v1/reviews/{run.id}/findings/{RUN_ID}/inspection"),
     ]
     seen = set()
@@ -923,6 +921,7 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         assert response.headers["X-Trace-ID"] == body["trace_id"]
         seen.add(body["code"])
     assert seen == {code.value for code in ErrorCode} - {
+        ErrorCode.NOT_IMPLEMENTED.value,
         ErrorCode.RATE_LIMITED.value,
         ErrorCode.SIMULATION_NOT_FOUND.value,
     }
