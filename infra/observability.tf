@@ -605,7 +605,8 @@ resource "docker_container" "node_exporter" {
     "--path.rootfs=/rootfs",
     "--path.procfs=/host/proc",
     "--path.sysfs=/host/sys",
-    # Отметка о последней резервной копии (backup.sh) — алерт BackupStale.
+    # Отметки о резервных копиях (backup.sh, db-backup.yml) — алерты
+    # BackupStale и OffsiteBackupStale.
     "--collector.textfile.directory=/textfile",
   ]
 

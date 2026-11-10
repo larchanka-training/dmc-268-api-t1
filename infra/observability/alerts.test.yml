@@ -670,6 +670,59 @@ tests:
               summary: "Нет отметки о резервной копии базы"
               description: "26 часов node-exporter не видит dmc268_backup_last_success_timestamp_seconds: копии не снимаются или не пишут отметку."
 
+  # Копия вне сервера: последняя отметка — 0, порог 28 часов.
+  - interval: 1h
+    input_series:
+      - series: 'dmc268_offsite_backup_last_success_timestamp_seconds{job="node-exporter"}'
+        values: "0x40"
+      - series: 'up{job="node-exporter", instance="node-exporter:9100"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: OffsiteBackupStale
+        exp_alerts: []
+      - eval_time: 29h
+        alertname: OffsiteBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: postgres-backup
+            exp_annotations:
+              summary: "Копия базы вне сервера не обновлялась больше 28 часов"
+              description: "Нет успешного прогона db-backup.yml с проверкой восстановления: gh run list -w db-backup.yml. Прогонов нет совсем — расписание отключено или не запускается (gh workflow enable db-backup.yml)."
+
+  # Отметка пропала после 2-го часа (node-exporter жив): алерт — когда её нет
+  # во всём окне 28 часов, то есть после 30-го часа.
+  - interval: 1h
+    input_series:
+      - series: 'dmc268_offsite_backup_last_success_timestamp_seconds{job="node-exporter"}'
+        values: "0x2 _x40"
+      - series: 'up{job="node-exporter", instance="node-exporter:9100"}'
+        values: "1x45"
+    alert_rule_test:
+      - eval_time: 29h
+        alertname: OffsiteBackupStale
+        exp_alerts: []
+      - eval_time: 31h
+        alertname: OffsiteBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: postgres-backup
+            exp_annotations:
+              summary: "Копия базы вне сервера не обновлялась больше 28 часов"
+              description: "Нет успешного прогона db-backup.yml с проверкой восстановления: gh run list -w db-backup.yml. Прогонов нет совсем — расписание отключено или не запускается (gh workflow enable db-backup.yml)."
+
+  # Отметки нет, но лежит сам node-exporter: молчит, горит ScrapeTargetDown.
+  - interval: 1h
+    input_series:
+      - series: 'up{job="node-exporter", instance="node-exporter:9100"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 30h
+        alertname: OffsiteBackupStale
+        exp_alerts: []
+
   # Сертификат: 40 часов до конца срока.
   - interval: 1m
     input_series:

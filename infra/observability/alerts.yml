@@ -395,6 +395,28 @@ groups:
           summary: "Нет отметки о резервной копии базы"
           description: "26 часов node-exporter не видит dmc268_backup_last_success_timestamp_seconds: копии не снимаются или не пишут отметку."
 
+      # Копия вне сервера (db-backup.yml): отметку пишет job mark-success после
+      # проверки восстановления, раз в сутки около 21:20 UTC. Порог — сутки плюс
+      # 4 часа на задержки расписания GitHub. Отметки нет за всё окно — тоже
+      # алерт: GitHub не запускает расписание или отметка не пишется. Без for,
+      # поэтому лежащий node-exporter ничего не сбрасывает; его отсечка — чтобы
+      # рядом со ScrapeTargetDown не горел второй алерт о том же. service тот
+      # же, что у BackupStale: без свежей копии на сервере вынос и не идёт, и
+      # critical BackupStale глушит это предупреждение (inhibit_rules).
+      - alert: OffsiteBackupStale
+        expr: |
+          time() - max(dmc268_offsite_backup_last_success_timestamp_seconds) > 28 * 3600
+          or (
+            absent_over_time(dmc268_offsite_backup_last_success_timestamp_seconds[28h])
+            unless on() (max_over_time(up{job="node-exporter"}[5m]) == 0)
+          )
+        labels:
+          severity: warning
+          service: postgres-backup
+        annotations:
+          summary: "Копия базы вне сервера не обновлялась больше 28 часов"
+          description: "Нет успешного прогона db-backup.yml с проверкой восстановления: gh run list -w db-backup.yml. Прогонов нет совсем — расписание отключено или не запускается (gh workflow enable db-backup.yml)."
+
   - name: dmc268-tls
     rules:
       # Сертификат на IP — профиль shortlived Let's Encrypt, 160 часов;

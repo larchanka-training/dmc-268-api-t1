@@ -12,7 +12,11 @@
   публичный. Ключ — существующий секрет `STATE_BACKUP_KEY_DMC268_T1` (им же шифруется аварийная
   копия состояния OpenTofu), параметры `openssl` — те же.
 - Копия старше 26 часов — красный прогон: значит, копирование на сервере сломано.
-- Вторым job'ом каждая вынесенная копия восстанавливается в чистый PostgreSQL 18 и проверяется.
+- Вторым job'ом каждая вынесенная копия восстанавливается в чистый PostgreSQL 18 (образ стенда) и
+  проверяется.
+- Третьим job'ом проверенная копия отмечается на стенде метрикой для node-exporter; алерт
+  `OffsiteBackupStale` зовёт команду, если отметки нет дольше 28 часов: письмо GitHub о падении
+  получает один человек, а не запущенное расписание не даёт и его.
 - Хранилище знают ровно два шага workflow; остальное — скрипты `.github/scripts/db-backup/`,
   работающие с файлом `<имя>.dump.enc`. Переезд в S3-совместимое хранилище — замена двух шагов.
 - `infra/README.md`: runbook восстановления из вынесенной копии и смены хранилища.
@@ -20,8 +24,10 @@
 ## Impact
 
 - `.github/workflows/db-backup.yml`, `.github/scripts/db-backup/`, `tests/test_db_backup.py`,
-  `infra/README.md`, `infra/replica.tf` (комментарий), `docs/SYSTEM_DESIGN.md`, комментарии к
+  `infra/observability/alerts.yml` и тесты promtool, `tests/infrastructure/test_alerting.py`,
+  `infra/README.md`, `infra/replica.tf` и `infra/observability.tf` (комментарии), `docs/SYSTEM_DESIGN.md`, комментарии к
   ключу в `deploy.yml` и `recover-state.sh`.
-- Стенд не меняется: workflow только читает копию по SSH (`docker exec … cat`).
+- Стенд не меняется: workflow читает копию по SSH (`docker exec … cat`) и пишет файл отметки в
+  существующий том метрик контейнера копий.
 - Ключ `STATE_BACKUP_KEY_DMC268_T1` теперь открывает и копии базы за 90 суток: его копия вне
   GitHub обязательна, утечка ключа — утечка базы.

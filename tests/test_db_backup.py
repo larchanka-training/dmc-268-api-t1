@@ -162,6 +162,8 @@ def test_workflow_stores_only_encrypted_copy_for_90_days_and_checks_restore() ->
     assert upload["with"]["retention-days"] == 90
     assert upload["with"]["path"] == "${{ steps.pull.outputs.file }}"
     assert jobs["restore-check"]["needs"] == "backup"
+    # Отметку для алерта OffsiteBackupStale — только проверенная копия.
+    assert jobs["mark-success"]["needs"] == "restore-check"
     # Ключ — только через env шага, не в тексте команд и не в выводе.
     for job in jobs.values():
         for step in job["steps"]:

@@ -10,7 +10,12 @@
 # <имя>.dump.enc и от хранилища не зависят. Переезд на S3-совместимое
 # хранилище — замена этих двух шагов (infra/README.md, «Копии вне сервера»).
 #
-# Падение — обычное письмо GitHub о красном прогоне, отдельного алерта нет.
+# Письмо о красном плановом прогоне GitHub шлёт одному человеку — тому, кто
+# последним менял строку `cron` (или включил workflow снова), а если расписание
+# не запустилось (нагрузка, автоотключение через 60 дней тишины в репозитории),
+# нет ни прогона, ни письма. Поэтому после проверки восстановления job
+# `mark-success` пишет на стенде отметку для node-exporter, и команду в Telegram
+# зовёт алерт OffsiteBackupStale: отметки нет дольше 28 часов.
 name: DB backup
 
 on:
@@ -32,8 +37,14 @@ jobs:
   backup:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Ключ и адрес стенда — секреты и переменная environment `stand`, как у деплоя.
-    environment: stand
+    # Environment `stand` пускает только develop: ручной запуск с другой ветки
+    # отклоняется до первого шага. Секретов отсюда в нём нет: ключ копии и
+    # SSH-ключ — секреты репозитория, пользователь и адрес — организации.
+    # deployment: false — без записи о деплое, иначе последним «деплоем» стенда
+    # каждую ночь становился бы этот вынос.
+    environment:
+      name: stand
+      deployment: false
     outputs:
       name: ${{ steps.pull.outputs.name }}
     steps:
@@ -68,11 +79,12 @@ jobs:
     needs: backup
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Та же мажорная версия, что на стенде (pgvector/pgvector:pg18 в
-    # infra/postgres.tf): pg_restore старшей версии дамп читает, младшей — нет.
+    # Образ стенда (pgvector/pgvector:pg18 в infra/postgres.tf), закреплённый
+    # digest: та же мажорная версия, и копия с расширением vector, если его
+    # создаст миграция, тоже восстановится.
     services:
       postgres:
-        image: postgres:18@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+        image: pgvector/pgvector:pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47
         env:
           POSTGRES_USER: dmc268
           POSTGRES_PASSWORD: dmc268
@@ -102,3 +114,39 @@ jobs:
           PGDATABASE: dmc268
           NAME: ${{ needs.backup.outputs.name }}
         run: .github/scripts/db-backup/verify.sh "$RUNNER_TEMP/db-backup/$NAME.dump.enc"
+
+  # Отметка для алерта OffsiteBackupStale — только после проверки
+  # восстановления: невосстановимая копия свежей не считается. Пишет её
+  # контейнер копий в свой том /metrics, который node-exporter читает как
+  # textfile (рядом с backup.prom от backup.sh): у хоста прав на том может не
+  # быть, у контейнера они есть. Время — часов сервера, файл — через .tmp и mv,
+  # чтобы node-exporter не прочитал его наполовину.
+  mark-success:
+    needs: restore-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: stand
+      deployment: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/stand-ssh
+        with:
+          ssh_key: ${{ secrets.VPS_DMC268_KEY_T1 }}
+          ssh_user: ${{ secrets.VPS_DMC268_U }}
+          host: ${{ vars.VPS_DMC268_IP_T1 }}
+
+      - name: Записать отметку о вынесенной копии на стенде
+        run: |
+          ssh stand 'docker exec -i dmc268-postgres-backup sh -eu' <<'SH'
+          f=/metrics/offsite-backup.prom
+          {
+            echo '# HELP dmc268_offsite_backup_last_success_timestamp_seconds Время последней вынесенной и проверенной восстановлением копии базы (unix).'
+            echo '# TYPE dmc268_offsite_backup_last_success_timestamp_seconds gauge'
+            echo "dmc268_offsite_backup_last_success_timestamp_seconds $(date -u +%s)"
+          } > "$f.tmp"
+          mv "$f.tmp" "$f"
+          SH

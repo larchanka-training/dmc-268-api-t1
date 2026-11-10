@@ -249,7 +249,8 @@ resource "docker_container" "postgres_backup" {
   }
 
   # Отметка об успешной копии для node-exporter (backup.sh, METRICS_DIR) —
-  # вход алерта BackupStale (#100).
+  # вход алерта BackupStale (#100). Сюда же через docker exec пишет отметку о
+  # вынесенной копии db-backup.yml — вход OffsiteBackupStale.
   volumes {
     volume_name    = docker_volume.backup_metrics.name
     container_path = "/metrics"
