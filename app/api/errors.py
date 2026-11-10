@@ -63,6 +63,7 @@ from app.api.problems import (
     WebhookSignatureInvalidProblem,
 )
 from app.api.trace_id import HEADER as TRACE_ID_HEADER
+from app.domain.analytics import MAX_PERIOD
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +314,8 @@ _REASONS = {
     "json_invalid": "тело запроса — не JSON",
     # Свой тип `PydanticCustomError`: диапазон, где начало позже конца (`ReviewRunListQuery`).
     "range_reversed": "начало диапазона позже его конца",
+    # Свой тип `PydanticCustomError`: период аналитики длиннее предела (`AnalyticsQuery`).
+    "period_too_long": f"период длиннее {MAX_PERIOD.days} дней",
     # Свой тип `PydanticCustomError`: повтор паттерна в фильтре веток (`RepositorySettingsUpdate`).
     "duplicate_patterns": "паттерны веток повторяются",
     "timezone_aware": "ожидается время с зоной",

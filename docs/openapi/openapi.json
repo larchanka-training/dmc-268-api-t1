@@ -2980,6 +2980,172 @@
         }
       }
     },
+    "/api/v1/analytics": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "Аналитика замечаний и длительности прогонов",
+        "description": "Требует сессию; параметры проверяются раньше обращения к GitHub. Агрегаты дашборда за период: замечания по UTC-дням, категориям и важности; число, средняя и p95 длительность прогонов — всего и по каждому репозиторию. Пользователю видны только прогоны репозиториев, к которым у него есть доступ на GitHub (любая роль; публичный репозиторий, на котором у пользователя роли нет, не виден), — то же правило, что у GET /repositories. Учитываются прогоны в статусе completed, сделавшие ревью: прогон без денег (coverage_reason = balance) модель не вызывал и в аналитику не входит. Считаются новые замечания: повтор открытого или закрытого человеком треда не считается. Период — по created_at прогона: created_from включительно, created_to исключительно, время с зоной; по умолчанию created_to — сейчас, created_from — за 30 дней до created_to. Замечание относится к UTC-дню своего прогона. Крайние дни периода неполные, дней без замечаний в findings_by_day нет: нули по периоду достраивает фронтенд. created_from позже created_to — 422 VALIDATION_ERROR в query.created_to, а без created_to — в query.created_from; период длиннее 180 дней — 422 VALIDATION_ERROR в query.created_from; без created_to конец берётся по часам сервера, поэтому для периода ровно в 180 дней передавайте обе границы. repository_id — только этот репозиторий; невидимый или несуществующий — 404 REPOSITORY_NOT_FOUND, как у GET /repositories/{repository_id}. В by_repository — только репозитории, у которых в периоде есть учтённые прогоны, по full_name.",
+        "operationId": "getAnalytics",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repository_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Только этот репозиторий; не задан — все видимые.",
+              "title": "Repository Id"
+            },
+            "description": "Только этот репозиторий; не задан — все видимые."
+          },
+          {
+            "name": "created_from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Начало периода (включительно), время с зоной; по умолчанию — за 30 дней до created_to.",
+              "title": "Created From"
+            },
+            "description": "Начало периода (включительно), время с зоной; по умолчанию — за 30 дней до created_to."
+          },
+          {
+            "name": "created_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Конец периода (исключительно), время с зоной; по умолчанию — сейчас.",
+              "title": "Created To"
+            },
+            "description": "Конец периода (исключительно), время с зоной; по умолчанию — сейчас."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Агрегаты за период.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "401": {
+            "description": "Нет действительной сессии. Пришедшая недействительная cookie `session` удаляется в том же ответе.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthenticatedProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "404": {
+            "description": "Репозитория с таким id нет.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryNotFoundProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "422": {
+            "description": "Параметр пути, запроса или тело не прошли проверку; в `errors` — где и почему, без самого значения.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "502": {
+            "description": "GitHub не ответил или ответил ошибкой, когда считался набор видимых репозиториев или обновлялся токен пользователя.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmUnavailableProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -3132,6 +3298,59 @@
   },
   "components": {
     "schemas": {
+      "AnalyticsResponse": {
+        "properties": {
+          "created_from": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Created From",
+            "description": "Начало периода, включительно.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "created_to": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "format": "date-time",
+            "title": "Created To",
+            "description": "Конец периода, исключительно.",
+            "examples": [
+              "2026-10-11T10:00:00Z"
+            ]
+          },
+          "findings_by_day": {
+            "items": {
+              "$ref": "#/components/schemas/FindingsDayCountResponse"
+            },
+            "type": "array",
+            "title": "Findings By Day",
+            "description": "По дню, затем по категории и важности в порядке перечислений; пар без замечаний нет."
+          },
+          "runs": {
+            "$ref": "#/components/schemas/RunDurationsResponse"
+          },
+          "by_repository": {
+            "items": {
+              "$ref": "#/components/schemas/RepositoryAnalyticsResponse"
+            },
+            "type": "array",
+            "title": "By Repository",
+            "description": "По full_name; только репозитории с прогонами."
+          }
+        },
+        "type": "object",
+        "required": [
+          "created_from",
+          "created_to",
+          "findings_by_day",
+          "runs",
+          "by_repository"
+        ],
+        "title": "AnalyticsResponse",
+        "description": "Агрегаты дашборда кабинета за период."
+      },
       "AnyProblem": {
         "oneOf": [
           {
@@ -3991,6 +4210,39 @@
         ],
         "title": "FindingSeverity",
         "description": "Насколько замечание важно."
+      },
+      "FindingsDayCountResponse": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date",
+            "title": "Date",
+            "description": "UTC-день created_at прогона.",
+            "examples": [
+              "2026-11-10"
+            ]
+          },
+          "category": {
+            "$ref": "#/components/schemas/FindingCategory"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/FindingSeverity"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "date",
+          "category",
+          "severity",
+          "count"
+        ],
+        "title": "FindingsDayCountResponse",
+        "description": "Сколько замечаний одной категории и важности нашли прогоны одного UTC-дня."
       },
       "HttpErrorProblem": {
         "properties": {
@@ -5022,6 +5274,56 @@
             "type": "urn:dmc-268:problem:repository-already-connected"
           }
         ]
+      },
+      "RepositoryAnalyticsResponse": {
+        "properties": {
+          "repository_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Repository Id"
+          },
+          "full_name": {
+            "type": "string",
+            "title": "Full Name",
+            "description": "Имя репозитория, записанное при подключении.",
+            "examples": [
+              "octo-org/api"
+            ]
+          },
+          "runs_count": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Runs Count",
+            "description": "Сколько прогонов учтено."
+          },
+          "average_duration_seconds": {
+            "type": "number",
+            "title": "Average Duration Seconds",
+            "description": "Средняя. Длительность прогона в секундах — от захвата воркером до завершения."
+          },
+          "p95_duration_seconds": {
+            "type": "number",
+            "title": "P95 Duration Seconds",
+            "description": "95-й перцентиль (percentile_cont). Длительность прогона в секундах — от захвата воркером до завершения."
+          },
+          "findings_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Findings Count",
+            "description": "Замечания учтённых прогонов."
+          }
+        },
+        "type": "object",
+        "required": [
+          "repository_id",
+          "full_name",
+          "runs_count",
+          "average_duration_seconds",
+          "p95_duration_seconds",
+          "findings_count"
+        ],
+        "title": "RepositoryAnalyticsResponse",
+        "description": "Аналитика одного репозитория за период."
       },
       "RepositoryListItem": {
         "properties": {
@@ -6988,6 +7290,48 @@
         ],
         "title": "RulesUnavailable",
         "description": "Провайдер не отдал файл правил: ревью по стандартным критериям."
+      },
+      "RunDurationsResponse": {
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Count",
+            "description": "Сколько прогонов учтено."
+          },
+          "average_duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Average Duration Seconds",
+            "description": "Средняя. Длительность прогона в секундах — от захвата воркером до завершения. null — прогонов нет."
+          },
+          "p95_duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Duration Seconds",
+            "description": "95-й перцентиль с интерполяцией (percentile_cont). Длительность прогона в секундах — от захвата воркером до завершения. null — прогонов нет."
+          }
+        },
+        "type": "object",
+        "required": [
+          "count",
+          "average_duration_seconds",
+          "p95_duration_seconds"
+        ],
+        "title": "RunDurationsResponse",
+        "description": "Учтённые прогоны периода и их длительность."
       },
       "RunUsageResponse": {
         "properties": {

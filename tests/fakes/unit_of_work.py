@@ -15,6 +15,11 @@ from typing import Any, Self
 from uuid import UUID
 
 from app.application.ports.unit_of_work import RunStateConflict, UnitOfWork
+from app.domain.analytics import (
+    EMPTY_ANALYTICS,
+    Analytics,
+    AnalyticsFilter,
+)
 from app.domain.billing import eur_per_token
 from app.domain.entities import (
     BalanceCredit,
@@ -229,6 +234,9 @@ class FakeReviewRunRepo:
         # Что добавлено через этот фейк — тестам приёма вебхуков.
         self.added: list[ReviewRun] = []
         self._added_mark = 0
+        # Что вернёт и с какими выборками вызван `analytics` — тестам ручки аналитики.
+        self.analytics_result: Analytics = EMPTY_ANALYTICS
+        self.analytics_filters: list[AnalyticsFilter] = []
 
     @property
     def runs(self) -> list[ReviewRun]:
@@ -356,6 +364,11 @@ class FakeReviewRunRepo:
         entries = [entry for entry in self._entries() if _matches(entry, run_filter)]
         entries.sort(key=lambda e: (e.run.created_at, e.run.id), reverse=True)
         return RunListPage(entries=entries[offset : offset + limit], total=len(entries))
+
+    def analytics(self, analytics_filter: AnalyticsFilter) -> Analytics:
+        # Агрегаты считает SQL, их проверяет tests/db/test_analytics_adapter.py; тут — заготовка и выборка.
+        self.analytics_filters.append(analytics_filter)
+        return self.analytics_result
 
     def _entries(self) -> list[ReviewRunListEntry]:
         entries: list[ReviewRunListEntry] = []

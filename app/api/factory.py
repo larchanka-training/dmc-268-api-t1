@@ -129,6 +129,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     from app.api import errors, log_redaction
+    from app.api.analytics import router as analytics_router
     from app.api.auth import router as auth_router
     from app.api.body_limit import RequestBodyLimitMiddleware
     from app.api.events import router as events_router
@@ -163,6 +164,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(repositories_router)
     app.include_router(pull_requests_router)
     app.include_router(reviews_router)
+    app.include_router(analytics_router)
     app.include_router(events_router)
     app.include_router(status_router)
 
