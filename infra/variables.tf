@@ -417,6 +417,22 @@ variable "eurorouter_reasoning_effort" {
   }
 }
 
+# Пополнение баланса через Stripe (change stripe-topup). Пусто — приём оплаты выключен
+# (`503 PAYMENTS_DISABLED`), деплой при этом проходит.
+variable "stripe_webhook_secret" {
+  type        = string
+  description = "Signing secret thin-событий Stripe, whsec_... (STRIPE_WEBHOOK_SECRET). Не коммитить."
+  default     = ""
+  sensitive   = true
+}
+
+variable "stripe_api_key" {
+  type        = string
+  description = "Restricted-ключ Stripe rk_... только на чтение сессий Checkout (STRIPE_API_KEY). Не коммитить."
+  default     = ""
+  sensitive   = true
+}
+
 variable "eurorouter_api_keys" {
   type        = string
   description = "Ключи Eurorouter через запятую (EUROROUTER_API_KEYS). Не коммитить."

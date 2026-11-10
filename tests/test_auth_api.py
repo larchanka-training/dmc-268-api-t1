@@ -131,7 +131,9 @@ def test_callback_sets_the_session_and_returns_to_the_deep_link(stand) -> None:
     assert 'oauth_state=""' in cookies["oauth_state"] and "Max-Age=0" in cookies["oauth_state"]
     me = client.get("/api/v1/auth/me")
     assert me.status_code == 200
+    [session] = stand.uow.sessions.stored
     assert me.json() == {
+        "id": str(session.user_id),
         "provider": "github",
         "login": "octocat",
         "name": "The Octocat",

@@ -101,6 +101,49 @@ MIIE...
 и заканчивается `completed`; в PR — ревью от `<app-slug>[bot]` и check run `dmc-268-ai-review`;
 прогон виден в `GET /api/v1/reviews` с той же cookie.
 
+## 4. Пополнение через Stripe
+
+Баланс пользователь пополняет кнопкой Stripe Buy Button в кабинете; сервис получает от Stripe
+thin-событие, запрашивает по нему сессию Checkout и зачисляет `amount_total / 100` € на баланс
+пользователя из `client_reference_id` — не больше одного раза на сессию (change `stripe-topup`).
+Зачисление не зависит от возврата браузера на `/app/?topup=success`. Возвраты и споры баланс не
+списывают: корректировка — `make credit-balance` с отрицательной суммой. Всё — в sandbox Stripe.
+
+Нужны два значения в `.env` (на стенде — секреты `STRIPE_WEBHOOK_SECRET_DMC268_T1` и
+`STRIPE_API_KEY_DMC268_T1`, `infra/README.md`). Без любого из них вебхук отвечает
+`503 PAYMENTS_DISABLED`:
+
+- `STRIPE_API_KEY` — restricted-ключ: Dashboard → Developers → API keys → Create restricted key,
+  права только **Checkout Sessions: Read**, остальное None. Ключ читает сессию по событию и ничего
+  не меняет; секретный ключ `sk_…` сервису не нужен.
+- `STRIPE_WEBHOOK_SECRET` — signing secret назначения событий: Workbench → Event destinations →
+  Create destination, формат **Thin**, события `v1.checkout.session.completed` и
+  `v1.checkout.session.async_payment_succeeded`, тип Webhook endpoint, URL
+  `https://<стенд>/api/v1/webhooks/stripe`. Signing secret (`whsec_…`) — на странице назначения.
+
+Форма thin-события от версии API не зависит, а сессию SDK запрашивает с версией API, зашитой в
+`stripe~=16.1`: читаются только `id`, `mode`, `payment_status`, `currency`, `amount_total` и
+`client_reference_id`.
+
+Локально вместо назначения в Workbench — Stripe CLI, он печатает свой `whsec_…` для
+`STRIPE_WEBHOOK_SECRET` (после правки `.env` — `make stop-local && make run-local`):
+
+```bash
+stripe listen --thin-events 'v1.checkout.session.completed,v1.checkout.session.async_payment_succeeded' \
+  --forward-thin-to localhost:8000/api/v1/webhooks/stripe
+stripe trigger checkout.session.completed
+```
+
+У сессии из `stripe trigger` нет `client_reference_id` нашего пользователя: ответ `200
+{"status": "ignored"}`, в логе API строка `stripe_outcome` с причиной. Настоящее зачисление —
+оплата тестовой картой `4242 4242 4242 4242` через кнопку кабинета или Payment Link с
+`?client_reference_id=<id из GET /api/v1/auth/me>`.
+
+Ответ `5xx` (база, тайм-аут запроса сессии) Stripe повторяет сам, но в sandbox — только 3 раза
+за несколько часов. Не дошедшее событие отправляется заново из Workbench: Events → событие →
+Resend; повтор зачисленной сессии ничего не добавит. Падения вебхука видит алерт
+`StripeWebhookFailing` (`infra/README.md`, «Алерты»): Stripe о них сам не сообщает.
+
 ## Если не работает
 
 | Симптом | Причина | Что делать |
@@ -113,4 +156,8 @@ MIIE...
 | `verifying` — `LLM_INVALID_OUTPUT` | модель мала или сбивается с формата | модель 7b и больше |
 | Ревью без правил, `rules.status = unavailable` | у App нет Contents: read | права App |
 | Нет check run | у App нет Checks: write | права App |
+| Stripe: `503 PAYMENTS_DISABLED` | не задан `STRIPE_WEBHOOK_SECRET` или `STRIPE_API_KEY` | шаг 4, `make stop-local && make run-local` |
+| Stripe: `400 WEBHOOK_SIGNATURE_INVALID` | секрет не того назначения (у `stripe listen` свой) или назначение в формате snapshot | шаг 4: формат Thin и его `whsec_…` |
+| Оплатил, а баланс не вырос; в логе API warning «оплата Stripe обработана» с `stripe_outcome` `unknown_account`, `other_currency` или `malformed` | ссылка без `client_reference_id`, валюта не EUR или сумма не та | сессию найти по `stripe_checkout_session_id` в Workbench, зачислить руками: `make credit-balance` с заметкой `Stripe <cs_…>` |
+| Stripe: `502 PAYMENT_PROVIDER_UNAVAILABLE` | ключ не restricted с Checkout Sessions: Read, ключ другого аккаунта или режима | тип ошибки — в `tail -F .local/api.log` (`error_type`) |
 | «порт 8000 уже занят» | работает `docker compose up` или прошлый `run-local` | `docker compose stop api worker` или `make stop-local` |

@@ -1,6 +1,7 @@
 """Зачисление на баланс аккаунта администратором: `python -m app.worker.credit_balance`.
 
-Пока пополнения через платёжную систему нет (design D8 change `account-balance`). Запускается в
+Помимо пополнения через Stripe (change `stripe-topup`): корректировки, возвраты, стартовые
+балансы (design D8 change `account-balance`). Запускается в
 образе воркера — `scripts/` туда не копируется — с теми же настройками окружения:
 
     python -m app.worker.credit_balance "$(gh api users/alice --jq .id)" 5 --note "оплата счёта 42" [--by admin]

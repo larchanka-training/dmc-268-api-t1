@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from time import monotonic
 
 import httpx
+import stripe
 from sqlalchemy import Engine, create_engine
 
 from app.application.ports import (
@@ -153,9 +154,14 @@ class Container:
     _app_slug_retry_at: float
     # Один на процесс: в нём кэш оценки статуса сервиса на SERVICE_STATUS_TTL_SECONDS.
     _service_status: ServiceStatusMonitor
+    # Клиент Stripe для приёма оплаты; `None` — секрет вебхука или ключ не задан, приём выключен.
+    _stripe_client: stripe.StripeClient | None
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine, self._token_cipher)
+
+    def stripe_client(self) -> stripe.StripeClient | None:
+        return self._stripe_client
 
     def untraced_unit_of_work(self) -> UnitOfWork:
         """Единица работы без спанов SQL — для опроса в потоке событий."""
@@ -357,6 +363,21 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
             monotonic=monotonic,
             now=lambda: datetime.now(UTC),
         ),
+        _stripe_client=_build_stripe_client(settings),
+    )
+
+
+# Запрос сессии идёт внутри доставки, а Stripe ждёт её ответа около 10 с; повтор — дело Stripe
+# (доставка с 5xx повторяется), поэтому своих повторов нет (change stripe-topup, D3).
+STRIPE_TIMEOUT_SECONDS = 5
+
+
+def _build_stripe_client(settings: Settings) -> stripe.StripeClient | None:
+    key = settings.stripe_api_key.get_secret_value()
+    if not key or not settings.stripe_webhook_secret.get_secret_value():
+        return None
+    return stripe.StripeClient(
+        key, http_client=stripe.RequestsClient(timeout=STRIPE_TIMEOUT_SECONDS), max_network_retries=0
     )
 
 

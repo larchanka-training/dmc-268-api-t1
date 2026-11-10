@@ -39,6 +39,9 @@ dependencies = [
     # OTLP/HTTP-экспортёры трейсов (затем и метрик) — ядро OTel, версия идёт
     # в одной серии с SDK: обновляется вместе с ней.
     "opentelemetry-exporter-otlp-proto-http>=1.45.1",
+    # Проверка подписи вебхука Stripe (`app/api/stripe_webhook.py`). Минорные релизы SDK меняют
+    # типы под новую версию API Stripe, поэтому серия зафиксирована.
+    "stripe~=16.1",
 ]
 
 [project.optional-dependencies]
@@ -164,6 +167,8 @@ forbidden_modules = [
     "tree_sitter_typescript", "tree_sitter_go",
     # Трассировка — только за портом StageTracer (спека observability).
     "opentelemetry",
+    # SDK платежей — только на краю, в роуте вебхука Stripe и контейнере (change stripe-topup).
+    "stripe",
 ]
 
 [dependency-groups]

@@ -596,9 +596,11 @@ class BalanceCredit:
     user_id: UUID
     amount_eur: Decimal
     note: str
-    # Кто зачислил: пока пополнения через платёжную систему нет — администратор.
+    # Кто зачислил: администратор или `stripe`.
     credited_by: str
     created_at: datetime
+    # Сессия Checkout оплаты Stripe: на одну сессию — одно зачисление. У ручного — None.
+    stripe_checkout_session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

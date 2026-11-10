@@ -6,6 +6,109 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/webhooks/stripe": {
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Принять thin-событие Stripe и зачислить оплату на баланс",
+        "description": "Без сессии и без проверки Origin: доставку подтверждает подпись `Stripe-Signature`. По `v1.checkout.session.completed` и `v1.checkout.session.async_payment_succeeded` сервис запрашивает сессию Checkout у Stripe и, если у неё `mode = payment`, `payment_status = paid` и валюта `eur`, зачисляет `amount_total / 100` € пользователю из `client_reference_id` — не больше одного раза на сессию. Остальное — `200` без зачисления.",
+        "operationId": "receiveStripeWebhook",
+        "responses": {
+          "200": {
+            "description": "Событие принято; в `status` — зачислено ли.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StripeWebhookReceived"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "default": {
+            "description": "Любая другая ошибка — тело из каталога, клиент ветвится по `code`. Так приходят `404 ROUTE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `413 REQUEST_BODY_TOO_LARGE`, `HTTP_ERROR` и `500 INTERNAL_ERROR`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnyProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "400": {
+            "description": "Подписи `Stripe-Signature` нет, она не совпала с телом или старше 300 с, или тело не thin-событие Stripe; ничего не зачислено.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookSignatureInvalidProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "413": {
+            "description": "Тело больше лимита (вебхук — `WEBHOOK_BODY_MAX_BYTES`, 2 МиБ; остальные — `REQUEST_BODY_MAX_BYTES`, 1 МиБ): по `Content-Length` отказ без чтения тела, поток без него обрывается на лимите. Ни разбора тела, ни сессии, ни подписи до отказа нет; соединение закрывается.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestBodyTooLargeProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "502": {
+            "description": "Stripe не отдал сессию оплаты (сеть, тайм-аут, отказ API или ключа); ничего не зачислено, Stripe повторит доставку.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentProviderUnavailableProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          },
+          "503": {
+            "description": "`STRIPE_WEBHOOK_SECRET` или `STRIPE_API_KEY` не задан: приём оплаты выключен, событие не прочитано, ничего не зачислено.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentsDisabledProblem"
+                }
+              }
+            },
+            "headers": {
+              "X-Trace-ID": {
+                "$ref": "#/components/headers/X-Trace-ID"
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/api/v1/webhooks/{provider}": {
       "post": {
         "tags": [
@@ -3092,6 +3195,12 @@
             "$ref": "#/components/schemas/NotImplementedProblem"
           },
           {
+            "$ref": "#/components/schemas/PaymentsDisabledProblem"
+          },
+          {
+            "$ref": "#/components/schemas/PaymentProviderUnavailableProblem"
+          },
+          {
             "$ref": "#/components/schemas/HttpErrorProblem"
           },
           {
@@ -3112,6 +3221,8 @@
             "METHOD_NOT_ALLOWED": "#/components/schemas/MethodNotAllowedProblem",
             "NOT_IMPLEMENTED": "#/components/schemas/NotImplementedProblem",
             "ORIGIN_FORBIDDEN": "#/components/schemas/OriginForbiddenProblem",
+            "PAYMENTS_DISABLED": "#/components/schemas/PaymentsDisabledProblem",
+            "PAYMENT_PROVIDER_UNAVAILABLE": "#/components/schemas/PaymentProviderUnavailableProblem",
             "PROVIDER_NOT_SUPPORTED": "#/components/schemas/ProviderNotSupportedProblem",
             "REPOSITORY_ALREADY_CONNECTED": "#/components/schemas/RepositoryAlreadyConnectedProblem",
             "REPOSITORY_MANAGE_REQUIRED": "#/components/schemas/RepositoryManageRequiredProblem",
@@ -4478,6 +4589,148 @@
         ],
         "title": "PaidRepository",
         "description": "Репозиторий, за который платит пользователь."
+      },
+      "PaymentProviderUnavailableProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:payment-provider-unavailable",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:payment-provider-unavailable"
+          },
+          "title": {
+            "type": "string",
+            "const": "Платёжный провайдер недоступен",
+            "title": "Title",
+            "default": "Платёжный провайдер недоступен"
+          },
+          "status": {
+            "type": "integer",
+            "const": 502,
+            "title": "Status",
+            "default": 502
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "PAYMENT_PROVIDER_UNAVAILABLE",
+            "title": "Code",
+            "default": "PAYMENT_PROVIDER_UNAVAILABLE"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "PaymentProviderUnavailableProblem",
+        "description": "`502 PAYMENT_PROVIDER_UNAVAILABLE`: сессию оплаты не удалось получить у Stripe — сеть,\nтайм-аут, отказ API или ключа; ничего не зачислено. Stripe повторит доставку.",
+        "examples": [
+          {
+            "code": "PAYMENT_PROVIDER_UNAVAILABLE",
+            "detail": "Stripe не отдал сессию оплаты: ничего не зачислено, Stripe повторит доставку.",
+            "instance": "/api/v1/webhooks/stripe",
+            "status": 502,
+            "title": "Платёжный провайдер недоступен",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:payment-provider-unavailable"
+          }
+        ]
+      },
+      "PaymentsDisabledProblem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "urn:dmc-268:problem:payments-disabled",
+            "title": "Type",
+            "default": "urn:dmc-268:problem:payments-disabled"
+          },
+          "title": {
+            "type": "string",
+            "const": "Приём оплаты выключен",
+            "title": "Title",
+            "default": "Приём оплаты выключен"
+          },
+          "status": {
+            "type": "integer",
+            "const": 503,
+            "title": "Status",
+            "default": 503
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Что случилось в этом запросе, по-русски, без значений из запроса."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "title": "Instance",
+            "description": "Путь запроса без query в том виде, в каком он пришёл, — закодированный (`/api/v1/a%20b`). Это ссылка на запрос, а не эхо ввода: запрет повторять переданное значение относится к `detail` и `errors`."
+          },
+          "code": {
+            "type": "string",
+            "const": "PAYMENTS_DISABLED",
+            "title": "Code",
+            "default": "PAYMENTS_DISABLED"
+          },
+          "trace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Trace Id",
+            "description": "Trace id запроса — 32 строчных hex-символа (формат trace-id W3C Trace Context). Тот же, что в заголовке `X-Trace-ID` и в строке лога сервера о сбое.",
+            "examples": [
+              "4bf92f3577b34da6a3ce929d0e0e4736"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "trace_id"
+        ],
+        "title": "PaymentsDisabledProblem",
+        "description": "`503 PAYMENTS_DISABLED`: приём оплаты Stripe на этом стенде не настроен (`STRIPE_WEBHOOK_SECRET`\nили `STRIPE_API_KEY` пуст); событие не прочитано, ничего не зачислено. Stripe повторит доставку.",
+        "examples": [
+          {
+            "code": "PAYMENTS_DISABLED",
+            "detail": "Приём оплаты Stripe не настроен: событие не принято, ничего не зачислено.",
+            "instance": "/api/v1/webhooks/stripe",
+            "status": 503,
+            "title": "Приём оплаты выключен",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "type": "urn:dmc-268:problem:payments-disabled"
+          }
+        ]
       },
       "Provider": {
         "type": "string",
@@ -6898,6 +7151,26 @@
         "title": "ServiceStatusResponse",
         "description": "Состояние сервиса для страницы статуса."
       },
+      "StripeWebhookReceived": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "credited",
+              "duplicate",
+              "ignored"
+            ],
+            "title": "Status",
+            "description": "`credited` — оплата зачислена; `duplicate` — эта сессия оплаты уже зачислена; `ignored` — событие ничего не зачисляет: другое событие, не разовая оплата, неоплаченная сессия, не евро, неизвестный пользователь в `client_reference_id`."
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "StripeWebhookReceived",
+        "description": "Тело `200` приёма события Stripe."
+      },
       "TriggerSource": {
         "type": "string",
         "enum": [
@@ -6981,6 +7254,12 @@
       },
       "UserResponse": {
         "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id",
+            "description": "Id пользователя сервиса. Кнопка оплаты Stripe передаёт его в `client-reference-id`: по нему вебхук находит, чей баланс пополнить."
+          },
           "provider": {
             "$ref": "#/components/schemas/Provider",
             "description": "Провайдер, через которого выполнен вход.",
@@ -7044,6 +7323,7 @@
         },
         "type": "object",
         "required": [
+          "id",
           "provider",
           "login",
           "name",
@@ -7221,9 +7501,11 @@
           },
           "status": {
             "type": "integer",
-            "const": 401,
-            "title": "Status",
-            "default": 401
+            "enum": [
+              400,
+              401
+            ],
+            "title": "Status"
           },
           "detail": {
             "type": "string",
@@ -7263,7 +7545,7 @@
           "trace_id"
         ],
         "title": "WebhookSignatureInvalidProblem",
-        "description": "`401 WEBHOOK_SIGNATURE_INVALID`: подписи вебхука нет или она не сошлась.",
+        "description": "`WEBHOOK_SIGNATURE_INVALID`: подписи вебхука нет или она не сошлась — GitHub `401`,\nStripe `400`, как велит его документация.",
         "examples": [
           {
             "code": "WEBHOOK_SIGNATURE_INVALID",

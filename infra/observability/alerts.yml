@@ -215,6 +215,27 @@ groups:
           summary: "Всплеск 5xx у API: {{ $value | humanizePercentage }} запросов"
           description: "Доля ответов 5xx за 5 минут выше 5 % уже 5 минут. Трейсы — в Grafana по X-Trace-ID из логов API."
 
+      # Вебхук Stripe не принимает события (change stripe-topup): Stripe о падениях
+      # нашего эндпоинта не сообщает, а в sandbox повторяет доставку всего 3 раза
+      # за несколько часов — потом оплата так и останется незачисленной. Считаются
+      # и 4xx: 400 — секрет не того назначения, 503 — приём выключен на стенде.
+      # Событий мало (одно-два на пополнение), поэтому окно 6 часов и порог в два
+      # отказа: одиночный сбой, за которым пошли 200, не алерт.
+      - alert: StripeWebhookFailing
+        expr: |
+          (
+            sum(increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code=~"[45].."}[6h]))
+            / sum(increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe"}[6h]))
+          ) > 0.5
+          and sum(increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code=~"[45].."}[6h])) >= 2
+        labels:
+          severity: warning
+          # Свой service: критические алерты api (Api5xxSpike) иначе глушили бы его через inhibit_rules.
+          service: stripe
+        annotations:
+          summary: "Вебхук Stripe отказывает: {{ $value | humanizePercentage }} доставок за 6 часов"
+          description: "Больше половины доставок Stripe за 6 часов получили 4xx или 5xx — оплаты не зачисляются. Код ответа — в логах API по url.path /api/v1/webhooks/stripe: 400 — секрет назначения, 502 — ключ или API Stripe, 503 — секреты не заданы. Не дошедшие события отправить заново из Workbench (docs/LOCAL_RUN.md, «Пополнение через Stripe»)."
+
       # Прогоны падают в воркере, и 5xx у API этого не покажет: доля failed
       # среди завершённых за 30 минут больше 30 % при хотя бы трёх прогонах.
       # Отказы по балансу (refused) не ревью и в долю не входят: иначе

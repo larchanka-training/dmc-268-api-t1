@@ -323,6 +323,8 @@ def process_container(
             monotonic=time.monotonic,
             now=lambda: datetime.now(UTC),
         ),
+        # Оплаты Stripe стенд не принимает.
+        _stripe_client=None,
     )
 
 

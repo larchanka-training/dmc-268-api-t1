@@ -157,6 +157,9 @@ services:
       # Ключ шифрования токенов пользователя (openssl rand -base64 32): пустой —
       # вход отказывает, токен открытым не хранится никогда.
       USER_TOKEN_ENCRYPTION_KEY: ${USER_TOKEN_ENCRYPTION_KEY:-}
+      # Пополнение через Stripe: оба пустые — вебхук Stripe отвечает 503.
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_API_KEY: ${STRIPE_API_KEY:-}
       # Страница статуса (GET /api/v1/status) читает сработавшие алерты у
       # Prometheus стека — он в той же сети default. Без профиля observability
       # Prometheus не поднят: статус — unknown, в логе API — предупреждение.

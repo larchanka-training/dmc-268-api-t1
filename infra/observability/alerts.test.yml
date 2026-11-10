@@ -185,6 +185,56 @@ tests:
         alertname: Api5xxSpike
         exp_alerts: []
 
+  # Вебхук Stripe с секретом не того назначения: все доставки за 2 часа — 400.
+  - interval: 30m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="400"}'
+        values: "0 1 2 3 3"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: StripeWebhookFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: stripe
+            exp_annotations:
+              summary: "Вебхук Stripe отказывает: 100% доставок за 6 часов"
+              description: "Больше половины доставок Stripe за 6 часов получили 4xx или 5xx — оплаты не зачисляются. Код ответа — в логах API по url.path /api/v1/webhooks/stripe: 400 — секрет назначения, 502 — ключ или API Stripe, 503 — секреты не заданы. Не дошедшие события отправить заново из Workbench (docs/LOCAL_RUN.md, «Пополнение через Stripe»)."
+
+  # Два сбоя 502, но принятых доставок больше: доля 33 %, не алерт.
+  - interval: 30m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="502"}'
+        values: "0 1 1 2 2"
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="200"}'
+        values: "0 1 2 3 4"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: StripeWebhookFailing
+        exp_alerts: []
+
+  # Единственный сбой — доля 100 %, но меньше порога в два отказа.
+  - interval: 30m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="503"}'
+        values: "0 0 1 1 1"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: StripeWebhookFailing
+        exp_alerts: []
+
+  # Отказы других ручек и принятые события Stripe вебхук Stripe не роняют.
+  - interval: 30m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/{provider}", http_response_status_code="401"}'
+        values: "0 1 2 3 4"
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/stripe", http_response_status_code="200"}'
+        values: "0 1 2 3 4"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: StripeWebhookFailing
+        exp_alerts: []
+
   # Прогоны падают сразу после рестарта воркера: до 10-й минуты рядов нет
   # (процесса нет), при старте telemetry.prime_run_outcomes заводит их нулём,
   # потом три failed из четырёх. Ряд с нуля — каждое падение в increase().

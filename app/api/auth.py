@@ -87,6 +87,12 @@ class PaidRepository(BaseModel):
 class UserResponse(BaseModel):
     """Пользователь кабинета — учётная запись у провайдера входа."""
 
+    id: UUID = Field(
+        description=(
+            "Id пользователя сервиса. Кнопка оплаты Stripe передаёт его в `client-reference-id`: "
+            "по нему вебхук находит, чей баланс пополнить."
+        )
+    )
     provider: Provider = Field(description="Провайдер, через которого выполнен вход.", examples=["github"])
     login: str = Field(description="Логин у провайдера.", examples=["octocat"])
     name: str | None = Field(description="Отображаемое имя у провайдера; null, если не задано.")
@@ -356,6 +362,7 @@ def me(
         balance = uow.billing.balance(user.id)
         paid = uow.repositories.list_paid_by(user.id)
     return UserResponse(
+        id=user.id,
         provider=user.provider,
         login=user.login,
         name=user.name,
