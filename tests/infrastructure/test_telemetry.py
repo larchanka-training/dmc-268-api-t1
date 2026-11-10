@@ -59,12 +59,13 @@ from sqlalchemy.pool import QueuePool, StaticPool
 from app.api.factory import create_app
 from app.config import Settings
 from app.domain.entities import ReviewJob
-from app.domain.enums import ReviewRunStage
+from app.domain.enums import ReviewRunStage, SimulationStatus
 from app.domain.llm_errors import LlmTimeoutError
 from app.infrastructure import telemetry
 from app.infrastructure.container import build_container
 from app.infrastructure.queue.rabbitmq import RabbitMQJobQueue, consuming_span
 from app.infrastructure.telemetry import (
+    OtelSimulationTracer,
     OtelStageTracer,
     build_tracer_provider,
     current_trace_id,
@@ -124,6 +125,26 @@ def test_a_failed_stage_span_has_the_error_status_and_code(
     assert finished.status.status_code is StatusCode.ERROR
     assert finished.attributes is not None
     assert finished.attributes["error.type"] == "SCM_UNAVAILABLE"
+
+
+def test_a_simulation_stage_span_carries_only_the_simulation_id_and_stage(
+    spans: InMemorySpanExporter,
+) -> None:
+    simulation_id = UUID(int=77)
+    span = OtelSimulationTracer().start(simulation_id, SimulationStatus.VERIFYING)
+    inside = trace.get_current_span()
+    span.end("LLM_TIMEOUT")
+
+    (finished,) = spans.get_finished_spans()
+    assert finished.name == "simulation.verifying"
+    assert dict(finished.attributes or {}) == {
+        "simulation_id": str(simulation_id),
+        "simulation.stage": "verifying",
+        "error.type": "LLM_TIMEOUT",
+    }
+    assert finished.status.status_code is StatusCode.ERROR
+    assert inside.get_span_context() == finished.get_span_context()
+    assert not trace.get_current_span().get_span_context().is_valid
 
 
 class _Channel:

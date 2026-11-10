@@ -13,6 +13,7 @@ from app.application.context_assembly import (
     SCHEMA,
     AssembledContext,
     ContextLimits,
+    ContextSubject,
     FileAst,
     PrContext,
     SkippedAst,
@@ -26,27 +27,21 @@ from app.domain.entities import (
     RejectedRule,
     RepoRule,
     RepoRules,
-    ReviewJob,
     ShownRule,
 )
 from app.domain.enums import DefinitionKind, Language, RulesStatus
+from app.domain.file_context import ContextOmission, ContextRule, file_contexts
 from app.domain.secret_redaction import REDACTED, redact_secrets
 from app.domain.untrusted import boundary, fence, sanitize
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 RUN_ID = UUID(int=2)
 
-JOB = ReviewJob(
-    id=UUID(int=1),
-    review_run_id=RUN_ID,
-    event_type="pull_request",
-    action="opened",
-    installation_id=512804923,
-    repository_provider_id="987654",
-    repository_full_name="owner/repo",
-    pull_request_number=42,
-    head_sha="a" * 40,
+SUBJECT = ContextSubject(
+    repository="owner/repo",
+    pull_request=42,
     base_sha="b" * 40,
+    head_sha="a" * 40,
 )
 
 LIMITS = ContextLimits(
@@ -115,7 +110,7 @@ def _assemble(
     sources: dict[str, str] | None = None,
 ) -> AssembledContext:
     return assemble_context(
-        JOB,
+        SUBJECT,
         parse_diff(diff),
         rules,
         asts,
@@ -153,7 +148,7 @@ def test_payload_carries_diff_ast_and_rules() -> None:
     assert payload.file_paths == ("app/repo.py",)
 
     assert body["schema"] == SCHEMA
-    assert (body["base_sha"], body["head_sha"]) == (JOB.base_sha, JOB.head_sha)
+    assert (body["base_sha"], body["head_sha"]) == (SUBJECT.base_sha, SUBJECT.head_sha)
     assert body["limits"] == {"max_tokens": 32_000}
 
     (hunk_item,) = body["diff"]
@@ -254,7 +249,7 @@ def test_hunk_longer_than_the_budget_is_omitted_without_sanitizing() -> None:
     tracemalloc.start()
     try:
         body = assemble_context(
-            JOB,
+            SUBJECT,
             files,
             RULES,
             (),
@@ -537,6 +532,41 @@ def test_package_with_pr_context_never_exceeds_the_limit() -> None:
     assert payload.token_count <= 1_024
 
 
+def test_package_without_a_pull_request_has_an_empty_header() -> None:
+    """Симуляция песочницы: репозитория, номера PR и коммитов у входа нет."""
+    body = assemble_context(
+        ContextSubject(),
+        parse_diff(DIFF),
+        RULES,
+        (AST,),
+        (),
+        sources={},
+        pr_context=NO_PR_CONTEXT,
+        limits=LIMITS,
+        review_run_id=RUN_ID,
+        now=NOW,
+        new_id=lambda: UUID(int=99),
+    ).payload.body
+    assert (body["repository"], body["pull_request"], body["base_sha"], body["head_sha"]) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert body["diff"] == _assemble().payload.body["diff"]
+
+
+def test_assembled_package_reads_back_by_file() -> None:
+    repo, lock = file_contexts(_assemble().payload.body)
+
+    assert repo.file_path == "app/repo.py"
+    (hunk,) = repo.hunks
+    assert hunk.startswith("@@ -10,3 +10,3 @@") and "+        self.items.insert(0, item)" in hunk
+    assert repo.scopes is not None and "10-12 def save(self, item)" in repo.scopes
+    assert repo.imports == "import os"
+    assert repo.rules == (ContextRule("Errors", RULE.checks),)
+    assert repo.omitted == ()
+    assert (lock.file_path, lock.hunks, lock.omitted) == ("uv.lock", (), (ContextOmission("file", "filtered"),))
 def _peak_of_assembly(
     diff: str, *, rules: RepoRules = RULES, pr_context: PrContext = NO_PR_CONTEXT
 ) -> tuple[dict[str, Any], int]:
@@ -545,7 +575,7 @@ def _peak_of_assembly(
     tracemalloc.start()
     try:
         body = assemble_context(
-            JOB,
+            SUBJECT,
             files,
             rules,
             (),

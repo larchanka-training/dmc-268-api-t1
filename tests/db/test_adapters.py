@@ -25,6 +25,7 @@ from app.domain.entities import (
     ReviewRunStep,
     RuleRef,
     User,
+    Verdict,
 )
 from app.domain.enums import (
     CommentKind,
@@ -39,6 +40,7 @@ from app.domain.enums import (
     ReviewRunStepStatus,
     TriggerSource,
     VerificationOutcome,
+    VerifierVerdict,
 )
 from app.domain.ids import new_id
 from app.domain.lifecycle import advance
@@ -929,6 +931,47 @@ def test_a_finding_keeps_its_rule_reference(uow) -> None:
     with uow as work:
         (stored,) = work.findings.list_for_run(run.id)
     assert stored.rule == RuleRef(name="Errors", check=2, check_text="Отказ - значение Result")
+
+
+def test_a_finding_keeps_the_verifier_verdict_and_its_reason(uow) -> None:
+    run = _stored_run(uow)
+    finding = Finding(
+        id=new_id(),
+        review_run_id=run.id,
+        anchor=DiffAnchor("app/main.py", DiffSide.NEW, new_line=10),
+        category=FindingCategory.SECURITY,
+        severity=FindingSeverity.CRITICAL,
+        message="m",
+        created_at=NOW,
+        updated_at=NOW,
+        verdict=Verdict(VerifierVerdict.DROP, "Не воспроизводится"),
+    )
+    with uow as work:
+        work.findings.add(finding)
+        work.commit()
+    with uow as work:
+        (stored,) = work.findings.list_for_run(run.id)
+    assert stored.verdict == Verdict(VerifierVerdict.DROP, "Не воспроизводится")
+
+
+def test_a_finding_without_a_verdict_comes_back_without_one(uow) -> None:
+    run = _stored_run(uow)
+    finding = Finding(
+        id=new_id(),
+        review_run_id=run.id,
+        anchor=DiffAnchor("app/main.py", DiffSide.NEW, new_line=10),
+        category=FindingCategory.CORRECTNESS,
+        severity=FindingSeverity.MEDIUM,
+        message="m",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    with uow as work:
+        work.findings.add(finding)
+        work.commit()
+    with uow as work:
+        (stored,) = work.findings.list_for_run(run.id)
+    assert stored.verdict is None
 
 
 def test_a_finding_without_a_rule_comes_back_without_one(uow) -> None:

@@ -169,6 +169,16 @@ def test_empty_package_still_has_three_messages() -> None:
     assert code.content == '## Раздел кода\n\nРепозиторий: "owner/repo"\n\n### Изменения\n\nИзменений в пакете нет.'
 
 
+def test_package_without_a_pull_request_skips_the_repository_and_the_run() -> None:
+    """Симуляция песочницы: репозитория, номера PR и коммитов нет - их нет и в промпте."""
+    body = copy.deepcopy(BODY)
+    body.update(repository=None, pull_request=None, base_sha=None, head_sha=None, ast=[])
+    system, _, code = build_review_prompt(TEXTS, body)
+    assert system.content == "ИНСТРУКЦИИ РЕВЬЮ"
+    assert code.content.startswith("## Раздел кода\n\n### Изменения\n\n")
+    assert "Репозиторий" not in code.content
+
+
 def _finding(message: str, *, rule: RuleRef | None = None, suggestion: str | None = None) -> Finding:
     return Finding(
         id=UUID(int=1),

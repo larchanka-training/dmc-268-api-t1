@@ -36,6 +36,7 @@ from app.domain.entities import (
     ReviewRun,
     ReviewRunStep,
     RuleRef,
+    Verdict,
 )
 from app.domain.enums import (
     CoverageReason,
@@ -46,6 +47,7 @@ from app.domain.enums import (
     ReviewRunStepStatus,
     TriggerSource,
     VerificationOutcome,
+    VerifierVerdict,
 )
 from app.domain.lifecycle import advance
 from app.domain.llm_errors import (
@@ -638,6 +640,27 @@ def test_verifier_drops_one_of_three_and_the_others_keep_their_text() -> None:
     assert run.verification is VerificationOutcome.VERIFIED
     assert run.verifier_dropped_findings == 1
     assert [f.message for f in uow.findings.list_for_run(JOB.review_run_id)] == ["первое", "третье"]
+    # Вердикт и причина сохраняются вместе с оставленным замечанием (инспектор находки).
+    assert [f.verdict for f in uow.findings.list_for_run(JOB.review_run_id)] == [
+        Verdict(VerifierVerdict.KEEP, "причина F1"),
+        Verdict(VerifierVerdict.KEEP, "причина F3"),
+    ]
+
+
+def test_a_security_finding_kept_against_a_drop_verdict_stores_the_drop() -> None:
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway(
+        [
+            review_response(finding_json(CHANGED_FILE, 1, "утечка", category="security", severity="critical")),
+            verification_response(("F1", "drop")),
+        ]
+    )
+
+    _run(uow, gateway)
+
+    (finding,) = uow.findings.list_for_run(JOB.review_run_id)
+    assert finding.verdict == Verdict(VerifierVerdict.DROP, "причина F1")
 
 
 def test_verifier_failure_is_fail_open() -> None:
@@ -657,6 +680,7 @@ def test_verifier_failure_is_fail_open() -> None:
     assert run.verification is VerificationOutcome.UNAVAILABLE
     assert run.verifier_dropped_findings == 0
     assert [f.message for f in uow.findings.list_for_run(JOB.review_run_id)] == ["находка"]
+    assert [f.verdict for f in uow.findings.list_for_run(JOB.review_run_id)] == [None]
 
 
 def test_verifier_that_skips_a_finding_is_treated_as_unavailable() -> None:

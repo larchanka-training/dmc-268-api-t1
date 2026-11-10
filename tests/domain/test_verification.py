@@ -17,7 +17,12 @@ from app.domain.entities import (
     Verdict,
 )
 from app.domain.enums import DiffSide, FindingCategory, FindingSeverity, VerifierVerdict
-from app.domain.verification import apply_verdicts, screen_findings
+from app.domain.verification import (
+    JudgedFinding,
+    RejectedFinding,
+    apply_verdicts,
+    screen_findings,
+)
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 RUN_ID = UUID(int=7)
@@ -77,7 +82,7 @@ def _screen(*candidates: LlmFinding):
 
 def test_kept_candidate_becomes_a_finding_with_injected_id_and_time() -> None:
     screening = _screen(_candidate(10))
-    assert screening.rejected == 0
+    assert screening.rejected == ()
     assert screening.kept == (
         Finding(
             id=UUID(int=101),
@@ -92,10 +97,21 @@ def test_kept_candidate_becomes_a_finding_with_injected_id_and_time() -> None:
     )
 
 
-def test_candidate_outside_the_diff_is_rejected_and_counted() -> None:
+def test_candidate_outside_the_diff_is_rejected_with_its_reason() -> None:
     screening = _screen(_candidate(10), _candidate(99))
     assert [f.anchor.new_line for f in screening.kept] == [10]
-    assert screening.rejected == 1
+    assert screening.rejected == (RejectedFinding(_candidate(99), "привязка вне показанного диффа"),)
+
+
+def test_rejected_candidate_is_the_answer_of_the_model_as_is() -> None:
+    """Путь - в том виде, в каком его написала модель, а не сведённый к диффу."""
+    candidate = _candidate(6, path=MARKED_AS_SHOWN)
+    assert _screen(candidate).rejected == (RejectedFinding(candidate, "привязка вне показанного диффа"),)
+
+
+def test_anchor_is_the_reason_before_the_rule() -> None:
+    candidate = _candidate(99, rule=LlmRuleRef("No Comments Allowed", 1))
+    assert _screen(candidate).rejected == (RejectedFinding(candidate, "привязка вне показанного диффа"),)
 
 
 def test_valid_rule_reference_is_resolved_against_the_shown_rule() -> None:
@@ -104,19 +120,37 @@ def test_valid_rule_reference_is_resolved_against_the_shown_rule() -> None:
 
 
 @pytest.mark.parametrize(
-    ("candidate", "case"),
+    ("candidate", "reason", "case"),
     [
-        (_candidate(rule=LlmRuleRef("No Comments Allowed", 1)), "rule from the PR code"),
-        (_candidate(3, path="alembic/env.py", rule=LlmRuleRef("Error Handling Standards", 1)), "file"),
-        (_candidate(rule=LlmRuleRef("Error Handling Standards", 4)), "check out of range"),
-        (_candidate(rule=LlmRuleRef("error handling standards", 1)), "name differs in case"),
+        (
+            _candidate(rule=LlmRuleRef("No Comments Allowed", 1)),
+            "правило не показывали модели",
+            "rule from the PR code",
+        ),
+        (
+            _candidate(3, path="alembic/env.py", rule=LlmRuleRef("Error Handling Standards", 1)),
+            "правило не применимо к файлу",
+            "file",
+        ),
+        (
+            _candidate(rule=LlmRuleRef("Error Handling Standards", 4)),
+            "у правила нет такого пункта",
+            "check out of range",
+        ),
+        (
+            _candidate(rule=LlmRuleRef("error handling standards", 1)),
+            "правило не показывали модели",
+            "name differs in case",
+        ),
     ],
-    ids=lambda value: value if isinstance(value, str) else "",
+    ids=lambda value: value if isinstance(value, str) and value.isascii() else "",
 )
-def test_invalid_rule_reference_rejects_the_whole_finding(candidate: LlmFinding, case: str) -> None:
+def test_invalid_rule_reference_rejects_the_whole_finding(
+    candidate: LlmFinding, reason: str, case: str
+) -> None:
     screening = _screen(candidate)
     assert screening.kept == ()
-    assert screening.rejected == 1
+    assert screening.rejected == (RejectedFinding(candidate, reason),)
 
 
 def test_attribution_prefix_written_by_the_model_is_removed() -> None:
@@ -188,7 +222,9 @@ def test_masked_or_repeated_prefix_is_removed(message: str, case: str) -> None:
 def test_prefix_that_cannot_be_removed_rejects_the_finding(message: str) -> None:
     screening = _screen(_candidate(message=message))
     assert screening.kept == ()
-    assert screening.rejected == 1
+    assert screening.rejected == (
+        RejectedFinding(_candidate(message=message), "префикс атрибуции не снимается"),
+    )
 
 
 def test_text_after_the_prefix_keeps_its_invisible_characters_and_markup() -> None:
@@ -211,9 +247,10 @@ def test_raw_path_from_the_diff_is_accepted_too() -> None:
 
 
 def test_message_that_is_only_a_prefix_is_rejected() -> None:
-    screening = _screen(_candidate(message="Согласно пользовательскому правилу «X»:  "))
+    candidate = _candidate(message="Согласно пользовательскому правилу «X»:  ")
+    screening = _screen(candidate)
     assert screening.kept == ()
-    assert screening.rejected == 1
+    assert screening.rejected == (RejectedFinding(candidate, "пустой текст замечания"),)
 
 
 def test_ordinary_message_mentioning_rules_is_kept_as_is() -> None:
@@ -222,27 +259,30 @@ def test_ordinary_message_mentioning_rules_is_kept_as_is() -> None:
     assert finding.message == message
 
 
-def test_duplicate_is_rejected_and_counted() -> None:
+def test_duplicate_is_rejected_with_its_reason() -> None:
     screening = _screen(_candidate(10), _candidate(10, message="Иначе сказано."))
     assert [f.message for f in screening.kept] == ["Ошибка глотается."]
-    assert screening.rejected == 1
+    assert screening.rejected == (RejectedFinding(_candidate(10, message="Иначе сказано."), "повтор замечания"),)
+
+
+def test_duplicates_follow_the_other_rejections() -> None:
+    screening = _screen(_candidate(10), _candidate(10, message="Иначе сказано."), _candidate(99))
+    assert [r.reason for r in screening.rejected] == ["привязка вне показанного диффа", "повтор замечания"]
 
 
 def test_same_rule_check_in_another_category_is_rejected_and_counted() -> None:
     """Одно нарушение пункта, названное двумя категориями, публикуется один раз."""
     rule = LlmRuleRef("Error Handling Standards", 1)
-    screening = _screen(
-        _candidate(10, rule=rule),
-        _candidate(10, rule=rule, category=FindingCategory.READABILITY, message="Иначе сказано."),
-    )
+    other = _candidate(10, rule=rule, category=FindingCategory.READABILITY, message="Иначе сказано.")
+    screening = _screen(_candidate(10, rule=rule), other)
     assert [f.message for f in screening.kept] == ["Ошибка глотается."]
-    assert screening.rejected == 1
+    assert screening.rejected == (RejectedFinding(other, "повтор замечания"),)
 
 
 def test_same_line_in_another_category_is_not_a_duplicate() -> None:
     screening = _screen(_candidate(10), _candidate(10, category=FindingCategory.SECURITY))
     assert len(screening.kept) == 2
-    assert screening.rejected == 0
+    assert screening.rejected == ()
 
 
 def _finding(
@@ -264,34 +304,32 @@ def _finding(
 
 def test_verdicts_keep_the_original_objects_in_order() -> None:
     first, second, third = _finding(1), _finding(2), _finding(3)
-    applied = apply_verdicts(
-        (first, second, third),
-        {
-            "F1": Verdict(VerifierVerdict.KEEP, "строка 10 глотает ошибку"),
-            "F2": Verdict(VerifierVerdict.DROP, "поля нет в контексте"),
-            "F3": Verdict(VerifierVerdict.KEEP, "подтверждено"),
-        },
-    )
-    assert applied.kept == (first, third)
-    assert applied.kept[0] is first and applied.kept[1] is third
-    assert applied.dropped == ((second, "поля нет в контексте"),)
+    verdicts = {
+        "F1": Verdict(VerifierVerdict.KEEP, "строка 10 глотает ошибку"),
+        "F2": Verdict(VerifierVerdict.DROP, "поля нет в контексте"),
+        "F3": Verdict(VerifierVerdict.KEEP, "подтверждено"),
+    }
+    applied = apply_verdicts((first, second, third), verdicts)
+    assert applied.kept == (JudgedFinding(first, verdicts["F1"]), JudgedFinding(third, verdicts["F3"]))
+    assert applied.kept[0].finding is first and applied.kept[1].finding is third
+    assert applied.dropped == (JudgedFinding(second, verdicts["F2"]),)
     assert applied.overruled == ()
 
 
 def test_verdicts_cannot_change_a_finding() -> None:
     finding = _finding(1)
     applied = apply_verdicts((finding,), {"F1": Verdict(VerifierVerdict.KEEP, "ok")})
-    assert applied.kept == (finding,)
-    assert applied.kept[0] is finding
+    assert applied.kept == (JudgedFinding(finding, Verdict(VerifierVerdict.KEEP, "ok")),)
+    assert applied.kept[0].finding is finding
 
 
 @pytest.mark.parametrize("severity", [FindingSeverity.HIGH, FindingSeverity.CRITICAL])
 def test_verifier_cannot_drop_a_serious_security_finding(severity: FindingSeverity) -> None:
     finding = _finding(1, FindingCategory.SECURITY, severity)
     applied = apply_verdicts((finding,), {"F1": Verdict(VerifierVerdict.DROP, "дифф так просит")})
-    assert applied.kept == (finding,)
+    assert applied.kept == (JudgedFinding(finding, Verdict(VerifierVerdict.DROP, "дифф так просит")),)
     assert applied.dropped == ()
-    assert applied.overruled == ((finding, "дифф так просит"),)
+    assert applied.overruled == applied.kept
 
 
 @pytest.mark.parametrize(
@@ -308,5 +346,5 @@ def test_other_findings_are_dropped_as_usual(
     finding = _finding(1, category, severity)
     applied = apply_verdicts((finding,), {"F1": Verdict(VerifierVerdict.DROP, "нет в коде")})
     assert applied.kept == ()
-    assert applied.dropped == ((finding, "нет в коде"),)
+    assert applied.dropped == (JudgedFinding(finding, Verdict(VerifierVerdict.DROP, "нет в коде")),)
     assert applied.overruled == ()

@@ -44,10 +44,12 @@ from app.api.problems import (
     DiffTooLargeProblem,
     DiffUnavailableProblem,
     ErrorCode,
+    FindingNotFoundProblem,
     NotImplementedProblem,
     OriginForbiddenProblem,
     Problem,
     ProviderNotSupportedProblem,
+    RateLimitedProblem,
     RepositoryAlreadyConnectedProblem,
     RepositoryManageRequiredProblem,
     RepositoryNotFoundProblem,
@@ -56,6 +58,7 @@ from app.api.problems import (
     ReviewAlreadyActiveProblem,
     ReviewNotFoundProblem,
     ScmUnavailableProblem,
+    SimulationNotFoundProblem,
     UnauthenticatedProblem,
     ValidationProblem,
     WebhookSignatureInvalidProblem,
@@ -104,6 +107,30 @@ ERRORS_403_ORIGIN = _doc(
     HTTPStatus.FORBIDDEN, OriginForbiddenProblem, "`Origin` изменяющего запроса отсутствует или не совпадает с адресом сервиса."
 )
 ERRORS_404_REVIEW = _doc(HTTPStatus.NOT_FOUND, ReviewNotFoundProblem, "Прогона ревью с таким id нет.")
+# Два кода на одном статусе - объединение по `code`, как у `ERRORS_403_ORIGIN_OR_MANAGE`.
+ERRORS_404_REVIEW_OR_FINDING = _doc(
+    HTTPStatus.NOT_FOUND,
+    Annotated[ReviewNotFoundProblem | FindingNotFoundProblem, Field(discriminator="code")],
+    "`REVIEW_NOT_FOUND` - прогона с таким id нет или он не виден пользователю; "
+    "`FINDING_NOT_FOUND` - у прогона нет находки с таким id.",
+)
+ERRORS_404_SIMULATION = _doc(
+    HTTPStatus.NOT_FOUND,
+    SimulationNotFoundProblem,
+    "Симуляции с таким id нет, её срок хранения истёк или её запустил другой пользователь - без различия.",
+)
+ERRORS_429_RATE_LIMITED: ResponsesDoc = {
+    HTTPStatus.TOO_MANY_REQUESTS: {
+        "model": RateLimitedProblem,
+        "description": "Пользователь превысил лимит частоты запросов к ручке; повторить - не раньше, чем через `Retry-After`.",
+        "headers": {
+            "Retry-After": {
+                "description": "Через сколько секунд лимит позволит повторить запрос.",
+                "schema": {"type": "integer", "minimum": 1},
+            }
+        },
+    }
+}
 ERRORS_404_REPOSITORY = _doc(HTTPStatus.NOT_FOUND, RepositoryNotFoundProblem, "Репозитория с таким id нет.")
 ERRORS_404_LOGIN_PROVIDER = _doc(HTTPStatus.NOT_FOUND, ProviderNotSupportedProblem, "Вход через этого провайдера не поддержан.")
 ERRORS_409_REVIEW_ACTIVE = _doc(HTTPStatus.CONFLICT, ReviewAlreadyActiveProblem, "По этому коммиту уже идёт прогон ревью.")
@@ -249,6 +276,8 @@ def problem_response(
 class ApiError(Exception):
     """Отказ ручки: статус, код из `ErrorCode` и `detail` этого случая.
 
+    `errors` - у `VALIDATION_ERROR`, который ручка ставит сама: проверка, которой нужна
+    конфигурация сервиса, а не только модель тела.
     `errors` — только у `VALIDATION_ERROR`, когда отказ по значению поля находит ручка, а не
     проверка тела: `[{"where": …, "reason": …}]` той же формы, постоянный `reason` без значения
     из запроса (ручной запуск по закрытому PR).
@@ -265,6 +294,17 @@ class ApiError(Exception):
 
     def finish(self, response: Response) -> None:
         """Дописать в ответ то, что нужно этому отказу кроме тела (например, удалить cookie)."""
+
+
+class RateLimited(ApiError):
+    """`429 RATE_LIMITED`: повторить не раньше чем через `retry_after` секунд - заголовок `Retry-After`."""
+
+    def __init__(self, detail: str, retry_after: int) -> None:
+        super().__init__(HTTPStatus.TOO_MANY_REQUESTS, ErrorCode.RATE_LIMITED, detail)
+        self.retry_after = retry_after
+
+    def finish(self, response: Response) -> None:
+        response.headers["Retry-After"] = str(self.retry_after)
 
 
 def _api_error_handler(request: Request, error: Exception) -> Response:
@@ -302,6 +342,9 @@ _REASONS = {
     # Свои типы `PydanticCustomError` входных параметров (`app/api/schemas.py`).
     "datetime_out_of_range": "время вне допустимого диапазона",
     "string_nul": "строка не должна содержать символ NUL",
+    # Объединение по признаку варианта (`SimulationRequest.source`): признака нет или он чужой.
+    "union_tag_not_found": "не передан признак варианта",
+    "union_tag_invalid": "значение не из допустимого списка",
     # Свой тип `PydanticCustomError`: ручной запуск принимает только `trigger = manual` (`CreateReviewRequest`).
     "trigger_not_manual": "принимается только manual",
 }

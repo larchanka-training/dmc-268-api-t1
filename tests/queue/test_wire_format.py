@@ -6,8 +6,13 @@
 import json
 from uuid import UUID
 
-from app.domain.entities import ReviewJob
-from app.infrastructure.queue.rabbitmq import from_wire_message, to_wire_message
+from app.domain.entities import ReviewJob, SimulationJob
+from app.infrastructure.queue.rabbitmq import (
+    from_wire_message,
+    job_type,
+    simulation_from_wire_message,
+    to_wire_message,
+)
 
 JOB = ReviewJob(
     id=UUID(int=1),
@@ -42,3 +47,20 @@ def test_wire_message_matches_system_design_schema() -> None:
 def test_from_wire_message_round_trips_to_wire_message() -> None:
     body = json.dumps(to_wire_message(JOB)).encode("utf-8")
     assert from_wire_message(body) == JOB
+
+
+SIMULATION_JOB = SimulationJob(id=UUID(int=3), simulation_id=UUID(int=4))
+
+
+def test_a_simulation_message_carries_only_the_ids() -> None:
+    """Вход пользователя лежит в строке симуляции: ни кода, ни правил в теле."""
+    assert to_wire_message(SIMULATION_JOB) == {
+        "job_id": str(SIMULATION_JOB.id),
+        "simulation_id": str(SIMULATION_JOB.simulation_id),
+    }
+    body = json.dumps(to_wire_message(SIMULATION_JOB)).encode("utf-8")
+    assert simulation_from_wire_message(body) == SIMULATION_JOB
+
+
+def test_the_job_type_names_the_kind_of_task() -> None:
+    assert (job_type(JOB), job_type(SIMULATION_JOB)) == ("review", "simulation")

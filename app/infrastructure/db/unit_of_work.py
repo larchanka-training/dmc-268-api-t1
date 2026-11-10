@@ -19,6 +19,7 @@ from app.application.ports.repositories import (
     ReviewRunRepo,
     ReviewRunStepRepo,
     SessionRepo,
+    SimulationRepo,
     UserRepo,
 )
 from app.application.ports.unit_of_work import ActiveRunConflict
@@ -34,6 +35,7 @@ from app.infrastructure.db.repositories import (
     SqlAlchemyReviewRunRepo,
     SqlAlchemyReviewRunStepRepo,
     SqlAlchemySessionRepo,
+    SqlAlchemySimulationRepo,
     SqlAlchemyUserRepo,
 )
 from app.infrastructure.db.token_cipher import TokenCipher
@@ -81,6 +83,7 @@ class SqlAlchemyUnitOfWork:
         self.users: UserRepo = SqlAlchemyUserRepo(session)
         self.sessions: SessionRepo = SqlAlchemySessionRepo(session)
         self.provider_tokens: ProviderTokenRepo = SqlAlchemyProviderTokenRepo(session, self._cipher)
+        self.simulations: SimulationRepo = SqlAlchemySimulationRepo(session)
         self.billing: BillingRepo = SqlAlchemyBillingRepo(session)
         return self
 

@@ -27,7 +27,7 @@ from app.infrastructure.queue.rabbitmq import (
     declare_topology,
 )
 from app.infrastructure.telemetry import instrument_engine
-from app.worker.factory import build_review_handler, build_worker
+from app.worker.factory import build_message_handler, build_review_handler, build_worker
 
 from .api.test_webhooks_e2e import SAMPLE_DIFF, SECRET, post_webhook
 from .conftest import TEST_RABBITMQ_URL, requires_broker, requires_db
@@ -121,7 +121,7 @@ def test_one_trace_links_the_webhook_the_queue_and_every_worker_stage(
     run_id = response.json()["id"]
 
     handler = build_review_handler(_WorkerDeps(clean_db), LIMITS, LLM_LIMITS, TEXTS)
-    build_worker(settings).run(handler, limit=1)
+    build_worker(settings).run(build_message_handler(handler), limit=1)
 
     with SqlAlchemyUnitOfWork(clean_db) as work:
         run = work.review_runs.get(UUID(run_id))

@@ -99,6 +99,16 @@ def retag(text: str) -> str:
     )
 
 
+def unfence(text: str) -> str:
+    """Текст блока `fence` без разметки - как его прочла модель; не блок - как есть.
+
+    Для показа человеку: обезвреженные `sanitize` символы и маркеры остаются
+    видимой записью.
+    """
+    match = _FENCED.fullmatch(text)
+    return match[3] if match else text
+
+
 def fence(kind: str, text: str) -> str:
     """Обезвредить текст и поместить в блок недоверенных данных.
 

@@ -47,6 +47,7 @@ from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
 from app.infrastructure.queue.rabbitmq import DLQ_NAME
 from app.worker.factory import (
     Worker,
+    build_message_handler,
     build_review_handler,
     build_worker,
     context_limits,
@@ -332,11 +333,13 @@ def _worker_process(
             github,
             SlowStubLlm(spec.model_latency_seconds),
         )
-        handler = build_review_handler(
-            container,
-            context_limits(spec.settings),
-            llm_limits(spec.settings),
-            load_checked_prompt_texts(spec.settings, DEFAULT_PROMPTS_DIR),
+        handler = build_message_handler(
+            build_review_handler(
+                container,
+                context_limits(spec.settings),
+                llm_limits(spec.settings),
+                load_checked_prompt_texts(spec.settings, DEFAULT_PROMPTS_DIR),
+            )
         )
         worker = build_worker(spec.settings)
         events.put((index, None))

@@ -120,7 +120,7 @@ from sqlalchemy import Engine
 from sqlalchemy.pool import QueuePool
 
 from app.application.ports.run_outcome import RUN_REFUSED
-from app.domain.enums import ReviewRunStage, ReviewRunStatus
+from app.domain.enums import ReviewRunStage, ReviewRunStatus, SimulationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,8 @@ MIGRATE_SERVICE = "dmc-268-migrate"
 
 # Имя атрибута — как у поля в API и в логах: по нему трейс ищется от прогона.
 REVIEW_RUN_ID = "review_run_id"
+# То же для симуляции песочницы правил.
+SIMULATION_ID = "simulation_id"
 # `x-request-id` ответа провайдера модели: атрибут спана httpx и поле записи лога об ошибке.
 LLM_REQUEST_ID = "review.llm.request_id"
 
@@ -879,6 +881,36 @@ class OtelStageTracer:
         )
         token = otel_context.attach(trace.set_span_in_context(span))
         return _OtelStageSpan(span, token, stage)
+
+
+class _OtelSimulationSpan:
+    def __init__(self, span: trace.Span, token: Token[Context]) -> None:
+        self._span = span
+        self._token = token
+
+    def end(self, error_code: str | None) -> None:
+        if error_code is not None:
+            self._span.set_attribute("error.type", error_code)
+            self._span.set_status(Status(StatusCode.ERROR, error_code))
+        self._span.end()
+        otel_context.detach(self._token)
+
+
+class OtelSimulationTracer:
+    """Адаптер `SimulationTracer`: спан `simulation.<этап>` с атрибутом `simulation_id`.
+
+    Как у этапов прогона, спан текущий, пока этап идёт. Метрик нет: бизнес-метрики
+    симуляций - не цель, пока у них нет потребителя (design change'а
+    rules-playground-simulation).
+    """
+
+    def start(self, simulation_id: UUID, stage: SimulationStatus) -> _OtelSimulationSpan:
+        span = _tracer.start_span(
+            f"simulation.{stage.value}",
+            attributes={SIMULATION_ID: str(simulation_id), "simulation.stage": stage.value},
+        )
+        token = otel_context.attach(trace.set_span_in_context(span))
+        return _OtelSimulationSpan(span, token)
 
 
 class OtelRunOutcomeRecorder:

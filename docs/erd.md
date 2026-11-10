@@ -6,8 +6,10 @@
 верификации — `0006_add_rule_ref_and_verification.py`, шаги прогона —
 `0007_add_review_run_steps.py`, индекс `review_runs (updated_at, id)` под курсор
 общего потока событий — `0008_add_review_runs_updated_at_index.py`, токен пользователя у
-провайдера при сессии — `0009_add_provider_tokens.py`, баланс аккаунта (зачисления,
-плательщик репозитория и прогона, резерв) — `0020_add_account_balance.py`; отдельный тест следит, чтобы таблицы
+провайдера при сессии - `0009_add_provider_tokens.py`, симуляции песочницы правил -
+`0022_add_simulations.py`, баланс аккаунта (зачисления, плательщик репозитория и прогона,
+резерв) - `0020_add_account_balance.py`, вердикт верификатора у замечания -
+`0023_add_finding_verifier_verdict.py`; отдельный тест следит, чтобы таблицы
 на этой диаграмме и модели не расходились.
 
 `ReviewRun` в тикете называется `ReviewJob`. Имя поменяли, потому что «job»
@@ -29,6 +31,7 @@ erDiagram
     users |o--o{ repositories : "платит за"
     users |o--o{ review_runs : "оплатил"
     sessions ||--o| provider_tokens : "токен провайдера"
+    users ||--o{ simulations : "запустил"
 
     repositories {
         provider provider "github или gitlab"
@@ -125,6 +128,8 @@ erDiagram
         int rule_check "номер пункта правила, с единицы"
         text rule_check_text "текст пункта на момент прогона"
         uuid covered_by_finding_id FK "находка, чей тред бота уже говорит об этом; null - опубликована сама"
+        verifier_verdict verifier_verdict "решение верификатора: keep или drop; null - он по находке не решал"
+        text verifier_reason "причина верификатора; заполнена вместе с вердиктом"
         uuid id PK
         timestamptz created_at
         timestamptz updated_at
@@ -176,6 +181,23 @@ erDiagram
         timestamptz access_expires_at "null — без истечения"
         bytea refresh_token_encrypted "null — refresh token нет"
         timestamptz refresh_expires_at
+    }
+    simulations {
+        uuid user_id FK
+        simulation_status status "queued, building_context, analysing, verifying, completed, failed"
+        simulation_source_kind source_kind "code или diff"
+        text file_path "только у code"
+        text source "фрагмент или дифф; только у незавершённой"
+        text rules "текст rules.md; только у незавершённой"
+        jsonb result "замечания, отброшенные, контекст без секретов; только у completed"
+        text model
+        bigint tokens_used "оба вызова модели"
+        review_verification verification
+        text error_code "только у failed"
+        timestamptz expires_at "запуск + SIMULATION_TTL_SECONDS"
+        uuid id PK
+        timestamptz created_at
+        timestamptz updated_at "время последнего перехода"
     }
 ```
 
@@ -319,6 +341,14 @@ associated data — id сессии и имя поля, так что шифро
 refresh под блокировкой `SELECT … FOR UPDATE`; удаляется она вместе с сессией. Сессии,
 открытые до ревизии 0009, строки не имеют.
 
+**`simulations`**: симуляция ревью в песочнице правил - фрагмент кода или дифф пользователя и его текст `rules.md`, прогнанные тем же анализом, что ревью, без провайдера VCS и публикации.
+Строка временная: проход обслуживания воркера удаляет её после `expires_at` (по умолчанию сутки от запуска), а незавершённую без смены статуса дольше `SIMULATION_STALE_SECONDS` переводит в `failed` с `SIMULATION_STALE`.
+Вход (`source`, `rules`) живёт, только пока симуляция не завершена: переход в `completed` или `failed` его стирает, а ограничения не пропустят итоговую строку со входом ни от одного писателя.
+`result` - один JSONB-документ с версией формата (`simulation-result/v1`): замечания с вердиктом верификатора, отброшенные отсевом и верификатором с причиной и контекст модели по файлам; его читают целиком и ни в каком запросе не разбирают.
+Контекст в нём записан с секретами, заменёнными меткой (`redact_secrets`), как тело `context_payloads`; замечания - как есть, как `findings`.
+Пакет контекста симуляции в `context_payloads` не пишется: та таблица - след прогонов ревью.
+Лимиты запусков считаются по строкам этой же таблицы: незавершённая симуляция пользователя и запуски за скользящий час по индексу `(user_id, created_at)`; поэтому строка живёт не меньше часа.
+
 ## Правила, которые обеспечивает схема
 
 Это ограничения, а не соглашения, поэтому ни один путь в коде не сможет о них
@@ -332,6 +362,7 @@ refresh под блокировкой `SELECT … FOR UPDATE`; удаляетс�
 | Чанки контекста сохраняют порядок | `UNIQUE (review_run_id, chunk_index)` |
 | Замечание не может повториться в одном прогоне | `UNIQUE NULLS NOT DISTINCT (review_run_id, file_path, side, old_line, new_line, category)`. Привязка заполняет только номер строки своей стороны, поэтому в ключе есть оба номера, а NULL считаются равными. Без любой из этих двух частей ограничение никогда не сработает на старой стороне, где `new_line` всегда NULL. |
 | Ссылка на правило заполнена целиком или пуста целиком | `ck_findings_rule_ref`: `rule_name`, `rule_check`, `rule_check_text` все `NULL` либо все заполнены и `rule_check >= 1`. Префикс атрибуции строится из всех трёх частей. |
+| Вердикт верификатора и причина заполнены вместе или пусты вместе | `ck_findings_verifier_verdict`: `verifier_verdict` и `verifier_reason` оба `NULL` либо оба заполнены. У находок прогонов до миграции `0023` оба пусты. |
 | Шаг закрыт целиком или идёт | `ck_review_run_steps_duration`: длительности нет ровно у `running`; `ck_review_run_steps_error_code`: код ошибки есть ровно у `failed`. Длительность и токены не отрицательны. |
 | Счётчик верификатора не отрицателен | `ck_review_runs_verifier_dropped`: `verifier_dropped_findings >= 0` |
 | Резерв — только с плательщиком | `ck_review_runs_estimate`: `estimated_cost_eur IS NULL OR (payer_user_id IS NOT NULL AND estimated_cost_eur >= 0)` |
@@ -343,8 +374,12 @@ refresh под блокировкой `SELECT … FOR UPDATE`; удаляетс�
 | Сессия находится по cookie одним запросом | `UNIQUE (token_hash)` |
 | Токен провайдера живёт не дольше сессии | `ON DELETE CASCADE` на `provider_tokens.session_id`: выход, вход поверх сессии, уборка истёкших и удаление пользователя удаляют и токен. Второе исключение из правила ниже, по той же причине. |
 | Срок refresh token без самого токена не хранится | `ck_provider_tokens_refresh_expiry_needs_token`: `refresh_expires_at IS NULL OR refresh_token_encrypted IS NOT NULL` |
-| Удаление пользователя гасит его сессии | `ON DELETE CASCADE` на `sessions.user_id` — единственное исключение из правила ниже: сессия без пользователя ничего не значит. |
-| Удаление строки никогда не удаляет зависимые | `ON DELETE RESTRICT` на каждом внешнем ключе конвейера. Удаление, после которого что-то осталось бы без родителя, отклоняется, так что `provider_comment_id` опубликованного комментария и стоимость прогона не пропадут побочным эффектом. Очистка, когда она появится, удаляет дочерние строки явно. |
+| Удаление пользователя гасит его сессии | `ON DELETE CASCADE` на `sessions.user_id` - исключение из правила ниже: сессия без пользователя ничего не значит. |
+| Не больше одной незавершённой симуляции на пользователя | Частичный `UNIQUE (user_id) WHERE status NOT IN ('completed','failed')`. Параллельный запуск того же пользователя вставкой `ON CONFLICT DO NOTHING` ждёт коммита первого и ничего не пишет. |
+| Вход симуляции хранится только до итога | `ck_simulations_source`, `ck_simulations_rules`: `source` и `rules` есть ровно у незавершённой. |
+| Итог симуляции согласован со статусом | `ck_simulations_result`: результат есть ровно у `completed`; `ck_simulations_error_code`: код сбоя ровно у `failed`; `ck_simulations_file_path`: путь ровно у фрагмента кода; токены не отрицательны. |
+| Удаление пользователя гасит его симуляции | `ON DELETE CASCADE` на `simulations.user_id`, по той же причине, что у сессий. |
+| Удаление строки никогда не удаляет зависимые | `ON DELETE RESTRICT` на каждом внешнем ключе конвейера ревью. Удаление, после которого что-то осталось бы без родителя, отклоняется, так что `provider_comment_id` опубликованного комментария и стоимость прогона не пропадут побочным эффектом. Очистка, когда она появится, удаляет дочерние строки явно. |
 
 ## Две вещи, которые стоит знать
 

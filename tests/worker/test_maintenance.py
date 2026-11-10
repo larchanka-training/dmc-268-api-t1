@@ -1,9 +1,12 @@
-"""Периодический проход воркера: зависшие прогоны и истёкшие сессии, без брокера.
+"""Периодический проход воркера: зависшие прогоны, истёкшие сессии, зависшие и
+истёкшие симуляции, без брокера.
 
 Спан прохода проверяется на настоящей базе: нужны спаны запросов SQLAlchemy.
 """
 
 import logging
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -12,9 +15,16 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanKind, StatusCode
 from sqlalchemy import create_engine
 
+from app.application.ports import UnitOfWork
 from app.config import Settings
-from app.domain.entities import ContextPayload, ReviewRun, Session
-from app.domain.enums import ReviewRunStatus, TriggerSource
+from app.domain.entities import ContextPayload, ReviewRun, Session, Simulation
+from app.domain.enums import (
+    ReviewRunStatus,
+    SimulationSourceKind,
+    SimulationStatus,
+    TriggerSource,
+)
+from app.domain.simulation import SIMULATION_STALE, fail_simulation, new_simulation
 from app.domain.webhook_redelivery import REDELIVERY_WINDOW, WebhookDelivery
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.telemetry import instrument_engine, sweep_span
@@ -45,13 +55,76 @@ def test_the_pass_purges_expired_sessions() -> None:
     uow.sessions.add(_session(1, NOW - timedelta(days=1)))
     uow.sessions.add(_session(2, NOW + timedelta(days=1)))
 
-    build_maintenance(lambda: uow, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
+    _maintenance(lambda: uow)()
 
     assert [s.id for s in uow.sessions.stored] == [UUID(int=2)]
 
 
 LIMIT = timedelta(minutes=30)
 QUEUED_LIMIT = timedelta(hours=6)
+SIMULATION_LIMIT = timedelta(minutes=30)
+
+
+def _maintenance(uow_factory: Callable[[], UnitOfWork]) -> Callable[[], None]:
+    return build_maintenance(
+        uow_factory,
+        stale_limit=LIMIT,
+        queued_limit=QUEUED_LIMIT,
+        simulation_stale_limit=SIMULATION_LIMIT,
+        now=lambda: NOW,
+    )
+
+
+def _simulation(n: int, *, created: datetime, status: SimulationStatus = SimulationStatus.QUEUED) -> Simulation:
+    simulation = new_simulation(
+        simulation_id=UUID(int=n),
+        user_id=UUID(int=n + 50),
+        source_kind=SimulationSourceKind.DIFF,
+        source="diff --git a/a b/a\n",
+        rules="",
+        file_path=None,
+        now=created,
+        ttl=timedelta(days=1),
+    )
+    return replace(simulation, status=status)
+
+
+def test_the_pass_fails_stale_simulations_and_purges_expired_ones() -> None:
+    uow = FakeUnitOfWork()
+    uow.simulations.add(_simulation(1, created=NOW - SIMULATION_LIMIT - timedelta(seconds=1)))
+    uow.simulations.add(_simulation(2, created=NOW - timedelta(minutes=1), status=SimulationStatus.ANALYSING))
+    expired = fail_simulation(_simulation(3, created=NOW - timedelta(days=2)), "LLM_TIMEOUT", NOW).unwrap()
+    uow.simulations.add(expired)
+
+    _maintenance(lambda: uow)()
+
+    stale = uow.simulations.get(UUID(int=1))
+    assert stale is not None
+    assert (stale.status, stale.error_code, stale.source) == (SimulationStatus.FAILED, SIMULATION_STALE, None)
+    fresh = uow.simulations.get(UUID(int=2))
+    assert fresh is not None and fresh.status is SimulationStatus.ANALYSING
+    assert uow.simulations.get(UUID(int=3)) is None
+
+
+def test_a_failing_simulation_step_does_not_stop_the_other(caplog, monkeypatch) -> None:
+    caplog.set_level(logging.ERROR)
+    monkeypatch.setattr(logging.getLogger("app.worker.factory"), "disabled", False)
+    uow = FakeUnitOfWork()
+    uow.simulations.add(fail_simulation(_simulation(3, created=NOW - timedelta(days=2)), "X", NOW).unwrap())
+    calls = 0
+
+    def uow_factory() -> FakeUnitOfWork:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("база недоступна")
+        return uow
+
+    _maintenance(uow_factory)()
+
+    assert uow.simulations.get(UUID(int=3)) is None
+    (record,) = caplog.records
+    assert record.maintenance_step == "sweep_stale_simulations"
 
 
 def test_the_pass_expires_old_context_payload_bodies() -> None:
@@ -75,6 +148,7 @@ def test_the_pass_expires_old_context_payload_bodies() -> None:
         lambda: uow,
         stale_limit=LIMIT,
         queued_limit=QUEUED_LIMIT,
+        simulation_stale_limit=SIMULATION_LIMIT,
         now=lambda: NOW,
         payload_retention=timedelta(days=7),
     )()
@@ -103,7 +177,13 @@ def test_the_expiry_count_is_a_log_field_not_text(caplog, monkeypatch) -> None:
         )
     )
 
-    build_maintenance(lambda: uow, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
+    build_maintenance(
+        lambda: uow,
+        stale_limit=LIMIT,
+        queued_limit=QUEUED_LIMIT,
+        simulation_stale_limit=SIMULATION_LIMIT,
+        now=lambda: NOW,
+    )()
 
     (record,) = [r for r in caplog.records if getattr(r, "maintenance_step", None) == "expire_context_payloads"]
     assert record.expired_count == 1
@@ -126,7 +206,7 @@ def test_the_pass_sweeps_stale_runs() -> None:
         )
     )
 
-    build_maintenance(lambda: uow, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
+    _maintenance(lambda: uow)()
 
     run = uow.review_runs.get(UUID(int=1))
     assert run is not None and run.status is ReviewRunStatus.FAILED
@@ -147,6 +227,7 @@ def test_the_pass_hands_the_gateway_and_catalog_to_the_sweep(monkeypatch: pytest
         FakeUnitOfWork,
         stale_limit=LIMIT,
         queued_limit=QUEUED_LIMIT,
+        simulation_stale_limit=SIMULATION_LIMIT,
         now=lambda: NOW,
         vcs=vcs,
         installations=installations,
@@ -173,10 +254,10 @@ def test_a_failing_step_is_logged_and_does_not_stop_the_other(caplog, monkeypatc
             raise RuntimeError("база недоступна")
         return uow
 
-    build_maintenance(uow_factory, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW)()
+    _maintenance(uow_factory)()
 
-    # Свой UnitOfWork у каждого шага: зависшие прогоны, сессии, тела пакетов контекста.
-    assert calls == 3
+    # Упал первый шаг; остальные - сессии, оба шага симуляций, тела пакетов контекста - прошли.
+    assert calls == 5
     assert uow.sessions.stored == []
     (record,) = caplog.records
     assert record.getMessage() == "проход по зависшим прогонам завершился ошибкой"
@@ -198,9 +279,7 @@ def test_a_failing_step_marks_the_pass_span_as_an_error(
         return uow
 
     with sweep_span():
-        build_maintenance(
-            uow_factory, stale_limit=LIMIT, queued_limit=QUEUED_LIMIT, now=lambda: NOW
-        )()
+        _maintenance(uow_factory)()
 
     # Второй шаг выполнен, хотя спан уже отмечен ошибкой первого.
     assert uow.sessions.stored == []
@@ -240,12 +319,13 @@ def test_the_queries_of_the_pass_are_children_of_its_span(
         lambda: SqlAlchemyUnitOfWork(engine),
         stale_limit=LIMIT,
         queued_limit=QUEUED_LIMIT,
+        simulation_stale_limit=SIMULATION_LIMIT,
         now=lambda: NOW,
     )
     try:
         # Один такт простоя: проход и ни одного сообщения.
         _worker(_strict([(None, None, None)])).run(
-            lambda body: None, sweep=sweep, sweep_interval=0
+            lambda body, kind: None, sweep=sweep, sweep_interval=0
         )
     finally:
         engine.dispose()
@@ -276,6 +356,7 @@ def test_the_redelivery_step_runs_on_its_own_interval() -> None:
         FakeUnitOfWork,
         stale_limit=LIMIT,
         queued_limit=QUEUED_LIMIT,
+        simulation_stale_limit=SIMULATION_LIMIT,
         now=lambda: clock["now"],
         redeliver=redeliver,
         redelivery_interval=timedelta(minutes=5),
@@ -303,6 +384,7 @@ def test_a_failing_redelivery_does_not_stop_the_other_steps(
             lambda: uow,
             stale_limit=LIMIT,
             queued_limit=QUEUED_LIMIT,
+            simulation_stale_limit=SIMULATION_LIMIT,
             now=lambda: NOW,
             redeliver=redeliver,
             redelivery_interval=timedelta(minutes=5),
