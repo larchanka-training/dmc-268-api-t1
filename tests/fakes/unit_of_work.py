@@ -748,8 +748,18 @@ class FakeBillingRepo:
             sum(usage.total_tokens for _, _, usage in paid),
         )
 
-    def add_credit(self, credit: BalanceCredit) -> None:
+    def add_credit(self, credit: BalanceCredit) -> bool:
+        session_id = credit.stripe_checkout_session_id
+        if session_id is not None and any(c.stripe_checkout_session_id == session_id for c in self.credits):
+            return False
         self.credits.append(credit)
+        return True
+
+    def stripe_total(self, user_id: UUID) -> Decimal:
+        return sum(
+            (c.amount_eur for c in self.credits if c.user_id == user_id and c.stripe_checkout_session_id is not None),
+            Decimal(0),
+        )
 
 
 def _run_spend(run: ReviewRun) -> Decimal:

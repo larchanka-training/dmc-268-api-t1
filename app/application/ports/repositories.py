@@ -283,7 +283,13 @@ class BillingRepo(Protocol):
         """Цена токена по последним прогонам с ненулевой стоимостью, любой модели; без них — ноль."""
         ...
 
-    def add_credit(self, credit: BalanceCredit) -> None: ...
+    def add_credit(self, credit: BalanceCredit) -> bool:
+        """Записать зачисление; `False` — зачисление этой сессии Stripe уже есть, ничего не записано."""
+        ...
+
+    def stripe_total(self, user_id: UUID) -> Decimal:
+        """Сколько всего зачислено аккаунту через Stripe; ручные зачисления не в счёт."""
+        ...
 
 
 class ProviderTokenRepo(Protocol):

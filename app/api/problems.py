@@ -44,6 +44,8 @@ class ErrorCode(StrEnum):
     METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
     REQUEST_BODY_TOO_LARGE = "REQUEST_BODY_TOO_LARGE"
     NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+    PAYMENTS_DISABLED = "PAYMENTS_DISABLED"
+    PAYMENT_PROVIDER_UNAVAILABLE = "PAYMENT_PROVIDER_UNAVAILABLE"
     HTTP_ERROR = "HTTP_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
@@ -257,16 +259,18 @@ class ReviewAlreadyActiveProblem(Problem):
 
 
 class WebhookSignatureInvalidProblem(Problem):
-    """`401 WEBHOOK_SIGNATURE_INVALID`: подписи вебхука нет или она не сошлась."""
+    """`WEBHOOK_SIGNATURE_INVALID`: подписи вебхука нет или она не сошлась — GitHub `401`,
+    Stripe `400`, как велит его документация."""
 
     example = {
+        "status": HTTPStatus.UNAUTHORIZED,
         "detail": "Подписи X-Hub-Signature-256 нет, или она не совпала с телом доставки.",
         "instance": "/api/v1/webhooks/github",
     }
 
     type: Literal["urn:dmc-268:problem:webhook-signature-invalid"] = "urn:dmc-268:problem:webhook-signature-invalid"
     title: Literal["Подпись вебхука не прошла проверку"] = "Подпись вебхука не прошла проверку"
-    status: Literal[HTTPStatus.UNAUTHORIZED] = HTTPStatus.UNAUTHORIZED
+    status: Literal[HTTPStatus.BAD_REQUEST, HTTPStatus.UNAUTHORIZED]
     code: Literal[ErrorCode.WEBHOOK_SIGNATURE_INVALID] = ErrorCode.WEBHOOK_SIGNATURE_INVALID
 
 
@@ -421,6 +425,38 @@ class NotImplementedProblem(Problem):
     code: Literal[ErrorCode.NOT_IMPLEMENTED] = ErrorCode.NOT_IMPLEMENTED
 
 
+class PaymentsDisabledProblem(Problem):
+    """`503 PAYMENTS_DISABLED`: приём оплаты Stripe на этом стенде не настроен (`STRIPE_WEBHOOK_SECRET`
+    или `STRIPE_API_KEY` пуст); событие не прочитано, ничего не зачислено. Stripe повторит доставку."""
+
+    example = {
+        "detail": "Приём оплаты Stripe не настроен: событие не принято, ничего не зачислено.",
+        "instance": "/api/v1/webhooks/stripe",
+    }
+
+    type: Literal["urn:dmc-268:problem:payments-disabled"] = "urn:dmc-268:problem:payments-disabled"
+    title: Literal["Приём оплаты выключен"] = "Приём оплаты выключен"
+    status: Literal[HTTPStatus.SERVICE_UNAVAILABLE] = HTTPStatus.SERVICE_UNAVAILABLE
+    code: Literal[ErrorCode.PAYMENTS_DISABLED] = ErrorCode.PAYMENTS_DISABLED
+
+
+class PaymentProviderUnavailableProblem(Problem):
+    """`502 PAYMENT_PROVIDER_UNAVAILABLE`: сессию оплаты не удалось получить у Stripe — сеть,
+    тайм-аут, отказ API или ключа; ничего не зачислено. Stripe повторит доставку."""
+
+    example = {
+        "detail": "Stripe не отдал сессию оплаты: ничего не зачислено, Stripe повторит доставку.",
+        "instance": "/api/v1/webhooks/stripe",
+    }
+
+    type: Literal["urn:dmc-268:problem:payment-provider-unavailable"] = (
+        "urn:dmc-268:problem:payment-provider-unavailable"
+    )
+    title: Literal["Платёжный провайдер недоступен"] = "Платёжный провайдер недоступен"
+    status: Literal[HTTPStatus.BAD_GATEWAY] = HTTPStatus.BAD_GATEWAY
+    code: Literal[ErrorCode.PAYMENT_PROVIDER_UNAVAILABLE] = ErrorCode.PAYMENT_PROVIDER_UNAVAILABLE
+
+
 class RequestBodyTooLargeProblem(Problem):
     """`413 REQUEST_BODY_TOO_LARGE`: тело запроса больше лимита.
 
@@ -500,6 +536,8 @@ class AnyProblem(
             | MethodNotAllowedProblem
             | RequestBodyTooLargeProblem
             | NotImplementedProblem
+            | PaymentsDisabledProblem
+            | PaymentProviderUnavailableProblem
             | HttpErrorProblem
             | InternalErrorProblem,
             Field(discriminator="code"),

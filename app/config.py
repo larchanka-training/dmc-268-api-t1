@@ -6,6 +6,7 @@
 
 import base64
 import binascii
+from decimal import Decimal
 from typing import Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -55,6 +56,23 @@ class Settings(BaseSettings):
     github_webhook_secret: SecretStr = Field(
         min_length=1,
         description="Shared secret GitHub signs webhook deliveries with (X-Hub-Signature-256).",
+    )
+    # Пополнение через Stripe (change stripe-topup): секрет подписи thin-событий (whsec_…) и
+    # restricted-ключ (rk_…) только на чтение сессий Checkout. Без любого из двух приём оплаты
+    # выключен: `POST /api/v1/webhooks/stripe` отвечает 503 и ничего не зачисляет.
+    stripe_webhook_secret: SecretStr = Field(
+        default=SecretStr(""),
+        description="Signing secret вебхука Stripe; пусто - приём оплаты выключен",
+    )
+    stripe_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Restricted-ключ Stripe на чтение сессий Checkout; пусто - приём оплаты выключен",
+    )
+    # Тестовый режим Stripe: картой 4242 пополнит любой вошедший, а токены Eurorouter настоящие.
+    stripe_topup_limit_eur: Decimal = Field(
+        default=Decimal(20),
+        gt=0,
+        description="Сколько евро всего можно зачислить одному пользователю через Stripe",
     )
     # Дольше самой долгой ожидаемой обработки: иначе выметатель зависших
     # объявит живой прогон мёртвым (docs/SYSTEM_DESIGN.md, `app/worker`).

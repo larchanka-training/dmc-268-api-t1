@@ -84,6 +84,9 @@ resource "docker_container" "api" {
     "PUBLIC_ORIGIN=${var.public_origin}",
     # Ключ шифрования токенов пользователя GitHub — только API: воркер их не читает.
     "USER_TOKEN_ENCRYPTION_KEY=${var.user_token_encryption_key}",
+    # Приём оплаты Stripe — тоже только API; пустые — приём выключен.
+    "STRIPE_WEBHOOK_SECRET=${var.stripe_webhook_secret}",
+    "STRIPE_API_KEY=${var.stripe_api_key}",
   ])
 
   ports {

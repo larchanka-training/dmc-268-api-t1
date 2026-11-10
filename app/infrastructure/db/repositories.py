@@ -999,18 +999,32 @@ class SqlAlchemyBillingRepo:
         # Правило «без истории — ноль» — в домене.
         return eur_per_token(Decimal(cost), int(tokens))
 
-    def add_credit(self, credit: BalanceCredit) -> None:
-        self._session.add(
-            BalanceCreditRow(
+    def add_credit(self, credit: BalanceCredit) -> bool:
+        # Повтор сессии Stripe — ничего, а не исключение: индекс закрывает и гонку двух доставок,
+        # вторая транзакция ждёт первую и не вставляет (change stripe-topup, D6).
+        session_id = BalanceCreditRow.stripe_checkout_session_id
+        inserted = self._session.execute(
+            pg_insert(BalanceCreditRow)
+            .values(
                 id=credit.id,
                 user_id=credit.user_id,
                 amount_eur=credit.amount_eur,
                 note=credit.note,
                 credited_by=credit.credited_by,
+                stripe_checkout_session_id=credit.stripe_checkout_session_id,
                 created_at=credit.created_at,
                 updated_at=credit.created_at,
             )
+            .on_conflict_do_nothing(index_elements=[session_id], index_where=session_id.is_not(None))
+            .returning(BalanceCreditRow.id)
+        ).first()
+        return inserted is not None
+
+    def stripe_total(self, user_id: UUID) -> Decimal:
+        total = select(func.coalesce(func.sum(BalanceCreditRow.amount_eur), 0)).where(
+            BalanceCreditRow.user_id == user_id, BalanceCreditRow.stripe_checkout_session_id.is_not(None)
         )
+        return Decimal(self._session.execute(total).scalar_one())
 
 
 class SqlAlchemyProviderTokenRepo:

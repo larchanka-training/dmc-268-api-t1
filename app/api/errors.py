@@ -46,6 +46,8 @@ from app.api.problems import (
     ErrorCode,
     NotImplementedProblem,
     OriginForbiddenProblem,
+    PaymentProviderUnavailableProblem,
+    PaymentsDisabledProblem,
     Problem,
     ProviderNotSupportedProblem,
     RepositoryAlreadyConnectedProblem,
@@ -109,6 +111,23 @@ ERRORS_404_LOGIN_PROVIDER = _doc(HTTPStatus.NOT_FOUND, ProviderNotSupportedProbl
 ERRORS_409_REVIEW_ACTIVE = _doc(HTTPStatus.CONFLICT, ReviewAlreadyActiveProblem, "По этому коммиту уже идёт прогон ревью.")
 ERRORS_401_WEBHOOK_SIGNATURE = _doc(
     HTTPStatus.UNAUTHORIZED, WebhookSignatureInvalidProblem, "Подписи доставки нет или она не прошла проверку; записей нет."
+)
+ERRORS_400_STRIPE_SIGNATURE = _doc(
+    HTTPStatus.BAD_REQUEST,
+    WebhookSignatureInvalidProblem,
+    "Подписи `Stripe-Signature` нет, она не совпала с телом или старше 300 с, или тело не thin-событие "
+    "Stripe; ничего не зачислено.",
+)
+ERRORS_503_PAYMENTS_DISABLED = _doc(
+    HTTPStatus.SERVICE_UNAVAILABLE,
+    PaymentsDisabledProblem,
+    "`STRIPE_WEBHOOK_SECRET` или `STRIPE_API_KEY` не задан: приём оплаты выключен, событие не прочитано, "
+    "ничего не зачислено.",
+)
+ERRORS_502_PAYMENT_PROVIDER = _doc(
+    HTTPStatus.BAD_GATEWAY,
+    PaymentProviderUnavailableProblem,
+    "Stripe не отдал сессию оплаты (сеть, тайм-аут, отказ API или ключа); ничего не зачислено, Stripe повторит доставку.",
 )
 ERRORS_501_WEBHOOK_PROVIDER = _doc(
     HTTPStatus.NOT_IMPLEMENTED, ProviderNotSupportedProblem, "Провайдер есть в `Provider`, но приёмник вебхуков для него не написан."

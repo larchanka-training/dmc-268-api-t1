@@ -88,9 +88,19 @@ run "secrets_reach_only_their_containers" {
       for env in [docker_container.worker.env, split("\n", output.migrate_env)] : length([
         for e in env : e
         if startswith(e, "USER_TOKEN_ENCRYPTION_KEY=") || startswith(e, "GITHUB_APP_CLIENT_SECRET=")
+        || startswith(e, "STRIPE_WEBHOOK_SECRET=") || startswith(e, "STRIPE_API_KEY=")
       ]) == 0
     ])
-    error_message = "USER_TOKEN_ENCRYPTION_KEY и GITHUB_APP_CLIENT_SECRET не должны попадать в миграции и worker."
+    error_message = "USER_TOKEN_ENCRYPTION_KEY, GITHUB_APP_CLIENT_SECRET и секреты Stripe не должны попадать в миграции и worker."
+  }
+
+  # Без секретов Stripe план проходит, а API получает пустые значения: приём оплаты выключен.
+  assert {
+    condition = (
+      contains(docker_container.api.env, "STRIPE_WEBHOOK_SECRET=")
+      && contains(docker_container.api.env, "STRIPE_API_KEY=")
+    )
+    error_message = "STRIPE_WEBHOOK_SECRET и STRIPE_API_KEY должны доходить до API, пустые - тоже."
   }
 
   assert {

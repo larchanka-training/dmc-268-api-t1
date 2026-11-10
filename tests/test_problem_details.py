@@ -696,6 +696,9 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     """
     from app.domain.vcs_errors import VcsError, VcsNotFoundError
 
+    from .api.test_stripe_webhook import FakeStripeApi, thin_event
+    from .api.test_stripe_webhook import make_client as stripe_client
+    from .api.test_stripe_webhook import post as post_stripe
     from .api.test_webhooks import make_client, post_webhook
     from .fakes import FakeUow, FakeVcs
     from .fakes.installation_catalog import FakeInstallationCatalog
@@ -755,6 +758,9 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         client.get("/api/v1/auth/bitbucket/login"),
         _signed_in_client().post("/api/v1/reviews", json={}, headers={"Origin": ORIGIN}),
         already_active.post(),
+        post_stripe(stripe_client()[0], thin_event(), signature="garbage"),
+        post_stripe(stripe_client(enabled=False)[0], thin_event()),
+        post_stripe(stripe_client(FakeStripeApi(status=500))[0], thin_event()),
     ]
     seen = set()
     for response in responses:

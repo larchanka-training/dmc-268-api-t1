@@ -331,6 +331,11 @@ jobs:
           # проверка переменной в infra/variables.tf роняет apply: стенд не
           # стартует без шифрования молча.
           TF_VAR_user_token_encryption_key: ${{ secrets.USER_TOKEN_KEY_DMC268_T1 }}
+          # Пополнение через Stripe (#412): signing secret thin-событий и restricted-ключ
+          # на чтение сессий Checkout. Нет секретов - пустые строки, приём оплаты
+          # выключен (503), деплой проходит.
+          TF_VAR_stripe_webhook_secret: ${{ secrets.STRIPE_WEBHOOK_SECRET_DMC268_T1 }}
+          TF_VAR_stripe_api_key: ${{ secrets.STRIPE_API_KEY_DMC268_T1 }}
           # Фраза шифрования состояния и плана (infra/encryption.tf, #147). Нужна
           # уже `tofu init`: без неё init падает до изменений на сервере.
           TF_VAR_state_passphrase: ${{ secrets.STATE_PASSPHRASE_DMC268_T1 }}

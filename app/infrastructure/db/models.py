@@ -482,6 +482,15 @@ class BalanceCreditRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     """
 
     __tablename__ = "balance_credits"
+    __table_args__ = (
+        # Одно зачисление на сессию оплаты Stripe: повтор вебхука вставляет ничего (change stripe-topup, D6).
+        Index(
+            "uq_balance_credits_stripe_checkout_session_id",
+            "stripe_checkout_session_id",
+            unique=True,
+            postgresql_where=text("stripe_checkout_session_id IS NOT NULL"),
+        ),
+    )
 
     # RESTRICT: зачисления — история денег, аккаунт с ними не удалить.
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -489,8 +498,9 @@ class BalanceCreditRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
     amount_eur: Mapped[Decimal] = mapped_column(Numeric(20, 10), nullable=False)
     note: Mapped[str] = mapped_column(Text, nullable=False)
-    # Кто зачислил: пока Stripe нет — администратор (`credit_balance --by`).
+    # Кто зачислил: администратор (`credit_balance --by`) или `stripe`.
     credited_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    stripe_checkout_session_id: Mapped[str | None] = mapped_column(String(255))
 
 
 class SessionRow(Base, UuidPrimaryKeyMixin):

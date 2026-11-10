@@ -137,6 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.api.repositories import router as repositories_router
     from app.api.reviews import router as reviews_router
     from app.api.status import router as status_router
+    from app.api.stripe_webhook import router as stripe_webhook_router
     from app.api.trace_id import TraceIdMiddleware
     from app.api.webhooks import router as webhooks_router
 
@@ -155,6 +156,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(OriginMiddleware, public_origin=settings.public_origin)
     app.add_middleware(TraceIdMiddleware)
 
+    # Раньше `/webhooks/{provider}`: иначе `stripe` ушёл бы в параметр провайдера VCS.
+    app.include_router(stripe_webhook_router)
     app.include_router(webhooks_router)
     app.include_router(auth_router)
     app.include_router(repositories_router)
