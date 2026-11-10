@@ -166,7 +166,7 @@ RabbitMQ: имя — `{messaging.operation.name} {destination}`, стандар�
 
 ### Requirement: Телеметрия не источник данных продукта
 
-Телеметрия SHALL служить только эксплуатации — команде. Данные, которые видит пользователь, — длительность, токены и модель прогона, шаги прогона, — SHALL браться из базы, и ни один ответ API SHALL NOT строиться из спанов. Модули роутов API SHALL NOT обращаться к OpenTelemetry; trace id в заголовке и теле ошибки — идентификатор для разбора, а не данные.
+Телеметрия SHALL служить только эксплуатации. Данные для пользователя (длительность, токены, модель и шаги прогона) SHALL браться из базы, ответ API SHALL NOT строиться из спанов, модули роутов SHALL NOT обращаться к OpenTelemetry; trace id в заголовке и теле ошибки — идентификатор для разбора, не данные. Единственное исключение — `GET /api/v1/status` (спека `service-status`): он SHALL строиться из сработавших алертов Prometheus через порт слоя приложения и отдавать только статусы компонентов.
 
 #### Scenario: Шаги прогона в кабинете
 
@@ -177,6 +177,11 @@ RabbitMQ: имя — `{messaging.operation.name} {destination}`, стандар�
 
 - **WHEN** проверяются импорты модулей HTTP-слоя
 - **THEN** OpenTelemetry и модуль телеметрии импортируют только фабрика приложения и middleware trace id
+
+#### Scenario: Статус сервиса из алертов
+
+- **WHEN** гость запрашивает `GET /api/v1/status`
+- **THEN** статусы компонентов выведены из сработавших алертов Prometheus, а в ответе нет ни имён алертов, ни меток, ни значений метрик
 
 ### Requirement: Трассировка не копит поток SSE
 
@@ -452,7 +457,7 @@ SHALL быть одними и теми же локально и на стенд
 настройки метрики никуда не уходят и в лог ошибок нет. HTTP-метрики SHALL давать встроенная
 телеметрия FastAPI. Ручные метрики SHALL ограничиваться бизнес-сигналами для алертов: прогоны по
 статусам, длительность этапов, длительность каждого вызова провайдера модели с исходом,
-состояние пула соединений с базой.
+пул соединений с базой, баланс провайдера.
 
 #### Scenario: Без настройки
 
@@ -802,12 +807,12 @@ nginx интерфейса SHALL ходить в Grafana по отдельной
 
 ### Requirement: Dead man's switch алертов
 
-Prometheus SHALL держать всегда горящий алерт `Watchdog`, а Alertmanager SHALL отправлять его не в Telegram, а на внешний heartbeat-сервис, повторяя не реже раза в 5 минут. Внешний сервис SHALL оповещать канал команды, когда пинги перестают приходить. `Watchdog` SHALL NOT менять публичный статус сервиса.
+Prometheus SHALL держать всегда горящий алерт `Watchdog`, а Alertmanager SHALL отправлять его не в Telegram, а на внешний heartbeat-сервис, повторяя раз в 5–6 минут. Внешний сервис SHALL оповещать канал команды, когда пинги перестают приходить. `Watchdog` SHALL NOT менять публичный статус сервиса.
 
 #### Scenario: Стек алертов работает
 
 - **WHEN** Prometheus и Alertmanager работают
-- **THEN** внешний сервис получает пинг не реже раза в 5 минут, а в Telegram `Watchdog` не приходит
+- **THEN** внешний сервис получает пинг раз в 5–6 минут, а в Telegram `Watchdog` не приходит
 
 #### Scenario: Упал Prometheus или Alertmanager
 
@@ -832,3 +837,112 @@ Prometheus SHALL держать всегда горящий алерт `Watchdog
 
 - **WHEN** адрес heartbeat не начинается с `https://` или содержит пробел
 - **THEN** развёртывание останавливается на этапе планирования, и на сервере ничего не меняется
+
+### Requirement: Сломанная доставка в Telegram видна мимо Telegram
+
+`AlertDeliveryFailing` SHALL гореть, когда за 10 минут выросло число неудачных отправок в Telegram, и SHALL уходить не в Telegram, а на тот же check heartbeat с суффиксом `/fail`: сразу и раз в час, пока горит. Пока он горит, Alertmanager SHALL NOT отправлять пинг `Watchdog`: check остаётся down до починки доставки. Адрес `/fail` SHALL приходить файлом из секрета heartbeat. Страницу статуса алерт SHALL NOT менять.
+
+#### Scenario: Токен бота отозван
+
+- **WHEN** Alertmanager не может отправить уведомление в Telegram
+- **THEN** в пределах 10 минут горит `AlertDeliveryFailing`, и внешний сервис получает запрос на адрес `/fail` своего check
+
+#### Scenario: Check не возвращается в up, пока доставка сломана
+
+- **WHEN** горит `AlertDeliveryFailing`
+- **THEN** `Watchdog` в Alertmanager подавлен, пинг на адрес heartbeat не уходит, и check внешнего сервиса остаётся down
+
+#### Scenario: Heartbeat без секрета
+
+- **WHEN** секрета heartbeat нет, и неудачно уходят только пинги `Watchdog`
+- **THEN** `AlertDeliveryFailing` не горит, а файл адреса `/fail` содержит заглушку
+
+#### Scenario: Доставка починилась
+
+- **WHEN** неудачных отправок в Telegram нет 10 минут
+- **THEN** `AlertDeliveryFailing` гаснет, и следующий пинг `Watchdog` возвращает check в up
+
+### Requirement: Расход модели в евро и его бюджет
+
+Стоимость вызовов модели SHALL считаться по `review_runs.cost_eur` прогонов с начала месяца (UTC)
+и попадать в Prometheus рядом `review_llm_cost_eur_month` через коллектор, под ролью мониторинга,
+которой из `review_runs` доступны только `created_at`, `tokens_used` и `cost_eur`. Бюджет — 20 € в
+месяц: выше 80 % SHALL гореть `LlmCostBudgetNearLimit` (warning), с 100 % — `LlmCostBudgetExceeded`
+(critical). «Обзор» SHALL показывать расход рядом с бюджетом.
+
+#### Scenario: Расход приближается к бюджету
+
+- **WHEN** прогоны с начала месяца стоили 17 €
+- **THEN** горит `LlmCostBudgetNearLimit`, а `LlmCostBudgetExceeded` молчит
+
+#### Scenario: Бюджет исчерпан
+
+- **WHEN** прогоны с начала месяца стоили 20 €
+- **THEN** горит `LlmCostBudgetExceeded`
+
+#### Scenario: Ровно 80 %
+
+- **WHEN** прогоны с начала месяца стоили 16 €
+- **THEN** `LlmCostBudgetNearLimit` молчит
+
+### Requirement: Баланс провайдера модели
+
+Воркер, у которого Eurorouter основной или фоллбэк, SHALL отдавать gauge
+`review_llm_provider_balance_eur` — `data.total_credits − data.total_usage` из `GET /credits` первым ключом,
+не чаще раза в 5 минут. Сбой опроса (сеть, не `200`, тело не того вида) SHALL давать одно
+предупреждение без ключа и тела ответа и ни одной точки до следующего опроса; исключение наружу
+SHALL NOT выходить. Ниже 5 € SHALL гореть `LlmProviderBalanceLow` (warning), ниже 1 € —
+`LlmProviderBalanceCritical` (critical).
+
+#### Scenario: Остаток
+
+- **WHEN** `/credits` отвечает `data.total_credits` `"20.0000000000"` и `data.total_usage` `"6.9039961619"`
+- **THEN** gauge равен 13,0960038381
+
+#### Scenario: Опрос не чаще раза в 5 минут
+
+- **WHEN** метрики собираются раз в минуту
+- **THEN** запрос к `/credits` уходит не чаще раза в 5 минут, между опросами отдаётся прошлый результат
+
+#### Scenario: Провайдер недоступен
+
+- **WHEN** `/credits` не отвечает или отвечает не `200`
+- **THEN** точки gauge нет, в логе одно предупреждение без ключа и тела ответа, воркер работает дальше
+
+#### Scenario: Остаток на исходе
+
+- **WHEN** остаток 0,99 €
+- **THEN** горят `LlmProviderBalanceLow` и `LlmProviderBalanceCritical`
+
+#### Scenario: Без Eurorouter
+
+- **WHEN** воркер работает с Ollama без фоллбэка или с заглушкой
+- **THEN** gauge нет, и к `/credits` запросов нет
+
+### Requirement: Идентификатор запроса провайдера модели
+
+Каждый ответ провайдера модели с кодом не `200` SHALL давать одну запись лога с кодом и
+`x-request-id` ответа в поле `review.llm.request_id`, если заголовок есть. Текст ответа и ключ
+SHALL NOT попадать в запись. Спан httpx ответа с `x-request-id`, успешного или нет, SHALL нести
+атрибут `review.llm.request_id`.
+
+#### Scenario: Отказ провайдера
+
+- **WHEN** Eurorouter отвечает `402` с `x-request-id` `req-402` и текстом ошибки
+- **THEN** в логе запись с `HTTP 402` и `review.llm.request_id` = `req-402`, текста ответа в ней нет
+
+#### Scenario: Успешный ответ
+
+- **WHEN** ответ провайдера несёт `x-request-id`
+- **THEN** у спана httpx этого запроса атрибут `review.llm.request_id` равен заголовку
+
+### Requirement: Провайдеру модели не уходит контекст трейса
+
+Запрос к провайдеру модели SHALL NOT нести наш контекст трейса (`traceparent`, `trace_id`) и
+другие метаданные сервиса: ни в заголовках, ни в теле. Запрос и ответ сопоставляются по
+`x-request-id` провайдера.
+
+#### Scenario: Заголовки запроса к модели
+
+- **WHEN** воркер вызывает Eurorouter внутри спана этапа
+- **THEN** в запросе нет `traceparent`, `tracestate` и `X-Trace-ID`, а в теле — только модель, сообщения, формат ответа и параметры генерации

@@ -216,7 +216,7 @@ tofu apply infra.tfplan
 | `github_app_client_secret` | секрет `APP_CLIENT_SECRET_DMC268_T1` |
 | `public_origin` | `https://` + `VPS_DMC268_IP_T1`: интерфейс отдаётся по HTTPS на тот же адрес. Callback `<public_origin>/api/v1/auth/github/callback` регистрируется в настройках GitHub App |
 | `alert_telegram_bot_token`, `alert_telegram_chat_id` | секреты `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1` — бот, от имени которого Alertmanager шлёт алерты, и чат, куда (раздел «Алерты»). Без них алерты считаются и видны в Alertmanager, но в Telegram не уходят. Заданные проверяются на формат — токен `<id>:<ключ>`, chat id числом: битое значение роняет `plan`. В Alertmanager токен приходит файлом (`upload`), поэтому в `docker inspect` его не видно, но в state OpenTofu он есть — так же, как пароли из `env` остальных контейнеров; state зашифрован фразой (раздел «Шифрование состояния») и лежит в хранилище на петле сервера (раздел «Хранилище состояния»). Ставятся вручную: `gh secret set TELEGRAM_BOT_TOKEN_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin) и так же chat id; следующий деплой пересоздаёт Alertmanager с ними |
-| `alert_heartbeat_url` | секрет `ALERT_HEARTBEAT_URL_DMC268_T1` — адрес пинга внешнего heartbeat-сервиса для `Watchdog` (раздел «Алерты», «Dead man's switch»). Без него деплой проходит с предупреждением, а падение самого Prometheus или Alertmanager никто не заметит. Только `https://<хост>/<путь>` без пробелов: другое значение роняет `plan`. В Alertmanager приходит файлом (`upload`, `url_file`), в его логе адрес скрыт (`<redacted>`). Ставится вручную: `gh secret set ALERT_HEARTBEAT_URL_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin), следующий деплой пересоздаёт Alertmanager |
+| `alert_heartbeat_url` | секрет `ALERT_HEARTBEAT_URL_DMC268_T1` — адрес пинга внешнего heartbeat-сервиса для `Watchdog` (раздел «Алерты», «Dead man's switch»). Без него деплой проходит с предупреждением, а падение самого Prometheus или Alertmanager никто не заметит. Только `https://<хост>/<путь>` без пробелов: другое значение роняет `plan`. В Alertmanager приходит файлом (`upload`, `url_file`), в его логе адрес скрыт (`<redacted>`); из него же деплой строит адрес `/fail` для `AlertDeliveryFailing`. Ставится вручную: `gh secret set ALERT_HEARTBEAT_URL_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin), следующий деплой пересоздаёт Alertmanager |
 
 Из этого стека наружу не смотрит ничего. API, PostgreSQL и RabbitMQ публикуются на петле сервера, воркер не публикуется вовсе; снаружи доступен только интерфейс, и API — через его `/api/`.
 
@@ -496,13 +496,13 @@ OTel с её миллисекундами. Логи сервисов колле�
 | Источник | `job` | Главные метрики | Ключевые лейблы | Панели «Обзора» |
 | --- | --- | --- | --- | --- |
 | API (OTel SDK) | `dmc-268-api` | `http_server_request_duration_seconds_*`, `http_server_active_requests`, `http_client_request_duration_seconds_*`, `db_client_connection_count`, `db_client_connection_max` | `http_route`, `http_request_method`, `http_response_status_code`, `db_client_connection_state` | RPS API; доля ошибок 5xx; длительность HTTP-запросов; соединения приложения с базой |
-| Воркер (OTel SDK) | `dmc-268-worker` | `review_runs_total`, `review_stage_duration_seconds_*`, `review_llm_call_duration_seconds_*`, `http_client_request_duration_seconds_*`, `db_client_connection_*` | `status`, `stage`, `provider`, `model`, `outcome` | прогоны по статусам; длительность этапов; длительность вызова модели; соединения приложения с базой |
+| Воркер (OTel SDK) | `dmc-268-worker` | `review_runs_total`, `review_stage_duration_seconds_*`, `review_llm_call_duration_seconds_*`, `review_llm_provider_balance_eur` (остаток Eurorouter, опрос `/credits` раз в 5 минут; только при Eurorouter основным или фоллбэком), `http_client_request_duration_seconds_*`, `db_client_connection_*` | `status`, `stage`, `provider`, `model`, `outcome` | прогоны по статусам; длительность этапов; длительность вызова модели; соединения приложения с базой; баланс Eurorouter |
 | PostgreSQL (receiver `postgresql` основного коллектора) | `collector` | `postgresql_backends`, `postgresql_connection_max`, `postgresql_replication_data_delay_bytes`, `postgresql_db_size_bytes`, `postgresql_table_size_bytes` | `postgresql_database_name` | соединения базы |
 | RabbitMQ (`rabbitmq_prometheus`) | `rabbitmq` | `rabbitmq_queue_messages`, `rabbitmq_queue_head_message_timestamp`, `rabbitmq_queue_consumers` | `queue` (`review_jobs`, `review_jobs.dlq`) | глубина очереди; возраст старшего сообщения |
 | Сервер (node_exporter) | `node-exporter` | `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes` | `mode`, `mountpoint`, `fstype` | CPU, память, свободное место |
 | Контейнеры (receiver `docker_stats`) | `docker-stats` | `container_cpu_usage_nanoseconds_total`, `container_memory_usage_total_bytes`, `container_uptime_seconds`, `container_restarts_total` | `container_name` | CPU и память контейнеров |
 | Вход, nginx интерфейса (receiver `nginx` основного коллектора, `stub_status`) | `collector` | `nginx_requests_total`, `nginx_connections_current`, `nginx_connections_accepted_total`, `nginx_connections_handled_total` | `state` | «Вход (nginx)»: соединения; запросы в секунду и доля ответов по классу кода считаются по access-логу `{service_name="dmc268-ui"}` в Loki без проб blackbox и без запросов к `/grafana/` (Grafana ходит через тот же nginx, открытый «Обзор» — около 0,6 запроса в секунду с вкладки): счётчик `stub_status` их не отличает |
-| Расход токенов (receiver `sqlquery/llm-tokens` основного коллектора) | `collector` | `review_llm_tokens_month` | нет | нет (алерты бюджета) |
+| Расход модели (receiver `sqlquery/llm-tokens` основного коллектора) | `collector` | `review_llm_tokens_month`, `review_llm_cost_eur_month` | нет | расход модели за месяц, € (и алерты бюджета) |
 | Резервные копии (textfile node-exporter, пишут `backup.sh` и `db-backup.yml`) | `node-exporter` | `dmc268_backup_last_success_timestamp_seconds`, `dmc268_offsite_backup_last_success_timestamp_seconds` | нет | нет (алерты `BackupStale`, `OffsiteBackupStale`) |
 | Пробы (blackbox-exporter) | `blackbox-services`, `blackbox-public` | `probe_success`, `probe_ssl_earliest_cert_expiry` | `service`, `instance` | нет (алерты) |
 | Коллекторы, Loki, Tempo, Prometheus | `collector-self`, `collector-docker-self`, `collector-logs-self`, `loki`, `tempo`, `prometheus` | `otelcol_*`, `loki_*`, `tempo_*`, `prometheus_*` | `receiver`, `exporter` | нет |
@@ -678,6 +678,10 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `LlmBudgetNearLimit` | токены модели с начала месяца (UTC) от бюджета `dmc268:llm_tokens_budget_month` — 50 млн | > 80 % | warning |
 | `LlmBudgetExceeded` | то же | ≥ 100 % | critical |
 | `LlmBudgetUnknown` | ряда расхода токенов нет — алерт бюджета слеп | 15 минут | warning |
+| `LlmCostBudgetNearLimit` | стоимость вызовов модели с начала месяца (UTC) от бюджета `dmc268:llm_cost_budget_eur_month` — 20 € | > 80 % | warning |
+| `LlmCostBudgetExceeded` | то же | ≥ 100 % | critical |
+| `LlmProviderBalanceLow` | остаток на счёте Eurorouter (`review_llm_provider_balance_eur`); ниже 0,10 € провайдер отвечает 402 | < 5 € | warning |
+| `LlmProviderBalanceCritical` | то же | < 1 € | critical |
 | `DiskSpaceLow` | свободно на файловой системе сервера | < 15 % дольше 5 минут | warning |
 | `DiskSpaceCritical` | то же | < 5 % дольше 2 минут | critical |
 | `DiskWillFillIn24h` | прогноз по 6 часам: место кончится за сутки, при свободных < 40 % | 30 минут | critical |
@@ -688,13 +692,22 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `OffsiteBackupStale` | последняя вынесенная и проверенная восстановлением копия (`dmc268_offsite_backup_last_success_timestamp_seconds`, пишет `db-backup.yml`) старше порога или отметки нет во всём окне при живом node-exporter; глушится `BackupStale` | 28 часов (сутки и 4 часа на задержки расписания GitHub) | warning |
 | `TlsCertificateExpiringSoon` | срок сертификата публичного входа (`shortlived`, 160 часов, продлевается на середине) | < 48 часов дольше 10 минут | critical |
 | `ScrapeTargetDown` | цель скрейпа Prometheus не отвечает — её алерты слепы | 5 минут | warning |
-| `Watchdog` | горит всегда; уходит не в Telegram, а на внешний heartbeat | сразу, повтор раз в 5 минут | none |
+| `AlertDeliveryFailing` | неудачные отправки Alertmanager в Telegram (`alertmanager_notifications_failed_total{integration="telegram"}`); уходит не в Telegram, а на `/fail` внешнего check | хотя бы одна за 10 минут, повтор раз в час | critical |
+| `Watchdog` | горит всегда; уходит не в Telegram, а на внешний heartbeat | сразу, повтор раз в 5–6 минут | none |
 
-Бюджет токенов — константа в `alerts.yml` (`dmc268:llm_tokens_budget_month`), а не
-переменная: конфиги стека одинаковы в обоих окружениях. Смена бюджета — правка этой строки и
-таблицы выше. Расход берётся из `review_runs.tokens_used` запросом receiver-а `sqlquery`
-основного коллектора под ролью `dmc268_monitor`; ревизия 0017 даёт ей `SELECT` только на
-`created_at` и `tokens_used`. Разбивка по типам токенов, стоимость и баланс провайдера — #119.
+Бюджеты токенов и евро — константы в `alerts.yml` (`dmc268:llm_tokens_budget_month`,
+`dmc268:llm_cost_budget_eur_month`), а не переменные: конфиги стека одинаковы в обоих
+окружениях. Смена бюджета — правка этой строки и таблицы выше. Расход берётся из
+`review_runs.tokens_used` и `review_runs.cost_eur` запросом receiver-а `sqlquery` основного
+коллектора под ролью `dmc268_monitor`; ревизии 0017 и 0021 дают ей `SELECT` только на
+`created_at`, `tokens_used` и `cost_eur`. Ряда стоимости нет — значит, нет и ряда токенов, и
+горит `LlmBudgetUnknown`.
+
+Баланс Eurorouter снимает воркер: `GET /credits` первым ключом не чаще раза в 5 минут, остаток —
+`data.total_credits − data.total_usage`. Опрос не удался — в лог одно предупреждение, и до
+следующего опроса воркер точку не отдаёт. Коллектор держит последнее значение 5 минут, так что
+ряд в Prometheus пропадает, только если опросы не удаются дольше; алерты баланса при этом молчат. Без Eurorouter (`LLM_BACKEND` не
+`eurorouter` и фоллбэк выключен) ряда нет совсем.
 
 **Чего алерты не видят.** Статуса healthcheck контейнера у receiver `docker_stats` 0.158 нет
 (`container.state.health.status` появился в 0.160), поэтому «unhealthy» ловят пробы
@@ -702,8 +715,11 @@ blackbox-exporter по тем же проверкам, а свежесть ко�
 Prometheus или Alertmanager ловит не правило, а внешний сервис («Dead man's switch» ниже):
 `ContainerDown` за `dmc268-prometheus` и `dmc268-alertmanager` не следит, а `ScrapeTargetDown` по
 Alertmanager отправлял бы сам упавший Alertmanager. Сломанную доставку в Telegram (токен бота
-отозван после ротации, бота убрали из чата) heartbeat не видит: пинг идёт мимо Telegram. Поэтому
-после смены секретов Telegram и после деплоя, пересоздавшего Alertmanager, — тестовый алерт
+отозван после ротации, бота убрали из чата) heartbeat не видит: пинг идёт мимо Telegram. Её ловит
+`AlertDeliveryFailing` и шлёт тоже мимо Telegram — на `/fail` внешнего check («Dead man's switch»
+ниже). Счётчик растёт только на попытке отправки: пока в Telegram ничего не уходит, отозванный
+токен не виден до первого настоящего алерта, а без секрета heartbeat этот путь молчит совсем. Поэтому
+после смены секретов Telegram и после деплоя, пересоздавшего Alertmanager, нужен тестовый алерт
 («Проверка доставки» ниже). Локально часть алертов
 горит всегда: реплики, копий и интерфейса там нет, а контейнеры compose называются по проекту
 (`<проект>-api-1`), поэтому `ContainerDown` горит по всем именам `dmc268-*`.
@@ -718,7 +734,18 @@ Alertmanager отправлял бы сам упавший Alertmanager. Сло�
   перестаёт;
 - остановлен или упал `dmc268-alertmanager`, или у него пропал выход наружу.
 
-Страницу статуса `Watchdog` не трогает: его нет в `ALERT_RULES`.
+**Сломанная доставка в Telegram.** Пинг `Watchdog` идёт мимо Telegram, поэтому отозванный
+токен бота или бот, удалённый из канала, heartbeat не видит. Это ловит `AlertDeliveryFailing`:
+счётчик неудачных отправок Alertmanager в Telegram вырос за 10 минут. Вторым маршрутом, тоже
+мимо Telegram, он уходит POST-ом на тот же check с суффиксом `/fail` (файл
+`/etc/alertmanager/secrets/heartbeat_fail_url`, адрес строит деплой из того же секрета).
+healthchecks.io по `/fail` сразу переводит check в down и оповещает своим каналом. Пока горит
+`AlertDeliveryFailing`, пинг `Watchdog` заглушён (`inhibit_rules`), поэтому check остаётся down до
+починки доставки, а не возвращается в up через 5–6 минут. `/fail` повторяется раз в час: check,
+вручную возвращённый в up, снова уходит в down. Локально адрес `/fail` compose строит из того же
+`ALERT_HEARTBEAT_URL` — задавайте его без завершающего `/`.
+
+Страницу статуса `Watchdog` и `AlertDeliveryFailing` не трогают: их нет в `ALERT_RULES`.
 
 Внешний сервис **необязателен**: без учётки в нём и без секрета стенд и алерты в Telegram работают
 как раньше, деплой проходит с предупреждением, а `Watchdog` горит в Alertmanager без пингов. Не
@@ -734,8 +761,10 @@ Alertmanager отправлял бы сам упавший Alertmanager. Сло�
 3. Ping URL (`https://hc-ping.com/<uuid>`) — в секрет `ALERT_HEARTBEAT_URL_DMC268_T1`, затем
    деплой. Адрес — секрет: по нему пинг может прислать кто угодно и скрыть падение.
 
-Подойдёт любой сервис, который принимает POST на HTTPS-адрес (Dead Man's Snitch, Cronitor, Better
-Stack). Пока секрета нет, Alertmanager получает заглушку `unset`: пинг раз в 5 минут падает в его
+Подойдёт сервис, который принимает POST на HTTPS-адрес и понимает неуспех по суффиксу `/fail`:
+healthchecks.io или Better Stack. Dead Man's Snitch и Cronitor неуспех принимают иначе (параметром,
+`?state=fail`): POST на `/fail` у них получит ошибку, а неудачи webhook `AlertDeliveryFailing` не
+считает — сломанная доставка снова пройдёт молча. Пока секрета нет, Alertmanager получает заглушку `unset`: пинг раз в 5 минут падает в его
 логе (`Notify attempt failed … receiver=heartbeat … unsupported protocol scheme`), а деплой
 предупреждает аннотацией прогона. Проверка — остановить Alertmanager и дождаться сообщения
 внешнего сервиса:

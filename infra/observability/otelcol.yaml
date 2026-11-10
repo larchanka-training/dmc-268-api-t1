@@ -50,14 +50,16 @@ receivers:
       insecure: true
     collection_interval: 15s
 
-  # Расход токенов модели с начала месяца — вход алертов бюджета #100
-  # (alerts.yml, LlmBudget*). Источник — tokens_used прогонов в базе: метрики
-  # токенов в SDK нет (её разбивку по типам и стоимость делает #119), а
-  # расход прогона и так пишется в базу. Роль та же, dmc268_monitor: миграция
-  # 0017 даёт ей SELECT ровно на две колонки review_runs — created_at и
-  # tokens_used, — остальные данные прогонов ей недоступны. Хост и порт —
-  # литералом: у этого receiver они раздельные, а POSTGRESQL_ENDPOINT —
-  # host:port; адрес одинаков в обоих окружениях (алиас сети dmc268-postgres).
+  # Расход модели с начала месяца — вход алертов бюджета #100 и #119
+  # (alerts.yml, LlmBudget* и LlmCostBudget*): токены и стоимость в евро.
+  # Источник — tokens_used и cost_eur прогонов в базе: расход прогона и так
+  # пишется туда, своей метрики в SDK для него нет. Роль та же, dmc268_monitor:
+  # миграции 0017 и 0021 дают ей SELECT ровно на три колонки review_runs —
+  # created_at, tokens_used и cost_eur, — остальные данные прогонов ей
+  # недоступны. Стоимость — double: бюджету в евро точность NUMERIC не
+  # нужна. Хост и порт — литералом: у этого receiver они раздельные, а
+  # POSTGRESQL_ENDPOINT — host:port; адрес одинаков в обоих окружениях (алиас
+  # сети dmc268-postgres).
   # Пароль receiver сам экранирует в строке подключения. Раз в минуту: сумма
   # по индексу created_at, а бюджету точность до секунд не нужна.
   sqlquery/llm-tokens:
@@ -72,7 +74,8 @@ receivers:
     collection_interval: 60s
     queries:
       - sql: >-
-          SELECT coalesce(sum(tokens_used), 0)::bigint AS tokens
+          SELECT coalesce(sum(tokens_used), 0)::bigint AS tokens,
+            coalesce(sum(cost_eur), 0)::double precision AS cost_eur
           FROM review_runs
           WHERE created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
         metrics:
@@ -81,6 +84,11 @@ receivers:
             value_type: int
             data_type: gauge
             description: Токены модели, потраченные прогонами с начала месяца (UTC).
+          - metric_name: review_llm_cost_eur_month
+            value_column: cost_eur
+            value_type: double
+            data_type: gauge
+            description: Стоимость вызовов модели прогонов с начала месяца (UTC), евро.
 
   # Вход стенда, nginx интерфейса (#364): stub_status на внутреннем порту
   # 8081 контейнера dmc268-ui (dmc-268-ui-t1, conf.d/status.conf), на хост порт

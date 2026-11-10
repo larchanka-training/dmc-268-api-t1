@@ -75,7 +75,11 @@ from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.httpx import (
+    HTTPXClientInstrumentor,
+    RequestInfo,
+    ResponseInfo,
+)
 from opentelemetry.instrumentation.utils import suppress_instrumentation
 from opentelemetry.propagators.textmap import (
     CarrierT,
@@ -128,6 +132,8 @@ MIGRATE_SERVICE = "dmc-268-migrate"
 
 # Имя атрибута — как у поля в API и в логах: по нему трейс ищется от прогона.
 REVIEW_RUN_ID = "review_run_id"
+# `x-request-id` ответа провайдера модели: атрибут спана httpx и поле записи лога об ошибке.
+LLM_REQUEST_ID = "review.llm.request_id"
 
 # Метрики пула соединений — снимками состояния, а не событиями: событийный
 # счётчик contrib (`db.client.connections.usage`) пропускает события внутри
@@ -544,11 +550,18 @@ def opt_in_stable_semconv() -> None:
     os.environ.setdefault("OTEL_SEMCONV_STABILITY_OPT_IN", SEMCONV_STABILITY_OPT_IN)
 
 
+def _provider_request_id(span: trace.Span, _request: RequestInfo, response: ResponseInfo) -> None:
+    """`x-request-id` ответа провайдера модели — на спан httpx: по нему поддержка ищет запрос."""
+    request_id = response.headers.get("x-request-id") if response.headers is not None else None
+    if request_id:
+        span.set_attribute(LLM_REQUEST_ID, request_id)
+
+
 def instrument_httpx() -> None:
     """Спаны на исходящие запросы httpx: GitHub и провайдеры модели."""
     instrumentor = HTTPXClientInstrumentor()
     if not instrumentor.is_instrumented_by_opentelemetry:
-        instrumentor.instrument()
+        instrumentor.instrument(response_hook=_provider_request_id)
 
 
 def instrument_engine(engine: Engine) -> None:
@@ -635,6 +648,29 @@ def instrument_pool(engine: Engine, pool_size: int, max_overflow: int) -> None:
         callbacks=[_limit],
         unit="{connection}",
         description="Предел пула соединений: pool_size + max_overflow.",
+    )
+
+
+def instrument_llm_balance(balance: Callable[[], float | None]) -> None:
+    """Остаток баланса провайдера модели — observable gauge `review_llm_provider_balance_eur`.
+
+    Колбэк зовёт `balance` на каждом сборе метрик; кэш опроса провайдера — забота `balance`
+    (`EurorouterBalance`). `None` — остатка нет, ряд в этом сборе не пишется. Запрос — без
+    спана httpx: опрос фоновый, корневой трейс на каждый был бы шумом.
+    """
+
+    def _observe(_options: metrics.CallbackOptions) -> Iterator[metrics.Observation]:
+        with untraced():
+            value = balance()
+        if value is not None:
+            yield metrics.Observation(value)
+
+    _meter.create_observable_gauge(
+        "review_llm_provider_balance_eur",
+        callbacks=[_observe],
+        # В фигурных скобках — аннотация: экспортёр Prometheus не дописывает её к имени ряда.
+        unit="{EUR}",
+        description="Остаток баланса провайдера модели (Eurorouter), евро.",
     )
 
 

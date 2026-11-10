@@ -13,6 +13,8 @@
 
 Ключи не попадают ни в текст ошибки, ни в лог: тексты строятся из кода
 ответа и номера ключа, а описание ошибки провайдера очищается от ключей.
+Каждый отказ по HTTP - запись в лог с кодом и `x-request-id` ответа (#119),
+без текста ответа.
 
 Расход - `usage` ответа целиком: входные, выходные, кэшированные и
 reasoning-токены, итог провайдера (`total_tokens`) и стоимость. Eurorouter
@@ -37,6 +39,7 @@ from app.domain.entities import PromptMessage
 from app.domain.llm_errors import LlmError, LlmRateLimitedError, LlmTimeoutError
 from app.domain.llm_usage import LlmUsage
 from app.infrastructure.llm.structured import RawReply, complete_structured, token_count
+from app.infrastructure.telemetry import LLM_REQUEST_ID
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,12 @@ _KEY_REJECTED = frozenset({401, 403, 429})
 # (`/generation`, `/credits`) - и меньше 10^10 € (колонка NUMERIC(20, 10)).
 _COST_PLACES = Decimal("1E-10")
 _COST_LIMIT = Decimal(10) ** 10
+
+
+def _request_id(response: httpx.Response) -> dict[str, str]:
+    """`x-request-id` отказа провайдера - полем записи лога: по нему поддержка Eurorouter находит запрос."""
+    request_id = response.headers.get("x-request-id")
+    return {LLM_REQUEST_ID: request_id} if request_id else {}
 
 
 def _object(value: Any) -> Mapping[str, Any]:
@@ -116,9 +125,11 @@ class OpenAiCompatibleGateway:
                     index + 1,
                     len(self._keys),
                     response.status_code,
+                    extra=_request_id(response),
                 )
                 continue
             if response.status_code != httpx.codes.OK:
+                logger.warning("%s: HTTP %d", self._name, response.status_code, extra=_request_id(response))
                 raise LlmError(
                     f"{self._name}: HTTP {response.status_code}: {self._error_text(response)}"
                 )

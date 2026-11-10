@@ -4,7 +4,8 @@
 infra/observability/alerts.test.yml в job observability-configs. Здесь —
 связи между файлами, которые promtool не видит: имена метрик в правилах
 совпадают с теми, что пишут источники, секреты Telegram и адрес heartbeat приходят файлами по одним
-путям в compose и infra, Watchdog уходит на heartbeat, а не в Telegram, пороги записаны в README.
+путям в compose и infra, Watchdog уходит на heartbeat, а не в Telegram, сломанная доставка в
+Telegram — на /fail того же check, пороги записаны в README.
 """
 
 import re
@@ -61,16 +62,27 @@ def test_container_down_watches_real_container_names() -> None:
 
 
 def test_token_spend_comes_from_the_collector_pipeline() -> None:
-    """Ряд, по которому считается бюджет, собирает sqlquery основного коллектора."""
+    """Ряды, по которым считаются бюджеты токенов и евро, собирает sqlquery основного коллектора."""
     config = yaml.safe_load(OTELCOL.read_text(encoding="utf-8"))
     receiver = config["receivers"]["sqlquery/llm-tokens"]
     names = [m["metric_name"] for q in receiver["queries"] for m in q["metrics"]]
-    assert names == ["review_llm_tokens_month"]
+    assert names == ["review_llm_tokens_month", "review_llm_cost_eur_month"]
     assert "sqlquery/llm-tokens" in config["service"]["pipelines"]["metrics"]["receivers"]
-    # Только колонки, на которые у роли мониторинга есть SELECT (ревизия 0017).
+    # Только колонки, на которые у роли мониторинга есть SELECT (ревизии 0017 и 0021).
     sql = receiver["queries"][0]["sql"]
-    assert set(re.findall(r"\b(tokens_used|created_at|\w+_id|id)\b", sql)) <= {"tokens_used", "created_at"}
+    columns = set(re.findall(r"\b(tokens_used|cost_eur|created_at|\w+_id|id)\b", sql))
+    assert columns <= {"tokens_used", "cost_eur", "created_at"}
     assert "review_llm_tokens_month" in _alerts()["LlmBudgetNearLimit"]["expr"]
+    assert "review_llm_cost_eur_month" in _alerts()["LlmCostBudgetNearLimit"]["expr"]
+
+
+def test_provider_balance_rules_read_the_worker_gauge() -> None:
+    metric = "review_llm_provider_balance_eur"
+    assert f'"{metric}"' in (REPO / "app" / "infrastructure" / "telemetry.py").read_text(encoding="utf-8")
+    for name in ("LlmProviderBalanceLow", "LlmProviderBalanceCritical"):
+        assert metric in _alerts()[name]["expr"]
+        # Общий service с бюджетом дал бы inhibit_rules глушить низкий баланс весь месяц.
+        assert _alerts()[name]["labels"]["service"] != _alerts()["LlmBudgetExceeded"]["labels"]["service"]
 
 
 def test_backup_mark_matches_the_rule() -> None:
@@ -96,8 +108,14 @@ def test_alert_secrets_are_files_at_the_same_paths_everywhere() -> None:
     telegram = receivers["telegram"]["telegram_configs"][0]
     assert "bot_token" not in telegram and "chat_id" not in telegram
     (heartbeat,) = receivers["heartbeat"]["webhook_configs"]
-    assert "url" not in heartbeat
-    paths = {telegram["bot_token_file"], telegram["chat_id_file"], heartbeat["url_file"]}
+    (heartbeat_fail,) = receivers["heartbeat-fail"]["webhook_configs"]
+    assert "url" not in heartbeat and "url" not in heartbeat_fail
+    paths = {
+        telegram["bot_token_file"],
+        telegram["chat_id_file"],
+        heartbeat["url_file"],
+        heartbeat_fail["url_file"],
+    }
 
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     targets = {c["target"] for c in compose["services"]["alertmanager"]["configs"]}
@@ -110,7 +128,7 @@ def test_alert_secrets_are_files_at_the_same_paths_everywhere() -> None:
 
 def test_watchdog_goes_to_the_heartbeat_and_not_to_telegram() -> None:
     """#334: первый маршрут ловит Watchdog по имени, иначе он ушёл бы в Telegram корневым
-    маршрутом. Повтор не реже раза в 5 минут — период проверки внешнего сервиса в README."""
+    маршрутом. Повтор раз в 5–6 минут — под период проверки внешнего сервиса в README."""
     route = yaml.safe_load(ALERTMANAGER.read_text(encoding="utf-8"))["route"]
     first = route["routes"][0]
     assert first["matchers"] == ['alertname="Watchdog"']
@@ -119,6 +137,36 @@ def test_watchdog_goes_to_the_heartbeat_and_not_to_telegram() -> None:
     assert first["repeat_interval"] == "5m"
     assert _receivers()["heartbeat"]["webhook_configs"][0]["send_resolved"] is False
     assert "Watchdog" in _alerts()
+
+
+def test_failed_telegram_delivery_goes_to_the_fail_url_and_not_to_telegram() -> None:
+    """Сломанную доставку в Telegram heartbeat не видит: пинг идёт мимо Telegram. Алерт о ней
+    ловит второй маршрут по имени и шлёт на /fail того же check, а не в сам Telegram."""
+    route = yaml.safe_load(ALERTMANAGER.read_text(encoding="utf-8"))["route"]
+    second = route["routes"][1]
+    assert second["matchers"] == ['alertname="AlertDeliveryFailing"']
+    assert second["receiver"] == "heartbeat-fail"
+    assert not second.get("continue", False)
+    assert _receivers()["heartbeat-fail"]["webhook_configs"][0]["send_resolved"] is False
+
+    # Пока доставка сломана, Watchdog не возвращает check в up: иначе после /fail он
+    # снова зелёный через 5–6 минут, и пару down/up легко принять за сетевой сбой.
+    inhibits = yaml.safe_load(ALERTMANAGER.read_text(encoding="utf-8"))["inhibit_rules"]
+    assert {
+        "source_matchers": ['alertname="AlertDeliveryFailing"'],
+        "target_matchers": ['alertname="Watchdog"'],
+    } in inhibits
+
+    # Локально /fail строится из того же адреса, что и пинг, как деплой строит его на стенде.
+    configs = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["configs"]
+    assert configs["heartbeat_fail_url"]["content"] == configs["heartbeat_url"]["content"] + "/fail"
+
+    rule = _alerts()["AlertDeliveryFailing"]
+    assert 'alertmanager_notifications_failed_total{integration="telegram"}' in rule["expr"]
+    # Счётчик пишет сам Alertmanager: Prometheus должен его скрейпить.
+    jobs = yaml.safe_load(PROMETHEUS.read_text(encoding="utf-8"))["scrape_configs"]
+    alertmanager = next(job for job in jobs if job["job_name"] == "alertmanager")
+    assert alertmanager["static_configs"][0]["targets"] == ["alertmanager:9093"]
 
 
 def test_prometheus_loads_the_rules_and_sends_to_alertmanager() -> None:
