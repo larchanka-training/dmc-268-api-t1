@@ -296,6 +296,16 @@ services:
     # больше этого грейса, воркер проверяет запас на старте.
     stop_grace_period: 41m
 
+  # Кабинет (#386): образ интерфейса собирается из его публичного репозитория,
+  # вторую копию клонировать не нужно. Без PUBLIC_HOST nginx работает по HTTP
+  # и проксирует /api/ на dmc268-api (алиас сервиса api). Вход через GitHub —
+  # только с реквизитами App в .env; без них открываются лендинг и /status.
+  ui:
+    build: https://github.com/larchanka-training/dmc-268-ui-t1.git#develop
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on: [api]
+
   # Локальная модель для прогона на своей машине, только с профилем:
   #   docker compose --profile ollama up -d
   #   docker compose exec ollama ollama pull qwen2.5-coder:7b

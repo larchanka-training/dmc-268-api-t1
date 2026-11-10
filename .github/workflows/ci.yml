@@ -224,7 +224,7 @@ jobs:
           key: build-metrics-${{ github.sha }}
 
   # Новичок с чистой машины (#386): `cp .env.example .env && docker compose up`
-  # поднимает базу, брокер, миграции, API и воркер, и API отвечает /health.
+  # поднимает базу, брокер, миграции, API, воркер и кабинет; API отвечает /health.
   compose-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -235,6 +235,8 @@ jobs:
       - run: cp .env.example .env
       - run: docker compose up -d --wait --wait-timeout 300
       - run: curl -fsS --retry 5 --retry-all-errors http://127.0.0.1:8000/health
+      # Кабинет отдаётся и проксирует API: статус сервиса через nginx интерфейса.
+      - run: curl -fsS --retry 5 --retry-all-errors http://127.0.0.1:8080/api/v1/status
       # У воркера нет healthcheck: --wait ждал только «running», а упавший на старте воркер это проскочил бы.
       - run: test -n "$(docker compose ps -q --status running worker)"
       - name: Состояние и логи при сбое

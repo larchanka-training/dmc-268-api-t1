@@ -4,8 +4,9 @@
 
 ## What Changes
 
-- Job CI `compose-smoke`: на чистом раннере `cp .env.example .env`, `docker compose up -d --wait`, `GET /health`; при сбое — состояние и логи сервисов, в конце `docker compose down -v`.
+- Сервис `ui` в `docker-compose.yml`: образ кабинета собирается из публичного репозитория `dmc-268-ui-t1` (`#develop`; пакет в GHCR закрыт для анонимного скачивания), порт `127.0.0.1:8080`, nginx кабинета проксирует `/api/` на `dmc268-api`.
+- Job CI `compose-smoke`: на чистом раннере `cp .env.example .env`, `docker compose up -d --wait`, `GET /health`, `GET /api/v1/status` через кабинет, воркер running; при сбое — состояние и логи сервисов, в конце `docker compose down -v`.
 
 ## Impact
 
-- `.github/workflows/ci.yml`. Поведение сервиса и спеки не меняются.
+- `docker-compose.yml`, `.github/workflows/ci.yml`, `README.md`. Поведение сервиса и спеки не меняются.
