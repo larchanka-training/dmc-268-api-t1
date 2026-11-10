@@ -119,6 +119,8 @@ def test_the_blind_list_covers_the_table() -> None:
         FiringAlert("ReviewDlqNotEmpty", {"service": "worker", "queue": "review_jobs.dlq"}),
         # Dead man's switch горит всегда (#334): он о цепочке алертов, не о сервисе.
         FiringAlert("Watchdog", {"severity": "none"}),
+        # Сломанная доставка в Telegram — о цепочке алертов, не о сервисе.
+        FiringAlert("AlertDeliveryFailing", {"severity": "critical", "service": "alertmanager"}),
         # Метки без имени нужного правила ничего не значат.
         FiringAlert("SomethingElse", {"container_name": "dmc268-api"}),
         # Имя правила без нужной метки — тоже.

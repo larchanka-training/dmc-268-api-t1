@@ -166,7 +166,7 @@ RabbitMQ: имя — `{messaging.operation.name} {destination}`, стандар�
 
 ### Requirement: Телеметрия не источник данных продукта
 
-Телеметрия SHALL служить только эксплуатации — команде. Данные, которые видит пользователь, — длительность, токены и модель прогона, шаги прогона, — SHALL браться из базы, и ни один ответ API SHALL NOT строиться из спанов. Модули роутов API SHALL NOT обращаться к OpenTelemetry; trace id в заголовке и теле ошибки — идентификатор для разбора, а не данные.
+Телеметрия SHALL служить только эксплуатации. Данные для пользователя (длительность, токены, модель и шаги прогона) SHALL браться из базы, ответ API SHALL NOT строиться из спанов, модули роутов SHALL NOT обращаться к OpenTelemetry; trace id в заголовке и теле ошибки — идентификатор для разбора, не данные. Единственное исключение — `GET /api/v1/status` (спека `service-status`): он SHALL строиться из сработавших алертов Prometheus через порт слоя приложения и отдавать только статусы компонентов.
 
 #### Scenario: Шаги прогона в кабинете
 
@@ -177,6 +177,11 @@ RabbitMQ: имя — `{messaging.operation.name} {destination}`, стандар�
 
 - **WHEN** проверяются импорты модулей HTTP-слоя
 - **THEN** OpenTelemetry и модуль телеметрии импортируют только фабрика приложения и middleware trace id
+
+#### Scenario: Статус сервиса из алертов
+
+- **WHEN** гость запрашивает `GET /api/v1/status`
+- **THEN** статусы компонентов выведены из сработавших алертов Prometheus, а в ответе нет ни имён алертов, ни меток, ни значений метрик
 
 ### Requirement: Трассировка не копит поток SSE
 
@@ -802,12 +807,12 @@ nginx интерфейса SHALL ходить в Grafana по отдельной
 
 ### Requirement: Dead man's switch алертов
 
-Prometheus SHALL держать всегда горящий алерт `Watchdog`, а Alertmanager SHALL отправлять его не в Telegram, а на внешний heartbeat-сервис, повторяя не реже раза в 5 минут. Внешний сервис SHALL оповещать канал команды, когда пинги перестают приходить. `Watchdog` SHALL NOT менять публичный статус сервиса.
+Prometheus SHALL держать всегда горящий алерт `Watchdog`, а Alertmanager SHALL отправлять его не в Telegram, а на внешний heartbeat-сервис, повторяя раз в 5–6 минут. Внешний сервис SHALL оповещать канал команды, когда пинги перестают приходить. `Watchdog` SHALL NOT менять публичный статус сервиса.
 
 #### Scenario: Стек алертов работает
 
 - **WHEN** Prometheus и Alertmanager работают
-- **THEN** внешний сервис получает пинг не реже раза в 5 минут, а в Telegram `Watchdog` не приходит
+- **THEN** внешний сервис получает пинг раз в 5–6 минут, а в Telegram `Watchdog` не приходит
 
 #### Scenario: Упал Prometheus или Alertmanager
 
@@ -832,6 +837,30 @@ Prometheus SHALL держать всегда горящий алерт `Watchdog
 
 - **WHEN** адрес heartbeat не начинается с `https://` или содержит пробел
 - **THEN** развёртывание останавливается на этапе планирования, и на сервере ничего не меняется
+
+### Requirement: Сломанная доставка в Telegram видна мимо Telegram
+
+`AlertDeliveryFailing` SHALL гореть, когда за 10 минут выросло число неудачных отправок в Telegram, и SHALL уходить не в Telegram, а на тот же check heartbeat с суффиксом `/fail`: сразу и раз в час, пока горит. Пока он горит, Alertmanager SHALL NOT отправлять пинг `Watchdog`: check остаётся down до починки доставки. Адрес `/fail` SHALL приходить файлом из секрета heartbeat. Страницу статуса алерт SHALL NOT менять.
+
+#### Scenario: Токен бота отозван
+
+- **WHEN** Alertmanager не может отправить уведомление в Telegram
+- **THEN** в пределах 10 минут горит `AlertDeliveryFailing`, и внешний сервис получает запрос на адрес `/fail` своего check
+
+#### Scenario: Check не возвращается в up, пока доставка сломана
+
+- **WHEN** горит `AlertDeliveryFailing`
+- **THEN** `Watchdog` в Alertmanager подавлен, пинг на адрес heartbeat не уходит, и check внешнего сервиса остаётся down
+
+#### Scenario: Heartbeat без секрета
+
+- **WHEN** секрета heartbeat нет, и неудачно уходят только пинги `Watchdog`
+- **THEN** `AlertDeliveryFailing` не горит, а файл адреса `/fail` содержит заглушку
+
+#### Scenario: Доставка починилась
+
+- **WHEN** неудачных отправок в Telegram нет 10 минут
+- **THEN** `AlertDeliveryFailing` гаснет, и следующий пинг `Watchdog` возвращает check в up
 
 ### Requirement: Расход модели в евро и его бюджет
 

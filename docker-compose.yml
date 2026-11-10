@@ -565,6 +565,8 @@ services:
         target: /etc/alertmanager/secrets/telegram_chat_id
       - source: heartbeat_url
         target: /etc/alertmanager/secrets/heartbeat_url
+      - source: heartbeat_fail_url
+        target: /etc/alertmanager/secrets/heartbeat_fail_url
     # Как dmc268-alertmanager на стенде. Без read_only: compose не создаёт
     # configs с content в read-only сервисе («`file` is the sole supported
     # option»), а на стенде read_only несовместим с upload.
@@ -621,6 +623,11 @@ configs:
   # Адрес heartbeat для Watchdog (#334); заглушка unset — пинг падает в логе.
   heartbeat_url:
     content: ${ALERT_HEARTBEAT_URL:-unset}
+  # Тот же check с /fail для AlertDeliveryFailing — из того же адреса, как на
+  # стенде; без него unset/fail — та же заглушка. Адрес задаётся без
+  # завершающего /: обрезать его, как деплой, compose не умеет.
+  heartbeat_fail_url:
+    content: ${ALERT_HEARTBEAT_URL:-unset}/fail
 
 volumes:
   postgres_data:

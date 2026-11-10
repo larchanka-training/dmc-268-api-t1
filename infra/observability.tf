@@ -733,6 +733,14 @@ resource "docker_container" "alertmanager" {
     file    = "/etc/alertmanager/secrets/heartbeat_url"
   }
 
+  # Тот же check с /fail для AlertDeliveryFailing (receiver heartbeat-fail):
+  # сломанную доставку в Telegram внешний сервис видит сразу. Без секрета —
+  # заглушка unset, как у пинга.
+  upload {
+    content = var.alert_heartbeat_url == "" ? "unset" : "${trimsuffix(var.alert_heartbeat_url, "/")}/fail"
+    file    = "/etc/alertmanager/secrets/heartbeat_fail_url"
+  }
+
   command = [
     "--config.file=/etc/alertmanager/alertmanager.yml",
     "--storage.path=/alertmanager",
