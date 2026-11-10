@@ -79,6 +79,8 @@ def test_provider_balance_rules_read_the_worker_gauge() -> None:
     assert f'"{metric}"' in (REPO / "app" / "infrastructure" / "telemetry.py").read_text(encoding="utf-8")
     for name in ("LlmProviderBalanceLow", "LlmProviderBalanceCritical"):
         assert metric in _alerts()[name]["expr"]
+        # Общий service с бюджетом дал бы inhibit_rules глушить низкий баланс весь месяц.
+        assert _alerts()[name]["labels"]["service"] != _alerts()["LlmBudgetExceeded"]["labels"]["service"]
 
 
 def test_backup_mark_matches_the_rule() -> None:

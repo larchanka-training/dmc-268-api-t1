@@ -319,12 +319,13 @@ groups:
 
       # Остаток на счёте Eurorouter — gauge воркера, опрос /credits раз в 5 минут.
       # Ниже 0,10 € провайдер отвечает 402, и прогоны падают. Нет ряда (опрос не
-      # удался, Eurorouter не используется) — алерты молчат.
+      # удался, Eurorouter не используется) — алерты молчат. Свой service: иначе
+      # inhibit_rules глушили бы низкий баланс горящим до конца месяца бюджетом.
       - alert: LlmProviderBalanceLow
         expr: review_llm_provider_balance_eur < 5
         labels:
           severity: warning
-          service: llm
+          service: llm-provider
         annotations:
           summary: "Баланс Eurorouter {{ $value | printf \"%.2f\" }} €"
           description: "Остаток на счёте Eurorouter ниже 5 €: пополните баланс, пока провайдер не начал отвечать 402."
@@ -333,7 +334,7 @@ groups:
         expr: review_llm_provider_balance_eur < 1
         labels:
           severity: critical
-          service: llm
+          service: llm-provider
         annotations:
           summary: "Баланс Eurorouter {{ $value | printf \"%.2f\" }} €"
           description: "Остаток на счёте Eurorouter ниже 1 €: ниже 0,10 € провайдер отвечает 402, и прогоны падают. Пополните баланс."

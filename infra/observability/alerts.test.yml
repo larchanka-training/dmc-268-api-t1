@@ -572,7 +572,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              service: llm
+              service: llm-provider
               job: dmc-268-worker
             exp_annotations:
               summary: "Баланс Eurorouter 4.99 €"
@@ -585,7 +585,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
-              service: llm
+              service: llm-provider
               job: dmc-268-worker
             exp_annotations:
               summary: "Баланс Eurorouter 0.99 €"
