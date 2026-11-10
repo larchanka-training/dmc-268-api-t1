@@ -86,9 +86,11 @@ class AnalyticsQuery(BaseModel):
         end = self.created_to or datetime.now(UTC)
         try:
             start = self.created_from or end - DEFAULT_PERIOD
-        except OverflowError:  # created_to у самого начала календаря: раньше начала нет.
-            start = datetime.min.replace(tzinfo=UTC)
-        if start > end:
+        except OverflowError:  # 30 дней до created_to раньше начала календаря: как у _param_to_utc.
+            start = None
+        if start is None:
+            bound, code = "created_to", "datetime_out_of_range"
+        elif start > end:
             # Без created_to конец — сейчас: виновато начало в будущем.
             bound, code = ("created_to" if self.created_to else "created_from"), "range_reversed"
         elif end - start > MAX_PERIOD:

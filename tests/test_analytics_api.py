@@ -257,11 +257,12 @@ def test_exactly_180_days_and_an_empty_period_are_accepted(created_from: str) ->
     assert response.status_code == 200, response.text
 
 
-def test_end_at_the_start_of_the_calendar_is_not_a_500() -> None:
-    """end - 30 дней переполняет datetime: начало упирается в начало календаря, а не в 500."""
+def test_end_at_the_start_of_the_calendar_is_422_not_500() -> None:
+    """30 дней до created_to раньше начала календаря: 422 в created_to, как у времени вне диапазона."""
     response = _client(World()).get(PATH, params={"created_to": "0001-01-05T00:00:00Z"})
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
+    assert response.json()["errors"] == [{"where": "query.created_to", "reason": "время вне допустимого диапазона"}]
 
 
 def test_without_session_is_401() -> None:
