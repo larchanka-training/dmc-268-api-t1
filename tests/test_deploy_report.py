@@ -58,7 +58,7 @@ esac
 # upgrade head` печатает вывод alembic из MIGRATE_LOG и выходит с
 # MIGRATE_EXIT; у N-й попытки — MIGRATE_LOG_N и MIGRATE_EXIT_N, если заданы.
 # `run … alembic current` печатает CURRENT (с CURRENT_FAIL — код 255, как при
-# оборванном ssh), `run … python -` (пароль роли мониторинга) с MONITOR_FAIL
+# оборванном ssh), `run … python alembic/monitor_password.py` (пароль роли мониторинга) с MONITOR_FAIL
 # выходит с этим кодом, `rm` контейнера, которого нет, — код 1.
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "docker $*" >> "$CALLS"
@@ -66,7 +66,7 @@ case "$1" in
   run)
     case "$*" in
       *"alembic current"*) [ -z "${CURRENT_FAIL:-}" ] || exit 255; printf '%s\\n' "${CURRENT:-}" ;;
-      *" python -") cat > /dev/null; exit "${MONITOR_FAIL:-0}" ;;
+      *" python alembic/monitor_password.py") exit "${MONITOR_FAIL:-0}" ;;
       *)
         n=$(( $(cat "$CALLS.upgrades" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$CALLS.upgrades"
         log="MIGRATE_LOG_$n" code="MIGRATE_EXIT_$n"
@@ -418,7 +418,9 @@ def volume_blocks() -> dict[str, str]:
 # воркер в них не пишут напрямую (только через коллектор, и без ответа
 # экспортёр просто теряет пачку), тома защищены сторожем томов, а WAL Loki,
 # Prometheus и Tempo доигрывают при старте. Замену приносит любая правка их
-# конфигурации — держать её за allow_stateful_replace незачем.
+# конфигурации — держать её за allow_stateful_replace незачем. Alertmanager
+# держит в томе тишины и журнал отправок, node-exporter только читает отметку
+# о копии (алерты #100): замена теряет разве что повтор уведомления.
 REPLACEABLE_ON_VOLUMES = frozenset({
     "docker_container.postgres_replica",
     "docker_container.postgres_backup",
@@ -426,6 +428,8 @@ REPLACEABLE_ON_VOLUMES = frozenset({
     "docker_container.loki",
     "docker_container.prometheus",
     "docker_container.tempo",
+    "docker_container.alertmanager",
+    "docker_container.node_exporter",
 })
 
 
@@ -480,6 +484,27 @@ def test_every_volume_prevents_destroy() -> None:
         assert re.search(
             r"^\s*lifecycle\s*\{[^}]*^\s*prevent_destroy\s*=\s*true\s*$", blocks[address], re.MULTILINE
         ), f"у {address} нет lifecycle {{ prevent_destroy = true }}"
+
+
+def test_broker_memory_threshold_is_below_its_container_limit() -> None:
+    """Лимит cgroup брокер не видит: порог памяти — абсолютный и ниже потолка контейнера (#150)."""
+    body = re.search(r'^resource\s+"docker_container"\s+"rabbitmq"\s*\{\n(.*?)^\}', read_infra_text(), re.MULTILINE | re.DOTALL)
+    assert body, "docker_container.rabbitmq не найден в infra/*.tf"
+    limit = re.search(r"^\s*memory\s*=\s*(\d+)", body.group(1), re.MULTILINE)
+    assert limit, "у брокера нет потолка памяти"
+    limit_mb = int(limit.group(1))
+    assert re.search(r'^\s*file\s*=\s*"/etc/rabbitmq/conf\.d/30-dmc268\.conf"', body.group(1), re.MULTILINE)
+    conf = Path("infra/rabbitmq/30-dmc268.conf").read_text()
+    watermark = re.search(r"^vm_memory_high_watermark\.absolute\s*=\s*(\d+)MiB$", conf, re.MULTILINE)
+    assert watermark and int(watermark.group(1)) < limit_mb
+    assert re.search(r"^disk_free_limit\.absolute\s*=", conf, re.MULTILINE)
+
+
+def test_broker_node_name_survives_container_replacement() -> None:
+    """Имя узла RabbitMQ — от hostname: без него новый контейнер — пустой узел на том же томе (#338)."""
+    body = re.search(r'^resource\s+"docker_container"\s+"rabbitmq"\s*\{\n(.*?)^\}', read_infra_text(), re.MULTILINE | re.DOTALL)
+    assert body, "docker_container.rabbitmq не найден в infra/*.tf"
+    assert re.search(r'^\s*hostname\s*=\s*"[^"]+"\s*$', body.group(1), re.MULTILINE), "у брокера нет постоянного hostname"
 
 
 # --- apply и простой API -----------------------------------------------------
@@ -921,7 +946,7 @@ def test_migrate_sets_the_monitor_password_after_a_success(tmp_path: Path) -> No
     assert result.returncode == 0, result.stdout + result.stderr
     runs = [c for c in (tmp_path / "calls").read_text().splitlines() if c.startswith("docker run ")]
     assert "alembic upgrade head" in runs[0], runs
-    assert runs[-1].endswith('ghcr.io/o/r:t@sha256:' + "0" * 64 + " python -"), runs
+    assert runs[-1].endswith('ghcr.io/o/r:t@sha256:' + "0" * 64 + " python alembic/monitor_password.py"), runs
     assert len(runs) == 2, runs
     assert (report / "migrate.log").read_text() == APPLIED_LOG
 
@@ -938,7 +963,7 @@ def test_a_failed_monitor_password_step_is_not_a_failed_migration(tmp_path: Path
 
     assert result.returncode == 2
     calls = (tmp_path / "calls").read_text().splitlines()
-    assert any(c.startswith("timeout 60 docker run ") and c.endswith(" python -") for c in calls), calls
+    assert any(c.startswith("timeout 60 docker run ") and c.endswith(" python alembic/monitor_password.py") for c in calls), calls
     assert (report / "migrate-monitor.error").read_text().strip() == "2"
     assert (report / "migrate.log").read_text() == APPLIED_LOG
 
@@ -971,7 +996,7 @@ def test_migrate_does_not_set_the_monitor_password_after_a_failure(tmp_path: Pat
     )
 
     assert result.returncode == 1
-    assert "python -" not in (tmp_path / "calls").read_text()
+    assert "monitor_password.py" not in (tmp_path / "calls").read_text()
 
 
 def test_migrate_keeps_the_alembic_exit_code(tmp_path: Path) -> None:
@@ -1213,6 +1238,7 @@ def test_summary_of_a_successful_deploy(tmp_path: Path) -> None:
     assert text.startswith("## Деплой: успешно\n")
     assert "| **Простой: SIGTERM старому → первая успешная проверка нового** | `dmc268.deploy.api.downtime` | **5.1** |" in text
     assert "`StartedAt` → `health_status: healthy`" in text
+    assert "nginx интерфейса узнаёт новый адрес API не позже чем через 10 с" in text
     assert "[!WARNING]" not in text
     assert "| `docker_container` |  |  |  | 2 |  |" in text
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 1 |" in text
@@ -1224,7 +1250,7 @@ def test_summary_of_a_successful_deploy(tmp_path: Path) -> None:
 
 def test_summary_names_the_failed_step_even_without_a_report(tmp_path: Path) -> None:
     results = ALL_SUCCESS.replace("plan success success", "plan failure failure")
-    results = re.sub(r"^(apply|check_api|check_worker|prune) success success$", r"\1 skipped skipped", results, flags=re.MULTILINE)
+    results = re.sub(r"^(apply|check_worker|prune) success success$", r"\1 skipped skipped", results, flags=re.MULTILINE)
 
     text = summary(tmp_path, tmp_path / "empty", JOB_STATUS="failure", STEP_RESULTS=results)
 

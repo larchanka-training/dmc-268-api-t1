@@ -1,4 +1,4 @@
-"""Ревизия 0016 откатывается начисто и накатывается снова."""
+"""Ревизия 0022 откатывается начисто и накатывается снова."""
 
 import pytest
 from alembic.config import Config
@@ -32,7 +32,7 @@ def _enum_types(engine) -> set[str]:
 def test_the_simulations_revision_downgrades_without_leftovers_and_upgrades_again(migrated) -> None:
     config = _config()
     try:
-        command.downgrade(config, "0015")
+        command.downgrade(config, "0021")
         assert "simulations" not in inspect(migrated).get_table_names()
         # Свои типы ушли, общий с прогонами `review_verification` остался.
         assert _enum_types(migrated) == {"review_verification"}

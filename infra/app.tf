@@ -18,35 +18,6 @@ locals {
   api_image_ref = join("@", regex("^(.+?)(?::[\\w][\\w.-]{0,127})?@(sha256:[0-9a-f]{64})$", var.api_image))
 }
 
-# Ресурсы образа API жили в стеке до #203. Из состояния они уходят без
-# уничтожения: keep_locally у них и так не снимал образ с сервера, а старые
-# образы убирает шаг чистки деплоя.
-removed {
-  from = docker_image.api
-
-  lifecycle {
-    destroy = false
-  }
-}
-
-removed {
-  from = docker_image.worker
-
-  lifecycle {
-    destroy = false
-  }
-}
-
-# Контейнер миграций жил в стеке до #159. Из состояния он уходит без
-# уничтожения: остановленный контейнер на сервере убирает шаг миграций.
-removed {
-  from = docker_container.migrate
-
-  lifecycle {
-    destroy = false
-  }
-}
-
 resource "docker_container" "api" {
   name    = "dmc268-api"
   image   = local.api_image_ref
@@ -90,7 +61,7 @@ resource "docker_container" "api" {
   # API — единственный, кто стоит в обеих сетях: запросы приходят из сети
   # входа, база и брокер — в сети данных. Сеть входа не internal: через неё
   # же API ходит в GitHub (OAuth, метаданные PR), и на ней опубликован порт
-  # для проверки живости через туннель.
+  # на петле для отладки.
   networks_advanced {
     name = docker_network.dmc268.name
   }
@@ -102,8 +73,9 @@ resource "docker_container" "api" {
   # Реквизиты GitHub App: VCS-шлюз у вебхуков (метаданные PR) и у воркера,
   # OAuth и origin — у входа и проверки сессии, ключ токенов пользователя — у
   # входа и ручек репозиториев. Телеметрия — local.telemetry_env: со включённым
-  # стеком логи, трейсы и метрики идут по OTLP в коллектор.
-  env = concat(local.app_env, local.telemetry_env, [
+  # стеком логи, трейсы и метрики идут по OTLP в коллектор, а страница статуса
+  # читает алерты Prometheus (local.status_env).
+  env = concat(local.app_env, local.telemetry_env, local.status_env, [
     "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-api",
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
@@ -155,7 +127,10 @@ resource "docker_container" "api" {
 # start_interval — частота проверок в start_period: без него первая проверка
 # шла бы через interval, и wait ждал бы 30 с даже здоровый API. Длительности
 # — в формате Go, в котором провайдер читает их обратно ("2s", "30s", "1m0s"):
-# "1m" давал бы вечный diff. curl в образе нет, python есть.
+# "1m" давал бы вечный diff. curl в образе нет, python есть. start_period не
+# короче wait_timeout: всё ожидание выката идёт с проверкой раз в секунду, и
+# медленный старт не ждёт следующей проверки через interval (до 30 с простоя,
+# а у края wait_timeout — упавший apply). Здоровый API healthy через секунду.
 locals {
   api_healthcheck = {
     test = [
@@ -165,7 +140,7 @@ locals {
     interval       = "30s"
     timeout        = "5s"
     retries        = 3
-    start_period   = "10s"
+    start_period   = "1m30s"
     start_interval = "1s"
   }
 }
@@ -235,6 +210,8 @@ resource "docker_container" "worker" {
     "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-worker",
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
+    # Ссылка из check run на прогон в кабинете (#295): check run ставит в основном воркер.
+    "PUBLIC_ORIGIN=${var.public_origin}",
     "LLM_BACKEND=${var.llm_backend}",
     "OLLAMA_BASE_URL=${var.ollama_base_url}",
     "OLLAMA_MODEL=${var.ollama_model}",
@@ -244,5 +221,7 @@ resource "docker_container" "worker" {
     "EUROROUTER_API_KEYS=${var.eurorouter_api_keys}",
     # Пусто - Settings читает как «не задано».
     "EUROROUTER_REASONING_EFFORT=${var.eurorouter_reasoning_effort}",
+    # Баланс сверяет только воркер, API показывает его и без флага.
+    "BILLING_ENABLED=${var.billing_enabled}",
   ])
 }

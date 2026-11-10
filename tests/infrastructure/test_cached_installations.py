@@ -125,3 +125,17 @@ def test_a_refreshing_catalog_always_asks_github_and_feeds_the_cache() -> None:
     assert fresh.calls == ["list_repositories", "list_repositories"]
     assert reading.list_repositories(TOKEN) == [PRIVATE]
     assert stale.calls == ["list_repositories"]
+
+
+def test_the_installation_id_goes_past_the_cache() -> None:
+    """Номер установки — всегда к GitHub: после переустановки приложения он другой."""
+    catalog = FakeInstallationCatalog(installation_ids={"octo-org/api": 42})
+    cache = FakeCache()
+    cached = CachedInstallationCatalog(catalog, cache, TTL)
+
+    assert cached.repository_installation_id("octo-org/api") == 42
+    catalog.installation_ids["octo-org/api"] = 43
+    assert cached.repository_installation_id("octo-org/api") == 43
+
+    assert catalog.calls == ["repository_installation_id", "repository_installation_id"]
+    assert cache.sets == []

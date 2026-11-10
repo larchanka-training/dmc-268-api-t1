@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-11-05
+# Поведение сервиса не меняется: возвращаются цели make для первого запуска песочницы
+# воркера (#237) — sandbox-demo, sandbox-doctor, sandbox-down — и скрипт
+# scripts/sandbox-doctor.sh. Правки только в Makefile, scripts/, .gitignore, tests/ и
+# документации; app/ не трогается.
+skip_specs: true

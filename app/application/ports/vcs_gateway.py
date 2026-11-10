@@ -77,6 +77,15 @@ class VcsGateway(Protocol):
         """
         ...
 
+    def resolve_branch_sha(self, repo_full_name: str, branch: str, installation_id: int) -> str:
+        """Sha коммита, на который сейчас указывает ветка `branch`.
+
+        Кэш правил репозитория ключуется коммитом, а не веткой: так видно,
+        изменился ли файл. Репозитория нет или он недоступен установке —
+        `VcsNotFoundError`; ветки нет и прочие сбои — `VcsError`.
+        """
+        ...
+
     def publish_pull_request_review(
         self,
         repo_full_name: str,
@@ -133,6 +142,12 @@ class VcsGateway(Protocol):
         head_sha: str,
         installation_id: int,
         check: MergeGateCheck,
+        *,
+        run_id: UUID | None = None,
     ) -> None:
-        """Check run на head коммита — блокировка мерджа при conclusion=failure."""
+        """Check run на head коммита — блокировка мерджа при conclusion=failure.
+
+        `conclusion` `None` — ревью идёт (`in_progress`). `run_id` — прогон, по которому
+        выставлен check: на его экран в кабинете ведёт ссылка из check run.
+        """
         ...

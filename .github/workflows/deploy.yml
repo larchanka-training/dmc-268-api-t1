@@ -113,6 +113,7 @@ jobs:
           # коммит сейчас на стенде.
           image="$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]'):${SHA}"
           echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
           echo "$image"
 
       # Без этого шага buildx работает на docker-драйвере, а тот не умеет
@@ -134,25 +135,15 @@ jobs:
           tags: ${{ steps.meta.outputs.image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Дата сбрасывает кеш слоя apt-get upgrade раз в сутки: из кеша он
+          # вернул бы пакеты на момент первой сборки, и trivy ниже ронял бы деплой
+          # на CVE, исправленной в Debian после неё (#361). Чаще не нужно: digest
+          # коммита без правок кода не меняется, и api с worker не пересоздаются.
+          build-args: APT_REFRESH=${{ steps.meta.outputs.day }}
           # Без provenance-аттестации: в ней данные прогона, и повторная сборка
           # того же коммита давала бы новый digest — tofu пересоздавал бы api и
           # worker с дренажом воркера. Аттестацию никто не читает.
           provenance: false
-
-      - name: Убедиться, что образ забирается обратно
-        env:
-          IMAGE: ${{ steps.meta.outputs.image }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          set -euo pipefail
-          # Пустой digest дал бы ссылку, которую отвергнет проверка api_image,
-          # но уже в job'е деплоя; ловим здесь.
-          if [ -z "$DIGEST" ]; then
-            echo "::error::сборка не вернула digest"
-            exit 1
-          fi
-          docker manifest inspect "${IMAGE}@${DIGEST}" > /dev/null
-          echo "образ доступен по digest ${DIGEST}"
 
       # trivy в ci.yml смотрит образ, собранный в CI, а на стенд уезжает этот:
       # он собран заново, и базовый python:3.14-slim между сборками мог
@@ -183,8 +174,7 @@ jobs:
     # Худший случай по шагам: targeted apply базы и брокера — до 1 мин штатной
     # остановки при пересоздании (destroy_grace_seconds 60) и ожидание healthy;
     # миграции; полный apply — до 41 мин грейса воркера и до 1,5 мин ожидания
-    # healthy у API (wait_timeout 90); после apply — 10 с туннеля к API,
-    # 1,5 мин воркера и до 5 мин реплики (первая сборка копирует базу целиком,
+    # healthy у API (wait_timeout 90); после apply — 1,5 мин воркера и до 5 мин реплики (первая сборка копирует базу целиком,
     # check-replica.sh). Итого ≈ 41 + 1 + 1,5 + 1,5 + 5 ≈ 50 мин плюс init и
     # миграции: запас в 60 есть, но растёт грейс воркера, wait_timeout API или
     # ожидание реплики — пересчитать здесь.
@@ -260,13 +250,6 @@ jobs:
         with:
           s3_user: ${{ secrets.S3_USER_DMC268_T1 }}
           s3_password: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
-          container: dmc268-s3
-          volume: dmc268-s3-data
-          port: "9000"
-          image: rustfs/rustfs:1.0.3
-          cred_user_var: RUSTFS_ACCESS_KEY
-          cred_pass_var: RUSTFS_SECRET_KEY
-          bucket: dmc268-tfstate
 
       # docker CLI раннера ходит к демону стенда (DOCKER_HOST=ssh://stand) и
       # отдаёт ему учётные данные реестра вместе с запросом pull: образ лежит
@@ -281,15 +264,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # До применения: считает логи контейнеров, которые выкат сейчас заменит.
-      - name: Доставки вебхука и сбои воркера с прошлого выката
-        id: diagnostics
-        if: *fresh
-        continue-on-error: true
-        run: |
-          .github/scripts/deploy/mark.sh
-          .github/scripts/deploy/diagnostics.sh
 
       # База и брокер — до миграций: на чистом сервере их ещё нет. На живом
       # стенде это `No changes` за несколько секунд. Targeted-план — в файл и
@@ -315,8 +289,7 @@ jobs:
           TF_VAR_docker_host: ssh://stand
           # Наружу не смотрит ничего из этого стека: снаружи API доступен через
           # `/api/` на публичном входе интерфейса, который ходит к нему по
-          # внутренней docker-сети. Порт остаётся на петле — от неё зависят
-          # туннельная проверка живости и отладка. База и брокер портов на
+          # внутренней docker-сети. Порт остаётся на петле для отладки. База и брокер портов на
           # хосте не публикуют вовсе: они только во внутренней сети стека.
           TF_VAR_bind_ip: 127.0.0.1
           # Интерфейс отдаётся по HTTPS на тот же адрес (public_tls в dmc-268-ui-t1),
@@ -338,6 +311,14 @@ jobs:
           # локальный (как у compose), валидация при observability_enabled =
           # true требует настоящего пароля — без секрета apply падает.
           TF_VAR_postgres_monitor_password: ${{ secrets.PG_MONITOR_PASSWORD_DMC268_T1 }}
+          # Доставка алертов в Telegram (#100): токен бота и chat id канала.
+          # Необязательны: без секретов алерты считаются и видны в
+          # Alertmanager, но в Telegram не уходят.
+          TF_VAR_alert_telegram_bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN_DMC268_T1 }}
+          TF_VAR_alert_telegram_chat_id: ${{ secrets.TELEGRAM_CHAT_ID_DMC268_T1 }}
+          # Адрес внешнего heartbeat для Watchdog (#334). Необязателен: без него
+          # не заметят упавший Prometheus или Alertmanager.
+          TF_VAR_alert_heartbeat_url: ${{ secrets.ALERT_HEARTBEAT_URL_DMC268_T1 }}
           # Пароль роли replicator. Нет секрета — пустая строка, и проверка
           # переменной роняет plan, ничего не меняя на сервере.
           TF_VAR_postgres_replication_password: ${{ secrets.PG_REPLICATION_PASSWORD_DMC268_T1 }}
@@ -350,6 +331,9 @@ jobs:
           # проверка переменной в infra/variables.tf роняет apply: стенд не
           # стартует без шифрования молча.
           TF_VAR_user_token_encryption_key: ${{ secrets.USER_TOKEN_KEY_DMC268_T1 }}
+          # Фраза шифрования состояния и плана (infra/encryption.tf, #147). Нужна
+          # уже `tofu init`: без неё init падает до изменений на сервере.
+          TF_VAR_state_passphrase: ${{ secrets.STATE_PASSPHRASE_DMC268_T1 }}
           # Ollama на стенде нет: модель - Eurorouter основным (#245), код
           # проверяемых репозиториев уходит ему. Адрес и ключи - те же, что у
           # eval.yml; модель и reasoning_effort - из .github/eurorouter-model и
@@ -357,6 +341,9 @@ jobs:
           TF_VAR_llm_backend: eurorouter
           TF_VAR_eurorouter_base_url: ${{ vars.AI_DMC268_URL }}
           TF_VAR_eurorouter_api_keys: ${{ secrets.AI_DMC268_T1 }}
+          # Ревью за деньги плательщика (#286, #405): плательщики и стартовые балансы
+          # на стенде назначены до включения.
+          TF_VAR_billing_enabled: "true"
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/infra.sh
@@ -398,7 +385,7 @@ jobs:
       # план пароль не трогает; после pull — он не входит в окно. До миграций:
       # они и новый API входят уже новым паролем, а старые API и воркер до
       # полного apply новых соединений не откроют (окно — infra/README.md,
-      # «Смена паролей»). Потолок 5 мин: брокер на чистом сервере ждём до двух.
+      # «Смена паролей»). Потолок 5 мин: зависший ssh не держит job.
       - name: Выставить пароли базы и брокера
         id: passwords
         if: *fresh
@@ -428,6 +415,9 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
           API_IMAGE: ${{ needs.image.outputs.image }}
           DOCKER_HOST: ssh://stand
+          # `tofu output` читает зашифрованное состояние (infra/encryption.tf):
+          # без фразы migrate.sh не получит адреса базы. Других TF_VAR ему не нужно.
+          TF_VAR_state_passphrase: ${{ secrets.STATE_PASSPHRASE_DMC268_T1 }}
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/migrate.sh
@@ -435,7 +425,11 @@ jobs:
       # Применяется ровно проверенный план. Apply ждёт, пока новый API станет
       # healthy (wait у docker_container.api), и падает через 90 с, если этого
       # не случилось. Заодно apply.sh собирает события контейнера API для
-      # разбивки простоя в summary и удаляет файл плана.
+      # разбивки простоя в summary и удаляет файл плана. Секреты Telegram
+      # необязательны (#100): без них алерты считаются, но не доставляются —
+      # деплой не падает, а предупреждает аннотацией прогона, иначе зелёный
+      # деплой выглядел бы как работающая доставка. Так же и адрес heartbeat
+      # (#334): без него падение самого стека алертов никто не заметит.
       - name: Применить конфигурацию
         id: apply
         if: *fresh
@@ -443,6 +437,12 @@ jobs:
         run: |
           .github/scripts/deploy/mark.sh
           .github/scripts/deploy/apply.sh
+          if [ -z "$TF_VAR_alert_telegram_bot_token" ] || [ -z "$TF_VAR_alert_telegram_chat_id" ]; then
+            echo "::warning title=Алерты не доставляются::Нет секретов TELEGRAM_BOT_TOKEN_DMC268_T1 или TELEGRAM_CHAT_ID_DMC268_T1: алерты видны в Alertmanager, но в Telegram не уходят (infra/README.md, «Алерты»)."
+          fi
+          if [ -z "$TF_VAR_alert_heartbeat_url" ]; then
+            echo "::warning title=Нет dead man's switch::Нет секрета ALERT_HEARTBEAT_URL_DMC268_T1: упавший Prometheus или Alertmanager никто не заметит (infra/README.md, «Алерты»)."
+          fi
 
       # Связь с хранилищем пропала посреди шага, который пишет состояние или
       # держит блокировку: несохранённое состояние осталось в
@@ -461,9 +461,10 @@ jobs:
       # не записаться. Сколько времени GitHub даёт шагам после отмены, не
       # документировано: не успел — блокировку снимет следующий деплой.
       #
-      # Потолок шага — сумма ожиданий recover-state.sh: порт до 15 с, ssh до
-      # 15 с, хранилище до 120 с, блокировка, pull, push и unlock до 60, 60,
-      # 120 и 60 с — ≈ 7,7 мин.
+      # Потолок шага — сумма ожиданий recover-state.sh с запасом: порт до
+      # 15 с, ssh до 15 с, хранилище до 120 с; дальше под `timeout` —
+      # блокировка 60 с, расшифровка errored.tfstate (init и state pull) по
+      # 60 с, pull 60 с, push 120 с и unlock 60 с — 570 с, 9,5 мин.
       - name: Восстановить состояние OpenTofu
         id: recover
         if: >-
@@ -471,7 +472,7 @@ jobs:
           steps.infra.outcome == 'failure' || steps.infra.outcome == 'cancelled' ||
           steps.plan.outcome == 'failure' || steps.plan.outcome == 'cancelled' ||
           steps.apply.outcome == 'failure' || steps.apply.outcome == 'cancelled')
-        timeout-minutes: 10
+        timeout-minutes: 12
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_USER_DMC268_T1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_PASSWORD_DMC268_T1 }}
@@ -479,6 +480,9 @@ jobs:
           # Ключ зашифрованной копии errored.tfstate (recover-state.sh) —
           # отдельный и случайный: артефакт публичного репо доступен всем.
           STATE_BACKUP_KEY: ${{ secrets.STATE_BACKUP_KEY_DMC268_T1 }}
+          # errored.tfstate зашифрован (infra/encryption.tf), а `state push` его
+          # не читает: recover-state.sh сначала расшифровывает его этой фразой.
+          TF_VAR_state_passphrase: ${{ secrets.STATE_PASSPHRASE_DMC268_T1 }}
           INTERRUPTED: >-
             ${{ steps.infra.outcome == 'cancelled' || steps.plan.outcome == 'cancelled' ||
             steps.apply.outcome == 'cancelled' }}
@@ -511,13 +515,6 @@ jobs:
         run: |
           .github/scripts/deploy/mark.sh
           ssh stand "docker logs --tail 50 dmc268-api 2>&1; docker inspect -f '{{json .State.Health}}' dmc268-api" || true
-
-      - name: Проверить, что API жив (через туннель)
-        id: check_api
-        if: *fresh
-        run: |
-          .github/scripts/deploy/mark.sh
-          .github/scripts/deploy/check-api.sh
 
       - name: Проверить, что воркер работает
         id: check_worker
@@ -578,7 +575,6 @@ jobs:
             tofu ${{ steps.tofu.outcome }} ${{ steps.tofu.conclusion }}
             s3 ${{ steps.s3.outcome }} ${{ steps.s3.conclusion }}
             login ${{ steps.login.outcome }} ${{ steps.login.conclusion }}
-            diagnostics ${{ steps.diagnostics.outcome }} ${{ steps.diagnostics.conclusion }}
             infra ${{ steps.infra.outcome }} ${{ steps.infra.conclusion }}
             plan ${{ steps.plan.outcome }} ${{ steps.plan.conclusion }}
             pull ${{ steps.pull.outcome }} ${{ steps.pull.conclusion }}
@@ -588,7 +584,6 @@ jobs:
             recover ${{ steps.recover.outcome }} ${{ steps.recover.conclusion }}
             state_artifact ${{ steps.state_artifact.outcome }} ${{ steps.state_artifact.conclusion }}
             api_logs ${{ steps.api_logs.outcome }} ${{ steps.api_logs.conclusion }}
-            check_api ${{ steps.check_api.outcome }} ${{ steps.check_api.conclusion }}
             check_worker ${{ steps.check_worker.outcome }} ${{ steps.check_worker.conclusion }}
             check_replica ${{ steps.check_replica.outcome }} ${{ steps.check_replica.conclusion }}
             prune ${{ steps.prune.outcome }} ${{ steps.prune.conclusion }}

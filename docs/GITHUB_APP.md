@@ -59,8 +59,11 @@ GitHub ──вебхук──▶ nginx (контейнер интерфейс�
 Остальные действия `pull_request` (`reopened`, `closed` и прочие) сервис игнорирует. Событие
 `pull_request_review_thread` ревью не запускает: по нему бот пересчитывает проверку
 `dmc-268-ai-review`, когда закрывают тред (README, «Merge gate»). Запуска по назначению бота
-ревьюером или по упоминанию в комментарии нет. В базе для такого запуска есть `trigger_source` `manual` и
-`mention`, а ручной запуск `POST /api/v1/reviews` пока отвечает `501`.
+ревьюером или по упоминанию в комментарии нет (`trigger_source` `mention` в базе зарезервирован).
+Ревью можно запустить вручную из кабинета: `POST /api/v1/reviews` создаёт прогон с
+`trigger = manual` — в том числе повторно по уже проверенному коммиту и при выключенном
+авторевью. Запустить может роль push, triage, maintain или admin; без неё —
+`403 REPOSITORY_MANAGE_REQUIRED`.
 
 ## Кто что делает
 
@@ -217,7 +220,7 @@ larchanka-training/dmc-268-api-t1    [●━━] вкл     Настройки
      обновляет список;
    - выбрали «All repositories», иначе бот сразу пошёл бы во все репозитории аккаунта;
    - приложение поставили прямо на GitHub, мимо кнопки сервиса;
-   - GitHub не вернул `state`. Возвращает ли он его, на стенде ещё не проверено.
+   - `state` не от этой сессии: ссылку установки открыли в другой сессии или переход подделан.
 
    Тогда репозиторий появляется в списке выключенным и включается переключателем.
 5. Пользователь возвращается на «Репозитории» с итогом: «подключено N», «запрос отправлен
@@ -287,7 +290,8 @@ larchanka-training/dmc-268-api-t1    [●━━] вкл     Настройки
 | `eurorouter` | hosted-провайдер Eurorouter основным и единственным, код проверяемых репозиториев уходит ему на каждом прогоне | стенд (`deploy.yml`: `TF_VAR_llm_backend: eurorouter`; Ollama там нет) |
 
 За каждый прогон на стенде платит ключ `AI_DMC268_T1`, тот же, что у `eval.yml`; модель задаёт
-файл `.github/eurorouter-model`, а уровень рассуждений задаёт `.github/eurorouter-reasoning-effort`. Лимитов и баланса нет: сколько прогонов, столько и трат.
+файл `.github/eurorouter-model`, а уровень рассуждений задаёт `.github/eurorouter-reasoning-effort`. Воркер сверяет баланс плательщика репозитория до вызова модели (`BILLING_ENABLED`, спека
+`review-billing`): прогон без денег до модели не доходит и получает check run `failure`.
 Ревьюятся только свои PR (`app/domain/webhook.py`): из ветки самого репозитория (запушить её
 может только тот, у кого есть право записи; членство в организации тут не проверяется, скрытое
 GitHub присылает как `CONTRIBUTOR`) или из форка от автора с `author_association` `OWNER`,
@@ -315,7 +319,7 @@ GitHub присылает как `CONTRIBUTOR`) или из форка от ав
 | Permissions → Pull requests | Read and write | нет метаданных PR, ревью не публикуется, треды не читаются |
 | Permissions → Checks | Read and write | нет проверки `dmc-268-ai-review`, merge gate не работает |
 | Subscribe to events | Pull request; Pull request review thread | без первого нет прогонов; без второго проверка не пересчитывается при закрытии треда |
-| Setup URL, Redirect on update | `<PUBLIC_ORIGIN>/api/v1/auth/github/setup`, Redirect on update включён. Прописывать только после проверки на стенде, что GitHub возвращает `state` (задача 3.4 change `repositories-one-list`); пока не прописано, поле пустое | после установки GitHub не вернёт пользователя в сервис |
+| Setup URL, Redirect on update | `<PUBLIC_ORIGIN>/api/v1/auth/github/setup`, Redirect on update включён | после установки GitHub не вернёт пользователя в сервис |
 | Where can this GitHub App be installed | «Any account» ставит на любые аккаунты; «Only on this account» только в аккаунте владельца приложения | с «Only on this account» пользователи не поставят приложение на свои репозитории |
 
 **«Any account» и деньги.** Каждый прогон платит за модель с ключа
@@ -373,9 +377,9 @@ Private key меняется без простоя: сгенерировать �
 
 1. **Доходят ли вебхуки.** В настройках приложения → Advanced → Recent Deliveries (видит
    владелец приложения). Доставок нет: не задан Webhook URL или не включён Webhook. Доставки с
-   ошибкой: там же код ответа. Со стороны стенда смотрите шаг «Доставки вебхука и сбои воркера с
-   прошлого выката» в summary деплоя: число `POST /webhooks` по кодам и запросов GitHub-Hookshot к
-   nginx.
+   ошибкой: там же код ответа. Со стороны стенда — Grafana стенда, Explore, запрос
+   `sum by (http_response_status_code) (increase(http_server_request_duration_seconds_count{job="dmc-268-api", http_route="/api/v1/webhooks/{provider}"}[1h]))`:
+   доставки вебхука по кодам ответа.
 2. **Что ответил сервис.**
    - `401`: секрет вебхука в настройках приложения не совпадает с `WEBHOOK_SECRET_DMC268_T1`;
    - `202` `ignored`: репозиторий не подключён или выключен (у выключенного на коммите

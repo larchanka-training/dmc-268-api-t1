@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from app.application.llm_review import LlmLimits
-from app.application.ports.llm_gateway import LlmTask
+from app.application.ports.llm_gateway import LlmMeter, LlmTask
 from app.application.verify_findings import verify_findings
 from app.domain.entities import ContextPayload, DiffAnchor, Finding, Verdict
 from app.domain.enums import (
@@ -19,7 +19,7 @@ from app.domain.prompt import PromptTexts
 from app.domain.untrusted import fence
 from app.domain.verification import JudgedFinding
 
-from ..fakes.llm_gateway import ScriptedLlmGateway, verification_response
+from ..fakes.llm_gateway import ScriptedLlmGateway, spent, verification_response
 
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 TEXTS = PromptTexts(review_system="РЕВЬЮ", verifier_system="ВЕРИФИКАЦИЯ")
@@ -67,8 +67,8 @@ def _finding(
     )
 
 
-def _verify(gateway: ScriptedLlmGateway, *candidates: Finding):
-    return verify_findings(CONTEXT, TEXTS, gateway, LIMITS, candidates)
+def _verify(gateway: ScriptedLlmGateway, *candidates: Finding, meter: LlmMeter | None = None):
+    return verify_findings(CONTEXT, TEXTS, gateway, LIMITS, candidates, meter=meter)
 
 
 def test_without_candidates_the_model_is_not_called() -> None:
@@ -79,7 +79,7 @@ def test_without_candidates_the_model_is_not_called() -> None:
     assert gateway.requests == []
     assert verification.outcome is VerificationOutcome.NOT_REQUIRED
     assert (verification.kept, verification.dropped, verification.applied) == ((), (), None)
-    assert verification.tokens_used == 0
+    assert verification.called_model is False
 
 
 def test_every_kept_finding_carries_its_verdict() -> None:
@@ -89,7 +89,8 @@ def test_every_kept_finding_carries_its_verdict() -> None:
         [verification_response(("F1", "keep"), ("F2", "drop"), ("F3", "drop"), tokens=7)]
     )
 
-    verification = _verify(gateway, first, second, serious)
+    meter = LlmMeter()
+    verification = _verify(gateway, first, second, serious, meter=meter)
 
     (request,) = gateway.requests
     assert request.task is LlmTask.VERIFY
@@ -101,18 +102,20 @@ def test_every_kept_finding_carries_its_verdict() -> None:
         JudgedFinding(serious, Verdict(VerifierVerdict.DROP, "причина F3")),
     )
     assert verification.dropped == (JudgedFinding(second, Verdict(VerifierVerdict.DROP, "причина F2")),)
-    assert (verification.tokens_used, verification.step_tokens, verification.error_code) == (7, 7, None)
+    assert (verification.called_model, verification.error_code) == (True, None)
+    assert meter.total.total_tokens == 7
 
 
 def test_model_failure_keeps_the_candidates_without_verdicts() -> None:
     candidates = (_finding(1), _finding(2))
-    gateway = ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=3)])
+    gateway = ScriptedLlmGateway([spent(LlmTimeoutError("таймаут"), 3)])
 
-    verification = _verify(gateway, *candidates)
+    meter = LlmMeter()
+    verification = _verify(gateway, *candidates, meter=meter)
 
     assert verification.outcome is VerificationOutcome.UNAVAILABLE
     assert (verification.kept, verification.dropped, verification.applied) == (candidates, (), None)
-    assert (verification.tokens_used, verification.step_tokens) == (3, 3)
+    assert (verification.called_model, meter.total.total_tokens) == (True, 3)
     assert verification.error_code == "LLM_TIMEOUT"
 
 
@@ -120,8 +123,9 @@ def test_answer_without_a_verdict_for_every_candidate_keeps_them_all() -> None:
     candidates = (_finding(1), _finding(2))
     gateway = ScriptedLlmGateway([verification_response(("F1", "drop"), tokens=5)])
 
-    verification = _verify(gateway, *candidates)
+    meter = LlmMeter()
+    verification = _verify(gateway, *candidates, meter=meter)
 
     assert verification.outcome is VerificationOutcome.UNAVAILABLE
     assert (verification.kept, verification.applied) == (candidates, None)
-    assert (verification.tokens_used, verification.error_code) == (5, "LLM_INVALID_OUTPUT")
+    assert (meter.total.total_tokens, verification.error_code) == (5, "LLM_INVALID_OUTPUT")

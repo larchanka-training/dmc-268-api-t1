@@ -1,7 +1,10 @@
 """Сборка пакета контекста — чистая функция на литеральных диффах и контурах."""
 
 import hashlib
+import tracemalloc
+from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -28,7 +31,7 @@ from app.domain.entities import (
 )
 from app.domain.enums import DefinitionKind, Language, RulesStatus
 from app.domain.file_context import ContextOmission, ContextRule, file_contexts
-from app.domain.secret_redaction import redact_secrets
+from app.domain.secret_redaction import REDACTED, redact_secrets
 from app.domain.untrusted import boundary, fence, sanitize
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
@@ -49,7 +52,7 @@ LIMITS = ContextLimits(
     ast_max_files=20,
     ast_max_file_bytes=262_144,
     pr_context_max_tokens=1_000,
-    diff_max_bytes=5_242_880,
+    diff_max_bytes=5_242_880, diff_file_max_bytes=262_144,
 )
 
 DIFF = """\
@@ -104,6 +107,7 @@ def _assemble(
     skipped: tuple[SkippedAst, ...] = (),
     limits: ContextLimits = LIMITS,
     pr_context: PrContext = NO_PR_CONTEXT,
+    sources: dict[str, str] | None = None,
 ) -> AssembledContext:
     return assemble_context(
         SUBJECT,
@@ -111,6 +115,7 @@ def _assemble(
         rules,
         asts,
         skipped,
+        sources=sources or {},
         pr_context=pr_context,
         limits=limits,
         review_run_id=RUN_ID,
@@ -175,6 +180,27 @@ def test_filtered_file_is_reported_not_shown() -> None:
     assert {"path": "uv.lock", "part": "file", "reason": "filtered"} in payload.body["omitted"]
 
 
+def test_coverage_names_reviewed_and_filtered_files() -> None:
+    """Охват для сводки ревью — по тому, что вошло в пакет (#279)."""
+    coverage = _assemble().coverage
+    assert (coverage.reviewed, coverage.partial, coverage.not_reviewed) == (("app/repo.py",), (), ())
+    assert coverage.filtered == ("uv.lock",)
+
+
+def test_change_over_the_file_limit_is_filtered_by_the_limit_from_settings() -> None:
+    """#293: лимит файла приходит из `ContextLimits`, а не константой домена."""
+    snapshot = "+" + "x" * 2_000
+    diff = DIFF + f"diff --git a/tests/snap.json b/tests/snap.json\n--- a/tests/snap.json\n+++ b/tests/snap.json\n@@ -0,0 +1,1 @@\n{snapshot}\n"
+
+    small = _assemble(diff=diff, limits=replace(LIMITS, diff_file_max_bytes=1_000))
+    large = _assemble(diff=diff, limits=replace(LIMITS, diff_file_max_bytes=10_000))
+
+    assert "tests/snap.json" not in small.payload.file_paths
+    assert {"path": "tests/snap.json", "part": "file", "reason": "filtered"} in small.payload.body["omitted"]
+    assert small.coverage.filtered == ("uv.lock", "tests/snap.json")
+    assert "tests/snap.json" in large.payload.file_paths
+
+
 def test_shown_hunks_are_returned_for_anchor_validation() -> None:
     result = _assemble()
     assert [h.file_path for h in result.hunks] == ["app/repo.py"]
@@ -200,7 +226,7 @@ def test_same_inputs_give_the_same_digest() -> None:
 
 @pytest.mark.parametrize("max_tokens", [1_024, 2_000, 5_000, 32_000])
 def test_huge_diff_never_exceeds_the_limit(max_tokens: int) -> None:
-    limits = ContextLimits(max_tokens, 200, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+    limits = ContextLimits(max_tokens, 200, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
     payload = _assemble(diff=_big_diff(files=400), limits=limits).payload
     assert payload.token_count <= max_tokens
     assert estimate_tokens(serialize(payload.body)) <= max_tokens
@@ -210,8 +236,42 @@ def test_huge_diff_never_exceeds_the_limit(max_tokens: int) -> None:
     assert payload.body["omitted_count"] >= len(payload.body["omitted"])
 
 
+def test_hunk_longer_than_the_budget_is_omitted_without_sanitizing() -> None:
+    """Ханк длиннее остатка бюджета не обезвреживается: `sanitize` раздул бы `\\x01` в 8 раз.
+
+    Одна строка из управляющих символов проходит и байтовый, и строковый лимит диффа, а её
+    обезвреженная копия выводила воркер за память контейнера (#328). Лимит файла поднят: по
+    умолчанию такой файл отбросил бы фильтр (#293), а путь бюджета должен держать и больший лимит.
+    """
+    text = "\x01" * 1_000_000
+    files = parse_diff(f"diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1,1 @@\n+{text}\n")
+
+    tracemalloc.start()
+    try:
+        body = assemble_context(
+            SUBJECT,
+            files,
+            RULES,
+            (),
+            (),
+            sources={},
+            pr_context=NO_PR_CONTEXT,
+            limits=replace(LIMITS, diff_file_max_bytes=2_000_000),
+            review_run_id=RUN_ID,
+            now=NOW,
+            new_id=lambda: UUID(int=99),
+        ).payload.body
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert body["diff"] == []
+    assert {"path": "a.py", "part": "hunk", "reason": "budget", "line": 1} in body["omitted"]
+    assert peak < len(text)
+
+
 def test_omitted_count_reports_entries_that_did_not_fit_the_list() -> None:
-    limits = ContextLimits(1_024, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+    limits = ContextLimits(1_024, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
     body = _assemble(diff=_big_diff(files=2_000, lines_per_hunk=2), limits=limits).payload.body
     assert body["omitted_count"] > len(body["omitted"])
 
@@ -225,7 +285,7 @@ def test_diff_displaces_ast_when_budget_is_short() -> None:
         ),
         imports=tuple(f"import module_{i}" for i in range(500)),
     )
-    limits = ContextLimits(2_000, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+    limits = ContextLimits(2_000, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
     payload = _assemble(
         diff=_big_diff(files=1, lines_per_hunk=40),
         rules=RepoRules(status=RulesStatus.ABSENT),
@@ -242,7 +302,7 @@ def test_diff_displaces_ast_when_budget_is_short() -> None:
 
 def test_rules_do_not_spend_more_than_their_share() -> None:
     many_checks = RepoRule("Huge", ("app/**",), ("x/**",), tuple(f"проверка {i}" * 20 for i in range(50)))
-    limits = ContextLimits(32_000, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+    limits = ContextLimits(32_000, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
     body = _assemble(rules=RepoRules(RulesStatus.LOADED, (many_checks,)), limits=limits).payload.body
     assert body["rules"]["items"] == []
     assert {"path": ".review/rules.md", "part": "rule", "reason": "budget", "name": "Huge"} in body["omitted"]
@@ -250,7 +310,7 @@ def test_rules_do_not_spend_more_than_their_share() -> None:
 
 
 def test_rule_for_files_whose_diff_was_dropped_is_not_shown() -> None:
-    limits = ContextLimits(1_024, 200, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+    limits = ContextLimits(1_024, 200, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
     docs_rule = RepoRule("Docs", ("app/f399.py",), ("x/**",), ("c",))
     body = _assemble(
         diff=_big_diff(files=400), rules=RepoRules(RulesStatus.LOADED, (docs_rule,)), limits=limits
@@ -267,7 +327,7 @@ def test_shown_rules_are_exactly_the_rules_in_the_package() -> None:
 
 def test_rule_evicted_by_the_budget_is_not_shown() -> None:
     many_checks = RepoRule("Huge", ("app/**",), ("x/**",), tuple(f"проверка {i}" * 20 for i in range(50)))
-    limits = ContextLimits(32_000, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+    limits = ContextLimits(32_000, 100, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
     assembled = _assemble(rules=RepoRules(RulesStatus.LOADED, (many_checks,)), limits=limits)
     assert assembled.rules == ()
 
@@ -369,8 +429,8 @@ def test_empty_diff_gives_empty_but_valid_payload() -> None:
 
 def test_unused_rules_share_goes_to_the_diff() -> None:
     """Без правил доля под них не отнимается у диффа."""
-    small_share = ContextLimits(2_000, 50, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
-    large_share = ContextLimits(2_000, 1_500, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+    small_share = ContextLimits(2_000, 50, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
+    large_share = ContextLimits(2_000, 1_500, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
     absent = RepoRules(status=RulesStatus.ABSENT)
     diff = _big_diff(files=200)
     shown_small = _assemble(diff=diff, rules=absent, asts=(), limits=small_share).hunks
@@ -381,7 +441,7 @@ def test_unused_rules_share_goes_to_the_diff() -> None:
 def test_rules_share_is_reserved_only_for_what_rules_need() -> None:
     """Правило на один файл не резервирует всю долю."""
     tiny = RepoRule("Tiny", ("app/f0.py",), ("x/**",), ("c",))
-    limits = ContextLimits(2_000, 1_500, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+    limits = ContextLimits(2_000, 1_500, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
     diff = _big_diff(files=200)
     with_rule = _assemble(diff=diff, rules=RepoRules(RulesStatus.LOADED, (tiny,)), asts=(), limits=limits)
     without = _assemble(diff=diff, rules=RepoRules(RulesStatus.ABSENT), asts=(), limits=limits)
@@ -455,7 +515,7 @@ def test_description_that_fits_is_not_marked_as_cut() -> None:
 
 
 def test_commits_over_the_share_are_each_reported() -> None:
-    limits = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 300, diff_max_bytes=5_242_880)
+    limits = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 300, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
     commits = tuple(f"коммит {n}: " + "x" * 400 for n in range(5, 0, -1))
     body = _assemble(limits=limits, pr_context=PrContext("t", "", commits)).payload.body
     shown = [item for item in body["pull_request_context"] if item["part"] == "commit"]
@@ -466,7 +526,7 @@ def test_commits_over_the_share_are_each_reported() -> None:
 
 
 def test_package_with_pr_context_never_exceeds_the_limit() -> None:
-    limits = ContextLimits(1_024, 100, 32_768, 60, 20, 262_144, 200, diff_max_bytes=5_242_880)
+    limits = ContextLimits(1_024, 100, 32_768, 60, 20, 262_144, 200, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
     context = PrContext("t" * 500, "d" * 2_000, tuple("c" * 300 for _ in range(10)))
     payload = _assemble(diff=_big_diff(30), limits=limits, pr_context=context).payload
     assert payload.token_count <= 1_024
@@ -480,6 +540,7 @@ def test_package_without_a_pull_request_has_an_empty_header() -> None:
         RULES,
         (AST,),
         (),
+        sources={},
         pr_context=NO_PR_CONTEXT,
         limits=LIMITS,
         review_run_id=RUN_ID,
@@ -506,3 +567,283 @@ def test_assembled_package_reads_back_by_file() -> None:
     assert repo.rules == (ContextRule("Errors", RULE.checks),)
     assert repo.omitted == ()
     assert (lock.file_path, lock.hunks, lock.omitted) == ("uv.lock", (), (ContextOmission("file", "filtered"),))
+def _peak_of_assembly(
+    diff: str, *, rules: RepoRules = RULES, pr_context: PrContext = NO_PR_CONTEXT
+) -> tuple[dict[str, Any], int]:
+    """Тело пакета и пик `tracemalloc` одной сборки; разбор диффа — вне замера."""
+    files = parse_diff(diff)
+    tracemalloc.start()
+    try:
+        body = assemble_context(
+            SUBJECT,
+            files,
+            rules,
+            (),
+            (),
+            sources={},
+            pr_context=pr_context,
+            limits=LIMITS,
+            review_run_id=RUN_ID,
+            now=NOW,
+            new_id=lambda: UUID(int=99),
+        ).payload.body
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return body, peak
+
+
+def test_path_is_sanitized_once_per_file_not_per_hunk() -> None:
+    """Путь из управляющих символов обезвреживается раз на файл: копия на каждый ханк
+    в `omitted` выводила воркер за память на диффе в пределах обоих лимитов (#328).
+    """
+    path = "\x01" * 4_000
+    hunks = 2_000
+    body_lines = "".join(f"@@ -0,0 +{i},1 @@\n+x\n" for i in range(1, hunks + 1))
+    diff = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{body_lines}"
+
+    body, peak = _peak_of_assembly(diff, rules=RepoRules(RulesStatus.ABSENT))
+
+    safe = sanitize(path)
+    entries = body["diff"] + [e for e in body["omitted"] if e["part"] == "hunk"]
+    assert entries and all(e["path"] == safe for e in entries)
+    assert body["omitted_count"] == hunks - len(body["diff"])
+    assert peak < len(safe) * hunks // 10
+
+
+def test_rule_files_share_the_sanitized_path() -> None:
+    """Списки файлов правил — ссылки на один обезвреженный путь, а не копия на пару
+    «правило × файл».
+    """
+    rules = RepoRules(
+        RulesStatus.LOADED,
+        tuple(RepoRule(f"R{i}", ("**",), (), ("c",)) for i in range(3)),
+    )
+    path = "a\x01.py"
+    diff = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+x\n"
+
+    body, _ = _peak_of_assembly(diff, rules=rules)
+
+    files = [item["files"][0] for item in body["rules"]["items"]]
+    assert len(files) == 3 and files[0] == sanitize(path)
+    assert all(f is body["diff"][0]["path"] for f in files)
+
+
+def test_commit_message_longer_than_the_share_is_omitted_without_sanitizing() -> None:
+    """Сообщение коммита длиннее доли контекста PR не войдёт никогда и не обезвреживается:
+    `sanitize` раздул бы `\\x01` в 8 раз, а размер сообщений GitHub не ограничивает (#328).
+    """
+    text = "\x01" * 1_000_000
+    pr_context = PrContext(title="", description="", commit_messages=("fix: коротко", text))
+
+    body, peak = _peak_of_assembly(DIFF, pr_context=pr_context)
+
+    assert body["pull_request_context"] == [
+        {"part": "commit", "index": 1, "text": fence("commit_message", "fix: коротко")}
+    ]
+    assert {"part": "commit_message", "reason": "budget", "index": 2} in body["omitted"]
+    assert peak < len(text)
+
+
+# --- Окружение изменений и файл целиком (change `context-surrounding`) ---
+
+# Строка ~100 байт: файл из 120 строк больше порога целого файла (8 КБ).
+def _long_lines(path: str, count: int = 120) -> list[str]:
+    return [f"{path} line {n} " + "x" * 80 for n in range(1, count + 1)]
+
+
+def _replace_diff(path: str, lines: list[str], number: int, new: str) -> str:
+    """Дифф замены строки `number` на `new` с тремя строками контекста, как у git."""
+    first, last = max(1, number - 3), min(len(lines), number + 3)
+    body = [f" {line}" for line in lines[first - 1 : number - 1]]
+    body += [f"-{lines[number - 1]}", f"+{new}"]
+    body += [f" {line}" for line in lines[number:last]]
+    count = last - first + 1
+    return (
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        f"@@ -{first},{count} +{first},{count} @@\n" + "".join(f"{line}\n" for line in body)
+    )
+
+
+def _head(lines: list[str], number: int, new: str) -> str:
+    return "".join(f"{new if n == number else line}\n" for n, line in enumerate(lines, start=1))
+
+
+def _diff_texts(body: dict[str, Any], path: str) -> list[str]:
+    return [item["hunk"] for item in body["diff"] if item["path"] == path]
+
+
+def test_hunk_gets_thirty_lines_of_surrounding() -> None:
+    lines = _long_lines("a.txt")
+    result = _assemble(
+        diff=_replace_diff("a.txt", lines, 60, "changed"),
+        asts=(),
+        sources={"a.txt": _head(lines, 60, "changed")},
+    )
+
+    (hunk,) = _diff_texts(result.payload.body, "a.txt")
+    assert "\n@@ -30,61 +30,61 @@\n" in hunk
+    assert f" {lines[29]}\n" in hunk and f" {lines[89]}\n" in hunk
+    assert f" {lines[28]}\n" not in hunk and f" {lines[90]}\n" not in hunk
+    assert result.payload.tiers == ("diff", "surrounding")
+    # Якоря сверяются по исходному hunk'у: контекстные строки якорем не становятся.
+    assert result.hunks[0].changed_new_lines == frozenset({60})
+    assert result.payload.token_count <= LIMITS.max_tokens
+
+
+def test_small_file_goes_whole_without_ast() -> None:
+    lines = [f"# line {n}" for n in range(1, 31)]
+    lines[9:12] = ["    def save(self, item):", "        self.items.append(item)", "        return item"]
+    diff = _replace_diff("app/repo.py", lines, 11, "        self.items.insert(0, item)")
+    result = _assemble(diff=diff, sources={"app/repo.py": _head(lines, 11, "        self.items.insert(0, item)")})
+
+    (hunk,) = _diff_texts(result.payload.body, "app/repo.py")
+    assert "\n@@ -1,30 +1,30 @@\n # line 1\n" in hunk
+    assert " # line 30\n" in hunk
+    assert result.payload.body["ast"] == []
+    assert result.payload.tiers == ("diff", "whole_file")
+
+
+def test_surrounding_never_crowds_out_hunks_of_another_file() -> None:
+    first, second = _long_lines("a.txt"), _long_lines("b.txt")
+    diff = _replace_diff("a.txt", first, 60, "one") + _replace_diff("b.txt", second, 60, "two")
+    plain = _assemble(diff=diff, asts=()).payload
+    # Бюджета хватает на hunk'и обоих файлов, но не на окно первого: оно ~6 КБ.
+    limits = ContextLimits(plain.token_count + 300, 4_000, 32_768, 60, 20, 262_144, 1_000, 5_242_880, 262_144)
+
+    result = _assemble(
+        diff=diff,
+        asts=(),
+        limits=limits,
+        sources={"a.txt": _head(first, 60, "one"), "b.txt": _head(second, 60, "two")},
+    )
+
+    assert result.payload.body["diff"] == plain.body["diff"]
+    assert result.payload.tiers == ("diff",)
+    assert result.payload.token_count <= limits.max_tokens
+
+
+def test_file_with_an_omitted_hunk_is_not_expanded() -> None:
+    """Hunk файла не вошёл, а к второму проходу остаток вырос: правило файла `c.txt`
+    вернуло свой резерв, когда hunk `c.txt` не вошёл. Окно файла всё равно не строится."""
+    lines = [f"b {n}" for n in range(1, 101)]
+    added = [f"added {n} " + "y" * 100 for n in range(50)]
+    head_lines = [*_head(lines, 10, "changed").splitlines()[:80], *added, *lines[80:]]
+    diff = (
+        _replace_diff("b.txt", lines, 10, "changed")
+        + "@@ -80,0 +81,50 @@\n"
+        + "".join(f"+{line}\n" for line in added)
+        + _big_diff(1, 400).replace("app/f0.py", "c.txt")
+    )
+    rule = RepoRule(name="C", patterns=("c.txt",), excludes=(), checks=("z" * 8_000,))
+    limits = ContextLimits(4_000, 4_000, 32_768, 60, 20, 262_144, 200, 5_242_880, 262_144)
+
+    result = _assemble(
+        diff=diff,
+        rules=RepoRules(status=RulesStatus.LOADED, rules=(rule,)),
+        asts=(),
+        limits=limits,
+        sources={"b.txt": "".join(f"{line}\n" for line in head_lines)},
+    )
+
+    assert [h.file_path for h in result.hunks] == ["b.txt"]
+    (hunk,) = _diff_texts(result.payload.body, "b.txt")
+    assert hunk == fence("diff", result.hunks[0].text)
+    assert result.payload.tiers == ("diff",)
+
+
+def test_new_small_file_goes_whole_without_ast() -> None:
+    """Hunk нового файла уже покрывает его целиком: файл - `whole_file`, AST не дублирует текст."""
+    lines = ["import os", "", "def f():", "    return os.sep"]
+    diff = (
+        "diff --git a/app/new.py b/app/new.py\nnew file mode 100644\n--- /dev/null\n+++ b/app/new.py\n"
+        "@@ -0,0 +1,4 @@\n" + "".join(f"+{line}\n" for line in lines)
+    )
+    outline = FileOutline(definitions=(Definition(DefinitionKind.FUNCTION, "f", "def f()", 3, 4),), imports=("import os",))
+
+    result = _assemble(
+        diff=diff,
+        asts=(FileAst("app/new.py", Language.PYTHON, outline),),
+        sources={"app/new.py": "".join(f"{line}\n" for line in lines)},
+    )
+
+    assert _diff_texts(result.payload.body, "app/new.py") == [fence("diff", result.hunks[0].text)]
+    assert result.payload.body["ast"] == []
+    assert result.payload.tiers == ("diff", "whole_file")
+
+
+def test_window_longer_than_the_remainder_is_not_sanitized() -> None:
+    """Окно из управляющих символов не помещается: его текст не обезвреживается до отказа,
+    иначе `sanitize` раздул бы его в 8 раз (#328). Файл остаётся с исходным hunk'ом."""
+    lines = _long_lines("a.txt")
+    for n in range(30, 53):
+        lines[n] = "\x01" * 50_000
+    diff = _replace_diff("a.txt", lines, 60, "changed")
+    head = _head(lines, 60, "changed")
+    control = 23 * 50_000
+
+    tracemalloc.start()
+    try:
+        result = _assemble(diff=diff, asts=(), sources={"a.txt": head})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert _diff_texts(result.payload.body, "a.txt") == [fence("diff", result.hunks[0].text)]
+    assert result.payload.tiers == ("diff",)
+    assert result.payload.token_count <= LIMITS.max_tokens
+    # Строки файла, вид и редакция секретов - несколько копий текста (~5x); с `sanitize`
+    # и `fence` до проверки бюджета пик был ~66x.
+    assert peak < 10 * control, peak
+
+
+@pytest.mark.parametrize("path", [".env.example", "deploy/app.secrets.yaml", "certs/server.PEM"])
+def test_file_that_may_hold_secrets_is_not_expanded(path: str) -> None:
+    """`DB_PASSWORD=hunter2` без узнаваемого префикса `redact_secrets` не ловит: такие файлы
+    идут только hunk'ами, без окна и целиком."""
+    lines = [f"KEY_{n}=value{n}" for n in range(1, 31)]
+    diff = _replace_diff(path, lines, 11, "KEY_11=changed")
+
+    result = _assemble(diff=diff, asts=(), sources={path: _head(lines, 11, "KEY_11=changed")})
+
+    (hunk,) = _diff_texts(result.payload.body, path)
+    assert "KEY_1=value1\n" not in hunk
+    assert result.payload.tiers == ("diff",)
+
+
+def test_secret_in_unchanged_surrounding_line_does_not_reach_the_model() -> None:
+    """Строку окна PR не менял: токен в ней - метка. Тот же токен в строке `+` модель видит."""
+    token = "ghp_" + "a" * 36
+    lines = _long_lines("a.txt")
+    lines[39] = f"token = '{token}'"
+    diff = _replace_diff("a.txt", lines, 60, f"added = '{token}'")
+
+    result = _assemble(diff=diff, asts=(), sources={"a.txt": _head(lines, 60, f"added = '{token}'")})
+
+    (hunk,) = _diff_texts(result.payload.body, "a.txt")
+    assert f"\n token = '{REDACTED}'\n" in hunk
+    assert f"\n+added = '{token}'\n" in hunk
+    assert result.payload.tiers == ("diff", "surrounding")
+
+
+def test_new_large_file_gets_no_surrounding_tier() -> None:
+    """Hunk нового файла больше 8 КБ уже покрывает файл: окно ничего не добавляет, `surrounding` нет."""
+    lines = _long_lines("big.txt")
+    diff = (
+        "diff --git a/big.txt b/big.txt\nnew file mode 100644\n--- /dev/null\n+++ b/big.txt\n"
+        f"@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{line}\n" for line in lines)
+    )
+
+    result = _assemble(diff=diff, asts=(), sources={"big.txt": "".join(f"{line}\n" for line in lines)})
+
+    assert _diff_texts(result.payload.body, "big.txt") == [fence("diff", result.hunks[0].text)]
+    assert result.payload.tiers == ("diff",)
+
+
+def test_source_that_does_not_match_the_hunk_changes_nothing() -> None:
+    """Текст на head_sha не тот, что в диффе: исходный hunk, AST на месте, без новых уровней."""
+    result = _assemble(sources={"app/repo.py": "совсем другой файл\n"})
+
+    assert _diff_texts(result.payload.body, "app/repo.py") == [fence("diff", result.hunks[0].text)]
+    assert [item["path"] for item in result.payload.body["ast"]] == ["app/repo.py", "app/repo.py"]
+    assert result.payload.tiers == ("diff", "ast")

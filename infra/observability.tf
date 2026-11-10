@@ -9,7 +9,8 @@
 # одни и те же адреса работают в обоих окружениях (prometheus.yml, grafana
 # datasources, endpoint коллектора). Сеть стека internal; публикуемый порт
 # Grafana живёт в отдельной не-internal сети dmc268-grafana и открывается
-# SSH-туннелем. Выход в интернет через неё есть только у Grafana, и её
+# SSH-туннелем, а через публичный вход — по сети dmc268-grafana-proxy
+# (infra/network.tf). Выход в интернет через неё есть только у Grafana, и её
 # собственные походы наружу (статистика, проверки обновлений Grafana и
 # плагинов) выключены env.
 # Стек поднимается только при observability_enabled: count = 1 : 0 у образа,
@@ -60,6 +61,18 @@ resource "docker_image" "docker_socket_proxy" {
   keep_locally = true
 }
 
+resource "docker_image" "alertmanager" {
+  count        = var.observability_enabled ? 1 : 0
+  name         = local.alertmanager_image
+  keep_locally = true
+}
+
+resource "docker_image" "blackbox" {
+  count        = var.observability_enabled ? 1 : 0
+  name         = local.blackbox_image
+  keep_locally = true
+}
+
 resource "docker_volume" "loki" {
   name = "dmc268-loki-data"
 
@@ -94,6 +107,17 @@ resource "docker_volume" "prometheus" {
 
 resource "docker_volume" "grafana" {
   name = "dmc268-grafana-data"
+
+  # prevent_destroy и отсутствие count — как у тома Loki выше.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# Тишины (silences) и журнал отправок Alertmanager: без тома пересоздание
+# контейнера снимало бы тишины и повторяло уже отправленные алерты.
+resource "docker_volume" "alertmanager" {
+  name = "dmc268-alertmanager-data"
 
   # prevent_destroy и отсутствие count — как у тома Loki выше.
   lifecycle {
@@ -146,6 +170,15 @@ resource "docker_network" "logs" {
   name  = "dmc268-logs"
 }
 
+# Выход наружу для алертов (#100): Alertmanager шлёт в api.telegram.org,
+# dmc268-blackbox-public проверяет публичный вход стенда по его адресу. Сеть
+# стека internal, поэтому им нужна своя не-internal сеть; портов в ней никто
+# не публикует, остальные контейнеры стека в неё не подключены.
+resource "docker_network" "alerting" {
+  count = var.observability_enabled ? 1 : 0
+  name  = "dmc268-alerting"
+}
+
 resource "docker_container" "otelcol" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-otelcol"
@@ -191,7 +224,8 @@ resource "docker_container" "otelcol" {
   }
 
   # Трейсы браузера: nginx интерфейса проксирует на dmc268-otelcol:4319 —
-  # отдельный приёмник otlp/browser, только трейсы (otelcol.yaml).
+  # отдельный приёмник otlp/browser, только трейсы (otelcol.yaml). По этой же
+  # сети receiver nginx скрейпит stub_status интерфейса (dmc268-ui:8081).
   networks_advanced {
     name = docker_network.otlp.name
   }
@@ -393,6 +427,19 @@ resource "docker_container" "prometheus" {
     file    = "/etc/prometheus/prometheus.yml"
   }
 
+  # Правила алертов #100 и цель пробы публичного входа (prometheus.yml,
+  # rule_files и job blackbox-public). Цель локально — пустой список из
+  # observability/public-targets.yml, здесь — адрес стенда.
+  upload {
+    content = file("${path.module}/observability/alerts.yml")
+    file    = "/etc/prometheus/alerts.yml"
+  }
+
+  upload {
+    content = yamlencode(local.blackbox_public_targets)
+    file    = "/etc/prometheus/targets/public.yml"
+  }
+
   command = [
     "--config.file=/etc/prometheus/prometheus.yml",
     # Хранение метрик — 30 дней (как retention логов Loki).
@@ -422,6 +469,8 @@ resource "docker_container" "prometheus" {
 
 # Доступ к Grafana — по учётке: анонимный вход выключен, пароль админа из
 # переменной (локальный compose, наоборот, поднимает Grafana без логина).
+# Открывается через публичный вход на порту 8443 по подпути /grafana/ (nginx
+# интерфейса, сеть dmc268-grafana-proxy) и туннелем на bind_ip — по тому же подпути.
 resource "docker_container" "grafana" {
   count   = var.observability_enabled ? 1 : 0
   name    = "dmc268-grafana"
@@ -459,6 +508,36 @@ resource "docker_container" "grafana" {
     "GF_SECURITY_ADMIN_PASSWORD=${var.grafana_admin_password}",
     "GF_AUTH_ANONYMOUS_ENABLED=false",
     "GF_USERS_ALLOW_SIGN_UP=false",
+    # Подпуть открыт наружу целиком. /metrics Grafana отдаёт без входа —
+    # версию, коммит, число пользователей; Prometheus стенда её не опрашивает.
+    "GF_METRICS_ENABLED=false",
+    # Basic auth идёт мимо limit_req nginx на /grafana/login, и пять неудачных
+    # попыток за 5 минут блокируют логин — кто угодно держал бы admin
+    # заблокированным. API-клиентов у Grafana нет, вход — только формой.
+    "GF_AUTH_BASIC_ENABLED=false",
+    # Без входа Grafana отдаёт версию и коммит в /grafana/api/health и в
+    # buildInfo страницы входа; GF_METRICS_ENABLED=false этого не закрывает.
+    "GF_AUTH_ANONYMOUS_HIDE_VERSION=true",
+    # Публичные дашборды в 13.x включены по умолчанию: Admin/Editor кнопкой
+    # «Share externally» открыл бы панели с логами и трейсами без входа.
+    "GF_PUBLIC_DASHBOARDS_ENABLED=false",
+    # Снимки по умолчанию включены и открываются без входа любым по ссылке
+    # (/api/snapshots/:key, /dashboard/snapshot/*), а внешние уходят на
+    # snapshots.raintank.io. enabled=false отвечает 403 на всё API снимков,
+    # включая созданные раньше; external — отдельная настройка, без неё
+    # интерфейс по-прежнему предлагает публикацию на raintank (13.2.4).
+    "GF_SNAPSHOTS_ENABLED=false",
+    "GF_SNAPSHOTS_EXTERNAL_ENABLED=false",
+    # Публичный вход по подпути /grafana/: nginx интерфейса проксирует путь
+    # как есть, без rewrite, а Grafana строит ссылки и редиректы от root_url.
+    # С serve_from_sub_path Grafana отвечает только под /grafana/, корень —
+    # 301 на root_url, поэтому туннель — http://localhost:3000/grafana/.
+    # Адрес — public_origin на порту 8443, см. local.grafana_public_root_url.
+    "GF_SERVER_ROOT_URL=${local.grafana_public_root_url}",
+    "GF_SERVER_SERVE_FROM_SUB_PATH=true",
+    # TLS терминирует nginx интерфейса: cookie сессии — только по HTTPS.
+    # Через туннель браузеры принимают Secure-cookie от http://localhost.
+    "GF_SECURITY_COOKIE_SECURE=true",
     # Телеметрия вендора off: статистика использования и проверки обновлений
     # Grafana и плагинов не должны уходить с сервера наружу. То же в compose и у Loki/Tempo в их
     # конфигах (loki.yaml, tempo.yaml).
@@ -492,6 +571,12 @@ resource "docker_container" "grafana" {
     name = docker_network.grafana[0].name
   }
 
+  # Публичный вход: nginx интерфейса ходит сюда по имени контейнера
+  # (dmc268-grafana:3000), алиас не нужен.
+  networks_advanced {
+    name = docker_network.grafana_proxy.name
+  }
+
   depends_on = [
     docker_container.loki,
     docker_container.tempo,
@@ -520,7 +605,15 @@ resource "docker_container" "node_exporter" {
     "--path.rootfs=/rootfs",
     "--path.procfs=/host/proc",
     "--path.sysfs=/host/sys",
+    # Отметка о последней резервной копии (backup.sh) — алерт BackupStale.
+    "--collector.textfile.directory=/textfile",
   ]
+
+  volumes {
+    volume_name    = docker_volume.backup_metrics.name
+    container_path = "/textfile"
+    read_only      = true
+  }
 
   volumes {
     host_path      = "/"
@@ -587,5 +680,165 @@ resource "docker_container" "docker_socket_proxy" {
   networks_advanced {
     name    = docker_network.observability_docker_proxy[0].name
     aliases = ["dockerproxy"]
+  }
+}
+
+# Доставка алертов (#100): Prometheus шлёт сработавшие правила сюда, отсюда — в
+# Telegram. Токен бота и chat id — отдельными файлами (*_file в
+# alertmanager.yml), а не в конфиге и не в env: конфиг один с локальным, а env
+# виден в docker inspect. Порта на хосте нет: горящие алерты и тишины —
+# через amtool внутри контейнера (infra/README.md, «Алерты»).
+resource "docker_container" "alertmanager" {
+  count   = var.observability_enabled ? 1 : 0
+  name    = "dmc268-alertmanager"
+  image   = docker_image.alertmanager[0].image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.alertmanager
+  memory_swap = var.observability_memory_mb.alertmanager
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  # Как у коллектора: без read_only из-за upload конфига и секретов.
+  security_opts = ["no-new-privileges:true"]
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  upload {
+    content = file("${path.module}/observability/alertmanager.yml")
+    file    = "/etc/alertmanager/alertmanager.yml"
+  }
+
+  # Без секретов — заглушки, как локально в compose: токен unset (доставка
+  # падает с 404 Telegram), chat id 0 — chat_id_file Alertmanager разбирает
+  # как число. Пустой файл не годится: compose вместо пустого конфига
+  # монтирует каталог, и Alertmanager не читает токен вовсе.
+  upload {
+    content = var.alert_telegram_bot_token == "" ? "unset" : var.alert_telegram_bot_token
+    file    = "/etc/alertmanager/secrets/telegram_bot_token"
+  }
+
+  upload {
+    content = var.alert_telegram_chat_id == "" ? "0" : var.alert_telegram_chat_id
+    file    = "/etc/alertmanager/secrets/telegram_chat_id"
+  }
+
+  # Адрес heartbeat для Watchdog (#334, url_file receiver heartbeat). Без секрета
+  # — заглушка unset, как у токена: пинг падает с ошибкой в логе, адрес в ней
+  # Alertmanager скрывает (<redacted>).
+  upload {
+    content = var.alert_heartbeat_url == "" ? "unset" : var.alert_heartbeat_url
+    file    = "/etc/alertmanager/secrets/heartbeat_url"
+  }
+
+  # Тот же check с /fail для AlertDeliveryFailing (receiver heartbeat-fail):
+  # сломанную доставку в Telegram внешний сервис видит сразу. Без секрета —
+  # заглушка unset, как у пинга.
+  upload {
+    content = var.alert_heartbeat_url == "" ? "unset" : "${trimsuffix(var.alert_heartbeat_url, "/")}/fail"
+    file    = "/etc/alertmanager/secrets/heartbeat_fail_url"
+  }
+
+  command = [
+    "--config.file=/etc/alertmanager/alertmanager.yml",
+    "--storage.path=/alertmanager",
+    # Экземпляр один: кластер HA (gossip на :9094) не нужен.
+    "--cluster.listen-address=",
+  ]
+
+  volumes {
+    volume_name    = docker_volume.alertmanager.name
+    container_path = "/alertmanager"
+  }
+
+  # Приём алертов от Prometheus и скрейп — в сети стека.
+  networks_advanced {
+    name    = docker_network.observability[0].name
+    aliases = ["alertmanager"]
+  }
+
+  # Выход в api.telegram.org.
+  networks_advanced {
+    name = docker_network.alerting[0].name
+  }
+}
+
+# Пробы сервисов для алертов (#100): /health API, порты базы, реплики и
+# брокера (job blackbox-services). Стоит ТОЛЬКО в сети данных: /probe
+# принимает любой URL без авторизации, поэтому экземпляр не должен видеть
+# никого с выходом наружу — ни сам интернет, ни dmc268-blackbox-public в сети
+# стека (цепочка /probe?target=http://blackbox-public:9115/probe?target=…
+# выводила бы запрос в интернет, замечание ревью #324). Prometheus скрейпит
+# его там же, в сети данных, по имени контейнера. Публичный вход проверяет
+# отдельный dmc268-blackbox-public ниже.
+resource "docker_container" "blackbox" {
+  count   = var.observability_enabled ? 1 : 0
+  name    = "dmc268-blackbox"
+  image   = docker_image.blackbox[0].image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.blackbox
+  memory_swap = var.observability_memory_mb.blackbox
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  # Только HTTP и TCP: ICMP (NET_RAW) пробам не нужен.
+  security_opts = ["no-new-privileges:true"]
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  upload {
+    content = file("${path.module}/observability/blackbox.yml")
+    file    = "/etc/blackbox_exporter/config.yml"
+  }
+
+  command = ["--config.file=/etc/blackbox_exporter/config.yml"]
+
+  # Цели проб API, базы, реплики и брокера и скрейп Prometheus
+  # (dmc268-blackbox:9115) — в сети данных.
+  networks_advanced {
+    name = docker_network.backend.name
+  }
+}
+
+# Проба публичного входа по HTTPS и срок сертификата (job blackbox-public):
+# выход наружу — через dmc268-alerting, сети данных у этого экземпляра нет.
+resource "docker_container" "blackbox_public" {
+  count   = var.observability_enabled ? 1 : 0
+  name    = "dmc268-blackbox-public"
+  image   = docker_image.blackbox[0].image_id
+  restart = "unless-stopped"
+
+  memory      = var.observability_memory_mb.blackbox_public
+  memory_swap = var.observability_memory_mb.blackbox_public
+  log_driver  = "json-file"
+  log_opts    = local.log_opts
+
+  security_opts = ["no-new-privileges:true"]
+
+  capabilities {
+    drop = ["ALL"]
+  }
+
+  upload {
+    content = file("${path.module}/observability/blackbox.yml")
+    file    = "/etc/blackbox_exporter/config.yml"
+  }
+
+  command = ["--config.file=/etc/blackbox_exporter/config.yml"]
+
+  # Скрейп Prometheus — blackbox-public:9115 в сети стека.
+  networks_advanced {
+    name    = docker_network.observability[0].name
+    aliases = ["blackbox-public"]
+  }
+
+  # Публичный вход — по внешнему адресу стенда.
+  networks_advanced {
+    name = docker_network.alerting[0].name
   }
 }

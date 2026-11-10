@@ -10,6 +10,9 @@ Schema для провайдера и ими же проверяет ответ.
 не станет строкой 3), а строки и перечисления и без того не принимают
 чужого. Лишнее поле - ошибка: модель, дописавшая своё, ответила не по форме.
 
+Текст модели (замечания, сводка, причины вердиктов) выходит отсюда без секретов:
+`redact_secrets` заменяет их меткой до записи, публикации и лога (#315).
+
 Pydantic живёт только здесь и в порте; остальной код получает dataclass'ы
 `LlmReviewResult` и доменные `Verdict` из чистых функций ниже.
 """
@@ -36,6 +39,7 @@ from app.domain.enums import (
     VerifierVerdict,
 )
 from app.domain.result import Result
+from app.domain.secret_redaction import redact_secrets
 
 # Обычные присваивания, а не `type X = …`: псевдоним PEP 695 Pydantic выносит
 # в `$defs` отдельным определением, и схема для провайдера обрастает ссылками.
@@ -120,27 +124,26 @@ def _anchor(file_path: str, side: DiffSide, line: int) -> DiffAnchor:
     return DiffAnchor(file_path=file_path, side=side, old_line=line)
 
 
-def to_review_result(output: ReviewOutput, *, model: str, tokens_used: int) -> LlmReviewResult:
+def to_review_result(output: ReviewOutput, *, model: str) -> LlmReviewResult:
     """Перевести проверенный ответ ревью в структуры приложения; `threadFollowUps` отбрасываются."""
     return LlmReviewResult(
         model=model,
-        tokens_used=tokens_used,
         findings=tuple(
             LlmFinding(
                 anchor=_anchor(f.file_path, f.side, f.line),
                 category=f.category,
                 severity=f.severity,
-                message=f.message,
-                suggestion=f.suggestion.diff if f.suggestion is not None else None,
+                message=redact_secrets(f.message),
+                suggestion=redact_secrets(f.suggestion.diff) if f.suggestion is not None else None,
                 confidence=f.confidence,
                 rule=LlmRuleRef(name=f.rule.name, check=f.rule.check) if f.rule is not None else None,
             )
             for f in output.findings
         ),
         summary=LlmReviewSummary(
-            problem=output.summary.problem,
-            positives=output.summary.positives,
-            effort=output.summary.effort,
+            problem=redact_secrets(output.summary.problem),
+            positives=tuple(redact_secrets(p) for p in output.summary.positives),
+            effort=redact_secrets(output.summary.effort),
         ),
     )
 
@@ -162,4 +165,5 @@ def check_verdicts(output: VerificationOutput, ids: Sequence[str]) -> Result[dic
     ]
     if problems:
         return Result.failure("ответ верификатора не покрывает замечания: " + "; ".join(problems))
-    return Result.success({v.id: Verdict(v.verdict, v.reason) for v in output.verdicts})
+    # `reason` уходит в лог (`review_pipeline`), секрет из диффа — нет.
+    return Result.success({v.id: Verdict(v.verdict, redact_secrets(v.reason)) for v in output.verdicts})

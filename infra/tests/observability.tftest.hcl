@@ -16,7 +16,13 @@ variables {
   postgres_replication_password = "repl:ication@pass-16"
   github_webhook_secret         = "webhook-secret"
   user_token_encryption_key     = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  state_passphrase              = "test-state-passphrase-16+"
   llm_backend                   = "stub"
+  # Доставка алертов: значения общие для всех run; пустые и битые — в
+  # отдельных run ниже.
+  alert_telegram_bot_token = "123456789:AAEexampleexampleexampleexample_-12"
+  alert_telegram_chat_id   = "-1001234567890"
+  alert_heartbeat_url      = "https://hc-ping.com/0f6c4a3e-8a8b-4a8e-9c1f-2b5d7e9a1c3d"
 }
 
 run "observability_stack_plans_protected" {
@@ -32,7 +38,7 @@ run "observability_stack_plans_protected" {
   }
 
   # Ресурсы стека считаются (count = 1 : 0), поэтому каждый адресуется по
-  # индексу: с включённым флагом все девять есть в плане. Список — по
+  # индексу: с включённым флагом все двенадцать есть в плане. Список — по
   # docker_container.* из observability.tf; новый контейнер стека обязан
   # добавляться сюда.
   assert {
@@ -42,7 +48,8 @@ run "observability_stack_plans_protected" {
         docker_container.otelcol_logs[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
-        docker_container.docker_socket_proxy[0],
+        docker_container.docker_socket_proxy[0], docker_container.alertmanager[0],
+        docker_container.blackbox[0], docker_container.blackbox_public[0],
       ] :
       c.memory > 0 && c.memory == c.memory_swap
     ])
@@ -58,7 +65,8 @@ run "observability_stack_plans_protected" {
         docker_container.otelcol_logs[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
-        docker_container.docker_socket_proxy[0],
+        docker_container.docker_socket_proxy[0], docker_container.alertmanager[0],
+        docker_container.blackbox[0], docker_container.blackbox_public[0],
       ] :
       c.log_driver == "json-file" && jsonencode(c.log_opts) == jsonencode(local.log_opts)
     ])
@@ -75,7 +83,8 @@ run "observability_stack_plans_protected" {
         docker_container.otelcol_logs[0], docker_container.loki[0],
         docker_container.tempo[0], docker_container.prometheus[0],
         docker_container.grafana[0], docker_container.node_exporter[0],
-        docker_container.docker_socket_proxy[0],
+        docker_container.docker_socket_proxy[0], docker_container.alertmanager[0],
+        docker_container.blackbox[0], docker_container.blackbox_public[0],
       ] :
       contains(c.security_opts, "no-new-privileges:true")
     ])
@@ -111,6 +120,128 @@ run "observability_stack_without_secrets_rejected" {
   }
 
   expect_failures = [var.grafana_admin_password, var.postgres_monitor_password]
+}
+
+# Секреты Telegram битые: опечатка всплыла бы только на первом алерте —
+# план падает до изменений на сервере.
+run "observability_stack_with_broken_telegram_rejected" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    alert_telegram_bot_token  = "not-a-token"
+    alert_telegram_chat_id    = "@channel"
+  }
+
+  expect_failures = [var.alert_telegram_bot_token, var.alert_telegram_chat_id]
+}
+
+# Адрес heartbeat битый (#334): не https или с пробелом — план падает, иначе
+# Watchdog молча не доходил бы до внешнего сервиса, и тот шумел бы зря.
+run "observability_stack_with_plain_http_heartbeat_rejected" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    alert_heartbeat_url       = "http://hc-ping.com/0f6c4a3e"
+  }
+
+  expect_failures = [var.alert_heartbeat_url]
+}
+
+run "observability_stack_with_spaced_heartbeat_rejected" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    alert_heartbeat_url       = "https://hc-ping.com/0f6c4a3e 1"
+  }
+
+  expect_failures = [var.alert_heartbeat_url]
+}
+
+# Секретов Telegram нет совсем (незаданный секрет приходит пустой строкой):
+# стек поднимается, Alertmanager получает заглушки unset и 0 — алерты
+# считаются, но не доставляются.
+run "observability_stack_without_telegram_plans" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    alert_telegram_bot_token  = ""
+    alert_telegram_chat_id    = ""
+    alert_heartbeat_url       = ""
+  }
+
+  assert {
+    condition = (
+      one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_bot_token"]) == "unset"
+      && one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_chat_id"]) == "0"
+    )
+    error_message = "Без секретов Telegram Alertmanager получает заглушки — токен unset и chat id 0, как локально в compose: пустой chat_id_file он не разобрал бы как число."
+  }
+
+  assert {
+    condition     = one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/heartbeat_url"]) == "unset"
+    error_message = "Без адреса heartbeat Alertmanager получает заглушку unset, как локально в compose: стек поднимается, пинг Watchdog падает в логе."
+  }
+
+  assert {
+    condition     = one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/heartbeat_fail_url"]) == "unset"
+    error_message = "Без адреса heartbeat адрес /fail для AlertDeliveryFailing — тоже заглушка unset, а не «/fail» без хоста."
+  }
+}
+
+# Адрес /fail строится из того же секрета: завершающий / адреса не даёт «//fail».
+run "heartbeat_fail_url_is_the_same_check_with_fail" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    alert_heartbeat_url       = "https://hc-ping.com/0f6c4a3e/"
+  }
+
+  assert {
+    condition     = one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/heartbeat_fail_url"]) == "https://hc-ping.com/0f6c4a3e/fail"
+    error_message = "AlertDeliveryFailing уходит на тот же check с /fail: healthchecks.io и аналоги понимают его как явный сбой."
+  }
+}
+
+# Секреты Telegram и цель пробы публичного входа доходят до контейнеров файлами.
+run "alerting_gets_secrets_as_files_and_the_public_target" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    public_origin             = "https://203.0.113.10"
+  }
+
+  assert {
+    condition = (
+      one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_bot_token"]) == var.alert_telegram_bot_token
+      && one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/telegram_chat_id"]) == var.alert_telegram_chat_id
+      && one([for u in docker_container.alertmanager[0].upload : u.content if u.file == "/etc/alertmanager/secrets/heartbeat_url"]) == var.alert_heartbeat_url
+      && length(coalesce(docker_container.alertmanager[0].env, [])) == 0
+    )
+    error_message = "Токен бота, chat id и адрес heartbeat попадают в Alertmanager файлами под /etc/alertmanager/secrets (bot_token_file, chat_id_file, url_file), а не через env: env виден в docker inspect."
+  }
+
+  assert {
+    condition     = yamldecode(one([for u in docker_container.prometheus[0].upload : u.content if u.file == "/etc/prometheus/targets/public.yml"])) == [{ targets = ["https://203.0.113.10/"] }]
+    error_message = "Цель пробы публичного входа — public_origin со слешем на конце (job blackbox-public, файл /etc/prometheus/targets/public.yml)."
+  }
 }
 
 # Сети и порт стека по плану (то же сверяет tests/test_infra_isolation.py по
@@ -166,15 +297,56 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
   }
 
   assert {
+    condition = toset([for n in docker_container.alertmanager[0].networks_advanced : n.name]) == toset([
+      docker_network.observability[0].name, docker_network.alerting[0].name,
+    ]) && docker_network.alerting[0].internal != true && length(docker_container.alertmanager[0].ports) == 0
+    error_message = "Alertmanager стоит ровно в двух сетях: стека (приём алертов от Prometheus) и dmc268-alerting — не internal, выход в api.telegram.org. Портов на хосте у него нет."
+  }
+
+  assert {
+    condition = toset([for n in docker_container.blackbox[0].networks_advanced : n.name]) == toset([
+      docker_network.backend.name,
+    ]) && length(docker_container.blackbox[0].ports) == 0
+    error_message = "blackbox с пробами сервисов стоит только в сети данных: /probe без авторизации сделал бы его прокси в интернет — напрямую или цепочкой через blackbox-public в сети стека. Портов на хосте у него нет."
+  }
+
+  assert {
+    condition = toset([for n in docker_container.blackbox_public[0].networks_advanced : n.name]) == toset([
+      docker_network.observability[0].name, docker_network.alerting[0].name,
+    ]) && length(docker_container.blackbox_public[0].ports) == 0
+    error_message = "blackbox-public стоит ровно в сетях стека и dmc268-alerting (проба публичного входа), без сети данных. Портов на хосте у него нет."
+  }
+
+  assert {
     condition     = docker_network.otlp.internal == true
     error_message = "Сеть dmc268-otlp — internal: через неё интерфейс ходит в коллектор, выхода в интернет у коллектора быть не должно."
   }
 
   assert {
     condition = toset([for n in docker_container.grafana[0].networks_advanced : n.name]) == toset([
-      docker_network.observability[0].name, docker_network.grafana[0].name,
+      docker_network.observability[0].name, docker_network.grafana[0].name, docker_network.grafana_proxy.name,
     ])
-    error_message = "Grafana должна стоять в сети стека (datasources loki/tempo/prometheus) и в отдельной сети dmc268-grafana, где публикуется её порт."
+    error_message = "Grafana должна стоять в сети стека (datasources loki/tempo/prometheus), в отдельной сети dmc268-grafana, где публикуется её порт, и в dmc268-grafana-proxy (публичный вход через nginx интерфейса)."
+  }
+
+  # Из стека бэкенда в сети прокси — только Grafana: интерфейс в ней видит
+  # её одну. Сеть internal — выхода наружу через неё нет.
+  assert {
+    condition = (
+      docker_network.grafana_proxy.internal == true
+      && length([
+        for c in [
+          docker_container.api, docker_container.worker,
+          docker_container.otelcol[0], docker_container.otelcol_docker[0],
+          docker_container.otelcol_logs[0], docker_container.loki[0],
+          docker_container.tempo[0], docker_container.prometheus[0],
+          docker_container.node_exporter[0], docker_container.docker_socket_proxy[0],
+          docker_container.alertmanager[0], docker_container.blackbox[0],
+          docker_container.blackbox_public[0],
+        ] : c if contains([for n in c.networks_advanced : n.name], docker_network.grafana_proxy.name)
+      ]) == 0
+    )
+    error_message = "Сеть dmc268-grafana-proxy — internal, и из стека бэкенда в ней только Grafana."
   }
 
   assert {
@@ -189,6 +361,72 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
       && docker_container.grafana[0].ports[0].internal == 3000
     )
     error_message = "Grafana публикует ровно один порт: 3000 из контейнера на grafana_port и bind_ip (петля; снаружи — SSH-туннель)."
+  }
+}
+
+# Публичный вход в Grafana (change grafana-public-access): root_url из
+# public_origin на порту 8443 (свой origin, отдельно от кабинета) с подпутём
+# /grafana/ — и для origin со слешем на конце, —
+# отдача из подпути и cookie только по HTTPS; анонимный вход и регистрация
+# по-прежнему выключены. /metrics и basic auth выключены: подпуть открыт
+# наружу, а basic auth обходит limit_req на /grafana/login. Версия без входа
+# скрыта, публичные дашборды и снимки выключены — иначе панели с логами и
+# трейсами открывались бы без входа.
+run "grafana_serves_public_entry_sub_path" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    public_origin             = "https://203.0.113.10/"
+  }
+
+  assert {
+    condition = alltrue([
+      for e in [
+        "GF_SERVER_ROOT_URL=https://203.0.113.10:8443/grafana/",
+        "GF_SERVER_SERVE_FROM_SUB_PATH=true",
+        "GF_SECURITY_COOKIE_SECURE=true",
+        "GF_AUTH_ANONYMOUS_ENABLED=false",
+        "GF_USERS_ALLOW_SIGN_UP=false",
+        "GF_METRICS_ENABLED=false",
+        "GF_AUTH_BASIC_ENABLED=false",
+        "GF_AUTH_ANONYMOUS_HIDE_VERSION=true",
+        "GF_PUBLIC_DASHBOARDS_ENABLED=false",
+        "GF_SNAPSHOTS_ENABLED=false",
+        "GF_SNAPSHOTS_EXTERNAL_ENABLED=false",
+      ] : contains(docker_container.grafana[0].env, e)
+    ])
+    error_message = "Grafana: GF_SERVER_ROOT_URL = public_origin без слеша + :8443/grafana/, GF_SERVER_SERVE_FROM_SUB_PATH=true, GF_SECURITY_COOKIE_SECURE=true, анонимный вход, регистрация, /metrics, basic auth, публичные дашборды и снимки выключены, версия скрыта."
+  }
+}
+
+# Без public_origin (локальный apply со стеком) root_url — относительный
+# /grafana/, без порта: склеивать порт не с чем, Grafana с ним стартует.
+run "grafana_root_url_is_relative_without_public_origin" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+  }
+
+  assert {
+    condition     = contains(docker_container.grafana[0].env, "GF_SERVER_ROOT_URL=/grafana/")
+    error_message = "Grafana: с пустым public_origin GF_SERVER_ROOT_URL — относительный /grafana/."
+  }
+}
+
+run "grafana_proxy_network_exists_without_the_stack" {
+  command = plan
+
+  # observability_enabled по умолчанию false. К dmc268-grafana-proxy по имени
+  # подключается стек dmc-268-ui-t1, как к dmc268-otlp.
+  assert {
+    condition     = docker_network.grafana_proxy.name == "dmc268-grafana-proxy" && docker_network.grafana_proxy.internal == true
+    error_message = "Сеть dmc268-grafana-proxy (internal) должна создаваться и с выключенным стеком: на неё по имени ссылается стек интерфейса."
   }
 }
 
@@ -257,5 +495,46 @@ run "otlp_network_exists_without_the_stack" {
   assert {
     condition     = docker_network.otlp.name == "dmc268-otlp"
     error_message = "Сеть dmc268-otlp должна создаваться и с выключенным стеком: на неё по имени ссылается стек интерфейса."
+  }
+}
+
+# Страница статуса (change add-status-page): API читает алерты у Prometheus
+# стека по имени контейнера — оба в сети данных. Воркеру адрес не нужен.
+run "api_reads_alerts_from_prometheus_with_the_stack" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+  }
+
+  assert {
+    condition = (
+      contains(docker_container.api.env, "PROMETHEUS_URL=http://${docker_container.prometheus[0].name}:9090")
+      && length([for e in docker_container.worker.env : e if startswith(e, "PROMETHEUS_URL=")]) == 0
+    )
+    error_message = "Со стеком API получает PROMETHEUS_URL=http://dmc268-prometheus:9090, воркер — нет."
+  }
+
+  assert {
+    condition = contains(
+      setintersection(
+        toset([for n in docker_container.api.networks_advanced : n.name]),
+        toset([for n in docker_container.prometheus[0].networks_advanced : n.name]),
+      ),
+      docker_network.backend.name,
+    )
+    error_message = "API и Prometheus должны делить сеть данных: по ней API читает алерты для страницы статуса."
+  }
+}
+
+run "api_has_no_prometheus_url_without_the_stack" {
+  command = plan
+
+  # observability_enabled по умолчанию false: Prometheus нет, статус — unknown.
+  assert {
+    condition     = length([for e in docker_container.api.env : e if startswith(e, "PROMETHEUS_URL=")]) == 0
+    error_message = "Без стека PROMETHEUS_URL у API не задаётся: Prometheus не существует."
   }
 }

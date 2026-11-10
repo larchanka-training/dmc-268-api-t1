@@ -1,4 +1,6 @@
 title: Уведомление - исключение проглочено молча
+# categories у нарушения правила: проглоченное исключение прячет сбой
+# доставки - correctness.
 pull_request:
   title: "feat: уведомление о платеже во внешнюю систему"
   description: После успешного платежа сервис отправляет уведомление партнёру.
@@ -22,3 +24,4 @@ expected:
     path: app/integrations/notifier.py
     contains: "except Exception:"
     rule: [Error Handling Standards, 2]
+    categories: [correctness]

@@ -13,15 +13,17 @@ from app.application.use_cases.connect_repository import (
     connect_installation,
     connect_repository,
     list_with_connections,
+    save_repository_settings,
 )
 from app.application.use_cases.user_token import SessionClosed
 from app.domain.entities import (
     InstallationRepository,
     Repository,
     RepositoryPermissions,
+    RepositorySettings,
     Secret,
 )
-from app.domain.enums import Provider, RepositorySelection
+from app.domain.enums import FindingSeverity, Provider, RepositorySelection
 from app.domain.provider_token import ProviderTokenRejected, token_from_grant
 from app.domain.session import open_session
 from app.domain.vcs_errors import VcsError
@@ -33,6 +35,8 @@ from ..fakes.unit_of_work import FakeUnitOfWork
 NOW = datetime(2026, 10, 22, 9, 30, tzinfo=UTC)
 NEW_ID = UUID("01920000-0000-7000-8000-000000000041")
 SESSION_ID = UUID(int=0x5E)
+# Пользователь сессии `_signed_in`.
+USER_ID = UUID(int=1)
 READ = RepositoryPermissions(admin=False, maintain=False, push=False, triage=False)
 ADMIN = RepositoryPermissions(admin=True, maintain=False, push=False, triage=False)
 MAINTAIN = RepositoryPermissions(admin=False, maintain=True, push=False, triage=False)
@@ -52,13 +56,13 @@ DOCS = _repo("303", "docs", WRITE)
 def _signed_in() -> FakeUnitOfWork:
     """Сессия с токеном, выданным при входе в `NOW`: обновлять не нужно."""
     uow = FakeUnitOfWork()
-    uow.sessions.add(open_session(SESSION_ID, UUID(int=1), "cookie", NOW))
+    uow.sessions.add(open_session(SESSION_ID, USER_ID, "cookie", NOW))
     uow.provider_tokens.save(SESSION_ID, token_from_grant(EXPIRING_GRANT, NOW))
     return uow
 
 
-def _user(oauth: FakeOAuthProvider | None = None) -> UserContext:
-    return UserContext(oauth=oauth or FakeOAuthProvider(), session_id=SESSION_ID)
+def _user(oauth: FakeOAuthProvider | None = None, user_id: UUID = USER_ID) -> UserContext:
+    return UserContext(oauth=oauth or FakeOAuthProvider(), session_id=SESSION_ID, user_id=user_id)
 
 
 def _registered(provider_id: str) -> Repository:
@@ -143,6 +147,7 @@ def test_admin_connects_and_the_repository_is_recorded() -> None:
         created_at=NOW,
         updated_at=NOW,
         connected_at=NOW,
+        payer_user_id=USER_ID,
     )
     assert outcome == expected
     assert uow.repositories.get(NEW_ID) == expected
@@ -285,3 +290,181 @@ def test_setup_counts_only_rows_it_actually_inserted() -> None:
     catalog = FakeInstallationCatalog([API], installations={7: (RepositorySelection.SELECTED, [API])})
 
     assert connect_installation(catalog, uow, _user(), 7, lambda: NEW_ID, NOW, connect_selected=True) == 0
+
+
+SETTINGS = RepositorySettings(auto_review_enabled=False, branch_filter=("main", "release/*"), min_severity=FindingSeverity.HIGH)
+LATER = datetime(2026, 10, 22, 10, 0, tzinfo=UTC)
+
+
+def _stored(uow: FakeUnitOfWork, repository: Repository) -> Repository:
+    with uow:
+        uow.repositories.add(repository)
+        uow.commit()
+    return repository
+
+
+def _save(
+    catalog: FakeInstallationCatalog, uow: FakeUnitOfWork, repository: Repository, settings: RepositorySettings = SETTINGS
+) -> Repository | ConnectRefusal:
+    return save_repository_settings(catalog, uow, _user(), repository, settings, LATER)
+
+
+def _settings_of(uow: FakeUnitOfWork, repository: Repository) -> Repository | None:
+    with uow:
+        return uow.repositories.get(repository.id)
+
+
+@pytest.mark.parametrize("permissions", [ADMIN, MAINTAIN])
+def test_admin_and_maintain_save_settings(permissions: RepositoryPermissions) -> None:
+    uow = _signed_in()
+    repository = _stored(uow, _registered("101"))
+
+    outcome = _save(FakeInstallationCatalog([_repo("101", "api", permissions)]), uow, repository)
+
+    saved = _settings_of(uow, repository)
+    assert outcome == saved
+    assert saved is not None
+    assert (saved.auto_review_enabled, saved.branch_filter, saved.min_severity, saved.updated_at) == (
+        False,
+        ("main", "release/*"),
+        FindingSeverity.HIGH,
+        LATER,
+    )
+
+
+@pytest.mark.parametrize("permissions", [WRITE, TRIAGE, READ])
+def test_without_admin_or_maintain_settings_are_refused_and_unchanged(permissions: RepositoryPermissions) -> None:
+    uow = _signed_in()
+    repository = _stored(uow, _registered("101"))
+
+    outcome = _save(FakeInstallationCatalog([_repo("101", "api", permissions)]), uow, repository)
+
+    assert outcome is ConnectRefusal.MANAGE_REQUIRED
+    assert _settings_of(uow, repository) == repository
+
+
+def test_settings_of_a_repository_github_does_not_give_are_refused() -> None:
+    uow = _signed_in()
+    repository = _stored(uow, _registered("101"))
+
+    assert _save(FakeInstallationCatalog([]), uow, repository) is ConnectRefusal.NOT_IN_INSTALLATION
+    assert _settings_of(uow, repository) == repository
+
+
+def test_the_role_is_asked_from_github_directly() -> None:
+    """Мимо кэша видимости: каталог спрашивается о самом репозитории, а не о списке."""
+    uow = _signed_in()
+    repository = _stored(uow, _registered("101"))
+    catalog = FakeInstallationCatalog([API])
+
+    _save(catalog, uow, repository)
+
+    assert catalog.calls == ["user_repository"]
+
+
+def test_a_github_failure_on_save_writes_nothing() -> None:
+    uow = _signed_in()
+    repository = _stored(uow, _registered("101"))
+
+    with pytest.raises(VcsError):
+        _save(FakeInstallationCatalog(error=VcsError("HTTP 503")), uow, repository)
+    assert _settings_of(uow, repository) == repository
+
+
+def test_saving_the_same_settings_twice_gives_the_same_record() -> None:
+    uow = _signed_in()
+    repository = _stored(uow, _registered("101"))
+    catalog = FakeInstallationCatalog([API])
+
+    _save(catalog, uow, repository)
+    first = _settings_of(uow, repository)
+    _save(catalog, uow, repository)
+
+    assert _settings_of(uow, repository) == first
+
+
+def test_saving_replaces_the_settings_whole() -> None:
+    uow = _signed_in()
+    repository = _stored(uow, _registered("101"))
+    catalog = FakeInstallationCatalog([API])
+    _save(catalog, uow, repository)
+
+    _save(catalog, uow, repository, RepositorySettings(True, (), FindingSeverity.CRITICAL))
+
+    saved = _settings_of(uow, repository)
+    assert saved is not None
+    assert (saved.auto_review_enabled, saved.branch_filter, saved.min_severity) == (True, (), FindingSeverity.CRITICAL)
+
+
+def test_settings_of_a_disconnected_repository_are_saved_without_connecting_it() -> None:
+    uow = _signed_in()
+    repository = _stored(uow, replace(_registered("101"), connected_at=None))
+
+    outcome = _save(FakeInstallationCatalog([API]), uow, repository)
+
+    saved = _settings_of(uow, repository)
+    assert outcome == saved
+    assert saved is not None
+    assert saved.connected_at is None
+    assert saved.min_severity is FindingSeverity.HIGH
+
+
+def test_reconnecting_keeps_the_saved_settings() -> None:
+    uow = _signed_in()
+    repository = _stored(uow, replace(_registered("101"), connected_at=None))
+    catalog = FakeInstallationCatalog([API])
+    _save(catalog, uow, repository)
+
+    reconnected = _connect(catalog, uow)
+
+    assert isinstance(reconnected, Repository)
+    assert reconnected.auto_review_enabled is False
+    assert (reconnected.connected_at, reconnected.branch_filter, reconnected.min_severity) == (
+        NOW,
+        ("main", "release/*"),
+        FindingSeverity.HIGH,
+    )
+
+
+BOB = UUID(int=0xB0B)
+
+
+def test_reconnecting_by_another_user_keeps_the_payer() -> None:
+    """Плательщик назначается один раз (design D6): включение другим его не меняет."""
+    uow = _signed_in()
+    _stored(uow, replace(_registered("101"), connected_at=None, payer_user_id=USER_ID))
+
+    reconnected = connect_repository(FakeInstallationCatalog([API]), uow, _user(user_id=BOB), Provider.GITHUB, "101", NEW_ID, NOW)
+
+    assert isinstance(reconnected, Repository)
+    assert reconnected.payer_user_id == USER_ID
+
+
+def test_reconnecting_a_repository_without_a_payer_assigns_the_caller() -> None:
+    uow = _signed_in()
+    _stored(uow, replace(_registered("101"), connected_at=None))
+
+    reconnected = connect_repository(FakeInstallationCatalog([API]), uow, _user(user_id=BOB), Provider.GITHUB, "101", NEW_ID, NOW)
+
+    assert isinstance(reconnected, Repository)
+    assert reconnected.payer_user_id == BOB
+
+
+def test_setup_assigns_the_caller_as_payer() -> None:
+    uow = _signed_in()
+    catalog = FakeInstallationCatalog([API], installations={7: (RepositorySelection.SELECTED, [API])})
+
+    assert connect_installation(catalog, uow, _user(), 7, lambda: NEW_ID, NOW, connect_selected=True) == 1
+
+    connected = uow.repositories.get(NEW_ID)
+    assert connected is not None and connected.payer_user_id == USER_ID
+
+
+def test_saving_settings_keeps_the_payer() -> None:
+    uow = _signed_in()
+    repository = _stored(uow, replace(_registered("101"), payer_user_id=BOB))
+
+    saved = _save(FakeInstallationCatalog([API]), uow, repository)
+
+    assert isinstance(saved, Repository)
+    assert saved.payer_user_id == BOB

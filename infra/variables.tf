@@ -148,7 +148,7 @@ variable "user_token_encryption_key" {
 
 variable "public_origin" {
   type        = string
-  description = "Публичный origin интерфейса без завершающего / (PUBLIC_ORIGIN): сверка Origin и callback входа. Пустой — изменяющие запросы с сессией получают 403."
+  description = "Публичный origin интерфейса без завершающего / (PUBLIC_ORIGIN): сверка Origin, callback входа и ссылка из check run на прогон. Пустой — изменяющие запросы с сессией получают 403, check run без ссылки."
   default     = ""
 }
 
@@ -236,6 +236,11 @@ variable "observability_memory_mb" {
     docker_proxy     = number
     collector_docker = number
     collector_logs   = number
+    # Алерты #100: Alertmanager держит в памяти горящие алерты и тишины,
+    # экземпляры blackbox-exporter — по несколько проб раз в 15 с.
+    alertmanager    = number
+    blackbox        = number
+    blackbox_public = number
   })
   description = "Потолки памяти контейнеров стека наблюдаемости, МБ, без свопа."
   default = {
@@ -243,17 +248,20 @@ variable "observability_memory_mb" {
     loki             = 768
     tempo            = 768
     prometheus       = 768
-    grafana          = 512
+    grafana          = 1024
     node_exporter    = 64
     docker_proxy     = 64
     collector_docker = 96
     collector_logs   = 96
+    alertmanager     = 64
+    blackbox         = 48
+    blackbox_public  = 48
   }
 }
 
 variable "grafana_port" {
   type        = number
-  description = "Порт Grafana на bind_ip: наружу не публикуется, в UI заходят через SSH-туннель."
+  description = "Порт Grafana на bind_ip для SSH-туннеля (http://localhost:<порт>/grafana/): наружу не публикуется, публичный вход — :8443/grafana/ через nginx интерфейса."
   default     = 3000
 }
 
@@ -290,6 +298,51 @@ variable "postgres_monitor_password" {
   validation {
     condition     = !var.observability_enabled || var.postgres_monitor_password != "dmc268_monitor"
     error_message = "Дефолт dmc268_monitor допустим только при observability_enabled = false: задайте настоящий пароль (секрет PG_MONITOR_PASSWORD_DMC268_T1)."
+  }
+}
+
+# Доставка алертов #100 в Telegram. Необязательна: без токена и chat id
+# Alertmanager работает и держит алерты, но в Telegram ничего не уходит —
+# ошибка доставки только в его логе (infra/README.md, «Алерты»). Заданное
+# значение проверяется на формат: опечатка в секрете иначе всплыла бы только
+# на первом алерте.
+variable "alert_telegram_bot_token" {
+  type        = string
+  description = "Токен бота Telegram, от имени которого Alertmanager шлёт алерты (bot_token_file); пусто — алерты не доставляются. Не коммитить."
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.alert_telegram_bot_token == "" || can(regex("^[0-9]+:[A-Za-z0-9_-]{30,}$", var.alert_telegram_bot_token))
+    error_message = "alert_telegram_bot_token — пусто или <id>:<ключ> от @BotFather: секрет TELEGRAM_BOT_TOKEN_DMC268_T1 битый."
+  }
+}
+
+variable "alert_telegram_chat_id" {
+  type        = string
+  description = "Chat id канала или группы Telegram для алертов (chat_id_file): число, у групп и каналов отрицательное; пусто — алерты не доставляются."
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.alert_telegram_chat_id == "" || can(regex("^-?[0-9]+$", var.alert_telegram_chat_id))
+    error_message = "alert_telegram_chat_id — пусто или число: секрет TELEGRAM_CHAT_ID_DMC268_T1 битый."
+  }
+}
+
+# Dead man's switch алертов (#334): адрес внешнего heartbeat-сервиса, на который
+# Alertmanager раз в 5 минут шлёт всегда горящий Watchdog. Необязателен: без него
+# стек работает, но падение самого Prometheus или Alertmanager никто не заметит.
+# Только https: пинг идёт наружу, а адрес — секрет.
+variable "alert_heartbeat_url" {
+  type        = string
+  description = "URL пинга внешнего heartbeat-сервиса (healthchecks.io и аналоги) для Watchdog (url_file); пусто — пинги не уходят. Не коммитить: по адресу пинг может прислать кто угодно."
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.alert_heartbeat_url == "" || can(regex("^https://[^\\s/]+/\\S*$", var.alert_heartbeat_url))
+    error_message = "alert_heartbeat_url — пусто или https://<хост>/<путь> без пробелов: секрет ALERT_HEARTBEAT_URL_DMC268_T1 битый."
   }
 }
 
@@ -341,6 +394,14 @@ variable "eurorouter_model" {
   type        = string
   description = "Модель Eurorouter (EUROROUTER_MODEL)."
   default     = ""
+}
+
+# Баланс плательщика перед вызовом модели (review-billing). Без плательщика у
+# репозитория прогон получает failure, поэтому включать после назначения плательщиков.
+variable "billing_enabled" {
+  type        = bool
+  description = "Проверять баланс плательщика репозитория перед вызовом модели (BILLING_ENABLED)."
+  default     = false
 }
 
 # Зеркало Literal в app/config.py. Пусто - параметр не уходит в запрос: не каждая

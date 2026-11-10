@@ -25,13 +25,12 @@ from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits, request_review
 from app.application.ports import UnitOfWork
 from app.application.ports.definition_extractor import DefinitionExtractor
-from app.application.ports.llm_gateway import LlmGateway
+from app.application.ports.llm_gateway import LlmGateway, LlmMeter
 from app.application.ports.stage_tracer import NO_SIMULATION_TRACING, SimulationTracer
 from app.application.use_cases.build_simulation_context import build_simulation_context
 from app.application.verify_findings import verify_findings
 from app.domain.entities import Simulation, SimulationJob
 from app.domain.enums import SimulationStatus
-from app.domain.llm_errors import LlmError
 from app.domain.prompt import PromptTexts
 from app.domain.run_steps import error_code
 from app.domain.simulation import (
@@ -86,7 +85,8 @@ def run_simulation(
         _fail(uow, simulation.id, SIMULATION_STALE, now())
         return
 
-    spent = 0
+    # Расход модели симуляции: адаптер пишет в счётчик каждый ответ, в том числе упавшего вызова.
+    meter = LlmMeter()
     model: str | None = None
     try:
         simulation = _advance(uow, simulation, S.BUILDING_CONTEXT, now())
@@ -102,8 +102,10 @@ def run_simulation(
 
         simulation = _advance(uow, simulation, S.ANALYSING, now())
         with _stage(tracer, simulation.id, S.ANALYSING):
-            answer = request_review(context, prompt_texts, llm_gateway, limits=llm_limits)
-            spent, model = answer.tokens_used, answer.model
+            answer = request_review(
+                context, prompt_texts, llm_gateway, limits=llm_limits, meter=meter
+            )
+            model = answer.model
             # Находка требует владельца-прогона; у симуляции владелец - она сама,
             # а в результат идентификатор прогона не попадает.
             screening = screen_findings(
@@ -118,9 +120,8 @@ def run_simulation(
         simulation = _advance(uow, simulation, S.VERIFYING, now())
         with _stage(tracer, simulation.id, S.VERIFYING):
             verification = verify_findings(
-                context, prompt_texts, llm_gateway, llm_limits, screening.kept
+                context, prompt_texts, llm_gateway, llm_limits, screening.kept, meter=meter
             )
-        spent += verification.tokens_used
 
         result = simulation_result(
             rejected=screening.rejected,
@@ -132,7 +133,7 @@ def run_simulation(
             simulation,
             result,
             model=answer.model,
-            tokens_used=spent,
+            tokens_used=meter.total.total_tokens,
             verification=verification.outcome,
             now=now(),
         ).unwrap()
@@ -142,17 +143,14 @@ def run_simulation(
             len(result.findings),
             len(result.discarded),
             verification.outcome,
-            spent,
+            meter.total.total_tokens,
         )
     except _ClosedElsewhere:
         logger.info("симуляцию закрыли во время анализа, результат отброшен")
     except Exception as exc:
         code = error_code(exc)
-        # Токены упавшего вызова модели - сверх уже потраченных.
-        if isinstance(exc, LlmError):
-            spent += exc.tokens_used
         logger.exception("симуляция упала: %s", code)
-        _fail(uow, job.simulation_id, code, now(), model=model, tokens_used=spent or None)
+        _fail(uow, job.simulation_id, code, now(), model=model, tokens_used=meter.total.total_tokens or None)
 
 
 def _advance(uow: UnitOfWork, simulation: Simulation, status: SimulationStatus, now: datetime) -> Simulation:

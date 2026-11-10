@@ -43,10 +43,12 @@ from ..fakes.llm_gateway import (
     ScriptedLlmGateway,
     finding_json,
     review_response,
+    spent,
     verification_response,
 )
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
+from ..fakes.webhooks import a_repository
 from .test_review_pipeline import LIMITS, LLM_LIMITS, TEXTS
 
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
@@ -269,12 +271,14 @@ OUTLINE = FileOutline(
 
 
 def test_a_python_fragment_gets_its_enclosing_definitions() -> None:
-    uow = _seeded()
-    extractor = FakeExtractor(outlines={CODE: OUTLINE})
+    # Фрагмент больше порога целого файла: как у ревью, меньший идёт целиком и без AST.
+    big = CODE + "".join(f"pad_{n} = {n}\n" for n in range(1_000))
+    uow = _seeded(_simulation(source=big))
+    extractor = FakeExtractor(outlines={big: OUTLINE})
 
     _run(uow, ScriptedLlmGateway([review_response()]), definition_extractor=extractor)
 
-    assert [source for source, _ in extractor.calls] == [CODE]
+    assert [source for source, _ in extractor.calls] == [big]
     (context,) = _context(uow)
     assert context.scopes is not None
     assert "class Billing:" in context.scopes and "def charge(self):" in context.scopes
@@ -350,7 +354,7 @@ def test_discarded_findings_show_where_and_why() -> None:
 def test_a_verifier_failure_keeps_the_screened_findings_without_verdicts() -> None:
     uow = _seeded()
     gateway = ScriptedLlmGateway(
-        [review_response(finding_json(PATH, 3, "Имя"), tokens=10), LlmTimeoutError("верификатор молчит", tokens_used=4)]
+        [review_response(finding_json(PATH, 3, "Имя"), tokens=10), spent(LlmTimeoutError("верификатор молчит"), 4)]
     )
 
     _run(uow, gateway)
@@ -369,7 +373,7 @@ def test_a_model_timeout_fails_the_simulation_with_its_code_and_tokens() -> None
     uow = _seeded()
     tracer = _Tracer()
 
-    _run(uow, ScriptedLlmGateway([LlmTimeoutError("модель молчит", tokens_used=12)]), tracer=tracer)
+    _run(uow, ScriptedLlmGateway([spent(LlmTimeoutError("модель молчит"), 12)]), tracer=tracer)
 
     failed = _stored(uow)
     assert (failed.status, failed.error_code, failed.tokens_used) == (SimulationStatus.FAILED, "LLM_TIMEOUT", 12)
@@ -470,6 +474,8 @@ REVIEW_JOB = ReviewJob(
 
 
 def _seed_review(uow: FakeUnitOfWork) -> None:
+    # Запись репозитория PR: без неё merge gate не прочитает порог.
+    uow.repositories.add(replace(a_repository(), id=UUID(int=63)))
     uow.merge_requests.add(
         MergeRequest(
             id=UUID(int=62),

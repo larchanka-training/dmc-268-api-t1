@@ -24,9 +24,19 @@ resource "docker_image" "rabbitmq" {
 }
 
 resource "docker_container" "rabbitmq" {
-  name    = "dmc268-rabbitmq"
-  image   = docker_image.rabbitmq.image_id
-  restart = "unless-stopped"
+  # Узел называется rabbit@<hostname> и хранит данные в mnesia/rabbit@<hostname>.
+  # Без hostname Docker берёт id контейнера, и каждый новый контейнер стартовал
+  # на томе пустым узлом, а очереди старого оставались сиротами (#338).
+  name     = "dmc268-rabbitmq"
+  hostname = "dmc268-rabbitmq"
+  image    = docker_image.rabbitmq.image_id
+  restart  = "unless-stopped"
+
+  # Как у postgres: на чистом сервере targeted apply возвращается, когда узел
+  # принимает AMQP (healthcheck ниже), и смене пароля в passwords.sh не нужен
+  # цикл ожидания. Две минуты, как было у цикла; живой стенд это не задевает.
+  wait         = true
+  wait_timeout = 120
 
   # Без destroy_grace_seconds провайдер при пересоздании удаляет контейнер
   # принудительно (SIGKILL): база поднимается с «not properly shut down» и
@@ -37,8 +47,8 @@ resource "docker_container" "rabbitmq" {
   stop_timeout          = 60
   destroy_grace_seconds = 60
 
-  # Как у postgres: entrypoint сам переходит на пользователя rabbitmq. Порог
-  # памяти брокер считает от лимита cgroup, так что memory он учтёт сам.
+  # Как у postgres: entrypoint сам переходит на пользователя rabbitmq. Лимит
+  # cgroup брокер не видит: пороги памяти и диска — абсолютные, в 30-dmc268.conf.
   security_opts = ["no-new-privileges:true"]
   memory        = 512
   memory_swap   = 512
@@ -75,13 +85,20 @@ resource "docker_container" "rabbitmq" {
     }
   }
 
+  upload {
+    content = file("${path.module}/rabbitmq/30-dmc268.conf")
+    file    = "/etc/rabbitmq/conf.d/30-dmc268.conf"
+  }
+
   volumes {
     volume_name    = docker_volume.rabbitmq.name
     container_path = "/var/lib/rabbitmq"
   }
 
   healthcheck {
-    test     = ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+    # ping отвечает, когда узел поднят, но ещё до листенера AMQP: зелёный
+    # healthcheck не значит, что API и воркер подключатся.
+    test     = ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
     interval = "10s"
     timeout  = "5s"
     retries  = 5

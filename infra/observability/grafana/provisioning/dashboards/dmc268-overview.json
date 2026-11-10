@@ -448,7 +448,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|nsfs\"}",
+          "expr": "node_filesystem_avail_bytes and on(device, mountpoint) dmc268:filesystem_avail:ratio",
           "legendFormat": "{{mountpoint}}",
           "range": true,
           "refId": "A"
@@ -510,6 +510,170 @@
           "editorMode": "code",
           "expr": "sum by (container_name) (container_memory_usage_total_bytes)",
           "legendFormat": "{{container_name}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Вход (nginx): запросы в секунду",
+      "description": "Запросы к nginx интерфейса, публичному входу стенда, из access-лога в Loki, с тем же фильтром, что у панели кодов: пробы blackbox исключены, иначе они дали бы 80 % счёта. Скрейп stub_status в лог не пишется. Счётчик stub_status проб не отличает, поэтому здесь не он.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 48 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "sum(rate({service_name=\"dmc268-ui\"} != \"Blackbox-Exporter\" !~ \"\\\"[A-Z]+ /grafana/\" | pattern `<_> - <_> [<_>] \"<_>\" <status> <_>` | status=~\"[1-5][0-9][0-9]\" [5m])) or vector(0)",
+          "legendFormat": "запросов/с",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Вход (nginx): соединения",
+      "description": "Открытые соединения nginx интерфейса по состоянию (stub_status): active: все открытые, сумма reading, writing и waiting.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 48 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (state) (nginx_connections_current)",
+          "legendFormat": "{{state}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Вход (nginx): ответы по классу кода",
+      "description": "Доля ответов nginx интерфейса по классу кода, из access-лога в Loki (формат combined, код ответа идёт полем после строки запроса). В stub_status кодов ответа нет. Строки error-лога шаблон отбрасывает, пробы blackbox исключены: они бьют в / и всегда получают 200, а это 80 % строк лога. Доли считает Grafana (stacking percent) по числу ответов за 5 минут: ось в процентах, подсказка показывает число ответов.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 48 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": { "mode": "percent", "group": "A" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "sum by (class) (count_over_time({service_name=\"dmc268-ui\"} != \"Blackbox-Exporter\" !~ \"\\\"[A-Z]+ /grafana/\" | pattern `<_> - <_> [<_>] \"<_>\" <status> <_>` | status=~\"[1-5][0-9][0-9]\" | label_format class=`{{ substr 0 1 .status }}xx` [5m]))",
+          "legendFormat": "{{class}}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Расход модели за месяц, €",
+      "description": "Стоимость вызовов модели прогонов с начала месяца (UTC) по review_runs.cost_eur и месячный бюджет из alerts.yml: выше 80 % — LlmCostBudgetNearLimit, 100 % — LlmCostBudgetExceeded.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "review_llm_cost_eur_month",
+          "legendFormat": "расход",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "dmc268:llm_cost_budget_eur_month",
+          "legendFormat": "бюджет",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Баланс Eurorouter, €",
+      "description": "Остаток на счёте Eurorouter (/credits, опрос воркером раз в 5 минут): ниже 5 € — LlmProviderBalanceLow, ниже 1 € — LlmProviderBalanceCritical, ниже 0,10 € провайдер отвечает 402. Разрыв линии — опросы не удаются дольше 5 минут.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "max(review_llm_provider_balance_eur)",
+          "legendFormat": "остаток",
           "range": true,
           "refId": "A"
         }

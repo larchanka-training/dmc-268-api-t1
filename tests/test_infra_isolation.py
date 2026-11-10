@@ -46,9 +46,20 @@ EXPECTED_NETWORKS: dict[str, frozenset[str]] = {
     "loki": frozenset({"observability"}),
     "tempo": frozenset({"observability"}),
     "prometheus": frozenset({"backend", "observability"}),
-    "grafana": frozenset({"observability", "grafana"}),
+    # Ещё одна — dmc268-grafana-proxy: по ней nginx интерфейса проксирует
+    # публичный вход /grafana/ (change grafana-public-access).
+    "grafana": frozenset({"observability", "grafana", "grafana_proxy"}),
     "node_exporter": frozenset({"observability"}),
     "docker_socket_proxy": frozenset({"observability_docker_proxy"}),
+    # Алерты (#100): наружу из стека ходят только Alertmanager (в
+    # api.telegram.org) и blackbox-public (на публичный вход стенда) — через
+    # свою не-internal сеть dmc268-alerting. blackbox с пробами API, базы,
+    # реплики и брокера стоит только в сети данных: /probe без авторизации
+    # сделал бы его прокси в интернет — напрямую или цепочкой через
+    # blackbox-public в сети стека (ревью #324).
+    "alertmanager": frozenset({"observability", "alerting"}),
+    "blackbox": frozenset({"backend"}),
+    "blackbox_public": frozenset({"observability", "alerting"}),
 }
 
 
@@ -156,12 +167,23 @@ def test_observability_network_has_no_way_out() -> None:
     assert network_is_internal(text, "logs") is False, (
         "сеть dmc268-logs не должна быть internal: в ней публикуется порт коллектора логов"
     )
+    assert network_is_internal(text, "alerting") is False, (
+        "сеть dmc268-alerting не должна быть internal: через неё Alertmanager шлёт "
+        "алерты в Telegram, а blackbox-public проверяет публичный вход"
+    )
 
 
 def test_browser_otlp_network_has_no_way_out() -> None:
     assert network_is_internal(read_infra_text(), "otlp") is True, (
         "сеть dmc268-otlp должна быть internal: через неё интерфейс ходит в коллектор, "
         "а без internal коллектор получает выход в интернет"
+    )
+
+
+def test_grafana_proxy_network_has_no_way_out() -> None:
+    assert network_is_internal(read_infra_text(), "grafana_proxy") is True, (
+        "сеть dmc268-grafana-proxy должна быть internal: через неё интерфейс ходит в Grafana, "
+        "а выход наружу у Grafana — только через dmc268-grafana"
     )
 
 

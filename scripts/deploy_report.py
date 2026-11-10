@@ -117,7 +117,6 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("start", "Подготовка: checkout", ("start", "checkout")),
     ("tip", "Сверить коммит с вершиной develop; SSH, OpenTofu, хранилище состояния, вход в ghcr",
      ("tip", "ssh", "tofu", "s3", "login")),
-    ("diagnostics", "Доставки вебхука и сбои воркера с прошлого выката", ("diagnostics",)),
     ("infra", "Поднять базу и брокер", ("infra",)),
     ("plan", "Спланировать и проверить план", ("plan",)),
     ("pull", "Скачать образ API", ("pull",)),
@@ -126,7 +125,6 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("apply", "Применить конфигурацию", ("apply",)),
     ("recover", "Восстановить состояние OpenTofu", ("recover", "state_artifact")),
     ("api_logs", "Логи API после упавшего apply", ("api_logs",)),
-    ("check_api", "Проверить, что API жив (через туннель)", ("check_api",)),
     ("check_worker", "Проверить, что воркер работает", ("check_worker",)),
     ("check_replica", "Проверить, что реплика получает поток", ("check_replica",)),
     ("prune", "Убрать устаревшие образы", ("prune",)),
@@ -679,6 +677,8 @@ def downtime_section(report_dir: Path) -> list[str]:
     if d["healthy_from"] == "health_log":
         note += " Событий нового контейнера в потоке `docker events` нет: готовность — из `State.Health.Log`."
     out.append(note)
+    out += ["", ("Простой — со стороны Docker. nginx интерфейса узнаёт новый адрес API не позже чем "
+                 "через 10 с после готовности нового (`resolver … valid=10s` в `dmc-268-ui-t1/nginx/http.conf`), до этого запросы клиентов могут получать 502.")]
     if not d["healthy_reliable"]:
         out += ["", "> [!WARNING]", ("> Готовность и простой недостоверны: журнал проверок полон, первая успешная "
                 "проверка могла из него вытесниться, и простой тогда завышен.")]

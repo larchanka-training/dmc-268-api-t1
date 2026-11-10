@@ -1,4 +1,7 @@
 title: Поиск пользователя - SQL-инъекция и print
+# categories у print: readability или correctness, как в кейсе 02. security
+# не входит: окна ±3 строки у print и SQL-инъекции пересекаются, и второе
+# замечание security про инъекцию засчиталось бы как найденный print.
 pull_request:
   title: "feat: поиск пользователя по имени"
   description: Репозиторий пользователей получает поиск по имени для экрана поддержки.
@@ -26,3 +29,4 @@ expected:
     path: app/repositories/users.py
     contains: "print(\"найден пользователь\""
     rule: [Logging, 1]
+    categories: [readability, correctness]

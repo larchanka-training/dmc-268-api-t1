@@ -7,13 +7,13 @@ import pytest
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from app.application.llm_schema import ReviewOutput
-from app.application.ports.llm_gateway import LlmRequest, LlmTask
+from app.application.ports.llm_gateway import LlmMeter, LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
 from app.domain.llm_errors import LlmError, LlmOutputError, LlmTimeoutError
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 
-from ..fakes.llm_gateway import ScriptedLlmGateway, review_response
+from ..fakes.llm_gateway import ScriptedLlmGateway, review_response, spent
 from ..metrics import metric_delta, metric_snapshot
 
 MESSAGES = (PromptMessage(PromptRole.USER, "код"),)
@@ -53,23 +53,29 @@ def test_when_every_provider_fails_the_last_failure_is_raised() -> None:
         FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(REQUEST)
 
 
-def test_tokens_burnt_by_a_failed_provider_are_added_to_the_answer() -> None:
-    local = ScriptedLlmGateway([LlmOutputError("не по схеме", tokens_used=500)])
+def test_usage_of_a_failed_provider_and_the_answering_one_is_counted_once() -> None:
+    local = ScriptedLlmGateway([spent(LlmOutputError("не по схеме"), 500)])
     hosted = ScriptedLlmGateway([review_response(model="mistral", tokens=300)])
+    meter = LlmMeter()
 
-    response = FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(REQUEST)
+    FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(
+        replace(REQUEST, meter=meter)
+    )
 
-    assert response.tokens_used == 800
+    assert meter.total.total_tokens == 800
 
 
-def test_tokens_of_every_provider_are_reported_when_all_fail() -> None:
-    local = ScriptedLlmGateway([LlmOutputError("не по схеме", tokens_used=500)])
+def test_usage_of_every_provider_stays_counted_when_all_fail() -> None:
+    local = ScriptedLlmGateway([spent(LlmOutputError("не по схеме"), 500)])
     hosted = ScriptedLlmGateway([LlmError("Eurorouter недоступен")])
+    meter = LlmMeter()
 
-    with pytest.raises(LlmError, match="Eurorouter") as error:
-        FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(REQUEST)
+    with pytest.raises(LlmError, match="Eurorouter"):
+        FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(
+            replace(REQUEST, meter=meter)
+        )
 
-    assert error.value.tokens_used == 500
+    assert meter.total.total_tokens == 500
 
 
 def test_single_provider_failure_is_raised_as_is() -> None:
@@ -114,33 +120,39 @@ def test_gateway_without_providers_is_rejected_at_construction() -> None:
 
 
 class _RetriesOnce:
-    """Провайдер, который сам повторил вызов один раз (100 токенов), потом ответил по сценарию."""
+    """Провайдер, который сам повторил вызов один раз (ответ за 100 токенов), потом ответил по сценарию."""
 
     def __init__(self, answer: object) -> None:
         self._scripted = ScriptedLlmGateway([answer])  # type: ignore[list-item]
 
     def complete(self, request):
-        assert request.on_retry is not None
-        request.on_retry(LlmOutputError("не по схеме"), 100)
+        assert request.on_retry is not None and request.meter is not None
+        request.meter.record(spent(LlmOutputError("не по схеме"), 100).usage)
+        request.on_retry(LlmOutputError("не по схеме"))
         return self._scripted.complete(request)
 
 
-def test_handover_and_retries_inside_providers_reach_the_listener_with_running_tokens() -> None:
+def test_handover_and_retries_inside_providers_reach_the_listener_after_their_usage() -> None:
     heard: list[tuple[str, int]] = []
-    request = replace(REQUEST, on_retry=lambda error, tokens: heard.append((str(error), tokens)))
-    local = _RetriesOnce(LlmOutputError("Ollama: не по схеме", tokens_used=200))
+    meter = LlmMeter()
+    request = replace(
+        REQUEST,
+        meter=meter,
+        on_retry=lambda error: heard.append((str(error), meter.total.total_tokens)),
+    )
+    local = _RetriesOnce(spent(LlmOutputError("Ollama: не по схеме"), 100))
     hosted = _RetriesOnce(review_response(model="mistral", tokens=300))
 
-    response = FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(request)
+    FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(request)
 
-    # Повтор внутри Ollama, переход к Eurorouter, повтор внутри Eurorouter: токены -
-    # от начала всего вызова, итог ответа - тоже.
+    # Повтор внутри Ollama, переход к Eurorouter, повтор внутри Eurorouter: к каждому
+    # сообщению счётчик уже знает расход всего вызова до него.
     assert heard == [("не по схеме", 100), ("Ollama: не по схеме", 200), ("не по схеме", 300)]
-    assert response.tokens_used == 500
+    assert meter.total.total_tokens == 600
 
 
-def test_a_request_without_a_listener_reaches_providers_unchanged() -> None:
-    local = ScriptedLlmGateway([LlmError("Ollama недоступна", tokens_used=10)])
+def test_a_request_reaches_providers_unchanged() -> None:
+    local = ScriptedLlmGateway([LlmError("Ollama недоступна")])
     hosted = ScriptedLlmGateway([review_response()])
 
     FallbackLlmGateway((("Ollama", local), ("Eurorouter", hosted))).complete(REQUEST)
@@ -232,8 +244,8 @@ def test_calls_failing_everywhere_still_reach_the_histogram(
 def test_calls_create_no_token_counter(
     metric_reader: InMemoryMetricReader,
 ) -> None:
-    """Токены модели — не метрика этого PR: учёт по каждому вызову провайдера,
-    с типами токенов и стоимостью, переделывает #119, счётчик удалён."""
+    """Токены модели — не метрика: метрики по каждому вызову провайдера — #119,
+    счётчик удалён."""
     gateway = FallbackLlmGateway((("Ollama", ScriptedLlmGateway([review_response(tokens=30)])),))
 
     gateway.complete(REQUEST)

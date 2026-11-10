@@ -73,7 +73,7 @@ from app.infrastructure.telemetry import (
 from app.worker import factory as worker_factory
 
 from ..application.test_review_pipeline import _run, _seed_run
-from ..fakes.llm_gateway import ScriptedLlmGateway
+from ..fakes.llm_gateway import ScriptedLlmGateway, spent
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..metrics import metric_delta, metric_histogram, metric_snapshot
 
@@ -790,7 +790,7 @@ def test_the_otlp_log_exporter_timeout_is_in_seconds(
     Спека OTel определяет эту переменную в миллисекундах (4000 = 4 с), но Python
     SDK читает её в секундах: `_resolve_timeout` возвращает `float(raw)` без
     пересчёта, и значение идёт в `time.time() + timeout` и в таймаут транспорта.
-    Поэтому compose и `infra/main.tf` ставят 4, а не 4000: при секундной
+    Поэтому compose и `infra/locals.tf` ставят 4, а не 4000: при секундной
     семантике 4000 — это 66 минут зависания одной попытки экспорта. Ассерт —
     на фактический атрибут клиента экспортёра: если SDK перейдёт на
     миллисекунды спеки, тест упадёт вместе со значением в конфигах — править
@@ -1159,6 +1159,15 @@ def test_pool_instruments_are_counted_in_connections(
     assert units[CONNECTION_MAX] == "{connection}"
 
 
+def test_the_provider_balance_gauge_skips_an_unknown_balance(pool_reader: InMemoryMetricReader) -> None:
+    """Остаток есть — точка ряда; `None` (опрос не удался) — точки нет."""
+    balances: list[float | None] = [12.5, None]
+    telemetry.instrument_llm_balance(lambda: balances.pop(0))
+
+    assert metric_snapshot(pool_reader)[("review_llm_provider_balance_eur", ())] == (12.5, None)
+    assert ("review_llm_provider_balance_eur", ()) not in metric_snapshot(pool_reader)
+
+
 def test_a_non_queuepool_engine_gets_no_pool_metrics(
     pool_reader: InMemoryMetricReader,
 ) -> None:
@@ -1407,6 +1416,7 @@ def test_sql_spans_carry_only_the_stable_attribute_names(
 class _Ok(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.send_response(200)
+        self.send_header("x-request-id", "req-1")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -1439,6 +1449,8 @@ def test_httpx_spans_carry_the_stable_attribute_names(
     assert attributes["http.request.method"] == "GET"
     assert attributes["url.full"] == f"{http_server}/ping"
     assert attributes["http.response.status_code"] == 200
+    # `x-request-id` ответа — на спане: по нему поддержка провайдера модели ищет запрос.
+    assert attributes["review.llm.request_id"] == "req-1"
     assert "http.method" not in attributes
     assert "http.url" not in attributes
 
@@ -1488,7 +1500,7 @@ def test_a_pipeline_failing_on_a_stage_closes_its_otel_span_as_an_error(
     with pytest.raises(LlmTimeoutError):
         _run(
             uow,
-            ScriptedLlmGateway([LlmTimeoutError("таймаут", tokens_used=30)]),
+            ScriptedLlmGateway([spent(LlmTimeoutError("таймаут"), 30)]),
             stage_tracer=OtelStageTracer(),
         )
 
@@ -1505,3 +1517,32 @@ def test_a_pipeline_failing_on_a_stage_closes_its_otel_span_as_an_error(
     ]
     assert (stages[-1].attributes or {})["error.type"] == "LLM_TIMEOUT"
     assert not trace.get_current_span().get_span_context().is_valid
+
+
+def test_priming_starts_every_run_outcome_series_at_zero(
+    metric_reader: InMemoryMetricReader,
+) -> None:
+    """Ряды `review_runs_total` по исходам заводятся нулём: первый упавший прогон
+    после рестарта — приращение, которое `increase()` в `ReviewRunsFailing` видит."""
+    before = metric_snapshot(metric_reader)
+
+    telemetry.prime_run_outcomes()
+
+    after = metric_snapshot(metric_reader)
+    for status in ("completed", "failed", "refused"):
+        assert ("review_runs_total", (("status", status),)) in after
+        value, _ = metric_delta(metric_reader, before, "review_runs_total", status=status)
+        assert value == 0
+
+
+def test_configure_telemetry_leaves_the_run_outcomes_to_the_factories(
+    monkeypatch: pytest.MonkeyPatch, logs_gate: None
+) -> None:
+    """Ряды исходов заводят фабрики API и воркера, а не `configure_telemetry`:
+    её зовёт и процесс миграций, где рядов `dmc-268-migrate` быть не должно."""
+    calls: list[None] = []
+    monkeypatch.setattr(telemetry, "prime_run_outcomes", lambda: calls.append(None))
+
+    telemetry.configure_telemetry(telemetry.MIGRATE_SERVICE)
+
+    assert calls == []

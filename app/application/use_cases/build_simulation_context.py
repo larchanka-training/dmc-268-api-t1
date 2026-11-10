@@ -58,12 +58,20 @@ def build_simulation_context(
     # Пустой редактор правил - как отсутствующий файл: ревью по стандартным критериям.
     rules = RepoRules(status=RulesStatus.ABSENT) if not simulation.rules else rules_from_text(simulation.rules)
     asts, skipped = _collect_asts(simulation.source_kind, simulation.source, files, extractor, limits)
+    # Фрагмент - новый файл целиком, как у ревью его читают из head; у диффа файлов нет:
+    # репозитория у входа нет, окружения изменений и файла целиком не будет.
+    sources = (
+        {simulation.file_path: simulation.source}
+        if simulation.source_kind is SimulationSourceKind.CODE and simulation.file_path
+        else {}
+    )
     return assemble_context(
         ContextSubject(),
         files,
         rules,
         asts,
         skipped,
+        sources=sources,
         pr_context=NO_PR_CONTEXT,
         limits=limits,
         review_run_id=simulation.id,
@@ -87,7 +95,7 @@ def _collect_asts(
     """
     candidates = [
         (parsed, language)
-        for parsed in filter_diff_files(files)
+        for parsed in filter_diff_files(files, max_file_bytes=limits.diff_file_max_bytes)
         if not parsed.is_deleted
         and parsed.hunks
         and (language := language_for_path(parsed.file_path)) is not None

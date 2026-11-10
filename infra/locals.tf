@@ -62,6 +62,14 @@ locals {
     "OTEL_BLRP_MAX_QUEUE_SIZE=512",
   ] : []
 
+  # Страница статуса (GET /api/v1/status, change add-status-page) читает
+  # сработавшие алерты у Prometheus стека: он в сети данных вместе с API
+  # (observability.tf). Только API — воркеру статус не нужен. Стек выключен —
+  # переменной нет, и статус сервиса — unknown без запросов.
+  status_env = var.observability_enabled ? [
+    "PROMETHEUS_URL=http://dmc268-prometheus:9090",
+  ] : []
+
   # Общая часть OTEL_RESOURCE_ATTRIBUTES; service.instance.id каждый контейнер
   # дописывает своим стабильным именем (см. env ниже): случайный UUID на
   # процесс растил бы в Prometheus серии exported_instance — ресурс
@@ -83,6 +91,24 @@ locals {
   # путей в своём шаблоне haproxy (observability/docker-socket-proxy.cfg),
   # минимум прав там же и в комментариях у контейнера в observability.tf.
   docker_socket_proxy_image = "tecnativa/docker-socket-proxy@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e"
+  # Алерты #100: доставка в Telegram и пробы сервисов (prom/alertmanager:v0.34.2,
+  # prom/blackbox-exporter:v0.29.1).
+  alertmanager_image = "prom/alertmanager@sha256:39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b"
+  blackbox_image     = "prom/blackbox-exporter@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13"
+
+  # Цель пробы публичного входа (job blackbox-public в prometheus.yml): адрес
+  # стенда из public_origin. Без него — пустой список, как в локальном
+  # observability/public-targets.yml.
+  blackbox_public_targets = var.public_origin == "" ? [] : [{ targets = ["${var.public_origin}/"] }]
+
+  # Публичный адрес Grafana (GF_SERVER_ROOT_URL): тот же хост и сертификат,
+  # что у кабинета, но свой порт 8443 — значит, свой origin, и XSS в Grafana
+  # не читает API кабинета. Порт слушает nginx интерфейса (dmc-268-ui-t1),
+  # бэкенд его не публикует — поэтому константа, а не переменная: менять его
+  # можно только вместе с фронтом. trimsuffix — на случай public_origin со
+  # слешем на конце. С пустым public_origin root_url — относительный
+  # /grafana/, Grafana с ним стартует (проверено на 13.2.4).
+  grafana_public_root_url = var.public_origin == "" ? "/grafana/" : "${trimsuffix(var.public_origin, "/")}:8443/grafana/"
 
   # Окружение, без которого не загрузятся общие настройки (`load_settings`):
   # его получают оба контейнера из образа приложения — api и worker — и

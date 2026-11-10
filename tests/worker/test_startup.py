@@ -120,6 +120,24 @@ def test_run_worker_configures_telemetry_before_the_config_checks(
     assert calls == ["logging", "telemetry", "hooks"]
 
 
+
+def test_run_worker_primes_the_run_outcomes_after_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ряды `review_runs_total` по исходам заводятся нулём со старта воркера,
+    уже на стоящем провайдере метрик: первое падение после рестарта —
+    приращение, которое видит `ReviewRunsFailing` (ревью PR #324)."""
+    calls: list[str] = []
+    monkeypatch.setattr(factory, "configure_logging", lambda service: None)
+    monkeypatch.setattr(factory, "configure_telemetry", lambda service: calls.append("telemetry"))
+    monkeypatch.setattr(factory, "prime_run_outcomes", lambda: calls.append("prime"))
+    monkeypatch.setattr(factory, "install_excepthooks", lambda: None)
+
+    with pytest.raises(WorkerConfigError, match="LLM_BACKEND"):
+        run_worker(_loader(_settings()))
+
+    assert calls == ["telemetry", "prime"]
+
 def test_run_worker_reads_the_environment_after_logs_telemetry_and_hooks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

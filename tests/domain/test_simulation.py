@@ -253,7 +253,7 @@ LOCK_ONLY = "diff --git a/uv.lock b/uv.lock\n--- a/uv.lock\n+++ b/uv.lock\n@@ -1
 def test_input_without_reviewable_hunks_after_the_review_filter_is_detected(
     kind: SimulationSourceKind, source: str, path: str | None, reviewable: bool
 ) -> None:
-    assert has_reviewable_hunks(simulation_files(kind, source, path)) is reviewable
+    assert has_reviewable_hunks(simulation_files(kind, source, path), max_file_bytes=262_144) is reviewable
 
 
 def test_a_fragment_without_a_path_is_a_programming_error() -> None:

@@ -11,11 +11,13 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from app.domain.enums import (
     CommentKind,
+    CoverageReason,
     DefinitionKind,
     DiffSide,
     DiscardStage,
@@ -35,6 +37,7 @@ from app.domain.enums import (
     VerifierVerdict,
 )
 from app.domain.file_context import FileContext
+from app.domain.llm_usage import LlmUsage
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +55,22 @@ class Repository:
     # Когда ревью включено последний раз; `None` — выключено (`DELETE /repositories/{id}`):
     # запись остаётся ради истории, вебхук `pull_request` прогона не создаёт.
     connected_at: datetime | None
+    # Глоб-паттерны веток для авторевью; пусто — все ветки. Пока не применяется.
+    branch_filter: tuple[str, ...] = ()
+    # Порог merge gate: блокирует открытая находка не ниже этой важности.
+    min_severity: FindingSeverity = FindingSeverity.CRITICAL
+    # Аккаунт сервиса, с баланса которого идут прогоны; `None` — не назначен (`review-billing`).
+    payer_user_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RepositorySettings:
+    """Настройки ревью репозитория, которые пользователь меняет в кабинете."""
+
+    auto_review_enabled: bool
+    # Глоб-паттерны веток; пусто — все ветки.
+    branch_filter: tuple[str, ...]
+    min_severity: FindingSeverity
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +145,9 @@ class ReviewRun:
     base_sha: str | None = None
     model: str | None = None
     tokens_used: int | None = None
+    # Расход модели по видам токенов и стоимость; пуст до анализа и у прогонов,
+    # записанных до разбивки. `tokens_used` - его `total_tokens`.
+    usage: LlmUsage | None = None
     duration_seconds: float | None = None
     rejected_findings: int = 0
     # Этап, на котором прогон упал. Заполняет только `advance` при переходе в
@@ -134,6 +156,11 @@ class ReviewRun:
     # Итог второго прохода модели; пуст, пока анализ не завершён.
     verification: VerificationOutcome | None = None
     verifier_dropped_findings: int = 0
+    # Биллинг (`review-billing`): плательщик и оценка, зарезервированная перед вызовом модели,
+    # и причина неполного покрытия. Пусты, пока баланс не проверялся или биллинг выключен.
+    payer_user_id: UUID | None = None
+    estimated_cost_eur: Decimal | None = None
+    coverage_reason: CoverageReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +198,11 @@ class ReviewRunStep:
 
 @dataclass(frozen=True, slots=True)
 class ContextPayload:
-    """Один кусок материала, отправленного модели для прогона."""
+    """Один кусок материала, отправленного модели для прогона.
+
+    Собранный пакет, который уходит модели и записывается, — всегда с телом. Прочитанный из
+    базы — `StoredContextPayload`: его тело могли стереть по сроку хранения.
+    """
 
     id: UUID
     review_run_id: UUID
@@ -181,6 +212,29 @@ class ContextPayload:
     token_count: int
     content_sha256: str
     body: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StoredContextPayload:
+    """Пакет контекста, прочитанный из базы.
+
+    Тело хранится ограниченный срок (change `context-payload-retention`): после него `body` —
+    `None`, а `body_expired_at` — когда его стёрли; метаданные остаются. `None`, а не `{}`:
+    стёртое тело не спутать с пустым пакетом, и тип заставляет каждого читателя сохранённого
+    пакета обработать этот случай.
+    """
+
+    id: UUID
+    review_run_id: UUID
+    chunk_index: int
+    tiers: tuple[str, ...]
+    file_paths: tuple[str, ...]
+    token_count: int
+    content_sha256: str
+    body: dict[str, Any] | None
+    body_expired_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -367,6 +421,7 @@ class ParsedFile:
     `old_path` заполнен только у переименования. Бинарные файлы на hunk'и не
     разбираются — ревьюить там нечего, их остаётся только отфильтровать.
     `is_deleted` — у файла нет новой стороны: AST-окружение строить не из чего.
+    `is_added` — у файла нет старой стороны: статус `added` в диффе прогона.
     """
 
     file_path: str
@@ -374,6 +429,7 @@ class ParsedFile:
     is_binary: bool = False
     is_deleted: bool = False
     hunks: tuple[Hunk, ...] = ()
+    is_added: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,7 +445,7 @@ class WebhookEvent:
     преобразований.
     `author_association` — связь автора с репозиторием по GitHub (`None`, если
     поля нет), `from_fork` — ветка PR не в самом репозитории; по ним
-    `is_trusted_author` отсекает PR посторонних.
+    `is_trusted_pull_request` отсекает PR посторонних.
     """
 
     action: str
@@ -427,6 +483,11 @@ class PRMetadata:
     source_branch: str
     target_branch: str
     state: MergeRequestState
+    # Ветка PR не в самом репозитории (удалённый форк — тоже форк) и связь автора с
+    # репозиторием по GitHub (`None`, если поля нет): по ним `is_trusted_pull_request`
+    # решает, свой ли PR, при ручном запуске — события вебхука там нет.
+    from_fork: bool
+    author_association: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,12 +520,14 @@ class RepoRules:
 
     При любом статусе, кроме `LOADED`, принятых правил нет — дефолтный фоллбэк.
     Отклонённые разделы бывают только у `LOADED` и `EMPTY`: при остальных
-    статусах файл не разбирался.
+    статусах файл не разбирался. `fetched_at` — время первого получения файла
+    от VCS (из кэша приходит сохранённое); у `UNAVAILABLE` — `None`.
     """
 
     status: RulesStatus
     rules: tuple[RepoRule, ...] = ()
     rejected: tuple[RejectedRule, ...] = ()
+    fetched_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -610,6 +673,19 @@ class User:
     avatar_url: str | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class BalanceCredit:
+    """Зачисление на баланс аккаунта; отрицательная сумма — возврат или корректировка."""
+
+    id: UUID
+    user_id: UUID
+    amount_eur: Decimal
+    note: str
+    # Кто зачислил: пока пополнения через платёжную систему нет — администратор.
+    credited_by: str
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

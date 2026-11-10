@@ -11,9 +11,14 @@ from typing import Annotated, cast
 from fastapi import Depends, Path, Request
 
 from app.application.ports import RunChanges, UnitOfWork
+from app.application.ports.cache_store import CacheStore
 from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.job_queue import JobQueue
 from app.application.ports.oauth_provider import OAuthProvider
+from app.application.ports.run_outcome import RunOutcomeRecorder
+from app.application.ports.vcs_gateway import VcsGateway
+from app.application.use_cases.service_status import ServiceStatusMonitor
+from app.config import Settings
 from app.domain.enums import Provider
 from app.infrastructure.container import Container
 
@@ -33,6 +38,11 @@ def get_unit_of_work(request: Request) -> Iterator[UnitOfWork]:
 
 def get_job_queue(container: Container = Depends(get_container)) -> JobQueue:
     return container.job_queue()
+
+
+def get_run_outcome(container: Container = Depends(get_container)) -> RunOutcomeRecorder:
+    """Счётчик терминальных исходов прогонов: компенсация «не поставили в очередь» ручного запуска."""
+    return container.run_outcome()
 
 
 def get_installation_catalog(container: Container = Depends(get_container)) -> InstallationCatalog:
@@ -108,3 +118,29 @@ def get_run_changes(container: Container = Depends(get_container)) -> RunChanges
 def get_clock() -> Callable[[], float]:
     """Монотонные часы потока событий; тесты подменяют их ходом своего «времени»."""
     return time.monotonic
+
+
+def get_cabinet_vcs_gateway(container: Container = Depends(get_container)) -> VcsGateway:
+    """VCS-шлюз чтений кабинета (дифф прогона): свои тайм-ауты, не шлюз вебхука; тесты подменяют его фейком."""
+    return container.cabinet_vcs_gateway()
+
+
+def get_run_diff_cache(container: Container = Depends(get_container)) -> CacheStore:
+    """Кэш диффов прогонов по паре коммитов — отдельный от кэша видимости."""
+    return container.run_diff_cache()
+
+
+def get_rules_cache(container: Container = Depends(get_container)) -> CacheStore:
+    """Кэш исходов загрузки `.review/rules.md` — своё хранилище процесса API, отдельное от кэша
+    видимости; ключ и формат те же, что у прогона, но записи воркера здесь не видны (design D7)."""
+    return container.rules_cache()
+
+
+def get_settings(container: Container = Depends(get_container)) -> Settings:
+    """Настройки процесса, с которыми собран контейнер."""
+    return container.settings
+
+
+def get_service_status_monitor(container: Container = Depends(get_container)) -> ServiceStatusMonitor:
+    """Статус сервиса с кэшем оценки, один на процесс; тесты подменяют его своим источником алертов."""
+    return container.service_status()

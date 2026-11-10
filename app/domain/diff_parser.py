@@ -10,9 +10,10 @@ GitHub отдаёт дифф пул-реквеста текстом; чтобы 
 """
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 from app.domain.entities import Hunk, ParsedFile
+from app.domain.enums import DiffLineKind
 
 LOCK_FILE_NAMES: frozenset[str] = frozenset(
     {
@@ -32,7 +33,12 @@ LOCK_FILE_NAMES: frozenset[str] = frozenset(
 MINIFIED_SUFFIXES: tuple[str, ...] = (".min.js", ".min.css")
 GENERATED_MARKER = ".generated."
 PROTOBUF_SUFFIX = ".pb.go"
-VENDOR_DIRECTORIES: frozenset[str] = frozenset({"vendor", "node_modules"})
+# Собранные бандлы и source map — вывод сборщика, а не код автора (#293).
+# Только source map сборщика: `*.map` целиком задел бы и написанные руками файлы
+# (`redirects.map` для nginx).
+BUNDLE_SUFFIXES: tuple[str, ...] = (".bundle.js", ".bundle.css", ".js.map", ".css.map")
+# Каталоги чужого или собранного кода на любой глубине пути.
+SKIPPED_DIRECTORIES: frozenset[str] = frozenset({"vendor", "node_modules", "dist"})
 
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
@@ -61,7 +67,7 @@ def parse_diff(raw: str) -> list[ParsedFile]:
 
 
 def is_filterable(file_path: str, is_binary: bool) -> bool:
-    """Правда, если файл — шум для ревью и модели его отправлять не стоит."""
+    """Правда, если файл — шум для ревью по пути или признаку бинарного, без учёта размера."""
     if is_binary:
         return True
     parts = file_path.split("/")
@@ -71,13 +77,44 @@ def is_filterable(file_path: str, is_binary: bool) -> bool:
         or name.endswith(MINIFIED_SUFFIXES)
         or GENERATED_MARKER in name
         or name.endswith(PROTOBUF_SUFFIX)
-        or any(part in VENDOR_DIRECTORIES for part in parts[:-1])
+        or name.endswith(BUNDLE_SUFFIXES)
+        or any(part in SKIPPED_DIRECTORIES for part in parts[:-1])
     )
 
 
-def filter_diff_files(files: Iterable[ParsedFile]) -> list[ParsedFile]:
+def change_exceeds(file: ParsedFile, max_bytes: int) -> bool:
+    """Правда, если текст hunk'ов файла в UTF-8 больше `max_bytes`.
+
+    Без копии всего текста: огромный hunk — тот самый случай, ради которого лимит, а его
+    копия в байтах выводила бы воркер за память (#328). ASCII считается длиной строки; текст
+    длиннее остатка лимита больше него и в байтах; иначе кодируется — не больше 4 × лимит.
+    """
+    total = 0
+    for hunk in file.hunks:
+        text = hunk.text
+        if text.isascii():
+            total += len(text)
+        elif len(text) > max_bytes - total:
+            return True
+        else:
+            total += len(text.encode("utf-8", "surrogatepass"))
+        if total > max_bytes:
+            return True
+    return False
+
+
+def is_filtered_out(file: ParsedFile, max_file_bytes: int) -> bool:
+    """Правда, если файл не ревьюится: шум по пути или изменение больше `max_file_bytes`.
+
+    Изменение больше лимита — снимок, дамп схемы, фикстура: целиком в пакет оно не войдёт,
+    а его первые hunk'и вытеснят остальные файлы PR. Файл ровно на лимите проходит.
+    """
+    return is_filterable(file.file_path, file.is_binary) or change_exceeds(file, max_file_bytes)
+
+
+def filter_diff_files(files: Iterable[ParsedFile], *, max_file_bytes: int) -> list[ParsedFile]:
     """Оставить файлы, подлежащие ревью, в исходном порядке."""
-    return [f for f in files if not is_filterable(f.file_path, f.is_binary)]
+    return [f for f in files if not is_filtered_out(f, max_file_bytes)]
 
 
 def _parse_file(lines: list[str]) -> ParsedFile:
@@ -89,6 +126,7 @@ def _parse_file(lines: list[str]) -> ParsedFile:
     rename_to: str | None = None
     is_binary = False
     is_deleted = False
+    is_added = False
     hunks: list[Hunk] = []
     header: re.Match[str] | None = None
     body: list[str] = []
@@ -105,11 +143,14 @@ def _parse_file(lines: list[str]) -> ParsedFile:
             body.append(line)
         elif line.startswith("--- "):
             minus_path = _path_after_marker(line, "--- ")
+            is_added = minus_path is None
         elif line.startswith("+++ "):
             plus_path = _path_after_marker(line, "+++ ")
             is_deleted = plus_path is None
         elif line.startswith("deleted file mode"):
             is_deleted = True
+        elif line.startswith("new file mode"):
+            is_added = True
         elif line.startswith("rename from "):
             rename_from = _unquote(line[len("rename from ") :])
         elif line.startswith("rename to "):
@@ -128,6 +169,7 @@ def _parse_file(lines: list[str]) -> ParsedFile:
         is_binary=is_binary,
         is_deleted=is_deleted,
         hunks=tuple(hunks),
+        is_added=is_added,
     )
 
 
@@ -142,21 +184,13 @@ def _build_hunk(file_path: str, header: re.Match[str], body: list[str]) -> Hunk:
     old_count = int(header.group(2) or "1")
     new_start = int(header.group(3))
     new_count = int(header.group(4) or "1")
-    old_line, new_line = old_start, new_start
     changed_old: set[int] = set()
     changed_new: set[int] = set()
-    for line in body:
-        if line.startswith("+"):
+    for kind, old_line, new_line, _ in number_lines(body, old_start, new_start):
+        if kind is DiffLineKind.ADDED and new_line is not None:
             changed_new.add(new_line)
-            new_line += 1
-        elif line.startswith("-"):
+        elif kind is DiffLineKind.REMOVED and old_line is not None:
             changed_old.add(old_line)
-            old_line += 1
-        elif line.startswith("\\"):
-            continue
-        else:
-            old_line += 1
-            new_line += 1
     return Hunk(
         file_path=file_path,
         old_start=old_start,
@@ -167,6 +201,31 @@ def _build_hunk(file_path: str, header: re.Match[str], body: list[str]) -> Hunk:
         changed_old_lines=frozenset(changed_old),
         text="\n".join([header.string, *body]),
     )
+
+
+def number_lines(
+    body: Iterable[str], old_start: int, new_start: int
+) -> Iterator[tuple[DiffLineKind, int | None, int | None, str]]:
+    """Пронумеровать строки тела hunk'а: вид, номер слева, номер справа, текст без префикса.
+
+    У добавленной строки нет старого номера, у удалённой — нового. Строка
+    `\\ No newline at end of file` — не строка файла: она пропускается и
+    номера не сдвигает. Одна нумерация на парсер и представление диффа.
+    """
+    old_line, new_line = old_start, new_start
+    for line in body:
+        if line.startswith("+"):
+            yield DiffLineKind.ADDED, None, new_line, line[1:]
+            new_line += 1
+        elif line.startswith("-"):
+            yield DiffLineKind.REMOVED, old_line, None, line[1:]
+            old_line += 1
+        elif line.startswith("\\"):
+            continue
+        else:
+            yield DiffLineKind.CONTEXT, old_line, new_line, line[1:]
+            old_line += 1
+            new_line += 1
 
 
 def _path_after_marker(line: str, marker: str) -> str | None:

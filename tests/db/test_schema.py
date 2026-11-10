@@ -28,6 +28,7 @@ TABLES = [
     "sessions",
     "provider_tokens",
     "simulations",
+    "balance_credits",
 ]
 
 

@@ -344,6 +344,7 @@ def create_simulation(
         limits=SimulationLimits(
             max_per_window=settings.simulation_max_per_hour,
             ttl=timedelta(seconds=settings.simulation_ttl_seconds),
+            file_max_bytes=settings.diff_file_max_bytes,
         ),
         now=datetime.now(UTC),
         new_id=new_id,

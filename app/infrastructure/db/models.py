@@ -8,6 +8,7 @@ CHECK: ограниченные наборы — часть контракта �
 
 import datetime as dt
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -20,12 +21,14 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
     Uuid,
     func,
     text,
+    true,
 )
 from sqlalchemy import (
     Enum as SAEnum,
@@ -37,6 +40,7 @@ from app.domain.enums import (
     FAILURE_STAGES,
     TERMINAL_STATUSES,
     CommentKind,
+    CoverageReason,
     DiffSide,
     FindingCategory,
     FindingSeverity,
@@ -74,17 +78,38 @@ class RepositoryRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "repositories"
     __table_args__ = (
         UniqueConstraint("provider", "provider_id", name="uq_repositories_provider_id"),
+        # Репозитории, за которые платит пользователь: `GET /auth/me` на каждый вход в кабинет.
+        Index(
+            "ix_repositories_payer_user_id",
+            "payer_user_id",
+            postgresql_where=text("payer_user_id IS NOT NULL"),
+        ),
     )
 
     provider: Mapped[Provider] = mapped_column(_enum(Provider, "provider"), nullable=False)
     provider_id: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(512), nullable=False)
     default_branch: Mapped[str] = mapped_column(String(255), nullable=False)
-    auto_review_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Настройки ревью (change `repository-settings`, D1, D2). Умолчания — в базе: старый код в окне
+    # деплоя вставляет запись без этих колонок, и она получает настройки контракта.
+    auto_review_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=true())
+    # Глоб-паттерны веток; пусто — все ветки.
+    branch_filter: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    # Порог merge gate — тот же тип, что у важности находки.
+    min_severity: Mapped[FindingSeverity] = mapped_column(
+        _enum(FindingSeverity, "finding_severity"), nullable=False, server_default="critical"
+    )
     # Когда ревью включено последний раз; `NULL` — выключено, запись и история остаются.
     # Умолчание `now()`: запись без колонки (старый код в окне деплоя, ручная вставка) — включённая.
     connected_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    # Плательщик прогонов (`review-billing`); `NULL` — не назначен. Пользователя с ролью
+    # плательщика не удалить: RESTRICT.
+    payer_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT")
     )
 
     # Их никто не читает. Они нужны потому, что unit of work упорядочивает
@@ -157,6 +182,29 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
             "verifier_dropped_findings >= 0",
             name="ck_review_runs_verifier_dropped",
         ),
+        # Расход модели пишется целиком или не пишется: маппер по пустым
+        # input_tokens считает расход неизвестным, и cost_eur без токенов
+        # молча пропал бы из API. Неотрицательность — как у шагов прогона.
+        CheckConstraint(
+            "(input_tokens IS NULL) = (output_tokens IS NULL)"
+            " AND (input_tokens IS NULL) = (cached_tokens IS NULL)"
+            " AND (input_tokens IS NULL) = (reasoning_tokens IS NULL)"
+            " AND (input_tokens IS NULL) = (cost_eur IS NULL)"
+            " AND (input_tokens IS NULL OR (tokens_used IS NOT NULL AND input_tokens >= 0"
+            " AND output_tokens >= 0 AND cached_tokens >= 0 AND reasoning_tokens >= 0 AND cost_eur >= 0))",
+            name="ck_review_runs_usage",
+        ),
+        # Резерв без плательщика не списался бы ни с чьего баланса.
+        CheckConstraint(
+            "estimated_cost_eur IS NULL OR (payer_user_id IS NOT NULL AND estimated_cost_eur >= 0)",
+            name="ck_review_runs_estimate",
+        ),
+        # Баланс плательщика суммирует его прогоны на каждой проверке.
+        Index(
+            "ix_review_runs_payer_user_id",
+            "payer_user_id",
+            postgresql_where=text("payer_user_id IS NOT NULL"),
+        ),
         # Курсор общего потока событий: опрос «изменённые после (updated_at, id)»
         # раз в секунду на соединение читает диапазон индекса, а не всю таблицу.
         Index("ix_review_runs_updated_at_id", "updated_at", "id"),
@@ -187,6 +235,14 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
     model: Mapped[str | None] = mapped_column(String(255))
     tokens_used: Mapped[int | None] = mapped_column(BigInteger)
+    # Разбивка `tokens_used` по видам и стоимость вызовов модели в евро
+    # (`LlmUsage`): точно, 10 знаков, как у баланса Eurorouter. Пишутся вместе;
+    # пусты до анализа и у прогонов, записанных до разбивки.
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cached_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    reasoning_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cost_eur: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
     duration_seconds: Mapped[float | None] = mapped_column(Float)
     rejected_findings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Итог второго прохода модели; пуст, пока анализ не завершён, и у прогонов,
@@ -196,6 +252,16 @@ class ReviewRunRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     )
     verifier_dropped_findings: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
+    )
+    # Биллинг (`review-billing`): плательщик и оценка, зарезервированная перед вызовом модели,
+    # тем же точным типом, что `cost_eur`; причина неполного покрытия. Пусты, пока баланс не
+    # проверялся.
+    payer_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    estimated_cost_eur: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    coverage_reason: Mapped[CoverageReason | None] = mapped_column(
+        _enum(CoverageReason, "review_coverage_reason")
     )
 
     merge_request: Mapped[MergeRequestRow] = relationship(back_populates="review_runs")
@@ -259,6 +325,18 @@ class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "context_payloads"
     __table_args__ = (
         UniqueConstraint("review_run_id", "chunk_index", name="uq_context_payloads_chunk"),
+        # Тело стирается по сроку хранения (change `context-payload-retention`): тела нет ровно
+        # тогда, когда отмечено время стирания.
+        CheckConstraint(
+            "(body IS NULL) = (body_expired_at IS NOT NULL)",
+            name="ck_context_payloads_body_expiry",
+        ),
+        # Проход стирания берёт самые старые живые тела и не читает уже стёртые строки.
+        Index(
+            "ix_context_payloads_live_created_at",
+            "created_at",
+            postgresql_where=text("body IS NOT NULL"),
+        ),
     )
 
     review_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -269,7 +347,9 @@ class ContextPayloadRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     file_paths: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    body: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # NULL — тело стёрто по сроку хранения, метаданные выше остаются.
+    body: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    body_expired_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class FindingRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
@@ -398,6 +478,25 @@ class UserRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
     sessions: Mapped[list[SessionRow]] = relationship(
         back_populates="user", passive_deletes="all"
     )
+
+
+class BalanceCreditRow(Base, UuidPrimaryKeyMixin, TimestampMixin):
+    """Зачисление на баланс аккаунта (`review-billing`): журнал, строки не меняются.
+
+    Возврат и корректировка — строка с отрицательной суммой. Расход — не здесь, а в
+    `review_runs` (design D1).
+    """
+
+    __tablename__ = "balance_credits"
+
+    # RESTRICT: зачисления — история денег, аккаунт с ними не удалить.
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    amount_eur: Mapped[Decimal] = mapped_column(Numeric(20, 10), nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    # Кто зачислил: пока Stripe нет — администратор (`credit_balance --by`).
+    credited_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class SessionRow(Base, UuidPrimaryKeyMixin):

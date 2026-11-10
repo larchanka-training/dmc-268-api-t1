@@ -75,7 +75,11 @@ from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.httpx import (
+    HTTPXClientInstrumentor,
+    RequestInfo,
+    ResponseInfo,
+)
 from opentelemetry.instrumentation.utils import suppress_instrumentation
 from opentelemetry.propagators.textmap import (
     CarrierT,
@@ -115,7 +119,8 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from sqlalchemy import Engine
 from sqlalchemy.pool import QueuePool
 
-from app.domain.enums import ReviewRunStage, SimulationStatus
+from app.application.ports.run_outcome import RUN_REFUSED
+from app.domain.enums import ReviewRunStage, ReviewRunStatus, SimulationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +134,8 @@ MIGRATE_SERVICE = "dmc-268-migrate"
 REVIEW_RUN_ID = "review_run_id"
 # То же для симуляции песочницы правил.
 SIMULATION_ID = "simulation_id"
+# `x-request-id` ответа провайдера модели: атрибут спана httpx и поле записи лога об ошибке.
+LLM_REQUEST_ID = "review.llm.request_id"
 
 # Метрики пула соединений — снимками состояния, а не событиями: событийный
 # счётчик contrib (`db.client.connections.usage`) пропускает события внутри
@@ -183,7 +190,7 @@ _review_runs_total = _meter.create_counter(
     # Прогоны, доведённые до терминального статуса тем, кто этот переход
     # сделал (пайплайн или выметатель), — не обработки сообщений: повторная
     # доставка терминального прогона и сообщение без прогона не пишутся.
-    description="Прогоны по терминальному статусу.",
+    description="Прогоны по терминальному исходу: completed, failed, refused.",
 )
 _review_stage_duration = _meter.create_histogram(
     "review_stage_duration", unit="s", description="Длительность этапов прогона."
@@ -324,6 +331,30 @@ def configure_telemetry(service_name: str) -> None:
         otel_logs.set_logger_provider(logger_provider)
         _logger_installed = logger_provider
         _install_log_handler(logger_provider)
+
+
+# Исходы, которые пишет `record_run_finished`: пайплайн, выметатель и приём вебхука
+# доводят прогон до `completed` или `failed`, пайплайн ещё отказывает по балансу.
+_RECORDED_RUN_OUTCOMES = (ReviewRunStatus.COMPLETED.value, ReviewRunStatus.FAILED.value, RUN_REFUSED)
+
+
+def prime_run_outcomes() -> None:
+    """Завести ряды `review_runs_total` по каждому исходу нулём при старте процесса.
+
+    Зовут фабрики API и воркера сразу за `configure_telemetry`, а не она сама:
+    процесс миграций прогоны не доводит, и рядов `job="dmc-268-migrate"` быть
+    не должно (ревью PR #324).
+
+    Без этого ряд появляется в Prometheus сразу с 1 — первым упавшим прогоном после
+    рестарта, — а `increase()` первый отсчёт нового ряда не считает: алерт
+    `ReviewRunsFailing` не видел бы первые падения после деплоя (ревью PR #324).
+    `add(0)` значения не меняет, повторный вызов безопасен. Нуль уходит с первым
+    периодическим экспортом (через 60 с): падения до него Prometheus увидит
+    первым сэмплом нового ряда, без нуля, и `increase()` их не посчитает. Окно
+    принято — `force_flush()` задерживал бы старт до 4 с при лежащем коллекторе.
+    """
+    for status in _RECORDED_RUN_OUTCOMES:
+        _review_runs_total.add(0, {"status": status})
 
 
 def shutdown_tracing() -> None:
@@ -521,11 +552,18 @@ def opt_in_stable_semconv() -> None:
     os.environ.setdefault("OTEL_SEMCONV_STABILITY_OPT_IN", SEMCONV_STABILITY_OPT_IN)
 
 
+def _provider_request_id(span: trace.Span, _request: RequestInfo, response: ResponseInfo) -> None:
+    """`x-request-id` ответа провайдера модели — на спан httpx: по нему поддержка ищет запрос."""
+    request_id = response.headers.get("x-request-id") if response.headers is not None else None
+    if request_id:
+        span.set_attribute(LLM_REQUEST_ID, request_id)
+
+
 def instrument_httpx() -> None:
     """Спаны на исходящие запросы httpx: GitHub и провайдеры модели."""
     instrumentor = HTTPXClientInstrumentor()
     if not instrumentor.is_instrumented_by_opentelemetry:
-        instrumentor.instrument()
+        instrumentor.instrument(response_hook=_provider_request_id)
 
 
 def instrument_engine(engine: Engine) -> None:
@@ -612,6 +650,29 @@ def instrument_pool(engine: Engine, pool_size: int, max_overflow: int) -> None:
         callbacks=[_limit],
         unit="{connection}",
         description="Предел пула соединений: pool_size + max_overflow.",
+    )
+
+
+def instrument_llm_balance(balance: Callable[[], float | None]) -> None:
+    """Остаток баланса провайдера модели — observable gauge `review_llm_provider_balance_eur`.
+
+    Колбэк зовёт `balance` на каждом сборе метрик; кэш опроса провайдера — забота `balance`
+    (`EurorouterBalance`). `None` — остатка нет, ряд в этом сборе не пишется. Запрос — без
+    спана httpx: опрос фоновый, корневой трейс на каждый был бы шумом.
+    """
+
+    def _observe(_options: metrics.CallbackOptions) -> Iterator[metrics.Observation]:
+        with untraced():
+            value = balance()
+        if value is not None:
+            yield metrics.Observation(value)
+
+    _meter.create_observable_gauge(
+        "review_llm_provider_balance_eur",
+        callbacks=[_observe],
+        # В фигурных скобках — аннотация: экспортёр Prometheus не дописывает её к имени ряда.
+        unit="{EUR}",
+        description="Остаток баланса провайдера модели (Eurorouter), евро.",
     )
 
 

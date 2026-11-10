@@ -95,6 +95,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(telemetry.API_SERVICE)
     # До контейнера: провайдеры трейсов и метрик нужны телеметрии FastAPI с первого запроса.
     telemetry.configure_telemetry(telemetry.API_SERVICE)
+    # Ряды исходов прогонов — нулём со старта: приём вебхука доводит прогон до
+    # `failed`, и первое падение должно быть приращением для `ReviewRunsFailing`.
+    telemetry.prime_run_outcomes()
     # Хук — за логами и до чтения окружения (замечание ревью PR #130): он
     # общий для API и воркера (`app.infrastructure.logging`), и `ValidationError`
     # pydantic из кривого окружения выходит из процесса JSON-записью с
@@ -117,6 +120,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Видно в логе старта API: вход на таком стенде будет отказывать. Не в
         # контейнере — его собирает и воркер, которому ключ не передаётся.
         _log.warning("USER_TOKEN_ENCRYPTION_KEY не задан: вход отказывает, токены не хранятся")
+    if not settings.prometheus_url:
+        # Как с ключом выше: видно в логе старта, почему страница статуса — unknown.
+        _log.warning("PROMETHEUS_URL не задан: статус сервиса (GET /api/v1/status) — unknown")
     telemetry.instrument_engine(app.state.container.engine)
     telemetry.instrument_pool(
         app.state.container.engine, settings.db_pool_size, settings.db_max_overflow
@@ -132,6 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.api.pull_requests import router as pull_requests_router
     from app.api.repositories import router as repositories_router
     from app.api.reviews import router as reviews_router
+    from app.api.status import router as status_router
     from app.api.trace_id import TraceIdMiddleware
     from app.api.webhooks import router as webhooks_router
 
@@ -158,6 +165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(inspection_router)
     app.include_router(playground_router)
     app.include_router(events_router)
+    app.include_router(status_router)
 
     # Служебные ручки вне `/api/v1` — не часть контракта.
     @app.get("/", include_in_schema=False)

@@ -1,10 +1,23 @@
-"""Отчёт eval правил: результаты прогонов → JSON и Markdown. Чистые функции."""
+"""Отчёт eval правил: результаты прогонов → JSON и Markdown. Чистые функции.
+
+Кроме Precision/Recall отчёт показывает долю ответов модели, прошедших схему с
+первой попытки (LLM_EVAL §3, Valid-output rate): повтор по схеме прячет
+сломанный формат, и без этой строки его не видно.
+"""
 
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .scoring import LINE_WINDOW, CaseScore, Metrics, Reported, aggregate, spread
+from .scoring import (
+    LINE_WINDOW,
+    CaseScore,
+    Metrics,
+    OutputCounts,
+    Reported,
+    aggregate,
+    spread,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +31,8 @@ class RunResult:
     failure: str | None
     reported: tuple[Reported, ...]
     score: CaseScore | None
+    # Исходы вызовов модели прогона - и у упавшего: невалидный ответ ревью роняет прогон.
+    outputs: OutputCounts
 
 
 _METRICS = (
@@ -28,6 +43,8 @@ _METRICS = (
     ("generic_recall", "Recall по общим дефектам"),
     ("attribution", "Верная ссылка на пункт"),
 )
+
+_OUTPUTS = ("first_try", "after_retry", "invalid", "no_answer")
 
 
 def config_metrics(results: Sequence[RunResult], config: str) -> list[Metrics]:
@@ -43,12 +60,28 @@ def config_metrics(results: Sequence[RunResult], config: str) -> list[Metrics]:
     ]
 
 
+def config_outputs(results: Sequence[RunResult], config: str) -> list[OutputCounts]:
+    """Исходы вызовов модели конфигурации по каждому повтору, вместе с упавшими прогонами."""
+    repetitions = sorted({r.repetition for r in results if r.config == config})
+    return [
+        sum(
+            (r.outputs for r in results if r.config == config and r.repetition == rep),
+            OutputCounts(),
+        )
+        for rep in repetitions
+    ]
+
+
 def _cell(values: Sequence[float | None]) -> str:
+    """Среднее ± отклонение по повторам; если не у всех повторов есть значение -
+    ещё и их число: «1.00 (2/3)» - среднее по двум повторам из трёх, а не по трём."""
     summary = spread(values)
     if summary is None:
         return "—"
     avg, deviation = summary
-    return f"{avg:.2f}" if len(values) == 1 else f"{avg:.2f} ± {deviation:.2f}"
+    text = f"{avg:.2f}" if len(values) == 1 else f"{avg:.2f} ± {deviation:.2f}"
+    present = sum(1 for v in values if v is not None)
+    return text if present == len(values) else f"{text} ({present}/{len(values)})"
 
 
 def to_json(
@@ -59,6 +92,12 @@ def to_json(
         "line_window": LINE_WINDOW,
         "configs": {
             config: [asdict(m) for m in config_metrics(results, config)] for config in configs
+        },
+        "outputs": {
+            config: [
+                {**asdict(o), "valid_rate": o.valid_rate} for o in config_outputs(results, config)
+            ]
+            for config in configs
         },
         "runs": [asdict(r) for r in results],
     }
@@ -84,6 +123,18 @@ def to_markdown(results: Sequence[RunResult], configs: Sequence[str], meta: dict
         for c in configs
     ]
     lines.append("| TP/FP/FN, сумма повторов | " + " | ".join(totals) + " |")
+    per_outputs = {c: config_outputs(results, c) for c in configs}
+    rates = [_cell([o.valid_rate for o in per_outputs[c]]) for c in configs]
+    lines.append("| Валидно с первой попытки | " + " | ".join(rates) + " |")
+    calls = [
+        "/".join(str(getattr(sum(per_outputs[c], OutputCounts()), k)) for k in _OUTPUTS)
+        for c in configs
+    ]
+    lines.append(
+        "| Вызовы: первая/повтор/невалидно/без ответа, сумма повторов | "
+        + " | ".join(calls)
+        + " |"
+    )
 
     lines += ["", "## Пропуски и шум по кейсам", ""]
     lines += ["| Кейс | Конфигурация | Пропущено | Лишних замечаний |", "|---|---|---|---|"]

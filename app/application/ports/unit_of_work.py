@@ -14,6 +14,7 @@ from types import TracebackType
 from typing import Protocol, Self
 
 from app.application.ports.repositories import (
+    BillingRepo,
     ContextPayloadRepo,
     FindingRepo,
     MergeRequestRepo,
@@ -34,6 +35,11 @@ class ActiveRunConflict(RuntimeError):
     параллельный прогон раньше записал те же комментарии ревью упавшего (#222)."""
 
 
+class RunStateConflict(RuntimeError):
+    """Прогон изменили с момента чтения: условная запись (`ReviewRunRepo.update`
+    с `previous`) не прошла, и решение по устаревшей копии не записано."""
+
+
 class UnitOfWork(Protocol):
     repositories: RepositoryRepo
     merge_requests: MergeRequestRepo
@@ -46,6 +52,7 @@ class UnitOfWork(Protocol):
     sessions: SessionRepo
     provider_tokens: ProviderTokenRepo
     simulations: SimulationRepo
+    billing: BillingRepo
 
     def __enter__(self) -> Self: ...
 

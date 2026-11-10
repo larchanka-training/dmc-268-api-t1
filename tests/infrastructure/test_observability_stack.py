@@ -48,6 +48,9 @@ STACK_SERVICES = {
     "grafana": "grafana_image",
     "node-exporter": "node_exporter_image",
     "dockerproxy": "docker_socket_proxy_image",
+    "alertmanager": "alertmanager_image",
+    "blackbox": "blackbox_image",
+    "blackbox-public": "blackbox_image",
 }
 
 # имя@sha256:… — дайджест манифест-листа (multi-arch), а не платформенный.
@@ -569,6 +572,8 @@ def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
     assert "docker_network.dmc268" not in grafana
     assert "docker_network.observability[" in grafana
     assert "docker_network.grafana[0].name" in grafana
+    # Публичный вход /grafana/ — через сеть прокси с интерфейсом.
+    assert "docker_network.grafana_proxy.name" in grafana
     for name in ("otelcol", "prometheus"):
         block = _tf_container_block(name)
         assert "docker_network.backend.name" in block, name
@@ -587,13 +592,14 @@ def test_the_monitor_role_password_step_travels_with_the_migrations() -> None:
     assert "POSTGRES_MONITOR_PASSWORD" in compose_migrate["environment"]
     command = " ".join(compose_migrate["command"])
     assert "alembic upgrade head" in command
-    assert "ALTER ROLE" in command
-    assert "track_utility" in command
+    assert "python alembic/monitor_password.py" in command
+    assert "python alembic/monitor_password.py" in MIGRATE_SCRIPT.read_text(encoding="utf-8")
 
-    script = MIGRATE_SCRIPT.read_text(encoding="utf-8")
-    assert 'os.environ["POSTGRES_MONITOR_PASSWORD"]' in script
-    assert "ALTER ROLE" in script
-    assert "track_utility" in script
+    # Шаг — один файл на оба окружения; он же едет в образ вместе с alembic/.
+    step = (REPO / "alembic" / "monitor_password.py").read_text(encoding="utf-8")
+    assert 'os.environ["POSTGRES_MONITOR_PASSWORD"]' in step
+    assert "ALTER ROLE" in step
+    assert "track_utility" in step
 
     # Пароль приезжает в скрипт окружением миграций — выходом migrate_env.
     outputs = OUTPUTS_TF.read_text(encoding="utf-8")
@@ -820,12 +826,16 @@ def test_dashboard_uid_and_title_are_fixed() -> None:
     assert dashboard["title"]
 
 
-def test_every_panel_and_target_uses_the_prometheus_datasource() -> None:
-    """Панели и их запросы привязаны к uid datasource из datasources.yaml."""
+def test_every_panel_and_target_uses_a_provisioned_datasource() -> None:
+    """Панели и их запросы привязаны к uid datasource из datasources.yaml.
+
+    Метрики идут из Prometheus, коды ответа входа (nginx) из Loki: в stub_status их нет.
+    """
     for panel in load_dashboard()["panels"]:
-        assert panel["datasource"]["uid"] == "prometheus", panel["title"]
+        uid = panel["datasource"]["uid"]
+        assert uid in {"prometheus", "loki"}, panel["title"]
         for target in panel["targets"]:
-            assert target["datasource"]["uid"] == "prometheus", panel["title"]
+            assert target["datasource"]["uid"] == uid, panel["title"]
 
 
 def test_dashboard_queries_cover_the_expected_signals() -> None:
@@ -857,6 +867,33 @@ def test_dashboard_queries_cover_the_expected_signals() -> None:
         "node_filesystem_avail_bytes",
         "container_cpu_usage_nanoseconds_total",
         "container_memory_usage_total_bytes",
+        "nginx_connections_current",
+        '{service_name="dmc268-ui"}',
+        "review_llm_cost_eur_month",
+        "dmc268:llm_cost_budget_eur_month",
+        "review_llm_provider_balance_eur",
     )
     missing = [signal for signal in expected if signal not in expressions]
     assert not missing, f"нет сигналов в выражениях дашборда: {missing}"
+
+
+def test_entry_traffic_excludes_probes_and_grafana_requests() -> None:
+    """Панели входа (nginx) считают только трафик интерфейса и API.
+
+    Grafana открывается через тот же nginx интерфейса по подпути /grafana/, и её
+    запросы попадают в access-лог dmc268-ui. Как и пробы Blackbox, они не вход:
+    каждое выражение по этому логу отсекает и то и другое фильтром строк.
+    """
+    selector = '{service_name="dmc268-ui"}'
+    required_filters = ('!= "Blackbox-Exporter"', '!~ "\\"[A-Z]+ /grafana/"')
+    expressions = [
+        target["expr"]
+        for panel in load_dashboard()["panels"]
+        for target in panel["targets"]
+        if selector in target["expr"]
+    ]
+    assert expressions, f"нет выражений по {selector}"
+    # Фильтры строк стоят сразу за селектором, до парсера pattern.
+    prefix = f"{selector} {' '.join(required_filters)} | pattern "
+    for expr in expressions:
+        assert prefix in expr, f"нет фильтров {required_filters}: {expr}"

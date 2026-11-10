@@ -15,6 +15,7 @@ from app.api.dependencies import get_unit_of_work
 from app.application import ports
 from app.config import Settings
 from app.infrastructure.container import (
+    CABINET_VCS_LIMITS,
     WORKER_VCS_LIMITS,
     build_container,
     llm_http_timeout,
@@ -39,6 +40,8 @@ class Adapter:
 
 
 PORT_TO_ADAPTER: dict[str, Adapter] = {
+    "AlertSource": Adapter("monitoring/prometheus.py", "PrometheusAlertSource"),
+    "BillingRepo": Adapter("db/repositories.py", "SqlAlchemyBillingRepo"),
     "CacheStore": Adapter("cache/memory.py", "InMemoryCacheStore"),
     "DefinitionExtractor": Adapter(
         "parsing/tree_sitter_extractor.py", "TreeSitterDefinitionExtractor"
@@ -188,6 +191,32 @@ def test_the_container_keeps_one_cache_per_process() -> None:
     assert container.cache_store() is container.cache_store()
 
 
+def test_the_run_diff_cache_is_its_own_store_kept_per_container() -> None:
+    """Диффы прогонов не вытесняют записи видимости: своё хранилище, одно на контейнер."""
+    container = build_container(SETTINGS)
+    assert container.run_diff_cache() is container.run_diff_cache()
+    assert container.run_diff_cache() is not container.cache_store()
+
+
+def test_the_rules_cache_is_its_own_store_kept_per_container() -> None:
+    """Исходы правил кабинета не вытесняют записи видимости: своё хранилище, одно на контейнер."""
+    container = build_container(SETTINGS)
+    assert container.rules_cache() is container.rules_cache()
+    assert container.rules_cache() is not container.cache_store()
+    assert container.rules_cache() is not container.run_diff_cache()
+
+
+def test_the_run_diff_cache_keeps_24_entries() -> None:
+    """Объём кэша диффов — число записей: 24 × RUN_DIFF_MAX_BYTES, старшая запись вытесняется."""
+    cache = build_container(SETTINGS).run_diff_cache()
+
+    for index in range(25):
+        cache.set(f"run-{index}", "дифф", ttl_seconds=100)
+
+    assert cache.get("run-0") is None
+    assert all(cache.get(f"run-{index}") == "дифф" for index in range(1, 25))
+
+
 def test_the_container_builds_the_parser_once() -> None:
     container = build_container(SETTINGS)
     extractor = container.definition_extractor()
@@ -319,3 +348,31 @@ def test_the_redelivery_pass_gets_a_gateway_that_does_not_wait_out_rate_limits()
 
     assert gateway._rate_limit_budget_seconds == 0.0  # type: ignore[attr-defined]
     assert gateway._client.timeout == httpx.Timeout(5.0)  # type: ignore[attr-defined]
+
+
+def test_the_cabinet_gets_its_own_gateway_with_twenty_seconds_and_no_rate_limit_wait() -> None:
+    """Дифф прогона в кабинете: 20 с на фазу, подключение 5 с, лимит не пережидается
+    (поток threadpool не спит минуту); шлюз API для вебхука остаётся с 5 с."""
+    container = build_container(SETTINGS)
+
+    cabinet = container.cabinet_vcs_gateway()
+
+    assert container.cabinet_vcs_gateway() is cabinet
+    assert cabinet is not container.vcs_gateway()
+    assert CABINET_VCS_LIMITS.timeout == httpx.Timeout(20.0, connect=5.0)
+    assert cabinet._client.timeout == httpx.Timeout(20.0, connect=5.0)  # type: ignore[attr-defined]
+    assert cabinet._rate_limit_budget_seconds == 0.0  # type: ignore[attr-defined]
+    assert container.vcs_gateway()._client.timeout == httpx.Timeout(5.0)
+
+
+def test_the_service_status_monitor_is_one_per_container_and_follows_prometheus_url() -> None:
+    """Кэш оценки статуса живёт, только если монитор один; без адреса — без HTTP-клиента."""
+    container = build_container(SETTINGS)
+    assert container.service_status() is container.service_status()
+    assert container.service_status()._source._client is None  # type: ignore[attr-defined]
+
+    configured = build_container(SETTINGS.model_copy(update={"prometheus_url": "http://dmc268-prometheus:9090"}))
+    client = configured.service_status()._source._client  # type: ignore[attr-defined]
+    assert isinstance(client, httpx.Client)
+    assert str(client.base_url) == "http://dmc268-prometheus:9090"
+    assert client.timeout.read == 2.0

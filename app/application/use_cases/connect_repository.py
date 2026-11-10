@@ -26,7 +26,12 @@ from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.use_cases.user_token import call_with_user_token
-from app.domain.entities import InstallationRepository, Repository, Secret
+from app.domain.entities import (
+    InstallationRepository,
+    Repository,
+    RepositorySettings,
+    Secret,
+)
 from app.domain.enums import Provider, RepositorySelection
 from app.domain.repository_access import (
     can_connect,
@@ -53,14 +58,18 @@ class ListedRepository:
     record: Repository | None
     # Подсказка интерфейсу, а не защита: `connect_repository` проверяет права сам (ui#45).
     can_connect: bool
+    # Логин плательщика записи; `None` — записи или плательщика нет (`review-billing`).
+    payer_login: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class UserContext:
-    """Чьими правами спрашиваем провайдера: сессия, к которой привязан токен."""
+    """Чьими правами спрашиваем провайдера: сессия, к которой привязан токен, и её пользователь."""
 
     oauth: OAuthProvider
     session_id: UUID
+    # Пользователь сессии: подключивший репозиторий становится его плательщиком (`review-billing`).
+    user_id: UUID
 
 
 def list_with_connections(
@@ -76,10 +85,21 @@ def list_with_connections(
     with uow:
         provider_ids = [repository.provider_id for repository in repositories]
         records = {r.provider_id: r for r in uow.repositories.list_by_provider_ids(Provider.GITHUB, provider_ids)}
-    listed = [
-        ListedRepository(r, record=records.get(r.provider_id), can_connect=can_connect(r.permissions))
-        for r in repositories
-    ]
+        # Плательщиков на странице единицы: чтение на каждого, а не на репозиторий.
+        payers = {r.payer_user_id for r in records.values() if r.payer_user_id is not None}
+        logins = {payer: found.login for payer in payers if (found := uow.users.get(payer)) is not None}
+    listed = []
+    for r in repositories:
+        record = records.get(r.provider_id)
+        payer = record.payer_user_id if record is not None else None
+        listed.append(
+            ListedRepository(
+                r,
+                record=record,
+                can_connect=can_connect(r.permissions),
+                payer_login=logins.get(payer) if payer is not None else None,
+            )
+        )
     return sorted(listed, key=lambda item: item.repository.full_name.casefold())
 
 
@@ -112,7 +132,8 @@ def connect_repository(
     `NOT_IN_INSTALLATION`, один отказ без различия; нет права admin или
     maintain — `MANAGE_REQUIRED`; уже подключён и включён — `ALREADY_CONNECTED`. Права проверяются раньше
     «уже подключён»: пользователь без прав не узнаёт, подключён ли репозиторий. Выключенный включается
-    обратно: ответ — его прежняя запись.
+    обратно: ответ — его прежняя запись. Плательщиком становится пользователь, только если у записи
+    его нет (design D6 change `account-balance`).
     """
     if provider is not Provider.GITHUB:
         return ConnectRefusal.NOT_IN_INSTALLATION
@@ -141,6 +162,7 @@ def connect_repository(
         created_at=now,
         updated_at=now,
         connected_at=now,
+        payer_user_id=user.user_id,
     )
     # Сначала включаем выключенную запись — прежний `id` и история остаются; её нет —
     # вставка. Обе операции сами разбирают гонку (design D4): проигравший параллельный
@@ -153,6 +175,25 @@ def connect_repository(
     return reconnected or repository
 
 
+def _manage_refusal(
+    catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, repository: Repository, now: datetime
+) -> ConnectRefusal | None:
+    """Может ли пользователь управлять репозиторием; `None` — может.
+
+    Запрос к провайдеру мимо кэша видимости: роль, отозванная после кэширования, видна сразу.
+    Провайдер репозиторий не отдаёт — `NOT_IN_INSTALLATION`; нет admin или maintain —
+    `MANAGE_REQUIRED`.
+    """
+    found = call_with_user_token(
+        uow, user.oauth, user.session_id, now, lambda token: catalog.user_repository(token, repository.provider_id)
+    )
+    if found is None:
+        return ConnectRefusal.NOT_IN_INSTALLATION
+    if not can_connect(found.permissions):
+        return ConnectRefusal.MANAGE_REQUIRED
+    return None
+
+
 def disconnect_repository(
     catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, repository: Repository, now: datetime
 ) -> ConnectRefusal | None:
@@ -163,17 +204,62 @@ def disconnect_repository(
     `NOT_IN_INSTALLATION`; нет admin или maintain — `MANAGE_REQUIRED`. Уже выключенный
     выключается ещё раз без ошибки.
     """
-    found = call_with_user_token(
-        uow, user.oauth, user.session_id, now, lambda token: catalog.user_repository(token, repository.provider_id)
-    )
-    if found is None:
-        return ConnectRefusal.NOT_IN_INSTALLATION
-    if not can_connect(found.permissions):
-        return ConnectRefusal.MANAGE_REQUIRED
+    refusal = _manage_refusal(catalog, uow, user, repository, now)
+    if refusal is not None:
+        return refusal
     with uow:
         uow.repositories.disconnect(repository.id, now)
         uow.commit()
     return None
+
+
+def save_repository_settings(
+    catalog: InstallationCatalog,
+    uow: UnitOfWork,
+    user: UserContext,
+    repository: Repository,
+    settings: RepositorySettings,
+    now: datetime,
+) -> Repository | ConnectRefusal:
+    """Записать настройки ревью видимого пользователю репозитория и вернуть записанную запись.
+
+    Права — тем же правилом и тем же запросом к провайдеру мимо кэша, что у выключения
+    (design D6): не отдан — `NOT_IN_INSTALLATION`, нет admin или maintain —
+    `MANAGE_REQUIRED`; при отказе ничего не пишется. Замена полная, повтор того же тела
+    даёт ту же запись. Записи репозитория в сервисе не удаляются (`DELETE` только выключает),
+    поэтому пропавшая запись — `LookupError`, а не отказ. Выключенный репозиторий настройки получает, но не включается:
+    `connected_at` не трогаем, включение — `connect_repository`.
+    """
+    refusal = _manage_refusal(catalog, uow, user, repository, now)
+    if refusal is not None:
+        return refusal
+    with uow:
+        saved = uow.repositories.update_settings(repository.id, settings, now)
+        uow.commit()
+    if saved is None:
+        raise LookupError(f"repository {repository.id} not found")
+    return saved
+
+
+def take_over_payment(
+    catalog: InstallationCatalog, uow: UnitOfWork, user: UserContext, repository: Repository, now: datetime
+) -> Repository | ConnectRefusal:
+    """Сделать пользователя плательщиком видимого ему репозитория (design D6 change `account-balance`).
+
+    Права — тем же правилом и запросом к провайдеру мимо кэша, что у записи настроек: не отдан —
+    `NOT_IN_INSTALLATION`, нет admin или maintain — `MANAGE_REQUIRED`; при отказе ничего не
+    пишется. Прогоны, уже зарезервировавшие оценку, остаются за прежним плательщиком: он записан
+    на них. Пропавшая запись — `LookupError`, как у настроек.
+    """
+    refusal = _manage_refusal(catalog, uow, user, repository, now)
+    if refusal is not None:
+        return refusal
+    with uow:
+        saved = uow.repositories.set_payer(repository.id, user.user_id, now)
+        uow.commit()
+    if saved is None:
+        raise LookupError(f"repository {repository.id} not found")
+    return saved
 
 
 def connect_installation(
@@ -228,6 +314,7 @@ def connect_installation(
                 created_at=now,
                 updated_at=now,
                 connected_at=now,
+                payer_user_id=user.user_id,
             )
             # Параллельный POST /repositories мог успеть: вставка его не перетирает.
             if uow.repositories.add(repository):

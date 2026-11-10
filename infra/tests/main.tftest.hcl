@@ -14,6 +14,7 @@ variables {
   postgres_replication_password = "repl:ication@pass-16"
   github_webhook_secret         = "webhook-secret"
   user_token_encryption_key     = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  state_passphrase              = "test-state-passphrase-16+"
   llm_backend                   = "stub"
 }
 
@@ -238,6 +239,24 @@ run "worker_grace_covers_hosted_fallback" {
     condition     = contains(docker_container.worker.env, "LLM_HOSTED_FALLBACK=true") && contains(docker_container.worker.env, "OLLAMA_MODEL=qwen3-coder:30b")
     error_message = "Выбор модели доходит до воркера окружением."
   }
+
+  assert {
+    condition     = contains(docker_container.worker.env, "BILLING_ENABLED=false")
+    error_message = "Без billing_enabled баланс не проверяется."
+  }
+}
+
+run "billing_flag_reaches_worker" {
+  command = plan
+
+  variables {
+    billing_enabled = true
+  }
+
+  assert {
+    condition     = contains(docker_container.worker.env, "BILLING_ENABLED=true")
+    error_message = "billing_enabled доходит до воркера окружением."
+  }
 }
 
 # Контейнеры ссылаются на образ по digest без тега: атрибут image провайдер
@@ -316,6 +335,18 @@ run "api_waits_until_healthy" {
     error_message = "Длительности healthcheck API — в формате Go, как их нормализует провайдер: \"2s\", \"30s\", \"1m0s\"."
   }
 
+  # start_period не короче wait_timeout: всё ожидание выката идёт с проверкой
+  # раз в start_interval. Короче — медленный старт у края ожидания ждал бы
+  # проверки через interval (30 с), и apply падал бы по таймауту (#214). Формат
+  # Go проверен выше: часы, минуты и секунды разбираются из одной строки.
+  assert {
+    condition = sum([
+      for part in regexall("([0-9]+)([hms])", docker_container.api.healthcheck[0].start_period) :
+      tonumber(part[0]) * lookup({ h = 3600, m = 60, s = 1 }, part[1])
+    ]) >= docker_container.api.wait_timeout
+    error_message = "start_period healthcheck API должен быть не короче wait_timeout: иначе медленный старт ждёт проверки через interval у края ожидания."
+  }
+
   # Правку healthcheck провайдер на месте не применяет: API пересоздаётся от
   # terraform_data.api_healthcheck, и описание у них обязано быть одним.
   assert {
@@ -335,6 +366,11 @@ run "database_ready_before_migrations" {
   assert {
     condition     = docker_container.postgres.wait == true && length(docker_container.postgres.healthcheck) == 1
     error_message = "У postgres нужны wait = true и healthcheck: без них миграции стартуют против базы, которая ещё не принимает соединения."
+  }
+
+  assert {
+    condition     = docker_container.rabbitmq.wait == true && length(docker_container.rabbitmq.healthcheck) == 1
+    error_message = "У rabbitmq нужны wait = true и healthcheck: без них смена пароля брокера идёт к узлу, который ещё не принимает AMQP."
   }
 }
 
@@ -360,6 +396,30 @@ run "empty_secrets_rejected" {
   }
 
   expect_failures = [var.github_webhook_secret, var.postgres_password, var.rabbitmq_password, var.postgres_replication_password]
+}
+
+# Фраза шифрования состояния: пустая (секрет не задан) или короче минимума
+# pbkdf2 отклоняется до изменений на сервере.
+run "short_state_passphrase_rejected" {
+  command = plan
+
+  variables {
+    state_passphrase = "short"
+  }
+
+  expect_failures = [var.state_passphrase]
+}
+
+# Плейсхолдер из terraform.tfvars.example проходит проверку длины, а tfvars
+# перекрывает TF_VAR_state_passphrase — отклоняется отдельно.
+run "placeholder_state_passphrase_rejected" {
+  command = plan
+
+  variables {
+    state_passphrase = "CHANGE_ME_STATE_PASSPHRASE_16_PLUS"
+  }
+
+  expect_failures = [var.state_passphrase]
 }
 
 run "ollama_without_model_rejected" {

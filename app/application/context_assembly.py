@@ -13,8 +13,12 @@
 (change `add-llm-gateway`, design D6); затем под правила резервируется то,
 что им нужно на файлах диффа (не больше их доли), затем hunk'и всех файлов
 в порядке диффа, затем правила —
-уже по файлам, чей дифф вошёл, — затем
-AST: сначала охватывающие определения всех файлов, потом импорты. Элемент,
+уже по файлам, чей дифф вошёл. Остаток идёт на улучшения по файлам (change
+`context-surrounding`, design D2): файлы до `WHOLE_FILE_MAX_BYTES` целиком, затем
+AST остальных (сначала охватывающие определения всех файлов, потом импорты),
+затем окна ±`SURROUNDING_LINES` строк вокруг hunk'ов остальных файлов. Улучшение
+заменяет элементы `diff` файла расширенными видами того же формата и входит,
+только если разница стоимостей помещается в остаток целиком. Элемент,
 не поместившийся целиком, не обрезается, а перечисляется в `omitted`. Одно
 исключение - описание PR: оно входит началом, обрезанным до остатка доли
 (change `llm-gateway-review-fixes`, design D6);
@@ -27,7 +31,7 @@ AST: сначала охватывающие определения всех ф�
 """
 
 import hashlib
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -52,8 +56,14 @@ from app.domain.entities import (
     ShownRule,
 )
 from app.domain.enums import Language
+from app.domain.hunk_context import (
+    SURROUNDING_LINES,
+    WHOLE_FILE_MAX_BYTES,
+    expand_hunks,
+)
 from app.domain.repo_rules import RULES_PATH, applicable_rules
-from app.domain.secret_redaction import redact_secrets
+from app.domain.review_coverage import ReviewCoverage, review_coverage
+from app.domain.secret_redaction import may_hold_secrets, redact_secrets
 from app.domain.untrusted import fence, sanitize
 
 SCHEMA = "context-payload/v1"
@@ -77,6 +87,8 @@ class ContextLimits:
     pr_context_max_tokens: int
     # Потолок unified diff прогона в байтах: больший не дочитывается, прогон - `failed`.
     diff_max_bytes: int
+    # Потолок изменения одного файла: больший отфильтровывается (`filter_diff_files`).
+    diff_file_max_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +144,8 @@ class AssembledContext:
     # Hunk'и, вошедшие в пакет: находка вне них указывает на то, чего модель
     # не видела.
     hunks: tuple[Hunk, ...]
+    # Какие файлы диффа модель видела: список в сводке ревью (#279).
+    coverage: ReviewCoverage
     # Правила, вошедшие в пакет, - по тому же принципу для ссылки на правило.
     rules: tuple[ShownRule, ...] = ()
 
@@ -143,13 +157,14 @@ def assemble_context(
     asts: Iterable[FileAst],
     skipped_asts: Iterable[SkippedAst],
     *,
+    sources: Mapping[str, str],
     pr_context: PrContext,
     limits: ContextLimits,
     review_run_id: UUID,
     now: datetime,
     new_id: Callable[[], UUID],
 ) -> AssembledContext:
-    reviewable = filter_diff_files(files)
+    reviewable = filter_diff_files(files, max_file_bytes=limits.diff_file_max_bytes)
     reviewable_paths = {f.file_path for f in reviewable}
     omitted: list[dict[str, Any]] = [
         _omission(f.file_path, "file", "filtered")
@@ -176,13 +191,16 @@ def assemble_context(
     reserve = min(limit_bytes // 10, _OMITTED_RESERVE_MAX_BYTES)
     budget = Budget(limit_bytes - json_size(body) - reserve)
 
-    pr_items, unavailable = _pr_context_items(pr_context)
+    pr_max_bytes = limits.pr_context_max_tokens * BYTES_PER_TOKEN
+    pr_items, unavailable = _pr_context_items(pr_context, pr_max_bytes)
     omitted += unavailable
     pr_share = budget.split(
-        min(limits.pr_context_max_tokens * BYTES_PER_TOKEN, sum(Budget.cost(i) for i, _ in pr_items))
+        min(pr_max_bytes, sum(Budget.cost(i) for i, _ in pr_items if i is not None))
     )
     for item, omission in pr_items:
-        if pr_share.take(item):
+        if item is None:
+            omitted.append(omission)
+        elif pr_share.take(item):
             body["pull_request_context"].append(item)
         elif item["part"] == "description" and (
             cut := _cut_description(pr_context.description or "", pr_share)
@@ -196,23 +214,40 @@ def assemble_context(
     # Правила резервируют не всю свою долю, а сколько им нужно на всех
     # файлах диффа: без правил дифф получает весь бюджет. После диффа правила
     # привязываются к вошедшим файлам — подмножеству, — и в резерв укладываются.
+    # Путь обезвреживается раз на файл: записи всех его ханков и списки файлов правил
+    # ссылаются на одну строку, а не держат по копии, раздутой `sanitize` в 8 раз (#328).
+    safe_paths = {
+        path: sanitize(path)
+        for f in reviewable
+        for path in (f.file_path, f.old_path)
+        if path is not None
+    }
     candidate_paths = tuple(dict.fromkeys(h.file_path for f in reviewable for h in f.hunks))
-    wanted = sum(Budget.cost(item) for item, _ in _rule_items(rules, candidate_paths))
+    wanted = sum(Budget.cost(item) for item, _ in _rule_items(rules, candidate_paths, safe_paths))
     rules_share = budget.split(min(limits.rules_max_tokens * BYTES_PER_TOKEN, wanted))
 
     shown: list[Hunk] = []
+    # Элементы `diff` по файлам: второй проход заменяет их у файла целиком.
+    diff_items: dict[str, list[dict[str, Any]]] = {}
     for parsed in reviewable:
+        safe_path = safe_paths[parsed.file_path]
         for hunk in parsed.hunks:
-            item = _hunk_item(parsed, hunk)
+            # Обезвреживание текст не укорачивает, а символ стоит в пакете не меньше байта:
+            # ханк длиннее остатка не поместится. Отбрасываем его до `sanitize`, которая
+            # раздувает управляющие символы в 8 раз и выводила воркер за память (#328).
+            if len(hunk.text) > budget.remaining:
+                omitted.append(_hunk_omission(safe_path, hunk))
+                continue
+            item = _diff_item(parsed, hunk.text, safe_paths)
             if budget.take(item):
-                body["diff"].append(item)
+                diff_items.setdefault(parsed.file_path, []).append(item)
                 shown.append(hunk)
             else:
-                omitted.append(_omission(parsed.file_path, "hunk", "budget", line=hunk.new_start))
+                omitted.append(_hunk_omission(safe_path, hunk))
     file_paths = tuple(dict.fromkeys(h.file_path for h in shown))
 
     shown_rules: list[ShownRule] = []
-    for item, rule in _rule_items(rules, file_paths):
+    for item, rule in _rule_items(rules, file_paths, safe_paths):
         section = "items" if rule is not None else "rejected"
         if rules_share.take(item):
             body["rules"][section].append(item)
@@ -227,7 +262,25 @@ def assemble_context(
     shown_by_file: dict[str, list[Hunk]] = {}
     for hunk in shown:
         shown_by_file.setdefault(hunk.file_path, []).append(hunk)
-    ast_files = [a for a in asts if a.path in shown_by_file]
+    # Второй проход - только файлы, у которых вошли все hunk'и: окну без изменения не место.
+    # Файлы с секретами по имени не расширяются: `redact_secrets` ловит не всякий секрет.
+    complete = [
+        (parsed, source)
+        for parsed in reviewable
+        if (source := sources.get(parsed.file_path)) is not None
+        and parsed.hunks
+        and not may_hold_secrets(parsed.file_path)
+        and len(shown_by_file.get(parsed.file_path, ())) == len(parsed.hunks)
+    ]
+    whole: set[str] = set()
+    for parsed, source in complete:
+        if len(source.encode("utf-8")) <= WHOLE_FILE_MAX_BYTES:
+            views = expand_hunks(parsed.hunks, source, source.count("\n") + 1)
+            # Виды, равные исходным, - файл уже целиком в hunk'ах (новый файл): тоже `whole_file`.
+            if _expand(budget, diff_items, parsed, views, safe_paths):
+                whole.add(parsed.file_path)
+    # Файл целиком виден модели весь: AST для него не нужен.
+    ast_files = [a for a in asts if a.path in shown_by_file and a.path not in whole]
     for file_ast in ast_files:
         scopes = select_scopes(file_ast.outline, touched_lines(shown_by_file[file_ast.path]))
         if scopes:
@@ -235,6 +288,16 @@ def assemble_context(
     for file_ast in ast_files:
         if file_ast.outline.imports:
             _take_ast(budget, body, omitted, file_ast, "imports", "\n".join(file_ast.outline.imports))
+
+    surrounding = False
+    for parsed, source in complete:
+        if parsed.file_path in whole:
+            continue
+        views = expand_hunks(parsed.hunks, source, SURROUNDING_LINES)
+        # Окно, равное исходным hunk'ам, ничего не добавило: уровень `surrounding` не ставится.
+        if views != tuple(h.text for h in parsed.hunks) and _expand(budget, diff_items, parsed, views, safe_paths):
+            surrounding = True
+    body["diff"] = [item for items in diff_items.values() for item in items]
 
     # Перечень не поместившегося — в остаток бюджета плюс отложенный резерв.
     budget.remaining += reserve
@@ -247,7 +310,12 @@ def assemble_context(
             id=new_id(),
             review_run_id=review_run_id,
             chunk_index=0,
-            tiers=("diff", "ast") if body["ast"] else ("diff",),
+            tiers=(
+                "diff",
+                *(("surrounding",) if surrounding else ()),
+                *(("whole_file",) if whole else ()),
+                *(("ast",) if body["ast"] else ()),
+            ),
             file_paths=file_paths,
             token_count=estimate_tokens(serialized),
             # Дайджест лежит рядом с телом, где секреты заменены: по исходному слабый
@@ -259,22 +327,23 @@ def assemble_context(
         ),
         hunks=tuple(shown),
         rules=tuple(shown_rules),
+        coverage=review_coverage(files, shown, max_file_bytes=limits.diff_file_max_bytes),
     )
 
 
 def _rule_items(
-    rules: RepoRules, paths: Sequence[str]
+    rules: RepoRules, paths: Sequence[str], safe_paths: Mapping[str, str]
 ) -> list[tuple[dict[str, Any], ShownRule | None]]:
     """Применимые к `paths` правила, затем отклонённые - элементы раздела `rules`.
 
     У применимого правила рядом с элементом пакета - `ShownRule` для сверки
-    ссылок; у отклонённого - `None`.
+    ссылок; у отклонённого - `None`. Пути берутся готовыми из `safe_paths`.
     """
     items: list[tuple[dict[str, Any], ShownRule | None]] = [
         (
             {
                 "name": sanitize(rule.name),
-                "files": [sanitize(p) for p in rule_files],
+                "files": [safe_paths[p] for p in rule_files],
                 "checks": [fence("rule_check", check) for check in rule.checks],
             },
             ShownRule(
@@ -290,14 +359,17 @@ def _rule_items(
 
 
 def _pr_context_items(
-    context: PrContext,
-) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], list[dict[str, Any]]]:
+    context: PrContext, max_bytes: int
+) -> tuple[list[tuple[dict[str, Any] | None, dict[str, Any]]], list[dict[str, Any]]]:
     """Элементы раздела `pull_request_context` с записью `omitted` на случай
     нехватки доли - и записи о том, что VCS вернуть не смогла.
 
     У текста автора PR нет пути, поэтому записи `omitted` без поля `path`.
+    Сообщение коммита длиннее `max_bytes` - больше всей доли - не войдёт никогда:
+    вместо элемента `None`, и `fence` его не обезвреживает. Размер сообщений
+    GitHub не ограничивает, а `sanitize` раздувает управляющие символы в 8 раз (#328).
     """
-    items: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    items: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
     unavailable: list[dict[str, Any]] = []
     if context.title is None or context.description is None:
         unavailable.append({"part": "pr_metadata", "reason": "unavailable"})
@@ -314,12 +386,16 @@ def _pr_context_items(
         unavailable.append({"part": "commit_messages", "reason": "unavailable"})
     else:
         for index, message in enumerate(context.commit_messages, start=1):
+            # `index` - место коммита в PR, с единицы от нового: по нему
+            # подписывается сообщение, даже если новые не вошли.
+            omission = {"part": "commit_message", "reason": "budget", "index": index}
+            if len(message) > max_bytes:
+                items.append((None, omission))
+                continue
             items.append(
                 (
-                    # `index` - место коммита в PR, с единицы от нового: по нему
-                    # подписывается сообщение, даже если новые не вошли.
                     {"part": "commit", "index": index, "text": fence("commit_message", message)},
-                    {"part": "commit_message", "reason": "budget", "index": index},
+                    omission,
                 )
             )
     return items, unavailable
@@ -346,11 +422,41 @@ def _cut_description(text: str, share: Budget) -> dict[str, Any] | None:
     return item(low) if low else None
 
 
-def _hunk_item(parsed: ParsedFile, hunk: Hunk) -> dict[str, Any]:
-    item: dict[str, Any] = {"path": sanitize(parsed.file_path), "hunk": fence("diff", hunk.text)}
+def _diff_item(parsed: ParsedFile, text: str, safe_paths: Mapping[str, str]) -> dict[str, Any]:
+    item: dict[str, Any] = {"path": safe_paths[parsed.file_path], "hunk": fence("diff", text)}
     if parsed.old_path is not None:
-        item["old_path"] = sanitize(parsed.old_path)
+        item["old_path"] = safe_paths[parsed.old_path]
     return item
+
+
+def _expand(
+    budget: Budget,
+    diff_items: dict[str, list[dict[str, Any]]],
+    parsed: ParsedFile,
+    views: tuple[str, ...] | None,
+    safe_paths: Mapping[str, str],
+) -> bool:
+    """Заменить элементы `diff` файла расширенными видами, если разница помещается в остаток.
+
+    `None` - строки hunk'ов не совпали с файлом, улучшения нет. Длина текста
+    отсекается до `fence`: обезвреживание раздувает управляющие символы в 8 раз (#328).
+    """
+    if views is None:
+        return False
+    current = sum(Budget.cost(item) for item in diff_items[parsed.file_path])
+    if sum(map(len, views)) > budget.remaining + current:
+        return False
+    items = [_diff_item(parsed, view, safe_paths) for view in views]
+    extra = sum(Budget.cost(item) for item in items) - current
+    if extra > budget.remaining:
+        return False
+    budget.remaining -= extra
+    diff_items[parsed.file_path] = items
+    return True
+
+
+def _hunk_omission(safe_path: str, hunk: Hunk) -> dict[str, Any]:
+    return {"path": safe_path, "part": "hunk", "reason": "budget", "line": hunk.new_start}
 
 
 def _take_ast(

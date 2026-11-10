@@ -1,13 +1,16 @@
-"""Решение о блокировке мерджа по открытым критичным замечаниям."""
+"""Решение о блокировке мерджа по открытым замечаниям не ниже порога важности."""
 
 from collections.abc import Iterable
 
 from app.domain.entities import Finding, PublishedComment
-from app.domain.enums import CommentKind, FindingSeverity
+from app.domain.enums import CommentKind, FindingSeverity, severity_at_least
 
 
-def merge_blocked_by_findings(open_findings: tuple[Finding, ...]) -> bool:
-    return any(f.severity is FindingSeverity.CRITICAL for f in open_findings)
+def merge_blocked_by_findings(
+    open_findings: tuple[Finding, ...], min_severity: FindingSeverity
+) -> bool:
+    """Блокирует мердж открытая находка с важностью не ниже порога `min_severity`."""
+    return any(severity_at_least(f.severity, min_severity) for f in open_findings)
 
 
 def untracked_findings(

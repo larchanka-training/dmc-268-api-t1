@@ -60,6 +60,8 @@
 # RECOVER_WAIT — сколько секунд ждать, пока хранилище ответит (120);
 # INTERRUPTED=true — шаг tofu оборван, а не упал сам;
 # STATE_BACKUP_KEY — ключ зашифрованной копии (секрет STATE_BACKUP_KEY_DMC268_T1);
+# TF_VAR_state_passphrase — фраза шифрования состояния (секрет
+# STATE_PASSPHRASE_DMC268_T1): без неё errored.tfstate не расшифровать;
 # S3_TUNNEL — скрипт туннеля, по умолчанию .github/scripts/s3-tunnel.sh (тест
 # подменяет его: настоящий открывает порт и запускает сторожа).
 set -uo pipefail
@@ -124,7 +126,8 @@ S3_TUNNEL_WAIT="$wait_for" "${S3_TUNNEL:-$here/../s3-tunnel.sh}" "$port" \
 # объекта», — хранилище не отвечает как надо, гадать нельзя.
 lock_file="$(mktemp)"
 remote_file="$(mktemp)"
-trap 'rm -f "$lock_file" "$remote_file"' EXIT
+work="$(mktemp -d)"
+trap 'rm -rf "$lock_file" "$remote_file" "$work"' EXIT
 if ! out="$(timeout 60 aws --endpoint-url "$endpoint" s3api get-object \
     --bucket "$bucket" --key "${key}.tflock" "$lock_file" 2>&1 >/dev/null)"; then
   case "$out" in
@@ -169,14 +172,40 @@ if [ "$lock_id" != "-" ]; then
 fi
 
 if [ -e "$errored" ]; then
-  serial="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["serial"])' "$errored" 2>/dev/null)" \
+  # errored.tfstate зашифрован (infra/encryption.tf), а `state push` читает
+  # файл без конфигурации шифрования и отказывает («This state file is
+  # encrypted»); TF_ENCRYPTION тоже не помогает (OpenTofu 1.13). Поэтому —
+  # local-бэкенд во временном каталоге с копией одного encryption.tf: его
+  # `state pull` отдаёт открытое состояние. С ним сверяемся и его пишем —
+  # хранилище получает его снова зашифрованным. Открытый файл — с правами
+  # 600 и удаляется на выходе; открытый errored.tfstate (fallback) проходит
+  # так же. Фраза — TF_VAR_state_passphrase.
+  #
+  # Ресурсы состояния требуют провайдера (kreuzwerker/docker), и `init` без
+  # него пошёл бы в реестр: медленный реестр уронил бы восстановление, а
+  # виноватой выглядела бы фраза. Провайдер берём из infra/.terraform/providers
+  # (его поставил `tofu init` шага infra — errored.tfstate без него не
+  # появляется), версию и хеши — из копии infra/.terraform.lock.hcl. Путь —
+  # абсолютный: `-chdir` меняет каталог, а скрипт идёт из корня репозитория.
+  # Без сети расшифровка проверена на OpenTofu 1.13.8.
+  plain="$work/errored.tfstate"
+  if ! { mkdir "$work/decrypt" && cp infra/encryption.tf infra/.terraform.lock.hcl "$work/decrypt/" \
+      && cp "$errored" "$work/decrypt/terraform.tfstate"; }; then
+    fail "$errored не скопировать для расшифровки"
+  fi
+  (umask 077
+    timeout 60 tofu -chdir="$work/decrypt" init -input=false \
+      -plugin-dir="$PWD/infra/.terraform/providers" -no-color >/dev/null \
+      && timeout 60 tofu -chdir="$work/decrypt" state pull > "$plain") \
+    || fail "$errored не расшифровать или не инициализировать (фраза TF_VAR_state_passphrase не задана или не та, либо нет провайдера в infra/.terraform/providers)"
+  serial="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["serial"])' "$plain" 2>/dev/null)" \
     || fail "$errored не читается"
   note serial "$serial"
   # Блокировка остаётся при любом отказе ниже: снять её без записи — пустить
   # следующий apply на старом состоянии.
   timeout 60 tofu -chdir=infra state pull > "$remote_file" \
     || fail "состояние в хранилище не прочитать (tofu state pull)"
-  verdict="$(python3 - "$errored" "$remote_file" <<'PY'
+  verdict="$(python3 - "$plain" "$remote_file" <<'PY'
 import json, sys
 ours = json.load(open(sys.argv[1]))
 text = open(sys.argv[2]).read().strip()
@@ -195,14 +224,15 @@ PY
     push)
       # Своя блокировка висит — пишем под ней; нет её — берём, как обычно.
       if [ "$lock_id" != "-" ]; then lock_flag=-lock=false; else lock_flag=-lock-timeout=2m; fi
-      timeout 120 tofu -chdir=infra state push -no-color "$lock_flag" errored.tfstate \
+      timeout 120 tofu -chdir=infra state push -no-color "$lock_flag" "$plain" \
         || fail "tofu state push не прошёл (причина в выводе выше)"
       echo "состояние serial $serial записано в хранилище"
       ;;
     written) echo "состояние serial $serial уже в хранилище: запись дошла, не дошёл ответ" ;;
     *) fail "$verdict — не перетираем его несохранённым serial $serial" ;;
   esac
-  # В файле состояния пароли открытым текстом: записано — убрать, и копию тоже.
+  # Записано — убрать и несохранённое состояние, и копию: открытый файл
+  # уберёт trap.
   rm -f "$errored" "$copy"
 fi
 

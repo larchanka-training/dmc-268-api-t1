@@ -11,9 +11,10 @@
 # (`ignore_changes = [env]` в infra/postgres.tf и infra/rabbitmq.tf) и не
 # пересоздаются.
 #
-# Сначала — оба контейнера отвечают: брокер на чистом сервере дождался старта,
-# в postgres проходит `docker exec`. Иначе шаг упал бы между сменами, с уже
-# новым паролем базы и старым у брокера.
+# Сначала — оба контейнера на месте, и брокер принимает AMQP (`check_port_connectivity`,
+# как healthcheck): на чистом сервере их дождался apply (`wait`), а брокер,
+# перезапущенный Docker'ом посреди деплоя, проба ловит. Иначе шаг упал бы между
+# сменами, с уже новым паролем базы и старым у брокера.
 #
 # Шаг идемпотентный: сначала вход новым паролем — у postgres по сети, как
 # входят API и миграции (`samenet`, scram), у брокера — `authenticate_user`. Вошёл
@@ -117,19 +118,6 @@ if ! signs_in; then
 fi
 echo "rabbitmq: пароль пользователя $user сменён"'
 
-# На чистом сервере брокер только что создан (`wait` у его контейнера нет):
-# ждём старта узла до двух минут.
-# shellcheck disable=SC2016 # переменные раскрывает sh контейнера
-rabbitmq_await_sh='tries=0
-until rabbitmqctl -q await_startup > /dev/null 2>&1; do
-  tries=$((tries + 1))
-  if [ "$tries" -ge 60 ]; then
-    echo "::error::rabbitmq: узел не запустился за две минуты"
-    exit 1
-  fi
-  sleep 2
-done'
-
 # Скрипт — в sh контейнера, пароль — первой строкой его stdin. Вывод — в лог
 # шага построчно; дошло до смены («меняю») — сервис сразу в
 # `passwords-changed`: шаг, снятый по тайм-ауту или упавший после этого,
@@ -142,7 +130,8 @@ set_password() { # контейнер, сервис, скрипт, пароль
   done
 }
 
-docker exec -i dmc268-rabbitmq sh -c "$rabbitmq_await_sh" < /dev/null
+# Проверки из шапки: до первой смены пароля.
+docker exec -i dmc268-rabbitmq rabbitmq-diagnostics -q check_port_connectivity < /dev/null
 docker exec -i dmc268-postgres true < /dev/null
 set_password dmc268-postgres postgres "$postgres_sh" "$PG_PASSWORD"
 set_password dmc268-rabbitmq rabbitmq "$rabbitmq_sh" "$RABBITMQ_PASSWORD"

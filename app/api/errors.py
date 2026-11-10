@@ -39,6 +39,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.problems import (
     PROBLEM_MODELS,
     AnyProblem,
+    CommitNotFoundProblem,
+    DiffExpiredProblem,
+    DiffTooLargeProblem,
+    DiffUnavailableProblem,
     ErrorCode,
     FindingNotFoundProblem,
     NotImplementedProblem,
@@ -167,7 +171,48 @@ ERRORS_403_ORIGIN_OR_MANAGE = _doc(
     HTTPStatus.FORBIDDEN,
     Annotated[OriginForbiddenProblem | RepositoryManageRequiredProblem, Field(discriminator="code")],
     "`ORIGIN_FORBIDDEN` — `Origin` отсутствует или не совпадает с адресом сервиса; "
-    "`REPOSITORY_MANAGE_REQUIRED` — у пользователя нет прав admin или maintain на репозиторий у провайдера.",
+    "`REPOSITORY_MANAGE_REQUIRED` — нет нужной роли на репозитории у провайдера.",
+)
+# Дифф прогона: у `404`, `410` и `422` по два кода — объединения по `code`, как у `ERRORS_403_ORIGIN_OR_MANAGE`.
+ERRORS_404_REVIEW_OR_NOT_IN_INSTALLATION = _doc(
+    HTTPStatus.NOT_FOUND,
+    Annotated[ReviewNotFoundProblem | RepositoryNotInInstallationProblem, Field(discriminator="code")],
+    "`REVIEW_NOT_FOUND` — прогона с таким id нет или он не виден пользователю; "
+    "`REPOSITORY_NOT_IN_INSTALLATION` — приложение не установлено на репозиторий прогона или установка "
+    "приостановлена, дифф у GitHub не запрашивался.",
+)
+ERRORS_404_REPOSITORY_OR_NOT_IN_INSTALLATION = _doc(
+    HTTPStatus.NOT_FOUND,
+    Annotated[RepositoryNotFoundProblem | RepositoryNotInInstallationProblem, Field(discriminator="code")],
+    "`REPOSITORY_NOT_FOUND` — репозитория с таким id нет или пользователь не видит его на GitHub "
+    "(у ручного запуска — и выключенный репозиторий, и запрос на изменение, которого нет: случай называет "
+    "`detail`); `REPOSITORY_NOT_IN_INSTALLATION` — приложение не установлено на репозиторий или установка "
+    "приостановлена, дальше GitHub не спрашивался.",
+)
+ERRORS_409_DIFF_UNAVAILABLE = _doc(
+    HTTPStatus.CONFLICT,
+    DiffUnavailableProblem,
+    "У прогона не записан base_sha — пары коммитов для диффа нет; запросов к GitHub не было.",
+)
+ERRORS_410_COMMIT_NOT_FOUND_OR_DIFF_EXPIRED = _doc(
+    HTTPStatus.GONE,
+    Annotated[CommitNotFoundProblem | DiffExpiredProblem, Field(discriminator="code")],
+    "`COMMIT_NOT_FOUND` — GitHub ответил 404 на сравнение base_sha...head_sha прогона: коммита больше нет "
+    "(например, после force-push); `DIFF_EXPIRED` — дифф прогона удалён по сроку хранения "
+    "(`diff_expired_at` прогона не null), ни кэш, ни GitHub не спрашивались.",
+)
+ERRORS_422_OR_DIFF_TOO_LARGE = _doc(
+    HTTPStatus.UNPROCESSABLE_CONTENT,
+    Annotated[ValidationProblem | DiffTooLargeProblem, Field(discriminator="code")],
+    "`VALIDATION_ERROR` — параметр пути не прошёл проверку, в `errors` — где и почему; "
+    "`DIFF_TOO_LARGE` — дифф прогона больше `RUN_DIFF_MAX_BYTES` (2 МиБ) или 50 000 строк, либо GitHub сам "
+    "отказался его строить (`422` на сравнение); тело ответа GitHub дальше лимита байт не читалось.",
+)
+ERRORS_502_SCM_DIFF = _doc(
+    HTTPStatus.BAD_GATEWAY,
+    ScmUnavailableProblem,
+    "GitHub не ответил или ответил ошибкой (`5xx`, отказ лимита), когда считался набор видимых репозиториев, "
+    "обновлялся токен пользователя, запрашивалась установка приложения на репозиторий или дифф.",
 )
 ERRORS_501_NOT_IMPLEMENTED = _doc(HTTPStatus.NOT_IMPLEMENTED, NotImplementedProblem, "Ручка ещё не реализована.")
 
@@ -233,6 +278,9 @@ class ApiError(Exception):
 
     `errors` - у `VALIDATION_ERROR`, который ручка ставит сама: проверка, которой нужна
     конфигурация сервиса, а не только модель тела.
+    `errors` — только у `VALIDATION_ERROR`, когда отказ по значению поля находит ручка, а не
+    проверка тела: `[{"where": …, "reason": …}]` той же формы, постоянный `reason` без значения
+    из запроса (ручной запуск по закрытому PR).
     """
 
     def __init__(
@@ -297,6 +345,8 @@ _REASONS = {
     # Объединение по признаку варианта (`SimulationRequest.source`): признака нет или он чужой.
     "union_tag_not_found": "не передан признак варианта",
     "union_tag_invalid": "значение не из допустимого списка",
+    # Свой тип `PydanticCustomError`: ручной запуск принимает только `trigger = manual` (`CreateReviewRequest`).
+    "trigger_not_manual": "принимается только manual",
 }
 _DEFAULT_REASON = "недопустимое значение"
 # Ошибки, у которых последний элемент `loc` — не поле схемы: имя лишнего поля (ввод клиента,

@@ -17,6 +17,8 @@ RULES      ?= rules
 # Сценарий модели и кейс для sandbox-script; диапазон git для sandbox-git.
 SCRIPT     ?= tests/sandbox/examples/llm-script.json
 CASE_FILE  ?= tests/sandbox/examples/case.yaml
+# Мок-PR для sandbox-demo.
+DEMO_CASE  ?= tests/sandbox/examples/case.yaml
 RANGE      ?= develop..HEAD
 # Дополнительные ключи: для sandbox - его флаги, для test-* - флаги pytest.
 ARGS       ?=
@@ -57,17 +59,17 @@ WORKER_ENV = $(SERVICE_ENV) $(call pass,LLM_BACKEND) \
 OPENSPEC := npx --yes @fission-ai/openspec@1.15.0
 
 .DEFAULT_GOAL := help
-.PHONY: help check \
-	sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
+.PHONY: help check cov-llm-schema \
+	sandbox-demo sandbox-doctor sandbox-down sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
 	test-db test-queue test-e2e test-all \
-	infra-up infra-down test-db-create test-queue-vhost migrate run-api run-worker \
+	infra-up infra-down test-db-create test-queue-vhost migrate credit-balance run-api run-worker \
 	run-local stop-local
 
 help: ## Список целей
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-check: ## Статические проверки как в CI: lock, ruff, lint-imports, mypy, контракт API, openspec
+check: ## Проверки job lint как в CI: lock, ruff, lint-imports, mypy, контракт API, openspec, порог покрытия схем
 	uv lock --check
 	uv run ruff check .
 	uv run lint-imports
@@ -75,8 +77,55 @@ check: ## Статические проверки как в CI: lock, ruff, lint
 	uv run python scripts/export_openapi.py --check
 	$(OPENSPEC) validate --all --strict
 	set -o pipefail; $(OPENSPEC) list --json | python3 scripts/check_openspec_archived.py
+	$(MAKE) cov-llm-schema
+
+# Порог 100% строк и ветвей схем ответа модели, считанный только их собственными
+# тестами (#275). Тот же шаг идёт в CI, job lint. CoverageWarning - ошибка: модуль,
+# переехавший мимо --cov, иначе молча выпал бы из порога (module-not-imported).
+cov-llm-schema: ## Порог 100% покрытия схем ответа модели, как в CI
+	PYTEST_FAIL_ON_SKIP=1 uv run pytest -q -rs -W error::coverage.exceptions.CoverageWarning \
+		tests/application/test_llm_schema.py tests/infrastructure/test_llm_structured.py \
+		--cov=app.application.llm_schema --cov=app.infrastructure.llm.structured \
+		--cov-branch --cov-report=term-missing --cov-fail-under=100
 
 # --- песочница воркера: всё подменено, кроме модели ------------------------------
+
+sandbox-demo: ## Начать отсюда: проверить окружение, поднять Ollama и модель, прогнать мок-PR (MODEL, DEMO_CASE)
+	@printf '\n\033[1m==> 1/4 Проверка окружения\033[0m\n'
+	@OLLAMA_URL='$(OLLAMA_URL)' MODEL='$(MODEL)' scripts/sandbox-doctor.sh
+	@printf '\n\033[1m==> 2/4 Зависимости Python (uv sync)\033[0m\n'
+	@uv sync --all-extras
+	@printf '\n\033[1m==> 3/4 Ollama и модель $(MODEL)\033[0m\n'
+	@$(MAKE) --no-print-directory ollama-up ollama-pull
+	@printf '\n\033[1m==> 4/4 Прогон воркера на мок-PR $(DEMO_CASE)\033[0m\n'
+	@uv run python -m tests.sandbox --llm ollama --model '$(MODEL)' --ollama-url '$(OLLAMA_URL)' \
+		--case-file '$(DEMO_CASE)' $(SANDBOX_FLAGS); status=$$?; echo; \
+	case $$status in \
+		0) printf '\033[32mГотово: прогон completed, сообщение подтверждено (ack).\033[0m\n' ;; \
+		1) printf '\033[31mПрогон не завершился или сообщение ушло в nack - см. отчёт выше; подробнее: make sandbox-demo ARGS=-v\033[0m\n' ;; \
+		*) printf '\033[31mВход или окружение не подошли (код %s) - причина в строке выше.\033[0m\n' $$status ;; \
+	esac; \
+	echo "Дальше: другая модель - MODEL=..., свой PR - DEMO_CASE=путь.yaml, остановить Ollama - make sandbox-down."; \
+	echo "Подробно: tests/sandbox/README.md"; \
+	exit $$status
+
+sandbox-doctor: ## Проверить окружение песочницы, ничего не меняя
+	@OLLAMA_URL='$(OLLAMA_URL)' MODEL='$(MODEL)' scripts/sandbox-doctor.sh
+
+# .ollama.pid: PID и время старта процесса. Сигнал уходит, только если по PID всё ещё
+# тот же процесс `ollama serve`: после её завершения PID мог достаться другому процессу.
+sandbox-down: ## Остановить Ollama, если её запустил make ollama-up
+	@pid=$$(sed -n 1p .ollama.pid 2>/dev/null); saved=$$(sed -n 2p .ollama.pid 2>/dev/null); \
+	started=$$(echo $$(ps -p "$${pid:-0}" -o lstart= 2>/dev/null)); \
+	if [ -n "$$pid" ] && [ -n "$$saved" ] && [ "$$started" = "$$saved" ] \
+		&& ps -p "$$pid" -o command= 2>/dev/null | grep -Eq '(^|/)ollama serve( |$$)'; then \
+		kill "$$pid" && echo "Ollama (pid $$pid) остановлена"; \
+	elif [ -n "$$pid" ]; then \
+		echo "PID $$pid из .ollama.pid - уже не Ollama, запущенная make ollama-up: процесс не трогаю"; \
+	else \
+		echo "Ollama, запущенной через make, нет - ничего не делаю"; \
+	fi; \
+	rm -f .ollama.pid
 
 sandbox: ollama-up ollama-pull ## Воркер на корпусе PR с локальной Ollama (MODEL, CASE, RULES, ARGS)
 	uv run python -m tests.sandbox --llm ollama --model '$(MODEL)' --ollama-url '$(OLLAMA_URL)' $(SANDBOX_FLAGS)
@@ -93,13 +142,14 @@ sandbox-script: ## Воркер на CASE_FILE со сценарием моде�
 sandbox-git: ## Воркер на диапазоне git RANGE с заглушкой модели (RULES, ARGS)
 	uv run python -m tests.sandbox --llm stub --from-git '$(RANGE)' $(SANDBOX_FLAGS)
 
-ollama-up: ## Поднять ollama serve в фоне, если она ещё не отвечает
+ollama-up: ## Поднять ollama serve в фоне, если она ещё не отвечает (остановить - make sandbox-down)
 	@if curl -sf '$(OLLAMA_URL)/api/tags' >/dev/null; then \
 		echo "Ollama уже отвечает на $(OLLAMA_URL)"; \
 	else \
 		command -v ollama >/dev/null || { echo "ollama не установлена: brew install ollama" >&2; exit 1; }; \
 		echo "Запускаю ollama serve в фоне, лог - .ollama.log"; \
 		OLLAMA_HOST='$(OLLAMA_URL)' nohup ollama serve >.ollama.log 2>&1 & \
+		pid=$$!; { echo $$pid; echo $$(ps -p $$pid -o lstart=); } >.ollama.pid; \
 		for i in $$(seq 1 30); do curl -sf '$(OLLAMA_URL)/api/tags' >/dev/null && exit 0; sleep 1; done; \
 		echo "Ollama не ответила за 30 с, см. .ollama.log" >&2; exit 1; \
 	fi
@@ -180,6 +230,12 @@ test-queue-vhost: ## Создать vhost dmc268_test брокера для те
 
 migrate: infra-up ## Применить миграции к локальной базе (настройки - из .env и явных переменных)
 	$(SERVICE_ENV) uv run alembic upgrade head
+
+# Пока пополнения через платёжную систему нет; на стенде - та же команда в контейнере воркера.
+# Значения - из окружения рецепта (переменные командной строки make туда попадают), а не
+# подстановкой в текст команды: апостроф в заметке не ломает кавычки.
+credit-balance: ## Зачислить деньги на баланс аккаунта: GITHUB_ID (gh api users/<логин> --jq .id), AMOUNT (евро, минус - возврат), NOTE, BY - кто зачислил
+	$(SERVICE_ENV) uv run python -m app.worker.credit_balance "$$GITHUB_ID" "$$AMOUNT" --note "$$NOTE" $${BY:+--by "$$BY"}
 
 run-api: migrate ## API на хосте с автоперезагрузкой (порт 8000)
 	$(SERVICE_ENV) uv run uvicorn app.main:app --reload

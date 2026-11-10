@@ -1,8 +1,8 @@
 # Коллектор телеметрии — один конфиг для локального стека (docker compose,
-# профиль observability) и стенда (infra/main.tf): различия окружений — только
+# профиль observability) и стенда (infra/observability.tf): различия окружений — только
 # переменные запуска (реквизиты receiver postgresql) и сетевые алиасы,
 # совпадающие в обоих окружениях. Образ зафиксирован дайджестом в
-# docker-compose.yml и main.tf (тег в комментарии рядом): при обновлении
+# docker-compose.yml и infra/observability.tf (тег в комментарии рядом): при обновлении
 # образа читаются breaking changes.
 
 receivers:
@@ -36,7 +36,7 @@ receivers:
   # суффикс /dbname endpoint этого receiver не принимает. Расширение
   # pg_stat_statements receiver не читает: медленные запросы им не собираются,
   # расширение остаётся только для ручной диагностики (shared_preload_libraries
-  # включает контейнер базы — docker-compose.yml и infra/main.tf, расширение
+  # включает контейнер базы — docker-compose.yml и infra/postgres.tf, расширение
   # создаёт та же миграция 0013).
   postgresql:
     username: ${env:POSTGRESQL_USERNAME}
@@ -49,6 +49,57 @@ receivers:
     tls:
       insecure: true
     collection_interval: 15s
+
+  # Расход модели с начала месяца — вход алертов бюджета #100 и #119
+  # (alerts.yml, LlmBudget* и LlmCostBudget*): токены и стоимость в евро.
+  # Источник — tokens_used и cost_eur прогонов в базе: расход прогона и так
+  # пишется туда, своей метрики в SDK для него нет. Роль та же, dmc268_monitor:
+  # миграции 0017 и 0021 дают ей SELECT ровно на три колонки review_runs —
+  # created_at, tokens_used и cost_eur, — остальные данные прогонов ей
+  # недоступны. Стоимость — double: бюджету в евро точность NUMERIC не
+  # нужна. Хост и порт — литералом: у этого receiver они раздельные, а
+  # POSTGRESQL_ENDPOINT — host:port; адрес одинаков в обоих окружениях (алиас
+  # сети dmc268-postgres).
+  # Пароль receiver сам экранирует в строке подключения. Раз в минуту: сумма
+  # по индексу created_at, а бюджету точность до секунд не нужна.
+  sqlquery/llm-tokens:
+    driver: postgres
+    host: dmc268-postgres
+    port: 5432
+    database: ${env:POSTGRESQL_DATABASE}
+    username: ${env:POSTGRESQL_USERNAME}
+    password: ${env:POSTGRESQL_PASSWORD}
+    additional_params:
+      sslmode: disable
+    collection_interval: 60s
+    queries:
+      - sql: >-
+          SELECT coalesce(sum(tokens_used), 0)::bigint AS tokens,
+            coalesce(sum(cost_eur), 0)::double precision AS cost_eur
+          FROM review_runs
+          WHERE created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+        metrics:
+          - metric_name: review_llm_tokens_month
+            value_column: tokens
+            value_type: int
+            data_type: gauge
+            description: Токены модели, потраченные прогонами с начала месяца (UTC).
+          - metric_name: review_llm_cost_eur_month
+            value_column: cost_eur
+            value_type: double
+            data_type: gauge
+            description: Стоимость вызовов модели прогонов с начала месяца (UTC), евро.
+
+  # Вход стенда, nginx интерфейса (#364): stub_status на внутреннем порту
+  # 8081 контейнера dmc268-ui (dmc-268-ui-t1, conf.d/status.conf), на хост порт
+  # не публикуется; коллектор достаёт его по сети dmc268-otlp. Коды ответа
+  # stub_status не отдаёт, их панель берёт из логов nginx в Loki. Адрес
+  # литералом: другого у интерфейса нет. В локальном compose интерфейса нет:
+  # там каждый скрейп пишет в лог коллектора ошибку соединения, на остальные
+  # receiver-ы это не влияет.
+  nginx:
+    endpoint: http://dmc268-ui:8081/stub_status
+    collection_interval: 30s
 
 processors:
   # Потолок памяти коллектора; в infra контейнеру задан лимит с запасом
@@ -209,7 +260,7 @@ service:
       processors: [memory_limiter, transform/browser-resource, transform/redact, batch]
       exporters: [otlp_http/tempo]
     metrics:
-      receivers: [otlp, postgresql]
+      receivers: [otlp, postgresql, sqlquery/llm-tokens, nginx]
       # Без batch: prometheus отдаёт точки по pull, пачка их только задерживала бы.
       processors: [memory_limiter, transform/trim-metrics-resource]
       exporters: [prometheus]

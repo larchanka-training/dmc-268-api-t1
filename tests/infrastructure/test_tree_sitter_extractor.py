@@ -231,6 +231,51 @@ export function Money(amount: number): Money {
 """
 
 
+OBJECT_LITERAL_TS = """\
+export const routes = {
+  list: async (req: Request) => {
+    return 1;
+  },
+  plain: 5,
+};
+"""
+
+
+@pytest.mark.parametrize("language", [Language.TYPESCRIPT, Language.JAVASCRIPT])
+def test_object_literal_method_is_a_definition(
+    extractor: TreeSitterDefinitionExtractor, language: Language
+) -> None:
+    """#348: функция в значении свойства объектного литерала, как в `tags.scm` грамматики."""
+    source = OBJECT_LITERAL_TS.replace(": Request", "") if language is Language.JAVASCRIPT else OBJECT_LITERAL_TS
+    outline = extractor.extract(source, language)
+    params = "(req)" if language is Language.JAVASCRIPT else "(req: Request)"
+    assert outline.definitions == (Definition(FUNCTION, "list", f"list: async {params} =>", 2, 4),)
+    assert [d.name for d in select_scopes(outline, frozenset({3}))] == ["list"]
+
+
+OVERLOADS_TS = """\
+export function parse(a: string): number;
+export function parse(a: number): number;
+export function parse(a: unknown): number {
+  return 0;
+}
+declare function emit(event: string): void;
+"""
+
+
+def test_overloads_and_declare_function_are_definitions(
+    extractor: TreeSitterDefinitionExtractor,
+) -> None:
+    """#348: перегрузки и `declare function` - сигнатуры без тела, без хвостового `;`."""
+    outline = extractor.extract(OVERLOADS_TS, Language.TYPESCRIPT)
+    assert outline.definitions == (
+        Definition(FUNCTION, "parse", "function parse(a: string): number", 1, 1),
+        Definition(FUNCTION, "parse", "function parse(a: number): number", 2, 2),
+        Definition(FUNCTION, "parse", "function parse(a: unknown): number", 3, 5),
+        Definition(FUNCTION, "emit", "function emit(event: string): void", 6, 6),
+    )
+
+
 def test_nested_function_does_not_pull_in_type_by_parent_name(
     extractor: TreeSitterDefinitionExtractor,
 ) -> None:

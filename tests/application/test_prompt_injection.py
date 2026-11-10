@@ -7,6 +7,7 @@
 
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import count
 from typing import Any
@@ -47,9 +48,10 @@ from ..fakes.llm_gateway import (
 )
 from ..fakes.unit_of_work import FakeUnitOfWork
 from ..fakes.vcs_gateway import RecordingVcsGateway
+from ..fakes.webhooks import a_repository
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
-LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880)
+LIMITS = ContextLimits(32_000, 4_000, 32_768, 60, 20, 262_144, 1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144)
 LLM_LIMITS = LlmLimits(window_tokens=65_536, max_output_tokens=4_096)
 TEXTS = PromptTexts(review_system="ИНСТРУКЦИИ РЕВЬЮ", verifier_system="ИНСТРУКЦИИ ВЕРИФИКАТОРА")
 JOB = ReviewJob(
@@ -97,6 +99,8 @@ def _review(
 ) -> tuple[FakeUnitOfWork, RecordingVcsGateway]:
     uow = FakeUnitOfWork()
     mr_id = MR_ID
+    # Запись репозитория PR: без неё merge gate не прочитает порог.
+    uow.repositories.add(replace(a_repository(), id=UUID(int=9)))
     uow.merge_requests.add(
         MergeRequest(
             id=mr_id,
@@ -451,7 +455,8 @@ def _follow_up(status: str) -> dict[str, Any]:
 
 
 def _assert_thread_stays_open(uow: FakeUnitOfWork, vcs: RecordingVcsGateway) -> None:
-    """Тред не закрыт и без ответа бота, прогон завершён, merge gate - `failure`."""
+    """Тред не закрыт и без ответа бота, прогон завершён, merge gate - `failure` после
+    `in_progress` захвата."""
     root = uow.published_comments.get(THREAD_ROOT_ID)
     assert root is not None
     assert (root.thread_resolved, root.thread_resolved_by_bot) == (False, False)
@@ -461,7 +466,7 @@ def _assert_thread_stays_open(uow: FakeUnitOfWork, vcs: RecordingVcsGateway) -> 
     assert replies == []
     run = uow.review_runs.get(JOB.review_run_id)
     assert run is not None and run.status is ReviewRunStatus.COMPLETED
-    assert [check.conclusion for check in vcs.checks] == ["failure"]
+    assert [check.conclusion for check in vcs.checks] == [None, "failure"]
 
 
 def test_diff_asking_to_supersede_a_critical_thread_does_not_open_the_merge_gate() -> None:

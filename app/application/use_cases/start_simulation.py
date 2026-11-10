@@ -50,6 +50,8 @@ class SimulationRequestInput:
 class SimulationLimits:
     max_per_window: int
     ttl: timedelta
+    # Тот же порог, что у ревью: файл больше него фильтр отбрасывает.
+    file_max_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +71,7 @@ def start_simulation(
 ) -> Simulation | Limited | NothingToReview:
     """Запустить симуляцию: записанная симуляция, отказ лимита или «нечего ревьюить»."""
     files = simulation_files(request.source_kind, request.source, request.file_path)
-    if not has_reviewable_hunks(files):
+    if not has_reviewable_hunks(files, max_file_bytes=limits.file_max_bytes):
         return NothingToReview()
 
     simulation = new_simulation(

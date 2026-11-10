@@ -7,6 +7,7 @@
 
 import re
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -22,6 +23,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
+from app.domain.entities import MergeRequest, Repository, ReviewRun
 from app.domain.enums import (
     DiffSide,
     FindingCategory,
@@ -80,6 +82,13 @@ def _param_to_utc(moment: datetime) -> datetime:
 # Время во входных параметрах: строка ISO 8601 с любой зоной, приводится к UTC. В схеме —
 # `date-time` без `pattern` ответа: на вход годится и `+03:00`, `Z` обязателен только в ответах.
 UtcDatetimeParam = Annotated[AwareDatetime, BeforeValidator(_iso_8601_only), AfterValidator(_param_to_utc)]
+
+
+def euro_string(amount: Decimal) -> str:
+    """Сумма в евро точной десятичной строкой: без хвостовых нулей колонки (normalize) и без
+    экспоненты (`f`, 1E+2 → 100); ноль — "0". Строкой, а не числом JSON: число клиент прочёл бы
+    во float."""
+    return f"{amount.normalize():f}"
 
 
 def without_nul(value: str) -> str:
@@ -178,7 +187,7 @@ class ReviewJob(AllFieldsResponse):
     )
     base_commit_sha: str | None = Field(
         default=None,
-        description="Коммит, относительно которого считается дифф; null, пока воркер его не узнал.",
+        description="Коммит, относительно которого считается дифф; null только у прогонов, записанных до появления колонки.",
         examples=["fedcba0987654321fedcba0987654321fedcba09"],
     )
     status: ReviewRunStatus = Field(description="Текущий статус прогона.", examples=["queued"])
@@ -198,6 +207,34 @@ class ReviewJob(AllFieldsResponse):
     )
     failed_stage: FailedStage | None = Field(default=None, description=FAILED_STAGE_DESCRIPTION)
     error: ReviewError | None = Field(description="Ошибка прогона; null, если прогон не упал.")
+
+
+def review_job(run: ReviewRun, merge_request: MergeRequest, repository: Repository) -> ReviewJob:
+    """Проекция прогона в `ReviewJob` — общая у приёма вебхука и ручного запуска.
+
+    `findings_count` у свежего прогона всегда 0: находки появляются позже,
+    при обработке задачи воркером, и в эти ответы больше не возвращаются.
+    """
+    return ReviewJob(
+        id=run.id,
+        provider=repository.provider,
+        provider_repository_id=repository.provider_id,
+        pull_request_number=merge_request.number,
+        trigger=run.trigger,
+        status=run.status,
+        head_commit_sha=run.head_sha,
+        base_commit_sha=run.base_sha,
+        findings_count=0,
+        rejected_findings=run.rejected_findings,
+        model=run.model,
+        tokens_used=run.tokens_used,
+        duration_seconds=run.duration_seconds,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        last_progress_at=run.last_progress_at,
+        failed_stage=run.failed_stage,
+        error=None,
+    )
 
 
 class RepositoryBase(BaseModel):

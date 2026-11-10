@@ -10,8 +10,9 @@
 
 Повтор этапа — отдельный шаг того же этапа: `retry` подходит как слушатель
 повтора порта модели (`RetryListener`), закрывает неудачную попытку упавшей
-и открывает новую. Токены вызова модели адаптер сообщает нарастающим итогом
-от начала вызова; шаг получает свою долю — разность с уже записанным.
+и открывает новую. Расход модели адаптер пишет в счётчик прогона (`LlmMeter`);
+шаг, вызывавший модель, получает свою долю — разность итога счётчика с уже
+отнесённым к прежним шагам.
 
 Шаг — ещё и спан трассировки (`StageTracer`): спан открывается вместе с шагом и
 закрывается вместе с его исходом. Это телеметрия для команды; источником шагов
@@ -24,6 +25,7 @@ from datetime import datetime
 from uuid import UUID
 
 from app.application.ports import UnitOfWork
+from app.application.ports.llm_gateway import LlmMeter
 from app.application.ports.stage_tracer import NO_STAGE_TRACING, StageSpan, StageTracer
 from app.domain.entities import ReviewRunStep
 from app.domain.enums import ReviewRunStage
@@ -39,14 +41,12 @@ from app.domain.run_steps import (
 logger = logging.getLogger(__name__)
 
 
-def spent_tokens(error: BaseException) -> int | None:
-    """Токены, которые вызов модели израсходовал к сбою; `None` — модель не вызывалась.
+def called_model(error: BaseException) -> bool:
+    """Вызывал ли модель шаг, упавший с `error`.
 
     `PromptTooLargeError` бросается до отправки: модели шаг не вызывал.
     """
-    if isinstance(error, PromptTooLargeError) or not isinstance(error, LlmError):
-        return None
-    return error.tokens_used
+    return isinstance(error, LlmError) and not isinstance(error, PromptTooLargeError)
 
 
 def close_abandoned_steps(
@@ -59,7 +59,7 @@ def close_abandoned_steps(
     """Закрыть шаги терминального прогона, оставшиеся `running`, своим коммитом.
 
     Зовётся после перевода прогона в `failed` или `completed`: шаг брошенной
-    попытки (воркер умер, сообщение доставлено снова или выметено) или шаг,
+    попытки (воркер умер, и прогон выметен) или шаг,
     чей исход не записался, иначе остался бы `running` навсегда. Исход,
     который воркер знает (`StepRecorder.unwritten`), записывается как есть,
     прочие шаги закрываются `REVIEW_RUN_STALE`. Отдельный коммит, а не общий
@@ -104,6 +104,7 @@ class StepRecorder:
         now: Callable[[], datetime],
         monotonic: Callable[[], float],
         new_id: Callable[[], UUID],
+        meter: LlmMeter,
         tracer: StageTracer = NO_STAGE_TRACING,
     ) -> None:
         self._uow = uow
@@ -118,7 +119,8 @@ class StepRecorder:
         self._tracer = tracer
         self._span: StageSpan | None = None
         self._started = 0.0
-        # Токены текущего вызова модели, уже отнесённые к шагам этого этапа.
+        # Счётчик расхода модели прогона и его токены, уже отнесённые к шагам.
+        self._meter = meter
         self._recorded_tokens = 0
         # Исходы шагов, которые не записались: их пишет `close_abandoned_steps`.
         self._unwritten: dict[UUID, ReviewRunStep] = {}
@@ -131,27 +133,24 @@ class StepRecorder:
     def start(self, stage: ReviewRunStage, *, at: datetime | None = None) -> None:
         """Открыть шаг этапа. `at` — начало, если вызывающий уже прочёл часы."""
         self._stage = stage
-        self._recorded_tokens = 0
         self._open(self._now() if at is None else at)
 
-    def finish(
-        self, *, tokens_used: int | None = None, error_code: str | None = None
-    ) -> None:
+    def finish(self, *, used_model: bool = False, error_code: str | None = None) -> None:
         """Закрыть открытый этап: с `error_code` — упавшим, без него — завершённым.
 
-        `tokens_used` — нарастающий итог вызова модели этапа; `None` — шаг
-        модель не вызывал.
+        `used_model` — шаг вызывал модель: его токены — доля счётчика; иначе
+        токенов у шага нет (`None`).
         """
-        self._close(tokens_used=tokens_used, error_code=error_code)
+        self._close(used_model=used_model, error_code=error_code)
         self._stage = None
 
-    def retry(self, error: LlmError, tokens_so_far: int) -> None:
+    def retry(self, error: LlmError) -> None:
         """Попытка вызова модели не удалась, вызов пробует снова: новый шаг того же этапа.
 
         Зовётся изнутри вызова модели, поэтому сбой записи не выходит наружу:
         вызов уходит следующей попытке или провайдеру, как без журнала.
         """
-        self._close(tokens_used=tokens_so_far, error_code=error.code)
+        self._close(used_model=True, error_code=error.code)
         self._open(self._now())
 
     def fail(self, error: BaseException) -> None:
@@ -161,7 +160,7 @@ class StepRecorder:
         логируется и не подменяет исходное исключение. Шаг останется `running`.
         """
         if self._stage is not None:
-            self.finish(tokens_used=spent_tokens(error), error_code=error_code(error))
+            self.finish(used_model=called_model(error), error_code=error_code(error))
 
     def abandon(self) -> None:
         """Закрыть открытый этап брошенным (`REVIEW_RUN_STALE`): прогон отменили, и
@@ -199,11 +198,11 @@ class StepRecorder:
         if span is not None:
             span.end(error_code)
 
-    def _close(self, *, tokens_used: int | None, error_code: str | None) -> None:
+    def _close(self, *, used_model: bool, error_code: str | None) -> None:
         self._current_stage()
         # Доля считается и для шага, который не записан: иначе токены этой
         # попытки достались бы следующей.
-        share = self._share(tokens_used)
+        share = self._share() if used_model else None
         step, self._step = self._step, None
         try:
             if step is None:
@@ -239,9 +238,9 @@ class StepRecorder:
             raise RuntimeError(f"у прогона {self._run_id} нет открытого этапа")
         return self._stage
 
-    def _share(self, tokens_so_far: int | None) -> int | None:
-        if tokens_so_far is None:
-            return None
-        share = max(tokens_so_far - self._recorded_tokens, 0)
-        self._recorded_tokens = max(tokens_so_far, self._recorded_tokens)
+    def _share(self) -> int:
+        total = self._meter.total.total_tokens
+        # Счётчик только растёт, но доля шага отрицательной не бывает ни при каком писателе.
+        share = max(total - self._recorded_tokens, 0)
+        self._recorded_tokens = max(total, self._recorded_tokens)
         return share

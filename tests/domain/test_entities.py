@@ -1,9 +1,16 @@
 import dataclasses
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
 
-from app.domain.entities import ReviewJob
+from app.domain.entities import (
+    Repository,
+    ReviewJob,
+)
+from app.domain.enums import FindingSeverity, Provider
+
+NOW = datetime(2026, 10, 31, tzinfo=UTC)
 
 
 def _job(**overrides: object) -> ReviewJob:
@@ -35,3 +42,20 @@ def test_review_job_is_frozen() -> None:
     job = _job()
     with pytest.raises(dataclasses.FrozenInstanceError):
         job.head_sha = "mutated"  # type: ignore[misc]
+
+
+def test_repository_without_settings_fields_gets_default_filter_and_threshold() -> None:
+    repository = Repository(
+        id=UUID(int=1),
+        provider=Provider.GITHUB,
+        provider_id="987654",
+        full_name="owner/repo",
+        default_branch="main",
+        auto_review_enabled=True,
+        created_at=NOW,
+        updated_at=NOW,
+        connected_at=NOW,
+    )
+
+    assert repository.branch_filter == ()
+    assert repository.min_severity is FindingSeverity.CRITICAL

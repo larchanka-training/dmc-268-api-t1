@@ -1,5 +1,6 @@
 """Сценарий сборки контекста на фейках VCS, кэша и парсера — без сети и tree-sitter."""
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
@@ -8,15 +9,16 @@ import pytest
 
 from app.application.context_assembly import AssembledContext, ContextLimits
 from app.application.use_cases.build_review_context import (
+    REVIEW_DIFF_MAX_LINES,
     build_review_context,
     fetch_review_diff,
 )
 from app.domain.entities import Definition, FileOutline, ReviewJob
 from app.domain.enums import DefinitionKind, Language
-from app.domain.vcs_errors import VcsError
+from app.domain.vcs_errors import DiffTooLargeError, VcsError
 
 from ..fakes.context import FakeCache, FakeExtractor
-from ..fakes.webhooks import FakeVcs, pr_metadata
+from ..fakes.webhooks import FakeVcs, diff_of_lines, pr_metadata
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 BASE, HEAD = "b" * 40, "a" * 40
@@ -34,7 +36,7 @@ JOB = ReviewJob(
     base_sha=BASE,
 )
 LIMITS = ContextLimits(
-    32_000, 4_000, 32_768, 60, ast_max_files=20, ast_max_file_bytes=1_000, pr_context_max_tokens=1_000, diff_max_bytes=5_242_880
+    32_000, 4_000, 32_768, 60, ast_max_files=20, ast_max_file_bytes=1_000, pr_context_max_tokens=1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144
 )
 
 SOURCE = "class Repo:\n    def save(self):\n        return 2\n"
@@ -54,13 +56,18 @@ def _file_diff(path: str) -> str:
     )
 
 
-def _build(vcs: FakeVcs, extractor: FakeExtractor | None = None, limits: ContextLimits = LIMITS) -> AssembledContext:
+def _build(
+    vcs: FakeVcs,
+    extractor: FakeExtractor | None = None,
+    limits: ContextLimits = LIMITS,
+    cache: FakeCache | None = None,
+) -> AssembledContext:
     return build_review_context(
         JOB,
         fetch_review_diff(JOB, vcs, max_bytes=limits.diff_max_bytes),
         vcs=vcs,
         extractor=extractor or FakeExtractor(outlines={SOURCE: OUTLINE}),
-        cache=FakeCache(),
+        cache=cache if cache is not None else FakeCache(),
         limits=limits,
         review_run_id=JOB.review_run_id,
         now=NOW,
@@ -82,12 +89,48 @@ def test_rules_at_base_and_sources_at_head() -> None:
     assert ("file", "owner/repo", "app/repo.py", HEAD, 77) in file_calls
 
 
-def test_full_context_contains_ast_of_changed_file() -> None:
+def test_rules_are_cached_with_the_run_time() -> None:
+    """Время получения правил — `now` прогона, а не часы внутри загрузки."""
     vcs = FakeVcs(diff=_file_diff("app/repo.py"), files={("app/repo.py", HEAD): SOURCE})
-    result = _build(vcs)
-    assert result.payload.tiers == ("diff", "ast")
+    cache = FakeCache()
+    _build(vcs, cache=cache)
+    ((_, value, _),) = cache.sets
+    assert json.loads(value)["fetched_at"] == "2026-10-11T12:00:00+00:00"
+
+
+def test_full_context_contains_ast_of_changed_file() -> None:
+    # Файл больше порога целого файла: AST в пакете, вокруг hunk'а - окно.
+    big = SOURCE + "# комментарий\n" * 1_000
+    vcs = FakeVcs(diff=_file_diff("app/repo.py"), files={("app/repo.py", HEAD): big})
+    limits = replace(LIMITS, ast_max_file_bytes=100_000)
+    result = _build(vcs, FakeExtractor(outlines={big: OUTLINE}), limits=limits)
+    assert result.payload.tiers == ("diff", "surrounding", "ast")
     assert "2-3 def save(self)" in result.payload.body["ast"][0]["scopes"]
     assert result.payload.body["rules"]["status"] == "absent"
+
+
+def test_diff_over_the_line_limit_is_refused() -> None:
+    """Байтовый лимит строк не ограничивает: дифф на строку длиннее `REVIEW_DIFF_MAX_LINES` — отказ."""
+    vcs = FakeVcs(diff=diff_of_lines(REVIEW_DIFF_MAX_LINES + 1))
+
+    with pytest.raises(DiffTooLargeError, match=f"{REVIEW_DIFF_MAX_LINES} строк"):
+        fetch_review_diff(JOB, vcs, max_bytes=LIMITS.diff_max_bytes)
+
+
+def test_lines_of_files_the_filter_drops_count_towards_the_limit() -> None:
+    """Строки считаются до разбора и фильтра: lock-файл на весь предел и две строки кода — отказ."""
+    lock = diff_of_lines(REVIEW_DIFF_MAX_LINES).replace("many.txt", "package-lock.json")
+    code = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+
+    with pytest.raises(DiffTooLargeError, match=f"{REVIEW_DIFF_MAX_LINES} строк"):
+        fetch_review_diff(JOB, FakeVcs(diff=lock + code), max_bytes=LIMITS.diff_max_bytes)
+
+
+def test_diff_of_exactly_the_line_limit_is_reviewed() -> None:
+    """Граница: ровно `REVIEW_DIFF_MAX_LINES` строк — дифф отдаётся как есть."""
+    diff = diff_of_lines(REVIEW_DIFF_MAX_LINES)
+
+    assert fetch_review_diff(JOB, FakeVcs(diff=diff), max_bytes=LIMITS.diff_max_bytes) == diff
 
 
 def test_diff_failure_propagates() -> None:
@@ -104,7 +147,7 @@ def test_file_fetch_failure_degrades_only_that_file() -> None:
     )
     body = _build(vcs).payload.body
     assert {"path": "app/a.py", "part": "ast", "reason": "unavailable"} in body["omitted"]
-    assert [item["path"] for item in body["ast"]] == ["app/b.py"]
+    assert [e for e in body["omitted"] if e.get("path") == "app/b.py"] == []
     assert {item["path"] for item in body["diff"]} == {"app/a.py", "app/b.py"}
 
 
@@ -119,7 +162,7 @@ def test_files_beyond_limit_are_not_fetched() -> None:
     diff = "".join(_file_diff(f"app/f{i}.py") for i in range(5))
     vcs = FakeVcs(diff=diff, files={(f"app/f{i}.py", HEAD): SOURCE for i in range(5)})
     limits = ContextLimits(
-        32_000, 4_000, 32_768, 60, ast_max_files=2, ast_max_file_bytes=1_000, pr_context_max_tokens=1_000, diff_max_bytes=5_242_880
+        32_000, 4_000, 32_768, 60, ast_max_files=2, ast_max_file_bytes=1_000, pr_context_max_tokens=1_000, diff_max_bytes=5_242_880, diff_file_max_bytes=262_144
     )
     body = _build(vcs, limits=limits).payload.body
     fetched = [c[2] for c in vcs.calls if c[0] == "file" and c[3] == HEAD]
@@ -129,6 +172,26 @@ def test_files_beyond_limit_are_not_fetched() -> None:
         "app/f3.py",
         "app/f4.py",
     ]
+
+
+def test_change_over_the_file_limit_is_not_fetched_and_keeps_no_ast_slot() -> None:
+    """#293: файл, отброшенный лимитом изменения, не занимает место из `ast_max_files`."""
+    huge = (
+        "diff --git a/app/generated_dump.py b/app/generated_dump.py\n"
+        "--- a/app/generated_dump.py\n+++ b/app/generated_dump.py\n"
+        "@@ -1,1 +1,1 @@\n-x = 1\n+x = '" + "y" * 500 + "'\n"
+    )
+    vcs = FakeVcs(
+        diff=huge + _file_diff("app/repo.py"),
+        files={("app/generated_dump.py", HEAD): SOURCE, ("app/repo.py", HEAD): SOURCE},
+    )
+    limits = replace(LIMITS, ast_max_files=1, diff_file_max_bytes=300)
+
+    body = _build(vcs, limits=limits).payload.body
+
+    # Единственное место довыборки досталось настоящему файлу, а не дампу.
+    assert [c[2] for c in vcs.calls if c[0] == "file" and c[3] == HEAD] == ["app/repo.py"]
+    assert {"path": "app/generated_dump.py", "part": "file", "reason": "filtered"} in body["omitted"]
 
 
 def test_too_large_file_is_not_parsed() -> None:
@@ -142,12 +205,35 @@ def test_too_large_file_is_not_parsed() -> None:
     assert {"path": "app/a.py", "part": "ast", "reason": "too_large"} in body["omitted"]
 
 
-def test_unsupported_language_is_not_fetched() -> None:
-    vcs = FakeVcs(diff=_file_diff("docs/guide.rst"))
-    body = _build(vcs).payload.body
-    assert [c for c in vcs.calls if c[0] == "file" and c[3] == HEAD] == []
-    assert body["diff"]
-    assert body["ast"] == []
+def test_file_without_ast_language_is_fetched_for_context() -> None:
+    lines = [f"line {n}" for n in range(1, 51)]
+    head = "".join(f"{'changed' if n == 20 else line}\n" for n, line in enumerate(lines, start=1))
+    diff = (
+        "diff --git a/docs/guide.rst b/docs/guide.rst\n--- a/docs/guide.rst\n+++ b/docs/guide.rst\n"
+        "@@ -19,3 +19,3 @@\n line 19\n-line 20\n+changed\n line 21\n"
+    )
+    vcs = FakeVcs(diff=diff, files={("docs/guide.rst", HEAD): head})
+    extractor = FakeExtractor()
+
+    result = _build(vcs, extractor)
+
+    assert ("file", "owner/repo", "docs/guide.rst", HEAD, 77) in vcs.calls
+    assert extractor.calls == []
+    assert result.payload.body["ast"] == []
+    assert result.payload.tiers == ("diff", "whole_file")
+    assert " line 1\n" in result.payload.body["diff"][0]["hunk"]
+
+
+def test_files_with_ast_language_are_fetched_first() -> None:
+    """Файлы без AST-языка не вытесняют из лимита довыборки файлы, которым нужен AST."""
+    diff = _file_diff("docs/a.rst") + _file_diff("app/b.py")
+    vcs = FakeVcs(diff=diff, files={("app/b.py", HEAD): SOURCE})
+    limits = replace(LIMITS, ast_max_files=1)
+
+    body = _build(vcs, limits=limits).payload.body
+
+    assert [c[2] for c in vcs.calls if c[0] == "file" and c[3] == HEAD] == ["app/b.py"]
+    assert [e for e in body["omitted"] if e.get("path") == "app/b.py"] == []
 
 
 def test_parser_receives_language_from_extension() -> None:

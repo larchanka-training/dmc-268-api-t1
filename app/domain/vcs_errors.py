@@ -29,6 +29,21 @@ class VcsTransientError(VcsError):
     """
 
 
+class VcsNotFoundError(VcsError):
+    """Провайдер ответил 404. Для диффа и метаданных — сбой, для `fetch_file`
+    — штатный исход «файла на коммите нет», который адаптер переводит в
+    `None`.
+
+    Код — `PR_NOT_FOUND`: 404 на `compare` GitHub отдаёт одним телом и на
+    неизвестный коммит (force-push убрал `head_sha`), и на репозиторий,
+    которого нет или к которому у установки App больше нет доступа. Отличить
+    `REPOSITORY_NOT_FOUND` можно только лишним запросом к репозиторию;
+    дифф прогона ищется по коммитам PR, поэтому выбран код PR.
+    """
+
+    code: ClassVar[str] = "PR_NOT_FOUND"
+
+
 class VcsFileTooLargeError(VcsError):
     """Файл или дифф больше лимита вызывающего: адаптер оборвал загрузку, не дочитав.
 
@@ -39,7 +54,7 @@ class VcsFileTooLargeError(VcsError):
 
 
 class DiffTooLargeError(VcsFileTooLargeError):
-    """Дифф прогона больше `diff_max_bytes`: ревью не выполняется.
+    """Дифф прогона больше `diff_max_bytes` байт или `REVIEW_DIFF_MAX_LINES` строк: ревью не выполняется.
 
     Код свой, а не `SCM_UNAVAILABLE`: VCS ответила исправно, и повтор не
     поможет — как `PROMPT_TOO_LARGE` у модели. Прогон уходит в `failed`, шаг

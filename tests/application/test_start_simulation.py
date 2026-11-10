@@ -28,7 +28,7 @@ from ..fakes.webhooks import FakeQueue
 
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 USER = UUID(int=7)
-LIMITS = SimulationLimits(max_per_window=3, ttl=timedelta(days=1))
+LIMITS = SimulationLimits(max_per_window=3, ttl=timedelta(days=1), file_max_bytes=262_144)
 CODE = SimulationRequestInput(
     source_kind=SimulationSourceKind.CODE, source="x = 1\n", rules="", file_path="app/a.py"
 )

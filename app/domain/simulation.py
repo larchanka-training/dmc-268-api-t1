@@ -284,9 +284,11 @@ def simulation_files(
     return parse_diff(source)
 
 
-def has_reviewable_hunks(files: Sequence[ParsedFile]) -> bool:
+def has_reviewable_hunks(files: Sequence[ParsedFile], *, max_file_bytes: int) -> bool:
     """Останется ли модели что ревьюить после того же фильтра, что у ревью."""
-    return any(parsed.hunks for parsed in filter_diff_files(files))
+    return any(
+        parsed.hunks for parsed in filter_diff_files(files, max_file_bytes=max_file_bytes)
+    )
 
 
 def code_as_new_file(file_path: str, content: str) -> ParsedFile:
@@ -312,4 +314,4 @@ def code_as_new_file(file_path: str, content: str) -> ParsedFile:
         changed_new_lines=frozenset(range(1, count + 1)),
         text="\n".join([header, *body]),
     )
-    return ParsedFile(file_path=file_path, hunks=(hunk,))
+    return ParsedFile(file_path=file_path, hunks=(hunk,), is_added=True)

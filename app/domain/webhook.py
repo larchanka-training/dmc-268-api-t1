@@ -3,7 +3,8 @@
 Запускают ревью `opened`, `synchronize` и `edited` со сменой целевой ветки;
 `edited` без неё, `reopened`, `closed` и любые прочие действия игнорируются —
 пользователь переназначает бота ревьюером сам. Свой ли PR, решает
-`is_trusted_author` (правило — у `TRUSTED_AUTHOR_ASSOCIATIONS`).
+`is_trusted_pull_request` (правило — у `TRUSTED_AUTHOR_ASSOCIATIONS`): вебхук
+зовёт её полями события, ручной запуск — полями свежих метаданных PR.
 Функция чистая и робкая к мусорному payload'у: всё, что не похоже на событие
 pull request, даёт `None`, чтобы эндпоинт отвечал «ignored», а не 500.
 `installation_id` достаётся из каждого payload'а — мульти-репозиторий по
@@ -66,6 +67,9 @@ def _base_changed(payload: dict[str, Any]) -> bool:
     return isinstance(changes, dict) and isinstance(changes.get("base"), dict)
 
 
-def is_trusted_author(event: WebhookEvent) -> bool:
-    """PR свой: ревью тратит ключ модели только на него."""
-    return not event.from_fork or event.author_association in TRUSTED_AUTHOR_ASSOCIATIONS
+def is_trusted_pull_request(from_fork: bool, author_association: str | None) -> bool:
+    """PR свой: ревью тратит ключ модели только на него.
+
+    Свой — ветка в самом репозитории или автор из `TRUSTED_AUTHOR_ASSOCIATIONS`.
+    """
+    return not from_fork or author_association in TRUSTED_AUTHOR_ASSOCIATIONS

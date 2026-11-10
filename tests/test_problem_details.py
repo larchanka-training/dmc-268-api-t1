@@ -22,7 +22,7 @@ from app.api.errors import problem_response
 from app.api.factory import create_app
 from app.api.problems import PROBLEM_MODELS, AnyProblem, ErrorCode, problem_type
 from app.config import Settings
-from app.domain.enums import RulesStatus
+from app.domain.enums import ReviewRunStatus, RulesStatus
 
 from .fakes.auth import sign_in
 from .fakes.unit_of_work import FakeUnitOfWork
@@ -85,6 +85,17 @@ def assert_problem(response, status: int, code: str, path: str) -> dict[str, Any
     assert body["trace_id"] != "0" * 32
     assert response.headers["X-Trace-ID"] == body["trace_id"]
     return body
+
+
+def test_manage_required_title_names_no_role() -> None:
+    """Код отдают и подключение (admin или maintain), и ручной запуск (push и выше): заголовок —
+    общий, нужные роли называет `detail` (D7 change `manual-review-launch`)."""
+    contract = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    schema = contract["components"]["schemas"]["RepositoryManageRequiredProblem"]
+    assert schema["properties"]["title"]["const"] == "Недостаточно прав на репозиторий"
+    assert PROBLEM_MODELS[ErrorCode.REPOSITORY_MANAGE_REQUIRED].model_fields["title"].default == (
+        "Недостаточно прав на репозиторий"
+    )
 
 
 def test_problem_type_is_kebab_case_urn() -> None:
@@ -276,14 +287,8 @@ def _signed_in_client() -> TestClient:
     return TestClient(app, base_url=ORIGIN)
 
 
-def test_planned_endpoint_answers_not_implemented() -> None:
-    """`POST /reviews` описан в схеме полностью, а отвечает `501 NOT_IMPLEMENTED`."""
-    response = _signed_in_client().post("/api/v1/reviews", json=REVIEW_BODY, headers={"Origin": ORIGIN})
-    assert_problem(response, 501, "NOT_IMPLEMENTED", "/api/v1/reviews")
-
-
-def test_planned_endpoint_checks_origin_session_and_body_first(client: TestClient) -> None:
-    """Заглушка проверяет `Origin`, сессию и тело, как изменяющие ручки."""
+def test_review_launch_checks_origin_session_and_body_first(client: TestClient) -> None:
+    """Ручной запуск проверяет `Origin`, сессию и тело раньше похода к GitHub, как изменяющие ручки."""
     assert_problem(client.post("/api/v1/reviews", json=REVIEW_BODY), 403, "ORIGIN_FORBIDDEN", "/api/v1/reviews")
     response = client.post("/api/v1/reviews", json=REVIEW_BODY, headers={"Origin": ORIGIN})
     assert_problem(response, 401, "UNAUTHENTICATED", "/api/v1/reviews")
@@ -417,32 +422,14 @@ SETTINGS_BODY = {"auto_review_enabled": True, "branch_filter": ["main", "release
 
 
 @pytest.mark.parametrize("path", [SETTINGS_PATH, RULES_PATH])
-def test_planned_repository_reads_answer_not_implemented(path: str) -> None:
-    """Настройки и статус rules.md описаны в схеме, а отвечают `501`."""
-    assert_problem(_signed_in_client().get(path), 501, "NOT_IMPLEMENTED", path)
-
-
-def test_planned_repository_settings_save_answers_not_implemented() -> None:
-    """Допустимое тело — в том числе пустой фильтр и ровно предельные паттерны — доходит до `501`."""
-    client = _signed_in_client()
-    for body in (
-        SETTINGS_BODY,
-        {**SETTINGS_BODY, "branch_filter": []},
-        {**SETTINGS_BODY, "branch_filter": [f"{n:02d}" + "x" * 198 for n in range(50)]},
-    ):
-        response = client.put(SETTINGS_PATH, json=body, headers={"Origin": ORIGIN})
-        assert_problem(response, 501, "NOT_IMPLEMENTED", SETTINGS_PATH)
-
-
-@pytest.mark.parametrize("path", [SETTINGS_PATH, RULES_PATH])
-def test_planned_repository_reads_check_session_and_id_first(client: TestClient, path: str) -> None:
+def test_repository_settings_and_rules_check_session_and_id_first(client: TestClient, path: str) -> None:
     assert_problem(client.get(path), 401, "UNAUTHENTICATED", path)
     bad = path.replace(REPO_ID, "not-a-uuid")
     problem = assert_problem(_signed_in_client().get(bad), 422, "VALIDATION_ERROR", bad)
     assert problem["errors"] == [{"where": "path.repository_id", "reason": "ожидается UUID"}]
 
 
-def test_planned_repository_settings_put_checks_origin_and_session_first(client: TestClient) -> None:
+def test_repository_settings_put_checks_origin_and_session_first(client: TestClient) -> None:
     """Без `Origin` — `403`, без сессии — `401`; неверное тело в обоих случаях не разбирается."""
     bad_body = {**SETTINGS_BODY, "min_severity": "unknown"}
     assert_problem(client.put(SETTINGS_PATH, json=bad_body), 403, "ORIGIN_FORBIDDEN", SETTINGS_PATH)
@@ -501,10 +488,10 @@ def test_planned_repository_settings_put_checks_origin_and_session_first(client:
         ),
     ],
 )
-def test_planned_repository_settings_save_checks_id_and_body_first(
+def test_repository_settings_save_checks_id_and_body_first(
     path: str, body: dict[str, Any], error: dict[str, str]
 ) -> None:
-    """Заглушка записи проверяет id и тело раньше, чем ответить `501`."""
+    """Запись проверяет id и тело раньше обращения к базе и к GitHub."""
     response = _signed_in_client().put(path, json=body, headers={"Origin": ORIGIN})
     problem = assert_problem(response, 422, "VALIDATION_ERROR", path)
     assert problem["errors"] == [error]
@@ -528,9 +515,26 @@ def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
     assert settings["put"]["requestBody"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/RepositorySettingsUpdate"
     }
-    assert {"401", "403", "404", "422", "501"} <= set(settings["put"]["responses"])
-    assert {"401", "404", "422", "501"} <= set(settings["get"]["responses"])
-    assert {"401", "404", "422", "501"} <= set(rules["get"]["responses"])
+    assert {"401", "403", "404", "422", "502"} <= set(settings["put"]["responses"])
+    assert {"401", "404", "422", "502"} <= set(settings["get"]["responses"])
+    assert {"401", "404", "422", "502"} <= set(rules["get"]["responses"])
+    # Ручки реализованы: `501` в схеме нет.
+    for operation in (settings["get"], settings["put"], rules["get"]):
+        assert "501" not in operation["responses"]
+
+    def problem_codes(operation: dict[str, Any], status: str) -> set[str]:
+        content = operation["responses"][status]["content"]["application/problem+json"]["schema"]
+        refs = [v["$ref"] for v in content["oneOf"]] if "oneOf" in content else [content["$ref"]]
+        return {schema["components"]["schemas"][r.rsplit("/", 1)[1]]["properties"]["code"]["const"] for r in refs}
+
+    for operation in (settings["get"], settings["put"], rules["get"]):
+        assert "REPOSITORY_NOT_FOUND" in problem_codes(operation, "404")
+        assert problem_codes(operation, "502") == {"SCM_UNAVAILABLE"}
+    assert problem_codes(rules["get"], "404") == {"REPOSITORY_NOT_FOUND", "REPOSITORY_NOT_IN_INSTALLATION"}
+    assert problem_codes(settings["put"], "403") == {"ORIGIN_FORBIDDEN", "REPOSITORY_MANAGE_REQUIRED"}
+    get_description = settings["get"]["description"]
+    for default in ("auto_review_enabled = true", "branch_filter = []", "min_severity = critical"):
+        assert default in get_description
 
     components = schema["components"]["schemas"]
     fields = {"auto_review_enabled", "branch_filter", "min_severity"}
@@ -540,6 +544,12 @@ def test_repository_settings_and_rules_are_in_the_exported_contract() -> None:
     assert update["additionalProperties"] is False
 
     assert update["properties"]["min_severity"]["$ref"] == "#/components/schemas/FindingSeverity"
+    # Фронтенд должен видеть синтаксис фильтра и что PR вне него не ревьюится, а не ждёт проверку (#313).
+    for model in ("RepositorySettingsResponse", "RepositorySettingsUpdate"):
+        description = components[model]["properties"]["branch_filter"]["description"]
+        for part in ("`**`", "регистр учитывается", "Ветка не в фильтре ревью", "Ручной запуск"):
+            assert part in description
+    assert "RepositoryResponse" in components["RepositorySettingsResponse"]["properties"]["auto_review_enabled"]["description"]
 
     variants = {
         "loaded": "RulesLoaded",
@@ -832,10 +842,9 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     """Тела, которые сервер отдаёт на деле, проходят модель своего кода (`AnyProblem`).
 
     Каждый код из `ErrorCode` здесь представлен хотя бы одним настоящим ответом — кроме
-    `REVIEW_ALREADY_ACTIVE`: его отдаст ручной запуск, а он пока отвечает `501`, - и
-    `RATE_LIMITED` и `SIMULATION_NOT_FOUND`: их отдаст симуляция ревью, она тоже пока `501`.
+    `RATE_LIMITED` и `SIMULATION_NOT_FOUND`: их отдаст симуляция ревью, она пока `501`.
     """
-    from app.domain.vcs_errors import VcsError
+    from app.domain.vcs_errors import VcsError, VcsNotFoundError
 
     from .api.test_webhooks import make_client, post_webhook
     from .fakes import FakeUow, FakeVcs
@@ -845,19 +854,42 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
     from .test_repositories_api import _client as repositories_client
     from .test_repositories_api import _connect as connect_repository
     from .test_repositories_api import _repository as registered_repository
+    from .test_reviews_api import BASE_SHA, RUN_DIFF, Launch, _run_on_head
     from .test_reviews_api import _add_run as add_run
     from .test_reviews_api import _client as reviews_client
+    from .test_reviews_api import _erase_all_bodies as erase_all_bodies
+    from .test_reviews_api import _finding as add_finding
 
     signed_in = repositories_client(FakeUnitOfWork())
     connected = FakeUnitOfWork()
     connected.repositories.add(registered_repository(101))
     scm_down, _ = make_client(uow=FakeUow(), vcs=FakeVcs(error=VcsError("HTTP 502")))
+    # Дифф прогона: свой unit of work на клиента — фейк откатывает незакоммиченное по выходу.
+    without_base, commit_gone, too_large = FakeUnitOfWork(), FakeUnitOfWork(), FakeUnitOfWork()
+    expired = FakeUnitOfWork()
+    run_expired = add_run(expired, base_sha=BASE_SHA)
+    erase_all_bodies(expired, run_expired)
+    run_without_base = add_run(without_base)
+    run_commit_gone = add_run(commit_gone, base_sha=BASE_SHA)
+    run_too_large = add_run(too_large, base_sha=BASE_SHA)
+    already_active = Launch()
+    _run_on_head(already_active, ReviewRunStatus.ANALYSING)
     with_run = FakeUnitOfWork()
     run = add_run(with_run)
+    finding = add_finding(run, None)
+    with_run.findings.add(finding)
     responses = [
         client.post("/api/v1/webhooks/bitbucket"),
         signed_in.get("/api/v1/repositories", params={"limit": "abc"}),
         reviews_client(FakeUnitOfWork()).get("/api/v1/reviews/00000000-0000-0000-0000-000000000001"),
+        reviews_client(without_base).get(f"/api/v1/reviews/{run_without_base.id}/diff"),
+        reviews_client(expired).get(f"/api/v1/reviews/{run_expired.id}/diff"),
+        reviews_client(commit_gone, vcs=FakeVcs(error=VcsNotFoundError("HTTP 404"))).get(
+            f"/api/v1/reviews/{run_commit_gone.id}/diff"
+        ),
+        reviews_client(
+            too_large, vcs=FakeVcs(diff=RUN_DIFF), settings=SETTINGS.model_copy(update={"run_diff_max_bytes": 1})
+        ).get(f"/api/v1/reviews/{run_too_large.id}/diff"),
         pull_requests_client(FakeUnitOfWork()).get(
             "/api/v1/repositories/00000000-0000-0000-0000-000000000001/pull-requests"
         ),
@@ -877,11 +909,8 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         client.post("/api/v1/webhooks/github", headers={"Content-Length": str(SETTINGS.webhook_body_max_bytes + 1)}),
         client.get("/api/v1/auth/bitbucket/login"),
         _signed_in_client().post("/api/v1/reviews", json={}, headers={"Origin": ORIGIN}),
-        _signed_in_client().post(
-            "/api/v1/reviews",
-            json=REVIEW_BODY,
-            headers={"Origin": ORIGIN},
-        ),
+        already_active.post(),
+        reviews_client(with_run).get(f"/api/v1/reviews/{run.id}/findings/{finding.id}/inspection"),
         reviews_client(with_run).get(f"/api/v1/reviews/{run.id}/findings/{RUN_ID}/inspection"),
     ]
     seen = set()
@@ -894,7 +923,6 @@ def test_server_bodies_match_their_models(client: TestClient) -> None:
         assert response.headers["X-Trace-ID"] == body["trace_id"]
         seen.add(body["code"])
     assert seen == {code.value for code in ErrorCode} - {
-        ErrorCode.REVIEW_ALREADY_ACTIVE.value,
         ErrorCode.RATE_LIMITED.value,
         ErrorCode.SIMULATION_NOT_FOUND.value,
     }

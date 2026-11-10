@@ -7,6 +7,7 @@
 
 import datetime as dt
 from collections.abc import Collection, Sequence
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +19,7 @@ from sqlalchemy import (
     delete,
     func,
     literal,
+    null,
     or_,
     select,
     text,
@@ -30,7 +32,10 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.application.ports.unit_of_work import RunStateConflict
+from app.domain.billing import eur_per_token
 from app.domain.entities import (
+    BalanceCredit,
     BotThread,
     ContextPayload,
     Finding,
@@ -39,11 +44,13 @@ from app.domain.entities import (
     ProviderToken,
     PublishedComment,
     Repository,
+    RepositorySettings,
     ReviewRun,
     ReviewRunListEntry,
     ReviewRunStep,
     Secret,
     Simulation,
+    StoredContextPayload,
     User,
 )
 from app.domain.entities import Session as UserSession
@@ -53,10 +60,13 @@ from app.domain.enums import (
     CommentKind,
     Provider,
     ReviewRunStatus,
+    ReviewRunStepStatus,
     SimulationStatus,
     TriggerSource,
 )
 from app.domain.lifecycle import next_status
+from app.domain.llm_usage import LlmUsage
+from app.domain.payload_retention import BodyExpiryStats
 from app.domain.provider_token import ProviderTokenBusy, ProviderTokenUnavailable
 from app.domain.run_feed import FeedCursor
 from app.domain.run_list import RunListFilter, RunListPage
@@ -68,6 +78,7 @@ from app.domain.simulation import (
 )
 from app.infrastructure.db import mappers as m
 from app.infrastructure.db.models import (
+    BalanceCreditRow,
     ContextPayloadRow,
     FindingRow,
     MergeRequestRow,
@@ -129,6 +140,9 @@ class SqlAlchemyRepositoryRepo:
                     created_at=repository.created_at,
                     updated_at=repository.updated_at,
                     connected_at=repository.connected_at,
+                    branch_filter=list(repository.branch_filter),
+                    min_severity=repository.min_severity,
+                    payer_user_id=repository.payer_user_id,
                 )
                 .on_conflict_do_nothing(constraint="uq_repositories_provider_id")
                 .returning(RepositoryRow.id)
@@ -150,6 +164,8 @@ class SqlAlchemyRepositoryRepo:
                 full_name=repository.full_name,
                 default_branch=repository.default_branch,
                 updated_at=repository.updated_at,
+                # Назначенного плательщика включение не меняет (`review-billing`).
+                payer_user_id=func.coalesce(RepositoryRow.payer_user_id, repository.payer_user_id),
             )
             .returning(RepositoryRow)
         ).one_or_none()
@@ -162,13 +178,49 @@ class SqlAlchemyRepositoryRepo:
             .values(connected_at=None, updated_at=now)
         )
 
-    def update(self, repository: Repository) -> None:
-        row = self._session.get(RepositoryRow, repository.id)
-        if row is None:
-            raise LookupError(f"repository {repository.id} is not stored")
-        row.full_name = repository.full_name
-        row.default_branch = repository.default_branch
-        row.auto_review_enabled = repository.auto_review_enabled
+    def update_settings(
+        self, repository_id: UUID, settings: RepositorySettings, now: dt.datetime
+    ) -> Repository | None:
+        # RETURNING — запись, какой её сохранила база, без второго запроса.
+        row = self._session.scalars(
+            update(RepositoryRow)
+            .where(RepositoryRow.id == repository_id)
+            .values(
+                auto_review_enabled=settings.auto_review_enabled,
+                branch_filter=list(settings.branch_filter),
+                min_severity=settings.min_severity,
+                updated_at=now,
+            )
+            .returning(RepositoryRow)
+        ).one_or_none()
+        return m.repository_to_domain(row) if row else None
+
+    def set_payer(self, repository_id: UUID, user_id: UUID, now: dt.datetime) -> Repository | None:
+        row = self._session.scalars(
+            update(RepositoryRow)
+            .where(RepositoryRow.id == repository_id)
+            .values(payer_user_id=user_id, updated_at=now)
+            .returning(RepositoryRow)
+        ).one_or_none()
+        return m.repository_to_domain(row) if row else None
+
+    def drop_payer(self, repository_id: UUID, user_id: UUID, now: dt.datetime) -> bool:
+        # Условие в UPDATE: перевод оплаты между чтением и записью не снимет нового плательщика.
+        dropped = self._session.scalars(
+            update(RepositoryRow)
+            .where(RepositoryRow.id == repository_id, RepositoryRow.payer_user_id == user_id)
+            .values(payer_user_id=None, updated_at=now)
+            .returning(RepositoryRow.id)
+        ).one_or_none()
+        return dropped is not None
+
+    def list_paid_by(self, user_id: UUID) -> list[Repository]:
+        rows = self._session.scalars(
+            select(RepositoryRow)
+            .where(RepositoryRow.payer_user_id == user_id)
+            .order_by(RepositoryRow.full_name)
+        )
+        return [m.repository_to_domain(row) for row in rows]
 
 
 class SqlAlchemyMergeRequestRepo:
@@ -281,6 +333,22 @@ class SqlAlchemyReviewRunRepo:
                 ReviewRunRow.head_sha == head_sha,
                 ReviewRunRow.trigger == TriggerSource.WEBHOOK,
                 ReviewRunRow.status.in_(REVIEWED_STATUSES),
+            )
+            .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+            .limit(1)
+        ).first()
+        return m.review_run_to_domain(row) if row else None
+
+    def find_completed_manual(self, merge_request_id: UUID, head_sha: str) -> ReviewRun | None:
+        row = self._session.scalars(
+            select(ReviewRunRow)
+            .where(
+                ReviewRunRow.merge_request_id == merge_request_id,
+                ReviewRunRow.head_sha == head_sha,
+                ReviewRunRow.trigger == TriggerSource.MANUAL,
+                ReviewRunRow.status == ReviewRunStatus.COMPLETED,
+                # Прогон без денег ревью не делал: держать gate вместо повтора без ревью ему нечем.
+                ReviewRunRow.coverage_reason.is_(None),
             )
             .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
             .limit(1)
@@ -445,16 +513,19 @@ class SqlAlchemyReviewRunRepo:
                 failure_reason=run.failure_reason,
                 failed_stage=run.failed_stage,
                 model=run.model,
-                tokens_used=run.tokens_used,
+                **m.run_usage_columns(run),
                 duration_seconds=run.duration_seconds,
                 rejected_findings=run.rejected_findings,
                 verification=run.verification,
                 verifier_dropped_findings=run.verifier_dropped_findings,
+                payer_user_id=run.payer_user_id,
+                estimated_cost_eur=run.estimated_cost_eur,
+                coverage_reason=run.coverage_reason,
             )
         )
         self._notify(run)
 
-    def update(self, run: ReviewRun) -> None:
+    def update(self, run: ReviewRun, *, previous: ReviewRun | None = None) -> None:
         """Записать прогресс прогона, отклонив статус, запрещённый машиной состояний.
 
         Единственное правило в этом классе, и оно делегировано: таблицей
@@ -473,6 +544,11 @@ class SqlAlchemyReviewRunRepo:
         )
         if row is None:
             raise LookupError(f"review run {run.id} is not stored")
+        if previous is not None and (row.status, row.last_progress_at) != (
+            previous.status,
+            previous.last_progress_at,
+        ):
+            raise RunStateConflict(f"review run {run.id} changed since it was read")
         # Терминальная строка проходит через next_status, даже если статус не
         # изменился: одного сравнения на равенство хватило бы, чтобы повторно
         # доставленное обновление перезаписало стоимость завершённого прогона.
@@ -485,12 +561,28 @@ class SqlAlchemyReviewRunRepo:
         row.failure_reason = run.failure_reason
         row.failed_stage = run.failed_stage
         row.model = run.model
-        row.tokens_used = run.tokens_used
+        for column, value in m.run_usage_columns(run).items():
+            setattr(row, column, value)
         row.duration_seconds = run.duration_seconds
         row.rejected_findings = run.rejected_findings
         row.verification = run.verification
         row.verifier_dropped_findings = run.verifier_dropped_findings
+        # Плательщик, резерв и причина покрытия пишутся один раз: копия прогона, прочитанная
+        # до проверки баланса (отмена `supersede`), их не стирает — иначе резерв пропал бы
+        # из баланса плательщика.
+        for column in _BILLING_COLUMNS:
+            if (value := getattr(run, column)) is not None:
+                setattr(row, column, value)
         self._notify(run)
+
+    def record_cancelled_spend(self, run_id: UUID, usage: LlmUsage) -> None:
+        row = self._session.get(ReviewRunRow, run_id, with_for_update=True, populate_existing=True)
+        if row is None or row.status is not ReviewRunStatus.CANCELLED:
+            return
+        row.tokens_used = usage.total_tokens
+        for column, value in m.usage_columns(usage).items():
+            setattr(row, column, value)
+        self._notify(m.review_run_to_domain(row))
 
     def _notify(self, run: ReviewRun) -> None:
         """Уведомить поток событий: `pg_notify` в той же транзакции уходит только при коммите.
@@ -502,6 +594,9 @@ class SqlAlchemyReviewRunRepo:
             text("SELECT pg_notify(:channel, :run_id)"),
             {"channel": REVIEW_RUNS_CHANNEL, "run_id": str(run.id)},
         )
+
+
+_BILLING_COLUMNS = ("payer_user_id", "estimated_cost_eur", "coverage_reason")
 
 
 class SqlAlchemyReviewRunStepRepo:
@@ -532,9 +627,14 @@ class SqlAlchemyReviewRunStepRepo:
         )
 
     def update(self, step: ReviewRunStep) -> None:
-        row = self._session.get(ReviewRunStepRow, step.id)
+        # Блокировка: воркер и очистка закрывают шаг параллельно, первый исход остаётся.
+        row = self._session.get(
+            ReviewRunStepRow, step.id, with_for_update=True, populate_existing=True
+        )
         if row is None:
             raise LookupError(f"review run step {step.id} is not stored")
+        if row.status is not ReviewRunStepStatus.RUNNING:
+            return
         # Прогон, этап и начало у шага не меняются: меняется только исход.
         row.status = step.status
         row.duration_seconds = step.duration_seconds
@@ -546,7 +646,7 @@ class SqlAlchemyContextPayloadRepo:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def list_for_run(self, review_run_id: UUID) -> list[ContextPayload]:
+    def list_for_run(self, review_run_id: UUID) -> list[StoredContextPayload]:
         rows = self._session.scalars(
             select(ContextPayloadRow)
             .where(ContextPayloadRow.review_run_id == review_run_id)
@@ -573,6 +673,45 @@ class SqlAlchemyContextPayloadRepo:
                 # Новая структура, а не ссылка на словарь сущности; секреты в базу не идут.
                 body=redact_secrets(payload.body),
             )
+        )
+
+    def expire_bodies(self, created_before: dt.datetime, now: dt.datetime, limit: int) -> int:
+        """Стереть тела самых старых пакетов, записанных раньше `created_before`, не больше `limit`.
+
+        Выбор идёт по частичному индексу `(created_at) WHERE body IS NOT NULL`: уже стёртые
+        строки проход не читает. `SKIP LOCKED` — два воркера в одном проходе не ждут друг друга
+        и не стирают одну строку дважды.
+        """
+        picked = (
+            select(ContextPayloadRow.id)
+            .where(ContextPayloadRow.body.is_not(None), ContextPayloadRow.created_at < created_before)
+            .order_by(ContextPayloadRow.created_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+            .scalar_subquery()
+        )
+        result = self._session.execute(
+            update(ContextPayloadRow)
+            .where(ContextPayloadRow.id.in_(picked))
+            # `null()`, а не `None`: JSONB записал бы `None` JSON-значением null, а не SQL NULL.
+            .values(body=null(), body_expired_at=now, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount)  # type: ignore[attr-defined]
+
+    def body_expiry_stats_for_run(self, review_run_id: UUID) -> BodyExpiryStats:
+        """Один агрегат по индексу `review_run_id`, без чтения тел: они весят до 128 КБ."""
+        payload_count, erased_count, last_expired_at = self._session.execute(
+            select(
+                func.count(),
+                func.count(ContextPayloadRow.body_expired_at),
+                func.max(ContextPayloadRow.body_expired_at),
+            ).where(ContextPayloadRow.review_run_id == review_run_id)
+        ).one()
+        return BodyExpiryStats(
+            payload_count=payload_count,
+            erased_count=erased_count,
+            last_expired_at=last_expired_at,
         )
 
 
@@ -820,6 +959,67 @@ _ACCESS = "access_token"
 # Предел ожидания чужой блокировки токена при refresh; дальше — `ProviderTokenBusy`.
 _LOCK_TIMEOUT = "15s"
 _REFRESH = "refresh_token"
+
+
+# Сколько последних оплаченных прогонов берёт цена токена (design D4). Модель не фильтруется:
+# в `model` — id апстрима, который выбрал роутер, а не настроенная модель.
+_PRICE_HISTORY_RUNS = 50
+
+
+class SqlAlchemyBillingRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def lock_payer(self, user_id: UUID) -> None:
+        # Ключ — хэш id: совпадение хэшей двух плательщиков лишь выстроит их в одну очередь.
+        self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:user_id, 0))"),
+            {"user_id": str(user_id)},
+        )
+
+    def balance(self, user_id: UUID) -> Decimal:
+        credits = (
+            select(func.coalesce(func.sum(BalanceCreditRow.amount_eur), 0))
+            .where(BalanceCreditRow.user_id == user_id)
+            .scalar_subquery()
+        )
+        spent = (
+            select(
+                func.coalesce(
+                    func.sum(func.coalesce(ReviewRunRow.cost_eur, ReviewRunRow.estimated_cost_eur, 0)), 0
+                )
+            )
+            .where(ReviewRunRow.payer_user_id == user_id)
+            .scalar_subquery()
+        )
+        return Decimal(self._session.execute(select(credits - spent)).scalar_one())
+
+    def eur_per_token(self) -> Decimal:
+        recent = (
+            select(ReviewRunRow.cost_eur, ReviewRunRow.tokens_used)
+            .where(ReviewRunRow.cost_eur > 0)
+            .order_by(ReviewRunRow.created_at.desc(), ReviewRunRow.id.desc())
+            .limit(_PRICE_HISTORY_RUNS)
+            .subquery()
+        )
+        cost, tokens = self._session.execute(
+            select(func.coalesce(func.sum(recent.c.cost_eur), 0), func.coalesce(func.sum(recent.c.tokens_used), 0))
+        ).one()
+        # Правило «без истории — ноль» — в домене.
+        return eur_per_token(Decimal(cost), int(tokens))
+
+    def add_credit(self, credit: BalanceCredit) -> None:
+        self._session.add(
+            BalanceCreditRow(
+                id=credit.id,
+                user_id=credit.user_id,
+                amount_eur=credit.amount_eur,
+                note=credit.note,
+                credited_by=credit.credited_by,
+                created_at=credit.created_at,
+                updated_at=credit.created_at,
+            )
+        )
 
 
 class SqlAlchemyProviderTokenRepo:

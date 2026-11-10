@@ -5,11 +5,18 @@
 что и в парсере.
 """
 
+import tracemalloc
 from dataclasses import replace
 
 import pytest
 
-from app.domain.diff_parser import filter_diff_files, is_filterable, parse_diff
+from app.domain.diff_parser import (
+    change_exceeds,
+    filter_diff_files,
+    is_filterable,
+    is_filtered_out,
+    parse_diff,
+)
 from app.domain.entities import Hunk, ParsedFile
 
 MULTI_FILE_DIFF = """\
@@ -245,6 +252,44 @@ def test_edited_and_new_files_are_not_deleted() -> None:
     assert not parse_diff(NEW_FILE_DIFF)[0].is_deleted
 
 
+NEW_BINARY_DIFF = """\
+diff --git a/assets/new.png b/assets/new.png
+new file mode 100644
+index 0000000..8e9f0a1
+Binary files /dev/null and b/assets/new.png differ
+"""
+
+# Без `new file mode`: добавленный файл узнаётся по `--- /dev/null`.
+NEW_FILE_WITHOUT_MODE_DIFF = """\
+diff --git a/app/fresh.py b/app/fresh.py
+--- /dev/null
++++ b/app/fresh.py
+@@ -0,0 +1 @@
++only line
+"""
+
+
+def test_new_text_file_is_added() -> None:
+    assert parse_diff(NEW_FILE_DIFF)[0].is_added is True
+
+
+def test_new_binary_file_is_added() -> None:
+    parsed = parse_diff(NEW_BINARY_DIFF)[0]
+    assert parsed.is_added is True
+    assert parsed.is_binary is True
+
+
+def test_dev_null_minus_side_marks_file_added() -> None:
+    assert parse_diff(NEW_FILE_WITHOUT_MODE_DIFF)[0].is_added is True
+
+
+def test_modified_deleted_and_renamed_files_are_not_added() -> None:
+    assert parse_diff(MULTI_FILE_DIFF)[0].is_added is False
+    assert parse_diff(DELETED_FILE_DIFF)[0].is_added is False
+    assert parse_diff(RENAME_WITH_EDITS_DIFF)[0].is_added is False
+    assert parse_diff(BINARY_DIFF)[0].is_added is False
+
+
 def test_hunk_text_stops_at_the_next_hunk() -> None:
     """Текст hunk'а — его заголовок и тело, без соседнего hunk'а и шапки файла."""
     first, second = parse_diff(TWO_HUNKS_DIFF)[0].hunks
@@ -409,20 +454,102 @@ def test_vendor_directories_are_filterable(path: str) -> None:
         "docs/README.md",
         "app/lock.py",
         "app/vendor.py",
+        "src/distance.py",
+        "app/dist_utils.py",
+        "docs/sitemap.md",
+        "app/bundle.py",
+        "nginx/redirects.map",
+        "conf/geo.map",
     ],
 )
 def test_regular_sources_pass_the_filter(path: str) -> None:
     assert not is_filterable(path, is_binary=False)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "dist/index.js",
+        "frontend/dist/assets/app-3f2a.js",
+        "packages/ui/dist/index.d.ts",
+        "static/app.bundle.js",
+        "static/vendor.bundle.css",
+        "static/app.js.map",
+        "static/styles.css.map",
+    ],
+)
+def test_bundles_are_filterable(path: str) -> None:
+    assert is_filterable(path, is_binary=False)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["alembic/versions/0001_init.py", "app/migrations/0002_users.py", "migrations/versions/abc_add_index.py"],
+)
+def test_migrations_pass_the_filter(path: str) -> None:
+    """#293: миграции не пропускаем — промпты ревью проверяют downgrade и enum."""
+    assert not is_filterable(path, is_binary=False)
+
+
+def _file_of(path: str, changed_bytes: int) -> ParsedFile:
+    """Файл с одним hunk'ом, текст которого ровно `changed_bytes` байт в UTF-8."""
+    header = "@@ -1 +1 @@\n+"
+    text = header + "я" * ((changed_bytes - len(header)) // 2) + "x" * ((changed_bytes - len(header)) % 2)
+    return ParsedFile(file_path=path, hunks=(Hunk(file_path=path, new_start=1, new_count=1, text=text),))
+
+
+@pytest.mark.parametrize("letter", ["x", "я", "😀"], ids=["ascii", "cyrillic", "outside-bmp"])
+def test_change_size_is_counted_in_utf8_bytes_over_all_hunks(letter: str) -> None:
+    width = len(letter.encode("utf-8"))
+    hunks = tuple(Hunk(file_path="a.py", new_start=i, new_count=1, text=letter * 100) for i in (1, 50))
+    file = ParsedFile(file_path="a.py", hunks=hunks)
+    assert not change_exceeds(file, max_bytes=200 * width)
+    assert change_exceeds(file, max_bytes=200 * width - 1)
+
+
+@pytest.mark.parametrize("letter", ["\x01", "я"], ids=["ascii", "cyrillic"])
+def test_huge_change_is_measured_without_a_copy(letter: str) -> None:
+    """Огромный hunk — ради него лимит: его копия в байтах выводила бы воркер за память (#328)."""
+    file = ParsedFile(file_path="a.py", hunks=(Hunk(file_path="a.py", new_start=1, new_count=1, text=letter * 1_000_000),))
+    tracemalloc.start()
+    try:
+        filtered = is_filtered_out(file, max_file_bytes=262_144)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert filtered
+    assert peak < 10_000
+
+
+def test_rename_without_hunks_has_no_size() -> None:
+    assert not change_exceeds(ParsedFile(file_path="new.py", old_path="old.py"), max_bytes=0)
+
+
+def test_change_over_the_file_limit_is_filtered_out_and_one_at_the_limit_is_not() -> None:
+    assert not is_filtered_out(_file_of("tests/snapshots/big.json", 1_000), max_file_bytes=1_000)
+    assert is_filtered_out(_file_of("tests/snapshots/big.json", 1_001), max_file_bytes=1_000)
+
+
+def test_filtered_out_keeps_the_path_rules() -> None:
+    assert is_filtered_out(_file_of("uv.lock", 10), max_file_bytes=1_000)
+    assert is_filtered_out(ParsedFile(file_path="logo.png", is_binary=True), max_file_bytes=1_000)
+    assert not is_filtered_out(_file_of("app/main.py", 10), max_file_bytes=1_000)
+
+
+def test_filter_diff_files_drops_a_file_over_the_limit() -> None:
+    files = [_file_of("app/a.py", 500), _file_of("schema/dump.sql", 5_000), _file_of("app/b.py", 500)]
+    kept = filter_diff_files(files, max_file_bytes=1_000)
+    assert [f.file_path for f in kept] == ["app/a.py", "app/b.py"]
+
+
 def test_filter_diff_files_keeps_reviewable_files_in_order() -> None:
-    kept = filter_diff_files(parse_diff(NOISY_DIFF))
+    kept = filter_diff_files(parse_diff(NOISY_DIFF), max_file_bytes=262_144)
     assert [f.file_path for f in kept] == ["app/main.py"]
     assert kept[0].hunks[0].changed_new_lines == frozenset({2, 3})
 
 
 def test_filter_diff_files_on_empty_input() -> None:
-    assert filter_diff_files([]) == []
+    assert filter_diff_files([], max_file_bytes=262_144) == []
 
 
 # Вывод `git diff` как есть: с `core.quotePath` пути с не-ASCII, `"` и

@@ -11,6 +11,7 @@ uv run uvicorn app.main:app --reload    # запуск, нужен DATABASE_URL
 uv run ruff check .                     # стиль
 uv run lint-imports                     # направление зависимостей
 uv run pytest                           # тесты без базы
+make cov-llm-schema                     # порог 100% покрытия схем ответа модели (шаг CI в job lint)
 uv run alembic upgrade head             # применить миграции
 uv run alembic heads                    # должна быть ровно одна голова
 uv run python scripts/export_openapi.py # экспорт контракта API в docs/openapi/openapi.json
@@ -192,7 +193,9 @@ uv run python scripts/export_openapi.py # экспорт контракта API 
   не родитель: trace id и сэмплирование остаются нашими.
 - **Граница**: телеметрия — для команды. Данные продукта (шаги, токены, длительность) — из базы,
   ответы API из телеметрии не строятся. Метрики — та же телеметрия: в Prometheus — сигналы
-  алертов, отчёты по прогонам — SQL по колонкам.
+  алертов, отчёты по прогонам — SQL по колонкам. Исключение одно — публичный статус сервиса
+  `GET /api/v1/status`: он из сработавших алертов Prometheus (порт `AlertSource`), и наружу
+  уходят только статусы компонентов.
 
 ### Логи
 
@@ -231,6 +234,13 @@ alembic CLI читают скрипты деплоя); OTLP-экспорт из 
 
 Каждая функция домена имеет тест без базы, брокера и сети. Интеграционные — только адаптеры и
 миграции. Цикл и антипаттерны — скилл [`backend-tdd`](../skills/backend-tdd/SKILL.md).
+
+Схемы ответа модели (`app/application/llm_schema.py`, `app/infrastructure/llm/structured.py`)
+покрыты своими тестами на 100% строк и ветвей: новая ветвь в валидации ответа модели приходит с
+тестом, иначе CI падает на пороге покрытия (#275). Локально — `make cov-llm-schema`, он же в
+`make check`. Ограничения полей (`min_length`, `ge`, `extra="forbid"`) порог не видит — они
+исполняются при импорте; новое поле схемы приходит со случаем отказа в `REVIEW_REJECTIONS` или
+`VERIFICATION_REJECTIONS`, иначе падает тест полноты в `tests/application/test_llm_schema.py`.
 
 ## Миграции
 

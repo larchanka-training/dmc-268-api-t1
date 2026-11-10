@@ -1,0 +1,833 @@
+# Тесты правил алертов: promtool test rules infra/observability/alerts.test.yml
+# (job observability-configs в CI). Синтетические ряды — по одному сценарию
+# «горит / молчит» на сигнал из #100; пороги — те же, что в infra/README.md.
+
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Контейнер пропал: ряд есть у всех, кроме воркера.
+  - interval: 1m
+    input_series:
+      - series: 'container_uptime_seconds{container_name="dmc268-api"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-postgres"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-postgres-replica"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-postgres-backup"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-rabbitmq"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-ui"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-otelcol"}'
+        values: "1+60x10"
+      - series: 'up{job="docker-stats", instance="collector-docker:8889"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ContainerDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ContainerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_name: dmc268-worker
+            exp_annotations:
+              summary: "Контейнер dmc268-worker не запущен"
+              description: "Ряда container_uptime_seconds нет 2 минуты: контейнер остановлен, удалён или не создан. Проверка: docker ps -a --filter name=dmc268-worker"
+
+  # docker_stats не читает Docker API (лёг socket-proxy): скрейп жив, рядов нет
+  # ни у кого — ContainerDown молчит, горит ContainerMetricsMissing.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="docker-stats", instance="collector-docker:8889"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ContainerDown
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: ContainerMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: observability
+            exp_annotations:
+              summary: "Нет метрик контейнеров"
+              description: "5 минут нет ни одного ряда container_uptime_seconds, хотя collector-docker отвечает: receiver docker_stats не читает Docker API. Проверьте dmc268-docker-proxy и логи dmc268-otelcol-docker."
+
+  # Экземпляр docker_stats лежит: рядов нет ни у кого, но ContainerDown молчит —
+  # горит ScrapeTargetDown.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="docker-stats", instance="collector-docker:8889"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ContainerDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ScrapeTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: observability
+              job: docker-stats
+              instance: collector-docker:8889
+            exp_annotations:
+              summary: "Prometheus не снимает docker-stats (collector-docker:8889)"
+              description: "Цель не отвечает 5 минут: алерты по её метрикам не сработают."
+
+  # Перезапуски: два за 15 минут — алерт, один — нет.
+  - interval: 1m
+    input_series:
+      - series: 'container_restarts_total{container_name="dmc268-worker"}'
+        values: "0 0 1 1 2 2 2 2"
+      - series: 'container_restarts_total{container_name="dmc268-api"}'
+        values: "0 0 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: ContainerRestarting
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_name: dmc268-worker
+            exp_annotations:
+              summary: "Контейнер dmc268-worker перезапускается"
+              description: "2 перезапусков за 15 минут. Причина — в docker logs dmc268-worker и в Loki."
+
+  # Память: воркер у потолка 10 минут, API далеко от него, у контейнера без
+  # лимита (0) деления на ноль нет.
+  - interval: 1m
+    input_series:
+      - series: 'container_memory_usage_total_bytes{container_name="dmc268-worker"}'
+        values: "500000000x15"
+      - series: 'container_memory_usage_limit_bytes{container_name="dmc268-worker"}'
+        values: "512000000x15"
+      - series: 'container_memory_usage_total_bytes{container_name="dmc268-api"}'
+        values: "100000000x15"
+      - series: 'container_memory_usage_limit_bytes{container_name="dmc268-api"}'
+        values: "512000000x15"
+      - series: 'container_memory_usage_total_bytes{container_name="dmc268-migrations"}'
+        values: "100000000x15"
+      - series: 'container_memory_usage_limit_bytes{container_name="dmc268-migrations"}'
+        values: "0x15"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ContainerMemoryNearLimit
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ContainerMemoryNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: worker
+              container_name: dmc268-worker
+            exp_annotations:
+              summary: "Контейнер dmc268-worker занял 97.66% лимита памяти"
+              description: "Больше 90 % лимита 10 минут: следующий рост убьёт процесс по OOM. Кто растёт: docker stats dmc268-worker; потолок задаёт memory в infra/*.tf или observability_memory_mb."
+
+  # Сервис не отвечает на пробу (unhealthy при запущенном контейнере).
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox-services", service="api", instance="http://dmc268-api:8000/health"}'
+        values: "1 1 0 0 0 0"
+      - series: 'probe_success{job="blackbox-services", service="postgres", instance="dmc268-postgres:5432"}'
+        values: "1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ServiceProbeFailed
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ServiceProbeFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: blackbox-services
+              service: api
+              instance: http://dmc268-api:8000/health
+            exp_annotations:
+              summary: "api не отвечает на проверку"
+              description: "Проба http://dmc268-api:8000/health падает 2 минуты подряд, хотя контейнер может быть запущен."
+
+  # Всплеск 5xx: 10 % ошибок при 1 запросе в секунду.
+  - interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_response_status_code="200"}'
+        values: "0+54x20"
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_response_status_code="500"}'
+        values: "0+6x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: Api5xxSpike
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: api
+            exp_annotations:
+              summary: "Всплеск 5xx у API: 10% запросов"
+              description: "Доля ответов 5xx за 5 минут выше 5 % уже 5 минут. Трейсы — в Grafana по X-Trace-ID из логов API."
+
+  # Единичная 5xx при почти нулевом трафике — не алерт.
+  - interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_response_status_code="200"}'
+        values: "0+1x20"
+      - series: 'http_server_request_duration_seconds_count{job="dmc-268-api", http_response_status_code="500"}'
+        values: "0+1x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: Api5xxSpike
+        exp_alerts: []
+
+  # Прогоны падают сразу после рестарта воркера: до 10-й минуты рядов нет
+  # (процесса нет), при старте telemetry.prime_run_outcomes заводит их нулём,
+  # потом три failed из четырёх. Ряд с нуля — каждое падение в increase().
+  - interval: 5m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
+        values: "_x2 0 1 2 3"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "_x2 0 0 0 1"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewRunsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+            exp_annotations:
+              summary: "Прогоны падают: 75% за 30 минут"
+              description: "Доля прогонов в failed выше 30 %. Код ошибки шага — в GET /api/v1/reviews/{id}/steps и в спанах review.<этап>."
+
+  # Отказы по балансу не разбавляют долю упавших: три failed и один completed
+  # на десять refused — всё равно 75 %, а не 3 из 14.
+  - interval: 5m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
+        values: "0 0 0 1 2 3"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 1"
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 2 4 6 8 10"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewRunsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+            exp_annotations:
+              summary: "Прогоны падают: 75% за 30 минут"
+              description: "Доля прогонов в failed выше 30 %. Код ошибки шага — в GET /api/v1/reviews/{id}/steps и в спанах review.<этап>."
+
+  # Порог «хотя бы три прогона» тоже без отказов: одно падение на три отказа —
+  # не 100 % упавших.
+  - interval: 5m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
+        values: "0 0 0 0 0 1"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 0"
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 1 1 2 2 3"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewRunsFailing
+        exp_alerts: []
+
+  # Отказывают все прогоны: ревью нет, ReviewRunsFailing молчит, горит отказ.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 1 2 3 4 5 6"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 0 0"
+      - series: 'review_runs_total{job="dmc-268-worker", status="failed"}'
+        values: "0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: worker
+            exp_annotations:
+              summary: "Прогоны отказаны по балансу: 100% за час"
+              description: "Больше половины прогонов за час завершены без денег (coverage_reason = balance). Проверьте балансы и плательщиков репозиториев и оценку стоимости прогона."
+      - eval_time: 60m
+        alertname: ReviewRunsFailing
+        exp_alerts: []
+
+  # Одиночные отказы — норма: два refused на двенадцать completed за час.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 0 1 1 2 2 2"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 2 4 6 8 10 12"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts: []
+
+  # Порог `>= 3` пройден, но отказов меньше половины: четыре refused на двенадцать completed.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 0 1 2 3 3 4"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 2 4 6 8 10 12"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts: []
+
+  # Доля 100 %, но в тихий час отказов два, меньше порога `>= 3`.
+  - interval: 10m
+    input_series:
+      - series: 'review_runs_total{job="dmc-268-worker", status="refused"}'
+        values: "0 0 0 0 0 1 2"
+      - series: 'review_runs_total{job="dmc-268-worker", status="completed"}'
+        values: "0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ReviewRunsRefused
+        exp_alerts: []
+
+  # DLQ не пуста дольше 5 минут; воркер не подписан на очередь.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_queue_messages{queue="review_jobs.dlq"}'
+        values: "0 1 1 1 1 1 1 1"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "1 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: ReviewDlqNotEmpty
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+              queue: review_jobs.dlq
+            exp_annotations:
+              summary: "В review_jobs.dlq 1 сообщений"
+              description: "Сообщения лежат в DLQ дольше 5 минут. Разбор — rabbitmqadmin get queue=review_jobs.dlq в контейнере dmc268-rabbitmq, причина — в логах воркера."
+      - eval_time: 7m
+        alertname: WorkerNotConsuming
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+              queue: review_jobs.qq
+            exp_annotations:
+              summary: "У очереди review_jobs.qq нет потребителей"
+              description: "5 минут ни один воркер не подписан на очередь: прогоны копятся и не выполняются."
+
+  # Очереди ревью нет совсем (воркер упал до объявления), брокер снимается.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="rabbitmq", instance="dmc268-rabbitmq:15692"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: WorkerNotConsuming
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+              queue: review_jobs.qq
+            exp_annotations:
+              summary: "У очереди review_jobs.qq нет потребителей"
+              description: "5 минут ни один воркер не подписан на очередь: прогоны копятся и не выполняются."
+
+  # Воркер завис на задаче: с 5-й минуты она выдана, за ней копится очередь,
+  # подтверждений нет. На 25-й минуте брокер перезапущен (счётчик в 0), и
+  # обнуление не прячет зависание. ReviewJobStuck: 20 минут сообщения в
+  # работе, раньше молчит; WorkerStalled: 15 минут готовых задач.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "0x5 2x35"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "0x4 1x36"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "80x24 0x15"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp10", queue_type="rabbit_quorum_queue"}'
+        values: "0x40"
+      - series: 'up{job="rabbitmq", instance="dmc268-rabbitmq:15692"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 23m
+        alertname: ReviewJobStuck
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: WorkerStalled
+        exp_alerts: &worker_stalled
+          - exp_labels:
+              severity: critical
+              service: worker
+              queue: review_jobs.qq
+            exp_annotations:
+              summary: "Воркер подписан на review_jobs.qq, но не берёт задачи"
+              description: "15 минут в очереди лежат готовые задачи и нет ни одного подтверждения, хотя потребитель есть. Чаще всего это медленная модель или фоллбэк на текущем прогоне (тогда горит и ReviewJobStuck): смотреть спаны review.<этап> в Grafana. Если в спанах тишина, воркер завис: стек в логах, docker restart dmc268-worker."
+      - eval_time: 25m
+        alertname: ReviewJobStuck
+        exp_alerts: &review_job_stuck
+          - exp_labels:
+              severity: critical
+              service: worker
+              queue: review_jobs.qq
+            exp_annotations:
+              summary: "Задача review_jobs.qq в работе дольше 20 минут"
+              description: "Сообщение выдано воркеру 20 минут назад и не подтверждено. Сначала проверить, не идут ли вызовы модели в таймаут с повтором (спаны review.<этап>, шаг прогона: GET /api/v1/reviews/{id}/steps): такой прогон дойдёт сам. Через 30 минут без прогресса прогон переведёт в failed выметатель."
+      - eval_time: 35m
+        alertname: WorkerStalled
+        exp_alerts: *worker_stalled
+      - eval_time: 35m
+        alertname: ReviewJobStuck
+        exp_alerts: *review_job_stuck
+      - eval_time: 35m
+        alertname: WorkerNotConsuming
+        exp_alerts: []
+
+  # Поток прогонов подряд: очередь не пустеет, сообщение в работе всегда,
+  # но задачи подтверждаются раз в 2 минуты; после рестарта брокера счётчик
+  # растёт с нуля. Ни зависания, ни застрявшей задачи.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "5x40"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "0+0.5x24 0+0.5x15"
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 24m
+        alertname: ReviewJobStuck
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: ReviewJobStuck
+        exp_alerts: []
+
+  # Потребителя нет: это WorkerNotConsuming, WorkerStalled его не дублирует.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "3x30"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "0x30"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "0x30"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "7x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ReviewJobStuck
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WorkerNotConsuming
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+              queue: review_jobs.qq
+            exp_annotations:
+              summary: "У очереди review_jobs.qq нет потребителей"
+              description: "5 минут ни один воркер не подписан на очередь: прогоны копятся и не выполняются."
+
+  # Бюджет токенов: 85 % — предупреждение, 100 % — критический.
+  - interval: 1m
+    input_series:
+      - series: 'review_llm_tokens_month{job="collector"}'
+        values: "42500000 42500000 50000000"
+      - series: 'up{job="collector", instance="collector:8889"}'
+        values: "1 1 1"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: LlmBudgetNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm
+              job: collector
+            exp_annotations:
+              summary: "Израсходовано 85% месячного бюджета токенов"
+              description: "Расход токенов модели с начала месяца выше 80 % бюджета (dmc268:llm_tokens_budget_month в alerts.yml)."
+      - eval_time: 1m
+        alertname: LlmBudgetExceeded
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: LlmBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: llm
+              job: collector
+            exp_annotations:
+              summary: "Месячный бюджет токенов исчерпан: 100%"
+              description: "Расход токенов модели с начала месяца превысил бюджет. Провайдер может начать отклонять запросы (Eurorouter — 402)."
+
+  # Расход неизвестен: коллектор жив, а ряда из sqlquery нет.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="collector", instance="collector:8889"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: LlmBudgetUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm
+            exp_annotations:
+              summary: "Расход токенов модели неизвестен"
+              description: "Ряда review_llm_tokens_month нет 15 минут: коллектор не читает review_runs, алерт бюджета не работает. Смотрите логи dmc268-otelcol (receiver sqlquery)."
+
+  # Один пропущенный скрейп коллектора посреди окна for не сбрасывает: глушит
+  # только цель, лежащая все 5 минут. С up == 0 вместо max_over_time алерт
+  # загорелся бы лишь на 23-й минуте.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="collector", instance="collector:8889"}'
+        values: "1x6 0 1x13"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: LlmBudgetUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm
+            exp_annotations:
+              summary: "Расход токенов модели неизвестен"
+              description: "Ряда review_llm_tokens_month нет 15 минут: коллектор не читает review_runs, алерт бюджета не работает. Смотрите логи dmc268-otelcol (receiver sqlquery)."
+
+  # Бюджет в евро: 16 € — молчит (ровно 80 %), 17 € — предупреждение, 20 € — критический.
+  # Первая проверка — с 1m: на 0m правило записи бюджета ещё не вычислено, и молчание пустое.
+  - interval: 1m
+    input_series:
+      - series: 'review_llm_cost_eur_month{job="collector"}'
+        values: "16 16 17 20"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: LlmCostBudgetNearLimit
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: LlmCostBudgetNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm
+              job: collector
+            exp_annotations:
+              summary: "Израсходовано 85% месячного бюджета модели в евро"
+              description: "Стоимость вызовов модели с начала месяца выше 80 % бюджета (dmc268:llm_cost_budget_eur_month в alerts.yml)."
+      - eval_time: 2m
+        alertname: LlmCostBudgetExceeded
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: LlmCostBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: llm
+              job: collector
+            exp_annotations:
+              summary: "Месячный бюджет модели в евро исчерпан: 100%"
+              description: "Стоимость вызовов модели с начала месяца превысила бюджет (dmc268:llm_cost_budget_eur_month в alerts.yml)."
+
+  # Баланс Eurorouter: 5 € — молчит, 4,99 € — предупреждение, 1 € — ещё не критический,
+  # 0,99 € — критический.
+  - interval: 1m
+    input_series:
+      - series: 'review_llm_provider_balance_eur{job="dmc-268-worker"}'
+        values: "5 4.99 1 0.99"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: LlmProviderBalanceLow
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: LlmProviderBalanceLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm-provider
+              job: dmc-268-worker
+            exp_annotations:
+              summary: "Баланс Eurorouter 4.99 €"
+              description: "Остаток на счёте Eurorouter ниже 5 €: пополните баланс, пока провайдер не начал отвечать 402."
+      - eval_time: 2m
+        alertname: LlmProviderBalanceCritical
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: LlmProviderBalanceCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: llm-provider
+              job: dmc-268-worker
+            exp_annotations:
+              summary: "Баланс Eurorouter 0.99 €"
+              description: "Остаток на счёте Eurorouter ниже 1 €: ниже 0,10 € провайдер отвечает 402, и прогоны падают. Пополните баланс."
+
+  # Диск: 10 % свободно — DiskSpaceLow, 3 % — ещё и DiskSpaceCritical.
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{mountpoint="/", fstype="ext4", device="/dev/sda1"}'
+        values: "10x10"
+      - series: 'node_filesystem_size_bytes{mountpoint="/", fstype="ext4", device="/dev/sda1"}'
+        values: "100x10"
+      - series: 'node_filesystem_avail_bytes{mountpoint="/data", fstype="ext4", device="/dev/sdb1"}'
+        values: "3x10"
+      - series: 'node_filesystem_size_bytes{mountpoint="/data", fstype="ext4", device="/dev/sdb1"}'
+        values: "100x10"
+      - series: 'node_filesystem_avail_bytes{mountpoint="/run", fstype="tmpfs", device="tmpfs"}'
+        values: "0x10"
+      - series: 'node_filesystem_size_bytes{mountpoint="/run", fstype="tmpfs", device="tmpfs"}'
+        values: "100x10"
+      # Read-only файловая система всегда «полная»: не алерт.
+      - series: 'node_filesystem_avail_bytes{mountpoint="/oldroot", fstype="erofs", device="/dev/vda"}'
+        values: "0x10"
+      - series: 'node_filesystem_size_bytes{mountpoint="/oldroot", fstype="erofs", device="/dev/vda"}'
+        values: "100x10"
+      - series: 'node_filesystem_readonly{mountpoint="/oldroot", fstype="erofs", device="/dev/vda"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DiskSpaceLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: host
+              mountpoint: /
+              fstype: ext4
+              device: /dev/sda1
+            exp_annotations:
+              summary: "На / осталось 10%"
+              description: "Свободно меньше 15 %. Кто растёт — docker system df -v на сервере."
+          - exp_labels:
+              severity: warning
+              service: host
+              mountpoint: /data
+              fstype: ext4
+              device: /dev/sdb1
+            exp_annotations:
+              summary: "На /data осталось 3%"
+              description: "Свободно меньше 15 %. Кто растёт — docker system df -v на сервере."
+      - eval_time: 6m
+        alertname: DiskSpaceCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: host
+              mountpoint: /data
+              fstype: ext4
+              device: /dev/sdb1
+            exp_annotations:
+              summary: "Диск /data почти заполнен: 3% свободно"
+              description: "Меньше 5 %: следующим остановится запись базы и WAL."
+
+  # Рост томов: 30 % свободно и минус 1 % в час — кончится за сутки.
+  # Шаг ряда 5 минут, а не больше: ряд реже окна устаревания (5 минут) между
+  # точками пропадает, и for сбрасывается.
+  - interval: 5m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{mountpoint="/", fstype="ext4", device="/dev/sda1"}'
+        values: "40000-166.67x120"
+      - series: 'node_filesystem_size_bytes{mountpoint="/", fstype="ext4", device="/dev/sda1"}'
+        values: "100000x120"
+    alert_rule_test:
+      - eval_time: 8h
+        alertname: DiskWillFillIn24h
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: host
+              mountpoint: /
+              fstype: ext4
+              device: /dev/sda1
+            exp_annotations:
+              summary: "/ заполнится меньше чем за сутки"
+              description: "Свободное место убывает так, что через 24 часа его не останется (прогноз по 6 часам)."
+
+  # Реплика: поток пропал при живом коллекторе; отставание выше 512 МБ.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="collector", instance="collector:8889"}'
+        values: "1x30"
+      - series: 'postgresql_replication_data_delay_bytes{replication_client="dmc268-postgres-replica"}'
+        values: "1073741824x12 _x8"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ReplicaLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: postgres-replica
+            exp_annotations:
+              summary: "Реплика отстаёт на 1GiB"
+              description: "Слот держит WAL на диске основного сервера; на 2 ГБ (max_slot_wal_keep_size) реплика потеряет поток и потребует пересоздания."
+      - eval_time: 11m
+        alertname: ReplicaNotStreaming
+        exp_alerts: []
+      # Ряд пропал после 12-й минуты: 5 минут до устаревания и 5 минут for.
+      - eval_time: 25m
+        alertname: ReplicaNotStreaming
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: postgres-replica
+            exp_annotations:
+              summary: "Реплика базы не получает поток WAL"
+              description: "В pg_stat_replication основного сервера нет реплики 5 минут. Копии при этом снимаются с основного сервера (backup.sh), но горячего резерва нет."
+
+  # Копия: последняя успешная — 27 часов назад.
+  - interval: 1h
+    input_series:
+      - series: 'dmc268_backup_last_success_timestamp_seconds{job="node-exporter"}'
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: postgres-backup
+            exp_annotations:
+              summary: "Свежей резервной копии базы нет 1d 3h 0m 0s"
+              description: "Последний успешный pg_dump старше 26 часов. Причина — docker logs dmc268-postgres-backup."
+
+  # Отметки о копии нет — BackupStatusUnknown, даже если node-exporter
+  # пропустил скрейп: for: 26h не сбрасывается.
+  - interval: 1h
+    input_series:
+      - series: 'up{job="node-exporter", instance="node-exporter:9100"}'
+        values: "1x10 0 1x19"
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: BackupStatusUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: postgres-backup
+            exp_annotations:
+              summary: "Нет отметки о резервной копии базы"
+              description: "26 часов node-exporter не видит dmc268_backup_last_success_timestamp_seconds: копии не снимаются или не пишут отметку."
+
+  # Сертификат: 40 часов до конца срока.
+  - interval: 1m
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox-public", instance="https://203.0.113.10/"}'
+        values: "144000x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: TlsCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: ui
+              job: blackbox-public
+              instance: https://203.0.113.10/
+            exp_annotations:
+              summary: "Сертификат https://203.0.113.10/ истекает через 1d 15h 45m 0s"
+              description: "Продление не прошло. Лог модуля ACME: docker logs dmc268-ui 2>&1 | grep -i acme."
+
+  # Одна задача висит, очередь за ней пуста: горит только ReviewJobStuck,
+  # WorkerStalled молчит (готовых задач нет). На странице статуса это degraded.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "0x40"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "5x40"
+      - series: 'up{job="rabbitmq", instance="x"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: ReviewJobStuck
+        exp_alerts:
+          - exp_labels: {severity: critical, service: worker, queue: review_jobs.qq}
+            exp_annotations:
+              summary: "Задача review_jobs.qq в работе дольше 20 минут"
+              description: "Сообщение выдано воркеру 20 минут назад и не подтверждено. Сначала проверить, не идут ли вызовы модели в таймаут с повтором (спаны review.<этап>, шаг прогона: GET /api/v1/reviews/{id}/steps): такой прогон дойдёт сам. Через 30 минут без прогресса прогон переведёт в failed выметатель."
+
+  # Доставка в Telegram сломана: счётчик неудачных отправок растёт. Неудачи webhook
+  # (heartbeat без секрета — заглушка unset) алерт не зажигают: он только о Telegram.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="alertmanager", integration="telegram", reason="other"}'
+        values: '0x10 1+1x20'
+      - series: 'alertmanager_notifications_failed_total{job="alertmanager", integration="webhook", reason="other"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AlertDeliveryFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AlertDeliveryFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: alertmanager, integration: telegram}
+            exp_annotations:
+              summary: "Алерты не доходят в Telegram"
+              description: "Неудачных отправок в Telegram за 10 минут: 5. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
+
+  # Доставка починилась: через 10 минут без новых неудач алерт гаснет.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="alertmanager", integration="telegram", reason="other"}'
+        values: '0x15 1 2 3 3x30'
+    alert_rule_test:
+      # Окно [10m, 20m] целиком внутри ряда: increase без экстраполяции на краю — ровно 3.
+      - eval_time: 20m
+        alertname: AlertDeliveryFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: alertmanager, integration: telegram}
+            exp_annotations:
+              summary: "Алерты не доходят в Telegram"
+              description: "Неудачных отправок в Telegram за 10 минут: 3. Проверить секреты TELEGRAM_BOT_TOKEN_DMC268_T1 и TELEGRAM_CHAT_ID_DMC268_T1, что бот в канале, и лог Alertmanager (Notify attempt failed … receiver=telegram)."
+      - eval_time: 35m
+        alertname: AlertDeliveryFailing
+        exp_alerts: []
+
+  # Watchdog (#334): горит всегда, рядов для него не нужно.
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels: {severity: none}
+            exp_annotations:
+              summary: "Цепочка алертов работает"
+              description: "Горит всегда, пока работают Prometheus и Alertmanager. Alertmanager шлёт его на внешний heartbeat-сервис, а не в Telegram: пропавшие пинги поднимают внешний сервис (infra/README.md, «Алерты»)."

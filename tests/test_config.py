@@ -131,6 +131,10 @@ def test_context_limits_have_defaults() -> None:
     assert settings.rules_max_tokens < settings.context_max_tokens
 
 
+def test_run_diff_limit_has_a_default() -> None:
+    assert make_settings().run_diff_max_bytes == 2 * 1024 * 1024
+
+
 def test_llm_limits_have_defaults() -> None:
     settings = make_settings()
     assert settings.llm_context_window_tokens == 65_536
@@ -164,6 +168,7 @@ def test_context_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatc
         "request_body_max_bytes",
         "webhook_body_max_bytes",
         "visible_repositories_cache_ttl_seconds",
+        "run_diff_max_bytes",
         "ast_max_files",
         "ast_max_file_bytes",
         "llm_context_window_tokens",
@@ -370,3 +375,12 @@ def test_the_token_key_is_read_from_the_environment(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("USER_TOKEN_ENCRYPTION_KEY", TOKEN_KEY)
     settings = Settings(database_url=DATABASE_URL, rabbitmq_url=RABBITMQ_URL, github_webhook_secret=WEBHOOK_SECRET)
     assert settings.user_token_key is not None
+
+
+def test_billing_is_off_by_default() -> None:
+    assert make_settings().billing_enabled is False
+
+
+def test_billing_is_turned_on_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BILLING_ENABLED", "true")
+    assert make_settings().billing_enabled is True
