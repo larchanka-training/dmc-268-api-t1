@@ -276,7 +276,7 @@ run "one_worker_keeps_its_name" {
   command = plan
 
   assert {
-    condition     = keys(docker_container.worker) == tolist(["dmc268-worker"]) && docker_container.worker["dmc268-worker"].name == "dmc268-worker"
+    condition     = toset(keys(docker_container.worker)) == toset(["dmc268-worker"]) && docker_container.worker["dmc268-worker"].name == "dmc268-worker"
     error_message = "По умолчанию воркер один — dmc268-worker, имя первого экземпляра не меняется."
   }
 
