@@ -43,6 +43,9 @@ trap 'rm -f infra/infra.tfplan' EXIT
 # деплой сразу — он ждёт её до двух минут, как plan.sh и apply.sh (#215).
 tofu -chdir=infra init -input=false -no-color
 
+# shortcut: одноразовый перенос адреса воркера, убрать после первого
+# успешного деплоя (#99).
+#
 # Воркер до #99 жил в состоянии по адресу без ключа, теперь он — первый
 # экземпляр for_each. Блок moved в infra/app.tf перенёс бы адрес полным
 # планом, но targeted-план ниже с непроведённым переносом OpenTofu не строит
@@ -51,7 +54,11 @@ tofu -chdir=infra init -input=false -no-color
 # плана, и только пока старый адрес в состоянии: со второго деплоя ветка не
 # срабатывает. Список — в переменную, а не трубой в `grep -q`: ранний выход
 # grep дал бы tofu SIGPIPE, и pipefail пропустил бы перенос.
-state="$(tofu -chdir=infra state list)"
+#
+# Без состояния (чистый сервер, потерянное состояние) `state list` отвечает
+# «No state file was found» с кодом 1: переносить нечего, и шаг не должен
+# падать. Настоящий сбой хранилища уронит следующий `plan`.
+state="$(tofu -chdir=infra state list 2>/dev/null || true)"
 if grep -qx 'docker_container.worker' <<< "$state"; then
   tofu -chdir=infra state mv -lock-timeout=2m 'docker_container.worker' 'docker_container.worker["dmc268-worker"]'
 fi

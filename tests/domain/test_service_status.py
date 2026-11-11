@@ -273,12 +273,11 @@ def test_container_names_are_watched_by_container_down() -> None:
     assert "dmc268:worker_expected" in expr
 
 
-def test_worker_replica_names_match_the_infra_rule() -> None:
-    """Шаблон экземпляров — то же правило, по которому их называют infra и проверка деплоя:
-    первый — dmc268-worker, следующие — dmc268-worker-<N>."""
+def test_worker_replica_names_match_the_deploy_check() -> None:
+    """Шаблон экземпляров и шаблон проверки деплоя принимают одни и те же имена: первый —
+    dmc268-worker, следующие — dmc268-worker-<N>. Сами имена из worker_replicas сверяет
+    infra/tests/main.tftest.hcl."""
     root = OBSERVABILITY.parents[1]
-    app_tf = (root / "infra" / "app.tf").read_text(encoding="utf-8")
-    assert re.search(r'worker_names = \[for i in range\(var\.worker_replicas\) : i == 0 \? "dmc268-worker" : "dmc268-worker-\$\{i \+ 1\}"\]', app_tf)
     check = (root / ".github" / "scripts" / "deploy" / "check-worker.sh").read_text(encoding="utf-8")
     shell = re.search(r"^pattern='(?P<p>[^']+)'$", check, re.MULTILINE)
     assert shell is not None

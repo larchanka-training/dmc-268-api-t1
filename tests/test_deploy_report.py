@@ -43,12 +43,15 @@ DEPLOY_WORKFLOW = Path(".github/workflows/deploy.yml")
 # Подложный tofu: `plan -out=<файл>` создаёт файл плана, `show -json`
 # отдаёт фикстуру, `apply <файл>` без файла падает, а с ним — если велит
 # тест. `output -raw` отдаёт окружение миграций, `state list` — адреса из
-# STATE_LIST. Вызовы — в журнал.
+# STATE_LIST, а с NO_STATE — ответ OpenTofu без состояния (код 1). Вызовы — в
+# журнал.
 FAKE_TOFU = """#!/usr/bin/env bash
 args="$*"
 echo "$args" >> "$CALLS"
 case "$args" in
-  *" state list") printf '%s\\n' "${STATE_LIST:-}" ;;
+  *" state list")
+    [ -z "${NO_STATE:-}" ] || { echo "No state file was found!" >&2; exit 1; }
+    printf '%s\\n' "${STATE_LIST:-}" ;;
   *" plan "*) out="${args##*-out=}"; touch "infra/${out%% *}" ;;
   *" show -json "*) cat "$PLAN_JSON" ;;
   *" apply "*) [ -e "infra/${args##* }" ] || exit 3; exit "${APPLY_EXIT:-0}" ;;
@@ -282,6 +285,17 @@ def test_targeted_step_leaves_a_moved_worker_alone(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert " state mv " not in (tmp_path / "calls").read_text()
+
+
+def test_targeted_step_on_a_server_without_state_skips_the_move(tmp_path: Path) -> None:
+    """Чистый сервер или потерянное состояние: `state list` выходит с кодом 1 («No state file
+    was found»), переносить нечего, и шаг идёт к плану, а не падает под `set -e`."""
+    result, _, _ = run_script(tmp_path, "infra.sh", plan="plan-infra-no-changes.json", NO_STATE="1")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "calls").read_text()
+    assert " state mv " not in calls
+    assert " plan " in calls and " apply " in calls
 
 
 def test_manual_override_lets_the_database_be_replaced_with_a_warning(tmp_path: Path) -> None:
