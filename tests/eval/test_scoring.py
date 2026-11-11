@@ -319,15 +319,6 @@ def test_missed_nice_to_have_is_not_a_false_negative_but_found_one_is_a_true_pos
     assert (found.tp, found.fp, found.fn) == (1, 0, 0)
 
 
-def test_finding_of_a_forbidden_category_is_a_false_positive_even_on_the_expected_line() -> None:
-    rule_issue = ExpectedIssue("r", PATH, 14, rule=RULE, categories=("readability",))
-    noise = Reported(PATH, "new", 14, "readability")
-
-    score = score_case([rule_issue], [noise], forbidden_categories=("readability",))
-
-    assert (score.tp, score.fp, score.fn) == (0, 1, 1)
-
-
 def test_duplicates_collapse_by_anchor_and_category_or_by_rule_check() -> None:
     first = Reported(PATH, "new", 14, "correctness", RULE)
     reported = [
@@ -348,7 +339,7 @@ def test_category_counts_split_true_false_positives_and_misses_by_category() -> 
         Reported("app/users.py", "new", 30, "correctness"),
     ]
 
-    counts = category_counts([SQL, REMOVED, NICE], reported, forbidden_categories=())
+    counts = category_counts([SQL, REMOVED, NICE], reported)
 
     assert counts == {
         "security": CategoryCounts(tp=1, tp_required=1),

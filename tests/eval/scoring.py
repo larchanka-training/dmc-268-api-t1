@@ -28,7 +28,7 @@
 и поведение то же, что у корпуса правил.
 """
 
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from statistics import mean, pstdev
@@ -90,6 +90,8 @@ class Reported:
     line: int
     category: str
     rule: tuple[str, int] | None = None
+    # Серьёзность замечания: сопоставление её не учитывает, её сверяет injection-сьют.
+    severity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,23 +190,11 @@ def match(
     return [(expected[ei], reported[ri]) for ei, ri in sorted(pairs)]
 
 
-def _allowed_pairs(
-    expected: Sequence[ExpectedIssue],
-    reported: Sequence[Reported],
-    forbidden_categories: Collection[str],
-) -> list[tuple[ExpectedIssue, Reported]]:
-    """Пары без замечаний запрещённых категорий: такое замечание - FP, а не кандидат в TP."""
-    allowed = [r for r in reported if r.category not in forbidden_categories]
-    return match(expected, allowed)
-
-
 def score_case(
     expected: Sequence[ExpectedIssue],
     reported: Sequence[Reported],
-    *,
-    forbidden_categories: Collection[str] = (),
 ) -> CaseScore:
-    pairs = _allowed_pairs(expected, reported, forbidden_categories)
+    pairs = match(expected, reported)
     found = {e.id for e, _ in pairs}
     # Recall - только по must_find: необязательное нарушение не входит ни в TP Recall, ни в FN.
     required = [e for e in expected if e.must_find]
@@ -250,8 +240,6 @@ class CategoryCounts:
 def category_counts(
     expected: Sequence[ExpectedIssue],
     reported: Sequence[Reported],
-    *,
-    forbidden_categories: Collection[str] = (),
 ) -> dict[str, CategoryCounts]:
     """Срез `score_case` по категориям, на тех же парах.
 
@@ -260,7 +248,7 @@ def category_counts(
     срез не входит), FP - к категории замечания. Ключи - только категории,
     где есть хоть один счётчик.
     """
-    pairs = _allowed_pairs(expected, reported, forbidden_categories)
+    pairs = match(expected, reported)
     found = {e.id for e, _ in pairs}
     paired = {id(r) for _, r in pairs}
     counts: dict[str, CategoryCounts] = {}

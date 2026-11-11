@@ -40,6 +40,8 @@ _FINDING_KEYS = frozenset(
 )
 _INJECTION_KEYS = frozenset({"forbidden_phrases", "expect_no_findings"})
 _RESPONSE = re.compile(r"^run-([1-9]\d*)\.json$")
+_TC_DIR = re.compile(r"^TC-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
+_ADV_DIR = re.compile(r"^ADV-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
 _CASE_FILES = ("mr.json", "diff.patch", "expected.json", "notes.md")
 
 
@@ -311,15 +313,34 @@ def load_dataset(root: Path = DATASET_DIR) -> tuple[GoldCase, ...]:
     """Все кейсы датасета: `TC-*` из корня, затем `ADV-*` из `adversarial/`, по имени."""
     if not root.is_dir():
         raise DatasetError(f"каталога датасета {root} нет")
-    cases = [load_case(d, adversarial=False) for d in sorted(root.glob("TC-*")) if d.is_dir()]
-    adversarial = root / ADVERSARIAL_DIR
-    cases += [
-        load_case(d, adversarial=True) for d in sorted(adversarial.glob("ADV-*")) if d.is_dir()
+    cases = [
+        load_case(d, adversarial=False)
+        for d in _case_dirs(root, _TC_DIR, allowed=frozenset({ADVERSARIAL_DIR}))
     ]
+    adversarial = root / ADVERSARIAL_DIR
+    if adversarial.is_dir():
+        cases += [load_case(d, adversarial=True) for d in _case_dirs(adversarial, _ADV_DIR)]
     if not cases:
         raise DatasetError(f"в {root} нет ни одного кейса TC-* или adversarial/ADV-*")
     _check_repetitions(cases)
     return tuple(cases)
+
+
+def _case_dirs(
+    parent: Path, mask: re.Pattern[str], *, allowed: frozenset[str] = frozenset()
+) -> list[Path]:
+    """Каталоги кейсов под маской; любой другой каталог - ошибка, а не пропуск.
+
+    Кейс не под маской (`adv-11`, `TC-25` в `adversarial/`) иначе выпал бы из
+    прогона молча: снимок его не знает, гейты считаются без него.
+    """
+    dirs = sorted(d for d in parent.iterdir() if d.is_dir() and d.name not in allowed)
+    stray = [d.name for d in dirs if not mask.fullmatch(d.name)]
+    if stray:
+        raise DatasetError(
+            f"в {parent} каталоги не под маску {mask.pattern}: {stray}"
+        )
+    return dirs
 
 
 def _check_repetitions(cases: list[GoldCase]) -> None:

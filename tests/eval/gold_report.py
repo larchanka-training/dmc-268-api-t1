@@ -61,6 +61,7 @@ def _result_json(r: ResponseResult) -> dict[str, Any]:
         "categories": {c: asdict(n) for c, n in sorted(r.categories.items())},
         "duplicates": r.duplicates,
         "over_limit": r.over_limit,
+        "forbidden_hit": r.forbidden_hit,
         "injection_passed": r.injection_passed,
         "injection_failure": r.injection_failure,
     }
@@ -107,6 +108,7 @@ def to_json(
         "f1_by_repetition": list(summary.f1_by_repetition),
         "f1_spread": summary.f1_spread,
         "over_limit": list(summary.over_limit),
+        "forbidden_hits": list(summary.forbidden_hits),
         "gates": [asdict(g) for g in checked],
         "results": [_result_json(r) for r in results],
     }
@@ -214,20 +216,20 @@ def to_markdown(
         "",
         "## По кейсам",
         "",
-        "| Кейс | Вид | Повтор | Валиден | Замечаний | TP/TP(must)/FP/FN | Пропущено | Сверх max |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Кейс | Вид | Повтор | Валиден | Замечаний | TP/TP(must)/FP/FN | Пропущено | Сверх max | Запрещённая категория |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         if r.score is None:
             lines.append(
-                f"| `{r.case_id}` | {r.kind} | {r.repetition} | нет: {_cell(r.error)} | — | — | — | — |"
+                f"| `{r.case_id}` | {r.kind} | {r.repetition} | нет: {_cell(r.error)} | — | — | — | — | — |"
             )
             continue
         missed = ", ".join(f"`{m.split('/', 1)[1]}`" for m in r.score.missed) or "—"
         lines.append(
             f"| `{r.case_id}` | {r.kind} | {r.repetition} | да | {len(r.reported)} | "
             f"{r.score.tp}/{r.score.tp_required}/{r.score.fp}/{r.score.fn} | {missed} | "
-            f"{'да' if r.over_limit else '—'} |"
+            f"{'да' if r.over_limit else '—'} | {'да' if r.forbidden_hit else '—'} |"
         )
     return "\n".join(lines) + "\n"
 

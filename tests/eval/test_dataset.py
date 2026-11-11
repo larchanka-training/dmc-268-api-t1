@@ -138,6 +138,26 @@ def test_case_without_responses_or_with_a_stray_file_is_rejected(tmp_path: Path)
         load_dataset(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("place", "name"),
+    [
+        ("adversarial", "TC-25-moved"),  # кейс-баг унесли в adversarial/
+        ("adversarial", "adv-11-lower"),  # регистр не тот
+        (".", "tc-02-lower"),
+        (".", "TC-3-short"),  # номер не из двух цифр
+        (".", "drafts"),
+    ],
+)
+def test_directory_outside_the_case_mask_is_rejected_not_skipped(
+    tmp_path: Path, place: str, name: str
+) -> None:
+    write_case(tmp_path, "TC-01-sql")
+    (tmp_path / place / name).mkdir(parents=True)
+
+    with pytest.raises(DatasetError, match=f"каталоги не под маску .*'{name}'"):
+        load_dataset(tmp_path)
+
+
 def test_empty_dataset_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(DatasetError, match="нет ни одного кейса"):
         load_dataset(tmp_path)
