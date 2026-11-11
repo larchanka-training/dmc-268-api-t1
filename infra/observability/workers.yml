@@ -1,0 +1,12 @@
+# Экземпляры воркера, которые должны работать (#99): по ряду
+# dmc268:worker_expected на имя контейнера. По ним ContainerDown (alerts.yml)
+# видит пропавший экземпляр — сколько воркеров, Prometheus иначе не знает.
+# Файл для compose и CI, с одним воркером; на стенде Prometheus получает тот же
+# файл, собранный из worker_replicas (local.worker_rules в infra/locals.tf).
+groups:
+  - name: dmc268-workers
+    rules:
+      - record: dmc268:worker_expected
+        expr: vector(1)
+        labels:
+          container_name: dmc268-worker

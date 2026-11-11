@@ -34,11 +34,20 @@ groups:
       # не работает сам сбор (лёг экземпляр docker_stats или socket-proxy):
       # тогда горит ScrapeTargetDown или ContainerMetricsMissing, а не восемь
       # ContainerDown разом.
+      #
+      # Воркеров может быть несколько (#99), и сколько их, правило не знает:
+      # ожидаемые экземпляры — ряды dmc268:worker_expected из workers.yml (на
+      # стенде он собран из worker_replicas), и горит каждый без ряда метрик
+      # контейнера. group by оставляет одну метку container_name, как у
+      # absent(): первый воркер из обеих ветвей — один алерт. absent() по
+      # dmc268-worker остаётся на случай, если workers.yml не прочитался:
+      # первый экземпляр есть при любом worker_replicas.
       - alert: ContainerDown
         expr: |
           (
             absent(container_uptime_seconds{container_name="dmc268-api"})
             or absent(container_uptime_seconds{container_name="dmc268-worker"})
+            or (group by (container_name) (dmc268:worker_expected) unless on(container_name) container_uptime_seconds)
             or absent(container_uptime_seconds{container_name="dmc268-postgres"})
             or absent(container_uptime_seconds{container_name="dmc268-postgres-replica"})
             or absent(container_uptime_seconds{container_name="dmc268-postgres-backup"})
@@ -90,12 +99,14 @@ groups:
       # ContainerRestarting. service берётся из имени без dmc268-, как у
       # ServiceProbeFailed: без этой метки предупреждение глушил бы любой
       # критический алерт без service, например ContainerDown чужого контейнера.
+      # Номер экземпляра отбрасывается (#99): у dmc268-worker-2 service тот же
+      # worker, и его предупреждение глушат критические алерты воркера.
       - alert: ContainerMemoryNearLimit
         expr: |
           label_replace(
             container_memory_usage_total_bytes{container_name=~"dmc268-.+"}
             / (container_memory_usage_limit_bytes > 0),
-            "service", "$1", "container_name", "dmc268-(.+)"
+            "service", "$1", "container_name", "dmc268-(.+?)(?:-[0-9]+)?"
           ) > 0.9
         for: 10m
         labels:
@@ -162,7 +173,7 @@ groups:
           service: worker
         annotations:
           summary: "Воркер подписан на review_jobs.qq, но не берёт задачи"
-          description: "15 минут в очереди лежат готовые задачи и нет ни одного подтверждения, хотя потребитель есть. Чаще всего это медленная модель или фоллбэк на текущем прогоне (тогда горит и ReviewJobStuck): смотреть спаны review.<этап> в Grafana. Если в спанах тишина, воркер завис: стек в логах, docker restart dmc268-worker."
+          description: "15 минут в очереди лежат готовые задачи и нет ни одного подтверждения, хотя потребитель есть. Чаще всего это медленная модель или фоллбэк на текущем прогоне (тогда горит и ReviewJobStuck): смотреть спаны review.<этап> в Grafana. Если в спанах тишина, воркер завис: стек в логах, docker restart dmc268-worker (и dmc268-worker-N, если экземпляров несколько)."
 
       # Одна задача в работе дольше 20 минут: сообщение выдано и не
       # подтверждено, и подтверждений за окно нет, иначе это поток коротких
@@ -170,10 +181,12 @@ groups:
       # (максимум 93 с на 105 прогонах); 20 минут набираются, только когда
       # вызовы модели уходят в таймаут с повтором. Выметатель переведёт прогон
       # в failed на 30 минутах (STALE_RUN_TIMEOUT_SECONDS), алерт приходит
-      # раньше. critical: воркер один и берёт по сообщению (prefetch 1), пока
-      # задача висит, не идёт ни одно ревью; warning же глушил бы любой
-      # critical воркера, в том числе ReviewDlqNotEmpty, который горит до
-      # ручного разбора DLQ.
+      # раньше. critical: воркер берёт по сообщению (prefetch 1), и при одном
+      # экземпляре, пока задача висит, не идёт ни одно ревью; warning же
+      # глушил бы любой critical воркера, в том числе ReviewDlqNotEmpty,
+      # который горит до ручного разбора DLQ. При нескольких экземплярах
+      # (#99) висящая задача держит один, и пока остальные подтверждают свои,
+      # алерт молчит: такой прогон доводит до failed выметатель.
       - alert: ReviewJobStuck
         expr: |
           min_over_time(rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}[20m]) > 0

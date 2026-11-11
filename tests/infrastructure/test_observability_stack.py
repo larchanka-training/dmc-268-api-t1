@@ -776,11 +776,13 @@ def test_compose_caps_batch_queues_by_default(service: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("container", "instance"),
-    [("api", "dmc268-api"), ("worker", "dmc268-worker")],
+    ("container", "instance", "name"),
+    # У воркера экземпляров несколько (#99): имя и идентификатор — ключ for_each,
+    # dmc268-worker, dmc268-worker-2 и далее (сверяет infra/tests/main.tftest.hcl).
+    [("api", "dmc268-api", '"dmc268-api"'), ("worker", "${each.key}", "each.key")],
 )
 def test_infra_resource_attributes_pin_a_stable_instance_id(
-    container: str, instance: str
+    container: str, instance: str, name: str
 ) -> None:
     """service.instance.id — стабильное имя контейнера, не UUID (смысл —
     в тесте compose выше). У миграций своего контейнера больше нет:
@@ -788,14 +790,14 @@ def test_infra_resource_attributes_pin_a_stable_instance_id(
     (выход migrate_env)."""
     block = _tf_container_block(container)
     match = re.search(
-        r"OTEL_RESOURCE_ATTRIBUTES=[^\n]+service\.instance\.id=(?P<instance>[\w-]+)",
+        r"OTEL_RESOURCE_ATTRIBUTES=[^\n]+service\.instance\.id=(?P<instance>[^\",\s]+)",
         block,
     )
     assert match is not None, f"в env {container} нет service.instance.id"
     assert match.group("instance") == instance
     # Источник истины для идентификатора — имя контейнера.
-    name = re.search(r'name\s*=\s*"(?P<name>[^"]+)"', block)
-    assert name is not None and name.group("name") == instance
+    found = re.search(r"^  name\s*=\s*(?P<name>\S+)$", block, re.MULTILINE)
+    assert found is not None and found.group("name") == name
 
 
 # --- дашборд Grafana (задача 8) ------------------------------------------------------

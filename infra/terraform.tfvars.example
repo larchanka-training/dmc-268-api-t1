@@ -50,6 +50,10 @@ postgres_max_slot_wal_keep_size = "2GB"
 postgres_replica_memory         = 512
 backup_keep_days                = 7
 
+# Экземпляры воркера: dmc268-worker, dmc268-worker-2 и далее, от 1 до 4. Запас
+# памяти и соединений базы — README.md, «Масштабирование воркеров».
+worker_replicas = 1
+
 # --- модель воркера ---
 # Eurorouter - основным при llm_backend = "eurorouter" (нужны все eurorouter_*)
 # или фоллбэком после локальной модели:

@@ -180,6 +180,24 @@ variable "github_webhook_secret" {
   }
 }
 
+# --- Воркеры ---
+
+# Сколько экземпляров воркера забирают задачи из одной очереди (#99): первый —
+# dmc268-worker, следующие — dmc268-worker-2, dmc268-worker-3 (local.worker_names
+# в app.tf). Потолок 4 — по памяти сервера и соединениям базы: infra/README.md,
+# «Масштабирование воркеров».
+variable "worker_replicas" {
+  type        = number
+  description = "Число экземпляров воркера: dmc268-worker, dmc268-worker-2 и далее, от 1 до 4."
+  default     = 1
+  nullable    = false
+
+  validation {
+    condition     = var.worker_replicas >= 1 && var.worker_replicas <= 4 && floor(var.worker_replicas) == var.worker_replicas
+    error_message = "worker_replicas — целое от 1 до 4: без воркера ревью не идут, а пятый вышел бы за бюджет памяти сервера и соединений базы (infra/README.md, «Масштабирование воркеров»)."
+  }
+}
+
 # --- Модель ---
 
 # Без значения по умолчанию: заглушка выбирается только явно, иначе стенд

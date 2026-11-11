@@ -11,9 +11,12 @@ global:
 
 # Критические алерты (#100): правила — alerts.yml (тесты — alerts.test.yml),
 # доставка в Telegram — Alertmanager (alertmanager.yml). Путь правил один и
-# тот же: compose монтирует файл, infra заливает upload-ом.
+# тот же: compose монтирует файл, infra заливает upload-ом. workers.yml —
+# экземпляры воркера для ContainerDown: в compose — файл с одним воркером, на
+# стенде — собранный из worker_replicas.
 rule_files:
   - /etc/prometheus/alerts.yml
+  - /etc/prometheus/workers.yml
 
 alerting:
   alertmanagers:

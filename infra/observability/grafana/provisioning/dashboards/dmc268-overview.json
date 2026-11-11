@@ -284,7 +284,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Соединения приложения с базой",
-      "description": "Снимок пула SQLAlchemy (db_client_connection_count по состоянию) против предела (db_client_connection_max = pool_size + max_overflow) у API и воркера.",
+      "description": "Снимок пула SQLAlchemy (db_client_connection_count по состоянию) против предела (db_client_connection_max = pool_size + max_overflow) у API и воркера. И занятые, и предел сложены по экземплярам сервиса: у воркера их worker_replicas (#99).",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
       "fieldConfig": {
@@ -311,7 +311,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "db_client_connection_max{job=~\"dmc-268-api|dmc-268-worker\"}",
+          "expr": "sum by (job) (db_client_connection_max{job=~\"dmc-268-api|dmc-268-worker\"})",
           "legendFormat": "предел {{job}}",
           "range": true,
           "refId": "B"

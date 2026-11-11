@@ -101,6 +101,23 @@ locals {
   # observability/public-targets.yml.
   blackbox_public_targets = var.public_origin == "" ? [] : [{ targets = ["${var.public_origin}/"] }]
 
+  # Экземпляры воркера, которые должны работать (#99): правило записи
+  # dmc268:worker_expected — по ряду на имя контейнера из local.worker_names.
+  # ContainerDown (alerts.yml) горит по каждому имени без ряда метрик
+  # контейнера: сколько воркеров, Prometheus иначе не знает, и пропавший
+  # dmc268-worker-2 был бы не виден. Локально и в CI тот же файл —
+  # observability/workers.yml с одним dmc268-worker.
+  worker_rules = {
+    groups = [{
+      name = "dmc268-workers"
+      rules = [for name in local.worker_names : {
+        record = "dmc268:worker_expected"
+        expr   = "vector(1)"
+        labels = { container_name = name }
+      }]
+    }]
+  }
+
   # Публичный адрес Grafana (GF_SERVER_ROOT_URL): тот же хост и сертификат,
   # что у кабинета, но свой порт 8443 — значит, свой origin, и XSS в Grafana
   # не читает API кабинета. Порт слушает nginx интерфейса (dmc-268-ui-t1),

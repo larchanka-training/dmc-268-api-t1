@@ -41,6 +41,95 @@ tests:
               summary: "Контейнер dmc268-worker не запущен"
               description: "Ряда container_uptime_seconds нет 2 минуты: контейнер остановлен, удалён или не создан. Проверка: docker ps -a --filter name=dmc268-worker"
 
+  # Воркеров два (#99): ожидаемые экземпляры — ряды dmc268:worker_expected
+  # (workers.yml; здесь — входными рядами, файла правил тест не читает).
+  # Пропали оба: первый горит один раз, хотя его видят и absent(), и список
+  # ожидаемых; второй — по списку. Через 6 минут второй вернулся — его алерт
+  # погас, первый горит.
+  - interval: 1m
+    input_series:
+      - series: 'dmc268:worker_expected{container_name="dmc268-worker"}'
+        values: "1x10"
+      - series: 'dmc268:worker_expected{container_name="dmc268-worker-2"}'
+        values: "1x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-worker-2"}'
+        values: "_ _ _ _ _ _ 1+60x4"
+      - series: 'container_uptime_seconds{container_name="dmc268-api"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-postgres"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-postgres-replica"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-postgres-backup"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-rabbitmq"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-ui"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-otelcol"}'
+        values: "1+60x10"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ContainerDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ContainerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_name: dmc268-worker
+            exp_annotations:
+              summary: "Контейнер dmc268-worker не запущен"
+              description: "Ряда container_uptime_seconds нет 2 минуты: контейнер остановлен, удалён или не создан. Проверка: docker ps -a --filter name=dmc268-worker"
+          - exp_labels:
+              severity: critical
+              container_name: dmc268-worker-2
+            exp_annotations:
+              summary: "Контейнер dmc268-worker-2 не запущен"
+              description: "Ряда container_uptime_seconds нет 2 минуты: контейнер остановлен, удалён или не создан. Проверка: docker ps -a --filter name=dmc268-worker-2"
+      - eval_time: 8m
+        alertname: ContainerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_name: dmc268-worker
+            exp_annotations:
+              summary: "Контейнер dmc268-worker не запущен"
+              description: "Ряда container_uptime_seconds нет 2 минуты: контейнер остановлен, удалён или не создан. Проверка: docker ps -a --filter name=dmc268-worker"
+
+  # Все ожидаемые экземпляры запущены — ContainerDown молчит; лишний ряд без
+  # ожидания (экземпляр, который ещё не снят) алерта не даёт.
+  - interval: 1m
+    input_series:
+      - series: 'dmc268:worker_expected{container_name="dmc268-worker"}'
+        values: "1x10"
+      - series: 'dmc268:worker_expected{container_name="dmc268-worker-2"}'
+        values: "1x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-worker"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-worker-2"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-worker-3"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-api"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-postgres"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-postgres-replica"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-postgres-backup"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-rabbitmq"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-ui"}'
+        values: "1+60x10"
+      - series: 'container_uptime_seconds{container_name="dmc268-otelcol"}'
+        values: "1+60x10"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ContainerDown
+        exp_alerts: []
+
   # docker_stats не читает Docker API (лёг socket-proxy): скрейп жив, рядов нет
   # ни у кого — ContainerDown молчит, горит ContainerMetricsMissing.
   - interval: 1m
@@ -131,6 +220,37 @@ tests:
             exp_annotations:
               summary: "Контейнер dmc268-worker занял 97.66% лимита памяти"
               description: "Больше 90 % лимита 10 минут: следующий рост убьёт процесс по OOM. Кто растёт: docker stats dmc268-worker; потолок задаёт memory в infra/*.tf или observability_memory_mb."
+
+  # Номер экземпляра в service не попадает (#99): у dmc268-worker-2 service —
+  # worker, как у первого; имя без номера (postgres-replica) остаётся целым.
+  - interval: 1m
+    input_series:
+      - series: 'container_memory_usage_total_bytes{container_name="dmc268-worker-2"}'
+        values: "500000000x15"
+      - series: 'container_memory_usage_limit_bytes{container_name="dmc268-worker-2"}'
+        values: "512000000x15"
+      - series: 'container_memory_usage_total_bytes{container_name="dmc268-postgres-replica"}'
+        values: "500000000x15"
+      - series: 'container_memory_usage_limit_bytes{container_name="dmc268-postgres-replica"}'
+        values: "512000000x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ContainerMemoryNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: worker
+              container_name: dmc268-worker-2
+            exp_annotations:
+              summary: "Контейнер dmc268-worker-2 занял 97.66% лимита памяти"
+              description: "Больше 90 % лимита 10 минут: следующий рост убьёт процесс по OOM. Кто растёт: docker stats dmc268-worker-2; потолок задаёт memory в infra/*.tf или observability_memory_mb."
+          - exp_labels:
+              severity: warning
+              service: postgres-replica
+              container_name: dmc268-postgres-replica
+            exp_annotations:
+              summary: "Контейнер dmc268-postgres-replica занял 97.66% лимита памяти"
+              description: "Больше 90 % лимита 10 минут: следующий рост убьёт процесс по OOM. Кто растёт: docker stats dmc268-postgres-replica; потолок задаёт memory в infra/*.tf или observability_memory_mb."
 
   # Сервис не отвечает на пробу (unhealthy при запущенном контейнере).
   - interval: 1m
@@ -496,7 +616,7 @@ tests:
               queue: review_jobs.qq
             exp_annotations:
               summary: "Воркер подписан на review_jobs.qq, но не берёт задачи"
-              description: "15 минут в очереди лежат готовые задачи и нет ни одного подтверждения, хотя потребитель есть. Чаще всего это медленная модель или фоллбэк на текущем прогоне (тогда горит и ReviewJobStuck): смотреть спаны review.<этап> в Grafana. Если в спанах тишина, воркер завис: стек в логах, docker restart dmc268-worker."
+              description: "15 минут в очереди лежат готовые задачи и нет ни одного подтверждения, хотя потребитель есть. Чаще всего это медленная модель или фоллбэк на текущем прогоне (тогда горит и ReviewJobStuck): смотреть спаны review.<этап> в Grafana. Если в спанах тишина, воркер завис: стек в логах, docker restart dmc268-worker (и dmc268-worker-N, если экземпляров несколько)."
       - eval_time: 25m
         alertname: ReviewJobStuck
         exp_alerts: &review_job_stuck

@@ -93,7 +93,7 @@ flowchart LR
         end
 
         subgraph EGRESS["сеть dmc268-egress · исходящая"]
-            WORKER["dmc268-worker<br/>python -m app.worker<br/>сети: dmc268-egress, dmc268-backend · 512 МБ"]
+            WORKER["dmc268-worker, dmc268-worker-N<br/>python -m app.worker · worker_replicas от 1 до 4<br/>сети: dmc268-egress, dmc268-backend · 512 МБ каждый"]
         end
 
         subgraph BACKEND["сеть dmc268-backend · internal, без шлюза"]
@@ -508,7 +508,7 @@ AST-уровень — первый кандидат на вынос из мон
 
 - **перезапуск**: у долгоживущих контейнеров `restart = "unless-stopped"` (`infra/*.tf`); одноразовый `dmc268-replication-setup` — `must_run = false` (`infra/replica.tf`), он отрабатывает и выходит;
 - **healthcheck API**: `GET /health` каждые 30 с, таймаут 5 с, 3 неудачи — `unhealthy`; деплой считает API выкаченным только по `healthy` (`local.api_healthcheck`, `infra/app.tf`);
-- **проверка воркера при деплое**: непрерывные 30 с работы без перезапуска, иначе деплой падает (спека `backend-delivery`);
+- **проверка воркера при деплое**: у каждого экземпляра (`worker_replicas`) непрерывные 30 с работы без перезапуска, иначе деплой падает (спека `backend-delivery`);
 - **простой API при деплое**: контейнер пересоздаётся, окно — секунды; каждый деплой пишет его разбивку в summary (`infra/README.md`, «Summary деплоя»);
 - **данные**: потоковая реплика PostgreSQL и ежесуточный `pg_dump` с реплики (`infra/replica.tf`), его зашифрованная копия вне сервера — артефакт GitHub Actions на 90 суток, восстановление проверяется каждым прогоном (`.github/workflows/db-backup.yml`); тома базы и брокера деплой не пересоздаёт (`.agents/rules/backend.md`, «Деплой»);
-- **память контейнеров**: API и воркер по 512 МБ, PostgreSQL 1 ГБ, RabbitMQ 512 МБ (`memory` в `infra/*.tf`).
+- **память контейнеров**: API и каждый экземпляр воркера по 512 МБ, PostgreSQL 1 ГБ, RabbitMQ 512 МБ (`memory` в `infra/*.tf`); запас под экземпляры воркера — `infra/README.md`, «Масштабирование воркеров».

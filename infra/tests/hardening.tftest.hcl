@@ -52,7 +52,7 @@ run "app_containers_run_with_minimal_privileges" {
 
   assert {
     condition = alltrue([
-      for c in [docker_container.api, docker_container.worker] :
+      for c in concat([docker_container.api], values(docker_container.worker)) :
       c.read_only == true
     ])
     error_message = "api и worker должны работать с файловой системой только для чтения."
@@ -60,7 +60,7 @@ run "app_containers_run_with_minimal_privileges" {
 
   assert {
     condition = alltrue([
-      for c in [docker_container.api, docker_container.worker] :
+      for c in concat([docker_container.api], values(docker_container.worker)) :
       jsonencode(c.tmpfs) == jsonencode({ "/tmp" = "rw,noexec,nosuid,size=64m" })
     ])
     error_message = "api и worker пишут только в /tmp: tmpfs rw,noexec,nosuid,size=64m."
@@ -68,7 +68,7 @@ run "app_containers_run_with_minimal_privileges" {
 
   assert {
     condition = alltrue([
-      for c in [docker_container.api, docker_container.worker] :
+      for c in concat([docker_container.api], values(docker_container.worker)) :
       length(c.capabilities) == 1 && toset(one(c.capabilities).drop) == toset(["ALL"]) && length(coalesce(one(c.capabilities).add, toset([]))) == 0
     ])
     error_message = "api и worker должны сбрасывать все Linux capabilities (drop = [\"ALL\"]) и ничего не добавлять."
@@ -76,7 +76,7 @@ run "app_containers_run_with_minimal_privileges" {
 
   assert {
     condition = alltrue([
-      for c in [docker_container.api, docker_container.worker] :
+      for c in concat([docker_container.api], values(docker_container.worker)) :
       toset(c.security_opts) == toset(["no-new-privileges:true"])
     ])
     error_message = "api и worker должны запрещать повышение привилегий: security_opts = [\"no-new-privileges:true\"]."
@@ -84,7 +84,7 @@ run "app_containers_run_with_minimal_privileges" {
 
   assert {
     condition = alltrue([
-      for c in [docker_container.api, docker_container.worker] :
+      for c in concat([docker_container.api], values(docker_container.worker)) :
       c.init == true
     ])
     error_message = "api и worker должны запускаться с init: без него некому подбирать зомби-процессы и передавать сигналы."
@@ -118,11 +118,10 @@ run "every_container_has_memory_ceiling_and_log_rotation" {
 
   assert {
     condition = alltrue([
-      for c in [
-        docker_container.postgres, docker_container.rabbitmq,
-        docker_container.api, docker_container.worker,
+      for c in concat([
+        docker_container.postgres, docker_container.rabbitmq, docker_container.api,
         docker_container.replication_setup, docker_container.postgres_replica, docker_container.postgres_backup,
-      ] :
+      ], values(docker_container.worker)) :
       c.memory > 0 && c.memory == c.memory_swap
     ])
     error_message = "У каждого контейнера должен быть потолок памяти, и memory_swap равен memory: иначе контейнер уйдёт в swap, а не завершится по OOM."
@@ -130,11 +129,10 @@ run "every_container_has_memory_ceiling_and_log_rotation" {
 
   assert {
     condition = alltrue([
-      for c in [
-        docker_container.postgres, docker_container.rabbitmq,
-        docker_container.api, docker_container.worker,
+      for c in concat([
+        docker_container.postgres, docker_container.rabbitmq, docker_container.api,
         docker_container.replication_setup, docker_container.postgres_replica, docker_container.postgres_backup,
-      ] :
+      ], values(docker_container.worker)) :
       c.log_driver == "json-file" && jsonencode(c.log_opts) == jsonencode({ "max-size" = "10m", "max-file" = "3" })
     ])
     error_message = "У каждого контейнера должна быть ротация логов: log_driver json-file, max-size 10m, max-file 3."

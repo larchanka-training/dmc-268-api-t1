@@ -474,6 +474,9 @@ services:
       # файл с пустым списком; на стенде его рендерит infra.
       - ./infra/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
       - ./infra/observability/public-targets.yml:/etc/prometheus/targets/public.yml:ro
+      # Экземпляры воркера для ContainerDown (#99): локально — один dmc268-worker;
+      # на стенде файл собирает infra из worker_replicas.
+      - ./infra/observability/workers.yml:/etc/prometheus/workers.yml:ro
       - prometheus_data:/prometheus
 
   grafana:

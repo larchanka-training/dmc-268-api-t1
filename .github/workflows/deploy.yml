@@ -171,6 +171,9 @@ jobs:
     # Но не раньше, чем воркер доработает сообщение: при пересоздании apply ждёт
     # его до destroy_grace_seconds — до 41 мин (local.worker_stop_seconds в
     # infra/locals.tf); job, убитый посреди apply, оставил бы блокировку висеть.
+    # Экземпляры воркера (worker_replicas, не больше 4) apply пересоздаёт
+    # параллельно — parallelism по умолчанию 10, — поэтому окно одно на всех,
+    # а не по окну на экземпляр.
     # Худший случай по шагам: targeted apply базы и брокера — до 1 мин штатной
     # остановки при пересоздании (destroy_grace_seconds 60) и ожидание healthy;
     # миграции; полный apply — до 41 мин грейса воркера и до 1,5 мин ожидания
@@ -190,8 +193,15 @@ jobs:
       packages: read
     # Адрес стенда: публичный origin интерфейса и адрес в summary. На сервер
     # шаги ходят через хост `stand` из ~/.ssh/config (stand-ssh).
+    #
+    # Число экземпляров воркера (#99) — одно на job: его берут OpenTofu
+    # (TF_VAR_*) и проверка воркеров после выката (check-worker.sh), поэтому
+    # оно здесь, а не в якоре *tofu-env. Поднять — сначала свериться с
+    # бюджетом памяти и соединений базы (infra/README.md, «Масштабирование
+    # воркеров»); потолок 4 держит проверка переменной в infra/variables.tf.
     env:
       HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+      TF_VAR_worker_replicas: "1"
     # Шаги с id — для summary: исход каждого берёт шаг summary, а каждый шаг с
     # `run` первой строкой ставит засечку (.github/scripts/deploy/mark.sh) —
     # по ним считается длительность. Так время шагов видно без `actions: read`
@@ -527,7 +537,7 @@ jobs:
           .github/scripts/deploy/mark.sh
           ssh stand "docker logs --tail 50 dmc268-api 2>&1; docker inspect -f '{{json .State.Health}}' dmc268-api" || true
 
-      - name: Проверить, что воркер работает
+      - name: Проверить, что воркеры работают
         id: check_worker
         if: *fresh
         run: |

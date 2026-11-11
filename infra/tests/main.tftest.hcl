@@ -28,7 +28,7 @@ run "app_containers_get_connection_settings" {
   # миграции — владельцем: схему меняют только они.
   assert {
     condition = alltrue([
-      for env in [docker_container.api.env, docker_container.worker.env] :
+      for env in concat([docker_container.api.env], [for w in docker_container.worker : w.env]) :
       contains(env, "DATABASE_URL=postgresql+psycopg://dmc268_app:app%2Bp%40ss%2Fw%3Ard-16@${docker_container.postgres.name}:5432/dmc268")
     ])
     error_message = "api и worker должны получать DATABASE_URL роли dmc268_app с закодированным паролем и именем контейнера postgres."
@@ -45,7 +45,7 @@ run "app_containers_get_connection_settings" {
   # Пароль владельца — только у миграций (и копий с репликой), не у приложения.
   assert {
     condition = alltrue([
-      for env in [docker_container.api.env, docker_container.worker.env] :
+      for env in concat([docker_container.api.env], [for w in docker_container.worker : w.env]) :
       length([for e in env : e if strcontains(e, "p%40ss%2Fw%3Ard@") || strcontains(e, "postgresql+psycopg://dmc268:")]) == 0
     ])
     error_message = "Пароль и роль владельца базы не должны попадать в окружение api и worker."
@@ -53,7 +53,7 @@ run "app_containers_get_connection_settings" {
 
   assert {
     condition = alltrue([
-      for env in [docker_container.api.env, docker_container.worker.env, split("\n", output.migrate_env)] :
+      for env in concat([docker_container.api.env], [for w in docker_container.worker : w.env], [split("\n", output.migrate_env)]) :
       contains(env, "RABBITMQ_URL=amqp://dmc268:r%40bbit%231@${docker_container.rabbitmq.name}:5672/%2F")
     ])
     error_message = "api, worker и миграции должны получать RABBITMQ_URL с закодированным паролем и vhost %2F."
@@ -61,7 +61,7 @@ run "app_containers_get_connection_settings" {
 
   assert {
     condition = alltrue([
-      for env in [docker_container.api.env, docker_container.worker.env, split("\n", output.migrate_env)] :
+      for env in concat([docker_container.api.env], [for w in docker_container.worker : w.env], [split("\n", output.migrate_env)]) :
       contains(env, "GITHUB_WEBHOOK_SECRET=webhook-secret")
     ])
     error_message = "Без GITHUB_WEBHOOK_SECRET общие настройки приложения не загрузятся."
@@ -103,7 +103,7 @@ run "secrets_reach_only_their_containers" {
   # Ключ шифрования токенов и client secret нужны только входу в API.
   assert {
     condition = alltrue([
-      for env in [docker_container.worker.env, split("\n", output.migrate_env)] : length([
+      for env in concat([for w in docker_container.worker : w.env], [split("\n", output.migrate_env)]) : length([
         for e in env : e
         if startswith(e, "USER_TOKEN_ENCRYPTION_KEY=") || startswith(e, "GITHUB_APP_CLIENT_SECRET=")
         || startswith(e, "STRIPE_WEBHOOK_SECRET=") || startswith(e, "STRIPE_API_KEY=")
@@ -124,7 +124,7 @@ run "secrets_reach_only_their_containers" {
   assert {
     condition = (
       contains(docker_container.api.env, "USER_TOKEN_ENCRYPTION_KEY=${var.user_token_encryption_key}")
-      && contains(docker_container.worker.env, "LLM_BACKEND=stub")
+      && contains(docker_container.worker["dmc268-worker"].env, "LLM_BACKEND=stub")
       && length([for e in docker_container.api.env : e if startswith(e, "LLM_BACKEND=")]) == 0
     )
     error_message = "Ключ токенов — у API, адаптер модели — у воркера, и не наоборот."
@@ -152,7 +152,7 @@ run "only_api_published_and_only_on_loopback" {
   assert {
     condition = (
       toset([for n in docker_container.api.networks_advanced : n.name]) == toset([docker_network.dmc268.name, docker_network.backend.name])
-      && toset([for n in docker_container.worker.networks_advanced : n.name]) == toset([docker_network.backend.name, docker_network.egress.name])
+      && toset([for n in docker_container.worker["dmc268-worker"].networks_advanced : n.name]) == toset([docker_network.backend.name, docker_network.egress.name])
     )
     error_message = "API — во входе dmc268 и в данных; воркер — в данных и в исходящей dmc268-egress, не во входе."
   }
@@ -164,10 +164,10 @@ run "only_api_published_and_only_on_loopback" {
 
   assert {
     condition = alltrue([
-      for c in [
-        docker_container.postgres, docker_container.rabbitmq, docker_container.worker,
+      for c in concat([
+        docker_container.postgres, docker_container.rabbitmq,
         docker_container.replication_setup, docker_container.postgres_replica, docker_container.postgres_backup,
-      ] :
+      ], values(docker_container.worker)) :
       length(c.ports) == 0
     ])
     error_message = "Портов на хосте нет ни у кого, кроме API: база и брокер — только во внутренней сети."
@@ -241,7 +241,7 @@ run "worker_grace_covers_one_provider" {
 
   # 2 вызова × 300 с × 2 попытки × 1 провайдер + 60 с.
   assert {
-    condition     = docker_container.worker.stop_timeout == 1260 && docker_container.worker.destroy_grace_seconds == 1260
+    condition     = docker_container.worker["dmc268-worker"].stop_timeout == 1260 && docker_container.worker["dmc268-worker"].destroy_grace_seconds == 1260
     error_message = "Без фоллбэка воркер дорабатывает сообщение до 1260 с — и при docker stop, и при пересоздании."
   }
 }
@@ -259,17 +259,17 @@ run "worker_grace_covers_hosted_fallback" {
   }
 
   assert {
-    condition     = docker_container.worker.stop_timeout == 2460 && docker_container.worker.destroy_grace_seconds == 2460
+    condition     = docker_container.worker["dmc268-worker"].stop_timeout == 2460 && docker_container.worker["dmc268-worker"].destroy_grace_seconds == 2460
     error_message = "С фоллбэком провайдеров два, и воркер ждёт до 2460 с."
   }
 
   assert {
-    condition     = contains(docker_container.worker.env, "LLM_HOSTED_FALLBACK=true") && contains(docker_container.worker.env, "OLLAMA_MODEL=qwen3-coder:30b")
+    condition     = contains(docker_container.worker["dmc268-worker"].env, "LLM_HOSTED_FALLBACK=true") && contains(docker_container.worker["dmc268-worker"].env, "OLLAMA_MODEL=qwen3-coder:30b")
     error_message = "Выбор модели доходит до воркера окружением."
   }
 
   assert {
-    condition     = contains(docker_container.worker.env, "BILLING_ENABLED=false")
+    condition     = contains(docker_container.worker["dmc268-worker"].env, "BILLING_ENABLED=false")
     error_message = "Без billing_enabled баланс не проверяется."
   }
 }
@@ -282,9 +282,103 @@ run "billing_flag_reaches_worker" {
   }
 
   assert {
-    condition     = contains(docker_container.worker.env, "BILLING_ENABLED=true")
+    condition     = contains(docker_container.worker["dmc268-worker"].env, "BILLING_ENABLED=true")
     error_message = "billing_enabled доходит до воркера окружением."
   }
+}
+
+# Масштабирование воркеров (#99). По умолчанию экземпляр один, и у него
+# прежнее имя dmc268-worker: на нём держатся алерты, дашборд и состояние стенда
+# (moved в app.tf переносит адрес без пересоздания).
+run "one_worker_keeps_its_name" {
+  command = plan
+
+  assert {
+    condition     = toset(keys(docker_container.worker)) == toset(["dmc268-worker"]) && docker_container.worker["dmc268-worker"].name == "dmc268-worker"
+    error_message = "По умолчанию воркер один — dmc268-worker, имя первого экземпляра не меняется."
+  }
+
+  assert {
+    condition     = contains(docker_container.worker["dmc268-worker"].env, "OTEL_RESOURCE_ATTRIBUTES=service.version=0123abc,deployment.environment.name=production,service.instance.id=dmc268-worker")
+    error_message = "service.instance.id воркера — имя его контейнера dmc268-worker."
+  }
+}
+
+# Два экземпляра: первый тот же, второй — dmc268-worker-2. Отличаются только
+# именем и service.instance.id; окно остановки, образ, сети и окружение — одни.
+run "two_workers_share_everything_but_the_name" {
+  command = plan
+
+  variables {
+    worker_replicas = 2
+  }
+
+  assert {
+    condition     = toset(keys(docker_container.worker)) == toset(["dmc268-worker", "dmc268-worker-2"])
+    error_message = "worker_replicas = 2 даёт dmc268-worker и dmc268-worker-2."
+  }
+
+  assert {
+    condition = alltrue([
+      for name, c in docker_container.worker :
+      c.name == name
+      && contains(c.env, "OTEL_RESOURCE_ATTRIBUTES=service.version=0123abc,deployment.environment.name=production,service.instance.id=${name}")
+    ])
+    error_message = "Имя контейнера и service.instance.id каждого экземпляра — его ключ for_each."
+  }
+
+  assert {
+    condition = alltrue([
+      for c in values(docker_container.worker) :
+      c.stop_timeout == 1260 && c.destroy_grace_seconds == 1260
+      && c.image == docker_container.worker["dmc268-worker"].image
+      && jsonencode(c.command) == jsonencode(["python", "-m", "app.worker"])
+      && toset([for n in c.networks_advanced : n.name]) == toset([docker_network.backend.name, docker_network.egress.name])
+      && length(c.ports) == 0
+      && contains(c.env, "LLM_BACKEND=stub")
+    ])
+    error_message = "Каждый экземпляр воркера — тот же образ, команда, сети, окно остановки 1260 с и окружение модели, без портов."
+  }
+
+  # Окружение отличается только строкой ресурса телеметрии.
+  assert {
+    condition = (
+      setsubtract(docker_container.worker["dmc268-worker"].env, docker_container.worker["dmc268-worker-2"].env)
+      == toset(["OTEL_RESOURCE_ATTRIBUTES=service.version=0123abc,deployment.environment.name=production,service.instance.id=dmc268-worker"])
+    )
+    error_message = "Окружение экземпляров одно, кроме service.instance.id."
+  }
+}
+
+run "no_workers_rejected" {
+  command = plan
+
+  variables {
+    worker_replicas = 0
+  }
+
+  expect_failures = [var.worker_replicas]
+}
+
+# Пятый экземпляр — за бюджетом памяти сервера и соединений базы (README).
+run "five_workers_rejected" {
+  command = plan
+
+  variables {
+    worker_replicas = 5
+  }
+
+  expect_failures = [var.worker_replicas]
+}
+
+run "fractional_worker_replicas_rejected" {
+  command = plan
+
+  variables {
+    worker_replicas = 1.5
+  }
+
+  expect_failures = [var.worker_replicas]
 }
 
 # Контейнеры ссылаются на образ по digest без тега: атрибут image провайдер
@@ -295,7 +389,7 @@ run "app_containers_run_the_api_image_by_digest" {
 
   assert {
     condition = alltrue([
-      for c in [docker_container.api, docker_container.worker] :
+      for c in concat([docker_container.api], values(docker_container.worker)) :
       c.image == "ghcr.io/larchanka-training/dmc-268-api-t1@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
     ])
     error_message = "api и worker запускаются из образа api_image по digest, без тега: <репозиторий>@sha256:<digest>."
@@ -311,7 +405,7 @@ run "api_image_without_tag_runs_as_is" {
   }
 
   assert {
-    condition     = docker_container.api.image == var.api_image && docker_container.worker.image == var.api_image
+    condition     = docker_container.api.image == var.api_image && docker_container.worker["dmc268-worker"].image == var.api_image
     error_message = "Ссылка <репозиторий>@sha256:<digest> доходит до контейнеров без изменений."
   }
 }
@@ -598,12 +692,12 @@ run "eurorouter_primary_reaches_the_worker" {
   }
 
   assert {
-    condition     = contains(docker_container.worker.env, "LLM_BACKEND=eurorouter") && contains(docker_container.worker.env, "EUROROUTER_MODEL=model")
+    condition     = contains(docker_container.worker["dmc268-worker"].env, "LLM_BACKEND=eurorouter") && contains(docker_container.worker["dmc268-worker"].env, "EUROROUTER_MODEL=model")
     error_message = "Eurorouter основным доходит до воркера окружением."
   }
 
   assert {
-    condition     = docker_container.worker.stop_timeout == 1260
+    condition     = docker_container.worker["dmc268-worker"].stop_timeout == 1260
     error_message = "Провайдер один: воркер ждёт столько же, сколько с одной локальной моделью."
   }
 }
@@ -620,7 +714,7 @@ run "eurorouter_reasoning_effort_reaches_the_worker" {
   }
 
   assert {
-    condition     = contains(docker_container.worker.env, "EUROROUTER_REASONING_EFFORT=low")
+    condition     = contains(docker_container.worker["dmc268-worker"].env, "EUROROUTER_REASONING_EFFORT=low")
     error_message = "Заданный reasoning_effort доходит до воркера окружением."
   }
 }
