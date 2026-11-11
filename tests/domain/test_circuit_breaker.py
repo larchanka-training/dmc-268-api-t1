@@ -64,6 +64,14 @@ def test_the_pause_stops_growing_at_the_ceiling() -> None:
     assert breaker.open_until == now + 600.0
 
 
+def test_a_week_of_failed_probes_keeps_the_ceiling_without_overflow() -> None:
+    """Неделя проб мёртвого провайдера: счёт размыканий не растёт без предела, и
+    `2 ** trips` не переполняет float — пауза остаётся на потолке."""
+    breaker = failed(Breaker(failures=3, trips=2000, open_until=0.0), POLICY, now=1.0)
+
+    assert breaker.open_until == 601.0
+
+
 def test_a_failure_during_the_pause_does_not_extend_it() -> None:
     """Вызов, начатый до размыкания, может отказать уже на паузе: пауза та же."""
     opened = _fail(CLOSED, 3, now=100.0)

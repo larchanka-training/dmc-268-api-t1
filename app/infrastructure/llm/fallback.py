@@ -108,7 +108,9 @@ class FallbackLlmGateway:
         breaker = self._breakers.get(name)
         if breaker is None or (wait := breaker.retry_after()) is None:
             return False
-        logger.warning("модель %s на паузе breaker'а ещё %.0f с, вызов пропущен", name, wait)
+        # Пауза может длиться сутками при живом фоллбэке: строка на каждый вызов — шум,
+        # переходы breaker'а пишет `CircuitBreaker`.
+        logger.debug("модель %s на паузе breaker'а ещё %.0f с, вызов пропущен", name, wait, extra={"provider": name})
         return True
 
     def _call[T: BaseModel](self, name: str, provider: LlmGateway, request: LlmRequest[T]) -> LlmResponse[T]:

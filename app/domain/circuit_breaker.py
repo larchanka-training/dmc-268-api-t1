@@ -43,6 +43,11 @@ class Breaker:
     open_until: float | None = None
 
 
+# Потолок счёта размыканий: 60 с * 2**31 давно выше любого `max_pause_seconds`, а без
+# потолка неделя проб мёртвого провайдера дала бы `2 ** 1024` — OverflowError при
+# переводе во float вместо паузы, и breaker застрял бы в half_open.
+_MAX_TRIPS = 32
+
 # Провайдер ответил — каким угодно ответом, хоть 4xx: он жив, breaker замкнут и счёт обнулён.
 CLOSED = Breaker()
 
@@ -68,6 +73,6 @@ def failed(breaker: Breaker, policy: BreakerPolicy, now: float) -> Breaker:
     if breaker.open_until is not None and now < breaker.open_until:
         # Вызов, начатый до размыкания, отказал уже на паузе: пауза не удлиняется.
         return replace(breaker, failures=failures)
-    trips = breaker.trips + 1
+    trips = min(breaker.trips + 1, _MAX_TRIPS)
     pause = min(policy.pause_seconds * 2 ** (trips - 1), policy.max_pause_seconds)
     return Breaker(failures=failures, trips=trips, open_until=now + pause)

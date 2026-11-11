@@ -1085,3 +1085,17 @@ def test_503_on_the_installation_token_opens_the_breaker(rsa_key_pair: RsaKeyPai
     with pytest.raises(VcsUnavailableError, match="паузе"):
         _metadata(gateway)
     assert [r.url.path for r in seen] == [f"/app/installations/{INSTALLATION_ID}/access_tokens"]
+
+
+def test_get_app_is_not_sent_during_the_pause(rsa_key_pair: RsaKeyPair) -> None:
+    """Slug ещё не в кэше, breaker разомкнут: `GET /app` не уходит, как любой вызов GitHub."""
+    seen: list[httpx.Request] = []
+    gateway = _guarded(rsa_key_pair, responding([502], httpx.Response(200, json=PR_JSON), seen), _Clock())
+
+    with pytest.raises(VcsOutageError):
+        _metadata(gateway)
+    sent = len(seen)
+    with pytest.raises(VcsUnavailableError, match="паузе breaker'а"):
+        gateway.app_slug()
+
+    assert len(seen) == sent

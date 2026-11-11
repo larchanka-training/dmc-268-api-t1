@@ -348,6 +348,9 @@ class GitHubVcsGateway:
         """
         if self._app_slug is not None:
             return self._app_slug
+        # На паузе breaker'а `GET /app` не уходит, как любой вызов GitHub.
+        if self._breaker is not None and (wait := self._breaker.retry_after()) is not None:
+            raise _counted(VcsUnavailableError(f"GitHub API на паузе breaker'а ещё {wait:.0f} с: GET /app"))
         try:
             response = self._client.get(
                 "/app",
