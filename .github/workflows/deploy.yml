@@ -307,6 +307,11 @@ jobs:
           TF_VAR_public_origin: https://${{ vars.VPS_DMC268_IP_T1 }}
           TF_VAR_api_image: ${{ needs.image.outputs.image }}
           TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
+          # Пароль роли приложения dmc268_app (миграция 0023): под ней входят
+          # api и worker, миграции — владельцем. Нет секрета — пустая строка, и
+          # проверка переменной роняет plan до изменений на сервере. Роли пароль
+          # ставит шаг миграций (alembic/role_passwords.py) на каждом деплое.
+          TF_VAR_postgres_app_password: ${{ secrets.PG_APP_PASSWORD_DMC268_T1 }}
           TF_VAR_rabbitmq_password: ${{ secrets.RABBITMQ_PASSWORD_DMC268_T1 }}
           # Стек наблюдаемости на стенде поднимается всегда (до
           # observability_enabled он был безусловным): флаг выключает его

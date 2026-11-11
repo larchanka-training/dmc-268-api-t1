@@ -12,6 +12,7 @@ mock_provider "docker" {}
 variables {
   api_image                     = "ghcr.io/larchanka-training/dmc-268-api-t1:0123abc@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
   postgres_password             = "p@ss/w:rd"
+  postgres_app_password         = "app+p@ss/w:rd-16"
   rabbitmq_password             = "r@bbit#1"
   postgres_replication_password = "repl:ication@pass-16"
   github_webhook_secret         = "webhook-secret"

@@ -16,6 +16,7 @@
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -336,3 +337,17 @@ def test_a_new_user_or_database_stops_the_plan() -> None:
             assert re.search(rf'contains\(self\.env, "{key}=\$\{{var\.\w+\}}"\)', post.group(1)), (name, key)
         assert "PASSWORD" not in post.group(1), "пароль сверять нельзя: его смена — обычный деплой"
         assert not re.search(r"^\s*replace_triggered_by\s*=", body, re.MULTILINE), "первое создание триггера пересоздало бы базу"
+
+
+def test_role_passwords_on_an_unreachable_database_claims_no_change() -> None:
+    """База не ответила: шаг падает до проб входа, отметки о смене пароля роли нет."""
+    env = os.environ | {
+        "DATABASE_URL": "postgresql+psycopg://dmc268:x@127.0.0.1:1/dmc268",
+        "POSTGRES_APP_PASSWORD": "app-password-16xx",
+        "POSTGRES_MONITOR_PASSWORD": "monitor-password-16",
+    }
+    result = subprocess.run(
+        [sys.executable, "alembic/role_passwords.py"], env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode != 0
+    assert "меняю" not in result.stdout
