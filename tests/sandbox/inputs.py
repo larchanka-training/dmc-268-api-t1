@@ -9,10 +9,11 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
-from ..eval.rules.corpus import Case, load_case
+from ..eval.rules.corpus import Case, case_from_raw
 from ..eval.scoring import ExpectedIssue
 
 logger = logging.getLogger(__name__)
@@ -59,19 +60,36 @@ def from_case(case: Case) -> PrInput:
     )
 
 
-def load_case_file(path: Path) -> PrInput:
-    """YAML в формате корпуса; раздел `expected` необязателен.
-
-    Битый YAML и неверная структура (`files:` списком, нет ключа) - `InputError`,
-    а не traceback: плохой вход - код выхода 2, а не 1.
-    """
+def read_case_yaml(path: Path) -> Any:
+    """Разобранный YAML кейса; нет файла, не прочитать, не UTF-8, битый YAML - `InputError`."""
     if not path.is_file():
         raise InputError(f"файла кейса {path} нет")
     try:
-        case = load_case(path, expected_required=False)
-    except (yaml.YAMLError, AttributeError, KeyError, TypeError, ValueError) as error:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise InputError(f"кейс {path} не прочитать: {error.strerror}") from error
+    except UnicodeDecodeError as error:
+        raise InputError(f"кейс {path} не в UTF-8") from error
+    except yaml.YAMLError as error:
+        raise InputError(f"кейс {path} не разобрать: {error}") from error
+
+
+def case_input(raw: Any, path: Path) -> PrInput:
+    """PR из разобранного кейса в формате корпуса; раздел `expected` необязателен.
+
+    Неверная структура (`files:` списком, нет ключа, YAML не словарём) -
+    `InputError`, а не traceback: плохой вход - код выхода 2, а не 1.
+    """
+    try:
+        case = case_from_raw(raw, path.stem, expected_required=False)
+    except (AttributeError, KeyError, TypeError, ValueError) as error:
         raise InputError(f"кейс {path} не разобрать: {error}") from error
     return from_case(case)
+
+
+def load_case_file(path: Path) -> PrInput:
+    """YAML в формате корпуса, прочитанный один раз; ошибки входа - `InputError`."""
+    return case_input(read_case_yaml(path), path)
 
 
 def _git(repo: Path, *args: str) -> bytes:

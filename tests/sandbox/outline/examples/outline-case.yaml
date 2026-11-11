@@ -1,8 +1,10 @@
 # Мок-PR песочницы tree-sitter: по файлу на язык, правки заданы ключом lines:
-# (путь -> "N", "N-M" или список через запятую). База файла из lines: - тот же файл,
-# где эти строки заменены заглушками, поэтому дифф затрагивает ровно их; остальные
-# файлы новые. Кейс читает и песочница воркера (make sandbox CASE_FILE=...): там
-# ключ lines: игнорируется и все файлы новые.
+# (путь -> "N", "N-M" или список через запятую). Эти строки - добавленные: база
+# файла из lines: - тот же файл без них, дифф затрагивает ровно их; остальные
+# файлы новые. Файлы до 8 КБ входят в дифф пакета целиком (whole_file) и AST им
+# не нужен; app/orders/service.py больше порога - у него в пакете блок ast.
+# Кейс читает и песочница воркера (make sandbox CASE_FILE=...): там ключ lines:
+# игнорируется и все файлы новые.
 title: Мультиязычный мок-PR
 pull_request:
   title: "feat: заказы - скидка, ключи репозитория и форматирование цен"
@@ -87,7 +89,201 @@ files:
     # Заказы
 
     Скидка считается в процентах от цены заказа.
+  # Больше 8 КБ: в дифф пакета не входит целиком, контекст правки в pay - из AST.
+  app/orders/service.py: |
+    """Сервис заказов: создание, позиции, скидки, оплата и доставка."""
+    from dataclasses import dataclass, field
+    from datetime import UTC, datetime
+    from decimal import Decimal
+    from enum import StrEnum
+    from uuid import UUID, uuid4
+
+
+    class OrderStatus(StrEnum):
+        DRAFT = "draft"
+        PLACED = "placed"
+        PAID = "paid"
+        SHIPPED = "shipped"
+        DELIVERED = "delivered"
+        CANCELLED = "cancelled"
+
+
+    class OrderError(ValueError):
+        """Операция недопустима в текущем статусе заказа."""
+
+
+    @dataclass
+    class OrderLine:
+        sku: str
+        quantity: int
+        price: Decimal
+
+        @property
+        def total(self) -> Decimal:
+            """К оплате: позиции минус скидка плюс доставка."""
+            return self.price * self.quantity
+
+
+    @dataclass
+    class Order:
+        id: UUID
+        customer_id: UUID
+        status: OrderStatus = OrderStatus.DRAFT
+        lines: list[OrderLine] = field(default_factory=list)
+        discount_percent: int = 0
+        shipping_cost: Decimal = Decimal("0")
+        placed_at: datetime | None = None
+        paid_at: datetime | None = None
+        tracking_number: str | None = None
+
+
+    class OrderService:
+        """Правила жизненного цикла заказа; хранение - забота вызывающего."""
+
+        def __init__(self, max_lines: int = 50, max_discount: int = 30) -> None:
+            self.max_lines = max_lines
+            self.max_discount = max_discount
+
+        def create(self, customer_id: UUID) -> Order:
+            return Order(id=uuid4(), customer_id=customer_id)
+
+        def _require(self, order: Order, *statuses: OrderStatus) -> None:
+            if order.status not in statuses:
+                raise OrderError(f"заказ {order.id} в статусе {order.status}")
+
+        def add_line(self, order: Order, sku: str, quantity: int, price: Decimal) -> None:
+            """Добавить позицию в черновик заказа."""
+            self._require(order, OrderStatus.DRAFT)
+            if quantity <= 0:
+                raise OrderError("количество должно быть положительным")
+            if len(order.lines) >= self.max_lines:
+                raise OrderError("слишком много позиций")
+            order.lines.append(OrderLine(sku, quantity, price))
+
+        def remove_line(self, order: Order, sku: str) -> None:
+            """Убрать позицию по артикулу; отсутствующую - молча."""
+            self._require(order, OrderStatus.DRAFT)
+            order.lines = [line for line in order.lines if line.sku != sku]
+
+        def change_quantity(self, order: Order, sku: str, quantity: int) -> None:
+            """Изменить количество позиции черновика."""
+            self._require(order, OrderStatus.DRAFT)
+            for line in order.lines:
+                if line.sku == sku:
+                    line.quantity = quantity
+                    return
+            raise OrderError(f"позиции {sku} нет в заказе")
+
+        def subtotal(self, order: Order) -> Decimal:
+            """Сумма позиций без скидки и доставки."""
+            return sum((line.total for line in order.lines), Decimal("0"))
+
+        def apply_discount(self, order: Order, percent: int) -> None:
+            """Скидка в процентах, не больше max_discount."""
+            self._require(order, OrderStatus.DRAFT, OrderStatus.PLACED)
+            if not 0 <= percent <= self.max_discount:
+                raise OrderError(f"скидка {percent}% вне допустимого")
+            order.discount_percent = percent
+
+        def discount_amount(self, order: Order) -> Decimal:
+            """Скидка в деньгах от суммы позиций."""
+            return self.subtotal(order) * order.discount_percent / 100
+
+        def set_shipping(self, order: Order, cost: Decimal) -> None:
+            """Стоимость доставки до оплаты заказа."""
+            self._require(order, OrderStatus.DRAFT, OrderStatus.PLACED)
+            if cost < 0:
+                raise OrderError("стоимость доставки отрицательна")
+            order.shipping_cost = cost
+
+        def total(self, order: Order) -> Decimal:
+            return self.subtotal(order) - self.discount_amount(order) + order.shipping_cost
+
+        def place(self, order: Order, now: datetime) -> None:
+            """Оформить черновик: дальше позиции не меняются."""
+            self._require(order, OrderStatus.DRAFT)
+            if not order.lines:
+                raise OrderError("пустой заказ не оформить")
+            order.status = OrderStatus.PLACED
+            order.placed_at = now
+
+        def pay(self, order: Order, amount: Decimal, now: datetime) -> None:
+            """Принять оплату ровно на сумму заказа."""
+            self._require(order, OrderStatus.PLACED)
+            if amount != self.total(order):
+                raise OrderError("сумма оплаты не совпадает с заказом")
+            order.status = OrderStatus.PAID
+            order.paid_at = now
+
+        def ship(self, order: Order, tracking_number: str) -> None:
+            """Передать оплаченный заказ в доставку."""
+            self._require(order, OrderStatus.PAID)
+            if not tracking_number.strip():
+                raise OrderError("нет трек-номера")
+            order.status = OrderStatus.SHIPPED
+            order.tracking_number = tracking_number
+
+        def deliver(self, order: Order) -> None:
+            """Отметить заказ доставленным."""
+            self._require(order, OrderStatus.SHIPPED)
+            order.status = OrderStatus.DELIVERED
+
+        def cancel(self, order: Order) -> None:
+            """Отменить заказ до отправки."""
+            self._require(order, OrderStatus.DRAFT, OrderStatus.PLACED, OrderStatus.PAID)
+            order.status = OrderStatus.CANCELLED
+
+        def refund_amount(self, order: Order) -> Decimal:
+            """Сколько вернуть покупателю за отменённый заказ."""
+            if order.status is not OrderStatus.CANCELLED or order.paid_at is None:
+                return Decimal("0")
+            return self.total(order)
+
+        def is_editable(self, order: Order) -> bool:
+            """Можно ли ещё менять позиции."""
+            return order.status is OrderStatus.DRAFT
+
+        def is_final(self, order: Order) -> bool:
+            """Заказ больше не меняет статус."""
+            return order.status in (OrderStatus.DELIVERED, OrderStatus.CANCELLED)
+
+        def line_count(self, order: Order) -> int:
+            """Число единиц товара во всех позициях."""
+            return sum(line.quantity for line in order.lines)
+
+        def skus(self, order: Order) -> list[str]:
+            """Артикулы заказа без повторов, по алфавиту."""
+            return sorted({line.sku for line in order.lines})
+
+        def most_expensive_line(self, order: Order) -> OrderLine | None:
+            """Самая дорогая позиция заказа или None."""
+            if not order.lines:
+                return None
+            return max(order.lines, key=lambda line: line.total)
+
+        def age_seconds(self, order: Order, now: datetime) -> float:
+            """Сколько секунд прошло с оформления."""
+            if order.placed_at is None:
+                return 0.0
+            return (now - order.placed_at).total_seconds()
+
+        def is_stale(self, order: Order, now: datetime, limit_seconds: float = 86400.0) -> bool:
+            """Оформлен, но не оплачен дольше limit_seconds."""
+            return order.status is OrderStatus.PLACED and self.age_seconds(order, now) > limit_seconds
+
+        def summary(self, order: Order) -> str:
+            """Строка для журнала и уведомлений."""
+            return (
+                f"заказ {order.id}: {order.status}, позиций {len(order.lines)},"
+                f" к оплате {self.total(order)}"
+            )
+
+
+    def stale_orders(service: OrderService, orders: list[Order]) -> list[Order]:
+        now = datetime.now(UTC)
+        return [order for order in orders if service.is_stale(order, now)]
 lines:
+  app/orders/service.py: "120-121"
   app/billing/discount.py: "13"
   app/billing/broken.py: "6"
   web/api/handler.ts: "4, 11"

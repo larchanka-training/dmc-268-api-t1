@@ -182,13 +182,10 @@ OUTLINE_FLAGS = --rules $(RULES) $(if $(CASE),--case $(CASE)) \
 
 .PHONY: sandbox-outline-demo sandbox-outline
 
-sandbox-outline-demo: ## tree-sitter: проверить окружение и грамматики, разобрать мок-PR (OUTLINE_CASE, ARGS)
-	@printf '\n\033[1m==> 1/3 Проверка окружения\033[0m\n'
-	@scripts/sandbox-outline-doctor.sh
-	@printf '\n\033[1m==> 2/3 Зависимости Python (uv sync) и грамматики tree-sitter\033[0m\n'
+sandbox-outline-demo: ## tree-sitter: поставить зависимости и разобрать мок-PR (OUTLINE_CASE, ARGS)
+	@printf '\n\033[1m==> 1/2 Зависимости Python (uv sync)\033[0m\n'
 	@uv sync --all-extras
-	@scripts/sandbox-outline-doctor.sh --grammars
-	@printf '\n\033[1m==> 3/3 Разбор мок-PR $(OUTLINE_CASE)\033[0m\n'
+	@printf '\n\033[1m==> 2/2 Разбор мок-PR $(OUTLINE_CASE)\033[0m\n'
 	@uv run python -m tests.sandbox.outline --rules $(RULES) --case-file '$(OUTLINE_CASE)' $(ARGS); status=$$?; echo; \
 	case $$status in \
 		0) printf '\033[32mГотово: контекст собран, отчёт выше.\033[0m\n' ;; \

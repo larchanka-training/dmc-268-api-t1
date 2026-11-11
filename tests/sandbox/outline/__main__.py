@@ -1,15 +1,15 @@
 """CLI песочницы tree-sitter: `uv run python -m tests.sandbox.outline`.
 
 Гоняет настоящий этап сборки контекста (`fetch_review_diff` →
-`build_review_context`) на фейковом GitHub и печатает, что tree-sitter нашёл в
-каждом файле, что выбрано вокруг изменённых строк, что ушло в блок `ast`
-пакета и что отброшено. Модели, базы, брокера и сети нет. Входы - кейсы
+`build_review_context`) на фейковом GitHub и печатает по каждому файлу то, что
+этап ответил: элементы блока `ast` пакета, записи `omitted` и охват; с
+`--full-outline` - ещё и весь контур tree-sitter. Модели, базы, брокера и сети нет. Входы - кейсы
 корпуса (`--case`), YAML-кейсы с ключом `lines:` (`--case-file`), диапазоны
 git (`--from-git`) и отдельные файлы (`--file` + `--lines`); без входов -
-`examples/outline-case.yaml`. Код выхода: 0 - всё разобрано (пустой контур -
-только предупреждение); 1 - дифф PR не получен, `parse_error` или файл не
-загружен (`missing`, `unavailable`); 2 - вход или настройки не подходят (отчёт
-не напечатан) либо не удалось записать `--json` (уже после отчёта).
+`examples/outline-case.yaml`. Код выхода: 0 - всё разобрано; 1 - дифф PR не
+получен или в видимом `omitted` есть `parse_error`, `missing`, `unavailable`;
+2 - вход или настройки не подходят (отчёт не напечатан) либо не удалось
+записать `--json` (уже после отчёта).
 """
 
 import argparse
@@ -24,30 +24,22 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.domain.untrusted import sanitize
 from app.worker.factory import WorkerConfigError
 
 from ...eval.rules.corpus import CONFIGS, load_corpus
 from ..inputs import InputError, PrInput, from_case, from_git
 from ..worker import SandboxConfig
-from .runner import FileOutlineReport, OutlineResult, PrOutline, run_outline
+from .runner import FileOutlineReport, PrOutline, run_outline
 from .sources import from_file, load_outline_case
 
 EXAMPLE = Path(__file__).parent / "examples" / "outline-case.yaml"
-# Сколько записей «отброшено по бюджету» печатать, остальное - числом.
-DROPPED_LIMIT = 10
 
 # Причины пропуска AST, которых на фейковом GitHub быть не должно: это ошибка
 # самой песочницы, а не свойство файла.
 _BROKEN_REASONS = frozenset({"parse_error", "missing", "unavailable"})
-# Однострочные описания статусов без контура; у первых трёх язык не печатается.
-_NO_LANGUAGE = frozenset({"no_grammar", "filtered", "deleted"})
-_STATUS_LINES = {
-    "no_grammar": "без грамматики",
-    "filtered": "отфильтрован",
-    "deleted": "удалён",
-    "no_hunks": "нет hunk'ов (пустой файл или смена режима) - AST не выбирался",
-    "diff_budget": "hunk'и не вошли в пакет по бюджету - AST не выбирался",
-}
+# Части `omitted`, относящиеся к AST файла.
+_AST_PARTS = frozenset({"ast", "scopes", "imports"})
 
 
 def _parse_args(
@@ -108,9 +100,6 @@ def _parse_args(
         help="что лежит в .review/rules.md целевой ветки (часть бюджета пакета)",
     )
     parser.add_argument(
-        "--window", type=int, help="окно модели в токенах (LLM_CONTEXT_WINDOW_TOKENS)"
-    )
-    parser.add_argument(
         "--context-max-tokens",
         type=int,
         help="потолок пакета контекста (CONTEXT_MAX_TOKENS)",
@@ -118,12 +107,7 @@ def _parse_args(
     parser.add_argument(
         "--full-outline",
         action="store_true",
-        help="печатать весь контур файла, а не только выбор",
-    )
-    parser.add_argument(
-        "--payload",
-        action="store_true",
-        help="вместо отчёта - JSON: ast, omitted и omitted_count пакета каждого PR",
+        help="печатать ещё и весь контур файла (отдельный разбор tree-sitter)",
     )
     parser.add_argument(
         "--json", type=Path, metavar="PATH", help="записать результат в JSON"
@@ -162,103 +146,81 @@ def _indented(text: str, prefix: str = "    ") -> str:
 
 
 def _problems(pr: PrOutline) -> list[str]:
-    """Проблемы PR. Пустой контур сюда не входит: это бывает и у нормального файла
-    (`__init__.py` из docstring, модуль из констант) - его печатает `_print_file`."""
+    """Проблемы PR: дифф не получен или в видимом `omitted` - сбой загрузки или разбора."""
     problems = [f"дифф не получен: {pr.error}"] if pr.error else []
     problems += [
-        f"{file.path}: {file.reason}"
-        for file in pr.files
-        if file.status == "skipped" and file.reason in _BROKEN_REASONS
+        f"{entry['path']}: {entry['reason']}"
+        for entry in pr.omitted
+        if entry["part"] == "ast" and entry["reason"] in _BROKEN_REASONS
     ]
     return problems
 
 
-def _print_file(file: FileOutlineReport, *, full_outline: bool) -> None:
-    if file.status in _NO_LANGUAGE:
-        print(f"{file.path}  {_STATUS_LINES[file.status]}")
-        return
-    head = f"{file.path}  {file.language}"
-    if file.status in _STATUS_LINES:
-        print(f"{head}  {_STATUS_LINES[file.status]}")
-        return
-    print(f"{head}  изменены строки {compress_lines(file.touched)}")
-    if file.status == "skipped":
-        print(f"  AST пропущен: {file.reason or 'причина не вошла в перечень omitted'}")
-        return
-    print(f"  контур: определений {file.definitions}, импортов {file.imports}")
-    if full_outline and file.outline:
-        print("  весь контур:")
-        print(_indented("\n".join(file.outline)))
-    if file.status == "whole_file":
-        print("  файл целиком в диффе пакета - AST не нужен; AST выбрал бы:")
-    if file.scopes is not None:
-        if file.status != "whole_file":
-            print("  в контекст (как видит модель):")
-        print(_indented(file.scopes))
-    if file.import_text is not None:
-        print("  импорты:")
-        print(_indented(file.import_text))
-    if file.dropped:
-        print(f"  отброшено бюджетом: {', '.join(file.dropped)}")
-    if file.empty_outline:
-        print(
-            "  предупреждение: пустой контур - в непустом файле нет ни определений,"
-            " ни импортов"
-        )
-    elif file.status == "no_scopes":
-        print("  в контекст: ничего - правка вне определений, импортов нет")
-
-
 def _omission(entry: dict[str, Any]) -> str:
-    """Запись `omitted` коротко: `a.py:7 hunk`, `commit_message #2`, `pr_metadata`."""
-    if "path" not in entry:
-        index = f" #{entry['index']}" if "index" in entry else ""
-        return f"{entry['part']}{index}"
-    line = f":{entry['line']}" if "line" in entry else ""
-    return f"{entry['path']}{line} {entry['part']}"
+    """Запись `omitted` коротко: `scopes - budget`, `hunk:7 - budget`, `commit_message #2 - budget`."""
+    where = f":{entry['line']}" if "line" in entry else ""
+    index = f" #{entry['index']}" if "index" in entry else ""
+    path = f"{entry['path']} " if "path" in entry else ""
+    return f"{path}{entry['part']}{where}{index} - {entry['reason']}"
 
 
-def _print_pr(pr: PrOutline, problems: list[str], *, full_outline: bool) -> None:
+def _print_file(file: FileOutlineReport, *, truncated: bool) -> None:
+    language = f"  {file.language}" if file.language else ""
+    print(
+        f"{file.path}{language}  изменены строки {compress_lines(file.touched)}"
+        f"  охват: {file.coverage or '-'}"
+    )
+    for item in file.ast:
+        part = "scopes" if "scopes" in item else "imports"
+        print(f"  ast/{part} (как видит модель):")
+        print(_indented(item[part]))
+    for entry in file.omitted:
+        print(f"  omitted: {_omission(entry).removeprefix(entry['path'] + ' ')}")
+    if not file.ast and not any(e["part"] in _AST_PARTS for e in file.omitted):
+        print(
+            "  AST в пакете нет; причина могла не войти в урезанный omitted"
+            if truncated
+            else "  AST не выбирался"
+        )
+    if file.outline is not None and file.outline.error is not None:
+        print(f"  весь контур: разбор упал: {file.outline.error}")
+    elif file.outline is not None:
+        outline = file.outline
+        print(
+            f"  весь контур: определений {len(outline.definitions)},"
+            f" импортов {len(outline.imports)}"
+        )
+        print(_indented("\n".join((*outline.definitions, *outline.imports)) or "-"))
+        if not outline.definitions and not outline.imports:
+            print(
+                "  предупреждение: пустой контур - нормально для __init__.py или модуля"
+                " констант, на файле с определениями - сломан запрос грамматики"
+            )
+
+
+def _print_pr(pr: PrOutline, problems: list[str]) -> None:
     print(f"=== [{pr.number}] {pr.id}: {pr.title}")
+    truncated = pr.omitted_count > len(pr.omitted)
     for file in pr.files:
-        _print_file(file, full_outline=full_outline)
-    skipped = [e for e in pr.omitted if e["part"] == "ast"]
-    if skipped:
-        print(
-            "пропущено AST: "
-            + ", ".join(f"{e['path']} - {e['reason']}" for e in skipped)
-        )
-    dropped = [e for e in pr.omitted if e["reason"] == "budget"]
-    if dropped:
-        shown = ", ".join(_omission(e) for e in dropped[:DROPPED_LIMIT])
-        rest = len(dropped) - DROPPED_LIMIT
-        print(
-            f"отброшено по бюджету: {shown}" + (f" … и ещё {rest}" if rest > 0 else "")
-        )
+        _print_file(file, truncated=truncated)
+    paths = {sanitize(file.path) for file in pr.files}
+    other = [e for e in pr.omitted if e.get("path") not in paths]
+    if other:
+        print("omitted вне файлов диффа: " + ", ".join(_omission(e) for e in other))
     if pr.error is None:
         ast_files = len({item["path"] for item in pr.ast})
         print(
             f"пакет: файлов с AST: {ast_files}, ~{pr.ast_tokens} токенов;"
             f" весь пакет ~{pr.token_count} из {pr.max_tokens};"
-            f" omitted: {len(pr.omitted)} из {pr.omitted_count}"
+            f" omitted: {len(pr.omitted)} из {pr.omitted_count};"
+            f" уровни: {', '.join(pr.tiers)}"
         )
+        if truncated:
+            print(
+                "  перечень omitted урезан бюджетом: у части файлов причина не видна"
+                " (модель её тоже не видит)"
+            )
     print("проблемы: " + ("; ".join(problems) if problems else "-"))
-
-
-def _payload(result: OutlineResult) -> str:
-    return json.dumps(
-        [
-            {
-                "id": pr.id,
-                "ast": pr.ast,
-                "omitted": pr.omitted,
-                "omitted_count": pr.omitted_count,
-            }
-            for pr in result.prs
-        ],
-        ensure_ascii=False,
-        indent=2,
-    )
 
 
 def _settings_error(error: ValidationError) -> str:
@@ -279,13 +241,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = SandboxConfig(
         llm="stub",
         rules_config=args.rules,
-        window_tokens=args.window,
         context_max_tokens=args.context_max_tokens,
     )
     started = time.monotonic()
     try:
         prs = _collect_inputs(args)
-        result = run_outline(prs, config)
+        result = run_outline(prs, config, full_outline=args.full_outline)
     except InputError as error:
         print(error, file=sys.stderr)
         return 2
@@ -298,36 +259,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     elapsed = time.monotonic() - started
 
-    problems = {pr.number: _problems(pr) for pr in result.prs}
-    if args.payload:
-        print(_payload(result))
-    else:
-        max_tokens = result.prs[0].max_tokens if result.prs else 0
-        print(
-            f"песочница tree-sitter: PR {len(result.prs)}, правила: {args.rules},"
-            f" лимит пакета: {max_tokens} токенов"
-        )
-        for pr in result.prs:
-            _print_pr(pr, problems[pr.number], full_outline=args.full_outline)
-        with_ast = sum(len({item["path"] for item in pr.ast}) for pr in result.prs)
-        total = sum(len(p) for p in problems.values())
-        print(
-            f"итого: PR {len(result.prs)}, файлов с AST {with_ast}, проблем {total},"
-            f" время {elapsed:.1f} с"
-        )
+    problems = {pr.number: _problems(pr) for pr in result}
+    max_tokens = result[0].max_tokens if result else 0
+    print(
+        f"песочница tree-sitter: PR {len(result)}, правила: {args.rules},"
+        f" лимит пакета: {max_tokens} токенов"
+    )
+    for pr in result:
+        _print_pr(pr, problems[pr.number])
+    with_ast = sum(len({item["path"] for item in pr.ast}) for pr in result)
+    total = sum(len(p) for p in problems.values())
+    print(
+        f"итого: PR {len(result)}, файлов с AST {with_ast}, проблем {total},"
+        f" время {elapsed:.1f} с"
+    )
     if args.json is not None:
         try:
             args.json.write_text(
-                json.dumps(dataclasses.asdict(result), ensure_ascii=False, indent=2),
+                json.dumps(
+                    [dataclasses.asdict(pr) for pr in result], ensure_ascii=False, indent=2
+                ),
                 encoding="utf-8",
             )
         except OSError as error:
             print(f"результат не записан в {args.json}: {error}", file=sys.stderr)
             return 2
-        # При --payload stdout - чистый JSON, поэтому строка о файле - в stderr.
-        print(
-            f"результат: {args.json}", file=sys.stderr if args.payload else sys.stdout
-        )
+        print(f"результат: {args.json}")
     return 1 if any(problems.values()) else 0
 
 
