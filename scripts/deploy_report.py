@@ -33,8 +33,9 @@ infra` — targeted-план шага «Поднять базу и брокер�
   ответила), `migrate-attempts` — номер последней попытки;
   `migrate-roles.error` — миграции прошли, а пароли ролей `dmc268_monitor` и
   `dmc268_app` не обновлены (код выхода); исход шага миграций — из `STEP_RESULTS`;
-- `passwords-changed` — у каких сервисов (`postgres`, `rabbitmq`) шаг паролей
-  дошёл до смены (`passwords.sh`);
+- `passwords-changed` — у каких сервисов (`postgres`, `postgres-app`, `rabbitmq`)
+  дошло до смены пароля: `postgres` и `rabbitmq` — шаг паролей (`passwords.sh`),
+  `postgres-app` — роль приложения на шаге миграций (`migrate.sh`);
 - `disk.txt` — `df -Pk` корня и каталога Docker (`summary.sh`);
 - `stale-tip` — вершина develop, если коммит прогона уже не она и деплой
   пропущен (`check-tip.sh`);
@@ -612,25 +613,33 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
     return "\n".join(out) + "\n"
 
 
-# Подписи сервисов из `passwords-changed`.
-PASSWORD_SERVICES = {"postgres": "база (`postgres`)", "rabbitmq": "брокер (`rabbitmq`)"}
+# Подписи сервисов из `passwords-changed` и кого устаревший пароль не пустит, пока
+# apply не пересоздал их: владельцу базы входят копии и replication-setup, роли
+# приложения и брокеру — API и воркер.
+PASSWORD_SERVICES = {
+    "postgres": ("база (`postgres`)", "`postgres-backup` и `replication-setup`"),
+    "postgres-app": ("роль приложения (`dmc268_app`)", "API и воркер"),
+    "rabbitmq": ("брокер (`rabbitmq`)", "API и воркер"),
+}
 
 
 def passwords_section(report_dir: Path, steps: dict[str, dict[str, str]], blob_url: str) -> list[str]:
-    """Пароли, сменённые этим деплоем; без замены API — предупреждение об окне смены.
+    """Пароли, сменённые этим деплоем; без пересоздания зависимых — предупреждение об окне смены.
 
     Смена пароля не рвёт открытых соединений, а новые со старым паролем
-    отклоняет: пока apply не заменил API и воркер, они не откроют новых. Упал
+    отклоняет: пока apply не заменил зависимых, они не откроют новых. Упал
     деплой до этого — окно смены не закрыто, а шаг паролей при этом зелёный.
     """
-    services = [s for s in PASSWORD_SERVICES if s in read(report_dir / "passwords-changed").split()]
+    changed = read(report_dir / "passwords-changed").split()
+    services = [s for s in PASSWORD_SERVICES if s in changed]
     if not services:
         return []
-    out = ["### Пароли", "", f"Сменены в этом деплое: {', '.join(PASSWORD_SERVICES[s] for s in services)}."]
+    out = ["### Пароли", "", f"Сменены в этом деплое: {', '.join(PASSWORD_SERVICES[s][0] for s in services)}."]
     if steps.get("apply", {}).get("conclusion") == "success":
         return out
+    affected = list(dict.fromkeys(PASSWORD_SERVICES[s][1] for s in services))
     return [*out, "", "> [!WARNING]",
-            ("> Пароль сменён, а API и воркер не заменены: до следующего успешного деплоя старые API и воркер "
+            (f"> {'Пароли сменены' if len(services) > 1 else 'Пароль сменён'}, а {', а также '.join(affected)} не заменены: до следующего успешного деплоя прежние "
              "не откроют новых соединений. Устранить причину и запустить деплой снова или вернуть старый пароль — "
              f"[«Откат»]({blob_url}/infra/README.md#откат).")]
 

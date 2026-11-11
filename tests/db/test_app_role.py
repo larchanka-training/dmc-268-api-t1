@@ -49,7 +49,7 @@ def _config() -> Config:
 PASSWORD = "dmc268_app"
 
 
-def _role_passwords() -> None:
+def _role_passwords() -> str:
     """Шаг деплоя после миграций: alembic/role_passwords.py с паролями compose."""
     assert TEST_DATABASE_URL is not None
     env = os.environ | {
@@ -57,7 +57,9 @@ def _role_passwords() -> None:
         "POSTGRES_APP_PASSWORD": PASSWORD,
         "POSTGRES_MONITOR_PASSWORD": "dmc268_monitor",
     }
-    subprocess.run([sys.executable, "alembic/role_passwords.py"], env=env, check=True)
+    return subprocess.run(
+        [sys.executable, "alembic/role_passwords.py"], env=env, check=True, capture_output=True, text=True
+    ).stdout
 
 
 @pytest.fixture
@@ -157,6 +159,15 @@ def test_the_app_path_works_under_the_role(app_url, app_engine) -> None:
 def test_the_role_cannot_change_the_schema(app_engine, statement: str) -> None:
     with app_engine.connect() as conn, pytest.raises(ProgrammingError, match=r"permission denied|must be owner"):
         conn.execute(text(statement))
+
+
+def test_the_deploy_step_reports_whether_the_app_role_password_changed(clean_db) -> None:
+    """migrate.sh пишет смену пароля в `passwords-changed` по строке «— меняю» (ревью #416)."""
+    with clean_db.begin() as conn:
+        conn.execute(text(f"ALTER ROLE {ROLE} PASSWORD 'other-password-for-the-test'"))
+
+    assert f"{ROLE}: пароль не совпадает с секретом — меняю" in _role_passwords()
+    assert f"{ROLE}: пароль совпадает с секретом" in _role_passwords()
 
 
 def test_the_deploy_step_closes_alembic_version_again(clean_db, app_engine) -> None:

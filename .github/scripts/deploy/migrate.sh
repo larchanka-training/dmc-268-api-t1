@@ -151,7 +151,14 @@ done
 # вошли бы в базу паролем из секрета.
 rm -f "$report_dir/migrate-roles.error"
 roles_code=0
-timeout 60 "${migrations_run[@]}" --name dmc268-migrations "$API_IMAGE" python alembic/role_passwords.py || roles_code=$?
+# Вывод идёт в лог шага построчно; дошло до смены пароля роли приложения («— меняю») —
+# `postgres-app` сразу в `passwords-changed`, как у passwords.sh: шаг, упавший или
+# снятый по тайм-ауту после этого, summary тоже покажет.
+timeout 60 "${migrations_run[@]}" --name dmc268-migrations "$API_IMAGE" python alembic/role_passwords.py \
+  | while IFS= read -r line; do
+    printf '%s\n' "$line"
+    case "$line" in 'dmc268_app: '*'— меняю') echo postgres-app >> "$report_dir/passwords-changed" ;; esac
+  done || roles_code=$?
 if [ "$roles_code" -ne 0 ]; then
   echo "$roles_code" > "$report_dir/migrate-roles.error"
   echo "::error::миграции применены, но пароли ролей dmc268_monitor и dmc268_app не обновлены (код $roles_code)"
