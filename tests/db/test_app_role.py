@@ -45,19 +45,27 @@ def _config() -> Config:
     return config
 
 
+# Роль кластерная: пароли те же, что в compose, иначе тест отрезал бы его api и воркер.
+PASSWORD = "dmc268_app"
+
+
+def _role_passwords() -> None:
+    """Шаг деплоя после миграций: alembic/role_passwords.py с паролями compose."""
+    assert TEST_DATABASE_URL is not None
+    env = os.environ | {
+        "DATABASE_URL": TEST_DATABASE_URL,
+        "POSTGRES_APP_PASSWORD": PASSWORD,
+        "POSTGRES_MONITOR_PASSWORD": "dmc268_monitor",
+    }
+    subprocess.run([sys.executable, "alembic/role_passwords.py"], env=env, check=True)
+
+
 @pytest.fixture
 def app_url(clean_db) -> str:
     """URL тестовой базы под ролью приложения: пароль ставит тот же скрипт, что на деплое."""
     assert TEST_DATABASE_URL is not None
-    # Роль кластерная: пароли те же, что в compose, иначе тест отрезал бы его api и воркер.
-    password = "dmc268_app"
-    env = os.environ | {
-        "DATABASE_URL": TEST_DATABASE_URL,
-        "POSTGRES_APP_PASSWORD": password,
-        "POSTGRES_MONITOR_PASSWORD": "dmc268_monitor",
-    }
-    subprocess.run([sys.executable, "alembic/role_passwords.py"], env=env, check=True)
-    url = make_url(TEST_DATABASE_URL).set(username=ROLE, password=password)
+    _role_passwords()
+    url = make_url(TEST_DATABASE_URL).set(username=ROLE, password=PASSWORD)
     return url.render_as_string(hide_password=False)
 
 
@@ -149,6 +157,17 @@ def test_the_app_path_works_under_the_role(app_url, app_engine) -> None:
 def test_the_role_cannot_change_the_schema(app_engine, statement: str) -> None:
     with app_engine.connect() as conn, pytest.raises(ProgrammingError, match=r"permission denied|must be owner"):
         conn.execute(text(statement))
+
+
+def test_the_deploy_step_closes_alembic_version_again(clean_db, app_engine) -> None:
+    """Как после pg_restore --clean: таблица снова открыта роли, шаг паролей на деплое закрывает её."""
+    with clean_db.begin() as conn:
+        conn.execute(text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON alembic_version TO {ROLE}"))
+
+    _role_passwords()
+
+    with app_engine.connect() as conn, pytest.raises(ProgrammingError, match="permission denied"):
+        conn.execute(text("UPDATE alembic_version SET version_num = version_num"))
 
 
 def test_a_table_of_a_later_revision_is_open_to_the_role(migrated, app_engine) -> None:

@@ -1,5 +1,9 @@
 """Пароли ролей dmc268_monitor и dmc268_app — из окружения, после миграций.
 
+Заодно снова закрывает alembic_version от роли приложения: после pg_restore --clean
+таблица пересоздана и по DEFAULT PRIVILEGES снова открыта ей, а этот шаг идёт на
+каждом деплое.
+
 Один шаг для деплоя (.github/scripts/deploy/migrate.sh) и сервиса migrate в
 docker-compose.yml. Роли создают миграции (0013 и 0023); ревизия 0023 пароля не
 задаёт, а ALTER ROLE здесь идемпотентен и сводит пароль с переменной на
@@ -34,3 +38,4 @@ with psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor) as conn, conn.tra
     for role, variable in ROLES.items():
         hashed = conn.pgconn.encrypt_password(os.environ[variable].encode(), role.encode(), b"scram-sha-256")
         conn.execute(sql.SQL("ALTER ROLE {} PASSWORD %s").format(sql.Identifier(role)), (hashed.decode(),))
+    conn.execute("REVOKE ALL ON alembic_version FROM dmc268_app")

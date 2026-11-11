@@ -81,7 +81,7 @@ docker run --rm --network dmc268-backend -v dmc268-postgres-backups:/backups:ro 
   pg_restore -h dmc268-postgres -U dmc268 -d dmc268 --clean --if-exists /backups/<файл>.dump
 ```
 
-После восстановления вернуть запрет на ревизию схемы: `alembic_version` пересоздана с правами по умолчанию, и роль приложения снова может её писать.
+После восстановления `alembic_version` пересоздана с правами по умолчанию, и роль приложения снова может её писать. Запрет вернёт ближайший деплой (`alembic/role_passwords.py`), до него можно вручную:
 
 ```bash
 docker run --rm --network dmc268-backend -e PGPASSWORD=<пароль> pgvector/pgvector:pg18 \
@@ -288,7 +288,7 @@ tofu apply infra.tfplan
 
 Проверки реплики (`check-replica.sh`, healthcheck реплики) входят по локальному сокету и пароля не знают.
 
-Пароли ролей `dmc268_app` и `dmc268_monitor` ставит не шаг паролей, а шаг миграций: роли создают миграции 0023 и 0013, и на первом деплое до миграций их ещё нет. После `alembic upgrade head` тем же образом запускается `alembic/role_passwords.py` и сводит оба пароля с секретами (`ALTER ROLE` параметром запроса, на сервер уходит только SCRAM-хеш, `track_utility` выключен той же транзакцией). Окно то же: от этого шага до замены API в apply. Упал шаг — summary пишет «миграции применены, пароли ролей не обновлены», apply не идёт.
+Пароли ролей `dmc268_app` и `dmc268_monitor` ставит не шаг паролей, а шаг миграций: роли создают миграции 0023 и 0013, и на первом деплое до миграций их ещё нет. После `alembic upgrade head` тем же образом запускается `alembic/role_passwords.py` и сводит оба пароля с секретами (`ALTER ROLE` параметром запроса, на сервер уходит только SCRAM-хеш, `track_utility` выключен той же транзакцией) и снова закрывает `alembic_version` от `dmc268_app`: после `pg_restore --clean` таблица открыта ей по DEFAULT PRIVILEGES. Окно то же: от этого шага до замены API в apply. Упал шаг — summary пишет «миграции применены, пароли ролей не обновлены», apply не идёт.
 
 ### Окно смены
 
