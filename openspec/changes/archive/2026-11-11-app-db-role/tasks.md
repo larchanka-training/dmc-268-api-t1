@@ -13,4 +13,4 @@
 
 ## 3. Проверка на стенде (после мёржа)
 
-- [ ] 3.1 До мёржа заведён секрет `PG_APP_PASSWORD_DMC268_T1`. Первый деплой после мёржа: миграция 0023 и шаг паролей зелёные, `docker exec dmc268-api printenv DATABASE_URL` — роль `dmc268_app`, API и воркер проходят проверки, в `pg_stat_activity` соединения API и воркера — `usename = 'dmc268_app'`
+- [x] 3.1 До мёржа заведён секрет `PG_APP_PASSWORD_DMC268_T1`. Первый деплой после мёржа: миграция 0023 и шаг паролей зелёные, `docker exec dmc268-api printenv DATABASE_URL` — роль `dmc268_app`, API и воркер проходят проверки, в `pg_stat_activity` соединения API и воркера — `usename = 'dmc268_app'`
