@@ -965,7 +965,9 @@ cd infra && tofu force-unlock <ID из ошибки>
 
 Состояние и сохранённый план OpenTofu шифрует сам (`infra/encryption.tf`, #147): ключ выводит `key_provider "pbkdf2"` из фразы, шифр — `method "aes_gcm"`. В состоянии лежат значения всех секретов стека — пароли базы, брокера и реплики, ключ GitHub App, секрет вебхука, ключ шифрования токенов, — и без шифрования доступ к бакету открывал бы их все. Теперь в бакете лежит конверт `{encrypted_data, encryption_version, lineage, meta, serial}`: serial и lineage читаются, ресурсы и значения — только с фразой. Зашифрован и `infra/errored.tfstate`, который остаётся на раннере после упавшей записи.
 
-Сейчас идёт шаг 1 из двух: у `state` есть `fallback` на `method "unencrypted"`, чтобы первый деплой прочитал прежнее открытое состояние. Любой `apply` (и `apply -refresh-only`) переписывает его зашифрованным, даже без изменений; `plan` — нет. У `plan` `fallback` нет: план создаётся и применяется в одном job'е, старых открытых планов не бывает. Шаг 2 — `enforced = true` без `fallback` у `state` и удаление старых открытых версий объекта в бакете (задачи — `openspec/changes/tfstate-encryption/tasks.md`).
+У `state` есть `fallback` на `method "unencrypted"`, чтобы первый деплой прочитал прежнее открытое состояние. Любой `apply` (и `apply -refresh-only`) переписывает его зашифрованным, даже без изменений; `plan` — нет. У `plan` `fallback` нет: план создаётся и применяется в одном job'е, старых открытых планов не бывает. Шаг 2 — `enforced = true` без `fallback` и удаление старых открытых версий объекта — отменён (#147): хранилище слушает только петлю сервера, а оба пути к нему — SSH на сервер и секреты GitHub — открывают те же секреты и без состояния (`docker inspect`, сама фраза).
+
+**Старые версии объекта открыты.** Версионирование бакета включено, и версии `api/terraform.tfstate`, записанные до шифрования, остались в нём открытым JSON со всеми секретами стенда. Пока хранилище доступно только с сервера, это не хуже `docker inspect`. **Прежде чем переносить хранилище или его копию за пределы сервера** (например, во внешнее S3-совместимое хранилище), открытые версии удалить и включить `enforced = true` без `fallback` у `state` и `plan`. Сначала снять текущее состояние с фразой (`tofu state pull > backup`). Удалять только версии, записанные до шифрования: в их теле нет `encrypted_data` (они же — с `LastModified` раньше 2026-11-09 13:55 UTC). Текущую и остальные зашифрованные версии не трогать: в версионируемом бакете удаление необратимо, дальше только `tofu import`. Список версий — `aws s3api list-object-versions`, удаление — `aws s3api delete-object --version-id`; на RustFS проверить на копии.
 
 **Где фраза.** Секрет `STATE_PASSPHRASE_DMC268_T1` в environment `stand`; деплой передаёт его как `TF_VAR_state_passphrase` всем шагам `tofu` и восстановлению. Не короче 16 символов (проверка переменной). Копия фразы **обязательно** хранится вне GitHub — секрет GitHub обратно не прочитать, а без фразы состояние не открыть. Поэтому фраза сначала сохраняется вне GitHub, а секрет ставится из той же переменной:
 
@@ -998,11 +1000,11 @@ cd infra && tofu init && tofu plan
 aws s3 cp s3://dmc268-tfstate/api/terraform.tfstate - --endpoint-url http://127.0.0.1:9000 | jq 'keys'
 ```
 
-Зашифрованное — в ключах есть `encrypted_data`, а `resources` нет. Видно `resources` — состояние открыто: после шага 1 так бывает только до первого деплоя.
+Зашифрованное — в ключах есть `encrypted_data`, а `resources` нет. Видно `resources` — состояние открыто: с шифрованием так бывает только до первого деплоя.
 
 **Ротация фразы.** Существующие `key_provider` и `method` не переименовывать: документация OpenTofu предупреждает, что переименованный провайдер или метод не откроет уже зашифрованное состояние.
 
-1. Добавить в `encryption.tf` новый `key_provider "pbkdf2"` с новым именем и новой переменной фразы и новый `method "aes_gcm"` на нём; у `state` и `plan` основным поставить новый метод, прежний `aes_gcm` — в `fallback`. `fallback` в блоке один и метод в нём один (второй блок — «Duplicate fallback block», список — «Invalid expression»), поэтому, пока идёт шаг 1, `unencrypted` у `state` уходит во вложенный `fallback`; у `plan` — только прежний `aes_gcm`:
+1. Добавить в `encryption.tf` новый `key_provider "pbkdf2"` с новым именем и новой переменной фразы и новый `method "aes_gcm"` на нём; у `state` и `plan` основным поставить новый метод, прежний `aes_gcm` — в `fallback`. `fallback` в блоке один и метод в нём один (второй блок — «Duplicate fallback block», список — «Invalid expression»), поэтому, пока у `state` есть `fallback` на открытое состояние, `unencrypted` уходит во вложенный `fallback`; у `plan` — только прежний `aes_gcm`:
 
    ```hcl
    state {
@@ -1010,7 +1012,7 @@ aws s3 cp s3://dmc268-tfstate/api/terraform.tfstate - --endpoint-url http://127.
      fallback {
        method = method.aes_gcm.main
        fallback {
-         method = method.unencrypted.legacy # только пока идёт шаг 1
+         method = method.unencrypted.legacy # только пока у state есть fallback на открытое
        }
      }
    }
