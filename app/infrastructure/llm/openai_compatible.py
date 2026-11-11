@@ -9,7 +9,8 @@
 кругу; ключ, отвергнутый провайдером или упёршийся в лимит (`401`, `403`,
 `429`), сменяется следующим в том же вызове. Отвергнуты все - сбой провайдера;
 если все по `429` - сбой «лимит запросов» (`LLM_RATE_LIMITED`). Ошибка сервера,
-таймаут и обрыв соединения - сбой провайдера сразу: ключ тут ни при чём.
+таймаут и обрыв соединения - сбой провайдера сразу (`LlmUnavailableError`, отказ
+для breaker'а, #294): ключ тут ни при чём.
 
 Ключи не попадают ни в текст ошибки, ни в лог: тексты строятся из кода
 ответа и номера ключа, а описание ошибки провайдера очищается от ключей.
@@ -36,7 +37,12 @@ from pydantic import BaseModel, SecretStr
 
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse
 from app.domain.entities import PromptMessage
-from app.domain.llm_errors import LlmError, LlmRateLimitedError, LlmTimeoutError
+from app.domain.llm_errors import (
+    LlmError,
+    LlmRateLimitedError,
+    LlmTimeoutError,
+    LlmUnavailableError,
+)
 from app.domain.llm_usage import LlmUsage
 from app.infrastructure.llm.structured import RawReply, complete_structured, token_count
 from app.infrastructure.telemetry import LLM_REQUEST_ID
@@ -130,7 +136,9 @@ class OpenAiCompatibleGateway:
                 continue
             if response.status_code != httpx.codes.OK:
                 logger.warning("%s: HTTP %d", self._name, response.status_code, extra=_request_id(response))
-                raise LlmError(
+                # 5xx — отказ провайдера (breaker, #294); прочий 4xx — провайдер ответил.
+                error_type = LlmUnavailableError if response.is_server_error else LlmError
+                raise error_type(
                     f"{self._name}: HTTP {response.status_code}: {self._error_text(response)}"
                 )
             return self._reply(response)
@@ -150,7 +158,7 @@ class OpenAiCompatibleGateway:
         except httpx.TimeoutException as error:
             raise LlmTimeoutError(f"{self._name}: таймаут ({type(error).__name__})") from None
         except httpx.RequestError as error:
-            raise LlmError(f"{self._name} недоступен ({type(error).__name__})") from None
+            raise LlmUnavailableError(f"{self._name} недоступен ({type(error).__name__})") from None
 
     def _reply(self, response: httpx.Response) -> RawReply:
         unexpected = f"{self._name} вернул неожиданное тело на /chat/completions"

@@ -517,6 +517,77 @@ tests:
         alertname: WorkerNotConsuming
         exp_alerts: []
 
+  # Breaker GitHub не замкнут (#294): прогоны откладываются — сообщение в работе и
+  # готовые задачи без подтверждений, — но воркер не завис: WorkerStalled и
+  # ReviewJobStuck молчат, горит ProviderCircuitOpen. Gauge скачет 2 → 1 → 2 между
+  # пробами и в 0 не падает; с 4-й минуты в очереди задачи, на 18-й алерт горит,
+  # на 17-й ещё нет. Ollama замкнута — по ней тишина.
+  - interval: 1m
+    input_series:
+      - series: 'review_circuit_breaker_state{job="dmc-268-worker", provider="GitHub"}'
+        values: "0x2 2 2 1 2 2 1 2 2 1 2 2 1 2 2 1 2 2 1 2 2 1 2 2 1 2 2 1 2 2 1 2 2 1 2 2 1"
+      - series: 'review_circuit_breaker_state{job="dmc-268-worker", provider="Ollama"}'
+        values: "0x40"
+      - series: 'rabbitmq_queue_messages{queue="review_jobs.qq"}'
+        values: "0x2 1 3x37"
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "0x3 2x37"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "0x2 1x38"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "80x40"
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: ProviderCircuitOpen
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: ProviderCircuitOpen
+        exp_alerts: &provider_circuit_open
+          - exp_labels:
+              severity: critical
+              service: worker
+              provider: GitHub
+            exp_annotations:
+              summary: "Breaker GitHub не замкнут 15 минут"
+              description: "Провайдер GitHub не отвечает: сеть, таймаут или 5xx. Прогоны ждут в очереди без траты попыток доставки и пойдут сами после удачного пробного вызова (пауза от минуты до 10). Причина — в логах воркера («breaker … разомкнут») и спанах HTTP-клиента; статус GitHub — githubstatus.com."
+      - eval_time: 39m
+        alertname: ProviderCircuitOpen
+        exp_alerts: *provider_circuit_open
+      - eval_time: 39m
+        alertname: WorkerStalled
+        exp_alerts: []
+      - eval_time: 39m
+        alertname: ReviewJobStuck
+        exp_alerts: []
+
+  # Ночной сбой: breaker разомкнулся и ждёт пробы, а задач нет — пробовать нечем и
+  # ждать некому, алерт молчит. Пришла задача (30-я минута) — через 15 минут горит.
+  - interval: 1m
+    input_series:
+      - series: 'review_circuit_breaker_state{job="dmc-268-worker", provider="Eurorouter"}'
+        values: "2x2 1x50"
+      - series: 'rabbitmq_queue_messages{queue="review_jobs.qq"}'
+        values: "0x29 1x22"
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: ProviderCircuitOpen
+        exp_alerts: []
+      - eval_time: 44m
+        alertname: ProviderCircuitOpen
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: ProviderCircuitOpen
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: worker
+              provider: Eurorouter
+            exp_annotations:
+              summary: "Breaker Eurorouter не замкнут 15 минут"
+              description: "Провайдер Eurorouter не отвечает: сеть, таймаут или 5xx. Прогоны ждут в очереди без траты попыток доставки и пойдут сами после удачного пробного вызова (пауза от минуты до 10). Причина — в логах воркера («breaker … разомкнут») и спанах HTTP-клиента; статус GitHub — githubstatus.com."
+
   # Поток прогонов подряд: очередь не пустеет, сообщение в работе всегда,
   # но задачи подтверждаются раз в 2 минуты; после рестарта брокера счётчик
   # растёт с нуля. Ни зависания, ни застрявшей задачи.

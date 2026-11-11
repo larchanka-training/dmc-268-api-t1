@@ -13,6 +13,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from app.application.context_assembly import ContextLimits
 from app.application.llm_review import LlmLimits
 from app.application.ports.llm_gateway import LlmGateway
+from app.application.review_pipeline import ReviewDeferred
 from app.domain.entities import MergeRequest, ReviewJob, ReviewRun
 from app.domain.enums import (
     CoverageReason,
@@ -293,3 +294,19 @@ def test_a_completed_run_grows_the_run_counter_by_status(
     assert completed == 1
     failed, _ = metric_delta(metric_reader, before, "review_runs_total", status="failed")
     assert failed == 0
+
+
+def test_a_deferred_run_is_not_logged_as_a_failure(caplog: pytest.LogCaptureFixture) -> None:
+    """#294: провайдер на паузе breaker'а — прогон откладывается без записи ERROR и без модели."""
+    body = json.dumps(to_wire_message(JOB)).encode("utf-8")
+    uow = _seeded_uow()
+    gateway = ScriptedLlmGateway([])
+    handler = build_review_handler(_Deps(uow, gateway), LIMITS, LLM_LIMITS, TEXTS, paused_for=lambda: 30.0)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(ReviewDeferred):
+        handler(body)
+
+    assert caplog.records == []
+    assert gateway.requests == []
+    run = uow.review_runs.get(JOB.review_run_id)
+    assert run is not None and run.status is ReviewRunStatus.QUEUED

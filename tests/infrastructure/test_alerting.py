@@ -85,6 +85,14 @@ def test_provider_balance_rules_read_the_worker_gauge() -> None:
         assert _alerts()[name]["labels"]["service"] != _alerts()["LlmBudgetExceeded"]["labels"]["service"]
 
 
+def test_circuit_breaker_rules_read_the_worker_gauge() -> None:
+    """#294: алерт и глушение зависаний читают gauge, который пишет воркер."""
+    metric = "review_circuit_breaker_state"
+    assert f'"{metric}"' in (REPO / "app" / "infrastructure" / "telemetry.py").read_text(encoding="utf-8")
+    for name in ("ProviderCircuitOpen", "WorkerStalled", "ReviewJobStuck"):
+        assert metric in _alerts()[name]["expr"], name
+
+
 def test_backup_mark_matches_the_rule() -> None:
     metric = "dmc268_backup_last_success_timestamp_seconds"
     assert metric in BACKUP_SCRIPT.read_text(encoding="utf-8")

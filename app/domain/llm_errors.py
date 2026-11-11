@@ -31,7 +31,14 @@ class LlmOutputError(LlmError):
     code: ClassVar[str] = "LLM_INVALID_OUTPUT"
 
 
-class LlmTimeoutError(LlmError):
+class LlmUnavailableError(LlmError):
+    """Провайдер не ответил: сеть, таймаут, 5xx. Отказ провайдера для breaker'а (#294).
+
+    Код тот же, что у общего сбоя: шаг прогона различает только таймаут.
+    """
+
+
+class LlmTimeoutError(LlmUnavailableError):
     """Провайдер не ответил за таймаут вызова."""
 
     code: ClassVar[str] = "LLM_TIMEOUT"

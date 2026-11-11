@@ -13,7 +13,7 @@ from app.application.llm_schema import ReviewOutput
 from app.application.ports.llm_gateway import LlmMeter, LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
-from app.domain.llm_errors import LlmError, LlmTimeoutError
+from app.domain.llm_errors import LlmError, LlmTimeoutError, LlmUnavailableError
 from app.domain.llm_usage import LlmUsage
 from app.infrastructure.llm.ollama import OllamaGateway
 
@@ -237,3 +237,29 @@ def test_timeout_is_classified_as_a_timeout() -> None:
 
     with pytest.raises(LlmTimeoutError, match="таймаут"):
         _gateway(handler).complete(REQUEST)
+
+
+@pytest.mark.parametrize(
+    ("reply", "unavailable"),
+    [
+        (httpx.ConnectError, True),
+        (httpx.ReadTimeout, True),
+        (httpx.Response(503, json={"error": "loading"}), True),
+        (httpx.Response(404, json={"error": "model 'x' not found"}), False),
+        (httpx.Response(200, text="не json"), False),
+    ],
+    ids=["connection", "timeout", "5xx", "4xx", "bad-body"],
+)
+def test_only_no_answer_is_an_outage_for_the_breaker(reply: object, unavailable: bool) -> None:
+    """Сеть, таймаут, 5xx — `LlmUnavailableError` (отказ для breaker'а, #294); ответ Ollama — нет."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if isinstance(reply, httpx.Response):
+            return reply
+        assert isinstance(reply, type)
+        raise reply("boom", request=request)
+
+    with pytest.raises(LlmError) as error:
+        _gateway(handler).complete(REQUEST)
+
+    assert isinstance(error.value, LlmUnavailableError) is unavailable

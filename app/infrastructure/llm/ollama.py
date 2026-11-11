@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse
 from app.domain.entities import PromptMessage
-from app.domain.llm_errors import LlmError, LlmTimeoutError
+from app.domain.llm_errors import LlmError, LlmTimeoutError, LlmUnavailableError
 from app.domain.llm_usage import LlmUsage
 from app.infrastructure.llm.structured import RawReply, complete_structured, token_count
 
@@ -60,9 +60,11 @@ class OllamaGateway:
         except httpx.TimeoutException as error:
             raise LlmTimeoutError(f"Ollama: таймаут ({type(error).__name__})") from None
         except httpx.RequestError as error:
-            raise LlmError(f"Ollama недоступна ({type(error).__name__})") from None
+            raise LlmUnavailableError(f"Ollama недоступна ({type(error).__name__})") from None
         if response.status_code != httpx.codes.OK:
-            raise LlmError(f"Ollama: HTTP {response.status_code}: {_error_text(response)}")
+            # 5xx — отказ провайдера (breaker, #294); 4xx — Ollama ответила.
+            error_type = LlmUnavailableError if response.is_server_error else LlmError
+            raise error_type(f"Ollama: HTTP {response.status_code}: {_error_text(response)}")
         unexpected = "Ollama вернула неожиданное тело на /api/chat"
         try:
             data = response.json()

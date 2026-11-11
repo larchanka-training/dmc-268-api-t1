@@ -24,6 +24,7 @@ import pika
 from opentelemetry import trace
 from pika import spec
 
+from app.application.circuit_breaker import deferral
 from app.application.context_assembly import ContextLimits
 from app.application.context_payload_expiry import expire_context_payloads
 from app.application.llm_review import LlmLimits
@@ -37,7 +38,7 @@ from app.application.ports import (
 from app.application.ports.llm_gateway import LlmGateway
 from app.application.ports.run_outcome import NO_RUN_OUTCOME, RunOutcomeRecorder
 from app.application.ports.webhook_deliveries import WebhookDeliveries
-from app.application.review_pipeline import run_review
+from app.application.review_pipeline import ReviewDeferred, run_review
 from app.application.session_purge import purge_expired_sessions
 from app.application.stale_sweep import sweep_stale_runs
 from app.application.webhook_redelivery import redeliver_failed_webhooks
@@ -47,6 +48,7 @@ from app.domain.prompt import PromptTexts, check_window_config
 from app.domain.webhook_redelivery import RedeliveryPolicy
 from app.infrastructure.container import (
     WORKER_VCS_LIMITS,
+    build_breakers,
     build_container,
     build_llm_balance,
 )
@@ -70,6 +72,7 @@ from app.infrastructure.telemetry import (
     OtelRunOutcomeRecorder,
     OtelStageTracer,
     configure_telemetry,
+    instrument_circuit_breakers,
     instrument_engine,
     instrument_llm_balance,
     instrument_pool,
@@ -103,6 +106,11 @@ _HANDLER_POLL_SECONDS = 1
 # моргнувшая на секунду, отправила бы прогон в DLQ. С паузой у сбоя есть около минуты.
 # Пауза идёт циклом соединения (`connection.sleep`): heartbeat она не прерывает.
 RETRY_DELAY_SECONDS = 15
+
+# Самое долгое, что воркер держит отложенное сообщение до возврата (#294): пауза breaker'а
+# бывает дольше, а очистка и сигнал остановки ждут такта цикла. Вернувшееся раньше пробы
+# сообщение откладывается снова — без траты попытки доставки.
+MAX_DEFER_SECONDS = 60.0
 
 # Сигналы штатной остановки: SIGTERM шлёт `docker stop`, SIGINT — Ctrl+C.
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
@@ -155,6 +163,7 @@ class Worker:
         sweep_interval: float = SWEEP_INTERVAL_SECONDS,
         stop: StopRequest | None = None,
         retry_delay: float = RETRY_DELAY_SECONDS,
+        max_defer: float = MAX_DEFER_SECONDS,
     ) -> None:
         """Потреблять очередь задач ревью (`QUEUE_NAME`).
 
@@ -170,7 +179,9 @@ class Worker:
         идёт, как обработчик, в своём потоке: цикл соединения отвечает на heartbeat.
 
         `retry_delay` — пауза перед возвратом не начатого прогона в очередь
-        (`RETRY_DELAY_SECONDS`); просьба остановиться её прерывает.
+        (`RETRY_DELAY_SECONDS`); просьба остановиться её прерывает. Отложенный
+        прогон (провайдер на паузе breaker'а) ждёт до пробы, но не дольше `max_defer`,
+        и возвращается `nack` — попытку доставки это не тратит.
 
         `stop` — просьба остановиться (`stop_on_signals`). Сообщение в работе
         дорабатывает и подтверждается, следующее не берётся, даже если брокер
@@ -227,6 +238,12 @@ class Worker:
                     logger.warning("прогон не начат из-за временного сбоя, сообщение вернётся в очередь")
                     self._pause_before_retry(retry_delay, stop)
                     self.channel.basic_reject(method.delivery_tag, requeue=True)
+                elif decision is Decision.DEFER:
+                    assert isinstance(exc, ReviewDeferred)
+                    logger.info("провайдер на паузе breaker'а, прогон отложен")
+                    self._pause_before_retry(min(exc.retry_after, max_defer), stop)
+                    # `nack` с requeue, как у штатной остановки: попытку доставки не тратит.
+                    self.channel.basic_nack(method.delivery_tag, requeue=True)
                 else:
                     self.channel.basic_nack(method.delivery_tag, requeue=False)
                 if last:
@@ -396,6 +413,7 @@ def build_review_handler(
     *,
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
     billing_enabled: bool = False,
+    paused_for: Callable[[], float | None] | None = None,
 ) -> MessageHandler:
     """Собрать обработчик сообщения: разбор + `run_review`.
 
@@ -405,8 +423,12 @@ def build_review_handler(
     передаёт composition root (`run_worker`) адаптером телеметрии, общим для
     обработчика и прохода очистки. Обработчик сам счётчик не пишет: прогон
     считается на фактическом терминальном переходе, который делает пайплайн.
+
+    `paused_for` — сколько ждать провайдеров на паузе breaker'а (`deferral`, #294);
+    `None` — без breaker'ов, прогон не откладывается.
     """
     stage_tracer = OtelStageTracer()
+    pause_check = paused_for if paused_for is not None else _never_paused
 
     def handle(body: bytes) -> None:
         job = from_wire_message(body)
@@ -432,7 +454,11 @@ def build_review_handler(
                     stage_tracer=stage_tracer,
                     run_outcome=run_outcome,
                     billing_enabled=billing_enabled,
+                    paused_for=pause_check,
                 )
+            except ReviewDeferred:
+                # Не сбой: прогон не захвачен, решение и запись — у consume-цикла.
+                raise
             except Exception:
                 # job.id остаётся в тексте: это идентификатор задачи очереди, у
                 # спанов поля с таким именем нет. Прогон ищется по атрибуту
@@ -441,6 +467,10 @@ def build_review_handler(
                 raise
 
     return handle
+
+
+def _never_paused() -> float | None:
+    return None
 
 
 class WorkerConfigError(RuntimeError):
@@ -691,7 +721,10 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
     check_sweep_thresholds(settings)
     # Воркеру — свои потолки VCS-клиента: дифф и ревью крупного PR дольше,
     # чем ответ на вебхук у api.
-    container = build_container(settings, vcs_limits=WORKER_VCS_LIMITS)
+    # Breaker'ы провайдеров (#294): общие для обработчика и прохода очистки, состояние — gauge.
+    breakers = build_breakers(settings)
+    instrument_circuit_breakers(breakers.all())
+    container = build_container(settings, vcs_limits=WORKER_VCS_LIMITS, breakers=breakers)
     instrument_engine(container.engine)
     instrument_pool(container.engine, settings.db_pool_size, settings.db_max_overflow)
     prompt_texts = load_checked_prompt_texts(settings, DEFAULT_PROMPTS_DIR)
@@ -729,6 +762,7 @@ def run_worker(load_settings: Callable[[], Settings]) -> None:
         prompt_texts,
         run_outcome=run_outcome,
         billing_enabled=settings.billing_enabled,
+        paused_for=lambda: deferral(breakers.vcs, list(breakers.llm.values())),
     )
     with stop_on_signals() as stop:
         try:

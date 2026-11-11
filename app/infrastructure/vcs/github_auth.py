@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import jwt
 
-from app.infrastructure.vcs.errors import VcsAuthError, VcsUnavailableError
+from app.infrastructure.vcs.errors import VcsAuthError, VcsOutageError
 
 # Документация GitHub Apps: exp не дальше 10 минут от iat.
 _JWT_TTL_SECONDS = 10 * 60
@@ -58,7 +58,7 @@ class GitHubAppAuth:
                 headers={"Authorization": f"Bearer {self.app_jwt()}"},
             )
         except httpx.RequestError as error:
-            raise VcsUnavailableError(
+            raise VcsOutageError(
                 f"GitHub недоступен при запросе installation token"
                 f" для {installation_id}: {error}"
             ) from error

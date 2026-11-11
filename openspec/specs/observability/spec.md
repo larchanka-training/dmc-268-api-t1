@@ -666,9 +666,9 @@ Access-запись uvicorn о запросе health-check'а SHALL NOT попа
 
 Алерт SHALL гореть, когда у `review_jobs.qq` есть потребитель и готовые задачи, но 15 минут нет
 подтверждений (`WorkerStalled`); когда сообщение выдано и 20 минут не подтверждено
-(`ReviewJobStuck`), раньше выметателя зависших прогонов; когда память контейнера `dmc268-*`
-10 минут выше 90 % лимита (`ContainerMemoryNearLimit`). Поток коротких прогонов подряд и
-очередь без потребителя SHALL NOT зажигать первые два.
+(`ReviewJobStuck`); когда память контейнера `dmc268-*` 10 минут выше 90 % лимита
+(`ContainerMemoryNearLimit`). Поток коротких прогонов, очередь без потребителя и не замкнутый
+breaker провайдера SHALL NOT зажигать первые два.
 
 #### Scenario: Воркер завис на задаче
 
@@ -689,6 +689,11 @@ Access-запись uvicorn о запросе health-check'а SHALL NOT попа
 
 - **WHEN** брокер перезапущен и счётчик подтверждений начался с нуля, а воркер так и не подтвердил задачу
 - **THEN** `WorkerStalled` продолжает гореть
+
+#### Scenario: Провайдер на паузе
+
+- **WHEN** breaker провайдера не замкнут, прогоны откладываются, и 20 минут нет подтверждений
+- **THEN** `WorkerStalled` и `ReviewJobStuck` молчат, горит `ProviderCircuitOpen`
 
 #### Scenario: Память у потолка
 
@@ -946,3 +951,20 @@ SHALL NOT попадать в запись. Спан httpx ответа с `x-re
 
 - **WHEN** воркер вызывает Eurorouter внутри спана этапа
 - **THEN** в запросе нет `traceparent`, `tracestate` и `X-Trace-ID`, а в теле — только модель, сообщения, формат ответа и параметры генерации
+
+### Requirement: Состояние breaker'а провайдера
+
+Воркер SHALL отдавать gauge `review_circuit_breaker_state` с меткой `provider` (`GitHub`, `Ollama`,
+`Eurorouter`): 0 — замкнут, 1 — пауза вышла и ждёт пробы, 2 — разомкнут. Breaker не замкнут 15
+минут при задачах в `review_jobs.qq` — SHALL гореть `ProviderCircuitOpen` (critical) с меткой
+провайдера; без задач SHALL NOT.
+
+#### Scenario: Долгий отказ GitHub
+
+- **WHEN** breaker GitHub 15 минут разомкнут или ждёт пробы, а в очереди задачи
+- **THEN** горит `ProviderCircuitOpen` с `provider="GitHub"`
+
+#### Scenario: Ночной сбой без трафика
+
+- **WHEN** breaker ждёт пробы, а очередь пуста
+- **THEN** `ProviderCircuitOpen` молчит

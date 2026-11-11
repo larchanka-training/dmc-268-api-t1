@@ -7,7 +7,7 @@
 """
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
@@ -16,6 +16,7 @@ import httpx
 import stripe
 from sqlalchemy import Engine, create_engine
 
+from app.application.circuit_breaker import CircuitBreaker
 from app.application.ports import (
     CacheStore,
     DefinitionExtractor,
@@ -31,6 +32,7 @@ from app.application.ports.vcs_gateway import VcsGateway
 from app.application.ports.webhook_deliveries import WebhookDeliveries
 from app.application.use_cases.service_status import ServiceStatusMonitor
 from app.config import Settings
+from app.domain.circuit_breaker import BreakerPolicy
 from app.domain.vcs_errors import VcsError
 from app.infrastructure.cache.memory import InMemoryCacheStore
 from app.infrastructure.db.run_changes import PostgresRunChanges, listen_conninfo
@@ -101,6 +103,45 @@ SERVICE_STATUS_TTL_SECONDS = 15.0
 _OAUTH_CALLBACK_PATH = "/api/v1/auth/{provider}/callback"
 
 
+# Breaker провайдера (#294): три отказа подряд размыкают на минуту, каждый неудачный
+# пробный вызов удваивает паузу до 10 минут. Порог — не один отказ: моргнувший
+# провайдер прогоны не откладывает. Потолок паузы много короче порога ждущего прогона
+# (`QUEUED_RUN_TIMEOUT_SECONDS`, 6 часов): отложенный прогон успевает пойти.
+BREAKER_POLICY = BreakerPolicy(failure_threshold=3, pause_seconds=60.0, max_pause_seconds=600.0)
+GITHUB = "GitHub"
+OLLAMA = "Ollama"
+EUROROUTER = "Eurorouter"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderBreakers:
+    """Breaker'ы процесса: GitHub и каждый провайдер модели по имени из фоллбэка."""
+
+    vcs: CircuitBreaker
+    llm: Mapping[str, CircuitBreaker]
+
+    def all(self) -> list[CircuitBreaker]:
+        return [self.vcs, *self.llm.values()]
+
+
+def build_breakers(
+    settings: Settings, *, clock: Callable[[], float] = monotonic, policy: BreakerPolicy = BREAKER_POLICY
+) -> ProviderBreakers:
+    """Breaker на GitHub и на каждого провайдера модели, до которого может дойти вызов.
+
+    У заглушки модели breaker'а нет: она не ходит в сеть.
+    """
+    names: list[str] = []
+    if settings.llm_backend == "ollama":
+        names.append(OLLAMA)
+    if settings.llm_backend == "eurorouter" or (settings.llm_backend == "ollama" and settings.llm_hosted_fallback):
+        names.append(EUROROUTER)
+    return ProviderBreakers(
+        vcs=CircuitBreaker(GITHUB, policy, clock=clock),
+        llm={name: CircuitBreaker(name, policy, clock=clock) for name in names},
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Container:
     """Всё, что можно передать слою приложения."""
@@ -156,6 +197,9 @@ class Container:
     _service_status: ServiceStatusMonitor
     # Клиент Stripe для приёма оплаты; `None` — приём выключен (`app/config.py`).
     _stripe_client: stripe.StripeClient | None
+    # Breaker'ы провайдеров (#294) — у воркера; `None` — без них (API: отказ вебхука
+    # GitHub переотправит сам, отложить его некуда).
+    _breakers: ProviderBreakers | None
 
     def unit_of_work(self) -> UnitOfWork:
         return SqlAlchemyUnitOfWork(self.engine, self._token_cipher)
@@ -176,7 +220,8 @@ class Container:
         """Собрать адаптер модели при первом обращении; конструирование - без сети."""
         gateway = self._llm_gateway
         if gateway is None:
-            gateway = build_llm_gateway(self.settings)
+            breakers = self._breakers.llm if self._breakers is not None else None
+            gateway = build_llm_gateway(self.settings, breakers=breakers)
             object.__setattr__(self, "_llm_gateway", gateway)
         return gateway
 
@@ -238,6 +283,7 @@ class Container:
             client,
             rate_limit_budget_seconds=limits.rate_limit_budget_seconds,
             public_origin=self.settings.public_origin,
+            breaker=self._breakers.vcs if self._breakers is not None else None,
         )
 
     def webhook_deliveries(self) -> WebhookDeliveries:
@@ -294,6 +340,9 @@ class Container:
         """Статус сервиса для публичной страницы — с кэшем оценки, один на процесс."""
         return self._service_status
 
+    def breakers(self) -> ProviderBreakers | None:
+        return self._breakers
+
     def run_outcome(self) -> RunOutcomeRecorder:
         """Счётчик терминальных исходов прогонов — адаптер телеметрии.
 
@@ -314,7 +363,12 @@ class Container:
         return extractor
 
 
-def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS_LIMITS) -> Container:
+def build_container(
+    settings: Settings,
+    *,
+    vcs_limits: VcsClientLimits = API_VCS_LIMITS,
+    breakers: ProviderBreakers | None = None,
+) -> Container:
     # pool_pre_ping: соединение, умершее в простое (перезапуск сервера, idle
     # timeout, NAT сбросил поток), обнаруживается при выдаче из пула и
     # заменяется, а не всплывает OperationalError на следующем запросе.
@@ -364,6 +418,7 @@ def build_container(settings: Settings, *, vcs_limits: VcsClientLimits = API_VCS
             now=lambda: datetime.now(UTC),
         ),
         _stripe_client=_build_stripe_client(settings),
+        _breakers=breakers,
     )
 
 
@@ -417,7 +472,7 @@ def llm_http_timeout(settings: Settings) -> httpx.Timeout:
 
 def _eurorouter(settings: Settings, timeout: httpx.Timeout) -> tuple[str, LlmGateway]:
     return (
-        "Eurorouter",
+        EUROROUTER,
         OpenAiCompatibleGateway(
             httpx.Client(base_url=settings.eurorouter_base_url, timeout=timeout),
             settings.eurorouter_model,
@@ -444,7 +499,9 @@ def build_llm_balance(settings: Settings) -> EurorouterBalance:
     )
 
 
-def build_llm_gateway(settings: Settings) -> LlmGateway:
+def build_llm_gateway(
+    settings: Settings, *, breakers: Mapping[str, CircuitBreaker] | None = None
+) -> LlmGateway:
     """Порядок провайдеров не выбирается: локальная модель первая, hosted -
     только вторым и только по флагу (change `add-llm-gateway`, design D3), или
     hosted единственным при `LLM_BACKEND=eurorouter` (change `eurorouter-primary-backend`).
@@ -464,10 +521,10 @@ def build_llm_gateway(settings: Settings) -> LlmGateway:
             settings.eurorouter_model,
             settings.eurorouter_reasoning_effort or "не задан",
         )
-        return FallbackLlmGateway([_eurorouter(settings, timeout)])
+        return FallbackLlmGateway([_eurorouter(settings, timeout)], breakers=breakers)
     providers: list[tuple[str, LlmGateway]] = [
         (
-            "Ollama",
+            OLLAMA,
             OllamaGateway(
                 httpx.Client(base_url=settings.ollama_base_url, timeout=timeout),
                 settings.ollama_model,
@@ -479,11 +536,11 @@ def build_llm_gateway(settings: Settings) -> LlmGateway:
     local = f"модель: Ollama ({settings.ollama_model})"
     if not settings.llm_hosted_fallback:
         logger.info("%s; hosted-фоллбэк выключен", local)
-        return FallbackLlmGateway(providers)
+        return FallbackLlmGateway(providers, breakers=breakers)
     providers.append(_eurorouter(settings, timeout))
     logger.info(
         "%s; фоллбэк - Eurorouter (%s): при сбое локальной модели код уходит hosted-провайдеру",
         local,
         settings.eurorouter_model,
     )
-    return FallbackLlmGateway(providers)
+    return FallbackLlmGateway(providers, breakers=breakers)

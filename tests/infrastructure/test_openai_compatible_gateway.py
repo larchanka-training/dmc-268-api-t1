@@ -15,7 +15,12 @@ from app.application.llm_schema import ReviewOutput
 from app.application.ports.llm_gateway import LlmMeter, LlmRequest, LlmTask
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
-from app.domain.llm_errors import LlmError, LlmRateLimitedError, LlmTimeoutError
+from app.domain.llm_errors import (
+    LlmError,
+    LlmRateLimitedError,
+    LlmTimeoutError,
+    LlmUnavailableError,
+)
 from app.domain.llm_usage import LlmUsage
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
@@ -523,3 +528,31 @@ def test_keys_never_reach_errors_or_logs(caplog: pytest.LogCaptureFixture) -> No
 def test_gateway_without_keys_is_rejected_at_construction() -> None:
     with pytest.raises(ValueError, match="Eurorouter: нужен хотя бы один ключ"):
         _gateway(lambda request: httpx.Response(200), keys=())
+
+
+@pytest.mark.parametrize(
+    ("reply", "unavailable"),
+    [
+        (httpx.ConnectError, True),
+        (httpx.ReadTimeout, True),
+        (httpx.Response(502), True),
+        (httpx.Response(400), False),
+        (httpx.Response(429), False),
+        (httpx.Response(401), False),
+    ],
+    ids=["connection", "timeout", "5xx", "4xx", "429-all-keys", "401-all-keys"],
+)
+def test_only_no_answer_is_an_outage_for_the_breaker(reply: object, unavailable: bool) -> None:
+    """Сеть, таймаут, 5xx — `LlmUnavailableError` (отказ для breaker'а, #294); 4xx и отказ
+    ключей с ротацией — провайдер ответил."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if isinstance(reply, httpx.Response):
+            return reply
+        assert isinstance(reply, type)
+        raise reply("boom", request=request)
+
+    with pytest.raises(LlmError) as error:
+        _gateway(handler).complete(REQUEST)
+
+    assert isinstance(error.value, LlmUnavailableError) is unavailable

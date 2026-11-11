@@ -25,7 +25,7 @@ from app.application.merge_gate_publish import (
 )
 from app.application.ports.llm_gateway import LlmRequest, LlmResponse, LlmTask
 from app.application.ports.vcs_review import MergeGateCheck
-from app.application.review_pipeline import ReviewNotStarted, run_review
+from app.application.review_pipeline import ReviewDeferred, ReviewNotStarted, run_review
 from app.application.stale_sweep import sweep_stale_runs
 from app.application.use_cases.build_review_context import REVIEW_DIFF_MAX_LINES
 from app.domain.entities import (
@@ -2120,3 +2120,34 @@ def test_a_run_superseded_before_the_balance_check_reserves_nothing() -> None:
     assert gateway.requests == []
     assert vcs.checks == [build_in_progress_check()]
     assert uow.billing.balance(PAYER) == Decimal(1)
+
+
+def test_a_paused_provider_defers_the_run_before_the_claim() -> None:
+    """#294: провайдер на паузе breaker'а — прогон не захвачен и ждёт в `queued`, модель и GitHub
+    не вызваны; после паузы тот же прогон доходит до конца."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow)
+    gateway = ScriptedLlmGateway([review_response()])
+    vcs = RecordingVcsGateway()
+
+    with pytest.raises(ReviewDeferred) as deferred:
+        _run(uow, gateway, vcs_gateway=vcs, paused_for=lambda: 42.0)
+
+    assert deferred.value.retry_after == 42.0
+    assert not isinstance(deferred.value, ReviewNotStarted)
+    assert uow.review_runs.get(JOB.review_run_id).status is ReviewRunStatus.QUEUED  # type: ignore[union-attr]
+    assert gateway.requests == []
+    assert vcs.attempted_checks == [] and vcs.publications == []
+
+    _run(uow, gateway, paused_for=lambda: None)
+
+    assert uow.review_runs.get(JOB.review_run_id).status is ReviewRunStatus.COMPLETED  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("status", [ReviewRunStatus.COMPLETED, ReviewRunStatus.ANALYSING])
+def test_a_run_that_is_not_queued_is_not_deferred(status: ReviewRunStatus) -> None:
+    """Завершённый или чужой прогон подтверждается как раньше: откладывать нечего."""
+    uow = FakeUnitOfWork()
+    _seed_run(uow, status=status)
+
+    _run(uow, ScriptedLlmGateway([]), paused_for=lambda: 42.0)

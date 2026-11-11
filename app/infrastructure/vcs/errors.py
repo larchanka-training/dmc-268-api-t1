@@ -16,6 +16,7 @@ __all__ = [
     "VcsAuthError",
     "VcsError",
     "VcsNotFoundError",
+    "VcsOutageError",
     "VcsUnavailableError",
 ]
 
@@ -23,6 +24,11 @@ __all__ = [
 class VcsUnavailableError(VcsTransientError):
     """GitHub недоступен: обрыв сети (транспортный сбой httpx) или
     повторяемые сбои (429/5xx) исчерпали попытки адаптера."""
+
+
+class VcsOutageError(VcsUnavailableError):
+    """GitHub не ответил: обрыв сети или 5xx до конца попыток. Отказ для breaker'а (#294);
+    исчерпанный лимит — не он: GitHub ответил."""
 
 
 class VcsAuthError(VcsError):

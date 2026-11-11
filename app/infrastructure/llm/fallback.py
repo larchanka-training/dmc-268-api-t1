@@ -17,16 +17,23 @@
 у ответа - модель ответа, у сбоя - имя провайдера. Метрика времени каждого
 вызова модели (аудит #89) видит и таймаут Ollama, и ответ Eurorouter двумя
 записями. Токены метрикой не собираются: токены и стоимость - в базе на прогоне (#119).
+
+У провайдера может быть свой breaker (#294): провайдер на паузе пропускается
+без вызова и без записи в гистограмму, а если на паузе все - сбой
+`LlmUnavailableError` сразу, без таймаутов. Исход вызова идёт в breaker:
+`LlmUnavailableError` (сеть, таймаут, 5xx) - отказ, любой другой исход -
+провайдер ответил.
 """
 
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from pydantic import BaseModel
 
+from app.application.circuit_breaker import CircuitBreaker
 from app.application.ports.llm_gateway import LlmGateway, LlmRequest, LlmResponse
-from app.domain.llm_errors import LlmError
+from app.domain.llm_errors import LlmError, LlmUnavailableError
 from app.infrastructure.telemetry import record_llm_call_duration
 
 logger = logging.getLogger(__name__)
@@ -38,18 +45,24 @@ class FallbackLlmGateway:
         providers: Sequence[tuple[str, LlmGateway]],
         *,
         clock: Callable[[], float] = time.monotonic,
+        breakers: Mapping[str, CircuitBreaker] | None = None,
     ) -> None:
+        """`breakers` - breaker провайдера по его имени; у провайдера без записи его нет."""
         if not providers:
             raise ValueError("нужен хотя бы один провайдер модели")
         self._providers = tuple(providers)
         self._clock = clock
+        self._breakers = dict(breakers or {})
 
     def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
-        *heads, (_, last) = self._providers
-        for (name, provider), (next_name, _) in zip(heads, self._providers[1:], strict=True):
+        providers = [(name, provider) for name, provider in self._providers if not self._paused(name)]
+        if not providers:
+            raise LlmUnavailableError("все провайдеры модели на паузе breaker'а")
+        *heads, (_, last) = providers
+        for (name, provider), (next_name, _) in zip(heads, providers[1:], strict=True):
             started = self._clock()
             try:
-                response = provider.complete(request)
+                response = self._call(name, provider, request)
             except LlmError as error:
                 record_llm_call_duration(
                     request.task.value, name, self._clock() - started, outcome="error"
@@ -73,10 +86,10 @@ class FallbackLlmGateway:
                     model=response.model,
                 )
                 return response
-        (last_name, _) = self._providers[-1]
+        (last_name, _) = providers[-1]
         started = self._clock()
         try:
-            response = last.complete(request)
+            response = self._call(last_name, last, request)
         except LlmError:
             record_llm_call_duration(
                 request.task.value, last_name, self._clock() - started, outcome="error"
@@ -89,4 +102,27 @@ class FallbackLlmGateway:
             outcome="ok",
             model=response.model,
         )
+        return response
+
+    def _paused(self, name: str) -> bool:
+        breaker = self._breakers.get(name)
+        if breaker is None or (wait := breaker.retry_after()) is None:
+            return False
+        logger.warning("модель %s на паузе breaker'а ещё %.0f с, вызов пропущен", name, wait)
+        return True
+
+    def _call[T: BaseModel](self, name: str, provider: LlmGateway, request: LlmRequest[T]) -> LlmResponse[T]:
+        """Вызов провайдера с записью исхода в его breaker."""
+        breaker = self._breakers.get(name)
+        if breaker is None:
+            return provider.complete(request)
+        try:
+            response = provider.complete(request)
+        except LlmUnavailableError:
+            breaker.record_failure()
+            raise
+        except LlmError:
+            breaker.record_answer()
+            raise
+        breaker.record_answer()
         return response

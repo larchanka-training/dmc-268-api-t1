@@ -57,7 +57,9 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import QueuePool, StaticPool
 
 from app.api.factory import create_app
+from app.application.circuit_breaker import CircuitBreaker
 from app.config import Settings
+from app.domain.circuit_breaker import BreakerPolicy
 from app.domain.entities import ReviewJob
 from app.domain.enums import ReviewRunStage
 from app.domain.llm_errors import LlmTimeoutError
@@ -1525,3 +1527,22 @@ def test_configure_telemetry_leaves_the_run_outcomes_to_the_factories(
     telemetry.configure_telemetry(telemetry.MIGRATE_SERVICE)
 
     assert calls == []
+
+
+def test_the_circuit_breaker_gauge_reads_the_state_on_every_collection(pool_reader: InMemoryMetricReader) -> None:
+    """#294: 0 замкнут, 2 разомкнут, 1 пауза вышла — без вызова, по часам на сборе."""
+    now = [0.0]
+    policy = BreakerPolicy(failure_threshold=1, pause_seconds=60.0, max_pause_seconds=600.0)
+    github = CircuitBreaker("GitHub", policy, clock=lambda: now[0])
+    ollama = CircuitBreaker("Ollama", policy, clock=lambda: now[0])
+    telemetry.instrument_circuit_breakers([github, ollama])
+    gauge = "review_circuit_breaker_state"
+
+    ollama.record_failure()
+    first = metric_snapshot(pool_reader)
+    now[0] = 60.0
+    second = metric_snapshot(pool_reader)
+
+    assert first[(gauge, (("provider", "GitHub"),))] == (0.0, None)
+    assert first[(gauge, (("provider", "Ollama"),))] == (2.0, None)
+    assert second[(gauge, (("provider", "Ollama"),))] == (1.0, None)

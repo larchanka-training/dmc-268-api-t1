@@ -10,6 +10,11 @@
 Пауза и часы приходят инъекцией (`sleep`, `clock`), чтобы тесты не ждали
 по-настоящему.
 
+Breaker GitHub (#294) стоит на том же цикле: на паузе запрос не уходит
+(`VcsUnavailableError` сразу), обрыв сети и 5xx до конца попыток — отказ
+(`VcsOutageError`), любой ответ GitHub, включая 4xx и исчерпанный лимит, —
+GitHub жив.
+
 Любой ответ адаптер переводит в своё исключение: наверх добирается 502, а не
 голый `JSONDecodeError` или `KeyError` от неожиданного тела (прокси отдал
 HTML, GitHub сменил форму ответа).
@@ -25,6 +30,7 @@ from uuid import UUID
 
 import httpx
 
+from app.application.circuit_breaker import CircuitBreaker
 from app.application.ports.vcs_review import (
     InlineCommentDraft,
     MergeGateCheck,
@@ -38,6 +44,7 @@ from app.infrastructure.vcs.errors import (
     VcsAuthError,
     VcsError,
     VcsNotFoundError,
+    VcsOutageError,
     VcsUnavailableError,
 )
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
@@ -81,10 +88,12 @@ class GitHubVcsGateway:
         backoff_base_seconds: float = 0.5,
         rate_limit_budget_seconds: float = 60.0,
         public_origin: str = "",
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         """`rate_limit_budget_seconds` - сколько один запрос может ждать снятия лимита
         суммарно; `clock` - стенные часы для `x-ratelimit-reset` (эпоха, секунды);
-        `public_origin` - адрес кабинета для ссылки из check run, пустой - без ссылки."""
+        `public_origin` - адрес кабинета для ссылки из check run, пустой - без ссылки;
+        `breaker` - breaker GitHub, общий для шлюзов процесса, `None` - без него."""
         self._auth = auth
         self._client = client
         self._sleep = sleep
@@ -93,6 +102,7 @@ class GitHubVcsGateway:
         self._backoff_base_seconds = backoff_base_seconds
         self._rate_limit_budget_seconds = rate_limit_budget_seconds
         self._public_origin = public_origin
+        self._breaker = breaker
         self._app_slug: str | None = None
         self._review = GitHubReviewClient(self)
 
@@ -367,6 +377,42 @@ class GitHubVcsGateway:
         already_done: Callable[[], httpx.Response | None] | None = None,
         too_large_statuses: frozenset[int] = frozenset(),
     ) -> httpx.Response:
+        """Запрос через breaker: на паузе - сбой сразу, исход - в breaker."""
+        breaker = self._breaker
+        if breaker is None:
+            return self._request_with_retries(
+                method, url, installation_id, accept=accept, json=json, max_bytes=max_bytes,
+                graphql=graphql, already_done=already_done, too_large_statuses=too_large_statuses,
+            )
+        if (wait := breaker.retry_after()) is not None:
+            raise VcsUnavailableError(f"GitHub API на паузе breaker'а ещё {wait:.0f} с: {method} {url}")
+        try:
+            response = self._request_with_retries(
+                method, url, installation_id, accept=accept, json=json, max_bytes=max_bytes,
+                graphql=graphql, already_done=already_done, too_large_statuses=too_large_statuses,
+            )
+        except VcsOutageError:
+            breaker.record_failure()
+            raise
+        except VcsError:
+            breaker.record_answer()
+            raise
+        breaker.record_answer()
+        return response
+
+    def _request_with_retries(
+        self,
+        method: str,
+        url: str,
+        installation_id: int,
+        *,
+        accept: str,
+        json: dict[str, Any] | None,
+        max_bytes: int | None,
+        graphql: bool,
+        already_done: Callable[[], httpx.Response | None] | None,
+        too_large_statuses: frozenset[int],
+    ) -> httpx.Response:
         """Один цикл повторов на все запросы к API.
 
         - 401 - один раз сбросить кэш installation token и взять новый: токен мог
@@ -382,7 +428,8 @@ class GitHubVcsGateway:
         Обрыв сети запроса без `already_done` не повторяется. С `already_done` -
         запрос без идемпотентности - на обрыв, 5xx и лимит после паузы спрашивает
         `already_done()`: ответ - результат запроса, `None` - запрос уходит снова.
-        Попытки или бюджет кончились - последняя проверка и `VcsUnavailableError`.
+        Попытки или бюджет кончились - последняя проверка и `VcsUnavailableError`
+        (`VcsOutageError`, если последний отказ - 5xx или сеть, а не лимит).
         """
         where = f"{method} {url}"
         token = self._auth.installation_token(installation_id)
@@ -396,7 +443,7 @@ class GitHubVcsGateway:
                 response = self._send(method, url, token, accept, json, max_bytes)
             except httpx.RequestError as error:
                 if already_done is None:
-                    raise VcsUnavailableError(f"GitHub API недоступен на {where}: {error}") from error
+                    raise VcsOutageError(f"GitHub API недоступен на {where}: {error}") from error
             else:
                 status = response.status_code
                 if status == 401:
@@ -438,7 +485,8 @@ class GitHubVcsGateway:
                 done = already_done() if already_done is not None else None
                 if done is not None:
                     return done
-                raise VcsUnavailableError(failure)
+                # Последний отказ - лимит: GitHub ответил. Иначе 5xx или сеть - отказ GitHub.
+                raise VcsUnavailableError(failure) if limited is not None else VcsOutageError(failure)
             if limited is not None:
                 waited += pause
             self._sleep(pause)
