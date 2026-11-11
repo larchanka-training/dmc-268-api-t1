@@ -8,14 +8,16 @@ from uuid import UUID
 import httpx
 import pytest
 
+from app.application.circuit_breaker import CircuitBreaker
 from app.application.ports.vcs_review import (
     InlineCommentDraft,
     MergeGateCheck,
     ReviewThreadState,
 )
+from app.domain.circuit_breaker import BreakerPolicy
 from app.domain.enums import DiffSide
 from app.domain.vcs_errors import VcsError
-from app.infrastructure.vcs.errors import VcsUnavailableError
+from app.infrastructure.vcs.errors import VcsOutageError, VcsUnavailableError
 from app.infrastructure.vcs.github import GitHubVcsGateway
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from tests.infrastructure.conftest import RsaKeyPair
@@ -240,6 +242,7 @@ class _GitHub:
         self.reviews: list[dict[str, Any]] = []
         self.seen: list[tuple[str, str]] = []
         self.comments_status = 200
+        self.reviews_status = 200
         self.comments: list[dict[str, Any]] = [
             {"id": 42, "path": "a.py", "line": None, "side": None, "body": DRAFT.body}
         ]
@@ -260,6 +263,8 @@ class _GitHub:
         if request.method == "POST" and path == "/repos/o/r/pulls/7/reviews":
             return self.create(request)
         if request.method == "GET" and path == "/repos/o/r/pulls/7/reviews":
+            if self.reviews_status != 200:
+                return httpx.Response(self.reviews_status, json={"message": "Bad Gateway"})
             return httpx.Response(200, json=self.reviews)
         if request.method == "GET" and path.endswith("/comments"):
             if self.comments_status != 200:
@@ -428,6 +433,50 @@ def test_create_review_gives_up_after_max_attempts_without_our_review(
     with pytest.raises(VcsUnavailableError):
         _publish(_sleeping_gateway(rsa_key_pair, github.handler, []))
     assert github.posts() == 3
+
+
+def _guarded_gateway(
+    rsa_key_pair: RsaKeyPair, handler: Callable[[httpx.Request], httpx.Response], threshold: int
+) -> tuple[GitHubVcsGateway, CircuitBreaker]:
+    client = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    auth = GitHubAppAuth(APP_ID, rsa_key_pair.private_pem, client)
+    breaker = CircuitBreaker(
+        "GitHub",
+        BreakerPolicy(failure_threshold=threshold, pause_seconds=60.0, max_pause_seconds=600.0),
+        clock=lambda: 0.0,
+    )
+    gateway = GitHubVcsGateway(
+        auth, client, sleep=lambda _: None, clock=lambda: 1_800_000_000.0, breaker=breaker
+    )
+    return gateway, breaker
+
+
+def test_an_outage_during_publication_is_one_failure_of_the_breaker(rsa_key_pair: RsaKeyPair) -> None:
+    """Все ответы 502, slug в кэше: поиск по маркеру внутри POST учитывает свой отказ сам,
+    а внешний POST его не дублирует — одна публикация даёт один отказ из порога 2."""
+    github = _GitHub(lambda request: httpx.Response(502, json={"message": "Bad Gateway"}))
+    gateway, breaker = _guarded_gateway(rsa_key_pair, github.handler, threshold=2)
+    gateway.bot_login()
+    github.reviews_status = 502
+
+    with pytest.raises(VcsOutageError):
+        _publish(gateway)
+
+    assert breaker.retry_after() is None
+
+
+def test_a_failed_get_app_inside_the_lookup_is_a_failure_not_an_answer(rsa_key_pair: RsaKeyPair) -> None:
+    """Slug не получен, POST и `GET /app` отвечают 502: отказ `GET /app` в поиске по маркеру —
+    сбой GitHub, и внешний POST не обнуляет им счёт breaker'а."""
+    github = _GitHub(lambda request: httpx.Response(502, json={"message": "Bad Gateway"}))
+    github.app_status_before_post = 502
+    github.app_status_after_post = 502
+    gateway, breaker = _guarded_gateway(rsa_key_pair, github.handler, threshold=1)
+
+    with pytest.raises(VcsOutageError):
+        _publish(gateway)
+
+    assert breaker.retry_after() is not None
 
 
 def test_lost_inline_comment_list_keeps_the_review_id(rsa_key_pair: RsaKeyPair) -> None:

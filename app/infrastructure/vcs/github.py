@@ -13,7 +13,9 @@
 Breaker GitHub (#294) стоит на том же цикле: на паузе запрос не уходит
 (`VcsUnavailableError` сразу), обрыв сети и 5xx до конца попыток — отказ
 (`VcsOutageError`), любой ответ GitHub, включая 4xx и исчерпанный лимит, —
-GitHub жив.
+GitHub жив. Исход вызова учитывается один раз: вложенный запрос (поиск ревью
+по маркеру в `already_done`) учитывает себя сам, и его ошибку внешний вызов
+второй раз не пишет.
 
 Любой ответ адаптер переводит в своё исключение: наверх добирается 502, а не
 голый `JSONDecodeError` или `KeyError` от неожиданного тела (прокси отдал
@@ -352,7 +354,11 @@ class GitHubVcsGateway:
                 headers={"Authorization": f"Bearer {self._auth.app_jwt()}", "Accept": _JSON_ACCEPT},
             )
         except httpx.RequestError as error:
-            raise VcsUnavailableError(f"GitHub API недоступен на GET /app: {error}") from error
+            raise VcsOutageError(f"GitHub API недоступен на GET /app: {error}") from error
+        if response.is_server_error:
+            # Отказ GitHub, как у 5xx в цикле повторов: поиск ревью по маркеру зовёт
+            # `GET /app` под учётом breaker'а, и ответ «GitHub жив» сбросил бы счёт посреди сбоя.
+            raise VcsOutageError(f"GitHub API: HTTP {response.status_code} на GET /app")
         if response.is_error:
             raise VcsError(f"GitHub API: HTTP {response.status_code} на GET /app")
         try:
@@ -385,17 +391,24 @@ class GitHubVcsGateway:
                 graphql=graphql, already_done=already_done, too_large_statuses=too_large_statuses,
             )
         if (wait := breaker.retry_after()) is not None:
-            raise VcsUnavailableError(f"GitHub API на паузе breaker'а ещё {wait:.0f} с: {method} {url}")
+            raise _counted(
+                VcsUnavailableError(f"GitHub API на паузе breaker'а ещё {wait:.0f} с: {method} {url}")
+            )
         try:
             response = self._request_with_retries(
                 method, url, installation_id, accept=accept, json=json, max_bytes=max_bytes,
                 graphql=graphql, already_done=already_done, too_large_statuses=too_large_statuses,
             )
-        except VcsOutageError:
-            breaker.record_failure()
-            raise
-        except VcsError:
-            breaker.record_answer()
+        except VcsError as error:
+            # Ошибка вложенного запроса из `already_done` уже учтена им: второй отказ
+            # за ту же публикацию раньше времени разомкнул бы breaker, а пауза
+            # вложенного, записанная как ответ, - замкнула бы его посреди сбоя.
+            if not getattr(error, _BREAKER_COUNTED, False):
+                if isinstance(error, VcsOutageError):
+                    breaker.record_failure()
+                else:
+                    breaker.record_answer()
+                _counted(error)
             raise
         breaker.record_answer()
         return response
@@ -520,6 +533,15 @@ class GitHubVcsGateway:
             return httpx.Response(
                 response.status_code, headers=kept, content=content, request=response.request
             )
+
+
+_BREAKER_COUNTED = "_dmc268_breaker_counted"
+
+
+def _counted(error: VcsError) -> VcsError:
+    """Пометить ошибку учтённой breaker'ом: внешний `_request` её не пишет."""
+    setattr(error, _BREAKER_COUNTED, True)
+    return error
 
 
 def _rate_limit_wait(response: httpx.Response, now: float, hits: int) -> float:

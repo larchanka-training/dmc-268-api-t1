@@ -153,15 +153,18 @@ groups:
       # не снимается), и алерт молчит, а горит ScrapeTargetDown. Окно без for:
       # for поверх окна удвоил бы срок до 30 минут, когда прогон уже выметен.
       # Воркер откладывает прогоны (#294) — breaker GitHub или всех провайдеров
-      # модели не замкнут, как в `deferral`: подтверждений нет, но воркер не завис,
-      # горит ProviderCircuitOpen. Лежит один провайдер модели при живом фоллбэке —
-      # прогоны идут, и зависание по-прежнему видно.
+      # модели разомкнут, как в `deferral`: подтверждений нет, но воркер не завис,
+      # горит ProviderCircuitOpen. Откладывает только состояние 2: в «ждёт пробы»
+      # (1) пробный вызов уже можно делать, и если его нет, а задачи лежат, воркер
+      # завис — алерт горит. max_over_time за 15 минут держит паузу между пробами
+      # (2 → 1 → 2), пауза не длиннее 10 минут. Лежит один провайдер модели при
+      # живом фоллбэке — прогоны идут, и зависание по-прежнему видно.
       - alert: WorkerStalled
         expr: |
           min_over_time(rabbitmq_queue_messages_ready{queue="review_jobs.qq"}[15m]) > 0
           and on() rabbitmq_queue_consumers{queue="review_jobs.qq"} > 0
           and on() sum(increase(rabbitmq_global_messages_acknowledged_total{queue_type="rabbit_quorum_queue"}[15m])) == 0
-          unless on() (max(review_circuit_breaker_state{provider="GitHub"}) > 0 or min(review_circuit_breaker_state{provider!="GitHub"}) > 0)
+          unless on() (max(max_over_time(review_circuit_breaker_state{provider="GitHub"}[15m])) == 2 or min(max_over_time(review_circuit_breaker_state{provider!="GitHub"}[15m])) == 2)
         labels:
           severity: critical
           service: worker
@@ -185,7 +188,7 @@ groups:
         expr: |
           min_over_time(rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}[20m]) > 0
           and on() sum(increase(rabbitmq_global_messages_acknowledged_total{queue_type="rabbit_quorum_queue"}[20m])) == 0
-          unless on() (max(review_circuit_breaker_state{provider="GitHub"}) > 0 or min(review_circuit_breaker_state{provider!="GitHub"}) > 0)
+          unless on() (max(max_over_time(review_circuit_breaker_state{provider="GitHub"}[15m])) == 2 or min(max_over_time(review_circuit_breaker_state{provider!="GitHub"}[15m])) == 2)
         labels:
           severity: critical
           service: worker
@@ -214,7 +217,7 @@ groups:
           service: worker
         annotations:
           summary: "Breaker {{ $labels.provider }} не замкнут 15 минут, прогоны ждут"
-          description: "Провайдер {{ $labels.provider }} не отвечает: сеть, таймаут или 5xx. Прогоны ждут в очереди без траты попыток доставки и пойдут сами после удачного пробного вызова (пауза от минуты до 10). Причина — в логах воркера («breaker … разомкнут») и спанах HTTP-клиента; статус GitHub — githubstatus.com."
+          description: "Провайдер {{ $labels.provider }} не отвечает: сеть, таймаут или 5xx. Прогоны ждут в очереди без траты попыток доставки и пойдут сами после удачного пробного вызова (пауза от минуты до 10). Причина — в логах воркера («breaker … разомкнут») и спанах HTTP-клиента{{ if eq $labels.provider \"GitHub\" }}; статус GitHub — githubstatus.com{{ end }}."
 
       # Один провайдер модели лежит, другой отвечает: прогоны идут через фоллбэк,
       # сервис жив — warning, а не critical. Для Ollama это ещё и сигнал, что код

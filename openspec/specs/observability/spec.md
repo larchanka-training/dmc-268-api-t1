@@ -668,7 +668,7 @@ Access-запись uvicorn о запросе health-check'а SHALL NOT попа
 подтверждений (`WorkerStalled`); когда сообщение выдано и 20 минут не подтверждено
 (`ReviewJobStuck`); когда память контейнера `dmc268-*` 10 минут выше 90 % лимита
 (`ContainerMemoryNearLimit`). Поток коротких прогонов, очередь без потребителя и отложенные
-прогоны (не замкнут breaker GitHub или всех провайдеров модели) SHALL NOT зажигать первые два.
+прогоны (разомкнут breaker GitHub или всех провайдеров модели) SHALL NOT зажигать первые два.
 
 #### Scenario: Воркер завис на задаче
 
@@ -692,8 +692,13 @@ Access-запись uvicorn о запросе health-check'а SHALL NOT попа
 
 #### Scenario: Провайдер на паузе
 
-- **WHEN** breaker GitHub не замкнут, прогоны откладываются, и 20 минут нет подтверждений
+- **WHEN** breaker GitHub разомкнут, прогоны откладываются, и 20 минут нет подтверждений
 - **THEN** `WorkerStalled` и `ReviewJobStuck` молчат, горит `ProviderCircuitOpen`
+
+#### Scenario: Breaker застрял в «ждёт пробы»
+
+- **WHEN** пауза breaker'а GitHub вышла 15 минут назад, пробного вызова нет, а воркер не подтверждает задачи
+- **THEN** `WorkerStalled` и `ReviewJobStuck` горят: прогоны не откладываются, воркер завис
 
 #### Scenario: Воркер завис при живом фоллбэке
 

@@ -1,6 +1,6 @@
 ## 1. Breaker
 
-- [x] 1.1 Чистая машина состояний `app/domain/circuit_breaker.py` (`failed`, `answered`, `state`, `retry_after`); `tests/domain/test_circuit_breaker.py`
+- [x] 1.1 Чистая машина состояний `app/domain/circuit_breaker.py` (`failed`, `state`, `retry_after`; ответ — `CLOSED`); `tests/domain/test_circuit_breaker.py`
 - [x] 1.2 `CircuitBreaker` и `deferral` в `app/application/circuit_breaker.py`, часы инъекцией; `tests/application/test_circuit_breaker.py`
 - [x] 1.3 Классы отказа: `LlmUnavailableError` (домен), `VcsOutageError` (адаптер); Ollama и Eurorouter — 5xx и сеть, GitHub — сеть и 5xx до конца попыток, выдача installation token — сеть и 5xx; тесты адаптеров
 - [x] 1.4 Breaker в `GitHubVcsGateway._request` и в `FallbackLlmGateway`; `tests/infrastructure/test_github_vcs_gateway.py`, `test_fallback_gateway.py`
