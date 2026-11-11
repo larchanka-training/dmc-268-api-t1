@@ -10,6 +10,7 @@ mock_provider "docker" {}
 variables {
   api_image                     = "ghcr.io/larchanka-training/dmc-268-api-t1:0123abc@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
   postgres_password             = "p@ss/w:rd"
+  postgres_app_password         = "app+p@ss/w:rd-16"
   rabbitmq_password             = "r@bbit#1"
   postgres_replication_password = "repl:ication@pass-16"
   github_webhook_secret         = "webhook-secret"
@@ -23,12 +24,31 @@ run "app_containers_get_connection_settings" {
 
   # Хост в адресах — имя контейнера в общей сети: переименование контейнера
   # без правки адреса оставило бы приложение без базы и брокера.
+  # api и worker входят ролью приложения без прав на схему (миграция 0023),
+  # миграции — владельцем: схему меняют только они.
   assert {
     condition = alltrue([
-      for env in [docker_container.api.env, docker_container.worker.env, split("\n", output.migrate_env)] :
-      contains(env, "DATABASE_URL=postgresql+psycopg://dmc268:p%40ss%2Fw%3Ard@${docker_container.postgres.name}:5432/dmc268")
+      for env in [docker_container.api.env, docker_container.worker.env] :
+      contains(env, "DATABASE_URL=postgresql+psycopg://dmc268_app:app%2Bp%40ss%2Fw%3Ard-16@${docker_container.postgres.name}:5432/dmc268")
     ])
-    error_message = "api, worker и миграции должны получать DATABASE_URL с закодированным паролем и именем контейнера postgres."
+    error_message = "api и worker должны получать DATABASE_URL роли dmc268_app с закодированным паролем и именем контейнера postgres."
+  }
+
+  assert {
+    condition = (
+      contains(split("\n", output.migrate_env), "DATABASE_URL=postgresql+psycopg://dmc268:p%40ss%2Fw%3Ard@${docker_container.postgres.name}:5432/dmc268")
+      && length([for e in split("\n", output.migrate_env) : e if startswith(e, "DATABASE_URL=")]) == 1
+    )
+    error_message = "Миграции должны получать один DATABASE_URL — владельца базы dmc268."
+  }
+
+  # Пароль владельца — только у миграций (и копий с репликой), не у приложения.
+  assert {
+    condition = alltrue([
+      for env in [docker_container.api.env, docker_container.worker.env] :
+      length([for e in env : e if strcontains(e, "p%40ss%2Fw%3Ard@") || strcontains(e, "postgresql+psycopg://dmc268:")]) == 0
+    ])
+    error_message = "Пароль и роль владельца базы не должны попадать в окружение api и worker."
   }
 
   assert {
@@ -47,26 +67,24 @@ run "app_containers_get_connection_settings" {
     error_message = "Без GITHUB_WEBHOOK_SECRET общие настройки приложения не загрузятся."
   }
 
-  # Окружение миграций — общая часть (app_env) плюс свои строки: телеметрия
-  # (trейс деплоя) и пароль роли мониторинга, шаг которой едет вместе с
-  # миграциями. Каждая строка app_env есть и у api, и у worker, а обратное
-  # не требуется.
+  # Окружение миграций — общая часть (service_env) плюс свои строки: адрес
+  # базы владельцем, телеметрия (трейс деплоя) и пароли ролей.
   assert {
     condition = alltrue([
-      for line in local.app_env :
+      for line in local.service_env :
       contains(split("\n", output.migrate_env), line)
     ])
-    error_message = "migrate_env должен содержать все строки local.app_env."
+    error_message = "migrate_env должен содержать все строки local.service_env."
   }
 
-  # Шаг роли мониторинга не теряется при переносе миграций: пароль едет в
+  # Шаг паролей ролей не теряется при переносе миграций: пароли едут в
   # migrate_env вместе с миграциями (замечание ревью PR #130).
   assert {
-    condition = contains(
-      split("\n", output.migrate_env),
-      "POSTGRES_MONITOR_PASSWORD=${var.postgres_monitor_password}",
+    condition = (
+      contains(split("\n", output.migrate_env), "POSTGRES_MONITOR_PASSWORD=${var.postgres_monitor_password}")
+      && contains(split("\n", output.migrate_env), "POSTGRES_APP_PASSWORD=${var.postgres_app_password}")
     )
-    error_message = "migrate_env должен содержать POSTGRES_MONITOR_PASSWORD: шаг роли едет вместе с миграциями."
+    error_message = "migrate_env должен содержать POSTGRES_MONITOR_PASSWORD и POSTGRES_APP_PASSWORD: шаг паролей ролей едет вместе с миграциями."
   }
 
   # service.instance.id миграций — стабильное имя dmc268-migrations.
@@ -406,6 +424,38 @@ run "empty_secrets_rejected" {
   }
 
   expect_failures = [var.github_webhook_secret, var.postgres_password, var.rabbitmq_password, var.postgres_replication_password]
+}
+
+# Пароль роли приложения: пустой (секрет не задан), короткий или с пробелом —
+# отказ на plan; пробел urlencode превратил бы в «+», и API не вошёл бы.
+run "empty_app_password_rejected" {
+  command = plan
+
+  variables {
+    postgres_app_password = ""
+  }
+
+  expect_failures = [var.postgres_app_password]
+}
+
+run "short_app_password_rejected" {
+  command = plan
+
+  variables {
+    postgres_app_password = "short-pass-15ch"
+  }
+
+  expect_failures = [var.postgres_app_password]
+}
+
+run "app_password_with_space_rejected" {
+  command = plan
+
+  variables {
+    postgres_app_password = "sixteen chars ok"
+  }
+
+  expect_failures = [var.postgres_app_password]
 }
 
 # Фраза шифрования состояния: пустая (секрет не задан) или короче минимума
