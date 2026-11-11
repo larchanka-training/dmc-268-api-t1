@@ -16,8 +16,10 @@
 # Экземпляры ищутся по имени на сервере: dmc268-worker и dmc268-worker-<N>
 # (local.worker_names в infra/app.tf). Снимок опроса — все экземпляры разом, по
 # строке «имя запущен рестарты»; окно идёт, пока снимок не меняется, все
-# запущены и их ровно столько, сколько ждали. Рестарт любого, пропавший или
-# лишний экземпляр начинает окно заново.
+# запущены и на сервере ровно ожидаемые имена (dmc268-worker … dmc268-worker-N),
+# а не просто столько же: оставшийся от ручного запуска dmc268-worker-3 не
+# заменит недостающий dmc268-worker-2. Рестарт любого, пропавший или лишний
+# экземпляр начинает окно заново.
 #
 # Не устоялись — печатает хвост лога каждого экземпляра и падает.
 #
@@ -31,6 +33,14 @@ set -uo pipefail
 
 expected="${TF_VAR_worker_replicas:-1}"
 pattern='^dmc268-worker(-[0-9]+)?$'
+
+# Ожидаемые имена по правилу local.worker_names, отсортированные как снимок.
+expected_names="$(
+  echo dmc268-worker
+  i=2
+  while [ "$i" -le "$expected" ]; do echo "dmc268-worker-$i"; i=$((i + 1)); done
+)"
+expected_names="$(printf '%s\n' "$expected_names" | sort)"
 
 # Имена экземпляров на сервере, по одному в строке. Фильтр docker — по
 # подстроке, точное имя сверяет grep.
@@ -49,10 +59,10 @@ state() {
     | sed 's#^/##' | grep -E '^dmc268-worker(-[0-9]+)? (true|false) [0-9]+$' | sort
 }
 
-# Снимок годится в окно: экземпляров столько, сколько ждали, и все запущены.
+# Снимок годится в окно: на сервере ровно ожидаемые экземпляры, и все запущены.
 healthy() {
   [ -n "$1" ] \
-    && [ "$(printf '%s\n' "$1" | wc -l | tr -d ' ')" -eq "$expected" ] \
+    && [ "$(printf '%s\n' "$1" | awk '{print $1}')" = "$expected_names" ] \
     && ! printf '%s\n' "$1" | grep -q ' false '
 }
 
@@ -78,7 +88,9 @@ while [ $(( $(date +%s) - started )) -lt 90 ]; do
 done
 
 found="$(names)"
-echo "::error::воркеры не проработали ${hold} с без рестартов за полторы минуты: ждали ${expected} шт., на сервере — $(printf '%s' "$found" | grep -c .) ($(echo "$found" | tr '\n' ' '))"
+missing="$(printf '%s\n' "$expected_names" | grep -vxF -f <(printf '%s\n' "$found" | grep .) | tr '\n' ' ')"
+extra="$(printf '%s\n' "$found" | grep . | grep -vxF -f <(printf '%s\n' "$expected_names") | tr '\n' ' ')"
+echo "::error::воркеры не проработали ${hold} с без рестартов за полторы минуты: ждали ${expected} шт., на сервере — $(printf '%s' "$found" | grep -c .) ($(echo "$found" | tr '\n' ' '))${missing:+; нет: ${missing% }}${extra:+; лишние: ${extra% }}"
 for name in $found; do
   echo "--- ${name}: последние строки лога"
   # shellcheck disable=SC2029 # имя — с сервера, раскрывается здесь намеренно

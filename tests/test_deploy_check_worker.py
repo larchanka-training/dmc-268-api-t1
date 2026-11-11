@@ -93,6 +93,30 @@ def test_a_missing_replica_fails_the_deploy(tmp_path: Path) -> None:
         result.stdout
     )
     assert "лог dmc268-worker" in result.stdout
+    assert "; нет: dmc268-worker-2" in result.stdout
+
+
+def test_a_leftover_replica_does_not_stand_in_for_a_missing_one(tmp_path: Path) -> None:
+    """Число сходится, имена нет: оставшийся от ручного запуска `dmc268-worker-3` не заменяет
+    недостающий `dmc268-worker-2`."""
+    result = check(
+        tmp_path,
+        TF_VAR_worker_replicas="2",
+        NAMES=r"dmc268-worker\ndmc268-worker-3",
+        INSPECT=r"/dmc268-worker true 0\n/dmc268-worker-3 true 0",
+    )
+
+    assert result.returncode == 1
+    assert "ждали 2 шт., на сервере — 2 (dmc268-worker dmc268-worker-3 ); нет: dmc268-worker-2; лишние: dmc268-worker-3" in (
+        result.stdout
+    )
+
+
+def test_no_worker_at_all_names_every_missing_one(tmp_path: Path) -> None:
+    result = check(tmp_path, TF_VAR_worker_replicas="2", NAMES="", INSPECT="")
+
+    assert result.returncode == 1
+    assert "на сервере — 0 ( ); нет: dmc268-worker dmc268-worker-2" in result.stdout
 
 
 def test_a_restarting_replica_fails_the_deploy(tmp_path: Path) -> None:
@@ -131,3 +155,4 @@ def test_an_extra_replica_fails_the_deploy(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "ждали 1 шт., на сервере — 2" in result.stdout
+    assert "; лишние: dmc268-worker-2" in result.stdout
